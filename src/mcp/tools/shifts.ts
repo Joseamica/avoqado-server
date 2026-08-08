@@ -15,7 +15,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_shifts',
-    'Cash-register shifts (turnos de caja) for a venue you can access: who opened it, since when, sales/tips/orders so far, cash vs card collected, starting/ending cash and the difference, and status. Defaults to currently open shifts. Answers "¿cómo va la caja? ¿quién está en turno? ¿cuánto llevan en efectivo?". Pass venueId.',
+    'Cash-register shifts (turnos de caja) for a venue you can access: who opened it, since when, sales/tips/orders so far, cash vs card collected, starting/ending cash, physical cash declared at close, the resulting difference, and status. Defaults to currently open shifts. Answers "¿cómo va la caja? ¿quién está en turno? ¿cuánto llevan en efectivo? ¿cuánto contaron al cerrar?". Pass venueId.',
     {
       venueId: z.string().describe('Venue whose shifts to read (must be in your scope)'),
       status: z.enum(['open', 'closed', 'all']).optional().describe("Which shifts: 'open' (default — open or closing), 'closed', or 'all'"),
@@ -23,7 +23,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, status, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
-      guard.requirePermission('shifts:read', venueId) // WHY: mirror the dashboard's shifts:read gate — shift rows expose drawer cash (starting/ending/difference)
+      guard.requirePermission('shifts:read', venueId) // WHY: mirror the dashboard's shifts:read gate — shift rows expose drawer cash (starting/ending/declared/difference)
       const statusFilter =
         status === 'closed'
           ? { status: ShiftStatus.CLOSED }
@@ -38,6 +38,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
           status: true,
           startingCash: true,
           endingCash: true,
+          cashDeclared: true,
           cashDifference: true,
           totalSales: true,
           totalTips: true,
@@ -64,6 +65,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
           card: money(s.totalCardPayments),
           startingCash: money(s.startingCash),
           endingCash: money(s.endingCash),
+          cashDeclared: money(s.cashDeclared),
           cashDifference: money(s.cashDifference),
         })),
       })

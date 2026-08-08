@@ -51,13 +51,18 @@ function legacyNumber(value: unknown): number {
   return value == null ? 0 : Number(value)
 }
 
-function legacyData(source: Record<string, unknown>): LegacyShiftCloseData {
+function legacyValue(primary: Record<string, unknown>, fallback: Record<string, unknown>, key: (typeof LEGACY_FIELDS)[number]): unknown {
+  return owns(primary, key) ? primary[key] : fallback[key]
+}
+
+function legacyData(primary: Record<string, unknown>, fallback: Record<string, unknown>): LegacyShiftCloseData {
+  const notes = legacyValue(primary, fallback, 'notes')
   return {
-    cashDeclared: legacyNumber(source.cashDeclared),
-    cardDeclared: legacyNumber(source.cardDeclared),
-    vouchersDeclared: legacyNumber(source.vouchersDeclared),
-    otherDeclared: legacyNumber(source.otherDeclared),
-    notes: typeof source.notes === 'string' ? source.notes : undefined,
+    cashDeclared: legacyNumber(legacyValue(primary, fallback, 'cashDeclared')),
+    cardDeclared: legacyNumber(legacyValue(primary, fallback, 'cardDeclared')),
+    vouchersDeclared: legacyNumber(legacyValue(primary, fallback, 'vouchersDeclared')),
+    otherDeclared: legacyNumber(legacyValue(primary, fallback, 'otherDeclared')),
+    notes: typeof notes === 'string' ? notes : undefined,
   }
 }
 
@@ -105,7 +110,7 @@ export function normalizeCashReconciliationRequest(rawBody: unknown): Normalized
     return {
       source: 'LEGACY',
       outcome: 'LEGACY_APPLIED',
-      legacyCloseData: legacyData(hasTopLevelLegacy ? body : nested),
+      legacyCloseData: legacyData(body, nested),
     }
   }
 

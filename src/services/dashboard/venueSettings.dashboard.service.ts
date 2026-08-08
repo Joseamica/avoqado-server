@@ -16,6 +16,7 @@ import { logAction } from './activity-log.service'
 import { VenueSettings, Prisma } from '@prisma/client'
 import { CASH_RECONCILIATION_FEATURE } from '../access/cashReconciliationAccess.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { withSerializableRetry } from '../../utils/serializableRetry'
 
 /**
  * Default settings for new venues
@@ -178,11 +179,6 @@ export async function updateVenueSettings(
   const hasCashReconciliationUpdate = Object.prototype.hasOwnProperty.call(updates, 'cashReconciliationEnabled')
   if (hasCashReconciliationUpdate) {
     const requestedValue = updates.cashReconciliationEnabled === true
-    const previousSettings = await prisma.venueSettings.findUnique({
-      where: { venueId },
-      select: { id: true, cashReconciliationEnabled: true },
-    })
-
     // Only the OFF -> ON direction needs a paid entitlement check. OFF must remain available after
     // downgrade, and lookup failures must surface as retryable rather than masquerading as a 403.
     if (requestedValue) {
@@ -192,7 +188,15 @@ export async function updateVenueSettings(
       }
     }
 
-    return prisma.$transaction(async tx => {
+    // The read, mutation, and audit share a serializable transaction. Concurrent toggles either
+    // observe the committed predecessor on retry or fail retryably; they cannot commit a stale
+    // previousValue in the audit trail.
+    return withSerializableRetry(async tx => {
+      const previousSettings = await tx.venueSettings.findUnique({
+        where: { venueId },
+        select: { id: true, cashReconciliationEnabled: true },
+      })
+
       const settings = await tx.venueSettings.upsert({
         where: { venueId },
         create: createData,

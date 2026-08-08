@@ -60,11 +60,13 @@ describe('both close paths share one formula', () => {
   const fs = require('fs') as typeof import('fs')
   const path = require('path') as typeof import('path')
   const tpv = fs.readFileSync(path.join(__dirname, '../../../../src/services/tpv/shift.tpv.service.ts'), 'utf8')
+  const dashboard = fs.readFileSync(path.join(__dirname, '../../../../src/services/dashboard/shift.dashboard.service.ts'), 'utf8')
 
   it('the TPV close calls the shared function instead of copying it', () => {
     // The purchase-order totals lived in triplicate and the copies drifted — editing an
     // order silently dropped the commission from its total. One function, two callers.
-    expect(tpv).toContain('computeCashDifference({')
+    expect(tpv).toContain('calculateCashReconciliation(')
+    expect(dashboard).toContain('calculateCashReconciliation(')
     expect(tpv).not.toMatch(/cashDifference:\s*.*endingCash\s*-\s*startingCash/)
   })
 })

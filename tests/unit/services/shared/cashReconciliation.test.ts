@@ -86,7 +86,7 @@ describe('normalizeCashReconciliationRequest', () => {
     ).toMatchObject({ source: 'NEW', outcome: 'IGNORED_INVALID' })
   })
 
-  it('preserves Avoqado Desktop top-level declarations and prefers them over nested legacy data', () => {
+  it('merges legacy fields individually while top-level values win over the same nested field', () => {
     const result = normalizeCashReconciliationRequest({
       cashDeclared: 6000,
       cardDeclared: 200,
@@ -100,9 +100,28 @@ describe('normalizeCashReconciliationRequest', () => {
       legacyCloseData: {
         cashDeclared: 6000,
         cardDeclared: 200,
-        vouchersDeclared: 0,
+        vouchersDeclared: 300,
         otherDeclared: 0,
         notes: 'Desktop close',
+      },
+    })
+  })
+
+  it('does not let top-level notes discard a nested legacy cash declaration', () => {
+    expect(
+      normalizeCashReconciliationRequest({
+        notes: 'Corte mixto',
+        closeData: { cashDeclared: 450, otherDeclared: 20 },
+      }),
+    ).toEqual({
+      source: 'LEGACY',
+      outcome: 'LEGACY_APPLIED',
+      legacyCloseData: {
+        cashDeclared: 450,
+        cardDeclared: 0,
+        vouchersDeclared: 0,
+        otherDeclared: 20,
+        notes: 'Corte mixto',
       },
     })
   })

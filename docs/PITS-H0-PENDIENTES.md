@@ -1,10 +1,11 @@
-# PITS · H0 — Los puntos que faltan
+# PITS · H0 — Registro histórico de pendientes
 
-> ✅ **H0.7, H0.4 y H0.6 ya están hechos** — 2026-08-07. Quedan **H0.3** (exportaciones,
-> con su propio plan) y **H0.9** (recibir ninguno).
+> ✅ **Los nueve puntos de H0 están implementados.** Este archivo conserva el diagnóstico que
+> guio la ejecución, pero ya no es una lista vigente de trabajo.
 >
-> ⚠️ H0.6 quedó a medias por una razón que NO es del servidor: la TPV nunca captura cuánto
-> efectivo se contó. Ver `docs/PITS-HANDOFF.md` §3.
+> **Actualización H0.6 — 2026-08-08:** la captura ciega, el opt-in PRO, el contrato aditivo, el
+> cierre atómico y la prueba HTTP/PostgreSQL ya están hechos. Falta rollout y piloto físico, no la
+> funcionalidad. Ver `docs/PITS-HANDOFF-SESION-2026-08-07.md` §0.
 
 > Continuación de `docs/PITS-HANDOFF.md`. Cada punto trae: dónde está el código, qué hace
 > hoy, qué debe hacer, **la trampa** (esto es lo que un implementador nuevo hace mal), y
@@ -73,41 +74,26 @@ ledger es la excepción, no la regla. No "uniformices" a centavos.
 
 ## H0.6 — Diferencia de caja al cerrar turno
 
-**Dónde:** `src/services/dashboard/shift.dashboard.service.ts:791` (dashboard) y
-`src/services/tpv/shift.tpv.service.ts:1126` → `closeShiftForVenue` (TPV).
+**Estado actual:** cerrado en implementación y prueba local.
 
-**Hoy, dos defectos distintos:**
+- Fórmula Decimal: `contado − (fondo inicial + pagos COMPLETED en efectivo)`.
+- `0.00` se conserva como balance real; ausencia de conteo conserva `null`.
+- Capacidad PRO + opt-in por venue, default `false`; el flujo antiguo no cambia.
+- `avoqado-tpv` captura efectivo físico total con conteo ciego, ofrece skip confirmado y mantiene
+  el resultado hasta acuse.
+- Desktop top-level `cashDeclared`, APKs antiguos y kiosk conservan sus contratos legacy.
+- CAS `OPEN -> CLOSING -> CLOSED`, auditoría transaccional y recovery acotado evitan doble cierre.
+- Customer MCP, socket y dashboard serializan `cashDeclared`/`cashDifference` sin perder cero.
 
-1. **El cierre desde la TPV no escribe `cashDifference` nunca.** Queda en `NULL`. Y la TPV
-   es por donde se cierra el turno en la operación real, así que la columna del reporte de
-   diferencias sale vacía — que se ve peor que no tener el reporte.
+La verificación real contra un clon PostgreSQL cubrió un turno balanceado con resultado `0.00`,
+cero físico, skip, inválido, overflow, gate FREE/PRO, downgrade, concurrencia, `CLOSING` obsoleto y
+aislamiento por tenant. El detalle y los comandos están en
+`docs/PITS-HANDOFF-SESION-2026-08-07.md` §0.
 
-2. 🔴 **La fórmula del dashboard está mal.** Hoy es:
-   ```ts
-   updateData.cashDifference = effectiveEndingCash - effectiveStartingCash
-   ```
-   Eso **no es una diferencia de caja**: es el cambio neto del cajón. En cualquier turno con
-   ventas en efectivo da un número positivo grande que parece un sobrante enorme. Una
-   diferencia de caja es **efectivo contado − efectivo esperado**, donde:
-
-   ```
-   esperado = fondo inicial + ventas en efectivo − retiros/pagos en efectivo
-   ```
-
-   Con `ending − starting`, un turno que vendió $5,000 en efectivo y cuadró perfecto reporta
-   "+$5,000 de sobrante". El número que hoy se muestra es ruido, no control.
-
-**Debe:** una sola función que calcule `esperado` a partir de los pagos en efectivo del
-turno y los retiros, y que **los dos caminos** (dashboard y TPV) la usen. El TPV ya manda
-el efectivo contado en `ShiftCloseData` — hay que verificar el campo exacto antes de asumir.
-
-**La trampa:** no la resuelvas escribiendo la fórmula dos veces. Es exactamente lo que pasó
-con los totales de la orden de compra, donde la fórmula vivía por triplicado y **la copia de
-editar se saltaba la comisión** — editar una orden le borraba dinero al total, en silencio.
-Una función, dos llamadores.
-
-**Verificación:** un turno de prueba con fondo inicial, una venta en efectivo y un conteo
-final exacto debe dar diferencia **0**, no el monto de la venta.
+**Límites honestos:** entradas/retiros de caja todavía no están ligados a Shift, y un pago en vuelo
+puede quedar fuera de la foto `COMPLETED` que lee el cierre ganador. Resolver cualquiera de los dos
+implica cambiar el ledger/flujo de cobro existente y quedó fuera de H0.6. También falta el piloto
+físico porque no hubo dispositivo ADB.
 
 ---
 
@@ -166,10 +152,10 @@ rechaza** en vez de corromper.
 
 ---
 
-## Orden recomendado
+## Orden histórico usado para ejecutar H0
 
-1. **H0.7** — horas, riesgo nulo.
-2. **H0.4** — un día, riesgo nulo (sólo lectura y descarga).
-3. **H0.6** — un día. Ojo: son dos defectos, no uno.
-4. **H0.3** — ver su plan aparte; trae dos bloqueos de decisión del fundador.
-5. **H0.9** — al final, con todo lo demás verde y la reversa ensayada.
+1. **H0.7** — completado.
+2. **H0.4** — completado.
+3. **H0.6** — completado en implementación/prueba local; rollout pendiente.
+4. **H0.3** — completado según el handoff general.
+5. **H0.9** — completado con regresión; la prueba destructiva contra base normal sigue separada.

@@ -7,6 +7,7 @@ import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility
 import { decryptCredentials } from '@/services/superadmin/merchantAccount.service'
 import { getAngelPayUserAccountForTerminal, getAngelPayUserAccountsForTerminal } from '@/services/superadmin/angelpayUserAccount.service'
 import { VenuePlanInfo, getVenuePlanInfo } from '@/services/access/basePlan.service'
+import { isCashReconciliationEnabled } from '@/services/access/cashReconciliationAccess.service'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
@@ -135,7 +136,10 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
  * Merges saved settings with defaults for missing fields
  */
 function getTpvSettingsFromConfig(config: unknown): TpvSettings {
-  const savedSettings = (config as any)?.settings || {}
+  // This server-owned entitlement must never be read from mutable terminal JSON. Older or
+  // concurrent writers may have persisted it before the contract was hardened, so strip it
+  // defensively instead of allowing the spread to leak it into `tpvSettings`.
+  const { cashReconciliationEnabled: _ignoredServerOwnedFlag, ...savedSettings } = (config as any)?.settings || {}
   return {
     ...DEFAULT_TPV_SETTINGS,
     ...savedSettings,
@@ -401,7 +405,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     // plan: REFERRAL_PROGRAM / PROMOTIONS / ADVANCED_REPORTS / SERIALIZED_INVENTORY teasers).
     // RESILIENT: a plan-lookup failure must NEVER break terminal config fetch — log it and
     // return the config WITHOUT the plan field (the TPV fails open and behaves as today).
-    const [venueSettings, plan] = await Promise.all([
+    const [venueSettings, plan, cashReconciliationEnabled] = await Promise.all([
       prisma.venueSettings.findUnique({
         where: { venueId: terminal.venueId },
         select: {
@@ -419,6 +423,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         })
         return undefined
       }),
+      isCashReconciliationEnabled(terminal.venueId),
     ])
 
     // Cambaceo: per-terminal override (Terminal.configOverrides.trackPromoterLocation) takes
@@ -567,6 +572,9 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         },
         merchantAccounts: transformedMerchants,
         tpvSettings, // Per-terminal payment flow configuration
+        // Server-owned effective gate (paid Feature AND explicit venue opt-in). Kept outside
+        // mutable `tpvSettings` so a device settings echo can never grant itself access.
+        cashReconciliationEnabled,
         angelpayAuth, // Task 13 / spec §4.5 — optional single-account back-compat; null unless terminal is NEXGO with ACTIVE account
         // Multi-account (2026-05-18) — full list of ACTIVE AngelPay user accounts
         // for the venue. Always present (possibly empty []) when the terminal
@@ -654,9 +662,17 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     // back here; if we let it enter newSettings/computeOverrides, the diff would either
     // wipe the explicit override or bake a wrong one in. Strip it from the incoming body
     // AND (defensively) from anything stored in config.settings.
-    const { trackPromoterLocation: _ignoredFromDevice, ...deviceSettingsUpdate } = settingsUpdate
+    const {
+      trackPromoterLocation: _ignoredFromDevice,
+      cashReconciliationEnabled: _ignoredCashFlagFromDevice,
+      ...deviceSettingsUpdate
+    } = settingsUpdate
     const existingConfig = (terminal.config as any) || {}
-    const { trackPromoterLocation: _ignoredFromStored, ...storedSettings } = existingConfig.settings || {}
+    const {
+      trackPromoterLocation: _ignoredFromStored,
+      cashReconciliationEnabled: _ignoredCashFlagFromStored,
+      ...storedSettings
+    } = existingConfig.settings || {}
     const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...storedSettings }
     const newSettings: TpvSettings = { ...currentSettings, ...deviceSettingsUpdate }
 
@@ -670,6 +686,7 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     // FULL-REPLACES configOverrides with the recomputed diff, so without this a device
     // settings push would silently wipe a dashboard-set override.
     delete overrides.trackPromoterLocation
+    delete overrides.cashReconciliationEnabled
     const prevOverrides = (terminal.configOverrides as Record<string, any>) || {}
     if (typeof prevOverrides.trackPromoterLocation === 'boolean') {
       overrides.trackPromoterLocation = prevOverrides.trackPromoterLocation

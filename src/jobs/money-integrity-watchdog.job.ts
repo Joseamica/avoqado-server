@@ -45,6 +45,32 @@ const WATCHDOG_UNTIL = new Date('2026-12-31T00:00:00-06:00')
 const REAL_VENUES = `v.slug NOT LIKE '%demo%' AND v.name NOT LIKE 'Live Demo%'
         AND NOT EXISTS (SELECT 1 FROM "Organization" org WHERE org.id = v."organizationId" AND org.name = 'Grupo Avoqado Prime')`
 
+/**
+ * Casos YA revisados que NO se pueden arreglar de nuestro lado: dependen de la decisión de
+ * un TERCERO. Se excluyen de la alarma (con motivo escrito) para que el vigilante pueda
+ * llegar a verde — una alarma que grita lo mismo cada 6 h entrena a todos a ignorarla, que
+ * es justo lo que este job existe para evitar.
+ *
+ * 🔴 NO agregues aquí un caso "para que deje de sonar". Sólo entra lo que ya se investigó y
+ * cuya resolución NO está en nuestras manos. Todo lo demás se arregla.
+ *
+ * Revisión: 2026-08-08 (el resto del backlog se limpió; ver ActivityLog `origen:
+ * reparacion-manual-money-watchdog`).
+ */
+const TRIAGED_AWAITING_THIRD_PARTY: Record<string, string> = {
+  // Venta de SIM de $100 en efectivo sobre un ítem de catálogo con precio $0. Su
+  // SaleVerification quedó COMPLETED y revisada el 2026-06-16 → ya fue la base de lo que
+  // Walmart le pagó a PlayTelecom. Reescribir el precio ahora desincroniza un registro ya
+  // aprobado y facturado. Decisión de Isaac Mayoral.
+  cmpxaycfu012vnh29j14xha8k: 'BAE: venta de SIM ya aprobada y facturada a Walmart — espera decisión de PlayTelecom',
+
+  // Cuenta de $380 (VISA) con dos cobros AMEX posteriores ($122 y $232, otro día,
+  // autorizaciones distintas): son ventas REALES de otro cliente que cayeron sobre un
+  // cheque ya cerrado. No es doble cobro; es atribución. Reconstruir qué se vendió sería
+  // inventar datos. Decisión de Mindform.
+  cmqnz0gkb0bc9o12a0fuc6deg: 'Mindform: cobros reales atribuidos a un cheque cerrado — espera que Mindform identifique la venta',
+}
+
 interface Violation {
   check: string
   venue: string
@@ -86,7 +112,17 @@ export class MoneyIntegrityWatchdogJob {
     }
 
     try {
-      const violations = await this.check()
+      const allViolations = await this.check()
+
+      const violations = allViolations.filter(v => !TRIAGED_AWAITING_THIRD_PARTY[v.orderId])
+      const silenced = allViolations.filter(v => TRIAGED_AWAITING_THIRD_PARTY[v.orderId])
+
+      // Se reportan como INFO (no error) para que no se pierdan de vista sin disparar alarma.
+      if (silenced.length > 0) {
+        logger.info(`💰 [Money watchdog] ${silenced.length} caso(s) ya triado(s), esperando a un tercero`, {
+          casos: silenced.map(v => ({ orderId: v.orderId, check: v.check, motivo: TRIAGED_AWAITING_THIRD_PARTY[v.orderId] })),
+        })
+      }
 
       if (violations.length === 0) {
         logger.info('💰 [Money watchdog] Todo cuadra ✅')

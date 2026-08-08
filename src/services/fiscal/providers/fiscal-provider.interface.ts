@@ -227,7 +227,13 @@ export interface FiscalProvider {
   createOrganization(params: CreateOrgParams): Promise<CreateOrgResult>
   updateOrgLegal(params: UpdateOrgLegalParams): Promise<void>
   uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult>
-  validateReceptor(params: ReceptorInput): Promise<ReceptorValidationResult>
+  // NOTA: la validación de formato del receptor NO vive aquí. `validateBeforeStamp()`
+  // (src/services/fiscal/cfdiValidation.ts) es el único pre-check antes de timbrar y ya
+  // cubre RFC, CP, razón social, régimen y uso de CFDI — además de CSD, forma de pago,
+  // conceptos y que el dinero cuadre al centavo. Hubo aquí un `validateReceptor` que
+  // duplicaba un subconjunto más débil de eso y que nunca se llamó desde ningún lado;
+  // se eliminó porque parecía una defensa activa sin serlo. No lo reintroduzcas: si hace
+  // falta más validación de formato, va en `validateBeforeStamp`.
   /** Crea o actualiza el Customer espejo en el PAC. Devuelve su id. */
   upsertCustomer(params: UpsertCustomerParams): Promise<string>
   /** Valida los datos del Customer contra el padrón del SAT. No gasta timbre. */

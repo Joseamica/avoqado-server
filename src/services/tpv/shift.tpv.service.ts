@@ -1,12 +1,18 @@
-import { Shift, ShiftStatus } from '@prisma/client'
-import { computeCashDifference } from '../dashboard/shift.dashboard.service'
+import { Prisma, Shift, ShiftStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import socketManager from '../../communication/sockets'
 import { logAction } from '../dashboard/activity-log.service'
+import { isCashReconciliationEnabled } from '../access/cashReconciliationAccess.service'
+import {
+  calculateCashReconciliation,
+  normalizeCashReconciliationRequest,
+  type CashReconciliationOutcome,
+  type NormalizedCashReconciliationRequest,
+} from '../shared/cashReconciliation.service'
 
 interface ShiftFilters {
   staffId?: string
@@ -929,15 +935,6 @@ interface ShiftCloseData {
   notes?: string
 }
 
-export type CashReconciliationOutcome =
-  | 'APPLIED'
-  | 'SKIPPED'
-  | 'LEGACY_APPLIED'
-  | 'IGNORED_DISABLED'
-  | 'IGNORED_INVALID'
-  | 'IGNORED_OVERFLOW'
-  | 'NOT_REQUESTED'
-
 export interface CashReconciliationResult {
   outcome: CashReconciliationOutcome
   countedCash?: string
@@ -949,6 +946,8 @@ export interface ShiftCloseRequestContext {
   actorStaffId?: string
   ipAddress?: string
   userAgent?: string
+  /** Deterministic clock for stale-claim recovery tests; HTTP callers use the real clock. */
+  now?: () => Date
 }
 
 export interface ShiftCloseExecutionResult {
@@ -1141,29 +1140,31 @@ export async function openShiftForVenue(
   return shift
 }
 
-/**
- * Close an existing shift for a venue
- * AUTOMATIC CALCULATION: Payment methods, products sold, inventory consumed
- * Works with both integrated POS (SOFTRESTAURANT) and standalone (NONE) mode
- * @param venueId Venue ID
- * @param shiftId Shift ID to close
- * @param closeData Cash reconciliation and closing data (OPTIONAL for automatic mode)
- * @param orgId Organization ID for authorization
- * @returns Updated shift object with automatic calculations
- */
-export async function closeShiftForVenue(venueId: string, shiftId: string, closeData?: ShiftCloseData, _orgId?: string): Promise<Shift> {
-  logger.info('🔄 Closing shift with AUTOMATIC calculation', {
-    venueId,
-    shiftId,
-    closeData,
-  })
+const SHIFT_CLOSE_STALE_MS = 5 * 60 * 1000
 
-  // Verify shift exists and belongs to the venue
-  const shift = await prisma.shift.findFirst({
-    where: {
-      id: shiftId,
-      venueId: venueId,
-    },
+type ClosableShift = Shift & {
+  venue: {
+    posType: string
+    posStatus: string
+    name: string
+  }
+}
+
+interface EffectiveCloseRequest extends NormalizedCashReconciliationRequest {
+  ignoreReason?: string
+}
+
+function moneyString(value: Decimal): string {
+  return value.toFixed(2)
+}
+
+function shiftCloseInProgress(): ConflictError {
+  return new ConflictError('El cierre de turno ya está en proceso. Intenta de nuevo en unos momentos.', 'SHIFT_CLOSE_IN_PROGRESS')
+}
+
+async function findClosableShift(venueId: string, shiftId: string): Promise<ClosableShift | null> {
+  return prisma.shift.findFirst({
+    where: { id: shiftId, venueId },
     include: {
       venue: {
         select: {
@@ -1173,333 +1174,118 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
         },
       },
     },
-  })
+  }) as Promise<ClosableShift | null>
+}
 
+/**
+ * Claims a shift using OPEN -> CLOSING compare-and-set. A fresh claim is never stolen;
+ * a process-abandoned claim older than five minutes can be recovered with a second CAS.
+ */
+async function claimShiftForClose(venueId: string, shiftId: string, claimedAt: Date): Promise<ClosableShift> {
+  const shift = await findClosableShift(venueId, shiftId)
   if (!shift) {
     throw new NotFoundError('Shift not found or does not belong to this venue')
   }
-
-  if (shift.endTime !== null) {
+  if (shift.endTime !== null || shift.status === ShiftStatus.CLOSED) {
     throw new BadRequestError('Shift is already closed')
   }
 
-  // ============================================================
-  // AUTOMATIC CALCULATION 1: Payment Method Breakdown
-  // ============================================================
-  const shiftPayments = await prisma.payment.findMany({
+  const claim = await prisma.shift.updateMany({
     where: {
-      shiftId: shiftId,
-      status: 'COMPLETED',
-    },
-    select: {
-      id: true,
-      amount: true,
-      tipAmount: true,
-      method: true,
-    },
-  })
-
-  let totalCashPayments = new Decimal(0)
-  let totalCardPayments = new Decimal(0)
-  let totalVoucherPayments = new Decimal(0)
-  let totalOtherPayments = new Decimal(0)
-  let totalSales = new Decimal(0)
-  let totalTips = new Decimal(0)
-
-  shiftPayments.forEach(payment => {
-    const amount = new Decimal(payment.amount || 0)
-    const tipAmount = new Decimal(payment.tipAmount || 0)
-
-    totalSales = totalSales.add(amount)
-    totalTips = totalTips.add(tipAmount)
-
-    // Group by payment method
-    switch (payment.method) {
-      case 'CASH':
-        totalCashPayments = totalCashPayments.add(amount)
-        break
-      case 'CREDIT_CARD':
-      case 'DEBIT_CARD':
-        totalCardPayments = totalCardPayments.add(amount)
-        break
-      case 'DIGITAL_WALLET':
-        totalVoucherPayments = totalVoucherPayments.add(amount)
-        break
-      case 'BANK_TRANSFER':
-      case 'OTHER':
-      default:
-        totalOtherPayments = totalOtherPayments.add(amount)
-        break
-    }
-  })
-
-  logger.info('💰 Payment breakdown calculated', {
-    cash: totalCashPayments.toNumber(),
-    card: totalCardPayments.toNumber(),
-    voucher: totalVoucherPayments.toNumber(),
-    other: totalOtherPayments.toNumber(),
-    totalSales: totalSales.toNumber(),
-  })
-
-  // ============================================================
-  // AUTOMATIC CALCULATION 2: Products Sold Count
-  // ============================================================
-  const orderItems = await prisma.orderItem.findMany({
-    where: {
-      order: {
-        shiftId: shiftId,
-        status: {
-          in: ['COMPLETED'],
-        },
-      },
-    },
-    select: {
-      id: true,
-      quantity: true,
-      productName: true, // Denormalized field for deleted products
-      product: {
-        select: {
-          name: true,
-        },
-      },
-    },
-  })
-
-  const totalProductsSold = orderItems.reduce((sum, item) => sum + item.quantity, 0)
-
-  logger.info('📦 Products sold calculated', {
-    totalProductsSold,
-    totalOrders: orderItems.length,
-  })
-
-  // ============================================================
-  // AUTOMATIC CALCULATION 3: Inventory Consumed (FIFO batches)
-  // ============================================================
-  const inventoryMovements = await prisma.rawMaterialMovement.findMany({
-    where: {
-      // Find all USAGE movements that happened during this shift
-      type: 'USAGE',
-      createdAt: {
-        gte: shift.startTime,
-        lte: new Date(), // Until now (shift close time)
-      },
-      rawMaterial: {
-        venueId: venueId,
-      },
-    },
-    include: {
-      rawMaterial: {
-        select: {
-          id: true,
-          name: true,
-          sku: true,
-          unit: true,
-        },
-      },
-    },
-    orderBy: {
-      createdAt: 'asc',
-    },
-  })
-
-  // Group inventory consumed by raw material
-  const inventoryConsumedMap = new Map<
-    string,
-    {
-      rawMaterialId: string
-      name: string
-      sku: string | null
-      unit: string
-      quantityConsumed: number
-      movementsCount: number
-    }
-  >()
-
-  inventoryMovements.forEach(movement => {
-    const key = movement.rawMaterialId
-    const quantity = Math.abs(Number(movement.quantity || 0)) // OUT movements are negative, make positive
-
-    if (inventoryConsumedMap.has(key)) {
-      const existing = inventoryConsumedMap.get(key)!
-      existing.quantityConsumed += quantity
-      existing.movementsCount += 1
-    } else {
-      inventoryConsumedMap.set(key, {
-        rawMaterialId: movement.rawMaterialId,
-        name: movement.rawMaterial.name,
-        sku: movement.rawMaterial.sku,
-        unit: movement.rawMaterial.unit,
-        quantityConsumed: quantity,
-        movementsCount: 1,
-      })
-    }
-  })
-
-  const inventoryConsumed = Array.from(inventoryConsumedMap.values())
-
-  logger.info('📊 Inventory consumed calculated', {
-    uniqueRawMaterials: inventoryConsumed.length,
-    totalMovements: inventoryMovements.length,
-  })
-
-  // ============================================================
-  // AUTOMATIC CALCULATION 4: Report Data (Summary JSON)
-  // ============================================================
-  const endTime = new Date()
-  const shiftDuration = Math.floor((endTime.getTime() - shift.startTime.getTime()) / 1000 / 60) // minutes
-
-  const reportData = {
-    shift: {
       id: shiftId,
-      startTime: shift.startTime,
-      endTime: endTime,
-      durationMinutes: shiftDuration,
-      venueName: shift.venue.name,
+      venueId,
+      status: ShiftStatus.OPEN,
+      endTime: null,
     },
-    sales: {
-      total: totalSales.toNumber(),
-      totalTips: totalTips.toNumber(),
-      totalOrders: orderItems.length,
-      productsSold: totalProductsSold,
-    },
-    paymentMethods: {
-      cash: totalCashPayments.toNumber(),
-      card: totalCardPayments.toNumber(),
-      voucher: totalVoucherPayments.toNumber(),
-      other: totalOtherPayments.toNumber(),
-    },
-    inventory: {
-      uniqueRawMaterialsConsumed: inventoryConsumed.length,
-      totalMovements: inventoryMovements.length,
-      details: inventoryConsumed,
-    },
-    products: {
-      totalSold: totalProductsSold,
-      uniqueProducts: new Set(orderItems.map(item => item.product?.name || item.productName || 'Unknown')).size,
-      items: orderItems.map(item => ({
-        name: item.product?.name || item.productName || 'Unknown',
-        quantity: item.quantity,
-      })),
-    },
-  }
-
-  logger.info('📋 Report data generated', {
-    shiftDuration: `${shiftDuration} minutes`,
-    reportSummary: {
-      sales: reportData.sales.total,
-      products: reportData.products.totalSold,
-      inventory: reportData.inventory.uniqueRawMaterialsConsumed,
+    data: {
+      status: ShiftStatus.CLOSING,
+      updatedAt: claimedAt,
     },
   })
+  if (claim.count === 1) return shift
 
-  // ============================================================
-  // POS Integration (if enabled)
-  // ============================================================
-  const isIntegratedPOS = shift.venue.posType === 'SOFTRESTAURANT' && shift.venue.posStatus === 'CONNECTED'
+  const latest = await findClosableShift(venueId, shiftId)
+  if (!latest) {
+    throw new NotFoundError('Shift not found or does not belong to this venue')
+  }
+  if (latest.endTime !== null || latest.status === ShiftStatus.CLOSED) {
+    throw new BadRequestError('Shift is already closed')
+  }
 
-  if (isIntegratedPOS && shift.externalId) {
-    try {
-      logger.info('Sending shift close command to POS', {
+  const staleBefore = new Date(claimedAt.getTime() - SHIFT_CLOSE_STALE_MS)
+  if (latest.status === ShiftStatus.CLOSING && latest.updatedAt instanceof Date && latest.updatedAt.getTime() < staleBefore.getTime()) {
+    const recovered = await prisma.shift.updateMany({
+      where: {
+        id: shiftId,
         venueId,
-        shiftId,
-        externalShiftId: shift.externalId,
-      })
-
-      await publishCommand(`command.softrestaurant.${venueId}`, {
-        entity: 'Shift',
-        action: 'CLOSE',
-        payload: {
-          shiftId: shift.externalId,
-          cashDeclared: closeData?.cashDeclared || 0,
-          cardDeclared: closeData?.cardDeclared || 0,
-          vouchersDeclared: closeData?.vouchersDeclared || 0,
-          otherDeclared: closeData?.otherDeclared || 0,
-        },
-      })
-    } catch (error) {
-      logger.error('Failed to send shift close command to POS', error)
-      // Continue with local shift close even if POS command fails
-    }
+        status: ShiftStatus.CLOSING,
+        endTime: null,
+        updatedAt: latest.updatedAt,
+      },
+      data: {
+        status: ShiftStatus.CLOSING,
+        updatedAt: claimedAt,
+      },
+    })
+    if (recovered.count === 1) return latest
   }
 
-  // ============================================================
-  // Update Shift Record with ALL Calculated Fields
-  // ============================================================
-  const updatedShift = await prisma.shift.update({
-    where: { id: shiftId },
-    data: {
-      endTime: endTime,
-      status: 'CLOSED' as ShiftStatus,
-      // Legacy fields (for backwards compatibility)
-      endingCash: closeData?.cashDeclared
-        ? new Decimal(shift.startingCash || 0).add(new Decimal(closeData.cashDeclared))
-        : totalCashPayments,
-      cashDeclared: closeData?.cashDeclared || null,
-      // Cash over/short, same formula the dashboard uses — one function, two callers, so
-      // the two paths can never drift the way the purchase-order totals did.
-      //
-      // 🔴 In practice this stays NULL today: the TPV closes the shift WITHOUT sending
-      // `closeData` at all (`CloseShiftData` is marked "NOT USED IN MVP" in ShiftDto.kt and
-      // `ShiftViewModel.closeShift()` passes nothing), so nobody ever tells us how much cash
-      // was actually counted. There is no cash difference to compute without a count, and
-      // writing 0 would read as "balanced" — the one answer we must never invent.
-      // The wiring is here so the day the TPV ships the count screen this works with no
-      // server change. Until then the honest value is NULL.
-      cashDifference: computeCashDifference({
-        countedCash: closeData?.cashDeclared ?? null,
-        startingCash: Number(shift.startingCash ?? 0),
-        cashSales: totalCashPayments.toNumber(),
-      }),
-      cardDeclared: closeData?.cardDeclared || null,
-      vouchersDeclared: closeData?.vouchersDeclared || null,
-      otherDeclared: closeData?.otherDeclared || null,
-      totalSales: totalSales,
-      totalTips: totalTips,
-      totalOrders: orderItems.length,
-      notes: closeData?.notes || null,
-      // NEW AUTOMATIC FIELDS
-      totalCashPayments: totalCashPayments,
-      totalCardPayments: totalCardPayments,
-      totalVoucherPayments: totalVoucherPayments,
-      totalOtherPayments: totalOtherPayments,
-      totalProductsSold: totalProductsSold,
-      inventoryConsumed: inventoryConsumed as any,
-      reportData: reportData as any,
-    },
-  })
+  throw shiftCloseInProgress()
+}
 
-  logger.info('✅ Shift closed successfully with automatic calculations', {
-    shiftId,
-    venueId,
-    summary: {
-      totalSales: totalSales.toNumber(),
-      productsSold: totalProductsSold,
-      inventoryConsumed: inventoryConsumed.length,
-      duration: `${shiftDuration} minutes`,
-    },
-  })
-
-  void logAction({
-    staffId: shift.staffId ?? null,
-    venueId: venueId,
-    action: 'SHIFT_CLOSED',
-    entity: 'Shift',
-    entityId: shift.id,
-    data: {
-      endingCash: updatedShift.endingCash?.toNumber() ?? undefined,
-      totalSales: Number(totalSales ?? 0),
-      totalTips: Number(totalTips ?? 0),
-      cashDiscrepancy: closeData?.cashDeclared != null ? new Decimal(closeData.cashDeclared).sub(totalCashPayments).toNumber() : undefined,
-    },
-  })
-
-  // Emit Socket.IO event for real-time dashboard updates
+async function releaseShiftCloseClaim(venueId: string, shiftId: string, claimedAt: Date): Promise<void> {
   try {
-    // Get staff info for the event
+    await prisma.shift.updateMany({
+      where: {
+        id: shiftId,
+        venueId,
+        status: ShiftStatus.CLOSING,
+        endTime: null,
+        updatedAt: claimedAt,
+      },
+      data: { status: ShiftStatus.OPEN },
+    })
+  } catch (releaseError) {
+    logger.error('[Shift Close] Failed to release CLOSING claim after rollback', {
+      venueId,
+      shiftId,
+      error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+    })
+  }
+}
+
+async function publishShiftCloseToPos(venueId: string, shift: ClosableShift, request: EffectiveCloseRequest): Promise<void> {
+  if (shift.venue.posType !== 'SOFTRESTAURANT' || shift.venue.posStatus !== 'CONNECTED' || !shift.externalId) return
+
+  const legacy = request.source === 'LEGACY' ? request.legacyCloseData : undefined
+  try {
+    await publishCommand('command.softrestaurant.' + venueId, {
+      entity: 'Shift',
+      action: 'CLOSE',
+      payload: {
+        shiftId: shift.externalId,
+        // Preserve the existing SoftRestaurant wire contract. The new physical-count
+        // protocol is intentionally not reinterpreted as the legacy declaration.
+        cashDeclared: legacy?.cashDeclared || 0,
+        cardDeclared: legacy?.cardDeclared || 0,
+        vouchersDeclared: legacy?.vouchersDeclared || 0,
+        otherDeclared: legacy?.otherDeclared || 0,
+      },
+    })
+  } catch (error) {
+    logger.error('Failed to send shift close command to POS', error)
+  }
+}
+
+async function broadcastClosedShift(venueId: string, updatedShift: Shift): Promise<void> {
+  try {
+    const broadcastingService = socketManager.getBroadcastingService()
+    if (!broadcastingService) return
+
     const staffInfo = await prisma.staffVenue.findFirst({
       where: {
         staffId: updatedShift.staffId,
-        venueId: venueId,
+        venueId,
       },
       include: {
         staff: {
@@ -1511,72 +1297,355 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
       },
     })
 
-    const broadcastingService = socketManager.getBroadcastingService()
-    if (broadcastingService) {
-      broadcastingService.broadcastShiftEvent(venueId, 'closed', {
-        shiftId: updatedShift.id,
-        staffId: updatedShift.staffId,
-        staffName: staffInfo ? `${staffInfo.staff.firstName} ${staffInfo.staff.lastName}` : 'Unknown',
-        status: 'CLOSED',
-        startTime: updatedShift.startTime.toISOString(),
-        endTime: updatedShift.endTime?.toISOString(),
-        startingCash: updatedShift.startingCash.toNumber(),
-        endingCash: updatedShift.endingCash?.toNumber(),
-        totalSales: updatedShift.totalSales.toNumber(),
-        totalTips: updatedShift.totalTips.toNumber(),
-        totalOrders: updatedShift.totalOrders,
-        totalCashPayments: updatedShift.totalCashPayments?.toNumber() || 0,
-        totalCardPayments: updatedShift.totalCardPayments?.toNumber() || 0,
-        totalVoucherPayments: updatedShift.totalVoucherPayments?.toNumber() || 0,
-        totalOtherPayments: updatedShift.totalOtherPayments?.toNumber() || 0,
-        totalProductsSold: updatedShift.totalProductsSold || 0,
-        venueId,
-      })
-      logger.info('✅ Broadcasted shift_closed event to dashboard', { shiftId: updatedShift.id, venueId })
-    }
-  } catch (error) {
-    logger.error('❌ Failed to broadcast shift_closed event', {
-      shiftId,
+    broadcastingService.broadcastShiftEvent(venueId, 'closed', {
+      shiftId: updatedShift.id,
+      staffId: updatedShift.staffId,
+      staffName: staffInfo ? staffInfo.staff.firstName + ' ' + staffInfo.staff.lastName : 'Unknown',
+      status: 'CLOSED',
+      startTime: updatedShift.startTime.toISOString(),
+      endTime: updatedShift.endTime?.toISOString(),
+      startingCash: updatedShift.startingCash.toNumber(),
+      endingCash: updatedShift.endingCash?.toNumber(),
+      cashDeclared: updatedShift.cashDeclared?.toNumber(),
+      cashDifference: updatedShift.cashDifference?.toNumber(),
+      totalSales: updatedShift.totalSales.toNumber(),
+      totalTips: updatedShift.totalTips.toNumber(),
+      totalOrders: updatedShift.totalOrders,
+      totalCashPayments: updatedShift.totalCashPayments?.toNumber() || 0,
+      totalCardPayments: updatedShift.totalCardPayments?.toNumber() || 0,
+      totalVoucherPayments: updatedShift.totalVoucherPayments?.toNumber() || 0,
+      totalOtherPayments: updatedShift.totalOtherPayments?.toNumber() || 0,
+      totalProductsSold: updatedShift.totalProductsSold || 0,
       venueId,
-      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } catch (error) {
+    logger.error('Failed to broadcast shift_closed event', {
+      shiftId: updatedShift.id,
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
     })
   }
+}
 
-  return updatedShift
+async function closeShiftUsingRequest(
+  venueId: string,
+  shiftId: string,
+  request: EffectiveCloseRequest,
+  context: ShiftCloseRequestContext,
+): Promise<ShiftCloseExecutionResult> {
+  const claimedAt = context.now?.() ?? new Date()
+  const shift = await claimShiftForClose(venueId, shiftId, claimedAt)
+
+  try {
+    const shiftPayments = await prisma.payment.findMany({
+      where: {
+        shiftId,
+        status: 'COMPLETED',
+      },
+      select: {
+        id: true,
+        amount: true,
+        tipAmount: true,
+        method: true,
+      },
+    })
+
+    let totalCashPayments = new Decimal(0)
+    let totalCardPayments = new Decimal(0)
+    let totalVoucherPayments = new Decimal(0)
+    let totalOtherPayments = new Decimal(0)
+    let totalSales = new Decimal(0)
+    let totalTips = new Decimal(0)
+
+    shiftPayments.forEach(payment => {
+      const amount = new Decimal(payment.amount || 0)
+      const tipAmount = new Decimal(payment.tipAmount || 0)
+      totalSales = totalSales.add(amount)
+      totalTips = totalTips.add(tipAmount)
+
+      switch (payment.method) {
+        case 'CASH':
+          totalCashPayments = totalCashPayments.add(amount)
+          break
+        case 'CREDIT_CARD':
+        case 'DEBIT_CARD':
+          totalCardPayments = totalCardPayments.add(amount)
+          break
+        case 'DIGITAL_WALLET':
+          totalVoucherPayments = totalVoucherPayments.add(amount)
+          break
+        case 'BANK_TRANSFER':
+        case 'OTHER':
+        default:
+          totalOtherPayments = totalOtherPayments.add(amount)
+          break
+      }
+    })
+
+    const orderItems = await prisma.orderItem.findMany({
+      where: {
+        order: {
+          shiftId,
+          status: { in: ['COMPLETED'] },
+        },
+      },
+      select: {
+        id: true,
+        quantity: true,
+        productName: true,
+        product: { select: { name: true } },
+      },
+    })
+    const totalProductsSold = orderItems.reduce((sum, item) => sum + item.quantity, 0)
+
+    const inventoryMovements = await prisma.rawMaterialMovement.findMany({
+      where: {
+        type: 'USAGE',
+        createdAt: {
+          gte: shift.startTime,
+          lte: claimedAt,
+        },
+        rawMaterial: { venueId },
+      },
+      include: {
+        rawMaterial: {
+          select: {
+            id: true,
+            name: true,
+            sku: true,
+            unit: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    })
+
+    const inventoryConsumedMap = new Map<
+      string,
+      {
+        rawMaterialId: string
+        name: string
+        sku: string | null
+        unit: string
+        quantityConsumed: number
+        movementsCount: number
+      }
+    >()
+
+    inventoryMovements.forEach(movement => {
+      const key = movement.rawMaterialId
+      const quantity = Math.abs(Number(movement.quantity || 0))
+      const existing = inventoryConsumedMap.get(key)
+      if (existing) {
+        existing.quantityConsumed += quantity
+        existing.movementsCount += 1
+      } else {
+        inventoryConsumedMap.set(key, {
+          rawMaterialId: movement.rawMaterialId,
+          name: movement.rawMaterial.name,
+          sku: movement.rawMaterial.sku,
+          unit: movement.rawMaterial.unit,
+          quantityConsumed: quantity,
+          movementsCount: 1,
+        })
+      }
+    })
+    const inventoryConsumed = Array.from(inventoryConsumedMap.values())
+
+    const shiftDuration = Math.floor((claimedAt.getTime() - shift.startTime.getTime()) / 1000 / 60)
+    const reportData = {
+      shift: {
+        id: shiftId,
+        startTime: shift.startTime,
+        endTime: claimedAt,
+        durationMinutes: shiftDuration,
+        venueName: shift.venue.name,
+      },
+      sales: {
+        total: totalSales.toNumber(),
+        totalTips: totalTips.toNumber(),
+        totalOrders: orderItems.length,
+        productsSold: totalProductsSold,
+      },
+      paymentMethods: {
+        cash: totalCashPayments.toNumber(),
+        card: totalCardPayments.toNumber(),
+        voucher: totalVoucherPayments.toNumber(),
+        other: totalOtherPayments.toNumber(),
+      },
+      inventory: {
+        uniqueRawMaterialsConsumed: inventoryConsumed.length,
+        totalMovements: inventoryMovements.length,
+        details: inventoryConsumed,
+      },
+      products: {
+        totalSold: totalProductsSold,
+        uniqueProducts: new Set(orderItems.map(item => item.product?.name || item.productName || 'Unknown')).size,
+        items: orderItems.map(item => ({
+          name: item.product?.name || item.productName || 'Unknown',
+          quantity: item.quantity,
+        })),
+      },
+    }
+
+    const expectedCash = new Decimal(shift.startingCash || 0).add(totalCashPayments)
+    let outcome: CashReconciliationOutcome = request.outcome
+    let ignoreReason = request.ignoreReason ?? request.reason
+    let endingCash = totalCashPayments
+    let cashDeclared: Decimal | null = null
+    let cashDifference: Decimal | null = null
+    let calculatedDifference: Decimal | null = null
+
+    if (request.source === 'NEW' && request.action === 'COUNTED' && request.countedCash && outcome === 'APPLIED') {
+      const calculation = calculateCashReconciliation(request.countedCash, shift.startingCash || 0, totalCashPayments)
+      endingCash = new Decimal(request.countedCash)
+      cashDeclared = new Decimal(request.countedCash)
+      calculatedDifference = new Decimal(calculation.difference)
+
+      if (calculation.fitsDifferenceColumn) {
+        cashDifference = calculatedDifference
+      } else {
+        outcome = 'IGNORED_OVERFLOW'
+        ignoreReason = 'cash difference exceeds Decimal(10,2)'
+      }
+    } else if (request.source === 'LEGACY' && request.legacyCloseData) {
+      const legacyCash = new Decimal(request.legacyCloseData.cashDeclared ?? 0)
+      endingCash = request.legacyCloseData.cashDeclared ? new Decimal(shift.startingCash || 0).add(legacyCash) : totalCashPayments
+      cashDeclared = request.legacyCloseData.cashDeclared ? legacyCash : null
+      // Preserve the active Desktop/legacy database contract: declarations remain stored and
+      // continue driving endingCash, but H0.6 does not retrofit a reconciliation difference.
+      // Only the explicit, entitled COUNTED protocol owns Shift.cashDifference.
+    }
+
+    const legacy = request.source === 'LEGACY' ? request.legacyCloseData : undefined
+    const finalData = {
+      endTime: claimedAt,
+      status: ShiftStatus.CLOSED,
+      endingCash,
+      cashDeclared,
+      cashDifference,
+      cardDeclared: legacy?.cardDeclared ? new Decimal(legacy.cardDeclared) : null,
+      vouchersDeclared: legacy?.vouchersDeclared ? new Decimal(legacy.vouchersDeclared) : null,
+      otherDeclared: legacy?.otherDeclared ? new Decimal(legacy.otherDeclared) : null,
+      totalSales,
+      totalTips,
+      totalOrders: orderItems.length,
+      notes: legacy?.notes || null,
+      totalCashPayments,
+      totalCardPayments,
+      totalVoucherPayments,
+      totalOtherPayments,
+      totalProductsSold,
+      inventoryConsumed: inventoryConsumed as Prisma.InputJsonValue,
+      reportData: reportData as Prisma.InputJsonValue,
+    }
+
+    const auditData: Record<string, string | number | undefined> = {
+      source: request.source,
+      action: request.action,
+      outcome,
+      expectedCash: moneyString(expectedCash),
+      ignoreReason,
+      endingCash: endingCash.toNumber(),
+      totalSales: totalSales.toNumber(),
+      totalTips: totalTips.toNumber(),
+    }
+    if (request.countedCash) auditData.countedCash = moneyString(new Decimal(request.countedCash))
+    if (cashDifference) auditData.cashDifference = moneyString(cashDifference)
+    if (outcome === 'IGNORED_OVERFLOW' && calculatedDifference) {
+      auditData.calculatedDifference = moneyString(calculatedDifference)
+    }
+    if (legacy) {
+      auditData.declaredCash = moneyString(new Decimal(legacy.cashDeclared ?? 0))
+      auditData.cashDiscrepancy =
+        legacy.cashDeclared != null ? new Decimal(legacy.cashDeclared).sub(totalCashPayments).toNumber() : undefined
+    }
+
+    const updatedShift = await prisma.$transaction(async tx => {
+      const finalized = await tx.shift.updateMany({
+        where: {
+          id: shiftId,
+          venueId,
+          status: ShiftStatus.CLOSING,
+          endTime: null,
+          updatedAt: claimedAt,
+        },
+        data: finalData,
+      })
+      if (finalized.count !== 1) throw shiftCloseInProgress()
+
+      const closedShift = await tx.shift.findUnique({ where: { id: shiftId } })
+      if (!closedShift) throw new NotFoundError('Shift disappeared while closing')
+
+      await tx.activityLog.create({
+        data: {
+          staffId: context.actorStaffId ?? shift.staffId ?? null,
+          venueId,
+          action: 'SHIFT_CLOSED',
+          entity: 'Shift',
+          entityId: shift.id,
+          data: auditData as Prisma.InputJsonValue,
+          ipAddress: context.ipAddress ?? null,
+          userAgent: context.userAgent ?? null,
+        },
+      })
+
+      return closedShift
+    })
+
+    logger.info('Shift closed successfully with an atomic claim', {
+      shiftId,
+      venueId,
+      source: request.source,
+      outcome,
+    })
+
+    // External effects are attempted only after the Shift + ActivityLog transaction commits.
+    await publishShiftCloseToPos(venueId, shift, request)
+    await broadcastClosedShift(venueId, updatedShift)
+
+    const reconciliation: CashReconciliationResult = { outcome }
+    if (request.source === 'NEW' && request.action === 'COUNTED' && request.countedCash) {
+      reconciliation.countedCash = moneyString(new Decimal(request.countedCash))
+    }
+    if (outcome === 'APPLIED' && cashDifference) {
+      reconciliation.cashDifference = moneyString(cashDifference)
+    }
+
+    return { shift: updatedShift, reconciliation }
+  } catch (error) {
+    await releaseShiftCloseClaim(venueId, shiftId, claimedAt)
+    throw error
+  }
 }
 
 /**
- * HTTP-facing additive wrapper. It intentionally leaves the long-lived
- * `closeShiftForVenue(...): Promise<Shift>` export intact for scripts and trusted callers.
- * Reconciliation normalization is expanded behind this boundary in the H0.6 TDD slices.
+ * Long-lived direct-call contract retained for scripts and trusted callers. Passing closeData
+ * remains the legacy declaration path and never consults the new paid-feature gate.
  */
+export async function closeShiftForVenue(venueId: string, shiftId: string, closeData?: ShiftCloseData, orgId?: string): Promise<Shift> {
+  const normalized = normalizeCashReconciliationRequest(closeData ?? {})
+  const result = await closeShiftUsingRequest(venueId, shiftId, normalized, { orgId })
+  return result.shift
+}
+
+/** HTTP-facing additive wrapper with request-scoped reconciliation outcome. */
 export async function closeShiftForVenueWithResult(
   venueId: string,
   shiftId: string,
   rawBody: unknown,
   context: ShiftCloseRequestContext = {},
 ): Promise<ShiftCloseExecutionResult> {
-  const body = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody) ? (rawBody as Record<string, unknown>) : {}
-  const nested = body.closeData && typeof body.closeData === 'object' && !Array.isArray(body.closeData)
-    ? (body.closeData as Record<string, unknown>)
-    : {}
-  const legacySource = Object.prototype.hasOwnProperty.call(body, 'cashDeclared') ? body : nested
-  const hasLegacyData = ['cashDeclared', 'cardDeclared', 'vouchersDeclared', 'otherDeclared', 'notes'].some(key =>
-    Object.prototype.hasOwnProperty.call(legacySource, key),
-  )
-  const legacyCloseData = hasLegacyData
-    ? ({
-        cashDeclared: legacySource.cashDeclared ?? 0,
-        cardDeclared: legacySource.cardDeclared ?? 0,
-        vouchersDeclared: legacySource.vouchersDeclared ?? 0,
-        otherDeclared: legacySource.otherDeclared ?? 0,
-        notes: legacySource.notes,
-      } as ShiftCloseData)
-    : undefined
+  const normalized = normalizeCashReconciliationRequest(rawBody)
+  const effective: EffectiveCloseRequest = { ...normalized }
 
-  const shift = await closeShiftForVenue(venueId, shiftId, legacyCloseData, context.orgId)
-  return {
-    shift,
-    reconciliation: { outcome: hasLegacyData ? 'LEGACY_APPLIED' : 'NOT_REQUESTED' },
+  if (normalized.source === 'NEW' && normalized.action === 'COUNTED' && normalized.outcome === 'APPLIED') {
+    const enabled = await isCashReconciliationEnabled(venueId)
+    if (!enabled) {
+      effective.outcome = 'IGNORED_DISABLED'
+      effective.ignoreReason = 'cash reconciliation is disabled'
+    }
   }
+
+  return closeShiftUsingRequest(venueId, shiftId, effective, context)
 }

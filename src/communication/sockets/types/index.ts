@@ -552,6 +552,8 @@ export interface ShiftEventPayload extends BaseEventPayload {
   endTime?: string
   startingCash?: number
   endingCash?: number
+  cashDeclared?: number
+  cashDifference?: number
   totalSales?: number
   totalTips?: number
   totalOrders?: number

@@ -2,7 +2,7 @@
 
 > **Para qué es esto:** darle a otra IA (o a una persona nueva) todo el contexto del
 > proyecto PITS sin tener que leer la conversación completa. Última actualización:
-> **2026-08-07**.
+> **2026-08-08**.
 >
 > Léelo entero antes de tocar nada. Son 10 minutos y evita repetir trabajo que ya falló dos
 > veces.
@@ -40,22 +40,25 @@ es también la más barata de cerrar. Por eso el hito H0 existe y va primero.
 |---|---|---|
 | 1 | `docs/PITS-PROGRAMA-COMPLETO.md` | **Empieza aquí.** El titular honesto (17 meses si construimos todo; 8-9 de lo que van a usar; 13 semanas de lo que decide la selección), las sorpresas buenas ya construidas, y el programa por hitos H0→H7 con su secuencia justificada. |
 | 2 | `docs/PITS-INVENTARIO-MATRIZ.md` | **125 de 259 renglones** con detalle: qué prometimos (cita textual), qué existe hoy (con archivo:línea), tamaño de la brecha, esfuerzo y riesgo a los ~70 venues vivos. |
-| 3 | `docs/PITS-H0-PENDIENTES.md` | Los cuatro puntos que faltan de H0, listos para ejecutar. **Empieza aquí si vas a implementar.** |
-| 4 | `docs/PITS-H0.3-EXPORTACIONES-PLAN.md` | Plan de implementación de las exportaciones + el patrón existente documentado + spec por módulo. **No implementado.** |
-| 4 | `docs/superpowers/specs/2026-08-06-autorizacion-y-segregacion-compras-design.md` | El único spec cerrado. Autorización de compras por monto y sucursal, con segregación aprobar/recibir. |
-| 5 | `docs/superpowers/plans/2026-08-06-autorizacion-y-segregacion-compras-v2.md` | 🔴 **Este plan FALLÓ la auditoría de Codex con 46 incidencias. No lo ejecutes tal cual.** |
-| 6 | `docs/DEMO-PITS-2026-08-BITACORA.md` | Bitácora de lo trabajado antes del 7 de agosto. |
+| 3 | `docs/PITS-H0-PENDIENTES.md` | Registro histórico de los puntos que faltaban de H0. Ya no es una lista vigente de ejecución. |
+| 4 | `docs/PITS-HANDOFF-SESION-2026-08-07.md` §0 | **Cierre verificable de H0.6:** contrato, 11 pruebas HTTP/DB, comandos, límites y rollout seguro. |
+| 5 | `docs/PITS-H0.3-EXPORTACIONES-PLAN.md` | Plan histórico de implementación de las exportaciones + patrón por módulo. |
+| 6 | `docs/superpowers/specs/2026-08-06-autorizacion-y-segregacion-compras-design.md` | Spec de autorización de compras por monto y sucursal, con segregación aprobar/recibir. |
+| 7 | `docs/superpowers/plans/2026-08-06-autorizacion-y-segregacion-compras-v2.md` | 🔴 **Este plan FALLÓ la auditoría de Codex con 46 incidencias. No lo ejecutes tal cual.** |
+| 8 | `docs/DEMO-PITS-2026-08-BITACORA.md` | Bitácora de lo trabajado antes del 7 de agosto. |
 
 Contexto de la plataforma en general (no específico de PITS): el `CLAUDE.md` de este repo y
 las reglas de `.claude/rules/` — auto-cargan y son obligatorias.
 
 ---
 
-## 3. Estado al 2026-08-07
+## 3. Estado actualizado al 2026-08-08
 
 ### Hito H0 — "todo lo que dijimos que ya cumple, cumple"
 
-Lista **cerrada** de nueve puntos, 2 semanas. **LOS NUEVE ATENDIDOS** — uno de ellos (H0.6) con un bloqueo que sólo se cierra desde la TPV. El detalle de los cuatro que faltan —dónde está el código, qué hace hoy, qué debe hacer, la trampa y cómo verificar— está en `docs/PITS-H0-PENDIENTES.md`.
+Lista **cerrada** de nueve puntos, 2 semanas. **LOS NUEVE IMPLEMENTADOS.** H0.6 terminó su
+implementación y prueba local el 8 de agosto; su despliegue permanece pendiente y el opt-in nace
+apagado, por lo que no cambia a ningún venue actual.
 
 | | Punto | Estado |
 |---|---|---|
@@ -64,7 +67,7 @@ Lista **cerrada** de nueve puntos, 2 semanas. **LOS NUEVE ATENDIDOS** — uno de
 | H0.3 | Exportación en bitácora, inventario, compras y contabilidad | ✅ (6 exportaciones + bitácora) |
 | H0.4 | Botón de pólizas XML + export de estado de resultados y balance | ✅ |
 | H0.5 | Montar captura de merma y exponer cuarentena de lotes | ✅ |
-| H0.6 | Diferencia de caja al cerrar turno | ⚠️ fórmula arreglada, pero **bloqueado por la TPV** (ver abajo) |
+| H0.6 | Diferencia de caja al cerrar turno | ✅ implementación + prueba HTTP/DB; ⚠️ rollout/piloto físico pendientes |
 | H0.7 | Candado de ajuste de inventario a `inventory:adjust` | ✅ |
 | H0.8 | Tasa de surtido y días de cobertura | ✅ |
 | H0.9 | "Recibir ninguno" devuelve la mercancía al almacén | ✅ |
@@ -125,30 +128,31 @@ cuánto queda y que la salida es una devolución al proveedor — el modelo de O
 
 Regresión: 150 pruebas en 18 suites de compras, lotes y reabasto, todas en verde.
 
-### 🔴 H0.6 tiene un bloqueo que NO se resuelve en el servidor
+### H0.6 — cerrado en implementación, pendiente de rollout
 
-La diferencia de caja tenía **dos defectos y un bloqueo**:
+El bloqueo original ya se resolvió de forma aditiva:
 
-1. **La fórmula estaba mal.** Era `efectivo final − fondo inicial`, que no es una diferencia
-   de caja sino el cambio neto del cajón. Un turno que vendió $5,000 en efectivo y cuadró al
-   peso reportaba **"+$5,000 de sobrante"**. Arreglado: ahora es `contado − esperado`, con
-   `esperado = fondo + ventas en efectivo`, en **una sola función** que usan los dos caminos.
+1. El cálculo nuevo es `contado − (fondo inicial + pagos COMPLETED en efectivo)` con Decimal exacto.
+   Un turno balanceado devuelve y persiste `0.00`; ausencia de conteo conserva `null`.
+2. `CASH_RECONCILIATION` es PRO y exige un opt-in por venue con default `false`. Sin ambos, el flujo
+   antiguo queda idéntico y nunca se convierte en stopper.
+3. `avoqado-tpv` ahora ofrece conteo ciego de efectivo físico total, cierre sin conteo confirmado y
+   un resultado que no desaparece hasta pulsar **Listo**.
+4. El payload antiguo, kiosk y Avoqado Desktop siguen funcionando. En particular, el top-level
+   legacy `cashDeclared` de Desktop permanece activo incluso en FREE/opt-out.
+5. El server usa cierre atómico `OPEN -> CLOSING -> CLOSED`, auditoría transaccional y outcomes
+   explícitos para counted, skipped, disabled, inválido, overflow y legacy.
 
-2. **El cierre desde la TPV no la escribía.** Ya está cableado.
+Se probaron once escenarios de punta a punta con el Express/Prisma real contra un clon PostgreSQL
+aislado, incluida concurrencia, recuperación de `CLOSING`, cero físico, downgrade e aislamiento por
+tenant. Server (8 508 unitarias), dashboard (624), TPV (suite + Production compile + lint) y Desktop
+`CajaFlowUiTest` quedaron verdes en sus verificaciones de alcance.
 
-3. 🔴 **Pero nadie captura el conteo.** `CloseShiftData` está marcado *"NOT USED IN MVP"* en
-   `ShiftDto.kt` y `ShiftViewModel.closeShift()` se llama **sin datos**. La TPV nunca le
-   pregunta al cajero cuánto efectivo contó, así que **no hay contra qué comparar**. El campo
-   queda en `NULL` a propósito: un 0 inventado se lee como "cuadró", que es la única
-   respuesta que no podemos fabricar.
-
-**Para cerrar esto de verdad hace falta una pantalla de conteo en `avoqado-tpv`** (Kotlin,
-con su propio ciclo de despliegue de días). El servidor ya está listo: el día que la TPV
-mande el conteo, funciona sin cambiar una línea aquí.
-
-**Consecuencia para la matriz:** si contestamos "reporte de diferencias de caja" como
-cumplimiento natural, hoy NO cumple para los turnos cerrados desde la terminal, que son
-todos los de la operación real.
+**Lo que falta es release, no diseño funcional:** resolver/separar dos WIP ajenos que bloquean los
+builds globales, commitear sólo con permiso, desplegar server antes del dashboard/APK, hacer bump
+MINOR y validar en una terminal 360x640. `adb devices -l` no mostró dispositivo, así que no se
+inventa evidencia física. Ver el registro exacto en
+`docs/PITS-HANDOFF-SESION-2026-08-07.md` §0.
 
 ### Limitación conocida y declarada
 
@@ -174,9 +178,11 @@ que esconde un hueco.
 
 ### 🔴 Estado del control de versiones
 
-**NADA de esto está commiteado.** Todo vive en el árbol de trabajo de la rama `develop`.
-El fundador tiene una regla dura: **nunca commitear, hacer push ni tocar git sin su permiso
-explícito.**
+El estado ya no es completamente no-commiteado: el commit mixto `891dc0fb` incorporó 125 archivos
+de varias sesiones, incluida una parte inicial de H0/H0.6. **No reescribirlo ni atribuirlo a una sola
+sesión.** Las correcciones finales de server y los cambios de dashboard/TPV continúan en el árbol
+compartido. El fundador mantiene la regla dura: **nunca hacer otro commit, push ni operación Git
+mutante sin permiso explícito.**
 
 **Verificación al 2026-08-07:** typecheck limpio en `avoqado-server` y en
 `avoqado-web-dashboard`; 159 pruebas propias en verde. Tres suites del repo fallan

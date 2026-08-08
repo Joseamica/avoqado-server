@@ -1,12 +1,12 @@
 /**
  * shiftCapture.test.ts
  *
- * Verifies that the two logAction calls added to shift.tpv.service.ts fire
- * with the correct action / entity / venueId arguments.
+ * Verifies that shift lifecycle audit records are written with the correct
+ * action / entity / venueId arguments.
  *
  * Coverage:
  *   - openShiftForVenue  → SHIFT_OPENED  (driven through success path)
- *   - closeShiftForVenue → SHIFT_CLOSED  (driven through success path)
+ *   - closeShiftForVenue → SHIFT_CLOSED  (atomically with the final Shift write)
  *
  * Strategy: mock prisma locally so we control exactly what DB calls return,
  * then assert logAction was called with the right shape. logAction itself is
@@ -26,6 +26,7 @@ jest.mock('@/utils/prismaClient', () => ({
       findFirst: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     staffVenue: { findFirst: jest.fn() },
     payment: { findMany: jest.fn() },
@@ -57,6 +58,9 @@ import prisma from '@/utils/prismaClient'
 
 const mockPrisma = prisma as any
 const mockLogAction = logAction as jest.MockedFunction<typeof logAction>
+const mockTxShiftUpdateMany = jest.fn()
+const mockTxShiftFindUnique = jest.fn()
+const mockTxActivityCreate = jest.fn()
 
 const VENUE_ID = 'venue-1'
 const SHIFT_ID = 'shift-1'
@@ -247,72 +251,81 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
       mockPrisma.payment.findMany.mockResolvedValue([])
       mockPrisma.orderItem.findMany.mockResolvedValue([])
       mockPrisma.rawMaterialMovement.findMany.mockResolvedValue([])
+      mockPrisma.shift.updateMany.mockResolvedValue({ count: 1 })
+      mockTxShiftUpdateMany.mockResolvedValue({ count: 1 })
+      mockTxShiftFindUnique.mockResolvedValue(makeUpdatedShift())
+      mockTxActivityCreate.mockResolvedValue({ id: 'activity-shift-closed' })
+      mockPrisma.$transaction.mockImplementation((callback: any) =>
+        callback({
+          shift: { updateMany: mockTxShiftUpdateMany, findUnique: mockTxShiftFindUnique },
+          activityLog: { create: mockTxActivityCreate },
+        }),
+      )
     })
 
-    it('fires logAction with action SHIFT_CLOSED, entity Shift, and venueId', async () => {
+    it('writes SHIFT_CLOSED, entity Shift, and venueId inside the final transaction', async () => {
       const updated = makeUpdatedShift()
-      mockPrisma.shift.update.mockResolvedValue(updated)
+      mockTxShiftFindUnique.mockResolvedValue(updated)
 
       await closeShiftForVenue(VENUE_ID, SHIFT_ID)
 
-      expect(mockLogAction).toHaveBeenCalledTimes(1)
-      expect(mockLogAction).toHaveBeenCalledWith(
-        expect.objectContaining({
+      expect(mockTxActivityCreate).toHaveBeenCalledTimes(1)
+      expect(mockTxActivityCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
           action: 'SHIFT_CLOSED',
           entity: 'Shift',
           entityId: SHIFT_ID,
           venueId: VENUE_ID,
           staffId: STAFF_ID,
         }),
-      )
+      })
     })
 
     it('includes totalSales, totalTips, and endingCash in data', async () => {
       const updated = makeUpdatedShift()
-      mockPrisma.shift.update.mockResolvedValue(updated)
+      mockTxShiftFindUnique.mockResolvedValue(updated)
 
       await closeShiftForVenue(VENUE_ID, SHIFT_ID)
 
-      expect(mockLogAction).toHaveBeenCalledWith(
-        expect.objectContaining({
+      expect(mockTxActivityCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
           data: expect.objectContaining({
             totalSales: 0, // no payments in mock → computed Decimal(0)
             totalTips: 0,
-            endingCash: 1200, // from makeUpdatedShift
+            endingCash: 0, // no count and no cash payments → existing no-count semantics
           }),
         }),
-      )
+      })
     })
 
     it('includes cashDiscrepancy when cashDeclared is provided', async () => {
       const updated = makeUpdatedShift()
-      mockPrisma.shift.update.mockResolvedValue(updated)
+      mockTxShiftFindUnique.mockResolvedValue(updated)
       // One cash payment of 600; declared 700 → discrepancy = 700 - 600 = 100
       mockPrisma.payment.findMany.mockResolvedValue([{ id: 'p1', amount: new Decimal(600), tipAmount: new Decimal(0), method: 'CASH' }])
 
       await closeShiftForVenue(VENUE_ID, SHIFT_ID, { cashDeclared: 700 } as any)
 
-      expect(mockLogAction).toHaveBeenCalledWith(
-        expect.objectContaining({
+      expect(mockTxActivityCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
           data: expect.objectContaining({ cashDiscrepancy: 100 }),
         }),
-      )
+      })
     })
 
     it('leaves cashDiscrepancy undefined when no cashDeclared is provided', async () => {
-      mockPrisma.shift.update.mockResolvedValue(makeUpdatedShift())
+      mockTxShiftFindUnique.mockResolvedValue(makeUpdatedShift())
 
       await closeShiftForVenue(VENUE_ID, SHIFT_ID) // no closeData
 
-      const callArg = mockLogAction.mock.calls[0][0]
-      // cashDiscrepancy key is present but explicitly undefined (no cashDeclared supplied)
+      const callArg = mockTxActivityCreate.mock.calls[0][0].data
       expect((callArg.data as any)?.cashDiscrepancy).toBeUndefined()
     })
 
     // ── Regression: return value unchanged ──────────────────────────────────
     it('still returns the updated shift object', async () => {
       const updated = makeUpdatedShift()
-      mockPrisma.shift.update.mockResolvedValue(updated)
+      mockTxShiftFindUnique.mockResolvedValue(updated)
 
       const result = await closeShiftForVenue(VENUE_ID, SHIFT_ID)
 

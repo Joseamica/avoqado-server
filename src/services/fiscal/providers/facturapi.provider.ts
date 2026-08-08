@@ -12,8 +12,6 @@ import {
   PaymentComplementParams,
   PayrollReceiptParams,
   ProviderInvoiceSummary,
-  ReceptorInput,
-  ReceptorValidationResult,
   SatValidationField,
   SatValidationResult,
   SearchInvoicesParams,
@@ -71,17 +69,6 @@ export class FacturapiProvider implements FiscalProvider {
     )
     const expiresAt = org.certificate?.expires_at ?? null
     return { csdExpiresAt: expiresAt ? new Date(expiresAt) : null }
-  }
-
-  async validateReceptor(params: ReceptorInput): Promise<ReceptorValidationResult> {
-    const reasons: string[] = []
-    if (!/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i.test(params.rfc)) reasons.push('El RFC no tiene un formato válido.')
-    if (!/^\d{5}$/.test(params.codigoPostal)) reasons.push('El código postal debe tener 5 dígitos.')
-    if (!params.razonSocial?.trim()) reasons.push('La razón social es obligatoria.')
-    if (!params.regimenFiscal?.trim()) reasons.push('El régimen fiscal es obligatorio.')
-    // Format-level validation only here; the SDK will reject at createInvoice() time if SAT
-    // rejects the receptor data (e.g. RFC not found in registry, mismatched regimenFiscal).
-    return { valid: reasons.length === 0, reasons }
   }
 
   /**

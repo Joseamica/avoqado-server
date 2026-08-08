@@ -4,7 +4,7 @@
  */
 
 const tx = {
-  venueSettings: { upsert: jest.fn() },
+  venueSettings: { findUnique: jest.fn(), upsert: jest.fn() },
   activityLog: { create: jest.fn() },
 }
 
@@ -34,7 +34,7 @@ describe('updateVenueSettings cashReconciliationEnabled', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     db.venue.findUnique.mockResolvedValue({ id: 'venue-1' })
-    db.venueSettings.findUnique.mockResolvedValue({ id: 'settings-1', cashReconciliationEnabled: false })
+    tx.venueSettings.findUnique.mockResolvedValue({ id: 'settings-1', cashReconciliationEnabled: false })
     tx.venueSettings.upsert.mockResolvedValue({ id: 'settings-1', venueId: 'venue-1', cashReconciliationEnabled: true })
     tx.activityLog.create.mockResolvedValue({ id: 'audit-1' })
   })
@@ -45,6 +45,11 @@ describe('updateVenueSettings cashReconciliationEnabled', () => {
     await updateVenueSettings('venue-1', { cashReconciliationEnabled: true } as any, 'staff-authenticated')
 
     expect(hasFeature).toHaveBeenCalledWith('venue-1', 'CASH_RECONCILIATION')
+    expect(db.venueSettings.findUnique).not.toHaveBeenCalled()
+    expect(tx.venueSettings.findUnique).toHaveBeenCalledWith({
+      where: { venueId: 'venue-1' },
+      select: { id: true, cashReconciliationEnabled: true },
+    })
     expect(tx.venueSettings.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { venueId: 'venue-1' },
@@ -74,7 +79,7 @@ describe('updateVenueSettings cashReconciliationEnabled', () => {
   })
 
   it('always allows disable after downgrade and does not consult the paid gate', async () => {
-    db.venueSettings.findUnique.mockResolvedValue({ id: 'settings-1', cashReconciliationEnabled: true })
+    tx.venueSettings.findUnique.mockResolvedValue({ id: 'settings-1', cashReconciliationEnabled: true })
     tx.venueSettings.upsert.mockResolvedValue({ id: 'settings-1', venueId: 'venue-1', cashReconciliationEnabled: false })
 
     await updateVenueSettings('venue-1', { cashReconciliationEnabled: false } as any, 'staff-1')
@@ -94,7 +99,7 @@ describe('updateVenueSettings cashReconciliationEnabled', () => {
   })
 
   it('defaults a missing settings row to previous=false and creates the requested raw value', async () => {
-    db.venueSettings.findUnique.mockResolvedValue(null)
+    tx.venueSettings.findUnique.mockResolvedValue(null)
     hasFeature.mockResolvedValue(true)
 
     await updateVenueSettings('venue-1', { cashReconciliationEnabled: true } as any, 'staff-1')

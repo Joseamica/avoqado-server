@@ -7,7 +7,7 @@ ADD COLUMN "cashReconciliationEnabled" BOOLEAN NOT NULL DEFAULT false;
 -- the capability is bundled with the base plan rather than sold à la carte by this migration.
 INSERT INTO "Feature" ("id", "code", "name", "description", "category", "monthlyPrice", "active")
 VALUES (
-  'feature_cash_reconciliation_v1',
+  'cmsk3f0h20000b2c9azow9epe',
   'CASH_RECONCILIATION',
   'Conciliación de efectivo por turno',
   'Conteo ciego y cálculo de caja cuadrada, faltante o sobrante al cerrar un turno.',

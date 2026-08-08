@@ -18,6 +18,280 @@
 
 ---
 
+## 0. ACTUALIZACIÓN DE CIERRE H0.6 — 2026-08-08
+
+> **Esta sección reemplaza cualquier afirmación posterior de que H0.6 sigue bloqueado por la
+> TPV.** Esas líneas describen correctamente el estado del 7 de agosto, antes de construir la
+> captura y el contrato nuevos. Al 8 de agosto H0.6 está **terminado en implementación y prueba
+> local**, pero **no está desplegado ni activado en producción**. Una parte inicial del server ya
+> quedó incluida en el commit mixto `891dc0fb`; las correcciones finales y los cambios de
+> dashboard/TPV siguen en el árbol compartido. No reescribir ese commit: mezcla 125 archivos de
+> varias sesiones.
+
+### 0.1 Resultado operativo
+
+H0.6 quedó como una adición opt-in, no como un cambio obligatorio del cierre existente:
+
+- `CASH_RECONCILIATION` es una capacidad **PRO** y además exige el interruptor por venue
+  `cashReconciliationEnabled`. La migración lo crea `false` para todos; el acceso efectivo es
+  *entitlement positivo AND opt-in explícito*.
+- Un venue actual, un APK viejo, el modo kiosk o un venue elegible con el interruptor apagado sigue
+  cerrando como antes, sin pantalla nueva ni stopper. La ausencia de conteo conserva
+  `cashDifference = null`; nunca se fabrica un cero.
+- Avoqado Desktop conserva su contrato activo top-level `cashDeclared` **sin gate de plan ni del
+  nuevo interruptor**. Ese camino sigue guardando la declaración/`endingCash`, pero H0.6 no le
+  retroajusta una diferencia nueva: `cashDifference` permanece `null`.
+- Un venue habilitado recibe en `avoqado-tpv` un conteo ciego de **efectivo físico total**, incluido
+  el fondo inicial. Puede enviar `COUNTED` con un decimal canónico o confirmar `SKIPPED`; cerrar sin
+  conteo sigue siendo posible y queda auditado.
+- El resultado `cuadrada` / `faltante` / `sobrante` queda visible hasta que el operador pulsa
+  **Listo**. Back, flecha, pull-to-refresh y reconexión no pueden borrar ese resultado; el cierre
+  legacy conserva su comportamiento previo.
+- Los importes nuevos viajan como string decimal canónico y se calculan/persisten con
+  `Prisma.Decimal` / `BigDecimal`. `0.00` es un valor real; no se pierde por truthiness ni se
+  transforma en `null`.
+- El servidor reclama el turno por CAS `OPEN -> CLOSING -> CLOSED`, recupera sólo un `CLOSING`
+  abandonado por más de cinco minutos, escribe cierre + auditoría en la misma transacción y ejecuta
+  integraciones después del commit. Un segundo terminal no vuelve a enviar el POST: ante 400/409,
+  la TPV hace un único GET acotado para recuperar el turno ya cerrado.
+- Android e iOS no cambiaron: usan su subsistema separado de `cash-drawer`. Desktop se verificó sin
+  editarlo. Los únicos clientes que cambian para H0.6 son dashboard y `avoqado-tpv`, además del
+  contrato aditivo del servidor/MCP.
+
+### 0.2 Por qué se diseñó así
+
+- **Square** distingue terminar una sesión sin conteo de cerrarla con efectivo real y registra
+  fondo y movimientos de caja.
+- **Toast** usa conteo ciego para que el cajero no copie el monto esperado.
+- **Shopify POS** exige confirmar conscientemente una discrepancia y conserva una salida cuando el
+  cajón no se puede contar.
+
+Avoqado adopta ese denominador común: conteo ciego, escape explícito no bloqueante, resultado
+visible hasta acuse y auditoría. Conteo por denominaciones, PIN obligatorio de gerente y
+movimientos de caja ligados al turno quedan fuera de H0.6.
+
+### 0.3 Prueba HTTP + PostgreSQL en clon aislado
+
+Se hizo `pg_dump` **sólo lectura** de la base local normal y se restauró en la base temporal
+`avoqado_h06_verify_20260808`. No se cerraron conexiones ni se mutó `av-db-25`; producción no se
+tocó. Sobre el clon se aplicó únicamente la migración H0.6 y un proceso HTTP efímero ejercitó el
+Express/Prisma real. Las once pruebas del plan pasaron:
+
+1. payload TPV antiguo: `200`, `NOT_REQUESTED`, sin conteo inventado;
+2. Desktop top-level en FREE/opt-out: `200`, `LEGACY_APPLIED`, declaración aplicada y diferencia
+   `null`;
+3. acción nueva con raw setting apagado: `200`, `IGNORED_DISABLED`, pero el turno sí cierra;
+4. venue elegible + opt-in + conteo balanceado: `200`, `APPLIED`, respuesta y DB `0.00` exacto;
+5. conteo físico cero: persiste cero y produce el faltante completo;
+6. omisión consciente: `SKIPPED`, campos monetarios `null` y auditoría `SKIPPED`;
+7. valor inválido y diferencia fuera de `Decimal(10,2)`: ambos cierran con
+   `IGNORED_INVALID` / `IGNORED_OVERFLOW` explícito;
+8. FREE no puede activar (`403`), pero un downgrade sí puede desactivar (`200`) y deja auditoría
+   `true -> false`;
+9. dos cierres concurrentes: `200/409`, una transición y una fila de auditoría; el venue de prueba
+   era `NOT_INTEGRATED`, por lo que hubo cero intentos POS, dentro del máximo de uno;
+10. `CLOSING` obsoleto se recupera y uno fresco conserva `409`;
+11. un actor del venue A no puede cerrar ni configurar el venue B (`403`), y el turno ajeno sigue
+    `OPEN`.
+
+La migración dejó los 14 `VenueSettings` del clon con el flag apagado y creó la Feature activa con
+precio `0.00`; no hubo backfill de activación.
+
+Después de preservar esta evidencia se confirmó que el clon tenía cero conexiones, se ejecutó
+`DROP DATABASE "avoqado_h06_verify_20260808"` y se borraron exclusivamente
+`/private/tmp/avoqado_h06_verify_20260808.dump` y
+`/private/tmp/avoqado-h06-http-verify.ts`. La consulta posterior devolvió cero bases con ese nombre
+y ambos archivos quedaron ausentes. El dump/harness eran temporales y ya no son recuperables salvo
+recrear el clon; la evidencia necesaria permanece en este documento. Una búsqueda final de los
+procesos del harness y de las tareas Gradle lanzadas por H0.6 no encontró ninguno activo.
+
+### 0.4 Verificación fresca
+
+| Repo | Comando | Resultado observado |
+|---|---|---|
+| server | `npm run test:unit -- --no-watchman` | ✅ 710 suites pasaron, 1 omitida; 8 508 pruebas pasaron, 14 omitidas |
+| server | 11 suites H0.6 dirigidas | ✅ 11/11 suites, 82 pruebas |
+| server | `npx jest --no-watchman --runInBand --runTestsByPath tests/unit/services/shared/cashReconciliation.test.ts tests/unit/services/tpv/shift.cashReconciliation.test.ts tests/unit/services/tpv/shift.closeConcurrency.test.ts` | ✅ 3/3 suites, 39/39 pruebas después de la corrección final |
+| server | `npx prisma validate` | ✅ esquema válido |
+| server | `npm run schema:map -- --check` | ✅ 294 modelos y 276 enums sincronizados |
+| server | `bash scripts/check-permission-migration.sh` | ✅ centralización de permisos completa |
+| server | `npm run audit:permissions` | ✅ exit 0; sólo avisó del catálogo ajeno `financialConnections:manage` |
+| server | `npm run lint -- --no-cache` | ✅ 0 errores; 61 warnings globales. Los cuatro archivos H0.6 revisados después quedaron sin warnings |
+| server | `npm run typecheck` y `npm run build` | ⚠️ bloqueados únicamente por dos errores del WIP ajeno `areaTicketV7.mobile.service.ts:758` y `:2662` |
+| dashboard | `npm run test:run` | ✅ 84/84 archivos, 624/624 pruebas |
+| dashboard | ESLint dirigido a H0.6 | ✅ exit 0, sin salida |
+| dashboard | `npm run lint:i18n` | ✅ exit 0; 767 avisos informativos globales |
+| dashboard | `npm run build` | ⚠️ bloqueado por WIP ajeno: `AccountingReports.tsx:190`, nombre `venue` inexistente |
+| dashboard | `npm run validate:contracts` | ⚠️ 10/17; siete fallos preexistentes de suppliers/purchase-orders, fuera de H0.6 |
+| TPV | `./gradlew testSandboxDebugUnitTest` con JDK 23 | ✅ BUILD SUCCESSFUL en 30 s |
+| TPV | `./gradlew compileProductionDebugKotlin` con JDK 23 | ✅ BUILD SUCCESSFUL en 9 s |
+| TPV | `./gradlew lintSandboxDebug` con JDK 23 | ✅ BUILD SUCCESSFUL en 1 min 54 s |
+| TPV | `./scripts/check-cross-repo.sh` | ⚠️ bloqueó correctamente el release: 42 cambios TPV sin commit, 15 commits TPV sin push y backend no verificable desde este entorno; no se generó APK |
+| TPV | `adb devices -l` | ⚠️ ningún dispositivo conectado; falta prueba física 360x640/logcat |
+| Desktop | `./gradlew :shared:jvmTest --tests "com.avoqado.pos.CajaFlowUiTest" --rerun-tasks` con JDK 17 | ✅ BUILD SUCCESSFUL |
+
+Los fallos globales nombrados arriba no están en rutas H0.6 y no se corrigieron para no invadir el
+trabajo de otras sesiones. Los warnings duplicados de `pdf-to-img`, la deprecación de `ts-jest` y
+los warnings de React Router también son ruido preexistente.
+
+### 0.5 Límites declarados
+
+1. **Paid-in/out:** Square sí incorpora entradas y retiros en el efectivo esperado. En Avoqado,
+   `CashDrawerSession` no está ligado a `Shift`; atribuir por staff y traslape horario sería adivinar
+   dinero. H0.6 usa la fórmula honesta `esperado = fondo inicial + pagos COMPLETED en efectivo`.
+   Un movimiento físico no ligado al turno puede aparecer como faltante/sobrante hasta que exista
+   ese vínculo contable.
+2. **Pago concurrente con cierre:** el cálculo es una foto de los pagos `COMPLETED` leídos por el
+   cierre ganador. El CAS elimina cierres duplicados, pero no convierte un pago en vuelo y el cierre
+   de caja en una transacción distribuida. Cambiar el flujo de cobro existente quedó fuera por
+   riesgo a producción.
+3. **Hardware:** previews exactos 360x640, unitarias, compile y lint pasaron, pero no había terminal
+   ADB. No se afirma validación física ni logcat.
+4. **Outcome futuro:** el set actual está sincronizado server/TPV, pero el enum Kotlin aún no tiene
+   fallback para un outcome desconocido. No agregar un outcome nuevo en server sin añadir primero
+   compatibilidad de cliente o un mapper tolerante.
+
+### 0.6 Estado de release
+
+H0.6 **no afecta hoy a ningún venue** porque sigue sin deploy y el flag nace apagado. El orden de
+salida es: servidor/migración aditiva -> observar estabilidad -> dashboard opt-in -> APK TPV con
+**bump MINOR** -> venue interno/demo -> venues PITS seleccionados. Esta continuación no hizo bump,
+commit, push, deploy ni activación; tampoco reescribió el commit mixto preexistente `891dc0fb`.
+
+Antes de declarar el release listo todavía hay que resolver o separar el WIP ajeno que bloquea los
+builds globales, obtener permiso explícito para commits por rutas, tener backend desplegado y hacer
+el piloto físico. Eso es un gate de lanzamiento; ya no es un faltante funcional de H0.6.
+
+### 0.7 Manifiesto exacto de H0.6 al cierre
+
+Auditoría read-only del 8 de agosto. No había ningún archivo staged en los tres repos.
+
+**`avoqado-server` — 35 rutas H0.6.** HEAD local `891dc0fbc1cc2b220120e264370ed54c97da7802`,
+siete commits adelante de `origin/develop`. Ese commit mixto incluyó 25 rutas H0.6 dentro de 125
+archivos totales; las otras 100 rutas del commit no son atribuibles a H0.6.
+
+Ya en HEAD y limpias:
+
+```text
+docs/superpowers/plans/2026-08-07-pits-h0-6-cash-reconciliation.md
+docs/superpowers/specs/2026-08-07-pits-h0-6-cash-reconciliation-design.md
+prisma/schema.prisma
+prisma/seed.ts
+src/controllers/dashboard/venueSettings.dashboard.controller.ts
+src/controllers/tpv/shift.tpv.controller.ts
+src/schemas/dashboard/venueSettings.schema.ts
+src/services/access/cashReconciliationAccess.service.ts
+src/services/onboarding/demoSeed.service.ts
+tests/unit/controllers/tpv/shift.closeContract.test.ts
+tests/unit/controllers/tpv/terminal.tpv.cashReconciliation.test.ts
+tests/unit/schemas/venueSettings.schema.test.ts
+tests/unit/services/access/cashReconciliationAccess.test.ts
+```
+
+En HEAD y modificadas de nuevo por correcciones/finalización:
+
+```text
+docs/PITS-H0-PENDIENTES.md
+docs/PITS-HANDOFF-SESION-2026-08-07.md
+docs/PITS-HANDOFF.md
+docs/SCHEMA_MAP.md
+prisma/migrations/20260808010000_add_cash_reconciliation_opt_in/migration.sql
+src/services/dashboard/shift.dashboard.service.ts
+src/services/dashboard/venueSettings.dashboard.service.ts
+src/services/shared/cashReconciliation.service.ts
+src/services/tpv/shift.tpv.service.ts
+tests/unit/services/dashboard/shift.cashDifference.test.ts
+tests/unit/services/dashboard/venueSettings.cashReconciliation.test.ts
+tests/unit/services/shared/cashReconciliation.test.ts
+```
+
+Sólo en el working tree al cierre:
+
+```text
+CHANGELOG.md
+src/communication/sockets/types/index.ts
+src/controllers/tpv/terminal.tpv.controller.ts
+src/mcp/tools/shifts.ts
+src/routes/tpv.routes.ts
+tests/unit/services/tpv/shiftCapture.test.ts
+tests/unit/mcp-customer/shifts.test.ts
+tests/unit/services/dashboard/shift.serializer.test.ts
+tests/unit/services/tpv/shift.cashReconciliation.test.ts
+tests/unit/services/tpv/shift.closeConcurrency.test.ts
+```
+
+`terminal.tpv.planInfo.test.ts` y `terminal.tpv.trackPromoterLocation.test.ts` estaban nombrados en
+el plan, pero no se modificaron; la cobertura terminó concentrada en
+`terminal.tpv.cashReconciliation.test.ts`. No atribuirlos.
+
+**`avoqado-web-dashboard` — 20 rutas H0.6, todas fuera de HEAD.** HEAD
+`7d6ca4e9ff65ab52d453675f018eef84025c8366`.
+
+```text
+CHANGELOG.md
+.impeccable.md
+src/config/__tests__/plan-catalog.test.ts
+src/config/plan-catalog.ts
+src/hooks/use-shift-socket-events.ts
+src/hooks/use-tier-feature-access.ts
+src/hooks/use-tier-feature-access.test.tsx
+src/locales/en/shifts.json
+src/locales/en/venue.json
+src/locales/es/shifts.json
+src/locales/es/venue.json
+src/locales/fr/shifts.json
+src/locales/fr/venue.json
+src/pages/Shift/ShiftId.tsx
+src/pages/Shift/components/CashReconciliationSummary.test.tsx
+src/pages/Shift/components/CashReconciliationSummary.tsx
+src/pages/Venue/Edit/BasicInfo.tsx
+src/pages/Venue/Edit/components/CashReconciliationSetting.test.tsx
+src/pages/Venue/Edit/components/CashReconciliationSetting.tsx
+src/types.ts
+```
+
+`.impeccable.md` es guía auxiliar de diseño, no dependencia del release. Son hotspots compartidos:
+changelog, locales, plan catalog, `use-tier-feature-access`, `types`, `BasicInfo` y `ShiftId`.
+
+**`avoqado-tpv` — 20 rutas H0.6, todas fuera de HEAD.** HEAD
+`5ad049816d2e367ff247dbf2b3dd1a807c3c0235`.
+
+```text
+CHANGELOG.md
+app/src/main/java/com/jaac/avoqado_tpv/core/data/local/SecureStorage.kt
+app/src/main/java/com/jaac/avoqado_tpv/core/data/network/dto/TerminalConfigDto.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/repository/TpvSettingsRepository.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/model/TpvSettings.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/plan/domain/model/VenuePlanInfo.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/dto/ShiftDto.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/shift/domain/CashCountParser.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/shift/domain/Shift.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt
+app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftViewModel.kt
+app/src/test/java/com/jaac/avoqado_tpv/core/data/network/dto/TerminalConfigCashReconciliationTest.kt
+app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/repository/TpvSettingsRepositoryLocalFirstTest.kt
+app/src/test/java/com/jaac/avoqado_tpv/features/plan/domain/model/VenuePlanInfoTest.kt
+app/src/test/java/com/jaac/avoqado_tpv/features/shift/data/ShiftCloseRequestTest.kt
+app/src/test/java/com/jaac/avoqado_tpv/features/shift/data/ShiftRepositoryTest.kt
+app/src/test/java/com/jaac/avoqado_tpv/features/shift/domain/CashCountParserTest.kt
+app/src/test/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftViewModelTest.kt
+```
+
+`SecureStorage`, settings, plan catalog, modelos/repositorio de turno y
+`ShiftScreen`/`ShiftViewModel` son hotspots compartidos: atribuir sólo los bloques H0.6, nunca el
+archivo completo.
+
+**Repos inspeccionados sin cambio H0.6:** `avoqado-android`, `avoqado-ios`, `avoqado-desktop` y
+`avoqado-windows-service`. Android/iOS usan el cash drawer móvil separado; Desktop sólo fue
+verificado por compatibilidad; Windows Service no llama este endpoint.
+
+No usar `git add -A` ni `git add .`. Si el fundador pide commits, preparar grupos por las rutas
+anteriores y revisar otra vez los hotspots inmediatamente antes de staging.
+
+---
+
 ## 1. OBJETIVO FINAL
 
 ### Qué se intenta lograr
@@ -289,7 +563,10 @@ Va junto o no va. Ver §5, deuda técnica.
 - `src/services/dashboard/shift.dashboard.service.ts` → `computeCashDifference()` **NUEVA**,
   exportada. Fórmula: `contado − (fondo + ventas en efectivo)`. Devuelve `null` si nadie contó.
   Normaliza `-0` a `0` (si no, el reporte pinta "-0", que se lee como faltante).
-- `src/services/tpv/shift.tpv.service.ts` → el cierre desde TPV llama a la misma función.
+- La implementación final del 8 de agosto separa el protocolo nuevo del legacy: conteo físico
+  canónico con Decimal, `COUNTED`/`SKIPPED`, outcome explícito y CAS atómico en server; opt-in PRO
+  en dashboard; conteo ciego y resultado hasta acuse en `avoqado-tpv`; campos de lectura en socket
+  y Customer MCP. Ver §0 para el contrato final y la verificación.
 
 **H0.7 — Candado de ajuste**
 - `src/routes/dashboard/inventory.routes.ts` → las dos rutas `adjust-stock` (insumos y productos)
@@ -459,7 +736,7 @@ Cuenta: `owner@owner.com` / `owner`.
 |---|---|
 | **H0.9 contra base real** | Necesita montar una orden con recepción y consumo parcial: varios pasos de mutación. Cubierto por 11 pruebas unitarias, **no ejercitado contra el servidor**. ⏳ |
 | **H0.4 en el navegador** | El botón de pólizas y las exportaciones contables **no los ha visto nadie funcionando**. Compila y tipa, pero la máquina estaba saturada y no levanté el navegador. ⏳ |
-| **H0.6 de punta a punta** | Imposible hoy: la TPV nunca captura el conteo de efectivo (ver §5). ⏳ |
+| **H0.6 de punta a punta** | ✅ Verificado por HTTP + PostgreSQL real contra clon local aislado en 11 escenarios. ⚠️ Sin terminal ADB, por lo que la prueba física 360x640/logcat sigue pendiente. |
 | **Exportación de kardex, gastos y balanza contra servidor** | No alcancé. ⏳ |
 | **`npm run pre-deploy`** | No se corrió. ⏳ |
 | **Pruebas de integración / workflows** | Sólo se corrió el proyecto `unit`. Las de integración necesitan base y estaban fallando por trabajo ajeno en curso. ⏳ |
@@ -470,7 +747,8 @@ Cuenta: `owner@owner.com` / `owner`.
 
 ### 5.1 Terminado
 
-**Los nueve puntos de H0**, con la salvedad de H0.6.
+**Los nueve puntos de H0** están implementados. H0.6 ya cerró su faltante funcional; su rollout
+sigue pendiente y default-off.
 
 | | Punto | Estado |
 |---|---|---|
@@ -479,34 +757,27 @@ Cuenta: `owner@owner.com` / `owner`.
 | H0.3 | Exportaciones | ✅ 4 de 7 verificadas contra servidor; el resto sólo unitarias |
 | H0.4 | Pólizas XML + estados financieros | ✅ código listo, ⏳ sin ver en navegador |
 | H0.5 | Merma y cuarentena | ✅ |
-| H0.6 | Diferencia de caja | ⚠️ **PARCIAL** — ver abajo |
+| H0.6 | Diferencia de caja | ✅ implementación + prueba HTTP/DB local; ⚠️ rollout/piloto físico pendientes |
 | H0.7 | Candado de ajuste | ✅ verificado, grandfathering comprobado en producción |
 | H0.8 | Surtido y cobertura | ✅ |
 | H0.9 | Recibir ninguno | ✅ 11 unitarias + 150 de regresión; ⏳ sin probar contra base |
 
-### 5.2 Parcialmente terminado
+### 5.2 H0.6 cerrado en implementación; rollout pendiente
 
-**H0.6 — diferencia de caja. 🔴 Bloqueado por la TPV, no por el servidor.**
+El bloqueo descrito en la versión original de este handoff ya se resolvió. `avoqado-tpv` captura un
+conteo físico ciego cuando el venue tiene entitlement PRO y opt-in efectivo; también permite cerrar
+sin conteo con confirmación y auditoría. Server, dashboard, TPV, socket y Customer MCP quedaron
+sincronizados, mientras el payload antiguo, kiosk y Desktop conservan sus contratos.
 
-Se arreglaron dos defectos reales:
-1. La fórmula era `efectivo final − fondo inicial`, que **no es una diferencia de caja** sino el
-   cambio neto del cajón. Un turno que vendió $5 000 en efectivo y cuadró al peso reportaba
-   **"+$5 000 de sobrante"**. El número del reporte era ruido, no control.
-2. El cierre desde TPV nunca la escribía. Ya está cableado.
+El criterio de la matriz quedó probado en un clon local real: fondo + venta en efectivo + conteo
+exacto produce diferencia decimal `0.00`, no el monto de la venta. Cero físico, faltante, sobrante,
+skip, input inválido, overflow, downgrade, concurrencia, recuperación y aislamiento por tenant
+también quedaron cubiertos. La evidencia completa está en §0.
 
-**Pero nadie captura el conteo.** ✅ VERIFICADO en el código de `avoqado-tpv`:
-`CloseShiftData` está marcado *"NOT USED IN MVP — Backend automatically calculates everything.
-Reserved for future FASE 2"* en
-`app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/dto/ShiftDto.kt:120-125`, y
-`ShiftViewModel.closeShift()` llama a `shiftRepository.closeShift(venueId, shiftId)` **sin datos**.
-
-Sin conteo no hay contra qué comparar. El campo queda en `NULL` a propósito.
-**Cerrarlo requiere una pantalla de captura en `avoqado-tpv`** (Kotlin, ciclo de despliegue de
-días). El servidor ya está listo: el día que la TPV mande el conteo, funciona sin tocar nada aquí.
-
-**Consecuencia para la matriz:** si se contestó "reporte de diferencias de caja" como cumplimiento
-natural, **hoy no cumple para los turnos cerrados desde la terminal**, que son todos los de la
-operación real.
+Lo pendiente ya es de lanzamiento: separar/terminar el WIP ajeno que hoy bloquea dos builds
+globales, obtener permiso de commit, desplegar server primero, hacer bump MINOR y piloto ADB, y sólo
+entonces activar un venue. El default `false` garantiza que los venues actuales no sientan el
+cambio mientras eso ocurre.
 
 ### 5.3 Qué falta, en orden recomendado
 
@@ -561,8 +832,10 @@ operación real.
 
 ### 5.6 Estado del working tree
 
-🔴 **~114 archivos modificados o nuevos, de TRES sesiones distintas, nada commiteado.**
-Rama: `develop`.
+**Snapshot del 7 de agosto:** había ~114 archivos modificados o nuevos de varias sesiones, todavía
+sin commit. **Actualización del 8 de agosto:** el commit mixto `891dc0fb` absorbió 125 archivos de
+esas corrientes; quedan correcciones y features dirty en server, dashboard y TPV. No usar ese
+commit como atribución de autoría ni reescribirlo. Rama: `develop`.
 
 **Cambios ajenos que DEBEN preservarse** (🔍 INFERIDO por los nombres y porque yo no los toqué):
 
@@ -765,24 +1038,24 @@ lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(3000|5173) "
    una matriz de **259 requerimientos** que funciona como contrato. **El demo se aplazó.**
 2. El riesgo central: **~30 renglones contestados como "cumple de forma natural" NO cumplen**. De
    ahí el hito **H0**, lista cerrada de nueve puntos para cerrar esa brecha.
-3. **Los nueve puntos de H0 están hechos**, salvo H0.6 que quedó parcial por un bloqueo que no es
-   del servidor.
+3. **Los nueve puntos de H0 están implementados.** H0.6 ya incluye captura ciega en TPV, opt-in PRO,
+   contrato aditivo, cierre atómico y prueba HTTP/DB; sigue sin deploy y default-off.
 4. **Hallazgo mayor, fuera de la lista:** tres reportes de inventario (**PMIX, consumo de insumos y
    variación de costo**) **estaban muertos** — SQL en snake_case contra columnas camelCase.
    Verificado contra producción. **Ya corren con datos reales.**
-5. **H0.6 está bloqueado por la TPV:** `CloseShiftData` está marcado *"NOT USED IN MVP"* y
-   `closeShift()` se llama sin datos, así que **nadie captura cuánto efectivo se contó**. La
-   fórmula del dashboard además estaba mal (`final − inicial`, que reportaba las ventas en efectivo
-   como sobrante). El servidor ya está listo; falta una pantalla en Kotlin.
+5. **H0.6 ya no está bloqueado por la TPV.** La pantalla de conteo ciego, skip confirmado y
+   resultado persistente están implementados; Desktop/kiosk/venues opt-out conservan el flujo
+   anterior. Faltan rollout y validación en hardware, no funcionalidad.
 6. **H0.9 resultó ser una borrada, no una construcción de 4-5 días:** `applyItemReceiveStatusInTx`
    ya sabía revertir. Sólo faltaba un guard contra existencias negativas del lado de mercancía de
    reventa.
-7. **Verificación:** 8 432 pruebas unitarias en verde, typecheck del dashboard limpio, auditor de
-   permisos en 0. El typecheck del server tiene **2 errores que son de otra sesión**.
+7. **Verificación actualizada:** server 8 508 unitarias verdes; dashboard 624; suite, compile
+   Production y lint de TPV verdes; Desktop `CajaFlowUiTest` verde; prueba HTTP/DB de 11 escenarios
+   verde. Los builds globales de server/dashboard siguen bloqueados por dos WIP ajenos identificados.
 8. **`/full-testing` contra servidor y base reales** confirmó H0.1, H0.2, H0.3 (4 de 7), H0.5, H0.8
    y los tres reportes resucitados.
-9. **NO se verificaron:** H0.9 contra base, H0.4 en navegador, y 3 exportaciones. Es lo primero que
-   debe hacer el siguiente agente.
+9. **H0.6 no se verificó en hardware:** `adb devices -l` no mostró terminal. No confundir la prueba
+   local completa con un piloto físico; ese piloto forma parte del release seguro.
 10. 🔴 **CERO commits, cero ramas, cero pushes.** ~114 archivos en el árbol de **tres sesiones
     distintas**. La lista de archivos ajenos a preservar está en §5.6.
 11. 🔴 **Incidente:** borré **14 renglones de `ActivityLog`** que no eran míos (cron y otra sesión)
@@ -811,8 +1084,10 @@ lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(3000|5173) "
 > (sólo lectura) de ambos repos, cruzado con lo que edité en esta ventana de contexto.
 > **Ningún comando de git que modifique estado fue ejecutado.**
 >
-> 🔴 **Limitación honesta:** el árbol NO está commiteado, así que **no hay forma de atribuir
-> autoría por historia de git.** La atribución se basa en mi propio registro de qué toqué.
+> 🔴 **Limitación honesta:** al crear este manifiesto el árbol no estaba commiteado y no había forma
+> de atribuir autoría por historia de Git. Después, el commit mixto `891dc0fb` incorporó 125 rutas
+> de varias sesiones; eso tampoco permite atribuir cada bloque a una sola persona/agente. La
+> clasificación se basa en el registro de esta sesión.
 > Para archivos compartidos identifico mis bloques por nombre de símbolo, pero **no puedo
 > garantizar que otra sesión no haya editado el mismo archivo después de mí.** Donde no
 > puedo determinarlo, lo digo.

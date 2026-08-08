@@ -1303,7 +1303,11 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *     tags:
  *       - TPV - Shifts
  *     summary: Close an existing shift
- *     description: Close an existing shift with cash reconciliation (works with both integrated POS and standalone mode)
+ *     description: >-
+ *       Atomically closes one shift. New opted-in clients send cashReconciliationAction with a
+ *       canonical Decimal(10,2) countedCash string. Existing top-level and nested cashDeclared
+ *       bodies remain supported with their legacy semantics. Reconciliation problems never block
+ *       the close; inspect the additive reconciliation outcome. Concurrent close attempts return 409.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -1330,8 +1334,7 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *             properties:
  *               cashDeclared:
  *                 type: number
- *                 description: Cash amount declared at closing
- *                 default: 0
+ *                 description: Legacy cash declaration (active Desktop/old clients; semantics unchanged)
  *               cardDeclared:
  *                 type: number
  *                 description: Card payment amount declared
@@ -1347,6 +1350,29 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *               notes:
  *                 type: string
  *                 description: Optional closing notes
+ *               closeData:
+ *                 type: object
+ *                 description: Legacy nested declaration shape used by older clients
+ *                 properties:
+ *                   cashDeclared:
+ *                     type: number
+ *                   cardDeclared:
+ *                     type: number
+ *                   vouchersDeclared:
+ *                     type: number
+ *                   otherDeclared:
+ *                     type: number
+ *                   notes:
+ *                     type: string
+ *               cashReconciliationAction:
+ *                 type: string
+ *                 enum: [COUNTED, SKIPPED]
+ *                 description: Explicit additive reconciliation action; when present it owns the request
+ *               countedCash:
+ *                 type: string
+ *                 pattern: '^(?:0|[1-9]\\d{0,7})(?:\\.\\d{1,2})?$'
+ *                 example: '6000.00'
+ *                 description: Total physical drawer cash including starting float; required only for COUNTED
  *     responses:
  *       200:
  *         description: Shift closed successfully
@@ -1383,6 +1409,20 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *                       type: number
  *                     cardDeclared:
  *                       type: number
+ *                     cashDifference:
+ *                       type: string
+ *                       nullable: true
+ *                       example: "0.00"
+ *                 reconciliation:
+ *                   type: object
+ *                   properties:
+ *                     outcome:
+ *                       type: string
+ *                       enum: [APPLIED, SKIPPED, LEGACY_APPLIED, IGNORED_DISABLED, IGNORED_INVALID, IGNORED_OVERFLOW, NOT_REQUESTED]
+ *                     countedCash:
+ *                       type: string
+ *                     cashDifference:
+ *                       type: string
  *       400:
  *         description: Bad request - Shift already closed
  *       401:
@@ -1391,6 +1431,8 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *         description: Forbidden - insufficient role permissions
  *       404:
  *         description: Shift not found
+ *       409:
+ *         description: Another request is closing this shift (code SHIFT_CLOSE_IN_PROGRESS)
  *       500:
  *         description: Internal server error
  */

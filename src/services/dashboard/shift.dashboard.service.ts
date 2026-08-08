@@ -2,6 +2,7 @@ import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
+import { calculateCashReconciliation } from '../shared/cashReconciliation.service'
 
 interface ShiftFilters {
   staffId?: string
@@ -39,6 +40,21 @@ interface ShiftSummaryResponse {
     amount: number
     count: number
   }>
+}
+
+type ShiftCashValue = { toString(): string } | number | null | undefined
+
+/** Preserve zero as a real count/difference while keeping an absent count null. */
+export function serializeShiftCashReconciliation(shift: {
+  endingCash: ShiftCashValue
+  cashDeclared: ShiftCashValue
+  cashDifference: ShiftCashValue
+}): { endingCash: number | null; cashDeclared: number | null; cashDifference: number | null } {
+  return {
+    endingCash: shift.endingCash == null ? null : Number(shift.endingCash),
+    cashDeclared: shift.cashDeclared == null ? null : Number(shift.cashDeclared),
+    cashDifference: shift.cashDifference == null ? null : Number(shift.cashDifference),
+  }
 }
 
 export async function getShifts(
@@ -127,8 +143,7 @@ export async function getShifts(
       startTime: shift.startTime,
       endTime: shift.endTime,
       startingCash: Number(shift.startingCash),
-      endingCash: shift.endingCash ? Number(shift.endingCash) : null,
-      cashDifference: shift.cashDifference ? Number(shift.cashDifference) : null,
+      ...serializeShiftCashReconciliation(shift),
       totalSales: Number(shift.totalSales),
       totalTips: Number(shift.totalTips),
       totalOrders: shift.totalOrders,
@@ -499,8 +514,7 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
     startTime: shift.startTime,
     endTime: shift.endTime,
     startingCash: Number(shift.startingCash),
-    endingCash: shift.endingCash ? Number(shift.endingCash) : null,
-    cashDifference: shift.cashDifference ? Number(shift.cashDifference) : null,
+    ...serializeShiftCashReconciliation(shift),
     totalSales: finalTotalSales,
     totalTips: finalTotalTips,
     totalOrders: shift.orders.length,
@@ -755,12 +769,9 @@ export interface UpdateShiftData {
  */
 export function computeCashDifference(input: { countedCash: number | null; startingCash: number; cashSales: number }): number | null {
   if (input.countedCash === null || input.countedCash === undefined) return null
-  const expected = input.startingCash + input.cashSales
-  // Two decimals: these are pesos, and floating point turns 0 into 0.000000001.
-  const rounded = Math.round((input.countedCash - expected) * 100) / 100
-  // `|| 0` collapses -0 to 0. A drawer that balanced would otherwise render as "-0" on the
-  // report, which reads as a shortfall of nothing and sends someone to recount for sport.
-  return rounded || 0
+  const { difference } = calculateCashReconciliation(input.countedCash, input.startingCash, input.cashSales)
+  const rounded = difference.toDecimalPlaces(2).toNumber()
+  return Object.is(rounded, -0) ? 0 : rounded
 }
 
 /**
@@ -819,7 +830,7 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
 
   const effectiveStartingCash = data.startingCash !== undefined ? data.startingCash : Number(existingShift.startingCash)
   const effectiveEndingCash =
-    data.endingCash !== undefined ? data.endingCash : existingShift.endingCash ? Number(existingShift.endingCash) : null
+    data.endingCash !== undefined ? data.endingCash : existingShift.endingCash == null ? null : Number(existingShift.endingCash)
 
   const difference = computeCashDifference({
     countedCash: effectiveEndingCash,
@@ -874,8 +885,7 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
     startTime: updatedShift.startTime,
     endTime: updatedShift.endTime,
     startingCash: Number(updatedShift.startingCash),
-    endingCash: updatedShift.endingCash ? Number(updatedShift.endingCash) : null,
-    cashDifference: updatedShift.cashDifference ? Number(updatedShift.cashDifference) : null,
+    ...serializeShiftCashReconciliation(updatedShift),
     totalSales: Number(updatedShift.totalSales),
     totalTips: Number(updatedShift.totalTips),
     totalOrders: updatedShift.totalOrders,
