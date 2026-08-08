@@ -251,6 +251,33 @@ export async function getCurrentlyClockedInStaff(req: Request, res: Response, ne
 }
 
 /**
+ * Get staff eligible for order/table reassignment (Fix 2, "staff picker",
+ * 2026-08-07 — see
+ * .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/zombie-table-and-staff-picker.md).
+ *
+ * Deliberately narrower than `getCurrentlyClockedInStaff` above: this is the
+ * source for `GET /tpv/venues/:venueId/staff/assignable`, gated `orders:update`
+ * (WAITER+) — NOT `tpv-time-entries:read` (MANAGER+, the time-clock view). See
+ * `time-entry.tpv.service.ts::getAssignableStaff` for why the fields differ.
+ */
+export async function getAssignableStaff(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+
+    logger.info(`Get assignable staff: venueId=${venueId}`)
+
+    const staff = await timeEntryService.getAssignableStaff(venueId)
+
+    res.status(200).json({
+      success: true,
+      data: staff,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * Get MY time entries (self-service)
  *
  * This endpoint allows any authenticated staff member to view ONLY their own time entries.

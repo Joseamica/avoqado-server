@@ -563,3 +563,45 @@ export async function getCurrentlyClockedInStaff(venueId: string) {
 
   return activeEntries
 }
+
+/**
+ * "Personal asignable" — narrow companion to `getCurrentlyClockedInStaff`,
+ * built for the ASSIGN_ORDER staff picker (Fix 2, 2026-08-07 — see
+ * .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/zombie-table-and-staff-picker.md).
+ *
+ * The ASSIGN_ORDER action itself only requires `orders:update` (WAITER has it
+ * by default — `src/lib/permissions.ts`), but the only existing read the
+ * picker could point to (`getCurrentlyClockedInStaff` above, behind
+ * `tpv-time-entries:read`, MANAGER+) is the time-clock MANAGER view: full
+ * `TimeEntry` rows with `clockInTime` and open `breaks` (start times).
+ * Loosening THAT route to `orders:update` would hand every waiter the whole
+ * staff's attendance data. This returns the MINIMUM the picker needs instead —
+ * who is on shift right now, their name, and whether they're on break — no
+ * clock-in/out or break timestamps. Wired to
+ * `GET /tpv/venues/:venueId/staff/assignable`, gated `orders:update`, the SAME
+ * permission as the action it serves.
+ */
+export async function getAssignableStaff(venueId: string) {
+  const activeEntries = await prisma.timeEntry.findMany({
+    where: {
+      venueId,
+      status: {
+        in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK],
+      },
+    },
+    select: {
+      staffId: true,
+      status: true,
+      staff: {
+        select: {
+          firstName: true,
+          lastName: true,
+          employeeCode: true,
+        },
+      },
+    },
+    orderBy: { clockInTime: 'desc' },
+  })
+
+  return activeEntries
+}
