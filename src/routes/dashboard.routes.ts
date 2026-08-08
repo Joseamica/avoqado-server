@@ -275,6 +275,7 @@ import commissionRoutes from './dashboard/commission.routes'
 import cashOutRoutes from './dashboard/cash-out.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import printStationRoutes from './dashboard/printStation.routes'
+import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
 import areaTicketRoutes from './dashboard/areaTicket.routes'
 import classSessionRoutes from './dashboard/classSession.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
@@ -4192,6 +4193,9 @@ router.use('/venues/:venueId/referrals', authenticateTokenMiddleware, checkFeatu
 router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), reservationRoutes)
 // PRINT_STATIONS — feature gratis/core (sin checkFeatureAccess); permission-gated dentro del sub-router.
 router.use('/venues/:venueId/print-stations', authenticateTokenMiddleware, printStationRoutes)
+// Datos fiscales del venue como RECEPTOR de las facturas de Avoqado — feature gratis/core
+// (sin checkFeatureAccess); permission-gated dentro del sub-router (venue-fiscal-profile:manage, OWNER-only).
+router.use('/venues/:venueId/fiscal-profile', authenticateTokenMiddleware, fiscalProfileRoutes)
 // Configuración explícita y operación de vales/básculas. El servicio aplica
 // entitlement al ACTIVAR; consultar permite mostrar por qué está deshabilitado.
 router.use('/venues/:venueId/area-tickets', authenticateTokenMiddleware, areaTicketRoutes)

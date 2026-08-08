@@ -225,6 +225,9 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'platform-billing:configure': ['platform-billing:configure', 'platform-billing:view'],
   'platform-billing:issue': ['platform-billing:issue', 'platform-billing:view'],
   'platform-billing:delete': ['platform-billing:delete', 'platform-billing:view'],
+  // Datos fiscales del PROPIO venue como RECEPTOR de las facturas de Avoqado.
+  // No confundir con cfdi:* (el venue EMITIENDO a sus clientes) — esto no requiere CSD.
+  'venue-fiscal-profile:manage': ['venue-fiscal-profile:manage'],
   'billing:subscriptions:read': ['billing:subscriptions:read', 'billing:read', 'venues:read', 'features:read'],
   'billing:subscriptions:manage': [
     'billing:subscriptions:manage',
@@ -1073,6 +1076,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // B4Bit Crypto Payments — venue owners need to configure crypto
     // settings for their own venues. SUPERADMIN still has full access via *:*.
     'venue-crypto:manage',
+    // Datos fiscales del venue como receptor de las facturas de Avoqado (Constancia de
+    // Situación Fiscal). OWNER-only, NO ADMIN/MANAGER: son los datos legales del negocio
+    // (RFC, razón social, régimen fiscal) y el dueño es quien responde por ellos ante el SAT.
+    'venue-fiscal-profile:manage',
     // Facturación CFDI 4.0 (Pro-tier) — OWNER has full CFDI access
     'cfdi:configure',
     'cfdi:issue',
@@ -1611,6 +1618,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   cfdi: ['cfdi:configure', 'cfdi:issue', 'cfdi:view'],
   // Platform billing CFDI (Avoqado factura a sus propios clientes) — superadmin-only back-office
   'platform-billing': ['platform-billing:view', 'platform-billing:configure', 'platform-billing:issue', 'platform-billing:delete'],
+  // Datos fiscales del venue como receptor de las facturas de Avoqado — OWNER-only (feature gratis/core)
+  'venue-fiscal-profile': ['venue-fiscal-profile:manage'],
   // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier, Task 10/11)
   'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage', 'delivery-channels:request'],
 }
