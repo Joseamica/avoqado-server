@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express'
+import { ModuleScope } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { moduleService, ModuleCode } from '../../services/modules/module.service'
@@ -25,10 +26,14 @@ export async function getAllOrganizations(req: Request, res: Response, next: Nex
           },
         },
         organizationModules: {
-          where: { enabled: true },
+          // Organization summaries must not resurrect stale VENUE_ONLY rows.
+          where: {
+            enabled: true,
+            module: { scope: { in: [ModuleScope.BOTH, ModuleScope.ORGANIZATION_ONLY] } },
+          },
           include: {
             module: {
-              select: { code: true, name: true },
+              select: { code: true, name: true, scope: true },
             },
           },
         },
@@ -50,6 +55,7 @@ export async function getAllOrganizations(req: Request, res: Response, next: Nex
       enabledModules: org.organizationModules.map(om => ({
         code: om.module.code,
         name: om.module.name,
+        scope: om.module.scope,
       })),
     }))
 
@@ -83,6 +89,7 @@ export async function getOrganizationById(req: Request, res: Response, next: Nex
           orderBy: { name: 'asc' },
         },
         organizationModules: {
+          where: { module: { scope: { in: [ModuleScope.BOTH, ModuleScope.ORGANIZATION_ONLY] } } },
           include: {
             module: true,
           },
@@ -264,7 +271,7 @@ export async function getModulesForOrganization(req: Request, res: Response, nex
 
     // Get all modules with organization's enablement status
     const modules = await prisma.module.findMany({
-      where: { active: true },
+      where: { active: true, scope: { in: [ModuleScope.BOTH, ModuleScope.ORGANIZATION_ONLY] } },
       include: {
         organizationModules: {
           where: { organizationId },
@@ -280,6 +287,8 @@ export async function getModulesForOrganization(req: Request, res: Response, nex
       description: module.description,
       defaultConfig: module.defaultConfig,
       presets: module.presets,
+      configSchema: module.configSchema,
+      scope: module.scope,
       enabled: module.organizationModules.length > 0 && module.organizationModules[0].enabled,
       config: module.organizationModules[0]?.config || null,
       enabledAt: module.organizationModules[0]?.enabledAt || null,
@@ -310,7 +319,7 @@ export async function enableModuleForOrganization(req: Request, res: Response, n
     // Validate module exists in database
     const moduleExists = await prisma.module.findUnique({
       where: { code: moduleCode },
-      select: { id: true, active: true },
+      select: { id: true, active: true, scope: true },
     })
 
     if (!moduleExists) {
@@ -319,6 +328,12 @@ export async function enableModuleForOrganization(req: Request, res: Response, n
 
     if (!moduleExists.active) {
       return res.status(400).json({ error: `Module ${moduleCode} is not active` })
+    }
+
+    // VENUE_ONLY definitions cannot acquire organization assignments, even if
+    // a stale caller reaches this legacy superadmin controller.
+    if (moduleExists.scope === ModuleScope.VENUE_ONLY) {
+      return res.status(400).json({ error: `Module ${moduleCode} is VENUE_ONLY and cannot be enabled for an organization` })
     }
 
     const organization = await prisma.organization.findUnique({
@@ -362,11 +377,15 @@ export async function disableModuleForOrganization(req: Request, res: Response, 
     // Validate module exists in database
     const moduleExists = await prisma.module.findUnique({
       where: { code: moduleCode },
-      select: { id: true },
+      select: { id: true, scope: true },
     })
 
     if (!moduleExists) {
       return res.status(400).json({ error: `Invalid module code: ${moduleCode}` })
+    }
+
+    if (moduleExists.scope === ModuleScope.VENUE_ONLY) {
+      return res.status(400).json({ error: `Module ${moduleCode} is VENUE_ONLY and cannot be disabled for an organization` })
     }
 
     const organization = await prisma.organization.findUnique({
@@ -412,11 +431,15 @@ export async function updateOrganizationModuleConfig(req: Request, res: Response
     // Validate module exists in database
     const moduleExists = await prisma.module.findUnique({
       where: { code: moduleCode },
-      select: { id: true },
+      select: { id: true, scope: true },
     })
 
     if (!moduleExists) {
       return res.status(400).json({ error: `Invalid module code: ${moduleCode}` })
+    }
+
+    if (moduleExists.scope === ModuleScope.VENUE_ONLY) {
+      return res.status(400).json({ error: `Module ${moduleCode} is VENUE_ONLY and has no organization config` })
     }
 
     const organization = await prisma.organization.findUnique({

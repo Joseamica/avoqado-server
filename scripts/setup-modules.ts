@@ -5,7 +5,27 @@
  * Usage: npx ts-node scripts/setup-modules.ts
  */
 
+import { ModuleScope, Prisma } from '@prisma/client'
 import prisma from '../src/utils/prismaClient'
+import { MASTER_CATALOG_DEFAULT_CONFIG } from '../src/types/master-catalog'
+
+const MASTER_CATALOG_CONFIG_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['schemaVersion', 'catalogCoreEnabled', 'identifiersEnabled', 'regionalPricingEnabled', 'governanceMode'],
+  properties: {
+    schemaVersion: { const: 1 },
+    catalogCoreEnabled: { type: 'boolean' },
+    identifiersEnabled: { type: 'boolean' },
+    regionalPricingEnabled: { type: 'boolean' },
+    governanceMode: { enum: ['OFF', 'ADVISORY', 'ENFORCED'] },
+  },
+}
+
+// Prisma's JSON input is structural and does not accept the named config
+// interface reliably across generated-client refreshes. Keep the cast at this
+// single persistence boundary; tests assert the exact shared object is stored.
+const MASTER_CATALOG_DEFAULT_CONFIG_JSON = MASTER_CATALOG_DEFAULT_CONFIG as unknown as Prisma.InputJsonValue
 
 export async function setupModules() {
   console.log('🚀 Setting up modules...\n')
@@ -747,6 +767,48 @@ export async function setupModules() {
   console.log(`✅ Module: ${googleCalendarSyncModule.code}`)
   console.log(`   ID: ${googleCalendarSyncModule.id}`)
   console.log(`   Name: ${googleCalendarSyncModule.name}\n`)
+
+  // MASTER_CATALOG is definition-only and default-off. The serializable
+  // preflight prevents this seed from rewriting a conflicting legacy scope.
+  const masterCatalogModule = await prisma.$transaction(
+    async tx => {
+      const existing = await tx.module.findUnique({
+        where: { code: 'MASTER_CATALOG' },
+        select: { id: true, code: true, scope: true },
+      })
+      if (existing && existing.scope !== ModuleScope.ORGANIZATION_ONLY) {
+        throw new Error(
+          `MASTER_CATALOG scope conflict: existing ${existing.scope}; expected ${ModuleScope.ORGANIZATION_ONLY}. Resolve explicitly in superadmin.`,
+        )
+      }
+
+      return tx.module.upsert({
+        where: { code: 'MASTER_CATALOG' },
+        create: {
+          code: 'MASTER_CATALOG',
+          name: 'Catálogo maestro',
+          description: 'Identidad corporativa y publicación gobernada de productos por organización.',
+          scope: ModuleScope.ORGANIZATION_ONLY,
+          defaultConfig: MASTER_CATALOG_DEFAULT_CONFIG_JSON,
+          presets: {},
+          configSchema: MASTER_CATALOG_CONFIG_SCHEMA,
+        },
+        update: {
+          name: 'Catálogo maestro',
+          description: 'Identidad corporativa y publicación gobernada de productos por organización.',
+          defaultConfig: MASTER_CATALOG_DEFAULT_CONFIG_JSON,
+          presets: {},
+          configSchema: MASTER_CATALOG_CONFIG_SCHEMA,
+        },
+      })
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  )
+
+  console.log(`✅ Module: ${masterCatalogModule.code}`)
+  console.log(`   ID: ${masterCatalogModule.id}`)
+  console.log(`   Name: ${masterCatalogModule.name}`)
+  console.log('   Scope: ORGANIZATION_ONLY (sin grants ni assignments)\n')
 
   // Summary
   const moduleCount = await prisma.module.count({ where: { active: true } })
