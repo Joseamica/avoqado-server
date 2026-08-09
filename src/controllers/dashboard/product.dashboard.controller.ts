@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as productService from '../../services/dashboard/product.dashboard.service'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
+import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
 
 /**
  * Get all products for a venue
@@ -37,7 +38,7 @@ export const getProductsHandler = async (req: Request, res: Response, next: Next
 
     res.status(200).json({
       message: `Products for venue ${venueId}`,
-      data: products,
+      data: products.map(toLegacyProductPayload),
       correlationId,
     })
   } catch (error) {
@@ -63,7 +64,7 @@ export const getProductHandler = async (req: Request, res: Response, next: NextF
 
     res.status(200).json({
       message: `Product ${productId} details`,
-      data: product,
+      data: toLegacyProductPayload(product),
       correlationId,
     })
   } catch (error) {
@@ -90,7 +91,7 @@ export const createProductHandler = async (req: Request, res: Response, next: Ne
 
     res.status(201).json({
       message: `Product '${product.name}' created successfully`,
-      data: product,
+      data: toLegacyProductPayload(product),
       correlationId,
     })
   } catch (error) {
@@ -116,7 +117,7 @@ export const updateProductHandler = async (req: Request, res: Response, next: Ne
 
     res.status(200).json({
       message: `Product '${product.name}' updated successfully`,
-      data: product,
+      data: toLegacyProductPayload(product),
       correlationId,
     })
   } catch (error) {
@@ -244,7 +245,7 @@ export const deleteProductImageHandler = async (req: Request, res: Response, nex
 
     res.status(200).json({
       message: 'Product image removed successfully',
-      data: product,
+      data: toLegacyProductPayload(product),
       correlationId,
     })
   } catch (error) {

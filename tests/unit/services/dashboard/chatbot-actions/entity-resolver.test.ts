@@ -81,6 +81,37 @@ describe('EntityResolverService', () => {
       expect(result.resolved).toBeUndefined()
       expect(result.candidates).toHaveLength(2)
     })
+
+    it('strips Product creator provenance from raw resolver candidates without dropping normal diff fields', async () => {
+      mockQueryRaw.mockResolvedValueOnce([
+        {
+          id: 'product-1',
+          name: 'Taco al pastor',
+          venueId: VENUE_ID,
+          sku: 'TACO-1',
+          updatedAt: new Date('2026-08-08T12:00:00.000Z'),
+          createdById: 'staff-internal',
+        },
+      ])
+
+      const result = await service.resolve('Product', 'Taco al pastor', VENUE_ID, makeConfig(), 'update')
+
+      expect(result.resolved?.data).toEqual({
+        venueId: VENUE_ID,
+        sku: 'TACO-1',
+        updatedAt: new Date('2026-08-08T12:00:00.000Z'),
+      })
+    })
+
+    it('keeps non-Product resolver candidate data byte-identical', async () => {
+      mockQueryRaw.mockResolvedValueOnce([
+        { id: 'raw-1', name: 'Carne', venueId: VENUE_ID, sku: 'CARNE-1', createdById: 'raw-material-actor' },
+      ])
+
+      const result = await service.resolve('RawMaterial', 'Carne', VENUE_ID, makeConfig(), 'update')
+
+      expect(result.resolved?.data).toEqual({ venueId: VENUE_ID, sku: 'CARNE-1', createdById: 'raw-material-actor' })
+    })
   })
 
   // -------------------------------------------------------------------------

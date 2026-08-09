@@ -11,6 +11,7 @@ import prisma from '../../utils/prismaClient'
 import { computeInventoryAvailability } from '../../services/dashboard/product.dashboard.service'
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
+import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,7 +73,8 @@ const productInclude = {
  * old clients keep reading availableQuantity and ignore the rest.
  */
 function withAvailableQuantity(product: any) {
-  return { ...product, ...computeInventoryAvailability(product) }
+  const legacyProduct = toLegacyProductPayload(product)
+  return { ...legacyProduct, ...computeInventoryAvailability(legacyProduct) }
 }
 
 // ---------------------------------------------------------------------------

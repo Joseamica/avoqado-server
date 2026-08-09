@@ -1,0 +1,208 @@
+{
+  "surface": "dashboard",
+  "contractVersion": "legacy-pre-h1a",
+  "list": {
+    "status": 200,
+    "body": {
+      "message": "Products for venue <venue-id>",
+      "data": [
+        {
+          "id": "<product-id>",
+          "venueId": "<venue-id>",
+          "name": "Café americano",
+          "description": null,
+          "sku": "LEGACY-001",
+          "gtin": null,
+          "categoryId": "<category-id>",
+          "price": "42.5",
+          "cost": null,
+          "taxRate": "0.16",
+          "type": "FOOD",
+          "imageUrl": null,
+          "displayOrder": 3,
+          "featured": false,
+          "tags": [],
+          "allergens": [],
+          "calories": null,
+          "prepTime": null,
+          "cookingNotes": null,
+          "isAlcoholic": false,
+          "kitchenName": null,
+          "abbreviation": null,
+          "duration": null,
+          "durationMinutes": null,
+          "maxParticipants": null,
+          "layoutConfig": null,
+          "trackInventory": false,
+          "inventoryMethod": null,
+          "unit": null,
+          "soldByWeight": false,
+          "active": true,
+          "availableFrom": null,
+          "availableUntil": null,
+          "deletedAt": null,
+          "deletedBy": null,
+          "externalId": null,
+          "externalData": null,
+          "originSystem": "AVOQADO",
+          "syncStatus": "NOT_REQUIRED",
+          "lastSyncAt": null,
+          "satProductKey": null,
+          "satUnitKey": null,
+          "objetoImp": "02",
+          "printStationId": null,
+          "creditCost": null,
+          "upfrontPolicy": "inherit",
+          "isDemo": false,
+          "upsellEnabled": false,
+          "category": {
+            "id": "<category-id>",
+            "venueId": "<venue-id>",
+            "name": "Bebidas",
+            "color": null,
+            "active": true,
+            "displayOrder": 1
+          },
+          "inventory": null,
+          "modifierGroups": [],
+          "recipe": null,
+          "availableQuantity": null,
+          "availableQuantityExact": null,
+          "limitingIngredient": null,
+          "insufficientIngredients": null
+        }
+      ],
+      "correlationId": "<correlation-id>"
+    }
+  },
+  "detail": {
+    "status": 200,
+    "body": {
+      "message": "Product <product-id> details",
+      "data": {
+        "id": "<product-id>",
+        "venueId": "<venue-id>",
+        "name": "Café americano",
+        "description": null,
+        "sku": "LEGACY-001",
+        "gtin": null,
+        "categoryId": "<category-id>",
+        "price": "42.5",
+        "cost": null,
+        "taxRate": "0.16",
+        "type": "FOOD",
+        "imageUrl": null,
+        "displayOrder": 3,
+        "featured": false,
+        "tags": [],
+        "allergens": [],
+        "calories": null,
+        "prepTime": null,
+        "cookingNotes": null,
+        "isAlcoholic": false,
+        "kitchenName": null,
+        "abbreviation": null,
+        "duration": null,
+        "durationMinutes": null,
+        "maxParticipants": null,
+        "layoutConfig": null,
+        "trackInventory": false,
+        "inventoryMethod": null,
+        "unit": null,
+        "soldByWeight": false,
+        "active": true,
+        "availableFrom": null,
+        "availableUntil": null,
+        "deletedAt": null,
+        "deletedBy": null,
+        "externalId": null,
+        "externalData": null,
+        "originSystem": "AVOQADO",
+        "syncStatus": "NOT_REQUIRED",
+        "lastSyncAt": null,
+        "satProductKey": null,
+        "satUnitKey": null,
+        "objetoImp": "02",
+        "printStationId": null,
+        "creditCost": null,
+        "upfrontPolicy": "inherit",
+        "isDemo": false,
+        "upsellEnabled": false,
+        "category": {
+          "id": "<category-id>",
+          "venueId": "<venue-id>",
+          "name": "Bebidas",
+          "color": null,
+          "active": true,
+          "displayOrder": 1
+        },
+        "inventory": null,
+        "modifierGroups": [],
+        "recipe": null,
+        "availableQuantity": null,
+        "availableQuantityExact": null,
+        "limitingIngredient": null,
+        "insufficientIngredients": null
+      },
+      "correlationId": "<correlation-id>"
+    }
+  },
+  "create": {
+    "status": 201,
+    "body": {
+      "message": "Product 'Café americano' created successfully",
+      "data": {
+        "id": "<product-id>",
+        "venueId": "<venue-id>",
+        "name": "Café americano",
+        "sku": "LEGACY-001",
+        "price": "42.5",
+        "categoryId": "<category-id>",
+        "description": null,
+        "gtin": null,
+        "category": {
+          "id": "<category-id>",
+          "venueId": "<venue-id>",
+          "name": "Bebidas",
+          "color": null,
+          "active": true,
+          "displayOrder": 1
+        },
+        "modifierGroups": []
+      },
+      "correlationId": "<correlation-id>"
+    }
+  },
+  "update": {
+    "status": 200,
+    "body": {
+      "message": "Product 'Café americano' updated successfully",
+      "data": {
+        "id": "<product-id>",
+        "venueId": "<venue-id>",
+        "name": "Café americano",
+        "sku": "LEGACY-001",
+        "price": "42.5",
+        "categoryId": "<category-id>",
+        "description": null,
+        "gtin": null,
+        "category": {
+          "id": "<category-id>",
+          "venueId": "<venue-id>",
+          "name": "Bebidas",
+          "color": null,
+          "active": true,
+          "displayOrder": 1
+        },
+        "modifierGroups": []
+      },
+      "correlationId": "<correlation-id>"
+    }
+  },
+  "notFound": {
+    "status": 404,
+    "body": {
+      "message": "Product with ID <product-id> not found in venue <venue-id>"
+    }
+  }
+}

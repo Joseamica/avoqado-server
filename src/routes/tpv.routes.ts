@@ -98,6 +98,7 @@ import {
 } from '../schemas/tpv.schema'
 import * as goalResolutionService from '../services/dashboard/commission/goal-resolution.service'
 import * as productService from '../services/dashboard/product.dashboard.service'
+import { toLegacyProductPayload } from '../utils/legacyProductPayload'
 import * as rolePermissionService from '../services/dashboard/rolePermission.service'
 import emailService from '../services/email.service'
 import { moduleService } from '../services/modules/module.service'
@@ -5612,7 +5613,7 @@ router.get(
 
       res.status(200).json({
         message: `Product found for barcode ${barcode}`,
-        data: product,
+        data: toLegacyProductPayload(product),
         correlationId: req.correlationId,
       })
     } catch (error) {
@@ -5748,7 +5749,7 @@ router.post(
 
         return res.status(409).json({
           message: `Product already exists with barcode ${barcode}`,
-          data: existingProduct,
+          data: toLegacyProductPayload(existingProduct),
           correlationId: req.correlationId,
         })
       }
@@ -5779,7 +5780,7 @@ router.post(
 
       res.status(201).json({
         message: 'Product created successfully',
-        data: product,
+        data: toLegacyProductPayload(product),
         correlationId: req.correlationId,
       })
     } catch (error) {

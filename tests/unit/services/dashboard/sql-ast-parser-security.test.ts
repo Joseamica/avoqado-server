@@ -313,6 +313,162 @@ describe('SqlAstParserService - Security Features', () => {
       expect(result.valid).toBe(false)
       expect(result.errors.join(' ')).toContain('Access denied: Column')
     })
+
+    it.each([
+      ['Product', 'createdById'],
+      ['Venue', 'catalogGovernanceEnforcedAt'],
+    ])('should REJECT direct reads of H1 server-only %s.%s fields', (table, column) => {
+      // Raw Text-to-SQL execution bypasses Prisma's global omit, so the AST ACL
+      // must independently reject explicit projections of either internal field.
+      const sql = `SELECT "${column}" FROM "${table}" WHERE "venueId" = '${testVenueId}'`
+
+      const result = service.validateQuery(sql, { requiredVenueId: testVenueId, userRole: UserRole.ADMIN })
+
+      expect(result.valid).toBe(false)
+      expect(result.errors.join(' ')).toContain('Access denied: Column')
+      expect(result.errors.join(' ').toLowerCase()).toContain(column.toLowerCase())
+    })
+
+    it.each([
+      ['direct Product provenance', `SELECT p."createdById" FROM "Product" p WHERE p."venueId" = '${testVenueId}'`, 'createdById'],
+      ['Product wildcard', `SELECT p.* FROM "Product" p WHERE p."venueId" = '${testVenueId}'`, 'createdById'],
+      [
+        'direct Venue fence',
+        `SELECT v."catalogGovernanceEnforcedAt" FROM "Venue" v WHERE v."venueId" = '${testVenueId}'`,
+        'catalogGovernanceEnforcedAt',
+      ],
+      ['Venue wildcard', `SELECT v.* FROM "Venue" v WHERE v."venueId" = '${testVenueId}'`, 'catalogGovernanceEnforcedAt'],
+    ])('should REJECT SUPERADMIN %s without weakening the server-only column boundary', (_label, sql, forbiddenColumn) => {
+      // SUPERADMIN may access more tables, but server-only columns remain a
+      // response-shape boundary until their owning H1 services opt in.
+      const result = service.validateQuery(sql, { requiredVenueId: testVenueId, userRole: UserRole.SUPERADMIN })
+
+      expect(result.valid).toBe(false)
+      expect(result.errors.join(' ').toLowerCase()).toContain(forbiddenColumn.toLowerCase())
+    })
+
+    it('should ACCEPT an allowed SUPERADMIN Product projection', () => {
+      const sql = `SELECT p."name" FROM "Product" p WHERE p."venueId" = '${testVenueId}'`
+      const result = service.validateQuery(sql, { requiredVenueId: testVenueId, userRole: UserRole.SUPERADMIN })
+
+      expect(result.valid).toBe(true)
+      expect(result.errors).toEqual([])
+    })
+
+    it.each([
+      ['aliased Product column', `SELECT p."createdById" FROM "Product" p WHERE p."venueId" = '${testVenueId}'`, 'createdById'],
+      [
+        'wrapped aliased Product column in a join',
+        `SELECT COALESCE(p."createdById", '') FROM "Product" p JOIN "Venue" v ON v.id = p."venueId" WHERE p."venueId" = '${testVenueId}'`,
+        'createdById',
+      ],
+      [
+        'wrapped aliased Venue column',
+        `SELECT CAST(v."catalogGovernanceEnforcedAt" AS TEXT) FROM "Venue" v WHERE v."venueId" = '${testVenueId}'`,
+        'catalogGovernanceEnforcedAt',
+      ],
+      ['qualified Product wildcard', `SELECT p.* FROM "Product" p WHERE p."venueId" = '${testVenueId}'`, 'createdById'],
+      ['unqualified Product wildcard', `SELECT * FROM "Product" p WHERE p."venueId" = '${testVenueId}'`, 'createdById'],
+      ['qualified Venue wildcard', `SELECT v.* FROM "Venue" v WHERE v."venueId" = '${testVenueId}'`, 'catalogGovernanceEnforcedAt'],
+      [
+        'Venue fence hidden in JOIN ON',
+        `SELECT p."name" FROM "Product" p JOIN "Venue" v ON v."catalogGovernanceEnforcedAt" IS NULL WHERE p."venueId" = '${testVenueId}'`,
+        'catalogGovernanceEnforcedAt',
+      ],
+      [
+        'Product provenance hidden in GROUP BY',
+        `SELECT COUNT(*) FROM "Product" p WHERE p."venueId" = '${testVenueId}' GROUP BY p."createdById"`,
+        'createdById',
+      ],
+      [
+        'Venue fence hidden in ORDER BY with LIMIT',
+        `SELECT v."name" FROM "Venue" v WHERE v."venueId" = '${testVenueId}' ORDER BY v."catalogGovernanceEnforcedAt" DESC LIMIT 1`,
+        'catalogGovernanceEnforcedAt',
+      ],
+      ['bare Product composite row', `SELECT p FROM "Product" p WHERE p."venueId" = '${testVenueId}'`, 'createdById'],
+      [
+        'Product composite row wrapped in to_jsonb',
+        `SELECT to_jsonb(p) FROM "Product" p WHERE p."venueId" = '${testVenueId}'`,
+        'createdById',
+      ],
+      [
+        'Venue composite row wrapped in row_to_json',
+        `SELECT row_to_json(v) FROM "Venue" v WHERE v."venueId" = '${testVenueId}'`,
+        'catalogGovernanceEnforcedAt',
+      ],
+      [
+        'Product provenance in the second UNION ALL branch',
+        `SELECT p."name" FROM "Product" p WHERE p."venueId" = '${testVenueId}' UNION ALL SELECT hidden."createdById" FROM "Product" hidden WHERE hidden."venueId" = '${testVenueId}'`,
+        'createdById',
+      ],
+      [
+        'Product provenance inside a derived table',
+        `SELECT x.v FROM (SELECT p."createdById" AS v, p."venueId" FROM "Product" p WHERE p."venueId" = '${testVenueId}') x WHERE x."venueId" = '${testVenueId}'`,
+        'createdById',
+      ],
+      [
+        'Product provenance hidden in DISTINCT ON',
+        `SELECT DISTINCT ON (p."createdById") p."name" FROM "Product" p WHERE p."venueId" = '${testVenueId}'`,
+        'createdById',
+      ],
+      [
+        'outer Product provenance in a correlated subquery',
+        `SELECT p."name" FROM "Product" p WHERE p."venueId" = '${testVenueId}' AND EXISTS (SELECT 1 FROM "Venue" v WHERE v."venueId" = '${testVenueId}' AND p."createdById" IS NULL)`,
+        'createdById',
+      ],
+      [
+        'Product provenance hidden in a named WINDOW clause',
+        `SELECT ROW_NUMBER() OVER w, p."name" FROM "Product" p WHERE p."venueId" = '${testVenueId}' WINDOW w AS (PARTITION BY p."createdById")`,
+        'createdById',
+      ],
+      [
+        'Product provenance in a derived-table nested UNION branch',
+        `SELECT x.v FROM (SELECT p."name" AS v, p."venueId" FROM "Product" p WHERE p."venueId" = '${testVenueId}' UNION ALL SELECT hidden."createdById" AS v, hidden."venueId" FROM "Product" hidden WHERE hidden."venueId" = '${testVenueId}') x WHERE x."venueId" = '${testVenueId}'`,
+        'createdById',
+      ],
+      [
+        'Product provenance in a CTE nested UNION branch',
+        `WITH x AS (SELECT p."name" AS v, p."venueId" FROM "Product" p WHERE p."venueId" = '${testVenueId}' UNION ALL SELECT hidden."createdById" AS v, hidden."venueId" FROM "Product" hidden WHERE hidden."venueId" = '${testVenueId}') SELECT x.v FROM x WHERE x."venueId" = '${testVenueId}'`,
+        'createdById',
+      ],
+      [
+        'Product provenance in a LIMIT scalar subquery',
+        `SELECT p."name" FROM "Product" p WHERE p."venueId" = '${testVenueId}' LIMIT (SELECT CASE WHEN hidden."createdById" IS NULL THEN 1 ELSE 0 END FROM "Product" hidden WHERE hidden."venueId" = '${testVenueId}' LIMIT 1)`,
+        'createdById',
+      ],
+      [
+        'Product provenance inside a LATERAL FROM function argument',
+        `SELECT p."name" FROM "Product" p JOIN LATERAL unnest(ARRAY[(SELECT hidden."createdById"::text FROM "Product" hidden WHERE hidden."venueId" = '${testVenueId}' LIMIT 1)]) leaked(value) ON p."id" IS NOT NULL WHERE p."venueId" = '${testVenueId}'`,
+        'createdById',
+      ],
+    ])('should REJECT %s that would bypass the raw-query denylist', (_label, sql, forbiddenColumn) => {
+      // Aliases, nested expressions, and qualified wildcards must resolve back
+      // to the FROM table before applying its column policy.
+      const result = service.validateQuery(sql, { requiredVenueId: testVenueId, userRole: UserRole.ADMIN })
+
+      expect(result.valid).toBe(false)
+      expect(result.errors.join(' ')).toContain('Access denied: Column')
+      expect(result.errors.join(' ').toLowerCase()).toContain(forbiddenColumn.toLowerCase())
+    })
+
+    it.each([
+      ['wrapped allowed Product field', `SELECT COALESCE(p."name", '') FROM "Product" p WHERE p."venueId" = '${testVenueId}'`],
+      [
+        'same-named allowed field on a resolved join alias',
+        `SELECT o."createdById" FROM "Order" o JOIN "Product" p ON p.id = o."venueId" WHERE o."venueId" = '${testVenueId}'`,
+      ],
+      ['COUNT wildcard', `SELECT COUNT(*) FROM "Product" p WHERE p."venueId" = '${testVenueId}'`],
+      ['literal LIMIT', `SELECT p."name" FROM "Product" p WHERE p."venueId" = '${testVenueId}' LIMIT 10 OFFSET 0`],
+      [
+        'allowed LATERAL FROM function argument',
+        `SELECT p."name" FROM "Product" p JOIN LATERAL unnest(ARRAY[1]) allowed(value) ON p."id" IS NOT NULL WHERE p."venueId" = '${testVenueId}'`,
+      ],
+    ])('should ACCEPT %s without broad denylist false positives', (_label, sql) => {
+      const result = service.validateQuery(sql, { requiredVenueId: testVenueId, userRole: UserRole.ADMIN })
+
+      expect(result.valid).toBe(true)
+      expect(result.errors).toEqual([])
+    })
   })
 
   // ═══════════════════════════════════════════════════════════════════════════

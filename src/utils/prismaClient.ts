@@ -52,14 +52,29 @@ function buildDatasourceUrl(): string | undefined {
 
 const datasourceUrl = buildDatasourceUrl()
 
-const prisma = datasourceUrl
+// These H1 server-only scalars are opt-in provenance/fence inputs, not legacy
+// response fields. Global omit also protects Product rows nested by endpoints
+// we did not enumerate; internal H1 readers can override with select/omit=false.
+const serverOnlyOmit = {
+  product: { createdById: true },
+  venue: { catalogGovernanceEnforcedAt: true },
+} as const
+
+// Prisma encodes global omit in the client's generic type, which otherwise
+// makes this singleton incompatible with the repo's many narrow PrismaClient /
+// TransactionClient ports. The stable public type preserves those ports while
+// the constructed runtime client still enforces the omit; H1 readers opt in
+// explicitly with select or omit:false.
+const prisma = (datasourceUrl
   ? new PrismaClient({
       datasources: { db: { url: datasourceUrl } },
+      omit: serverOnlyOmit,
       // log: process.env.NODE_ENV === 'development' ? ['query', 'info', 'warn', 'error'] : ['error'],
     })
   : new PrismaClient({
+      omit: serverOnlyOmit,
       // log: process.env.NODE_ENV === 'development' ? ['query', 'info', 'warn', 'error'] : ['error'],
-    })
+    })) as unknown as PrismaClient
 
 // Graceful shutdown to close database connections
 process.on('beforeExit', async () => {

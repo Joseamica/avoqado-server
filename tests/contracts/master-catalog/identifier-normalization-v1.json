@@ -1,0 +1,34 @@
+{
+  "version": "v1",
+  "scope": "corporate-sku",
+  "rules": {
+    "unicodeNormalization": "NFKC",
+    "trim": "peripheral-whitespace-only",
+    "case": "locale-neutral-uppercase",
+    "preserveLeadingZeroes": true,
+    "preserveInternalSpaces": true,
+    "preserveHyphens": true
+  },
+  "vectors": [
+    {
+      "input": "  sku-001  ",
+      "normalized": "SKU-001"
+    },
+    {
+      "input": "００１-ab",
+      "normalized": "001-AB"
+    },
+    {
+      "input": "  001 ab-c  ",
+      "normalized": "001 AB-C"
+    },
+    {
+      "input": "i-ı-ß",
+      "normalized": "I-I-SS"
+    },
+    {
+      "input": "  000  A-B  ",
+      "normalized": "000  A-B"
+    }
+  ]
+}

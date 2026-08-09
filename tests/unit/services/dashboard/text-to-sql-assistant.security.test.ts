@@ -10,6 +10,7 @@ import { SecurityViolationType } from '@/services/dashboard/security-response.se
 
 describe('TextToSqlAssistantService security helpers', () => {
   const service = textToSqlAssistantService as unknown as {
+    schemaContext: string
     hasExplicitPromptInjectionSignals(message: string): boolean
     isCrudMutationMessage(message: string): boolean
     shouldBypassSemanticInjectionBlock(message: string): boolean
@@ -24,6 +25,22 @@ describe('TextToSqlAssistantService security helpers', () => {
       errorMessage: string
     } | null
   }
+
+  const schemaBlock = (model: string): string => {
+    const marker = `### ${model}`
+    const start = service.schemaContext.indexOf(marker)
+    expect(start).toBeGreaterThanOrEqual(0)
+    const remainder = service.schemaContext.slice(start)
+    const nextModel = remainder.indexOf('\n### ', marker.length)
+    return nextModel === -1 ? remainder : remainder.slice(0, nextModel)
+  }
+
+  it('does not advertise H1 server-only Product or Venue fields in the generated schema prompt', () => {
+    // The model must not be taught columns that the downstream AST correctly
+    // rejects, keeping generation and execution on the same denylist.
+    expect(schemaBlock('Product')).not.toContain('createdById')
+    expect(schemaBlock('Venue')).not.toContain('catalogGovernanceEnforcedAt')
+  })
 
   it('should detect normal inventory CRUD wording without treating it as prompt injection', () => {
     expect(service.isCrudMutationMessage('quiero modificar mi inventario')).toBe(true)

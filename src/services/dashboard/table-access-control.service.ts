@@ -98,7 +98,9 @@ export class TableAccessControlService {
       table: 'Product',
       accessLevel: AccessLevel.PUBLIC,
       allowedRoles: TableAccessControlService.ALL_ROLES,
-      forbiddenColumns: ['internalCost', 'profitMargin'],
+      // Raw Text-to-SQL bypasses Prisma's global omit; keep H1 provenance
+      // internal even while legacy Product remains a public analytics table.
+      forbiddenColumns: ['internalCost', 'profitMargin', 'createdById'],
     },
     { table: 'ModifierGroup', accessLevel: AccessLevel.PUBLIC, allowedRoles: TableAccessControlService.ALL_ROLES },
     { table: 'Modifier', accessLevel: AccessLevel.PUBLIC, allowedRoles: TableAccessControlService.ALL_ROLES },
@@ -214,7 +216,9 @@ export class TableAccessControlService {
       table: 'Venue',
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
-      forbiddenColumns: ['stripeLiveSecretKey', 'stripeTestSecretKey', 'internalSettings'],
+      // The governance fence is a server-side rollout control and must never
+      // appear in generated prompts or raw query results.
+      forbiddenColumns: ['stripeLiveSecretKey', 'stripeTestSecretKey', 'internalSettings', 'catalogGovernanceEnforcedAt'],
       reason: 'Venue configuration contains sensitive API keys',
     },
     {

@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 
 import * as venueTpvService from '../../services/tpv/venue.tpv.service'
+import { toLegacyVenuePayload } from '../../utils/legacyProductPayload'
 
 export async function getVenueById(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -14,7 +15,7 @@ export async function getVenueById(req: Request<{ venueId: string }>, res: Respo
     // 4. Llamada al servicio con datos limpios (Controller delega)
     const venue = await venueTpvService.getVenueById(venueId)
 
-    res.status(200).json(venue) // 5. Enviar respuesta HTTP (Controller)
+    res.status(200).json(toLegacyVenuePayload(venue)) // 5. Enviar respuesta HTTP (Controller)
   } catch (error) {
     next(error) // 6. Manejo de error HTTP (Controller)
   }
