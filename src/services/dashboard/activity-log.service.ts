@@ -102,63 +102,66 @@ export interface PaginatedActivityLogs {
   }
 }
 
-/**
- * Query activity logs for an organization with filters and pagination.
- * Fetches all org venue IDs, then queries by venueId IN (...).
- */
+/** Build the authoritative tenant predicate shared by organization list/dropdown queries. */
+export function buildOrganizationActivityLogTenantScope(organizationId: string, venueIds: string[]): Prisma.ActivityLogWhereInput {
+  // Classified rows use organizationId; only legacy null-attribution rows may
+  // fall back to the organization's current venue set.
+  return {
+    OR: [{ organizationId }, { organizationId: null, venueId: { in: venueIds } }],
+  }
+}
+
+/** Build organization scope and user filters without allowing either OR to replace the other. */
+export function buildOrganizationActivityLogWhere(params: QueryActivityLogsParams, venueIds: string[]): Prisma.ActivityLogWhereInput {
+  const and: Prisma.ActivityLogWhereInput[] = [buildOrganizationActivityLogTenantScope(params.organizationId, venueIds)]
+
+  if (params.venueId) {
+    and.push({ venueId: params.venueId })
+    // An explicit venue filter must itself belong to the route organization;
+    // this remains defense-in-depth even for newly classified rows.
+    and.push({ venueId: { in: venueIds } })
+  }
+  if (params.staffId) and.push({ staffId: params.staffId })
+  if (params.action) and.push({ action: params.action })
+  if (params.entity) and.push({ entity: params.entity })
+  if (params.search) {
+    and.push({
+      OR: [
+        { action: { contains: params.search, mode: 'insensitive' } },
+        { entity: { contains: params.search, mode: 'insensitive' } },
+        { entityId: { contains: params.search, mode: 'insensitive' } },
+      ],
+    })
+  }
+  if (params.startDate || params.endDate) {
+    const createdAt: Prisma.DateTimeFilter = {}
+    if (params.startDate) createdAt.gte = new Date(params.startDate)
+    if (params.endDate) createdAt.lte = new Date(params.endDate)
+    and.push({ createdAt })
+  }
+
+  return { AND: and }
+}
+
+/** Query activity logs for one organization with classified + legacy compatibility. */
 export async function queryActivityLogs(params: QueryActivityLogsParams): Promise<PaginatedActivityLogs> {
   const { organizationId, page = 1, pageSize = 25 } = params
 
-  // Get all venue IDs for this organization
   const orgVenues = await prisma.venue.findMany({
     where: { organizationId },
     select: { id: true, name: true },
   })
-
-  if (orgVenues.length === 0) {
-    return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
-  }
-
   const venueIds = orgVenues.map(v => v.id)
   const venueNameMap = new Map(orgVenues.map(v => [v.id, v.name]))
-
-  // Build where clause
-  const where: Record<string, unknown> = {
-    venueId: params.venueId ? { equals: params.venueId } : { in: venueIds },
-  }
-
-  if (params.staffId) {
-    where.staffId = params.staffId
-  }
-
-  if (params.action) {
-    where.action = params.action
-  }
-
-  if (params.entity) {
-    where.entity = params.entity
-  }
-
-  if (params.search) {
-    where.OR = [
-      { action: { contains: params.search, mode: 'insensitive' } },
-      { entity: { contains: params.search, mode: 'insensitive' } },
-      { entityId: { contains: params.search, mode: 'insensitive' } },
-    ]
-  }
-
-  if (params.startDate || params.endDate) {
-    const createdAt: Record<string, Date> = {}
-    if (params.startDate) createdAt.gte = new Date(params.startDate)
-    if (params.endDate) createdAt.lte = new Date(params.endDate)
-    where.createdAt = createdAt
-  }
+  // No zero-venue early return: H1 organization-level audit rows have no venue
+  // and must remain visible to the corporate audit screen.
+  const where = buildOrganizationActivityLogWhere(params, venueIds)
 
   // Count + fetch in parallel
   const [total, logs] = await Promise.all([
-    prisma.activityLog.count({ where: where as any }),
+    prisma.activityLog.count({ where }),
     prisma.activityLog.findMany({
-      where: where as any,
+      where,
       include: {
         staff: {
           select: { id: true, firstName: true, lastName: true },
@@ -210,12 +213,12 @@ export async function getDistinctActions(organizationId: string): Promise<string
     select: { id: true },
   })
 
-  if (orgVenues.length === 0) return []
-
   const venueIds = orgVenues.map(v => v.id)
 
   const results = await prisma.activityLog.findMany({
-    where: { venueId: { in: venueIds } },
+    // Reusing the exact tenant predicate keeps dropdown values from disclosing
+    // actions that the corresponding organization list can never display.
+    where: buildOrganizationActivityLogTenantScope(organizationId, venueIds),
     select: { action: true },
     distinct: ['action'],
     orderBy: { action: 'asc' },

@@ -203,13 +203,17 @@ describe('Activity-log pagination stability (Asana 1217127206664238)', () => {
     expect(dates).toEqual([...dates].sort((a, b) => b - a))
   })
 
-  it('still scopes the org list to that org’s venues and still pages', async () => {
+  it('scopes the org list to authoritative org rows plus legacy rows from its venues and still pages', async () => {
     serveLogs([])
 
     await queryActivityLogs({ organizationId: ORG_ID, page: 3, pageSize: PAGE_SIZE })
 
     const arg = mockPrisma.activityLog.findMany.mock.calls[0][0] as any
-    expect(arg.where.venueId).toEqual({ in: [VENUE_ID] })
+    // H1 rows may have no venue, while legacy rows have no organizationId; the
+    // tenant OR must remain the first AND branch so later filters cannot erase it.
+    expect(arg.where.AND[0]).toEqual({
+      OR: [{ organizationId: ORG_ID }, { organizationId: null, venueId: { in: [VENUE_ID] } }],
+    })
     expect(arg.skip).toBe(2 * PAGE_SIZE)
     expect(arg.take).toBe(PAGE_SIZE)
   })
