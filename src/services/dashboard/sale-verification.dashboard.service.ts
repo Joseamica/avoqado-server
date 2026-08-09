@@ -464,18 +464,45 @@ function createServiceError(message: string, statusCode: number): ServiceError {
   return err
 }
 
+/** Mínimo de caracteres del comentario que el promotor lee en su TPV. */
+export const PROMOTER_FEEDBACK_MIN_CHARS = 5
+
+/** Mensaje único del candado (en español: el usuario lo ve crudo). */
+export const PROMOTER_FEEDBACK_REQUIRED_MESSAGE =
+  'Para dejar la venta en "Revisar por promotor" escribe qué debe corregir el promotor (mínimo 5 caracteres).'
+
+/**
+ * Candado de "Revisar por promotor": una venta no puede quedar en FAILED sin un
+ * comentario que le diga al promotor QUÉ corregir. Los `rejectionReasons`
+ * (checkboxes) son opcionales — categorizan para el reporte a Walmart, pero un
+ * checkbox solo no dice cuál imagen está mal.
+ *
+ * NO aplica a REJECTED ("Rechazada"): esa es terminal y el promotor no la corrige.
+ *
+ * @returns el texto ya trimmeado, listo para guardar.
+ * @throws error con statusCode 400 si no alcanza el mínimo.
+ */
+export function assertPromoterFeedback(reviewNotes?: string | null): string {
+  const trimmed = reviewNotes?.trim() ?? ''
+  if (trimmed.length < PROMOTER_FEEDBACK_MIN_CHARS) {
+    throw createServiceError(PROMOTER_FEEDBACK_REQUIRED_MESSAGE, 400)
+  }
+  return trimmed
+}
+
 /**
  * Approve or reject a sale verification (back-office documentation review).
  *
  * Decisions:
  *   - APPROVE      → status=COMPLETED, rejectionReasons cleared
- *   - REJECT       → status=FAILED, rejectionReasons stored, reviewNotes optional but encouraged
+ *   - REJECT       → status=FAILED, rejectionReasons stored, reviewNotes REQUIRED (>=5 chars)
  *   - REJECT_FINAL → status=REJECTED (terminal "Rechazada"), reviewNotes optional, no reasons required
  *
  * Validations:
  *   - Verification must exist and belong to the given venue
  *   - Verification must be in PENDING status (no double-review)
- *   - REJECT requires at least one rejectionReason OR reviewNotes (not silent rejection)
+ *   - REJECT requires reviewNotes with >= PROMOTER_FEEDBACK_MIN_CHARS chars (never a silent
+ *     "revisar" — the promoter must know WHAT to fix). rejectionReasons stay optional.
  *
  * Side-effects:
  *   - Emits SALE_VERIFICATION_REVIEWED socket event to the promoter (staff) so their TPV refreshes in real time
@@ -505,12 +532,15 @@ export async function reviewSaleVerification(
     throw createServiceError(`Sale verification already reviewed (status=${existing.status})`, 409)
   }
 
-  const trimmedNotes = params.reviewNotes?.trim() || null
   const reasons = params.rejectionReasons ?? []
 
-  if (params.decision === 'REJECT' && reasons.length === 0 && !trimmedNotes) {
-    throw createServiceError('Rejection requires at least one reason or notes', 400)
+  // Candado: "Revisar por promotor" (FAILED) SIEMPRE lleva comentario.
+  // REJECT_FINAL ("Rechazada") sigue con motivo opcional a propósito.
+  if (params.decision === 'REJECT') {
+    assertPromoterFeedback(params.reviewNotes)
   }
+
+  const trimmedNotes = params.reviewNotes?.trim() || null
 
   const newStatus: 'COMPLETED' | 'FAILED' | 'REJECTED' =
     params.decision === 'APPROVE' ? 'COMPLETED' : params.decision === 'REJECT_FINAL' ? 'REJECTED' : 'FAILED'

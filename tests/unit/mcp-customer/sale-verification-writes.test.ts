@@ -87,6 +87,34 @@ describe('review_sale_verification', () => {
     expect(out.ok).toBe(false)
     expect(mockReview).not.toHaveBeenCalled()
   })
+  it('reject con motivos pero SIN reviewNotes → error (un checkbox pelón no dice qué corregir)', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    const out = parse(
+      await call('review_sale_verification', {
+        saleVerificationId: 'sv1',
+        decision: 'reject',
+        rejectionReasons: ['REVIEW_ILLEGIBLE_IMAGES'],
+        confirm: true,
+      }),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/mínimo 5 caracteres/i)
+    expect(mockReview).not.toHaveBeenCalled()
+  })
+  it('reject con reviewNotes válidas → llama al backend', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    mockReview.mockResolvedValue({ status: 'FAILED' })
+    const out = parse(
+      await call('review_sale_verification', {
+        saleVerificationId: 'sv1',
+        decision: 'reject',
+        reviewNotes: 'Falta la imagen de vinculación',
+        confirm: true,
+      }),
+    )
+    expect(out.ok).toBe(true)
+    expect(mockReview).toHaveBeenCalledWith('o1', expect.objectContaining({ decision: 'REJECT' }))
+  })
 })
 
 describe('reopen_sale_verification', () => {
@@ -119,6 +147,38 @@ describe('edit_sale_verification', () => {
     expect(mockEdit).toHaveBeenCalledWith(
       'o1',
       expect.objectContaining({ saleVerificationId: 'sv1', editedById: 's1', amount: 300, reason: 'ajuste monto' }),
+    )
+  })
+  it('status=FAILED sin reviewNotes → error, servicio no llamado', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        status: 'FAILED',
+        reason: 'Documentación incompleta',
+        confirm: true,
+      }),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/mínimo 5 caracteres/i)
+    expect(mockEdit).not.toHaveBeenCalled()
+  })
+  it('status=FAILED con reviewNotes → las pasa al servicio', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    mockEdit.mockResolvedValue({ status: 'FAILED' })
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        status: 'FAILED',
+        reviewNotes: 'Falta la imagen de vinculación',
+        reason: 'Documentación incompleta',
+        confirm: true,
+      }),
+    )
+    expect(out.ok).toBe(true)
+    expect(mockEdit).toHaveBeenCalledWith(
+      'o1',
+      expect.objectContaining({ status: 'FAILED', reviewNotes: 'Falta la imagen de vinculación' }),
     )
   })
 })
