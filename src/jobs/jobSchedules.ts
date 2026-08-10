@@ -9,4 +9,6 @@ export const DATABASE_JOB_SCHEDULES = {
   posConnectionMonitor: '17 1-59/5 * * * *',
   gcalInboxSweeper: '23,53 * * * * *',
   gcalOutboxSweeper: '26,56 * * * * *',
+  catalogPublicationOutboxSweeper: '29,59 * * * * *',
+  catalogPublicationWatchdog: '32 * * * * *',
 } as const
