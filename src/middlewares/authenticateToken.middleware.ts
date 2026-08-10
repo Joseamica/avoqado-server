@@ -5,6 +5,7 @@ import { IMPERSONATION_ERROR_CODES } from '../types/impersonation'
 import * as liveDemoService from '../services/liveDemo.service'
 import { isJtiRevoked } from '../utils/tokenRevocation'
 import { enforceImpersonationRules } from './impersonationGuard.middleware'
+import { enrichContext } from '../observability/executionContext'
 
 export const authenticateTokenMiddleware = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
@@ -65,6 +66,16 @@ export const authenticateTokenMiddleware = async (req: Request, res: Response, n
     const authContext: AuthContext = buildAuthContextFromPayload(decoded)
 
     req.authContext = authContext
+
+    // Stamp the tenant onto the execution context that requestLogger opened. From here down
+    // every log line — and every error captured later — knows which venue and which user it
+    // belongs to, without a single call site passing it along.
+    enrichContext({
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      role: authContext.role,
+      terminalSerial: authContext.terminalSerialNumber,
+    })
 
     // Enforce impersonation rules (read-only, blocked routes, target validity).
     // This runs on every authenticated request, so new endpoints are protected by default.
