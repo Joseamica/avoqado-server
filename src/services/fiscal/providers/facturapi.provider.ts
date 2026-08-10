@@ -72,6 +72,20 @@ export class FacturapiProvider implements FiscalProvider {
   }
 
   /**
+   * Normaliza el nombre del receptor justo antes de mandarlo al PAC — la última red antes
+   * del SAT. El padrón del SAT guarda las razones sociales en MAYÚSCULAS; un nombre bien
+   * escrito pero en minúsculas o con espacios de más puede rechazarse con "El campo Nombre
+   * del receptor debe pertenecer al nombre asociado al RFC" aunque el texto sea correcto.
+   *
+   * Sólo trim + colapso de espacios + MAYÚSCULAS. 🔴 NO quita el régimen de capital
+   * ("SA DE CV", "S DE RL") — el SAT lo prefiere fuera, pero hay contribuyentes registrados
+   * CON él en el padrón, así que quitarlo automáticamente rompería a esos.
+   */
+  private static normalizeReceptorName(nombre: string): string {
+    return nombre.trim().replace(/\s+/g, ' ').toUpperCase()
+  }
+
+  /**
    * Mapea el `path` que devuelve Facturapi al campo del formulario. Los paths siguen la
    * forma del payload de Customer (`legal_name`, `tax_id`, `tax_system`, `address.zip`),
    * no los nombres del CFDI.
@@ -87,7 +101,11 @@ export class FacturapiProvider implements FiscalProvider {
 
   async upsertCustomer(params: UpsertCustomerParams): Promise<string> {
     const payload = {
-      legal_name: params.razonSocial,
+      // Normalizado: este mismo Customer es el que luego valida `validateCustomerTaxInfo()` contra
+      // el padrón del SAT, y ese padrón guarda las razones sociales en MAYÚSCULAS — sin esto la
+      // validación podía rechazar un nombre correcto solo por venir en minúsculas/espacios de más,
+      // mientras el timbrado (que sí normaliza) hubiera pasado igual con el mismo dato.
+      legal_name: FacturapiProvider.normalizeReceptorName(params.razonSocial),
       tax_id: params.rfc,
       tax_system: params.regimenFiscal,
       address: { zip: params.codigoPostal },
@@ -124,7 +142,7 @@ export class FacturapiProvider implements FiscalProvider {
   async createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice> {
     const payload = {
       customer: {
-        legal_name: params.receptor.razonSocial,
+        legal_name: FacturapiProvider.normalizeReceptorName(params.receptor.razonSocial),
         tax_id: params.receptor.rfc,
         tax_system: params.receptor.regimenFiscal,
         address: { zip: params.receptor.codigoPostal },
@@ -267,7 +285,7 @@ export class FacturapiProvider implements FiscalProvider {
     const payload: any = {
       type: 'P', // CFDI tipo Pago (receptor uso CP01 — facturapi lo fija para type P)
       customer: {
-        legal_name: params.receptor.razonSocial,
+        legal_name: FacturapiProvider.normalizeReceptorName(params.receptor.razonSocial),
         tax_id: params.receptor.rfc,
         tax_system: params.receptor.regimenFiscal,
         address: { zip: params.receptor.codigoPostal },

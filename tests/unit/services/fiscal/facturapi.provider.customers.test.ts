@@ -68,6 +68,58 @@ describe('FacturapiProvider — customers', () => {
       expect(id).toBe('cus_nuevo')
       expect(create).toHaveBeenCalled()
     })
+
+    // ── Normalización del nombre (Fase 4) ─────────────────────────────────────
+    //
+    // Este mismo Customer es el que después valida `validateCustomerTaxInfo()` contra el
+    // padrón del SAT. Si aquí se guarda el nombre crudo (minúsculas / espacios de más) pero
+    // `createInvoice` sí lo normaliza al timbrar, la validación previa contradice al timbrado
+    // real: le dice al operador "está mal" cuando el mismo dato, ya normalizado, sí pasaría.
+
+    it('crea el Customer con el legal_name normalizado aunque el receptor venga mal escrito', async () => {
+      const create = jest.fn().mockResolvedValue({ id: 'cus_1' })
+      const p = providerWith({ create, update: jest.fn() })
+
+      await p.upsertCustomer({
+        rfc: 'GAL150211KT5',
+        razonSocial: '  la   galeterie  ',
+        regimenFiscal: '601',
+        codigoPostal: '06400',
+      })
+
+      expect(create).toHaveBeenCalledWith(expect.objectContaining({ legal_name: 'LA GALETERIE' }))
+    })
+
+    it('actualiza el Customer existente con el legal_name normalizado aunque el receptor venga mal escrito', async () => {
+      const update = jest.fn().mockResolvedValue({ id: 'cus_9' })
+      const p = providerWith({ create: jest.fn(), update })
+
+      await p.upsertCustomer({
+        rfc: 'GAL150211KT5',
+        razonSocial: '  la   galeterie  ',
+        regimenFiscal: '601',
+        codigoPostal: '06400',
+        existingCustomerId: 'cus_9',
+      })
+
+      expect(update).toHaveBeenCalledWith('cus_9', expect.objectContaining({ legal_name: 'LA GALETERIE' }))
+    })
+
+    it('la recuperación por 404 (Customer borrado en Facturapi) también crea con el legal_name normalizado', async () => {
+      const update = jest.fn().mockRejectedValue(new Error('Request failed with status code 404'))
+      const create = jest.fn().mockResolvedValue({ id: 'cus_nuevo' })
+      const p = providerWith({ create, update })
+
+      await p.upsertCustomer({
+        rfc: 'GAL150211KT5',
+        razonSocial: '  la   galeterie  ',
+        regimenFiscal: '601',
+        codigoPostal: '06400',
+        existingCustomerId: 'cus_borrado',
+      })
+
+      expect(create).toHaveBeenCalledWith(expect.objectContaining({ legal_name: 'LA GALETERIE' }))
+    })
   })
 
   describe('validateCustomerTaxInfo', () => {
