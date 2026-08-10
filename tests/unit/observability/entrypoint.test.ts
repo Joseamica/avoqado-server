@@ -21,9 +21,7 @@ describe('normalizeEntrypoint', () => {
   })
 
   it('replaces a uuid segment', () => {
-    expect(normalizeEntrypoint('GET', '/api/v1/venues/3f2504e0-4f89-41d3-9a0c-0305e82c3301/staff')).toBe(
-      'GET /api/v1/venues/:id/staff',
-    )
+    expect(normalizeEntrypoint('GET', '/api/v1/venues/3f2504e0-4f89-41d3-9a0c-0305e82c3301/staff')).toBe('GET /api/v1/venues/:id/staff')
   })
 
   it('replaces a numeric id segment', () => {

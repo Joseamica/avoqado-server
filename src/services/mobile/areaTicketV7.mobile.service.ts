@@ -727,9 +727,16 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   if (!terminal.canIssueAreaTickets || !terminal.fulfillmentAreaId || !terminal.fulfillmentArea?.active) {
     throw new ForbiddenError('Esta terminal no está configurada para emitir vales de un área activa.', 'TERMINAL_AREA_MISMATCH')
   }
+  // El guard de arriba ya garantiza que ambos existen, pero TypeScript descarta el
+  // estrechamiento de PROPIEDADES al entrar al callback de `prisma.$transaction`
+  // (podrían mutar entre el chequeo y la ejecución). Fijarlos aquí es lo que hace
+  // que adentro se lean sin `!`: la garantía queda en una constante, no en una
+  // aserción que nadie vuelve a verificar.
+  const fulfillmentAreaId = terminal.fulfillmentAreaId
+  const fulfillmentArea = terminal.fulfillmentArea
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   const normalizedItems = normalizeIssueLines(input.lines)
-  const { itemsData, subtotal, itemDiscountTotal } = await buildOrderItemsData(venueId, normalizedItems, terminal.fulfillmentAreaId)
+  const { itemsData, subtotal, itemDiscountTotal } = await buildOrderItemsData(venueId, normalizedItems, fulfillmentAreaId)
   const snapshots = buildSnapshotLines(input.lines, itemsData)
   const snapshotHash = canonicalSnapshotHash('MXN', snapshots)
   const total = new Prisma.Decimal(subtotal).sub(itemDiscountTotal)
@@ -754,8 +761,8 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
           const ticket = await tx.areaTicket.create({
             data: {
               venueId,
-              fulfillmentAreaId: terminal.fulfillmentAreaId!,
-              fulfillmentModeSnapshot: terminal.fulfillmentArea.fulfillmentMode,
+              fulfillmentAreaId,
+              fulfillmentModeSnapshot: fulfillmentArea.fulfillmentMode,
               sourceTerminalId: terminal.id,
               issuedByStaffId: staffId ?? null,
               code,
@@ -2659,17 +2666,19 @@ export async function finalizeAreaTicketPaymentInTransaction(
       ...(input.reconcileCapturedPayment ? { fullyPaid: finalFullyPaid } : {}),
     }
   }
-  if (attempt.status !== AreaTicketPaymentAttemptStatus.SUCCEEDED) {
-    await tx.areaTicketPaymentAttempt.update({
-      where: { id: attempt.id },
-      data: {
-        status: AreaTicketPaymentAttemptStatus.SUCCEEDED,
-        paymentId: input.paymentId,
-        completedAt: new Date(),
-        lastCheckedAt: new Date(),
-      },
-    })
-  }
+  // Sin condición A PROPÓSITO: el bloque de arriba ya cubre el caso SUCCEEDED —
+  // o lanza CHECKOUT_PAYMENT_ALREADY_FINALIZED o retorna—, así que aquí el intento
+  // siempre está pendiente. El `if (status !== SUCCEEDED)` que había era una
+  // condición imposible de falsear, y leerla sugería una rama que nunca existió.
+  await tx.areaTicketPaymentAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      status: AreaTicketPaymentAttemptStatus.SUCCEEDED,
+      paymentId: input.paymentId,
+      completedAt: new Date(),
+      lastCheckedAt: new Date(),
+    },
+  })
 
   if (!finalFullyPaid) {
     await tx.areaTicketCheckoutSession.update({

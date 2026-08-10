@@ -62,10 +62,7 @@ describe('tables_status derives occupancy from live checks', () => {
   })
 
   it('keeps RESERVED and CLEANING, the legitimate states without a check', async () => {
-    const out = await run([
-      table({ id: 't1', number: '1', status: 'RESERVED' }),
-      table({ id: 't2', number: '2', status: 'CLEANING' }),
-    ])
+    const out = await run([table({ id: 't1', number: '1', status: 'RESERVED' }), table({ id: 't2', number: '2', status: 'CLEANING' })])
 
     expect(out.tables.map((t: any) => t.status)).toEqual(['RESERVED', 'CLEANING'])
   })

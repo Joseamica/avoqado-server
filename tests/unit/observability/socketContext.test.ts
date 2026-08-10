@@ -191,7 +191,10 @@ describe('no socket handler is registered without a context', () => {
 
   it('🔴 no file calls socket.on directly', () => {
     const offenders = files
-      .map(file => ({ file: path.relative(SOCKETS_DIR, file), hits: (fs.readFileSync(file, 'utf8').match(/\bsocket\.on\(/g) ?? []).length }))
+      .map(file => ({
+        file: path.relative(SOCKETS_DIR, file),
+        hits: (fs.readFileSync(file, 'utf8').match(/\bsocket\.on\(/g) ?? []).length,
+      }))
       .filter(({ hits }) => hits > 0)
       .map(({ file, hits }) => `${file}: ${hits} registro(s) sin onWithContext`)
 

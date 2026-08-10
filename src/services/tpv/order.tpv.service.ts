@@ -2845,11 +2845,27 @@ export async function applyDiscount(
   // Round to 2 decimal places
   discountAmount = Math.round(discountAmount * 100) / 100
 
-  logger.info(`  💰 Calculated discount: $${discountAmount}`)
+  // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
+  //
+  // Los topes de arriba miran el subtotal COMPLETO, y eso no basta cuando la
+  // cuenta YA traía descuento: los mismos pesos se regalan dos veces. Un
+  // descuento fijo de $253 sobre una cuenta de $253 que ya tenía 10% ($25.30)
+  // dejaba el acumulado en $278.30 —más que la mercancía— y el total en −$25.30.
+  // Reproducido en vivo el 2026-08-09: es el mismo mecanismo que rompió la mesa
+  // M13, sólo que por la vía del descuento manual en vez de la cortesía.
+  //
+  // `discount.tpv.service.ts` y `discountEngine.service.ts` ya recortaban contra
+  // este "disponible" (su `remainingDiscountable`); este camino era el único que
+  // faltaba. El `Math.max` del total es cinturón-y-tirantes: con el recorte ya
+  // no puede dar negativo.
+  const remainingDiscountable = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
+  discountAmount = Math.min(discountAmount, remainingDiscountable)
+
+  logger.info(`  💰 Calculated discount: $${discountAmount} (disponible: $${remainingDiscountable})`)
 
   // Update order: add to existing discount
   const newDiscountAmount = Number(order.discountAmount) + discountAmount
-  const newTotal = Number(order.subtotal) - newDiscountAmount
+  const newTotal = Math.max(0, Number(order.subtotal) - newDiscountAmount)
 
   // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)

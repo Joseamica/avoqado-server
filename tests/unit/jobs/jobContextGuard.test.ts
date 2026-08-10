@@ -80,7 +80,9 @@ describe('every cron job runs inside an execution context', () => {
   it('the pending list is real — those files genuinely still schedule directly', () => {
     // Guards the exclusion itself: once a file is migrated it must leave the list, or the
     // list quietly becomes a place where jobs go to be forgotten.
-    const stillPending = [...PENDING_MIGRATION].filter(file => fs.existsSync(path.join(JOBS_DIR, file)) && countRawSchedulers(read(file)) > 0)
+    const stillPending = [...PENDING_MIGRATION].filter(
+      file => fs.existsSync(path.join(JOBS_DIR, file)) && countRawSchedulers(read(file)) > 0,
+    )
 
     expect(stillPending.sort()).toEqual([...PENDING_MIGRATION].sort())
   })

@@ -3,6 +3,7 @@ import * as venueDashboardService from '@/services/dashboard/venue.dashboard.ser
 import * as venueTpvService from '@/services/tpv/venue.tpv.service'
 import * as venueDashboardController from '@/controllers/dashboard/venue.dashboard.controller'
 import * as venueTpvController from '@/controllers/tpv/venue.tpv.controller'
+import type { ListVenuesQueryDto } from '@/schemas/dashboard/venue.schema'
 
 jest.mock('@/services/dashboard/venue.dashboard.service')
 jest.mock('@/services/tpv/venue.tpv.service')
@@ -57,7 +58,7 @@ describe('H1A legacy Venue contracts', () => {
 
     const listResponse = makeResponse()
     await venueDashboardController.listVenues(
-      { authContext: { orgId: organizationId }, query: {} } as unknown as Request,
+      { authContext: { orgId: organizationId }, query: { page: 1, limit: 20 } } as unknown as Request<{}, any, any, ListVenuesQueryDto>,
       listResponse,
       next,
     )
@@ -73,7 +74,9 @@ describe('H1A legacy Venue contracts', () => {
 
     const detailResponse = makeResponse()
     await venueDashboardController.getVenueById(
-      { authContext: { orgId: organizationId, role: 'OWNER' }, params: { venueId } } as unknown as Request,
+      { authContext: { orgId: organizationId, role: 'OWNER' }, params: { venueId } } as unknown as Request<{
+        venueId: string
+      }>,
       detailResponse,
       next,
     )
@@ -86,7 +89,7 @@ describe('H1A legacy Venue contracts', () => {
     const next = jest.fn() as NextFunction
     const response = makeResponse()
 
-    await venueTpvController.getVenueById({ params: { venueId } } as unknown as Request, response, next)
+    await venueTpvController.getVenueById({ params: { venueId } } as unknown as Request<{ venueId: string }>, response, next)
 
     expectResponse(response, 200, legacyVenue)
     expect(next).not.toHaveBeenCalled()

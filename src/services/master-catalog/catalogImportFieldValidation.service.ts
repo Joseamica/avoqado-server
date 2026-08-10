@@ -110,17 +110,26 @@ export async function appendCatalogImportStandaloneErrorLines(
   errors: CatalogImportRowError[],
   checkpoint: CatalogImportCooperativeCheckpoint,
 ): Promise<void> {
-  const stagedKeys = new Set<string>()
+  const stagedRowsBySheet = new Map<string, Set<number>>()
   let visited = 0
   for (const line of staged) {
-    for (const error of line.errors) {
-      stagedKeys.add(`${error.source_sheet}:${error.source_row}`)
-      visited += 1
-      if (visited % 64 === 0) await checkpoint()
-    }
+    const rows = stagedRowsBySheet.get(line.sourceSheet) ?? new Set<number>()
+    rows.add(line.sourceRow)
+    stagedRowsBySheet.set(line.sourceSheet, rows)
+    visited += 1
+    if (visited % 64 === 0) await checkpoint()
   }
   const grouped = new Map<string, CatalogImportRowError[]>()
   for (const error of errors) {
+    // WHY: Most validation findings already belong to a durable staged line.
+    // Avoid allocating a second 400k-entry grouping only to discard it later;
+    // under a warm server that redundant allocation can itself trigger a
+    // main-thread GC pause beyond the 50 ms event-loop budget.
+    if (stagedRowsBySheet.get(error.source_sheet)?.has(error.source_row)) {
+      visited += 1
+      if (visited % 64 === 0) await checkpoint()
+      continue
+    }
     const key = `${error.source_sheet}:${error.source_row}`
     const findings = grouped.get(key) ?? []
     findings.push(error)
@@ -130,9 +139,8 @@ export async function appendCatalogImportStandaloneErrorLines(
   }
   // WHY: A single grouping pass avoids quadratic error scans for a hostile
   // workbook while preserving one durable line per source coordinate.
-  for (const [key, findings] of grouped) {
+  for (const findings of grouped.values()) {
     await checkpoint()
-    if (stagedKeys.has(key)) continue
     const error = findings[0]
     if (!error) continue
     staged.push({

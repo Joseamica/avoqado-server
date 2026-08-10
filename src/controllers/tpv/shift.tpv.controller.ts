@@ -47,17 +47,12 @@ export async function closeShift(req: Request, res: Response, next: NextFunction
 
     // Forward the body without inventing zero declarations. The service owns the additive
     // reconciliation contract and keeps legacy Desktop/TPV shapes separate.
-    const result = await shiftTpvService.closeShiftForVenueWithResult(
-      venueId,
-      shiftId,
-      req.body ?? {},
-      {
-        orgId,
-        actorStaffId: req.authContext?.userId,
-        ipAddress: req.ip,
-        userAgent: req.headers['user-agent'],
-      },
-    )
+    const result = await shiftTpvService.closeShiftForVenueWithResult(venueId, shiftId, req.body ?? {}, {
+      orgId,
+      actorStaffId: req.authContext?.userId,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
 
     res.status(200).json({
       success: true,

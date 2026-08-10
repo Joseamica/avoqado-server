@@ -12,6 +12,7 @@ import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboa
 import { restockItem } from '../dashboard/inventoryRestock.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
+import { PhaseTimer } from '@/utils/phaseTimer'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
@@ -503,7 +504,23 @@ async function updateOrderTotalsForStandalonePayment(
   const totalTip = previousTips + tipAmount
 
   // ✅ FIX: Calculate new total including tips (consistent with fast payments)
-  const newTotal = orderSubtotal - orderDiscount + totalTip
+  //
+  // 🔴 MONEY: la MERCANCÍA se clampa a 0 ANTES de sumar la propina.
+  //
+  // Un `discountAmount` mayor que el subtotal es un estado que sí existe en la
+  // base —lo dejan las cortesías de cuenta completa, y `recalculateOrderTotals`
+  // guarda la suma cruda de descuentos aunque clampe su propio total— y aquí se
+  // convertía en un `Order.total` NEGATIVO al cobrar: la cuenta pasaba a deber
+  // dinero al cliente, el corte lo restaba de la venta del día y el POS pintaba
+  // un botón "Pagar $-25.30". Visto en M13 (`cmsetvfft0001c9jxv33p26gl`):
+  // subtotal 253.00 − descuento 278.30 = −25.30.
+  //
+  // El clamp va sobre `subtotal − descuento` y NO sobre el total completo: la
+  // propina es dinero que el cliente decidió dar, no mercancía, y un descuento
+  // excedente no debe comérsela. Mismo criterio que
+  // `recalculateOrderTotals` (base clampada, luego se suman los cargos) y que
+  // `applyManualDiscount` en discount.tpv.service.ts.
+  const newTotal = Math.max(0, orderSubtotal - orderDiscount) + totalTip
 
   // Calculate remaining amount (based on new total)
   // 🔴 El clamp a 0 se CONSERVA a propósito: clientes viejos (TPV/Android/iOS) esperan
@@ -2591,6 +2608,12 @@ export async function recordOrderPayment(
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
 
+  // ⏱️ SOLO MEDICIÓN (2026-08-09). Prod: mediana 4,471 ms / p95 4,971 ms contra
+  // 130 ms de red real México→Oregon: ~97% del tiempo es trabajo del servidor,
+  // no internet. Antes de mover algo a segundo plano hay que saber QUÉ fase
+  // pesa. No cambia orden, valores ni manejo de errores.
+  const t = new PhaseTimer('recordFastPayment', { venueId, method: paymentData.method })
+
   // 🛡️ IDEMPOTENCY CHECK - Layered defense (Stripe/Square/Toast pattern)
   //
   // Check 1 (preferred):  idempotencyKey — client-generated UUID v4 per logical
@@ -2662,18 +2685,19 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
   }
 
-  await assertVenueSalesEnabled(venueId)
+  await t.time('assertVenueSalesEnabled', () => assertVenueSalesEnabled(venueId))
 
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
 
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
-  const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
+  const validatedStaffId = await t.time('validateStaffVenue', () => validateStaffVenue(paymentData.staffId, venueId, userId))
 
   // ✅ CORRECTED: Find current open shift for THIS STAFF MEMBER (not just any shift)
   // CRITICAL: If multiple staff members have open shifts simultaneously,
   // we must match the payment to the correct staff's shift
+  t.mark('idempotenciaYChequeosPrevios')
   const currentShift = await prisma.shift.findFirst({
     where: {
       venueId,
@@ -2804,6 +2828,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   let payment: Awaited<ReturnType<typeof prisma.payment.create>> & { processedBy: any }
   let fastOrder: Awaited<ReturnType<typeof prisma.order.create>>
   try {
+    t.mark('turnoMerchantYTerminal')
     const result = await prisma.$transaction(async tx => {
       // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
       // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
@@ -3045,7 +3070,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {
-    await createTransactionCost(payment.id)
+    await t.time('createTransactionCost', () => createTransactionCost(payment.id))
   } catch (transactionCostError) {
     logger.error('Failed to create TransactionCost for fast payment', {
       paymentId: payment.id,
@@ -3085,7 +3110,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Generate digital receipt for fast TPV payments (AVOQADO origin)
   let digitalReceipt = null
   try {
-    digitalReceipt = await generateDigitalReceipt(payment.id)
+    digitalReceipt = await t.time('generateDigitalReceipt', () => generateDigitalReceipt(payment.id))
     logger.info('Digital receipt generated for fast payment', {
       paymentId: payment.id,
       receiptId: digitalReceipt.id,
@@ -3099,7 +3124,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // REFERRAL HOOK: trigger referral qualification if this fast order has a pending referral
   try {
     const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
-    await onOrderPaid({ orderId: fastOrder.id, venueId: fastOrder.venueId })
+    await t.time('referralOnOrderPaid', () => onOrderPaid({ orderId: fastOrder.id, venueId: fastOrder.venueId }))
   } catch (err) {
     console.error('[referral hook] onOrderPaid failed for order', fastOrder.id, err)
   }
@@ -3197,6 +3222,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     // Don't fail the payment if socket emission fails
   }
 
+  t.mark('transaccionSocketsYComisiones')
   logger.info('Fast payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
   // 🪝 Backfill any Blumon webhook that arrived BEFORE this Payment was recorded.
@@ -3238,6 +3264,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   )
 
   // Add digital receipt info to payment response
+  const autofacturaAvailable = digitalReceipt
+    ? await t.time('resolveAutofacturaAvailable', () => resolveAutofacturaAvailable(fastOrder?.id))
+    : false
+  t.end({ paymentId: payment.id })
+
   return {
     ...payment,
     digitalReceipt: digitalReceipt
@@ -3245,7 +3276,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
           receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
-          autofacturaAvailable: await resolveAutofacturaAvailable(fastOrder?.id),
+          autofacturaAvailable,
         }
       : null,
   }

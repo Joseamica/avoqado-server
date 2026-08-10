@@ -2,7 +2,7 @@ import type { Socket } from 'socket.io'
 import { runWithContext } from './executionContext'
 import { resolveCorrelationId } from './correlationId'
 
-type Handler = (...args: any[]) => unknown // eslint-disable-line @typescript-eslint/no-explicit-any
+type Handler = (...args: any[]) => unknown
 
 /** What the socket authentication middleware attaches (see sockets/middleware/authentication.middleware.ts). */
 interface SocketWithAuth extends Socket {

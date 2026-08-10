@@ -11,6 +11,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 
@@ -94,10 +95,17 @@ function authHeader(ctx: object): [string, string] {
 // ─── Tests ──────────────────────────────────────────────────────────────────────
 
 describe('Organization Config Routes', () => {
-  let app: express.Express
+  let server: Server
 
-  beforeEach(() => {
-    app = createApp()
+  beforeAll(() => {
+    // WHY: Passing an Express app to Supertest binds and closes an ephemeral
+    // port for every request. Reusing one server removes the socket churn that
+    // otherwise flakes as ECONNRESET under the complete unit suite.
+    server = createApp().listen(0)
+  })
+
+  afterAll(done => {
+    server.close(done)
   })
 
   // ═══════════════════════════════════════════════════════════════════════════════
@@ -109,7 +117,7 @@ describe('Organization Config Routes', () => {
       // CASHIER is not SUPERADMIN, and has no OWNER StaffVenue in the org
       prismaMock.staffVenue.findFirst.mockResolvedValue(null)
 
-      const res = await request(app)
+      const res = await request(server)
         .get(`/dashboard/organizations/${ORG_ID}/org-goals`)
         .set(...authHeader(cashierContext))
 
@@ -125,7 +133,7 @@ describe('Organization Config Routes', () => {
       prismaMock.venue.findFirst.mockResolvedValue({ id: VENUE_ID })
       ;(goalResolutionService.getOrgGoals as jest.Mock).mockResolvedValue([])
 
-      const res = await request(app)
+      const res = await request(server)
         .get(`/dashboard/organizations/${ORG_ID}/org-goals`)
         .set(...authHeader(ownerContext))
 
@@ -138,7 +146,7 @@ describe('Organization Config Routes', () => {
       prismaMock.venue.findFirst.mockResolvedValue({ id: VENUE_ID })
       ;(goalResolutionService.getOrgGoals as jest.Mock).mockResolvedValue([])
 
-      const res = await request(app)
+      const res = await request(server)
         .get(`/dashboard/organizations/${ORG_ID}/org-goals`)
         .set(...authHeader(superadminContext))
 
@@ -166,7 +174,7 @@ describe('Organization Config Routes', () => {
         const mockGoals = [{ id: GOAL_ID, goal: 50000, goalType: 'AMOUNT', period: 'MONTHLY', active: true }]
         ;(goalResolutionService.getOrgGoals as jest.Mock).mockResolvedValue(mockGoals)
 
-        const res = await request(app)
+        const res = await request(server)
           .get(`/dashboard/organizations/${ORG_ID}/org-goals`)
           .set(...header)
 
@@ -179,7 +187,7 @@ describe('Organization Config Routes', () => {
       it('should return 404 when org has no venues', async () => {
         prismaMock.venue.findFirst.mockResolvedValue(null)
 
-        const res = await request(app)
+        const res = await request(server)
           .get(`/dashboard/organizations/${ORG_ID}/org-goals`)
           .set(...header)
 
@@ -194,7 +202,7 @@ describe('Organization Config Routes', () => {
         const newGoal = { id: 'new-goal', goal: 100000, goalType: 'AMOUNT', period: 'MONTHLY' }
         ;(goalResolutionService.createOrgGoal as jest.Mock).mockResolvedValue(newGoal)
 
-        const res = await request(app)
+        const res = await request(server)
           .post(`/dashboard/organizations/${ORG_ID}/org-goals`)
           .set(...header)
           .send({ goal: 100000, goalType: 'AMOUNT', period: 'MONTHLY' })
@@ -212,7 +220,7 @@ describe('Organization Config Routes', () => {
       it('should default goalType to AMOUNT and period to MONTHLY', async () => {
         ;(goalResolutionService.createOrgGoal as jest.Mock).mockResolvedValue({ id: 'g1' })
 
-        await request(app)
+        await request(server)
           .post(`/dashboard/organizations/${ORG_ID}/org-goals`)
           .set(...header)
           .send({ goal: 5000 })
@@ -230,7 +238,7 @@ describe('Organization Config Routes', () => {
         const updatedGoal = { id: GOAL_ID, goal: 75000, goalType: 'AMOUNT', period: 'MONTHLY', active: true }
         ;(goalResolutionService.updateOrgGoal as jest.Mock).mockResolvedValue(updatedGoal)
 
-        const res = await request(app)
+        const res = await request(server)
           .patch(`/dashboard/organizations/${ORG_ID}/org-goals/${GOAL_ID}`)
           .set(...header)
           .send({ goal: 75000 })
@@ -246,7 +254,7 @@ describe('Organization Config Routes', () => {
       it('should delete a goal', async () => {
         ;(goalResolutionService.deleteOrgGoal as jest.Mock).mockResolvedValue(undefined)
 
-        const res = await request(app)
+        const res = await request(server)
           .delete(`/dashboard/organizations/${ORG_ID}/org-goals/${GOAL_ID}`)
           .set(...header)
 
@@ -272,7 +280,7 @@ describe('Organization Config Routes', () => {
     it('only returns CURRENT members (StaffOrganization.isActive = true)', async () => {
       prismaMock.staffOrganization.findMany.mockResolvedValue([])
 
-      const res = await request(app)
+      const res = await request(server)
         .get(`/dashboard/organizations/${ORG_ID}/team`)
         .set(...header)
 
@@ -302,7 +310,7 @@ describe('Organization Config Routes', () => {
         ]
         prismaMock.itemCategory.findMany.mockResolvedValue(mockCategories)
 
-        const res = await request(app)
+        const res = await request(server)
           .get(`/dashboard/organizations/${ORG_ID}/org-categories`)
           .set(...header)
 
@@ -329,7 +337,7 @@ describe('Organization Config Routes', () => {
         }
         prismaMock.itemCategory.create.mockResolvedValue(createdCat)
 
-        const res = await request(app)
+        const res = await request(server)
           .post(`/dashboard/organizations/${ORG_ID}/org-categories`)
           .set(...header)
           .send({ name: 'Nueva Categoría' })
@@ -350,7 +358,7 @@ describe('Organization Config Routes', () => {
         prismaMock.itemCategory.aggregate.mockResolvedValue({ _max: { sortOrder: null } })
         prismaMock.itemCategory.create.mockResolvedValue({ id: 'cat-new', sortOrder: 0 })
 
-        await request(app)
+        await request(server)
           .post(`/dashboard/organizations/${ORG_ID}/org-categories`)
           .set(...header)
           .send({ name: 'Primera' })
@@ -361,7 +369,7 @@ describe('Organization Config Routes', () => {
       })
 
       it('should reject empty name with 400', async () => {
-        const res = await request(app)
+        const res = await request(server)
           .post(`/dashboard/organizations/${ORG_ID}/org-categories`)
           .set(...header)
           .send({ name: '   ' })
@@ -372,7 +380,7 @@ describe('Organization Config Routes', () => {
       })
 
       it('should reject missing name with 400', async () => {
-        const res = await request(app)
+        const res = await request(server)
           .post(`/dashboard/organizations/${ORG_ID}/org-categories`)
           .set(...header)
           .send({})
@@ -392,7 +400,7 @@ describe('Organization Config Routes', () => {
         }
         prismaMock.itemCategory.update.mockResolvedValue(updatedCat)
 
-        const res = await request(app)
+        const res = await request(server)
           .put(`/dashboard/organizations/${ORG_ID}/org-categories/${CATEGORY_ID}`)
           .set(...header)
           .send({ name: 'Actualizada', description: 'Desc nueva' })
@@ -411,7 +419,7 @@ describe('Organization Config Routes', () => {
       it('should delete a category', async () => {
         prismaMock.itemCategory.delete.mockResolvedValue({ id: CATEGORY_ID })
 
-        const res = await request(app)
+        const res = await request(server)
           .delete(`/dashboard/organizations/${ORG_ID}/org-categories/${CATEGORY_ID}`)
           .set(...header)
 

@@ -99,11 +99,7 @@ describe('terminal cash reconciliation contract', () => {
 
   it('returns false without changing any existing terminal-config fields when access is disabled', async () => {
     const res = makeRes()
-    await getTerminalConfig(
-      { params: { serialNumber } } as unknown as Request,
-      res,
-      jest.fn() as unknown as NextFunction,
-    )
+    await getTerminalConfig({ params: { serialNumber } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
 
     expect(res.__status).toBe(200)
     expect(res.__body.data.cashReconciliationEnabled).toBe(false)

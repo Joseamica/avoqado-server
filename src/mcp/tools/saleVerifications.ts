@@ -292,7 +292,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'edit_sale_verification',
-    "Correct a sale verification (OWNER back-office fix): amount (PESOS), paymentForm (CASH/CARD/OTHER), isPortabilidad, and/or status (PENDING/COMPLETED/FAILED/REJECTED). reason is mandatory (≥5 chars). Does NOT recompute commissions. ⚠️ Changing status AWAY from COMPLETED can claw back the promoter's Cash Out commission on the next reconciliation. By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — OWNER-only (requires sale-verifications:edit). Si status=\"FAILED\" (\"Revisar por promotor\"), reviewNotes es obligatorio (mín. 5 caracteres).",
+    'Correct a sale verification (OWNER back-office fix): amount (PESOS), paymentForm (CASH/CARD/OTHER), isPortabilidad, and/or status (PENDING/COMPLETED/FAILED/REJECTED). reason is mandatory (≥5 chars). Does NOT recompute commissions. ⚠️ Changing status AWAY from COMPLETED can claw back the promoter\'s Cash Out commission on the next reconciliation. By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — OWNER-only (requires sale-verifications:edit). Si status="FAILED" ("Revisar por promotor"), reviewNotes es obligatorio (mín. 5 caracteres).',
     {
       saleVerificationId: z.string().min(1).describe('The verification id'),
       amount: z.number().min(0).optional().describe('New amount in PESOS (major units), e.g. 250'),
@@ -300,10 +300,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
       isPortabilidad: z.boolean().optional().describe('true = portabilidad; false = línea nueva'),
       status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'REJECTED']).optional().describe('New verification status'),
       reason: z.string().min(5).describe('Why (min 5 chars) — recorded in the activity log'),
-      reviewNotes: z
-        .string()
-        .optional()
-        .describe('Qué debe corregir el promotor — OBLIGATORIO (mín. 5 caracteres) cuando status="FAILED"'),
+      reviewNotes: z.string().optional().describe('Qué debe corregir el promotor — OBLIGATORIO (mín. 5 caracteres) cuando status="FAILED"'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
     },
     async ({ saleVerificationId, amount, paymentForm, isPortabilidad, status, reason, reviewNotes, confirm }) => {
