@@ -361,30 +361,57 @@ function computeRecipeShortage(recipe: any): {
  */
 // Exported: el POS móvil (product.mobile.controller) reutiliza EXACTAMENTE este
 // cálculo para que iOS/Android expliquen QUÉ falta igual que el TPV/dashboard.
+/**
+ * Gramo entero: la báscula y `AreaTicketLine.weightKg` trabajan a 3 decimales,
+ * así que redondear ahí evita que un binario como 8.064999… se arrastre a la UI.
+ */
+function roundKilos(kg: number): number {
+  return Math.round(kg * 1000) / 1000
+}
+
 export function computeInventoryAvailability(product: any): {
   availableQuantity: number | null
+  /**
+   * Existencia sin truncar. Campo NUEVO y opcional: `availableQuantity` no puede
+   * dejar de ser entero sin romper las apps ya instaladas, así que el decimal
+   * viaja aparte y sólo lo lee quien lo entiende.
+   */
+  availableQuantityExact: number | null
   limitingIngredient: IngredientShortage | null
   insufficientIngredients: IngredientShortage[] | null
 } {
   if (!product.trackInventory) {
-    return { availableQuantity: null, limitingIngredient: null, insufficientIngredients: null }
+    return { availableQuantity: null, availableQuantityExact: null, limitingIngredient: null, insufficientIngredients: null }
   }
   if (product.inventoryMethod === 'QUANTITY') {
+    const currentStock = Number(product.inventory?.currentStock ?? 0)
+    const floored = Math.floor(currentStock)
+    // `availableQuantity` SIGUE SIENDO ENTERO a propósito: las apps instaladas
+    // lo deserializan como Int y un 8.065 las rompería. Lo único que cambia es
+    // que una existencia positiva jamás se reporta como 0 — 0.435 kg de jamón
+    // se veía "agotado" con casi medio kilo en el mostrador.
     return {
-      availableQuantity: Math.floor(Number(product.inventory?.currentStock ?? 0)),
+      availableQuantity: product.soldByWeight && currentStock > 0 ? Math.max(floored, 1) : floored,
+      // El valor real, para quien sepa leerlo. Por peso el decimal ES el
+      // inventario: 8.065 kg no es "8".
+      availableQuantityExact: product.soldByWeight ? roundKilos(currentStock) : floored,
       limitingIngredient: null,
       insufficientIngredients: null,
     }
   }
   if (product.inventoryMethod === 'RECIPE' && product.recipe) {
     const shortage = computeRecipeShortage(product.recipe)
+    const portions = calculateAvailablePortions(product.recipe)
     return {
-      availableQuantity: calculateAvailablePortions(product.recipe),
+      availableQuantity: portions,
+      // Las porciones ya son enteras; se expone igual para que el cliente no
+      // tenga que preguntarse por qué a veces falta el campo.
+      availableQuantityExact: portions,
       limitingIngredient: shortage.limitingIngredient,
       insufficientIngredients: shortage.insufficientIngredients,
     }
   }
-  return { availableQuantity: null, limitingIngredient: null, insufficientIngredients: null }
+  return { availableQuantity: null, availableQuantityExact: null, limitingIngredient: null, insufficientIngredients: null }
 }
 
 /**

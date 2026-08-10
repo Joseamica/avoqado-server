@@ -13,6 +13,7 @@ import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { fromZonedTime } from 'date-fns-tz'
+import { normalizeLegacyActivityActor, preserveUnknownStaffId } from '../../lib/activityAuditActor'
 
 export interface LogActionParams {
   staffId?: string | null
@@ -24,13 +25,6 @@ export interface LogActionParams {
   ipAddress?: string
   userAgent?: string
 }
-
-/**
- * Sentinel strings callers pass as the actor of an action when the trigger
- * is not a real staff user. Persisting these would violate the staffId FK,
- * so we normalize them to null here.
- */
-const ACTOR_SENTINELS = new Set(['SYSTEM', 'CUSTOMER', 'PUBLIC', 'WEBHOOK', 'MASTER_ADMIN'])
 
 /**
  * Best-effort audit log writer.
@@ -45,7 +39,7 @@ export async function logAction(params: LogActionParams): Promise<void> {
   // already signals "no human did this".
   //
   // Fuera del try a propósito: el catch lo necesita para el reintento sin actor.
-  const staffId = params.staffId && !ACTOR_SENTINELS.has(params.staffId) ? params.staffId : null
+  const { staffId, data } = normalizeLegacyActivityActor(params.staffId, params.data)
 
   try {
     await prisma.activityLog.create({
@@ -55,7 +49,7 @@ export async function logAction(params: LogActionParams): Promise<void> {
         action: params.action,
         entity: params.entity ?? null,
         entityId: params.entityId ?? null,
-        data: params.data ?? undefined,
+        data,
         ipAddress: params.ipAddress ?? null,
         userAgent: params.userAgent ?? null,
       },
@@ -86,7 +80,7 @@ export async function logAction(params: LogActionParams): Promise<void> {
             entityId: params.entityId ?? null,
             // El actor desconocido se conserva en `data`: es lo único que queda
             // para rastrear de quién era ese token.
-            data: { ...((params.data as Record<string, unknown>) ?? {}), unknownStaffId: staffId },
+            data: preserveUnknownStaffId(params.data, staffId),
             ipAddress: params.ipAddress ?? null,
             userAgent: params.userAgent ?? null,
           },
