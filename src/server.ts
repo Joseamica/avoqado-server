@@ -58,6 +58,7 @@ import { cfdiGlobalJob } from './jobs/cfdiGlobal.job'
 import { cfdiReconcileJob } from './jobs/cfdiReconcile.job'
 import { catalogPublicationOutboxSweeperJob } from './jobs/catalog-publication-outbox-sweeper.job'
 import { catalogPublicationWatchdogJob } from './jobs/catalog-publication-watchdog.job'
+import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -133,6 +134,7 @@ const gracefulShutdown = async (signal: string) => {
       // durable recovery loops and both must stop before Prisma disconnects.
       catalogPublicationOutboxSweeperJob.stop()
       catalogPublicationWatchdogJob.stop()
+      shiftCloseWatchdogJob.stop()
 
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
@@ -415,6 +417,7 @@ const startApplication = async (retries = 3) => {
       // through these no-overlap durable workers after a process restart.
       catalogPublicationOutboxSweeperJob.start()
       catalogPublicationWatchdogJob.start()
+      shiftCloseWatchdogJob.start()
 
       // Start subscription cancellation job
       subscriptionCancellationJob.start()

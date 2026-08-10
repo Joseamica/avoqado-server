@@ -13,6 +13,7 @@ import {
   type CashReconciliationOutcome,
   type NormalizedCashReconciliationRequest,
 } from '../shared/cashReconciliation.service'
+import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
 
 interface ShiftFilters {
   staffId?: string
@@ -1139,8 +1140,6 @@ export async function openShiftForVenue(
 
   return shift
 }
-
-const SHIFT_CLOSE_STALE_MS = 5 * 60 * 1000
 
 type ClosableShift = Shift & {
   venue: {
