@@ -22,7 +22,7 @@ services:
     autoDeploy: false
     branch: develop
     buildCommand: >-
-      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npx prisma migrate deploy
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npm run migrate:deploy:bounded
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -77,7 +77,7 @@ services:
     autoDeploy: false
     branch: main
     buildCommand: >-
-      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npx prisma migrate deploy
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npm run migrate:deploy:bounded
     startCommand: npm start
     healthCheckPath: /health
     envVars:

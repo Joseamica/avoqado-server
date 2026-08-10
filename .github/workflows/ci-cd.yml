@@ -98,7 +98,7 @@ jobs:
 
       - name: 🏪 Run integration tests
         run: |
-          npx prisma migrate deploy
+          npm run migrate:deploy:bounded
           npm run test:integration
         env:
           ACCESS_TOKEN_SECRET: test-access-token-secret
