@@ -6,6 +6,10 @@
 > Ésta es la materia prima del **acta de alcance** (§6.2 del programa): la columna _Brecha_ dice si el renglón se entrega hoy, en un hito, o
 > requiere insumo de PITS.
 
+> **Actualización 2026-08-10:** las secciones “Qué existe hoy” conservan la fotografía original usada para dimensionar el programa. Los
+> bloques **Cierre H1A** registran el estado posterior comprobable. “Software listo” no significa “aceptado por PITS”: layouts, matriz de
+> obligatoriedad y activación ENFORCED requieren aprobación separada.
+
 ## Módulo: compras
 
 El esqueleto transaccional de compras es real y está probado (OC completa con máquina de estados, autorización/rechazo/reenvío, recepción
@@ -33,6 +37,12 @@ tienda, y el usuario que dio de alta el producto).
 - **Depende de:** Decidir qué es campo de primera clase en Product (marca, fabricante, IEPS, presentación) vs. atributo genérico; Product es
   el modelo más caliente de la plataforma (POS, KDS, CFDI, inventario, MCP) y cada migración toca los ~70 puntos de venta. IEPS además
   obliga a decidir si se emite en el CFDI, lo que lo empalma con el módulo fiscal.
+- **Cierre H1A (2026-08-10):** 🟡 **software parcial listo, aceptación pendiente.** El catálogo corporativo ya modela y valida fotografía,
+  nombre, descripción, marca, fabricante, familia/subfamilia hoja, presentación, unidad, tipo, IVA, IEPS, SAT, corporate SKU, valores de
+  compra/venta y actor/fecha; además exporta un XLSX master y bloquea altas incompletas mediante baseline + perfiles activos. `Product`
+  conserva identidad y relaciones locales mediante binding/publicación. Región, identificadores regionales y precios regionales no se
+  inventaron: `Regions`/`RegionalValues` son header-only y quedan en H1B/H1C. Falta que PITS/LDM entregue el layout real y apruebe la matriz
+  versionada de campos; por eso este renglón no se marca comercialmente aceptado.
 
 ### Fila 44 — Alta de platillo con las mismas especificaciones que producto.
 
@@ -44,6 +54,10 @@ tienda, y el usuario que dio de alta el producto).
   src/services/dashboard/costRecalculationTrigger.service.ts recalculando costo. Product.prepTime existe. Lo que falta es exactamente lo
   mismo que en la fila 43 (marca, fabricante, presentación, IEPS, región, validación de alta completa, actor del alta).
 - **Depende de:** Se resuelve solo cuando se cierre la fila 43: es el mismo catálogo. No arrancarlo por separado.
+- **Cierre H1A (2026-08-10):** 🟡 **software parcial listo, aceptación pendiente.** Usa el mismo artículo corporativo y agrega readiness
+  vivo de Recipe/RecipeLine, porciones, preparación y costos de lote/porción sin mutar la receta. El export distingue seis estados
+  representables y falla cerrado ante una receta inválida/no representable. Comparte los bloqueadores regionales de la fila 43 y necesita la
+  matriz real de platillo de PITS antes de considerarse aceptado.
 
 ### Fila 45 — Código agrupador al que se asocien distintos códigos de barras (SKU). Política: código de barras único y vigente; alertar duplicados. Reporte: códigos relacionados a un código corto.
 
@@ -83,6 +97,10 @@ tienda, y el usuario que dio de alta el producto).
   paradores hoy son 31 altas (o 31 imports).
 - **Depende de:** Nada para lo contestado. Pero conviene avisarle a PITS que el 'catálogo master' que piden en el reporte de la fila 43
   implica gobierno corporativo del catálogo, que hoy no existe.
+- **Cierre H1A (2026-08-10):** 🟢 **enabler de software listo.** Ya existe binding corporativo por venue, preview/confirm, override con
+  maker-checker, publicación e inversa. La publicación administra sólo el field mask aprobado y preserva Product ID, categoría, menú,
+  modificadores, receta, inventario y demás configuración local. El paso `ENFORCED` sigue siendo una decisión operacional por sucursal; no
+  se activa por migración, seed ni por conceder el módulo.
 
 ### Fila 47 — Asignar distintos precios de venta de acuerdo con la Región definida. Reporte: costo de producto por región.
 
@@ -417,6 +435,10 @@ tienda, y el usuario que dio de alta el producto).
 - **Depende de:** Definir la matriz de obligatoriedad por formato (tienda / restaurante / cafetería). Riesgo medio no por el trabajo sino
   por el efecto: volver obligatorio un atributo rompe altas que hoy funcionan en los venues vivos, así que tiene que ser configuración por
   venue y no una regla global.
+- **Cierre H1A (2026-08-10):** 🟢 **motor listo, aceptación pendiente.** H1A aplica un baseline no relajable y perfiles V1 activos por tipo
+  de negocio/rol, falla cerrado ante reglas futuras o contradictorias y exporta catálogo filtrado con `RequiredFields` y versiones exactas.
+  Los venues legacy no reciben esas reglas sin entitlement+módulo+configuración explícitos. PITS/LDM todavía debe entregar y firmar qué
+  atributos son obligatorios para tienda, restaurante y cafetería; esa aprobación crea una nueva versión, no una edición silenciosa.
 
 ## Módulo: contabilidad
 
@@ -1605,6 +1627,10 @@ que además dependen de que PITS defina proveedor.
   categorías de item. NO hay importador de proveedores, clientes, materias primas ni catálogo de cuentas.
 - **Depende de:** Que PITS entregue sus layouts reales. El patrón de importación ya está probado; replicarlo por catálogo es 1-2 días cada
   uno.
+- **Cierre H1A (2026-08-10):** 🟡 **enabler de catálogo maestro listo.** Existe template XLSX V1 exacto, parser OOXML aislado y acotado,
+  preview paginado, confirmación explícita/idempotente, staging durable, reporte de errores por renglón y aplicación atómica del catálogo
+  maestro. Esto cubre el layout H1A; no convierte automáticamente proveedores, clientes, cuentas u otros catálogos estáticos en importables.
+  Los layouts específicos de PITS siguen siendo insumo contractual.
 
 ### Fila 192 — Carga masiva desde Excel para tablas productivas (órdenes de compra, órdenes de servicio, programación de pagos)
 

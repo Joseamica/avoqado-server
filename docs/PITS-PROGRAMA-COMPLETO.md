@@ -155,24 +155,27 @@ amenaza en evidencia a favor.
 
 ### H1 — Catálogo maestro de PITS
 
-**Duración: 3 semanas · 30 días-persona · Depende de: una decisión tuya (media hora) sobre qué es campo de primera clase**
+**Estado 2026-08-10: H1A implementado default-off · H1B/H1C pendientes · aceptación PITS pendiente de insumos**
 
 Qué entrega: filas 43, 44, 45, 68, 69, 71, 47, 248.
 
-- Marca, fabricante, presentación, región, IEPS (campo y catálogo; el cálculo viene en H5), `createdById`, validación de alta completa por
-  tipo de negocio (tienda exige EAN-13, cafetería exige receta).
-- Código agrupador con varios códigos de barras por SKU + carga masiva por layout con validación EAN-13 y reporte por renglón antes de
-  aplicar.
-- Cambio masivo de precios con previsualización `actual → nuevo`, confirmación en dos pasos y bitácora por renglón. **Esto trae gratis la
-  fila 69** (ver qué SKU cambiaron de precio), porque hoy la auditoría guarda sólo los _nombres_ de los campos que cambiaron, sin valor
-  viejo ni nuevo, y sin capturar el dato la pantalla nace vacía.
-- Precio por Región: el modelo `Zone` existe y está muerto (nadie lo lee). Activarlo.
+- **H1A construido:** catálogo corporativo con marca/fabricante/familia/subfamilia/presentación/IVA/IEPS/SAT, corporate SKU, valores,
+  perfiles por tipo de negocio, recetas/costos vivos, import/export XLSX, binding por sucursal, override, publicación/inversa, auditoría,
+  dashboard, superadmin y MCP. Todo requiere entitlement+módulo+configuración explícitos; migración y seeds conceden cero acceso.
+- **H1B/H1C aún no construido:** región, identificadores regionales, precios regionales y el alcance comercial final de múltiples EAN por
+  SKU. Las hojas `Regions`/`RegionalValues` existen sólo como contrato header-only para no fingir datos.
+- **Aceptación aún pendiente:** PITS/LDM debe entregar los layouts reales, la matriz versionada de campos obligatorios y aprobar el canary
+  antes de cualquier venue `ENFORCED`. Software verde y aceptación contractual son estados separados.
 
-**Se demuestra así:** cargas el catálogo real de PITS —sus SKU, sus regiones, sus códigos— por layout, delante de ellos, y cambias 200
-precios de una región con previsualización. Es la prueba de que el sistema aguanta _su_ operación, no una demo.
+**Se demuestra H1A así:** en una organización aislada, compruebas gates OFF, concedes acceso explícito, cargas por template un catálogo real
+sin regiones, revisas preview, confirmas, haces binding a un Product existente, publicas con field mask y reviertes conservando Product ID,
+receta, menú e inventario; finalmente deshabilitas el módulo y el Product sigue operando. La demostración regional espera H1B/H1C.
 
 **Por qué va segundo:** bloquea la bandeja de alta de producto (52), el pronóstico por familia (63-67), la evaluación por tipo de negocio
 (248) y el IEPS (146). Sin catálogo, todo lo demás se construye sobre arena.
+
+Contratos y operación: [`PITS-HANDOFF-SESION-2026-08-08.md`](./PITS-HANDOFF-SESION-2026-08-08.md) y
+[`PITS-H1A-ROLLOUT-RUNBOOK.md`](./PITS-H1A-ROLLOUT-RUNBOOK.md).
 
 ---
 

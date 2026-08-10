@@ -835,3 +835,71 @@ Final evidence: Task 11 unit gate 6 suites/76 tests, production API 1 suite/10 t
 exact-path ESLint/Prettier exit 0, and all owned files below 500 lines (max 491). Root reread the frozen contract and source with zero open
 P0/P1; no separate LLM review is claimed. Production/tests are commit `10266f49`. No database, persistent server/process or external
 integration was used.
+
+---
+
+## Task 12 — Fail-closed dashboard discovery and legacy Product preservation
+
+Task 12 exposes the server-side effective-access result in auth status and mirrors the default venue permissions in the dashboard without
+granting H1 by UI convention. Dashboard discovery fails closed on missing/unknown/outage state and keeps all legacy Product navigation and
+fixtures unchanged when access is absent.
+
+| Repository              | Commit                 | Evidence boundary                                                                                                                |
+| ----------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `avoqado-server`        | `2b806f3a`             | Auth status exposes only the shared live access resolver result; it does not infer from a venue/JWT.                             |
+| `avoqado-web-dashboard` | `a25a11d2`, `6f5f863f` | Permission defaults mirror server authority; route/sidebar visibility remains default-off and legacy Product UX stays available. |
+
+Focused server/dashboard auth, navigation and legacy-compatibility suites were GREEN before the checkpoint. Task 12 creates no entitlement,
+module, config, catalog data or ENFORCED venue.
+
+## Task 13 — Organization dashboard workflow
+
+Dashboard commit `fa35b19d` adds the organization master-catalog workflow over the Task 10/11 APIs: items, references, validation profiles,
+imports, bindings, publication, audit and XLSX downloads. It preserves the two-step preview/confirm contracts and never derives organization
+scope from a form field. Loading, empty, error, stale, idempotency-recovery and permission-denial states are explicit.
+
+Focused feature/navigation/legacy fixture tests, i18n/lint/build and desktop/mobile localhost visual checks were GREEN at checkpoint. The UI
+does not activate the module or a venue and remains unreachable without effective access.
+
+## Task 14 — Dedicated superadmin control plane
+
+Server commit `db5001d1` and superadmin commit `cd92696` expose dedicated organization entitlement/module/config/governance controls. Every
+read/write revalidates a live active SUPERADMIN before tenant lookup; unknown and foreign targets remain indistinguishable to revoked
+actors. Entitlement, module, config and venue rollout are separate controls, and readiness cannot be relaxed by a partial override.
+
+Checkpoint evidence included server focal 9/9, server global typecheck/build, superadmin focused 14/14, full superadmin 121 suites / 917
+pass / 1 skip, check/build, plus desktop/mobile localhost visual inspection. These controls still grant nothing until an operator performs
+the explicit writes.
+
+## Task 15 — Documentation and release evidence
+
+Owned documentation:
+
+- `docs/PITS-H1A-ROLLOUT-RUNBOOK.md`
+- `docs/api/master-catalog-h1a.md`
+- `docs/mcp/master-catalog-h1a.md`
+- `docs/xlsx/catalog-master-v1.md`
+- `docs/xlsx/catalog-master-import-v1.md`
+- `docs/PITS-HANDOFF-SESION-2026-08-08.md`
+
+Task 15 synchronizes the design/plan/handoff/customer matrix and marketing collateral, then runs the exact final unit/API/integration and
+default-off localhost matrix against an explicitly disposable database.
+
+Final localhost evidence on 2026-08-10:
+
+- server `npm run pre-deploy`: exit 0 in 426 seconds; 829 unit suites (10,083 pass / 14 skip), 24 API suites / 607 tests, 14 isolated
+  migration tests, 46 pass / 3 skip integration suites (389 pass / 52 skip), typecheck/build/assistant audit/DB consistency GREEN;
+- dashboard H1A: 14 Vitest files / 71 tests and 6/6 Chromium Playwright tests GREEN against `localhost:5173`;
+- superadmin: 121 files, 917 pass / 1 skip, check/build GREEN;
+- disposable PostgreSQL `avoqado_h1a_test_20260808`: 423 migrations current, final H1 replay GREEN, every `Catalog*` table returned to zero;
+- localhost API/dashboard/superadmin remained HTTP 200 and the inspected backend log slice contained zero relevant error/5xx/unhandled
+  lines.
+
+The global full-testing status remains **FAIL outside H1A** because seven pre-existing dashboard E2E contracts reproduce red in serial:
+PlayTelecom sales detail/executive/review (five assertions), referral activation (one), and reservation settings (one). Their test files are
+unchanged by H1A. Therefore the isolated H1A/Task 15 commit is approved by the scoped evidence, while a global dashboard deploy remains
+blocked until those seven regressions are repaired or their contracts are deliberately updated. The complete local transcript is
+`/tmp/full-testing-20260810-task15-final-ok-rTOVih/report.md`.
+
+PITS commercial acceptance remains separately blocked by real layouts, the approved field matrix, canary ownership and a published clickable
+web deck.

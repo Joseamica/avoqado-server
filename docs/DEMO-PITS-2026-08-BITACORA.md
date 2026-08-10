@@ -13,6 +13,18 @@ servicio y banca), que van como adaptadores detrás de una interfaz genérica.
 nuevas opcionales, jamás cambiar el significado de una columna existente. Un venue que no active nada opera exactamente igual que hoy. Sólo
 se prende por defecto lo demostrablemente inocuo.
 
+## Actualización H1A — catálogo maestro default-off (2026-08-10)
+
+El núcleo H1A ya está implementado en server, dashboard y superadmin. La migración es expand-only y no crea grants; entitlement, módulo,
+configuración y `ENFORCED` son decisiones separadas. Con gates OFF no aparece administración H1 ni se consultan tablas H1 desde Product,
+menú, inventario, receta u orden. El escenario de demostración válido es catálogo → import preview/confirm → binding → publication
+preview/confirm → inverse publication → disable, siempre sobre una organización/base aislada y preservando Product ID y relaciones locales.
+
+Esto **no** autoriza a presentar región, identificadores regionales o precios regionales como disponibles: H1A sólo conserva headers para
+`Regions`/`RegionalValues`; esos datos son H1B/H1C. Tampoco equivale a aceptación de PITS hasta recibir su layout real y matriz de campos.
+Ver [`PITS-HANDOFF-SESION-2026-08-08.md`](./PITS-HANDOFF-SESION-2026-08-08.md) y
+[`PITS-H1A-ROLLOUT-RUNBOOK.md`](./PITS-H1A-ROLLOUT-RUNBOOK.md).
+
 **Decisiones de nivel (tomadas por el fundador, 2026-08-05):**
 
 | Capacidad                              | Nivel               |
