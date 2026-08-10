@@ -1,6 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import * as controller from '../../controllers/dashboard/masterCatalog.dashboard.controller'
+import * as exportController from '../../controllers/dashboard/masterCatalogExport.dashboard.controller'
 import multer from 'multer'
 import AppError from '../../errors/AppError'
 
@@ -50,7 +51,11 @@ router.get('/catalogs/families', controller.listFamilies)
 router.post('/catalogs/families', controller.createFamily)
 router.patch('/catalogs/families/:familyId', controller.updateFamily)
 router.post('/catalogs/families/:familyId/retire', controller.retireFamily)
+router.get('/exports/catalog-master.xlsx', exportController.getCatalogMasterExport)
+router.get('/exports/catalog-by-business-type.xlsx', exportController.getCatalogBusinessTypeExport)
+router.get('/templates/catalog-master-import-v1.xlsx', exportController.getCatalogImportTemplate)
 router.post('/imports/preview', catalogImportUpload, controller.previewImport)
+router.get('/imports/:importBatchId/errors.xlsx', exportController.getCatalogImportErrors)
 router.get('/imports/:importBatchId', controller.getImport)
 router.post('/imports/:importBatchId/confirm', controller.confirmImport)
 router.post('/bindings/preview', controller.previewBindings)
