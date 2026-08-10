@@ -12,6 +12,26 @@
 
 **Alcance de este plan:** SOLO `avoqado-server` (Partes A y B del spec). El dashboard y las tres apps móviles tienen planes propios.
 
+## Lo aprendido ejecutando las Tareas 1–3 (2026-08-09)
+
+Cinco desviaciones respecto a lo planeado. Las tareas restantes deben seguir estas, no lo que decía el plan original.
+
+**1. Un módulo por pieza pura, siempre.** `env.ts` corre validación y `process.exit(1)` al importarse, y `@/config/logger` está **mockeado globalmente** en `tests/__helpers__/setup.ts:341`. Cualquier helper exportado desde esos dos archivos es imposible de testear: el primero cuelga el worker, el segundo desaparece tras el mock. Por eso todo lo nuevo vive en su propio archivo sin efectos secundarios. Costó dos intentos fallidos descubrirlo.
+
+**2. Piezas nuevas que el plan no contemplaba.** Ya construidas y con tests:
+   - `src/config/envHelpers.ts` — `dropEmptyValues`, la trampa de arranque.
+   - `src/observability/logContext.ts` — el formato de Winston (movido fuera de `logger.ts` por el punto 1).
+   - `src/observability/correlationId.ts` — `sanitizeCorrelationId` / `resolveCorrelationId`. **Reusar en RabbitMQ (Tarea 5)**, no escribir otro validador.
+   - `src/observability/entrypoint.ts` — `normalizeEntrypoint`. Sin esto cada id en la ruta crea su propia etiqueta y la agrupación no sirve; además borra el query string, que carga correos y RFC.
+
+**3. `SENTRY_DSN` ya existía** en `src/config/env.ts` desde antes, commiteado. El paso que decía "agregarlo" es redundante.
+
+**4. El header entrante se aceptaba sin validar.** Se sanea ahora: un cliente podía mandar una cadena de 500 caracteres, o el mismo header dos veces (Express lo entrega como **array** y el código lo escribía tal cual en `req.correlationId`). Ambos casos tienen test.
+
+**5. Cómo correr un solo archivo de test.** El argumento posicional no filtra en este repo — corre la suite entera. Usar `npx jest --selectProjects unit --testPathPattern "<nombre>"`.
+
+---
+
 ## Global Constraints
 
 - **Idioma del código: inglés.** Identificadores, comentarios y nombres de test en inglés. Solo lo que lee una persona (mensajes de Zod, `AppError`, respuestas de API) va en español.
@@ -583,11 +603,23 @@ npm run build
 
 Expected: PASS incluido el test de 50 requests; compila.
 
-- [ ] **Step 8: Format and commit** (pedir permiso)
+- [ ] **Step 8: Expose the correlation header to browsers**
+
+Verificado 2026-08-08: `X-Correlation-Id` **ya está** en `allowedHeaders` (`src/config/corsOptions.ts:156`), así que el dashboard puede **enviarlo** sin cambiar nada y sin riesgo de romper el preflight. Lo que falta es poder **leerlo** de la respuesta: `exposedHeaders` (`:164`) no lo incluye, y sin eso el navegador lo esconde aunque el server lo mande.
+
+En `src/config/corsOptions.ts:164`:
+
+```typescript
+    exposedHeaders: ['X-Client-Id', 'X-Total-Labels', 'X-Correlation-Id'],
+```
+
+El diseño del dashboard no depende de esto (origina su propio id en el interceptor de request), pero exponerlo permite ver la correlación en las devtools durante una investigación, que es cuando más se agradece. Es una línea y no rompe a nadie: agregar un header a `exposedHeaders` nunca invalida un cliente existente.
+
+- [ ] **Step 9: Format and commit** (pedir permiso)
 
 ```bash
 npm run format && npm run lint:fix
-git add src/middlewares/requestLogger.ts src/middlewares/authenticateToken.middleware.ts tests/unit/observability/httpContext.test.ts
+git add src/middlewares/requestLogger.ts src/middlewares/authenticateToken.middleware.ts src/config/corsOptions.ts tests/unit/observability/httpContext.test.ts
 git commit -m "feat(observability): open execution context on HTTP requests and stamp tenant after auth"
 ```
 
@@ -812,7 +844,20 @@ git commit -m "feat(observability): open execution context on every cron tick, g
 
 ---
 
-### Task 5: Correlación a través de RabbitMQ
+### Task 5: Correlación a través de RabbitMQ — ⏸️ EN SUSPENSO (2026-08-09)
+
+> **RabbitMQ está apagado.** `DISABLE_RABBITMQ=true` en el `.env` local, verificado en el log de
+> arranque (`⏭️ RabbitMQ disabled`). Los tres consumidores no corren, así que esta tarea no entrega
+> nada hoy y no se puede verificar de verdad.
+>
+> **Antes de retomarla, confirmar el estado en producción**: `render.yaml` no define
+> `DISABLE_RABBITMQ` ni `DEMO_MODE`, y en Render las variables se definen desde el dashboard. O sea
+> que desde el repo **no se puede saber** si en prod corre. Si corre en prod, esta tarea sube de
+> prioridad; si está apagado en los dos lados, es alcance muerto y se borra del plan.
+>
+> Lo de abajo se conserva tal cual para cuando se retome.
+
+
 
 **Files:**
 - Modify: `src/communication/rabbitmq/publisher.ts:9-25`
