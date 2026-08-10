@@ -92,6 +92,44 @@ describe('catalogPublicationPersistence.service', () => {
     expect(tx.product.updateMany).not.toHaveBeenCalled()
   })
 
+  it('keeps exact corporate cost and taxRate decimals in the bulk Product patch', async () => {
+    const tx = transaction()
+    const monetaryLine = line(1, {
+      fieldMask: ['cost', 'taxRate'],
+      decisions: [
+        {
+          field: 'cost',
+          decision: 'PUBLISH_CORPORATE',
+          before: '11.00',
+          proposed: '12.00',
+          after: '12.00',
+          overrideId: null,
+          reason: null,
+        },
+        {
+          field: 'taxRate',
+          decision: 'PUBLISH_CORPORATE',
+          before: '0.0800',
+          proposed: '0.1600',
+          after: '0.1600',
+          overrideId: null,
+          reason: null,
+        },
+      ],
+    })
+
+    await persistCatalogPublicationTx(tx as never, {
+      organizationId: 'org-1',
+      staffId: 'staff-1',
+      lines: [monetaryLine],
+    })
+
+    const productQuery = tx.$executeRaw.mock.calls.find(call => call[0].strings.join('?').includes('UPDATE "Product"'))?.[0]
+    expect(productQuery?.values).toEqual(['product-1', 'venue-1', JSON.stringify({ cost: '12.00', taxRate: '0.1600' })])
+    expect(productQuery?.strings.join('?')).toContain("(changes.patch->>'cost')::numeric")
+    expect(productQuery?.strings.join('?')).toContain("(changes.patch->>'taxRate')::numeric")
+  })
+
   it('chunks a 501-target atomic apply into bounded bulk statements of at most 500 targets', async () => {
     const tx = transaction()
     const lines = Array.from({ length: 501 }, (_, index) =>

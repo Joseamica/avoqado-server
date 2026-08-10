@@ -117,6 +117,8 @@ describe('CatalogPublication — real preview/confirm/recovery', () => {
       db().catalogPublicationOutbox.findMany({ where: { batchId: preview.publicationBatchId } }),
     ])
     expect(product).toMatchObject({ name: 'Corporate name', description: 'Corporate description', active: false })
+    expect(product.cost?.toFixed(2)).toBe('12.00')
+    expect(product.taxRate.toFixed(4)).toBe('0.1600')
     expect(binding.lastPublishedCatalogRevision).toBe(1)
     expect(lines).toHaveLength(1)
     expect(lines[0].status).toBe('APPLIED')
