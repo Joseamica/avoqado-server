@@ -53,6 +53,8 @@ import { registerAreaTicketTools } from './tools/areaTickets'
 import { registerCashOutTools } from './tools/cash-out'
 import { registerWhiteLabelOpsTools } from './tools/whiteLabelOps'
 import { registerInterVenueTransferTools } from './tools/interVenueTransfers'
+import { registerMasterCatalogTools } from './tools/masterCatalog'
+import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 
 /**
  * Server-level guidance the client (Claude/ChatGPT) hands to the model on every connection.
@@ -74,6 +76,7 @@ When the operator asks about their real numbers:
 export interface ToolRegistrationFlags {
   serializedEnabled: boolean
   whiteLabelEnabled: boolean
+  catalogEnabled: boolean
 }
 
 /**
@@ -127,6 +130,8 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerPrinterTools(server, scope)
   registerAreaTicketTools(server, scope)
 
+  if (flags.catalogEnabled) registerMasterCatalogTools(server, scope)
+
   if (flags.serializedEnabled) {
     registerSerializedTools(server, scope)
     registerSaleVerificationTools(server, scope)
@@ -154,11 +159,19 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
   const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' }, { instructions: AVOQADO_MCP_INSTRUCTIONS })
   instrumentTools(server, { staffId, org: activeOrg }) // log every tool call (must run BEFORE registering tools)
 
-  const [serializedEnabled, whiteLabelEnabled] = await Promise.all([
+  const [serializedEnabled, whiteLabelEnabled, catalogAccess] = await Promise.all([
     moduleService.anyVenueHasModule(scope.allowedVenueIds, MODULE_CODES.SERIALIZED_INVENTORY),
     moduleService.anyVenueHasModule(scope.allowedVenueIds, MODULE_CODES.WHITE_LABEL_DASHBOARD),
+    scope.organizationId && scope.orgRole && !scope.isSuperAdmin
+      ? resolveMasterCatalogAccess({
+          organizationId: scope.organizationId,
+          principal: { type: 'HUMAN', staffId: scope.staffId, impersonating: false },
+          capability: 'READ_CONTENT',
+          requiredGate: 'CORE',
+        })
+      : Promise.resolve(null),
   ])
-  registerAllTools(server, scope, { serializedEnabled, whiteLabelEnabled })
+  registerAllTools(server, scope, { serializedEnabled, whiteLabelEnabled, catalogEnabled: catalogAccess?.canRead === true })
   return server
 }
 

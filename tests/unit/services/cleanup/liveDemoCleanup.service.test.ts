@@ -12,6 +12,12 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { cleanupExpiredLiveDemos, cleanupAllLiveDemos } from '@/services/cleanup/liveDemoCleanup.service'
+import { deleteOrRetainStaffWithH1ProvenanceTx } from '@/services/superadmin/staffDeletion.service'
+
+jest.mock('@/services/superadmin/staffDeletion.service', () => ({
+  deleteOrRetainStaffWithH1ProvenanceTx: jest.fn(),
+  isH1ProvenanceConstraint: jest.fn().mockReturnValue(false),
+}))
 
 const prismaMock = prisma as any
 
@@ -39,9 +45,12 @@ function makeSession(n = 1) {
  * .delete() throws P2025 while .deleteMany() resolves with count 0.
  */
 function mockCascadeAlreadyDeletedSession(status = 'LIVE_DEMO') {
+  prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock))
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 'venue-1', status, name: 'Live Demo 1' }])
   prismaMock.venue.findUnique.mockResolvedValue({ status, name: 'Live Demo 1' })
   prismaMock.venue.delete.mockResolvedValue({})
   prismaMock.staff.delete.mockResolvedValue({})
+  ;(deleteOrRetainStaffWithH1ProvenanceTx as jest.Mock).mockResolvedValue({ staff: { email: 'demo@avoqado.io' }, retainedForAudit: false })
   prismaMock.liveDemoSession.delete.mockRejectedValue(p2025())
   prismaMock.liveDemoSession.deleteMany.mockResolvedValue({ count: 0 })
 }
@@ -59,7 +68,8 @@ describe('cleanupExpiredLiveDemos — cascade-tolerant session delete', () => {
 
     expect(cleaned).toBe(1)
     expect(prismaMock.venue.delete).toHaveBeenCalledWith({ where: { id: 'venue-1' } })
-    expect(prismaMock.staff.delete).toHaveBeenCalledWith({ where: { id: 'staff-1' } })
+    expect(deleteOrRetainStaffWithH1ProvenanceTx).toHaveBeenCalledWith(prismaMock, 'staff-1')
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     // Idempotent delete: tolerates the row being gone (cascade), never throws P2025
     expect(prismaMock.liveDemoSession.deleteMany).toHaveBeenCalledWith({ where: { id: 'lds-1' } })
   })
@@ -67,12 +77,14 @@ describe('cleanupExpiredLiveDemos — cascade-tolerant session delete', () => {
   it('cleans the remaining sessions when one of them fails', async () => {
     prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1), makeSession(2)])
     mockCascadeAlreadyDeletedSession()
-    prismaMock.staff.delete.mockRejectedValueOnce(new Error('transient DB error')).mockResolvedValueOnce({})
+    ;(deleteOrRetainStaffWithH1ProvenanceTx as jest.Mock)
+      .mockRejectedValueOnce(new Error('transient DB error'))
+      .mockResolvedValueOnce({ staff: { email: 'demo@avoqado.io' }, retainedForAudit: false })
 
     const cleaned = await cleanupExpiredLiveDemos()
 
     expect(cleaned).toBe(1)
-    expect(prismaMock.venue.delete).toHaveBeenCalledTimes(2)
+    expect(prismaMock.venue.delete).toHaveBeenCalledTimes(1)
   })
 
   // REGRESSION: pre-existing behavior that must not change
@@ -95,6 +107,20 @@ describe('cleanupExpiredLiveDemos — cascade-tolerant session delete', () => {
     expect(cleaned).toBe(0)
     expect(prismaMock.venue.delete).not.toHaveBeenCalled()
     expect(prismaMock.staff.delete).not.toHaveBeenCalled()
+  })
+
+  it('fails closed before venue deletion when demo Staff has immutable H1 provenance', async () => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+    ;(deleteOrRetainStaffWithH1ProvenanceTx as jest.Mock).mockResolvedValue({
+      staff: { email: 'demo@avoqado.io' },
+      retainedForAudit: true,
+    })
+
+    await expect(cleanupExpiredLiveDemos()).resolves.toBe(0)
+
+    expect(prismaMock.venue.delete).not.toHaveBeenCalled()
+    expect(prismaMock.liveDemoSession.deleteMany).not.toHaveBeenCalled()
   })
 })
 

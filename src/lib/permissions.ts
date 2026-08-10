@@ -563,6 +563,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.VIEWER]: [
     'home:read',
+    'catalog-venue:read',
     'analytics:read',
     'menu:read',
     'orders:read',
@@ -708,6 +709,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.MANAGER]: [
     'home:read',
+    'catalog-venue:read',
+    'catalog-venue:request-override',
     'analytics:read',
     'analytics:export',
     'reports:read', // Dashboard reports (Sales Summary, Sales by Item, etc.)
@@ -850,6 +853,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.ADMIN]: [
     'home:*',
+    'catalog-venue:read',
+    'catalog-venue:request-override',
     'analytics:*',
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
@@ -967,6 +972,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.OWNER]: [
     'home:*',
+    'catalog-venue:read',
+    'catalog-venue:request-override',
     'activity:read', // Bitácora de auditoría por-venue (Pro-tier, owner-only)
     'analytics:*',
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
@@ -1472,6 +1479,7 @@ export function validatePermissionFormat(permission: string): string | null {
  */
 const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   home: ['home:read'],
+  'catalog-venue': ['catalog-venue:read', 'catalog-venue:request-override'],
   activity: ['activity:read'],
   analytics: ['analytics:read', 'analytics:export'],
   settlements: ['settlements:read', 'settlements:simulate'],

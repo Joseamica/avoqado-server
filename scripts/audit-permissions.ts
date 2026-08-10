@@ -33,6 +33,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { StaffRole } from '@prisma/client'
 import { DEFAULT_PERMISSIONS, hasPermission } from '../src/lib/permissions'
+import { compareCatalogVenueDefaults } from './lib/auditCatalogPermissionDefaults'
 
 // ────────────────────────────────────────────────────────────────────────────
 // Config
@@ -366,6 +367,22 @@ function main(): void {
   const tpvPermsSet = new Set(tpvUsages.map(u => u.perm))
 
   const issues: Issue[] = []
+
+  // H1 venue defaults are a cross-repo authority, not merely UI gate names.
+  // Compare the exact role matrix when the optional dashboard sibling exists.
+  const dashboardDefaultsPath = path.join(WORKSPACE_ROOT, 'avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts')
+  if (fs.existsSync(dashboardDefaultsPath)) {
+    const dashboardDefaultsSource = fs.readFileSync(dashboardDefaultsPath, 'utf8')
+    const drift = compareCatalogVenueDefaults(DEFAULT_PERMISSIONS as unknown as Record<string, readonly string[]>, dashboardDefaultsSource)
+    for (const item of drift) {
+      issues.push({
+        severity: 'ERROR',
+        code: item.code,
+        perm: `${item.permission}@${item.role}`,
+        message: `Expected direct default=${item.expected}, found ${item.actual}. Server and dashboard must mirror the frozen H1 role matrix.`,
+      })
+    }
+  }
 
   // ── Check 1: every backend perm satisfiable by a non-SUPERADMIN role
   // SUPERADMIN always passes via *:* short-circuit, so we exclude them when looking

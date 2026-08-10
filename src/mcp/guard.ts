@@ -46,6 +46,23 @@ export function enforceWriteScope(scope: McpScope, permission: string): void {
   }
 }
 
+/**
+ * H1 catalog writes are never observe-only. Catalog preview/confirm tokens can
+ * authorize bulk organization changes, so an absent legacy scope is not
+ * equivalent to a write grant at this boundary.
+ */
+export function requireCatalogWriteScope(scope: McpScope): void {
+  if (!scope.scopes?.includes('mcp:write')) {
+    logger.warn('[MCP] catalog write blocked: token lacks mcp:write scope', {
+      mcp: true,
+      staffId: scope.staffId,
+      activeOrg: scope.activeOrg,
+      grantedScopes: scope.scopes ?? [],
+    })
+    throw new ScopeError('Esta conexión no puede modificar el catálogo (falta el scope mcp:write).')
+  }
+}
+
 export function createGuard(scope: McpScope) {
   return {
     /** The venue filter EVERY query must spread into its `where`. Throws on out-of-scope. */

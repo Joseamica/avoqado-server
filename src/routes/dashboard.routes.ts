@@ -298,6 +298,8 @@ import organizationDashboardRoutes from './dashboard/organizationDashboard.route
 import organizationConfigRoutes from './dashboard/organizationConfig.routes'
 import organizationStockControlRoutes from './dashboard/organizationStockControl.routes'
 import cashOutOrgRoutes from './dashboard/cash-out.org.routes'
+import masterCatalogRoutes from './dashboard/masterCatalog.routes'
+import masterCatalogVenueRoutes from './dashboard/masterCatalogVenue.routes'
 import simCustodyDashboardRoutes from './dashboard/simCustody.dashboard.routes'
 import simRegistrationDashboardRoutes from './dashboard/simRegistration.dashboard.routes'
 // Org-scoped sale verification routes (PlayTelecom back-office Walmart documentation approval)
@@ -4240,6 +4242,10 @@ router.use('/venues/:venueId/org-item-categories', orgItemCategoryRoutes)
 
 // Organization Dashboard routes for PlayTelecom/White-Label dashboard
 // Provides organization-level aggregate metrics and vision global
+// Corporate catalog owns this literal segment; mount it before the generic
+// organization dashboard router so no future `/:orgId/:resource` can swallow it.
+router.use('/venues/:venueId/master-catalog', masterCatalogVenueRoutes)
+router.use('/organizations/:orgId/master-catalog', masterCatalogRoutes)
 router.use('/organizations', organizationDashboardRoutes)
 
 // Organization Config routes — org-level goals, attendance, TPV defaults, categories

@@ -1,4 +1,4 @@
-import { StaffRole } from '@prisma/client'
+import { OrgRole, StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { getUserAccess, createAccessCache } from '@/services/access/access.service'
 import type { UserAccess } from '@/services/access/access.service'
@@ -6,6 +6,10 @@ import type { UserAccess } from '@/services/access/access.service'
 export interface McpScope {
   staffId: string
   activeOrg: string
+  /** Revalidated organization bound to this connection (H1 authority). */
+  organizationId?: string
+  /** Revalidated active organization role; absent for legacy venue-only scopes. */
+  orgRole?: OrgRole
   allowedVenueIds: string[]
   perVenueAccess: Map<string, UserAccess>
   /** Platform SUPERADMIN connection (global access — mirrors getUserAccess's bypass). */
@@ -58,12 +62,19 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
     return { staffId, activeOrg, allowedVenueIds: venues.map(v => v.id), perVenueAccess, isSuperAdmin: true }
   }
 
+  // The OAuth token can outlive a Staff deactivation. Recheck the principal
+  // before resolving either legacy venue scope or the H1 organization scope.
+  const staff = await prisma.staff.findUnique({ where: { id: staffId }, select: { active: true } })
+  if (!staff?.active) {
+    return { staffId, activeOrg, allowedVenueIds: [], perVenueAccess: new Map() }
+  }
+
   const membership = await prisma.staffOrganization.findUnique({
     where: { staffId_organizationId: { staffId, organizationId: activeOrg } },
-    select: { role: true, isActive: true },
+    select: { role: true, isActive: true, leftAt: true },
   })
   // An org membership that exists but is deactivated = access revoked → nothing.
-  if (membership && !membership.isActive) {
+  if (membership && (!membership.isActive || membership.leftAt != null)) {
     return { staffId, activeOrg, allowedVenueIds: [], perVenueAccess: new Map() }
   }
 
@@ -77,7 +88,7 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
     // StaffVenue access but no StaffOrganization row, e.g. the Mindform owner) → only their
     // assignments in this org. getUserAccess below is the final per-venue authority.
     const assignments = await prisma.staffVenue.findMany({
-      where: { staffId, venue: { organizationId: activeOrg } },
+      where: { staffId, active: true, venue: { organizationId: activeOrg } },
       select: { venueId: true },
     })
     venueIds = assignments.map(a => a.venueId)
@@ -104,5 +115,11 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
     )
     for (const entry of batch) if (entry) perVenueAccess.set(entry[0], entry[1])
   }
-  return { staffId, activeOrg, allowedVenueIds: [...perVenueAccess.keys()], perVenueAccess }
+  return {
+    staffId,
+    activeOrg,
+    ...(membership ? { organizationId: activeOrg, orgRole: membership.role as OrgRole } : {}),
+    allowedVenueIds: [...perVenueAccess.keys()],
+    perVenueAccess,
+  }
 }

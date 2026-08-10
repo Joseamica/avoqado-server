@@ -21,6 +21,8 @@
 
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { OrgRole } from '@prisma/client'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 // ── Local prisma mock (overrides the global one for this test file) ───────────
 jest.mock('@/utils/prismaClient', () => {
@@ -34,14 +36,23 @@ jest.mock('@/utils/prismaClient', () => {
       update: jest.fn(),
       upsert: jest.fn(),
       count: jest.fn(),
+      updateMany: jest.fn(),
     },
-    staffVenue: { findFirst: jest.fn(), update: jest.fn(), upsert: jest.fn() },
+    staffVenue: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), upsert: jest.fn() },
+    staffPasskey: { deleteMany: jest.fn() },
+    deviceToken: { deleteMany: jest.fn() },
+    mcpAuthCode: { deleteMany: jest.fn() },
+    mcpRefreshToken: { updateMany: jest.fn() },
+    oAuthState: { deleteMany: jest.fn() },
+    googleOAuthSession: { deleteMany: jest.fn() },
+    googleCalendarConnection: { deleteMany: jest.fn() },
     venue: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn() },
   }
   return {
     __esModule: true,
     default: {
       ...models,
+      $queryRaw: jest.fn(),
       // $transaction(cb) → run the callback with a tx client exposing the same models.
       $transaction: jest.fn((cb: any) => cb(models)),
     },
@@ -71,6 +82,7 @@ import {
   deleteStaff,
   resetPassword,
 } from '@/services/superadmin/staff.superadmin.service'
+import { isH1ProvenanceConstraint } from '@/services/superadmin/staffDeletion.service'
 
 const mockPrisma = prisma as any
 const mockLogAction = logAction as jest.MockedFunction<typeof logAction>
@@ -107,6 +119,14 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
         staffOrganization: mockPrisma.staffOrganization,
         staffVenue: mockPrisma.staffVenue,
         venue: mockPrisma.venue,
+        staffPasskey: mockPrisma.staffPasskey,
+        deviceToken: mockPrisma.deviceToken,
+        mcpAuthCode: mockPrisma.mcpAuthCode,
+        mcpRefreshToken: mockPrisma.mcpRefreshToken,
+        oAuthState: mockPrisma.oAuthState,
+        googleOAuthSession: mockPrisma.googleOAuthSession,
+        googleCalendarConnection: mockPrisma.googleCalendarConnection,
+        $queryRaw: mockPrisma.$queryRaw,
       }),
     )
     ;(bcrypt.hash as jest.Mock).mockResolvedValue('hashed-pw')
@@ -221,7 +241,7 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
   // deleteStaff → STAFF_DELETED
   // ===========================================================================
   it('deleteStaff logs STAFF_DELETED with the actor and the deleted staff id', async () => {
-    mockPrisma.staff.findUnique.mockResolvedValue({ id: TARGET_STAFF_ID, email: 'target@example.com' })
+    mockPrisma.$queryRaw.mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'target@example.com' }]).mockResolvedValueOnce([])
     mockPrisma.staff.delete.mockResolvedValue({})
 
     await deleteStaff(TARGET_STAFF_ID, ACTOR_ID, ACTOR_ID)
@@ -236,6 +256,91 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
         data: { email: 'target@example.com' },
       }),
     )
+    expect(mockPrisma.mcpAuthCode.deleteMany).toHaveBeenCalledWith({ where: { staffId: TARGET_STAFF_ID } })
+    expect(mockPrisma.mcpRefreshToken.updateMany).toHaveBeenCalledWith({
+      where: { staffId: TARGET_STAFF_ID, revokedAt: null },
+      data: { revokedAt: expect.any(Date) },
+    })
+    expect(mockPrisma.oAuthState.deleteMany).toHaveBeenCalledWith({ where: { userId: TARGET_STAFF_ID } })
+    expect(mockPrisma.googleOAuthSession.deleteMany).toHaveBeenCalledWith({
+      where: { OR: [{ authUserId: TARGET_STAFF_ID }, { staffId: TARGET_STAFF_ID }] },
+    })
+  })
+
+  it('retains and anonymizes a Staff with immutable H1 provenance in one transaction', async () => {
+    mockPrisma.$queryRaw
+      .mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'target@example.com' }])
+      .mockResolvedValueOnce([{ hasProvenance: true }])
+    mockPrisma.staff.update.mockResolvedValue({})
+
+    await expect(deleteStaff(TARGET_STAFF_ID, ACTOR_ID, ACTOR_ID)).resolves.toEqual({ success: true, retainedForAudit: true })
+
+    expect(mockPrisma.staff.delete).not.toHaveBeenCalled()
+    expect(mockPrisma.staff.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: TARGET_STAFF_ID },
+        data: expect.objectContaining({
+          active: false,
+          password: null,
+          googleId: null,
+          phone: null,
+          resetToken: null,
+          resetTokenExpiry: null,
+          resetTokenUsedAt: null,
+          posRawData: expect.anything(),
+        }),
+      }),
+    )
+    expect(mockPrisma.staffOrganization.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { staffId: TARGET_STAFF_ID, isActive: true } }),
+    )
+    expect(mockPrisma.staffVenue.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { staffId: TARGET_STAFF_ID, active: true },
+        data: expect.objectContaining({ active: false, pin: null, posStaffId: null }),
+      }),
+    )
+    expect(mockPrisma.staffPasskey.deleteMany).toHaveBeenCalledWith({ where: { staffId: TARGET_STAFF_ID } })
+    expect(mockPrisma.deviceToken.deleteMany).toHaveBeenCalledWith({ where: { staffId: TARGET_STAFF_ID } })
+    expect(mockPrisma.mcpAuthCode.deleteMany).toHaveBeenCalledWith({ where: { staffId: TARGET_STAFF_ID } })
+    expect(mockPrisma.mcpRefreshToken.updateMany).toHaveBeenCalledWith({
+      where: { staffId: TARGET_STAFF_ID, revokedAt: null },
+      data: { revokedAt: expect.any(Date) },
+    })
+    expect(mockPrisma.googleCalendarConnection.deleteMany).toHaveBeenCalledWith({ where: { staffId: TARGET_STAFF_ID } })
+    expect(mockPrisma.oAuthState.deleteMany).toHaveBeenCalledWith({ where: { userId: TARGET_STAFF_ID } })
+    expect(mockPrisma.googleOAuthSession.deleteMany).toHaveBeenCalledWith({
+      where: { OR: [{ authUserId: TARGET_STAFF_ID }, { staffId: TARGET_STAFF_ID }] },
+    })
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'STAFF_RETAINED_FOR_AUDIT', entityId: TARGET_STAFF_ID, data: { retainedForAudit: true } }),
+    )
+    expect(JSON.stringify(mockLogAction.mock.calls)).not.toContain('target@example.com')
+  })
+
+  it('does not reach anonymization when retained credential revocation fails in the transaction', async () => {
+    mockPrisma.$queryRaw
+      .mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'target@example.com' }])
+      .mockResolvedValueOnce([{ hasProvenance: true }])
+    mockPrisma.mcpRefreshToken.updateMany.mockRejectedValue(new Error('credential revoke failed'))
+
+    await expect(deleteStaff(TARGET_STAFF_ID, ACTOR_ID, ACTOR_ID)).rejects.toThrow('credential revoke failed')
+
+    expect(mockPrisma.staff.update).not.toHaveBeenCalled()
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('does not reach retained anonymization when OAuth session invalidation fails in the transaction', async () => {
+    mockPrisma.$queryRaw
+      .mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'target@example.com' }])
+      .mockResolvedValueOnce([{ hasProvenance: true }])
+    mockPrisma.googleOAuthSession.deleteMany.mockRejectedValue(new Error('oauth session cleanup failed'))
+
+    await expect(deleteStaff(TARGET_STAFF_ID, ACTOR_ID, ACTOR_ID)).rejects.toThrow('oauth session cleanup failed')
+
+    expect(mockPrisma.staff.update).not.toHaveBeenCalled()
+    expect(mockPrisma.staff.delete).not.toHaveBeenCalled()
+    expect(mockLogAction).not.toHaveBeenCalled()
   })
 
   // ===========================================================================
@@ -278,5 +383,54 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
     expect(mockLogAction).toHaveBeenCalledWith(
       expect.objectContaining({ staffId: null, action: 'STAFF_UPDATED', entityId: TARGET_STAFF_ID }),
     )
+  })
+})
+
+describe('H1 Staff provenance constraint recovery', () => {
+  it('recognizes an exact raw PostgreSQL H1 Staff FK constraint', () => {
+    expect(
+      isH1ProvenanceConstraint({
+        code: '23503',
+        constraint: 'CatalogItem_createdById_fkey',
+        detail: 'Key (id) remains referenced.',
+        message: 'update or delete violates foreign key constraint',
+      }),
+    ).toBe(true)
+  })
+
+  it('does not relabel an unrelated legacy FK conflict as H1 provenance', () => {
+    expect(
+      isH1ProvenanceConstraint({
+        code: '23503',
+        constraint: 'Order_createdById_fkey',
+        message: 'update or delete violates foreign key constraint',
+      }),
+    ).toBe(false)
+  })
+
+  it('recognizes the exact raw PostgreSQL H1 CHECK signature without broadening unrelated checks', () => {
+    expect(isH1ProvenanceConstraint({ code: '23514', constraint: 'ActivityLog_actorStaffId_h1_guard', message: 'check violation' })).toBe(
+      true,
+    )
+    expect(isH1ProvenanceConstraint({ code: '23514', constraint: 'Staff_email_format_check', message: 'check violation' })).toBe(false)
+  })
+})
+
+describe('Staff offboarding credential inventory drift', () => {
+  const schema = readFileSync(join(process.cwd(), 'prisma/schema.prisma'), 'utf8')
+  const deletionService = readFileSync(join(process.cwd(), 'src/services/superadmin/staffDeletion.service.ts'), 'utf8')
+
+  it.each([
+    ['McpAuthCode', 'staffId', 'mcpAuthCode.deleteMany'],
+    ['McpRefreshToken', 'staffId', 'mcpRefreshToken.updateMany'],
+    ['OAuthState', 'userId', 'oAuthState.deleteMany'],
+    ['GoogleOAuthSession', 'authUserId', 'googleOAuthSession.deleteMany'],
+    ['GoogleOAuthSession', 'staffId', 'googleOAuthSession.deleteMany'],
+    ['GoogleCalendarConnection', 'staffId', 'googleCalendarConnection.deleteMany'],
+  ])('keeps schema authority %s.%s in the transactional cleanup inventory', (model, actorField, cleanupCall) => {
+    const modelSource = schema.match(new RegExp(`model ${model} \\{([\\s\\S]*?)\\n\\}`))?.[1]
+    expect(modelSource).toBeDefined()
+    expect(modelSource).toMatch(new RegExp(`\\b${actorField}\\b`))
+    expect(deletionService).toContain(cleanupCall)
   })
 })
