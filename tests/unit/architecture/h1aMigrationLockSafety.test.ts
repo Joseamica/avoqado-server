@@ -4,7 +4,12 @@ import { spawnSync } from 'node:child_process'
 
 const migrationsRoot = path.resolve(__dirname, '../../../prisma/migrations')
 const prismaSchemaPath = path.resolve(__dirname, '../../../prisma/schema.prisma')
-const h1TestWrapper = path.resolve(__dirname, '../../../.superpowers/sdd/2026-08-08-pits-h1a-catalog-core/run-with-h1-test-db.cjs')
+// WHY `scripts/` and not `.superpowers/`: this is a tracked test asserting a
+// production-safety guard (the wrapper refuses a remote DATABASE_URL and blanks
+// every Render alias). `.superpowers/` is gitignored, so the wrapper existed on
+// the authoring machine and nowhere else — the test passed locally and failed on
+// every CI run. A tracked test may only depend on tracked files.
+const h1TestWrapper = path.resolve(__dirname, '../../../scripts/run-with-h1-test-db.cjs')
 const migrationHarness = path.resolve(__dirname, '../../integration/master-catalog/h1a-migration-harness.cjs')
 
 const h1aChain = [

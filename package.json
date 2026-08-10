@@ -106,6 +106,7 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "cron": "^4.3.3",
+    "cuid": "^3.0.0",
     "date-fns": "^4.1.0",
     "date-fns-tz": "^3.2.0",
     "detect-port": "^2.1.0",

@@ -1,6 +1,7 @@
 import { canonicalizeAndHashCatalogImportRows, EVENT_LOOP_BUDGET_MS } from '@/services/master-catalog/catalogImport.service'
 import {
   expectCatalogImportEventLoopBudgetV1,
+  itWhenEventLoopProbeSupportedV1,
   readCatalogImportThreadCpuUsageV1,
   startCatalogImportEventLoopProbeV1,
 } from './catalogImportEventLoopTestHarness'
@@ -61,7 +62,7 @@ describe('catalog import main-thread event-loop budget', () => {
     expectCatalogImportEventLoopBudgetV1(samples)
   }, 20_000)
 
-  it('keeps detecting a synchronous CPU monopolizer without blaming process descheduling', async () => {
+  itWhenEventLoopProbeSupportedV1('keeps detecting a synchronous CPU monopolizer without blaming process descheduling', async () => {
     const probe = startCatalogImportEventLoopProbeV1()
     await new Promise<void>(resolve => setTimeout(resolve, 10))
 
