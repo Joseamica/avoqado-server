@@ -19,6 +19,7 @@
 import { CronJob } from 'cron'
 import logger from '@/config/logger'
 import * as marketingService from '../services/superadmin/marketing.superadmin.service'
+import { scheduleJob } from '../observability/jobContext'
 
 export class MarketingCampaignJob {
   private job: CronJob | null = null
@@ -29,7 +30,8 @@ export class MarketingCampaignJob {
     // (reservation reminders, auto no-show, POS monitor, stale-pending alert) share
     // this cadence; firing on the exact same tick can exhaust the connection pool
     // (P2024 incident 2026-07-03). See .claude/rules/cron-jobs.md checklist item 4.
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'marketing-campaign',
       '5 */5 * * * *', // :00:05, :05:05, :10:05...
       async () => {
         // CronJob expects void | Promise<void>, so we wrap and ignore return value

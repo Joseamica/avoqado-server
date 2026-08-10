@@ -3,6 +3,7 @@ import cron from 'node-cron'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { scheduleCron } from '../observability/jobContext'
 
 const STALE_THRESHOLD_SECONDS = 60
 
@@ -45,7 +46,7 @@ export function startStalePendingAlertJob(): void {
   // reservation reminders/no-show, POS monitor) share this cadence; firing on the
   // exact same tick can exhaust the connection pool (P2024 incident 2026-07-03).
   // See .claude/rules/cron-jobs.md checklist item 4.
-  cron.schedule('4-59/5 * * * *', () => {
+  scheduleCron('stale-pending-alert', '4-59/5 * * * *', () => {
     runStalePendingAlert().catch(err => {
       logger.error('[Stale-PENDING Alert] Job iteration failed', { err })
     })

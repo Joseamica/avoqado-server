@@ -32,6 +32,7 @@ import { processOutboxRow } from '../services/google-calendar/push.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { scheduleJob } from '../observability/jobContext'
 
 const TIMEZONE = 'America/Mexico_City'
 const BATCH_SIZE = 100
@@ -41,7 +42,8 @@ export class GcalOutboxSweeperJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'gcal-outbox-sweeper',
       DATABASE_JOB_SCHEDULES.gcalOutboxSweeper,
       async () => {
         await this.process()

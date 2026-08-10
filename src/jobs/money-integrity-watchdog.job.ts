@@ -4,6 +4,7 @@ import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Vigilante de integridad del dinero — PRUEBA TEMPORAL DE 4 DÍAS.
@@ -86,7 +87,7 @@ export class MoneyIntegrityWatchdogJob {
   private readonly CRON_PATTERN = '17 */6 * * *'
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('money-integrity-watchdog', this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {

@@ -3,6 +3,7 @@
 import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Job que limpia órdenes abandonadas (vacías sin items)
@@ -26,7 +27,14 @@ export class AbandonedOrdersCleanupJob {
   private readonly CRON_PATTERN = '*/15 * * * *' // Every 15 minutes
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.cleanupAbandonedOrders.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob(
+      'abandoned-orders-cleanup',
+      this.CRON_PATTERN,
+      this.cleanupAbandonedOrders.bind(this),
+      null,
+      false,
+      'America/Mexico_City',
+    )
   }
 
   /**

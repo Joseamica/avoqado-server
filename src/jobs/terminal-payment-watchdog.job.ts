@@ -4,6 +4,7 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { terminalPaymentService } from '../services/terminal-payment.service'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Terminal Payment Watchdog
@@ -30,7 +31,7 @@ export class TerminalPaymentWatchdogJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('terminal-payment-watchdog', this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {

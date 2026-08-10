@@ -2,6 +2,7 @@ import cron from 'node-cron'
 
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
+import { scheduleCron } from '../observability/jobContext'
 
 const INACTIVITY_DAYS = 7
 
@@ -22,7 +23,7 @@ export async function runVenueChatInactivityCleanup(): Promise<void> {
 
 export function startVenueChatInactivityCleanupJob(): void {
   logger.info('[Inactivity Cleanup] ⏰ Job started. Runs hourly.')
-  cron.schedule('0 * * * *', () => {
+  scheduleCron('venue-chat-inactivity-cleanup', '0 * * * *', () => {
     runVenueChatInactivityCleanup().catch(err => {
       logger.error('[Inactivity Cleanup] Job iteration failed', { err })
     })

@@ -23,6 +23,7 @@ import Stripe from 'stripe'
 import { subDays } from 'date-fns'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
+import { scheduleJob } from '../observability/jobContext'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -31,7 +32,8 @@ export class SubscriptionCancellationJob {
 
   constructor() {
     // Run daily at 2:00 AM (low-traffic time)
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'subscription-cancellation',
       '0 2 * * *', // Every day at 2:00 AM
       this.runAllTasks.bind(this),
       null, // onComplete callback

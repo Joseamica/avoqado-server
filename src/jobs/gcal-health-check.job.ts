@@ -19,6 +19,7 @@ import prisma from '../utils/prismaClient'
 import { buildOAuthClient } from '../services/google-calendar/oauth.service'
 import { decryptToken } from '../services/google-calendar/encryption.service'
 import { handleAuthError } from '../services/google-calendar/pull.service'
+import { scheduleJob } from '../observability/jobContext'
 
 const TIMEZONE = 'America/Mexico_City'
 const QUIET_AFTER_MS = 24 * 3600_000
@@ -28,7 +29,8 @@ export class GcalHealthCheckJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'gcal-health-check',
       '0 5 * * *',
       async () => {
         await this.process()

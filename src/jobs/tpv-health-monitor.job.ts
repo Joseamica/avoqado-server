@@ -5,6 +5,7 @@ import { tpvHealthService } from '../services/tpv/tpv-health.service'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Job que monitorea la salud de las terminales TPV
@@ -16,7 +17,8 @@ export class TpvHealthMonitorJob {
 
   constructor() {
     // Crear el cron job que se ejecuta cada 2 minutos
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'tpv-health-monitor',
       DATABASE_JOB_SCHEDULES.tpvHealthMonitor, // Cada 2 minutos, desfasado de otros jobs de DB
       this.checkTerminalHealth.bind(this),
       null, // onComplete callback

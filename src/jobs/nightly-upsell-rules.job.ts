@@ -33,6 +33,7 @@ import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { venuesWithFeatureAccess } from '../services/access/basePlan.service'
 import { computeDedupeKey } from '../services/upsell/upsell.service'
+import { scheduleJob } from '../observability/jobContext'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Umbrales — con nombre, no mágicos
@@ -371,7 +372,8 @@ export class NightlyUpsellRulesJob {
   constructor() {
     // 03:15 hora de Ciudad de México: fuera de la hora en punto, donde se alinean
     // todos los cron y revienta el pool (`.claude/rules/cron-jobs.md`).
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'nightly-upsell-rules',
       '15 3 * * *',
       async () => {
         await this.run()

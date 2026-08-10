@@ -20,6 +20,7 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import tokenBudgetService from '../services/dashboard/token-budget.service'
+import { scheduleJob } from '../observability/jobContext'
 
 export interface OverageBillingResult {
   venuesScanned: number
@@ -36,7 +37,8 @@ export class MonthlyOverageBillingJob {
   constructor() {
     // Daily at 3:17 AM Mexico City — late enough that no human is using the app,
     // offset from other 3 AM jobs to keep Stripe webhook traffic spread out.
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'monthly-overage-billing',
       '17 3 * * *',
       async () => {
         await this.run()

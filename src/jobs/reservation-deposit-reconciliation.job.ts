@@ -6,6 +6,7 @@ import { calculateApplicationFeeWithVAT, toStripeAmount } from '../services/paym
 import { getVatRateBps } from '../services/superadmin/platformSettings.service'
 import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { scheduleJob } from '../observability/jobContext'
 
 export class ReservationDepositReconciliationJob {
   private job: CronJob | null = null
@@ -13,7 +14,14 @@ export class ReservationDepositReconciliationJob {
   private readonly ORPHAN_THRESHOLD_MINUTES = 5
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.reconcile.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob(
+      'reservation-deposit-reconciliation',
+      this.CRON_PATTERN,
+      this.reconcile.bind(this),
+      null,
+      false,
+      'America/Mexico_City',
+    )
   }
 
   start(): void {

@@ -20,6 +20,7 @@ import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { issueGlobalForEmisor } from '../services/fiscal/cfdiGlobal.service'
 import { NODE_ENV } from '../config/env'
+import { scheduleJob } from '../observability/jobContext'
 
 export class CfdiGlobalJob {
   private job: CronJob | null = null
@@ -27,7 +28,8 @@ export class CfdiGlobalJob {
 
   constructor() {
     // 04:00 AM Mexico City — offset from hour boundary to reduce stampede overlap
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'cfdi-global',
       '0 4 * * *',
       async () => {
         await this.run()

@@ -12,6 +12,7 @@ import {
   reconcileBlumonEvent,
 } from '../services/tpv/blumon-webhook.service'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Blumon TPV webhook async reconciliation job
@@ -50,7 +51,7 @@ export class BlumonWebhookReconciliationJob {
   private readonly BATCH_SIZE = 100
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('blumon-webhook-reconciliation', this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {

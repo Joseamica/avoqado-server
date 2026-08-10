@@ -3,6 +3,7 @@ import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import emailService from '../services/email.service'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Job que maneja el ciclo de vida de órdenes TPV pendientes:
@@ -24,7 +25,7 @@ export class TpvOrderExpiryJob {
   private readonly REMINDER_DAYS = [3, 7]
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.runOnce.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('tpv-order-expiry', this.CRON_PATTERN, this.runOnce.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {

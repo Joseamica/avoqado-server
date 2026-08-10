@@ -23,6 +23,7 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { refreshIfExpiring } from '../services/mercado-pago/connection.service'
+import { scheduleJob } from '../observability/jobContext'
 
 const TIMEZONE = 'America/Mexico_City'
 const REFRESH_THRESHOLD_DAYS = 30
@@ -40,7 +41,8 @@ export class MercadoPagoTokenRefreshJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'mercadopago-token-refresh',
       '0 3 * * *', // Daily at 03:00
       async () => {
         await this.process()

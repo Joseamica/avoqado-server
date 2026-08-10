@@ -12,6 +12,7 @@ import { fromZonedTime } from 'date-fns-tz'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import emailService from '../services/email.service'
+import { scheduleJob } from '../observability/jobContext'
 
 // ─── Types ───
 
@@ -208,7 +209,8 @@ export class VenueCommissionSettlementJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'venue-commission-settlement',
       '0 7 * * *',
       async () => {
         await this.process()

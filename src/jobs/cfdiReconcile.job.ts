@@ -27,6 +27,7 @@ import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { reconcileStuckCfdi, StuckCfdi } from '../services/fiscal/cfdiReconcile.service'
 import { NODE_ENV } from '../config/env'
+import { scheduleJob } from '../observability/jobContext'
 
 // Only reconcile rows that have been STAMPING for longer than this. Comfortably larger than the
 // 3-min issuance reclaim TTL (STAMPING_TTL_MS / GLOBAL_STAMPING_TTL_MS) plus a normal stamp's
@@ -42,7 +43,8 @@ export class CfdiReconcileJob {
 
   constructor() {
     // Every 5 minutes at :02 offset — avoids aligning with top-of-hour / :00 / :05 cron bursts.
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'cfdi-reconcile',
       '2-59/5 * * * *',
       async () => {
         await this.run()

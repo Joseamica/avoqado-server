@@ -17,6 +17,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { subscribeToCalendar, stopChannel } from '../services/google-calendar/watch-channel.service'
 import { decryptToken } from '../services/google-calendar/encryption.service'
+import { scheduleJob } from '../observability/jobContext'
 
 const TIMEZONE = 'America/Mexico_City'
 const RENEWAL_WINDOW_MS = 48 * 3600_000
@@ -30,7 +31,8 @@ export class GcalChannelRenewalJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'gcal-channel-renewal',
       '0 */12 * * *',
       async () => {
         await this.process()

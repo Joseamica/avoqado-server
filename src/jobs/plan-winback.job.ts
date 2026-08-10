@@ -28,6 +28,7 @@ import logger from '@/config/logger'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
+import { scheduleJob } from '../observability/jobContext'
 
 export class PlanWinbackJob {
   private job: CronJob | null = null
@@ -36,7 +37,7 @@ export class PlanWinbackJob {
    * Start the daily win-back cron (10:00 America/Mexico_City).
    */
   start(): void {
-    this.job = new CronJob('0 10 * * *', () => this.runNow(), null, true, 'America/Mexico_City')
+    this.job = scheduleJob('plan-winback', '0 10 * * *', () => this.runNow(), null, true, 'America/Mexico_City')
     logger.info('🗓️ Plan Win-back Job started - runs daily at 10:00 AM')
   }
 

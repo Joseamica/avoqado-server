@@ -14,6 +14,7 @@ import prisma from '../utils/prismaClient'
 import { pullConnection } from '../services/google-calendar/pull.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { scheduleJob } from '../observability/jobContext'
 
 const TIMEZONE = 'America/Mexico_City'
 const STALE_AFTER_MS = 60_000
@@ -24,7 +25,8 @@ export class GcalInboxSweeperJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'gcal-inbox-sweeper',
       DATABASE_JOB_SCHEDULES.gcalInboxSweeper,
       async () => {
         await this.process()

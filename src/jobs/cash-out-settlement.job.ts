@@ -11,13 +11,15 @@
 import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { runCashOutSettlement } from '../services/dashboard/cash-out/cash-out.settlement.service'
+import { scheduleJob } from '../observability/jobContext'
 
 export class CashOutSettlementJob {
   private job: CronJob | null = null
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'cash-out-settlement',
       '15 18 * * *', // 18:15 every day
       async () => {
         await this.run()

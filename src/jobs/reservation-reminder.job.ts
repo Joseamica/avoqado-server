@@ -6,6 +6,7 @@ import logger from '../config/logger'
 import emailService from '../services/email.service'
 import { sendReservationReminderWhatsApp } from '../services/whatsapp.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { scheduleJob } from '../observability/jobContext'
 
 type ReminderChannel = 'EMAIL' | 'SMS' | 'WHATSAPP'
 
@@ -35,7 +36,7 @@ export class ReservationReminderJob {
   private readonly SCAN_HORIZON_MS = 25 * 60 * 60_000
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('reservation-reminder', this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {

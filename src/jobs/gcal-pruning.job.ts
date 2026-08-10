@@ -10,6 +10,7 @@
 import { CronJob } from 'cron'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
+import { scheduleJob } from '../observability/jobContext'
 
 const TIMEZONE = 'America/Mexico_City'
 const RETENTION_DAYS = 7
@@ -19,7 +20,8 @@ export class GcalPruningJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'gcal-pruning',
       '30 4 * * *',
       async () => {
         await this.process()

@@ -1,6 +1,7 @@
 import { CronJob } from 'cron'
 import * as settlementIncidentService from '../services/dashboard/settlementIncident.service'
 import logger from '../config/logger'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Settlement Detection Job
@@ -21,7 +22,8 @@ export class SettlementDetectionJob {
     // Run every day at 9:00 AM Mexico City time
     // Cron pattern: minute hour day month dayOfWeek
     // '0 9 * * *' = At 9:00 AM every day
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'settlement-detection',
       '0 9 * * *', // Daily at 9:00 AM
       this.detectMissingSettlements.bind(this),
       null, // onComplete callback
