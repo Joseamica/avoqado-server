@@ -33,6 +33,7 @@ import * as tpvMessageService from '../../../services/tpv/tpv-message.service'
 import { RoomController } from '../controllers/room.controller'
 import { BusinessEventController } from '../controllers/businessEvent.controller'
 import { ObservabilityController } from '../controllers/observability.controller'
+import { onWithContext } from '../../../observability/socketContext'
 
 /**
  * Main Socket Manager
@@ -212,49 +213,49 @@ export class SocketManager implements ISocketManager {
    */
   private registerSocketEventHandlers(socket: AuthenticatedSocket): void {
     // Authentication events (if not already authenticated)
-    socket.on(SocketEventType.AUTHENTICATE, (payload, callback) => {
+    onWithContext(socket, SocketEventType.AUTHENTICATE, (payload, callback) => {
       this.connectionController.handleAuthentication(socket, payload, callback)
     })
 
     // Room management events
-    socket.on(SocketEventType.JOIN_ROOM, (payload, callback) => {
+    onWithContext(socket, SocketEventType.JOIN_ROOM, (payload, callback) => {
       this.roomController.handleJoinRoom(socket, payload, callback)
     })
 
-    socket.on(SocketEventType.LEAVE_ROOM, (payload, callback) => {
+    onWithContext(socket, SocketEventType.LEAVE_ROOM, (payload, callback) => {
       this.roomController.handleLeaveRoom(socket, payload, callback)
     })
 
     // Business events
-    socket.on(SocketEventType.PAYMENT_INITIATED, (payload, callback) => {
+    onWithContext(socket, SocketEventType.PAYMENT_INITIATED, (payload, callback) => {
       this.businessEventController.handlePaymentEvent(socket, 'initiated', payload, callback)
     })
 
-    socket.on(SocketEventType.ORDER_CREATED, (payload, callback) => {
+    onWithContext(socket, SocketEventType.ORDER_CREATED, (payload, callback) => {
       this.businessEventController.handleOrderEvent(socket, 'created', payload, callback)
     })
 
-    socket.on(SocketEventType.ORDER_UPDATED, (payload, callback) => {
+    onWithContext(socket, SocketEventType.ORDER_UPDATED, (payload, callback) => {
       this.businessEventController.handleOrderEvent(socket, 'updated', payload, callback)
     })
 
     // System events
-    socket.on(SocketEventType.SYSTEM_ALERT, (payload, callback) => {
+    onWithContext(socket, SocketEventType.SYSTEM_ALERT, (payload, callback) => {
       this.businessEventController.handleSystemAlert(socket, payload, callback)
     })
 
     // Observability events (Terminal → Server)
-    socket.on('tpv:log', (payload, callback) => {
+    onWithContext(socket, 'tpv:log', (payload, callback) => {
       this.observabilityController.handleTerminalLog(socket, payload, callback)
     })
 
-    socket.on('tpv:heartbeat', (payload, callback) => {
+    onWithContext(socket, 'tpv:heartbeat', (payload, callback) => {
       this.observabilityController.handleTerminalHeartbeat(socket, payload, callback)
     })
 
     // TPV Command Events (Terminal → Server)
     // Handle command acknowledgment from terminal
-    socket.on(SocketEventType.TPV_COMMAND_ACK, async (payload, callback) => {
+    onWithContext(socket, SocketEventType.TPV_COMMAND_ACK, async (payload, callback) => {
       try {
         const { commandId, terminalId, receivedAt } = payload
         logger.info('📡 TPV Command ACK received', { commandId, terminalId, socketId: socket.id })
@@ -273,7 +274,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Handle command execution started from terminal
-    socket.on(SocketEventType.TPV_COMMAND_STARTED, async (payload, callback) => {
+    onWithContext(socket, SocketEventType.TPV_COMMAND_STARTED, async (payload, callback) => {
       try {
         const { commandId, terminalId, startedAt } = payload
         logger.info('📡 TPV Command execution started', { commandId, terminalId, socketId: socket.id })
@@ -292,7 +293,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Handle command result from terminal (SUCCESS/FAILURE/REJECTED)
-    socket.on(SocketEventType.TPV_COMMAND_RESULT, async (payload, callback) => {
+    onWithContext(socket, SocketEventType.TPV_COMMAND_RESULT, async (payload, callback) => {
       try {
         const { commandId, terminalId, success, resultStatus: directResultStatus, resultData, errorMessage, message } = payload
 
@@ -337,7 +338,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Terminal Payment Result (TPV → Server → iOS HTTP response)
-    socket.on('terminal:payment_result', (payload, callback) => {
+    onWithContext(socket, 'terminal:payment_result', (payload, callback) => {
       try {
         const { requestId, status, paymentId, transactionId, cardDetails, errorMessage, receipt } = payload
         logger.info('💳 Terminal payment result received', {
@@ -370,7 +371,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Terminal Receipt Print Result (TPV → Server → Android HTTP response)
-    socket.on('terminal:print_receipt_result', (payload, callback) => {
+    onWithContext(socket, 'terminal:print_receipt_result', (payload, callback) => {
       try {
         const { requestId, status, errorMessage } = payload
         logger.info('🖨️ Terminal receipt print result received', {
@@ -398,7 +399,7 @@ export class SocketManager implements ISocketManager {
 
     // TPV Message Events (Terminal → Server)
     // Handle message acknowledge/dismiss from terminal
-    socket.on(SocketEventType.TPV_MESSAGE_ACK, async (payload, callback) => {
+    onWithContext(socket, SocketEventType.TPV_MESSAGE_ACK, async (payload, callback) => {
       try {
         const { messageId, terminalId, action, staffId } = payload
         logger.info('📨 TPV Message ACK received', { messageId, terminalId, action, socketId: socket.id })
@@ -421,7 +422,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Handle survey response from terminal
-    socket.on(SocketEventType.TPV_MESSAGE_RESPONSE, async (payload, callback) => {
+    onWithContext(socket, SocketEventType.TPV_MESSAGE_RESPONSE, async (payload, callback) => {
       try {
         const { messageId, terminalId, selectedOptions, staffId, staffName } = payload
         logger.info('📨 TPV Survey response received', { messageId, terminalId, selectedOptions, socketId: socket.id })
@@ -440,7 +441,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Disconnection
-    socket.on(SocketEventType.DISCONNECT, _reason => {
+    onWithContext(socket, SocketEventType.DISCONNECT, _reason => {
       if (socket.authContext) {
         this.roomManager.unregisterSocket(socket)
       }
@@ -451,7 +452,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Error handling
-    socket.on('error', error => {
+    onWithContext(socket, 'error', error => {
       logger.error('📡 Socket error', {
         correlationId: socket.correlationId,
         socketId: socket.id,
@@ -484,8 +485,8 @@ export class SocketManager implements ISocketManager {
     }, this.config.authentication.timeout)
 
     // Clear timeout if socket disconnects or authenticates
-    socket.on(SocketEventType.DISCONNECT, () => clearTimeout(timeout))
-    socket.on(SocketEventType.AUTHENTICATION_SUCCESS, () => clearTimeout(timeout))
+    onWithContext(socket, SocketEventType.DISCONNECT, () => clearTimeout(timeout))
+    onWithContext(socket, SocketEventType.AUTHENTICATION_SUCCESS, () => clearTimeout(timeout))
   }
 
   // Public broadcasting methods implementing ISocketManager interface
