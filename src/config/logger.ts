@@ -1,6 +1,7 @@
 import winston from 'winston'
 import path from 'path'
 import { inspect } from 'util'
+import { contextFormat } from '../observability/logContext'
 
 const { combine, timestamp, printf, colorize, json, splat } = winston.format
 
@@ -11,6 +12,7 @@ const SIMPLE_LOGGING = process.env.SIMPLE_LOGGING === 'true'
 // Asegurarse de que el directorio de logs exista (Winston lo crea si no existe para los transportes de archivo)
 
 const baseFormat = combine(
+  contextFormat(), // FIRST: the fields must exist before json()/printf render the record
   timestamp({ format: 'YYYY-MM-DDTHH:mm:ss.SSSZ' }),
   splat(), // Permite usar logger.info('mensaje %s', variable)
 )

@@ -39,12 +39,15 @@ const ACTOR_SENTINELS = new Set(['SYSTEM', 'CUSTOMER', 'PUBLIC', 'WEBHOOK'])
  * returning a response.
  */
 export async function logAction(params: LogActionParams): Promise<void> {
+  // Normalize sentinel actor strings (SYSTEM, CUSTOMER, etc.) to null so we
+  // don't trip the ActivityLog_staffId_fkey constraint. The action itself
+  // (e.g. RESERVATION_NO_SHOW) records what happened; the absence of staffId
+  // already signals "no human did this".
+  //
+  // Fuera del try a propósito: el catch lo necesita para el reintento sin actor.
+  const staffId = params.staffId && !ACTOR_SENTINELS.has(params.staffId) ? params.staffId : null
+
   try {
-    // Normalize sentinel actor strings (SYSTEM, CUSTOMER, etc.) to null so we
-    // don't trip the ActivityLog_staffId_fkey constraint. The action itself
-    // (e.g. RESERVATION_NO_SHOW) records what happened; the absence of staffId
-    // already signals "no human did this".
-    const staffId = params.staffId && !ACTOR_SENTINELS.has(params.staffId) ? params.staffId : null
 
     await prisma.activityLog.create({
       data: {
@@ -59,6 +62,46 @@ export async function logAction(params: LogActionParams): Promise<void> {
       },
     })
   } catch (error) {
+    // 🔴 Un actor que ya no existe NO puede costarnos la entrada de auditoría.
+    //
+    // El caso real: un empleado dado de baja cuyo token sigue vigente intenta
+    // algo y recibe 403. El middleware manda su PERMISSION_DENIED a auditar, el
+    // FK `ActivityLog_staffId_fkey` revienta, y el intento queda SOLO en el log
+    // de texto — justo el registro que se necesita para investigar un acceso
+    // indebido. Se reintenta UNA vez sin actor: mejor "alguien sin identificar
+    // intentó esto" que ningún rastro. Medido en full-testingv2 2026-08-09.
+    // Se compara contra el NOMBRE de la constraint, que es estable, en vez de
+    // depender de la forma de `error.meta` (cambia entre versiones de Prisma:
+    // unas traen `field_name`, otras `constraint`, y el wrapper puede perderlo).
+    const fkMessage = error instanceof Error ? error.message : ''
+    const isMissingActorFk = staffId !== null && fkMessage.includes('ActivityLog_staffId_fkey')
+
+    if (isMissingActorFk) {
+      try {
+        await prisma.activityLog.create({
+          data: {
+            staffId: null,
+            venueId: params.venueId ?? null,
+            action: params.action,
+            entity: params.entity ?? null,
+            entityId: params.entityId ?? null,
+            // El actor desconocido se conserva en `data`: es lo único que queda
+            // para rastrear de quién era ese token.
+            data: { ...((params.data as Record<string, unknown>) ?? {}), unknownStaffId: staffId },
+            ipAddress: params.ipAddress ?? null,
+            userAgent: params.userAgent ?? null,
+          },
+        })
+        logger.warn('[ActivityLog] Actor desconocido — auditado sin staffId', {
+          action: params.action,
+          unknownStaffId: staffId,
+        })
+        return
+      } catch {
+        // cae al log de error de abajo
+      }
+    }
+
     logger.error('[ActivityLog] Failed to write audit log', {
       action: params.action,
       entity: params.entity,
