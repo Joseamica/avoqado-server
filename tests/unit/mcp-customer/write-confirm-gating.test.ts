@@ -62,7 +62,16 @@ describe('set_menu_item_price — confirm-gated (customer-visible price)', () =>
   it('confirm:true → writes the new price and audits', async () => {
     mockProductFindMany.mockResolvedValueOnce([{ id: 'p1', name: 'Carnitas', active: true, price: 129 }])
     const out = parse(await call('set_menu_item_price', { venueId: 'v1', name: 'Carnitas', price: 99, confirm: true }))
-    expect(mockUpdateProduct).toHaveBeenCalledWith('v1', 'p1', { price: 99 })
+    expect(mockUpdateProduct).toHaveBeenCalledWith(
+      'v1',
+      'p1',
+      { price: 99 },
+      {
+        type: 'HUMAN',
+        staffId: 's1',
+        impersonating: false,
+      },
+    )
     expect(mockAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'MENU_ITEM_PRICE_SET' }))
     expect(out.ok).toBe(true)
   })
