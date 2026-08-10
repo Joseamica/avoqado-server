@@ -580,10 +580,42 @@ export class TpvHealthService {
         return []
       }
 
+      const now = new Date()
+
+      // Expire this terminal's stale in-flight commands, piggybacked on the heartbeat
+      // that is already here.
+      //
+      // A command is handed to the terminal exactly once (PENDING/QUEUED → SENT) and is
+      // never re-delivered, so one that is never acknowledged sits in SENT forever and
+      // the dashboard reads it as "in flight". `processExpiredCommands()` exists for this
+      // but nothing ever calls it — prod had 61 already-expired FACTORY_RESETs (some since
+      // April) still showing as SENT, which makes "the terminal was wiped" and "the command
+      // never landed" look identical.
+      //
+      // Scoped to THIS terminal on purpose: it rides traffic that already exists instead of
+      // a cron sweeping the whole table, it uses the terminalId index the query below
+      // already relies on, and it matches 0 rows on virtually every heartbeat. Each
+      // terminal heals its own backlog the next time it checks in.
+      //
+      // Trade-off: a terminal that never heartbeats again (stolen, dead) keeps its stale
+      // rows. That is the case where nobody is waiting on the status anyway, and a
+      // venue-scoped sweep on the dashboard list can close it if it ever matters.
+      await prisma.tpvCommandQueue.updateMany({
+        where: {
+          terminalId: terminal.id,
+          status: { in: ['SENT', 'RECEIVED', 'EXECUTING'] },
+          expiresAt: { lt: now },
+        },
+        data: {
+          status: 'EXPIRED',
+          resultStatus: 'TIMEOUT',
+          resultMessage: 'Command expired before execution',
+        },
+      })
+
       // Get pending/queued commands that haven't expired
       // Note: Commands are created with status 'QUEUED' when terminal is online,
       // 'PENDING' when terminal is offline. Both should be delivered via heartbeat.
-      const now = new Date()
       const pendingCommands = await prisma.tpvCommandQueue.findMany({
         where: {
           terminalId: terminal.id,
