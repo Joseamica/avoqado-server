@@ -12,6 +12,7 @@ import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { verifyAccessToken } from '../../jwt.service'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
+import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 
 /**
  * Simple deep merge for module config objects.
@@ -121,7 +122,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         createdAt: true,
         lastLoginAt: true,
         organizations: {
-          where: { isActive: true },
+          where: { isActive: true, leftAt: null },
           include: { organization: true },
           // Fetch all active organizations (not just primary) to find OWNER orgs
         },
@@ -669,6 +670,39 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       }
     }
 
+    // WHY: This is a visibility hint, never an authorization cache. Reuse the
+    // same live tenant/entitlement/module/config authority as the endpoint so
+    // hidden or malformed organizations cause no catalog probe in the client.
+    const organizationMemberships = await Promise.all(
+      staff.organizations.map(async membership => {
+        let masterCatalogVisible = false
+        try {
+          const access = await resolveMasterCatalogAccess({
+            organizationId: membership.organizationId,
+            principal: { type: 'HUMAN', staffId: staff.id, impersonating: false },
+            capability: 'READ_CONTENT',
+            requiredGate: 'CORE',
+          })
+          masterCatalogVisible = access.reasonCode === 'ACCESSIBLE' && access.canRead
+        } catch (error) {
+          // WHY: this field is only a fail-closed navigation hint. A catalog
+          // dependency outage must hide that entry, never invalidate the
+          // user's otherwise healthy dashboard session.
+          logger.warn('[AUTH] Master catalog visibility unavailable', {
+            organizationId: membership.organizationId,
+            staffId: staff.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+        return {
+          organizationId: membership.organizationId,
+          organizationName: membership.organization.name,
+          role: membership.role,
+          masterCatalogVisible,
+        }
+      }),
+    )
+
     // Formatear respuesta
     const userPayload = {
       id: staff.id,
@@ -685,6 +719,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       createdAt: staff.createdAt,
       lastLogin: staff.lastLoginAt,
       venues: enrichedVenues, // Use enriched venues with permissions
+      organizationMemberships,
     }
 
     // Disable caching for sensitive auth status data
