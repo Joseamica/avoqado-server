@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import dotenv from 'dotenv'
 import logger from './logger'
+import { dropEmptyValues } from './envHelpers'
 
 // Load .env file FIRST (before any validation)
 dotenv.config()
@@ -190,7 +191,11 @@ const envSchema = z.object({
 // Parse and Validate
 // ============================================================================
 
-const parsed = envSchema.safeParse(process.env)
+// An env var that exists but is empty means "somebody created the key and left it blank",
+// not "the value is an empty string". Zod would treat `SENTRY_DSN=""` as a present string,
+// run `.url()` on it, fail, and hit the `process.exit(1)` below — taking the API down for
+// every venue over an optional variable. See envHelpers.ts for the full rationale.
+const parsed = envSchema.safeParse(dropEmptyValues(process.env))
 
 if (!parsed.success) {
   logger.error('\n❌ ═══════════════════════════════════════════════════════════')
