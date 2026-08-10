@@ -3984,6 +3984,12 @@ model Terminal {
   canDeliverAreaTickets  Boolean           @default(false)
   defaultWorkspace       TerminalWorkspace @default(STANDARD_POS)
 
+  /// Mostrador invertido: el cliente ve la pantalla grande y el cajero trabaja
+  /// en la chica. Es por DISPOSITIVO (así está armado ESE mostrador), no por
+  /// venue. El POS aplica su valor local y sincroniza con este; el dashboard lo
+  /// puede cambiar en remoto.
+  customerDisplayInverted Boolean @default(false)
+
   scaleProfileId String?
   scaleProfile   ScaleProfile? @relation(fields: [scaleProfileId], references: [id], onDelete: SetNull)
 

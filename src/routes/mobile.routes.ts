@@ -28,6 +28,7 @@ import * as discountMobileController from '../controllers/mobile/discount.mobile
 import * as couponMobileController from '../controllers/mobile/coupon.mobile.controller'
 import * as upsellMobileController from '../controllers/mobile/upsell.mobile.controller'
 import { recordUpsellImpressionSchema, convertUpsellImpressionSchema } from '../schemas/dashboard/upsell.schema'
+import { updateDisplayModeSchema } from '../schemas/mobile/tpvSettings.mobile.schema'
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
@@ -1627,6 +1628,16 @@ router.get(
   authenticateTokenMiddleware,
   requireVenueMembership,
   tpvSettingsMobileController.getVenueTpvSettings,
+)
+
+// Mostrador invertido (customer-display grande/chico) — por DISPOSITIVO. El POS
+// aplica su valor local y sincroniza con este; el dashboard lo puede cambiar remoto.
+router.patch(
+  '/venues/:venueId/terminals/:terminalId/display-mode',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(updateDisplayModeSchema),
+  tpvSettingsMobileController.updateDisplayMode,
 )
 
 // ============================================================================
