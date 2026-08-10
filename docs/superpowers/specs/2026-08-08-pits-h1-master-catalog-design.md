@@ -1,5 +1,11 @@
 # PITS H1 — Catálogo maestro corporativo, códigos y precios regionales
 
+> **Enmienda 2026-08-10:** las respuestas directas de PITS posteriores a este diseño sustituyen, para trabajo todavía no implementado de
+> H1B/H1C, las suposiciones sobre EAN-13 obligatorio, múltiples regiones por venue, excepciones locales, receta siempre local, costo siempre
+> calculado y caps 5,000/10,000 como capacidad final. El alcance autorizado mientras llegan las aclaraciones vive en
+> [`2026-08-10-pits-confirmed-foundations-design.md`](./2026-08-10-pits-confirmed-foundations-design.md). Los mecanismos H1A ya entregados
+> no se reinterpretan ni se eliminan sin un plan de migración explícito.
+
 **Fecha:** 2026-08-08 **Estado:** Revisión técnica cerrada — pendiente aprobación formal del usuario y respuestas de PITS para
 rollout/aceptación contractual **Empaquetado comercial:** ENTERPRISE/custom; PITS recibe grant explícito incluido **Rollout operativo:**
 módulo organizacional MASTER_CATALOG, apagado por defecto y con gates separados para H1A/H1B/H1C **Estimación de referencia:** el programa
