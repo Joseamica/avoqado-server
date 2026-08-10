@@ -2,11 +2,15 @@ import { monthlyMrrFromPrice, buildOverviewCounts } from '@/services/superadmin/
 import type { SuperadminVenueSubscription } from '@/services/superadmin/subscription.service'
 import { prismaMock } from '../../../__helpers__/setup'
 import {
+  activateVenuePlan,
+  deactivateVenuePlan,
+  grantVenuePlanTrial,
   getSubscriptionsForSuperadmin,
   getSubscriptionOverview,
   adjustVenuePlanEndDate,
   getVenueSubscription,
 } from '@/services/superadmin/subscription.service'
+import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 
 // Stripe is mocked module-wide; resolve subs/prices deterministically.
 jest.mock('stripe')
@@ -240,6 +244,9 @@ describe('adjustVenuePlanEndDate', () => {
     const Stripe = require('stripe')
     // DB-only plan (no Stripe sub) keeps mapping deterministic — state derived from endDate.
     Stripe.prototype.subscriptions = { retrieve: jest.fn() }
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: never) => Promise<unknown>) => callback(prismaMock as never))
+    prismaMock.venue.findUnique.mockResolvedValue({ id: 'cven1' } as never)
+    prismaMock.feature.findUnique.mockResolvedValue({ id: 'feature-pro', monthlyPrice: 1158.84 } as never)
   })
 
   function planVenueRow(endDate: Date | null) {
@@ -265,7 +272,7 @@ describe('adjustVenuePlanEndDate', () => {
     const newEnd = new Date('2026-07-10T00:00:00.000Z')
     prismaMock.venue.findFirst.mockResolvedValue(planVenueRow(newEnd))
 
-    const row = await adjustVenuePlanEndDate('cven1', 10)
+    const row = await adjustVenuePlanEndDate('cven1', 10, 'staff-1')
 
     expect(prismaMock.venueFeature.update).toHaveBeenCalledWith({
       where: { id: 'vf1' },
@@ -280,7 +287,7 @@ describe('adjustVenuePlanEndDate', () => {
     const newEnd = new Date('2026-06-23T00:00:00.000Z') // -7 days
     prismaMock.venue.findFirst.mockResolvedValue(planVenueRow(newEnd))
 
-    await adjustVenuePlanEndDate('cven1', -7)
+    await adjustVenuePlanEndDate('cven1', -7, 'staff-1')
 
     expect(prismaMock.venueFeature.update).toHaveBeenCalledWith({
       where: { id: 'vf1' },
@@ -293,7 +300,7 @@ describe('adjustVenuePlanEndDate', () => {
     prismaMock.venueFeature.update.mockResolvedValue({ id: 'vf1' })
     prismaMock.venue.findFirst.mockResolvedValue(planVenueRow(new Date()))
 
-    await adjustVenuePlanEndDate('cven1', 5)
+    await adjustVenuePlanEndDate('cven1', 5, 'staff-1')
 
     const arg = prismaMock.venueFeature.update.mock.calls[0][0]
     const days = Math.round((arg.data.endDate.getTime() - Date.now()) / 86400_000)
@@ -302,7 +309,65 @@ describe('adjustVenuePlanEndDate', () => {
 
   it('throws BadRequestError when the venue has no PLAN_PRO feature', async () => {
     prismaMock.venueFeature.findFirst.mockResolvedValue(null)
-    await expect(adjustVenuePlanEndDate('cven1', 10)).rejects.toThrow('El venue no tiene un plan PLAN_PRO')
+    await expect(adjustVenuePlanEndDate('cven1', 10, 'staff-1')).rejects.toThrow('El venue no tiene un plan PLAN_PRO')
     expect(prismaMock.venueFeature.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('audited venue plan mutations', () => {
+  function makeTx() {
+    return {
+      venue: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'cven1' }),
+        findFirst: jest.fn().mockResolvedValue(venueRow()),
+      },
+      feature: { findUnique: jest.fn().mockResolvedValue({ id: 'feature-pro', monthlyPrice: 1158.84 }) },
+      venueFeature: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'vf1', endDate: new Date('2026-06-30T00:00:00.000Z') }),
+        upsert: jest.fn().mockResolvedValue({ id: 'vf1' }),
+        update: jest.fn().mockResolvedValue({ id: 'vf1' }),
+      },
+      activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
+    }
+  }
+
+  it('uses the same transaction client for every plan mutation and its audit row', async () => {
+    const cases = [
+      { run: (actorId: string) => activateVenuePlan('cven1', actorId), action: 'SUPERADMIN_PLAN_ACTIVATED' },
+      { run: (actorId: string) => deactivateVenuePlan('cven1', actorId), action: 'SUPERADMIN_PLAN_DEACTIVATED' },
+      { run: (actorId: string) => grantVenuePlanTrial('cven1', 14, actorId), action: 'SUPERADMIN_PLAN_TRIAL_GRANTED' },
+      { run: (actorId: string) => adjustVenuePlanEndDate('cven1', 5, actorId), action: 'SUPERADMIN_PLAN_ENDDATE_ADJUSTED' },
+    ]
+
+    for (const testCase of cases) {
+      const tx = makeTx()
+      prismaMock.$transaction.mockImplementationOnce(async (callback: (client: never) => Promise<unknown>) => callback(tx as never))
+
+      await testCase.run(MASTER_ADMIN_PRINCIPAL_ID)
+
+      expect(tx.activityLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          staffId: null,
+          venueId: 'cven1',
+          action: testCase.action,
+          data: expect.objectContaining({ unknownStaffId: MASTER_ADMIN_PRINCIPAL_ID }),
+        }),
+      })
+    }
+
+    expect(prismaMock.venueFeature.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.venueFeature.update).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('rejects the transaction when the audit write fails', async () => {
+    const tx = makeTx()
+    tx.activityLog.create.mockRejectedValueOnce(new Error('audit unavailable'))
+    prismaMock.$transaction.mockImplementationOnce(async (callback: (client: never) => Promise<unknown>) => callback(tx as never))
+
+    await expect(activateVenuePlan('cven1', 'staff-1')).rejects.toThrow('audit unavailable')
+
+    expect(tx.venueFeature.upsert).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
   })
 })

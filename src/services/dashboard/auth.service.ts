@@ -12,6 +12,7 @@ import { getPrimaryOrganizationId, hasOrganizationAccess } from '../staffOrganiz
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from './venueRoleConfig.dashboard.service'
+import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
@@ -73,6 +74,7 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
     // superadmin audit view. Fire-and-forget: never blocks the auth path. Mirrors the
     // MASTER_LOGIN_FAILED write the TPV master login already does.
     void logAction({
+      staffId: MASTER_ADMIN_PRINCIPAL_ID,
       venueId: null,
       action: 'MASTER_LOGIN_FAILED',
       entity: 'Dashboard',
@@ -106,16 +108,17 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
 
   // Generate JWT tokens with SUPERADMIN role
   const accessToken = jwtService.generateAccessToken(
-    'MASTER_ADMIN',
+    MASTER_ADMIN_PRINCIPAL_ID,
     firstVenue.organizationId || firstVenue.id,
     firstVenue.id,
     StaffRole.SUPERADMIN,
     rememberMe,
   )
-  const refreshToken = jwtService.generateRefreshToken('MASTER_ADMIN', firstVenue.organizationId || firstVenue.id, rememberMe)
+  const refreshToken = jwtService.generateRefreshToken(MASTER_ADMIN_PRINCIPAL_ID, firstVenue.organizationId || firstVenue.id, rememberMe)
 
   // Audit log for successful master login
   logAction({
+    staffId: MASTER_ADMIN_PRINCIPAL_ID,
     venueId: firstVenue.id,
     action: 'MASTER_LOGIN_SUCCESS',
     entity: 'Dashboard',
@@ -134,7 +137,7 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
     accessToken,
     refreshToken,
     staff: {
-      id: 'MASTER_ADMIN',
+      id: MASTER_ADMIN_PRINCIPAL_ID,
       email: MASTER_LOGIN_EMAIL,
       firstName: 'Master',
       lastName: 'Admin',

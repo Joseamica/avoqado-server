@@ -7,6 +7,7 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
 import { getRoleDisplayName, DEFAULT_ROLE_DISPLAY_NAMES } from '../dashboard/venueRoleConfig.dashboard.service'
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
+import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 
 const TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30 // 30 days
 
@@ -474,6 +475,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
 
     // Audit log for security monitoring
     logAction({
+      staffId: MASTER_ADMIN_PRINCIPAL_ID,
       venueId,
       action: 'MASTER_LOGIN_FAILED',
       entity: 'Terminal',
@@ -534,8 +536,8 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
   // Generate JWT tokens with SUPERADMIN role
   const correlationId = uuidv4()
   const tokenPayload = {
-    userId: 'MASTER_ADMIN',
-    staffId: 'MASTER_ADMIN',
+    userId: MASTER_ADMIN_PRINCIPAL_ID,
+    staffId: MASTER_ADMIN_PRINCIPAL_ID,
     venueId: venue.id,
     orgId: venue.organizationId || venue.id,
     role: StaffRole.SUPERADMIN,
@@ -549,6 +551,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
 
   // Audit log for successful master login
   logAction({
+    staffId: MASTER_ADMIN_PRINCIPAL_ID,
     venueId,
     action: 'MASTER_LOGIN_SUCCESS',
     entity: 'Terminal',
@@ -565,8 +568,8 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
 
   return {
     // Staff-like structure for TPV compatibility
-    id: 'MASTER_ADMIN',
-    staffId: 'MASTER_ADMIN',
+    id: MASTER_ADMIN_PRINCIPAL_ID,
+    staffId: MASTER_ADMIN_PRINCIPAL_ID,
     venueId: venue.id,
     role: 'SUPERADMIN',
     roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
@@ -576,7 +579,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
     averageRating: 0,
     totalOrders: 0,
     staff: {
-      id: 'MASTER_ADMIN',
+      id: MASTER_ADMIN_PRINCIPAL_ID,
       firstName: 'Master',
       lastName: 'Admin',
       email: 'master@avoqado.io',

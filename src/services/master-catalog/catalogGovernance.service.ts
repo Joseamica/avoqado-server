@@ -4,6 +4,7 @@ import type { CatalogActor, MasterCatalogModuleConfigV1 } from '../../types/mast
 import { writeCatalogAudit } from './catalogAudit.service'
 import { acquireCatalogGovernanceVenueFence, type CatalogGovernanceVenueFence } from './catalogGovernanceFence.service'
 import { MASTER_CATALOG_FEATURE_CODE, resolveMasterCatalogAccess } from './masterCatalogAccess.service'
+import { MASTER_ADMIN_PRINCIPAL_ID } from '../../lib/authPrincipals'
 
 type GovernanceTransaction = Prisma.TransactionClient
 
@@ -92,7 +93,9 @@ export function resolveLegacyCatalogActor(staffId: string, impersonating: boolea
   // WHY: Break-glass master tokens use a stable synthetic subject and have no
   // Staff row. Classifying that exact identity as SERVICE prevents FK writes
   // while preserving immutable provenance through the catalog audit.
-  if (staffId === 'MASTER_ADMIN') return { type: 'SERVICE', servicePrincipalId: 'MASTER_ADMIN' }
+  if (staffId === MASTER_ADMIN_PRINCIPAL_ID) {
+    return { type: 'SERVICE', servicePrincipalId: MASTER_ADMIN_PRINCIPAL_ID }
+  }
   return { type: 'HUMAN', staffId, impersonating }
 }
 

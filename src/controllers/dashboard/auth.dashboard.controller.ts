@@ -11,6 +11,7 @@ import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/perm
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { verifyAccessToken } from '../../jwt.service'
+import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 
 /**
  * Simple deep merge for module config objects.
@@ -196,7 +197,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
 
     if (!staff) {
       // 🔐 Special handling for Master TOTP login (synthetic SUPERADMIN user)
-      if (decoded.sub === 'MASTER_ADMIN') {
+      if (decoded.sub === MASTER_ADMIN_PRINCIPAL_ID) {
         logger.info('🔐 [AUTH STATUS] Master Admin session detected')
 
         // Fetch ALL venues for SUPERADMIN access
@@ -276,7 +277,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         return res.status(200).json({
           authenticated: true,
           user: {
-            id: 'MASTER_ADMIN',
+            id: MASTER_ADMIN_PRINCIPAL_ID,
             firstName: 'Master',
             lastName: 'Admin',
             email: process.env.MASTER_LOGIN_EMAIL || 'master@avoqado.io',

@@ -3,8 +3,12 @@ import { MASTER_ADMIN_PRINCIPAL_ID } from './authPrincipals'
 
 const ACTOR_SENTINELS = new Set(['SYSTEM', 'CUSTOMER', 'PUBLIC', 'WEBHOOK', MASTER_ADMIN_PRINCIPAL_ID])
 
+function isInputJsonObject(data: Prisma.InputJsonValue | undefined): data is Prisma.InputJsonObject {
+  return data !== null && typeof data === 'object' && !Array.isArray(data)
+}
+
 function withUnknownStaffId(data: Prisma.InputJsonValue | undefined, unknownStaffId: string): Prisma.InputJsonObject {
-  const existing = data !== null && typeof data === 'object' && !Array.isArray(data) ? data : data === undefined ? {} : { legacyData: data }
+  const existing = isInputJsonObject(data) ? data : data === undefined ? {} : { legacyData: data }
   return { ...existing, unknownStaffId }
 }
 
