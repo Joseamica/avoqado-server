@@ -26,13 +26,14 @@ import { validateCatalogPublicationAppliedResultTx } from './catalogPublicationR
 import { applyCatalogProductActivationTx } from './catalogPublicationActivation.service'
 import { applyCatalogPublicationReversionsTx, projectCatalogPublicationReversion } from './catalogPublicationReversion.service'
 import { revalidateLockedCatalogPublicationReversionsTx } from './catalogPublicationReversionAuthority.service'
+import {
+  acquireCatalogPublicationAttemptLockTx,
+  CATALOG_PUBLICATION_TRANSACTION_OPTIONS,
+  isSupportedCatalogPublicationOperation,
+  retryCatalogPublicationReservationOnce,
+} from './catalogPublicationAttempt.service'
 
-const SUPPORTED_OPERATIONS = new Set<CatalogPublicationOperation>([
-  'CATALOG_FIELDS_PUBLISH',
-  'CATALOG_PRODUCT_ACTIVATION',
-  'CATALOG_FIELDS_REVERSION',
-])
-const TRANSACTION_OPTIONS = { maxWait: 5_000, timeout: 90_000, isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+export { acquireCatalogPublicationAttemptLockTx } from './catalogPublicationAttempt.service'
 
 type BatchAuthority = CatalogPublicationBatchAuthority
 
@@ -140,17 +141,6 @@ async function defaultAssertAccessTx(tx: Prisma.TransactionClient, context: Cata
     throw new ServiceUnavailableError('No fue posible revalidar Catalog Core', 'DEPENDENCY_UNAVAILABLE')
   }
   if (!access.canMutateContent) throw new ForbiddenError('No puedes confirmar esta publicación')
-}
-
-export async function acquireCatalogPublicationAttemptLockTx(
-  tx: Prisma.TransactionClient,
-  organizationId: string,
-  batchId: string,
-): Promise<void> {
-  // WHY: Confirmation and watchdog share this versioned lock so an expired-attempt CAS and a live APPLIED CAS cannot both win.
-  await tx.$executeRaw(Prisma.sql`
-    SELECT pg_advisory_xact_lock(hashtextextended(${`h1a:catalog-publication-attempt:v1:${organizationId}:${batchId}`}, 0))
-  `)
 }
 
 const defaults: ConfirmationDependencies = {
@@ -277,90 +267,92 @@ export function createCatalogPublicationConfirmationService(overrides: Partial<C
       }
       const staffId = context.actor.staffId
 
-      const reservation = await dependencies.prisma.$transaction(async tx => {
-        await dependencies.assertAccessTx(tx, context)
-        await dependencies.acquireAttemptLockTx(tx, context.organizationId, input.publicationBatchId)
-        const batch = (await tx.catalogPublicationBatch.findFirst({
-          where: { id: input.publicationBatchId, organizationId: context.organizationId },
-        })) as BatchAuthority | null
-        if (!batch) throw new NotFoundError('Preview de publicación no encontrado')
-        if (!SUPPORTED_OPERATIONS.has(batch.operation as CatalogPublicationOperation)) {
-          throw new AppError('Operación de publicación no soportada.', 422, true, 'CATALOG_PUBLICATION_OPERATION_UNSUPPORTED')
-        }
-        const record = (await tx.catalogIdempotencyRecord.findUnique({
-          where: {
-            organizationId_operation_idempotencyKey: {
+      const reserve = () =>
+        dependencies.prisma.$transaction(async tx => {
+          await dependencies.assertAccessTx(tx, context)
+          await dependencies.acquireAttemptLockTx(tx, context.organizationId, input.publicationBatchId)
+          const batch = (await tx.catalogPublicationBatch.findFirst({
+            where: { id: input.publicationBatchId, organizationId: context.organizationId },
+          })) as BatchAuthority | null
+          if (!batch) throw new NotFoundError('Preview de publicación no encontrado')
+          if (!isSupportedCatalogPublicationOperation(batch.operation)) {
+            throw new AppError('Operación de publicación no soportada.', 422, true, 'CATALOG_PUBLICATION_OPERATION_UNSUPPORTED')
+          }
+          const record = (await tx.catalogIdempotencyRecord.findUnique({
+            where: {
+              organizationId_operation_idempotencyKey: {
+                organizationId: context.organizationId,
+                operation: batch.operation,
+                idempotencyKey: input.idempotencyKey,
+              },
+            },
+          })) as unknown as Record<string, unknown> | null
+          if (!record) stale('La key ya no pertenece a este preview.')
+          assertDual(batch, record, context)
+          if (!previewTokenMatches(batch.previewTokenHash, input.previewToken)) stale('El token de preview no coincide.')
+          if (batch.state === 'APPLIED') {
+            let durableResultsMatch = false
+            try {
+              durableResultsMatch = canonicalJsonV1(batch.result) === canonicalJsonV1(record.result)
+            } catch {
+              durableResultsMatch = false
+            }
+            if (!durableResultsMatch) {
+              throw new ConflictError('Resultado durable inválido.', 'CATALOG_PUBLICATION_RESULT_INVALID')
+            }
+            const result = await validateCatalogPublicationAppliedResultTx(tx, {
+              organizationId: context.organizationId,
+              publicationBatchId: batch.id,
+              operation: batch.operation as CatalogPublicationOperation,
+              recordResult: record.result,
+              batchResult: batch.result,
+            })
+            return { kind: 'done' as const, result }
+          }
+          if (batch.state === 'APPLYING') {
+            const retryAfterSeconds = Math.max(
+              0,
+              Math.min(
+                60,
+                Math.ceil(((batch.leaseExpiresAt?.getTime() ?? dependencies.now().getTime()) - dependencies.now().getTime()) / 1_000),
+              ),
+            )
+            return {
+              kind: 'done' as const,
+              result: {
+                publicationBatchId: batch.id,
+                operation: batch.operation as CatalogPublicationOperation,
+                state: 'IN_PROGRESS' as const,
+                retryAfterSeconds,
+              },
+            }
+          }
+          if (batch.state !== 'PREVIEWED') {
+            throw new ConflictError('El preview requiere una key nueva.', 'CATALOG_PUBLICATION_NEW_PREVIEW_REQUIRED')
+          }
+          const startedAt = dependencies.now()
+          if (batch.previewExpiresAt.getTime() <= startedAt.getTime()) stale('El preview expiró.')
+          const attemptId = dependencies.randomAttemptId()
+          const leaseExpiresAt = new Date(startedAt.getTime() + 120_000)
+          const batchReserved = await tx.catalogPublicationBatch.updateMany({
+            where: { id: batch.id, organizationId: context.organizationId, state: 'PREVIEWED' },
+            data: { state: 'APPLYING', attemptId, leaseExpiresAt, heartbeatAt: startedAt },
+          })
+          const recordReserved = await tx.catalogIdempotencyRecord.updateMany({
+            where: {
               organizationId: context.organizationId,
               operation: batch.operation,
               idempotencyKey: input.idempotencyKey,
+              state: 'PREVIEWED',
             },
-          },
-        })) as unknown as Record<string, unknown> | null
-        if (!record) stale('La key ya no pertenece a este preview.')
-        assertDual(batch, record, context)
-        if (!previewTokenMatches(batch.previewTokenHash, input.previewToken)) stale('El token de preview no coincide.')
-        if (batch.state === 'APPLIED') {
-          let durableResultsMatch = false
-          try {
-            durableResultsMatch = canonicalJsonV1(batch.result) === canonicalJsonV1(record.result)
-          } catch {
-            durableResultsMatch = false
-          }
-          if (!durableResultsMatch) {
-            throw new ConflictError('Resultado durable inválido.', 'CATALOG_PUBLICATION_RESULT_INVALID')
-          }
-          const result = await validateCatalogPublicationAppliedResultTx(tx, {
-            organizationId: context.organizationId,
-            publicationBatchId: batch.id,
-            operation: batch.operation as CatalogPublicationOperation,
-            recordResult: record.result,
-            batchResult: batch.result,
+            data: { state: 'APPLYING', attemptId, leaseExpiresAt, heartbeatAt: startedAt },
           })
-          return { kind: 'done' as const, result }
-        }
-        if (batch.state === 'APPLYING') {
-          const retryAfterSeconds = Math.max(
-            0,
-            Math.min(
-              60,
-              Math.ceil(((batch.leaseExpiresAt?.getTime() ?? dependencies.now().getTime()) - dependencies.now().getTime()) / 1_000),
-            ),
-          )
-          return {
-            kind: 'done' as const,
-            result: {
-              publicationBatchId: batch.id,
-              operation: batch.operation as CatalogPublicationOperation,
-              state: 'IN_PROGRESS' as const,
-              retryAfterSeconds,
-            },
+          if (batchReserved.count !== 1 || recordReserved.count !== 1) {
+            throw new ConflictError('Otro confirm adquirió el preview.', 'CATALOG_PUBLICATION_IN_PROGRESS')
           }
-        }
-        if (batch.state !== 'PREVIEWED') {
-          throw new ConflictError('El preview requiere una key nueva.', 'CATALOG_PUBLICATION_NEW_PREVIEW_REQUIRED')
-        }
-        const startedAt = dependencies.now()
-        if (batch.previewExpiresAt.getTime() <= startedAt.getTime()) stale('El preview expiró.')
-        const attemptId = dependencies.randomAttemptId()
-        const leaseExpiresAt = new Date(startedAt.getTime() + 120_000)
-        const batchReserved = await tx.catalogPublicationBatch.updateMany({
-          where: { id: batch.id, organizationId: context.organizationId, state: 'PREVIEWED' },
-          data: { state: 'APPLYING', attemptId, leaseExpiresAt, heartbeatAt: startedAt },
-        })
-        const recordReserved = await tx.catalogIdempotencyRecord.updateMany({
-          where: {
-            organizationId: context.organizationId,
-            operation: batch.operation,
-            idempotencyKey: input.idempotencyKey,
-            state: 'PREVIEWED',
-          },
-          data: { state: 'APPLYING', attemptId, leaseExpiresAt, heartbeatAt: startedAt },
-        })
-        if (batchReserved.count !== 1 || recordReserved.count !== 1) {
-          throw new ConflictError('Otro confirm adquirió el preview.', 'CATALOG_PUBLICATION_IN_PROGRESS')
-        }
-        return { kind: 'reserved' as const, batch, attemptId, leaseExpiresAt }
-      }, TRANSACTION_OPTIONS)
+          return { kind: 'reserved' as const, batch, attemptId, leaseExpiresAt }
+        }, CATALOG_PUBLICATION_TRANSACTION_OPTIONS)
+      const reservation = await retryCatalogPublicationReservationOnce(reserve)
       if (reservation.kind === 'done') return reservation.result
 
       return dependencies.prisma.$transaction(async tx => {
@@ -484,7 +476,7 @@ export function createCatalogPublicationConfirmationService(overrides: Partial<C
           throw new ConflictError('La confirmación perdió su CAS.', 'CATALOG_PUBLICATION_STATE_CONFLICT')
         }
         return result
-      }, TRANSACTION_OPTIONS)
+      }, CATALOG_PUBLICATION_TRANSACTION_OPTIONS)
     },
   }
 }

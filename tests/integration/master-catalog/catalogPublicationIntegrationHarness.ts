@@ -11,6 +11,8 @@ export interface CatalogPublicationFixture {
   productId: string
   catalogItemId: string
   bindingId: string
+  moduleId: string
+  ownsModule: boolean
 }
 
 export interface CatalogPublicationIntegrationHarness {
@@ -101,7 +103,25 @@ export async function createCatalogPublicationFixture(client: PrismaClient, suit
   const staffId = `h1a-pub-staff-${key}`
   const catalogItemId = `h1a-pub-item-${key}`
   const sku = `H1A-PUB-${key}`.toUpperCase()
-  const module = await client.module.findUniqueOrThrow({ where: { code: 'MASTER_CATALOG' }, select: { id: true } })
+  const existingModule = await client.module.findUnique({ where: { code: 'MASTER_CATALOG' }, select: { id: true } })
+  const module =
+    existingModule ??
+    (await client.module.create({
+      data: {
+        code: 'MASTER_CATALOG',
+        name: 'Master Catalog H1A publication integration',
+        description: 'Disposable definition-only module for publication integration.',
+        scope: 'ORGANIZATION_ONLY',
+        defaultConfig: {
+          schemaVersion: 1,
+          catalogCoreEnabled: false,
+          identifiersEnabled: false,
+          regionalPricingEnabled: false,
+          governanceMode: 'ADVISORY',
+        },
+      },
+      select: { id: true },
+    }))
 
   await client.organization.create({
     data: { id: organizationId, name: `H1A publication ${key}`, email: `${key}@example.test`, phone: '5500000000' },
@@ -287,6 +307,8 @@ export async function createCatalogPublicationFixture(client: PrismaClient, suit
     productId: product.id,
     catalogItemId,
     bindingId: binding.id,
+    moduleId: module.id,
+    ownsModule: existingModule === null,
   }
 }
 
@@ -299,4 +321,14 @@ export async function cleanupCatalogPublicationFixture(client: PrismaClient, fix
   await client.venue.deleteMany({ where: { id: fixture.venueId, organizationId: fixture.organizationId } })
   await client.organization.deleteMany({ where: { id: fixture.organizationId } })
   await client.staff.deleteMany({ where: { id: fixture.staffId } })
+  // WHY: Several fixtures can share the one test-only module. The last cleanup owns deletion, independent of fixture cleanup order.
+  await client.module.deleteMany({
+    where: {
+      id: fixture.moduleId,
+      code: 'MASTER_CATALOG',
+      description: 'Disposable definition-only module for publication integration.',
+      organizationModules: { none: {} },
+      venueModules: { none: {} },
+    },
+  })
 }

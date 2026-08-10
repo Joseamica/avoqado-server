@@ -427,7 +427,9 @@ describe('CatalogItem complete aggregate — real command and transaction', () =
     }
 
     expect(transactionError).toBeDefined()
-    expect(JSON.stringify(transactionError)).toContain('CatalogItem_relational_baseline_check')
+    expect(transactionError instanceof Error ? transactionError.message : String(transactionError)).toContain(
+      'CatalogItem must have at least one CatalogItemBusinessType',
+    )
     await expect(client.catalogItem.count({ where: { organizationId, normalizedSku: sku } })).resolves.toBe(0)
     await expect(client.activityLog.count({ where: { organizationId, entityId: createdId } })).resolves.toBe(0)
   })
@@ -459,7 +461,9 @@ describe('CatalogItem complete aggregate — real command and transaction', () =
     }
 
     expect(transactionError).toBeDefined()
-    expect(JSON.stringify(transactionError)).toContain('CatalogItem_corporate_sku_projection_check')
+    expect(transactionError instanceof Error ? transactionError.message : String(transactionError)).toContain(
+      'CORPORATE_SKU normalizedCode must equal CatalogItem.normalizedSku',
+    )
     await expect(client.catalogItem.count({ where: { organizationId, normalizedSku: sku } })).resolves.toBe(0)
     await expect(client.activityLog.count({ where: { organizationId, entityId: createdId } })).resolves.toBe(0)
   })

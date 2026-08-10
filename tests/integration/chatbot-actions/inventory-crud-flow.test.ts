@@ -312,6 +312,7 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
           gtin: '7501234567890',
           categoryId: 'category-bebidas',
         }),
+        { type: 'HUMAN', staffId: USER_ID, impersonating: false },
       )
     })
 
@@ -365,6 +366,7 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
           price: 50,
           categoryId: 'category-bebidas',
         }),
+        { type: 'HUMAN', staffId: USER_ID, impersonating: false },
       )
     })
 

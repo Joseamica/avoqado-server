@@ -55,7 +55,7 @@ export async function createCatalogBindingWriterHarness(input: {
   })
 
   async function waitForBothAdvisoryWaiters(): Promise<void> {
-    const deadline = Date.now() + 4_000
+    const deadline = Date.now() + 15_000
     let lastObserved: Array<{ applicationName: string; pid: number }> = []
 
     // WHY: Seeing both named writer pools in PostgreSQL's advisory-lock wait

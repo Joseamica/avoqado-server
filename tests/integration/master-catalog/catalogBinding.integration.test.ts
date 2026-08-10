@@ -338,6 +338,7 @@ describe('catalog binding — real PostgreSQL transaction', () => {
     })
     const productId = result.lines[0]?.productId as string
     const product = await client.product.findUniqueOrThrow({ where: { id: productId } })
+    const provenance = await client.product.findUniqueOrThrow({ where: { id: productId }, select: { createdById: true } })
 
     expect(product).toEqual(
       expect.objectContaining({
@@ -347,11 +348,11 @@ describe('catalog binding — real PostgreSQL transaction', () => {
         sku: `LOCAL-${fixtureKey}`.toUpperCase(),
         gtin: null,
         active: false,
-        createdById: staffId,
         tags: [],
         allergens: [],
       }),
     )
+    expect(provenance).toEqual({ createdById: staffId })
     expect(product.price.toFixed(2)).toBe('20.00')
     expect(product.cost?.toFixed(2)).toBe('12.50')
     await expect(

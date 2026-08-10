@@ -354,7 +354,7 @@ describe('catalog import — real PostgreSQL preview and atomic confirmation', (
 
     const applied = await service.confirm(context, confirmInput)
     await expect(service.confirm(context, confirmInput)).resolves.toEqual(applied)
-    await expect(db().catalogItem.count({ where: { organizationId, normalizedSku: sku } })).resolves.toBe(1)
+    await expect(db().catalogItem.count({ where: { organizationId, normalizedSku: sku.toUpperCase() } })).resolves.toBe(1)
     await expect(
       db().catalogIdempotencyRecord.count({ where: { organizationId, operation: 'CATALOG_IMPORT', idempotencyKey: `key-${sku}` } }),
     ).resolves.toBe(1)
@@ -410,7 +410,7 @@ describe('catalog import — real PostgreSQL preview and atomic confirmation', (
       secondService.confirm(context, confirmInput),
     ])
     expect(second).toEqual(first)
-    await expect(db().catalogItem.count({ where: { organizationId, normalizedSku: sku } })).resolves.toBe(1)
+    await expect(db().catalogItem.count({ where: { organizationId, normalizedSku: sku.toUpperCase() } })).resolves.toBe(1)
     await expect(
       db().catalogIdempotencyRecord.count({ where: { organizationId, operation: 'CATALOG_IMPORT', idempotencyKey: `key-${sku}` } }),
     ).resolves.toBe(1)

@@ -75,6 +75,11 @@ function sequenceId(organizationId: string, venueId: string): string {
   return `catalog-seq-${createHash('sha256').update(`${organizationId}\u0000${venueId}`).digest('hex').slice(0, 24)}`
 }
 
+function utcTimestampSql(value: Date): Prisma.Sql {
+  // WHY: These legacy Prisma DateTime columns are timestamp-without-time-zone. Raw Date parameters are timestamptz and shift in non-UTC DB sessions.
+  return Prisma.sql`${value.toISOString()}::timestamp`
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -250,7 +255,7 @@ export async function enqueueCatalogPublicationOutboxTx(
   const randomId = input.randomId ?? cuid
   const now = input.now ?? new Date()
   const requested = venueIds.map(
-    venueId => Prisma.sql`(${sequenceId(input.organizationId, venueId)}, ${input.organizationId}, ${venueId}, 1::bigint)`,
+    venueId => Prisma.sql`(${sequenceId(input.organizationId, venueId)}, ${input.organizationId}, ${venueId}, 1::bigint, ${now}, ${now})`,
   )
   // WHY: Sequence issuance locks/upserts every affected venue in ordinal order;
   // retries reuse outbox IDs and never mint a later event ahead of an earlier one.
@@ -380,6 +385,8 @@ export function createCatalogPublicationOutboxService(overrides: Partial<OutboxD
       const limit = Math.max(1, Math.min(MAX_CLAIM, input.limit ?? MAX_CLAIM))
       const claimedAt = dependencies.now()
       const claimExpiresAt = new Date(claimedAt.getTime() + CLAIM_LEASE_MS)
+      const claimedAtSql = utcTimestampSql(claimedAt)
+      const claimExpiresAtSql = utcTimestampSql(claimExpiresAt)
       const claimed = await dependencies.prisma.$transaction(async tx => {
         // WHY: NOT EXISTS enforces venue order while SKIP LOCKED gives workers
         // disjoint claims; one venue can expose only its earliest undelivered row.
@@ -388,8 +395,8 @@ export function createCatalogPublicationOutboxService(overrides: Partial<OutboxD
             SELECT candidate.id
             FROM "CatalogPublicationOutbox" AS candidate
             WHERE candidate.status = 'PENDING'
-              AND candidate."nextAttemptAt" <= ${claimedAt}
-              AND (candidate."claimExpiresAt" IS NULL OR candidate."claimExpiresAt" <= ${claimedAt})
+              AND candidate."nextAttemptAt" <= ${claimedAtSql}
+              AND (candidate."claimExpiresAt" IS NULL OR candidate."claimExpiresAt" <= ${claimedAtSql})
               AND NOT EXISTS (
                 SELECT 1 FROM "CatalogPublicationOutbox" AS earlier
                 WHERE earlier."organizationId" = candidate."organizationId"
@@ -402,7 +409,7 @@ export function createCatalogPublicationOutboxService(overrides: Partial<OutboxD
             FOR UPDATE SKIP LOCKED
           )
           UPDATE "CatalogPublicationOutbox" AS outbox
-          SET "claimedBy" = ${input.workerId}, "claimedAt" = ${claimedAt}, "claimExpiresAt" = ${claimExpiresAt},
+          SET "claimedBy" = ${input.workerId}, "claimedAt" = ${claimedAtSql}, "claimExpiresAt" = ${claimExpiresAtSql},
               attempts = outbox.attempts + 1, "updatedAt" = CURRENT_TIMESTAMP
           FROM candidates
           WHERE outbox.id = candidates.id

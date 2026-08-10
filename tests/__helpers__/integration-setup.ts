@@ -62,5 +62,13 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
 
 console.log('Integration test setup loaded (using REAL Prisma client)')
 
+if (typeof afterAll === 'function') {
+  afterAll(async () => {
+    // WHY: Jest creates a fresh module registry per integration file; without teardown, each imported singleton leaves its own pool alive.
+    const { default: prisma } = await import('@/utils/prismaClient')
+    if (typeof prisma.$disconnect === 'function') await prisma.$disconnect()
+  })
+}
+
 // Note: We do NOT mock Prisma for integration tests
 // Integration tests use the real Prisma client to test actual database operations

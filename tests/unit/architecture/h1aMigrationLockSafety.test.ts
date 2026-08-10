@@ -103,6 +103,17 @@ describe('H1A migration lock-safety architecture', () => {
     expect(source.match(/await releaseHarnessLock\(harnessLock\)/g)).toHaveLength(2)
     expect(resetBody).not.toMatch(/pg_try_advisory_lock|pg_advisory_unlock/)
   })
+
+  it('waits a bounded interval for prior test sessions to leave without terminating them', () => {
+    const source = fs.readFileSync(migrationHarness, 'utf8')
+    const resetBody = source.match(/async function resetDatabase[\s\S]*?\n}\n/)?.[0]
+
+    expect(source).toMatch(/async function waitForDatabaseQuiescence\(/)
+    expect(source).toMatch(/DATABASE_QUIESCENCE_TIMEOUT_MS\s*=\s*5_000/)
+    expect(source).toMatch(/DATABASE_QUIESCENCE_POLL_MS\s*=\s*50/)
+    expect(resetBody).toMatch(/await waitForDatabaseQuiescence\(databaseName, harnessLock\)/)
+    expect(source).not.toMatch(/pg_terminate_backend/)
+  })
   it('scrubs Render selectors before spawning any disposable-database command', () => {
     const probe = spawnSync(
       process.execPath,

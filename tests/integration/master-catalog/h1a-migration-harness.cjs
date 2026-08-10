@@ -10,6 +10,8 @@ const migrationsRoot = path.join(repoRoot, 'prisma/migrations')
 const fixturePath = path.join(repoRoot, 'tests/fixtures/master-catalog/h1a-legacy-graph.sql')
 const cutoff = '20260808010000_add_cash_reconciliation_opt_in'
 const rejectedMonolith = '20260808120000_add_master_catalog_core'
+const DATABASE_QUIESCENCE_TIMEOUT_MS = 5_000
+const DATABASE_QUIESCENCE_POLL_MS = 50
 const h1aChain = [
   '20260808120000_add_h1a_catalog_types',
   '20260808120100_add_h1a_activity_log_columns',
@@ -319,6 +321,21 @@ async function releaseHarnessLock(client) {
   await client.end().catch(() => undefined)
 }
 
+async function waitForDatabaseQuiescence(databaseName, harnessLock) {
+  const deadline = Date.now() + DATABASE_QUIESCENCE_TIMEOUT_MS
+  let activeCount = 0
+
+  do {
+    const active = await harnessLock.query(`SELECT COUNT(*)::int AS count FROM pg_stat_activity WHERE datname = $1`, [databaseName])
+    activeCount = active.rows[0]?.count ?? 0
+    if (activeCount === 0) return
+    if (Date.now() >= deadline) break
+    await delay(DATABASE_QUIESCENCE_POLL_MS)
+  } while (true)
+
+  throw new Error(`H1 replay refuses reset while ${activeCount} session(s) use the database`)
+}
+
 async function resetDatabase(url, harnessLock) {
   const databaseName = url.pathname.slice(1)
 
@@ -337,10 +354,7 @@ async function resetDatabase(url, harnessLock) {
 
   // The caller owns this maintenance session for its entire replay. Keeping
   // the session lock outside reset closes the zero-session copy/deploy window.
-  const active = await harnessLock.query(`SELECT COUNT(*)::int AS count FROM pg_stat_activity WHERE datname = $1`, [databaseName])
-  if (active.rows[0]?.count !== 0) {
-    throw new Error(`H1 replay refuses reset while ${active.rows[0]?.count} session(s) use the database`)
-  }
+  await waitForDatabaseQuiescence(databaseName, harnessLock)
 
   await harnessLock.query(`DROP DATABASE IF EXISTS "avoqado_h1a_test_20260808"`)
   await harnessLock.query(`CREATE DATABASE "avoqado_h1a_test_20260808"`)

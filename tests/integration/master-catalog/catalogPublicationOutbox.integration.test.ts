@@ -56,6 +56,11 @@ beforeAll(async () => {
     '@/services/master-catalog/catalogPublicationConfirmation.service'
   ))
   ;({ createCatalogPublicationOutboxService: createOutbox } = await import('@/services/master-catalog/catalogPublicationOutbox.service'))
+  // WHY: Focused reruns share this disposable database. Quarantine only stale global-worker residue before creating this suite's fixtures.
+  await h().primary.catalogPublicationOutbox.updateMany({
+    where: { status: 'PENDING' },
+    data: { nextAttemptAt: new Date('2200-01-01T00:00:00.000Z') },
+  })
 })
 
 afterAll(async () => {
@@ -80,13 +85,24 @@ describe('CatalogPublicationOutbox — real claim and CAS', () => {
     const firstBatch = await publish(fixture, 'first')
     const secondBatch = await publish(fixture, 'second')
     const emitted: Array<{ eventId: string; venueSequence: string }> = []
+    const sweepAt = new Date(Date.now() + 60_000)
     const outbox = createOutbox({
       prisma: h().primary as never,
       emit: async event => {
         emitted.push({ eventId: event.eventId, venueSequence: event.venueSequence })
       },
-      now: () => new Date('2026-08-09T20:00:00.000Z'),
+      now: () => sweepAt,
     })
+
+    const pending = await h().primary.catalogPublicationOutbox.findMany({
+      where: { organizationId: fixture.organizationId, venueId: fixture.venueId },
+      select: { batchId: true, status: true, nextAttemptAt: true, claimExpiresAt: true, venueSequence: true },
+      orderBy: { venueSequence: 'asc' },
+    })
+    expect(pending.map(row => ({ ...row, nextAttemptAt: row.nextAttemptAt.getTime() <= sweepAt.getTime() }))).toEqual([
+      { batchId: firstBatch, status: 'PENDING', nextAttemptAt: true, claimExpiresAt: null, venueSequence: 1n },
+      { batchId: secondBatch, status: 'PENDING', nextAttemptAt: true, claimExpiresAt: null, venueSequence: 2n },
+    ])
 
     await expect(outbox.sweepOnce({ workerId: 'ordered-worker', limit: 100 })).resolves.toEqual({
       claimed: 1,
@@ -115,7 +131,7 @@ describe('CatalogPublicationOutbox — real claim and CAS', () => {
     const fixture = await newFixture('claim-race')
     await publish(fixture, 'only')
     const emitted: string[] = []
-    const now = new Date('2026-08-09T20:01:00.000Z')
+    const now = new Date(Date.now() + 60_000)
     let deliveryStarted!: () => void
     let releaseDelivery!: () => void
     const claimedLeaseVisible = new Promise<void>(resolve => (deliveryStarted = resolve))
@@ -159,7 +175,7 @@ describe('CatalogPublicationOutbox — real claim and CAS', () => {
     const batchId = await publish(fixture, 'retry')
     const emitted: string[] = []
     let fail = true
-    const now = new Date('2026-08-09T20:02:00.000Z')
+    const now = new Date(Date.now() + 60_000)
     const outbox = createOutbox({
       prisma: h().primary as never,
       emit: async event => {
@@ -193,13 +209,13 @@ describe('CatalogPublicationOutbox — real claim and CAS', () => {
     const row = await h().primary.catalogPublicationOutbox.findFirstOrThrow({ where: { batchId } })
     await h().primary.catalogPublicationOutbox.update({
       where: { id: row.id },
-      data: { payloadVersion: 2, attempts: 7, nextAttemptAt: new Date('2026-08-09T20:03:00.000Z') },
+      data: { payloadVersion: 2, attempts: 7, nextAttemptAt: new Date(Date.now() + 30_000) },
     })
     const emit = jest.fn()
     const outbox = createOutbox({
       prisma: h().primary as never,
       emit,
-      now: () => new Date('2026-08-09T20:03:00.000Z'),
+      now: () => new Date(Date.now() + 60_000),
     })
 
     await expect(outbox.sweepOnce({ workerId: 'future-worker', limit: 1 })).resolves.toEqual({

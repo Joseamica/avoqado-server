@@ -140,7 +140,7 @@ describe('H1A deployed lock-safe migration chain', () => {
   })
 
   afterAll(async () => {
-    await client.end()
+    await client?.end()
   })
 
   it('keeps legacy Product/ActivityLog writes live while CIC waits on an old snapshot', () => {

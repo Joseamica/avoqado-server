@@ -395,6 +395,24 @@ describe('catalogPublicationConfirmation.service', () => {
     expect(h.dependencies.persistTx).not.toHaveBeenCalled()
   })
 
+  it('retries one Serializable P2034 in a fresh reservation transaction and observes the winner', async () => {
+    const h = harness()
+    const retryTx = transaction([batch({ state: 'APPLYING', attemptId: 'winner', leaseExpiresAt: new Date('2026-08-09T12:00:30.000Z') })])
+    h.prisma.$transaction
+      .mockReset()
+      .mockRejectedValueOnce(Object.assign(new Error('write conflict'), { code: 'P2034' }))
+      .mockImplementationOnce(async (callback: (tx: typeof retryTx) => unknown) => callback(retryTx))
+
+    await expect(h.service.confirm(context, confirmInput)).resolves.toEqual({
+      publicationBatchId: 'batch-1',
+      operation: 'CATALOG_FIELDS_PUBLISH',
+      state: 'IN_PROGRESS',
+      retryAfterSeconds: 30,
+    })
+    expect(h.prisma.$transaction).toHaveBeenCalledTimes(2)
+    expect(h.dependencies.persistTx).not.toHaveBeenCalled()
+  })
+
   it('replays an identical durable APPLIED v1 envelope as the stable public DTO', async () => {
     const durableResult = {
       schemaVersion: 1,

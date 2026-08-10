@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { CronJob } from 'cron'
 import logger from '../config/logger'
-import { acquireCatalogPublicationAttemptLockTx } from '../services/master-catalog/catalogPublicationConfirmation.service'
+import { acquireCatalogPublicationAttemptLockTx } from '../services/master-catalog/catalogPublicationAttempt.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
