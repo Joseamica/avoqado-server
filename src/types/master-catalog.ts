@@ -70,6 +70,95 @@ export interface CatalogReadContext {
 
 export type CatalogPublicationOperation = 'CATALOG_FIELDS_PUBLISH' | 'CATALOG_FIELDS_REVERSION' | 'CATALOG_PRODUCT_ACTIVATION'
 
+export type CatalogPublicationFieldDecisionKindV1 = 'PUBLISH_CORPORATE' | 'APPROVE_LOCAL_OVERRIDE' | 'UNDECIDED'
+
+export type CatalogPublicationFieldV1 = CatalogManagedFieldV1 | 'active'
+
+export type CatalogPublicationFieldDecisionInput =
+  | { field: CatalogManagedFieldV1; decision: 'PUBLISH_CORPORATE' }
+  | { field: CatalogManagedFieldV1; decision: 'APPROVE_LOCAL_OVERRIDE'; overrideId: string }
+  | { field: CatalogManagedFieldV1; decision: 'UNDECIDED' }
+
+export interface CatalogPublicationPreviewTargetInput {
+  catalogItemId: string
+  venueId: string
+  productId: string
+  sourceLineId?: string
+  decisions?: CatalogPublicationFieldDecisionInput[]
+}
+
+export interface CatalogPublicationPreviewInput {
+  operation: CatalogPublicationOperation
+  sourcePublicationBatchId?: string
+  idempotencyKey: string
+  targets: CatalogPublicationPreviewTargetInput[]
+}
+
+export interface CatalogPublicationPreviewField {
+  field: CatalogPublicationFieldV1
+  before: Prisma.JsonValue
+  proposed: Prisma.JsonValue
+  after: Prisma.JsonValue
+  decision: CatalogPublicationFieldDecisionKindV1
+  overrideId: string | null
+}
+
+export interface CatalogPublicationPreviewLine {
+  catalogItemId: string
+  venueId: string
+  productId: string
+  bindingId: string
+  status: string
+  fieldMask: CatalogPublicationFieldV1[]
+  canonicalTargetHash: string
+  diagnosticCode: string | null
+  diagnostic: string | null
+  fields: CatalogPublicationPreviewField[]
+}
+
+export interface CatalogPublicationPreview {
+  publicationBatchId: string
+  operation: CatalogPublicationOperation
+  previewToken: string
+  targetHash: string
+  expiresAt: string
+  canConfirm: boolean
+  lines: CatalogPublicationPreviewLine[]
+}
+
+export interface CatalogPublicationConfirmInput extends CatalogConfirmInput {
+  publicationBatchId: string
+}
+
+export interface CatalogPublicationResultLine {
+  lineId: string
+  catalogItemId: string
+  venueId: string
+  productId: string
+  status: 'APPLIED' | 'NO_CHANGE'
+}
+
+export interface CatalogPublicationResult {
+  publicationBatchId: string
+  operation: CatalogPublicationOperation
+  state: 'APPLIED'
+  lines: CatalogPublicationResultLine[]
+}
+
+export interface CatalogPublicationInProgress {
+  publicationBatchId: string
+  operation: CatalogPublicationOperation
+  state: 'IN_PROGRESS'
+  retryAfterSeconds: number
+}
+
+export interface CatalogPublicationPreviewed {
+  publicationBatchId: string
+  operation: CatalogPublicationOperation
+  state: 'PREVIEWED'
+  expiresAt: string
+}
+
 // H1 audit data stays transaction-ready and tenant-explicit so later writers
 // cannot fall back to the legacy fire-and-forget logger or infer organization.
 export interface CatalogAuditInput {
@@ -222,4 +311,176 @@ export interface PreparedDishReadiness {
     costPerPortion: string
     storedCostPerPortion: string
   }
+}
+
+// WHY: Task 8 and Task 9 share one closed ownership vocabulary. Keeping the
+// ordered masks here prevents publication from silently hashing local fields.
+export type CatalogManagedFieldV1 =
+  | 'cost'
+  | 'description'
+  | 'imageUrl'
+  | 'name'
+  | 'objetoImp'
+  | 'satProductKey'
+  | 'satUnitKey'
+  | 'taxRate'
+  | 'type'
+  | 'unit'
+
+export const CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 = [
+  'cost',
+  'description',
+  'imageUrl',
+  'name',
+  'objetoImp',
+  'satProductKey',
+  'satUnitKey',
+  'taxRate',
+  'type',
+  'unit',
+] as const satisfies readonly CatalogManagedFieldV1[]
+
+export const CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1 = [
+  'description',
+  'imageUrl',
+  'name',
+  'objetoImp',
+  'satProductKey',
+  'satUnitKey',
+  'taxRate',
+  'type',
+  'unit',
+] as const satisfies readonly CatalogManagedFieldV1[]
+
+export type CatalogBindingDecisionInput =
+  | { decision: 'LINK'; productId: string }
+  | { decision: 'CREATE'; create: { categoryId: string; localSku: string; initialPrice: string } }
+  | { decision: 'SKIP' }
+
+export interface CatalogBindingPreviewLineInput {
+  catalogItemId: string
+  venueId: string
+  decision?: CatalogBindingDecisionInput
+}
+
+export interface CatalogBindingPreviewInput {
+  lines: CatalogBindingPreviewLineInput[]
+}
+
+export interface CatalogBindingCandidateV1 {
+  id: string
+  sku: string
+  gtin: string | null
+  name: string
+  categoryId: string
+  active: boolean
+  deletedAt: string | null
+  updatedAt: string
+}
+
+export interface CatalogBindingPreviewLine {
+  catalogItemId: string
+  venueId: string
+  proposal: 'LINK' | 'CREATE' | 'SKIP'
+  decision: CatalogBindingDecisionInput | null
+  status: 'READY' | 'CONFLICT' | 'INVALID'
+  errorCode: string | null
+  candidates: CatalogBindingCandidateV1[]
+  readiness: 'NOT_REQUIRED' | 'READY' | 'MISSING_RECIPE' | 'INVALID' | 'STALE'
+}
+
+export interface CatalogBindingPreview {
+  bindingBatchId: string | null
+  previewToken: string | null
+  targetHash: string
+  expiresAt: string | null
+  canConfirm: boolean
+  lines: CatalogBindingPreviewLine[]
+}
+
+export interface CatalogBindingConfirmInput extends CatalogConfirmInput {
+  bindingBatchId: string
+}
+
+export interface CatalogBindingResultLine {
+  catalogItemId: string
+  venueId: string
+  decision: 'LINK' | 'CREATE' | 'SKIP'
+  status: 'APPLIED' | 'SKIPPED'
+  productId: string | null
+  bindingId: string | null
+  readiness: PreparedDishReadiness | null
+}
+
+export interface CatalogBindingResult {
+  bindingBatchId: string
+  state: 'APPLIED'
+  lines: CatalogBindingResultLine[]
+}
+
+export interface CatalogVenueContext {
+  organizationId: string
+  venueId: string
+  actor: CatalogActor
+}
+
+export interface CatalogOverrideRequestLineInput {
+  field: CatalogManagedFieldV1
+  reason: string
+}
+
+export interface CatalogOverrideRequestInput {
+  bindingId: string
+  idempotencyKey: string
+  requests: CatalogOverrideRequestLineInput[]
+}
+
+export interface CatalogOverrideRequestPreviewLine extends CatalogOverrideRequestLineInput {
+  bindingId: string
+  localValue: Prisma.JsonValue
+}
+
+export interface CatalogOverrideRequestPreview {
+  requestBatchId: string
+  previewToken: string
+  targetHash: string
+  expiresAt: string
+  requests: CatalogOverrideRequestPreviewLine[]
+}
+
+export interface CatalogOverrideConfirmInput extends CatalogConfirmInput {
+  requestBatchId: string
+}
+
+export interface CatalogOverrideRequestResult {
+  requestBatchId: string
+  state: 'APPLIED'
+  overrideIds: string[]
+}
+
+export interface CatalogVenueProvenanceInput {
+  productId: string
+}
+
+export interface CatalogVenueProvenanceResult {
+  bindingId: string
+  catalogItemId: string
+  productId: string | null
+  status: string
+  revision: number
+  managedFieldMask: CatalogManagedFieldV1[]
+  lastPublishedCatalogRevision: number | null
+  lastPublishedManagedSnapshot: Prisma.JsonValue | null
+  lastPublishedManagedHash: string | null
+  productUpdatedAtObserved: string | null
+}
+
+export interface CatalogVenueChangesInput {
+  cursor?: string | null
+  pageSize?: number
+}
+
+export interface CatalogVenueChangesPage {
+  items: CatalogVenueProvenanceResult[]
+  nextCursor: string | null
 }

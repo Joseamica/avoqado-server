@@ -7,6 +7,24 @@ import { createStockBatch, deductStockFIFO } from './fifoBatch.service'
 import { sendLowStockAlertNotification } from './notification.service'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
+import { calculateRecipeCostV1, RecipeCostCalculationError } from './recipe-cost-calculator'
+import { acquireRecipeCostGraphVenueLockV1, lockRecipeCostGraphsForRawMaterialUpdateV1 } from './recipe-cost-graph-lock'
+
+function calculateRawMaterialRecipeCostV1(input: Parameters<typeof calculateRecipeCostV1>[0]) {
+  try {
+    return calculateRecipeCostV1(input)
+  } catch (error) {
+    // WHY: A cost edit must roll back cleanly when historical Recipe inputs are
+    // invalid; exposing a stable 422 avoids committing a partially fresh graph.
+    if (error instanceof RecipeCostCalculationError) {
+      throw new AppError('Recipe cost inputs are invalid', 422, true, 'RECIPE_COST_INPUT_INVALID', {
+        reason: error.code,
+        lineId: error.lineId,
+      })
+    }
+    throw error
+  }
+}
 
 /**
  * Convert a quantity to a raw material's storage unit. Recipes and modifiers can
@@ -271,14 +289,6 @@ export async function updateRawMaterial(
   data: UpdateRawMaterialDto,
   staffId?: string,
 ): Promise<RawMaterial> {
-  const existing = await prisma.rawMaterial.findFirst({
-    where: { id: rawMaterialId, venueId },
-  })
-
-  if (!existing) {
-    throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
-  }
-
   // Strip currentStock from update — stock changes must go through adjustStock()
   // to maintain StockBatch consistency
   const { currentStock: _stripStock, ...safeData } = data as any
@@ -293,28 +303,63 @@ export async function updateRawMaterial(
     updateData.unitType = getUnitType(unit)
   }
 
-  // If cost changed, every recipe that references this RM has stale
-  // costPerServing/totalCost. Recompute them inside the same transaction so
-  // the dashboard shows accurate margins immediately. The historical
-  // RawMaterialMovement.costImpact is intentionally NOT touched (it reflects
-  // the cost AT the moment of the movement).
-  const costChanging = data.costPerUnit !== undefined && !new Decimal(data.costPerUnit).equals(existing.costPerUnit)
+  const mutation = await prisma.$transaction(async tx => {
+    let lockedRecipeIds: string[] = []
+    let recomputedRecipes: Array<{ productName: string; oldTotal: number; newTotal: number }> = []
+    if (data.costPerUnit !== undefined || data.unit !== undefined) {
+      await acquireRecipeCostGraphVenueLockV1(tx, venueId)
+      const candidates = await tx.recipe.findMany({
+        where: { lines: { some: { rawMaterialId } }, product: { venueId } },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+      })
+      lockedRecipeIds = await lockRecipeCostGraphsForRawMaterialUpdateV1(
+        tx,
+        venueId,
+        candidates.map(recipe => recipe.id),
+        rawMaterialId,
+      )
+    }
 
-  const rawMaterial = await prisma.$transaction(async tx => {
+    // WHY: This live read follows the target RM UPDATE lock whenever either
+    // graph input is supplied, so cost/unit decisions never use a stale snapshot.
+    const existing = await tx.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId } })
+    if (!existing) throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
+    const costChanging = data.costPerUnit !== undefined && !new Decimal(data.costPerUnit).equals(existing.costPerUnit)
+    const unitChanging = data.unit !== undefined && data.unit !== existing.unit
     const updated = await tx.rawMaterial.update({
       where: { id: rawMaterialId },
       data: updateData,
     })
 
-    if (costChanging) {
-      await recomputeRecipesUsingRawMaterial(tx, venueId, rawMaterialId, staffId, {
-        oldCost: existing.costPerUnit,
-        newCost: updated.costPerUnit,
-      })
+    if (costChanging || unitChanging) {
+      recomputedRecipes = await recomputeRecipesUsingRawMaterial(tx, venueId, rawMaterialId, lockedRecipeIds)
     }
 
-    return updated
+    return { rawMaterial: updated, costChanging, unitChanging, oldCost: existing.costPerUnit, oldUnit: existing.unit, recomputedRecipes }
   })
+  const { rawMaterial, costChanging, unitChanging, oldCost, oldUnit, recomputedRecipes } = mutation
+
+  if (recomputedRecipes.length > 0) {
+    // WHY: The operational activity log uses the global best-effort logger, so
+    // it is emitted only after the graph transaction has committed successfully.
+    logAction({
+      venueId,
+      staffId,
+      action: 'RECIPES_RECOMPUTED',
+      entity: 'RawMaterial',
+      entityId: rawMaterialId,
+      data: {
+        trigger: 'raw_material_cost_or_unit_change',
+        oldCost: oldCost.toNumber(),
+        newCost: rawMaterial.costPerUnit.toNumber(),
+        oldUnit,
+        newUnit: rawMaterial.unit,
+        recipesAffected: recomputedRecipes.length,
+        recipes: recomputedRecipes,
+      },
+    })
+  }
 
   logAction({
     venueId,
@@ -325,8 +370,11 @@ export async function updateRawMaterial(
     data: {
       name: rawMaterial.name,
       costChanged: costChanging,
-      oldCostPerUnit: costChanging ? existing.costPerUnit.toNumber() : undefined,
+      unitChanged: unitChanging,
+      oldCostPerUnit: costChanging ? oldCost.toNumber() : undefined,
       newCostPerUnit: costChanging ? rawMaterial.costPerUnit.toNumber() : undefined,
+      oldUnit: unitChanging ? oldUnit : undefined,
+      newUnit: unitChanging ? rawMaterial.unit : undefined,
     },
   })
 
@@ -334,73 +382,49 @@ export async function updateRawMaterial(
 }
 
 /**
- * Recompute Recipe.totalCost + RecipeLine.costPerServing for every recipe that
- * uses a given RawMaterial. Called whenever the RM's costPerUnit changes so the
- * dashboard never shows stale costs (the bug where Hazelnut treat displayed
- * "$2,242 per dátil" because the recipe stored a frozen costPerServing).
+ * Recompute Recipe.totalCost + RecipeLine.costPerServing for locked, valid
+ * graphs changed through this dashboard editor. Non-cooperating transfer and
+ * offline recovery writers may still make readiness report H1 STALE; they are
+ * explicitly inventoried follow-up rather than a claimed global invariant.
  *
- * Logs a single RECIPES_RECOMPUTED activity entry summarizing the deltas.
+ * Returns the committed-delta summary so the caller can log after transaction.
  */
 async function recomputeRecipesUsingRawMaterial(
   tx: Prisma.TransactionClient,
   venueId: string,
   rawMaterialId: string,
-  staffId: string | undefined,
-  costChange: { oldCost: Decimal; newCost: Decimal },
-): Promise<void> {
+  lockedRecipeIds: readonly string[],
+): Promise<Array<{ productName: string; oldTotal: number; newTotal: number }>> {
   const recipes = await tx.recipe.findMany({
-    where: { lines: { some: { rawMaterialId } }, product: { venueId } },
+    where: { id: { in: [...lockedRecipeIds] }, lines: { some: { rawMaterialId } }, product: { venueId } },
     include: {
       product: { select: { id: true, name: true, venueId: true } },
-      lines: { include: { rawMaterial: { select: { id: true, name: true, unit: true, costPerUnit: true } } } },
+      lines: { include: { rawMaterial: true }, orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }] },
     },
+    orderBy: { id: 'asc' },
   })
 
   const recipeUpdates: Array<{ productName: string; oldTotal: number; newTotal: number }> = []
 
   for (const recipe of recipes) {
-    let newTotal = new Decimal(0)
-    const lineUpdates: Array<{ lineId: string; newCost: Decimal }> = []
-    for (const line of recipe.lines) {
-      const rm = line.rawMaterial
-      let qtyInRm: Decimal
-      if (line.unit === rm.unit) {
-        qtyInRm = line.quantity
-      } else if (areUnitsCompatible(line.unit, rm.unit)) {
-        qtyInRm = convertUnit(line.quantity, line.unit, rm.unit)
-      } else {
-        // Schema validation prevents this going forward; skip stale rows.
-        continue
-      }
-      const newCostPerServing = qtyInRm.mul(rm.costPerUnit).div(recipe.portionYield)
-      newTotal = newTotal.add(newCostPerServing)
-      lineUpdates.push({ lineId: line.id, newCost: newCostPerServing })
+    if (recipe.lines.some(line => line.rawMaterial.venueId !== venueId)) {
+      throw new AppError('Recipe contains an ingredient from another venue', 422, true, 'RECIPE_COST_INPUT_INVALID')
     }
-    for (const lu of lineUpdates) {
-      await tx.recipeLine.update({ where: { id: lu.lineId }, data: { costPerServing: lu.newCost } })
+    const calculated = calculateRawMaterialRecipeCostV1({ portionYield: recipe.portionYield, lines: recipe.lines })
+    for (const line of calculated.lines) {
+      await tx.recipeLine.update({ where: { id: line.id }, data: { costPerServing: line.costPerServing } })
     }
-    if (!newTotal.equals(recipe.totalCost)) {
-      await tx.recipe.update({ where: { id: recipe.id }, data: { totalCost: newTotal } })
-      recipeUpdates.push({ productName: recipe.product.name, oldTotal: recipe.totalCost.toNumber(), newTotal: newTotal.toNumber() })
+    await tx.recipe.update({ where: { id: recipe.id }, data: { totalCost: calculated.costPerPortion } })
+    if (!calculated.costPerPortion.equals(recipe.totalCost)) {
+      recipeUpdates.push({
+        productName: recipe.product.name,
+        oldTotal: recipe.totalCost.toNumber(),
+        newTotal: calculated.costPerPortion.toNumber(),
+      })
     }
   }
 
-  if (recipeUpdates.length > 0) {
-    logAction({
-      venueId,
-      staffId,
-      action: 'RECIPES_RECOMPUTED',
-      entity: 'RawMaterial',
-      entityId: rawMaterialId,
-      data: {
-        trigger: 'cost_change',
-        oldCost: costChange.oldCost.toNumber(),
-        newCost: costChange.newCost.toNumber(),
-        recipesAffected: recipeUpdates.length,
-        recipes: recipeUpdates,
-      },
-    })
-  }
+  return recipeUpdates
 }
 
 /**

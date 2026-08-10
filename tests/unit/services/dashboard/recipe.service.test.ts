@@ -17,6 +17,13 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
   logAction: jest.fn(),
 }))
 
+jest.mock('@/services/dashboard/recipe-cost-graph-lock', () => ({
+  acquireRecipeCostGraphVenueLockV1: jest.fn(),
+  lockRecipeCostGraphRowsV1: jest.fn().mockResolvedValue(true),
+  lockRecipeCostProductForUpdateV1: jest.fn().mockResolvedValue(true),
+  lockRecipeCostRawMaterialsForShareV1: jest.fn().mockImplementation(async (_tx, _venue, ids) => ids),
+}))
+
 // Mock dependencies
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -28,6 +35,7 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     recipe: {
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
     },
@@ -38,6 +46,8 @@ jest.mock('@/utils/prismaClient', () => ({
     recipeLine: {
       create: jest.fn(),
       deleteMany: jest.fn(),
+      update: jest.fn(),
+      delete: jest.fn(),
     },
     $transaction: jest.fn(),
   },
@@ -58,7 +68,14 @@ describe('Recipe Service - Active/Deleted Validation', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async callback => callback(prisma))
   })
+
+  function mockLockedRecipe(row: Record<string, unknown>) {
+    // WHY: The service performs an id-only discovery and then trusts only the
+    // post-row-lock graph reread; this mock preserves that two-read contract.
+    ;(prisma.recipe.findFirst as jest.Mock).mockImplementation(async ({ select }: any) => (select ? { id: row.id } : row))
+  }
 
   describe('createRecipe - Priority 1B', () => {
     it('should create recipe successfully with active ingredients', async () => {
@@ -225,8 +242,9 @@ describe('Recipe Service - Active/Deleted Validation', () => {
       }
 
       ;(prisma.recipe.findUnique as jest.Mock).mockResolvedValue(mockExistingRecipe)
+      mockLockedRecipe({ ...mockExistingRecipe, lines: [] })
       ;(prisma.rawMaterial.findMany as jest.Mock).mockResolvedValue([mockActiveRawMaterial])
-      ;(prisma.$transaction as jest.Mock).mockResolvedValue(mockUpdatedRecipe)
+      ;(prisma.recipe.update as jest.Mock).mockResolvedValue(mockUpdatedRecipe)
 
       // Execute
       const result = await updateRecipe(mockVenueId, mockProductId, {
@@ -263,6 +281,7 @@ describe('Recipe Service - Active/Deleted Validation', () => {
       }
 
       ;(prisma.recipe.findUnique as jest.Mock).mockResolvedValue(mockExistingRecipe)
+      mockLockedRecipe({ ...mockExistingRecipe, lines: [] })
       ;(prisma.rawMaterial.findMany as jest.Mock).mockResolvedValue([])
 
       // Execute & Verify
@@ -312,6 +331,7 @@ describe('Recipe Service - Active/Deleted Validation', () => {
       }
 
       ;(prisma.recipe.findUnique as jest.Mock).mockResolvedValue(mockRecipe)
+      mockLockedRecipe(mockRecipe)
       ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue(mockActiveRawMaterial)
       ;(prisma.recipeLine.create as jest.Mock).mockResolvedValue(mockRecipeLine)
       ;(prisma.recipe.update as jest.Mock).mockResolvedValue(mockRecipe)
@@ -347,6 +367,7 @@ describe('Recipe Service - Active/Deleted Validation', () => {
       }
 
       ;(prisma.recipe.findUnique as jest.Mock).mockResolvedValue(mockRecipe)
+      mockLockedRecipe(mockRecipe)
       ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue(null) // Inactive/deleted
 
       // Execute & Verify
@@ -427,6 +448,7 @@ describe('Recipe Service - Active/Deleted Validation', () => {
       }
 
       ;(prisma.recipe.findUnique as jest.Mock).mockResolvedValue(mockExistingRecipe)
+      mockLockedRecipe({ ...mockExistingRecipe, lines: [] })
       ;(prisma.recipe.update as jest.Mock).mockResolvedValue(mockUpdatedRecipe)
 
       // Execute - no lines update
