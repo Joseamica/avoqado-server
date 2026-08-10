@@ -53,20 +53,26 @@ jobs:
   test-and-build:
     name: 🧪 Test, Lint & Build
     runs-on: ubuntu-latest
+    # The database is named for the disposable H1 fixture on purpose. Fourteen
+    # integration suites delete data (rollback, cleanup, staff deletion,
+    # concurrency) and refuse to run unless DATABASE_URL and TEST_DATABASE_URL
+    # both point at this exact local name — a guard so they can never reach a
+    # shared or real database. A CI service container IS that disposable
+    # database, so it adopts the name instead of the guard being relaxed.
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/avoqado_test
-      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/avoqado_test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/avoqado_h1a_test_20260808
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/avoqado_h1a_test_20260808
     services:
       postgres:
         image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: avoqado_test
+          POSTGRES_DB: avoqado_h1a_test_20260808
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d avoqado_test" --health-interval 10s --health-timeout 5s --health-retries 5
+          --health-cmd "pg_isready -U postgres -d avoqado_h1a_test_20260808" --health-interval 10s --health-timeout 5s --health-retries 5
     outputs:
       version: ${{ steps.package-version.outputs.version }}
       build-time: ${{ steps.build-info.outputs.build-time }}
