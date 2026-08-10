@@ -24,6 +24,7 @@ import { subDays } from 'date-fns'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
 import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -98,23 +99,32 @@ export class SubscriptionCancellationJob {
       // - endDate has passed
       // - No Stripe subscription (DB-only trial)
       // - Feature is still active
-      const expiredTrials = await prisma.venueFeature.findMany({
-        where: {
-          active: true,
-          endDate: {
-            lt: now, // End date has passed
-          },
-          stripeSubscriptionId: null, // No Stripe subscription = DB-only trial
-        },
-        include: {
-          venue: {
-            include: {
-              organization: true,
+      const expiredTrials = await retry(
+        () =>
+          prisma.venueFeature.findMany({
+            where: {
+              active: true,
+              endDate: {
+                lt: now, // End date has passed
+              },
+              stripeSubscriptionId: null, // No Stripe subscription = DB-only trial
             },
-          },
-          feature: true,
+            include: {
+              venue: {
+                include: {
+                  organization: true,
+                },
+              },
+              feature: true,
+            },
+          }),
+        {
+          retries: 2,
+          initialDelay: 1500,
+          shouldRetry: shouldRetryDbConnectionError,
+          context: 'subscription-cancellation.findExpiredTrials',
         },
-      })
+      )
 
       if (expiredTrials.length === 0) {
         logger.info('✅ No expired DB-only trials found')
@@ -217,28 +227,32 @@ export class SubscriptionCancellationJob {
       // So if gracePeriodEndsAt < now - 7 days, it's been 14+ days total
       const sevenDaysAgo = subDays(now, 7)
 
-      const expiredSubscriptions = await prisma.venueFeature.findMany({
-        where: {
-          suspendedAt: {
-            not: null, // Must be suspended
-          },
-          gracePeriodEndsAt: {
-            lt: sevenDaysAgo, // Grace period ended more than 7 days ago (14+ days total)
-          },
-          stripeSubscriptionId: {
-            not: null, // Must have Stripe subscription
-          },
-          active: false, // Must be inactive (suspended)
-        },
-        include: {
-          venue: {
-            include: {
-              organization: true,
+      const expiredSubscriptions = await retry(
+        () =>
+          prisma.venueFeature.findMany({
+            where: {
+              suspendedAt: {
+                not: null, // Must be suspended
+              },
+              gracePeriodEndsAt: {
+                lt: sevenDaysAgo, // Grace period ended more than 7 days ago (14+ days total)
+              },
+              stripeSubscriptionId: {
+                not: null, // Must have Stripe subscription
+              },
+              active: false, // Must be inactive (suspended)
             },
-          },
-          feature: true,
-        },
-      })
+            include: {
+              venue: {
+                include: {
+                  organization: true,
+                },
+              },
+              feature: true,
+            },
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'subscription-cancellation.findExpiredSubs' },
+      )
 
       if (expiredSubscriptions.length === 0) {
         logger.info('✅ No expired subscriptions found')

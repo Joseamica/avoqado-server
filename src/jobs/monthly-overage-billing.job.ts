@@ -21,6 +21,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import tokenBudgetService from '../services/dashboard/token-budget.service'
 import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 export interface OverageBillingResult {
   venuesScanned: number
@@ -79,13 +80,22 @@ export class MonthlyOverageBillingJob {
 
     try {
       const now = new Date()
-      const expiredBudgets = await prisma.chatbotTokenBudget.findMany({
-        where: {
-          currentPeriodEnd: { lte: now },
-          overageTokensUsed: { gt: 0 },
+      const expiredBudgets = await retry(
+        () =>
+          prisma.chatbotTokenBudget.findMany({
+            where: {
+              currentPeriodEnd: { lte: now },
+              overageTokensUsed: { gt: 0 },
+            },
+            select: { venueId: true, overageTokensUsed: true },
+          }),
+        {
+          retries: 2,
+          initialDelay: 1500,
+          shouldRetry: shouldRetryDbConnectionError,
+          context: 'monthly-overage-billing.findExpiredBudgets',
         },
-        select: { venueId: true, overageTokensUsed: true },
-      })
+      )
 
       result.venuesScanned = expiredBudgets.length
       if (expiredBudgets.length === 0) {

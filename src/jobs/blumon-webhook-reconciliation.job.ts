@@ -13,6 +13,7 @@ import {
 } from '../services/tpv/blumon-webhook.service'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 /**
  * Blumon TPV webhook async reconciliation job
@@ -103,24 +104,28 @@ export class BlumonWebhookReconciliationJob {
    */
   private async reconcilePending(): Promise<number> {
     const cutoff = new Date(Date.now() - BLUMON_WEBHOOK_PENDING_TTL_MS)
-    const pending = await prisma.providerEventLog.findMany({
-      where: {
-        provider: ProviderType.PAYMENT_PROCESSOR,
-        status: EventStatus.PENDING,
-        createdAt: { gte: cutoff },
-        // Only Blumon TPV events have eventId starting with 'blumon-tpv-'.
-        // Use a startsWith to leave room for other providers in the same table.
-        eventId: { startsWith: 'blumon-tpv-' },
-        // Reversals are informational — they must never enter the sale
-        // reconciliation path. Written as an explicit exclusion (rather than
-        // `type: 'VENTA'`) so rows typed 'UNKNOWN' or null — which ARE sales —
-        // keep being reconciled.
-        OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }],
-      },
-      take: this.BATCH_SIZE,
-      orderBy: { createdAt: 'asc' },
-      select: { id: true, payload: true },
-    })
+    const pending = await retry(
+      () =>
+        prisma.providerEventLog.findMany({
+          where: {
+            provider: ProviderType.PAYMENT_PROCESSOR,
+            status: EventStatus.PENDING,
+            createdAt: { gte: cutoff },
+            // Only Blumon TPV events have eventId starting with 'blumon-tpv-'.
+            // Use a startsWith to leave room for other providers in the same table.
+            eventId: { startsWith: 'blumon-tpv-' },
+            // Reversals are informational — they must never enter the sale
+            // reconciliation path. Written as an explicit exclusion (rather than
+            // `type: 'VENTA'`) so rows typed 'UNKNOWN' or null — which ARE sales —
+            // keep being reconciled.
+            OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }],
+          },
+          take: this.BATCH_SIZE,
+          orderBy: { createdAt: 'asc' },
+          select: { id: true, payload: true },
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'blumon-webhook-reconciliation.findPending' },
+    )
 
     if (pending.length === 0) return 0
 

@@ -5,6 +5,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import { withSerializableRetry } from '../../utils/serializableRetry'
+import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 
 /**
  * Generate unique batch number for a raw material
@@ -593,23 +594,29 @@ export async function getBatchesForRawMaterial(
 export async function markExpiredBatches(venueId?: string): Promise<number> {
   const now = new Date()
 
-  const expiredBatches = await prisma.stockBatch.findMany({
-    where: {
-      ...(venueId && { venueId }),
-      status: BatchStatus.ACTIVE,
-      expirationDate: {
-        lte: now,
-      },
-    },
-    select: {
-      id: true,
-      venueId: true,
-      rawMaterialId: true,
-      batchNumber: true,
-      unit: true,
-      costPerUnit: true,
-    },
-  })
+  // Entry read of the batch-expiration cron — retried on transient connection
+  // errors per .claude/rules/cron-jobs.md.
+  const expiredBatches = await retry(
+    () =>
+      prisma.stockBatch.findMany({
+        where: {
+          ...(venueId && { venueId }),
+          status: BatchStatus.ACTIVE,
+          expirationDate: {
+            lte: now,
+          },
+        },
+        select: {
+          id: true,
+          venueId: true,
+          rawMaterialId: true,
+          batchNumber: true,
+          unit: true,
+          costPerUnit: true,
+        },
+      }),
+    { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'batch-expiration.findExpiredBatches' },
+  )
 
   let expiredCount = 0
 

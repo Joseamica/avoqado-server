@@ -4,6 +4,7 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import emailService from '../services/email.service'
 import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 /**
  * Job que maneja el ciclo de vida de órdenes TPV pendientes:
@@ -56,14 +57,20 @@ export class TpvOrderExpiryJob {
 
   private async expireStripeOrders(): Promise<number> {
     const cutoff = new Date(Date.now() - this.STRIPE_EXPIRY_DAYS * 24 * 60 * 60 * 1000)
-    const result = await prisma.terminalOrder.updateMany({
-      where: {
-        paymentMethod: 'CARD_STRIPE',
-        paymentStatus: 'AWAITING_PAYMENT',
-        createdAt: { lt: cutoff },
-      },
-      data: { paymentStatus: 'EXPIRED' },
-    })
+    // Idempotent updateMany: the WHERE only matches still-AWAITING orders, so a
+    // retry after a connection blip re-expires nothing already expired.
+    const result = await retry(
+      () =>
+        prisma.terminalOrder.updateMany({
+          where: {
+            paymentMethod: 'CARD_STRIPE',
+            paymentStatus: 'AWAITING_PAYMENT',
+            createdAt: { lt: cutoff },
+          },
+          data: { paymentStatus: 'EXPIRED' },
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'tpv-order-expiry.expireStripe' },
+    )
     if (result.count > 0) {
       logger.info(`📅 Expired ${result.count} stale Stripe AWAITING_PAYMENT orders`)
     }

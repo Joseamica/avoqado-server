@@ -4,6 +4,7 @@ import { IncidentStatus, SettlementStatus } from '@prisma/client'
 import { subDays } from 'date-fns'
 import { venueStartOfDay, DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { logAction } from './activity-log.service'
+import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 
 /**
  * Settlement Incident Detection Service
@@ -34,46 +35,52 @@ export async function detectMissingSettlements(): Promise<{
     // 2. Don't have an actualSettlementDate yet
     // 3. Are still in PENDING status
     // 4. Don't already have an incident created
-    const missingSettlements = await prisma.venueTransaction.findMany({
-      where: {
-        estimatedSettlementDate: {
-          gte: yesterday,
-          lt: today,
-        },
-        actualSettlementDate: null,
-        status: SettlementStatus.PENDING,
-        // Don't create duplicate incidents
-        incidents: {
-          none: {
-            status: {
-              in: [IncidentStatus.PENDING_CONFIRMATION, IncidentStatus.CONFIRMED_DELAY, IncidentStatus.ESCALATED],
+    // Entry read of the settlement-detection cron — retried on transient
+    // connection errors per .claude/rules/cron-jobs.md.
+    const missingSettlements = await retry(
+      () =>
+        prisma.venueTransaction.findMany({
+          where: {
+            estimatedSettlementDate: {
+              gte: yesterday,
+              lt: today,
             },
-          },
-        },
-      },
-      include: {
-        payment: {
-          include: {
-            transactionCost: {
-              include: {
-                merchantAccount: {
-                  include: {
-                    provider: true,
-                  },
+            actualSettlementDate: null,
+            status: SettlementStatus.PENDING,
+            // Don't create duplicate incidents
+            incidents: {
+              none: {
+                status: {
+                  in: [IncidentStatus.PENDING_CONFIRMATION, IncidentStatus.CONFIRMED_DELAY, IncidentStatus.ESCALATED],
                 },
               },
             },
           },
-        },
-        venue: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
+          include: {
+            payment: {
+              include: {
+                transactionCost: {
+                  include: {
+                    merchantAccount: {
+                      include: {
+                        provider: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            venue: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
           },
-        },
-      },
-    })
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'settlement-detection.findMissing' },
+    )
 
     logger.info(`Found ${missingSettlements.length} potentially delayed settlements`)
 

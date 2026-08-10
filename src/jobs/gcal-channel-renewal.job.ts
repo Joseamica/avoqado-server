@@ -18,6 +18,7 @@ import prisma from '../utils/prismaClient'
 import { subscribeToCalendar, stopChannel } from '../services/google-calendar/watch-channel.service'
 import { decryptToken } from '../services/google-calendar/encryption.service'
 import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 const TIMEZONE = 'America/Mexico_City'
 const RENEWAL_WINDOW_MS = 48 * 3600_000
@@ -66,14 +67,18 @@ export class GcalChannelRenewalJob {
     this.isRunning = true
 
     try {
-      const expiringChannels = await prisma.googleCalendarChannel.findMany({
-        where: {
-          status: 'ACTIVE',
-          expiresAt: { lt: new Date(Date.now() + RENEWAL_WINDOW_MS) },
-        },
-        include: { connection: true },
-        take: BATCH_SIZE,
-      })
+      const expiringChannels = await retry(
+        () =>
+          prisma.googleCalendarChannel.findMany({
+            where: {
+              status: 'ACTIVE',
+              expiresAt: { lt: new Date(Date.now() + RENEWAL_WINDOW_MS) },
+            },
+            include: { connection: true },
+            take: BATCH_SIZE,
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'gcal-channel-renewal.findExpiring' },
+      )
 
       for (const ch of expiringChannels) {
         if (ch.connection.status !== 'CONNECTED') continue

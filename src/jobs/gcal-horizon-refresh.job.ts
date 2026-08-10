@@ -31,6 +31,7 @@ import { decryptToken } from '../services/google-calendar/encryption.service'
 import { upsertBlock } from '../services/google-calendar/external-busy-block.service'
 import { runBackfill } from '../services/google-calendar/pull.service'
 import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 const TIMEZONE = 'America/Mexico_City'
 const DEFAULT_MAX_ADVANCE_DAYS = 60
@@ -76,10 +77,14 @@ export class GcalHorizonRefreshJob {
     this.isRunning = true
 
     try {
-      const connections = await prisma.googleCalendarConnection.findMany({
-        where: { status: 'CONNECTED' },
-        include: { venue: { include: { reservationSettings: true } } },
-      })
+      const connections = await retry(
+        () =>
+          prisma.googleCalendarConnection.findMany({
+            where: { status: 'CONNECTED' },
+            include: { venue: { include: { reservationSettings: true } } },
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'gcal-horizon-refresh.findConnected' },
+      )
 
       for (const conn of connections) {
         try {

@@ -13,6 +13,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import emailService from '../services/email.service'
 import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 // ─── Types ───
 
@@ -267,10 +268,19 @@ export class VenueCommissionSettlementJob {
         amexIntlDate: aiDateStr,
       })
 
-      const aggregator = await prisma.aggregator.findFirst({
-        where: { active: true },
-        select: { id: true, name: true, baseFees: true, ivaRate: true },
-      })
+      const aggregator = await retry(
+        () =>
+          prisma.aggregator.findFirst({
+            where: { active: true },
+            select: { id: true, name: true, baseFees: true, ivaRate: true },
+          }),
+        {
+          retries: 2,
+          initialDelay: 1500,
+          shouldRetry: shouldRetryDbConnectionError,
+          context: 'venue-commission-settlement.findAggregator',
+        },
+      )
       if (!aggregator) {
         logger.info('No active aggregator found, skipping venue commission report')
         return
