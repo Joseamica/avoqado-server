@@ -12,6 +12,14 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { prismaMock } from '../../../__helpers__/setup'
 import * as productService from '../../../../src/services/dashboard/product.dashboard.service'
 
+const humanActor = { type: 'HUMAN' as const, staffId: 'staff-1', impersonating: false }
+
+jest.mock('../../../../src/services/master-catalog/catalogGovernance.service', () => ({
+  assertLegacyCatalogGovernanceForVenue: jest.fn().mockResolvedValue(undefined),
+  assertLegacyCatalogProductUpdateGovernance: jest.fn().mockResolvedValue({ id: 'product-abc', active: true }),
+  assertLegacyProductReferencesForVenue: jest.fn().mockResolvedValue(undefined),
+}))
+
 // Minimal mock product factory — typed as any to avoid Prisma payload shape strictness
 const makeMockProduct = (overrides: Record<string, any> = {}): any => ({
   id: 'product-abc',
@@ -103,16 +111,20 @@ describe('Product SAT fiscal fields', () => {
       prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
       prismaMock.product.create.mockResolvedValue(createdProduct)
 
-      const result = await productService.createProduct('venue-xyz', {
-        name: 'Producto Test',
-        sku: 'SKU001',
-        price: 100,
-        type: 'REGULAR' as any,
-        categoryId: 'cat-001',
-        satProductKey: '81111500',
-        satUnitKey: 'E48',
-        objetoImp: '02',
-      })
+      const result = await productService.createProduct(
+        'venue-xyz',
+        {
+          name: 'Producto Test',
+          sku: 'SKU001',
+          price: 100,
+          type: 'REGULAR' as any,
+          categoryId: 'cat-001',
+          satProductKey: '81111500',
+          satUnitKey: 'E48',
+          objetoImp: '02',
+        },
+        humanActor,
+      )
 
       // Assert Prisma create was called with the SAT fields
       const createCall = prismaMock.product.create.mock.calls[0][0]
@@ -133,13 +145,17 @@ describe('Product SAT fiscal fields', () => {
       prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
       prismaMock.product.create.mockResolvedValue(createdProduct)
 
-      await productService.createProduct('venue-xyz', {
-        name: 'Producto Test',
-        sku: 'SKU001',
-        price: 100,
-        type: 'REGULAR' as any,
-        categoryId: 'cat-001',
-      })
+      await productService.createProduct(
+        'venue-xyz',
+        {
+          name: 'Producto Test',
+          sku: 'SKU001',
+          price: 100,
+          type: 'REGULAR' as any,
+          categoryId: 'cat-001',
+        },
+        humanActor,
+      )
 
       const createCall = prismaMock.product.create.mock.calls[0][0]
       expect(createCall.data).not.toHaveProperty('satProductKey')
@@ -164,12 +180,17 @@ describe('Product SAT fiscal fields', () => {
       prismaMock.product.findFirst.mockResolvedValue(existing)
       prismaMock.product.update.mockResolvedValue(updated)
 
-      const result = await productService.updateProduct('venue-xyz', 'product-abc', {
-        name: 'Producto Test',
-        satProductKey: '81111500',
-        satUnitKey: 'H87',
-        objetoImp: '01',
-      })
+      const result = await productService.updateProduct(
+        'venue-xyz',
+        'product-abc',
+        {
+          name: 'Producto Test',
+          satProductKey: '81111500',
+          satUnitKey: 'H87',
+          objetoImp: '01',
+        },
+        humanActor,
+      )
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data.satProductKey).toBe('81111500')
@@ -198,7 +219,7 @@ describe('Product SAT fiscal fields', () => {
       prismaMock.product.update.mockResolvedValue(updated)
 
       // Update with only name — no SAT fields provided
-      await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Actualizado' })
+      await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Actualizado' }, humanActor)
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       // SAT fields must NOT appear in updateData sent to Prisma
@@ -218,10 +239,15 @@ describe('Product SAT fiscal fields', () => {
       prismaMock.product.findFirst.mockResolvedValue(existing)
       prismaMock.product.update.mockResolvedValue(updated)
 
-      await productService.updateProduct('venue-xyz', 'product-abc', {
-        satProductKey: null,
-        satUnitKey: null,
-      })
+      await productService.updateProduct(
+        'venue-xyz',
+        'product-abc',
+        {
+          satProductKey: null,
+          satUnitKey: null,
+        },
+        humanActor,
+      )
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data.satProductKey).toBeNull()

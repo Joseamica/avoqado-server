@@ -18,6 +18,7 @@ import {
   AssignModifierGroupToProductDto,
 } from '../../schemas/dashboard/menu.schema'
 import { NotFoundError } from '../../errors/AppError'
+import { resolveLegacyCatalogActor } from '../../services/master-catalog/catalogGovernance.service'
 
 // Helper to check venue access against authContext
 async function checkVenueAccess(orgIdFromAuth: string, venueIdFromParams: string, userRole: string): Promise<void> {
@@ -600,7 +601,11 @@ export async function importMenuHandler(
     }
     await checkVenueAccess(orgId, venueId, req.authContext?.role || '')
 
-    const result = await menuCategoryService.importMenu(venueId, req.body)
+    const result = await menuCategoryService.importMenu(
+      venueId,
+      req.body,
+      resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating)),
+    )
     res.status(200).json(result)
   } catch (error) {
     next(error)

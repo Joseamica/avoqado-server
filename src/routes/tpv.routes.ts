@@ -106,6 +106,12 @@ import { serializedInventoryService } from '../services/serialized-inventory/ser
 import { simRegistrationService } from '../services/serialized-inventory/simRegistration.service'
 import * as orderTpvService from '../services/tpv/order.tpv.service'
 import prisma from '../utils/prismaClient'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  assertLegacyProductReferencesForVenue,
+  resolveLegacyCatalogActor,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../services/master-catalog/catalogGovernance.service'
 
 const router = express.Router()
 
@@ -5716,48 +5722,55 @@ router.get(
  *       403:
  *         description: Forbidden (lacks menu:create permission)
  */
-router.post(
-  '/venues/:venueId/products/quick-add',
-  authenticateTokenMiddleware,
-  checkPermission('menu:create'),
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { venueId } = req.params
-      const { barcode, name, price, categoryId, trackInventory } = req.body
+export async function createTpvQuickAddProductHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const { barcode, name, price, categoryId, trackInventory } = req.body
 
-      // Validate required fields
-      if (!barcode || !name || price === undefined || !categoryId) {
-        return next(new AppError('Missing required fields: barcode, name, price, and categoryId are required', 400))
-      }
+    // Validate required fields
+    if (!barcode || !name || price === undefined || !categoryId) {
+      return next(new AppError('Missing required fields: barcode, name, price, and categoryId are required', 400))
+    }
 
-      logger.info(`📦 [TPV Quick Add] Creating product from barcode scan`, {
+    logger.info(`📦 [TPV Quick Add] Creating product from barcode scan`, {
+      correlationId: req.correlationId,
+      venueId,
+      barcode,
+      name,
+      price,
+      categoryId,
+    })
+
+    // Check if product already exists with this barcode
+    const existingProduct = await productService.getProductByBarcode(venueId, barcode)
+    if (existingProduct) {
+      logger.warn(`⚠️ [TPV Quick Add] Product already exists with barcode: ${barcode}`, {
         correlationId: req.correlationId,
-        venueId,
-        barcode,
-        name,
-        price,
-        categoryId,
+        existingProductId: existingProduct.id,
       })
 
-      // Check if product already exists with this barcode
-      const existingProduct = await productService.getProductByBarcode(venueId, barcode)
-      if (existingProduct) {
-        logger.warn(`⚠️ [TPV Quick Add] Product already exists with barcode: ${barcode}`, {
-          correlationId: req.correlationId,
-          existingProductId: existingProduct.id,
-        })
+      return res.status(409).json({
+        message: `Product already exists with barcode ${barcode}`,
+        data: toLegacyProductPayload(existingProduct),
+        correlationId: req.correlationId,
+      })
+    }
 
-        return res.status(409).json({
-          message: `Product already exists with barcode ${barcode}`,
-          data: toLegacyProductPayload(existingProduct),
-          correlationId: req.correlationId,
-        })
-      }
-
-      // Create product using Prisma directly
-      const product = await prisma.product.create({
+    // Create product using Prisma directly
+    const product = await prisma.$transaction(async tx => {
+      const authContext = req.authContext!
+      const actor = resolveLegacyCatalogActor(authContext.userId, Boolean(authContext.isImpersonating))
+      await assertLegacyCatalogGovernanceForVenue(tx, {
+        venueId,
+        operation: 'CREATE',
+        willBeVendable: true,
+        actor,
+      })
+      await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId })
+      const created = await tx.product.create({
         data: {
           venueId,
+          createdById: actor.type === 'HUMAN' ? actor.staffId : null,
           sku: barcode, // ✅ Store barcode as SKU
           name,
           price: new Decimal(price),
@@ -5771,26 +5784,37 @@ router.post(
           inventory: true,
         },
       })
+      if (actor.type === 'SERVICE') {
+        await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
+      }
+      return created
+    })
 
-      logger.info(`✅ [TPV Quick Add] Product created successfully: ${product.name} (${product.id})`, {
-        correlationId: req.correlationId,
-        productId: product.id,
-        barcode,
-      })
+    logger.info(`✅ [TPV Quick Add] Product created successfully: ${product.name} (${product.id})`, {
+      correlationId: req.correlationId,
+      productId: product.id,
+      barcode,
+    })
 
-      res.status(201).json({
-        message: 'Product created successfully',
-        data: toLegacyProductPayload(product),
-        correlationId: req.correlationId,
-      })
-    } catch (error) {
-      logger.error(`❌ [TPV Quick Add] Error creating product`, {
-        correlationId: req.correlationId,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      })
-      next(error)
-    }
-  },
+    res.status(201).json({
+      message: 'Product created successfully',
+      data: toLegacyProductPayload(product),
+      correlationId: req.correlationId,
+    })
+  } catch (error) {
+    logger.error(`❌ [TPV Quick Add] Error creating product`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+}
+
+router.post(
+  '/venues/:venueId/products/quick-add',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  createTpvQuickAddProductHandler,
 )
 
 /**

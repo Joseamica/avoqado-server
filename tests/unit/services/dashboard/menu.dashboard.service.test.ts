@@ -17,6 +17,8 @@
 
 import { prismaMock } from '../../../__helpers__/setup'
 import * as menuService from '../../../../src/services/dashboard/menu.dashboard.service'
+import AppError from '../../../../src/errors/AppError'
+import { assertLegacyCatalogGovernanceComputedForVenue } from '../../../../src/services/master-catalog/catalogGovernance.service'
 
 // Mock Socket.IO so getBroadcastingService() returns null (no broadcasts)
 jest.mock('../../../../src/communication/sockets', () => ({
@@ -27,6 +29,10 @@ jest.mock('../../../../src/communication/sockets', () => ({
 // Mock slug utility so we don't depend on its internals
 jest.mock('../../../../src/utils/slugify', () => ({
   generateSlug: jest.fn((name: string) => name.toLowerCase().replace(/\s+/g, '-')),
+}))
+
+jest.mock('../../../../src/services/master-catalog/catalogGovernance.service', () => ({
+  assertLegacyCatalogGovernanceComputedForVenue: jest.fn(),
 }))
 
 const makeMockCategory = (overrides: Record<string, any> = {}) => ({
@@ -142,5 +148,59 @@ describe('MenuCategory printStationId (print-station routing)', () => {
       const updateCall = prismaMock.menuCategory.update.mock.calls[0][0]
       expect(updateCall.data.printStation).toEqual({ disconnect: true })
     })
+  })
+})
+
+describe('importMenu — governed bulk preflight', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock))
+    prismaMock.product.findMany.mockResolvedValue([])
+  })
+
+  it('returns bounded per-row diagnostics after the lock-first inspection and before destructive writes', async () => {
+    const longSku = `${'😀'.repeat(140)}-tail`
+    ;(assertLegacyCatalogGovernanceComputedForVenue as jest.Mock).mockImplementation(
+      async (_tx: unknown, _input: unknown, inspect: () => Promise<boolean>) => {
+        await inspect()
+        throw new AppError('governed', 422, true, 'CATALOG_GOVERNANCE_REQUIRED')
+      },
+    )
+
+    const result = menuService.importMenu(
+      'venue-xyz',
+      {
+        mode: 'merge',
+        categories: [
+          {
+            name: 'Alimentos',
+            slug: 'alimentos',
+            products: [{ name: 'Producto', sku: longSku, price: 10 }],
+          },
+        ],
+      } as never,
+      { type: 'HUMAN', staffId: 'staff-1', impersonating: false },
+    )
+
+    await expect(result).rejects.toMatchObject({
+      code: 'CATALOG_GOVERNANCE_REQUIRED',
+      details: {
+        total: 1,
+        truncated: false,
+        errors: [
+          {
+            categoryOrdinal: 1,
+            productOrdinal: 1,
+            sku: '😀'.repeat(128),
+            skuTruncated: true,
+            code: 'CATALOG_GOVERNANCE_REQUIRED',
+          },
+        ],
+      },
+    })
+    expect(Array.from('😀'.repeat(128))).toHaveLength(128)
+    expect(prismaMock.product.deleteMany).not.toHaveBeenCalled()
+    expect(prismaMock.menu.create).not.toHaveBeenCalled()
+    expect(prismaMock.product.create).not.toHaveBeenCalled()
   })
 })

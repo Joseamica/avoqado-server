@@ -6,6 +6,16 @@ import * as mobileProductController from '@/controllers/mobile/product.mobile.co
 import { toLegacyProductPayload, toLegacyVenuePayload } from '@/utils/legacyProductPayload'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn().mockReturnValue(null) } }))
+jest.mock('@/services/master-catalog/catalogGovernance.service', () => ({
+  assertLegacyCatalogGovernanceForVenue: jest.fn().mockResolvedValue(undefined),
+  assertLegacyCatalogProductUpdateGovernance: jest.fn().mockResolvedValue({ id: '<product-id>', active: true }),
+  assertLegacyProductReferencesForVenue: jest.fn().mockResolvedValue(undefined),
+  resolveLegacyCatalogActor: jest.fn((staffId: string, impersonating: boolean) => ({
+    type: 'HUMAN',
+    staffId,
+    impersonating,
+  })),
+}))
 
 const venueId = '<venue-id>'
 const productId = '<product-id>'
@@ -35,7 +45,10 @@ function expectSanitizedProduct(product: any): void {
   expect(product).toHaveProperty('arbitraryLegacyField', { retained: true })
 }
 
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock))
+})
 afterEach(() => jest.restoreAllMocks())
 
 describe('H1A internal-field legacy boundaries', () => {
@@ -82,7 +95,11 @@ describe('H1A internal-field legacy boundaries', () => {
         makeResponse(),
         async function () {
           await dashboardProductController.createProductHandler(
-            { params: { venueId }, body: { name: internalProduct.name } } as unknown as Request,
+            {
+              params: { venueId },
+              body: { name: internalProduct.name },
+              authContext: { userId: '<actor>', isImpersonating: false },
+            } as unknown as Request,
             calls[2][0],
             next,
           )
@@ -93,7 +110,11 @@ describe('H1A internal-field legacy boundaries', () => {
         makeResponse(),
         async function () {
           await dashboardProductController.updateProductHandler(
-            { params: { venueId, productId }, body: { name: internalProduct.name } } as unknown as Request,
+            {
+              params: { venueId, productId },
+              body: { name: internalProduct.name },
+              authContext: { userId: '<actor>', isImpersonating: false },
+            } as unknown as Request,
             calls[3][0],
             next,
           )
@@ -104,7 +125,7 @@ describe('H1A internal-field legacy boundaries', () => {
         makeResponse(),
         async function () {
           await dashboardProductController.deleteProductImageHandler(
-            { params: { venueId, productId } } as unknown as Request,
+            { params: { venueId, productId }, authContext: { userId: '<actor>', isImpersonating: false } } as unknown as Request,
             calls[4][0],
             next,
           )
@@ -133,7 +154,11 @@ describe('H1A internal-field legacy boundaries', () => {
 
     const createResponse = makeResponse()
     await mobileProductController.createProduct(
-      { params: { venueId }, body: { name: internalProduct.name, categoryId } } as unknown as Request,
+      {
+        params: { venueId },
+        body: { name: internalProduct.name, categoryId },
+        authContext: { userId: '<actor>', isImpersonating: false },
+      } as unknown as Request,
       createResponse,
       next,
     )
@@ -141,7 +166,11 @@ describe('H1A internal-field legacy boundaries', () => {
 
     const updateResponse = makeResponse()
     await mobileProductController.updateProduct(
-      { params: { venueId, productId }, body: { name: internalProduct.name } } as unknown as Request,
+      {
+        params: { venueId, productId },
+        body: { name: internalProduct.name },
+        authContext: { userId: '<actor>', isImpersonating: false },
+      } as unknown as Request,
       updateResponse,
       next,
     )

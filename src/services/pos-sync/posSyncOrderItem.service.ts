@@ -2,6 +2,10 @@ import { OriginSystem, Prisma, Product, SyncStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../master-catalog/catalogGovernance.service'
 
 interface OrderItemPayload {
   venueId: string
@@ -61,44 +65,45 @@ export async function processPosOrderItemEvent(payload: OrderItemPayload) {
     throw new NotFoundError(`El payload para el item ${itemData.externalId} no tiene productExternalId.`)
   }
 
-  // Encontrar o crear el producto asociado
-  const product = await getOrCreatePosProduct(
-    itemData.productExternalId,
-    itemData.productName || 'Producto Desconocido',
-    itemData.unitPrice || 0,
-    venueId,
-  )
-
-  const orderItem = await prisma.orderItem.upsert({
-    where: { orderId_externalId: { orderId: parentOrder.id, externalId: itemData.externalId } },
-    update: {
-      quantity: itemData.quantity,
-      unitPrice: itemData.unitPrice,
-      discountAmount: itemData.discountAmount,
-      taxAmount: itemData.taxAmount,
-      total: itemData.total,
-      notes: itemData.notes,
-      posRawData: itemData.posRawData ?? undefined,
-      syncStatus: SyncStatus.SYNCED,
-      lastSyncAt: new Date(),
-      sequence: itemData.sequence,
-    },
-    create: {
-      order: { connect: { id: parentOrder.id } },
-      product: { connect: { id: product.id } },
-      externalId: itemData.externalId,
-      quantity: itemData.quantity || 1,
-      unitPrice: itemData.unitPrice || 0,
-      discountAmount: itemData.discountAmount || 0,
-      taxAmount: itemData.taxAmount || 0,
-      total: itemData.total || 0,
-      notes: itemData.notes,
-      posRawData: itemData.posRawData ?? undefined,
-      originSystem: OriginSystem.POS_SOFTRESTAURANT,
-      syncStatus: SyncStatus.SYNCED,
-      sequence: itemData.sequence,
-      lastSyncAt: new Date(),
-    },
+  const orderItem = await prisma.$transaction(async tx => {
+    const product = await getOrCreatePosProduct(
+      tx,
+      itemData.productExternalId as string,
+      itemData.productName || 'Producto Desconocido',
+      itemData.unitPrice || 0,
+      venueId,
+    )
+    return tx.orderItem.upsert({
+      where: { orderId_externalId: { orderId: parentOrder.id, externalId: itemData.externalId } },
+      update: {
+        quantity: itemData.quantity,
+        unitPrice: itemData.unitPrice,
+        discountAmount: itemData.discountAmount,
+        taxAmount: itemData.taxAmount,
+        total: itemData.total,
+        notes: itemData.notes,
+        posRawData: itemData.posRawData ?? undefined,
+        syncStatus: SyncStatus.SYNCED,
+        lastSyncAt: new Date(),
+        sequence: itemData.sequence,
+      },
+      create: {
+        order: { connect: { id: parentOrder.id } },
+        product: { connect: { id: product.id } },
+        externalId: itemData.externalId,
+        quantity: itemData.quantity || 1,
+        unitPrice: itemData.unitPrice || 0,
+        discountAmount: itemData.discountAmount || 0,
+        taxAmount: itemData.taxAmount || 0,
+        total: itemData.total || 0,
+        notes: itemData.notes,
+        posRawData: itemData.posRawData ?? undefined,
+        originSystem: OriginSystem.POS_SOFTRESTAURANT,
+        syncStatus: SyncStatus.SYNCED,
+        sequence: itemData.sequence,
+        lastSyncAt: new Date(),
+      },
+    })
   })
 
   logger.info(`[🍔 PosSyncItem] Item ${orderItem.id} (externalId: ${orderItem.externalId}) guardado/actualizado.`)
@@ -109,14 +114,32 @@ export async function processPosOrderItemEvent(payload: OrderItemPayload) {
 /**
  * Función de utilidad para encontrar un producto por su ID del POS, o crearlo si no existe.
  */
-async function getOrCreatePosProduct(externalId: string, name: string, price: number, venueId: string): Promise<Product> {
-  const existing = await prisma.product.findUnique({
+async function getOrCreatePosProduct(
+  tx: Prisma.TransactionClient,
+  externalId: string,
+  name: string,
+  price: number,
+  venueId: string,
+): Promise<Product> {
+  const existing = await tx.product.findUnique({
     where: { venueId_externalId: { venueId, externalId } },
   })
   if (existing) return existing
 
   logger.info(`[🍔 PosSyncItem] Producto ${externalId} no encontrado. Creando placeholder...`)
-  return prisma.product.upsert({
+  await assertLegacyCatalogGovernanceForVenue(tx, {
+    venueId,
+    operation: 'CREATE',
+    willBeVendable: true,
+    actor: { type: 'SERVICE', servicePrincipalId: 'POS_SYNC' },
+  })
+  // WHY: The first read is only a fast path. The Venue fence may wait behind
+  // another creator, so provenance is decided from this post-lock reread.
+  const createdWhileWaiting = await tx.product.findUnique({
+    where: { venueId_externalId: { venueId, externalId } },
+  })
+  if (createdWhileWaiting) return createdWhileWaiting
+  const product = await tx.product.upsert({
     where: { venueId_externalId: { venueId, externalId } },
     update: {
       price,
@@ -138,4 +161,10 @@ async function getOrCreatePosProduct(externalId: string, name: string, price: nu
       syncStatus: SyncStatus.SYNCED,
     },
   })
+  await writeLegacyServiceProductCreationAuditForVenue(tx, {
+    venueId,
+    productId: product.id,
+    actor: { type: 'SERVICE', servicePrincipalId: 'POS_SYNC' },
+  })
+  return product
 }

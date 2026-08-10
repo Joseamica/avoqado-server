@@ -6,6 +6,13 @@ import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
+import type { CatalogActor } from '../../types/master-catalog'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  assertLegacyProductReferencesForVenue,
+  assertLegacyCatalogProductUpdateGovernance,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../master-catalog/catalogGovernance.service'
 
 export interface CreateProductDto {
   name: string
@@ -524,7 +531,7 @@ export async function getProduct(venueId: string, productId: string): Promise<an
 /**
  * Create a new product
  */
-export async function createProduct(venueId: string, productData: CreateProductDto): Promise<Product> {
+export async function createProduct(venueId: string, productData: CreateProductDto, actor: CatalogActor): Promise<Product> {
   // ✅ Validate product data based on type (Square-aligned)
   validateProductByType(productData)
 
@@ -544,6 +551,12 @@ export async function createProduct(venueId: string, productData: CreateProductD
   const createProductInTransaction = async (): Promise<CreatedProductWithRelations> =>
     prisma.$transaction(
       async tx => {
+        await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
+        await assertLegacyProductReferencesForVenue(tx, {
+          venueId,
+          categoryId: productFields.categoryId,
+          printStationId: productFields.printStationId,
+        })
         const maxOrder = await tx.product.findFirst({
           where: { venueId },
           orderBy: { displayOrder: 'desc' },
@@ -552,7 +565,7 @@ export async function createProduct(venueId: string, productData: CreateProductD
 
         const displayOrder = (maxOrder?.displayOrder || 0) + 1
 
-        return tx.product.create({
+        const product = await tx.product.create({
           data: {
             // Basic fields
             name: productFields.name,
@@ -565,6 +578,7 @@ export async function createProduct(venueId: string, productData: CreateProductD
             categoryId: productFields.categoryId,
             printStationId: productFields.printStationId ?? null,
             venueId,
+            createdById: actor.type === 'HUMAN' ? actor.staffId : null,
             displayOrder,
             active: true,
 
@@ -628,6 +642,18 @@ export async function createProduct(venueId: string, productData: CreateProductD
             },
           },
         })
+
+        // WHY: SERVICE callers have no Staff FK, so their durable provenance must
+        // commit atomically with the Product instead of fabricating a HUMAN actor.
+        if (actor.type === 'SERVICE') {
+          await writeLegacyServiceProductCreationAuditForVenue(tx, {
+            venueId,
+            productId: product.id,
+            actor,
+          })
+        }
+
+        return product
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
@@ -719,7 +745,12 @@ export async function createProduct(venueId: string, productData: CreateProductD
 /**
  * Update an existing product
  */
-export async function updateProduct(venueId: string, productId: string, productData: UpdateProductDto): Promise<Product> {
+export async function updateProduct(
+  venueId: string,
+  productId: string,
+  productData: UpdateProductDto,
+  actor: CatalogActor,
+): Promise<Product> {
   // ✅ Validate product data based on type (Square-aligned)
   validateProductByType(productData, true)
 
@@ -788,17 +819,30 @@ export async function updateProduct(venueId: string, productId: string, productD
     }
   }
 
-  const product = await prisma.product.update({
-    where: { id: productId },
-    data: updateData,
-    include: {
-      category: true,
-      modifierGroups: {
-        include: {
-          group: true,
+  const product = await prisma.$transaction(async tx => {
+    await assertLegacyCatalogProductUpdateGovernance(tx, {
+      venueId,
+      productId,
+      requestedActive: productData.active === true,
+      actor,
+    })
+    await assertLegacyProductReferencesForVenue(tx, {
+      venueId,
+      categoryId: productData.categoryId,
+      printStationId: productData.printStationId,
+    })
+    return tx.product.update({
+      where: { id: productId },
+      data: updateData,
+      include: {
+        category: true,
+        modifierGroups: {
+          include: {
+            group: true,
+          },
         },
       },
-    },
+    })
   })
 
   // 🔌 REAL-TIME: Broadcast product update via Socket.IO
@@ -1117,7 +1161,7 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
  * ✅ BARCODE QUICK ADD: When scanning unknown barcode, create product on-the-fly
  * Creates minimal product with barcode as SKU
  */
-export async function createQuickAddProduct(venueId: string, quickAddData: QuickAddProductDto): Promise<Product> {
+export async function createQuickAddProduct(venueId: string, quickAddData: QuickAddProductDto, actor: CatalogActor): Promise<Product> {
   const { barcode, name, price, categoryId, trackInventory } = quickAddData
 
   // ✅ CategoryId is required by the database schema
@@ -1137,42 +1181,43 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
     throw new AppError(`Product with barcode ${barcode} already exists in venue ${venueId}`, 409)
   }
 
-  // Get the next display order
-  const maxOrder = await prisma.product.findFirst({
-    where: { venueId },
-    orderBy: { displayOrder: 'desc' },
-    select: { displayOrder: true },
-  })
-
-  const displayOrder = (maxOrder?.displayOrder || 0) + 1
-
-  // ✅ Create product with barcode as SKU
-  const product = await prisma.product.create({
-    data: {
-      name,
-      sku: barcode, // ✅ Barcode becomes the SKU
-      price,
-      venueId,
-      categoryId, // Validated above, always present
-      type: ProductType.OTHER, // Default type for quick-add
-      trackInventory: trackInventory || false,
-      inventoryMethod: trackInventory ? 'QUANTITY' : null,
-      displayOrder,
-      active: true,
-    },
-    include: {
-      category: true,
-      inventory: true,
-      modifierGroups: {
-        include: {
-          group: {
-            include: {
-              modifiers: { where: { active: true } },
+  const product = await prisma.$transaction(async tx => {
+    await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
+    await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId })
+    const maxOrder = await tx.product.findFirst({
+      where: { venueId },
+      orderBy: { displayOrder: 'desc' },
+      select: { displayOrder: true },
+    })
+    const displayOrder = (maxOrder?.displayOrder || 0) + 1
+    return tx.product.create({
+      data: {
+        name,
+        sku: barcode, // ✅ Barcode becomes the SKU
+        price,
+        venueId,
+        createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+        categoryId, // Validated above, always present
+        type: ProductType.OTHER, // Default type for quick-add
+        trackInventory: trackInventory || false,
+        inventoryMethod: trackInventory ? 'QUANTITY' : null,
+        displayOrder,
+        active: true,
+      },
+      include: {
+        category: true,
+        inventory: true,
+        modifierGroups: {
+          include: {
+            group: {
+              include: {
+                modifiers: { where: { active: true } },
+              },
             },
           },
         },
       },
-    },
+    })
   })
 
   // 🔌 REAL-TIME: Broadcast product creation via Socket.IO

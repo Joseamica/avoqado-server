@@ -113,7 +113,16 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         })
       }
       try {
-        const updated = await updateProduct(venueId, matches[0].id, { active })
+        const updated = await updateProduct(
+          venueId,
+          matches[0].id,
+          { active },
+          {
+            type: 'HUMAN',
+            staffId: scope.staffId,
+            impersonating: false,
+          },
+        )
         await auditMcpWrite(scope, {
           action: 'MENU_ITEM_ACTIVE_SET',
           entity: 'Product',
@@ -159,7 +168,16 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         })
       }
       try {
-        const updated = await updateProduct(venueId, matches[0].id, { price })
+        const updated = await updateProduct(
+          venueId,
+          matches[0].id,
+          { price },
+          {
+            type: 'HUMAN',
+            staffId: scope.staffId,
+            impersonating: false,
+          },
+        )
         await auditMcpWrite(scope, {
           action: 'MENU_ITEM_PRICE_SET',
           entity: 'Product',
@@ -378,17 +396,21 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         }-${Date.now().toString(36).slice(-5).toUpperCase()}`
 
       try {
-        const product = await createProduct(venueId, {
-          name,
-          price,
-          type: PRODUCT_TYPE_MAP[type],
-          sku: finalSku,
-          categoryId: cat.id,
-          ...(description ? { description } : {}),
-          ...(durationMinutes ? { duration: durationMinutes } : {}),
-          ...(isAlcoholic !== undefined ? { isAlcoholic } : {}),
-          ...(soldByWeight !== undefined ? { soldByWeight } : {}),
-        })
+        const product = await createProduct(
+          venueId,
+          {
+            name,
+            price,
+            type: PRODUCT_TYPE_MAP[type],
+            sku: finalSku,
+            categoryId: cat.id,
+            ...(description ? { description } : {}),
+            ...(durationMinutes ? { duration: durationMinutes } : {}),
+            ...(isAlcoholic !== undefined ? { isAlcoholic } : {}),
+            ...(soldByWeight !== undefined ? { soldByWeight } : {}),
+          },
+          { type: 'HUMAN', staffId: scope.staffId, impersonating: false },
+        )
         await auditMcpWrite(scope, {
           action: 'PRODUCT_CREATED',
           entity: 'Product',

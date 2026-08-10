@@ -14,12 +14,17 @@ import {
   UpdateModifierDto,
   AssignModifierGroupToProductDto,
 } from '../../schemas/dashboard/menu.schema'
-import { NotFoundError, BadRequestError } from '../../errors/AppError'
+import AppError, { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
+import type { CatalogActor } from '../../types/master-catalog'
+import {
+  assertLegacyCatalogGovernanceComputedForVenue,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../master-catalog/catalogGovernance.service'
 
 export async function getMenus(venueId: string): Promise<Menu[]> {
   return prisma.menu.findMany({
@@ -1193,6 +1198,10 @@ interface ImportMenuData {
         | 'RETAIL'
         | 'SERVICE'
         | 'OTHER'
+      // Minutos del servicio con cita. OPCIONAL a propósito: hay locales que no
+      // quieren fijar tiempos y el motor de reservas cae al `defaultDurationMin`
+      // del venue. Ausente ≠ null: si no viene, el update NO toca la columna.
+      duration?: number | null
       tags?: string[]
       allergens?: string[]
       trackInventory?: boolean
@@ -1214,7 +1223,20 @@ interface ImportMenuData {
   }[]
 }
 
-export async function importMenu(venueId: string, data: ImportMenuData) {
+const GOVERNANCE_DIAGNOSTIC_ROWS_MAX = 100
+const GOVERNANCE_DIAGNOSTIC_SKU_SCALARS_MAX = 128
+
+function boundedGovernanceDiagnosticSku(value: string): { sku: string; skuTruncated: boolean } {
+  const scalars = Array.from(value)
+  // WHY: A row cap alone still permits multi-megabyte error payloads. Slice
+  // complete Unicode scalars so diagnostics stay valid JSON and bounded.
+  return {
+    sku: scalars.slice(0, GOVERNANCE_DIAGNOSTIC_SKU_SCALARS_MAX).join(''),
+    skuTruncated: scalars.length > GOVERNANCE_DIAGNOSTIC_SKU_SCALARS_MAX,
+  }
+}
+
+export async function importMenu(venueId: string, data: ImportMenuData, actor: CatalogActor) {
   let categoriesCreated = 0
   let productsCreated = 0
   let productsUpdated = 0
@@ -1223,6 +1245,45 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
 
   await prisma.$transaction(
     async tx => {
+      const incomingProducts = data.categories.flatMap((category, categoryIndex) =>
+        category.products.map((product, productIndex) => ({ product, categoryIndex, productIndex })),
+      )
+      let wouldCreate = incomingProducts
+      try {
+        await assertLegacyCatalogGovernanceComputedForVenue(tx, { venueId, operation: 'CREATE', actor }, async () => {
+          const existingSkus =
+            data.mode === 'replace' || incomingProducts.length === 0
+              ? new Set<string>()
+              : new Set(
+                  (
+                    await tx.product.findMany({
+                      where: { venueId, sku: { in: incomingProducts.map(entry => entry.product.sku) } },
+                      select: { sku: true },
+                    })
+                  ).map(product => product.sku),
+                )
+          wouldCreate = data.mode === 'replace' ? incomingProducts : incomingProducts.filter(entry => !existingSkus.has(entry.product.sku))
+          return wouldCreate.length > 0
+        })
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'CATALOG_GOVERNANCE_REQUIRED') {
+          throw new AppError(error.message, 422, true, error.code, {
+            action: 'OPEN_MASTER_CATALOG',
+            total: wouldCreate.length,
+            truncated: wouldCreate.length > GOVERNANCE_DIAGNOSTIC_ROWS_MAX,
+            errors: wouldCreate.slice(0, GOVERNANCE_DIAGNOSTIC_ROWS_MAX).map(entry => ({
+              categoryOrdinal: entry.categoryIndex + 1,
+              productOrdinal: entry.productIndex + 1,
+              ...boundedGovernanceDiagnosticSku(entry.product.sku),
+              code: 'CATALOG_GOVERNANCE_REQUIRED',
+            })),
+          })
+        }
+        throw error
+      }
+      // WHY: Fence, current-SKU inspection and bounded diagnostics all finish
+      // before replace deletes or any menu write, so stale preflight cannot
+      // reject a row created while waiting or leave a partially destroyed menu.
       // REPLACE MODE: Delete all existing menu data (Toast/Square pattern)
       // With SET NULL FK constraints, order history preserves denormalized product/modifier names
       if (data.mode === 'replace') {
@@ -1329,6 +1390,9 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
                 displayOrder: prodIndex,
                 tags: productData.tags || [],
                 allergens: productData.allergens || [],
+                // Ausente ≠ null: re-importar precios no puede borrar la duración
+                // ya configurada y desconfigurar la agenda del local.
+                ...(productData.duration !== undefined ? { duration: productData.duration } : {}),
               },
             })
             productsUpdated++
@@ -1337,6 +1401,7 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
             product = await tx.product.create({
               data: {
                 venueId,
+                createdById: actor.type === 'HUMAN' ? actor.staffId : null,
                 name: productData.name,
                 sku: productData.sku,
                 price: productData.price,
@@ -1347,8 +1412,13 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
                 displayOrder: prodIndex,
                 tags: productData.tags || [],
                 allergens: productData.allergens || [],
+                // Nulo es válido: el motor de reservas cae al default del venue.
+                duration: productData.duration ?? null,
               },
             })
+            if (actor.type === 'SERVICE') {
+              await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: product.id, actor })
+            }
             productsCreated++
           }
 

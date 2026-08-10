@@ -501,14 +501,18 @@ async function seedCatalog(bp: VenueBlueprint, venueId: string): Promise<SeededP
     })
 
     for (const p of bp.regulars) {
-      const product = await createProduct(venueId, {
-        name: p.name,
-        description: p.description,
-        price: p.price,
-        type: ProductType.REGULAR,
-        sku: p.sku,
-        categoryId: productCat.id,
-      })
+      const product = await createProduct(
+        venueId,
+        {
+          name: p.name,
+          description: p.description,
+          price: p.price,
+          type: ProductType.REGULAR,
+          sku: p.sku,
+          categoryId: productCat.id,
+        },
+        { type: 'SERVICE', servicePrincipalId: 'DEMO_VENUE_SEED' },
+      )
 
       // Turn on quantity inventory tracking + create the stock row (mirrors the
       // café seeder's seedProductInventory pattern).
@@ -540,16 +544,20 @@ async function seedCatalog(bp: VenueBlueprint, venueId: string): Promise<SeededP
     })
 
     for (const s of bp.services) {
-      const product = await createProduct(venueId, {
-        name: s.name,
-        description: s.description,
-        price: s.price,
-        type: ProductType.APPOINTMENTS_SERVICE,
-        sku: s.sku,
-        categoryId: svcCat.id,
-        durationMinutes: s.durationMinutes,
-        duration: s.durationMinutes,
-      })
+      const product = await createProduct(
+        venueId,
+        {
+          name: s.name,
+          description: s.description,
+          price: s.price,
+          type: ProductType.APPOINTMENTS_SERVICE,
+          sku: s.sku,
+          categoryId: svcCat.id,
+          durationMinutes: s.durationMinutes,
+          duration: s.durationMinutes,
+        },
+        { type: 'SERVICE', servicePrincipalId: 'DEMO_VENUE_SEED' },
+      )
       seeded.push({ id: product.id, name: product.name, price: s.price, type: ProductType.APPOINTMENTS_SERVICE })
     }
     logger.info(`   ✅ ${bp.services.length} APPOINTMENTS_SERVICE products`)

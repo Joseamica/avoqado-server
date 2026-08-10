@@ -30,7 +30,7 @@ export interface LogActionParams {
  * is not a real staff user. Persisting these would violate the staffId FK,
  * so we normalize them to null here.
  */
-const ACTOR_SENTINELS = new Set(['SYSTEM', 'CUSTOMER', 'PUBLIC', 'WEBHOOK'])
+const ACTOR_SENTINELS = new Set(['SYSTEM', 'CUSTOMER', 'PUBLIC', 'WEBHOOK', 'MASTER_ADMIN'])
 
 /**
  * Best-effort audit log writer.
@@ -48,7 +48,6 @@ export async function logAction(params: LogActionParams): Promise<void> {
   const staffId = params.staffId && !ACTOR_SENTINELS.has(params.staffId) ? params.staffId : null
 
   try {
-
     await prisma.activityLog.create({
       data: {
         staffId,

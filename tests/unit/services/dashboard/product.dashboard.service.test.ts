@@ -12,6 +12,14 @@
 import { Decimal } from '@prisma/client/runtime/library'
 import { prismaMock } from '../../../__helpers__/setup'
 import * as productService from '../../../../src/services/dashboard/product.dashboard.service'
+import {
+  assertLegacyProductReferencesForVenue,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../../../../src/services/master-catalog/catalogGovernance.service'
+import AppError from '../../../../src/errors/AppError'
+
+const humanActor = { type: 'HUMAN' as const, staffId: 'staff-1', impersonating: false }
+const serviceActor = { type: 'SERVICE' as const, servicePrincipalId: 'DEMO_VENUE_SEED' }
 
 // Minimal mock product factory — typed as any to avoid Prisma payload shape strictness
 const makeMockProduct = (overrides: Record<string, any> = {}): any => ({
@@ -85,6 +93,13 @@ jest.mock('../../../../src/communication/sockets', () => ({
   default: { getBroadcastingService: jest.fn().mockReturnValue(null) },
 }))
 
+jest.mock('../../../../src/services/master-catalog/catalogGovernance.service', () => ({
+  assertLegacyCatalogGovernanceForVenue: jest.fn().mockResolvedValue(undefined),
+  assertLegacyCatalogProductUpdateGovernance: jest.fn().mockResolvedValue({ id: 'product-abc', active: true }),
+  assertLegacyProductReferencesForVenue: jest.fn().mockResolvedValue(undefined),
+  writeLegacyServiceProductCreationAuditForVenue: jest.fn().mockResolvedValue(undefined),
+}))
+
 describe('getProducts — recipe/modifier trees are opt-out (perf: fan-out to ~10 pages)', () => {
   beforeEach(() => jest.clearAllMocks())
 
@@ -142,17 +157,22 @@ describe('Product printStationId (print-station routing)', () => {
       prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
       prismaMock.product.create.mockResolvedValue(createdProduct)
 
-      const result = await productService.createProduct('venue-xyz', {
-        name: 'Producto Test',
-        sku: 'SKU001',
-        price: 100,
-        type: 'REGULAR' as any,
-        categoryId: 'cat-001',
-        printStationId: 'station-001',
-      })
+      const result = await productService.createProduct(
+        'venue-xyz',
+        {
+          name: 'Producto Test',
+          sku: 'SKU001',
+          price: 100,
+          type: 'REGULAR' as any,
+          categoryId: 'cat-001',
+          printStationId: 'station-001',
+        },
+        humanActor,
+      )
 
       const createCall = prismaMock.product.create.mock.calls[0][0]
       expect(createCall.data.printStationId).toBe('station-001')
+      expect(createCall.data.createdById).toBe('staff-1')
       expect(result.printStationId).toBe('station-001')
     })
 
@@ -163,16 +183,61 @@ describe('Product printStationId (print-station routing)', () => {
       prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
       prismaMock.product.create.mockResolvedValue(createdProduct)
 
-      await productService.createProduct('venue-xyz', {
-        name: 'Producto Test',
-        sku: 'SKU001',
-        price: 100,
-        type: 'REGULAR' as any,
-        categoryId: 'cat-001',
-      })
+      await productService.createProduct(
+        'venue-xyz',
+        {
+          name: 'Producto Test',
+          sku: 'SKU001',
+          price: 100,
+          type: 'REGULAR' as any,
+          categoryId: 'cat-001',
+        },
+        humanActor,
+      )
 
       const createCall = prismaMock.product.create.mock.calls[0][0]
       expect(createCall.data.printStationId).toBeNull()
+    })
+
+    it('co-commits exact SERVICE provenance while HUMAN creation has no duplicate legacy audit', async () => {
+      prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+      prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
+      prismaMock.product.create.mockResolvedValue(makeMockProduct())
+      const input = { name: 'Producto Test', sku: 'SKU001', price: 100, type: 'REGULAR' as any, categoryId: 'cat-001' }
+
+      await productService.createProduct('venue-xyz', input, humanActor)
+      expect(writeLegacyServiceProductCreationAuditForVenue).not.toHaveBeenCalled()
+
+      await productService.createProduct('venue-xyz', input, serviceActor)
+      expect(prismaMock.product.create.mock.calls[1][0].data.createdById).toBeNull()
+      expect(writeLegacyServiceProductCreationAuditForVenue).toHaveBeenCalledTimes(1)
+      expect(writeLegacyServiceProductCreationAuditForVenue).toHaveBeenCalledWith(prismaMock, {
+        venueId: 'venue-xyz',
+        productId: 'product-abc',
+        actor: serviceActor,
+      })
+    })
+
+    it('does not resolve the SERVICE transaction when provenance audit fails', async () => {
+      let committed = false
+      prismaMock.$transaction.mockImplementationOnce(async (cb: any) => {
+        const result = await cb(prismaMock)
+        committed = true
+        return result
+      })
+      prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
+      prismaMock.product.create.mockResolvedValue(makeMockProduct())
+      ;(writeLegacyServiceProductCreationAuditForVenue as jest.Mock).mockRejectedValueOnce(new Error('audit unavailable'))
+
+      await expect(
+        productService.createProduct(
+          'venue-xyz',
+          { name: 'Producto Test', sku: 'SKU001', price: 100, type: 'REGULAR' as any, categoryId: 'cat-001' },
+          serviceActor,
+        ),
+      ).rejects.toThrow('audit unavailable')
+      expect(prismaMock.product.create).toHaveBeenCalledTimes(1)
+      expect(committed).toBe(false)
     })
   })
 
@@ -187,9 +252,14 @@ describe('Product printStationId (print-station routing)', () => {
       prismaMock.product.findFirst.mockResolvedValue(existing)
       prismaMock.product.update.mockResolvedValue(updated)
 
-      const result = await productService.updateProduct('venue-xyz', 'product-abc', {
-        printStationId: 'station-002',
-      })
+      const result = await productService.updateProduct(
+        'venue-xyz',
+        'product-abc',
+        {
+          printStationId: 'station-002',
+        },
+        humanActor,
+      )
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data.printStationId).toBe('station-002')
@@ -204,7 +274,7 @@ describe('Product printStationId (print-station routing)', () => {
       prismaMock.product.update.mockResolvedValue(updated)
 
       // Update with only name — no printStationId provided
-      await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Actualizado' })
+      await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Actualizado' }, humanActor)
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       // printStationId must NOT appear in updateData sent to Prisma
@@ -218,13 +288,45 @@ describe('Product printStationId (print-station routing)', () => {
       prismaMock.product.findFirst.mockResolvedValue(existing)
       prismaMock.product.update.mockResolvedValue(updated)
 
-      await productService.updateProduct('venue-xyz', 'product-abc', {
-        printStationId: null,
-      })
+      await productService.updateProduct(
+        'venue-xyz',
+        'product-abc',
+        {
+          printStationId: null,
+        },
+        humanActor,
+      )
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data.printStationId).toBeNull()
     })
+  })
+})
+
+describe('Product governed tenant references', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
+  })
+
+  it('does not create a Product when its category belongs to another venue', async () => {
+    ;(assertLegacyProductReferencesForVenue as jest.Mock).mockRejectedValueOnce(new AppError('Categoría no encontrada', 404))
+
+    await expect(
+      productService.createProduct(
+        'venue-xyz',
+        {
+          name: 'Foreign',
+          sku: 'FOREIGN',
+          price: 10,
+          type: 'REGULAR' as any,
+          categoryId: 'foreign-category',
+        },
+        humanActor,
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 })
+    expect(prismaMock.product.create).not.toHaveBeenCalled()
   })
 })
 
@@ -244,14 +346,18 @@ describe('Product soldByWeight (venta por peso)', () => {
       prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
       prismaMock.product.create.mockResolvedValue(created)
 
-      await productService.createProduct('venue-xyz', {
-        name: 'Jamón serrano',
-        sku: 'CHA-001',
-        price: 420,
-        type: 'REGULAR' as any,
-        categoryId: 'cat-001',
-        soldByWeight: true,
-      })
+      await productService.createProduct(
+        'venue-xyz',
+        {
+          name: 'Jamón serrano',
+          sku: 'CHA-001',
+          price: 420,
+          type: 'REGULAR' as any,
+          categoryId: 'cat-001',
+          soldByWeight: true,
+        },
+        humanActor,
+      )
 
       const createCall = prismaMock.product.create.mock.calls[0][0]
       expect(createCall.data.soldByWeight).toBe(true)
@@ -264,13 +370,17 @@ describe('Product soldByWeight (venta por peso)', () => {
       prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
       prismaMock.product.create.mockResolvedValue(created)
 
-      await productService.createProduct('venue-xyz', {
-        name: 'Refresco',
-        sku: 'BEB-001',
-        price: 40,
-        type: 'REGULAR' as any,
-        categoryId: 'cat-001',
-      })
+      await productService.createProduct(
+        'venue-xyz',
+        {
+          name: 'Refresco',
+          sku: 'BEB-001',
+          price: 40,
+          type: 'REGULAR' as any,
+          categoryId: 'cat-001',
+        },
+        humanActor,
+      )
 
       const createCall = prismaMock.product.create.mock.calls[0][0]
       expect(createCall.data.soldByWeight).toBe(false)
@@ -285,7 +395,7 @@ describe('Product soldByWeight (venta por peso)', () => {
       prismaMock.product.findFirst.mockResolvedValue(existing)
       prismaMock.product.update.mockResolvedValue(updated)
 
-      await productService.updateProduct('venue-xyz', 'product-abc', { soldByWeight: true } as any)
+      await productService.updateProduct('venue-xyz', 'product-abc', { soldByWeight: true } as any, humanActor)
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data.soldByWeight).toBe(true)
@@ -298,7 +408,7 @@ describe('Product soldByWeight (venta por peso)', () => {
       prismaMock.product.findFirst.mockResolvedValue(existing)
       prismaMock.product.update.mockResolvedValue(updated)
 
-      await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Actualizado' })
+      await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Actualizado' }, humanActor)
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data).not.toHaveProperty('soldByWeight')
@@ -311,7 +421,7 @@ describe('Product soldByWeight (venta por peso)', () => {
       prismaMock.product.findFirst.mockResolvedValue(existing)
       prismaMock.product.update.mockResolvedValue(updated)
 
-      await productService.updateProduct('venue-xyz', 'product-abc', { soldByWeight: false } as any)
+      await productService.updateProduct('venue-xyz', 'product-abc', { soldByWeight: false } as any, humanActor)
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data.soldByWeight).toBe(false)

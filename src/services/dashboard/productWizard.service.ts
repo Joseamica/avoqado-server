@@ -6,6 +6,12 @@ import { createRecipe } from './recipe.service'
 import { setProductInventoryMethod, InventoryMethod } from './productInventoryIntegration.service'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
+import type { CatalogActor } from '../../types/master-catalog'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  assertLegacyProductReferencesForVenue,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../master-catalog/catalogGovernance.service'
 
 /**
  * Product Creation Wizard Service
@@ -65,7 +71,7 @@ export interface WizardStep3RecipeData {
  * Step 1: Create basic product
  * Returns productId for subsequent steps
  */
-export async function createProductStep1(venueId: string, data: WizardStep1Data) {
+export async function createProductStep1(venueId: string, data: WizardStep1Data, actor: CatalogActor) {
   // Validate category belongs to venue
   const category = await prisma.menuCategory.findFirst({
     where: {
@@ -89,29 +95,42 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data)
   // showing a generic 500.
   let product
   try {
-    product = await prisma.product.create({
-      data: {
+    product = await prisma.$transaction(async tx => {
+      await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
+      await assertLegacyProductReferencesForVenue(tx, {
         venueId,
         categoryId: data.categoryId,
-        printStationId: data.printStationId ?? null,
-        name: data.name,
-        sku: providedSku && providedSku.length > 0 ? providedSku : `SKU-${Date.now()}`,
-        gtin: providedGtin && providedGtin.length > 0 ? providedGtin : undefined,
-        description: data.description,
-        price: new Decimal(data.price),
-        imageUrl: data.imageUrl && data.imageUrl.trim() !== '' ? data.imageUrl : undefined,
-        active: true,
-        ...(data.type && { type: data.type as any }),
-        ...(data.duration && { duration: data.duration }),
-        ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
-        ...(data.layoutConfig !== undefined && {
-          layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
-        }),
-        externalData: {
-          wizardCompleted: false,
-          inventoryConfigured: false,
+        printStationId: data.printStationId,
+      })
+      const created = await tx.product.create({
+        data: {
+          venueId,
+          createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+          categoryId: data.categoryId,
+          printStationId: data.printStationId ?? null,
+          name: data.name,
+          sku: providedSku && providedSku.length > 0 ? providedSku : `SKU-${Date.now()}`,
+          gtin: providedGtin && providedGtin.length > 0 ? providedGtin : undefined,
+          description: data.description,
+          price: new Decimal(data.price),
+          imageUrl: data.imageUrl && data.imageUrl.trim() !== '' ? data.imageUrl : undefined,
+          active: true,
+          ...(data.type && { type: data.type as any }),
+          ...(data.duration && { duration: data.duration }),
+          ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
+          ...(data.layoutConfig !== undefined && {
+            layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
+          }),
+          externalData: {
+            wizardCompleted: false,
+            inventoryConfigured: false,
+          },
         },
-      },
+      })
+      if (actor.type === 'SERVICE') {
+        await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
+      }
+      return created
     })
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -380,9 +399,10 @@ export async function createProductWithInventory(
     simpleStock?: WizardStep3SimpleStockData
     recipe?: WizardStep3RecipeData
   },
+  actor: CatalogActor,
 ) {
   // Step 1: Create product
-  const step1Result = await createProductStep1(venueId, data.product)
+  const step1Result = await createProductStep1(venueId, data.product, actor)
   const productId = step1Result.productId
 
   try {

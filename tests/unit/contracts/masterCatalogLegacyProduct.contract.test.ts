@@ -12,8 +12,19 @@ import tpvFixture from '../../contracts/master-catalog/product-tpv-legacy.fixtur
 import identifierFixture from '../../contracts/master-catalog/identifier-normalization-v1.json'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn().mockReturnValue(null) } }))
+jest.mock('@/services/master-catalog/catalogGovernance.service', () => ({
+  assertLegacyCatalogGovernanceForVenue: jest.fn().mockResolvedValue(undefined),
+  assertLegacyCatalogProductUpdateGovernance: jest.fn().mockResolvedValue(undefined),
+  assertLegacyProductReferencesForVenue: jest.fn().mockResolvedValue(undefined),
+  resolveLegacyCatalogActor: jest.fn((staffId: string, impersonating: boolean) => ({
+    type: 'HUMAN',
+    staffId,
+    impersonating,
+  })),
+}))
 
 const correlationId = '<correlation-id>'
+const actorId = '<actor-id>'
 const venueId = '<venue-id>'
 const productId = '<product-id>'
 const categoryId = '<category-id>'
@@ -189,6 +200,9 @@ const makeApp = () => {
   app.use(express.json())
   app.use((req, _res, next) => {
     ;(req as any).correlationId = correlationId
+    // WHY: these real controllers require authenticated provenance; the contract
+    // freezes only their legacy response envelope, never an unauthenticated call.
+    ;(req as any).authContext = { userId: actorId, isImpersonating: false }
     next()
   })
   return app
@@ -273,6 +287,7 @@ describe('H1A legacy Product contracts', () => {
         categoryId,
         printStationId: null,
         venueId,
+        createdById: actorId,
         displayOrder: 4,
         active: true,
         isAlcoholic: false,
