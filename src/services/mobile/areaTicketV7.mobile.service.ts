@@ -16,8 +16,11 @@
 
 import { createHash, randomInt } from 'node:crypto'
 import {
+  AreaSettlementRoute,
   AreaTicketCheckoutStatus,
   AreaTicketDeliveryVerificationMode,
+  AreaTicketExternalHandoffState,
+  AreaTicketExternalSettlementStatus,
   AreaTicketFulfillmentMethod,
   AreaTicketInventoryReservationMode,
   AreaTicketInventoryReservationStatus,
@@ -146,6 +149,9 @@ const ticketInclude = {
       terminal: { select: { id: true, name: true } },
     },
   },
+  // null en la ruta AVOQADO — issueAreaTicket sólo crea el settlement cuando el área
+  // es EXTERNAL (ver isExternal).
+  externalSettlement: true,
 } satisfies Prisma.AreaTicketInclude
 
 const checkoutInclude = {
@@ -259,6 +265,9 @@ function mapTicket(ticket: any) {
     code: ticket.code,
     status: ticket.status,
     fulfillmentModeSnapshot: ticket.fulfillmentModeSnapshot,
+    // Ruta vigente AL EMITIR (§caja externa fase 1). AVOQADO para todo lo existente
+    // — el default no cambia nada de lo que ya funciona.
+    settlementRoute: ticket.settlementRoute,
     fulfillmentArea: ticket.fulfillmentArea ? { ...ticket.fulfillmentArea, fulfillmentMode: ticket.fulfillmentModeSnapshot } : null,
     sourceTerminal: ticket.sourceTerminal,
     currency: ticket.currency,
@@ -304,6 +313,19 @@ function mapTicket(ticket: any) {
             ? `${ticket.fulfillment.deliveredByStaff.firstName} ${ticket.fulfillment.deliveredByStaff.lastName}`.trim()
             : null,
           terminal: ticket.fulfillment.terminal,
+        }
+      : null,
+    // Sólo existe si el área es EXTERNAL — null en la ruta AVOQADO.
+    externalSettlement: ticket.externalSettlement
+      ? {
+          id: ticket.externalSettlement.id,
+          status: ticket.externalSettlement.status,
+          handoffState: ticket.externalSettlement.handoffState,
+          confirmationMode: ticket.externalSettlement.confirmationMode,
+          referenceAmount: money(ticket.externalSettlement.referenceAmount),
+          externalAmount: ticket.externalSettlement.externalAmount == null ? null : money(ticket.externalSettlement.externalAmount),
+          externalReference: ticket.externalSettlement.externalReference,
+          confirmedAt: ticket.externalSettlement.confirmedAt,
         }
       : null,
   }
@@ -377,7 +399,9 @@ async function resolveTerminal(venueId: string, deviceUid: string | null | undef
           active: true,
         },
       },
-      fulfillmentArea: { select: { id: true, name: true, fulfillmentMode: true, active: true } },
+      fulfillmentArea: {
+        select: { id: true, name: true, fulfillmentMode: true, active: true, settlementRoute: true, externalConfirmationMode: true },
+      },
     },
   })
   if (!terminal) {
@@ -734,6 +758,9 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   // aserción que nadie vuelve a verificar.
   const fulfillmentAreaId = terminal.fulfillmentAreaId
   const fulfillmentArea = terminal.fulfillmentArea
+  // Ruta vigente AL EMITIR — se congela en el vale (y, si aplica, en su settlement).
+  // Cambiar la ruta del área después no reescribe vales ya emitidos.
+  const isExternal = fulfillmentArea.settlementRoute === AreaSettlementRoute.EXTERNAL
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   const normalizedItems = normalizeIssueLines(input.lines)
   const { itemsData, subtotal, itemDiscountTotal } = await buildOrderItemsData(venueId, normalizedItems, fulfillmentAreaId)
@@ -763,6 +790,7 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
               venueId,
               fulfillmentAreaId,
               fulfillmentModeSnapshot: fulfillmentArea.fulfillmentMode,
+              settlementRoute: fulfillmentArea.settlementRoute,
               sourceTerminalId: terminal.id,
               issuedByStaffId: staffId ?? null,
               code,
@@ -800,17 +828,44 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
               }),
             )
           }
-          if (reservationSpecs.length > 0) {
-            await tx.areaTicketInventoryReservation.createMany({
-              data: reservationSpecs.map(spec => ({
+          if (isExternal) {
+            await tx.areaTicketExternalSettlement.create({
+              data: {
                 venueId,
                 areaTicketId: ticket.id,
-                areaTicketLineId: createdLines[spec.lineIndex].id,
-                inventoryKind: spec.inventoryKind,
-                inventoryId: spec.inventoryId,
-                quantityBaseUnits: spec.quantityBaseUnits,
-              })),
+                status: AreaTicketExternalSettlementStatus.PENDING,
+                handoffState: AreaTicketExternalHandoffState.PENDING,
+                // Se congela: la política puede cambiar mañana, este vale se emitió bajo la de hoy.
+                confirmationMode: fulfillmentArea.externalConfirmationMode,
+                referenceAmount: total,
+                idempotencyKey,
+              },
             })
+          }
+          if (reservationSpecs.length > 0) {
+            if (isExternal) {
+              // El producto ya salió del área al emitir (enmienda E3): la reserva nace
+              // CONSUMIDA con su movimiento en esta misma transacción, en vez de ACTIVA
+              // a la espera de un pago que Avoqado nunca observa (cobra otra caja).
+              await consumeReservationsAtIssue(
+                tx,
+                venueId,
+                ticket.id,
+                reservationSpecs.map(spec => ({ ...spec, areaTicketLineId: createdLines[spec.lineIndex].id })),
+                staffId ?? undefined,
+              )
+            } else {
+              await tx.areaTicketInventoryReservation.createMany({
+                data: reservationSpecs.map(spec => ({
+                  venueId,
+                  areaTicketId: ticket.id,
+                  areaTicketLineId: createdLines[spec.lineIndex].id,
+                  inventoryKind: spec.inventoryKind,
+                  inventoryId: spec.inventoryId,
+                  quantityBaseUnits: spec.quantityBaseUnits,
+                })),
+              })
+            }
           }
           return tx.areaTicket.findUniqueOrThrow({ where: { id: ticket.id }, include: ticketInclude })
         },
@@ -2113,6 +2168,49 @@ async function consumeAreaTicketReservations(
   for (const reservation of reservations) {
     if (reservation.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
       await consumeQuantityReservation(tx, venueId, reservation, orderId, staffId)
+    } else {
+      await consumeRawMaterialReservation(tx, venueId, reservation, staffId)
+    }
+  }
+}
+
+/**
+ * Ruta externa: consume la reserva EN EL MOMENTO DE EMITIR, no de pagar (enmienda E3
+ * del spec — otro POS cobra en su propia caja y Avoqado nunca ve ese cobro). El
+ * producto ya se rebanó y salió del área; esperar un pago que nunca llega dejaría el
+ * stock inflado para siempre.
+ *
+ * Reutiliza `consumeQuantityReservation`/`consumeRawMaterialReservation` — las MISMAS
+ * funciones que la ruta nativa dispara al pagar — para que el efecto contable (signo,
+ * tipo de movimiento, orden FIFO de lotes) sea idéntico al de esa ruta. Lo único que
+ * cambia es CUÁNDO: aquí la reserva nace y se consume en la misma transacción de
+ * emisión, no al materializar/pagar un checkout.
+ */
+async function consumeReservationsAtIssue(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  ticketId: string,
+  specs: Array<ReservationSpec & { areaTicketLineId: string }>,
+  staffId?: string,
+): Promise<void> {
+  for (const spec of specs) {
+    const reservation = await tx.areaTicketInventoryReservation.create({
+      data: {
+        venueId,
+        areaTicketId: ticketId,
+        areaTicketLineId: spec.areaTicketLineId,
+        inventoryKind: spec.inventoryKind,
+        inventoryId: spec.inventoryId,
+        quantityBaseUnits: spec.quantityBaseUnits,
+      },
+    })
+    if (spec.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+      // La ruta externa nunca tiene Order (lo prohíbe el CHECK
+      // area_ticket_external_no_avoqado_circuit) — se pasa el propio ticketId donde la
+      // firma pide un orderId. El parámetro no participa en la escritura (el
+      // `reference` del movimiento sigue siendo `reservation.id`, igual que en la ruta
+      // nativa), así que no hay semántica de dinero que traicionar.
+      await consumeQuantityReservation(tx, venueId, reservation, ticketId, staffId)
     } else {
       await consumeRawMaterialReservation(tx, venueId, reservation, staffId)
     }
