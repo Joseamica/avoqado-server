@@ -277,6 +277,8 @@ import reservationRoutes from './dashboard/reservation.routes'
 import printStationRoutes from './dashboard/printStation.routes'
 import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
 import areaTicketRoutes from './dashboard/areaTicket.routes'
+import * as areaTicketController from '../controllers/dashboard/areaTicket.dashboard.controller'
+import { updateAreaSettlementRouteSchema } from '../schemas/dashboard/areaTicket.schema'
 import classSessionRoutes from './dashboard/classSession.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
@@ -4201,6 +4203,16 @@ router.use('/venues/:venueId/fiscal-profile', authenticateTokenMiddleware, fisca
 // Configuración explícita y operación de vales/básculas. El servicio aplica
 // entitlement al ACTIVAR; consultar permite mostrar por qué está deshabilitado.
 router.use('/venues/:venueId/area-tickets', authenticateTokenMiddleware, areaTicketRoutes)
+// Ruta de cobro externa de UN área (§caja externa fase 1) — vive fuera del mount de
+// arriba a propósito: es el switch canónico que cambia dónde entra el dinero de esa
+// área (otro POS cobra en su propia caja), no una preferencia más de "vales por área".
+router.patch(
+  '/venues/:venueId/fulfillment-areas/:areaId/settlement-route',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:configure'),
+  validateRequest(updateAreaSettlementRouteSchema),
+  areaTicketController.updateAreaSettlementRoute,
+)
 
 // Class Sessions (group classes / workshops) — part of the reservations/appointments product
 // (uses reservations:* permissions; attendees ARE reservations), so it shares the RESERVATIONS gate.

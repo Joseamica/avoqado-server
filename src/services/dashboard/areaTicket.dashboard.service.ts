@@ -1,6 +1,10 @@
 import {
+  AreaSettlementRoute,
   AreaTicketCheckoutStatus,
   AreaTicketStatus,
+  ExternalConfirmationMode,
+  ExternalDeliveryTracking,
+  ExternalOfflinePolicy,
   FulfillmentMode,
   Prisma,
   ScaleContext,
@@ -13,6 +17,7 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/App
 import {
   CreateFulfillmentAreaInput,
   CreateScaleProfileInput,
+  UpdateAreaSettlementRouteInput,
   UpdateAreaTicketSettingsInput,
   UpdateAreaTicketTerminalInput,
   UpdateFulfillmentAreaInput,
@@ -254,6 +259,55 @@ export async function updateArea(venueId: string, areaId: string, input: UpdateF
     entity: 'FulfillmentArea',
     entityId: area.id,
     data: { changes: input } as unknown as Prisma.InputJsonValue,
+  })
+  return area
+}
+
+/**
+ * Ruta de cobro externa de un área (§caja externa fase 1). Las cuatro políticas viajan
+ * SIEMPRE juntas — el Zod ya las hace todas requeridas — porque prenderlo cambia dónde
+ * entra el dinero de esta área: Avoqado deja de crear Order/Payment para sus vales.
+ * Audita con `{ from, to }` completos: es exactamente el tipo de cambio que un owner
+ * necesita poder reconstruir después ("¿desde cuándo cobra otra caja aquí?").
+ */
+export async function updateAreaSettlementRoute(
+  venueId: string,
+  areaId: string,
+  input: UpdateAreaSettlementRouteInput,
+  performedBy?: string,
+) {
+  const previous = await prisma.fulfillmentArea.findFirst({ where: { id: areaId, venueId } })
+  if (!previous) throw new NotFoundError('Área no encontrada')
+
+  const area = await prisma.fulfillmentArea.update({
+    where: { id: areaId },
+    data: {
+      settlementRoute: input.settlementRoute as AreaSettlementRoute,
+      externalConfirmationMode: input.externalConfirmationMode as ExternalConfirmationMode,
+      externalOfflinePolicy: input.externalOfflinePolicy as ExternalOfflinePolicy,
+      externalDeliveryTracking: input.externalDeliveryTracking as ExternalDeliveryTracking,
+    },
+  })
+  await logAction({
+    staffId: performedBy ?? null,
+    venueId,
+    action: 'AREA_SETTLEMENT_ROUTE_CHANGED',
+    entity: 'FulfillmentArea',
+    entityId: area.id,
+    data: {
+      from: {
+        settlementRoute: previous.settlementRoute,
+        externalConfirmationMode: previous.externalConfirmationMode,
+        externalOfflinePolicy: previous.externalOfflinePolicy,
+        externalDeliveryTracking: previous.externalDeliveryTracking,
+      },
+      to: {
+        settlementRoute: area.settlementRoute,
+        externalConfirmationMode: area.externalConfirmationMode,
+        externalOfflinePolicy: area.externalOfflinePolicy,
+        externalDeliveryTracking: area.externalDeliveryTracking,
+      },
+    } as unknown as Prisma.InputJsonValue,
   })
   return area
 }

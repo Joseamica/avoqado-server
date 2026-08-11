@@ -61,6 +61,35 @@ export const updateFulfillmentAreaSchema = z.object({
   body: areaBody.refine(body => Object.keys(body).length > 0, 'Envía al menos un campo a actualizar'),
 })
 
+const SETTLEMENT_ROUTES = ['AVOQADO', 'EXTERNAL'] as const
+const EXTERNAL_CONFIRMATION_MODES = ['MANUAL', 'ASSUME_ON_PRINT'] as const
+const EXTERNAL_OFFLINE_POLICIES = ['ALLOW', 'BLOCK'] as const
+const EXTERNAL_DELIVERY_TRACKING_MODES = ['TRACKED', 'UNTRACKED'] as const
+
+// Ruta de cobro externa de un área (§caja externa fase 1). Las cuatro políticas viajan
+// SIEMPRE juntas — nunca un PATCH parcial — porque son una sola decisión de negocio
+// (dónde entra el dinero de esta área), no cuatro ajustes sueltos e independientes.
+export const updateAreaSettlementRouteSchema = z.object({
+  params: venueParams.extend({ areaId: z.string().min(1, 'El área es requerida') }),
+  query: emptyQuery,
+  body: z
+    .object({
+      settlementRoute: z.enum(SETTLEMENT_ROUTES, {
+        errorMap: () => ({ message: 'La ruta de cobro debe ser AVOQADO o EXTERNAL.' }),
+      }),
+      externalConfirmationMode: z.enum(EXTERNAL_CONFIRMATION_MODES, {
+        errorMap: () => ({ message: 'El modo de confirmación debe ser MANUAL o ASSUME_ON_PRINT.' }),
+      }),
+      externalOfflinePolicy: z.enum(EXTERNAL_OFFLINE_POLICIES, {
+        errorMap: () => ({ message: 'La política sin conexión debe ser ALLOW o BLOCK.' }),
+      }),
+      externalDeliveryTracking: z.enum(EXTERNAL_DELIVERY_TRACKING_MODES, {
+        errorMap: () => ({ message: 'El seguimiento de entrega debe ser TRACKED o UNTRACKED.' }),
+      }),
+    })
+    .strict(),
+})
+
 export const updateAreaTicketTerminalSchema = z.object({
   params: venueParams.extend({ terminalId: z.string().min(1, 'La terminal es requerida') }),
   query: emptyQuery,
@@ -133,6 +162,7 @@ export const updateScaleProfileSchema = z.object({
 export type UpdateAreaTicketSettingsInput = z.infer<typeof updateAreaTicketSettingsSchema>['body']
 export type CreateFulfillmentAreaInput = z.infer<typeof createFulfillmentAreaSchema>['body']
 export type UpdateFulfillmentAreaInput = z.infer<typeof updateFulfillmentAreaSchema>['body']
+export type UpdateAreaSettlementRouteInput = z.infer<typeof updateAreaSettlementRouteSchema>['body']
 export type UpdateAreaTicketTerminalInput = z.infer<typeof updateAreaTicketTerminalSchema>['body']
 export type UpdateScaleSettingsInput = z.infer<typeof updateScaleSettingsSchema>['body']
 export type CreateScaleProfileInput = z.infer<typeof createScaleProfileSchema>['body']

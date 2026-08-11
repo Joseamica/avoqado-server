@@ -35,6 +35,17 @@ export async function updateArea(req: Request, res: Response, next: NextFunction
   }
 }
 
+export async function updateAreaSettlementRoute(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    res.status(200).json({
+      success: true,
+      data: await service.updateAreaSettlementRoute(req.params.venueId, req.params.areaId, req.body, actor(req)),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function updateTerminal(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     res
