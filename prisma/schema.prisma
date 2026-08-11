@@ -13410,8 +13410,17 @@ model AreaTicketFulfillment {
   id           String     @id @default(cuid())
   areaTicketId String     @unique
   areaTicket   AreaTicket @relation(fields: [areaTicketId], references: [id], onDelete: Restrict)
-  orderId      String
-  order        Order      @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// Nullable a nivel de tipo, pero SIGUE siendo obligatorio en la ruta AVOQADO: lo
+  /// exige `atf_order_required_for_avoqado_route` (CHECK, migración a mano) — la
+  /// invariante nativa se vuelve explícita en la base, no se debilita. Solo una
+  /// entrega EXTERNAL puede tener este campo en NULL (esa ruta nunca crea Order).
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// Ruta de cobro de ESTA entrega. Default AVOQADO — reproduce el comportamiento
+  /// actual (toda entrega existente ya trae orderId).
+  settlementRoute AreaSettlementRoute @default(AVOQADO)
 
   fulfillmentAreaId String
   fulfillmentArea   FulfillmentArea             @relation(fields: [fulfillmentAreaId], references: [id], onDelete: Restrict)
