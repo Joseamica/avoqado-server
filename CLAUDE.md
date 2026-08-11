@@ -3,9 +3,8 @@
 Multi-tenant B2B SaaS for restaurant/venue management (POS, payments, inventory, staff). Express.js + TypeScript, PostgreSQL/Prisma,
 Socket.IO, Redis, RabbitMQ. Payments via Blumon (TPV + E-commerce) and Stripe (subscriptions).
 
-> **Reglas de entorno** — sesiones de IA en paralelo, y cuándo verificar según la carga de la
-> máquina — están en el `CLAUDE.md` del workspace (`../CLAUDE.md`), que auto-carga junto con este
-> archivo. Léelas antes de correr builds/tests o de tocar git.
+> **Reglas de entorno** — sesiones de IA en paralelo, y cuándo verificar según la carga de la máquina — están en el `CLAUDE.md` del
+> workspace (`../CLAUDE.md`), que auto-carga junto con este archivo. Léelas antes de correr builds/tests o de tocar git.
 
 ## 🔴 CRITICAL — Ask which payment tier (and how it gets turned on) BEFORE building or changing anything
 

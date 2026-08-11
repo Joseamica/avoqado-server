@@ -1,10 +1,14 @@
 # Supervisor Sales Export Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Mantener el reporte anual completo de PlayTelecom sin que el feed interactivo cargue, ordene y serialice miles de eventos cada 30 segundos.
+**Goal:** Mantener el reporte anual completo de PlayTelecom sin que el feed interactivo cargue, ordene y serialice miles de eventos cada 30
+segundos.
 
-**Architecture:** El feed interactivo queda acotado y sujeto al alcance del actor. Un servicio nuevo pagina únicamente órdenes con cursor keyset y selección mínima; el dashboard descarga páginas secuenciales y genera CSV/XLSX en el navegador. Una ruta separada audita el formato después de la descarga.
+**Architecture:** El feed interactivo queda acotado y sujeto al alcance del actor. Un servicio nuevo pagina únicamente órdenes con cursor
+keyset y selección mínima; el dashboard descarga páginas secuenciales y genera CSV/XLSX en el navegador. Una ruta separada audita el formato
+después de la descarga.
 
 **Tech Stack:** TypeScript, Express, Prisma, Jest/Supertest, React, TanStack Query, Vitest, ExcelJS/PapaParse.
 
@@ -25,12 +29,14 @@
 ### Task 1: Alcance y límite del feed interactivo
 
 **Files:**
+
 - Create: `src/services/organization-dashboard/storesAnalysisScope.service.ts`
 - Modify: `src/routes/dashboard/storesAnalysis.routes.ts`
 - Modify: `src/services/organization-dashboard/organizationDashboard.service.ts`
 - Test: `tests/unit/routes/storesAnalysis.activity-feed.routes.test.ts`
 
 **Interfaces:**
+
 - Produce `resolveStoresAnalysisVenueIds({ organizationId, userId, role, filterVenueId }): Promise<string[] | undefined>`.
 - `undefined` significa todos los venues activos para rol privilegiado; `[]`, ningún venue autorizado.
 
@@ -68,7 +74,8 @@ const scopedVenueIds = await resolveStoresAnalysisVenueIds({
 })
 ```
 
-Añadir un último parámetro opcional `scopedVenueIds` a `getActivityFeed` y aplicarlo en la consulta de venues; dejar intacto al caller organizacional.
+Añadir un último parámetro opcional `scopedVenueIds` a `getActivityFeed` y aplicarlo en la consulta de venues; dejar intacto al caller
+organizacional.
 
 - [ ] **Step 4: Correr verde y revisar targets**
 
@@ -82,10 +89,12 @@ git status --short
 ### Task 2: Servicio paginado de ventas
 
 **Files:**
+
 - Create: `src/services/organization-dashboard/supervisorSalesExport.service.ts`
 - Test: `tests/unit/services/organization-dashboard/supervisorSalesExport.service.test.ts`
 
 **Interfaces:**
+
 - Produce `getSupervisorSalesExportPage(input): Promise<{ rows; nextCursor; total? }>`.
 - Exporta helpers de cursor y constantes `500`, `25000`, `370`.
 
@@ -138,6 +147,7 @@ const orders = await prisma.order.findMany({
 ### Task 3: Rutas de páginas y auditoría
 
 **Files:**
+
 - Modify: `src/routes/dashboard/storesAnalysis.routes.ts`
 - Test: `tests/unit/routes/storesAnalysis.sales-export.routes.test.ts`
 
@@ -164,18 +174,22 @@ await logAction({
 ### Task 4: Cliente paginado y helpers puros
 
 **Files:**
+
 - Modify: `../avoqado-web-dashboard/src/services/storesAnalysis.service.ts`
 - Create: `../avoqado-web-dashboard/src/pages/playtelecom/Supervisor/supervisorExport.ts`
 - Test: `../avoqado-web-dashboard/src/services/__tests__/storesAnalysis.service.test.ts`
 - Test: `../avoqado-web-dashboard/src/pages/playtelecom/Supervisor/supervisorExport.test.ts`
 
 **Interfaces:**
-- Produce `getSalesExportRows`, `recordSalesExportAudit`, `fetchAllSupervisorSales`, `buildSupervisorExportData`, `shouldPollSupervisorActivity`.
+
+- Produce `getSalesExportRows`, `recordSalesExportAudit`, `fetchAllSupervisorSales`, `buildSupervisorExportData`,
+  `shouldPollSupervisorActivity`.
 
 - [ ] **Step 1: Tests rojos del API, cursor loop, progreso y mapeo de columnas**
 
 ```ts
-const fetchPage = vi.fn()
+const fetchPage = vi
+  .fn()
   .mockResolvedValueOnce({ rows: [row1], nextCursor: 'c1', total: 2 })
   .mockResolvedValueOnce({ rows: [row2], nextCursor: null })
 const rows = await fetchAllSupervisorSales(baseParams, fetchPage, onProgress)
@@ -196,6 +210,7 @@ npm run test:run -- src/services/__tests__/storesAnalysis.service.test.ts src/pa
 ### Task 5: Integrar SupervisorDashboard
 
 **Files:**
+
 - Modify: `../avoqado-web-dashboard/src/pages/playtelecom/Supervisor/SupervisorDashboard.tsx`
 - Modify: `../avoqado-web-dashboard/src/hooks/useStoresAnalysis.ts`
 
@@ -213,4 +228,3 @@ npm run test:run -- src/services/__tests__/storesAnalysis.service.test.ts src/pa
 - [ ] `npm run typecheck` en server y `npm run build` en dashboard.
 - [ ] Lint de archivos tocados y `git diff --check`.
 - [ ] Comparar estado final con el inventario inicial; no stagear ni commitear.
-

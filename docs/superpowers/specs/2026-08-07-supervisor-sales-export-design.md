@@ -6,25 +6,34 @@
 
 ## Objetivo
 
-Conservar el reporte anual completo que usa Isaac Mayoral (OWNER de PlayTelecom), incluidos Excel, CSV y Google Sheets, sin cargar miles de órdenes, asistencias, relaciones y fotografías en una sola petición periódica del servidor.
+Conservar el reporte anual completo que usa Isaac Mayoral (OWNER de PlayTelecom), incluidos Excel, CSV y Google Sheets, sin cargar miles de
+órdenes, asistencias, relaciones y fotografías en una sola petición periódica del servidor.
 
 ## Evidencia
 
 - El dashboard solicita `activity-feed?limit=10000` cada 30 segundos, aun cuando sólo necesita la tabla reciente.
-- El backend consulta hasta 10,000 órdenes y 10,000 asistencias, construye hasta tres eventos por registro, ordena el arreglo completo y lo serializa.
+- El backend consulta hasta 10,000 órdenes y 10,000 asistencias, construye hasta tres eventos por registro, ordena el arreglo completo y lo
+  serializa.
 - En producción el rango observado contenía 5,706 órdenes y 1,806 asistencias, aproximadamente 9,300 eventos.
 - La exportación actual ocurre en el navegador. PostgreSQL y `ActivityLog` no registran el formato elegido.
-- Isaac es OWNER de PlayTelecom. La organización tiene 47 venues activos; tiene 41 asignaciones `StaffVenue`, pero el OWNER debe conservar alcance organizacional.
+- Isaac es OWNER de PlayTelecom. La organización tiene 47 venues activos; tiene 41 asignaciones `StaffVenue`, pero el OWNER debe conservar
+  alcance organizacional.
 
 ## Decisiones
 
 ### Separar lectura interactiva y exportación
 
-La tabla interactiva usará `activity-feed` con 100 eventos y un máximo ineludible de 200 impuesto por el backend. Sólo estará habilitada en la pestaña operativa. El polling de 30 segundos sólo correrá si el rango contiene el instante actual; los rangos históricos se consultan una vez.
+La tabla interactiva usará `activity-feed` con 100 eventos y un máximo ineludible de 200 impuesto por el backend. Sólo estará habilitada en
+la pestaña operativa. El polling de 30 segundos sólo correrá si el rango contiene el instante actual; los rangos históricos se consultan una
+vez.
 
-La exportación usará un endpoint nuevo de ventas paginadas. Cada página contendrá como máximo 500 órdenes y seleccionará exclusivamente los campos que aparecen en el archivo: identificador, tienda, monto, fecha, promotor, código interno e ICCID. No traerá asistencias, pagos, verificaciones, fotos, tags ni categorías que el archivo no consume.
+La exportación usará un endpoint nuevo de ventas paginadas. Cada página contendrá como máximo 500 órdenes y seleccionará exclusivamente los
+campos que aparecen en el archivo: identificador, tienda, monto, fecha, promotor, código interno e ICCID. No traerá asistencias, pagos,
+verificaciones, fotos, tags ni categorías que el archivo no consume.
 
-El navegador solicitará páginas secuenciales y construirá el CSV/XLSX con las utilidades existentes. Esto mantiene la CPU de Excel fuera del proceso Node. Google Sheets conservará el comportamiento actual (descargar CSV y abrir Sheets); la pestaña se abrirá sincrónicamente al clic para evitar el bloqueador de popups durante la espera asíncrona.
+El navegador solicitará páginas secuenciales y construirá el CSV/XLSX con las utilidades existentes. Esto mantiene la CPU de Excel fuera del
+proceso Node. Google Sheets conservará el comportamiento actual (descargar CSV y abrir Sheets); la pestaña se abrirá sincrónicamente al clic
+para evitar el bloqueador de popups durante la espera asíncrona.
 
 ### Límites explícitos
 
@@ -35,7 +44,8 @@ El navegador solicitará páginas secuenciales y construirá el CSV/XLSX con las
 
 ### Orden y cursor
 
-La paginación es keyset, ordenada por `createdAt DESC, id DESC`. El cursor opaco contiene ambos valores. Así una venta insertada mientras se genera el reporte no duplica ni desplaza filas ya leídas.
+La paginación es keyset, ordenada por `createdAt DESC, id DESC`. El cursor opaco contiene ambos valores. Así una venta insertada mientras se
+genera el reporte no duplica ni desplaza filas ya leídas.
 
 ### Autorización
 
@@ -46,7 +56,8 @@ La paginación es keyset, ordenada por `createdAt DESC, id DESC`. El cursor opac
 
 ### Auditoría
 
-Después de generar el archivo, el cliente enviará un evento autenticado `SALES_REPORT_EXPORTED`. `ActivityLog` guardará actor, venue de contexto, formato, rango, filtro y cantidad de filas. La auditoría es best-effort y nunca convierte una descarga correcta en error.
+Después de generar el archivo, el cliente enviará un evento autenticado `SALES_REPORT_EXPORTED`. `ActivityLog` guardará actor, venue de
+contexto, formato, rango, filtro y cantidad de filas. La auditoría es best-effort y nunca convierte una descarga correcta en error.
 
 ## Contratos
 
@@ -86,4 +97,3 @@ Cada fila contiene:
 5. Más de 25,000 filas o más de 370 días falla explícitamente, sin archivo parcial.
 6. El formato queda consultable en `ActivityLog` después de una descarga.
 7. No se cambia Prisma ni se añade una dependencia.
-

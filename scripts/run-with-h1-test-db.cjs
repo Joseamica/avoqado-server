@@ -31,12 +31,7 @@ const childEnv = {
   H1_TEST_DATABASE_URL: testUrl,
   TEST_DATABASE_URL: testUrl,
 }
-for (const remoteAlias of [
-  'RENDER_DATABASE_URL',
-  'DIRECT_URL',
-  'DIRECT_DATABASE_URL',
-  'SHADOW_DATABASE_URL',
-]) {
+for (const remoteAlias of ['RENDER_DATABASE_URL', 'DIRECT_URL', 'DIRECT_DATABASE_URL', 'SHADOW_DATABASE_URL']) {
   // Empty (instead of absent) also prevents a nested dotenv.config() from
   // repopulating a secret that exists in the repository's .env file.
   childEnv[remoteAlias] = ''

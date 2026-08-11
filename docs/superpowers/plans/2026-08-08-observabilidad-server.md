@@ -1,10 +1,15 @@
 # Observabilidad del server: contexto de ejecución + error tracking — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que todo error del backend salga identificado con su venue, su usuario y un hilo de correlación que sobreviva la cadena de llamadas, y que llegue agrupado a Better Stack Errors con el release que lo introdujo.
+**Goal:** Que todo error del backend salga identificado con su venue, su usuario y un hilo de correlación que sobreviva la cadena de
+llamadas, y que llegue agrupado a Better Stack Errors con el release que lo introdujo.
 
-**Architecture:** Un `AsyncLocalStorage` guarda un `ExecutionContext` por unidad de trabajo. Cuatro puntos de arranque lo abren (request HTTP, tick de cron, mensaje de RabbitMQ, evento de Socket.IO) y todo lo que corre debajo lo hereda sin pasarlo a mano. Un formato de Winston lo inyecta en cada log; un `beforeSend` de Sentry lo inyecta en cada evento de error tras limpiar datos sensibles. Abrir contexto y capturar errores son responsabilidades separadas a propósito: los wrappers de contexto nunca atrapan.
+**Architecture:** Un `AsyncLocalStorage` guarda un `ExecutionContext` por unidad de trabajo. Cuatro puntos de arranque lo abren (request
+HTTP, tick de cron, mensaje de RabbitMQ, evento de Socket.IO) y todo lo que corre debajo lo hereda sin pasarlo a mano. Un formato de Winston
+lo inyecta en cada log; un `beforeSend` de Sentry lo inyecta en cada evento de error tras limpiar datos sensibles. Abrir contexto y capturar
+errores son responsabilidades separadas a propósito: los wrappers de contexto nunca atrapan.
 
 **Tech Stack:** Node 20 + TypeScript (CommonJS), Express 4, Winston, `node:async_hooks`, `@sentry/node` v8, Jest + ts-jest.
 
@@ -16,30 +21,42 @@
 
 Cinco desviaciones respecto a lo planeado. Las tareas restantes deben seguir estas, no lo que decía el plan original.
 
-**1. Un módulo por pieza pura, siempre.** `env.ts` corre validación y `process.exit(1)` al importarse, y `@/config/logger` está **mockeado globalmente** en `tests/__helpers__/setup.ts:341`. Cualquier helper exportado desde esos dos archivos es imposible de testear: el primero cuelga el worker, el segundo desaparece tras el mock. Por eso todo lo nuevo vive en su propio archivo sin efectos secundarios. Costó dos intentos fallidos descubrirlo.
+**1. Un módulo por pieza pura, siempre.** `env.ts` corre validación y `process.exit(1)` al importarse, y `@/config/logger` está **mockeado
+globalmente** en `tests/__helpers__/setup.ts:341`. Cualquier helper exportado desde esos dos archivos es imposible de testear: el primero
+cuelga el worker, el segundo desaparece tras el mock. Por eso todo lo nuevo vive en su propio archivo sin efectos secundarios. Costó dos
+intentos fallidos descubrirlo.
 
 **2. Piezas nuevas que el plan no contemplaba.** Ya construidas y con tests:
-   - `src/config/envHelpers.ts` — `dropEmptyValues`, la trampa de arranque.
-   - `src/observability/logContext.ts` — el formato de Winston (movido fuera de `logger.ts` por el punto 1).
-   - `src/observability/correlationId.ts` — `sanitizeCorrelationId` / `resolveCorrelationId`. **Reusar en RabbitMQ (Tarea 5)**, no escribir otro validador.
-   - `src/observability/entrypoint.ts` — `normalizeEntrypoint`. Sin esto cada id en la ruta crea su propia etiqueta y la agrupación no sirve; además borra el query string, que carga correos y RFC.
+
+- `src/config/envHelpers.ts` — `dropEmptyValues`, la trampa de arranque.
+- `src/observability/logContext.ts` — el formato de Winston (movido fuera de `logger.ts` por el punto 1).
+- `src/observability/correlationId.ts` — `sanitizeCorrelationId` / `resolveCorrelationId`. **Reusar en RabbitMQ (Tarea 5)**, no escribir
+  otro validador.
+- `src/observability/entrypoint.ts` — `normalizeEntrypoint`. Sin esto cada id en la ruta crea su propia etiqueta y la agrupación no sirve;
+  además borra el query string, que carga correos y RFC.
 
 **3. `SENTRY_DSN` ya existía** en `src/config/env.ts` desde antes, commiteado. El paso que decía "agregarlo" es redundante.
 
-**4. El header entrante se aceptaba sin validar.** Se sanea ahora: un cliente podía mandar una cadena de 500 caracteres, o el mismo header dos veces (Express lo entrega como **array** y el código lo escribía tal cual en `req.correlationId`). Ambos casos tienen test.
+**4. El header entrante se aceptaba sin validar.** Se sanea ahora: un cliente podía mandar una cadena de 500 caracteres, o el mismo header
+dos veces (Express lo entrega como **array** y el código lo escribía tal cual en `req.correlationId`). Ambos casos tienen test.
 
-**5. Cómo correr un solo archivo de test.** El argumento posicional no filtra en este repo — corre la suite entera. Usar `npx jest --selectProjects unit --testPathPattern "<nombre>"`.
+**5. Cómo correr un solo archivo de test.** El argumento posicional no filtra en este repo — corre la suite entera. Usar
+`npx jest --selectProjects unit --testPathPattern "<nombre>"`.
 
 ---
 
 ## Global Constraints
 
-- **Idioma del código: inglés.** Identificadores, comentarios y nombres de test en inglés. Solo lo que lee una persona (mensajes de Zod, `AppError`, respuestas de API) va en español.
+- **Idioma del código: inglés.** Identificadores, comentarios y nombres de test en inglés. Solo lo que lee una persona (mensajes de Zod,
+  `AppError`, respuestas de API) va en español.
 - **Mensajes de Zod en español.** `src/middlewares/validation.ts` los muestra tal cual al usuario.
-- **Git: nunca commitear sin permiso explícito del founder** (`.claude/rules/testing-and-git.md`). Los pasos de commit muestran el comando exacto; **preguntar antes de ejecutarlo**.
+- **Git: nunca commitear sin permiso explícito del founder** (`.claude/rules/testing-and-git.md`). Los pasos de commit muestran el comando
+  exacto; **preguntar antes de ejecutarlo**.
 - **`git add` siempre por rutas explícitas.** Nunca `git add -A` ni `git add .`: hay otras sesiones de IA editando el árbol de trabajo.
-- **No tocar la regla de cron jobs.** `.claude/rules/cron-jobs.md` obliga a que la primera lectura de DB de cada job vaya envuelta en `retry(..., shouldRetryDbConnectionError)`. Este plan envuelve el tick por fuera; **no mover, quitar ni anidar ese `retry` existente**.
-- **Nada de secretos al repo.** `Joseamica/avoqado-server` es **público** (verificado 2026-08-08). Ningún DSN real, token ni `.env` entra al control de versiones.
+- **No tocar la regla de cron jobs.** `.claude/rules/cron-jobs.md` obliga a que la primera lectura de DB de cada job vaya envuelta en
+  `retry(..., shouldRetryDbConnectionError)`. Este plan envuelve el tick por fuera; **no mover, quitar ni anidar ese `retry` existente**.
+- **Nada de secretos al repo.** `Joseamica/avoqado-server` es **público** (verificado 2026-08-08). Ningún DSN real, token ni `.env` entra al
+  control de versiones.
 - **Compatibilidad de API intacta.** No se elimina ni renombra ningún campo de respuesta.
 - **Tests:** unitarios en `tests/unit/**/*.test.ts`, alias `@/` para `src/`. Correr con `npx jest --selectProjects unit`.
 - **Formato:** al terminar cada tarea, `npm run format && npm run lint:fix`.
@@ -48,36 +65,41 @@ Cinco desviaciones respecto a lo planeado. Las tareas restantes deben seguir est
 
 ## File Structure
 
-| Archivo | Responsabilidad | Tarea |
-|---|---|---|
-| `src/observability/executionContext.ts` | **Nuevo.** El `AsyncLocalStorage` y su API. Puro, sin dependencias del framework | 1 |
-| `src/observability/jobContext.ts` | **Nuevo.** Abrir contexto para un tick de cron | 4 |
-| `src/observability/redactPatterns.ts` | **Nuevo.** Patrones de datos sensibles y el redactor recursivo. Puro | 7 |
-| `src/observability/sentry.ts` | **Nuevo.** `Sentry.init` en el cuerpo del módulo, `beforeSend`, `beforeBreadcrumb` | 8 |
-| `src/config/logger.ts` | Se le añade un `format` que inyecta el contexto | 2 |
-| `src/middlewares/requestLogger.ts` | Punto de arranque HTTP | 3 |
-| `src/middlewares/authenticateToken.middleware.ts` | Enriquece el contexto con el tenant | 3 |
-| `src/communication/rabbitmq/{publisher,consumer}.ts` | Header `x-correlation-id` | 5 |
-| `src/communication/rabbitmq/commandRetryService.ts` | Contexto propio (corre en `setInterval`, no pasa por ningún punto de arranque) | 5 |
-| `src/communication/sockets/managers/socketManager.ts` | Punto de arranque de sockets | 6 |
-| `src/app.ts` | Único punto de captura del camino HTTP | 9 |
-| `src/server.ts` | Import de Sentry primero; captura en handlers de proceso | 8, 9 |
-| `src/config/env.ts` | `SENTRY_DSN` opcional | 8 |
-| `src/jobs/*.job.ts` | Envolver el tick | 4 |
+| Archivo                                               | Responsabilidad                                                                    | Tarea |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------- | ----- |
+| `src/observability/executionContext.ts`               | **Nuevo.** El `AsyncLocalStorage` y su API. Puro, sin dependencias del framework   | 1     |
+| `src/observability/jobContext.ts`                     | **Nuevo.** Abrir contexto para un tick de cron                                     | 4     |
+| `src/observability/redactPatterns.ts`                 | **Nuevo.** Patrones de datos sensibles y el redactor recursivo. Puro               | 7     |
+| `src/observability/sentry.ts`                         | **Nuevo.** `Sentry.init` en el cuerpo del módulo, `beforeSend`, `beforeBreadcrumb` | 8     |
+| `src/config/logger.ts`                                | Se le añade un `format` que inyecta el contexto                                    | 2     |
+| `src/middlewares/requestLogger.ts`                    | Punto de arranque HTTP                                                             | 3     |
+| `src/middlewares/authenticateToken.middleware.ts`     | Enriquece el contexto con el tenant                                                | 3     |
+| `src/communication/rabbitmq/{publisher,consumer}.ts`  | Header `x-correlation-id`                                                          | 5     |
+| `src/communication/rabbitmq/commandRetryService.ts`   | Contexto propio (corre en `setInterval`, no pasa por ningún punto de arranque)     | 5     |
+| `src/communication/sockets/managers/socketManager.ts` | Punto de arranque de sockets                                                       | 6     |
+| `src/app.ts`                                          | Único punto de captura del camino HTTP                                             | 9     |
+| `src/server.ts`                                       | Import de Sentry primero; captura en handlers de proceso                           | 8, 9  |
+| `src/config/env.ts`                                   | `SENTRY_DSN` opcional                                                              | 8     |
+| `src/jobs/*.job.ts`                                   | Envolver el tick                                                                   | 4     |
 
-`src/observability/` es un directorio nuevo. Todo lo que agrega este plan vive ahí, para que revertirlo sea borrar una carpeta más cinco puntos de enganche.
+`src/observability/` es un directorio nuevo. Todo lo que agrega este plan vive ahí, para que revertirlo sea borrar una carpeta más cinco
+puntos de enganche.
 
 ---
 
 ### Task 1: El contexto de ejecución
 
 **Files:**
+
 - Create: `src/observability/executionContext.ts`
 - Test: `tests/unit/observability/executionContext.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada. Es la base.
-- Produces: `ExecutionContext` (interface), `ContextSource` (type), `runWithContext<T>(ctx: ExecutionContext, fn: () => T): T`, `getContext(): ExecutionContext | undefined`, `enrichContext(patch: Partial<ExecutionContext>): void`. Todas las tareas siguientes dependen de estos cuatro nombres exactos.
+- Produces: `ExecutionContext` (interface), `ContextSource` (type), `runWithContext<T>(ctx: ExecutionContext, fn: () => T): T`,
+  `getContext(): ExecutionContext | undefined`, `enrichContext(patch: Partial<ExecutionContext>): void`. Todas las tareas siguientes
+  dependen de estos cuatro nombres exactos.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -248,12 +270,15 @@ git commit -m "feat(observability): add AsyncLocalStorage execution context"
 ### Task 2: Inyectar el contexto en todos los logs
 
 **Files:**
+
 - Modify: `src/config/logger.ts:13-16` (el `baseFormat`)
 - Test: `tests/unit/observability/loggerContext.test.ts`
 
 **Interfaces:**
+
 - Consumes: `getContext`, `runWithContext` de la Tarea 1.
-- Produces: nada nuevo exportado. El efecto es que todo `logger.*` emite `correlationId`, `venueId`, `userId`, `source` y `entrypoint` cuando hay contexto activo.
+- Produces: nada nuevo exportado. El efecto es que todo `logger.*` emite `correlationId`, `venueId`, `userId`, `source` y `entrypoint`
+  cuando hay contexto activo.
 
 Esta es la tarea de mayor palanca del plan: sin tocar ninguno de los 622 sitios de llamada existentes, cada log del backend gana identidad.
 
@@ -401,15 +426,19 @@ git commit -m "feat(observability): inject execution context into every log reco
 ### Task 3: Punto de arranque HTTP y enriquecimiento con el tenant
 
 **Files:**
+
 - Modify: `src/middlewares/requestLogger.ts` (envolver el cuerpo completo)
 - Modify: `src/middlewares/authenticateToken.middleware.ts:67` (después de `req.authContext = authContext`)
 - Test: `tests/unit/observability/httpContext.test.ts`
 
 **Interfaces:**
+
 - Consumes: `runWithContext`, `enrichContext` de la Tarea 1.
 - Produces: contexto activo con `source: 'http'` durante todo el ciclo del request, incluidos los callbacks de `res.on('finish')`.
 
-**Detalle que importa:** hay que envolver el **cuerpo completo** del middleware, no solo la llamada a `next()`. Los `res.on('finish')` y `res.on('close')` se registran antes de `next()`; si quedan fuera del `runWithContext`, sus callbacks corren sin contexto y el log de cierre del request pierde el tenant, que es justo el que más se consulta.
+**Detalle que importa:** hay que envolver el **cuerpo completo** del middleware, no solo la llamada a `next()`. Los `res.on('finish')` y
+`res.on('close')` se registran antes de `next()`; si quedan fuera del `runWithContext`, sus callbacks corren sin contexto y el log de cierre
+del request pierde el tenant, que es justo el que más se consulta.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -501,7 +530,8 @@ En `src/middlewares/requestLogger.ts`, añadir el import:
 import { runWithContext } from '../observability/executionContext'
 ```
 
-Y envolver todo el cuerpo a partir de `const start = process.hrtime()`. La estructura queda así (se conserva **íntegro** el contenido actual; solo se indenta dentro del callback):
+Y envolver todo el cuerpo a partir de `const start = process.hrtime()`. La estructura queda así (se conserva **íntegro** el contenido
+actual; solo se indenta dentro del callback):
 
 ```typescript
 export const requestLoggerMiddleware = (req: Request, res: Response, next: NextFunction) => {
@@ -534,17 +564,17 @@ import { enrichContext } from '../observability/executionContext'
 E inmediatamente después de `req.authContext = authContext` (línea 67):
 
 ```typescript
-    req.authContext = authContext
+req.authContext = authContext
 
-    // Stamp the tenant onto the execution context opened by requestLogger. From here on,
-    // every log line and every Sentry event below this point knows which venue and which
-    // user it belongs to, without any call site passing it.
-    enrichContext({
-      venueId: authContext.venueId,
-      userId: authContext.userId,
-      role: authContext.role,
-      terminalSerial: authContext.terminalSerialNumber,
-    })
+// Stamp the tenant onto the execution context opened by requestLogger. From here on,
+// every log line and every Sentry event below this point knows which venue and which
+// user it belongs to, without any call site passing it.
+enrichContext({
+  venueId: authContext.venueId,
+  userId: authContext.userId,
+  role: authContext.role,
+  terminalSerial: authContext.terminalSerialNumber,
+})
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
@@ -557,7 +587,8 @@ Expected: PASS, 15 tests en los tres archivos.
 
 - [ ] **Step 6: Write the concurrency test that closes acceptance criterion 3**
 
-Este es el test que importa de todo el plan. Si el contexto se cruza entre requests, atribuiríamos un bug de dinero al venue equivocado, que es peor que no atribuirlo. Se hace en el proyecto `unit` a propósito: no depende de la suite `api-tests`, que hoy está frágil.
+Este es el test que importa de todo el plan. Si el contexto se cruza entre requests, atribuiríamos un bug de dinero al venue equivocado, que
+es peor que no atribuirlo. Se hace en el proyecto `unit` a propósito: no depende de la suite `api-tests`, que hoy está frágil.
 
 Añadir al final de `tests/unit/observability/httpContext.test.ts`:
 
@@ -605,7 +636,9 @@ Expected: PASS incluido el test de 50 requests; compila.
 
 - [ ] **Step 8: Expose the correlation header to browsers**
 
-Verificado 2026-08-08: `X-Correlation-Id` **ya está** en `allowedHeaders` (`src/config/corsOptions.ts:156`), así que el dashboard puede **enviarlo** sin cambiar nada y sin riesgo de romper el preflight. Lo que falta es poder **leerlo** de la respuesta: `exposedHeaders` (`:164`) no lo incluye, y sin eso el navegador lo esconde aunque el server lo mande.
+Verificado 2026-08-08: `X-Correlation-Id` **ya está** en `allowedHeaders` (`src/config/corsOptions.ts:156`), así que el dashboard puede
+**enviarlo** sin cambiar nada y sin riesgo de romper el preflight. Lo que falta es poder **leerlo** de la respuesta: `exposedHeaders`
+(`:164`) no lo incluye, y sin eso el navegador lo esconde aunque el server lo mande.
 
 En `src/config/corsOptions.ts:164`:
 
@@ -613,7 +646,9 @@ En `src/config/corsOptions.ts:164`:
     exposedHeaders: ['X-Client-Id', 'X-Total-Labels', 'X-Correlation-Id'],
 ```
 
-El diseño del dashboard no depende de esto (origina su propio id en el interceptor de request), pero exponerlo permite ver la correlación en las devtools durante una investigación, que es cuando más se agradece. Es una línea y no rompe a nadie: agregar un header a `exposedHeaders` nunca invalida un cliente existente.
+El diseño del dashboard no depende de esto (origina su propio id en el interceptor de request), pero exponerlo permite ver la correlación en
+las devtools durante una investigación, que es cuando más se agradece. Es una línea y no rompe a nadie: agregar un header a `exposedHeaders`
+nunca invalida un cliente existente.
 
 - [ ] **Step 9: Format and commit** (pedir permiso)
 
@@ -628,16 +663,19 @@ git commit -m "feat(observability): open execution context on HTTP requests and 
 ### Task 4: Contexto en los cron jobs, con guardia estática
 
 **Files:**
+
 - Create: `src/observability/jobContext.ts`
 - Modify: todos los `src/jobs/*.job.ts` (39 archivos) + `src/jobs/monitorPosConnections.ts`
 - Test: `tests/unit/observability/jobContext.test.ts`
 - Test: `tests/unit/observability/jobContextCoverage.test.ts` (la guardia)
 
 **Interfaces:**
+
 - Consumes: `runWithContext` de la Tarea 1.
 - Produces: `runInJobContext<T>(jobName: string, fn: () => T): T`.
 
-Aquí viven los bugs caros: la agregación de comisiones, el watchdog de dinero y las reconciliaciones de webhooks son todos jobs. Hoy sus errores salen sin ninguna identidad.
+Aquí viven los bugs caros: la agregación de comisiones, el watchdog de dinero y las reconciliaciones de webhooks son todos jobs. Hoy sus
+errores salen sin ninguna identidad.
 
 - [ ] **Step 1: Write the failing test for the helper**
 
@@ -677,8 +715,16 @@ describe('runInJobContext', () => {
   })
 
   it('🔴 does not swallow errors', async () => {
-    expect(() => runInJobContext('my-job', () => { throw new Error('boom') })).toThrow('boom')
-    await expect(runInJobContext('my-job', async () => { throw new Error('async boom') })).rejects.toThrow('async boom')
+    expect(() =>
+      runInJobContext('my-job', () => {
+        throw new Error('boom')
+      }),
+    ).toThrow('boom')
+    await expect(
+      runInJobContext('my-job', async () => {
+        throw new Error('async boom')
+      }),
+    ).rejects.toThrow('async boom')
   })
 })
 ```
@@ -774,19 +820,14 @@ Expected: FAIL en ~40 casos. Esa lista es exactamente el trabajo del paso siguie
 
 - [ ] **Step 7: Wrap every job tick**
 
-Para **cada** archivo que la guardia reportó, envolver el callback que el scheduler ejecuta. Los jobs siguen dos formas; el cambio es análogo.
+Para **cada** archivo que la guardia reportó, envolver el callback que el scheduler ejecuta. Los jobs siguen dos formas; el cambio es
+análogo.
 
 Forma A, clase con `CronJob` (ejemplo real, `src/jobs/tpv-health-monitor.job.ts:19-25`):
 
 ```typescript
 // antes
-this.job = new CronJob(
-  DATABASE_JOB_SCHEDULES.tpvHealthMonitor,
-  this.checkTerminalHealth.bind(this),
-  null,
-  false,
-  'America/Mexico_City',
-)
+this.job = new CronJob(DATABASE_JOB_SCHEDULES.tpvHealthMonitor, this.checkTerminalHealth.bind(this), null, false, 'America/Mexico_City')
 
 // después
 this.job = new CronJob(
@@ -813,9 +854,12 @@ const task = cron.schedule(
 ```
 
 Reglas al hacerlo:
-- El `jobName` es el nombre del archivo sin `.job.ts`, en kebab-case. `money-integrity-watchdog.job.ts` → `'money-integrity-watchdog'`. Consistencia importa: es la etiqueta por la que se filtrará en la consola.
+
+- El `jobName` es el nombre del archivo sin `.job.ts`, en kebab-case. `money-integrity-watchdog.job.ts` → `'money-integrity-watchdog'`.
+  Consistencia importa: es la etiqueta por la que se filtrará en la consola.
 - Añadir el import `import { runInJobContext } from '../observability/jobContext'` en cada archivo.
-- **No tocar el `retry(..., shouldRetryDbConnectionError)`** de la lectura de entrada. El wrapper va por fuera del tick, el retry se queda donde está.
+- **No tocar el `retry(..., shouldRetryDbConnectionError)`** de la lectura de entrada. El wrapper va por fuera del tick, el retry se queda
+  donde está.
 - **No añadir ni mover ningún `try/catch`** en esta tarea. La captura de errores es la Tarea 9.
 
 - [ ] **Step 8: Run the guard until it is green**
@@ -832,7 +876,8 @@ Expected: PASS en todos los archivos.
 npm run build && npx jest --selectProjects unit
 ```
 
-Expected: compila y la suite unitaria sigue verde. Si algún test de job falla, casi siempre es que el `bind(this)` se perdió al envolver: usar la forma de arrow function del ejemplo.
+Expected: compila y la suite unitaria sigue verde. Si algún test de job falla, casi siempre es que el `bind(this)` se perdió al envolver:
+usar la forma de arrow function del ejemplo.
 
 - [ ] **Step 10: Format and commit** (pedir permiso)
 
@@ -846,20 +891,17 @@ git commit -m "feat(observability): open execution context on every cron tick, g
 
 ### Task 5: Correlación a través de RabbitMQ — ⏸️ EN SUSPENSO (2026-08-09)
 
-> **RabbitMQ está apagado.** `DISABLE_RABBITMQ=true` en el `.env` local, verificado en el log de
-> arranque (`⏭️ RabbitMQ disabled`). Los tres consumidores no corren, así que esta tarea no entrega
-> nada hoy y no se puede verificar de verdad.
+> **RabbitMQ está apagado.** `DISABLE_RABBITMQ=true` en el `.env` local, verificado en el log de arranque (`⏭️ RabbitMQ disabled`). Los tres
+> consumidores no corren, así que esta tarea no entrega nada hoy y no se puede verificar de verdad.
 >
-> **Antes de retomarla, confirmar el estado en producción**: `render.yaml` no define
-> `DISABLE_RABBITMQ` ni `DEMO_MODE`, y en Render las variables se definen desde el dashboard. O sea
-> que desde el repo **no se puede saber** si en prod corre. Si corre en prod, esta tarea sube de
-> prioridad; si está apagado en los dos lados, es alcance muerto y se borra del plan.
+> **Antes de retomarla, confirmar el estado en producción**: `render.yaml` no define `DISABLE_RABBITMQ` ni `DEMO_MODE`, y en Render las
+> variables se definen desde el dashboard. O sea que desde el repo **no se puede saber** si en prod corre. Si corre en prod, esta tarea sube
+> de prioridad; si está apagado en los dos lados, es alcance muerto y se borra del plan.
 >
 > Lo de abajo se conserva tal cual para cuando se retome.
 
-
-
 **Files:**
+
 - Modify: `src/communication/rabbitmq/publisher.ts:9-25`
 - Modify: `src/communication/rabbitmq/consumer.ts:44-77` (`handleMessage`)
 - Modify: `src/communication/rabbitmq/commandRetryService.ts` (republicación)
@@ -867,8 +909,10 @@ git commit -m "feat(observability): open execution context on every cron tick, g
 - Test: `tests/unit/observability/correlationHeader.test.ts`
 
 **Interfaces:**
+
 - Consumes: `getContext`, `runWithContext` de la Tarea 1.
-- Produces: `CORRELATION_HEADER` (const `'x-correlation-id'`), `readCorrelationHeader(headers: unknown): string | undefined`, `currentCorrelationId(): string`.
+- Produces: `CORRELATION_HEADER` (const `'x-correlation-id'`), `readCorrelationHeader(headers: unknown): string | undefined`,
+  `currentCorrelationId(): string`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -993,20 +1037,16 @@ import { CORRELATION_HEADER, currentCorrelationId } from '../../observability/co
 Y añadir `headers` al objeto de opciones de `channel.publish` (línea 21), conservando `persistent: true`:
 
 ```typescript
-    const published = channel.publish(
-      POS_COMMANDS_EXCHANGE,
-      routingKey,
-      message,
-      {
-        persistent: true, // Mensaje persistente
-        headers: { [CORRELATION_HEADER]: currentCorrelationId() },
-      },
-    )
+const published = channel.publish(POS_COMMANDS_EXCHANGE, routingKey, message, {
+  persistent: true, // Mensaje persistente
+  headers: { [CORRELATION_HEADER]: currentCorrelationId() },
+})
 ```
 
 - [ ] **Step 6: Open the context when consuming**
 
-En `src/communication/rabbitmq/consumer.ts`, dentro de `handleMessage` (línea ~44), envolver el cuerpo. El `routingKey` sirve de `entrypoint`:
+En `src/communication/rabbitmq/consumer.ts`, dentro de `handleMessage` (línea ~44), envolver el cuerpo. El `routingKey` sirve de
+`entrypoint`:
 
 ```typescript
 import { runWithContext } from '../../observability/executionContext'
@@ -1015,19 +1055,19 @@ import { randomUUID } from 'node:crypto'
 
 // al inicio de handleMessage, antes de cualquier otra cosa:
 const correlationId = readCorrelationHeader(msg.properties?.headers) ?? randomUUID()
-return runWithContext(
-  { correlationId, source: 'rabbit', entrypoint: `rabbit:${msg.fields.routingKey}` },
-  async () => {
-    // ... todo el cuerpo actual de handleMessage, incluidos los channel.ack / channel.nack
-  },
-)
+return runWithContext({ correlationId, source: 'rabbit', entrypoint: `rabbit:${msg.fields.routingKey}` }, async () => {
+  // ... todo el cuerpo actual de handleMessage, incluidos los channel.ack / channel.nack
+})
 ```
 
 - [ ] **Step 7: Give the retry service its own context**
 
-**Verificado 2026-08-08: `commandRetryService.ts` NO republica a AMQP.** `retryFailedCommands` (`:27-58`) solo lee comandos `FAILED` de la base y les cambia el status a `PENDING` para disparar el NOTIFY. No hay header que conservar ahí, y cualquier instrucción que diga lo contrario está mal.
+**Verificado 2026-08-08: `commandRetryService.ts` NO republica a AMQP.** `retryFailedCommands` (`:27-58`) solo lee comandos `FAILED` de la
+base y les cambia el status a `PENDING` para disparar el NOTIFY. No hay header que conservar ahí, y cualquier instrucción que diga lo
+contrario está mal.
 
-Lo que sí hace falta es que ese servicio tenga contexto propio, porque corre en un `setInterval` y no pasa por ninguno de los cuatro puntos de arranque. Envolver el cuerpo de `retryFailedCommands`:
+Lo que sí hace falta es que ese servicio tenga contexto propio, porque corre en un `setInterval` y no pasa por ninguno de los cuatro puntos
+de arranque. Envolver el cuerpo de `retryFailedCommands`:
 
 ```typescript
 import { runInJobContext } from '../../observability/jobContext'
@@ -1040,7 +1080,9 @@ import { runInJobContext } from '../../observability/jobContext'
 ```
 
 Dos cosas que notar de paso, sin arreglarlas aquí:
-- Su `catch` (`:55-57`) loguea y sigue, o sea que **hoy traga el error**. La captura para Sentry se le añade en la Tarea 9, junto con los jobs.
+
+- Su `catch` (`:55-57`) loguea y sigue, o sea que **hoy traga el error**. La captura para Sentry se le añade en la Tarea 9, junto con los
+  jobs.
 - No es un `*.job.ts`, así que la guardia estática de la Tarea 4 no lo cubre. Por eso se envuelve a mano en este paso.
 
 - [ ] **Step 8: Verify the build and the suite**
@@ -1064,12 +1106,15 @@ git commit -m "feat(observability): propagate correlation id through RabbitMQ"
 ### Task 6: Contexto en Socket.IO
 
 **Files:**
+
 - Modify: `src/communication/sockets/managers/socketManager.ts:182-430`
 - Test: `tests/unit/observability/socketContext.test.ts`
 
 **Interfaces:**
+
 - Consumes: `runWithContext` de la Tarea 1, `CORRELATION_HEADER` de la Tarea 5.
-- Produces: `withSocketContext(eventName: string, handler: (...args: unknown[]) => unknown)` — helper local exportado desde `socketManager.ts` para poder testearlo.
+- Produces: `withSocketContext(eventName: string, handler: (...args: unknown[]) => unknown)` — helper local exportado desde
+  `socketManager.ts` para poder testearlo.
 
 Los 20 handlers están todos en este archivo, así que un solo helper los cubre a todos.
 
@@ -1108,7 +1153,11 @@ describe('withSocketContext', () => {
   })
 
   it('🔴 re-throws after capturing, never swallows', () => {
-    expect(() => withSocketContext('x', () => { throw new Error('boom') })()).toThrow('boom')
+    expect(() =>
+      withSocketContext('x', () => {
+        throw new Error('boom')
+      })(),
+    ).toThrow('boom')
   })
 })
 ```
@@ -1146,13 +1195,21 @@ Después aplicarlo a **cada** `socket.on(...)` del archivo (líneas 215 a ~430, 
 
 ```typescript
 // antes
-socket.on(SocketEventType.JOIN_ROOM, (payload, callback) => { /* ... */ })
+socket.on(SocketEventType.JOIN_ROOM, (payload, callback) => {
+  /* ... */
+})
 
 // después
-socket.on(SocketEventType.JOIN_ROOM, withSocketContext('join-room', (payload, callback) => { /* ... */ }))
+socket.on(
+  SocketEventType.JOIN_ROOM,
+  withSocketContext('join-room', (payload, callback) => {
+    /* ... */
+  }),
+)
 ```
 
-El `eventName` que se pasa al wrapper es la etiqueta legible del evento en kebab-case, no la constante del enum: es lo que se va a leer en la consola.
+El `eventName` que se pasa al wrapper es la etiqueta legible del evento en kebab-case, no la constante del enum: es lo que se va a leer en
+la consola.
 
 - [ ] **Step 4: Run it to verify it passes**
 
@@ -1184,14 +1241,17 @@ git commit -m "feat(observability): open execution context on socket events"
 ### Task 7: Redacción de datos sensibles
 
 **Files:**
+
 - Create: `src/observability/redactPatterns.ts`
 - Test: `tests/unit/observability/redactPatterns.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada. Puro.
 - Produces: `redactString(value: string): string`, `redactDeep<T>(value: T, depth?: number): T`.
 
-Se escribe **antes** que Sentry a propósito: es la pieza que decide si datos fiscales de clientes salen o no de la infra. El repo es público y la plataforma maneja RFC y CLABE; esto no es opcional.
+Se escribe **antes** que Sentry a propósito: es la pieza que decide si datos fiscales de clientes salen o no de la infra. El repo es público
+y la plataforma maneja RFC y CLABE; esto no es opcional.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1338,7 +1398,8 @@ export function redactDeep<T>(value: T, depth = 0, seen = new WeakSet<object>())
 npx jest --selectProjects unit tests/unit/observability/redactPatterns.test.ts
 ```
 
-Expected: PASS, 10 tests. Si el test del RFC falla porque el patrón de `card` o `phone` se lo comió primero, revisar el orden del array: los patrones más específicos van antes que los genéricos.
+Expected: PASS, 10 tests. Si el test del RFC falla porque el patrón de `card` o `phone` se lo comió primero, revisar el orden del array: los
+patrones más específicos van antes que los genéricos.
 
 - [ ] **Step 5: Format and commit** (pedir permiso)
 
@@ -1353,6 +1414,7 @@ git commit -m "feat(observability): add recursive sensitive-data redaction"
 ### Task 8: Inicializar Sentry contra Better Stack
 
 **Files:**
+
 - Create: `src/observability/sentry.ts`
 - Modify: `src/config/env.ts` (añadir `SENTRY_DSN`)
 - Modify: `src/server.ts:1` (primer import)
@@ -1360,10 +1422,12 @@ git commit -m "feat(observability): add recursive sensitive-data redaction"
 - Test: `tests/unit/observability/sentryScrubbing.test.ts`
 
 **Interfaces:**
+
 - Consumes: `getContext` (Tarea 1), `redactDeep` (Tarea 7).
 - Produces: `buildBeforeSend()` — la función que Sentry llama por evento, exportada para poder testearla sin inicializar el SDK.
 
-**Prerequisito:** la app `avoqado-server` creada en Better Stack Errors y su DSN a mano (P1 del spec). Sin DSN el SDK queda inerte y la tarea igual se puede completar y testear.
+**Prerequisito:** la app `avoqado-server` creada en Better Stack Errors y su DSN a mano (P1 del spec). Sin DSN el SDK queda inerte y la
+tarea igual se puede completar y testear.
 
 - [ ] **Step 1: Install the SDK**
 
@@ -1494,8 +1558,16 @@ import { redactDeep, redactString } from './redactPatterns'
 const ALLOWED_HEADERS = ['user-agent', 'x-app-version-code', 'x-correlation-id']
 
 const ALLOWED_EXTRA_KEYS = [
-  'venueId', 'userId', 'role', 'correlationId', 'source', 'entrypoint',
-  'terminalSerial', 'orderId', 'paymentId', 'jobName',
+  'venueId',
+  'userId',
+  'role',
+  'correlationId',
+  'source',
+  'entrypoint',
+  'terminalSerial',
+  'orderId',
+  'paymentId',
+  'jobName',
 ]
 
 const pick = (source: Record<string, unknown>, keys: string[]): Record<string, unknown> =>
@@ -1630,12 +1702,14 @@ git commit -m "feat(observability): report backend errors to Better Stack with s
 ### Task 9: Conectar los puntos de captura
 
 **Files:**
+
 - Modify: `src/app.ts:346-427` (error handler global)
 - Modify: `src/server.ts:267-305` (handlers de proceso)
 - Modify: `src/communication/sockets/managers/socketManager.ts` (`withSocketContext`)
 - Test: `tests/unit/observability/captureRules.test.ts`
 
 **Interfaces:**
+
 - Consumes: `buildBeforeSend` indirectamente vía el SDK ya inicializado; `getContext` de la Tarea 1.
 - Produces: `shouldCaptureError(err: Error): boolean` exportada desde `src/app.ts`.
 
@@ -1672,7 +1746,8 @@ describe('shouldCaptureError', () => {
 })
 ```
 
-**Nota para el implementador:** verificar primero la firma real de `AppError` en `src/utils/httpErrors.ts` y ajustar la construcción del test si difiere. No inventar la firma.
+**Nota para el implementador:** verificar primero la firma real de `AppError` en `src/utils/httpErrors.ts` y ajustar la construcción del
+test si difiere. No inventar la firma.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -1701,30 +1776,30 @@ export function shouldCaptureError(err: Error): boolean {
 }
 ```
 
-Dentro de `globalErrorHandler`, en la rama de `AppError` (después del `logger[logLevel](...)`, línea 393) y en la rama de error inesperado (después del `logger.error(...)`, línea 414):
+Dentro de `globalErrorHandler`, en la rama de `AppError` (después del `logger[logLevel](...)`, línea 393) y en la rama de error inesperado
+(después del `logger.error(...)`, línea 414):
 
 ```typescript
-    if (shouldCaptureError(err)) Sentry.captureException(err)
+if (shouldCaptureError(err)) Sentry.captureException(err)
 ```
 
 Añadir el `venueId`/`userId`/`role` al metadata de los tres caminos de log, tomándolos de `authContext`:
 
 ```typescript
-  const authContext = (req as any).authContext
-  const tenant = authContext
-    ? { venueId: authContext.venueId, userId: authContext.userId, role: authContext.role }
-    : {}
+const authContext = (req as any).authContext
+const tenant = authContext ? { venueId: authContext.venueId, userId: authContext.userId, role: authContext.role } : {}
 ```
 
 y esparcir `...tenant` en cada objeto de metadata que ya se pasa a `logger`.
 
 - [ ] **Step 4: Capture in the process handlers**
 
-En `src/server.ts`, dentro de `process.on('uncaughtException', ...)` (línea 267) y `process.on('unhandledRejection', ...)` (línea 276), añadir la captura **antes** de la llamada a `gracefulShutdown`, y darle margen al SDK para vaciar la cola:
+En `src/server.ts`, dentro de `process.on('uncaughtException', ...)` (línea 267) y `process.on('unhandledRejection', ...)` (línea 276),
+añadir la captura **antes** de la llamada a `gracefulShutdown`, y darle margen al SDK para vaciar la cola:
 
 ```typescript
-  Sentry.captureException(error)
-  void Sentry.flush(2000)
+Sentry.captureException(error)
+void Sentry.flush(2000)
 ```
 
 **No** cambiar la lógica de apagado existente: `src/server.ts` es el único dueño de estos handlers y ya hubo un incidente por duplicarlos.
@@ -1751,7 +1826,8 @@ export function withSocketContext<A extends unknown[], R>(eventName: string, han
 
 - [ ] **Step 6: Capture in job and rabbit catches**
 
-En cada `src/jobs/*.job.ts`, dentro del `try/catch` que ya rodea el tick, añadir `Sentry.captureException(error)` junto al `logger.error` existente. **Si algún job no tiene `try/catch` alrededor de su tick, añadírselo**: sin él, ese job ya está perdiendo su error hoy.
+En cada `src/jobs/*.job.ts`, dentro del `try/catch` que ya rodea el tick, añadir `Sentry.captureException(error)` junto al `logger.error`
+existente. **Si algún job no tiene `try/catch` alrededor de su tick, añadírselo**: sin él, ese job ya está perdiendo su error hoy.
 
 En `src/communication/rabbitmq/consumer.ts`, en el `catch` que hace `channel.nack` (línea ~75), añadir la captura antes del `nack`.
 
@@ -1787,7 +1863,8 @@ Expected: pasa. Si la máquina está saturada va a tardar varios minutos; **no c
 
 - [ ] **Step 2: Verify the context reaches a service three layers down**
 
-Levantar el server en local con un DSN de staging y disparar un request autenticado cualquiera. En el log del request debe aparecer `venueId`, `userId` y `correlationId` en **todas** las líneas del request, no solo en la de inicio y fin.
+Levantar el server en local con un DSN de staging y disparar un request autenticado cualquiera. En el log del request debe aparecer
+`venueId`, `userId` y `correlationId` en **todas** las líneas del request, no solo en la de inicio y fin.
 
 ```bash
 npm run dev
@@ -1798,7 +1875,8 @@ Expected: cada línea del log lleva el tenant. Esto cubre los criterios 1 y 2 de
 
 - [ ] **Step 3: Verify a seeded error lands in Better Stack**
 
-Con el DSN configurado, provocar un 500 real (por ejemplo un endpoint temporal que lance) y confirmar en la consola de Better Stack Errors que llega **agrupado**, con `release` igual al SHA y los tags `venueId`, `correlationId`, `source`, `entrypoint`.
+Con el DSN configurado, provocar un 500 real (por ejemplo un endpoint temporal que lance) y confirmar en la consola de Better Stack Errors
+que llega **agrupado**, con `release` igual al SHA y los tags `venueId`, `correlationId`, `source`, `entrypoint`.
 
 Borrar el endpoint temporal antes de commitear. Cubre el criterio 4.
 
@@ -1808,7 +1886,8 @@ Disparar un 404 y un 401 y confirmar que **no** aparecen en la consola. Cubre el
 
 - [ ] **Step 5: Verify the stack trace points at .ts**
 
-En el error del paso 3, el frame superior debe apuntar a `src/**/*.ts` con la línea correcta, no a `dist/**/*.js`. Si apunta a `dist`, falta el `--enable-source-maps` en el arranque. Cubre el criterio 7.
+En el error del paso 3, el frame superior debe apuntar a `src/**/*.ts` con la línea correcta, no a `dist/**/*.js`. Si apunta a `dist`, falta
+el `--enable-source-maps` en el arranque. Cubre el criterio 7.
 
 - [ ] **Step 6: Measure the latency cost**
 
@@ -1818,11 +1897,13 @@ En el error del paso 3, el frame superior debe apuntar a `src/**/*.ts` con la l�
 npx autocannon -c 50 -d 30 -H "Authorization: Bearer <token-de-staging>" https://<staging>/api/v1/dashboard/venues
 ```
 
-Umbral del criterio 12: **+5 ms absolutos o +3% sobre la mediana de los p95, lo que sea mayor.** Documentar los seis números en el PR. Si se pasa del umbral, no revertir todo: acotar el contexto a los caminos que importan y volver a medir.
+Umbral del criterio 12: **+5 ms absolutos o +3% sobre la mediana de los p95, lo que sea mayor.** Documentar los seis números en el PR. Si se
+pasa del umbral, no revertir todo: acotar el contexto a los caminos que importan y volver a medir.
 
 - [ ] **Step 7: Verify the rollback works**
 
-En staging, borrar `SENTRY_DSN` y reiniciar. El server debe arrancar normal y dejar de enviar eventos. Cubre el criterio 11 en condiciones reales.
+En staging, borrar `SENTRY_DSN` y reiniciar. El server debe arrancar normal y dejar de enviar eventos. Cubre el criterio 11 en condiciones
+reales.
 
 - [ ] **Step 8: Final commit and hand-off** (pedir permiso)
 
@@ -1836,10 +1917,14 @@ Confirmar que no quedan endpoints temporales ni scripts de prueba. Los planes de
 
 ## Notas para quien ejecute
 
-**El orden importa hasta la Tarea 7; después no tanto.** Las Tareas 1 y 2 son la base de todo. Las 3, 4, 5 y 6 son los cuatro puntos de arranque y son independientes entre sí: se pueden repartir. La 7 tiene que estar antes de la 8. La 9 necesita la 8. La 10 va al final.
+**El orden importa hasta la Tarea 7; después no tanto.** Las Tareas 1 y 2 son la base de todo. Las 3, 4, 5 y 6 son los cuatro puntos de
+arranque y son independientes entre sí: se pueden repartir. La 7 tiene que estar antes de la 8. La 9 necesita la 8. La 10 va al final.
 
-**El error más probable al envolver los jobs** es perder el `this` de una clase. Usar siempre la forma de arrow function del ejemplo, nunca pasar el método directo.
+**El error más probable al envolver los jobs** es perder el `this` de una clase. Usar siempre la forma de arrow function del ejemplo, nunca
+pasar el método directo.
 
-**Si un test de contexto falla de forma intermitente**, casi seguro es un `res.on(...)` o un listener registrado fuera del `runWithContext`. El contexto se hereda en el momento del **registro** del callback, no en el de su ejecución.
+**Si un test de contexto falla de forma intermitente**, casi seguro es un `res.on(...)` o un listener registrado fuera del `runWithContext`.
+El contexto se hereda en el momento del **registro** del callback, no en el de su ejecución.
 
-**Lo que este plan deliberadamente no hace:** tracing distribuido con OpenTelemetry, alertas, y explicabilidad de cálculos de dominio. Están en "Out of Scope" del spec con su razón.
+**Lo que este plan deliberadamente no hace:** tracing distribuido con OpenTelemetry, alertas, y explicabilidad de cálculos de dominio. Están
+en "Out of Scope" del spec con su razón.

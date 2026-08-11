@@ -15,17 +15,17 @@ del proceso del que dependen los sockets, los rate limiters y los crons. **Subir
 hacer antes las 4 piezas de abajo rompe la operación SIN UN SOLO ERROR EN EL LOG.** El health check pasa, el deploy sale verde, y te enteras
 por el reclamo de un cliente dos días después.
 
-Si te piden "aguanta más carga" / "optimiza el rendimiento": **la respuesta por defecto es escalar VERTICAL** (subir el plan de la instancia).
-Eso no necesita ningún cambio de código y deja todo lo de abajo correcto tal cual está.
+Si te piden "aguanta más carga" / "optimiza el rendimiento": **la respuesta por defecto es escalar VERTICAL** (subir el plan de la
+instancia). Eso no necesita ningún cambio de código y deja todo lo de abajo correcto tal cual está.
 
 ## Lo que se rompe, y por qué es silencioso
 
-| # | Pieza | Qué pasa con 2 instancias | Dónde |
-|---|-------|---------------------------|-------|
-| 1 | **Socket.IO sin adapter** | La TPV conectada al pod A no recibe lo que emite el pod B. El cobro pasa pero el dashboard no se mueve → el mesero cobra otra vez. | `src/communication/sockets/managers/socketManager.ts:108` (`setupRedisAdapter`, ya escrito, solo espera `REDIS_URL`) |
-| 2 | **Crons duplicados** | Los ~40 jobs viven DENTRO del proceso web (`src/server.ts`) → cada uno corre 2 veces. Incluye jobs de DINERO: `money-integrity-watchdog`, `settlement-detection`, `blumon-webhook-reconciliation`, `commission-aggregation`, `monthly-overage-billing`. | `src/server.ts` + `src/jobs/jobSchedules.ts` |
-| 3 | **Rate limiters en memoria** | Los 32 `rateLimit({...})` cuentan por proceso → 2 pods = el doble de intentos permitidos. En `pin-login` y `password-reset` eso es tu defensa contra fuerza bruta partida a la mitad. | `src/middlewares/*-rate-limit.middleware.ts` |
-| 4 | **Challenge store en memoria** | El reto de auth se emite en un pod y se valida en otro → login móvil que falla aleatoriamente. | `src/services/mobile/auth.mobile.service.ts:34` |
+| #   | Pieza                          | Qué pasa con 2 instancias                                                                                                                                                                                                                               | Dónde                                                                                                                |
+| --- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Socket.IO sin adapter**      | La TPV conectada al pod A no recibe lo que emite el pod B. El cobro pasa pero el dashboard no se mueve → el mesero cobra otra vez.                                                                                                                      | `src/communication/sockets/managers/socketManager.ts:108` (`setupRedisAdapter`, ya escrito, solo espera `REDIS_URL`) |
+| 2   | **Crons duplicados**           | Los ~40 jobs viven DENTRO del proceso web (`src/server.ts`) → cada uno corre 2 veces. Incluye jobs de DINERO: `money-integrity-watchdog`, `settlement-detection`, `blumon-webhook-reconciliation`, `commission-aggregation`, `monthly-overage-billing`. | `src/server.ts` + `src/jobs/jobSchedules.ts`                                                                         |
+| 3   | **Rate limiters en memoria**   | Los 32 `rateLimit({...})` cuentan por proceso → 2 pods = el doble de intentos permitidos. En `pin-login` y `password-reset` eso es tu defensa contra fuerza bruta partida a la mitad.                                                                   | `src/middlewares/*-rate-limit.middleware.ts`                                                                         |
+| 4   | **Challenge store en memoria** | El reto de auth se emite en un pod y se valida en otro → login móvil que falla aleatoriamente.                                                                                                                                                          | `src/services/mobile/auth.mobile.service.ts:34`                                                                      |
 
 De los cuatro, **sólo el #4 se queja**. Los otros tres fallan callados, y el #2 mueve dinero.
 

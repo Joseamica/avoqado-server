@@ -1,41 +1,54 @@
 # Observabilidad del dashboard web — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que cuando a un cliente se le rompa una pantalla te enteres tú antes que él, con el stack simbolicado a `.tsx`, el venue al que le pasó, y la secuencia de llamadas a la API que precedió al crash.
+**Goal:** Que cuando a un cliente se le rompa una pantalla te enteres tú antes que él, con el stack simbolicado a `.tsx`, el venue al que le
+pasó, y la secuencia de llamadas a la API que precedió al crash.
 
-**Architecture:** `@sentry/react` reporta a Sentry SaaS (D6 del spec: el dashboard se despliega minificado y Better Stack no acepta source maps). `@sentry/vite-plugin` sube los mapas en cada build y los borra del artefacto publicado, así que el bundle sigue minificado de cara al usuario. Un interceptor de request origina un `X-Correlation-ID` por llamada; el de respuesta deja un breadcrumb con ese id, de modo que un error de render llega con la secuencia real de requests que lo precedieron y se salta al log del server desde cualquiera de ellos.
+**Architecture:** `@sentry/react` reporta a Sentry SaaS (D6 del spec: el dashboard se despliega minificado y Better Stack no acepta source
+maps). `@sentry/vite-plugin` sube los mapas en cada build y los borra del artefacto publicado, así que el bundle sigue minificado de cara al
+usuario. Un interceptor de request origina un `X-Correlation-ID` por llamada; el de respuesta deja un breadcrumb con ese id, de modo que un
+error de render llega con la secuencia real de requests que lo precedieron y se salta al log del server desde cualquiera de ellos.
 
 **Tech Stack:** React 18.3, Vite 7.3, TypeScript, axios 1.7, Vitest 4.
 
 **Spec:** `docs/superpowers/specs/2026-08-08-observabilidad-de-errores-design.md`, Parte C.
 
-**Repo:** `avoqado-web-dashboard` (hermano de `avoqado-server` en el workspace). Todas las rutas de este plan son relativas a la raíz de ese repo.
+**Repo:** `avoqado-web-dashboard` (hermano de `avoqado-server` en el workspace). Todas las rutas de este plan son relativas a la raíz de ese
+repo.
 
-**Dependencia de orden con el server:** ninguna que bloquee. Verificado 2026-08-08: `X-Correlation-Id` ya está en `allowedHeaders` del CORS del server (`avoqado-server/src/config/corsOptions.ts:156`), así que **enviar** el header no rompe el preflight. Exponerlo para poder **leerlo** es un paso del plan del server, pero este plan no depende de él: el dashboard origina su propio id.
+**Dependencia de orden con el server:** ninguna que bloquee. Verificado 2026-08-08: `X-Correlation-Id` ya está en `allowedHeaders` del CORS
+del server (`avoqado-server/src/config/corsOptions.ts:156`), así que **enviar** el header no rompe el preflight. Exponerlo para poder
+**leerlo** es un paso del plan del server, pero este plan no depende de él: el dashboard origina su propio id.
 
 ## Global Constraints
 
-- **Idioma del código: inglés.** Identificadores, comentarios y nombres de test en inglés. Solo lo que lee una persona (textos de UI vía i18n) va en español.
+- **Idioma del código: inglés.** Identificadores, comentarios y nombres de test en inglés. Solo lo que lee una persona (textos de UI vía
+  i18n) va en español.
 - **Git: nunca commitear sin permiso explícito del founder.** Los pasos muestran el comando; preguntar antes.
 - **`git add` por rutas explícitas.** Nunca `git add -A`.
-- **Nada de secretos al repo.** El `VITE_SENTRY_DSN` es visible en el bundle publicado y eso es normal por diseño de Sentry; el **auth token** de subida de source maps NO lo es y vive solo en CI y en `.env.sentry-build-plugin` (que va a `.gitignore`).
-- **No romper el auto-reload de chunks.** `ErrorBoundary` y `main.tsx` recargan la página cuando falla la carga de un chunk tras un deploy. Es un comportamiento correcto y frecuente; **no se reporta como error** o la consola se llena de ruido de cada despliegue.
-- **`console` se elimina en producción.** `vite.config.ts:38` tiene `esbuild.drop: ['console','debugger']` en modo production. Los breadcrumbs de consola de Sentry estarán **vacíos en prod**; por eso los breadcrumbs de axios de la Tarea 4 son la fuente real de contexto y no un extra.
+- **Nada de secretos al repo.** El `VITE_SENTRY_DSN` es visible en el bundle publicado y eso es normal por diseño de Sentry; el **auth
+  token** de subida de source maps NO lo es y vive solo en CI y en `.env.sentry-build-plugin` (que va a `.gitignore`).
+- **No romper el auto-reload de chunks.** `ErrorBoundary` y `main.tsx` recargan la página cuando falla la carga de un chunk tras un deploy.
+  Es un comportamiento correcto y frecuente; **no se reporta como error** o la consola se llena de ruido de cada despliegue.
+- **`console` se elimina en producción.** `vite.config.ts:38` tiene `esbuild.drop: ['console','debugger']` en modo production. Los
+  breadcrumbs de consola de Sentry estarán **vacíos en prod**; por eso los breadcrumbs de axios de la Tarea 4 son la fuente real de contexto
+  y no un extra.
 - **Tests con Vitest**, no Jest: `npx vitest run <archivo>`.
 
 ---
 
 ## File Structure
 
-| Archivo | Responsabilidad | Tarea |
-|---|---|---|
-| `src/lib/sentry.ts` | **Nuevo.** `Sentry.init`, scrubbing, y los helpers de identidad | 1 |
-| `src/main.tsx:20` | Llamar al init junto a `initPostHog()` | 1 |
-| `vite.config.ts` | `build.sourcemap` + `sentryVitePlugin` | 2 |
-| `src/api.ts` | Interceptor de request (nuevo) y extensión del de respuesta (`:71`) | 3, 4 |
-| `src/components/ErrorBoundary.tsx:53-62` | Captura real, conservando el camino de chunk | 5 |
-| `src/context/AuthContext.tsx:123-132` | Identidad de usuario y venue | 6 |
+| Archivo                                  | Responsabilidad                                                     | Tarea |
+| ---------------------------------------- | ------------------------------------------------------------------- | ----- |
+| `src/lib/sentry.ts`                      | **Nuevo.** `Sentry.init`, scrubbing, y los helpers de identidad     | 1     |
+| `src/main.tsx:20`                        | Llamar al init junto a `initPostHog()`                              | 1     |
+| `vite.config.ts`                         | `build.sourcemap` + `sentryVitePlugin`                              | 2     |
+| `src/api.ts`                             | Interceptor de request (nuevo) y extensión del de respuesta (`:71`) | 3, 4  |
+| `src/components/ErrorBoundary.tsx:53-62` | Captura real, conservando el camino de chunk                        | 5     |
+| `src/context/AuthContext.tsx:123-132`    | Identidad de usuario y venue                                        | 6     |
 
 Todo lo nuevo vive en `src/lib/sentry.ts` para que revertir sea borrar un archivo y cinco enganches.
 
@@ -44,16 +57,20 @@ Todo lo nuevo vive en `src/lib/sentry.ts` para que revertir sea borrar un archiv
 ### Task 1: Inicializar Sentry
 
 **Files:**
+
 - Create: `src/lib/sentry.ts`
 - Modify: `src/main.tsx`
 - Create: `.env.example` (añadir la variable) y `.gitignore` (añadir `.env.sentry-build-plugin`)
 - Test: `src/lib/__tests__/sentry.test.ts`
 
 **Interfaces:**
-- Consumes: nada.
-- Produces: `initSentry(): void`, `buildBeforeSend()` (exportada para testear), `identifySentryUser(user: { id: string } | null): void`, `setSentryVenue(venueId: string | null): void`. Las tareas 4, 5 y 6 usan estos nombres exactos.
 
-**Prerequisito:** proyecto `avoqado-dashboard` creado en Sentry (P2 del spec) y su DSN a mano. Sin DSN el SDK queda inerte y la tarea se completa y testea igual.
+- Consumes: nada.
+- Produces: `initSentry(): void`, `buildBeforeSend()` (exportada para testear), `identifySentryUser(user: { id: string } | null): void`,
+  `setSentryVenue(venueId: string | null): void`. Las tareas 4, 5 y 6 usan estos nombres exactos.
+
+**Prerequisito:** proyecto `avoqado-dashboard` creado en Sentry (P2 del spec) y su DSN a mano. Sin DSN el SDK queda inerte y la tarea se
+completa y testea igual.
 
 - [ ] **Step 1: Install the SDK**
 
@@ -253,7 +270,8 @@ Expected: PASS, 9 tests.
 
 - [ ] **Step 6: Wire it into main.tsx**
 
-En `src/main.tsx`, añadir el import junto a los otros de `lib` y llamarlo **antes** de `initPostHog()` (línea 20), para que un fallo del propio arranque quede reportado:
+En `src/main.tsx`, añadir el import junto a los otros de `lib` y llamarlo **antes** de `initPostHog()` (línea 20), para que un fallo del
+propio arranque quede reportado:
 
 ```typescript
 import { initSentry } from './lib/sentry'
@@ -301,13 +319,16 @@ git commit -m "feat(observability): initialize Sentry error reporting"
 ### Task 2: Source maps simbolicados en el build
 
 **Files:**
+
 - Modify: `vite.config.ts:40` (bloque `build`)
 
 **Interfaces:**
+
 - Consumes: nada del código; consume el auth token de Sentry (P6 del spec) desde el entorno de CI.
 - Produces: builds de producción cuyos stack traces se leen en `.tsx` con la línea correcta.
 
-Sin esta tarea, el resto del plan entrega una consola llena de `index-a1b2c3.js:1:48213`. Es la razón por la que D6 mandó el dashboard a Sentry en vez de a Better Stack.
+Sin esta tarea, el resto del plan entrega una consola llena de `index-a1b2c3.js:1:48213`. Es la razón por la que D6 mandó el dashboard a
+Sentry en vez de a Better Stack.
 
 - [ ] **Step 1: Add the plugin to the Vite config**
 
@@ -356,7 +377,8 @@ npm run build
 ls dist/assets/*.map 2>/dev/null | head
 ```
 
-Expected: sin `SENTRY_AUTH_TOKEN` el plugin está deshabilitado, así que los `.map` **se generan y se quedan** en `dist/`. Eso es correcto en local. Lo que importa es que el build no falle.
+Expected: sin `SENTRY_AUTH_TOKEN` el plugin está deshabilitado, así que los `.map` **se generan y se quedan** en `dist/`. Eso es correcto en
+local. Lo que importa es que el build no falle.
 
 - [ ] **Step 3: Verify the shipped bundle has no sourceMappingURL**
 
@@ -364,7 +386,8 @@ Expected: sin `SENTRY_AUTH_TOKEN` el plugin está deshabilitado, así que los `.
 grep -l "sourceMappingURL" dist/assets/*.js | head
 ```
 
-Expected: **sin resultados.** Con `sourcemap: 'hidden'` el comentario no se emite. Si aparece, el valor quedó en `true` en vez de `'hidden'` y los mapas serían públicos.
+Expected: **sin resultados.** Con `sourcemap: 'hidden'` el comentario no se emite. Si aparece, el valor quedó en `true` en vez de `'hidden'`
+y los mapas serían públicos.
 
 - [ ] **Step 4: Configure CI**
 
@@ -382,14 +405,20 @@ git commit -m "build(observability): upload source maps to Sentry and keep the b
 ### Task 3: Originar el `X-Correlation-ID` en cada request
 
 **Files:**
+
 - Modify: `src/api.ts` (añadir `api.interceptors.request`)
 - Test: `src/__tests__/api-correlation.test.ts`
 
 **Interfaces:**
-- Consumes: nada.
-- Produces: cada request de `api` sale con el header `X-Correlation-ID` y con `config.correlationId` disponible para el interceptor de respuesta de la Tarea 4.
 
-**Sutileza que hay que respetar:** el interceptor de respuesta existente reintenta una vez los errores de red (`config._retry`, `src/api.ts:95-100`) reusando el mismo objeto `config`. El reintento **debe conservar el id original**: son dos requests HTTP pero una sola operación lógica, y darles ids distintos rompe justo la traza que queremos. Es el mismo razonamiento que aplicó al servicio de reintentos del server.
+- Consumes: nada.
+- Produces: cada request de `api` sale con el header `X-Correlation-ID` y con `config.correlationId` disponible para el interceptor de
+  respuesta de la Tarea 4.
+
+**Sutileza que hay que respetar:** el interceptor de respuesta existente reintenta una vez los errores de red (`config._retry`,
+`src/api.ts:95-100`) reusando el mismo objeto `config`. El reintento **debe conservar el id original**: son dos requests HTTP pero una sola
+operación lógica, y darles ids distintos rompe justo la traza que queremos. Es el mismo razonamiento que aplicó al servicio de reintentos
+del server.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -485,7 +514,9 @@ Expected: PASS, 4 tests.
 npm run dev
 ```
 
-Abrir el dashboard, entrar a cualquier pantalla y en las devtools, pestaña Network, confirmar que los requests a la API llevan `X-Correlation-ID` en los headers de solicitud y que **ninguno falla por CORS**. Si algo se bloquea en el preflight, parar aquí y revisar `allowedHeaders` en el server: no debería pasar, ya está permitido.
+Abrir el dashboard, entrar a cualquier pantalla y en las devtools, pestaña Network, confirmar que los requests a la API llevan
+`X-Correlation-ID` en los headers de solicitud y que **ninguno falla por CORS**. Si algo se bloquea en el preflight, parar aquí y revisar
+`allowedHeaders` en el server: no debería pasar, ya está permitido.
 
 - [ ] **Step 6: Commit** (pedir permiso)
 
@@ -499,14 +530,18 @@ git commit -m "feat(observability): originate a correlation id on every API requ
 ### Task 4: Breadcrumbs y captura de fallos de API
 
 **Files:**
+
 - Modify: `src/api.ts:71` (el `onRejected` del interceptor de respuesta)
 - Test: `src/__tests__/api-breadcrumbs.test.ts`
 
 **Interfaces:**
+
 - Consumes: `config.correlationId` de la Tarea 3.
 - Produces: `recordApiBreadcrumb(response)` y `captureApiFailure(error)` exportadas desde `src/api.ts`.
 
-Este es el mecanismo que hace útil al `ErrorBoundary` de la Tarea 5. Como el error de render no puede saber honestamente cuál de los requests en vuelo lo causó, en vez de inventar esa atribución dejamos la secuencia completa: quien investiga ve las últimas llamadas con su id y salta al log del server desde cualquiera.
+Este es el mecanismo que hace útil al `ErrorBoundary` de la Tarea 5. Como el error de render no puede saber honestamente cuál de los
+requests en vuelo lo causó, en vez de inventar esa atribución dejamos la secuencia completa: quien investiga ve las últimas llamadas con su
+id y salta al log del server desde cualquiera.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -640,21 +675,23 @@ export const shouldCaptureApiFailure = (error: { response?: { status?: number };
 }
 ```
 
-En el interceptor de respuesta (`:71`), añadir la llamada al breadcrumb en **ambas** ramas, y la captura en la de error. En la rama de éxito, antes del `return response`:
+En el interceptor de respuesta (`:71`), añadir la llamada al breadcrumb en **ambas** ramas, y la captura en la de error. En la rama de
+éxito, antes del `return response`:
 
 ```typescript
-    recordApiBreadcrumb(response)
+recordApiBreadcrumb(response)
 ```
 
-En la rama de error, **después** del bloque de reintento por red y **antes** del manejo de impersonación, para que un reintento exitoso no reporte nada:
+En la rama de error, **después** del bloque de reintento por red y **antes** del manejo de impersonación, para que un reintento exitoso no
+reporte nada:
 
 ```typescript
-    recordApiBreadcrumb({ config: error.config, status: error.response?.status })
-    if (shouldCaptureApiFailure(error)) {
-      Sentry.captureException(error, {
-        tags: { correlationId: error.config?.correlationId, httpStatus: error.response?.status },
-      })
-    }
+recordApiBreadcrumb({ config: error.config, status: error.response?.status })
+if (shouldCaptureApiFailure(error)) {
+  Sentry.captureException(error, {
+    tags: { correlationId: error.config?.correlationId, httpStatus: error.response?.status },
+  })
+}
 ```
 
 - [ ] **Step 4: Run it to verify it passes**
@@ -671,7 +708,8 @@ Expected: PASS, 7 tests.
 npx vitest run
 ```
 
-Expected: la suite completa en verde. Prestar atención a los tests de `AuthContext` (`src/context/__tests__/`), que ejercitan el camino de 401 y logout.
+Expected: la suite completa en verde. Prestar atención a los tests de `AuthContext` (`src/context/__tests__/`), que ejercitan el camino de
+401 y logout.
 
 - [ ] **Step 6: Commit** (pedir permiso)
 
@@ -685,10 +723,12 @@ git commit -m "feat(observability): breadcrumb every API call and report server 
 ### Task 5: Captura real en el ErrorBoundary
 
 **Files:**
+
 - Modify: `src/components/ErrorBoundary.tsx:53-62`
 - Test: `src/components/__tests__/ErrorBoundary.capture.test.tsx`
 
 **Interfaces:**
+
 - Consumes: `isIgnorableError` de la Tarea 1.
 - Produces: nada nuevo. El efecto es que un crash de render llega a Sentry con su `componentStack`.
 
@@ -775,22 +815,23 @@ import * as Sentry from '@sentry/react'
 import { isIgnorableError } from '@/lib/sentry'
 ```
 
-Y reemplazar el bloque final de `componentDidCatch` (líneas 53-62, desde el comentario `// Log error to console` hasta el `// Example:`) por:
+Y reemplazar el bloque final de `componentDidCatch` (líneas 53-62, desde el comentario `// Log error to console` hasta el `// Example:`)
+por:
 
 ```typescript
-    // Log error to console in development only
-    if (import.meta.env.DEV) {
-      console.error('ErrorBoundary caught an error:', error)
-      console.error('Component stack:', errorInfo.componentStack)
-    }
+// Log error to console in development only
+if (import.meta.env.DEV) {
+  console.error('ErrorBoundary caught an error:', error)
+  console.error('Component stack:', errorInfo.componentStack)
+}
 
-    // Report the crash with the component stack, which is what makes a render error
-    // actionable. Chunk failures are already handled above and are deploy noise, not bugs.
-    if (!isIgnorableError(error.message)) {
-      Sentry.captureException(error, {
-        contexts: { react: { componentStack: errorInfo.componentStack } },
-      })
-    }
+// Report the crash with the component stack, which is what makes a render error
+// actionable. Chunk failures are already handled above and are deploy noise, not bugs.
+if (!isIgnorableError(error.message)) {
+  Sentry.captureException(error, {
+    contexts: { react: { componentStack: errorInfo.componentStack } },
+  })
+}
 ```
 
 **No tocar** el bloque de `isChunkError` que está arriba: sigue siendo el primero en correr y sigue haciendo `return` antes de llegar aquí.
@@ -815,14 +856,17 @@ git commit -m "feat(observability): report render crashes with their component s
 ### Task 6: Identidad de usuario y de venue
 
 **Files:**
+
 - Modify: `src/context/AuthContext.tsx:123-132`
 - Test: `src/context/__tests__/AuthContext.sentry-identity.test.ts`
 
 **Interfaces:**
+
 - Consumes: `identifySentryUser`, `setSentryVenue` de la Tarea 1.
 - Produces: nada nuevo.
 
-Sin esto, la consola muestra errores sin dueño y no se puede contestar la pregunta que de verdad importa: "¿a cuántos venues les está pasando?".
+Sin esto, la consola muestra errores sin dueño y no se puede contestar la pregunta que de verdad importa: "¿a cuántos venues les está
+pasando?".
 
 - [ ] **Step 1: Write the failing test**
 
@@ -885,33 +929,35 @@ import { identifySentryUser, setSentryVenue } from '@/lib/sentry'
 Y dentro del efecto que ya existe (`:123-132`), junto a `identifyUser` y `resetUser`, sin cambiar su lógica de guarda:
 
 ```typescript
-  useEffect(() => {
-    if (user?.id) {
-      identifyUser(user)
-      identifySentryUser({ id: user.id })
-      hadIdentifiedUserRef.current = true
-    } else if (hadIdentifiedUserRef.current) {
-      resetUser()
-      identifySentryUser(null)
-      hadIdentifiedUserRef.current = false
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- identify only when the user id changes, not on every refetch
-  }, [user?.id])
+useEffect(() => {
+  if (user?.id) {
+    identifyUser(user)
+    identifySentryUser({ id: user.id })
+    hadIdentifiedUserRef.current = true
+  } else if (hadIdentifiedUserRef.current) {
+    resetUser()
+    identifySentryUser(null)
+    hadIdentifiedUserRef.current = false
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- identify only when the user id changes, not on every refetch
+}, [user?.id])
 ```
 
 - [ ] **Step 4: Add a second effect for the venue tag**
 
-Justo después del efecto anterior. Va aparte y no dentro de `switchVenue` a propósito: keyeado al `activeVenue` queda correcto también en la carga inicial y tras un refetch, no solo cuando alguien cambia de venue a mano.
+Justo después del efecto anterior. Va aparte y no dentro de `switchVenue` a propósito: keyeado al `activeVenue` queda correcto también en la
+carga inicial y tras un refetch, no solo cuando alguien cambia de venue a mano.
 
 ```typescript
-  // Venue tag, keyed on the active venue so it is correct on first load too, not only
-  // after an explicit switch.
-  useEffect(() => {
-    setSentryVenue(activeVenue?.id ?? null)
-  }, [activeVenue?.id])
+// Venue tag, keyed on the active venue so it is correct on first load too, not only
+// after an explicit switch.
+useEffect(() => {
+  setSentryVenue(activeVenue?.id ?? null)
+}, [activeVenue?.id])
 ```
 
-Verificar el nombre real de la variable del venue activo en el contexto antes de escribirlo: en este archivo aparece como `activeVenue` (`:218`, `:228`). Si el campo del id no es `.id`, ajustarlo, no inventarlo.
+Verificar el nombre real de la variable del venue activo en el contexto antes de escribirlo: en este archivo aparece como `activeVenue`
+(`:218`, `:228`). Si el campo del id no es `.id`, ajustarlo, no inventarlo.
 
 - [ ] **Step 5: Run the AuthContext suite**
 
@@ -942,34 +988,44 @@ Expected: verde y compila.
 
 - [ ] **Step 2: Verify a seeded error arrives symbolicated**
 
-Construir con el token de Sentry configurado, desplegar a preview, y provocar un error real desde un componente. En la consola de Sentry el stack debe apuntar a un archivo `.tsx` con la línea correcta.
+Construir con el token de Sentry configurado, desplegar a preview, y provocar un error real desde un componente. En la consola de Sentry el
+stack debe apuntar a un archivo `.tsx` con la línea correcta.
 
-Si aparece `index-a1b2c3.js:1:48213`, los mapas no se subieron: revisar que `SENTRY_AUTH_TOKEN` esté presente en el build y que `sourcemap: 'hidden'` esté puesto. Cubre el criterio 8 del spec.
+Si aparece `index-a1b2c3.js:1:48213`, los mapas no se subieron: revisar que `SENTRY_AUTH_TOKEN` esté presente en el build y que
+`sourcemap: 'hidden'` esté puesto. Cubre el criterio 8 del spec.
 
 - [ ] **Step 3: Verify the breadcrumb trail**
 
-En ese mismo error, confirmar que los breadcrumbs muestran las últimas llamadas a la API con su `correlationId`. Tomar uno y buscarlo en el log stream de Better Stack (source `1720702`): debe aparecer el request correspondiente del server. Ese salto entre consolas es el entregable central de este plan.
+En ese mismo error, confirmar que los breadcrumbs muestran las últimas llamadas a la API con su `correlationId`. Tomar uno y buscarlo en el
+log stream de Better Stack (source `1720702`): debe aparecer el request correspondiente del server. Ese salto entre consolas es el
+entregable central de este plan.
 
 - [ ] **Step 4: Verify the deploy noise is NOT reported**
 
-Tras un despliegue, confirmar que **no** llegan eventos de `Failed to fetch dynamically imported module`. Si llegan, el filtro de `isIgnorableError` no se está aplicando en alguno de los dos caminos (`beforeSend` o `ErrorBoundary`).
+Tras un despliegue, confirmar que **no** llegan eventos de `Failed to fetch dynamically imported module`. Si llegan, el filtro de
+`isIgnorableError` no se está aplicando en alguno de los dos caminos (`beforeSend` o `ErrorBoundary`).
 
 - [ ] **Step 5: Verify no PII in real events**
 
-Abrir tres o cuatro errores reales en la consola y revisar URL, breadcrumbs, mensaje y `extra`. No debe haber correos, RFC, CLABE ni tokens. Si aparece algo, añadir el patrón a `SENSITIVE_PATTERNS` y **borrar los eventos afectados en Sentry** antes de seguir.
+Abrir tres o cuatro errores reales en la consola y revisar URL, breadcrumbs, mensaje y `extra`. No debe haber correos, RFC, CLABE ni tokens.
+Si aparece algo, añadir el patrón a `SENSITIVE_PATTERNS` y **borrar los eventos afectados en Sentry** antes de seguir.
 
 - [ ] **Step 6: Verify the kill switch**
 
-En Sentry → Settings → Client Keys, deshabilitar la key del proyecto y confirmar que dejan de llegar eventos sin redesplegar. Volver a habilitarla. Este es el rollback del plan y hay que probarlo antes de darlo por listo.
+En Sentry → Settings → Client Keys, deshabilitar la key del proyecto y confirmar que dejan de llegar eventos sin redesplegar. Volver a
+habilitarla. Este es el rollback del plan y hay que probarlo antes de darlo por listo.
 
 ---
 
 ## Notas para quien ejecute
 
-**Las Tareas 1 y 2 van juntas o el resto no sirve.** Reportar sin simbolicar produce una consola de errores ilegibles, que es peor que no tener consola: da la sensación de cobertura sin darla.
+**Las Tareas 1 y 2 van juntas o el resto no sirve.** Reportar sin simbolicar produce una consola de errores ilegibles, que es peor que no
+tener consola: da la sensación de cobertura sin darla.
 
 **Las Tareas 3, 4, 5 y 6 son independientes entre sí** una vez hecha la 1. Se pueden repartir.
 
-**El error más probable** es reportar el ruido de deploy. Si tras el primer despliegue la consola se llena de fallos de chunk, el filtro no se está aplicando; revisar los dos caminos, no solo uno.
+**El error más probable** es reportar el ruido de deploy. Si tras el primer despliegue la consola se llena de fallos de chunk, el filtro no
+se está aplicando; revisar los dos caminos, no solo uno.
 
-**Lo que este plan deliberadamente no hace:** session replay (implica PII en pantallas con datos fiscales y necesita su propia decisión de enmascarado), performance tracing (`tracesSampleRate: 0` a propósito, las transacciones son el grueso de la cuota), y tocar PostHog.
+**Lo que este plan deliberadamente no hace:** session replay (implica PII en pantallas con datos fiscales y necesita su propia decisión de
+enmascarado), performance tracing (`tracesSampleRate: 0` a propósito, las transacciones son el grueso de la cuota), y tocar PostHog.

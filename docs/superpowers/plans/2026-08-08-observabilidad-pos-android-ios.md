@@ -1,12 +1,17 @@
 # Observabilidad de los POS (android + iOS) — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Sacar de la ceguera total a las dos apps que toman órdenes en el salón. Hoy no reportan **nada**: ni crashes, ni errores manejados. Si una tablet truena a media comida, nadie se entera nunca.
+**Goal:** Sacar de la ceguera total a las dos apps que toman órdenes en el salón. Hoy no reportan **nada**: ni crashes, ni errores
+manejados. Si una tablet truena a media comida, nadie se entera nunca.
 
-**Architecture:** Terreno virgen en ambas, así que Sentry entra completo: crashes **y** errores manejados, con simbolicación automática (mapping de R8 en Android, dSYM en iOS). Un archivo por app concentra todo el trato con el SDK. La correlación con el backend viaja en el header `X-Correlation-ID` que el server ya honra.
+**Architecture:** Terreno virgen en ambas, así que Sentry entra completo: crashes **y** errores manejados, con simbolicación automática
+(mapping de R8 en Android, dSYM en iOS). Un archivo por app concentra todo el trato con el SDK. La correlación con el backend viaja en el
+header `X-Correlation-ID` que el server ya honra.
 
-**Tech Stack:** Kotlin + Jetpack Compose + OkHttp (`avoqado-android`) · SwiftUI + URLSession (`avoqado-ios`, iOS 15+) · `sentry-android` ≥8 · `sentry-cocoa` ≥8.
+**Tech Stack:** Kotlin + Jetpack Compose + OkHttp (`avoqado-android`) · SwiftUI + URLSession (`avoqado-ios`, iOS 15+) · `sentry-android` ≥8
+· `sentry-cocoa` ≥8.
 
 **Spec:** `docs/superpowers/specs/2026-08-08-observabilidad-de-errores-design.md`, Parte D.
 
@@ -14,40 +19,54 @@
 
 ## Por qué cada tarea toca las dos apps
 
-La regla del workspace es que android e iOS se cambian **juntos**: un cambio de producto en una se porta a la otra en el mismo trabajo, nunca "después". Este plan la hace estructural en vez de dejarla a la memoria de quien ejecuta: **cada tarea entrega las dos plataformas**. Si el trabajo se detiene a mitad, se detiene en paridad, no con Android instrumentado e iOS ciego.
+La regla del workspace es que android e iOS se cambian **juntos**: un cambio de producto en una se porta a la otra en el mismo trabajo,
+nunca "después". Este plan la hace estructural en vez de dejarla a la memoria de quien ejecuta: **cada tarea entrega las dos plataformas**.
+Si el trabajo se detiene a mitad, se detiene en paridad, no con Android instrumentado e iOS ciego.
 
-La simetría del código lo permite: los dos repos tienen los mismos nombres para las mismas piezas (`SyncOutbox`, `PaymentSyncService`, `PrintConfigRepository`, `PrintRoutingMapper`).
+La simetría del código lo permite: los dos repos tienen los mismos nombres para las mismas piezas (`SyncOutbox`, `PaymentSyncService`,
+`PrintConfigRepository`, `PrintRoutingMapper`).
 
-| Pieza | android | ios |
-|---|---|---|
-| Entrada de la app | `app/src/main/java/com/avoqado/pos/AvoqadoApp.kt` | `avoqado-ios/avoqado_iosApp.swift` |
-| Capa de red | `core/di/NetworkModule.kt` (OkHttp) | `Services/APIClient.swift` |
-| Cola offline | `core/data/sync/SyncOutbox.kt` | `Services/SyncOutbox.swift` |
-| Cuarentena | `sync/presentation/QuarantineViewModel.kt` | (buscar equivalente) |
-| Impresión | `printing/routing/PrintRoutingEngine.kt` | `Printing/Routing/PrintRoutingMapper.swift` |
+| Pieza             | android                                           | ios                                         |
+| ----------------- | ------------------------------------------------- | ------------------------------------------- |
+| Entrada de la app | `app/src/main/java/com/avoqado/pos/AvoqadoApp.kt` | `avoqado-ios/avoqado_iosApp.swift`          |
+| Capa de red       | `core/di/NetworkModule.kt` (OkHttp)               | `Services/APIClient.swift`                  |
+| Cola offline      | `core/data/sync/SyncOutbox.kt`                    | `Services/SyncOutbox.swift`                 |
+| Cuarentena        | `sync/presentation/QuarantineViewModel.kt`        | (buscar equivalente)                        |
+| Impresión         | `printing/routing/PrintRoutingEngine.kt`          | `Printing/Routing/PrintRoutingMapper.swift` |
 
 ## Global Constraints
 
 - **Idioma del código: inglés.** Identificadores, comentarios y nombres de test en inglés.
 - **Git: nunca commitear sin permiso explícito.** Los pasos muestran el comando; preguntar antes.
-- **Un solo build pesado a la vez.** Antes de `./gradlew` o `xcodebuild`, verificar con `pgrep -fl "GradleDaemon|KotlinCompileDaemon|xcodebuild"`. La máquina es compartida con otras sesiones. Nunca dos builds tuyos en paralelo.
-- **Paridad obligatoria.** Ninguna tarea se da por terminada con una sola plataforma. Si algo impide portar en el momento (falta hardware, worktree bloqueado), va **explícito en el reporte**, nunca en silencio.
-- **Offline es estado normal, no error** (`.claude/rules/offline-first-y-hub-lan.md`). Un fallo de red que se convierte en intent encolado **no se reporta**. Solo el rechazo permanente (`REJECTED`). `RETRY` jamás.
+- **Un solo build pesado a la vez.** Antes de `./gradlew` o `xcodebuild`, verificar con
+  `pgrep -fl "GradleDaemon|KotlinCompileDaemon|xcodebuild"`. La máquina es compartida con otras sesiones. Nunca dos builds tuyos en
+  paralelo.
+- **Paridad obligatoria.** Ninguna tarea se da por terminada con una sola plataforma. Si algo impide portar en el momento (falta hardware,
+  worktree bloqueado), va **explícito en el reporte**, nunca en silencio.
+- **Offline es estado normal, no error** (`.claude/rules/offline-first-y-hub-lan.md`). Un fallo de red que se convierte en intent encolado
+  **no se reporta**. Solo el rechazo permanente (`REJECTED`). `RETRY` jamás.
 - **Sin secretos al repo.** El auth token de Sentry va en `local.properties` (android) y en el entorno de CI / `.xcconfig` ignorado (iOS).
-- **Contrato de tags idéntico en ambas:** `venueId`, `staffId`, `terminalSerial`, `appVersionCode`, `correlationId`. Los mismos nombres que usan el dashboard y el TPV. Filtrar por `venueId` igual en las cuatro consolas es la mayor parte del valor.
+- **Contrato de tags idéntico en ambas:** `venueId`, `staffId`, `terminalSerial`, `appVersionCode`, `correlationId`. Los mismos nombres que
+  usan el dashboard y el TPV. Filtrar por `venueId` igual en las cuatro consolas es la mayor parte del valor.
 
 ---
 
 ### Task 1: SDK, arranque y simbolicación en ambas apps
 
 **Files:**
-- android — Modify: `build.gradle.kts` (raíz), `app/build.gradle.kts`, `app/src/main/java/com/avoqado/pos/AvoqadoApp.kt`. Create: `app/src/main/java/com/avoqado/pos/core/observability/Telemetry.kt`
-- ios — Modify: `avoqado-ios.xcodeproj` (SPM + fase de build), `avoqado-ios/avoqado_iosApp.swift`. Create: `avoqado-ios/Services/Telemetry.swift`
+
+- android — Modify: `build.gradle.kts` (raíz), `app/build.gradle.kts`, `app/src/main/java/com/avoqado/pos/AvoqadoApp.kt`. Create:
+  `app/src/main/java/com/avoqado/pos/core/observability/Telemetry.kt`
+- ios — Modify: `avoqado-ios.xcodeproj` (SPM + fase de build), `avoqado-ios/avoqado_iosApp.swift`. Create:
+  `avoqado-ios/Services/Telemetry.swift`
 
 **Interfaces (idénticas en ambas plataformas, por contrato):**
-- Produces: `Telemetry.start(dsn:environment:release:)`, `Telemetry.capture(_ error:tags:)`, `Telemetry.breadcrumb(category:message:data:)`, `Telemetry.setSession(venueId:staffId:terminalSerial:)`, `Telemetry.clearSession()`.
 
-**Diferencia importante con el TPV:** aquí **sí** se deja que Sentry maneje los crashes no atrapados. El TPV los cede a Crashlytics porque ya los tenía; estas dos apps no tienen nada, así que apagar ese manejador las dejaría igual de ciegas ante lo más grave.
+- Produces: `Telemetry.start(dsn:environment:release:)`, `Telemetry.capture(_ error:tags:)`, `Telemetry.breadcrumb(category:message:data:)`,
+  `Telemetry.setSession(venueId:staffId:terminalSerial:)`, `Telemetry.clearSession()`.
+
+**Diferencia importante con el TPV:** aquí **sí** se deja que Sentry maneje los crashes no atrapados. El TPV los cede a Crashlytics porque
+ya los tenía; estas dos apps no tienen nada, así que apagar ese manejador las dejaría igual de ciegas ante lo más grave.
 
 **Prerequisito:** proyectos `avoqado-android` y `avoqado-ios` creados en Sentry (P4 y P5 del spec) más el auth token (P6).
 
@@ -87,11 +106,13 @@ sentry {
 }
 ```
 
-Credenciales en `local.properties` (ya ignorado): `sentryOrg`, `sentry.auth.token`, `sentryDsn`. Exponer el DSN con `buildConfigField` en `defaultConfig`, igual que se hizo en el TPV.
+Credenciales en `local.properties` (ya ignorado): `sentryOrg`, `sentry.auth.token`, `sentryDsn`. Exponer el DSN con `buildConfigField` en
+`defaultConfig`, igual que se hizo en el TPV.
 
 - [ ] **Step 2 (ios): Add the SDK via SPM and the dSYM upload phase**
 
-En Xcode, File → Add Package Dependencies → `https://github.com/getsentry/sentry-cocoa`, versión ≥ 8.0.0. El proyecto ya usa SPM (firebase-ios-sdk, GRDB), así que no hay que cambiar de gestor.
+En Xcode, File → Add Package Dependencies → `https://github.com/getsentry/sentry-cocoa`, versión ≥ 8.0.0. El proyecto ya usa SPM
+(firebase-ios-sdk, GRDB), así que no hay que cambiar de gestor.
 
 Añadir una **Run Script Phase** al target, **después** de "Embed Frameworks":
 
@@ -104,7 +125,8 @@ sentry-cli debug-files upload --include-sources \
   --org "$SENTRY_ORG" --project avoqado-ios "$DWARF_DSYM_FOLDER_PATH"
 ```
 
-Verificar que la configuración **Release** tenga `DEBUG_INFORMATION_FORMAT = dwarf-with-dsym`. Sin dSYM no hay nada que subir y los crashes llegan como direcciones hexadecimales.
+Verificar que la configuración **Release** tenga `DEBUG_INFORMATION_FORMAT = dwarf-with-dsym`. Sin dSYM no hay nada que subir y los crashes
+llegan como direcciones hexadecimales.
 
 - [ ] **Step 3 (android): Write Telemetry.kt**
 
@@ -284,6 +306,7 @@ Después, y **no en paralelo**, el build de iOS desde Xcode o `xcodebuild`.
 ### Task 2: Identidad de sesión en ambas
 
 **Files:**
+
 - android — Modify: el sitio de login/logout y el de selección de venue
 - ios — Modify: sus equivalentes
 
@@ -298,7 +321,8 @@ Anotar `archivo:línea` de los seis sitios (tres por app) antes de editar.
 
 - [ ] **Step 2: Call setSession on login and on venue change, clearSession on logout**
 
-En los seis sitios. El de `clearSession` es el que **no** se puede olvidar: una tablet de POS la usa todo el turno gente distinta, y dejar la identidad anterior atribuye los errores del siguiente mesero al primero que entró.
+En los seis sitios. El de `clearSession` es el que **no** se puede olvidar: una tablet de POS la usa todo el turno gente distinta, y dejar
+la identidad anterior atribuye los errores del siguiente mesero al primero que entró.
 
 - [ ] **Step 3: Verify parity between the two repos**
 
@@ -316,10 +340,12 @@ Expected: mismo número de llamadas en ambas. Si difieren, falta portar un sitio
 ### Task 3: `X-Correlation-ID` en cada request
 
 **Files:**
+
 - android — Modify: `app/src/main/java/com/avoqado/pos/core/di/NetworkModule.kt`
 - ios — Modify: `avoqado-ios/Services/APIClient.swift`
 
-Sin esto, un error del POS y el 500 del backend que lo causó son dos hechos inconexos en dos consolas. El server ya honra el header entrante y CORS no aplica aquí (son clientes nativos), así que el lado del servidor ya está hecho.
+Sin esto, un error del POS y el 500 del backend que lo causó son dos hechos inconexos en dos consolas. El server ya honra el header entrante
+y CORS no aplica aquí (son clientes nativos), así que el lado del servidor ya está hecho.
 
 - [ ] **Step 1 (android): Add an OkHttp interceptor**
 
@@ -361,11 +387,13 @@ Registrarlo en el `OkHttpClient.Builder` con `.addInterceptor(CorrelationIdInter
 
 - [ ] **Step 2 (ios): Do the same in APIClient**
 
-En `Services/APIClient.swift`, en el punto donde se arma cada `URLRequest`, añadir el header y el breadcrumb tras recibir la respuesta. Leer primero cómo se construyen los requests en ese archivo y seguir su patrón; **no** reescribir la capa de red para esto.
+En `Services/APIClient.swift`, en el punto donde se arma cada `URLRequest`, añadir el header y el breadcrumb tras recibir la respuesta. Leer
+primero cómo se construyen los requests en ese archivo y seguir su patrón; **no** reescribir la capa de red para esto.
 
 - [ ] **Step 3: Verify on both**
 
-Con el server local corriendo, hacer una llamada desde cada app y confirmar en el log del server que llega el `correlationId` **y que es el mismo** que la app mandó. Ese emparejamiento es el entregable.
+Con el server local corriendo, hacer una llamada desde cada app y confirmar en el log del server que llega el `correlationId` **y que es el
+mismo** que la app mandó. Ese emparejamiento es el entregable.
 
 - [ ] **Step 4: Build both and commit** (pedir permiso)
 
@@ -392,14 +420,16 @@ if (response.code >= 500) {
 
 - [ ] **Step 2: 🔴 Do NOT capture network failures**
 
-Un fallo de red en un POS **no es un error**: es el estado normal de un salón sin internet, y la app lo convierte en un intent encolado. Verificar en ambos repos que el camino de red caída no llega a `Telemetry.capture`:
+Un fallo de red en un POS **no es un error**: es el estado normal de un salón sin internet, y la app lo convierte en un intent encolado.
+Verificar en ambos repos que el camino de red caída no llega a `Telemetry.capture`:
 
 ```bash
 cd avoqado-android && grep -rn "orQueueOffline\|queueOfflineOrRethrow" app/src/main/java --include="*.kt" | head
 cd ../avoqado-ios && grep -rn "queueOffline\|enqueueIntent" avoqado-ios --include="*.swift" | head
 ```
 
-Esta verificación es la más importante de la tarea. Reportar el encolado llena la consola de falsos positivos y empuja a alguien a "arreglar" el offline, que está bien.
+Esta verificación es la más importante de la tarea. Reportar el encolado llena la consola de falsos positivos y empuja a alguien a
+"arreglar" el offline, que está bien.
 
 - [ ] **Step 3: Build both and commit** (pedir permiso)
 
@@ -408,10 +438,12 @@ Esta verificación es la más importante de la tarea. Reportar el encolado llena
 ### Task 5: Reportar intents rechazados permanentemente
 
 **Files:**
+
 - android — Modify: `app/src/main/java/com/avoqado/pos/core/data/sync/SyncOutbox.kt` y `sync/presentation/QuarantineViewModel.kt`
 - ios — Modify: `avoqado-ios/Services/SyncOutbox.swift` y su equivalente de cuarentena
 
-Un intent en cuarentena es una operación real de un mesero que **nunca llegó al servidor**: una mesa que no se abrió, un cobro que no se registró. Hoy queda en una pantalla que quizá nadie mira.
+Un intent en cuarentena es una operación real de un mesero que **nunca llegó al servidor**: una mesa que no se abrió, un cobro que no se
+registró. Hoy queda en una pantalla que quizá nadie mira.
 
 - [ ] **Step 1: Find where REJECTED is handled on both**
 
@@ -431,7 +463,9 @@ Telemetry.capture(
 
 - [ ] **Step 3: 🔴 Verify RETRY is NOT captured**
 
-`RETRY` es una condición transitoria por diseño (hoy solo `VERSION_CONFLICT`): el cliente lo deja PENDING y corta el batch para preservar el FIFO. Reportarlo sería ruido puro y, peor, invitaría a alguien a convertirlo en `REJECTED`, que es el P1 que ya ocurrió una vez y pierde el intent para siempre.
+`RETRY` es una condición transitoria por diseño (hoy solo `VERSION_CONFLICT`): el cliente lo deja PENDING y corta el batch para preservar el
+FIFO. Reportarlo sería ruido puro y, peor, invitaría a alguien a convertirlo en `REJECTED`, que es el P1 que ya ocurrió una vez y pierde el
+intent para siempre.
 
 - [ ] **Step 4: Build both and commit** (pedir permiso)
 
@@ -440,6 +474,7 @@ Telemetry.capture(
 ### Task 6: Reportar fallos de impresión
 
 **Files:**
+
 - android — Modify: `app/src/main/java/com/avoqado/pos/printing/routing/PrintRoutingEngine.kt`
 - ios — Modify: `avoqado-ios/Printing/Routing/PrintRoutingMapper.swift`
 
@@ -449,7 +484,9 @@ Una impresora que tarda o que rechaza un intento es normal en un salón. Solo el
 
 - [ ] **Step 2: 🔴 Do NOT add any guard in front of printing**
 
-Regla dura de este dominio (`.claude/rules/offline-first-y-hub-lan.md`): **el fail-safe de la impresión no puede ser no imprimir.** Ya hubo un bug donde un guard de configuración impedía imprimir comandas en locales sin estaciones. Este cambio **solo observa**; si al añadir el reporte aparece la tentación de validar algo antes de imprimir, no hacerlo.
+Regla dura de este dominio (`.claude/rules/offline-first-y-hub-lan.md`): **el fail-safe de la impresión no puede ser no imprimir.** Ya hubo
+un bug donde un guard de configuración impedía imprimir comandas en locales sin estaciones. Este cambio **solo observa**; si al añadir el
+reporte aparece la tentación de validar algo antes de imprimir, no hacerlo.
 
 - [ ] **Step 3: Build both and commit** (pedir permiso)
 
@@ -477,7 +514,8 @@ cd avoqado-android && ./gradlew assembleRelease
 
 iOS: archive de Release, y confirmar en la salida que el dSYM se subió.
 
-Esperado en Sentry: nombres reales de clase, método y línea. Si Android muestra `a.b.c(SourceFile:1)`, el mapping no se subió. Si iOS muestra direcciones hexadecimales, falta el dSYM. Cubre el criterio 9 del spec.
+Esperado en Sentry: nombres reales de clase, método y línea. Si Android muestra `a.b.c(SourceFile:1)`, el mapping no se subió. Si iOS
+muestra direcciones hexadecimales, falta el dSYM. Cubre el criterio 9 del spec.
 
 - [ ] **Step 4: 🔴 Offline behavior unchanged, both platforms**
 
@@ -487,7 +525,8 @@ Con el backend inalcanzable pero la LAN viva:
 ./gradlew assembleDebug -Pavoqado.devBaseUrl=http://<ip-del-mac>:3009/api/v1
 ```
 
-Abrir una mesa, agregar items, cobrar en efectivo. Esperado: todo se encola, la UI **no** muestra error, y **no llegó ni un evento a Sentry**. Si llegó alguno, volver a la Tarea 4 paso 2.
+Abrir una mesa, agregar items, cobrar en efectivo. Esperado: todo se encola, la UI **no** muestra error, y **no llegó ni un evento a
+Sentry**. Si llegó alguno, volver a la Tarea 4 paso 2.
 
 - [ ] **Step 5: Kill switch on both**
 
@@ -495,14 +534,20 @@ Deshabilitar la client key de cada proyecto y confirmar que dejan de llegar even
 
 - [ ] **Step 6: Report parity honestly**
 
-En el reporte final, declarar explícitamente qué se verificó **en hardware real** y qué se hizo solo por lectura de código. El precedente existe: el fix de impresión offline de iOS se hizo por paridad y lectura, y nunca se probó con un iPad y una impresora físicos. Si algo queda así, se dice.
+En el reporte final, declarar explícitamente qué se verificó **en hardware real** y qué se hizo solo por lectura de código. El precedente
+existe: el fix de impresión offline de iOS se hizo por paridad y lectura, y nunca se probó con un iPad y una impresora físicos. Si algo
+queda así, se dice.
 
 ---
 
 ## Notas para quien ejecute
 
-**El orden importa poco después de la Tarea 1.** Las Tareas 3, 4, 5 y 6 son independientes entre sí. La 2 conviene temprano porque sin identidad los eventos de las otras llegan anónimos.
+**El orden importa poco después de la Tarea 1.** Las Tareas 3, 4, 5 y 6 son independientes entre sí. La 2 conviene temprano porque sin
+identidad los eventos de las otras llegan anónimos.
 
-**El riesgo dominante es el ruido, no los bugs.** Estas apps viven en salones con WiFi malo. Si reportan cada bache, en dos semanas nadie mira la consola y habremos gastado el esfuerzo en empeorar la señal. Los pasos marcados 🔴 de las Tareas 4, 5 y 6 existen exactamente por eso, y son los que hay que revisar con más cuidado en el code review.
+**El riesgo dominante es el ruido, no los bugs.** Estas apps viven en salones con WiFi malo. Si reportan cada bache, en dos semanas nadie
+mira la consola y habremos gastado el esfuerzo en empeorar la señal. Los pasos marcados 🔴 de las Tareas 4, 5 y 6 existen exactamente por
+eso, y son los que hay que revisar con más cuidado en el code review.
 
-**Si el tiempo se acaba**, terminar en un múltiplo de tareas completas (las dos plataformas), nunca a mitad de una. Un plan detenido en la Tarea 4 con ambas apps al día es un buen estado; uno detenido con Android en la 6 e iOS en la 2 no lo es.
+**Si el tiempo se acaba**, terminar en un múltiplo de tareas completas (las dos plataformas), nunca a mitad de una. Un plan detenido en la
+Tarea 4 con ambas apps al día es un buen estado; uno detenido con Android en la 6 e iOS en la 2 no lo es.

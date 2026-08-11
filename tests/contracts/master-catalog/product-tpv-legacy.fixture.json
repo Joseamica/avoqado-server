@@ -78,11 +78,7 @@
   "detail": null,
   "create": null,
   "update": null,
-  "unsupportedOperations": [
-    "detail",
-    "create",
-    "update"
-  ],
+  "unsupportedOperations": ["detail", "create", "update"],
   "error": {
     "status": 500,
     "body": {

@@ -1,10 +1,15 @@
 # PITS · Cierre del hito H0 — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Cerrar los dos puntos que faltan del hito H0 de PITS — exportación en inventario, compras y contabilidad (la bitácora ya quedó), y que "recibir ninguno" devuelva la mercancía al almacén en vez de dejar el inventario inflado.
+**Goal:** Cerrar los dos puntos que faltan del hito H0 de PITS — exportación en inventario, compras y contabilidad (la bitácora ya quedó), y
+que "recibir ninguno" devuelva la mercancía al almacén en vez de dejar el inventario inflado.
 
-**Architecture:** Las cuatro exportaciones copian el patrón ya probado en producción (pagos, órdenes, resumen de ventas): el controlador cuenta primero, rechaza si excede el tope, reusa el MISMO servicio de listado que la pantalla, arma `ExportColumnDef[]` y delega en `encodeExport`/`sendExport`. "Recibir ninguno" deriva lo que de verdad entró del estado real —lotes vivos y movimientos de inventario— y se niega si algo ya se consumió, siguiendo el modelo de Odoo: cancelar es "esto nunca pasó", devolver es otro documento.
+**Architecture:** Las cuatro exportaciones copian el patrón ya probado en producción (pagos, órdenes, resumen de ventas): el controlador
+cuenta primero, rechaza si excede el tope, reusa el MISMO servicio de listado que la pantalla, arma `ExportColumnDef[]` y delega en
+`encodeExport`/`sendExport`. "Recibir ninguno" deriva lo que de verdad entró del estado real —lotes vivos y movimientos de inventario— y se
+niega si algo ya se consumió, siguiendo el modelo de Odoo: cancelar es "esto nunca pasó", devolver es otro documento.
 
 **Tech Stack:** Express + TypeScript, Prisma/PostgreSQL, Jest, React 18 (dashboard).
 
@@ -12,45 +17,58 @@
 
 Estas aplican a TODAS las tareas. Violarlas es motivo de rechazo en la revisión.
 
-- **Código en INGLÉS**: identificadores, comentarios, JSDoc y descripciones de prueba. En español SÓLO lo que lee una persona: mensajes de Zod, mensajes de `AppError`, etiquetas de UI, y las descripciones y llaves de salida de las herramientas del MCP.
+- **Código en INGLÉS**: identificadores, comentarios, JSDoc y descripciones de prueba. En español SÓLO lo que lee una persona: mensajes de
+  Zod, mensajes de `AppError`, etiquetas de UI, y las descripciones y llaves de salida de las herramientas del MCP.
 - **Aislamiento multi-tenant**: TODA consulta filtra por `venueId` u `orgId`. Sin excepción.
 - **`authContext`** se lee como `(req as any).authContext` — NUNCA `req.user`. Campos: `{ userId, orgId, venueId, role }`.
-- **Permisos** con `checkPermission('recurso:accion')`. El nombre debe existir en `src/lib/permissions.ts`. NO crear permisos nuevos: usar `inventory:read`, `accounting:read`.
-- **Dinero en PESOS 1:1** como `Decimal`. La ÚNICA excepción es el libro mayor (`...Cents`, enteros en centavos) — ahí se divide entre 100 antes de salir.
+- **Permisos** con `checkPermission('recurso:accion')`. El nombre debe existir en `src/lib/permissions.ts`. NO crear permisos nuevos: usar
+  `inventory:read`, `accounting:read`.
+- **Dinero en PESOS 1:1** como `Decimal`. La ÚNICA excepción es el libro mayor (`...Cents`, enteros en centavos) — ahí se divide entre 100
+  antes de salir.
 - **Fechas venue-local**: nunca `new Date('YYYY-MM-DD')` pelón. Usar `fromZonedTime(\`${fecha}T00:00:00.000\`, venueTz)`.
 - **Orden de rutas Express**: las estáticas ANTES de las dinámicas `:param`. Una ruta `/export` debajo de `/:id` nace muerta.
 - **`orderBy` único**: todo listado exportable ordena por algo único (agregar `id` como desempate) o pierde filas en silencio.
-- **NO correr `npm run format` global** ni el typecheck del repo completo: otras sesiones trabajan en este árbol y el typecheck completo consume ~6 GB. Cada tarea corre `npx prettier --write <sus archivos>` y `npx jest <sus archivos de prueba> --maxWorkers=1`.
-- **NO commitear.** El fundador tiene regla dura: nada de git sin su permiso explícito. Los pasos de commit de este plan quedan pendientes hasta que él lo autorice.
-- **`tests/__helpers__/setup.ts` mockea globalmente** `@/services/dashboard/activity-log.service` con sólo `{ logAction: jest.fn() }`. Una función pura que viva ahí es INTESTABLE (el import vuelve `undefined` y el error dice "is not a function"). Las funciones puras van en su propio módulo.
+- **NO correr `npm run format` global** ni el typecheck del repo completo: otras sesiones trabajan en este árbol y el typecheck completo
+  consume ~6 GB. Cada tarea corre `npx prettier --write <sus archivos>` y `npx jest <sus archivos de prueba> --maxWorkers=1`.
+- **NO commitear.** El fundador tiene regla dura: nada de git sin su permiso explícito. Los pasos de commit de este plan quedan pendientes
+  hasta que él lo autorice.
+- **`tests/__helpers__/setup.ts` mockea globalmente** `@/services/dashboard/activity-log.service` con sólo `{ logAction: jest.fn() }`. Una
+  función pura que viva ahí es INTESTABLE (el import vuelve `undefined` y el error dice "is not a function"). Las funciones puras van en su
+  propio módulo.
 
 ---
 
 ## File Structure
 
-| Archivo | Responsabilidad |
-|---|---|
-| `src/controllers/dashboard/inventory/export.controller.ts` | **Crear.** Los tres exports de inventario y compras. Un solo controlador porque comparten filtros, tope y forma. |
-| `src/routes/dashboard/inventory.routes.ts` | **Modificar.** Cuatro rutas `/export`, todas antes de sus `:param`. |
-| `src/services/dashboard/rawMaterial.service.ts` | **Modificar.** `countRawMaterialsForExport`. |
-| `src/services/dashboard/purchaseOrder.service.ts` | **Modificar.** `countPurchaseOrdersForExport` y `revertReceiptForOrderInTx` (T5). |
+| Archivo                                                     | Responsabilidad                                                                                                                                |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/controllers/dashboard/inventory/export.controller.ts`  | **Crear.** Los tres exports de inventario y compras. Un solo controlador porque comparten filtros, tope y forma.                               |
+| `src/routes/dashboard/inventory.routes.ts`                  | **Modificar.** Cuatro rutas `/export`, todas antes de sus `:param`.                                                                            |
+| `src/services/dashboard/rawMaterial.service.ts`             | **Modificar.** `countRawMaterialsForExport`.                                                                                                   |
+| `src/services/dashboard/purchaseOrder.service.ts`           | **Modificar.** `countPurchaseOrdersForExport` y `revertReceiptForOrderInTx` (T5).                                                              |
 | `src/controllers/dashboard/accounting.export.controller.ts` | **Crear.** Export de gastos y de la balanza. Separado de inventario: distinto candado de plan (`CFDI`) y distinto manejo de dinero (centavos). |
-| `src/routes/dashboard/accounting.routes.ts` | **Modificar.** Dos rutas `/export`. |
-| `tests/unit/controllers/dashboard/export.*.test.ts` | **Crear.** Una suite por tarea. |
+| `src/routes/dashboard/accounting.routes.ts`                 | **Modificar.** Dos rutas `/export`.                                                                                                            |
+| `tests/unit/controllers/dashboard/export.*.test.ts`         | **Crear.** Una suite por tarea.                                                                                                                |
 
 ---
 
 ## Task 1: Exportación de existencias (insumos)
 
 **Files:**
+
 - Create: `src/controllers/dashboard/inventory/export.controller.ts`
 - Modify: `src/services/dashboard/rawMaterial.service.ts` (agregar al final)
 - Modify: `src/routes/dashboard/inventory.routes.ts` (antes del bloque `RECIPES ROUTES`)
 - Test: `tests/unit/controllers/dashboard/export.rawMaterials.test.ts`
 
 **Interfaces:**
-- Consumes: `getRawMaterials(venueId: string, filters?: { category?: string; lowStock?: boolean; active?: boolean; search?: string }): Promise<RawMaterial[]>` de `src/services/dashboard/rawMaterial.service.ts:59`. Helpers de `src/services/dashboard/export.helpers.ts`: `encodeExport`, `sendExport`, `parseFormatParam`, `parseColumnsParam`, `getRowCapForFormat`, `type ExportColumnDef`.
-- Produces: `exportRawMaterials(req, res, next)` — lo consume la ruta. `countRawMaterialsForExport(venueId, filters): Promise<number>` — la usa T1 nada más.
+
+- Consumes:
+  `getRawMaterials(venueId: string, filters?: { category?: string; lowStock?: boolean; active?: boolean; search?: string }): Promise<RawMaterial[]>`
+  de `src/services/dashboard/rawMaterial.service.ts:59`. Helpers de `src/services/dashboard/export.helpers.ts`: `encodeExport`,
+  `sendExport`, `parseFormatParam`, `parseColumnsParam`, `getRowCapForFormat`, `type ExportColumnDef`.
+- Produces: `exportRawMaterials(req, res, next)` — lo consume la ruta. `countRawMaterialsForExport(venueId, filters): Promise<number>` — la
+  usa T1 nada más.
 
 - [ ] **Step 1: Escribir la prueba que falla**
 
@@ -91,7 +109,17 @@ beforeEach(() => {
   jest.clearAllMocks()
   countRawMaterialsForExport.mockResolvedValue(3)
   getRawMaterials.mockResolvedValue([
-    { id: 'rm-1', name: 'Harina', sku: 'H-01', category: 'FOOD', unit: 'GRAM', currentStock: 1000, reorderPoint: 200, costPerUnit: 0.01, active: true },
+    {
+      id: 'rm-1',
+      name: 'Harina',
+      sku: 'H-01',
+      category: 'FOOD',
+      unit: 'GRAM',
+      currentStock: 1000,
+      reorderPoint: 200,
+      costPerUnit: 0.01,
+      active: true,
+    },
   ])
 })
 
@@ -124,7 +152,9 @@ describe('exportRawMaterials', () => {
     await exportRawMaterials(req(), res(), jest.fn())
 
     const columns = encodeExport.mock.calls[0][1].allColumns.map((c: { id: string }) => c.id)
-    expect(columns).toEqual(expect.arrayContaining(['name', 'sku', 'category', 'unit', 'currentStock', 'reorderPoint', 'costPerUnit', 'stockValue']))
+    expect(columns).toEqual(
+      expect.arrayContaining(['name', 'sku', 'category', 'unit', 'currentStock', 'reorderPoint', 'costPerUnit', 'stockValue']),
+    )
     const labels = encodeExport.mock.calls[0][1].allColumns.map((c: { label: string }) => c.label)
     expect(labels).toContain('Existencia')
   })
@@ -140,8 +170,8 @@ describe('exportRawMaterials', () => {
 
 - [ ] **Step 2: Correr la prueba y verificar que falla**
 
-Run: `npx jest tests/unit/controllers/dashboard/export.rawMaterials.test.ts --maxWorkers=1`
-Expected: FAIL — "Cannot find module '@/controllers/dashboard/inventory/export.controller'"
+Run: `npx jest tests/unit/controllers/dashboard/export.rawMaterials.test.ts --maxWorkers=1` Expected: FAIL — "Cannot find module
+'@/controllers/dashboard/inventory/export.controller'"
 
 - [ ] **Step 3: Agregar el contador al servicio**
 
@@ -256,8 +286,7 @@ export async function exportRawMaterials(req: Request, res: Response, next: Next
 
 - [ ] **Step 5: Correr la prueba y verificar que pasa**
 
-Run: `npx jest tests/unit/controllers/dashboard/export.rawMaterials.test.ts --maxWorkers=1`
-Expected: PASS (5 pruebas)
+Run: `npx jest tests/unit/controllers/dashboard/export.rawMaterials.test.ts --maxWorkers=1` Expected: PASS (5 pruebas)
 
 - [ ] **Step 6: Montar la ruta**
 
@@ -306,12 +335,12 @@ describe('export routes', () => {
 })
 ```
 
-Run: `npx jest tests/unit/routes/inventory.export.routes.test.ts --maxWorkers=1`
-Expected: PASS
+Run: `npx jest tests/unit/routes/inventory.export.routes.test.ts --maxWorkers=1` Expected: PASS
 
 - [ ] **Step 8: Formatear**
 
-Run: `npx prettier --write src/controllers/dashboard/inventory/export.controller.ts src/services/dashboard/rawMaterial.service.ts src/routes/dashboard/inventory.routes.ts tests/unit/controllers/dashboard/export.rawMaterials.test.ts tests/unit/routes/inventory.export.routes.test.ts`
+Run:
+`npx prettier --write src/controllers/dashboard/inventory/export.controller.ts src/services/dashboard/rawMaterial.service.ts src/routes/dashboard/inventory.routes.ts tests/unit/controllers/dashboard/export.rawMaterials.test.ts tests/unit/routes/inventory.export.routes.test.ts`
 
 - [ ] **Step 9: Commit** — ⚠️ **PENDIENTE DE AUTORIZACIÓN DEL FUNDADOR.** No ejecutar.
 
@@ -325,48 +354,59 @@ git commit -m "feat(inventario): exportar existencias de insumos"
 ## Task 2: Exportación del kardex (movimientos de insumo)
 
 **Files:**
+
 - Modify: `src/controllers/dashboard/inventory/export.controller.ts` (agregar función)
 - Modify: `src/routes/dashboard/inventory.routes.ts`
 - Test: `tests/unit/controllers/dashboard/export.movements.test.ts`
 
 **Interfaces:**
-- Consumes: `getStockMovements` de `src/services/dashboard/rawMaterial.service.ts:799` — **leer su firma exacta antes de escribir el controlador** (`sed -n '799,815p' src/services/dashboard/rawMaterial.service.ts`), porque acepta paginación y hay que pasarle el tope como `limit`.
+
+- Consumes: `getStockMovements` de `src/services/dashboard/rawMaterial.service.ts:799` — **leer su firma exacta antes de escribir el
+  controlador** (`sed -n '799,815p' src/services/dashboard/rawMaterial.service.ts`), porque acepta paginación y hay que pasarle el tope como
+  `limit`.
 - Produces: `exportStockMovements(req, res, next)`.
 
 - [ ] **Step 1: Leer la firma real del servicio**
 
 Run: `sed -n '799,825p' src/services/dashboard/rawMaterial.service.ts`
 
-**No adivines los nombres de los parámetros.** Si `getStockMovements` no acepta un límite, agrégale uno con el mismo patrón que `countRawMaterialsForExport` de la Tarea 1 y déjalo documentado.
+**No adivines los nombres de los parámetros.** Si `getStockMovements` no acepta un límite, agrégale uno con el mismo patrón que
+`countRawMaterialsForExport` de la Tarea 1 y déjalo documentado.
 
 - [ ] **Step 2: Escribir la prueba que falla**
 
 Mismo esqueleto de mocks que la Tarea 1 (cópialo entero; no lo asumas), con estos casos:
 
 ```typescript
-  it('🔴 the movement columns answer WHO moved stock and WHY', async () => {
-    // A kardex without the actor and the reason is a list of numbers. The reason this report
-    // exists is anti-fraud: someone adjusted stock and the owner wants to know who.
-    const columns = encodeExport.mock.calls[0][1].allColumns.map((c: { id: string }) => c.id)
-    expect(columns).toEqual(expect.arrayContaining(['createdAt', 'rawMaterialName', 'type', 'quantity', 'previousStock', 'newStock', 'reason', 'staffName']))
-  })
+it('🔴 the movement columns answer WHO moved stock and WHY', async () => {
+  // A kardex without the actor and the reason is a list of numbers. The reason this report
+  // exists is anti-fraud: someone adjusted stock and the owner wants to know who.
+  const columns = encodeExport.mock.calls[0][1].allColumns.map((c: { id: string }) => c.id)
+  expect(columns).toEqual(
+    expect.arrayContaining(['createdAt', 'rawMaterialName', 'type', 'quantity', 'previousStock', 'newStock', 'reason', 'staffName']),
+  )
+})
 
-  it('🔴 refuses over the cap instead of truncating', async () => { /* igual que Tarea 1 */ })
+it('🔴 refuses over the cap instead of truncating', async () => {
+  /* igual que Tarea 1 */
+})
 
-  it('TENANT: only ever asks for the venue in the auth context', async () => { /* igual que Tarea 1 */ })
+it('TENANT: only ever asks for the venue in the auth context', async () => {
+  /* igual que Tarea 1 */
+})
 
-  it('reports the movement type in Spanish, not the enum', async () => {
-    // "SPOILAGE" in a column an owner reads is a leak of our schema into their report.
-    const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'type')
-    expect(col.value({ type: 'SPOILAGE' })).toBe('Merma')
-    expect(col.value({ type: 'PURCHASE' })).toBe('Compra')
-  })
+it('reports the movement type in Spanish, not the enum', async () => {
+  // "SPOILAGE" in a column an owner reads is a leak of our schema into their report.
+  const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'type')
+  expect(col.value({ type: 'SPOILAGE' })).toBe('Merma')
+  expect(col.value({ type: 'PURCHASE' })).toBe('Compra')
+})
 ```
 
 - [ ] **Step 3: Correr y verificar que falla**
 
-Run: `npx jest tests/unit/controllers/dashboard/export.movements.test.ts --maxWorkers=1`
-Expected: FAIL — "exportStockMovements is not a function"
+Run: `npx jest tests/unit/controllers/dashboard/export.movements.test.ts --maxWorkers=1` Expected: FAIL — "exportStockMovements is not a
+function"
 
 - [ ] **Step 4: Implementar**
 
@@ -390,12 +430,12 @@ const MOVEMENT_TYPE_LABEL: Record<string, string> = {
 }
 ```
 
-El resto sigue exactamente la forma de `exportRawMaterials`: contar → rechazar sobre el tope → traer → columnas → `encodeExport` → `sendExport(res, encoded, 'kardex')`.
+El resto sigue exactamente la forma de `exportRawMaterials`: contar → rechazar sobre el tope → traer → columnas → `encodeExport` →
+`sendExport(res, encoded, 'kardex')`.
 
 - [ ] **Step 5: Correr y verificar que pasa**
 
-Run: `npx jest tests/unit/controllers/dashboard/export.movements.test.ts --maxWorkers=1`
-Expected: PASS
+Run: `npx jest tests/unit/controllers/dashboard/export.movements.test.ts --maxWorkers=1` Expected: PASS
 
 - [ ] **Step 6: Montar la ruta**
 
@@ -403,11 +443,13 @@ Expected: PASS
 router.get('/raw-materials/:rawMaterialId/movements/export', checkPermission('inventory:read'), exportController.exportStockMovements)
 ```
 
-⚠️ Va ANTES de `/raw-materials/:rawMaterialId/movements` si esa ruta existiera con un `:param` posterior. Verifica el orden con `grep -n "movements" src/routes/dashboard/inventory.routes.ts`.
+⚠️ Va ANTES de `/raw-materials/:rawMaterialId/movements` si esa ruta existiera con un `:param` posterior. Verifica el orden con
+`grep -n "movements" src/routes/dashboard/inventory.routes.ts`.
 
 - [ ] **Step 7: Formatear y correr las dos suites de export**
 
-Run: `npx prettier --write src/controllers/dashboard/inventory/export.controller.ts src/routes/dashboard/inventory.routes.ts tests/unit/controllers/dashboard/export.movements.test.ts`
+Run:
+`npx prettier --write src/controllers/dashboard/inventory/export.controller.ts src/routes/dashboard/inventory.routes.ts tests/unit/controllers/dashboard/export.movements.test.ts`
 Run: `npx jest tests/unit/controllers/dashboard/export. tests/unit/routes/inventory.export --maxWorkers=1`
 
 - [ ] **Step 8: Commit** — ⚠️ PENDIENTE DE AUTORIZACIÓN.
@@ -417,71 +459,82 @@ Run: `npx jest tests/unit/controllers/dashboard/export. tests/unit/routes/invent
 ## Task 3: Exportación de órdenes de compra y de proveedores
 
 **Files:**
+
 - Modify: `src/controllers/dashboard/inventory/export.controller.ts`
 - Modify: `src/services/dashboard/purchaseOrder.service.ts`
 - Modify: `src/routes/dashboard/inventory.routes.ts`
 - Test: `tests/unit/controllers/dashboard/export.purchasing.test.ts`
 
 **Interfaces:**
-- Consumes: `getPurchaseOrders(venueId, filters?: { status?: PurchaseOrderStatus[]; supplierId?: string; startDate?: Date; endDate?: Date }): Promise<PurchaseOrder[]>` (`purchaseOrder.service.ts:442`) y `getSuppliers(venueId, filters?: { active?: boolean; search?: string; rating?: number }): Promise<Supplier[]>` (`supplier.service.ts:11`).
-- Produces: `exportPurchaseOrders(req, res, next)`, `exportSuppliers(req, res, next)`, `countPurchaseOrdersForExport(venueId, filters): Promise<number>`.
 
-**Decisión de diseño ya tomada — no la re-litigues:** la exportación de órdenes va **una fila por RENGLÓN**, no por orden. Un contralor que compara contra facturas necesita el renglón; el total de la orden se repite en cada fila para que siga siendo agrupable en una tabla dinámica. Una exportación por orden esconde exactamente lo que se va a auditar.
+- Consumes:
+  `getPurchaseOrders(venueId, filters?: { status?: PurchaseOrderStatus[]; supplierId?: string; startDate?: Date; endDate?: Date }): Promise<PurchaseOrder[]>`
+  (`purchaseOrder.service.ts:442`) y
+  `getSuppliers(venueId, filters?: { active?: boolean; search?: string; rating?: number }): Promise<Supplier[]>` (`supplier.service.ts:11`).
+- Produces: `exportPurchaseOrders(req, res, next)`, `exportSuppliers(req, res, next)`,
+  `countPurchaseOrdersForExport(venueId, filters): Promise<number>`.
+
+**Decisión de diseño ya tomada — no la re-litigues:** la exportación de órdenes va **una fila por RENGLÓN**, no por orden. Un contralor que
+compara contra facturas necesita el renglón; el total de la orden se repite en cada fila para que siga siendo agrupable en una tabla
+dinámica. Una exportación por orden esconde exactamente lo que se va a auditar.
 
 - [ ] **Step 1: Escribir la prueba que falla**
 
 ```typescript
-  it('🔴 one row per LINE, not per order', async () => {
-    // A buyer reconciling against an invoice needs the line. An order-level export hides the
-    // one thing being audited.
-    getPurchaseOrders.mockResolvedValue([
-      { id: 'po-1', orderNumber: 'OC-001', status: 'RECEIVED', total: 1000, items: [{ id: 'i1' }, { id: 'i2' }] },
-    ])
+it('🔴 one row per LINE, not per order', async () => {
+  // A buyer reconciling against an invoice needs the line. An order-level export hides the
+  // one thing being audited.
+  getPurchaseOrders.mockResolvedValue([
+    { id: 'po-1', orderNumber: 'OC-001', status: 'RECEIVED', total: 1000, items: [{ id: 'i1' }, { id: 'i2' }] },
+  ])
 
-    await exportPurchaseOrders(req(), res(), jest.fn())
+  await exportPurchaseOrders(req(), res(), jest.fn())
 
-    expect(encodeExport.mock.calls[0][1].rows).toHaveLength(2)
-  })
+  expect(encodeExport.mock.calls[0][1].rows).toHaveLength(2)
+})
 
-  it('repeats the order header on every line so the file groups cleanly', async () => {
-    const rows = encodeExport.mock.calls[0][1].rows
-    expect(rows[0].orderNumber).toBe('OC-001')
-    expect(rows[1].orderNumber).toBe('OC-001')
-  })
+it('repeats the order header on every line so the file groups cleanly', async () => {
+  const rows = encodeExport.mock.calls[0][1].rows
+  expect(rows[0].orderNumber).toBe('OC-001')
+  expect(rows[1].orderNumber).toBe('OC-001')
+})
 
-  it('🔴 names the article for BOTH kinds of line', async () => {
-    // A purchase-order line is either a raw material or a resale product (XOR). Reading only
-    // `rawMaterial` leaves every convenience-store line anonymous — and the 18 stores are
-    // resale merchandise.
-    const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'article')
-    expect(col.value({ rawMaterial: { name: 'Harina' }, product: null })).toBe('Harina')
-    expect(col.value({ rawMaterial: null, product: { name: 'Refresco 600ml' } })).toBe('Refresco 600ml')
-  })
+it('🔴 names the article for BOTH kinds of line', async () => {
+  // A purchase-order line is either a raw material or a resale product (XOR). Reading only
+  // `rawMaterial` leaves every convenience-store line anonymous — and the 18 stores are
+  // resale merchandise.
+  const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'article')
+  expect(col.value({ rawMaterial: { name: 'Harina' }, product: null })).toBe('Harina')
+  expect(col.value({ rawMaterial: null, product: { name: 'Refresco 600ml' } })).toBe('Refresco 600ml')
+})
 
-  it('🔴 refuses over the cap instead of truncating', async () => { /* igual que Tarea 1 */ })
-  it('TENANT: only ever asks for the venue in the auth context', async () => { /* igual que Tarea 1 */ })
+it('🔴 refuses over the cap instead of truncating', async () => {
+  /* igual que Tarea 1 */
+})
+it('TENANT: only ever asks for the venue in the auth context', async () => {
+  /* igual que Tarea 1 */
+})
 ```
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `npx jest tests/unit/controllers/dashboard/export.purchasing.test.ts --maxWorkers=1`
-Expected: FAIL
+Run: `npx jest tests/unit/controllers/dashboard/export.purchasing.test.ts --maxWorkers=1` Expected: FAIL
 
 - [ ] **Step 3: Implementar el aplanado a renglones**
 
 ```typescript
-    // One row per line. The order header repeats on each so the file stays groupable in a
-    // pivot table without the reader reconstructing the relationship by hand.
-    const rows = orders.flatMap(order =>
-      order.items.map(item => ({
-        ...item,
-        orderNumber: order.orderNumber,
-        orderDate: order.orderDate,
-        status: order.status,
-        supplierName: order.supplier?.name ?? '',
-        orderTotal: Number(order.total) || 0,
-      })),
-    )
+// One row per line. The order header repeats on each so the file stays groupable in a
+// pivot table without the reader reconstructing the relationship by hand.
+const rows = orders.flatMap(order =>
+  order.items.map(item => ({
+    ...item,
+    orderNumber: order.orderNumber,
+    orderDate: order.orderDate,
+    status: order.status,
+    supplierName: order.supplier?.name ?? '',
+    orderTotal: Number(order.total) || 0,
+  })),
+)
 ```
 
 Y la columna del artículo:
@@ -493,12 +546,12 @@ Y la columna del artículo:
       { id: 'article', label: 'Artículo', value: r => r.rawMaterial?.name ?? r.product?.name ?? '' },
 ```
 
-⚠️ **Verifica que `getPurchaseOrders` incluya `items` con `rawMaterial` Y `product`.** Si su `include` sólo trae `rawMaterial`, agrégale `product: true` — es el mismo defecto que ya se corrigió en `purchaseOrderWorkflow.service.ts`.
+⚠️ **Verifica que `getPurchaseOrders` incluya `items` con `rawMaterial` Y `product`.** Si su `include` sólo trae `rawMaterial`, agrégale
+`product: true` — es el mismo defecto que ya se corrigió en `purchaseOrderWorkflow.service.ts`.
 
 - [ ] **Step 4: Correr y verificar que pasa**
 
-Run: `npx jest tests/unit/controllers/dashboard/export.purchasing.test.ts --maxWorkers=1`
-Expected: PASS
+Run: `npx jest tests/unit/controllers/dashboard/export.purchasing.test.ts --maxWorkers=1` Expected: PASS
 
 - [ ] **Step 5: Exportación de proveedores**
 
@@ -511,11 +564,13 @@ router.get('/purchase-orders/export', checkPermission('inventory:read'), exportC
 router.get('/suppliers/export', checkPermission('inventory:read'), exportController.exportSuppliers)
 ```
 
-⚠️ Ambas ANTES de `/purchase-orders/:purchaseOrderId` y `/suppliers/:supplierId`. Agrega el caso a `tests/unit/routes/inventory.export.routes.test.ts`.
+⚠️ Ambas ANTES de `/purchase-orders/:purchaseOrderId` y `/suppliers/:supplierId`. Agrega el caso a
+`tests/unit/routes/inventory.export.routes.test.ts`.
 
 - [ ] **Step 7: Formatear y correr**
 
-Run: `npx prettier --write src/controllers/dashboard/inventory/export.controller.ts src/services/dashboard/purchaseOrder.service.ts src/routes/dashboard/inventory.routes.ts tests/unit/controllers/dashboard/export.purchasing.test.ts tests/unit/routes/inventory.export.routes.test.ts`
+Run:
+`npx prettier --write src/controllers/dashboard/inventory/export.controller.ts src/services/dashboard/purchaseOrder.service.ts src/routes/dashboard/inventory.routes.ts tests/unit/controllers/dashboard/export.purchasing.test.ts tests/unit/routes/inventory.export.routes.test.ts`
 Run: `npx jest tests/unit/controllers/dashboard/export. tests/unit/routes/inventory.export --maxWorkers=1`
 
 - [ ] **Step 8: Commit** — ⚠️ PENDIENTE DE AUTORIZACIÓN.
@@ -525,46 +580,55 @@ Run: `npx jest tests/unit/controllers/dashboard/export. tests/unit/routes/invent
 ## Task 4: Exportación de contabilidad (gastos y balanza)
 
 **Files:**
+
 - Create: `src/controllers/dashboard/accounting.export.controller.ts`
 - Modify: `src/routes/dashboard/accounting.routes.ts`
 - Test: `tests/unit/controllers/dashboard/export.accounting.test.ts`
 
 **Interfaces:**
-- Consumes: `listExpenses(venueId: string, filters?: ListExpensesFilters): Promise<ListExpensesResult>` (`src/services/fiscal/expense.service.ts:415`) y `getTrialBalance(venueId: string, period: string): Promise<TrialBalanceResult>` (`src/services/fiscal/trialBalance.service.ts:71`). **Lee las dos interfaces de resultado antes de escribir columnas** — no adivines los nombres de campo.
+
+- Consumes: `listExpenses(venueId: string, filters?: ListExpensesFilters): Promise<ListExpensesResult>`
+  (`src/services/fiscal/expense.service.ts:415`) y `getTrialBalance(venueId: string, period: string): Promise<TrialBalanceResult>`
+  (`src/services/fiscal/trialBalance.service.ts:71`). **Lee las dos interfaces de resultado antes de escribir columnas** — no adivines los
+  nombres de campo.
 - Produces: `exportExpenses(req, res, next)`, `exportTrialBalance(req, res, next)`.
 
-🔴 **La trampa de esta tarea, y es la única que importa:** el libro mayor guarda **enteros en centavos** (`debitCents`, `creditCents`, `totalCents`). TODA celda que salga hacia una persona divide entre 100. Un archivo 100× lo carga un contador a su sistema y el error aparece semanas después, si aparece. El resto de la plataforma trabaja en pesos 1:1 — el ledger es la excepción, no la regla.
+🔴 **La trampa de esta tarea, y es la única que importa:** el libro mayor guarda **enteros en centavos** (`debitCents`, `creditCents`,
+`totalCents`). TODA celda que salga hacia una persona divide entre 100. Un archivo 100× lo carga un contador a su sistema y el error aparece
+semanas después, si aparece. El resto de la plataforma trabaja en pesos 1:1 — el ledger es la excepción, no la regla.
 
 - [ ] **Step 1: Escribir la prueba que falla — el caso de los centavos primero**
 
 ```typescript
-  it('🔴 converts cents to pesos — a 100x file is the whole risk of this task', async () => {
-    // The ledger stores whole cents. Everything leaving for a human divides by 100. This is
-    // the one place in the platform where money is not already in pesos 1:1.
-    const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'debit')
-    expect(col.value({ debitCents: 123456 })).toBe(1234.56)
-  })
+it('🔴 converts cents to pesos — a 100x file is the whole risk of this task', async () => {
+  // The ledger stores whole cents. Everything leaving for a human divides by 100. This is
+  // the one place in the platform where money is not already in pesos 1:1.
+  const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'debit')
+  expect(col.value({ debitCents: 123456 })).toBe(1234.56)
+})
 
-  it('a zero-cent amount exports as 0, not blank', async () => {
-    const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'debit')
-    expect(col.value({ debitCents: 0 })).toBe(0)
-  })
+it('a zero-cent amount exports as 0, not blank', async () => {
+  const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'debit')
+  expect(col.value({ debitCents: 0 })).toBe(0)
+})
 
-  it('a null amount exports as 0, not NaN', async () => {
-    const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'debit')
-    expect(col.value({ debitCents: null })).toBe(0)
-  })
+it('a null amount exports as 0, not NaN', async () => {
+  const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'debit')
+  expect(col.value({ debitCents: null })).toBe(0)
+})
 
-  it('🔴 the trial balance still balances after conversion', async () => {
-    // If rounding breaks the debit/credit equality, the file is worthless to an accountant —
-    // and worse, it looks fine until they try to load it.
-    const rows = encodeExport.mock.calls[0][1].rows
-    const debit = rows.reduce((s: number, r: { debitCents: number }) => s + r.debitCents, 0)
-    const credit = rows.reduce((s: number, r: { creditCents: number }) => s + r.creditCents, 0)
-    expect(debit).toBe(credit)
-  })
+it('🔴 the trial balance still balances after conversion', async () => {
+  // If rounding breaks the debit/credit equality, the file is worthless to an accountant —
+  // and worse, it looks fine until they try to load it.
+  const rows = encodeExport.mock.calls[0][1].rows
+  const debit = rows.reduce((s: number, r: { debitCents: number }) => s + r.debitCents, 0)
+  const credit = rows.reduce((s: number, r: { creditCents: number }) => s + r.creditCents, 0)
+  expect(debit).toBe(credit)
+})
 
-  it('TENANT: only ever asks for the venue in the auth context', async () => { /* igual que Tarea 1 */ })
+it('TENANT: only ever asks for the venue in the auth context', async () => {
+  /* igual que Tarea 1 */
+})
 ```
 
 - [ ] **Step 2: Correr y verificar que falla**
@@ -590,14 +654,21 @@ const pesosFromCents = (cents: number | null | undefined): number => (cents == n
 // `checkFeatureAccess('CFDI')` va porque el resto del namespace fiscal ya lo lleva: una
 // exportación que se salte el candado del módulo que la alimenta es un hueco de plan.
 router.get('/expenses/export', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), accountingExportController.exportExpenses)
-router.get('/trial-balance/export', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), accountingExportController.exportTrialBalance)
+router.get(
+  '/trial-balance/export',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  accountingExportController.exportTrialBalance,
+)
 ```
 
-⚠️ Ambas ANTES de cualquier `/:param` de su familia. Verifica con `grep -n "'/expenses\|'/trial-balance" src/routes/dashboard/accounting.routes.ts`.
+⚠️ Ambas ANTES de cualquier `/:param` de su familia. Verifica con
+`grep -n "'/expenses\|'/trial-balance" src/routes/dashboard/accounting.routes.ts`.
 
 - [ ] **Step 6: Formatear y correr**
 
-Run: `npx prettier --write src/controllers/dashboard/accounting.export.controller.ts src/routes/dashboard/accounting.routes.ts tests/unit/controllers/dashboard/export.accounting.test.ts`
+Run:
+`npx prettier --write src/controllers/dashboard/accounting.export.controller.ts src/routes/dashboard/accounting.routes.ts tests/unit/controllers/dashboard/export.accounting.test.ts`
 Run: `npx jest tests/unit/controllers/dashboard/export. --maxWorkers=1`
 
 - [ ] **Step 7: Commit** — ⚠️ PENDIENTE DE AUTORIZACIÓN.
@@ -606,30 +677,38 @@ Run: `npx jest tests/unit/controllers/dashboard/export. --maxWorkers=1`
 
 ## Task 5: "Recibir ninguno" devuelve la mercancía al almacén
 
-> 🔴 **La única tarea con riesgo a producción.** Toca la deducción de inventario de ~70 puntos de venta cobrando hoy. **No la empieces hasta que las Tareas 1-4 estén verdes.**
+> 🔴 **La única tarea con riesgo a producción.** Toca la deducción de inventario de ~70 puntos de venta cobrando hoy. **No la empieces hasta
+> que las Tareas 1-4 estén verdes.**
 >
-> ⚠️ **ESTA TAREA NO ESTÁ LISTA PARA UN SUBAGENTE.** Auto-revisión del plan (2026-08-07): a
-> diferencia de las Tareas 1-4, aquí los pasos 1, 3 y 4 describen QUÉ hacer sin mostrar el
-> código. Eso es un hueco del plan, no un estilo — un subagente lo rellena adivinando, y el
-> lugar donde va a adivinar es la reversión de inventario de 70 locales que están cobrando.
+> ⚠️ **ESTA TAREA NO ESTÁ LISTA PARA UN SUBAGENTE.** Auto-revisión del plan (2026-08-07): a diferencia de las Tareas 1-4, aquí los pasos 1,
+> 3 y 4 describen QUÉ hacer sin mostrar el código. Eso es un hueco del plan, no un estilo — un subagente lo rellena adivinando, y el lugar
+> donde va a adivinar es la reversión de inventario de 70 locales que están cobrando.
 >
-> Antes de despacharla: o se escribe completa (cuerpos de prueba y implementación literales),
-> o la ejecuta alguien con el contexto del módulo en la cabeza. Dado el riesgo, lo segundo.
+> Antes de despacharla: o se escribe completa (cuerpos de prueba y implementación literales), o la ejecuta alguien con el contexto del
+> módulo en la cabeza. Dado el riesgo, lo segundo.
 
 **Files:**
+
 - Modify: `src/services/dashboard/purchaseOrder.service.ts:2012` (`receiveNoItems`)
 - Test: `tests/unit/services/dashboard/purchaseOrder.receiveNone.test.ts`
 
 **Interfaces:**
-- Consumes: `prisma.stockBatch` (campos `purchaseOrderItemId`, `initialQuantity`, `remainingQuantity`, `status`), `prisma.inventoryMovement` (campos `purchaseOrderItemId`, `previousStock`, `newStock`), `prisma.inventory` (`productId` es `@unique`, campo `currentStock`).
+
+- Consumes: `prisma.stockBatch` (campos `purchaseOrderItemId`, `initialQuantity`, `remainingQuantity`, `status`), `prisma.inventoryMovement`
+  (campos `purchaseOrderItemId`, `previousStock`, `newStock`), `prisma.inventory` (`productId` es `@unique`, campo `currentStock`).
 - Produces: `receiveNoItems` con el mismo contrato público; internamente usa `revertReceiptForOrderInTx(tx, venueId, purchaseOrderId)`.
 
 **El diseño ya está decidido — no lo re-litigues.** Está justificado en `docs/PITS-H0-PENDIENTES.md` §H0.9:
 
-1. **Lo que se revierte sale del ESTADO REAL, nunca de `quantityReceived`.** Esa columna es un metadato mutable que esta misma función pone en 0. Calcular contra ella hace que "recibir 5 → recibir ninguno → recibir todo" deje **10 de existencia habiendo llegado 5**: un usuario, tres clics, sin concurrencia.
-   - Mercancía de reventa: sumar `newStock − previousStock` de los `InventoryMovement` con ese `purchaseOrderItemId`. **Nunca `quantity`** — la convención de signo no es uniforme entre servicios.
+1. **Lo que se revierte sale del ESTADO REAL, nunca de `quantityReceived`.** Esa columna es un metadato mutable que esta misma función pone
+   en 0. Calcular contra ella hace que "recibir 5 → recibir ninguno → recibir todo" deje **10 de existencia habiendo llegado 5**: un
+   usuario, tres clics, sin concurrencia.
+   - Mercancía de reventa: sumar `newStock − previousStock` de los `InventoryMovement` con ese `purchaseOrderItemId`. **Nunca `quantity`** —
+     la convención de signo no es uniforme entre servicios.
    - Insumos: los `StockBatch` con ese `purchaseOrderItemId`.
-2. **Se NIEGA si algo ya se consumió.** Regla universal para ambos caminos: *no puedes devolver más de lo que hoy existe*. Insumos: `remainingQuantity < initialQuantity` en cualquier lote de la orden. Mercancía: `inventory.currentStock < lo que entró`. Es el modelo de Odoo — cancelar es "esto nunca pasó", devolver es otro documento. Confundirlos destruye la trazabilidad.
+2. **Se NIEGA si algo ya se consumió.** Regla universal para ambos caminos: _no puedes devolver más de lo que hoy existe_. Insumos:
+   `remainingQuantity < initialQuantity` en cualquier lote de la orden. Mercancía: `inventory.currentStock < lo que entró`. Es el modelo de
+   Odoo — cancelar es "esto nunca pasó", devolver es otro documento. Confundirlos destruye la trazabilidad.
 
 - [ ] **Step 1: Escribir las pruebas que fallan**
 
@@ -679,7 +758,8 @@ describe('receiveNoItems', () => {
 })
 ```
 
-**Escribe los cuerpos completos.** El esqueleto de mocks se copia de `tests/unit/services/dashboard/fifoBatch.quarantine.test.ts` (`cablearTransaccion`, el patrón de `$transaction`) — ábrelo y cópialo; no lo reconstruyas de memoria.
+**Escribe los cuerpos completos.** El esqueleto de mocks se copia de `tests/unit/services/dashboard/fifoBatch.quarantine.test.ts`
+(`cablearTransaccion`, el patrón de `$transaction`) — ábrelo y cópialo; no lo reconstruyas de memoria.
 
 - [ ] **Step 2: Correr y verificar que fallan**
 
@@ -697,7 +777,8 @@ Dentro de la MISMA `prisma.$transaction` que ya usa la función.
 
 - [ ] **Step 6: Correr TODA la suite de compras e inventario — aquí sí, es el punto de riesgo**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseOrder tests/unit/services/dashboard/fifoBatch tests/unit/services/dashboard/autoReorder --maxWorkers=2`
+Run:
+`npx jest tests/unit/services/dashboard/purchaseOrder tests/unit/services/dashboard/fifoBatch tests/unit/services/dashboard/autoReorder --maxWorkers=2`
 Expected: PASS, sin regresiones.
 
 - [ ] **Step 7: Formatear**
@@ -708,9 +789,12 @@ Expected: PASS, sin regresiones.
 
 ## Fuera de alcance, a propósito
 
-- **Los botones del dashboard para estas cuatro exportaciones.** El backend primero; la UI se conecta después con el `ExportDialog` que ya existe. Meterlo aquí duplica el tamaño de cada tarea y mezcla dos ciclos de revisión.
-- **Migración de bajada y ensayo de restore para la Tarea 5.** Son requisito ANTES de desplegar, no antes de implementar. Van en el paso de despliegue, con el fundador.
-- **La decisión de `activity:read` para ADMIN** y **el tier que contrata PITS**. Son decisiones de producto del fundador, no de implementación.
+- **Los botones del dashboard para estas cuatro exportaciones.** El backend primero; la UI se conecta después con el `ExportDialog` que ya
+  existe. Meterlo aquí duplica el tamaño de cada tarea y mezcla dos ciclos de revisión.
+- **Migración de bajada y ensayo de restore para la Tarea 5.** Son requisito ANTES de desplegar, no antes de implementar. Van en el paso de
+  despliegue, con el fundador.
+- **La decisión de `activity:read` para ADMIN** y **el tier que contrata PITS**. Son decisiones de producto del fundador, no de
+  implementación.
 
 ## Verificación final (la corro yo, no los subagentes)
 

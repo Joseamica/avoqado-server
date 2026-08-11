@@ -1,10 +1,13 @@
 # Cron Pool Hardening Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Evitar que los trabajos de 30 segundos y los monitores POS/TPV pidan conexiones exactamente al mismo tiempo, sin cambiar frecuencia ni la política P2024.
+**Goal:** Evitar que los trabajos de 30 segundos y los monitores POS/TPV pidan conexiones exactamente al mismo tiempo, sin cambiar
+frecuencia ni la política P2024.
 
-**Architecture:** Los patrones cron se centralizan y se prueban como calendario conjunto. Los jobs que hoy admiten auto-solapamiento reciben una guarda `isRunning/finally`; POS usa `node-cron` con `noOverlap: true`.
+**Architecture:** Los patrones cron se centralizan y se prueban como calendario conjunto. Los jobs que hoy admiten auto-solapamiento reciben
+una guarda `isRunning/finally`; POS usa `node-cron` con `noOverlap: true`.
 
 **Tech Stack:** TypeScript, cron 4.3, node-cron 4.2, Jest.
 
@@ -23,10 +26,12 @@
 ### Task 1: Política de schedules sin colisiones
 
 **Files:**
+
 - Create: `src/jobs/jobSchedules.ts`
 - Test: `tests/unit/jobs/jobSchedules.test.ts`
 
 **Interfaces:**
+
 - Produce `JOB_SCHEDULES` con los seis patrones exactos.
 
 - [ ] **Step 1: Escribir test rojo que expande diez minutos con `CronTime`**
@@ -68,6 +73,7 @@ export const JOB_SCHEDULES = {
 ### Task 2: Guardas de no-solapamiento
 
 **Files:**
+
 - Modify: `src/jobs/terminal-payment-watchdog.job.ts`
 - Modify: `src/jobs/blumon-webhook-reconciliation.job.ts`
 - Modify: `src/jobs/tpv-health-monitor.job.ts`
@@ -119,6 +125,7 @@ try {
 ### Task 3: Cablear los seis schedules
 
 **Files:**
+
 - Modify: los seis jobs de Task 1.
 - Test: `tests/unit/jobs/jobSchedules.test.ts`
 - Test: `tests/unit/jobs/gcal-outbox-sweeper.test.ts`
@@ -146,4 +153,3 @@ npm run typecheck
 git diff --check
 git status --short
 ```
-
