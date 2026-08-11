@@ -39,9 +39,17 @@ describe('listPendingExternalConfirmation — cola de cobros por confirmar', () 
   let staffId: string
   let externalAreaId: string
   let nativeAreaId: string
+  // Step 4 (Task 10, revisión de la Task 9): segunda área EXTERNAL — el test
+  // de aislamiento original comparaba contra una terminal NATIVA, que queda
+  // fuera por TRES condiciones independientes a la vez (fulfillmentAreaId,
+  // settlementRoute, ausencia de externalSettlement), así que no vigilaba el
+  // filtro de área que decía vigilar. Con dos áreas EXTERNAL, sólo
+  // fulfillmentAreaId las distingue.
+  let secondExternalAreaId: string
   let productId: string
   let externalIssueDeviceUid: string
   let nativeIssueDeviceUid: string
+  let segundaAreaDeviceUid: string
   let issueCounter = 0
 
   beforeAll(async () => {
@@ -117,6 +125,30 @@ describe('listPendingExternalConfirmation — cola de cobros por confirmar', () 
       ],
     })
 
+    // Step 4 (Task 10): segunda área EXTERNAL + su propia terminal — ver
+    // comentario en la declaración de `secondExternalAreaId` arriba.
+    const secondExternalArea = await prisma.fulfillmentArea.create({
+      data: {
+        venueId,
+        name: `Cremería externa cola 2 ${suffix}`,
+        fulfillmentMode: FulfillmentMode.HOLD_UNTIL_PAID,
+        settlementRoute: AreaSettlementRoute.EXTERNAL,
+      },
+    })
+    secondExternalAreaId = secondExternalArea.id
+    segundaAreaDeviceUid = `queue-issue-external-2-${suffix}`
+    await prisma.terminal.create({
+      data: {
+        venueId,
+        name: 'Emisión externa 2 (cola)',
+        type: TerminalType.POS_ANDROID,
+        status: TerminalStatus.ACTIVE,
+        deviceUid: segundaAreaDeviceUid,
+        fulfillmentAreaId: secondExternalAreaId,
+        canIssueAreaTickets: true,
+      },
+    })
+
     // inventoryReservationMode se deja en su default (NONE): este archivo
     // prueba la cola, no inventario — Tasks 4/5 ya cubren la reserva/reversa.
     await prisma.venueAreaTicketSettings.create({ data: { venueId, enabled: true } })
@@ -166,6 +198,16 @@ describe('listPendingExternalConfirmation — cola de cobros por confirmar', () 
     return issueAreaTicket(venueId, {
       idempotencyKey: `queue-ext-${suffix}-${issueCounter}`,
       deviceUid: externalIssueDeviceUid,
+      lines: [{ clientLineId: 'l1', productId, quantity: '1' }],
+    })
+  }
+
+  // Step 4 (Task 10): mismo vale, emitido en la SEGUNDA área EXTERNAL.
+  async function issueExternalTicketInSecondArea() {
+    issueCounter += 1
+    return issueAreaTicket(venueId, {
+      idempotencyKey: `queue-ext-2-${suffix}-${issueCounter}`,
+      deviceUid: segundaAreaDeviceUid,
       lines: [{ clientLineId: 'l1', productId, quantity: '1' }],
     })
   }
@@ -278,6 +320,29 @@ describe('listPendingExternalConfirmation — cola de cobros por confirmar', () 
   it('una terminal de otra área no ve estos vales', async () => {
     const r = await listPendingExternalConfirmation(venueId, { deviceUid: nativeIssueDeviceUid })
     expect(r.items).toHaveLength(0)
+  })
+
+  // Step 4 (Task 10) — el test de arriba usa una terminal NATIVA, que queda
+  // fuera de la cola por TRES condiciones independientes a la vez
+  // (fulfillmentAreaId, settlementRoute: EXTERNAL, y la ausencia de relación
+  // externalSettlement): pasaría igual si se borrara la línea de
+  // `fulfillmentAreaId` de la query — no vigila el predicado que dice
+  // vigilar, que es justo la regla de seguridad central de este módulo. El
+  // código de la query ya era correcto (verificado en revisión); lo que
+  // fallaba era la prueba. Este test lo arregla con DOS áreas EXTERNAL: la
+  // única diferencia entre ellas es el área, así que sólo el filtro de área
+  // puede explicar el aislamiento.
+  it('una terminal de OTRA área externa no ve estos vales — aísla el filtro de área, no otros', async () => {
+    const mio = await issueExternalTicket()
+    const ajeno = await issueExternalTicketInSecondArea()
+
+    const propia = await listPendingExternalConfirmation(venueId, { deviceUid: externalIssueDeviceUid })
+    expect(propia.items.map((i: any) => i.id)).toContain(mio.id)
+    expect(propia.items.map((i: any) => i.id)).not.toContain(ajeno.id)
+
+    const otra = await listPendingExternalConfirmation(venueId, { deviceUid: segundaAreaDeviceUid })
+    expect(otra.items.map((i: any) => i.id)).toContain(ajeno.id)
+    expect(otra.items.map((i: any) => i.id)).not.toContain(mio.id)
   })
 
   it('una terminal sin área asignada no truena — regresa una cola vacía', async () => {
