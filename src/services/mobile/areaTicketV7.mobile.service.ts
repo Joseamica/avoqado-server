@@ -1164,10 +1164,20 @@ export async function addTicketToCheckout(venueId: string, sessionId: string, ti
         checkoutSessionId: true,
         expiresAt: true,
         claimExpiresAt: true,
+        settlementRoute: true,
       },
     })
     if (!ticket) {
       throw domainError(404, 'AREA_TICKET_NOT_FOUND', 'No encontramos ese vale en este local.')
+    }
+    // Un vale EXTERNAL se cobra en la caja del otro POS, nunca en una de Avoqado.
+    // El CHECK "area_ticket_external_no_avoqado_circuit" ya lo impide en la base
+    // (un vale EXTERNAL no puede traer checkoutSessionId ni status CLAIMED), pero
+    // dejar que este código llegue al updateMany de abajo convierte esa defensa en
+    // un 500 crudo de Postgres para el cajero. Rechazar aquí, ANTES de cualquier
+    // escritura, es la puerta — el CHECK sigue siendo la red.
+    if (ticket.settlementRoute === AreaSettlementRoute.EXTERNAL) {
+      throw domainError(409, 'AREA_TICKET_IS_EXTERNAL', 'Este vale se cobra en la caja externa, no en Avoqado.')
     }
     if (ticket.checkoutSessionId === current.id && ticket.status === AreaTicketStatus.CLAIMED) {
       return
@@ -1184,6 +1194,7 @@ export async function addTicketToCheckout(venueId: string, sessionId: string, ti
             checkoutSessionId: true,
             expiresAt: true,
             claimExpiresAt: true,
+            settlementRoute: true,
           },
         })
       }
