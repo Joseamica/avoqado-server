@@ -160,6 +160,43 @@ describe('confirmExternalSettlement', () => {
     expect(r.variance).toBe('-0.20')
   })
 
+  // --- Fix round 1: Finding 1 (revisión) — externalAmount no se cuantizaba a 2
+  // decimales antes de comparar/escribir, produciendo una discrepancia mentirosa. ---
+
+  it('cruza un límite de redondeo donde float y Decimal divergen — el test de arriba (0.30 vs 0.10) NO lo detectaría', async () => {
+    mockSettlement({ referenceAmount: '160.00' })
+
+    const r = await confirmExternalSettlement(venueId, ticketId, { ...baseInput, externalAmount: '168.165' })
+
+    // Verificado con node contra el Prisma.Decimal real: 168.165 cuantiza a
+    // 168.17 en Decimal (ROUND_HALF_UP), pero (168.165).toFixed(2) en `number`
+    // da "168.16" — IEEE754 guarda 168.165 como 168.16499999999999204..., así
+    // que redondea para abajo. Es un dígito distinto: el test de arriba
+    // (0.10 - 0.30 → "-0.20") pasa IGUAL en float que en Decimal, por eso no
+    // habría delatado una implementación en `number`; éste sí.
+    expect(r.externalAmount).toBe('168.17')
+    expect(r.variance).toBe('8.17')
+    expect(r.status).toBe('DISCREPANCY')
+  })
+
+  it('un sub-céntimo (168.001 vs 168.00) NO es discrepancia tras cuantizar — antes del fix mentía', async () => {
+    mockSettlement({ referenceAmount: '168.00' })
+
+    const r = await confirmExternalSettlement(venueId, ticketId, { ...baseInput, externalAmount: '168.001' })
+
+    // Antes del fix: variance SIN cuantizar = 0.001 → isZero()=false → status
+    // DISCREPANCY, pero variance.toFixed(2) mostraba "0.00" y
+    // externalAmount.toFixed(2) mostraba "168.00" — la respuesta y la
+    // incidencia decían "hay discrepancia" con importes idénticos y variación
+    // cero (verificado con node antes de aplicar el fix). Cuantizar
+    // externalAmount a 2 decimales ANTES de comparar hace que 168.001 sea
+    // indistinguible de 168.00 — que es la precisión real con la que se
+    // guarda el dinero (`Decimal(12,2)`).
+    expect(r.status).toBe('CONFIRMED')
+    expect(r.variance).toBe('0.00')
+    expect(r.externalAmount).toBe('168.00')
+  })
+
   it('repetir la misma llave devuelve alreadyConfirmed y NO cambia el importe', async () => {
     mockSettlement({ status: AreaTicketExternalSettlementStatus.CONFIRMED, externalAmount: '168.00', idempotencyKey: 'k1' })
 

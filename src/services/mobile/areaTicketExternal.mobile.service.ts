@@ -215,7 +215,7 @@ function buildAlreadyConfirmedResult(
  * importe capturado) o "cobro asumido con discrepancia" (importes distintos).
  *
  * Una discrepancia abre una incidencia pero NO bloquea nada — el producto ya
- * está pagado en la otra caja; retenerlo castigaría al cliente por un error
+ * se cobró en la otra caja; retenerlo castigaría al cliente por un error
  * de captura (la Task 10 hace explícita esa no-obstrucción en la entrega).
  */
 export async function confirmExternalSettlement(
@@ -269,8 +269,22 @@ export async function confirmExternalSettlement(
     )
   }
 
-  const reference = new Prisma.Decimal(settlement.referenceAmount)
-  const external = input.externalAmount == null ? null : new Prisma.Decimal(input.externalAmount)
+  // Cuantiza a 2 decimales ANTES de comparar — no después. Sin esto, "168.001"
+  // contra referenceAmount "168.00" da variance.isZero() === false (DISCREPANCY)
+  // mientras que variance.toFixed(2) y external.toFixed(2) muestran "0.00" /
+  // "168.00": la respuesta y la incidencia dirían "hay discrepancia" con
+  // importes idénticos, y Postgres redondea la columna Decimal(12,2) al
+  // guardar de todos modos — lo persistido tampoco cuadraría con lo devuelto.
+  // Cuantizar aquí, una sola vez, hace que el estado, la variación expuesta,
+  // lo escrito en la fila y lo auditado salgan del MISMO número.
+  // ROUND_HALF_UP porque es el redondeo comercial estándar (0.005 sube a
+  // 0.01) y el que ya usa el resto del dinero en este repo
+  // (`parsePositiveDecimal` en este mismo archivo hermano, `money.ts`,
+  // `recipe-cost-calculator.ts`) — usar otro modo aquí sería la única fuente
+  // de dinero del sistema que redondea distinto.
+  const reference = new Prisma.Decimal(settlement.referenceAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  const external =
+    input.externalAmount == null ? null : new Prisma.Decimal(input.externalAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
   const variance = external === null ? null : external.sub(reference)
   const status =
     variance !== null && !variance.isZero() ? AreaTicketExternalSettlementStatus.DISCREPANCY : AreaTicketExternalSettlementStatus.CONFIRMED
