@@ -381,3 +381,149 @@ export async function confirmExternalSettlement(
     alreadyConfirmed: false,
   }
 }
+
+export interface MarkExternalNotChargedInput extends ExternalSettlementInput {
+  reason: string
+}
+
+interface MarkExternalNotChargedResult {
+  areaTicketId: string
+  status: 'NOT_CHARGED'
+}
+
+/**
+ * El momento en que UNA PERSONA afirma que la caja externa NUNCA cobró este
+ * vale — el papel salió del área, pero el cliente no pasó por la otra caja.
+ * Es la salida para un vale que, si no, queda varado: `cancelAreaTicket`
+ * bloquea cualquier estado que "suene" a cobrado (`YA_COBRADO_AFUERA` en el
+ * archivo hermano, ensanchado en esta misma tarea para incluir `ASSUMED`), y
+ * sin esta función nada puede sacar a un vale `ASSUMED` de ahí.
+ *
+ * 🔴 Esto NO cancela el vale ni revierte inventario — son decisiones DISTINTAS
+ * que toma una persona: declarar "no se cobró" es un hecho sobre el pasado;
+ * cancelar es qué hacer con el inventario ahora. El vale queda `ISSUED` con el
+ * cobro en `NOT_CHARGED`; quien decida cancelarlo (y disparar la reversa) lo
+ * hace después, explícitamente, por `cancelAreaTicket` — que con el settlement
+ * ya en `NOT_CHARGED` deja de bloquear.
+ */
+export async function markExternalNotCharged(
+  venueId: string,
+  ticketId: string,
+  input: MarkExternalNotChargedInput,
+): Promise<MarkExternalNotChargedResult> {
+  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
+  const reason = input.reason?.trim()
+  if (!reason) {
+    // Es una afirmación que alguien va a auditar — sin motivo no queda rastro
+    // de POR QUÉ se declaró que la otra caja nunca cobró.
+    throw domainError(
+      400,
+      'REASON_REQUIRED',
+      'Escribe por qué este vale no se cobró en la caja externa — es una afirmación que alguien tendrá que auditar.',
+    )
+  }
+
+  // Mismo alcance que `markExternalHandoff` y `confirmExternalSettlement`:
+  // sólo valida que el dispositivo pertenezca a este venue.
+  await resolveTerminal(venueId, input.deviceUid)
+  const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
+
+  const ticket = await loadExternalTicket(venueId, ticketId)
+  const settlement = ticket.externalSettlement! // el guard ya garantiza que no es null
+
+  if (ticket.status !== AreaTicketStatus.ISSUED) {
+    // Mismo razonamiento que `confirmExternalSettlement`: en la ruta EXTERNAL
+    // sólo ISSUED/CANCELLED/EXPIRED son alcanzables aquí. Si no es ISSUED, el
+    // vale ya está muerto — nada que declarar sobre su cobro.
+    throw domainError(409, 'AREA_TICKET_NOT_ISSUED', `Este vale está en estado ${ticket.status}.`)
+  }
+
+  if (settlement.status === AreaTicketExternalSettlementStatus.NOT_CHARGED) {
+    // Idempotente por ESTADO, igual que el resto de este archivo — no compara
+    // la idempotencyKey recibida contra ninguna guardada.
+    return { areaTicketId: ticket.id, status: AreaTicketExternalSettlementStatus.NOT_CHARGED }
+  }
+  if (
+    settlement.status === AreaTicketExternalSettlementStatus.CONFIRMED ||
+    settlement.status === AreaTicketExternalSettlementStatus.DISCREPANCY
+  ) {
+    // Alguien YA afirmó que la otra caja cobró (con o sin diferencia de
+    // importe) — declarar "no se cobró" encima de eso contradiría esa
+    // afirmación en vez de corregirla. Mismo código que usa `cancelAreaTicket`
+    // para el mismo hecho.
+    throw domainError(
+      409,
+      'AREA_TICKET_EXTERNAL_ALREADY_CHARGED',
+      'Este vale ya se cobró en la caja externa. No se puede declarar que no se cobró.',
+    )
+  }
+  // Sólo quedan PENDING o ASSUMED — ambos elegibles. ASSUMED es exactamente el
+  // caso que esta función existe para resolver: un cobro que se dio por hecho
+  // sin que nadie lo verificara.
+
+  const now = new Date()
+
+  const wroteHere = await prisma.$transaction(async tx => {
+    // `updateMany` condicionado, no un `update` ciego — mismo patrón que sus
+    // hermanas: si dos dispositivos declaran "no cobrado" al mismo tiempo,
+    // sólo uno afecta una fila.
+    const result = await tx.areaTicketExternalSettlement.updateMany({
+      where: {
+        areaTicketId: ticket.id,
+        venueId,
+        status: { in: [AreaTicketExternalSettlementStatus.PENDING, AreaTicketExternalSettlementStatus.ASSUMED] },
+      },
+      data: { status: AreaTicketExternalSettlementStatus.NOT_CHARGED },
+    })
+    if (result.count === 0) return false
+
+    // Si había una incidencia de "cobro sin confirmar" abierta, esta
+    // declaración la resuelve: ya no está sin confirmar, alguien confirmó que
+    // NO se cobró. `updateMany` (no `update`) porque puede no existir — hoy
+    // ningún código produce todavía esta incidencia, así que "si existe" es
+    // literal; que el `count` resultante sea 0 no es un error.
+    await tx.areaTicketExternalIncident.updateMany({
+      where: {
+        areaTicketId: ticket.id,
+        venueId,
+        kind: AreaTicketExternalIncidentKind.UNCONFIRMED_CHARGE,
+        status: AreaTicketExternalIncidentStatus.OPEN,
+      },
+      data: {
+        status: AreaTicketExternalIncidentStatus.RESOLVED,
+        resolvedAt: now,
+        resolvedByStaffId: staffId ?? null,
+        resolution: reason,
+      },
+    })
+    return true
+  })
+
+  if (!wroteHere) {
+    // Perdimos la carrera: el settlement cambió entre nuestra lectura y
+    // nuestro intento de escritura. Releer y responder con lo que de verdad
+    // quedó guardado — nunca con nuestro propio intento.
+    const fresh = await prisma.areaTicketExternalSettlement.findUniqueOrThrow({ where: { areaTicketId: ticket.id } })
+    if (fresh.status === AreaTicketExternalSettlementStatus.NOT_CHARGED) {
+      return { areaTicketId: ticket.id, status: AreaTicketExternalSettlementStatus.NOT_CHARGED }
+    }
+    // Alguien más lo confirmó (CONFIRMED/DISCREPANCY) en el mismo instante:
+    // seguimos sin poder fingir NOT_CHARGED sobre eso.
+    throw domainError(
+      409,
+      'AREA_TICKET_EXTERNAL_ALREADY_CHARGED',
+      'Este vale ya se cobró en la caja externa. No se puede declarar que no se cobró.',
+    )
+  }
+
+  void logAction({
+    staffId,
+    venueId,
+    action: 'AREA_TICKET_EXTERNAL_MARKED_NOT_CHARGED',
+    entity: 'AreaTicketExternalSettlement',
+    entityId: settlement.id,
+    data: { ticketId: ticket.id, code: ticket.code, reason, idempotencyKey },
+  })
+
+  return { areaTicketId: ticket.id, status: AreaTicketExternalSettlementStatus.NOT_CHARGED }
+}
