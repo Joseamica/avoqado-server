@@ -16,7 +16,10 @@
  *
  * Esta tarea (6) implementa sólo el handoff: marcar que el papel salió del
  * área rumbo a la caja externa. `loadExternalTicket` es el guard compartido
- * que las Tasks 7 (confirmar), 8 (marcar no-cobrado) y 9 (cola) reutilizan.
+ * que las Tasks 7 (confirmar) y 8 (marcar no-cobrado) reutilizan — operan
+ * sobre UN vale por id. La Task 9 (cola) es distinta: lista VARIOS vales, así
+ * que no pasa por ese guard (haría N+1) — filtra directo en una sola query y
+ * reutiliza el cursor estable de `areaTicketV7.mobile.service.ts`.
  */
 
 import {
@@ -33,7 +36,21 @@ import {
 import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
-import { domainError, requireIdempotencyKey, resolveTerminal } from './areaTicketV7.mobile.service'
+import {
+  decodePendingCursor,
+  domainError,
+  encodePendingCursor,
+  requireIdempotencyKey,
+  resolveTerminal,
+} from './areaTicketV7.mobile.service'
+
+// Mismos números que `listPendingAreaTicketFulfillment` (el otro cursor
+// paginado de este dominio, en el archivo v7): el default 25 es más chico a
+// propósito — esta cola la lee una persona, no un picker de bodega — y el
+// tope 100 existe para que nadie pida miles de filas de un jalón y tumbe la
+// respuesta.
+const DEFAULT_PENDING_CONFIRMATION_LIMIT = 25
+const MAX_PENDING_CONFIRMATION_LIMIT = 100
 
 export interface ExternalSettlementInput {
   idempotencyKey: string
@@ -526,4 +543,103 @@ export async function markExternalNotCharged(
   })
 
   return { areaTicketId: ticket.id, status: AreaTicketExternalSettlementStatus.NOT_CHARGED }
+}
+
+export interface PendingExternalItem {
+  id: string
+  code: string
+  fulfillmentAreaId: string
+  issuedAt: Date
+  // Decimal string de dos posiciones, el mismo número que congeló `issueAreaTicket`
+  // en `externalSettlement.referenceAmount` — la cola no recalcula nada.
+  referenceAmount: string
+  handoffState: AreaTicketExternalHandoffState
+}
+
+/**
+ * La cola (Task 9): qué vales de ESTA área — la de la terminal autenticada,
+ * NUNCA la que mande el body — siguen con un cobro externo por confirmar. Es
+ * una lectura, no una mutación: no toca `AreaTicketExternalSettlement` ni
+ * genera ninguna bitácora.
+ *
+ * Filtro exacto — cada estado que NO aparece, aparece por una razón distinta:
+ *   - `settlementRoute: EXTERNAL` — sólo esta ruta tiene cobro externo que confirmar.
+ *   - `status: ISSUED` — CANCELLED/EXPIRED son vales muertos, nada que confirmar.
+ *   - `externalSettlement.status: PENDING` — deja fuera CONFIRMED/DISCREPANCY
+ *     (alguien ya afirmó qué pasó), NOT_CHARGED (ya se declaró que no se
+ *     cobró) y ASSUMED.
+ *
+ * 🔴 ASSUMED se deja FUERA a propósito, aunque en prosa suene parecido a
+ * "todavía sin confirmar". El nombre de esta función es literal: lista lo que
+ * le falta una CONFIRMACIÓN HUMANA. Un vale ASSUMED nace exactamente de la
+ * política contraria — `ExternalConfirmationMode.ASSUME_ON_PRINT` — que por
+ * diseño NO exige que nadie lo verifique contra la caja externa. Meterlo aquí
+ * le daría al operador una tarea que el propio local decidió que no hacía
+ * falta hacer, y le restaría urgencia a los que sí la necesitan (los PENDING
+ * de verdad, algunos con el papel ya entregado). Si más adelante hace falta
+ * auditar vales ASSUMED (verificarlos de todos modos, sin bloquear nada), esa
+ * es una cola DISTINTA — con otro nombre, no "por confirmar" — probablemente
+ * la que arme el job de conciliación (Task 12).
+ *
+ * Cursor estable (issuedAt, id) — no offset — reutilizando
+ * `encodePendingCursor`/`decodePendingCursor` de `areaTicketV7.mobile.service.ts`
+ * en vez de duplicarlos: un cursor por offset se recorre solo cuando entra un
+ * vale nuevo mientras el operador lee la lista, y entonces se saltan o
+ * repiten filas sin que nadie se entere.
+ */
+export async function listPendingExternalConfirmation(
+  venueId: string,
+  input: { deviceUid: string; cursor?: string | null; limit?: number },
+): Promise<{ items: PendingExternalItem[]; nextCursor: string | null }> {
+  const terminal = await resolveTerminal(venueId, input.deviceUid)
+
+  // El área SIEMPRE sale de la terminal autenticada, nunca del body (regla de
+  // seguridad central de todo este módulo: una terminal de panadería no debe
+  // poder ver — ni tocar — los vales de cremería). Una terminal que no está
+  // asignada a ningún área no tiene cola que mostrar; eso no es un error que
+  // inventar, es una lista vacía honesta.
+  if (!terminal.fulfillmentAreaId) {
+    return { items: [], nextCursor: null }
+  }
+
+  const cursor = decodePendingCursor(input.cursor)
+  const limit = Math.max(1, Math.min(input.limit ?? DEFAULT_PENDING_CONFIRMATION_LIMIT, MAX_PENDING_CONFIRMATION_LIMIT))
+
+  const tickets = await prisma.areaTicket.findMany({
+    where: {
+      venueId,
+      fulfillmentAreaId: terminal.fulfillmentAreaId,
+      settlementRoute: AreaSettlementRoute.EXTERNAL,
+      status: AreaTicketStatus.ISSUED,
+      externalSettlement: { status: AreaTicketExternalSettlementStatus.PENDING },
+      ...(cursor ? { OR: [{ issuedAt: { gt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { gt: cursor.id } }] } : {}),
+    },
+    select: {
+      id: true,
+      code: true,
+      fulfillmentAreaId: true,
+      issuedAt: true,
+      externalSettlement: { select: { referenceAmount: true, handoffState: true } },
+    },
+    orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
+    take: limit + 1,
+  })
+
+  const hasMore = tickets.length > limit
+  const page = hasMore ? tickets.slice(0, limit) : tickets
+
+  return {
+    items: page.map(ticket => {
+      const settlement = ticket.externalSettlement! // el WHERE de arriba ya garantiza que existe y está PENDING
+      return {
+        id: ticket.id,
+        code: ticket.code,
+        fulfillmentAreaId: ticket.fulfillmentAreaId,
+        issuedAt: ticket.issuedAt,
+        referenceAmount: new Prisma.Decimal(settlement.referenceAmount).toFixed(2),
+        handoffState: settlement.handoffState,
+      }
+    }),
+    nextCursor: hasMore ? encodePendingCursor(page[page.length - 1]) : null,
+  }
 }

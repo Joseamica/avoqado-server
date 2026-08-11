@@ -1924,11 +1924,14 @@ export async function resolveAreaTicketScan(
   }
 }
 
-function encodePendingCursor(ticket: { issuedAt: Date; id: string }): string {
+// Exportadas (Task 9, §caja externa fase 1): `areaTicketExternal.mobile.service.ts`
+// reutiliza este MISMO par encode/decode para la cola de cobros por confirmar,
+// en vez de duplicar el mecanismo de cursor estable en un segundo archivo.
+export function encodePendingCursor(ticket: { issuedAt: Date; id: string }): string {
   return Buffer.from(`${ticket.issuedAt.toISOString()}|${ticket.id}`).toString('base64url')
 }
 
-function decodePendingCursor(cursor?: string | null): { issuedAt: Date; id: string } | null {
+export function decodePendingCursor(cursor?: string | null): { issuedAt: Date; id: string } | null {
   if (!cursor) return null
   try {
     const [date, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|')
