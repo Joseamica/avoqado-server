@@ -537,3 +537,61 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     expect((await p1).status).toBe('success')
   })
 })
+
+describe('TerminalPaymentService — el watchdog no cierra con el pago de otro', () => {
+  // 🔴 El watchdog reconcilia una solicitud vencida contra un Payment de la MISMA orden.
+  // Tenía dos guardas (no anterior a la solicitud, no reclamado por otra) pero NINGUNA
+  // sobre qué CLASE de pago es. Una orden lleva varios pagos por split/tender parcial, así
+  // que un efectivo posterior —o una tarjeta RECHAZADA— cerraba la solicitud como cobrada.
+  //
+  // El daño es el caro y silencioso: el POS le dice al cajero "ya se cobró", el cajero no
+  // cobra, y el comercio pierde la venta. Nadie reclama un cobro que no ocurrió.
+  //
+  // La dirección segura ya la eligió este archivo: si no consta, cae en UNKNOWN, que RETIENE
+  // la ranura y levanta alerta. Molesto y correcto — nunca liberar a ciegas.
+
+  const staleRow = (overrides: Record<string, unknown> = {}) => ({
+    id: 'row-1',
+    requestId: 'REQ-W1',
+    venueId: 'venue-1',
+    terminalId: 't-w1',
+    orderId: 'order-w1',
+    status: 'SENT',
+    createdAt: new Date('2026-08-11T10:00:00Z'),
+    ...overrides,
+  })
+
+  it('un pago RECHAZADO de la misma orden NO cierra la solicitud como cobrada', async () => {
+    tpr().findMany.mockResolvedValueOnce([staleRow()])
+    prismaMock.payment.findFirst.mockResolvedValueOnce(null) // el filtro lo descarta
+
+    const res = await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    expect(res.completed).toBe(0)
+    expect(res.unknown).toBe(1)
+    const where = prismaMock.payment.findFirst.mock.calls[0][0].where
+    expect(where.status).toBe('COMPLETED')
+  })
+
+  it('un pago en EFECTIVO de la misma orden tampoco la cierra — no prueba que la tarjeta pasó', async () => {
+    tpr().findMany.mockResolvedValueOnce([staleRow({ id: 'row-2', requestId: 'REQ-W2' })])
+    prismaMock.payment.findFirst.mockResolvedValueOnce(null)
+
+    await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    const where = prismaMock.payment.findFirst.mock.calls[0][0].where
+    expect(where.method).toEqual({ in: ['CREDIT_CARD', 'DEBIT_CARD'] })
+  })
+
+  it('un pago con TARJETA y COMPLETED sí la cierra — el camino bueno no se rompe', async () => {
+    tpr().findMany.mockResolvedValueOnce([staleRow({ id: 'row-3', requestId: 'REQ-W3' })])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-ok' })
+    tpr().findFirst.mockResolvedValueOnce(null) // no reclamado por otra solicitud
+    tpr().updateMany.mockResolvedValueOnce({ count: 1 })
+
+    const res = await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    expect(res.completed).toBe(1)
+    expect(res.unknown).toBe(0)
+  })
+})

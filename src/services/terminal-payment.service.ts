@@ -18,7 +18,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid'
-import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
+import { Prisma, TerminalPaymentRequestStatus, TransactionStatus, PaymentMethod } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/terminal-registry'
 import socketManager from '../communication/sockets/managers/socketManager'
@@ -601,15 +601,36 @@ class TerminalPaymentService {
     for (const row of stale) {
       // Reconcile ONLY against a Payment that plausibly belongs to THIS request; otherwise fall
       // through to UNKNOWN and HOLD the slot (never free blind → the double-charge safeguard).
-      // Two guards, because an order legitimately carries several Payments (split/partial tender):
+      // Four guards, because an order legitimately carries several Payments (split/partial tender):
       //   1) createdAt >= row.createdAt — a payment for THIS request cannot predate the request row,
       //      so an unrelated PRIOR cash/split payment on the same order is never matched.
       //   2) not already claimed by another TerminalPaymentRequest.paymentId (soft ref, no FK) —
       //      so one payment can't reconcile (and free) multiple stale requests.
+      //   3) 🔴 status COMPLETED — a PENDING/PROCESSING/FAILED/REFUNDED Payment is NOT evidence
+      //      that money moved. Without this, a DECLINED card closed the request as "charged".
+      //   4) 🔴 card method — this row is a TERMINAL charge. A CASH (or transfer) payment landing
+      //      on the same order afterwards proves nothing about whether the CARD went through;
+      //      matching it closed the request as "charged" on the strength of an unrelated tender.
+      //
+      // Both new guards trade a silent WRONG money answer for an UNKNOWN, which holds the slot
+      // and raises the alert. That direction is the expensive-but-correct one: the failure this
+      // prevents is the POS telling the cashier "ya se cobró" for a sale that was never paid —
+      // the merchant eats it, and nobody complains about a charge that never happened.
+      //
+      // NOT filtered on amount/tip on purpose: the tip is chosen ON the terminal, so a legitimate
+      // charge can differ from the requested amount. Guessing there would push good cases into
+      // UNKNOWN and jam terminals. If exact binding is ever needed, it has to come from a
+      // request↔payment reference, not from arithmetic.
       let payment: { id: string } | null = null
       if (row.orderId) {
         const candidate = await prisma.payment.findFirst({
-          where: { orderId: row.orderId, venueId: row.venueId, createdAt: { gte: row.createdAt } },
+          where: {
+            orderId: row.orderId,
+            venueId: row.venueId,
+            createdAt: { gte: row.createdAt },
+            status: TransactionStatus.COMPLETED,
+            method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
+          },
           select: { id: true },
           orderBy: { createdAt: 'desc' },
         })
