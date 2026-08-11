@@ -182,7 +182,10 @@ const checkoutInclude = {
   },
 } satisfies Prisma.AreaTicketCheckoutSessionInclude
 
-function domainError(statusCode: number, code: string, message: string, details?: unknown): AppError {
+// Exportado: `areaTicketExternal.mobile.service.ts` (cobro externo, §caja
+// externa fase 1) lo reutiliza en vez de duplicar el mismo constructor de
+// error de dominio en un segundo archivo.
+export function domainError(statusCode: number, code: string, message: string, details?: unknown): AppError {
   return new AppError(message, statusCode, true, code, details)
 }
 
@@ -206,7 +209,8 @@ function assertDeliveryMethodAllowed(verificationMode: AreaTicketDeliveryVerific
   )
 }
 
-function requireIdempotencyKey(value: string | null | undefined): string {
+// Exportado por el mismo motivo que `domainError` — ver comentario arriba.
+export function requireIdempotencyKey(value: string | null | undefined): string {
   const key = value?.trim()
   if (!key || key.length > 64) {
     throw new BadRequestError('idempotencyKey es requerido y debe tener máximo 64 caracteres.')
@@ -371,7 +375,8 @@ function mapCheckout(session: any) {
   }
 }
 
-async function resolveTerminal(venueId: string, deviceUid: string | null | undefined, client: DbClient = prisma) {
+// Exportado por el mismo motivo que `domainError` — ver comentario arriba.
+export async function resolveTerminal(venueId: string, deviceUid: string | null | undefined, client: DbClient = prisma) {
   const uid = deviceUid?.trim()
   if (!uid) {
     throw new BadRequestError('Falta el identificador del dispositivo (X-Device-Id).')

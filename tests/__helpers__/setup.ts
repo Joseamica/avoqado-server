@@ -235,6 +235,7 @@ const prismaMock: any = {
   areaTicketPaymentAttempt: createMockModel(),
   areaTicketPrintAttempt: createMockModel(),
   areaTicketFulfillment: createMockModel(),
+  areaTicketExternalSettlement: createMockModel(),
   venueScaleSettings: createMockModel(),
   scaleProfile: createMockModel(),
   // Reservation / Booking models
