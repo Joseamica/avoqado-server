@@ -81,6 +81,19 @@ export async function markExternalHandoff(
   input: ExternalSettlementInput,
 ): Promise<{ areaTicketId: string; handoffState: 'HANDED_OFF'; alreadyHandedOff: boolean }> {
   const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
+
+  // 🔴 A propósito NO llama a `assertAreaTicketsEnabled` aquí, a diferencia
+  // de sus cuatro hermanas en el archivo v7 que sí lo hacen antes de tocar un
+  // vale (`issueAreaTicket:762`, `cancelAreaTicket:946`,
+  // `createAreaTicketCheckout:1075`, `materializeAreaTicketCheckout:1144`).
+  // No es un descuido: apagar el módulo de vales por área detiene EMISIONES y
+  // CLAIMS nuevos, pero un vale que ya se emitió es un compromiso vigente que
+  // el local tiene que poder cerrar aunque alguien apague el módulo a media
+  // operación. Marcar que el papel salió del área es justo eso — completar
+  // algo pendiente, no empezar algo nuevo. Si se agrega el guard aquí, un
+  // venue que desactiva vales por área a medio turno deja handoffs en curso
+  // sin forma de terminar.
+  //
   // Sólo valida que el dispositivo pertenezca a este venue — mismo alcance
   // que `cancelAreaTicket` en el archivo v7. No existe hoy una capacidad de
   // terminal tipo `canSettleExternalTickets`, y el brief no pide una — añadir
