@@ -157,14 +157,40 @@ export function registerAreaTicketTools(server: McpServer, scope: McpScope): voi
         where: {
           venueId,
           fulfillment: null,
-          // Unión explícita por ruta — mismo criterio que la autoridad de este
+          // Espejo verificado CAMPO POR CAMPO contra la autoridad de este
           // dominio, `listPendingAreaTicketFulfillment` en
-          // `areaTicketV7.mobile.service.ts`. Un vale EXTERNAL NUNCA llega a
-          // status PAID (el CHECK de la Task 2 se lo impide), así que sin esta
-          // segunda rama la ruta EXTERNAL era invisible en esta cola — el hueco
-          // que cierra la Task 13.
+          // `areaTicketV7.mobile.service.ts:1963-1995` (fix round 1 de la Task
+          // 13 — la ronda anterior solo había verificado la mitad EXTERNAL y
+          // este comentario afirmaba paridad completa sin haberla revisado;
+          // ver el reporte). Dos diferencias quedan a propósito, nombradas
+          // para que nadie las lea como un hueco sin explicar:
+          //   - La autoridad además filtra por `fulfillmentAreaId` de UNA
+          //     terminal (el dispositivo de entrega autenticado). Este tool
+          //     es de venue completo — "grouped by emitting area" en su
+          //     descripción de arriba — así que no hay una sola área que
+          //     filtrar: es la diferencia entre "qué ve ESTA terminal" y "qué
+          //     hay pendiente en TODO el venue", no un campo olvidado.
+          //   - La autoridad pagina con cursor (`decodePendingCursor`); este
+          //     tool siempre usó `limit` simple, desde antes de la Task 13.
+          //     No se agrega paginación por cursor aquí — sería un cambio de
+          //     contrato que nadie pidió.
+          fulfillmentModeSnapshot: { not: 'IMMEDIATE' },
+          // Unión explícita por ruta — nativos: pagados como siempre, Y con su
+          // orden todavía viva. Externos: cobro ya elegible en la otra caja. Un
+          // vale EXTERNAL NUNCA llega a status PAID (el CHECK de la Task 2 se lo
+          // impide), así que sin la segunda rama la ruta EXTERNAL era invisible
+          // en esta cola — el hueco que cierra la Task 13.
           OR: [
-            { settlementRoute: 'AVOQADO', status: 'PAID' },
+            {
+              settlementRoute: 'AVOQADO',
+              status: 'PAID',
+              // Sin este filtro, un vale que se quedó marcado PAID pero cuya
+              // orden se canceló o se borró DESPUÉS seguía apareciendo aquí
+              // como "pendiente de entregar", mientras que la cola real del
+              // personal (la autoridad de arriba) ya lo ignoraba — el hueco
+              // concreto que encontró la revisión de esta ronda.
+              order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
+            },
             {
               settlementRoute: 'EXTERNAL',
               status: 'ISSUED',

@@ -228,4 +228,36 @@ describe('cobro externo (ruta EXTERNAL) en los tools de vales', () => {
       externalSettlement: { status: 'CONFIRMED', referenceAmount: '168.00', externalAmount: '168.00' },
     })
   })
+
+  // Fix round 1 (revisión de la Task 13): el `where` original solo espejaba la
+  // mitad EXTERNAL de `listPendingAreaTicketFulfillment` — la rama AVOQADO no
+  // filtraba por el estado de la orden ni por `fulfillmentModeSnapshot`, así que
+  // un vale nativo que se quedó marcado PAID pero cuya orden se canceló o borró
+  // DESPUÉS seguía saliendo aquí como "pendiente de entregar".
+  //
+  // `prismaMock` no ejecuta el `where` — `findMany` devuelve lo que se le diga sin
+  // importar el filtro, así que la única forma honesta de fijar esto a nivel de
+  // test unitario es verificar que el CÓDIGO construye el filtro correcto (lo que
+  // Prisma sí aplicaría contra la base real), no simular el resultado ya filtrado.
+  it('pending_area_ticket_deliveries construye el where con la orden viva y el modo de entrega — no solo la ruta EXTERNAL', async () => {
+    await call('pending_area_ticket_deliveries', { venueId: 'venue-1', limit: 20 })
+
+    expect(prismaMock.areaTicket.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          venueId: 'venue-1',
+          fulfillmentModeSnapshot: { not: 'IMMEDIATE' },
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              settlementRoute: 'AVOQADO',
+              status: 'PAID',
+              // El filtro concreto que faltaba: una orden CANCELLED/DELETED
+              // saca al vale de la cola, igual que en la autoridad del dominio.
+              order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
+            }),
+          ]),
+        }),
+      }),
+    )
+  })
 })
