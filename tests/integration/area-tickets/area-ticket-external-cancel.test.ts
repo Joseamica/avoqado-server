@@ -1,5 +1,6 @@
 import {
   AreaSettlementRoute,
+  AreaTicketExternalSettlementStatus,
   AreaTicketInventoryReservationMode,
   FulfillmentMode,
   InventoryMethod,
@@ -11,7 +12,7 @@ import {
 } from '@prisma/client'
 
 import { createStockBatch } from '@/services/dashboard/fifoBatch.service'
-import { confirmExternalSettlement } from '@/services/mobile/areaTicketExternal.mobile.service'
+import { confirmExternalSettlement, markExternalNotCharged } from '@/services/mobile/areaTicketExternal.mobile.service'
 import { cancelAreaTicket, issueAreaTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
 
@@ -236,6 +237,24 @@ describe('Cancelación de un vale externo ya consumido', () => {
     return row.currentStock
   }
 
+  /**
+   * Task 8 (Step 4) — un vale cuyo cobro externo quedó ASSUMED ("se dio por
+   * cobrado sin verificar"). Hoy ningún código de producción produce este
+   * estado todavía (es el resultado de un "asumido automático" que este plan
+   * deja para una tarea futura) — así que el helper lo fuerza directo en la
+   * fila, igual que el resto de este archivo fuerza `recordWasteOnCancel` por
+   * `prisma.venueAreaTicketSettings.update` para armar el escenario que quiere
+   * probar en vez de esperar a que exista el camino que lo produce.
+   */
+  async function issueAssumedExternalTicket() {
+    const ticket = await issueExternalTicket({ quantity: '1' })
+    await prisma.areaTicketExternalSettlement.update({
+      where: { areaTicketId: ticket.id },
+      data: { status: AreaTicketExternalSettlementStatus.ASSUMED },
+    })
+    return ticket
+  }
+
   async function issueExternalRecipeTicket({ quantity }: { quantity: string }) {
     issueCounter += 1
     return issueAreaTicket(venueId, {
@@ -425,5 +444,51 @@ describe('Cancelación de un vale externo ya consumido', () => {
         reason: 'ya no',
       }),
     ).rejects.toMatchObject({ code: 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED' })
+  })
+
+  // ---------------------------------------------------------------------
+  // Task 8 (Step 4) — el hueco que encontró la revisión de Task 7: el guard
+  // de arriba sólo bloqueaba CONFIRMED. DISCREPANCY (Task 7) y ASSUMED
+  // también significan "la otra caja cobró, o se dio por cobrado" — cancelar
+  // encima revierte inventario de una venta que probablemente ocurrió. El
+  // tercer caso prueba que no es un callejón sin salida: `markExternalNotCharged`
+  // es la puerta explícita para salir de ASSUMED y sí poder cancelar después.
+  // ---------------------------------------------------------------------
+
+  it('no se puede cancelar un vale con DISCREPANCY — la otra caja cobró, aunque por otro importe', async () => {
+    const ticket = await issueExternalTicket({ quantity: '1' })
+    await confirmExternalSettlement(venueId, ticket.id, {
+      idempotencyKey: `d-${suffix}`,
+      deviceUid: externalIssueDeviceUid,
+      staffId,
+      externalAmount: '999.00',
+    })
+
+    await expect(
+      cancelAreaTicket(venueId, ticket.id, { idempotencyKey: `dx-${suffix}`, deviceUid: externalIssueDeviceUid, reason: 'x' }),
+    ).rejects.toMatchObject({ code: 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED' })
+  })
+
+  it('no se puede cancelar un vale ASSUMED sin declarar primero que no se cobró', async () => {
+    const ticket = await issueAssumedExternalTicket()
+
+    await expect(
+      cancelAreaTicket(venueId, ticket.id, { idempotencyKey: `ax-${suffix}`, deviceUid: externalIssueDeviceUid, reason: 'x' }),
+    ).rejects.toMatchObject({ code: 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED' })
+  })
+
+  it('tras marcarlo NOT_CHARGED, el mismo vale SÍ se puede cancelar y el stock vuelve', async () => {
+    const ticket = await issueAssumedExternalTicket()
+    await markExternalNotCharged(venueId, ticket.id, {
+      idempotencyKey: `nc-${suffix}`,
+      deviceUid: externalIssueDeviceUid,
+      staffId,
+      reason: 'El cliente no pasó a caja',
+    })
+    const before = await stockOf(externalInventoryId)
+
+    await cancelAreaTicket(venueId, ticket.id, { idempotencyKey: `ok-${suffix}`, deviceUid: externalIssueDeviceUid, reason: 'no pasó' })
+
+    expect((await stockOf(externalInventoryId)).toFixed(3)).toBe(before.plus(1).toFixed(3))
   })
 })

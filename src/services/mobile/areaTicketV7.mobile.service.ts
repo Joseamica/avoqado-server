@@ -915,6 +915,41 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   return mapTicket(created)
 }
 
+// Estados donde la otra caja YA cobró este vale, o se dio por cobrado sin que
+// nadie lo verificara — cancelar en cualquiera de estos dispara la reversa de
+// inventario (más abajo) sobre una venta que probablemente SÍ ocurrió.
+// CONFIRMED y DISCREPANCY: alguien AFIRMÓ que la otra caja cobró (con o sin
+// diferencia de importe, §caja externa fase 1 Task 7) — la devolución se hace
+// ahí, no aquí. ASSUMED: se dio por cobrado sin verificar — cancelar directo
+// sobre ese estado revertiría inventario de una venta que nadie ni confirmó
+// ni negó; la salida es declarar primero, con `markExternalNotCharged`
+// (archivo hermano, Task 8), que la otra caja NO cobró — eso mueve el
+// settlement a NOT_CHARGED, y ahí sí se puede cancelar. Amplía el guard
+// original de esta función (sólo CONFIRMED), que quedó corto en cuanto
+// DISCREPANCY y ASSUMED se volvieron estados alcanzables (Task 7).
+const YA_COBRADO_AFUERA: AreaTicketExternalSettlementStatus[] = [
+  AreaTicketExternalSettlementStatus.CONFIRMED,
+  AreaTicketExternalSettlementStatus.DISCREPANCY,
+  AreaTicketExternalSettlementStatus.ASSUMED,
+]
+
+// Un solo constructor para los DOS puntos del guard (abajo) — así no pueden
+// divergir en el mensaje. ASSUMED recibe una instrucción distinta de
+// CONFIRMED/DISCREPANCY: para ASSUMED nadie ha AFIRMADO un cobro todavía
+// (sólo se dio por hecho), así que decirle al usuario "la devolución se hace
+// ahí" presupondría un cobro que nadie confirmó — lo correcto es señalar el
+// paso previo real (`markExternalNotCharged`).
+function buildExternalAlreadyChargedError(status: AreaTicketExternalSettlementStatus): AppError {
+  if (status === AreaTicketExternalSettlementStatus.ASSUMED) {
+    return domainError(
+      409,
+      'AREA_TICKET_EXTERNAL_ALREADY_CHARGED',
+      'Este vale se dio por cobrado en la caja externa sin confirmarse. Antes de cancelarlo, declara si en realidad no se cobró.',
+    )
+  }
+  return domainError(409, 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED', 'Este vale ya se cobró en la caja externa. La devolución se hace ahí.')
+}
+
 /**
  * Cancela un vale ISSUED — el único estado cancelable hoy. No existía ninguna
  * cancelación a nivel de vale individual antes de este cambio (sólo
@@ -964,8 +999,8 @@ export async function cancelAreaTicket(venueId: string, ticketId: string, input:
     // trabajo de reversa ya ocurrió (o nunca hizo falta) la primera vez.
     return mapTicket(await prisma.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, include: ticketInclude }))
   }
-  if (existing.externalSettlement?.status === AreaTicketExternalSettlementStatus.CONFIRMED) {
-    throw domainError(409, 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED', 'Este vale ya se cobró en la caja externa. La devolución se hace ahí.')
+  if (existing.externalSettlement && YA_COBRADO_AFUERA.includes(existing.externalSettlement.status)) {
+    throw buildExternalAlreadyChargedError(existing.externalSettlement.status)
   }
   if (existing.status !== AreaTicketStatus.ISSUED) {
     throw domainError(409, 'AREA_TICKET_CANNOT_CANCEL', `Este vale está en estado ${existing.status} y no admite cancelación.`)
@@ -988,8 +1023,8 @@ export async function cancelAreaTicket(venueId: string, ticketId: string, input:
     if (fresh.status === AreaTicketStatus.CANCELLED) {
       return tx.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, include: ticketInclude })
     }
-    if (fresh.externalSettlement?.status === AreaTicketExternalSettlementStatus.CONFIRMED) {
-      throw domainError(409, 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED', 'Este vale ya se cobró en la caja externa. La devolución se hace ahí.')
+    if (fresh.externalSettlement && YA_COBRADO_AFUERA.includes(fresh.externalSettlement.status)) {
+      throw buildExternalAlreadyChargedError(fresh.externalSettlement.status)
     }
     if (fresh.status !== AreaTicketStatus.ISSUED) {
       throw domainError(409, 'AREA_TICKET_CANNOT_CANCEL', `Este vale está en estado ${fresh.status} y no admite cancelación.`)
