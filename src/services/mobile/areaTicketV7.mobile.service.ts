@@ -29,6 +29,7 @@ import {
   AreaTicketPrintAttemptKind,
   AreaTicketPrintAttemptStatus,
   AreaTicketStatus,
+  ExternalDeliveryTracking,
   FulfillmentMode,
   MovementType,
   PaymentMethod,
@@ -1963,14 +1964,34 @@ export async function listPendingAreaTicketFulfillment(
       venueId,
       fulfillmentAreaId: terminal.fulfillmentAreaId!,
       fulfillmentModeSnapshot: { not: FulfillmentMode.IMMEDIATE },
-      status: AreaTicketStatus.PAID,
       fulfillment: null,
-      order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
-      ...(cursor
-        ? {
-            OR: [{ issuedAt: { gt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { gt: cursor.id } }],
-          }
-        : {}),
+      // La lista es la UNIÓN, explícita por ruta — nunca "si no hay Order,
+      // inclúyelo". Nativos: pagados como siempre. Externos: cobro ya
+      // elegible (mismo conjunto que habilita entregar en `fulfillAreaTicket`)
+      // Y el área en modo TRACKED — un área UNTRACKED entrega mirando el
+      // papel y no debe acumular una cola que nadie va a vaciar.
+      AND: [
+        {
+          OR: [
+            {
+              settlementRoute: AreaSettlementRoute.AVOQADO,
+              status: AreaTicketStatus.PAID,
+              order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
+            },
+            {
+              settlementRoute: AreaSettlementRoute.EXTERNAL,
+              status: AreaTicketStatus.ISSUED,
+              fulfillmentArea: { externalDeliveryTracking: ExternalDeliveryTracking.TRACKED },
+              externalSettlement: { status: { in: YA_COBRADO_AFUERA } },
+            },
+          ],
+        },
+        // Segundo elemento de `AND` (no un `OR` en el mismo nivel que el de
+        // arriba): un objeto literal con dos claves `OR` colisionaría — la
+        // segunda pisaría a la primera en silencio — así que el cursor viaja
+        // en su PROPIA cláusula.
+        ...(cursor ? [{ OR: [{ issuedAt: { gt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { gt: cursor.id } }] }] : []),
+      ],
     },
     include: ticketInclude,
     orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
@@ -2046,6 +2067,10 @@ export async function fulfillAreaTicket(venueId: string, ticketId: string, input
           order: {
             select: { id: true, paymentStatus: true, status: true },
           },
+          // Sólo la rama EXTERNAL de abajo la lee — null en la ruta AVOQADO,
+          // igual que en `ticketInclude` (issueAreaTicket sólo crea el
+          // settlement cuando el área es EXTERNAL).
+          externalSettlement: { select: { status: true } },
         },
       })
       if (!ticket) throw domainError(404, 'AREA_TICKET_NOT_FOUND', 'No encontramos ese vale en este local.')
@@ -2060,16 +2085,43 @@ export async function fulfillAreaTicket(venueId: string, ticketId: string, input
       }
       const settings = await getSettingsRecord(venueId, tx)
       assertDeliveryMethodAllowed(settings?.deliveryVerificationMode ?? AreaTicketDeliveryVerificationMode.PAPER_OR_SCAN, input.method)
-      if (!ticket.order || ticket.order.paymentStatus !== 'PAID' || ticket.status !== AreaTicketStatus.PAID) {
-        throw domainError(409, 'AREA_TICKET_NOT_PAID', 'Este vale todavía no está completamente pagado.')
+
+      // Bifurcación EXPLÍCITA por ruta — nunca implícita ("si no hay orden,
+      // sáltate la validación"). Cada rama nombra su propia ruta y trae su
+      // propio predicado de elegibilidad; confundirlas convertiría cualquier
+      // `orderId` nulo ACCIDENTAL de la ruta nativa en una entrega gratis.
+      if (ticket.settlementRoute === AreaSettlementRoute.EXTERNAL) {
+        // Ruta externa: no hay Order que pagar — la autorización sale del
+        // cobro que alguien declaró en la caja externa. Mismo conjunto de
+        // estados que `YA_COBRADO_AFUERA` ya usa en `cancelAreaTicket` para
+        // "la otra caja cobró, o se dio por cobrado sin verificar": es el
+        // MISMO hecho visto desde el otro lado — ahí bloquea cancelar, aquí
+        // habilita entregar. DISCREPANCY entra a propósito: el producto ya se
+        // cobró en la otra caja, retenerlo castigaría al cliente por un error
+        // de captura del importe.
+        const externalStatus = ticket.externalSettlement?.status
+        if (!externalStatus || !YA_COBRADO_AFUERA.includes(externalStatus)) {
+          throw domainError(409, 'AREA_TICKET_EXTERNAL_NOT_CONFIRMED', 'Confirma el cobro en la caja antes de entregar este vale.')
+        }
+      } else {
+        // Ruta nativa (AVOQADO): idéntica a v7, sin tocar.
+        if (!ticket.order || ticket.order.paymentStatus !== 'PAID' || ticket.status !== AreaTicketStatus.PAID) {
+          throw domainError(409, 'AREA_TICKET_NOT_PAID', 'Este vale todavía no está completamente pagado.')
+        }
+        if (ticket.order.status === 'CANCELLED' || ticket.order.status === 'DELETED') {
+          throw domainError(409, 'AREA_TICKET_ORDER_REFUNDED', 'La venta fue cancelada o reembolsada.')
+        }
       }
-      if (ticket.order.status === 'CANCELLED' || ticket.order.status === 'DELETED') {
-        throw domainError(409, 'AREA_TICKET_ORDER_REFUNDED', 'La venta fue cancelada o reembolsada.')
-      }
+
       const fulfillment = await tx.areaTicketFulfillment.create({
         data: {
           areaTicketId: ticket.id,
-          orderId: ticket.order.id,
+          // `?? null` cubre las DOS rutas con la misma línea: en AVOQADO el
+          // guard de arriba ya garantizó que `ticket.orderId` existe; en
+          // EXTERNAL el CHECK `area_ticket_external_no_avoqado_circuit`
+          // (Task 2) garantiza que siempre es null — esta ruta nunca crea Order.
+          orderId: ticket.orderId ?? null,
+          settlementRoute: ticket.settlementRoute,
           fulfillmentAreaId: terminal.fulfillmentAreaId!,
           method: input.method,
           idempotencyKey,
@@ -2081,18 +2133,27 @@ export async function fulfillAreaTicket(venueId: string, ticketId: string, input
           terminal: { select: { id: true, name: true } },
         },
       })
-      const transitioned = await tx.areaTicket.updateMany({
-        where: {
-          id: ticket.id,
-          venueId,
-          status: AreaTicketStatus.PAID,
-          version: ticket.version,
-        },
-        data: { status: AreaTicketStatus.DELIVERED, version: { increment: 1 } },
-      })
-      if (transitioned.count !== 1) {
-        throw domainError(409, 'AREA_TICKET_FULFILLMENT_CONFLICT', 'Otra terminal entregó el vale al mismo tiempo.')
+
+      if (ticket.settlementRoute !== AreaSettlementRoute.EXTERNAL) {
+        // Sólo la ruta nativa transiciona `AreaTicket.status` (PAID → DELIVERED),
+        // con concurrencia optimista sobre `version`. La ruta EXTERNAL NUNCA
+        // toca `status` — el CHECK de la Task 2 sólo permite
+        // ISSUED/CANCELLED/EXPIRED ahí; la entrega se lee de la EXISTENCIA del
+        // fulfillment que se acaba de crear arriba, no de un estado del vale.
+        const transitioned = await tx.areaTicket.updateMany({
+          where: {
+            id: ticket.id,
+            venueId,
+            status: AreaTicketStatus.PAID,
+            version: ticket.version,
+          },
+          data: { status: AreaTicketStatus.DELIVERED, version: { increment: 1 } },
+        })
+        if (transitioned.count !== 1) {
+          throw domainError(409, 'AREA_TICKET_FULFILLMENT_CONFLICT', 'Otra terminal entregó el vale al mismo tiempo.')
+        }
       }
+
       return { fulfillment, created: true }
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
