@@ -11,6 +11,7 @@ import {
 } from '@prisma/client'
 
 import { createStockBatch } from '@/services/dashboard/fifoBatch.service'
+import { confirmExternalSettlement } from '@/services/mobile/areaTicketExternal.mobile.service'
 import { cancelAreaTicket, issueAreaTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
 
@@ -400,5 +401,29 @@ describe('Cancelación de un vale externo ya consumido', () => {
       expect(r.status).toBe('RELEASED')
       expect(r.reversalMovementId).not.toBeNull()
     }
+  })
+
+  // ---------------------------------------------------------------------
+  // Task 7 — el caso que Task 5 dejó pendiente (ver docstring del archivo):
+  // el guard `AREA_TICKET_EXTERNAL_ALREADY_CHARGED` ya vivía en `cancelAreaTicket`
+  // desde Task 5, pero no se podía probar sin `confirmExternalSettlement`,
+  // que nace en Task 7. Ahora sí.
+  // ---------------------------------------------------------------------
+
+  it('no se puede cancelar un vale con el cobro CONFIRMED — eso es una devolución, y ocurre en la otra caja', async () => {
+    const ticket = await issueExternalTicket({ quantity: '1' })
+    await confirmExternalSettlement(venueId, ticket.id, {
+      idempotencyKey: `conf-${suffix}`,
+      deviceUid: externalIssueDeviceUid,
+      staffId,
+    })
+
+    await expect(
+      cancelAreaTicket(venueId, ticket.id, {
+        idempotencyKey: `cx-${suffix}`,
+        deviceUid: externalIssueDeviceUid,
+        reason: 'ya no',
+      }),
+    ).rejects.toMatchObject({ code: 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED' })
   })
 })

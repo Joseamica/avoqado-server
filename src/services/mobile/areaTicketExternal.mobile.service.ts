@@ -19,7 +19,16 @@
  * que las Tasks 7 (confirmar), 8 (marcar no-cobrado) y 9 (cola) reutilizan.
  */
 
-import { AreaSettlementRoute, AreaTicketExternalHandoffState, AreaTicketPrintStatus } from '@prisma/client'
+import {
+  AreaSettlementRoute,
+  AreaTicketExternalHandoffState,
+  AreaTicketExternalIncidentKind,
+  AreaTicketExternalIncidentStatus,
+  AreaTicketExternalSettlementStatus,
+  AreaTicketPrintStatus,
+  AreaTicketStatus,
+  Prisma,
+} from '@prisma/client'
 
 import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
@@ -145,4 +154,216 @@ export async function markExternalHandoff(
   })
 
   return { areaTicketId: ticket.id, handoffState: AreaTicketExternalHandoffState.HANDED_OFF, alreadyHandedOff: false }
+}
+
+export interface ConfirmExternalSettlementInput extends ExternalSettlementInput {
+  externalAmount?: string | null // decimal string en pesos, p.ej. "168.00"
+  externalReference?: string | null
+  notes?: string | null
+}
+
+interface ConfirmExternalSettlementResult {
+  areaTicketId: string
+  status: 'CONFIRMED' | 'DISCREPANCY'
+  referenceAmount: string
+  externalAmount: string | null
+  variance: string | null
+  alreadyConfirmed: boolean
+}
+
+/**
+ * Arma la respuesta idempotente a partir de una fila YA resuelta (CONFIRMED o
+ * DISCREPANCY). Se usa en dos momentos: si al leer el settlement ya venía
+ * resuelto (alguien lo confirmó antes), o si perdimos la carrera contra otro
+ * dispositivo confirmando el MISMO vale entre nuestra lectura y nuestro
+ * intento de escritura — en ambos casos se reporta lo que de verdad quedó
+ * guardado, nunca el intento propio.
+ */
+function buildAlreadyConfirmedResult(
+  areaTicketId: string,
+  // `status` viaja SEPARADO del objeto `settlement` (no como su campo) a
+  // propósito: TS no propaga el narrowing de `settlement.status === X` al
+  // tipo del objeto `settlement` completo cuando ese objeto se pasa entero a
+  // otra función (limitación conocida de control-flow analysis) — pero SÍ
+  // preserva el narrowing de la EXPRESIÓN `settlement.status` leída de nuevo
+  // en el sitio de la llamada. Pasarlo aparte es lo que hace que el llamador
+  // no pueda pasar cualquier string; tiene que venir de un narrowing real.
+  status: 'CONFIRMED' | 'DISCREPANCY',
+  settlement: {
+    referenceAmount: Prisma.Decimal
+    externalAmount: Prisma.Decimal | null
+  },
+): ConfirmExternalSettlementResult {
+  const reference = new Prisma.Decimal(settlement.referenceAmount)
+  const external = settlement.externalAmount === null ? null : new Prisma.Decimal(settlement.externalAmount)
+  return {
+    areaTicketId,
+    status,
+    referenceAmount: reference.toFixed(2),
+    externalAmount: external === null ? null : external.toFixed(2),
+    variance: external === null ? null : external.sub(reference).toFixed(2),
+    alreadyConfirmed: true,
+  }
+}
+
+/**
+ * El momento en que UNA PERSONA afirma que la caja externa cobró este vale —
+ * y, si captura el importe real, calcula la diferencia contra lo que Avoqado
+ * había calculado (`referenceAmount`, congelado al emitir). Avoqado nunca vio
+ * ese dinero: esta función NUNCA produce un `Payment` ni usa la palabra
+ * "pagado" — el resultado es "cobro confirmado" (importes iguales, o sin
+ * importe capturado) o "cobro asumido con discrepancia" (importes distintos).
+ *
+ * Una discrepancia abre una incidencia pero NO bloquea nada — el producto ya
+ * está pagado en la otra caja; retenerlo castigaría al cliente por un error
+ * de captura (la Task 10 hace explícita esa no-obstrucción en la entrega).
+ */
+export async function confirmExternalSettlement(
+  venueId: string,
+  ticketId: string,
+  input: ConfirmExternalSettlementInput,
+): Promise<ConfirmExternalSettlementResult> {
+  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
+
+  // Mismo alcance que `markExternalHandoff`: sólo valida que el dispositivo
+  // pertenezca a este venue. A diferencia del handoff, aquí `terminal.id` SÍ
+  // se usa más abajo — queda grabado en `terminalId` (desde qué caja se
+  // confirmó), no es sólo una validación de pertenencia.
+  const terminal = await resolveTerminal(venueId, input.deviceUid)
+  const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
+
+  const ticket = await loadExternalTicket(venueId, ticketId)
+  const settlement = ticket.externalSettlement! // el guard ya garantiza que no es null
+
+  if (ticket.status !== AreaTicketStatus.ISSUED) {
+    // En la ruta EXTERNAL, el CHECK de la Task 2 impide que `status` llegue a
+    // CLAIMED/PAID/DELIVERED — la entrega (Task 10) se lee del
+    // `AreaTicketFulfillment`, no de `status`. Así que si no es ISSUED aquí,
+    // sólo puede ser CANCELLED o EXPIRED: un vale muerto, nada que confirmar.
+    // Mismo código y mensaje que usa el resto de este dominio para "vale
+    // muerto" (`areaTicketV7.mobile.service.ts`).
+    throw domainError(409, 'AREA_TICKET_NOT_ISSUED', `Este vale está en estado ${ticket.status}.`)
+  }
+
+  if (
+    settlement.status === AreaTicketExternalSettlementStatus.CONFIRMED ||
+    settlement.status === AreaTicketExternalSettlementStatus.DISCREPANCY
+  ) {
+    // Idempotente por ESTADO, igual que `markExternalHandoff`: NO compara la
+    // `idempotencyKey` recibida contra ninguna guardada. La columna
+    // `idempotencyKey` de esta fila es la de EMITIR (fijada en la Task 6);
+    // confirmar no tiene una columna de idempotencia propia, así que el
+    // ancla real es `status` saliendo de PENDING.
+    return buildAlreadyConfirmedResult(ticket.id, settlement.status, settlement)
+  }
+  if (settlement.status !== AreaTicketExternalSettlementStatus.PENDING) {
+    // ASSUMED / NOT_CHARGED: los produce OTRA operación (un "asumido"
+    // automático futuro, y `markExternalNotCharged` de la Task 8,
+    // respectivamente) — no ésta. Esta función SÓLO puede terminar en
+    // CONFIRMED o DISCREPANCY; fingir uno de esos dos sobre un cobro que ya
+    // se resolvió de otra forma sería mentir sobre qué pasó.
+    throw domainError(
+      409,
+      'AREA_TICKET_EXTERNAL_SETTLEMENT_NOT_PENDING',
+      `El cobro de este vale ya se resolvió como ${settlement.status} y no se puede confirmar.`,
+    )
+  }
+
+  const reference = new Prisma.Decimal(settlement.referenceAmount)
+  const external = input.externalAmount == null ? null : new Prisma.Decimal(input.externalAmount)
+  const variance = external === null ? null : external.sub(reference)
+  const status =
+    variance !== null && !variance.isZero() ? AreaTicketExternalSettlementStatus.DISCREPANCY : AreaTicketExternalSettlementStatus.CONFIRMED
+
+  // `variance` se DERIVA de referenceAmount y externalAmount, no se persiste:
+  // una columna calculada que se puede desincronizar de sus dos insumos es
+  // una fuente de mentiras. Se formatea UNA vez aquí y se reutiliza para la
+  // respuesta, la incidencia y la bitácora, para que los tres nunca diverjan.
+  const referenceAmount = reference.toFixed(2)
+  const externalAmount = external === null ? null : external.toFixed(2)
+  const variancePesos = variance === null ? null : variance.toFixed(2)
+  const now = new Date()
+  const externalReference = input.externalReference?.trim() || null
+  const notes = input.notes?.trim() || null
+
+  const wroteHere = await prisma.$transaction(async tx => {
+    // `updateMany` condicionado a PENDING — no un `update` ciego — por la
+    // misma razón que el handoff: dos dispositivos confirmando el MISMO vale
+    // a la vez sólo dejan escribir a uno.
+    const result = await tx.areaTicketExternalSettlement.updateMany({
+      where: { areaTicketId: ticket.id, venueId, status: AreaTicketExternalSettlementStatus.PENDING },
+      data: {
+        status,
+        externalAmount: external,
+        externalReference,
+        notes,
+        confirmedByStaffId: staffId ?? null,
+        confirmedAt: now,
+        terminalId: terminal.id,
+      },
+    })
+    if (result.count === 0) return false
+
+    if (status === AreaTicketExternalSettlementStatus.DISCREPANCY) {
+      // Una fila VIVA por (vale, tipo): si ya existía (p.ej. reabierta por el
+      // job de conciliación de la Task 12 antes de que alguien volviera a
+      // confirmar), esto la REABRE en vez de duplicarla — mismo `detail`
+      // actualizado, `occurrenceCount` +1, `reopenedAt` pisado a ahora. La
+      // primera vez (el caso normal de ESTA función) es un INSERT liso,
+      // porque el `@@unique([areaTicketId, kind])` no encuentra fila previa.
+      await tx.areaTicketExternalIncident.upsert({
+        where: { areaTicketId_kind: { areaTicketId: ticket.id, kind: AreaTicketExternalIncidentKind.AMOUNT_VARIANCE } },
+        create: {
+          venueId,
+          areaTicketId: ticket.id,
+          kind: AreaTicketExternalIncidentKind.AMOUNT_VARIANCE,
+          status: AreaTicketExternalIncidentStatus.OPEN,
+          detail: { referenceAmount, externalAmount, variance: variancePesos },
+        },
+        update: {
+          status: AreaTicketExternalIncidentStatus.OPEN,
+          detail: { referenceAmount, externalAmount, variance: variancePesos },
+          occurrenceCount: { increment: 1 },
+          reopenedAt: now,
+        },
+      })
+    }
+    return true
+  })
+
+  if (!wroteHere) {
+    // Perdimos la carrera: alguien más confirmó este MISMO vale entre nuestra
+    // lectura (arriba) y nuestro intento de escritura. Releer y responder con
+    // lo que de verdad quedó guardado — nunca con nuestro propio intento.
+    const fresh = await prisma.areaTicketExternalSettlement.findUniqueOrThrow({ where: { areaTicketId: ticket.id } })
+    if (fresh.status !== AreaTicketExternalSettlementStatus.CONFIRMED && fresh.status !== AreaTicketExternalSettlementStatus.DISCREPANCY) {
+      // Defensivo: hoy inalcanzable (nada más escribe este settlement entre
+      // nuestra lectura y nuestra escritura salvo otra confirmación), pero si
+      // algún día lo fuera, seguimos sin poder fingir CONFIRMED/DISCREPANCY.
+      throw domainError(
+        409,
+        'AREA_TICKET_EXTERNAL_SETTLEMENT_NOT_PENDING',
+        `El cobro de este vale ya se resolvió como ${fresh.status} y no se puede confirmar.`,
+      )
+    }
+    return buildAlreadyConfirmedResult(ticket.id, fresh.status, fresh)
+  }
+
+  void logAction({
+    action: 'AREA_TICKET_EXTERNAL_CHARGE_CONFIRMED',
+    entity: 'AreaTicketExternalSettlement',
+    entityId: settlement.id,
+    staffId: staffId ?? null,
+    venueId,
+    data: { areaTicketId: ticket.id, idempotencyKey, referenceAmount, externalAmount, variance: variancePesos, status },
+  })
+
+  return {
+    areaTicketId: ticket.id,
+    status,
+    referenceAmount,
+    externalAmount,
+    variance: variancePesos,
+    alreadyConfirmed: false,
+  }
 }
