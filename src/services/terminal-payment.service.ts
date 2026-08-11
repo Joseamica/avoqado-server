@@ -649,6 +649,24 @@ class TerminalPaymentService {
           data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: payment.id, lateResult: true },
         })
         completed += r.count
+        // 🔴 El MISMO evento de dinero se descubre por dos rutas y sólo una avisaba:
+        // closeRowFromPaymentTx dispara el 🚨 cuando la fila venía cancelada, y esta no
+        // disparaba nada. Si el hallazgo llegaba por aquí, nadie se enteraba de que el
+        // cajero canceló y el dinero se fue igual.
+        //
+        // No se puede prevenir en la caja: medido en esta base, el registro tardío llega
+        // entre 65 s y 3 HORAS después del cobro. Retener la venta ese tiempo sería mucho
+        // peor que el problema — dejaría un fantasma bloqueando cada venta cancelada
+        // durante toda una tarde. Si no se puede prevenir, lo mínimo es que un humano se
+        // entere y pueda devolver el dinero.
+        //
+        // 🚨 token estable que machea la regla de Better Stack — NO renombrar.
+        if (r.count > 0 && row.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED) {
+          logger.error(
+            `🚨 [Terminal-payment watchdog] Payment recorded for an already-${row.status} request — reconciled to COMPLETED (money moved despite cancel)`,
+            { requestId: row.requestId, paymentId: payment.id, priorStatus: row.status },
+          )
+        }
         continue
       }
 

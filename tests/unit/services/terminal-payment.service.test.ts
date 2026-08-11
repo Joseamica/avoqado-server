@@ -595,3 +595,69 @@ describe('TerminalPaymentService — el watchdog no cierra con el pago de otro',
     expect(res.unknown).toBe(0)
   })
 })
+
+describe('TerminalPaymentService — un cobro que pasó pese al cancel SIEMPRE avisa', () => {
+  // 🔴 El mismo evento de dinero se descubre por DOS rutas, y sólo una avisaba.
+  //
+  // `closeRowFromPaymentTx` (la TPV registra el pago por REST) dispara el 🚨 cuando la fila
+  // venía cancelada: "a human must know a cancelled attempt actually took money".
+  // El WATCHDOG hace el mismo ascenso a COMPLETED y no avisaba nada — así que si el
+  // descubrimiento llegaba por ahí, nadie se enteraba de que el cajero canceló y el dinero
+  // se fue igual.
+  //
+  // Importa porque no hay forma de prevenirlo en la caja: medido en esta base, el registro
+  // tardío llega entre 65 s y 3 HORAS después. Retener la venta ese tiempo sería peor que el
+  // problema. Si no se puede prevenir, lo mínimo es que un humano se entere.
+
+  it('el watchdog también dispara la alerta cuando el dinero se movió pese a la cancelación', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    errSpy.mockClear()
+
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-c1',
+        requestId: 'REQ-C1',
+        venueId: 'venue-1',
+        terminalId: 't-c1',
+        orderId: 'order-c1',
+        status: 'CANCEL_REQUESTED',
+        createdAt: new Date('2026-08-11T10:00:00Z'),
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c1' })
+    tpr().findFirst.mockResolvedValueOnce(null)
+    tpr().updateMany.mockResolvedValueOnce({ count: 1 })
+
+    await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    const alerted = errSpy.mock.calls.some(c => String(c[0]).includes('🚨') && String(c[0]).toLowerCase().includes('cancel'))
+    expect(alerted).toBe(true)
+  })
+
+  it('un cobro normal que sólo llegó tarde NO dispara la alarma — no se cansa a nadie con ruido', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    errSpy.mockClear()
+
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-c2',
+        requestId: 'REQ-C2',
+        venueId: 'venue-1',
+        terminalId: 't-c2',
+        orderId: 'order-c2',
+        status: 'SENT', // nadie canceló: es una reconciliación normal
+        createdAt: new Date('2026-08-11T10:00:00Z'),
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c2' })
+    tpr().findFirst.mockResolvedValueOnce(null)
+    tpr().updateMany.mockResolvedValueOnce({ count: 1 })
+
+    await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    const alerted = errSpy.mock.calls.some(c => String(c[0]).includes('🚨'))
+    expect(alerted).toBe(false)
+  })
+})
