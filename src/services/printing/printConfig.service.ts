@@ -24,6 +24,8 @@ export interface PrintConfigPayload {
     address: string | null
     stableKey: string | null
     paperWidthMm: number
+    /** Corrimiento a la derecha en columnas, para `GS L`. Ver `Printer.leftMarginChars`. */
+    leftMarginChars: number
     charset: string
     active: boolean
     lastStatus: string | null
@@ -74,6 +76,7 @@ export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayl
       address: p.address,
       stableKey: p.stableKey,
       paperWidthMm: p.paperWidthMm,
+      leftMarginChars: p.leftMarginChars,
       charset: p.charset,
       active: p.active,
       lastStatus: p.lastStatus,

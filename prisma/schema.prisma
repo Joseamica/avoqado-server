@@ -12985,6 +12985,22 @@ model Printer {
   charset        String                @default("CP858") // ñ/acentos
   active         Boolean               @default(true)
 
+  /// Margen izquierdo en COLUMNAS de fuente A, para `GS L`. 0 = rollo pegado al
+  /// origen del cabezal (impresora nativa de 58 mm, o rollo alineado a la
+  /// izquierda) y es el default seguro.
+  ///
+  /// Existe porque un rollo angosto montado con adaptadores en un cabezal de
+  /// 80 mm NO queda en el origen, y NADA lo reporta: no hay sensor de ancho ni
+  /// de posición en esta categoría de impresora, así que de qué lado se puso el
+  /// adaptador sólo lo sabe quien lo puso. Sin este corrimiento el POS escribe
+  /// a la izquierda de donde empieza el papel y el ticket sale mocho.
+  ///
+  /// En COLUMNAS y no en mm a propósito: la fuente A mide 12 puntos de ancho
+  /// tanto a 180 como a 203 dpi, así que el número que se cuenta en la regla de
+  /// la página de prueba es el mismo que entra al comando, sin conversiones que
+  /// se rompan según el modelo.
+  leftMarginChars Int @default(0)
+
   // Mirror of the existing PRINTER_STATUS socket telemetry (ONLINE|OFFLINE|PAPER_LOW|PAPER_OUT|ERROR)
   lastStatus String?
   lastSeenAt DateTime?
