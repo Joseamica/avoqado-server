@@ -78,6 +78,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'area-tickets:checkout': ['area-tickets:checkout', 'orders:read', 'orders:create', 'orders:update', 'payments:read', 'payments:create'],
   'area-tickets:cancel': ['area-tickets:cancel', 'area-tickets:checkout', 'orders:cancel', 'payments:read'],
   'area-tickets:deliver': ['area-tickets:deliver', 'orders:read', 'payments:read'],
+  // area-tickets:confirm-external (ruta EXTERNAL) SIN ENTRADA A PROPÓSITO — no es un olvido.
+  // Confirma un AreaTicketExternalSettlement usando datos ya congelados en el propio vale
+  // (AreaTicketLine.productNameSnapshot/skuSnapshot), así que no necesita menu:read/products:read
+  // como 'issue'. Y a diferencia de checkout/cancel/deliver, un vale de ruta EXTERNAL nunca tiene
+  // Order ni Payment (constraint en schema.prisma) — depender de orders:read/payments:read
+  // gatearía datos que estructuralmente no existen para este flujo.
   'area-tickets:configure': [
     'area-tickets:configure',
     'area-tickets:issue',
@@ -733,6 +739,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'area-tickets:cancel',
     'area-tickets:deliver',
     'area-tickets:configure',
+    // Confirmar cobro en caja externa (ruta EXTERNAL): es una afirmación sobre dinero que
+    // alguien con autoridad hace a mano — trabajo de gerencia, no de cajero (ver CASHIER abajo).
+    'area-tickets:confirm-external',
     'scale:use',
     'scale:configure',
     // Reservations & class sessions — managers operate the calendar (Square-style:
@@ -1477,7 +1486,7 @@ export function validatePermissionFormat(permission: string): string | null {
  * ⚠️ CRITICAL: This must match the frontend PERMISSION_CATEGORIES in:
  * `avoqado-web-dashboard/src/lib/permissions/roleHierarchy.ts`
  */
-const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
+export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   home: ['home:read'],
   'catalog-venue': ['catalog-venue:read', 'catalog-venue:request-override'],
   activity: ['activity:read'],
@@ -1487,7 +1496,14 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],
-  'area-tickets': ['area-tickets:issue', 'area-tickets:checkout', 'area-tickets:cancel', 'area-tickets:deliver', 'area-tickets:configure'],
+  'area-tickets': [
+    'area-tickets:issue',
+    'area-tickets:checkout',
+    'area-tickets:cancel',
+    'area-tickets:deliver',
+    'area-tickets:configure',
+    'area-tickets:confirm-external', // Confirmar cobro en caja externa (ruta EXTERNAL — Avoqado nunca vio ese cobro)
+  ],
   scale: ['scale:use', 'scale:configure'],
   payments: ['payments:read', 'payments:create', 'payments:refund', 'payments:routing-read', 'payments:routing-manage'],
   printers: ['printers:read', 'printers:manage'],
