@@ -13581,13 +13581,22 @@ model AreaTicketExternalIncident {
   detail Json
 
   openedAt          DateTime  @default(now())
+  /// Cuántas veces se ha abierto este problema para este vale. Arranca en 1 al crear
+  /// la fila; reabrir la incrementa en vez de insertar una fila nueva.
+  occurrenceCount   Int       @default(1)
+  /// Cuándo se reabrió por última vez. `null` mientras nunca se ha reabierto.
+  reopenedAt        DateTime?
   resolvedAt        DateTime?
   resolvedByStaffId String?
   resolvedByStaff   Staff?    @relation("AreaTicketExternalIncidentStaff", fields: [resolvedByStaffId], references: [id], onDelete: SetNull)
   resolution        String?
 
-  /// Una incidencia VIVA por tipo y por vale. Sin esto el job de conciliación abre una
-  /// fila nueva cada vez que corre y la cola se vuelve ilegible en un día.
+  /// Una fila VIVA por (vale, tipo) — no una fila por ocurrencia. Reabrir un problema
+  /// que ya estaba RESOLVED/DISMISSED actualiza esta MISMA fila (`occurrenceCount++`,
+  /// `reopenedAt` pisado) en vez de insertar una nueva: es a propósito, no un bug del
+  /// unique. La conciliación (tareas 7 y 12) hace `upsert` sobre esta llave para ser
+  /// idempotente sin una carrera de `findFirst`+`create`; y un vale externo vive
+  /// horas, no meses, así que un historial de ocurrencias separadas no aporta.
   @@unique([areaTicketId, kind])
   @@index([venueId, status, kind, openedAt])
 }
