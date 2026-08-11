@@ -10,6 +10,7 @@ import {
   Unit,
 } from '@prisma/client'
 
+import { createStockBatch } from '@/services/dashboard/fifoBatch.service'
 import { cancelAreaTicket, issueAreaTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
 
@@ -36,6 +37,11 @@ describe('Cancelación de un vale externo ya consumido', () => {
   let externalInventoryId: string
   let externalIssueDeviceUid: string
   let issueCounter = 0
+  // Rama RAW_MATERIAL (releaseRawMaterialReservation) — fix round 1: sin esto
+  // ningún test ejercitaba esa rama y el lost-update de Finding 1 quedaba
+  // indetectable.
+  let recipeProductId: string
+  let rawMaterialId: string
 
   beforeAll(async () => {
     const organization = await prisma.organization.create({
@@ -128,16 +134,82 @@ describe('Cancelación de un vale externo ya consumido', () => {
       data: { venueId, productId, currentStock: new Prisma.Decimal('50.000') },
     })
     externalInventoryId = inventory.id
+
+    // Insumo + receta — para ejercitar releaseRawMaterialReservation (rama
+    // RAW_MATERIAL). Un solo ingrediente, 100g por porción, así el cálculo de
+    // "antes/después" es directo.
+    const rawMaterial = await prisma.rawMaterial.create({
+      data: {
+        venueId,
+        name: `Queso insumo cancel ${suffix}`,
+        sku: `EXT-CANCEL-RM-${suffix}`,
+        category: 'OTHER',
+        currentStock: new Prisma.Decimal('5000.000'),
+        unit: Unit.GRAM,
+        unitType: 'WEIGHT',
+        minimumStock: new Prisma.Decimal('0'),
+        reorderPoint: new Prisma.Decimal('0'),
+        costPerUnit: new Prisma.Decimal('0.05'),
+        avgCostPerUnit: new Prisma.Decimal('0.05'),
+      },
+    })
+    rawMaterialId = rawMaterial.id
+    // consumeRawMaterialReservation asigna por FIFO de StockBatch, no
+    // directo contra RawMaterial.currentStock — sin un lote ACTIVE no hay de
+    // dónde asignar y la emisión truena con "Los lotes FIFO no cubren la
+    // reserva del vale" antes de llegar a nada de lo que prueba este archivo.
+    await createStockBatch(venueId, rawMaterialId, { quantity: 5000, unit: Unit.GRAM, costPerUnit: 0.05, receivedDate: new Date() })
+
+    const recipeProduct = await prisma.product.create({
+      data: {
+        venueId,
+        categoryId: category.id,
+        sku: `EXT-CANCEL-RECIPE-${suffix}`,
+        name: 'Producto receta cancelación externa',
+        price: new Prisma.Decimal('30.00'),
+        taxRate: new Prisma.Decimal(0),
+        tags: [],
+        allergens: [],
+        soldByWeight: false,
+        trackInventory: true,
+        inventoryMethod: InventoryMethod.RECIPE,
+        unit: Unit.PIECE,
+      },
+    })
+    recipeProductId = recipeProduct.id
+
+    await prisma.recipe.create({
+      data: {
+        productId: recipeProductId,
+        portionYield: 1,
+        totalCost: new Prisma.Decimal('5.00'),
+        lines: {
+          create: [
+            {
+              rawMaterialId,
+              quantity: new Prisma.Decimal('100.000'),
+              unit: Unit.GRAM,
+              isOptional: false,
+            },
+          ],
+        },
+      },
+    })
   })
 
   afterAll(async () => {
     if (!venueId) return
     await prisma.inventoryMovement.deleteMany({ where: { inventory: { venueId } } })
+    await prisma.rawMaterialMovement.deleteMany({ where: { venueId } })
+    await prisma.stockBatch.deleteMany({ where: { venueId } })
     await prisma.areaTicketInventoryReservation.deleteMany({ where: { venueId } })
     await prisma.areaTicketExternalSettlement.deleteMany({ where: { venueId } })
     await prisma.areaTicket.deleteMany({ where: { venueId } })
     await prisma.inventory.deleteMany({ where: { venueId } })
+    // product cascada a Recipe → RecipeLine; rawMaterial va DESPUÉS para que
+    // esas RecipeLine ya no lo referencien (su FK no cascada desde RawMaterial).
     await prisma.product.deleteMany({ where: { venueId } })
+    await prisma.rawMaterial.deleteMany({ where: { venueId } })
     await prisma.menuCategory.deleteMany({ where: { venueId } })
     await prisma.terminal.deleteMany({ where: { venueId } })
     await prisma.fulfillmentArea.deleteMany({ where: { venueId } })
@@ -160,6 +232,20 @@ describe('Cancelación de un vale externo ya consumido', () => {
 
   async function stockOf(inventoryId: string): Promise<Prisma.Decimal> {
     const row = await prisma.inventory.findUniqueOrThrow({ where: { id: inventoryId } })
+    return row.currentStock
+  }
+
+  async function issueExternalRecipeTicket({ quantity }: { quantity: string }) {
+    issueCounter += 1
+    return issueAreaTicket(venueId, {
+      idempotencyKey: `issue-recipe-${suffix}-${issueCounter}`,
+      deviceUid: externalIssueDeviceUid,
+      lines: [{ clientLineId: 'l1', productId: recipeProductId, quantity }],
+    })
+  }
+
+  async function rawMaterialStockOf(): Promise<Prisma.Decimal> {
+    const row = await prisma.rawMaterial.findUniqueOrThrow({ where: { id: rawMaterialId } })
     return row.currentStock
   }
 
@@ -218,5 +304,101 @@ describe('Cancelación de un vale externo ya consumido', () => {
     const r = await prisma.areaTicketInventoryReservation.findFirst({ where: { areaTicketId: ticket.id } })
     expect(r!.status).toBe('WASTE')
     expect(r!.reversalMovementId).not.toBeNull()
+  })
+
+  // ---------------------------------------------------------------------
+  // Fix round 1/5 — rama RAW_MATERIAL (releaseRawMaterialReservation).
+  // Finding 2 de la revisión: ningún test commiteado ejercitaba esta rama,
+  // así que su bug de Finding 1 (lost-update en RawMaterial.currentStock)
+  // era indetectable. Los tres casos de abajo la cubren: devolución simple,
+  // merma, y la concurrencia que expone el lost-update.
+  // ---------------------------------------------------------------------
+
+  it('RAW_MATERIAL: devuelve el insumo a existencia y marca la reserva RELEASED', async () => {
+    await prisma.venueAreaTicketSettings.update({ where: { venueId }, data: { recordWasteOnCancel: false } })
+    const ticket = await issueExternalRecipeTicket({ quantity: '1' })
+    const before = await rawMaterialStockOf()
+
+    await cancelAreaTicket(venueId, ticket.id, {
+      idempotencyKey: `cancel-recipe-${suffix}-1`,
+      deviceUid: externalIssueDeviceUid,
+      reason: 'El cliente se arrepintió',
+    })
+
+    // 1 porción × 100g/porción = 100g. Comparar en Decimal, no en Number.
+    expect((await rawMaterialStockOf()).toFixed(3)).toBe(before.plus(100).toFixed(3))
+    const r = await prisma.areaTicketInventoryReservation.findFirst({
+      where: { areaTicketId: ticket.id, inventoryKind: 'RAW_MATERIAL' },
+    })
+    expect(r!.status).toBe('RELEASED')
+    expect(r!.reversalMovementId).not.toBeNull()
+  })
+
+  it('RAW_MATERIAL con recordWasteOnCancel: el insumo NO vuelve, se registra merma', async () => {
+    await prisma.venueAreaTicketSettings.update({ where: { venueId }, data: { recordWasteOnCancel: true } })
+    const ticket = await issueExternalRecipeTicket({ quantity: '1' })
+    const before = await rawMaterialStockOf()
+
+    await cancelAreaTicket(venueId, ticket.id, {
+      idempotencyKey: `cancel-recipe-${suffix}-2`,
+      deviceUid: externalIssueDeviceUid,
+      reason: 'Se echó a perder',
+    })
+
+    expect((await rawMaterialStockOf()).toFixed(3)).toBe(before.toFixed(3))
+    const r = await prisma.areaTicketInventoryReservation.findFirst({
+      where: { areaTicketId: ticket.id, inventoryKind: 'RAW_MATERIAL' },
+    })
+    expect(r!.status).toBe('WASTE')
+    expect(r!.reversalMovementId).not.toBeNull()
+  })
+
+  it('RAW_MATERIAL: dos cancelaciones concurrentes contra el MISMO insumo no se pisan (Finding 1 — lost update)', async () => {
+    // Nada bloquea la fila de RawMaterial entre las dos cancelaciones — sólo
+    // AreaTicket, y son vales DISTINTOS. Si releaseRawMaterialReservation lee
+    // currentStock sin FOR UPDATE y escribe de vuelta un valor calculado en
+    // JS, la segunda escritura puede pisar a la primera silenciosamente.
+    await prisma.venueAreaTicketSettings.update({ where: { venueId }, data: { recordWasteOnCancel: false } })
+    const ticketA = await issueExternalRecipeTicket({ quantity: '1' }) // -100g
+    const ticketB = await issueExternalRecipeTicket({ quantity: '1' }) // -100g
+    const before = await rawMaterialStockOf()
+
+    const results = await Promise.allSettled([
+      cancelAreaTicket(venueId, ticketA.id, {
+        idempotencyKey: `cancel-race-${suffix}-a`,
+        deviceUid: externalIssueDeviceUid,
+        reason: 'race a',
+      }),
+      cancelAreaTicket(venueId, ticketB.id, {
+        idempotencyKey: `cancel-race-${suffix}-b`,
+        deviceUid: externalIssueDeviceUid,
+        reason: 'race b',
+      }),
+    ])
+
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    if (rejected.length > 0) {
+      // Diagnóstico si alguna de las dos truena — no debería con el fix, pero
+      // si pasa queremos ver POR QUÉ en vez de un "toBe fulfilled" mudo.
+
+      console.error(
+        'cancelAreaTicket concurrente rechazó:',
+        rejected.map(r => r.reason?.message ?? r.reason),
+      )
+    }
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(2)
+
+    // Las DOS cantidades deben volver — si una se pierde por el lost-update,
+    // esto da +100 en vez de +200.
+    expect((await rawMaterialStockOf()).toFixed(3)).toBe(before.plus(200).toFixed(3))
+
+    const reservations = await prisma.areaTicketInventoryReservation.findMany({
+      where: { areaTicketId: { in: [ticketA.id, ticketB.id] }, inventoryKind: 'RAW_MATERIAL' },
+    })
+    expect(reservations).toHaveLength(2)
+    for (const r of reservations) {
+      expect(r.status).toBe('RELEASED')
+      expect(r.reversalMovementId).not.toBeNull()
+    }
   })
 })

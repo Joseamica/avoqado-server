@@ -2381,9 +2381,35 @@ async function releaseQuantityReservation(
 
 /**
  * Reversa de una reserva CONSUMED sobre `RawMaterial` (RAW_MATERIAL) —
- * cancelación de un vale externo (Task 5). Sin cobertura en el test de esta
- * tarea (el fixture sólo ejercita QUANTITY_INVENTORY) — mismo alcance que
- * dejó Task 4 para su propia rama RAW_MATERIAL de `consumeReservationsAtIssue`.
+ * cancelación de un vale externo (Task 5).
+ *
+ * 🔴 Fix round 1 (revisión, Finding 1): la primera versión leía
+ * `currentStock` con un `findFirst` normal — sin lock — y escribía de vuelta
+ * un `newStock` calculado en JS con un `update` separado. Dos cancelaciones
+ * CONCURRENTES de vales DISTINTOS que liberan reservas del MISMO
+ * `rawMaterialId` no tienen nada que las serialice (`cancelAreaTicket` sólo
+ * bloquea la fila de `AreaTicket`, que es distinta para cada una) — las dos
+ * podían leer el mismo `currentStock`, calcular por su cuenta, y la segunda
+ * escritura pisaba a la primera en silencio (lost update: se sub-acredita el
+ * stock). Detectable sólo en el conteo físico, nunca en un test secuencial.
+ *
+ * El fix: `SELECT … FOR UPDATE` sobre `RawMaterial` como PRIMERA operación,
+ * antes de leer `currentStock` y antes de `createStockBatch` — mismo patrón
+ * que ya usa `consumeRawMaterialReservation` (la hermana de consumo, un poco
+ * más arriba en este archivo). El lock serializa el cuerpo COMPLETO de la
+ * función entre dos cancelaciones que compiten por el mismo insumo, así que
+ * además cierra una segunda carrera que apareció al escribir el test de
+ * concurrencia: `createStockBatch` genera su `batchNumber` con su propio
+ * `SELECT` sin lock (`generateBatchNumber`, `fifoBatch.service.ts`), y dos
+ * llamadas concurrentes pueden calcular el MISMO número y chocar contra
+ * `@@unique([rawMaterialId, batchNumber])` (23505). Con el lock tomado
+ * primero, la segunda transacción no arranca su propio `createStockBatch`
+ * hasta que la primera ya commiteó — ve el lote nuevo y calcula el siguiente
+ * número correctamente. (`UPDATE … SET currentStock = currentStock + qty …
+ * RETURNING`, el patrón atómico de `releaseQuantityReservation`, habría
+ * cerrado SÓLO la carrera de `currentStock` — no la de `createStockBatch`,
+ * que ocurre antes del `UPDATE` y necesitaba su propia serialización de
+ * todos modos.)
  *
  * `!wastes`: reutiliza `createStockBatch` (ya usado por `adjustStock` en
  * `rawMaterial.service.ts` para el caso hermano "reponer insumo por
@@ -2393,7 +2419,8 @@ async function releaseQuantityReservation(
  * repartir una sola reserva entre varios lotes y sólo guarda el id del
  * PRIMER movimiento. `createStockBatch` acepta un `tx` externo (a diferencia
  * de `adjustStock`/`deductStockFIFO`, que abren su propia transacción), así
- * que sí participa atómicamente en la de `cancelAreaTicket`.
+ * que sí participa atómicamente en la de `cancelAreaTicket` y bajo el MISMO
+ * lock adquirido arriba.
  *
  * `wastes`: igual que en QUANTITY_INVENTORY, no se toca `currentStock` — ya
  * bajó al consumir. `SPOILAGE` es el tipo real de `RawMaterialMovementType`
@@ -2408,10 +2435,16 @@ async function releaseRawMaterialReservation(
   staffId?: string,
 ) {
   const reference = `area-ticket-cancel:${ticketId}`
-  const material = await tx.rawMaterial.findFirst({ where: { id: reservation.inventoryId, venueId } })
-  if (!material) {
+  const locked = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; unit: any; costPerUnit: Prisma.Decimal }>>`
+    SELECT id, "currentStock", unit, "costPerUnit"
+    FROM "RawMaterial"
+    WHERE id = ${reservation.inventoryId} AND "venueId" = ${venueId}
+    FOR UPDATE
+  `
+  if (locked.length !== 1) {
     throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'No encontramos el insumo reservado para revertir.')
   }
+  const material = locked[0]
 
   if (wastes) {
     const movement = await tx.rawMaterialMovement.create({
