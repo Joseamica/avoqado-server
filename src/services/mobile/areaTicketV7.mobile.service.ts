@@ -30,8 +30,10 @@ import {
   AreaTicketPrintAttemptStatus,
   AreaTicketStatus,
   FulfillmentMode,
+  MovementType,
   PaymentMethod,
   Prisma,
+  RawMaterialMovementType,
 } from '@prisma/client'
 
 import logger from '../../config/logger'
@@ -39,6 +41,7 @@ import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError
 import { areaTicketCheckDigit } from '../../lib/areaTicketCode'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { createStockBatch } from '../dashboard/fifoBatch.service'
 import { convertUnit } from '../../utils/unitConversion'
 import prisma from '../../utils/prismaClient'
 import { withSerializableRetry } from '../../utils/serializableRetry'
@@ -102,6 +105,10 @@ export interface RecordPrintAttemptInput extends CheckoutMutationInput {
 
 export interface FulfillAreaTicketInput extends CheckoutMutationInput {
   method: AreaTicketFulfillmentMethod
+}
+
+export interface CancelAreaTicketInput extends CheckoutMutationInput {
+  reason: string
 }
 
 interface SnapshotModifier {
@@ -901,6 +908,138 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   })
   logger.info(`[AREA TICKETS v7] Vale emitido ${created.code}`, { venueId, ticketId: created.id })
   return mapTicket(created)
+}
+
+/**
+ * Cancela un vale ISSUED — el único estado cancelable hoy. No existía ninguna
+ * cancelación a nivel de vale individual antes de este cambio (sólo
+ * `cancelAreaTicketCheckout`, que cancela una SESIÓN de caja completa y nunca
+ * tocó `AreaTicketInventoryReservation`); esta función es nueva.
+ *
+ * Reservas `ACTIVE` (ruta AVOQADO, todavía sin pagar) sólo se sueltan — nunca
+ * tocaron `currentStock` (son un hold validado contra el DISPONIBLE, ver
+ * `lockAndValidateReservations`), así que soltarlas es 100% seguro.
+ *
+ * Reservas `CONSUMED` (ruta EXTERNAL, consumidas al emitir — Task 4) SÍ movieron
+ * stock de verdad, así que revertirlas es la parte peligrosa de esta función:
+ * o se devuelve el producto a existencia, o se registra como merma
+ * (`VenueAreaTicketSettings.recordWasteOnCancel`) y el stock se queda como está.
+ *
+ * Idempotencia en DOS capas: (1) si el vale ya está CANCELLED, se corta antes
+ * de tocar nada — ni siquiera se reabre la transacción; (2) por si acaso, cada
+ * reserva revisa su propio `reversalMovementId` antes de moverse. Un vale sólo
+ * se puede cancelar una vez, así que en la práctica la capa (1) sola ya
+ * garantiza "una sola reversa" — la (2) es la misma defensa en profundidad que
+ * pidió el brief.
+ */
+export async function cancelAreaTicket(venueId: string, ticketId: string, input: CancelAreaTicketInput) {
+  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
+  const reason = input.reason?.trim()
+  if (!reason) {
+    throw new BadRequestError('Escribe por qué se cancela este vale.')
+  }
+  await assertAreaTicketsEnabled(venueId)
+  // Sólo valida que el dispositivo pertenezca a este venue — igual que el
+  // resto de las mutaciones de este archivo. No exige `canIssueAreaTickets`:
+  // el brief no pide esa restricción y añadirla sin que nadie la pidiera
+  // arriesgaba bloquear una llamada legítima que mis propios tests no
+  // ejercitarían (yo mismo elijo qué probar).
+  await resolveTerminal(venueId, input.deviceUid)
+  const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
+
+  const existing = await prisma.areaTicket.findFirst({
+    where: { id: ticketId, venueId },
+    select: { id: true, status: true, externalSettlement: { select: { status: true } } },
+  })
+  if (!existing) {
+    throw domainError(404, 'AREA_TICKET_NOT_FOUND', 'No encontramos ese vale en este local.')
+  }
+  if (existing.status === AreaTicketStatus.CANCELLED) {
+    // Idempotente: ya cancelado. Ni siquiera se reabre la transacción — el
+    // trabajo de reversa ya ocurrió (o nunca hizo falta) la primera vez.
+    return mapTicket(await prisma.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, include: ticketInclude }))
+  }
+  if (existing.externalSettlement?.status === AreaTicketExternalSettlementStatus.CONFIRMED) {
+    throw domainError(409, 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED', 'Este vale ya se cobró en la caja externa. La devolución se hace ahí.')
+  }
+  if (existing.status !== AreaTicketStatus.ISSUED) {
+    throw domainError(409, 'AREA_TICKET_CANNOT_CANCEL', `Este vale está en estado ${existing.status} y no admite cancelación.`)
+  }
+
+  const settings = await getSettingsRecord(venueId)
+  const wastes = settings?.recordWasteOnCancel === true
+
+  const cancelled = await prisma.$transaction(async tx => {
+    // Mismo patrón que cancelAreaTicketCheckout: lock pesimista + relectura
+    // dentro de la tx. Dos cancelaciones concurrentes del MISMO vale se
+    // serializan aquí — la segunda ve el estado ya actualizado por la primera
+    // y toma la rama idempotente de abajo.
+    await tx.$queryRaw`SELECT id FROM "AreaTicket" WHERE id = ${ticketId} AND "venueId" = ${venueId} FOR UPDATE`
+    const fresh = await tx.areaTicket.findFirst({
+      where: { id: ticketId, venueId },
+      include: { externalSettlement: { select: { status: true } } },
+    })
+    if (!fresh) throw new NotFoundError('No encontramos ese vale en este local.')
+    if (fresh.status === AreaTicketStatus.CANCELLED) {
+      return tx.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, include: ticketInclude })
+    }
+    if (fresh.externalSettlement?.status === AreaTicketExternalSettlementStatus.CONFIRMED) {
+      throw domainError(409, 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED', 'Este vale ya se cobró en la caja externa. La devolución se hace ahí.')
+    }
+    if (fresh.status !== AreaTicketStatus.ISSUED) {
+      throw domainError(409, 'AREA_TICKET_CANNOT_CANCEL', `Este vale está en estado ${fresh.status} y no admite cancelación.`)
+    }
+
+    const reservations = await tx.areaTicketInventoryReservation.findMany({
+      where: {
+        areaTicketId: ticketId,
+        venueId,
+        status: { in: [AreaTicketInventoryReservationStatus.ACTIVE, AreaTicketInventoryReservationStatus.CONSUMED] },
+      },
+      orderBy: [{ inventoryKind: 'asc' }, { inventoryId: 'asc' }, { id: 'asc' }],
+    })
+
+    for (const reservation of reservations) {
+      if (reservation.status === AreaTicketInventoryReservationStatus.CONSUMED) {
+        // Ya revertida: un reintento no debe volver a mover inventario.
+        if (reservation.reversalMovementId) continue
+        if (reservation.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+          await releaseQuantityReservation(tx, venueId, reservation, ticketId, wastes, staffId ?? undefined)
+        } else {
+          await releaseRawMaterialReservation(tx, venueId, reservation, ticketId, wastes, staffId ?? undefined)
+        }
+      } else {
+        // ACTIVE: la ruta AVOQADO reserva sin pagar todavía. Nunca tocó
+        // currentStock (es sólo un hold), así que soltarla no mueve
+        // inventario — sólo libera el cupo para que otra venta lo use.
+        await tx.areaTicketInventoryReservation.update({
+          where: { id: reservation.id },
+          data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date() },
+        })
+      }
+    }
+
+    await tx.areaTicket.update({
+      where: { id: ticketId },
+      data: { status: AreaTicketStatus.CANCELLED, cancelledAt: new Date(), version: { increment: 1 } },
+    })
+
+    return tx.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, include: ticketInclude })
+  })
+
+  void logAction({
+    staffId,
+    venueId,
+    action: 'AREA_TICKET_CANCELLED',
+    entity: 'AreaTicket',
+    entityId: ticketId,
+    // El idempotencyKey de ESTA llamada queda en la bitácora para trazabilidad
+    // — el ancla real contra doble-reversa es `reversalMovementId` por
+    // reserva (columna @unique, Task 1), no esta llave.
+    data: { reason, idempotencyKey, settlementRoute: cancelled.settlementRoute, recordedAsWaste: wastes },
+  })
+  logger.info(`[AREA TICKETS v7] Vale cancelado ${cancelled.code}`, { venueId, ticketId })
+  return mapTicket(cancelled)
 }
 
 async function loadCheckout(venueId: string, sessionId: string) {
@@ -2147,6 +2286,190 @@ async function consumeRawMaterialReservation(tx: Prisma.TransactionClient, venue
       inventoryMovementId: firstMovementId,
       consumedAt: new Date(),
     },
+  })
+}
+
+/**
+ * Reversa de una reserva CONSUMED sobre `Inventory` (QUANTITY_INVENTORY) —
+ * cancelación de un vale externo (Task 5).
+ *
+ * El signo es el espejo exacto de `consumeQuantityReservation`, unas líneas
+ * arriba: ese helper resta con `"currentStock" - ${qty}` y registra
+ * `quantity: qty.neg()` (negativo). Aquí se SUMA (`"currentStock" + ${qty}`) y
+ * se registra `quantity: qty` en positivo — mismo patrón atómico
+ * UPDATE...RETURNING (evita el race de leer-y-luego-escribir por separado),
+ * sólo que en la dirección contraria. No hay una función de reversa
+ * preexistente que reutilizar tal cual: `restockItem`
+ * (`inventoryRestock.service.ts`, el restock por reembolso) resuelve por
+ * `productId` y abre su PROPIA transacción, así que no puede participar en
+ * ésta; pero de ahí sale el `MovementType` correcto para esto —
+ * `ADJUSTMENT`, no `RETURN`/`WASTE` (ninguno de los dos existe en
+ * `MovementType`; ver el enum real en schema.prisma:7215).
+ *
+ * `wastes=true` (merma, `VenueAreaTicketSettings.recordWasteOnCancel`): el
+ * producto YA salió de `currentStock` cuando se consumió al emitir
+ * (movimiento SALE de Task 4) — confirmarlo como merma NO es una segunda
+ * baja, es sólo reclasificar esa salida ya ocurrida. `currentStock` no se
+ * toca aquí; `previousStock`/`newStock` del movimiento quedan iguales a
+ * propósito (cero cambio real de stock), mientras que `quantity` sí lleva el
+ * signo negativo del monto perdido — así un reporte que sume `quantity`
+ * agrupado por `type=LOSS` cuenta la merma real, sin que esta fila mienta
+ * sobre el nivel de stock.
+ */
+async function releaseQuantityReservation(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  reservation: { id: string; inventoryId: string; quantityBaseUnits: Prisma.Decimal },
+  ticketId: string,
+  wastes: boolean,
+  staffId?: string,
+) {
+  const reference = `area-ticket-cancel:${ticketId}`
+
+  if (wastes) {
+    const current = await tx.inventory.findUniqueOrThrow({
+      where: { id: reservation.inventoryId },
+      select: { currentStock: true },
+    })
+    const movement = await tx.inventoryMovement.create({
+      data: {
+        inventoryId: reservation.inventoryId,
+        type: MovementType.LOSS,
+        quantity: new Prisma.Decimal(reservation.quantityBaseUnits).neg(),
+        previousStock: current.currentStock,
+        newStock: current.currentStock,
+        reason: 'Vale por área externo cancelado — merma confirmada',
+        reference,
+        createdBy: staffId,
+      },
+    })
+    await tx.areaTicketInventoryReservation.update({
+      where: { id: reservation.id },
+      data: { status: AreaTicketInventoryReservationStatus.WASTE, releasedAt: new Date(), reversalMovementId: movement.id },
+    })
+    return
+  }
+
+  const updated = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; previousStock: Prisma.Decimal }>>`
+    UPDATE "Inventory"
+    SET "currentStock" = "currentStock" + ${reservation.quantityBaseUnits},
+        "updatedAt" = NOW()
+    WHERE id = ${reservation.inventoryId}
+      AND "venueId" = ${venueId}
+    RETURNING id, "currentStock", ("currentStock" - ${reservation.quantityBaseUnits}) AS "previousStock"
+  `
+  if (updated.length !== 1) {
+    throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'No encontramos el inventario reservado para revertir.')
+  }
+  const movement = await tx.inventoryMovement.create({
+    data: {
+      inventoryId: reservation.inventoryId,
+      type: MovementType.ADJUSTMENT,
+      quantity: new Prisma.Decimal(reservation.quantityBaseUnits),
+      previousStock: updated[0].previousStock,
+      newStock: updated[0].currentStock,
+      reason: 'Reversa de vale por área externo cancelado',
+      reference,
+      createdBy: staffId,
+    },
+  })
+  await tx.areaTicketInventoryReservation.update({
+    where: { id: reservation.id },
+    data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date(), reversalMovementId: movement.id },
+  })
+}
+
+/**
+ * Reversa de una reserva CONSUMED sobre `RawMaterial` (RAW_MATERIAL) —
+ * cancelación de un vale externo (Task 5). Sin cobertura en el test de esta
+ * tarea (el fixture sólo ejercita QUANTITY_INVENTORY) — mismo alcance que
+ * dejó Task 4 para su propia rama RAW_MATERIAL de `consumeReservationsAtIssue`.
+ *
+ * `!wastes`: reutiliza `createStockBatch` (ya usado por `adjustStock` en
+ * `rawMaterial.service.ts` para el caso hermano "reponer insumo por
+ * reembolso", ver `inventoryRestock.service.ts`) para abrir un lote nuevo al
+ * costo vigente, en vez de reconstruir a qué lote(s) FIFO exactos se dedujo
+ * — esa traza no se conserva hoy: `consumeRawMaterialReservation` puede
+ * repartir una sola reserva entre varios lotes y sólo guarda el id del
+ * PRIMER movimiento. `createStockBatch` acepta un `tx` externo (a diferencia
+ * de `adjustStock`/`deductStockFIFO`, que abren su propia transacción), así
+ * que sí participa atómicamente en la de `cancelAreaTicket`.
+ *
+ * `wastes`: igual que en QUANTITY_INVENTORY, no se toca `currentStock` — ya
+ * bajó al consumir. `SPOILAGE` es el tipo real de `RawMaterialMovementType`
+ * para esto (tampoco existe `WASTE` en ese enum).
+ */
+async function releaseRawMaterialReservation(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  reservation: { id: string; inventoryId: string; quantityBaseUnits: Prisma.Decimal },
+  ticketId: string,
+  wastes: boolean,
+  staffId?: string,
+) {
+  const reference = `area-ticket-cancel:${ticketId}`
+  const material = await tx.rawMaterial.findFirst({ where: { id: reservation.inventoryId, venueId } })
+  if (!material) {
+    throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'No encontramos el insumo reservado para revertir.')
+  }
+
+  if (wastes) {
+    const movement = await tx.rawMaterialMovement.create({
+      data: {
+        rawMaterialId: reservation.inventoryId,
+        venueId,
+        type: RawMaterialMovementType.SPOILAGE,
+        quantity: new Prisma.Decimal(reservation.quantityBaseUnits).neg(),
+        unit: material.unit,
+        previousStock: material.currentStock,
+        newStock: material.currentStock,
+        reason: 'Vale por área externo cancelado — merma confirmada',
+        reference,
+        createdBy: staffId,
+      },
+    })
+    await tx.areaTicketInventoryReservation.update({
+      where: { id: reservation.id },
+      data: { status: AreaTicketInventoryReservationStatus.WASTE, releasedAt: new Date(), reversalMovementId: movement.id },
+    })
+    return
+  }
+
+  const batch = await createStockBatch(
+    venueId,
+    reservation.inventoryId,
+    {
+      quantity: Number(reservation.quantityBaseUnits),
+      unit: material.unit,
+      costPerUnit: material.costPerUnit.toNumber(),
+      receivedDate: new Date(),
+    },
+    staffId,
+    tx,
+    { skipAudit: true },
+  )
+  const previousStock = material.currentStock
+  const newStock = previousStock.add(reservation.quantityBaseUnits)
+  await tx.rawMaterial.update({ where: { id: reservation.inventoryId }, data: { currentStock: newStock } })
+  const movement = await tx.rawMaterialMovement.create({
+    data: {
+      rawMaterialId: reservation.inventoryId,
+      venueId,
+      batchId: batch.id,
+      type: RawMaterialMovementType.ADJUSTMENT,
+      quantity: new Prisma.Decimal(reservation.quantityBaseUnits),
+      unit: material.unit,
+      previousStock,
+      newStock,
+      costImpact: batch.costPerUnit.mul(reservation.quantityBaseUnits),
+      reason: 'Reversa de vale por área externo cancelado',
+      reference,
+      createdBy: staffId,
+    },
+  })
+  await tx.areaTicketInventoryReservation.update({
+    where: { id: reservation.id },
+    data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date(), reversalMovementId: movement.id },
   })
 }
 
