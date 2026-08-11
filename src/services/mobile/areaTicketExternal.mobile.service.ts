@@ -85,7 +85,7 @@ export async function markExternalHandoff(
   // 🔴 A propósito NO llama a `assertAreaTicketsEnabled` aquí, a diferencia
   // de sus cuatro hermanas en el archivo v7 que sí lo hacen antes de tocar un
   // vale (`issueAreaTicket:762`, `cancelAreaTicket:946`,
-  // `createAreaTicketCheckout:1075`, `materializeAreaTicketCheckout:1144`).
+  // `createAreaTicketCheckout:1075`, `addTicketToCheckout:1144`).
   // No es un descuido: apagar el módulo de vales por área detiene EMISIONES y
   // CLAIMS nuevos, pero un vale que ya se emitió es un compromiso vigente que
   // el local tiene que poder cerrar aunque alguien apague el módulo a media
