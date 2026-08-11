@@ -543,11 +543,13 @@ model Venue {
   // ==========================================
   // Vales por área (AREA_TICKETS) — vales independientes + consolidación en caja
   // ==========================================
-  fulfillmentAreas           FulfillmentArea[]
-  areaTicketSettings         VenueAreaTicketSettings?
-  areaTickets                AreaTicket[]
-  areaTicketCheckoutSessions AreaTicketCheckoutSession[]
-  areaTicketReservations     AreaTicketInventoryReservation[]
+  fulfillmentAreas              FulfillmentArea[]
+  areaTicketSettings            VenueAreaTicketSettings?
+  areaTickets                   AreaTicket[]
+  areaTicketCheckoutSessions    AreaTicketCheckoutSession[]
+  areaTicketReservations        AreaTicketInventoryReservation[]
+  areaTicketExternalSettlements AreaTicketExternalSettlement[]
+  areaTicketExternalIncidents   AreaTicketExternalIncident[]
 
   // Básculas (SCALE_INTEGRATION) — capacidad y rollout independientes de vales.
   scaleSettings VenueScaleSettings?
@@ -907,10 +909,12 @@ model Staff {
   /// es el "por Rosa" que ve el área al reintentar una entrega ya hecha.
   fulfillmentsDelivered OrderFulfillment[] @relation("OrderFulfillmentStaff")
 
-  areaTicketsIssued          AreaTicket[]                @relation("AreaTicketIssuedByStaff")
-  areaTicketCheckoutSessions AreaTicketCheckoutSession[] @relation("AreaTicketCheckoutStaff")
-  areaTicketPrintAttempts    AreaTicketPrintAttempt[]    @relation("AreaTicketPrintStaff")
-  areaTicketFulfillments     AreaTicketFulfillment[]     @relation("AreaTicketFulfillmentStaff")
+  areaTicketsIssued             AreaTicket[]                   @relation("AreaTicketIssuedByStaff")
+  areaTicketCheckoutSessions    AreaTicketCheckoutSession[]    @relation("AreaTicketCheckoutStaff")
+  areaTicketPrintAttempts       AreaTicketPrintAttempt[]       @relation("AreaTicketPrintStaff")
+  areaTicketFulfillments        AreaTicketFulfillment[]        @relation("AreaTicketFulfillmentStaff")
+  areaTicketExternalSettlements AreaTicketExternalSettlement[] @relation("AreaTicketExternalSettlementStaff")
+  areaTicketExternalIncidents   AreaTicketExternalIncident[]   @relation("AreaTicketExternalIncidentStaff")
 
   // Notifications
   notifications           Notification[]
@@ -3993,10 +3997,11 @@ model Terminal {
   scaleProfileId String?
   scaleProfile   ScaleProfile? @relation(fields: [scaleProfileId], references: [id], onDelete: SetNull)
 
-  areaTicketsIssued          AreaTicket[]                @relation("AreaTicketSourceTerminal")
-  areaTicketCheckoutSessions AreaTicketCheckoutSession[] @relation("AreaTicketCheckoutTerminal")
-  areaTicketPrintAttempts    AreaTicketPrintAttempt[]    @relation("AreaTicketPrintTerminal")
-  areaTicketFulfillments     AreaTicketFulfillment[]     @relation("AreaTicketFulfillmentTerminal")
+  areaTicketsIssued             AreaTicket[]                   @relation("AreaTicketSourceTerminal")
+  areaTicketCheckoutSessions    AreaTicketCheckoutSession[]    @relation("AreaTicketCheckoutTerminal")
+  areaTicketPrintAttempts       AreaTicketPrintAttempt[]       @relation("AreaTicketPrintTerminal")
+  areaTicketFulfillments        AreaTicketFulfillment[]        @relation("AreaTicketFulfillmentTerminal")
+  areaTicketExternalSettlements AreaTicketExternalSettlement[] @relation("AreaTicketExternalSettlementTerminal")
 
   reviews Review[] // ✅ LÍNEA AGREGADA
 
@@ -13080,6 +13085,14 @@ model FulfillmentArea {
   /// HOLD_UNTIL_PAID se muestra como "Lo guardamos hasta que pague".
   fulfillmentMode FulfillmentMode @default(IMMEDIATE)
 
+  /// Ruta de cobro externa (otro POS cobra en su propia caja) — §caja externa fase 1.
+  /// Los cuatro campos nacen con el default que reproduce el comportamiento actual:
+  /// ningún venue existente cambia de flujo hasta que alguien lo prenda a propósito.
+  settlementRoute          AreaSettlementRoute      @default(AVOQADO)
+  externalConfirmationMode ExternalConfirmationMode @default(MANUAL)
+  externalOfflinePolicy    ExternalOfflinePolicy    @default(BLOCK)
+  externalDeliveryTracking ExternalDeliveryTracking @default(TRACKED)
+
   active       Boolean @default(true)
   displayOrder Int     @default(0)
 
@@ -13207,6 +13220,9 @@ model AreaTicket {
   /// cambiar si este vale se entrega al momento o requiere entrega manual.
   fulfillmentModeSnapshot FulfillmentMode
 
+  /// Ruta vigente al emitir. Default AVOQADO — no cambia nada en lo existente.
+  settlementRoute AreaSettlementRoute @default(AVOQADO)
+
   code           String
   idempotencyKey String           @db.VarChar(64)
   status         AreaTicketStatus @default(ISSUED)
@@ -13242,6 +13258,9 @@ model AreaTicket {
   reservations  AreaTicketInventoryReservation[]
   printAttempts AreaTicketPrintAttempt[]
   fulfillment   AreaTicketFulfillment?
+
+  externalSettlement AreaTicketExternalSettlement?
+  externalIncidents  AreaTicketExternalIncident[]
 
   @@unique([venueId, code])
   @@unique([venueId, idempotencyKey])
@@ -13297,6 +13316,10 @@ model AreaTicketInventoryReservation {
   quantityBaseUnits   Decimal                              @db.Decimal(12, 3)
   status              AreaTicketInventoryReservationStatus @default(ACTIVE)
   inventoryMovementId String?                              @unique
+
+  /// Ancla de la REVERSA. Sin una segunda columna única, un reintento de cancelación
+  /// devuelve el producto a stock dos veces.
+  reversalMovementId String? @unique
 
   createdAt  DateTime  @default(now())
   consumedAt DateTime?
@@ -13446,6 +13469,127 @@ model ScaleProfile {
 
   @@unique([venueId, name])
   @@index([venueId, active])
+}
+
+// ----------------------------------------------------------------------------
+// Ruta de cobro externa — otro POS cobra en SU caja, Avoqado no crea Order ni
+// Payment. Todo aditivo, default AVOQADO: ningún venue existente cambia de flujo.
+// ----------------------------------------------------------------------------
+
+enum AreaSettlementRoute {
+  /// Flujo v7: caja Avoqado, Order y Payment. Default de todo lo existente.
+  AVOQADO
+  /// Otro POS cobra en su caja. Avoqado NO crea Order ni Payment.
+  EXTERNAL
+}
+
+enum ExternalConfirmationMode {
+  /// Una persona con permiso confirma que la caja externa cobró.
+  MANUAL
+  /// Se da por ocurrido al imprimir. NO es "pagado": es "asumido".
+  ASSUME_ON_PRINT
+}
+
+enum ExternalOfflinePolicy {
+  ALLOW
+  BLOCK
+}
+
+enum ExternalDeliveryTracking {
+  /// Se registra la entrega y hay cola de pendientes.
+  TRACKED
+  /// El área entrega mirando el papel. Sin cola. Se pierde trazabilidad, nada más.
+  UNTRACKED
+}
+
+enum AreaTicketExternalSettlementStatus {
+  PENDING
+  ASSUMED
+  CONFIRMED
+  DISCREPANCY
+  NOT_CHARGED
+}
+
+enum AreaTicketExternalHandoffState {
+  PENDING
+  HANDED_OFF
+  RETURNED
+}
+
+enum AreaTicketExternalIncidentKind {
+  UNCONFIRMED_CHARGE
+  AMOUNT_VARIANCE
+  NEGATIVE_STOCK
+  CODE_MISMATCH
+  REPRINT_RISK
+}
+
+enum AreaTicketExternalIncidentStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+/// El cobro que ocurrió en la caja de OTRO sistema. No es un Payment y nunca debe
+/// convertirse en uno: Avoqado no vio ese dinero. `referenceAmount` es lo que Avoqado
+/// calculó; `externalAmount` es lo que alguien dice que la otra caja cobró.
+model AreaTicketExternalSettlement {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+
+  areaTicketId String     @unique
+  areaTicket   AreaTicket @relation(fields: [areaTicketId], references: [id], onDelete: Cascade)
+
+  status           AreaTicketExternalSettlementStatus @default(PENDING)
+  handoffState     AreaTicketExternalHandoffState     @default(PENDING)
+  /// Qué política estaba vigente al emitir. Se congela: cambiarla después no reescribe
+  /// la historia de un vale que ya se cobró bajo otra regla.
+  confirmationMode ExternalConfirmationMode
+
+  referenceAmount   Decimal  @db.Decimal(12, 2)
+  externalAmount    Decimal? @db.Decimal(12, 2)
+  externalReference String?
+
+  idempotencyKey     String    @db.VarChar(64)
+  confirmedByStaffId String?
+  confirmedByStaff   Staff?    @relation("AreaTicketExternalSettlementStaff", fields: [confirmedByStaffId], references: [id], onDelete: SetNull)
+  confirmedAt        DateTime?
+  terminalId         String?
+  terminal           Terminal? @relation("AreaTicketExternalSettlementTerminal", fields: [terminalId], references: [id], onDelete: SetNull)
+  notes              String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([areaTicketId, idempotencyKey])
+  @@index([venueId, status, createdAt])
+}
+
+/// Cola de trabajo de oficina. Deliberadamente NO es un estado del vale: una incidencia
+/// abierta jamás bloquea el piso.
+model AreaTicketExternalIncident {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  areaTicketId String?
+  areaTicket   AreaTicket? @relation(fields: [areaTicketId], references: [id], onDelete: Cascade)
+
+  kind   AreaTicketExternalIncidentKind
+  status AreaTicketExternalIncidentStatus @default(OPEN)
+  detail Json
+
+  openedAt          DateTime  @default(now())
+  resolvedAt        DateTime?
+  resolvedByStaffId String?
+  resolvedByStaff   Staff?    @relation("AreaTicketExternalIncidentStaff", fields: [resolvedByStaffId], references: [id], onDelete: SetNull)
+  resolution        String?
+
+  /// Una incidencia VIVA por tipo y por vale. Sin esto el job de conciliación abre una
+  /// fila nueva cada vez que corre y la cola se vuelve ilegible en un día.
+  @@unique([areaTicketId, kind])
+  @@index([venueId, status, kind, openedAt])
 }
 
 enum AreaTicketStatus {

@@ -305,6 +305,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   AreaTicketPaymentAttempt: 'Orders, KDS & Cash',
   AreaTicketPrintAttempt: 'Orders, KDS & Cash',
   AreaTicketFulfillment: 'Orders, KDS & Cash',
+  AreaTicketExternalSettlement: 'Orders, KDS & Cash',
+  AreaTicketExternalIncident: 'Orders, KDS & Cash',
 
   // 10. Payments & Fees
   Payment: 'Payments & Fees',
