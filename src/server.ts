@@ -20,6 +20,7 @@ import { startGcalPushConsumer } from './communication/rabbitmq/gcal-push-consum
 import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { startStalePendingAlertJob } from './jobs/stalePendingAlert.job'
 import { startVenueChatInactivityCleanupJob } from './jobs/venueChatInactivityCleanup.job'
+import { startAreaTicketExternalReconciliationJob } from './jobs/areaTicketExternalReconciliation.job'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { planRenewalReminderJob } from './jobs/plan-renewal-reminder.job'
@@ -406,6 +407,9 @@ const startApplication = async (retries = 3) => {
       // Start venue-chat relay supervisors (stale-PENDING alert + inactivity cleanup)
       startStalePendingAlertJob()
       startVenueChatInactivityCleanupJob()
+
+      // Start area-ticket external-charge reconciliation (opens UNCONFIRMED_CHARGE incidents)
+      startAreaTicketExternalReconciliationJob()
 
       // Start TPV health monitor
       tpvHealthMonitorJob.start()
