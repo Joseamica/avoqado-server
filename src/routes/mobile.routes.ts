@@ -46,6 +46,8 @@ import * as creditPackMobileController from '../controllers/mobile/creditPack.mo
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
 import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
+import * as areaTicketExternalMobileController from '../controllers/mobile/areaTicketExternal.mobile.controller'
+import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
@@ -2701,6 +2703,58 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('area-tickets:deliver'),
   areaTicketV7MobileController.fulfill,
+)
+
+// ─── COBRO EXTERNO (settlementRoute EXTERNAL) — Task 11 de
+// "caja externa fase 1": la puerta HTTP de lo que ya construyeron las Tasks
+// 6-9 en `areaTicketExternal.mobile.service.ts`. `handoff` y la cola comparten
+// el permiso de emitir (`area-tickets:issue`, trabajo de piso — kitchen/waiter
+// también lo tienen); `confirm` y `not-charged` exigen
+// `area-tickets:confirm-external` (MANAGER+ — es una afirmación sobre dinero
+// que Avoqado nunca vio, no una tarea de piso).
+//
+// Sin `checkFeatureAccess('AREA_TICKETS')` en ninguna de las cuatro: mismo
+// criterio que ya explica el comentario de arriba para checkout/cancel/deliver
+// — un vale YA emitido es un compromiso vigente, no una apertura nueva. El
+// propio servicio (`markExternalHandoff`) deja explícito por qué NO llama a
+// `assertAreaTicketsEnabled`.
+router.post(
+  '/venues/:venueId/area-tickets/:ticketId/external-settlement/handoff',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:issue'),
+  validateRequest(handoffSchema),
+  areaTicketExternalMobileController.handoff,
+)
+
+router.post(
+  '/venues/:venueId/area-tickets/:ticketId/external-settlement/confirm',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:confirm-external'),
+  validateRequest(confirmExternalSettlementSchema),
+  areaTicketExternalMobileController.confirm,
+)
+
+router.post(
+  '/venues/:venueId/area-tickets/:ticketId/external-settlement/not-charged',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:confirm-external'),
+  validateRequest(notChargedSchema),
+  areaTicketExternalMobileController.notCharged,
+)
+
+// 🔴 DEBE ir antes de `GET /area-tickets/:code` (justo abajo): mismo verbo y
+// misma forma de ruta (2 segmentos bajo `area-tickets/`), y Express resuelve
+// por ORDEN DE REGISTRO, no por especificidad — un segmento `:code` hace match
+// de CUALQUIER string, incluida la palabra literal "pending-confirmation". Se
+// verificó empíricamente en el RED de esta tarea: con este bloque después de
+// `:code`, la petición caía en `resolveAreaTicket` (que por diseño responde
+// SIEMPRE 200 con `state: NOT_FOUND` en vez de un 404) y el 200 salía por la
+// razón equivocada — nunca llegaba a este controlador.
+router.get(
+  '/venues/:venueId/area-tickets/pending-confirmation',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:issue'),
+  areaTicketExternalMobileController.listPendingConfirmation,
 )
 
 /**
