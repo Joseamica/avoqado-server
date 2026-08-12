@@ -55,6 +55,21 @@
  * comprobando el mensaje de su error — ese error ahora se traga y cae a FAST. Se
  * simplificó a probar sólo A QUIÉN se le preguntó; el fallback en sí tiene su
  * propio test dedicado más abajo.
+ *
+ * 🔴 Ronda 2 (segunda pasada) — el fallback de arriba abría una puerta nueva:
+ * `recordOrderPayment` puede tronar DESPUÉS de que su propia transacción ya
+ * comitió el Payment (`updateOrderTotalsForStandalonePayment`, rama "autónoma",
+ * corre un pre-flight de inventario FUERA de la transacción; si rechaza, el catch
+ * de `recordOrderPayment` relanza `BadRequestError`/`NotFoundError` con el dinero
+ * YA escrito en firme). Caer a FAST en ESE caso concreto duplica el Payment —
+ * salvo que `paymentData` traiga `idempotencyKey`/`referenceNumber`, una
+ * suposición operativa, no una garantía. El fix relee la fila de arbitraje
+ * (`terminalPaymentRequest.paymentId`, que `closeRowFromPaymentTx` escribe DENTRO
+ * de la misma transacción que crea el Payment) antes de decidir: si el pago YA
+ * aterrizó, NO cae a FAST — sube el error original tal cual. El test de este caso
+ * usa un throw TARDÍO (post-commit, vía el pre-flight de
+ * `updateOrderTotalsForStandalonePayment`), distinto del throw TEMPRANO (orden
+ * inexistente, antes de escribir nada) que ya cubre el test anterior.
  */
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
@@ -90,6 +105,15 @@ jest.mock('@/services/dashboard/autoReorder.service', () => ({
   __esModule: true,
   runAutoReorderForVenue: jest.fn().mockResolvedValue({ ran: false }),
 }))
+// Sólo lo usa el test del throw POST-commit (updateOrderTotalsForStandalonePayment
+// llama a esto por cada línea sin pagar del pre-flight). Default con stock de
+// sobra para no afectar a los demás tests — se sobreescribe puntualmente donde
+// se necesita forzar el rechazo por inventario insuficiente.
+jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({
+  __esModule: true,
+  getProductInventoryStatus: jest.fn().mockResolvedValue({ inventoryMethod: 'QUANTITY', currentStock: 999 }),
+  deductInventoryForProduct: jest.fn().mockResolvedValue(undefined),
+}))
 // Import dinámico dentro de recordFastPayment (gancho de referidos). Sin mockear,
 // corre de verdad y truena por dependencias sin configurar — inofensivo (atrapado
 // por su propio try/catch en la fuente) pero ensucia la salida con console.error.
@@ -101,8 +125,11 @@ jest.mock('@/services/referrals/referralQualification.service', () => ({
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
+import { getProductInventoryStatus } from '@/services/dashboard/productInventoryIntegration.service'
+import { BadRequestError } from '@/errors/AppError'
 
 const prismaMock = prisma as any
+const getProductInventoryStatusMock = getProductInventoryStatus as jest.Mock
 
 describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () => {
   beforeEach(() => {
@@ -298,6 +325,103 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('🚨'),
       expect.objectContaining({ requestId: 'req-1', orderId: 'order-real' }),
+    )
+  })
+
+  it('si recordOrderPayment truena DESPUÉS de comitear el pago, NO cae a FAST — no se duplica el cobro', async () => {
+    // 🔴 [Ronda 2, segunda pasada] Éste es el throw TARDÍO (post-commit): la
+    // transacción de recordOrderPayment YA escribió el Payment y cerró la fila de
+    // arbitraje, y el pre-flight de updateOrderTotalsForStandalonePayment (que
+    // corre DESPUÉS, fuera de la transacción) rechaza por inventario insuficiente.
+    // A diferencia del test anterior (orden inexistente, nada escrito), aquí SÍ
+    // hay un Payment real en firme antes del throw — caer a FAST duplicaría.
+    prismaMock.terminalPaymentRequest.findUnique
+      .mockResolvedValueOnce({ orderId: 'order-real', venueId: 'venue-1', status: 'CANCELLED' }) // 1ª lectura: arbitrationRow
+      .mockResolvedValueOnce({ paymentId: 'real-payment-postcommit' }) // 2ª lectura: verificación post-fallo — closeRowFromPaymentTx YA escribió esto dentro de la transacción que comitió
+
+    // 1er order.findUnique (activeOrder, dentro de recordOrderPayment): total
+    // grande para que el pre-flight DE ANTES de la transacción no se dispare —
+    // ese no es el que este test quiere ejercitar.
+    prismaMock.order.findUnique
+      .mockResolvedValueOnce({
+        id: 'order-real',
+        venueId: 'venue-1',
+        splitType: null,
+        items: [],
+        payments: [],
+        total: 1000,
+        source: 'TPV',
+        externalId: null,
+      })
+      // 2º order.findUnique (dentro de updateOrderTotalsForStandalonePayment, YA
+      // con la transacción comiteada): subtotal == lo cobrado → isFullyPaid true →
+      // dispara el pre-flight de inventario con un producto sin stock.
+      .mockResolvedValueOnce({
+        id: 'order-real',
+        venueId: 'venue-1',
+        subtotal: 30,
+        discountAmount: 0,
+        paymentStatus: 'PENDING',
+        servedById: 'staff-1',
+        createdById: 'staff-1',
+        items: [
+          {
+            id: 'item-1',
+            productId: 'prod-1',
+            product: { name: 'Producto agotado' },
+            quantity: 1,
+            areaTicketLineId: null,
+            paymentAllocations: [],
+            modifiers: [],
+          },
+        ],
+        payments: [],
+        customer: null,
+      })
+
+    prismaMock.payment.create.mockResolvedValueOnce({
+      id: 'real-payment-postcommit',
+      feeAmount: 0,
+      netAmount: 30,
+      status: 'COMPLETED',
+      type: 'REGULAR',
+      amount: 30,
+      tipAmount: 0,
+      method: 'CASH',
+      processedBy: null,
+    })
+    getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+
+    let result: any
+    let caughtError: unknown
+    try {
+      // amount en CENTAVOS (totalAmount = amount/100): 3000 = $30, para que
+      // calce con el subtotal:30 de la 2ª orden y dispare isFullyPaid=true.
+      result = await recordFastPayment(
+        'venue-1',
+        { amount: 3000, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH' } as any,
+        'user-1',
+      )
+    } catch (err) {
+      caughtError = err
+    }
+
+    // El error ORIGINAL (inventario) sube tal cual — no uno inventado por FAST, y
+    // NO se traga como en el caso del throw temprano.
+    expect(result).toBeUndefined()
+    expect(caughtError).toBeInstanceOf(BadRequestError)
+    expect((caughtError as Error).message).toMatch(/insufficient inventory/i)
+
+    // La señal inequívoca: el pago de recordOrderPayment NO se duplicó y no se
+    // creó una orden/pago FAST encima.
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+
+    // Se sí se hizo la relectura de verificación (2ª consulta a la fila).
+    expect(prismaMock.terminalPaymentRequest.findUnique).toHaveBeenCalledTimes(2)
+    expect(prismaMock.terminalPaymentRequest.findUnique).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ where: { requestId: 'req-1' } }),
     )
   })
 })

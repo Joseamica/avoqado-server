@@ -2643,6 +2643,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // 🔴 `return await` (no `return` a secas): así el try/catch de abajo SÍ atrapa
       // un rechazo de esta promesa. Con `return recordOrderPayment(...)` a secas, el
       // catch nunca vería el error — se propagaría directo al llamador.
+      const requestId = paymentData.terminalPaymentRequestId
       try {
         return await recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
       } catch (err) {
@@ -2653,20 +2654,77 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         // propagar el error, el cobro no aterriza en NINGÚN lado: sería una regresión
         // que introduciríamos nosotros, dejando el sistema peor que antes de este
         // cambio. Una venta FAST vacía es mala; ninguna venta es peor. Por eso se cae
-        // a la ruta FAST de siempre en vez de propagar.
+        // a la ruta FAST de siempre en vez de propagar... PERO SÓLO si el pago no
+        // aterrizó ya. Ver el chequeo de abajo.
         //
-        // Es seguro: la escritura de recordOrderPayment corre dentro de una
-        // transacción (prisma.$transaction) — si tronó, hizo rollback y no dejó nada
-        // a medias. Y si por alguna otra vía SÍ llegó a persistirse un Payment antes
-        // del throw, los checks de idempotencia de la ruta FAST (idempotencyKey /
-        // referenceNumber, arriba en esta misma función) son la red que evita
-        // duplicar el cobro.
+        // 🔴 [Ronda 2] recordOrderPayment puede tronar DESPUÉS de que su propia
+        // transacción ya comitió el Payment: `updateOrderTotalsForStandalonePayment`
+        // corre un pre-flight de inventario FUERA de la transacción (rama "autónoma"
+        // — MODO AUTÓNOMO más abajo en recordOrderPayment) y, si rechaza por stock
+        // insuficiente, el catch de recordOrderPayment relanza BadRequestError /
+        // NotFoundError con el Payment YA escrito en firme. Caer a FAST en ESE caso
+        // duplicaría el cobro — y sólo se salvaría si paymentData trae
+        // idempotencyKey/referenceNumber (los checks de idempotencia de FAST, arriba
+        // en esta misma función, encontrarían el pago ya comitteado y lo devolverían
+        // en vez de duplicar). Que la TPV siempre mande uno de los dos es una
+        // suposición operativa, no una invariante forzada — no basta como red.
         //
+        // La señal real: closeRowFromPaymentTx (terminal-payment.service.ts) escribe
+        // `paymentId` en la fila de arbitraje DENTRO de la MISMA transacción que crea
+        // el Payment — ambos comitean juntos o ninguno. Releer la fila después del
+        // fallo dice si esa transacción llegó a comitear.
+        //
+        // Hueco residual conocido y aceptado (preexistente al diseño de
+        // closeRowFromPaymentTx, no introducido por este cambio): esa función es
+        // best-effort ("never throws" — no debe hacer rollback de un cobro real por
+        // un fallo suyo), así que EN TEORÍA el Payment podría comitear sin que
+        // `paymentId` llegue a escribirse. Requeriría dos fallos independientes
+        // encima de un pre-flight que ya es infrecuente — se acepta el riesgo
+        // residual en vez de bloquear el fallback que pidió el founder.
+        let paymentAlreadyLanded = false
+        try {
+          const rowAfterFailure = await prisma.terminalPaymentRequest.findUnique({
+            where: { requestId },
+            select: { paymentId: true },
+          })
+          paymentAlreadyLanded = !!rowAfterFailure?.paymentId
+        } catch (checkErr) {
+          // No se pudo verificar. Fail-open consistente con el resto de esta función
+          // (nunca perder un cobro por un fallo de infraestructura) — el residual es
+          // duplicar en un caso ya doblemente infrecuente (pre-flight post-commit +
+          // esta consulta tronando), contra el original que sí era alcanzable.
+          logger.error(
+            '🚨 [FastPayment] No se pudo confirmar si el pago ya aterrizó tras el fallo de recordOrderPayment — se sigue a FAST bajo incertidumbre',
+            {
+              requestId,
+              orderId: target.orderId,
+              originalError: err instanceof Error ? err.message : String(err),
+              verificationError: checkErr instanceof Error ? checkErr.message : String(checkErr),
+            },
+          )
+        }
+
+        if (paymentAlreadyLanded) {
+          // El dinero SÍ quedó registrado en su venta real — el fallo es del
+          // pre-flight posterior (inventario, etc.), no del cobro en sí. Se deja
+          // subir el error ORIGINAL tal cual para que el llamador vea la razón real,
+          // en vez de disfrazarlo con un segundo Payment.
+          //
+          // 🚨 = el token estable que Better Stack usa para alertar (mismo patrón
+          // que terminal-payment.service.ts).
+          logger.error('🚨 [FastPayment] recordOrderPayment tronó DESPUÉS de comitear el pago — NO se cae a FAST (evita duplicar)', {
+            requestId,
+            orderId: target.orderId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          throw err
+        }
+
         // 🚨 = el token estable que Better Stack usa para alertar (mismo patrón que
         // terminal-payment.service.ts) — un cobro que no pudo aterrizar en su venta
         // real necesita que alguien lo revise, aunque el dinero SÍ quede registrado.
         logger.error('🚨 [FastPayment] recordOrderPayment tronó al delegar — el cobro cae a venta rápida para no perderse', {
-          requestId: paymentData.terminalPaymentRequestId,
+          requestId,
           orderId: target.orderId,
           error: err instanceof Error ? err.message : String(err),
         })
