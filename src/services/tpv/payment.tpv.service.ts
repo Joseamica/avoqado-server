@@ -2639,7 +2639,38 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       })
       // recordOrderPayment ya sabe descontar inventario, cerrar la orden, actualizar el
       // turno y cerrar la fila de arbitraje. No se reimplementa nada de eso aquí.
-      return recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+      //
+      // 🔴 `return await` (no `return` a secas): así el try/catch de abajo SÍ atrapa
+      // un rechazo de esta promesa. Con `return recordOrderPayment(...)` a secas, el
+      // catch nunca vería el error — se propagaría directo al llamador.
+      try {
+        return await recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+      } catch (err) {
+        // 🔴 La tarjeta YA se cobró. Antes de esta delegación, ese dinero por lo menos
+        // aterrizaba en una venta FAST. Si recordOrderPayment truena por dentro —
+        // pre-flight de inventario rechazando por stock insuficiente, venue con
+        // ventas deshabilitadas, split incompatible, orden no encontrada— y se deja
+        // propagar el error, el cobro no aterriza en NINGÚN lado: sería una regresión
+        // que introduciríamos nosotros, dejando el sistema peor que antes de este
+        // cambio. Una venta FAST vacía es mala; ninguna venta es peor. Por eso se cae
+        // a la ruta FAST de siempre en vez de propagar.
+        //
+        // Es seguro: la escritura de recordOrderPayment corre dentro de una
+        // transacción (prisma.$transaction) — si tronó, hizo rollback y no dejó nada
+        // a medias. Y si por alguna otra vía SÍ llegó a persistirse un Payment antes
+        // del throw, los checks de idempotencia de la ruta FAST (idempotencyKey /
+        // referenceNumber, arriba en esta misma función) son la red que evita
+        // duplicar el cobro.
+        //
+        // 🚨 = el token estable que Better Stack usa para alertar (mismo patrón que
+        // terminal-payment.service.ts) — un cobro que no pudo aterrizar en su venta
+        // real necesita que alguien lo revise, aunque el dinero SÍ quede registrado.
+        logger.error('🚨 [FastPayment] recordOrderPayment tronó al delegar — el cobro cae a venta rápida para no perderse', {
+          requestId: paymentData.terminalPaymentRequestId,
+          orderId: target.orderId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
   }
 
