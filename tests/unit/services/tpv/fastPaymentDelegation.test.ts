@@ -11,65 +11,30 @@
  * mock seguía en 0 llamadas y corría la función real).
  *
  * Por eso esta suite deja correr la `recordOrderPayment` REAL y verifica la
- * delegación por sus efectos observables en Prisma:
- *   - `recordOrderPayment` hace, como PRIMERA consulta sustantiva (sin
- *     idempotencyKey/referenceNumber en el payload, ambos checks previos se
- *     saltan), `prisma.order.findUnique({ where: { id: orderId, venueId } })`.
- *     Que esa consulta lleve el `orderId` de la fila de arbitraje —y no cree una
- *     orden nueva— prueba que la delegación ocurrió de verdad.
- *   - El error resultante ("Order order-real not found…") es exclusivo de
- *     `recordOrderPayment`; la ruta FAST nunca lo produce.
+ * delegación por sus efectos observables en Prisma.
  *
- * 🔴 Ronda 2 (mutation testing) — dos huecos Critical que los mocks de "no se llegó
- * a llamar X" no cerraban:
- *   1. El test de fail-open sólo probaba "no delegó", no "SÍ se cobró por FAST". Un
- *      mutante que convierte el catch en fail-CERRADO (agrega `throw err`) seguía
- *      pasando los 3 tests originales.
- *   2. Ningún fixture dejaba tener ÉXITO a `recordOrderPayment`, así que un mutante
- *      que quita el `return` de la delegación (dejando el cobro seguir de largo a
- *      crear una orden FAST encima) también pasaba: el único test que delega SIEMPRE
- *      truena, y la excepción se propaga igual con o sin `return`.
+ * 🔴 Ronda 3 — lo que esta suite dejó de mockear, y por qué importa:
  *
- * Para cerrar ambos huecos hace falta que la ruta FAST real (creación de orden +
- * pago) y la `recordOrderPayment` real puedan completar sin tronar en las pruebas
- * de éxito. Como ninguna de las dos es interceptable desde este archivo (mismo
- * problema de arriba: varias de sus dependencias — `updateOrderTotalsForStandalonePayment`,
- * la creación de la orden FAST — también viven en el MISMO módulo), se mockean sólo
- * las dependencias CRUZADAS (de otro archivo, sí interceptables) que hacen falta
- * para que ambos caminos terminen limpio: guard de ventas, validación de staff,
- * cierre de la fila de arbitraje, sockets, costo de transacción, comisión,
- * auto-reorder y recibo digital. Todas están además envueltas en try/catch en el
- * propio código de producción ("no tumbar el pago por un efecto secundario"), así
- * que ni siquiera son estrictamente obligatorias para que la función resuelva —
- * pero mockearlas evita ruido y hace el camino feliz determinista.
+ * 1. `terminalPaymentService.closeRowFromPaymentTx` YA NO SE MOCKEA. La ronda anterior
+ *    lo sustituía por un `jest.fn()` y, encima, fijaba A MANO el resultado de la
+ *    relectura de la fila. O sea: la suite le dictaba a la prueba la respuesta de la
+ *    única función de la que dependía la corrección. Con eso, los dos agujeros reales
+ *    (paymentId AJENO y fila COMPLETED con paymentId NULO) no rompían un solo test.
+ *    Ahora corre la implementación REAL contra una fila de arbitraje en memoria que
+ *    ella misma muta — así el estado que ve el código bajo prueba lo produce el código
+ *    de producción, no el autor del test.
  *
- * 🔴 Ronda 2, hallazgo Important (resuelto por el founder — ahora SÍ en alcance):
- * si `recordOrderPayment` truena por dentro (pre-flight de inventario, venue con
- * ventas deshabilitadas, split incompatible, orden no encontrada…), la tarjeta YA
- * se cobró — dejar propagar el error perdería el registro del dinero en NINGÚN
- * lado, peor que la venta FAST vacía que este cambio vino a arreglar. Por eso
- * `recordFastPayment` ahora envuelve la delegación en try/catch: si truena, cae a
- * la ruta FAST de siempre (con un `logger.error('🚨 …')` obligatorio para que
- * alguien lo revise). Como consecuencia, el test original de "delega con el
- * orderId correcto" ya NO puede probarlo dejando tronar a recordOrderPayment y
- * comprobando el mensaje de su error — ese error ahora se traga y cae a FAST. Se
- * simplificó a probar sólo A QUIÉN se le preguntó; el fallback en sí tiene su
- * propio test dedicado más abajo.
+ * 2. Los pagos ya no se fijan con `mockResolvedValueOnce`: hay una tabla `Payment` en
+ *    memoria. `payment.create` inserta; `findUnique`/`findFirst`/`findMany` consultan.
+ *    Así la verificación de "¿mi pago aterrizó?" se DERIVA de si realmente se creó un
+ *    pago — que es justo lo que la ronda anterior fijaba a mano — y los checks de
+ *    idempotencia de la ruta FAST se comportan como en producción.
  *
- * 🔴 Ronda 2 (segunda pasada) — el fallback de arriba abría una puerta nueva:
- * `recordOrderPayment` puede tronar DESPUÉS de que su propia transacción ya
- * comitió el Payment (`updateOrderTotalsForStandalonePayment`, rama "autónoma",
- * corre un pre-flight de inventario FUERA de la transacción; si rechaza, el catch
- * de `recordOrderPayment` relanza `BadRequestError`/`NotFoundError` con el dinero
- * YA escrito en firme). Caer a FAST en ESE caso concreto duplica el Payment —
- * salvo que `paymentData` traiga `idempotencyKey`/`referenceNumber`, una
- * suposición operativa, no una garantía. El fix relee la fila de arbitraje
- * (`terminalPaymentRequest.paymentId`, que `closeRowFromPaymentTx` escribe DENTRO
- * de la misma transacción que crea el Payment) antes de decidir: si el pago YA
- * aterrizó, NO cae a FAST — sube el error original tal cual. El test de este caso
- * usa un throw TARDÍO (post-commit, vía el pre-flight de
- * `updateOrderTotalsForStandalonePayment`), distinto del throw TEMPRANO (orden
- * inexistente, antes de escribir nada) que ya cubre el test anterior.
+ * Las dependencias CRUZADAS que sí se siguen mockeando (otro archivo, interceptables)
+ * son sólo las que hacen falta para que ambos caminos terminen limpio: guard de
+ * ventas, validación de staff, sockets, costo de transacción, comisión, auto-reorder,
+ * recibo digital e inventario. Todas están además envueltas en try/catch en el propio
+ * código de producción ("no tumbar el pago por un efecto secundario").
  */
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
@@ -81,12 +46,10 @@ jest.mock('@/utils/staff-venue.util', () => ({
   // no interceptable) que sólo reenvía aquí — mockear el cruzado basta.
   validateStaffVenue: jest.fn().mockResolvedValue('staff-1'),
 }))
-jest.mock('@/services/terminal-payment.service', () => ({
-  __esModule: true,
-  terminalPaymentService: { closeRowFromPaymentTx: jest.fn().mockResolvedValue(undefined) },
-}))
+// 🔴 `@/services/terminal-payment.service` NO se mockea a propósito (ver nota de arriba).
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
+  default: { broadcastToVenue: jest.fn() },
   socketManager: { broadcastToVenue: jest.fn() },
 }))
 jest.mock('@/services/tpv/digitalReceipt.tpv.service', () => ({
@@ -105,10 +68,9 @@ jest.mock('@/services/dashboard/autoReorder.service', () => ({
   __esModule: true,
   runAutoReorderForVenue: jest.fn().mockResolvedValue({ ran: false }),
 }))
-// Sólo lo usa el test del throw POST-commit (updateOrderTotalsForStandalonePayment
-// llama a esto por cada línea sin pagar del pre-flight). Default con stock de
-// sobra para no afectar a los demás tests — se sobreescribe puntualmente donde
-// se necesita forzar el rechazo por inventario insuficiente.
+// Lo usan los tests de throw POST-commit (updateOrderTotalsForStandalonePayment llama
+// a esto por cada línea sin pagar del pre-flight). Default con stock de sobra para no
+// afectar a los demás — se sobreescribe donde se necesita forzar el rechazo.
 jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({
   __esModule: true,
   getProductInventoryStatus: jest.fn().mockResolvedValue({ inventoryMethod: 'QUANTITY', currentStock: 999 }),
@@ -131,24 +93,111 @@ import { BadRequestError } from '@/errors/AppError'
 const prismaMock = prisma as any
 const getProductInventoryStatusMock = getProductInventoryStatus as jest.Mock
 
+// ---------------------------------------------------------------------------
+// Fila de arbitraje EN MEMORIA. La lee `recordFastPayment` y la MUTA el
+// `closeRowFromPaymentTx` real — nadie le dicta su contenido a la prueba.
+// ---------------------------------------------------------------------------
+type FakeRow = { requestId: string; venueId: string; orderId: string | null; status: string; paymentId: string | null }
+let arbitrationRow: FakeRow | null = null
+
+// Tabla `Payment` en memoria. `payment.create` inserta aquí, y las consultas —
+// tanto la verificación de identidad como los checks de idempotencia de FAST —
+// leen de aquí. Así "¿aterrizó mi pago?" se DERIVA de la realidad del fixture.
+let payments: any[] = []
+
+/** Igualdad simple + el único operador que usan estos where: `{ not: x }`. */
+function whereMatches(row: any, where: any): boolean {
+  return Object.entries(where ?? {}).every(([key, value]) => {
+    if (value && typeof value === 'object' && 'not' in (value as any)) return row[key] !== (value as any).not
+    return row[key] === value
+  })
+}
+
+function installFakes() {
+  prismaMock.terminalPaymentRequest.findUnique.mockImplementation(async ({ where }: any) =>
+    arbitrationRow && arbitrationRow.requestId === where.requestId ? { ...arbitrationRow } : null,
+  )
+  prismaMock.terminalPaymentRequest.updateMany.mockImplementation(async ({ where, data }: any) => {
+    if (!arbitrationRow || arbitrationRow.requestId !== where.requestId) return { count: 0 }
+    if (where.status?.not && arbitrationRow.status === where.status.not) return { count: 0 }
+    if (where.status?.in && !where.status.in.includes(arbitrationRow.status)) return { count: 0 }
+    Object.assign(arbitrationRow, data)
+    return { count: 1 }
+  })
+
+  prismaMock.payment.create.mockImplementation(async ({ data }: any) => {
+    const created = {
+      id: `pay-${payments.length + 1}`,
+      feeAmount: 0,
+      netAmount: 0,
+      status: 'COMPLETED',
+      tipAmount: 0,
+      processedBy: null,
+      receipts: [],
+      ...data,
+    }
+    payments.push(created)
+    return created
+  })
+  prismaMock.payment.findFirst.mockImplementation(async ({ where }: any) => payments.find(p => whereMatches(p, where)) ?? null)
+  prismaMock.payment.findMany.mockImplementation(async ({ where }: any) => payments.filter(p => whereMatches(p, where)))
+  prismaMock.payment.findUnique.mockImplementation(async ({ where }: any) => {
+    // Check 1 de idempotencia de FAST usa la llave compuesta del índice único.
+    const compound = where.venueId_idempotencyKey
+    if (compound) return payments.find(p => whereMatches(p, compound)) ?? null
+    return payments.find(p => whereMatches(p, where)) ?? null
+  })
+}
+
+/** Orden real que hace COMPLETAR a recordOrderPayment sin disparar el pre-flight. */
+const ordenQueCompleta = {
+  id: 'order-real',
+  venueId: 'venue-1',
+  splitType: null,
+  items: [],
+  payments: [],
+  total: 1000, // pago PARCIAL → willBeFullyPaid = false → sin pre-flight de inventario
+  source: 'TPV',
+  externalId: null,
+}
+
+/** Segunda lectura, ya con la transacción comiteada: dispara el pre-flight que RECHAZA. */
+const ordenQueRechazaPorInventario = {
+  id: 'order-real',
+  venueId: 'venue-1',
+  subtotal: 30,
+  discountAmount: 0,
+  paymentStatus: 'PENDING',
+  servedById: 'staff-1',
+  createdById: 'staff-1',
+  items: [
+    {
+      id: 'item-1',
+      productId: 'prod-1',
+      product: { name: 'Producto agotado' },
+      quantity: 1,
+      areaTicketLineId: null,
+      paymentAllocations: [],
+      modifiers: [],
+    },
+  ],
+  payments: [],
+  customer: null,
+}
+
 describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.terminalPaymentRequest.findUnique.mockResolvedValue(null)
+    arbitrationRow = null
+    payments = []
+    installFakes()
   })
 
   it('con solicitud que traia orden, delega en recordOrderPayment preguntando por el orderId correcto', async () => {
-    prismaMock.terminalPaymentRequest.findUnique.mockResolvedValueOnce({
-      orderId: 'order-real',
-      venueId: 'venue-1',
-      status: 'CANCELLED',
-    })
+    arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'CANCELLED', paymentId: null }
+
     // No se mockea `order.findUnique` con una orden completa a propósito: el punto
-    // de este test es sólo probar A QUIÉN se le pregunta. recordOrderPayment truena
-    // (orden inexistente en el mock — NotFoundError), pero desde el fallback del
-    // founder ese error ya NO se propaga: se traga y cae a FAST (probado en su
-    // propio test más abajo). Por eso aquí sólo importa la consulta, no el resultado
-    // final de la llamada — se tolera cualquier desenlace con `.catch()`.
+    // de este test es sólo probar A QUIÉN se le pregunta.
     await recordFastPayment('venue-1', { amount: 30, terminalPaymentRequestId: 'req-1' } as any, 'user-1').catch(() => {})
 
     expect(prismaMock.order.findUnique).toHaveBeenCalledWith(
@@ -166,14 +215,8 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
 
   it('si la consulta de la fila truena, el cobro SÍ se registra por la ruta FAST (no sólo "no delegó")', async () => {
     // 🔴 Fail-open: un fallo de infra jamás puede impedir registrar dinero que YA se cobró.
-    //
-    // Ronda 2: antes esta prueba sólo comprobaba `order.findUnique` no llamado (=
-    // "no delegó"). Un mutante que convierte el catch de la consulta en fail-CERRADO
-    // (agrega `throw err` tras el logger.error) también deja "no delegó" en verdad
-    // —porque ahora nada se registra en absoluto— y el test seguía en verde. La
-    // señal que sí lo detecta es POSITIVA: el dinero quedó registrado por FAST.
+    // La señal que detecta un catch fail-CERRADO es POSITIVA: el dinero quedó registrado.
     prismaMock.terminalPaymentRequest.findUnique.mockRejectedValueOnce(new Error('connection refused'))
-
     prismaMock.order.create.mockResolvedValueOnce({
       id: 'fast-order-1',
       venueId: 'venue-1',
@@ -181,110 +224,58 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
       status: 'COMPLETED',
       paymentStatus: 'PAID',
     })
-    prismaMock.payment.create.mockResolvedValueOnce({
-      id: 'fast-payment-1',
-      feeAmount: 0,
-      netAmount: 30,
-      status: 'COMPLETED',
-      type: 'FAST',
-      amount: 30,
-      tipAmount: 0,
-      method: 'CASH',
-      processedBy: null,
-    })
 
     let result: any
     let caughtError: unknown
     try {
-      result = await recordFastPayment('venue-1', { amount: 30, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH' } as any, 'user-1')
+      result = await recordFastPayment(
+        'venue-1',
+        { amount: 30, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH' } as any,
+        'user-1',
+      )
     } catch (err) {
       caughtError = err
     }
 
-    // Si el fail-open estuviera roto (catch fail-cerrado), esto quedaría undefined.
     expect(caughtError).toBeUndefined()
-    // La prueba positiva: SÍ se creó la venta FAST y SÍ se registró el pago.
     expect(prismaMock.order.create).toHaveBeenCalled()
-    expect(prismaMock.payment.create).toHaveBeenCalled()
-    expect(result).toMatchObject({ id: 'fast-payment-1' })
-
-    // Se conserva la señal original: tampoco se acercó a la búsqueda de orden
-    // activa que sólo hace recordOrderPayment (o sea, además de cobrar, no delegó).
+    expect(payments).toHaveLength(1)
+    expect(result).toMatchObject({ id: payments[0].id })
+    // Además de cobrar, no delegó.
     expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
   })
 
   it('si recordOrderPayment tiene éxito, recordFastPayment NO sigue de largo a crear una orden FAST', async () => {
-    // Ronda 2, Critical #2: quitar el `return` de la delegación no lo detectaba
-    // ningún test, porque el único caso que delega SIEMPRE tronaba (orden
-    // inexistente) — la excepción se propaga igual con o sin `return`, así que
-    // "perder el `return`" era indistinguible. Aquí se arma un fixture donde
-    // recordOrderPayment SÍ completa, para poder comprobar que la ejecución no
-    // sigue de largo a la lógica FAST (que crearía una SEGUNDA orden y un SEGUNDO
-    // Payment encima del que recordOrderPayment ya registró).
-    prismaMock.terminalPaymentRequest.findUnique.mockResolvedValueOnce({
-      orderId: 'order-real',
-      venueId: 'venue-1',
-      status: 'CANCELLED',
-    })
-    // Orden real sin líneas (evita el pre-flight de inventario por falta de items)
-    // y con un total mucho mayor al pago (pago PARCIAL: willBeFullyPaid = false),
-    // que también evita ese mismo pre-flight por el otro lado. Ninguna de las dos
-    // cosas es lo que este test quiere ejercitar — sólo que recordOrderPayment
-    // complete de verdad.
-    prismaMock.order.findUnique.mockResolvedValueOnce({
-      id: 'order-real',
-      venueId: 'venue-1',
-      splitType: null,
-      items: [],
-      payments: [],
-      total: 1000,
-      source: 'TPV',
-      externalId: null,
-    })
-    prismaMock.payment.create.mockResolvedValueOnce({
-      id: 'real-order-payment-1',
-      feeAmount: 0,
-      netAmount: 30,
-      status: 'COMPLETED',
-      type: 'REGULAR',
-      amount: 30,
-      tipAmount: 0,
-      method: 'CASH',
-      processedBy: null,
-    })
+    // Quitar el `return` de la delegación dejaría el cobro seguir de largo a la
+    // lógica FAST, creando una SEGUNDA orden y un SEGUNDO Payment encima.
+    arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'CANCELLED', paymentId: null }
+    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta)
 
     let result: any
     let caughtError: unknown
     try {
-      result = await recordFastPayment('venue-1', { amount: 30, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH' } as any, 'user-1')
+      result = await recordFastPayment(
+        'venue-1',
+        { amount: 30, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH' } as any,
+        'user-1',
+      )
     } catch (err) {
       caughtError = err
     }
 
     expect(caughtError).toBeUndefined()
-    // La señal inequívoca de que NO se siguió de largo: nunca se creó una orden
-    // FAST encima del pago que recordOrderPayment ya había registrado.
     expect(prismaMock.order.create).not.toHaveBeenCalled()
-    // Y el resultado devuelto es el de recordOrderPayment, no uno inventado por FAST.
-    expect(result).toMatchObject({ id: 'real-order-payment-1' })
+    expect(payments).toHaveLength(1)
+    expect(result).toMatchObject({ id: payments[0].id })
   })
 
   it('si recordOrderPayment truena al delegar, el cobro SÍ se registra por FAST en vez de perderse', async () => {
-    // 🔴 Hallazgo Important resuelto por el founder: la tarjeta YA se cobró. Antes
-    // de la delegación, ese dinero por lo menos aterrizaba en una venta FAST — sin
-    // este fallback, un pre-flight de inventario, un venue con ventas deshabilitadas
-    // o (como aquí) una orden que ya no existe dejarían el cobro sin registrar en
-    // NINGÚN lado. Eso sería una regresión de ESTE cambio: peor que la venta FAST
-    // vacía que se vino a arreglar.
-    prismaMock.terminalPaymentRequest.findUnique.mockResolvedValueOnce({
-      orderId: 'order-real',
-      venueId: 'venue-1',
-      status: 'CANCELLED',
-    })
-    // No se mockea `order.findUnique` con una orden completa → recordOrderPayment
-    // truena con NotFoundError. Cualquier otra causa (inventario, venue deshabilitado,
-    // split incompatible) tronaría igual de temprano y activaría el mismo fallback —
-    // no hace falta ejercitar cada una para probar que el fallback en sí funciona.
+    // 🔴 La tarjeta YA se cobró. Sin este fallback, una orden que ya no existe (o un
+    // venue con ventas deshabilitadas) dejaría el cobro sin registrar en NINGÚN lado
+    // — peor que la venta FAST vacía que este cambio vino a arreglar.
+    arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'CANCELLED', paymentId: null }
+    // Sin mockear `order.findUnique` → recordOrderPayment truena TEMPRANO (NotFoundError),
+    // antes de escribir nada.
     prismaMock.order.create.mockResolvedValueOnce({
       id: 'fast-order-2',
       venueId: 'venue-1',
@@ -292,36 +283,26 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
       status: 'COMPLETED',
       paymentStatus: 'PAID',
     })
-    prismaMock.payment.create.mockResolvedValueOnce({
-      id: 'fast-payment-2',
-      feeAmount: 0,
-      netAmount: 30,
-      status: 'COMPLETED',
-      type: 'FAST',
-      amount: 30,
-      tipAmount: 0,
-      method: 'CASH',
-      processedBy: null,
-    })
 
     let result: any
     let caughtError: unknown
     try {
-      result = await recordFastPayment('venue-1', { amount: 30, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH' } as any, 'user-1')
+      result = await recordFastPayment(
+        'venue-1',
+        { amount: 30, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH', idempotencyKey: 'idem-1' } as any,
+        'user-1',
+      )
     } catch (err) {
       caughtError = err
     }
 
-    // Si el try/catch de la delegación se quitara, esto quedaría con el error real
-    // de recordOrderPayment en vez de undefined.
     expect(caughtError).toBeUndefined()
-    // El dinero SÍ quedó registrado — por FAST, y una sola vez (no se duplicó).
+    // El dinero SÍ quedó registrado — por FAST, y UNA sola vez.
     expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
-    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
-    expect(result).toMatchObject({ id: 'fast-payment-2' })
+    expect(payments).toHaveLength(1)
+    expect(result).toMatchObject({ id: payments[0].id })
 
-    // El 🚨 NO es opcional: un cobro que no pudo aterrizar en su venta real
-    // necesita que alguien lo revise, aunque el dinero sí haya quedado registrado.
+    // El 🚨 NO es opcional: alguien tiene que revisar un cobro que no aterrizó en su venta.
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('🚨'),
       expect.objectContaining({ requestId: 'req-1', orderId: 'order-real' }),
@@ -329,99 +310,176 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
   })
 
   it('si recordOrderPayment truena DESPUÉS de comitear el pago, NO cae a FAST — no se duplica el cobro', async () => {
-    // 🔴 [Ronda 2, segunda pasada] Éste es el throw TARDÍO (post-commit): la
-    // transacción de recordOrderPayment YA escribió el Payment y cerró la fila de
-    // arbitraje, y el pre-flight de updateOrderTotalsForStandalonePayment (que
-    // corre DESPUÉS, fuera de la transacción) rechaza por inventario insuficiente.
-    // A diferencia del test anterior (orden inexistente, nada escrito), aquí SÍ
-    // hay un Payment real en firme antes del throw — caer a FAST duplicaría.
-    prismaMock.terminalPaymentRequest.findUnique
-      .mockResolvedValueOnce({ orderId: 'order-real', venueId: 'venue-1', status: 'CANCELLED' }) // 1ª lectura: arbitrationRow
-      .mockResolvedValueOnce({ paymentId: 'real-payment-postcommit' }) // 2ª lectura: verificación post-fallo — closeRowFromPaymentTx YA escribió esto dentro de la transacción que comitió
-
-    // 1er order.findUnique (activeOrder, dentro de recordOrderPayment): total
-    // grande para que el pre-flight DE ANTES de la transacción no se dispare —
-    // ese no es el que este test quiere ejercitar.
-    prismaMock.order.findUnique
-      .mockResolvedValueOnce({
-        id: 'order-real',
-        venueId: 'venue-1',
-        splitType: null,
-        items: [],
-        payments: [],
-        total: 1000,
-        source: 'TPV',
-        externalId: null,
-      })
-      // 2º order.findUnique (dentro de updateOrderTotalsForStandalonePayment, YA
-      // con la transacción comiteada): subtotal == lo cobrado → isFullyPaid true →
-      // dispara el pre-flight de inventario con un producto sin stock.
-      .mockResolvedValueOnce({
-        id: 'order-real',
-        venueId: 'venue-1',
-        subtotal: 30,
-        discountAmount: 0,
-        paymentStatus: 'PENDING',
-        servedById: 'staff-1',
-        createdById: 'staff-1',
-        items: [
-          {
-            id: 'item-1',
-            productId: 'prod-1',
-            product: { name: 'Producto agotado' },
-            quantity: 1,
-            areaTicketLineId: null,
-            paymentAllocations: [],
-            modifiers: [],
-          },
-        ],
-        payments: [],
-        customer: null,
-      })
-
-    prismaMock.payment.create.mockResolvedValueOnce({
-      id: 'real-payment-postcommit',
-      feeAmount: 0,
-      netAmount: 30,
-      status: 'COMPLETED',
-      type: 'REGULAR',
-      amount: 30,
-      tipAmount: 0,
-      method: 'CASH',
-      processedBy: null,
-    })
+    // Throw TARDÍO: la transacción YA escribió el Payment y el pre-flight de
+    // updateOrderTotalsForStandalonePayment (que corre DESPUÉS, fuera de la
+    // transacción) rechaza por inventario. Caer a FAST aquí duplicaría.
+    arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'PENDING', paymentId: null }
+    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta).mockResolvedValueOnce(ordenQueRechazaPorInventario)
     getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
 
     let result: any
     let caughtError: unknown
     try {
-      // amount en CENTAVOS (totalAmount = amount/100): 3000 = $30, para que
-      // calce con el subtotal:30 de la 2ª orden y dispare isFullyPaid=true.
+      // amount en CENTAVOS (totalAmount = amount/100): 3000 = $30, que calza con el
+      // subtotal 30 de la 2ª orden y dispara isFullyPaid = true.
       result = await recordFastPayment(
         'venue-1',
-        { amount: 3000, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH' } as any,
+        { amount: 3000, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH', idempotencyKey: 'idem-post' } as any,
         'user-1',
       )
     } catch (err) {
       caughtError = err
     }
 
-    // El error ORIGINAL (inventario) sube tal cual — no uno inventado por FAST, y
-    // NO se traga como en el caso del throw temprano.
+    // El error ORIGINAL (inventario) sube tal cual — no uno inventado por FAST.
     expect(result).toBeUndefined()
     expect(caughtError).toBeInstanceOf(BadRequestError)
     expect((caughtError as Error).message).toMatch(/insufficient inventory/i)
 
-    // La señal inequívoca: el pago de recordOrderPayment NO se duplicó y no se
-    // creó una orden/pago FAST encima.
-    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    // La señal inequívoca: un solo Payment y ninguna orden FAST encima.
+    expect(payments).toHaveLength(1)
     expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
 
-    // Se sí se hizo la relectura de verificación (2ª consulta a la fila).
-    expect(prismaMock.terminalPaymentRequest.findUnique).toHaveBeenCalledTimes(2)
-    expect(prismaMock.terminalPaymentRequest.findUnique).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ where: { requestId: 'req-1' } }),
+  // =========================================================================
+  // REGRESIONES DE LA REVISIÓN FINAL — los dos casos que la ronda anterior no
+  // podía ver porque preguntaba por EXISTENCIA en la fila en vez de por
+  // IDENTIDAD en la tabla Payment.
+  // =========================================================================
+
+  it('🔴 C1 — con un paymentId AJENO en la fila y un throw TEMPRANO, el cobro NO se pierde: se registra por FAST', async () => {
+    // `TerminalPaymentRequest.paymentId` es un binding HEURÍSTICO: el watchdog ata
+    // CUALQUIER Payment COMPLETED + tarjeta + posterior a la fila sobre esa orden, y
+    // `closeRow` escribe el que reporte la terminal (campo opcional). O sea: que la
+    // fila traiga un paymentId NO prueba que MI pago comiteó.
+    //
+    // Aquí la fila trae uno ajeno y recordOrderPayment truena TEMPRANO (orden
+    // inexistente → nada escrito). Leer existencia concluiría "ya aterrizó" y
+    // relanzaría: el cobro no quedaría registrado en NINGÚN lado — exactamente la
+    // regresión que el fallback vino a evitar, y peor que antes de esta rama.
+    arbitrationRow = {
+      requestId: 'req-1',
+      orderId: 'order-real',
+      venueId: 'venue-1',
+      status: 'COMPLETED',
+      paymentId: 'pago-de-otra-cosa', // atado por el watchdog, NO por esta llamada
+    }
+    prismaMock.order.create.mockResolvedValueOnce({
+      id: 'fast-order-c1',
+      venueId: 'venue-1',
+      orderNumber: 'FAST-C1',
+      status: 'COMPLETED',
+      paymentStatus: 'PAID',
+    })
+
+    let result: any
+    let caughtError: unknown
+    try {
+      result = await recordFastPayment(
+        'venue-1',
+        { amount: 30, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH', idempotencyKey: 'idem-c1' } as any,
+        'user-1',
+      )
+    } catch (err) {
+      caughtError = err
+    }
+
+    // Lo único que importa: el dinero quedó registrado.
+    expect(caughtError).toBeUndefined()
+    expect(payments).toHaveLength(1)
+    expect(result).toMatchObject({ id: payments[0].id })
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 I2 (keyless) — con la fila ya COMPLETED y paymentId NULO, un throw POST-commit NO duplica el Payment', async () => {
+    // La premisa que la ronda anterior daba por buena —"closeRowFromPaymentTx escribe
+    // el paymentId en la misma transacción, ambos comitean juntos o ninguno"— es FALSA
+    // por una vía MAINLINE: `closeRowFromPaymentTx` retorna SIN escribir cuando la fila
+    // ya está COMPLETED, y un resultado por socket con `status:'success'` y sin
+    // paymentId la deja justo así ANTES del registro REST.
+    //
+    // Este test NO fija ese estado a mano: corre el `closeRowFromPaymentTx` REAL sobre
+    // la fila en memoria y luego COMPRUEBA que quedó COMPLETED con paymentId nulo.
+    // Con un payload sin llave de identidad (el peor caso: la ruta FAST tampoco tendría
+    // con qué deduplicar), leer la fila concluiría "no aterrizó" → FAST → DOS Payments.
+    arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'COMPLETED', paymentId: null }
+    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta).mockResolvedValueOnce(ordenQueRechazaPorInventario)
+    getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+    prismaMock.order.create.mockResolvedValueOnce({
+      id: 'fast-order-i2',
+      venueId: 'venue-1',
+      orderNumber: 'FAST-I2',
+      status: 'COMPLETED',
+      paymentStatus: 'PAID',
+    })
+
+    let caughtError: unknown
+    try {
+      // Sin idempotencyKey ni referenceNumber: el payload del repro del revisor.
+      await recordFastPayment('venue-1', { amount: 3000, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH' } as any, 'user-1')
+    } catch (err) {
+      caughtError = err
+    }
+
+    // La premisa falsa, comprobada por el código REAL y no afirmada por el test:
+    // la fila quedó COMPLETED y su paymentId sigue NULO pese a haber comiteado un pago.
+    expect(arbitrationRow!.status).toBe('COMPLETED')
+    expect(arbitrationRow!.paymentId).toBeNull()
+
+    // Y aun así: UN solo Payment, ninguna orden FAST, y el error original arriba.
+    expect(payments).toHaveLength(1)
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(caughtError).toBeInstanceOf(BadRequestError)
+  })
+
+  it('🔴 la verificación pregunta por MI llave a la tabla Payment, no por el paymentId de la fila', async () => {
+    // El ancla del arreglo: la pregunta correcta es "¿existe el pago con MI
+    // idempotencyKey en ESTA orden?". Si alguien la volviera a cambiar por una lectura
+    // de `terminalPaymentRequest.paymentId`, este test cae.
+    arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'PENDING', paymentId: null }
+    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta).mockResolvedValueOnce(ordenQueRechazaPorInventario)
+    getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+
+    await recordFastPayment(
+      'venue-1',
+      { amount: 3000, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH', idempotencyKey: 'idem-ancla' } as any,
+      'user-1',
+    ).catch(() => {})
+
+    expect(prismaMock.payment.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ venueId: 'venue-1', orderId: 'order-real', idempotencyKey: 'idem-ancla' }),
+      }),
+    )
+  })
+
+  it('🔴 una fila de OTRO venue no presta su orden: el cobro se registra como venta rápida y alerta', async () => {
+    // `requestId` es @unique GLOBAL y lo genera el cliente: una colisión entre
+    // inquilinos devolvería el orderId de otro negocio. Pagar esa orden le cobraría a
+    // un venue la cuenta de otro, en silencio.
+    arbitrationRow = { requestId: 'req-1', orderId: 'order-del-vecino', venueId: 'venue-2', status: 'CANCELLED', paymentId: null }
+    prismaMock.order.create.mockResolvedValueOnce({
+      id: 'fast-order-x',
+      venueId: 'venue-1',
+      orderNumber: 'FAST-X',
+      status: 'COMPLETED',
+      paymentStatus: 'PAID',
+    })
+
+    const result = await recordFastPayment(
+      'venue-1',
+      { amount: 30, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH', idempotencyKey: 'idem-x' } as any,
+      'user-1',
+    )
+
+    // Nunca se acercó a la orden ajena.
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    // El dinero SÍ se registró — en el venue del token, como venta rápida.
+    expect(payments).toHaveLength(1)
+    expect(result).toMatchObject({ id: payments[0].id })
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('🚨'),
+      expect.objectContaining({ expectedVenueId: 'venue-1', rowVenueId: 'venue-2' }),
     )
   })
 })

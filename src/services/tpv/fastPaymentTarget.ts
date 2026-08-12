@@ -5,8 +5,17 @@ export interface ArbitrationRowSnapshot {
   status: string
 }
 
+/** Por qué un cobro NO se pudo atar a una venta existente. Sólo para el log/alerta. */
+export type FastOrderReason =
+  /** No hay fila de arbitraje (cobro nacido EN la terminal, o TPV vieja). */
+  | 'noRow'
+  /** La fila existe pero nunca tuvo orden (el POS cobró sin mesa). */
+  | 'noOrder'
+  /** 🔴 La fila pertenece a OTRO venue — colisión de `requestId` entre inquilinos. */
+  | 'venueMismatch'
+
 /** A qué venta pertenece el dinero que acaba de cobrar la terminal. */
-export type FastPaymentTarget = { kind: 'existingOrder'; orderId: string } | { kind: 'fastOrder' }
+export type FastPaymentTarget = { kind: 'existingOrder'; orderId: string } | { kind: 'fastOrder'; reason: FastOrderReason }
 
 /**
  * ¿A qué venta pertenece este cobro?
@@ -21,10 +30,20 @@ export type FastPaymentTarget = { kind: 'existingOrder'; orderId: string } | { k
  *
  * Que la solicitud esté `CANCELLED` no cambia nada: cancelar es una PETICIÓN, y si la
  * terminal cobró igual, la venta ocurrió de verdad.
+ *
+ * 🔴 `expectedVenueId` es OBLIGATORIO a propósito. `TerminalPaymentRequest.requestId` es
+ * `@unique` GLOBAL (no por venue) y lo genera el CLIENTE: dos inquilinos pueden colisionar
+ * — por accidente o a propósito. Sin comparar el venue, la búsqueda por `requestId`
+ * devolvería el `orderId` de OTRO negocio y este cobro se iría a pagar la venta de un
+ * tercero. Se degrada a venta rápida (el dinero se registra en el venue correcto, el del
+ * token) en vez de cruzar la frontera del inquilino.
  */
-export function resolveFastPaymentTarget(row: ArbitrationRowSnapshot | null): FastPaymentTarget {
-  const orderId = row?.orderId?.trim()
+export function resolveFastPaymentTarget(row: ArbitrationRowSnapshot | null, expectedVenueId: string): FastPaymentTarget {
+  if (!row) return { kind: 'fastOrder', reason: 'noRow' }
+  if (row.venueId !== expectedVenueId) return { kind: 'fastOrder', reason: 'venueMismatch' }
+
+  const orderId = row.orderId?.trim()
   // Una cadena vacía no es una orden: pagar "" reventaría o, peor, pagaría cualquier cosa.
-  if (!orderId) return { kind: 'fastOrder' }
+  if (!orderId) return { kind: 'fastOrder', reason: 'noOrder' }
   return { kind: 'existingOrder', orderId }
 }
