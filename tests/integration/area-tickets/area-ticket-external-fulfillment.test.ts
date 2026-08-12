@@ -398,4 +398,58 @@ describe('Entrega de un vale externo', () => {
     ).rejects.toMatchObject({ statusCode: 409, code: 'AREA_TICKET_NOT_PAID' })
     expect(await prisma.areaTicketFulfillment.count({ where: { areaTicketId: ticket.id } })).toBe(0)
   })
+
+  it('un vale NATIVO con orderId nulo NO se entrega — el modo de fallo contra el que existe la bifurcación', async () => {
+    // Task 16, Step 6(a): la bifurcación explícita por ruta de la Task 10 se
+    // blindó contra "cualquier `orderId` nulo ACCIDENTAL de la ruta nativa
+    // convertido en una entrega gratis" (comentario en `fulfillAreaTicket`,
+    // línea 2092), pero ningún test hasta ahora ejercitaba el caso EXACTO:
+    // vale AVOQADO, `status: PAID`, `orderId: null`. El test de arriba ('la
+    // ruta nativa sigue exigiendo Order pagada') es parecido pero SÍ tiene
+    // `orderId` — prueba `order.paymentStatus !== 'PAID'`, no `!ticket.order`.
+    // Se fuerza el estado por escritura directa a la base: ningún endpoint de
+    // producción emite un vale AVOQADO sin `orderId` (`lockAreaTicketCheckoutForPayment`
+    // siempre lo asigna desde una Order real antes de marcar PAID), y ese es
+    // justamente el punto — el guard existe para el día que algo sí lo
+    // produzca. Nada en el schema ni en el CHECK de la Task 2 impide esta fila:
+    // `atf_order_required_for_avoqado_route` vive en `AreaTicketFulfillment`
+    // (exige `orderId` sólo en la fila de ENTREGA), no en `AreaTicket`.
+    //
+    // Mismo patrón de fixture hecho a mano que el test anterior — el brief
+    // pide un helper `issueNativeTicket(...)` que no existe en este archivo
+    // (el área nativa no tiene terminal emisor, sólo uno de entrega); montar
+    // esa infraestructura sólo para este caso habría sido más superficie de
+    // fixture que el propio escenario que se prueba, y el archivo ya resuelve
+    // "fuerza un vale AVOQADO inconsistente" con `prisma.areaTicket.create`
+    // directo (ver el test de arriba).
+    const nativeTerminal = await prisma.terminal.findFirstOrThrow({ where: { deviceUid: nativeDeliveryDeviceUid } })
+    const ticket = await prisma.areaTicket.create({
+      data: {
+        venueId,
+        fulfillmentAreaId: nativeAreaId,
+        fulfillmentModeSnapshot: FulfillmentMode.HOLD_UNTIL_PAID,
+        settlementRoute: AreaSettlementRoute.AVOQADO,
+        code: `native-null-order-${suffix}`,
+        idempotencyKey: `native-null-order-key-${suffix}`,
+        status: AreaTicketStatus.PAID,
+        sourceTerminalId: nativeTerminal.id,
+        orderId: null,
+        subtotal: new Prisma.Decimal('20.00'),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal('20.00'),
+        pricingSnapshotHash: '0'.repeat(64),
+        paidAt: new Date(),
+      },
+    })
+
+    await expect(
+      fulfillAreaTicket(venueId, ticket.id, {
+        idempotencyKey: `native-null-order-fulfill-${suffix}`,
+        deviceUid: nativeDeliveryDeviceUid,
+        staffId,
+        method: AreaTicketFulfillmentMethod.PAPER_CONFIRMATION,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'AREA_TICKET_NOT_PAID' })
+    expect(await prisma.areaTicketFulfillment.count({ where: { areaTicketId: ticket.id } })).toBe(0)
+  })
 })

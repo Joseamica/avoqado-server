@@ -2099,6 +2099,42 @@ export async function fulfillAreaTicket(venueId: string, ticketId: string, input
         // habilita entregar. DISCREPANCY entra a propósito: el producto ya se
         // cobró en la otra caja, retenerlo castigaría al cliente por un error
         // de captura del importe.
+        //
+        // Nota (Task 16, cierre de fase): esta rama NO revisa `ticket.status`
+        // — sólo el settlement. Hoy es IMPOSIBLE que un vale CANCELLED o
+        // EXPIRED llegue hasta aquí (es decir, con un settlement dentro de
+        // `YA_COBRADO_AFUERA`), verificado por tres vías independientes:
+        //   1. EXPIRED sólo se escribe en un sitio de todo el código:
+        //      `addTicketToCheckout` (este archivo, ~línea 1246). Esa MISMA
+        //      función rechaza cualquier vale EXTERNAL con
+        //      `AREA_TICKET_IS_EXTERNAL` (~línea 1220) ANTES de llegar a esa
+        //      escritura — mismo ticket, mismo bloque secuencial, sin
+        //      re-fetch entre medias. Ningún otro código pone EXPIRED.
+        //   2. Ida (elegible → CANCELLED): `cancelAreaTicket` (~líneas 1003 y
+        //      1027) bloquea cancelar en cuanto `externalSettlement.status`
+        //      ya está en `YA_COBRADO_AFUERA` — un vale que ya calificaría
+        //      para entregarse no se puede cancelar después.
+        //   3. Vuelta (CANCELLED → elegible): `confirmExternalSettlement`
+        //      (`areaTicketExternal.mobile.service.ts:255`) — la ÚNICA
+        //      función que escribe CONFIRMED o DISCREPANCY — exige
+        //      `ticket.status === ISSUED` ANTES de tocar el settlement, así
+        //      que un vale ya CANCELLED no puede volverse elegible después.
+        //      (El tercer miembro de `YA_COBRADO_AFUERA`, ASSUMED, hoy no lo
+        //      escribe ningún código de producción — Tasks 8/9.)
+        // Las vías 2 y 3 cubren los dos órdenes posibles de cancelar/confirmar;
+        // la 1 descarta EXPIRED sin importar el orden.
+        //
+        // El día que exista vencimiento de vales EXTERNAL (hoy NO existe: el
+        // job de conciliación de la Task 12 sólo LEE `status: ISSUED`, nunca
+        // escribe EXPIRED — `src/jobs/areaTicketExternalReconciliation.job.ts`),
+        // esta rama sí podría recibir un vale vencido con settlement ya
+        // confirmado, y hoy lo entregaría sin decir nada. Cuando eso se
+        // construya, hay que decidir a propósito: ¿se entrega igual porque el
+        // cliente ya pagó en la otra caja (bloquear castigaría un vencimiento
+        // de bookkeeping interno, no una falta de pago — mismo razonamiento
+        // que la Task 10 usó para dejar pasar DISCREPANCY), o se exige un paso
+        // de reactivación primero? No cambiar este comportamiento sin decidir
+        // esto explícitamente.
         const externalStatus = ticket.externalSettlement?.status
         if (!externalStatus || !YA_COBRADO_AFUERA.includes(externalStatus)) {
           throw domainError(409, 'AREA_TICKET_EXTERNAL_NOT_CONFIRMED', 'Confirma el cobro en la caja antes de entregar este vale.')
