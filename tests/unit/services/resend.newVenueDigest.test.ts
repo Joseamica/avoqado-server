@@ -7,6 +7,12 @@
  * legacy notifier short-circuited and nobody got an email. The digest fixes
  * that by firing unconditionally for REAL onboarding.
  */
+
+// A test file with no top-level import/export is a SCRIPT, not a module, so its
+// top-level `const`s land in the global scope and collide across files — two
+// suites both declaring `mockSend` broke the typecheck, not the tests. This
+// keeps the file a module even when it needs no imports.
+export {}
 const mockSend = jest.fn()
 
 // Resend must be a function-style constructor for the SUT's `new Resend(...)`.

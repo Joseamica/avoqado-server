@@ -12,6 +12,12 @@
  * - Nested object sanitization
  */
 
+
+// A test file with no top-level import/export is a SCRIPT, not a module, so its
+// top-level `const`s land in the global scope and collide across files — two
+// suites both declaring `mockSend` broke the typecheck, not the tests. This
+// keeps the file a module even when it needs no imports.
+export {}
 // Since the methods are private, we'll test them indirectly through examples
 // For direct testing, we create a test helper that exposes the patterns
 
