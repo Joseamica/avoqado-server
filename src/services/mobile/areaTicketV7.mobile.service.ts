@@ -2326,11 +2326,20 @@ export async function lockAreaTicketCheckoutForPayment(
   return { sessionId: session.id, attemptId: attempt.id }
 }
 
+/**
+ * `orderId` es NULLABLE a propósito: la ruta EXTERNAL consume al emitir y NUNCA tiene
+ * Order (lo prohíbe el CHECK `area_ticket_external_no_avoqado_circuit`). Antes esa ruta
+ * pasaba aquí el id del VALE para satisfacer un parámetro `string` — dos cuids del mismo
+ * tipo, así que el compilador no podía ver la mentira. Hoy es inocuo (el valor sólo se
+ * devuelve y ambos llamadores lo descartan), pero el día que alguien use `orderId` para
+ * escribir, la ruta externa metería un id de vale en un campo de orden. `null` dice la
+ * verdad: en esa ruta no hay orden a la cual atribuir el consumo.
+ */
 async function consumeQuantityReservation(
   tx: Prisma.TransactionClient,
   venueId: string,
   reservation: any,
-  orderId: string,
+  orderId: string | null,
   staffId?: string,
 ) {
   const updated = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; previousStock: Prisma.Decimal }>>`
@@ -2718,12 +2727,13 @@ async function consumeReservationsAtIssue(
       },
     })
     if (spec.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
-      // La ruta externa nunca tiene Order (lo prohíbe el CHECK
-      // area_ticket_external_no_avoqado_circuit) — se pasa el propio ticketId donde la
-      // firma pide un orderId. El parámetro no participa en la escritura (el
-      // `reference` del movimiento sigue siendo `reservation.id`, igual que en la ruta
-      // nativa), así que no hay semántica de dinero que traicionar.
-      await consumeQuantityReservation(tx, venueId, reservation, ticketId, staffId)
+      // `null`, no el ticketId: la ruta externa nunca tiene Order (lo prohíbe el CHECK
+      // `area_ticket_external_no_avoqado_circuit`) y meter un id de vale en un
+      // parámetro llamado `orderId` es una mentira que el compilador no puede atrapar
+      // — los dos son cuids `string`. El vale queda ligado al movimiento por
+      // `reservation.id` (el `reference`, igual que en la ruta nativa), que es el
+      // vínculo correcto.
+      await consumeQuantityReservation(tx, venueId, reservation, null, staffId)
     } else {
       await consumeRawMaterialReservation(tx, venueId, reservation, staffId)
     }
