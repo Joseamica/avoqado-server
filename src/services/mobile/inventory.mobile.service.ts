@@ -466,17 +466,28 @@ export async function confirmStockCount(countId: string, venueId: string, userId
     throw new Error(`No se pudo ajustar ${ingredientFailures.length} insumo(s): ${ingredientFailures.map(f => f.name).join(', ')}`)
   }
 
-  // Apply adjustments for each product item
+  // Apply adjustments for each product item.
+  //
+  // El delta se mide contra el stock ACTUAL, NUNCA contra `expected` — que es
+  // la foto de cuando se ABRIÓ el conteo y envejece con cada venta, compra o
+  // conteo posterior. Es el mismo criterio que ya usaban los insumos arriba.
+  //
+  // Con `expected` pasaban dos cosas, ambas silenciosas (caso real en la DB:
+  // conteo abierto con expected=89 de Cerveza Corona cuando el stock ya era 32):
+  //   1. Contar 89 daba `89 − 89 = 0` → `continue` → el conteo se marcaba
+  //      COMPLETADO sin corregir nada y el inventario se quedaba en 32.
+  //   2. Cuando sí ajustaba, el movimiento guardaba una `quantity` que no
+  //      cuadraba con su propio `previousStock`/`newStock`.
   for (const item of countedItems) {
     if (!item.product) continue
-    const difference = Number(item.counted) - Number(item.expected)
-    if (difference === 0) continue
 
     const inventory = item.product.inventory
     if (!inventory) continue
 
     const previousStock = Number(inventory.currentStock)
     const newStock = Number(item.counted)
+    const difference = newStock - previousStock
+    if (difference === 0) continue
 
     await prisma.$transaction([
       prisma.inventory.update({

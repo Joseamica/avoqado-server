@@ -186,6 +186,9 @@ const prismaMock: any = {
   // Inventory models (QUANTITY method)
   inventory: createMockModel(),
   inventoryMovement: createMockModel(),
+  // Stock counts (conteo de existencias)
+  stockCount: createMockModel(),
+  stockCountItem: createMockModel(),
   // Recipe models (RECIPE method)
   recipe: createMockModel(),
   recipeLine: createMockModel(),
