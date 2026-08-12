@@ -155,6 +155,89 @@ function mapTpvRatingToNumeric(tpvRating: string): number | null {
 }
 
 /**
+ * 🔴 DINERO — Aviso de inventario que viaja PEGADO a un cobro que YA se registró.
+ *
+ * Existe porque el inventario se revisa DOS veces: una ANTES de cobrar
+ * (`validatePreFlightInventory`, que sí puede prevenir y sí rechaza) y otra
+ * DESPUÉS de que el Payment quedó comiteado. En la segunda ya no hay nada que
+ * prevenir: rechazar ahí no des-cobra la tarjeta, sólo le miente al cajero, que
+ * entonces vuelve a pasarla. Ese fue el doble cobro real.
+ *
+ * Mismo criterio que el bloque 🚨 [Sobrepago] de este archivo: el pago se
+ * registra SIEMPRE y lo que se elimina es la invisibilidad del problema.
+ *
+ * Se sirve como campo OPCIONAL de la respuesta de `recordOrderPayment` — con
+ * spread condicional, igual que `areaTicketCheckoutState`, así que la llave
+ * está AUSENTE (no `null`) cuando no hay nada que avisar y ningún cliente viejo
+ * cambia de comportamiento.
+ */
+export interface OrderInventoryWarning {
+  /**
+   * `INSUFFICIENT_INVENTORY` — se detectó faltante pero el descuento SÍ corrió.
+   * `INVENTORY_NOT_DEDUCTED` — el descuento falló y se revirtió; la causa puede ser
+   * falta de stock, concurrencia o una receta mal configurada, y va en `issues[].reason`.
+   */
+  code: 'INSUFFICIENT_INVENTORY' | 'INVENTORY_NOT_DEDUCTED'
+  /** El cobro SIEMPRE quedó registrado. Esto dice si el stock alcanzó a moverse. */
+  inventoryDeducted: boolean
+  /** Español, listo para pintarse al cajero. NO puede sugerir que el cobro falló. */
+  message: string
+  /** Los mismos 4 datos que antes se aplastaban en el string del error, ya estructurados. */
+  issues: Array<{
+    productId: string
+    productName: string
+    requested: number | null
+    available: number | string | null
+    reason: string
+  }>
+}
+
+/**
+ * Arma el aviso que ve el cajero. La PRIMERA frase siempre confirma el cobro:
+ * si el POS sólo alcanza a pintar una línea, esa línea no puede ser la que lo
+ * mande a pasar la tarjeta otra vez.
+ */
+function buildInventoryWarning(rawIssues: OrderInventoryWarning['issues'], inventoryDeducted: boolean): OrderInventoryWarning {
+  // En un TOCTOU real las DOS puertas reportan el MISMO producto: el pre-flight
+  // con el `available` numérico, y la deducción con `available: null` y su error.
+  // Sin esto el cajero ve la hamburguesa dos veces y no sabe si son dos problemas.
+  // Gana la primera (el pre-flight, que trae el número), y si a ella le faltaba el
+  // dato disponible, lo rellena la segunda. Un producto = una línea.
+  const porProducto = new Map<string, OrderInventoryWarning['issues'][number]>()
+  for (const issue of rawIssues) {
+    const previo = porProducto.get(issue.productId)
+    if (!previo) {
+      porProducto.set(issue.productId, { ...issue })
+      continue
+    }
+    if (previo.available == null && issue.available != null) previo.available = issue.available
+    if (previo.requested == null && issue.requested != null) previo.requested = issue.requested
+  }
+  const issues = [...porProducto.values()]
+
+  const detalle = issues
+    .map(issue => {
+      const disponible = issue.available == null ? 'sin disponibilidad confirmada' : `disponibles ${issue.available}`
+      const pedido = issue.requested == null ? 'cantidad no determinada' : `se pidieron ${issue.requested}`
+      return `${issue.productName} (${pedido}, ${disponible} — ${issue.reason})`
+    })
+    .join('; ')
+
+  const cierre = inventoryDeducted
+    ? 'El inventario sí se descontó; revisa el stock de estos productos.'
+    : 'El inventario NO se descontó y la cuenta quedó marcada para revisión.'
+
+  return {
+    // El motivo real (falta de stock, concurrencia, receta mal configurada) viaja
+    // verbatim en `issues[].reason`; el código sólo resume qué pasó con el stock.
+    code: inventoryDeducted ? 'INSUFFICIENT_INVENTORY' : 'INVENTORY_NOT_DEDUCTED',
+    inventoryDeducted,
+    message: `El cobro se registró correctamente. Hubo un problema de inventario: ${detalle || 'sin detalle disponible'}. ${cierre}`,
+    issues,
+  }
+}
+
+/**
  * ✅ WORLD-CLASS PATTERN: Pre-flight validation (Stripe, Shopify, Toast POS)
  * Validate inventory availability BEFORE capturing payment
  * Also validates modifier inventory (Toast/Square pattern)
@@ -434,6 +517,8 @@ function mapPaymentSource(source?: string): PaymentSource {
  * @param tipAmount Tip amount from this payment (to calculate cumulative order.tipAmount)
  * @param currentPaymentId Current payment ID to exclude from calculation
  * @param staffId Optional staff ID who processed the payment (for loyalty points)
+ * @returns Aviso de inventario cuando hubo faltante, o `null`. NUNCA lanza por
+ *          inventario: cuando esta función corre el Payment ya está comiteado.
  */
 async function updateOrderTotalsForStandalonePayment(
   orderId: string,
@@ -442,7 +527,7 @@ async function updateOrderTotalsForStandalonePayment(
   currentPaymentId?: string,
   staffId?: string,
   options?: { areaTicketAlreadyFinalized?: boolean },
-): Promise<void> {
+): Promise<OrderInventoryWarning | null> {
   // Get current order with payment information
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -583,6 +668,25 @@ async function updateOrderTotalsForStandalonePayment(
       })
   }
 
+  // 🚨 INVENTARIO INSUFICIENTE — detectar y gritar, NUNCA rechazar ni lanzar.
+  //
+  // Cuando este bloque corre, `prisma.$transaction` de `recordOrderPayment` YA
+  // retornó: el Payment está comiteado y la tarjeta ya se cobró en el proveedor.
+  // Un `throw` aquí NO des-cobra nada — sólo hace que el POS pinte "error de
+  // inventario" sobre un cobro que sí pasó. El cajero concluye que no se cobró y
+  // vuelve a pasar la tarjeta; ese segundo intento lleva `idempotencyKey` y
+  // `referenceNumber` NUEVOS, así que la deduplicación no lo atrapa. Doble cobro
+  // irrecuperable, medido en producción.
+  //
+  // La prevención de verdad ya existe y NO vive aquí: `validatePreFlightInventory`
+  // corre ANTES de la transacción y ahí sí rechaza sin haber cobrado. Este chequeo
+  // sólo puede disparar cuando el stock cambió entre ambos momentos (TOCTOU) o
+  // cuando los dos difieren al decidir "queda saldada" — y en los dos casos el
+  // dinero ya entró.
+  //
+  // Mismo razonamiento, línea por línea, que el bloque 🚨 [Sobrepago] de arriba.
+  const inventoryIssues: OrderInventoryWarning['issues'] = []
+
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
   // Validate inventory availability before marking order as complete
   if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
@@ -610,26 +714,66 @@ async function updateOrderTotalsForStandalonePayment(
     )
 
     if (!validation.available) {
-      logger.error('❌ Pre-flight validation failed: Insufficient inventory', {
-        orderId,
-        venueId: order.venueId,
-        issues: validation.issues,
-      })
-
-      // Format issues into error message
+      // Se conserva el mismo detalle que antes viajaba en el mensaje del error
+      // (producto, cuánto se pidió, cuánto había, motivo) — ahora estructurado.
       const issuesDescription = validation.issues
         ?.map(issue => `${issue.productName}: requested ${issue.requested}, available ${issue.available} (${issue.reason})`)
         .join('; ')
 
-      throw new BadRequestError(
-        `Cannot complete order - insufficient inventory. ${issuesDescription || 'Please check stock levels and try again.'}`,
-      )
-    }
+      // 🚨 token estable que machea la regla de Better Stack — NO renombrar.
+      logger.error('🚨 [Inventario] Stock insuficiente detectado DESPUÉS de registrar el cobro — el pago se conserva, requiere revisión', {
+        orderId,
+        venueId: order.venueId,
+        paymentId: currentPaymentId ?? null,
+        staffId: staffId ?? null,
+        stage: 'PRE_DEDUCTION',
+        issues: validation.issues,
+        issuesDescription,
+      })
 
-    logger.info('✅ Pre-flight validation passed: All inventory available', {
-      orderId,
-      venueId: order.venueId,
-    })
+      // Fire-and-forget FUERA de toda transacción: una falla del audit jamás puede tocar el cobro.
+      void prisma.activityLog
+        .create({
+          data: {
+            action: 'INVENTARIO_INSUFICIENTE_AL_COBRAR',
+            entity: 'Order',
+            entityId: orderId,
+            staffId: staffId ?? null,
+            venueId: order.venueId,
+            data: {
+              stage: 'PRE_DEDUCTION',
+              paymentId: currentPaymentId ?? null,
+              issues: (validation.issues ?? []) as unknown as Prisma.InputJsonValue,
+            },
+          },
+        })
+        .catch(err => {
+          logger.error('🚨 [Inventario] No se pudo escribir el ActivityLog del faltante de inventario', {
+            orderId,
+            error: err instanceof Error ? err.message : err,
+          })
+        })
+
+      for (const issue of validation.issues ?? []) {
+        inventoryIssues.push({
+          productId: issue.productId,
+          productName: issue.productName,
+          requested: issue.requested,
+          available: issue.available,
+          reason: issue.reason,
+        })
+      }
+      // Sin `throw`: el cobro ya existe. Se sigue adelante para dejar la cuenta
+      // consistente con el dinero que SÍ entró, y el faltante viaja como aviso.
+    } else {
+      // En `else` a propósito: al quitar el `throw`, este log quedaba cayendo por
+      // gravedad y cantaba "All inventory available" JUSTO debajo de la alerta de
+      // faltante. Un log que se contradice a sí mismo cuesta una hora en un incidente.
+      logger.info('✅ Pre-flight validation passed: All inventory available', {
+        orderId,
+        venueId: order.venueId,
+      })
+    }
   }
 
   // Determine new payment status
@@ -711,7 +855,7 @@ async function updateOrderTotalsForStandalonePayment(
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
   // ✅ WORLD-CLASS PATTERN: Fail payment if inventory deduction fails (Shopify, Square, Toast)
   if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
-    const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
+    const deductionErrors: Array<{ productId: string; productName: string; requested: number; error: string }> = []
     // Items cuya deducción SÍ se aplicó — si otro item falla, esto es lo que
     // hay que revertir antes de regresar la orden a PENDING.
     const deductedItems: Array<{ productId: string; quantity: number }> = []
@@ -859,6 +1003,7 @@ async function updateOrderTotalsForStandalonePayment(
           deductionErrors.push({
             productId: item.productId!,
             productName: item.product?.name || item.productName || 'Unknown',
+            requested: item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity,
             error: deductionError.message,
           })
 
@@ -977,14 +1122,38 @@ async function updateOrderTotalsForStandalonePayment(
         },
       })
 
-      // Build user-friendly error message
-      const productNames = deductionErrors.map(e => e.productName).join(', ')
       const errorDetails = deductionErrors.map(e => `${e.productName}: ${e.error}`).join('; ')
 
-      throw new BadRequestError(
-        `Payment could not be completed due to insufficient inventory for: ${productNames}. ` +
-          `Please reduce quantity or remove items from your order. Details: ${errorDetails}`,
-      )
+      // 🚨 Segunda puerta del MISMO doble cobro: este bloque también corre con el
+      // Payment ya comiteado, así que tampoco puede lanzar. Toda la compensación
+      // de arriba (restock, seriales, orden a PENDING) se conserva intacta; lo
+      // único que cambia es que el cajero se entera SIN que se le mienta sobre el
+      // dinero. 🚨 token estable de Better Stack — NO renombrar.
+      logger.error('🚨 [Inventario] La deducción de stock falló DESPUÉS de registrar el cobro — el pago se conserva, requiere revisión', {
+        orderId,
+        venueId: updatedOrder.venueId,
+        paymentId: currentPaymentId ?? null,
+        staffId: staffId ?? null,
+        stage: 'DEDUCTION',
+        failedProducts: deductionErrors,
+        restoredProducts: deductedItems,
+        errorDetails,
+      })
+
+      for (const failed of deductionErrors) {
+        inventoryIssues.push({
+          productId: failed.productId,
+          productName: failed.productName,
+          requested: failed.requested,
+          available: null,
+          reason: failed.error,
+        })
+      }
+
+      // `return` y no `throw`: se conserva EXACTAMENTE el corte de flujo que había
+      // (cupones, referidos, lealtad y auto-reorder siguen sin ejecutarse cuando la
+      // orden se revirtió a PENDING), pero el cobro ya no se reporta como fallido.
+      return buildInventoryWarning(inventoryIssues, false)
     }
 
     logger.info('🎯 Inventory deduction completed successfully for order', {
@@ -1139,6 +1308,10 @@ async function updateOrderTotalsForStandalonePayment(
       })
     }
   }
+
+  // El faltante detectado por el pre-flight post-commit viaja como aviso. Aquí
+  // la deducción SÍ corrió (si hubiera fallado se habría regresado arriba).
+  return inventoryIssues.length > 0 ? buildInventoryWarning(inventoryIssues, true) : null
 }
 
 interface PaymentFilters {
@@ -2007,6 +2180,9 @@ export async function recordOrderPayment(
   let payment: Awaited<ReturnType<typeof prisma.payment.create>>
   let lockedAreaCheckout: { sessionId: string; attemptId: string } | null = null
   let areaTicketCheckoutState: string | null = null
+  // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
+  // en la respuesta — nunca como error, o el cajero vuelve a pasar la tarjeta.
+  let inventoryWarning: OrderInventoryWarning | null = null
   try {
     payment = await prisma.$transaction(async tx => {
       if (paymentData.status === 'COMPLETED') {
@@ -2512,7 +2688,13 @@ export async function recordOrderPayment(
         // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
         // ⭐ LOYALTY: Pass staffId for loyalty points attribution
         // ✅ FIX: Pass tipAmount separately to update order.tipAmount
-        await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId)
+        inventoryWarning = await updateOrderTotalsForStandalonePayment(
+          activeOrder.id,
+          totalAmount + tipAmount,
+          tipAmount,
+          payment.id,
+          validatedStaffId,
+        )
       }
 
       logger.info('Order totals updated directly in backend (Standalone Mode)', {
@@ -2521,9 +2703,20 @@ export async function recordOrderPayment(
         paymentAmount: totalAmount + tipAmount,
       })
     } catch (updateError: any) {
-      // ✅ WORLD-CLASS PATTERN: Re-throw business validation errors (Stripe/Shopify/Toast pattern)
-      // Validation errors (insufficient inventory, etc.) should FAIL the payment
-      // Infrastructure errors (network, DB) can be logged but don't fail the payment
+      // ⚠️ Este re-throw ya NO puede alcanzar al inventario, y es a propósito.
+      //
+      // Decía "Validation errors should FAIL the payment", pero para cuando este
+      // catch corre el Payment lleva rato comiteado: fallar aquí no des-cobra la
+      // tarjeta, sólo le miente al cajero — que vuelve a pasarla con
+      // `idempotencyKey`/`referenceNumber` nuevos y produce el doble cobro. Por eso
+      // `updateOrderTotalsForStandalonePayment` ya no lanza por inventario: devuelve
+      // un `inventoryWarning` que viaja en la respuesta 201.
+      //
+      // El clause se conserva para el resto (p.ej. un `NotFoundError` que burbujee
+      // desde la rama de area tickets), y ésos se juzgan uno por uno. El único throw
+      // propio de esa función que sigue vivo es el `Error` de "order not found for
+      // total update", que NO es BadRequest/NotFound y por diseño cae abajo sin
+      // tumbar el cobro.
       if (updateError instanceof BadRequestError || updateError instanceof NotFoundError) {
         logger.error('❌ Payment rejected: Business validation failed', {
           paymentId: payment.id,
@@ -2587,6 +2780,10 @@ export async function recordOrderPayment(
   return {
     ...payment,
     ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
+    // Aditivo y con spread condicional (mismo criterio que `areaTicketCheckoutState`):
+    // la llave está AUSENTE cuando no hay nada que avisar, así que ninguna app vieja
+    // en la calle cambia de comportamiento.
+    ...(inventoryWarning ? { inventoryWarning } : {}),
     digitalReceipt: digitalReceipt
       ? {
           id: digitalReceipt.id,
