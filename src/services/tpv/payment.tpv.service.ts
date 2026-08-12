@@ -33,6 +33,7 @@ import {
   type ClientCountryEvidenceSource,
 } from '../payments/cardInternationality.service'
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
+import { resolveFastPaymentTarget } from './fastPaymentTarget'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -2598,6 +2599,110 @@ export async function recordOrderPayment(
 }
 
 /**
+ * ¿El Payment de ESTA llamada quedó comiteado?
+ *
+ * - `landed`       — sí, con certeza. NO se cae a FAST (duplicaría).
+ * - `not-landed`   — no. Se cae a FAST (el dinero tiene que aterrizar en algún lado).
+ * - `unverifiable` — el payload no trae NINGUNA llave de identidad y tampoco se pudo
+ *                    censar la orden. Se cae a FAST: perder un cobro es peor que
+ *                    duplicar un registro (ver `verifyDelegatedPaymentLanded`).
+ */
+type DelegatedPaymentVerdict = 'landed' | 'not-landed' | 'unverifiable'
+
+/** ¿El payload trae con qué probar identidad? Hoy la TPV SIEMPRE manda `idempotencyKey`. */
+function hasPaymentIdentityKey(paymentData: PaymentCreationData): boolean {
+  return !!(paymentData.idempotencyKey || paymentData.referenceNumber)
+}
+
+/**
+ * Censo de los pagos que la orden YA tenía antes de delegar.
+ *
+ * Sólo se usa para payloads SIN llave de identidad — o sea, nunca en producción: la TPV
+ * manda `idempotencyKey` en todo cobro (`buildFastPaymentContext`) y las reposiciones de
+ * la cola offline mandan `referenceNumber`. Es la red para un cliente que no cumpla el
+ * contrato, no un camino caliente: con llave, esta consulta NO corre.
+ *
+ * Fail-open: si truena, devuelve null → el veredicto será `unverifiable` → FAST.
+ */
+async function snapshotOrderPaymentIds(venueId: string, orderId: string): Promise<Set<string> | null> {
+  try {
+    const rows = await prisma.payment.findMany({ where: { venueId, orderId }, select: { id: true } })
+    return new Set(rows.map(r => r.id))
+  } catch (err) {
+    logger.error('⚠️ [FastPayment] No se pudo censar los pagos de la orden antes de delegar', {
+      venueId,
+      orderId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
+  }
+}
+
+/**
+ * ¿MI pago comiteó? Se le pregunta a la tabla `Payment` por IDENTIDAD.
+ *
+ * 🔴 Por qué NO se le pregunta a la fila de arbitraje: `TerminalPaymentRequest.paymentId`
+ * es un binding HEURÍSTICO por diseño de este repo, no una prueba de identidad.
+ *   · El watchdog (`terminal-payment.service.ts`) ata CUALQUIER Payment COMPLETED + tarjeta
+ *     + posterior a la fila sobre esa orden; su propio comentario dice que un binding
+ *     exacto "tendría que venir de una referencia request↔payment, no de aritmética".
+ *   · `closeRow` escribe el paymentId que reporte la terminal por socket, y ese campo del
+ *     resultado es opcional.
+ *   · En el schema es `paymentId String?` "(soft ref)", sin FK.
+ *
+ * Leer EXISTENCIA en esa fila contesta "¿hay ALGÚN paymentId?", no "¿está el MÍO?" — y se
+ * equivoca en las DOS direcciones, las dos caras:
+ *   · paymentId AJENO + throw TEMPRANO (nada escrito) → creeríamos que aterrizó, no
+ *     caeríamos a FAST, y el cobro no quedaría registrado en NINGÚN lado. Ésa es
+ *     exactamente la regresión que este fallback vino a evitar.
+ *   · Fila ya COMPLETED con paymentId NULO + throw POST-commit → creeríamos que no
+ *     aterrizó y caeríamos a FAST: DOS Payments. Y no es teórico ni raro:
+ *     `closeRowFromPaymentTx` retorna SIN escribir cuando la fila ya está COMPLETED
+ *     (deliberado y ya testeado en `terminal-payment.service.test.ts`), y un resultado por
+ *     socket con `status:'success'` sin paymentId deja la fila justo así ANTES de que la
+ *     TPV registre por REST. Es una vía MAINLINE.
+ *
+ * La llave con la que se verifica aquí es la MISMA con la que la ruta FAST deduplica más
+ * abajo, así que un falso negativo NO duplica: FAST encuentra el pago ya comiteado y lo
+ * devuelve. Por eso, ante la duda, caer a FAST es la dirección segura.
+ *
+ * Sin ninguna llave, el último recurso es el censo antes/después de la orden: si apareció
+ * un pago que no estaba, fue el nuestro.
+ */
+async function verifyDelegatedPaymentLanded(
+  venueId: string,
+  orderId: string,
+  paymentData: PaymentCreationData,
+  paymentIdsBeforeDelegation: Set<string> | null,
+): Promise<DelegatedPaymentVerdict> {
+  // Identidad exacta: `@@unique([venueId, idempotencyKey])` en Payment.
+  if (paymentData.idempotencyKey) {
+    const mine = await prisma.payment.findFirst({
+      where: { venueId, orderId, idempotencyKey: paymentData.idempotencyKey },
+      select: { id: true },
+    })
+    return mine ? 'landed' : 'not-landed'
+  }
+
+  // Igual que el Check 2 de idempotencia de FAST: los refunds comparten
+  // `referenceNumber` con el original, por eso se excluyen.
+  if (paymentData.referenceNumber) {
+    const mine = await prisma.payment.findFirst({
+      where: { venueId, orderId, referenceNumber: paymentData.referenceNumber, type: { not: 'REFUND' } },
+      select: { id: true },
+    })
+    return mine ? 'landed' : 'not-landed'
+  }
+
+  if (paymentIdsBeforeDelegation) {
+    const after = await prisma.payment.findMany({ where: { venueId, orderId }, select: { id: true } })
+    return after.some(p => !paymentIdsBeforeDelegation.has(p.id)) ? 'landed' : 'not-landed'
+  }
+
+  return 'unverifiable'
+}
+
+/**
  * Record a fast payment (without specific table association)
  * @param venueId Venue ID
  * @param paymentData Payment creation data
@@ -2607,6 +2712,147 @@ export async function recordOrderPayment(
  */
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
+
+  // 🔴 ¿Este dinero pertenece a una venta que YA existe? El cajero pudo mandar el cobro
+  // desde el POS, cancelar, y la terminal cobrar igual. Ese cobro es de la venta que lo
+  // originó —con sus productos—, no de una venta sintética vacía. La solicitud de
+  // arbitraje guarda el `orderId`; hasta hoy sólo se usaba para cerrar la fila.
+  //
+  // Fail-open a propósito: si la consulta truena, se sigue por FAST. Un fallo de infra
+  // jamás puede impedir registrar dinero que YA se cobró.
+  if (paymentData.terminalPaymentRequestId) {
+    let arbitrationRow: { orderId: string | null; venueId: string; status: string } | null = null
+    try {
+      arbitrationRow = await prisma.terminalPaymentRequest.findUnique({
+        where: { requestId: paymentData.terminalPaymentRequestId },
+        select: { orderId: true, venueId: true, status: true },
+      })
+    } catch (err) {
+      logger.error('⚠️ [FastPayment] No se pudo leer la solicitud de arbitraje — se sigue como venta rápida', {
+        requestId: paymentData.terminalPaymentRequestId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+
+    const target = resolveFastPaymentTarget(arbitrationRow, venueId)
+
+    // 🔴 `requestId` es `@unique` GLOBAL y lo genera el cliente: una colisión entre
+    // inquilinos devolvería el `orderId` de OTRO negocio. Se degrada a venta rápida —
+    // el dinero se registra en el venue del token, nunca cruzando la frontera — y se
+    // alerta, porque una colisión así no debería ocurrir jamás.
+    if (target.kind === 'fastOrder' && target.reason === 'venueMismatch') {
+      logger.error(
+        '🚨 [FastPayment] La solicitud de arbitraje pertenece a OTRO venue — se ignora su orden y se registra como venta rápida',
+        {
+          requestId: paymentData.terminalPaymentRequestId,
+          expectedVenueId: venueId,
+          rowVenueId: arbitrationRow?.venueId,
+        },
+      )
+    }
+
+    if (target.kind === 'existingOrder') {
+      logger.info('🎯 [FastPayment] El cobro pertenece a una venta existente — no se crea venta rápida', {
+        requestId: paymentData.terminalPaymentRequestId,
+        orderId: target.orderId,
+        priorStatus: arbitrationRow?.status,
+      })
+      // recordOrderPayment ya sabe descontar inventario, cerrar la orden, actualizar el
+      // turno y cerrar la fila de arbitraje. No se reimplementa nada de eso aquí.
+      //
+      // 🔴 `return await` (no `return` a secas): así el try/catch de abajo SÍ atrapa
+      // un rechazo de esta promesa. Con `return recordOrderPayment(...)` a secas, el
+      // catch nunca vería el error — se propagaría directo al llamador.
+      const requestId = paymentData.terminalPaymentRequestId
+      // Sólo para payloads SIN llave de identidad (nunca en producción — ver
+      // `snapshotOrderPaymentIds`): con llave, esta consulta NO corre.
+      const paymentIdsBeforeDelegation = hasPaymentIdentityKey(paymentData) ? null : await snapshotOrderPaymentIds(venueId, target.orderId)
+      try {
+        return await recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+      } catch (err) {
+        // 🔴 La tarjeta YA se cobró. Antes de esta delegación, ese dinero por lo menos
+        // aterrizaba en una venta FAST. Si recordOrderPayment truena por dentro —
+        // pre-flight de inventario rechazando por stock insuficiente, venue con
+        // ventas deshabilitadas, split incompatible, orden no encontrada— y se deja
+        // propagar el error, el cobro no aterriza en NINGÚN lado: sería una regresión
+        // que introduciríamos nosotros, dejando el sistema peor que antes de este
+        // cambio. Una venta FAST vacía es mala; ninguna venta es peor. Por eso se cae
+        // a la ruta FAST de siempre en vez de propagar... PERO SÓLO si el pago no
+        // aterrizó ya. Ver el chequeo de abajo.
+        //
+        // 🔴 [Ronda 2] recordOrderPayment puede tronar DESPUÉS de que su propia
+        // transacción ya comitió el Payment: `updateOrderTotalsForStandalonePayment`
+        // corre un pre-flight de inventario FUERA de la transacción (rama "autónoma"
+        // — MODO AUTÓNOMO más abajo en recordOrderPayment) y, si rechaza por stock
+        // insuficiente, el catch de recordOrderPayment relanza BadRequestError /
+        // NotFoundError con el Payment YA escrito en firme. Caer a FAST en ESE caso
+        // duplicaría el cobro — y sólo se salvaría si paymentData trae
+        // idempotencyKey/referenceNumber (los checks de idempotencia de FAST, arriba
+        // en esta misma función, encontrarían el pago ya comitteado y lo devolverían
+        // en vez de duplicar). Que la TPV siempre mande uno de los dos es una
+        // suposición operativa, no una invariante forzada — no basta como red.
+        //
+        // La señal real NO es la fila de arbitraje: su `paymentId` es un binding
+        // heurístico que ni prueba que MI pago comiteó (puede traer uno AJENO) ni
+        // prueba que no (llega a COMPLETED con paymentId nulo por vía mainline). Se
+        // le pregunta a la tabla `Payment` por IDENTIDAD — el razonamiento completo,
+        // con las dos formas de equivocarse y lo que cuesta cada una, está en
+        // `verifyDelegatedPaymentLanded`.
+        let verdict: DelegatedPaymentVerdict = 'unverifiable'
+        try {
+          verdict = await verifyDelegatedPaymentLanded(venueId, target.orderId, paymentData, paymentIdsBeforeDelegation)
+        } catch (checkErr) {
+          // No se pudo verificar. Fail-open consistente con el resto de esta función
+          // (nunca perder un cobro por un fallo de infraestructura): se sigue a FAST,
+          // donde los checks de idempotencia vuelven a mirar por la MISMA llave y
+          // devuelven el pago existente en vez de duplicarlo.
+          logger.error(
+            '🚨 [FastPayment] No se pudo confirmar si el pago ya aterrizó tras el fallo de recordOrderPayment — se sigue a FAST bajo incertidumbre',
+            {
+              requestId,
+              orderId: target.orderId,
+              originalError: err instanceof Error ? err.message : String(err),
+              verificationError: checkErr instanceof Error ? checkErr.message : String(checkErr),
+            },
+          )
+        }
+
+        if (verdict === 'landed') {
+          // El dinero SÍ quedó registrado en su venta real — el fallo es del
+          // pre-flight posterior (inventario, etc.), no del cobro en sí. Se deja
+          // subir el error ORIGINAL tal cual para que el llamador vea la razón real,
+          // en vez de disfrazarlo con un segundo Payment.
+          //
+          // 🚨 = el token estable que Better Stack usa para alertar (mismo patrón
+          // que terminal-payment.service.ts).
+          logger.error('🚨 [FastPayment] recordOrderPayment tronó DESPUÉS de comitear el pago — NO se cae a FAST (evita duplicar)', {
+            requestId,
+            orderId: target.orderId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          throw err
+        }
+
+        // 🚨 = el token estable que Better Stack usa para alertar (mismo patrón que
+        // terminal-payment.service.ts) — un cobro que no pudo aterrizar en su venta
+        // real necesita que alguien lo revise, aunque el dinero SÍ quede registrado.
+        //
+        // `unverifiable` se distingue del `not-landed` limpio: significa que el
+        // payload no traía NINGUNA llave de identidad (contrato incumplido — la TPV
+        // siempre manda `idempotencyKey`) y tampoco hubo censo. Se cae a FAST igual,
+        // porque perder el cobro es peor: el POS le diría al cajero que la venta
+        // sigue sin pagar y volvería a pasar la tarjeta — un doble cobro REAL. Sin
+        // llave, además, FAST no tiene con qué deduplicar, así que el residual de
+        // duplicar el REGISTRO se acepta a cambio de no perder el DINERO.
+        logger.error('🚨 [FastPayment] recordOrderPayment tronó al delegar — el cobro cae a venta rápida para no perderse', {
+          requestId,
+          orderId: target.orderId,
+          verdict,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+  }
 
   // ⏱️ SOLO MEDICIÓN (2026-08-09). Prod: mediana 4,471 ms / p95 4,971 ms contra
   // 130 ms de red real México→Oregon: ~97% del tiempo es trabajo del servidor,
