@@ -811,14 +811,29 @@ describe('H1A aggregate invariant concurrency', () => {
         .finally(() => {
           insertSettled = true
         })
+      // Attach the rejection matcher in the SAME tick `insert` is created — not
+      // after the `delay(75)` / `deleter.query('COMMIT')` awaits below. `.finally()`
+      // above observes the ORIGINAL query promise, but `insert` itself (the promise
+      // `.finally()` returns) still has no handler until `.rejects` attaches to it.
+      // `deleter.query('COMMIT')` releases the trigger's `FOR KEY SHARE` lock on a
+      // DIFFERENT pg connection than `insert`'s; whether Node observes "COMMIT
+      // resolved" before or after "insert's blocked trigger unblocked and rejected"
+      // is a genuine, unordered race between two independent socket callbacks. If
+      // `insert` rejects before this file reaches a `.rejects` call, jest-circus's
+      // unhandled-rejection detector fails the test with the raw trigger error —
+      // even though the assertion below would otherwise have passed. Same pattern
+      // (and same underlying race) as `rejectionAssertion` in
+      // liveDemoCleanupConcurrency.integration.test.ts, and as `insertionAssertion`
+      // in staffProvenanceDeletionConcurrency.integration.test.ts:113.
+      const insertRejection = expect(insert).rejects.toMatchObject({
+        code: '23514',
+        constraint: 'ActivityLog_venue_organization_check',
+      })
       await delay(75)
       expect(insertSettled).toBe(false)
 
       await deleter.query('COMMIT')
-      await expect(insert).rejects.toMatchObject({
-        code: '23514',
-        constraint: 'ActivityLog_venue_organization_check',
-      })
+      await insertRejection
     } finally {
       await Promise.allSettled([deleter.query('ROLLBACK'), writer.query('ROLLBACK')])
       await Promise.all([deleter.end(), writer.end()])

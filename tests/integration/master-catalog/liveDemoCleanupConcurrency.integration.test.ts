@@ -107,9 +107,20 @@ describe('live-demo cleanup venue-status serialization', () => {
         venueId: updateFirstVenueId,
         staffId: updateFirstStaffId,
       })
+      // Attach the rejection matcher in the SAME tick `deleting` is created — not
+      // after the two intervening `await`s below. `updater.query('COMMIT')` releases
+      // the row lock on a DIFFERENT pg connection than `deleting`'s; whether Node
+      // observes "COMMIT resolved" before or after "deleting's blocked FOR UPDATE
+      // unblocked and rejected" is a genuine, unordered race between two independent
+      // socket callbacks. If `deleting` rejects before this file reaches a `.rejects`
+      // call, jest-circus's unhandled-rejection detector fails the test with the raw
+      // error — even though the assertion below would otherwise have passed. Same
+      // pattern already used correctly next door for this exact reason:
+      // staffProvenanceDeletionConcurrency.integration.test.ts:113 (`insertionAssertion`).
+      const rejectionAssertion = expect(deleting).rejects.toMatchObject({ code: 'LIVE_DEMO_VENUE_NOT_DISPOSABLE' })
       await waitForBlockedActivity(observer, { blockerPid: updaterPid, queryFragment: 'FROM "Venue"' })
       await updater.query('COMMIT')
-      await expect(deleting).rejects.toMatchObject({ code: 'LIVE_DEMO_VENUE_NOT_DISPOSABLE' })
+      await rejectionAssertion
 
       await expect(observer.query(`SELECT status FROM "Venue" WHERE id = $1`, [updateFirstVenueId])).resolves.toMatchObject({
         rows: [{ status: 'ACTIVE' }],
