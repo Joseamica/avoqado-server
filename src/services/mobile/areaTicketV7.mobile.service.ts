@@ -928,7 +928,13 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
 // settlement a NOT_CHARGED, y ahí sí se puede cancelar. Amplía el guard
 // original de esta función (sólo CONFIRMED), que quedó corto en cuanto
 // DISCREPANCY y ASSUMED se volvieron estados alcanzables (Task 7).
-const YA_COBRADO_AFUERA: AreaTicketExternalSettlementStatus[] = [
+// Exportada (no module-private) porque es el criterio de elegibilidad de TODA la ruta
+// externa y ya se consume desde fuera de este archivo: `getOperations`
+// (`areaTicket.dashboard.service.ts`) lo necesita para que el panel de operación de la
+// oficina vea la misma cola que el piso. Una segunda lista literal en otro archivo
+// podría divergir en silencio, que es justo lo que la revisión de la Task 10 señaló
+// como el valor de tener UNA sola constante.
+export const YA_COBRADO_AFUERA: AreaTicketExternalSettlementStatus[] = [
   AreaTicketExternalSettlementStatus.CONFIRMED,
   AreaTicketExternalSettlementStatus.DISCREPANCY,
   AreaTicketExternalSettlementStatus.ASSUMED,

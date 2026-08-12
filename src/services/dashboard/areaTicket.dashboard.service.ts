@@ -33,6 +33,9 @@ import {
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+// Criterio de "ya se cobró en la otra caja" — la MISMA constante que usan la autoridad
+// del dominio y el guard de cancelación, no una copia (ver `getOperations`).
+import { YA_COBRADO_AFUERA } from '../mobile/areaTicketV7.mobile.service'
 import { logAction } from './activity-log.service'
 
 const DEFAULT_SETTINGS = {
@@ -476,12 +479,55 @@ export async function updateScaleProfile(venueId: string, profileId: string, inp
   return profile
 }
 
+/**
+ * Panel de operación de la oficina. `pendingDelivery` es la CUARTA superficie del mismo
+ * criterio de elegibilidad para entregar, y la última que quedaba ciega a la ruta
+ * externa: filtraba `status: PAID`, un estado que un vale EXTERNAL nunca alcanza (lo
+ * prohíbe el CHECK `area_ticket_external_no_avoqado_circuit`, Task 2). Resultado: el
+ * panel reportaba CERO pendientes mientras el piso tenía cola.
+ *
+ * El criterio de abajo es espejo de la autoridad del dominio,
+ * `listPendingAreaTicketFulfillment` (`areaTicketV7.mobile.service.ts`), y del tool
+ * `pending_area_ticket_deliveries` del MCP — mismo `fulfillmentModeSnapshot`, misma
+ * unión explícita por ruta, mismo `YA_COBRADO_AFUERA` (importado, no recopiado). Dos
+ * diferencias a propósito, las mismas que declara el tool del MCP:
+ *   - Sin `fulfillmentAreaId`: esta vista es del venue completo (la oficina), no de la
+ *     terminal de UN área.
+ *   - Sin cursor: siempre fue un `take: 100` simple; agregar paginación aquí sería un
+ *     cambio de contrato que nadie pidió.
+ *
+ * `orderBy` pasa de `paidAt` a `issuedAt` por la misma razón que en el MCP (Task 13): un
+ * vale EXTERNAL nunca tiene `paidAt`, y con `paidAt asc` los NULL se van al final —
+ * en un venue con volumen, el `take: 100` habría cortado justo la cola externa entera.
+ */
 export async function getOperations(venueId: string) {
   await assertVenue(venueId)
   const [pendingDelivery, reconciliation, recentlyIssued] = await Promise.all([
     prisma.areaTicket.findMany({
-      where: { venueId, status: AreaTicketStatus.PAID, fulfillment: null },
-      orderBy: { paidAt: 'asc' },
+      where: {
+        venueId,
+        fulfillment: null,
+        fulfillmentModeSnapshot: { not: FulfillmentMode.IMMEDIATE },
+        OR: [
+          {
+            settlementRoute: AreaSettlementRoute.AVOQADO,
+            status: AreaTicketStatus.PAID,
+            // Un vale marcado PAID cuya orden se canceló o borró DESPUÉS ya no es una
+            // entrega pendiente — `fulfillAreaTicket` lo rechaza con
+            // `AREA_TICKET_ORDER_REFUNDED`.
+            order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
+          },
+          {
+            settlementRoute: AreaSettlementRoute.EXTERNAL,
+            status: AreaTicketStatus.ISSUED,
+            // Un área UNTRACKED entrega mirando el papel y por diseño no acumula cola;
+            // ponerla aquí le daría a la oficina una lista que nadie va a vaciar.
+            fulfillmentArea: { externalDeliveryTracking: ExternalDeliveryTracking.TRACKED },
+            externalSettlement: { status: { in: YA_COBRADO_AFUERA } },
+          },
+        ],
+      },
+      orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
       take: 100,
       include: {
         fulfillmentArea: { select: { id: true, name: true } },
