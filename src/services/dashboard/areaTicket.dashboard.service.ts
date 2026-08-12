@@ -584,6 +584,29 @@ const staffFullName = (staff: { firstName: string; lastName: string } | null): s
  * dashboard mandando `status=PENDING`, no esta función. Paginada por cursor estable
  * (createdAt, id) sobre el mismo índice `@@index([venueId, status, createdAt])` que
  * ya trae el modelo.
+ *
+ * 🔴 Sólo vales VIVOS (`areaTicket.status === ISSUED`), igual que las otras tres
+ * superficies del mismo dominio: `listPendingExternalConfirmation`
+ * (`areaTicketExternal.mobile.service.ts`), el tool `pending_external_confirmations`
+ * del MCP y el job de conciliación (`areaTicketExternalReconciliation.job.ts`, que
+ * explica el porqué en su propio comentario). Sin este filtro, un vale cancelado con
+ * el settlement en PENDING quedaba como fila PERMANENTE de esta pantalla: nadie puede
+ * resolverla — la pantalla es de sólo lectura y las dos mutaciones del piso
+ * (`confirmExternalSettlement`, `markExternalNotCharged`) rechazan con
+ * `AREA_TICKET_NOT_ISSUED`.
+ *
+ * `ISSUED` (igualdad) NO recorta el historial: en la ruta EXTERNAL el vale nunca
+ * transiciona de estado — el CHECK `area_ticket_external_no_avoqado_circuit` (Task 2)
+ * sólo admite ISSUED/CANCELLED/EXPIRED, y `fulfillAreaTicket` deja explícitamente el
+ * vale en ISSUED al entregar (la entrega se lee de la EXISTENCIA del
+ * `AreaTicketFulfillment`, no de un estado). O sea que aquí `ISSUED` es exactamente "no
+ * está muerto", y un cobro ya confirmado y entregado sigue viéndose en el historial.
+ *
+ * ⚠️ Esto es la DEFENSA, no la causa raíz: `cancelAreaTicket` todavía no cierra el
+ * settlement al cancelar un vale externo, así que la fila sigue diciendo PENDING en la
+ * base — sólo deja de contaminar esta cola. Cerrarla de verdad necesita un estado nuevo
+ * que se distinga de NOT_CHARGED ("una persona afirmó que la otra caja no cobró", que
+ * es un hecho operativo distinto); está levantado en el reporte de cierre de fase.
  */
 export async function listExternalSettlements(venueId: string, filters: ListExternalSettlementsQuery) {
   const timezone = await assertVenueTimezone(venueId)
@@ -595,7 +618,15 @@ export async function listExternalSettlements(venueId: string, filters: ListExte
     where: {
       venueId,
       ...(filters.status ? { status: filters.status as AreaTicketExternalSettlementStatus } : {}),
-      ...(filters.areaId ? { areaTicket: { fulfillmentAreaId: filters.areaId } } : {}),
+      // 🔴 UNA sola clave `areaTicket`: el filtro de vale vivo y el de área viajan
+      // juntos a propósito. Dos claves `areaTicket` en el mismo objeto literal se
+      // pisarían EN SILENCIO (gana la última) — es el mismo bug que la revisión de la
+      // Task 10 atrapó con dos `OR` en `listPendingAreaTicketFulfillment`, y aquí
+      // habría borrado justo el filtro que arregla esta cola.
+      areaTicket: {
+        status: AreaTicketStatus.ISSUED,
+        ...(filters.areaId ? { fulfillmentAreaId: filters.areaId } : {}),
+      },
       ...(createdAtRange ? { createdAt: createdAtRange } : {}),
       ...(cursor ? { OR: [{ createdAt: { gt: cursor.sortAt } }, { createdAt: cursor.sortAt, id: { gt: cursor.id } }] } : {}),
     },

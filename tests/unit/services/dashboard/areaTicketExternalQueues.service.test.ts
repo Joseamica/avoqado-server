@@ -87,7 +87,7 @@ describe('listExternalSettlements() — cola "cobros por confirmar"', () => {
     expect(result.items[0].variance).toBe('-30.00')
   })
 
-  it('filters by area and status when provided', async () => {
+  it('filters by area and status when provided, without dropping the live-ticket filter', async () => {
     await listExternalSettlements(VENUE_ID, { areaId: 'area_1', status: 'PENDING' })
 
     expect(mockPrisma.areaTicketExternalSettlement.findMany).toHaveBeenCalledWith(
@@ -95,10 +95,21 @@ describe('listExternalSettlements() — cola "cobros por confirmar"', () => {
         where: expect.objectContaining({
           venueId: VENUE_ID,
           status: 'PENDING',
-          areaTicket: { fulfillmentAreaId: 'area_1' },
+          // Ambas condiciones viajan bajo la MISMA clave `areaTicket` — dos claves
+          // homónimas en el objeto literal se pisarían en silencio. Esta aserción es
+          // exacta (no `objectContaining`) justo para atrapar esa colisión: si el
+          // filtro de área borrara al de vale vivo, o al revés, aquí falla.
+          areaTicket: { status: 'ISSUED', fulfillmentAreaId: 'area_1' },
         }),
       }),
     )
+  })
+
+  it('excludes dead tickets even with no area filter — a cancelled ticket must not linger in the queue', async () => {
+    await listExternalSettlements(VENUE_ID, { status: 'PENDING' })
+
+    const call = mockPrisma.areaTicketExternalSettlement.findMany.mock.calls[0][0]
+    expect(call.where.areaTicket).toEqual({ status: 'ISSUED' })
   })
 
   it('converts a venue-local dateFrom/dateTo into a UTC range instead of trusting the host timezone', async () => {
