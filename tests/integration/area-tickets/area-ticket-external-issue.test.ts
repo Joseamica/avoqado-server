@@ -3,6 +3,7 @@ import {
   AreaTicketInventoryReservationMode,
   FulfillmentMode,
   InventoryMethod,
+  MovementType,
   Prisma,
   StaffRole,
   TerminalStatus,
@@ -212,14 +213,16 @@ describe('Emisión en un área con ruta externa', () => {
   })
 
   it('consume el inventario AL EMITIR, no al cobrar — el producto ya salió del área', async () => {
-    const before = await prisma.inventory.findUnique({ where: { id: externalInventoryId } })
+    const before = await prisma.inventory.findUniqueOrThrow({ where: { id: externalInventoryId } })
     await issueAreaTicket(venueId, {
       idempotencyKey: `ext-${suffix}-3`,
       deviceUid: externalIssueDeviceUid,
       lines: [{ clientLineId: 'l1', productId, quantity: '3' }],
     })
-    const after = await prisma.inventory.findUnique({ where: { id: externalInventoryId } })
-    expect(Number(after!.currentStock)).toBe(Number(before!.currentStock) - 3)
+    const after = await prisma.inventory.findUniqueOrThrow({ where: { id: externalInventoryId } })
+    // Comparación en Decimal, no en `Number()`: colapsar a float una cantidad es
+    // justo lo que esta fase se propuso no hacer (minor de la revisión de Task 4).
+    expect(after.currentStock.toFixed(3)).toBe(before.currentStock.sub(3).toFixed(3))
 
     const reservation = await prisma.areaTicketInventoryReservation.findFirst({
       where: { inventoryId: externalInventoryId },
@@ -227,6 +230,21 @@ describe('Emisión en un área con ruta externa', () => {
     })
     expect(reservation!.status).toBe('CONSUMED')
     expect(reservation!.inventoryMovementId).not.toBeNull()
+
+    // 🔴 El SIGNO del movimiento, asertado sobre el movimiento mismo — no sobre
+    // `Inventory.currentStock`, que es OTRA columna. Sin esto, un movimiento
+    // registrado en POSITIVO pasaría el test igual (el descuento de `currentStock`
+    // lo hace el `UPDATE`, no el `create` del movimiento), y el signo es EL riesgo
+    // nombrado de la Task 4: un movimiento positivo convierte una salida de
+    // producto en una entrada en todo reporte de inventario que sume movimientos.
+    const movement = await prisma.inventoryMovement.findUniqueOrThrow({ where: { id: reservation!.inventoryMovementId! } })
+    expect(movement.quantity.toFixed(3)).toBe('-3.000')
+    expect(movement.type).toBe(MovementType.SALE)
+    expect(movement.previousStock.toFixed(3)).toBe(before.currentStock.toFixed(3))
+    expect(movement.newStock.toFixed(3)).toBe(after.currentStock.toFixed(3))
+    // El vínculo con el vale es la reserva (`reference`), no un orderId — la ruta
+    // externa no tiene Order.
+    expect(movement.reference).toBe(reservation!.id)
   })
 
   it('la misma idempotencyKey no crea un segundo settlement ni un segundo movimiento', async () => {
