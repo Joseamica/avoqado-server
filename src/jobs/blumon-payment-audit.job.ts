@@ -162,7 +162,7 @@ export class BlumonPaymentAuditJob {
       logger.error('🚨 [Blumon audit] Card payment WITHOUT Blumon webhook — verify capture', {
         paymentId: row.id,
         amount: row.amount,
-        venue: row.venueName,
+        venueName: row.venueName,
         authorizationNumber: row.authorizationNumber,
         createdAt: row.createdAt,
       })

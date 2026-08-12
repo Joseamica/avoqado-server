@@ -132,7 +132,9 @@ export class MoneyIntegrityWatchdogJob {
 
       // BetterStack debe alertar sobre '🚨 [Money watchdog]'.
       for (const v of violations) {
-        logger.error(`🚨 [Money watchdog] ${v.check}`, { venue: v.venue, orderId: v.orderId, detalle: v.detalle })
+        // `venueName` (not `venue`) is the field the rest of the platform stamps, so a money
+        // alert filters and reads exactly like every other log line.
+        logger.error(`🚨 [Money watchdog] ${v.check}`, { venueName: v.venue, orderId: v.orderId, detalle: v.detalle })
       }
       logger.error(`🚨 [Money watchdog] ${violations.length} problema(s) de dinero detectado(s)`, {
         porTipo: violations.reduce<Record<string, number>>((acc, v) => ({ ...acc, [v.check]: (acc[v.check] ?? 0) + 1 }), {}),

@@ -1,6 +1,7 @@
 import type { Socket } from 'socket.io'
 import { runWithContext } from './executionContext'
 import { resolveCorrelationId } from './correlationId'
+import { getVenueName } from './venueNames'
 
 type Handler = (...args: any[]) => unknown
 
@@ -49,6 +50,7 @@ export function onWithContext(socket: Socket, event: string, handler: Handler): 
         source: 'socket',
         entrypoint: `socket:${event}`,
         venueId: withAuth.authContext?.venueId,
+        venueName: getVenueName(withAuth.authContext?.venueId),
         userId: withAuth.authContext?.userId,
         role: withAuth.authContext?.role,
       },
