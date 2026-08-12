@@ -6,6 +6,7 @@ import type { McpScope } from '../scope'
 import { ScopeError, enforceWriteScope } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
+import { PROMOTER_FEEDBACK_MIN_CHARS } from '@/services/dashboard/sale-verification.dashboard.service'
 import {
   getOrgSalesSummary,
   getSalesByMonth,
@@ -164,7 +165,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'review_sale_verification',
-    'Approve or reject ONE PENDING sale verification (back-office documentation review — approving is what makes Walmart pay PlayTelecom for a sale). decision: "approve" → COMPLETED ("venta correcta"); "reject" → FAILED (the promoter re-uploads/corrects it on the TPV); "reject_final" → REJECTED (terminal loss). Only PENDING sales can be reviewed — if it is already COMPLETED, reopen it first; to fix data use edit_sale_verification. For "reject" you MUST give a rejectionReasons value or reviewNotes. Find the id with list_sale_verifications (it searches by ICCID / promoter). By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — requires sale-verifications:review.',
+    'Approve or reject ONE PENDING sale verification (back-office documentation review — approving is what makes Walmart pay PlayTelecom for a sale). decision: "approve" → COMPLETED ("venta correcta"); "reject" → FAILED (the promoter re-uploads/corrects it on the TPV); "reject_final" → REJECTED (terminal loss). Only PENDING sales can be reviewed — if it is already COMPLETED, reopen it first; to fix data use edit_sale_verification. For "reject" you MUST give reviewNotes (min 5 chars) telling the promoter WHAT to fix; rejectionReasons are optional. Find the id with list_sale_verifications (it searches by ICCID / promoter). By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — requires sale-verifications:review.',
     {
       saleVerificationId: z.string().min(1).describe('The verification id (from list_sale_verifications)'),
       decision: z
@@ -182,9 +183,12 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
         )
         .optional()
         .describe(
-          'Why it was rejected (required for "reject" unless you give reviewNotes). REVIEW_MISSING_LINKING_IMAGE = falta imagen de vinculación; REVIEW_PORTABILIDAD = falta imagen de portabilidad; REVIEW_DUPLICATE_VINCULACION = # de vinculación duplicada; REVIEW_ILLEGIBLE_IMAGES = imágenes ilegibles.',
+          'Optional categorization for the Walmart report. REVIEW_MISSING_LINKING_IMAGE = falta imagen de vinculación; REVIEW_PORTABILIDAD = falta imagen de portabilidad; REVIEW_DUPLICATE_VINCULACION = # de vinculación duplicada; REVIEW_ILLEGIBLE_IMAGES = imágenes ilegibles.',
         ),
-      reviewNotes: z.string().optional().describe('Optional free-text note'),
+      reviewNotes: z
+        .string()
+        .optional()
+        .describe('Qué debe corregir el promotor — OBLIGATORIO (mín. 5 caracteres) cuando decision="reject"'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
     },
     async ({ saleVerificationId, decision, rejectionReasons, reviewNotes, confirm }) => {
@@ -197,8 +201,12 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
           error: `Esta venta está en estado ${sale.status}, no PENDING. Solo se pueden aprobar/rechazar ventas PENDING. Si ya está COMPLETED y quieres re-evaluarla usa reopen_sale_verification; para corregir datos usa edit_sale_verification.`,
         })
       }
-      if (decision === 'reject' && (!rejectionReasons || rejectionReasons.length === 0) && !reviewNotes?.trim()) {
-        return text({ ok: false, error: 'Para rechazar (reject) indica al menos una razón en rejectionReasons o una nota en reviewNotes.' })
+      if (decision === 'reject' && (reviewNotes?.trim().length ?? 0) < PROMOTER_FEEDBACK_MIN_CHARS) {
+        return text({
+          ok: false,
+          error:
+            'Para dejar la venta en "Revisar por promotor" escribe en reviewNotes qué debe corregir el promotor (mínimo 5 caracteres). Los rejectionReasons son opcionales.',
+        })
       }
       const who = sale.staff ? `${sale.staff.firstName} ${sale.staff.lastName}`.trim() : 'sin promotor'
       if (!confirm) {
@@ -284,7 +292,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'edit_sale_verification',
-    "Correct a sale verification (OWNER back-office fix): amount (PESOS), paymentForm (CASH/CARD/OTHER), isPortabilidad, and/or status (PENDING/COMPLETED/FAILED/REJECTED). reason is mandatory (≥5 chars). Does NOT recompute commissions. ⚠️ Changing status AWAY from COMPLETED can claw back the promoter's Cash Out commission on the next reconciliation. By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — OWNER-only (requires sale-verifications:edit).",
+    'Correct a sale verification (OWNER back-office fix): amount (PESOS), paymentForm (CASH/CARD/OTHER), isPortabilidad, and/or status (PENDING/COMPLETED/FAILED/REJECTED). reason is mandatory (≥5 chars). Does NOT recompute commissions. ⚠️ Changing status AWAY from COMPLETED can claw back the promoter\'s Cash Out commission on the next reconciliation. By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — OWNER-only (requires sale-verifications:edit). Si status="FAILED" ("Revisar por promotor"), reviewNotes es obligatorio (mín. 5 caracteres).',
     {
       saleVerificationId: z.string().min(1).describe('The verification id'),
       amount: z.number().min(0).optional().describe('New amount in PESOS (major units), e.g. 250'),
@@ -292,14 +300,22 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
       isPortabilidad: z.boolean().optional().describe('true = portabilidad; false = línea nueva'),
       status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'REJECTED']).optional().describe('New verification status'),
       reason: z.string().min(5).describe('Why (min 5 chars) — recorded in the activity log'),
+      reviewNotes: z.string().optional().describe('Qué debe corregir el promotor — OBLIGATORIO (mín. 5 caracteres) cuando status="FAILED"'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
     },
-    async ({ saleVerificationId, amount, paymentForm, isPortabilidad, status, reason, confirm }) => {
+    async ({ saleVerificationId, amount, paymentForm, isPortabilidad, status, reason, reviewNotes, confirm }) => {
       requireOrgPermission('sale-verifications:edit')
       const sale = await fetchSaleForPreview(saleVerificationId)
       if (!sale) return text({ ok: false, error: 'No encontré esa venta en tu organización.' })
       if (amount === undefined && paymentForm === undefined && isPortabilidad === undefined && status === undefined) {
         return text({ ok: false, error: 'Indica al menos un campo a cambiar (amount, paymentForm, isPortabilidad o status).' })
+      }
+      if (status === 'FAILED' && (reviewNotes?.trim().length ?? 0) < PROMOTER_FEEDBACK_MIN_CHARS) {
+        return text({
+          ok: false,
+          error:
+            'Para dejar la venta en "Revisar por promotor" escribe en reviewNotes qué debe corregir el promotor (mínimo 5 caracteres).',
+        })
       }
       if (!confirm) {
         const willClawback = status != null && status !== 'COMPLETED' && sale.status === 'COMPLETED'
@@ -323,6 +339,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
           isPortabilidad,
           status,
           reason,
+          reviewNotes,
         })
         await auditMcpWrite(scope, {
           action: 'SALE_VERIFICATION_EDITED_VIA_MCP',

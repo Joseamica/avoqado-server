@@ -9,9 +9,61 @@
 
 import prisma from '@/utils/prismaClient'
 import { addHours } from 'date-fns'
+import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
+import { ConflictError } from '@/errors/AppError'
+import { deleteOrRetainStaffWithH1ProvenanceTx, isH1ProvenanceConstraint } from '@/services/superadmin/staffDeletion.service'
 
 const INACTIVITY_THRESHOLD_HOURS = 5
+
+type DbClient = Prisma.TransactionClient
+
+interface DisposableDemoSession {
+  id: string
+  venueId: string
+  staffId: string
+}
+
+export function createDisposableDemoSessionDeletion(
+  overrides: { prisma?: typeof prisma; afterVenueLock?: (venueId: string) => Promise<void> } = {},
+) {
+  const db = overrides.prisma ?? prisma
+  return async (session: DisposableDemoSession): Promise<void> => {
+    try {
+      await db.$transaction(async tx => {
+        // WHY: Venue disposition, Staff provenance classification, and every
+        // destructive write share one transaction. The row lock makes a
+        // concurrent LIVE_DEMO -> real venue transition wait until cleanup has
+        // atomically committed or rolled back.
+        const venues = await tx.$queryRaw<Array<{ id: string; name: string; status: string }>>(Prisma.sql`
+        SELECT id, name, status FROM "Venue" WHERE id = ${session.venueId} FOR UPDATE
+      `)
+        const venue = venues[0]
+        if (!venue || venue.status !== 'LIVE_DEMO') {
+          throw new ConflictError('La sucursal ya no es un demo desechable', 'LIVE_DEMO_VENUE_NOT_DISPOSABLE')
+        }
+        await overrides.afterVenueLock?.(session.venueId)
+        const result = await deleteOrRetainStaffWithH1ProvenanceTx(tx, session.staffId)
+        if (result.retainedForAudit) {
+          throw new ConflictError(
+            'El Staff del demo conserva provenance H1 y requiere revisión manual',
+            'LIVE_DEMO_STAFF_HAS_H1_PROVENANCE',
+          )
+        }
+        await deleteVenueDataTx(tx, session.venueId)
+        // Venue deletion cascades the session, so this remains idempotent.
+        await tx.liveDemoSession.deleteMany({ where: { id: session.id } })
+      })
+    } catch (error) {
+      if (isH1ProvenanceConstraint(error) || (error as { code?: string }).code === 'STAFF_HAS_H1_PROVENANCE') {
+        throw new ConflictError('El Staff del demo conserva provenance H1 y requiere revisión manual', 'LIVE_DEMO_STAFF_HAS_H1_PROVENANCE')
+      }
+      throw error
+    }
+  }
+}
+
+export const deleteDisposableDemoSession = createDisposableDemoSessionDeletion()
 
 /**
  * Cleans up expired and inactive live demo sessions
@@ -64,20 +116,9 @@ export async function cleanupExpiredLiveDemos(): Promise<number> {
         // Delete venue and staff data manually to avoid foreign key constraint errors
         logger.info(`🗑️ Cleaning up venue: ${session.venue.name} (${session.venue.id})`)
 
-        // Delete all venue-related data in correct order (from dependent to independent)
-        await deleteVenueData(session.venue.id)
-
-        // Delete staff
-        await prisma.staff.delete({
-          where: { id: session.staff.id },
-        })
-
-        // Finally delete the session. deleteMany (not delete): the venueId FK has
-        // onDelete: Cascade, so deleting the venue above already removed this row —
-        // an exact delete would throw P2025 on every cleanup.
-        await prisma.liveDemoSession.deleteMany({
-          where: { id: session.id },
-        })
+        // Staff deletion performs the row-lock + provenance decision before
+        // any venue data is removed, so cleanup fails closed without partial loss.
+        await deleteDisposableDemoSession(session)
 
         logger.info(`✅ Cleaned up live demo session ${session.sessionId} (venue: ${session.venue.name}, staff: ${session.staff.email})`)
 
@@ -128,16 +169,7 @@ export async function cleanupAllLiveDemos(): Promise<number> {
         // Delete venue and staff data manually to avoid foreign key constraint errors
         logger.info(`🗑️ Cleaning up venue: ${session.venue.name} (${session.venue.id})`)
 
-        await deleteVenueData(session.venue.id)
-
-        await prisma.staff.delete({
-          where: { id: session.staff.id },
-        })
-
-        // deleteMany: row is already gone via the venue onDelete: Cascade (see above)
-        await prisma.liveDemoSession.deleteMany({
-          where: { id: session.id },
-        })
+        await deleteDisposableDemoSession(session)
 
         logger.info(`✅ Cleaned up session ${session.sessionId}`)
         cleanedCount++
@@ -204,12 +236,12 @@ export async function getLiveDemoStats(): Promise<{
  *
  * @param venueId - Venue ID to delete data for
  */
-async function deleteVenueData(venueId: string): Promise<void> {
+async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<void> {
   // 🔒 HARD GUARD — this function ERASES a venue and everything in it.
   // It must be physically impossible to point it at a real business: if a
   // LiveDemoSession row ever references a non-LIVE_DEMO venue (bug, manual
   // data edit, tampering), we refuse loudly instead of destroying it.
-  const venue = await prisma.venue.findUnique({
+  const venue = await tx.venue.findUnique({
     where: { id: venueId },
     select: { status: true, name: true },
   })
@@ -229,39 +261,39 @@ async function deleteVenueData(venueId: string): Promise<void> {
 
   // Delete in correct order (most dependent first)
   // 1. Order items and payments
-  await prisma.orderItem.deleteMany({ where: { order: { venueId } } })
-  await prisma.payment.deleteMany({ where: { order: { venueId } } })
-  await prisma.order.deleteMany({ where: { venueId } })
+  await tx.orderItem.deleteMany({ where: { order: { venueId } } })
+  await tx.payment.deleteMany({ where: { order: { venueId } } })
+  await tx.order.deleteMany({ where: { venueId } })
 
   // 2. Reviews
-  await prisma.review.deleteMany({ where: { venueId } })
+  await tx.review.deleteMany({ where: { venueId } })
 
   // 3. Products and modifiers
-  await prisma.productModifierGroup.deleteMany({ where: { product: { venueId } } })
-  await prisma.modifier.deleteMany({ where: { group: { venueId } } })
-  await prisma.modifierGroup.deleteMany({ where: { venueId } })
+  await tx.productModifierGroup.deleteMany({ where: { product: { venueId } } })
+  await tx.modifier.deleteMany({ where: { group: { venueId } } })
+  await tx.modifierGroup.deleteMany({ where: { venueId } })
 
   // 4. Recipes and inventory
-  await prisma.recipe.deleteMany({ where: { product: { venueId } } })
-  await prisma.rawMaterialMovement.deleteMany({ where: { rawMaterial: { venueId } } })
-  await prisma.rawMaterial.deleteMany({ where: { venueId } })
-  await prisma.inventory.deleteMany({ where: { venueId } })
+  await tx.recipe.deleteMany({ where: { product: { venueId } } })
+  await tx.rawMaterialMovement.deleteMany({ where: { rawMaterial: { venueId } } })
+  await tx.rawMaterial.deleteMany({ where: { venueId } })
+  await tx.inventory.deleteMany({ where: { venueId } })
 
   // 5. Products
-  await prisma.product.deleteMany({ where: { venueId } })
+  await tx.product.deleteMany({ where: { venueId } })
 
   // 6. Menu categories and menus
-  await prisma.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } })
-  await prisma.menuCategory.deleteMany({ where: { venueId } })
-  await prisma.menu.deleteMany({ where: { venueId } })
+  await tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } })
+  await tx.menuCategory.deleteMany({ where: { venueId } })
+  await tx.menu.deleteMany({ where: { venueId } })
 
   // 7. Tables and areas
-  await prisma.table.deleteMany({ where: { venueId } })
-  await prisma.area.deleteMany({ where: { venueId } })
+  await tx.table.deleteMany({ where: { venueId } })
+  await tx.area.deleteMany({ where: { venueId } })
 
   // 8. Shifts and staff assignments
-  await prisma.shift.deleteMany({ where: { venueId } })
-  await prisma.staffVenue.deleteMany({ where: { venueId } })
+  await tx.shift.deleteMany({ where: { venueId } })
+  await tx.staffVenue.deleteMany({ where: { venueId } })
 
   // 9. Payment config + the merchant accounts it points to.
   // MerchantAccount has NO venueId and its FK from VenuePaymentConfig is
@@ -269,26 +301,26 @@ async function deleteVenueData(venueId: string): Promise<void> {
   // demo accounts seedDemoVenue created just for this venue would otherwise
   // orphan forever in the global MerchantAccount table (found accumulating in
   // prod's superadmin "Cuentas de Comercio" screen, 2026-07-06).
-  const paymentConfig = await prisma.venuePaymentConfig.findUnique({ where: { venueId } })
-  await prisma.venuePaymentConfig.deleteMany({ where: { venueId } })
+  const paymentConfig = await tx.venuePaymentConfig.findUnique({ where: { venueId } })
+  await tx.venuePaymentConfig.deleteMany({ where: { venueId } })
   if (paymentConfig) {
     const merchantAccountIds = [paymentConfig.primaryAccountId, paymentConfig.secondaryAccountId, paymentConfig.tertiaryAccountId].filter(
       (id): id is string => Boolean(id),
     )
     if (merchantAccountIds.length > 0) {
-      await prisma.merchantAccount.deleteMany({ where: { id: { in: merchantAccountIds } } })
+      await tx.merchantAccount.deleteMany({ where: { id: { in: merchantAccountIds } } })
     }
   }
 
   // 10. Features and settings
-  await prisma.venueFeature.deleteMany({ where: { venueId } })
-  await prisma.venueSettings.deleteMany({ where: { venueId } })
+  await tx.venueFeature.deleteMany({ where: { venueId } })
+  await tx.venueSettings.deleteMany({ where: { venueId } })
 
   // 11. Webhook events
-  await prisma.webhookEvent.deleteMany({ where: { venueId } })
+  await tx.webhookEvent.deleteMany({ where: { venueId } })
 
   // 12. Finally, delete the venue
-  await prisma.venue.delete({ where: { id: venueId } })
+  await tx.venue.delete({ where: { id: venueId } })
 
   logger.info(`✅ Successfully deleted all data for venue ${venueId}`)
 }

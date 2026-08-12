@@ -38,6 +38,7 @@ import subscriptionRoutes from './superadmin/subscription.routes'
 import billingRoutes from './superadmin/billing.routes'
 import reportsRoutes from './superadmin/reports.routes'
 import deliveryActivationRoutes from './superadmin/deliveryActivation.routes'
+import masterCatalogRoutes from './superadmin/masterCatalog.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
@@ -76,6 +77,7 @@ router.use('/subscriptions', subscriptionRoutes)
 router.use('/billing', billingRoutes) // Platform billing CFDI (Avoqado factura a sus propios clientes)
 router.use('/reports', reportsRoutes)
 router.use('/delivery-activation', deliveryActivationRoutes) // Task 4/7 delivery-activation-backend: cola de ops + avanzar status
+router.use('/master-catalog', masterCatalogRoutes)
 // Aditivo (2026-05): mismos controllers que ya viven en /api/v1/dashboard/superadmin/*,
 // expuestos también aquí para que el frontend superadmin use un solo namespace.
 router.use('/settlement-configurations', settlementConfigRoutes)

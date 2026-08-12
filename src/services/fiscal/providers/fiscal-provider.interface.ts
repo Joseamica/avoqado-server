@@ -42,6 +42,27 @@ export interface ReceptorValidationResult {
   reasons: string[] // human-readable, Spanish (shown to staff/customer on failure)
 }
 
+/** Datos para crear/actualizar el Customer espejo en el PAC. */
+export interface UpsertCustomerParams extends ReceptorInput {
+  email?: string
+  /** Id del Customer ya guardado, si existe. Se intenta actualizar antes de crear. */
+  existingCustomerId?: string | null
+}
+
+/** Campo del formulario al que apunta un error de validación del SAT. */
+export type SatValidationField = 'razonSocial' | 'rfc' | 'regimenFiscal' | 'codigoPostal' | 'email' | 'otro'
+
+export interface SatValidationError {
+  field: SatValidationField
+  message: string
+}
+
+/** Resultado de validar los datos del receptor contra el padrón del SAT (sin gastar timbre). */
+export interface SatValidationResult {
+  valid: boolean
+  errors: SatValidationError[]
+}
+
 export interface CfdiItemTax {
   type: 'IVA' | 'IEPS' | 'ISR'
   factor: 'Tasa' | 'Cuota' | 'Exento'
@@ -206,7 +227,17 @@ export interface FiscalProvider {
   createOrganization(params: CreateOrgParams): Promise<CreateOrgResult>
   updateOrgLegal(params: UpdateOrgLegalParams): Promise<void>
   uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult>
-  validateReceptor(params: ReceptorInput): Promise<ReceptorValidationResult>
+  // NOTA: la validación de formato del receptor NO vive aquí. `validateBeforeStamp()`
+  // (src/services/fiscal/cfdiValidation.ts) es el único pre-check antes de timbrar y ya
+  // cubre RFC, CP, razón social, régimen y uso de CFDI — además de CSD, forma de pago,
+  // conceptos y que el dinero cuadre al centavo. Hubo aquí un `validateReceptor` que
+  // duplicaba un subconjunto más débil de eso y que nunca se llamó desde ningún lado;
+  // se eliminó porque parecía una defensa activa sin serlo. No lo reintroduzcas: si hace
+  // falta más validación de formato, va en `validateBeforeStamp`.
+  /** Crea o actualiza el Customer espejo en el PAC. Devuelve su id. */
+  upsertCustomer(params: UpsertCustomerParams): Promise<string>
+  /** Valida los datos del Customer contra el padrón del SAT. No gasta timbre. */
+  validateCustomerTaxInfo(customerId: string): Promise<SatValidationResult>
   createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice>
   /** Issues a factura global to "Público en General" (RFC XAXX010101000). */
   createGlobalInvoice(params: GlobalInvoiceParams): Promise<StampedInvoice>

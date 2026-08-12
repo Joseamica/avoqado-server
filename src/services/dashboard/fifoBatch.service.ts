@@ -5,6 +5,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import { withSerializableRetry } from '../../utils/serializableRetry'
+import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 
 /**
  * Generate unique batch number for a raw material
@@ -546,9 +547,13 @@ export async function getBatchesForRawMaterial(
 
   const batches = await prisma.stockBatch.findMany({
     where,
-    orderBy: {
-      receivedDate: 'asc',
-    },
+    orderBy: [
+      { receivedDate: 'asc' },
+      // Tiebreak by id: two batches received at the very same instant would come back in
+      // arbitrary order, and a list whose order shifts between queries is indefensible in
+      // front of an auditor (and starts dropping rows the moment someone paginates it).
+      { id: 'asc' },
+    ],
     include: {
       rawMaterial: {
         select: {
@@ -589,23 +594,29 @@ export async function getBatchesForRawMaterial(
 export async function markExpiredBatches(venueId?: string): Promise<number> {
   const now = new Date()
 
-  const expiredBatches = await prisma.stockBatch.findMany({
-    where: {
-      ...(venueId && { venueId }),
-      status: BatchStatus.ACTIVE,
-      expirationDate: {
-        lte: now,
-      },
-    },
-    select: {
-      id: true,
-      venueId: true,
-      rawMaterialId: true,
-      batchNumber: true,
-      unit: true,
-      costPerUnit: true,
-    },
-  })
+  // Entry read of the batch-expiration cron — retried on transient connection
+  // errors per .claude/rules/cron-jobs.md.
+  const expiredBatches = await retry(
+    () =>
+      prisma.stockBatch.findMany({
+        where: {
+          ...(venueId && { venueId }),
+          status: BatchStatus.ACTIVE,
+          expirationDate: {
+            lte: now,
+          },
+        },
+        select: {
+          id: true,
+          venueId: true,
+          rawMaterialId: true,
+          batchNumber: true,
+          unit: true,
+          costPerUnit: true,
+        },
+      }),
+    { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'batch-expiration.findExpiredBatches' },
+  )
 
   let expiredCount = 0
 
@@ -683,6 +694,13 @@ export async function markExpiredBatches(venueId?: string): Promise<number> {
  * retenido.
  */
 export async function quarantineBatch(venueId: string, batchId: string, reason: string, staffId?: string): Promise<any> {
+  // The reason is the line whoever audits this hold will read months from now; without it
+  // the record explains nothing and the goods sit frozen "just because".
+  const trimmedReason = reason?.trim()
+  if (!trimmedReason) {
+    throw new AppError('Escribe por qué se retiene el lote: es lo que un auditor va a leer.', 400)
+  }
+
   const batch = await prisma.stockBatch.findFirst({
     where: {
       id: batchId,
@@ -691,7 +709,14 @@ export async function quarantineBatch(venueId: string, batchId: string, reason: 
   })
 
   if (!batch) {
-    throw new AppError(`Batch not found`, 404)
+    throw new AppError('No encontramos ese lote en esta sucursal.', 404)
+  }
+
+  // Quarantining twice does not deduct twice (`wasActive` below guards that), but it would
+  // leave a second audit-trail line, with a different reason, for a hold that already
+  // existed — and whoever audits it would believe two separate events happened.
+  if (batch.status === BatchStatus.QUARANTINED) {
+    throw new AppError('Ese lote ya está retenido.', 409)
   }
 
   const wasActive = batch.status === BatchStatus.ACTIVE
@@ -739,7 +764,7 @@ export async function quarantineBatch(venueId: string, batchId: string, reason: 
         previousStock,
         newStock,
         costImpact: batch.costPerUnit.mul(remaining).neg(),
-        reason: `Batch quarantined: ${reason}`,
+        reason: `Lote retenido: ${trimmedReason}`,
         reference: batchId,
       },
     })
@@ -753,10 +778,113 @@ export async function quarantineBatch(venueId: string, batchId: string, reason: 
     action: 'STOCK_BATCH_QUARANTINED',
     entity: 'StockBatch',
     entityId: batchId,
-    data: { reason, batchNumber: batch.batchNumber },
+    data: { reason: trimmedReason, batchNumber: batch.batchNumber },
   })
 
   return updatedBatch
+}
+
+/**
+ * Release a batch that was being held in quarantine.
+ *
+ * Without this, quarantining was a one-way trip: the batch stayed out of circulation
+ * forever and the only way out was editing the database by hand. A quality hold is by
+ * definition temporary — you hold it, someone inspects it, and it either gets released or
+ * written off.
+ *
+ * INVARIANT: `currentStock === Σ remainingQuantity of ACTIVE batches`. Since the held batch
+ * was NOT ACTIVE it contributed 0; turning it ACTIVE makes it contribute its remainder, so
+ * the aggregate has to go up by exactly that remainder. That holds regardless of which
+ * status it had before the quarantine — the status is derived from today's reality, not
+ * from a history we don't keep:
+ *   - already expired → EXPIRED, and it does NOT rejoin the aggregate (letting expired
+ *                       goods back into circulation would be the worst possible ending for
+ *                       this function)
+ *   - no remainder    → DEPLETED, contributes 0
+ *   - otherwise       → ACTIVE, its remainder comes back with a positive movement
+ */
+export async function releaseBatchFromQuarantine(venueId: string, batchId: string, reason: string, staffId?: string): Promise<any> {
+  const trimmedReason = reason?.trim()
+  if (!trimmedReason) {
+    throw new AppError('Escribe por qué se libera el lote: es lo que un auditor va a leer.', 400)
+  }
+
+  const batch = await prisma.stockBatch.findFirst({ where: { id: batchId, venueId } })
+
+  if (!batch) {
+    throw new AppError('No encontramos ese lote en esta sucursal.', 404)
+  }
+
+  if (batch.status !== BatchStatus.QUARANTINED) {
+    throw new AppError('Ese lote no está retenido, así que no hay nada que liberar.', 400)
+  }
+
+  return prisma.$transaction(async tx => {
+    // Re-read inside the tx: anything could have happened between the read above and here.
+    const fresh = await tx.stockBatch.findUnique({
+      where: { id: batchId },
+      select: { remainingQuantity: true, expirationDate: true, status: true },
+    })
+
+    if (!fresh || fresh.status !== BatchStatus.QUARANTINED) {
+      throw new AppError('Ese lote ya no está retenido; alguien más lo movió.', 409)
+    }
+
+    const remaining = fresh.remainingQuantity ?? new Decimal(0)
+    const hasExpired = Boolean(fresh.expirationDate && fresh.expirationDate <= new Date())
+    const newStatus = hasExpired ? BatchStatus.EXPIRED : remaining.lessThanOrEqualTo(0) ? BatchStatus.DEPLETED : BatchStatus.ACTIVE
+
+    const updated = await tx.stockBatch.update({
+      where: { id: batchId },
+      data: { status: newStatus },
+      include: { rawMaterial: true },
+    })
+
+    // Only a batch coming back as ACTIVE with a remainder rejoins the aggregate.
+    if (newStatus === BatchStatus.ACTIVE && remaining.greaterThan(0)) {
+      const previousStock = updated.rawMaterial.currentStock
+      const newStock = previousStock.add(remaining)
+
+      await tx.rawMaterial.update({
+        where: { id: batch.rawMaterialId },
+        data: { currentStock: newStock },
+      })
+
+      await tx.rawMaterialMovement.create({
+        data: {
+          rawMaterialId: batch.rawMaterialId,
+          venueId,
+          batchId,
+          type: RawMaterialMovementType.ADJUSTMENT,
+          quantity: remaining,
+          unit: batch.unit,
+          previousStock,
+          newStock,
+          costImpact: batch.costPerUnit.mul(remaining),
+          reason: `Lote liberado de cuarentena: ${trimmedReason}`,
+          reference: batchId,
+        },
+      })
+    }
+
+    void logAction({
+      staffId,
+      venueId,
+      action: 'STOCK_BATCH_RELEASED',
+      entity: 'StockBatch',
+      entityId: batchId,
+      data: {
+        reason: trimmedReason,
+        batchNumber: batch.batchNumber,
+        // These two keys stay in Spanish on purpose: they are the payload an operator reads
+        // in the audit screen, and a test outside this file already asserts on them.
+        estadoResultante: newStatus,
+        regresoAlInventario: newStatus === BatchStatus.ACTIVE && remaining.greaterThan(0),
+      },
+    })
+
+    return updated
+  })
 }
 
 /**

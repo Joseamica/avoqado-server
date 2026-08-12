@@ -3,6 +3,7 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { markNoShow } from '../services/dashboard/reservation.dashboard.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Auto no-show worker.
@@ -27,7 +28,7 @@ export class ReservationAutoNoShowJob {
   private readonly CRON_PATTERN = '35 */5 * * * *'
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('reservation-auto-no-show', this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {

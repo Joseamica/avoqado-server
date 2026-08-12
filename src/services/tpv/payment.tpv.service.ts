@@ -12,6 +12,7 @@ import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboa
 import { restockItem } from '../dashboard/inventoryRestock.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
+import { PhaseTimer } from '@/utils/phaseTimer'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
@@ -31,6 +32,7 @@ import {
   type CardInternationalityDecision,
   type ClientCountryEvidenceSource,
 } from '../payments/cardInternationality.service'
+import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -166,6 +168,7 @@ async function validateOrderInventoryAvailability(
     productId: string
     product: { name: string }
     quantity: number
+    weightQuantity?: any
     modifiers?: Array<{
       quantity: number
       modifier: {
@@ -186,23 +189,19 @@ async function validateOrderInventoryAvailability(
 
   // Validate each product
   for (const item of orderItems) {
+    const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
     try {
       const inventoryStatus = await getProductInventoryStatus(venueId, item.productId)
-
-      // No inventory tracking → always available
-      if (!inventoryStatus.inventoryMethod) {
-        continue
-      }
 
       // QUANTITY method → check current stock
       if (inventoryStatus.inventoryMethod === 'QUANTITY') {
         const currentStock = inventoryStatus.currentStock || 0
 
-        if (currentStock < item.quantity) {
+        if (currentStock < effectiveQuantity) {
           issues.push({
             productId: item.productId,
             productName: item.product.name,
-            requested: item.quantity,
+            requested: effectiveQuantity,
             available: currentStock,
             reason: 'Insufficient stock for product',
           })
@@ -213,7 +212,7 @@ async function validateOrderInventoryAvailability(
       if (inventoryStatus.inventoryMethod === 'RECIPE') {
         const maxPortions = inventoryStatus.maxPortions || 0
 
-        if (maxPortions < item.quantity) {
+        if (maxPortions < effectiveQuantity) {
           // Gather missing ingredient details
           const missingIngredients =
             inventoryStatus.insufficientIngredients
@@ -223,7 +222,7 @@ async function validateOrderInventoryAvailability(
           issues.push({
             productId: item.productId,
             productName: item.product.name,
-            requested: item.quantity,
+            requested: effectiveQuantity,
             available: `${maxPortions} portions (missing: ${missingIngredients})`,
             reason: 'Insufficient ingredients for recipe',
           })
@@ -279,7 +278,7 @@ async function validateOrderInventoryAvailability(
 
           // Calculate total quantity needed: quantityPerUnit × orderItem.quantity × modifier.quantity
           const quantityPerUnit = parseFloat(modifier.quantityPerUnit.toString())
-          const totalNeeded = quantityPerUnit * item.quantity * orderModifier.quantity
+          const totalNeeded = quantityPerUnit * effectiveQuantity * orderModifier.quantity
           const currentStock = parseFloat(rawMaterial.currentStock.toString())
 
           if (currentStock < totalNeeded) {
@@ -328,6 +327,9 @@ async function validatePreFlightInventory(
       product: { name: string } | null
       productName?: string | null
       quantity: number
+      weightQuantity?: any
+      areaTicketLineId?: string | null
+      modifiers?: any[]
       paymentAllocations?: any[]
     }>
     payments: Array<{ amount: any; tipAmount: any }>
@@ -348,6 +350,8 @@ async function validatePreFlightInventory(
 
   // Only validate inventory if this payment will complete the order
   if (willBeFullyPaid) {
+    const coveredAreaTicketLines = await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
+
     // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
     // Items with paymentAllocations have already been "claimed" by a previous split payment
     // Their inventory will be deducted when the order is completed
@@ -355,7 +359,8 @@ async function validatePreFlightInventory(
 
     // Filter out items with deleted products (null productId) - they can't be validated for inventory
     const itemsToValidate = unpaidItems.filter(
-      (item): item is typeof item & { productId: string; product: { name: string } } => item.productId !== null && item.product !== null,
+      (item): item is typeof item & { productId: string; product: { name: string } } =>
+        item.productId !== null && item.product !== null && (!item.areaTicketLineId || !coveredAreaTicketLines.has(item.areaTicketLineId)),
     )
 
     logger.info('🔍 PRE-FLIGHT: Checking inventory before creating payment', {
@@ -435,6 +440,7 @@ async function updateOrderTotalsForStandalonePayment(
   tipAmount: number, // ✅ FIX: Pass tip separately to update order.tipAmount
   currentPaymentId?: string,
   staffId?: string,
+  options?: { areaTicketAlreadyFinalized?: boolean },
 ): Promise<void> {
   // Get current order with payment information
   const order = await prisma.order.findUnique({
@@ -453,6 +459,21 @@ async function updateOrderTotalsForStandalonePayment(
           product: true,
           // ✅ Include paymentAllocations to filter out paid items in validation
           paymentAllocations: true,
+          modifiers: {
+            include: {
+              modifier: {
+                select: {
+                  id: true,
+                  name: true,
+                  groupId: true,
+                  rawMaterialId: true,
+                  quantityPerUnit: true,
+                  unit: true,
+                  inventoryMode: true,
+                },
+              },
+            },
+          },
         },
       },
       customer: true, // ⭐ LOYALTY: Need customer for points earning
@@ -483,7 +504,23 @@ async function updateOrderTotalsForStandalonePayment(
   const totalTip = previousTips + tipAmount
 
   // ✅ FIX: Calculate new total including tips (consistent with fast payments)
-  const newTotal = orderSubtotal - orderDiscount + totalTip
+  //
+  // 🔴 MONEY: la MERCANCÍA se clampa a 0 ANTES de sumar la propina.
+  //
+  // Un `discountAmount` mayor que el subtotal es un estado que sí existe en la
+  // base —lo dejan las cortesías de cuenta completa, y `recalculateOrderTotals`
+  // guarda la suma cruda de descuentos aunque clampe su propio total— y aquí se
+  // convertía en un `Order.total` NEGATIVO al cobrar: la cuenta pasaba a deber
+  // dinero al cliente, el corte lo restaba de la venta del día y el POS pintaba
+  // un botón "Pagar $-25.30". Visto en M13 (`cmsetvfft0001c9jxv33p26gl`):
+  // subtotal 253.00 − descuento 278.30 = −25.30.
+  //
+  // El clamp va sobre `subtotal − descuento` y NO sobre el total completo: la
+  // propina es dinero que el cliente decidió dar, no mercancía, y un descuento
+  // excedente no debe comérsela. Mismo criterio que
+  // `recalculateOrderTotals` (base clampada, luego se suman los cargos) y que
+  // `applyManualDiscount` en discount.tpv.service.ts.
+  const newTotal = Math.max(0, orderSubtotal - orderDiscount) + totalTip
 
   // Calculate remaining amount (based on new total)
   // 🔴 El clamp a 0 se CONSERVA a propósito: clientes viejos (TPV/Android/iOS) esperan
@@ -494,6 +531,9 @@ async function updateOrderTotalsForStandalonePayment(
   // esa invisibilidad sin cambiar el contrato de la API.
   const remainingAmount = Math.max(0, newTotal - totalPaid)
   const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+  const coveredAreaTicketLines = isFullyPaid
+    ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
+    : new Set<string>()
 
   // 🚨 SOBREPAGO — detectar y gritar, NUNCA rechazar ni lanzar.
   //
@@ -544,12 +584,15 @@ async function updateOrderTotalsForStandalonePayment(
 
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
   // Validate inventory availability before marking order as complete
-  if (isFullyPaid && !isAreaTicketOrder) {
+  if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
     // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
     // Items with paymentAllocations have already been "claimed" by a previous split payment
     // Also skip items with deleted products (productId is null - Toast/Square pattern)
     const unpaidItems = order.items.filter(
-      (item: any) => item.productId && (!item.paymentAllocations || item.paymentAllocations.length === 0),
+      (item: any) =>
+        item.productId &&
+        (!item.paymentAllocations || item.paymentAllocations.length === 0) &&
+        (!item.areaTicketLineId || !coveredAreaTicketLines.has(item.areaTicketLineId)),
     )
 
     logger.info('🔍 Pre-flight validation: Checking inventory availability before completing order', {
@@ -600,51 +643,53 @@ async function updateOrderTotalsForStandalonePayment(
   // ⭐ KIOSK MODE FIX: If servedById is null, assign the staff who processed the payment
   const shouldAssignServer = !order.servedById && staffId
 
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: {
-      paymentStatus: newPaymentStatus,
-      // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
-      paidAmount: totalPaid,
-      remainingBalance: remainingAmount,
-      // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
-      tipAmount: totalTip,
-      // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
-      total: newTotal,
-      // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
-      ...(shouldAssignServer && {
-        servedById: staffId,
-        createdById: order.createdById || staffId, // Also set createdById if null
-      }),
-      ...(isFullyPaid && {
-        status: 'COMPLETED',
-        completedAt: new Date(),
-      }),
-    },
-    include: {
-      items: {
+  const updatedOrder = options?.areaTicketAlreadyFinalized
+    ? order
+    : await prisma.order.update({
+        where: { id: orderId },
+        data: {
+          paymentStatus: newPaymentStatus,
+          // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
+          paidAmount: totalPaid,
+          remainingBalance: remainingAmount,
+          // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
+          tipAmount: totalTip,
+          // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
+          total: newTotal,
+          // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
+          ...(shouldAssignServer && {
+            servedById: staffId,
+            createdById: order.createdById || staffId, // Also set createdById if null
+          }),
+          ...(isFullyPaid && {
+            status: 'COMPLETED',
+            completedAt: new Date(),
+          }),
+        },
         include: {
-          product: true,
-          // ✅ Include modifiers with inventory-related fields for stock deduction
-          modifiers: {
+          items: {
             include: {
-              modifier: {
-                select: {
-                  id: true,
-                  name: true,
-                  groupId: true,
-                  rawMaterialId: true,
-                  quantityPerUnit: true,
-                  unit: true,
-                  inventoryMode: true,
+              product: true,
+              // ✅ Include modifiers with inventory-related fields for stock deduction
+              modifiers: {
+                include: {
+                  modifier: {
+                    select: {
+                      id: true,
+                      name: true,
+                      groupId: true,
+                      rawMaterialId: true,
+                      quantityPerUnit: true,
+                      unit: true,
+                      inventoryMode: true,
+                    },
+                  },
                 },
               },
             },
           },
         },
-      },
-    },
-  })
+      })
 
   logger.info('Order totals updated for standalone payment', {
     orderId,
@@ -664,7 +709,7 @@ async function updateOrderTotalsForStandalonePayment(
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
   // ✅ WORLD-CLASS PATTERN: Fail payment if inventory deduction fails (Shopify, Square, Toast)
-  if (isFullyPaid && !isAreaTicketOrder) {
+  if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
     const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
     // Items cuya deducción SÍ se aplicó — si otro item falla, esto es lo que
     // hay que revertir antes de regresar la orden a PENDING.
@@ -678,6 +723,15 @@ async function updateOrderTotalsForStandalonePayment(
 
     // Deduct stock for each product in the order
     for (const item of updatedOrder.items) {
+      if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
+        logger.info('⏭️ Skipping generic deduction for area-ticket line covered by reservation', {
+          orderId,
+          orderItemId: item.id,
+          areaTicketLineId: item.areaTicketLineId,
+        })
+        continue
+      }
+
       // Skip items where product was deleted (Toast/Square pattern)
       if (!item.productId) {
         // ⚠️ SERIALIZED INVENTORY: Check if this is a serialized item before skipping
@@ -1554,6 +1608,112 @@ async function resolveTerminalIdFromSerial(venueId: string, deviceSerialNumber: 
  * @param orgId Organization ID
  * @returns Created payment with order information
  */
+async function markAreaTicketPaymentForReconciliation(input: {
+  venueId: string
+  sessionId: string
+  attemptId: string
+  paymentId: string
+}): Promise<void> {
+  await prisma.$transaction(async tx => {
+    await tx.areaTicketPaymentAttempt.updateMany({
+      where: { id: input.attemptId, checkoutSessionId: input.sessionId },
+      data: {
+        status: 'UNKNOWN',
+        paymentId: input.paymentId,
+        lastCheckedAt: new Date(),
+      },
+    })
+    await tx.areaTicketCheckoutSession.updateMany({
+      where: { id: input.sessionId, venueId: input.venueId },
+      data: {
+        status: 'RECONCILIATION_REQUIRED',
+        activePaymentAttemptId: input.attemptId,
+        version: { increment: 1 },
+      },
+    })
+  })
+}
+
+async function finalizeCapturedAreaTicketPayment(input: {
+  venueId: string
+  orderId: string
+  paymentId: string
+  sessionId: string
+  attemptId: string
+  staffId?: string | null
+}): Promise<'PAID' | 'PARTIALLY_PAID'> {
+  const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
+  const finalization = await prisma.$transaction(
+    tx =>
+      areaTicketPayment.finalizeAreaTicketPaymentInTransaction(tx, {
+        venueId: input.venueId,
+        orderId: input.orderId,
+        paymentId: input.paymentId,
+        // The transaction recomputes this from durable COMPLETED payments.
+        fullyPaid: false,
+        staffId: input.staffId ?? undefined,
+        reconcileCapturedPayment: true,
+        locked: { sessionId: input.sessionId, attemptId: input.attemptId },
+      }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  )
+  return finalization.fullyPaid ? 'PAID' : 'PARTIALLY_PAID'
+}
+
+async function resumeCapturedAreaTicketPayment(
+  venueId: string,
+  orderId: string,
+  payment: { id: string; processedById?: string | null },
+  idempotencyKey?: string | null,
+): Promise<'PAID' | 'PARTIALLY_PAID' | 'RECONCILIATION_REQUIRED' | null> {
+  const session = await prisma.areaTicketCheckoutSession.findFirst({
+    where: { venueId, orderId },
+    select: { id: true, status: true, activePaymentAttemptId: true },
+  })
+  if (!session) return null
+
+  const attempt = await prisma.areaTicketPaymentAttempt.findFirst({
+    where: {
+      checkoutSessionId: session.id,
+      orderId,
+      OR: [{ paymentId: payment.id }, ...(idempotencyKey ? [{ idempotencyKey }] : [])],
+    },
+    orderBy: { sequence: 'desc' },
+  })
+  if (!attempt) return session.status === 'PAID' ? 'PAID' : session.status === 'PARTIALLY_PAID' ? 'PARTIALLY_PAID' : null
+
+  if (attempt.status === 'SUCCEEDED' && attempt.paymentId === payment.id) {
+    if (session.status === 'PAID') return 'PAID'
+    if (session.status === 'PARTIALLY_PAID') return 'PARTIALLY_PAID'
+  }
+
+  try {
+    return await finalizeCapturedAreaTicketPayment({
+      venueId,
+      orderId,
+      paymentId: payment.id,
+      sessionId: session.id,
+      attemptId: attempt.id,
+      staffId: payment.processedById,
+    })
+  } catch (error) {
+    await markAreaTicketPaymentForReconciliation({
+      venueId,
+      sessionId: session.id,
+      attemptId: attempt.id,
+      paymentId: payment.id,
+    })
+    logger.error('[AREA TICKETS v7] Reintento del pago capturado sigue requiriendo conciliación', {
+      venueId,
+      orderId,
+      paymentId: payment.id,
+      checkoutSessionId: session.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return 'RECONCILIATION_REQUIRED'
+  }
+}
+
 export async function recordOrderPayment(
   venueId: string,
   orderId: string,
@@ -1584,7 +1744,15 @@ export async function recordOrderPayment(
         idempotencyKey: paymentData.idempotencyKey,
         existingPaymentId: existingByKey.id,
       })
-      return { ...existingByKey, digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]) }
+      const areaTicketCheckoutState =
+        existingByKey.status === 'COMPLETED'
+          ? await resumeCapturedAreaTicketPayment(venueId, orderId, existingByKey, paymentData.idempotencyKey)
+          : null
+      return {
+        ...existingByKey,
+        ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
+        digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
+      }
     }
   }
 
@@ -1613,8 +1781,18 @@ export async function recordOrderPayment(
       })
 
       // Return existing payment with receipt (safe retry - client gets same response)
+      const areaTicketCheckoutState =
+        existingPayment.status === 'COMPLETED'
+          ? await resumeCapturedAreaTicketPayment(
+              venueId,
+              orderId,
+              existingPayment,
+              paymentData.idempotencyKey ?? existingPayment.idempotencyKey,
+            )
+          : null
       return {
         ...existingPayment,
+        ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
         digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
       }
     }
@@ -1695,9 +1873,7 @@ export async function recordOrderPayment(
   // Validate inventory availability to prevent charging customers for orders we can't fulfill
   // Vales v7 ya reservaron disponibilidad y consumen esas reservas dentro de su
   // finalización transaccional; validarlas como inventario libre las restaría dos veces.
-  if (!hasAreaTicketLines) {
-    await validatePreFlightInventory(activeOrder, totalAmount + tipAmount)
-  }
+  await validatePreFlightInventory(activeOrder, totalAmount + tipAmount)
 
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
@@ -2031,7 +2207,15 @@ export async function recordOrderPayment(
         })
 
         if (winner) {
-          return { ...winner, digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]) }
+          const winnerAreaTicketCheckoutState =
+            winner.status === 'COMPLETED'
+              ? await resumeCapturedAreaTicketPayment(venueId, orderId, winner, paymentData.idempotencyKey)
+              : null
+          return {
+            ...winner,
+            ...(winnerAreaTicketCheckoutState ? { areaTicketCheckoutState: winnerAreaTicketCheckoutState } : {}),
+            digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),
+          }
         }
 
         logger.error('🚨 [recordOrderPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
@@ -2274,59 +2458,29 @@ export async function recordOrderPayment(
   } else {
     // MODO AUTÓNOMO: Backend maneja los totales directamente
     try {
-      // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
-      // ⭐ LOYALTY: Pass staffId for loyalty points attribution
-      // ✅ FIX: Pass tipAmount separately to update order.tipAmount
-      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId)
-
       const capturedAreaCheckout = lockedAreaCheckout as {
         sessionId: string
         attemptId: string
       } | null
 
       if (capturedAreaCheckout && payment.status === 'COMPLETED') {
-        const freshOrder = await prisma.order.findUnique({
-          where: { id: activeOrder.id },
-          select: { paymentStatus: true },
-        })
-        const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
         try {
-          await prisma.$transaction(
-            tx =>
-              areaTicketPayment.finalizeAreaTicketPaymentInTransaction(tx, {
-                venueId,
-                orderId: activeOrder.id,
-                paymentId: payment.id,
-                fullyPaid: freshOrder?.paymentStatus === 'PAID',
-                staffId: validatedStaffId,
-                locked: capturedAreaCheckout,
-              }),
-            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-          )
-          areaTicketCheckoutState = freshOrder?.paymentStatus === 'PAID' ? 'PAID' : 'PARTIALLY_PAID'
+          areaTicketCheckoutState = await finalizeCapturedAreaTicketPayment({
+            venueId,
+            orderId: activeOrder.id,
+            paymentId: payment.id,
+            sessionId: capturedAreaCheckout.sessionId,
+            attemptId: capturedAreaCheckout.attemptId,
+            staffId: validatedStaffId,
+          })
         } catch (finalizationError) {
           // El proveedor ya confirmó el dinero. Nunca habilitar otro cobro:
           // congela la sesión y conserva el mismo intento para conciliación.
-          await prisma.$transaction(async tx => {
-            await tx.areaTicketPaymentAttempt.updateMany({
-              where: {
-                id: capturedAreaCheckout.attemptId,
-                checkoutSessionId: capturedAreaCheckout.sessionId,
-              },
-              data: {
-                status: 'UNKNOWN',
-                paymentId: payment.id,
-                lastCheckedAt: new Date(),
-              },
-            })
-            await tx.areaTicketCheckoutSession.updateMany({
-              where: { id: capturedAreaCheckout.sessionId, venueId },
-              data: {
-                status: 'RECONCILIATION_REQUIRED',
-                activePaymentAttemptId: capturedAreaCheckout.attemptId,
-                version: { increment: 1 },
-              },
-            })
+          await markAreaTicketPaymentForReconciliation({
+            venueId,
+            sessionId: capturedAreaCheckout.sessionId,
+            attemptId: capturedAreaCheckout.attemptId,
+            paymentId: payment.id,
           })
           logger.error('[AREA TICKETS v7] Pago capturado; finalización requiere conciliación', {
             venueId,
@@ -2337,6 +2491,27 @@ export async function recordOrderPayment(
           })
           areaTicketCheckoutState = 'RECONCILIATION_REQUIRED'
         }
+        if (areaTicketCheckoutState !== 'RECONCILIATION_REQUIRED') {
+          try {
+            // The atomic area-ticket transaction already persisted totals and
+            // inventory. Re-enter only the coupon/referral/loyalty side effects.
+            await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId, {
+              areaTicketAlreadyFinalized: true,
+            })
+          } catch (sideEffectError) {
+            logger.error('[AREA TICKETS v7] El pago finalizó, pero fallaron efectos secundarios no monetarios', {
+              venueId,
+              orderId,
+              paymentId: payment.id,
+              error: sideEffectError instanceof Error ? sideEffectError.message : String(sideEffectError),
+            })
+          }
+        }
+      } else {
+        // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
+        // ⭐ LOYALTY: Pass staffId for loyalty points attribution
+        // ✅ FIX: Pass tipAmount separately to update order.tipAmount
+        await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId)
       }
 
       logger.info('Order totals updated directly in backend (Standalone Mode)', {
@@ -2433,6 +2608,12 @@ export async function recordOrderPayment(
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
 
+  // ⏱️ SOLO MEDICIÓN (2026-08-09). Prod: mediana 4,471 ms / p95 4,971 ms contra
+  // 130 ms de red real México→Oregon: ~97% del tiempo es trabajo del servidor,
+  // no internet. Antes de mover algo a segundo plano hay que saber QUÉ fase
+  // pesa. No cambia orden, valores ni manejo de errores.
+  const t = new PhaseTimer('recordFastPayment', { venueId, method: paymentData.method })
+
   // 🛡️ IDEMPOTENCY CHECK - Layered defense (Stripe/Square/Toast pattern)
   //
   // Check 1 (preferred):  idempotencyKey — client-generated UUID v4 per logical
@@ -2504,18 +2685,19 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
   }
 
-  await assertVenueSalesEnabled(venueId)
+  await t.time('assertVenueSalesEnabled', () => assertVenueSalesEnabled(venueId))
 
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
 
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
-  const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
+  const validatedStaffId = await t.time('validateStaffVenue', () => validateStaffVenue(paymentData.staffId, venueId, userId))
 
   // ✅ CORRECTED: Find current open shift for THIS STAFF MEMBER (not just any shift)
   // CRITICAL: If multiple staff members have open shifts simultaneously,
   // we must match the payment to the correct staff's shift
+  t.mark('idempotenciaYChequeosPrevios')
   const currentShift = await prisma.shift.findFirst({
     where: {
       venueId,
@@ -2646,6 +2828,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   let payment: Awaited<ReturnType<typeof prisma.payment.create>> & { processedBy: any }
   let fastOrder: Awaited<ReturnType<typeof prisma.order.create>>
   try {
+    t.mark('turnoMerchantYTerminal')
     const result = await prisma.$transaction(async tx => {
       // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
       // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
@@ -2887,7 +3070,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {
-    await createTransactionCost(payment.id)
+    await t.time('createTransactionCost', () => createTransactionCost(payment.id))
   } catch (transactionCostError) {
     logger.error('Failed to create TransactionCost for fast payment', {
       paymentId: payment.id,
@@ -2927,7 +3110,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Generate digital receipt for fast TPV payments (AVOQADO origin)
   let digitalReceipt = null
   try {
-    digitalReceipt = await generateDigitalReceipt(payment.id)
+    digitalReceipt = await t.time('generateDigitalReceipt', () => generateDigitalReceipt(payment.id))
     logger.info('Digital receipt generated for fast payment', {
       paymentId: payment.id,
       receiptId: digitalReceipt.id,
@@ -2941,7 +3124,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // REFERRAL HOOK: trigger referral qualification if this fast order has a pending referral
   try {
     const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
-    await onOrderPaid({ orderId: fastOrder.id, venueId: fastOrder.venueId })
+    await t.time('referralOnOrderPaid', () => onOrderPaid({ orderId: fastOrder.id, venueId: fastOrder.venueId }))
   } catch (err) {
     console.error('[referral hook] onOrderPaid failed for order', fastOrder.id, err)
   }
@@ -3039,6 +3222,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     // Don't fail the payment if socket emission fails
   }
 
+  t.mark('transaccionSocketsYComisiones')
   logger.info('Fast payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
   // 🪝 Backfill any Blumon webhook that arrived BEFORE this Payment was recorded.
@@ -3080,6 +3264,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   )
 
   // Add digital receipt info to payment response
+  const autofacturaAvailable = digitalReceipt
+    ? await t.time('resolveAutofacturaAvailable', () => resolveAutofacturaAvailable(fastOrder?.id))
+    : false
+  t.end({ paymentId: payment.id })
+
   return {
     ...payment,
     digitalReceipt: digitalReceipt
@@ -3087,7 +3276,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
           receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
-          autofacturaAvailable: await resolveAutofacturaAvailable(fastOrder?.id),
+          autofacturaAvailable,
         }
       : null,
   }

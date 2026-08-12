@@ -67,6 +67,7 @@ describe('auditTerminalConfig', () => {
       status: 'ACTIVE',
       config: { settings: { showCheckout: true, showQuickPayment: true } },
       configOverrides: { showQuickPayment: false },
+      customerDisplayInverted: false,
     })
     expect(r.settings.showCheckout).toBe(true)
     expect(r.settings.showQuickPayment).toBe(false)
@@ -78,12 +79,23 @@ describe('auditTerminalConfig', () => {
       status: 'ACTIVE',
       config: { settings: { showCheckout: true, showQuickPayment: false } },
       configOverrides: null,
+      customerDisplayInverted: false,
     })
     expect(r.flags).toContain('checkout_on_quickpay_off')
   })
   it('handles null config without throwing', () => {
-    const r = auditTerminalConfig({ name: 'T3', serialNumber: null, status: 'INACTIVE', config: null, configOverrides: null })
+    const r = auditTerminalConfig({
+      name: 'T3',
+      serialNumber: null,
+      status: 'INACTIVE',
+      config: null,
+      configOverrides: null,
+      customerDisplayInverted: true,
+    })
     expect(r.flags).toEqual([])
+    // The report echoes the flag verbatim; asserting it once keeps the field
+    // from being a fixture value nothing ever reads.
+    expect(r.customerDisplayInverted).toBe(true)
   })
 })
 

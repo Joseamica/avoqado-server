@@ -3,8 +3,9 @@ import logger from '@/config/logger'
 import Stripe from 'stripe'
 import { Prisma } from '@prisma/client'
 import { addDays } from 'date-fns'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { PAID_PLAN_TIER_CODES, derivePlanState } from '@/services/access/basePlan.service'
+import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -62,6 +63,7 @@ export function buildOverviewCounts(rows: SuperadminVenueSubscription[]): Subscr
 }
 
 type ListParams = { state?: SubscriptionState; q?: string; page: number; pageSize: number }
+const PLAN_PRO_FEATURE_CODE = 'PLAN_PRO' as const
 
 /** A single venue row as loaded by {@link loadVenueSubscriptions}: its PLAN_PRO VenueFeature (if any) + owner staff. */
 type VenueSubscriptionRow = {
@@ -197,21 +199,117 @@ export async function getSubscriptionOverview(): Promise<SubscriptionOverview> {
   return { counts, mrr: { total, currency: 'MXN' }, trialsEndingSoon }
 }
 
+type PlanFeatureRow = Prisma.FeatureGetPayload<{ select: { id: true; monthlyPrice: true } }>
+
+async function requirePlanFeatureTx(tx: Prisma.TransactionClient, venueId: string): Promise<PlanFeatureRow> {
+  const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { id: true } })
+  if (!venue) throw new NotFoundError('Venue no encontrado')
+
+  const feature = await tx.feature.findUnique({
+    where: { code: PLAN_PRO_FEATURE_CODE },
+    select: { id: true, monthlyPrice: true },
+  })
+  if (!feature) throw new NotFoundError('Feature PLAN_PRO no encontrado')
+  return feature
+}
+
+type PlanMutationResult = { auditData: Prisma.InputJsonObject }
+
+async function runAuditedPlanMutation(
+  venueId: string,
+  actorId: string,
+  action: string,
+  mutate: (tx: Prisma.TransactionClient, feature: PlanFeatureRow) => Promise<PlanMutationResult>,
+): Promise<SuperadminVenueSubscription> {
+  const venue = await prisma.$transaction(async tx => {
+    const feature = await requirePlanFeatureTx(tx, venueId)
+    const { auditData } = await mutate(tx, feature)
+
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorId,
+      venueId,
+      action,
+      entity: 'VenueFeature',
+      entityId: venueId,
+      data: { featureCode: PLAN_PRO_FEATURE_CODE, ...auditData },
+    })
+
+    const updatedVenue = (await tx.venue.findFirst({
+      where: { id: venueId },
+      select: VENUE_SUBSCRIPTION_SELECT,
+    })) as unknown as VenueSubscriptionRow | null
+    if (!updatedVenue) throw new NotFoundError('Venue no encontrado')
+    return updatedVenue
+  })
+
+  return mapVenueSubscription(venue)
+}
+
+export async function activateVenuePlan(venueId: string, actorId: string): Promise<SuperadminVenueSubscription> {
+  return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_ACTIVATED', async (tx, feature) => {
+    await tx.venueFeature.upsert({
+      where: { venueId_featureId: { venueId, featureId: feature.id } },
+      create: {
+        venueId,
+        featureId: feature.id,
+        active: true,
+        monthlyPrice: feature.monthlyPrice,
+        startDate: new Date(),
+      },
+      update: { active: true, endDate: null, monthlyPrice: feature.monthlyPrice },
+    })
+    return { auditData: {} }
+  })
+}
+
+export async function deactivateVenuePlan(venueId: string, actorId: string): Promise<SuperadminVenueSubscription> {
+  return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_DEACTIVATED', async (tx, feature) => {
+    await tx.venueFeature.update({
+      where: { venueId_featureId: { venueId, featureId: feature.id } },
+      data: { active: false, endDate: new Date() },
+    })
+    return { auditData: {} }
+  })
+}
+
+export async function grantVenuePlanTrial(venueId: string, days: number, actorId: string): Promise<SuperadminVenueSubscription> {
+  return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_TRIAL_GRANTED', async (tx, feature) => {
+    const startDate = new Date()
+    const endDate = addDays(startDate, days)
+    await tx.venueFeature.upsert({
+      where: { venueId_featureId: { venueId, featureId: feature.id } },
+      create: { venueId, featureId: feature.id, active: true, monthlyPrice: feature.monthlyPrice, startDate, endDate },
+      update: {
+        active: true,
+        startDate,
+        endDate,
+        monthlyPrice: feature.monthlyPrice,
+        stripeSubscriptionId: null,
+        stripeSubscriptionItemId: null,
+        suspendedAt: null,
+        gracePeriodEndsAt: null,
+      },
+    })
+    return { auditData: { days, endDate: endDate.toISOString() } }
+  })
+}
+
 /**
  * Superadmin management action: shift a venue's PLAN_PRO end date by `deltaDays`
  * (negative shortens it). Base is the existing endDate, or now() if it's null.
  * Returns the freshly-mapped single-venue row. Throws BadRequestError if the
  * venue has no PLAN_PRO VenueFeature.
  */
-export async function adjustVenuePlanEndDate(venueId: string, deltaDays: number): Promise<SuperadminVenueSubscription | null> {
-  const vf = await prisma.venueFeature.findFirst({
-    where: { venueId, feature: { code: 'PLAN_PRO' } },
-    select: { id: true, endDate: true },
+export async function adjustVenuePlanEndDate(venueId: string, deltaDays: number, actorId: string): Promise<SuperadminVenueSubscription> {
+  return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_ENDDATE_ADJUSTED', async tx => {
+    const vf = await tx.venueFeature.findFirst({
+      where: { venueId, feature: { code: PLAN_PRO_FEATURE_CODE } },
+      select: { id: true, endDate: true },
+    })
+    if (!vf) throw new BadRequestError('El venue no tiene un plan PLAN_PRO')
+
+    const newEnd = addDays(vf.endDate ?? new Date(), deltaDays)
+    await tx.venueFeature.update({ where: { id: vf.id }, data: { endDate: newEnd } })
+    return { auditData: { deltaDays, endDate: newEnd.toISOString() } }
   })
-  if (!vf) throw new BadRequestError('El venue no tiene un plan PLAN_PRO')
-
-  const newEnd = addDays(vf.endDate ?? new Date(), deltaDays)
-  await prisma.venueFeature.update({ where: { id: vf.id }, data: { endDate: newEnd } })
-
-  return getVenueSubscription(venueId)
 }

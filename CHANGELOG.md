@@ -9,74 +9,349 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- **Product availability now reports WHICH raw material is short (RECIPE inventory)**: `product.dashboard.service.ts` exposes two new optional fields on the product responses (`getProducts` — the endpoint the TPV/POS consumes at `GET /dashboard/venues/:venueId/products` — plus `getProduct` and the barcode lookup): `limitingIngredient` (the bottleneck raw material: `{ rawMaterialId, name, required, available, unit, maxPortions }`) and `insufficientIngredients` (the ones that can't make even one portion). Computed by new helpers `computeRecipeShortage` + `computeInventoryAvailability`, which unify the three previously-duplicated `availableQuantity` blocks into one source of truth using the exact same math (incl. unit conversion via `convertUnit`/`areUnitsCompatible`) — so `availableQuantity` is **byte-identical** to before; the shortage fields are purely additive and null on QUANTITY products / not-tracked products. Backward-compatible: old clients ignore the new fields. Lets the TPV tell the cashier exactly what ran out ("Carne Molida de Res: agotado") instead of a generic "SIN INSUMOS". **MCP kept in sync**: `menu_item_detail` (`src/mcp/tools/menu.ts`) gains an `availability` block (live stock + limiting/insufficient ingredients) so an ops agent can answer "¿por qué está agotada la X?". No schema change. Paired with avoqado-tpv Fase 2 (info modal on out-of-stock tap).
+- **PITS H1A — catálogo maestro corporativo, default-off y reversible**: se añadió gobierno de catálogo por organización sin cambiar la
+  identidad ni las relaciones operativas de `Product`. Incluye autoridad separada de entitlement/módulo/configuración, roles y permisos por
+  organización/sucursal, alta y retiro de artículos con marca/fabricante/familia/subfamilia/presentación/IVA/IEPS/SAT, valores corporativos,
+  perfiles de obligatoriedad por tipo de negocio, recetas/costos vivos, importación XLSX segura con preview/confirm/idempotencia, bindings y
+  overrides por sucursal, publicación/inversa con outbox, siete tools MCP, exportaciones XLSX versionadas, UI corporativa, control plane de
+  superadmin y runbook de canary/rollback. Migración y seeds no conceden acceso; con los gates apagados los flujos legacy de
+  producto/menú/inventario/receta/orden permanecen vigentes y sin consultas H1. Región, identificadores regionales y precios regionales
+  quedan explícitamente fuera de H1A hasta H1B/H1C; la aceptación contractual de PITS sigue bloqueada por sus layouts y matriz final de
+  campos.
 
-- **Permission system audit infrastructure** (`scripts/audit-permissions.ts`, `.github/workflows/permissions-audit.yml`, `.claude/rules/permissions-policy.md`). Cross-repo static analysis that prevents permission drift between backend, dashboard, TPV and Android. Reads `permissions.ts` as source of truth, then greps `checkPermission()` (backend), `<PermissionGate>` + `hasPermission()` (dashboard), `hasPermission()` (TPV) — reports `PHANTOM` (route checks a permission no non-SUPERADMIN can satisfy), `CATALOG_GAP` (route uses perm missing from `INDIVIDUAL_PERMISSIONS_BY_RESOURCE` → can't be granted individually), `DASHBOARD_DEAD_GATE` (UI gates a perm no endpoint checks), `TPV_CLIENT_ONLY`, `NAME_DRIFT` (Levenshtein-1 typos), and `SUPERADMIN_ONLY` (only SUPERADMIN via `*:*` short-circuit). Exit code 1 on ERROR. Two npm scripts: `npm run audit:permissions` (warns OK) and `npm run audit:permissions:strict` (fail on WARN too). CI workflow runs on every PR touching `permissions.ts`, `src/routes/**`, `src/middlewares/checkPermission*.ts`, plus weekly Monday 09:00 UTC to catch cross-repo drift. Locally the script auto-discovers sibling repos at `../avoqado-web-dashboard`, `../avoqado-tpv`, `../avoqado-android` — in CI only server is checked out. Allowlists for intentional cases (`SUPERADMIN_ONLY_ALLOWLIST`, `CATALOG_GAP_ALLOWLIST`) keep the noise floor at zero. Caught 22 real drift cases on first run (5 PHANTOMs in `tpv-commands:*` which are documented as TODO until granular middleware lands; 17 catalog gaps in `creditPacks:*`, `loyalty:expire`, `coupons:redeem`, `payment-link:read`, etc.). The 4 bugs we fixed in this same release (`role-permissions:update`, `shifts:manage`, `features:write` vs `update`, `commissions:process_payout` vs `payout`) would all have been caught by this audit before merge.
+- **PITS H0.6 — arqueo ciego de caja opt-in (PRO), compatible con venues y clientes actuales**: se añadió `CASH_RECONCILIATION` como
+  entitlement PRO y `VenueSettings.cashReconciliationEnabled` con default `false`; el flag efectivo (tier + opt-in) se entrega en la raíz de
+  terminal-config. El cierre TPV acepta de forma aditiva `COUNTED` con decimal canónico o `SKIPPED`, devuelve un outcome explícito, persiste
+  conteo/diferencia/auditoría de forma atómica con claim `CLOSING`, y mantiene sin gatear los cuerpos legacy de Desktop/otras integraciones.
+  Flag apagado, FREE, campo ausente y APK viejo conservan el comportamiento previo. Customer MCP `list_shifts` ahora expone `cashDeclared` y
+  `cashDifference` de forma null-safe.
 
-- **Backend Option B closure**: new `POST /api/v1/superadmin/venues/:venueId/angelpay-merchants/:merchantAccountId/approve` endpoint + `approveDiscoveredAngelPayMerchant` service. Atomically flips `MerchantAccount.active=true` AND assigns it to a `VenuePaymentConfig` slot (default: PRIMARY; optional body `{slot:'SECONDARY'|'TERTIARY'}`) inside a single `prisma.$transaction`. Mirrors Blumon's auto-attach-on-discovery pattern (Blumon attaches to Terminals via `assignedMerchantIds`; AngelPay is intent-routed and terminal-agnostic, so the equivalent home is `VenuePaymentConfig.{primary,secondary,tertiary}AccountId`). Returns 409 ConflictError if the chosen slot is already occupied by a different merchant (operator must pick another slot or unassign the incumbent first). When no VenuePaymentConfig exists for the venue yet, only PRIMARY-slot approval succeeds (schema requires `primaryAccountId` non-null) — SECONDARY/TERTIARY first-approval returns 400 with a clear hint to seed PRIMARY first. Closes Option B workaround so the admin no longer has to manually wire approved AngelPay merchants into a slot in a second screen.
-- **Backend Option B workaround**: new `POST /api/v1/tpv/angelpay/report-discovered-merchants` endpoint + `upsertDiscoveredAngelPayMerchants` service. TPV reports merchants from `AngelPaySDK.getUserMerchants()` after auth; backend idempotently upserts `MerchantAccount` rows (existing rows: refresh display fields only, never flip `active` to respect admin decisions; new rows: `active=false` PENDING_REVIEW with placeholder credentials). Bypasses Task 10's ACTIVE-account gate (by the time TPV calls, the SDK already authenticated). MerchantAccount has no direct `venueId` column — auto-discovered rows enter the global pool and become routable only after admin both approves them and wires them into a `VenuePaymentConfig` slot. Workaround while AngelPay confirms server-to-server merchant listing endpoint availability.
+- **Product availability now reports WHICH raw material is short (RECIPE inventory)**: `product.dashboard.service.ts` exposes two new
+  optional fields on the product responses (`getProducts` — the endpoint the TPV/POS consumes at `GET /dashboard/venues/:venueId/products` —
+  plus `getProduct` and the barcode lookup): `limitingIngredient` (the bottleneck raw material:
+  `{ rawMaterialId, name, required, available, unit, maxPortions }`) and `insufficientIngredients` (the ones that can't make even one
+  portion). Computed by new helpers `computeRecipeShortage` + `computeInventoryAvailability`, which unify the three previously-duplicated
+  `availableQuantity` blocks into one source of truth using the exact same math (incl. unit conversion via
+  `convertUnit`/`areUnitsCompatible`) — so `availableQuantity` is **byte-identical** to before; the shortage fields are purely additive and
+  null on QUANTITY products / not-tracked products. Backward-compatible: old clients ignore the new fields. Lets the TPV tell the cashier
+  exactly what ran out ("Carne Molida de Res: agotado") instead of a generic "SIN INSUMOS". **MCP kept in sync**: `menu_item_detail`
+  (`src/mcp/tools/menu.ts`) gains an `availability` block (live stock + limiting/insufficient ingredients) so an ops agent can answer "¿por
+  qué está agotada la X?". No schema change. Paired with avoqado-tpv Fase 2 (info modal on out-of-stock tap).
+
+- **Permission system audit infrastructure** (`scripts/audit-permissions.ts`, `.github/workflows/permissions-audit.yml`,
+  `.claude/rules/permissions-policy.md`). Cross-repo static analysis that prevents permission drift between backend, dashboard, TPV and
+  Android. Reads `permissions.ts` as source of truth, then greps `checkPermission()` (backend), `<PermissionGate>` + `hasPermission()`
+  (dashboard), `hasPermission()` (TPV) — reports `PHANTOM` (route checks a permission no non-SUPERADMIN can satisfy), `CATALOG_GAP` (route
+  uses perm missing from `INDIVIDUAL_PERMISSIONS_BY_RESOURCE` → can't be granted individually), `DASHBOARD_DEAD_GATE` (UI gates a perm no
+  endpoint checks), `TPV_CLIENT_ONLY`, `NAME_DRIFT` (Levenshtein-1 typos), and `SUPERADMIN_ONLY` (only SUPERADMIN via `*:*` short-circuit).
+  Exit code 1 on ERROR. Two npm scripts: `npm run audit:permissions` (warns OK) and `npm run audit:permissions:strict` (fail on WARN too).
+  CI workflow runs on every PR touching `permissions.ts`, `src/routes/**`, `src/middlewares/checkPermission*.ts`, plus weekly Monday 09:00
+  UTC to catch cross-repo drift. Locally the script auto-discovers sibling repos at `../avoqado-web-dashboard`, `../avoqado-tpv`,
+  `../avoqado-android` — in CI only server is checked out. Allowlists for intentional cases (`SUPERADMIN_ONLY_ALLOWLIST`,
+  `CATALOG_GAP_ALLOWLIST`) keep the noise floor at zero. Caught 22 real drift cases on first run (5 PHANTOMs in `tpv-commands:*` which are
+  documented as TODO until granular middleware lands; 17 catalog gaps in `creditPacks:*`, `loyalty:expire`, `coupons:redeem`,
+  `payment-link:read`, etc.). The 4 bugs we fixed in this same release (`role-permissions:update`, `shifts:manage`, `features:write` vs
+  `update`, `commissions:process_payout` vs `payout`) would all have been caught by this audit before merge.
+
+- **Backend Option B closure**: new `POST /api/v1/superadmin/venues/:venueId/angelpay-merchants/:merchantAccountId/approve` endpoint +
+  `approveDiscoveredAngelPayMerchant` service. Atomically flips `MerchantAccount.active=true` AND assigns it to a `VenuePaymentConfig` slot
+  (default: PRIMARY; optional body `{slot:'SECONDARY'|'TERTIARY'}`) inside a single `prisma.$transaction`. Mirrors Blumon's
+  auto-attach-on-discovery pattern (Blumon attaches to Terminals via `assignedMerchantIds`; AngelPay is intent-routed and terminal-agnostic,
+  so the equivalent home is `VenuePaymentConfig.{primary,secondary,tertiary}AccountId`). Returns 409 ConflictError if the chosen slot is
+  already occupied by a different merchant (operator must pick another slot or unassign the incumbent first). When no VenuePaymentConfig
+  exists for the venue yet, only PRIMARY-slot approval succeeds (schema requires `primaryAccountId` non-null) — SECONDARY/TERTIARY
+  first-approval returns 400 with a clear hint to seed PRIMARY first. Closes Option B workaround so the admin no longer has to manually wire
+  approved AngelPay merchants into a slot in a second screen.
+- **Backend Option B workaround**: new `POST /api/v1/tpv/angelpay/report-discovered-merchants` endpoint +
+  `upsertDiscoveredAngelPayMerchants` service. TPV reports merchants from `AngelPaySDK.getUserMerchants()` after auth; backend idempotently
+  upserts `MerchantAccount` rows (existing rows: refresh display fields only, never flip `active` to respect admin decisions; new rows:
+  `active=false` PENDING_REVIEW with placeholder credentials). Bypasses Task 10's ACTIVE-account gate (by the time TPV calls, the SDK
+  already authenticated). MerchantAccount has no direct `venueId` column — auto-discovered rows enter the global pool and become routable
+  only after admin both approves them and wires them into a `VenuePaymentConfig` slot. Workaround while AngelPay confirms server-to-server
+  merchant listing endpoint availability.
 
 ### Changed
 
-- **Backend approve endpoint per-terminal scoping**: `POST /superadmin/venues/:venueId/angelpay-merchants/:merchantAccountId/approve` body now accepts optional `terminalIds: string[]`. When provided non-empty, pushes the merchant ID onto each `Terminal.assignedMerchantIds` (idempotent — skips duplicates) inside the same `prisma.$transaction` that flips `active=true` + writes the VenuePaymentConfig slot. Each terminalId is validated to belong to the same venue (security: prevents cross-venue assignment) and passes through `assertMerchantTerminalCompatible` (Task 11) so e.g. PAX terminal + ANGELPAY merchant rejects with HTTP 409. Empty array or omitted = no per-terminal restriction (merchant available on every brand-compatible terminal in the venue via VenuePaymentConfig inheritance). The terminal config endpoint already honored `assignedMerchantIds` on the READ path (Task 13): non-empty array means "restrict to these IDs", empty means "use venue inheritance". Closes the multi-TPV per-venue scoping gap (e.g. Madre Café with rooftop + cafecito + main floor wants different AngelPay merchants per terminal). Controller dedupes incoming IDs and coerces empty arrays to undefined before forwarding to the service.
-- **Backend controller**: `merchantAccount.controller.create` now forwards `req.body.venueId` to `createMerchantAccount()` — unblocks the AngelPay validation gate added in Task 10 (which is a no-op without `venueId`). Existing Blumon callers that don't pass `venueId` keep their exact prior behavior. Wire-through is purely additive: the request body destructure adds `venueId`, the service call passes it through, and 2 unit tests in `tests/unit/controllers/superadmin/merchantAccount.controller.test.ts` cover both the AngelPay (venueId present → forwarded) and Blumon (venueId absent → falsy at the service boundary) paths. Closes Task 17 backend half — paired with dashboard `<AngelPayFields>` + `<DeviceCompatibilityBanner>`.
+- **PITS H1A release verification is local-only, reproducible and fail-closed**: the server pre-deploy gate now requires a caller-supplied
+  disposable `TEST_DATABASE_URL`, preserves explicitly empty remote database selectors, runs the three reset-only H1 migration suites in
+  isolated Jest processes, disconnects per-file Prisma pools, and keeps lint read-only. Publication confirmation retries only the exact
+  pre-write `P2034` reservation once under the shared attempt lock; the Product transaction is never retried. Outbox claiming now binds all
+  six selected columns and converts raw PostgreSQL timestamps through the canonical UTC helper. The final 2026-08-10 localhost run passed
+  the complete server gate, H1A dashboard and superadmin scopes; seven unrelated legacy dashboard E2E failures remain a global deploy
+  blocker and are not hidden by the scoped H1A approval.
+
+- **Backend approve endpoint per-terminal scoping**: `POST /superadmin/venues/:venueId/angelpay-merchants/:merchantAccountId/approve` body
+  now accepts optional `terminalIds: string[]`. When provided non-empty, pushes the merchant ID onto each `Terminal.assignedMerchantIds`
+  (idempotent — skips duplicates) inside the same `prisma.$transaction` that flips `active=true` + writes the VenuePaymentConfig slot. Each
+  terminalId is validated to belong to the same venue (security: prevents cross-venue assignment) and passes through
+  `assertMerchantTerminalCompatible` (Task 11) so e.g. PAX terminal + ANGELPAY merchant rejects with HTTP 409. Empty array or omitted = no
+  per-terminal restriction (merchant available on every brand-compatible terminal in the venue via VenuePaymentConfig inheritance). The
+  terminal config endpoint already honored `assignedMerchantIds` on the READ path (Task 13): non-empty array means "restrict to these IDs",
+  empty means "use venue inheritance". Closes the multi-TPV per-venue scoping gap (e.g. Madre Café with rooftop + cafecito + main floor
+  wants different AngelPay merchants per terminal). Controller dedupes incoming IDs and coerces empty arrays to undefined before forwarding
+  to the service.
+- **Backend controller**: `merchantAccount.controller.create` now forwards `req.body.venueId` to `createMerchantAccount()` — unblocks the
+  AngelPay validation gate added in Task 10 (which is a no-op without `venueId`). Existing Blumon callers that don't pass `venueId` keep
+  their exact prior behavior. Wire-through is purely additive: the request body destructure adds `venueId`, the service call passes it
+  through, and 2 unit tests in `tests/unit/controllers/superadmin/merchantAccount.controller.test.ts` cover both the AngelPay (venueId
+  present → forwarded) and Blumon (venueId absent → falsy at the service boundary) paths. Closes Task 17 backend half — paired with
+  dashboard `<AngelPayFields>` + `<DeviceCompatibilityBanner>`.
 
 ### Added
 
-- **Audit trail for permission denials and permission-set changes** in `ActivityLog`. Two writes added via the existing `logAction()` helper (best-effort, never throws, never blocks the response):
-  - **`checkPermission` middleware** writes `action='PERMISSION_DENIED'` on every 403 with `entity='permission' | 'venue-access'`, `entityId=<perm>`, and `data={ permission, userRole, roleSource, method, path, hasPermissionSet }`. Verified: WAITER POST /products gets logged with `menu:create` denial, while 3 successful ADMIN GETs added zero rows (denials only). Lets you query post-deploy `SELECT * FROM "ActivityLog" WHERE action='PERMISSION_DENIED' AND "createdAt" > NOW() - INTERVAL '24 hours'` to see exactly which user/venue/perm/endpoint is being rejected.
-  - **`permissionSet.service.ts`** writes `PERMISSION_SET_{CREATED,UPDATED,DELETED,DUPLICATED}` (previously only winston-logged — invisible from the DB). Brings PermissionSet operations to the same audit-trail coverage that `rolePermission.service.ts` and `team.dashboard.service.ts` already had via `logAction()`. Captures who created/changed what, when, and with which perm list — useful for forensics if a custom role behavior changes unexpectedly.
+- **Audit trail for permission denials and permission-set changes** in `ActivityLog`. Two writes added via the existing `logAction()` helper
+  (best-effort, never throws, never blocks the response):
+  - **`checkPermission` middleware** writes `action='PERMISSION_DENIED'` on every 403 with `entity='permission' | 'venue-access'`,
+    `entityId=<perm>`, and `data={ permission, userRole, roleSource, method, path, hasPermissionSet }`. Verified: WAITER POST /products gets
+    logged with `menu:create` denial, while 3 successful ADMIN GETs added zero rows (denials only). Lets you query post-deploy
+    `SELECT * FROM "ActivityLog" WHERE action='PERMISSION_DENIED' AND "createdAt" > NOW() - INTERVAL '24 hours'` to see exactly which
+    user/venue/perm/endpoint is being rejected.
+  - **`permissionSet.service.ts`** writes `PERMISSION_SET_{CREATED,UPDATED,DELETED,DUPLICATED}` (previously only winston-logged — invisible
+    from the DB). Brings PermissionSet operations to the same audit-trail coverage that `rolePermission.service.ts` and
+    `team.dashboard.service.ts` already had via `logAction()`. Captures who created/changed what, when, and with which perm list — useful
+    for forensics if a custom role behavior changes unexpectedly.
 
 ### Fixed
 
-- **Superadmin onboarding wizard: "pre-approve KYC & activate" now works, and every venue creation is audited** (`src/controllers/superadmin/onboarding.controller.ts`, new `src/utils/venueOnboarding.ts`). The wizard (`POST /api/v1/superadmin/onboarding/venue`) always created the venue in `ONBOARDING`, and the superadmin frontend then fired a 2nd call to `POST /dashboard/superadmin/venues/:id/approve` to activate it. But `approveVenue` **requires `PENDING_ACTIVATION`** (`if (venue.status !== PENDING_ACTIVATION) throw`), so activating a freshly-created `ONBOARDING` venue **always failed** with "Cannot approve venue in ONBOARDING status". Fixed in-band: the payload accepts `activateImmediately?: boolean`, and a new pure helper `resolveInitialVenueState()` sets the venue directly to `ACTIVE` + `active:true` + `statusChangedBy` in the same `$transaction` when it's set (default stays `ONBOARDING`/inactive). No change to `approveVenue`'s guard — that path is shared with the legacy KYC-review flow and must keep requiring `PENDING_ACTIVATION`. Also: the wizard previously wrote **nothing** to `ActivityLog` (violating the "audit value-mutating writes" rule) — it now logs `VENUE_CREATED` on every creation and additionally `VENUE_APPROVED` when activated immediately (both best-effort via `logAction`, mirroring `approveVenue`). Purely additive to the response contract; `activateImmediately` is optional and defaults to the prior behavior. Unit test: `tests/unit/utils/venueOnboarding.test.ts`.
-- **eSIM sales misclassified as "eSIM" in the "Tipo de venta" column** (`src/services/dashboard/sale-verification.org.dashboard.service.ts`, `deriveSaleType`). eSIM is a *SIM type* (the category "E-SIM de promotor"), not a sale type, but `deriveSaleType` gave the category-name match `/e-?sim/i` absolute precedence and returned `'ESIM'`, overriding the real `isPortabilidad` flag the promoter captured at sale time. So every eSIM sale surfaced as "eSIM" in the org "Ventas" table instead of "Portabilidad" / "Línea nueva" like physical SIMs. Fix: `deriveSaleType` now returns `isPortabilidad ? 'PORTABILIDAD' : 'LINEA_NUEVA'` unconditionally (category name ignored). Because `saleType` is derived at read time (not stored — only `SaleVerification.isPortabilidad` is persisted), this **retroactively reclassifies all existing eSIM sales** from their stored flag with no data migration: eSIMs sold with the portabilidad toggle on → "Portabilidad", otherwise → "Línea nueva". The TPV already captures `isPortabilidad` for eSIM categories (the toggle is not skipped for eSIMs), so the underlying data is correct. The `'ESIM'` union member is kept for backwards compatibility but is never produced anymore. Paired with the dashboard removing the now-dead "eSIM" filter option from "Tipo de venta". (PlayTelecom / Isaac, 2026-06-08)
-- **Catalog gaps + dashboard gate drift for granular permission assignment** (`src/lib/permissions.ts`, `src/routes/dashboard/paymentLink.routes.ts`, `scripts/audit-permissions.ts`). Audit found 10 cases where backend permissions couldn't be assigned individually from the dashboard role editor (default roles got them via wildcards, but custom roles had no toggle). Resolved each case based on intent:
-  - **Added to `INDIVIDUAL_PERMISSIONS_BY_RESOURCE`** (granular assignment is the right behavior): `creditPacks:read/create/update/delete` (4 — new full entry), `payment-link:read/create/update` (new full entry), `coupons:redeem` (existing entry extended), `loyalty:expire` (existing entry extended). `coupons:redeem` was particularly important — WAITER/CASHIER already have it in defaults but custom roles couldn't be granted it without giving the full `coupons:*` wildcard.
-  - **Added to `CATALOG_GAP_ALLOWLIST` with intent comments** (destructive/financial — wildcard-only by design): `settlements:write` (confirms settlement incidents — financial), `venues:manage` (OAuth integrations + venue-level config — sensitive). If a venue ever needs more granular control over either, the right fix is to decompose them into sub-permissions (`settlements:confirm-incident`, `venues:integrations`, etc.) and add those to the catalog rather than expose the broad strokes.
-  - **Added granular backend gates** to `paymentLink.routes.ts` (`checkPermission('payment-link:create')` on POST `/`, `checkPermission('payment-link:update')` on PUT/PATCH/DELETE endpoints, branding/config PUT, settings PATCH). The dashboard `PaymentLinks.tsx` had 5 `<PermissionGate permission="payment-link:create">` blocks but the backend subrouter only checked `payment-link:read` on the parent, so the UI gating was cosmetic — anyone with `:read` could call create/update/delete. Now the backend honors the same granular split the dashboard exposes.
-  - **Audit script improvement**: `isAssignableFromCatalog()` now checks reachability via `PERMISSION_DEPENDENCIES` aliases, so a perm like `features:write` (not in catalog but reachable via the `features:update` alias) no longer triggers a false `CATALOG_GAP` warning.
+- **Superadmin onboarding wizard: "pre-approve KYC & activate" now works, and every venue creation is audited**
+  (`src/controllers/superadmin/onboarding.controller.ts`, new `src/utils/venueOnboarding.ts`). The wizard
+  (`POST /api/v1/superadmin/onboarding/venue`) always created the venue in `ONBOARDING`, and the superadmin frontend then fired a 2nd call
+  to `POST /dashboard/superadmin/venues/:id/approve` to activate it. But `approveVenue` **requires `PENDING_ACTIVATION`**
+  (`if (venue.status !== PENDING_ACTIVATION) throw`), so activating a freshly-created `ONBOARDING` venue **always failed** with "Cannot
+  approve venue in ONBOARDING status". Fixed in-band: the payload accepts `activateImmediately?: boolean`, and a new pure helper
+  `resolveInitialVenueState()` sets the venue directly to `ACTIVE` + `active:true` + `statusChangedBy` in the same `$transaction` when it's
+  set (default stays `ONBOARDING`/inactive). No change to `approveVenue`'s guard — that path is shared with the legacy KYC-review flow and
+  must keep requiring `PENDING_ACTIVATION`. Also: the wizard previously wrote **nothing** to `ActivityLog` (violating the "audit
+  value-mutating writes" rule) — it now logs `VENUE_CREATED` on every creation and additionally `VENUE_APPROVED` when activated immediately
+  (both best-effort via `logAction`, mirroring `approveVenue`). Purely additive to the response contract; `activateImmediately` is optional
+  and defaults to the prior behavior. Unit test: `tests/unit/utils/venueOnboarding.test.ts`.
+- **eSIM sales misclassified as "eSIM" in the "Tipo de venta" column** (`src/services/dashboard/sale-verification.org.dashboard.service.ts`,
+  `deriveSaleType`). eSIM is a _SIM type_ (the category "E-SIM de promotor"), not a sale type, but `deriveSaleType` gave the category-name
+  match `/e-?sim/i` absolute precedence and returned `'ESIM'`, overriding the real `isPortabilidad` flag the promoter captured at sale time.
+  So every eSIM sale surfaced as "eSIM" in the org "Ventas" table instead of "Portabilidad" / "Línea nueva" like physical SIMs. Fix:
+  `deriveSaleType` now returns `isPortabilidad ? 'PORTABILIDAD' : 'LINEA_NUEVA'` unconditionally (category name ignored). Because `saleType`
+  is derived at read time (not stored — only `SaleVerification.isPortabilidad` is persisted), this **retroactively reclassifies all existing
+  eSIM sales** from their stored flag with no data migration: eSIMs sold with the portabilidad toggle on → "Portabilidad", otherwise →
+  "Línea nueva". The TPV already captures `isPortabilidad` for eSIM categories (the toggle is not skipped for eSIMs), so the underlying data
+  is correct. The `'ESIM'` union member is kept for backwards compatibility but is never produced anymore. Paired with the dashboard
+  removing the now-dead "eSIM" filter option from "Tipo de venta". (PlayTelecom / Isaac, 2026-06-08)
+- **Catalog gaps + dashboard gate drift for granular permission assignment** (`src/lib/permissions.ts`,
+  `src/routes/dashboard/paymentLink.routes.ts`, `scripts/audit-permissions.ts`). Audit found 10 cases where backend permissions couldn't be
+  assigned individually from the dashboard role editor (default roles got them via wildcards, but custom roles had no toggle). Resolved each
+  case based on intent:
+
+  - **Added to `INDIVIDUAL_PERMISSIONS_BY_RESOURCE`** (granular assignment is the right behavior): `creditPacks:read/create/update/delete`
+    (4 — new full entry), `payment-link:read/create/update` (new full entry), `coupons:redeem` (existing entry extended), `loyalty:expire`
+    (existing entry extended). `coupons:redeem` was particularly important — WAITER/CASHIER already have it in defaults but custom roles
+    couldn't be granted it without giving the full `coupons:*` wildcard.
+  - **Added to `CATALOG_GAP_ALLOWLIST` with intent comments** (destructive/financial — wildcard-only by design): `settlements:write`
+    (confirms settlement incidents — financial), `venues:manage` (OAuth integrations + venue-level config — sensitive). If a venue ever
+    needs more granular control over either, the right fix is to decompose them into sub-permissions (`settlements:confirm-incident`,
+    `venues:integrations`, etc.) and add those to the catalog rather than expose the broad strokes.
+  - **Added granular backend gates** to `paymentLink.routes.ts` (`checkPermission('payment-link:create')` on POST `/`,
+    `checkPermission('payment-link:update')` on PUT/PATCH/DELETE endpoints, branding/config PUT, settings PATCH). The dashboard
+    `PaymentLinks.tsx` had 5 `<PermissionGate permission="payment-link:create">` blocks but the backend subrouter only checked
+    `payment-link:read` on the parent, so the UI gating was cosmetic — anyone with `:read` could call create/update/delete. Now the backend
+    honors the same granular split the dashboard exposes.
+  - **Audit script improvement**: `isAssignableFromCatalog()` now checks reachability via `PERMISSION_DEPENDENCIES` aliases, so a perm like
+    `features:write` (not in catalog but reachable via the `features:update` alias) no longer triggers a false `CATALOG_GAP` warning.
   - Result: audit exits 0 in both default and `--strict` modes — zero ERRORS, zero WARNINGS. Any future drift will fail CI before merge.
 
-- **`features:write` and `features:update` name drift between catalog and routes** (`src/lib/permissions.ts`). Backend routes (`dashboard.routes.ts`) historically check `checkPermission('features:write')`, but `INDIVIDUAL_PERMISSIONS_BY_RESOURCE.features` exposed `features:update` as the catalog/UI name. Result: a custom role marked with the catalog toggle `features:update` would 403 on the endpoint that wants `features:write`, and conversely a custom role marked with `features:write` (Mindform MANAGER's case) would not show up in the UI's "Features management" toggle group. Fix: bidirectional alias entries in `PERMISSION_DEPENDENCIES` so `features:write` resolves to `[features:write, features:update, features:read]` and `features:update` resolves to `[features:update, features:write, features:read]`. The previous `features:write → [features:read, features:write]` dep entry was removed (deduplicated — its `features:read` inclusion is preserved by the new alias). Mindform PROD verified: ADMIN (`features:update`) and MANAGER (`features:write`) now both satisfy either name without changing their stored overrides. Additive change, no data migration.
+- **`features:write` and `features:update` name drift between catalog and routes** (`src/lib/permissions.ts`). Backend routes
+  (`dashboard.routes.ts`) historically check `checkPermission('features:write')`, but `INDIVIDUAL_PERMISSIONS_BY_RESOURCE.features` exposed
+  `features:update` as the catalog/UI name. Result: a custom role marked with the catalog toggle `features:update` would 403 on the endpoint
+  that wants `features:write`, and conversely a custom role marked with `features:write` (Mindform MANAGER's case) would not show up in the
+  UI's "Features management" toggle group. Fix: bidirectional alias entries in `PERMISSION_DEPENDENCIES` so `features:write` resolves to
+  `[features:write, features:update, features:read]` and `features:update` resolves to `[features:update, features:write, features:read]`.
+  The previous `features:write → [features:read, features:write]` dep entry was removed (deduplicated — its `features:read` inclusion is
+  preserved by the new alias). Mindform PROD verified: ADMIN (`features:update`) and MANAGER (`features:write`) now both satisfy either name
+  without changing their stored overrides. Additive change, no data migration.
 
-- **3 permission set routes in dashboard gated by phantom permission `role-permissions:update`** (`src/routes/dashboard.routes.ts:7970, 7978, 7993`). The string `'role-permissions:update'` does not exist anywhere in the permission catalog (`DEFAULT_PERMISSIONS`, `PERMISSION_DEPENDENCIES`, `INDIVIDUAL_PERMISSIONS_BY_RESOURCE`) — only SUPERADMIN passed via the `*:*` short-circuit. Every ADMIN/OWNER got a 403 trying to create/update/duplicate a PermissionSet. Inconsistent: the DELETE route on the same module (line 7986) already used the correct `settings:manage`. Fix: changed all 3 to `settings:manage`, which exists in the catalog and is held by ADMIN/OWNER/SUPERADMIN in `DEFAULT_PERMISSIONS`. Zero production impact today (no PermissionSets exist across the entire platform — 0 rows across 59 venues), but unblocks the feature for ADMIN/OWNER once anyone tries to use it. Paired with frontend fix in `avoqado-web-dashboard` `RolePermissions.tsx:171` which used the same phantom string on the "Crear conjunto de permisos" button gate.
+- **3 permission set routes in dashboard gated by phantom permission `role-permissions:update`**
+  (`src/routes/dashboard.routes.ts:7970, 7978, 7993`). The string `'role-permissions:update'` does not exist anywhere in the permission
+  catalog (`DEFAULT_PERMISSIONS`, `PERMISSION_DEPENDENCIES`, `INDIVIDUAL_PERMISSIONS_BY_RESOURCE`) — only SUPERADMIN passed via the `*:*`
+  short-circuit. Every ADMIN/OWNER got a 403 trying to create/update/duplicate a PermissionSet. Inconsistent: the DELETE route on the same
+  module (line 7986) already used the correct `settings:manage`. Fix: changed all 3 to `settings:manage`, which exists in the catalog and is
+  held by ADMIN/OWNER/SUPERADMIN in `DEFAULT_PERMISSIONS`. Zero production impact today (no PermissionSets exist across the entire platform
+  — 0 rows across 59 venues), but unblocks the feature for ADMIN/OWNER once anyone tries to use it. Paired with frontend fix in
+  `avoqado-web-dashboard` `RolePermissions.tsx:171` which used the same phantom string on the "Crear conjunto de permisos" button gate.
 
-- **TPV `/tpv/venues/:venueId/time-entries` and `/time-entries/active` had a phantom permission gate `shifts:manage` that 403s venues with custom perms** (`src/routes/tpv.routes.ts:3402, 3429`). The string `'shifts:manage'` does not exist in `DEFAULT_PERMISSIONS`, `PERMISSION_DEPENDENCIES`, or `INDIVIDUAL_PERMISSIONS_BY_RESOURCE` — nobody can literally have it. Default-role users passed via `evaluatePermissionList`'s wildcard fallback (`shifts:*` matches `shifts:manage` via `${resource}:*` check), but venues whose admins customized `VenueRolePermission` to enumerate `shifts:read/create/update/delete/close` individually (without the `shifts:*` wildcard) had no path to satisfy the gate. The endpoints are currently unused by TPV (`TimeclockViewModel` only invokes the self-service `/staff/:staffId/time-entries` path which has no permission requirement) and unused by the dashboard, so this was a dormant trap rather than an active bug — but any future feature wired to the manager-view endpoint would silently fail for custom-perm venues. Fix: changed both route gates to `checkPermission('tpv-time-entries:read')`, which is the canonical manager-view perm and is held literally by MANAGER/ADMIN/OWNER in `DEFAULT_PERMISSIONS` (lines 628, 716, 787). No regression possible: (a) `shifts:manage` is phantom so nobody had it explicitly, (b) every default role that previously passed via `shifts:*` wildcard match also has `tpv-time-entries:read` literal, (c) OWNERs with `['*:*']` pass via the global short-circuit unchanged. Verified Mindform's ADMIN (158 perms) and MANAGER (96 perms) both have `tpv-time-entries:read` literal, so the fix is correctness-only for them (they couldn't have hit the bug yet because the endpoint had no caller, but they're now positioned to use it). JSDoc comments updated to explain the new gate.
+- **TPV `/tpv/venues/:venueId/time-entries` and `/time-entries/active` had a phantom permission gate `shifts:manage` that 403s venues with
+  custom perms** (`src/routes/tpv.routes.ts:3402, 3429`). The string `'shifts:manage'` does not exist in `DEFAULT_PERMISSIONS`,
+  `PERMISSION_DEPENDENCIES`, or `INDIVIDUAL_PERMISSIONS_BY_RESOURCE` — nobody can literally have it. Default-role users passed via
+  `evaluatePermissionList`'s wildcard fallback (`shifts:*` matches `shifts:manage` via `${resource}:*` check), but venues whose admins
+  customized `VenueRolePermission` to enumerate `shifts:read/create/update/delete/close` individually (without the `shifts:*` wildcard) had
+  no path to satisfy the gate. The endpoints are currently unused by TPV (`TimeclockViewModel` only invokes the self-service
+  `/staff/:staffId/time-entries` path which has no permission requirement) and unused by the dashboard, so this was a dormant trap rather
+  than an active bug — but any future feature wired to the manager-view endpoint would silently fail for custom-perm venues. Fix: changed
+  both route gates to `checkPermission('tpv-time-entries:read')`, which is the canonical manager-view perm and is held literally by
+  MANAGER/ADMIN/OWNER in `DEFAULT_PERMISSIONS` (lines 628, 716, 787). No regression possible: (a) `shifts:manage` is phantom so nobody had
+  it explicitly, (b) every default role that previously passed via `shifts:*` wildcard match also has `tpv-time-entries:read` literal, (c)
+  OWNERs with `['*:*']` pass via the global short-circuit unchanged. Verified Mindform's ADMIN (158 perms) and MANAGER (96 perms) both have
+  `tpv-time-entries:read` literal, so the fix is correctness-only for them (they couldn't have hit the bug yet because the endpoint had no
+  caller, but they're now positioned to use it). JSDoc comments updated to explain the new gate.
 
-- **TPV cortesía/anulación returns 403 for ADMIN/MANAGER in venues with custom `VenueRolePermission` overrides** (`src/lib/permissions.ts`). `POST /tpv/venues/:venueId/orders/:orderId/comp` and `.../void` route gates were checking the data-level `orders:comp` / `orders:void` strings, but the canonical permissions issued to operators are the TPV-prefixed `tpv-orders:comp` / `tpv-orders:void` (those are what the dashboard role editor exposes and what `DEFAULT_PERMISSIONS` lists for ADMIN/MANAGER/OWNER). For default-role users this worked transparently because role defaults include the `orders:*` wildcard which `evaluatePermissionList` matches against `orders:comp`, but for venues that customized role permissions via `VenueRolePermission` the wildcard gets exploded into individual `orders:read/create/update/cancel` literals (no `orders:comp`/`orders:void`) → wildcard fallback fails → 403. Reproduced 2026-05-20 on venue Mindform (`cmisvi38o001fhr2828ygmxi2`): both ADMIN (158 perms) and MANAGER (96 perms) had literal `tpv-orders:comp` + `tpv-orders:void` plus individual orders perms but no wildcard nor literal `orders:comp/void` — `Fatima Flores` (ADMIN) and others got 403 every time they tried cortesía or void from the TPV's `MenuViewModel.compItems`/`voidItems` flow. Additive fix (zero risk of breaking other consumers): (a) `PERMISSION_DEPENDENCIES['tpv-orders:comp']` now resolves to include `'orders:comp'` and `['tpv-orders:void']` includes `'orders:void'` — anyone granted the TPV-level perm via the dashboard automatically resolves the data-level perm through `resolvePermissions`; (b) `INDIVIDUAL_PERMISSIONS_BY_RESOURCE.orders` extended to include `'orders:comp'` and `'orders:void'` so future `orders:*` wildcard expansions are consistent. OWNERs with `['*:*']` already pass via the existing global short-circuit; nothing changes for them. No data migration, no removal of any existing strings. Paired with `avoqado-tpv` fix to `MenuViewModel.kt:310-311` (was checking `orders:comp/void` literals that no expansion path ever produced → button always "Sin permisos para cortesía/anular"; now checks `tpv-orders:comp/void`). 6 existing permission unit tests + 18 permissionSet tests pass.
+- **TPV cortesía/anulación returns 403 for ADMIN/MANAGER in venues with custom `VenueRolePermission` overrides** (`src/lib/permissions.ts`).
+  `POST /tpv/venues/:venueId/orders/:orderId/comp` and `.../void` route gates were checking the data-level `orders:comp` / `orders:void`
+  strings, but the canonical permissions issued to operators are the TPV-prefixed `tpv-orders:comp` / `tpv-orders:void` (those are what the
+  dashboard role editor exposes and what `DEFAULT_PERMISSIONS` lists for ADMIN/MANAGER/OWNER). For default-role users this worked
+  transparently because role defaults include the `orders:*` wildcard which `evaluatePermissionList` matches against `orders:comp`, but for
+  venues that customized role permissions via `VenueRolePermission` the wildcard gets exploded into individual
+  `orders:read/create/update/cancel` literals (no `orders:comp`/`orders:void`) → wildcard fallback fails → 403. Reproduced 2026-05-20 on
+  venue Mindform (`cmisvi38o001fhr2828ygmxi2`): both ADMIN (158 perms) and MANAGER (96 perms) had literal `tpv-orders:comp` +
+  `tpv-orders:void` plus individual orders perms but no wildcard nor literal `orders:comp/void` — `Fatima Flores` (ADMIN) and others got 403
+  every time they tried cortesía or void from the TPV's `MenuViewModel.compItems`/`voidItems` flow. Additive fix (zero risk of breaking
+  other consumers): (a) `PERMISSION_DEPENDENCIES['tpv-orders:comp']` now resolves to include `'orders:comp'` and `['tpv-orders:void']`
+  includes `'orders:void'` — anyone granted the TPV-level perm via the dashboard automatically resolves the data-level perm through
+  `resolvePermissions`; (b) `INDIVIDUAL_PERMISSIONS_BY_RESOURCE.orders` extended to include `'orders:comp'` and `'orders:void'` so future
+  `orders:*` wildcard expansions are consistent. OWNERs with `['*:*']` already pass via the existing global short-circuit; nothing changes
+  for them. No data migration, no removal of any existing strings. Paired with `avoqado-tpv` fix to `MenuViewModel.kt:310-311` (was checking
+  `orders:comp/void` literals that no expansion path ever produced → button always "Sin permisos para cortesía/anular"; now checks
+  `tpv-orders:comp/void`). 6 existing permission unit tests + 18 permissionSet tests pass.
 
-- **AngelPay multi-account: relax MerchantAccount unique key to allow shared merchants across accounts** (migration `20260519210000_merchantaccount_unique_per_angelpay_account` + schema + `merchantAccount.service.ts` + `terminal.tpv.controller.ts`). Replaces yesterday's orphan-placeholder-cleanup workaround with the architecturally correct fix: changed `@@unique([providerId, externalMerchantId])` → `@@unique([providerId, externalMerchantId, angelpayUserAccountId])` so the same AngelPay merchant (e.g. afiliación 9814275) CAN exist multiple times in the DB — once per `AngelPayUserAccount` that has access to it. Each row gets its own slot assignment, its own cost structure, its own dashboard card, and its own SDK session at payment time. The orphan-placeholder cleanup branch from yesterday is removed (`upsertDiscoveredAngelPayMerchants` `existing` branch is now a simple in-place update without the slot-repointing transaction). The `findUnique` was replaced with `findFirst` keyed by the 3-column tuple. Postgres unique constraints treat NULL as distinct, so Blumon rows (which always have `angelpayUserAccountId = NULL`) retain their de-facto uniqueness because Blumon never inserts duplicate `externalMerchantId`s; a partial unique index could be added later if a stricter guarantee is needed. TPV config controller (`/tpv/terminals/:serial/config`) now eager-loads `angelpayUserAccount.email` and conditionally appends ` ({email})` to `displayName` ONLY when two rows share the same `externalMerchantId` — single-account venues keep clean labels. Includes SQL backfill executed on local `cmpaiwleb001f9kh88csbymkm` venue: cloned merchant 61 row for `contacto@avoqado.io`, repointed secondary slot to the new row, cloned the cost structure so the dashboard card shows "1 costo". Result: TPV merchant switcher will render `Avoqado (ventas@avoqado.io)` and `Avoqado (contacto@avoqado.io)` as distinct options, cashier picks → `switchAccount` swaps the SDK session → cobra under that account.
+- **AngelPay multi-account: relax MerchantAccount unique key to allow shared merchants across accounts** (migration
+  `20260519210000_merchantaccount_unique_per_angelpay_account` + schema + `merchantAccount.service.ts` + `terminal.tpv.controller.ts`).
+  Replaces yesterday's orphan-placeholder-cleanup workaround with the architecturally correct fix: changed
+  `@@unique([providerId, externalMerchantId])` → `@@unique([providerId, externalMerchantId, angelpayUserAccountId])` so the same AngelPay
+  merchant (e.g. afiliación 9814275) CAN exist multiple times in the DB — once per `AngelPayUserAccount` that has access to it. Each row
+  gets its own slot assignment, its own cost structure, its own dashboard card, and its own SDK session at payment time. The
+  orphan-placeholder cleanup branch from yesterday is removed (`upsertDiscoveredAngelPayMerchants` `existing` branch is now a simple
+  in-place update without the slot-repointing transaction). The `findUnique` was replaced with `findFirst` keyed by the 3-column tuple.
+  Postgres unique constraints treat NULL as distinct, so Blumon rows (which always have `angelpayUserAccountId = NULL`) retain their
+  de-facto uniqueness because Blumon never inserts duplicate `externalMerchantId`s; a partial unique index could be added later if a
+  stricter guarantee is needed. TPV config controller (`/tpv/terminals/:serial/config`) now eager-loads `angelpayUserAccount.email` and
+  conditionally appends ` ({email})` to `displayName` ONLY when two rows share the same `externalMerchantId` — single-account venues keep
+  clean labels. Includes SQL backfill executed on local `cmpaiwleb001f9kh88csbymkm` venue: cloned merchant 61 row for `contacto@avoqado.io`,
+  repointed secondary slot to the new row, cloned the cost structure so the dashboard card shows "1 costo". Result: TPV merchant switcher
+  will render `Avoqado (ventas@avoqado.io)` and `Avoqado (contacto@avoqado.io)` as distinct options, cashier picks → `switchAccount` swaps
+  the SDK session → cobra under that account.
 
-- **AngelPay multi-account: `reportDiscoveredMerchants` controller wasn't forwarding `angelpayUserAccountId`** (`angelpayValidation.tpv.controller.ts`). The TPV report endpoint already had the `accountId` in the request body and the controller looked up the `AngelPayUserAccount` to resolve `venueId` — but the call to `upsertDiscoveredAngelPayMerchants` only passed `{ venueId, merchants }`, dropping the account context entirely. Result: every TPV report was upgraded as if it had no account scoping, breaking (a) FK back-fill for new merchant rows, (b) placeholder-by-account preference, and (c) the new shared-merchant orphan-placeholder cleanup (see entry below). Fix: forward `angelpayUserAccountId: accountId` in the service call.
+- **AngelPay multi-account: `reportDiscoveredMerchants` controller wasn't forwarding `angelpayUserAccountId`**
+  (`angelpayValidation.tpv.controller.ts`). The TPV report endpoint already had the `accountId` in the request body and the controller
+  looked up the `AngelPayUserAccount` to resolve `venueId` — but the call to `upsertDiscoveredAngelPayMerchants` only passed
+  `{ venueId, merchants }`, dropping the account context entirely. Result: every TPV report was upgraded as if it had no account scoping,
+  breaking (a) FK back-fill for new merchant rows, (b) placeholder-by-account preference, and (c) the new shared-merchant orphan-placeholder
+  cleanup (see entry below). Fix: forward `angelpayUserAccountId: accountId` in the service call.
 
-- **AngelPay multi-account: placeholder never upgrades when sharing a merchant with another account** (`upsertDiscoveredAngelPayMerchants` in `merchantAccount.service.ts`). When a venue has two AngelPay accounts (e.g. ventas@ + contacto@) and both accounts have access to the SAME AngelPay merchant (same `angelpayId`), the second account's reserved placeholder stayed `AWAITING_*` forever. Two interacting bugs: (1) the existing-merchant branch only updated the row's affiliation/name and never touched any placeholder reserved for the second account; (2) the placeholder upgrade branch (only reached when the merchant is unknown) wasn't filtered by `angelpayUserAccountId` — it would have grabbed *any* placeholder in the venue and upgraded the wrong account's slot. Fix: (a) in the existing branch, after the in-place update look up an orphan placeholder owned by the report's `angelpayUserAccountId`, repoint whichever `VenuePaymentConfig` slot held the placeholder to the existing merchant, then delete the placeholder (single transaction); (b) in the upgrade branch, prefer placeholders owned by the report's `angelpayUserAccountId` and only fall back to unlinked placeholders, never picking another account's reserved slot. Routing still works because TPV's `switchAccount(B)` flips the SDK session at payment time independently of the `MerchantAccount.angelpayUserAccountId` FK. Cleanup also deletes the placeholder's `ProviderCostStructure` rows first (no `ON DELETE CASCADE` on that FK — first cut threw `P2003: Foreign key constraint violated on the constraint: ProviderCostStructure_merchantAccountId_fkey` because `reserveSlot` seeds a default cost row when the placeholder is created). Reproduced 2026-05-19 with `contacto@avoqado.io` sharing AngelPay merchant 61 (Avoqado / afiliación 9814275) with `ventas@avoqado.io`.
+- **AngelPay multi-account: placeholder never upgrades when sharing a merchant with another account** (`upsertDiscoveredAngelPayMerchants`
+  in `merchantAccount.service.ts`). When a venue has two AngelPay accounts (e.g. ventas@ + contacto@) and both accounts have access to the
+  SAME AngelPay merchant (same `angelpayId`), the second account's reserved placeholder stayed `AWAITING_*` forever. Two interacting bugs:
+  (1) the existing-merchant branch only updated the row's affiliation/name and never touched any placeholder reserved for the second
+  account; (2) the placeholder upgrade branch (only reached when the merchant is unknown) wasn't filtered by `angelpayUserAccountId` — it
+  would have grabbed _any_ placeholder in the venue and upgraded the wrong account's slot. Fix: (a) in the existing branch, after the
+  in-place update look up an orphan placeholder owned by the report's `angelpayUserAccountId`, repoint whichever `VenuePaymentConfig` slot
+  held the placeholder to the existing merchant, then delete the placeholder (single transaction); (b) in the upgrade branch, prefer
+  placeholders owned by the report's `angelpayUserAccountId` and only fall back to unlinked placeholders, never picking another account's
+  reserved slot. Routing still works because TPV's `switchAccount(B)` flips the SDK session at payment time independently of the
+  `MerchantAccount.angelpayUserAccountId` FK. Cleanup also deletes the placeholder's `ProviderCostStructure` rows first (no
+  `ON DELETE CASCADE` on that FK — first cut threw
+  `P2003: Foreign key constraint violated on the constraint: ProviderCostStructure_merchantAccountId_fkey` because `reserveSlot` seeds a
+  default cost row when the placeholder is created). Reproduced 2026-05-19 with `contacto@avoqado.io` sharing AngelPay merchant 61 (Avoqado
+  / afiliación 9814275) with `ventas@avoqado.io`.
 
-- **B4Bit currency field name**: `createPaymentOrder` was sending `fiat_currency` + `output_currency` (both undocumented), causing B4Bit to ignore the currency and fall back to its default — orders charged in $25 MXN were rendered as $25 USD on the QR. Per https://docs.b4bit.com/pay/api/endpoints/orders-create/, the documented field is `fiat`. Now sends `fiat: "MXN"` only.
+- **B4Bit currency field name**: `createPaymentOrder` was sending `fiat_currency` + `output_currency` (both undocumented), causing B4Bit to
+  ignore the currency and fall back to its default — orders charged in $25 MXN were rendered as $25 USD on the QR. Per
+  https://docs.b4bit.com/pay/api/endpoints/orders-create/, the documented field is `fiat`. Now sends `fiat: "MXN"` only.
 
 ### Changed
 
-- **Backend data migration**: normalized `Terminal.brand` values to canonical set `PAX | NEXGO | INGENICO | VERIFONE`. Migration `20260518011942_normalize_terminal_brand` uppercases and standardizes pre-existing free-text variants (e.g., `pax`, `pax a910s`, `n86` → `PAX`/`NEXGO`). This is the data prerequisite for the upcoming device-provider compatibility validation (Task 10+) which gates AngelPay merchants to NEXGO terminals and Blumon merchants to PAX terminals. Dev DB had 0 Terminal rows at write time — migration is a forward-fix for sandbox/production datasets that may have free-text values.
-- **B4Bit crypto auth simplified — fully login-less**: Removed the B4Bit username/password login flow entirely. Per B4Bit docs (https://docs.b4bit.com/pay/api/autenticacion/), the only required header is `X-Device-Id: <api-key-uuid4>` — no `Authorization` header, no signIn endpoint. Changes across three layers:
-  - `b4bit.service.ts` (payment path): removed `getAuthToken()`, `cachedAuthToken`, `loginUrl` config, and `Authorization: Token` from `createPaymentOrder`/`getPaymentStatus`
-  - `cryptoConfig.dashboard.service.ts` (setup wizard): removed `getAuthData()`, `cachedAuth`, `listB4BitDevices()`, `loginUrl`, `username`/`password` from config, and `Authorization: Token` from `completeCryptoSetup` validation
+- **Backend data migration**: normalized `Terminal.brand` values to canonical set `PAX | NEXGO | INGENICO | VERIFONE`. Migration
+  `20260518011942_normalize_terminal_brand` uppercases and standardizes pre-existing free-text variants (e.g., `pax`, `pax a910s`, `n86` →
+  `PAX`/`NEXGO`). This is the data prerequisite for the upcoming device-provider compatibility validation (Task 10+) which gates AngelPay
+  merchants to NEXGO terminals and Blumon merchants to PAX terminals. Dev DB had 0 Terminal rows at write time — migration is a forward-fix
+  for sandbox/production datasets that may have free-text values.
+- **B4Bit crypto auth simplified — fully login-less**: Removed the B4Bit username/password login flow entirely. Per B4Bit docs
+  (https://docs.b4bit.com/pay/api/autenticacion/), the only required header is `X-Device-Id: <api-key-uuid4>` — no `Authorization` header,
+  no signIn endpoint. Changes across three layers:
+  - `b4bit.service.ts` (payment path): removed `getAuthToken()`, `cachedAuthToken`, `loginUrl` config, and `Authorization: Token` from
+    `createPaymentOrder`/`getPaymentStatus`
+  - `cryptoConfig.dashboard.service.ts` (setup wizard): removed `getAuthData()`, `cachedAuth`, `listB4BitDevices()`, `loginUrl`,
+    `username`/`password` from config, and `Authorization: Token` from `completeCryptoSetup` validation
   - `dashboard.routes.ts` + `cryptoConfig.dashboard.controller.ts`: removed `GET /dashboard/crypto/devices` route + `listDevices` controller
-  - Web dashboard (`CryptoConfigSection.tsx`): replaced the "Select device" dropdown (which depended on `signIn`) with a manual Device ID text input where the admin pastes the UUID directly from the B4Bit dashboard. Removed `listDevices()` from `crypto-config.service.ts`
-  - **Env vars `B4BIT_USERNAME` and `B4BIT_PASSWORD` are no longer used** — safe to remove from all environments. `secretKey` still used ONLY for webhook HMAC validation
+  - Web dashboard (`CryptoConfigSection.tsx`): replaced the "Select device" dropdown (which depended on `signIn`) with a manual Device ID
+    text input where the admin pastes the UUID directly from the B4Bit dashboard. Removed `listDevices()` from `crypto-config.service.ts`
+  - **Env vars `B4BIT_USERNAME` and `B4BIT_PASSWORD` are no longer used** — safe to remove from all environments. `secretKey` still used
+    ONLY for webhook HMAC validation
 
 ### Added
 
-- **Backend schema**: `AngelPayUserAccount` model + `AngelPayAccountStatus` enum (`PENDING_PIN | ACTIVE | PIN_ROTATION_REQUIRED | SUSPENDED | DELETED`) for per-venue AngelPay credential storage. Design choices: `pinEncrypted` is nullable (null = no PIN provisioned yet, matches `PENDING_PIN` status); FK to `Venue` uses `onDelete: Restrict` (cascade would silently drop the AngelPay credential trail; operator must explicitly transition status to `DELETED` first); no `@@index([venueId])` (redundant with `@unique` constraint). First schema change for the AngelPay SDK 1.0.5 multi-merchant migration (D3 lifecycle). Migration: `20260518010202_add_angelpay_user_account`.
-- **Backend schema**: optional display fields on `MerchantAccount` — `angelpayAffiliation` (the affiliation number from AngelPay's `MerchantOption.afiliationNumber`) and `angelpayMerchantName` (display name from `MerchantOption.name`). Both nullable, populated only for AngelPay merchant accounts. The actual AngelPay merchant ID is stored in the existing `externalMerchantId` column (per spec §3.2 — no new typed column required since `externalMerchantId` is already unique per provider).
-- **Backend seed**: `PaymentProvider` row for AngelPay (`code: 'ANGELPAY'`, name "Angel Pay", PAYMENT_PROCESSOR, MX). `configSchema` has no required fields — AngelPay merchant IDs ride on the existing `MerchantAccount.externalMerchantId` (which is already required + unique-per-provider); the schema only documents the optional display fields (`angelpayAffiliation`, `angelpayMerchantName`).
-- **Backend lib**: `src/lib/providerDeviceCompatibility.ts` — defines the `PROVIDER_DEVICE_COMPATIBILITY` catalog (`BLUMON: ['PAX']`, `ANGELPAY: ['NEXGO']`), the cheap `isProviderCompatibleWithBrand()` predicate (permissive on unknown providers / null brand), and the DB-aware `assertVenueHasCompatibleTerminal()` guard that counts ACTIVE terminals via Prisma. Throws `IncompatibleDeviceError` (new — HTTP 409, code `INCOMPATIBLE_DEVICE`, appended to `src/errors/AppError.ts`) when an AngelPay merchant is being created for a venue that has zero ACTIVE NEXGO terminals (or vice versa for Blumon/PAX). Accepts an optional `Prisma.TransactionClient` so callers can run it inside `prisma.$transaction()`. TDD-driven: 15 unit tests in `tests/unit/lib/providerDeviceCompatibility.test.ts` (mocked-prisma pattern matching the rest of `tests/unit/`). Wired into `createMerchantAccount` in Task 10 and into terminal assignment + brand change in Tasks 11–13.
-- **Backend service**: provider↔device compatibility guard wired into `assignMerchantToTerminal` (Task 11, validation point #2 of 4). When code mutates `Terminal.assignedMerchantIds`, the merchant's provider must be compatible with the terminal's brand (e.g., ANGELPAY merchants → NEXGO terminals only). Rejects with `IncompatibleDeviceError` (HTTP 409). Bulk-assign paths emit a single error listing all incompatible merchants for the operator UI. Two helpers added to `src/lib/providerDeviceCompatibility.ts`: `assertMerchantTerminalCompatible(terminalId, merchantId, tx?)` for single-merchant push paths and `assertMerchantsTerminalCompatible(terminalId, merchantIds[], tx?)` for set/replace flows. Wired into the canonical service path (`terminals.superadmin.service.updateTerminal` + `createTerminal`) and 6 bypass paths in the superadmin controllers: `terminal.controller.assignMerchantsToTerminal`, four push sites in `merchantAccount.controller` (Blumon auto-fetch single, Blumon batch auto-fetch, batch assign terminals, Full Setup auto-attach + additional), and `onboarding.controller` terminal create. Auto-attach paths log + skip incompatible terminals (matching serial number from a different brand era should not fail the whole flow); operator-explicit paths fail hard with the error surfaced to the UI. TDD-driven: 5 unit tests in `tests/unit/services/dashboard/terminals.superadmin.deviceCompatibility.test.ts`.
-- **Backend service**: `createMerchantAccount` now enforces provider↔device compatibility via `assertVenueHasCompatibleTerminal` (Task 8) — ANGELPAY merchants require a NEXGO terminal in the venue, BLUMON merchants require PAX. Adds AngelPay-specific branch: requires ACTIVE `AngelPayUserAccount`, validates `externalMerchantId` as numeric string (AngelPay merchant IDs are integers), and stores placeholder `encryptCredentials({})` blob in `credentialsEncrypted` (real auth lives on `AngelPayUserAccount`). The compat gate runs only when the new optional `venueId` is supplied on `CreateMerchantAccountData` (existing Blumon callers that omit it keep legacy behavior; callers that include it get the gate for free). Blumon path otherwise unchanged. TDD-driven: 5 unit tests in `tests/unit/services/superadmin/merchantAccount.deviceCompatibility.test.ts` (mocked Prisma + mocked compat helper). Spec §3.1, §4.4.
-- **Backend service**: `src/services/superadmin/angelpayUserAccount.service.ts` — 8-function lifecycle CRUD for `AngelPayUserAccount` (D3): `createAngelPayUserAccount` (validates email + optional 6-digit PIN, returns `PENDING_PIN` or `ACTIVE` depending on whether PIN was provided, rejects duplicate venue accounts with `ConflictError`), `setAngelPayUserAccountPin` (encrypts + transitions to `ACTIVE`, clears prior `lastValidationErr` / `statusReason`), `markAngelPayUserAccountRotationRequired` / `suspendAngelPayUserAccount` / `softDeleteAngelPayUserAccount` (status transitions with audit fields), `markAngelPayUserAccountValidated` / `recordAngelPayUserAccountError` (TPV-side validation reporting — status unchanged), `getAngelPayUserAccountForTerminal` (terminal → venue → account join). PIN encryption reuses `encryptCredentials` from `merchantAccount.service.ts` (now exported) for a single canonical credentials-at-rest format. Standalone-exported-function style matches the rest of `services/superadmin/`. TDD-driven: 14 unit tests in `tests/unit/services/superadmin/angelpayUserAccount.service.test.ts` (mocked Prisma + mocked encryption helper).
-- **B4Bit minimum amount validation**: `initiateCryptoPayment` now rejects orders below $20 MXN (2000 centavos) with a clear error `El monto mínimo para pagar con cripto es $20 MXN`. Prevents confusing validation errors from B4Bit's API when merchants try to charge small amounts
-- **Backend endpoint**: `/api/v1/tpv/terminals/:serialNumber/config` now (a) filters returned `merchants[]` to only providers compatible with `terminal.brand` (validation point #4 of 4 — runtime gate / defense in depth), and (b) includes a new optional `angelpayAuth` payload `{ accountId, email, pin, environment }` when the terminal is NEXGO and the venue has an ACTIVE `AngelPayUserAccount`. PIN is decrypted server-side and transported over TLS; never logged or persisted on the TPV (see spec §4.5b PIN handling rules). Merchant DTO extended additively with `externalMerchantId`, `isActive`, `angelpayAffiliation`, `angelpayMerchantName` per spec §6.4. `decryptCredentials` in `src/services/superadmin/merchantAccount.service.ts` was exported (it already existed but was internal). TDD-driven: 4 unit tests in `tests/unit/controllers/tpv/terminal.tpv.angelpay.test.ts` (mocked Prisma + mocked compat/decrypt/account helpers). Spec §3.1 (point 2d), §4.4, §4.5, §4.5b, §6.4.
-- **Backend endpoints (superadmin)**: 6 new endpoints exposing `AngelPayUserAccountService` to the dashboard for Phase 2 UI (Task 15): `GET /superadmin/venues/:venueId/angelpay-account`, `POST .../angelpay-account` (create), `PATCH /superadmin/angelpay-accounts/:id/pin` (rotate PIN, transitions to ACTIVE), `PATCH .../:id/status` (single endpoint dispatched by body.status to `markAngelPayUserAccountRotationRequired` or `suspendAngelPayUserAccount` — keeps dashboard symmetric), `DELETE .../:id` (soft delete). All gated by the existing superadmin auth + role middleware (no new middleware needed); response payloads strip `pinEncrypted` so ciphertext never crosses the wire. Two new service helpers (`getAngelPayUserAccountByVenueId`, `getAngelPayUserAccountById`) added to support 404-before-mutation. New controller `src/controllers/superadmin/angelpayUserAccount.controller.ts` + routes `src/routes/superadmin/angelpayUserAccount.routes.ts` mounted at the superadmin router root so both venue-scoped (`/venues/:venueId/angelpay-account`) and id-scoped (`/angelpay-accounts/:id/...`) paths live in one file. TDD-driven: 10 unit tests in `tests/unit/controllers/superadmin/angelpayUserAccount.controller.test.ts` covering happy paths + 404 + 400 dispatch failures.
-- **Backend endpoints**: two new TPV report endpoints (Task 14, closes backend Phase 1). `POST /api/v1/tpv/angelpay/report-validation` accepts `{ accountId, state, ... }` and updates the corresponding `AngelPayUserAccount` (`markAngelPayUserAccountValidated` on AUTHENTICATED with `externalUserId`, `recordAngelPayUserAccountError` on AUTH_ERROR or CONFIG_MISMATCH with structured `missingInAvoqado` / `missingInSdk` diff). `POST /api/v1/tpv/angelpay/report-merchant-switch` accepts `{ fromMerchantId, toMerchantId, durationMs }` and emits a structured audit log line (no DB writes — switch events live in logs/observability tooling for now per spec §8.2). Both routes require terminal-auth via `authenticateTokenMiddleware` (JWT carries `terminalSerialNumber` in `req.authContext`) and return 204 on success; bad state / missing required fields surface as `BadRequestError` (HTTP 400) through the standard error handler. TDD-driven: 9 unit tests in `tests/unit/controllers/tpv/angelpayValidation.tpv.controller.test.ts` (mocked service). Spec §4.6, §8.2.
+- **Backend schema**: `AngelPayUserAccount` model + `AngelPayAccountStatus` enum
+  (`PENDING_PIN | ACTIVE | PIN_ROTATION_REQUIRED | SUSPENDED | DELETED`) for per-venue AngelPay credential storage. Design choices:
+  `pinEncrypted` is nullable (null = no PIN provisioned yet, matches `PENDING_PIN` status); FK to `Venue` uses `onDelete: Restrict` (cascade
+  would silently drop the AngelPay credential trail; operator must explicitly transition status to `DELETED` first); no `@@index([venueId])`
+  (redundant with `@unique` constraint). First schema change for the AngelPay SDK 1.0.5 multi-merchant migration (D3 lifecycle). Migration:
+  `20260518010202_add_angelpay_user_account`.
+- **Backend schema**: optional display fields on `MerchantAccount` — `angelpayAffiliation` (the affiliation number from AngelPay's
+  `MerchantOption.afiliationNumber`) and `angelpayMerchantName` (display name from `MerchantOption.name`). Both nullable, populated only for
+  AngelPay merchant accounts. The actual AngelPay merchant ID is stored in the existing `externalMerchantId` column (per spec §3.2 — no new
+  typed column required since `externalMerchantId` is already unique per provider).
+- **Backend seed**: `PaymentProvider` row for AngelPay (`code: 'ANGELPAY'`, name "Angel Pay", PAYMENT_PROCESSOR, MX). `configSchema` has no
+  required fields — AngelPay merchant IDs ride on the existing `MerchantAccount.externalMerchantId` (which is already required +
+  unique-per-provider); the schema only documents the optional display fields (`angelpayAffiliation`, `angelpayMerchantName`).
+- **Backend lib**: `src/lib/providerDeviceCompatibility.ts` — defines the `PROVIDER_DEVICE_COMPATIBILITY` catalog (`BLUMON: ['PAX']`,
+  `ANGELPAY: ['NEXGO']`), the cheap `isProviderCompatibleWithBrand()` predicate (permissive on unknown providers / null brand), and the
+  DB-aware `assertVenueHasCompatibleTerminal()` guard that counts ACTIVE terminals via Prisma. Throws `IncompatibleDeviceError` (new — HTTP
+  409, code `INCOMPATIBLE_DEVICE`, appended to `src/errors/AppError.ts`) when an AngelPay merchant is being created for a venue that has
+  zero ACTIVE NEXGO terminals (or vice versa for Blumon/PAX). Accepts an optional `Prisma.TransactionClient` so callers can run it inside
+  `prisma.$transaction()`. TDD-driven: 15 unit tests in `tests/unit/lib/providerDeviceCompatibility.test.ts` (mocked-prisma pattern matching
+  the rest of `tests/unit/`). Wired into `createMerchantAccount` in Task 10 and into terminal assignment + brand change in Tasks 11–13.
+- **Backend service**: provider↔device compatibility guard wired into `assignMerchantToTerminal` (Task 11, validation point #2 of 4). When
+  code mutates `Terminal.assignedMerchantIds`, the merchant's provider must be compatible with the terminal's brand (e.g., ANGELPAY
+  merchants → NEXGO terminals only). Rejects with `IncompatibleDeviceError` (HTTP 409). Bulk-assign paths emit a single error listing all
+  incompatible merchants for the operator UI. Two helpers added to `src/lib/providerDeviceCompatibility.ts`:
+  `assertMerchantTerminalCompatible(terminalId, merchantId, tx?)` for single-merchant push paths and
+  `assertMerchantsTerminalCompatible(terminalId, merchantIds[], tx?)` for set/replace flows. Wired into the canonical service path
+  (`terminals.superadmin.service.updateTerminal` + `createTerminal`) and 6 bypass paths in the superadmin controllers:
+  `terminal.controller.assignMerchantsToTerminal`, four push sites in `merchantAccount.controller` (Blumon auto-fetch single, Blumon batch
+  auto-fetch, batch assign terminals, Full Setup auto-attach + additional), and `onboarding.controller` terminal create. Auto-attach paths
+  log + skip incompatible terminals (matching serial number from a different brand era should not fail the whole flow); operator-explicit
+  paths fail hard with the error surfaced to the UI. TDD-driven: 5 unit tests in
+  `tests/unit/services/dashboard/terminals.superadmin.deviceCompatibility.test.ts`.
+- **Backend service**: `createMerchantAccount` now enforces provider↔device compatibility via `assertVenueHasCompatibleTerminal` (Task 8) —
+  ANGELPAY merchants require a NEXGO terminal in the venue, BLUMON merchants require PAX. Adds AngelPay-specific branch: requires ACTIVE
+  `AngelPayUserAccount`, validates `externalMerchantId` as numeric string (AngelPay merchant IDs are integers), and stores placeholder
+  `encryptCredentials({})` blob in `credentialsEncrypted` (real auth lives on `AngelPayUserAccount`). The compat gate runs only when the new
+  optional `venueId` is supplied on `CreateMerchantAccountData` (existing Blumon callers that omit it keep legacy behavior; callers that
+  include it get the gate for free). Blumon path otherwise unchanged. TDD-driven: 5 unit tests in
+  `tests/unit/services/superadmin/merchantAccount.deviceCompatibility.test.ts` (mocked Prisma + mocked compat helper). Spec §3.1, §4.4.
+- **Backend service**: `src/services/superadmin/angelpayUserAccount.service.ts` — 8-function lifecycle CRUD for `AngelPayUserAccount` (D3):
+  `createAngelPayUserAccount` (validates email + optional 6-digit PIN, returns `PENDING_PIN` or `ACTIVE` depending on whether PIN was
+  provided, rejects duplicate venue accounts with `ConflictError`), `setAngelPayUserAccountPin` (encrypts + transitions to `ACTIVE`, clears
+  prior `lastValidationErr` / `statusReason`), `markAngelPayUserAccountRotationRequired` / `suspendAngelPayUserAccount` /
+  `softDeleteAngelPayUserAccount` (status transitions with audit fields), `markAngelPayUserAccountValidated` /
+  `recordAngelPayUserAccountError` (TPV-side validation reporting — status unchanged), `getAngelPayUserAccountForTerminal` (terminal → venue
+  → account join). PIN encryption reuses `encryptCredentials` from `merchantAccount.service.ts` (now exported) for a single canonical
+  credentials-at-rest format. Standalone-exported-function style matches the rest of `services/superadmin/`. TDD-driven: 14 unit tests in
+  `tests/unit/services/superadmin/angelpayUserAccount.service.test.ts` (mocked Prisma + mocked encryption helper).
+- **B4Bit minimum amount validation**: `initiateCryptoPayment` now rejects orders below $20 MXN (2000 centavos) with a clear error
+  `El monto mínimo para pagar con cripto es $20 MXN`. Prevents confusing validation errors from B4Bit's API when merchants try to charge
+  small amounts
+- **Backend endpoint**: `/api/v1/tpv/terminals/:serialNumber/config` now (a) filters returned `merchants[]` to only providers compatible
+  with `terminal.brand` (validation point #4 of 4 — runtime gate / defense in depth), and (b) includes a new optional `angelpayAuth` payload
+  `{ accountId, email, pin, environment }` when the terminal is NEXGO and the venue has an ACTIVE `AngelPayUserAccount`. PIN is decrypted
+  server-side and transported over TLS; never logged or persisted on the TPV (see spec §4.5b PIN handling rules). Merchant DTO extended
+  additively with `externalMerchantId`, `isActive`, `angelpayAffiliation`, `angelpayMerchantName` per spec §6.4. `decryptCredentials` in
+  `src/services/superadmin/merchantAccount.service.ts` was exported (it already existed but was internal). TDD-driven: 4 unit tests in
+  `tests/unit/controllers/tpv/terminal.tpv.angelpay.test.ts` (mocked Prisma + mocked compat/decrypt/account helpers). Spec §3.1 (point 2d),
+  §4.4, §4.5, §4.5b, §6.4.
+- **Backend endpoints (superadmin)**: 6 new endpoints exposing `AngelPayUserAccountService` to the dashboard for Phase 2 UI (Task 15):
+  `GET /superadmin/venues/:venueId/angelpay-account`, `POST .../angelpay-account` (create), `PATCH /superadmin/angelpay-accounts/:id/pin`
+  (rotate PIN, transitions to ACTIVE), `PATCH .../:id/status` (single endpoint dispatched by body.status to
+  `markAngelPayUserAccountRotationRequired` or `suspendAngelPayUserAccount` — keeps dashboard symmetric), `DELETE .../:id` (soft delete).
+  All gated by the existing superadmin auth + role middleware (no new middleware needed); response payloads strip `pinEncrypted` so
+  ciphertext never crosses the wire. Two new service helpers (`getAngelPayUserAccountByVenueId`, `getAngelPayUserAccountById`) added to
+  support 404-before-mutation. New controller `src/controllers/superadmin/angelpayUserAccount.controller.ts` + routes
+  `src/routes/superadmin/angelpayUserAccount.routes.ts` mounted at the superadmin router root so both venue-scoped
+  (`/venues/:venueId/angelpay-account`) and id-scoped (`/angelpay-accounts/:id/...`) paths live in one file. TDD-driven: 10 unit tests in
+  `tests/unit/controllers/superadmin/angelpayUserAccount.controller.test.ts` covering happy paths + 404 + 400 dispatch failures.
+- **Backend endpoints**: two new TPV report endpoints (Task 14, closes backend Phase 1). `POST /api/v1/tpv/angelpay/report-validation`
+  accepts `{ accountId, state, ... }` and updates the corresponding `AngelPayUserAccount` (`markAngelPayUserAccountValidated` on
+  AUTHENTICATED with `externalUserId`, `recordAngelPayUserAccountError` on AUTH_ERROR or CONFIG_MISMATCH with structured `missingInAvoqado`
+  / `missingInSdk` diff). `POST /api/v1/tpv/angelpay/report-merchant-switch` accepts `{ fromMerchantId, toMerchantId, durationMs }` and
+  emits a structured audit log line (no DB writes — switch events live in logs/observability tooling for now per spec §8.2). Both routes
+  require terminal-auth via `authenticateTokenMiddleware` (JWT carries `terminalSerialNumber` in `req.authContext`) and return 204 on
+  success; bad state / missing required fields surface as `BadRequestError` (HTTP 400) through the standard error handler. TDD-driven: 9
+  unit tests in `tests/unit/controllers/tpv/angelpayValidation.tpv.controller.test.ts` (mocked service). Spec §4.6, §8.2.
 
 ### Fixed
 

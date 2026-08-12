@@ -44,6 +44,7 @@ export const UpdateVenueSettingsSchema = z.object({
     autoCloseShifts: z.boolean().optional(),
     shiftDuration: z.number().int().min(1).max(24).optional(),
     enableShifts: z.boolean().optional(),
+    cashReconciliationEnabled: z.boolean().optional(),
     requirePinLogin: z.boolean().optional(),
     // Propiedad de mesa (PRO): solo el mesero dueño modifica/cierra sus mesas;
     // override = permiso 'tables:manage-all'. Enforcement en mobile routes.

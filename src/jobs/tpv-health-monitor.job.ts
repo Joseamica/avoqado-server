@@ -4,6 +4,8 @@ import { CronJob } from 'cron'
 import { tpvHealthService } from '../services/tpv/tpv-health.service'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Job que monitorea la salud de las terminales TPV
@@ -11,11 +13,13 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
  */
 export class TpvHealthMonitorJob {
   private job: CronJob | null = null
+  private isChecking = false
 
   constructor() {
     // Crear el cron job que se ejecuta cada 2 minutos
-    this.job = new CronJob(
-      '*/2 * * * *', // Cada 2 minutos
+    this.job = scheduleJob(
+      'tpv-health-monitor',
+      DATABASE_JOB_SCHEDULES.tpvHealthMonitor, // Cada 2 minutos, desfasado de otros jobs de DB
       this.checkTerminalHealth.bind(this),
       null, // onComplete callback
       false, // Start job immediately
@@ -54,6 +58,12 @@ export class TpvHealthMonitorJob {
    * Función principal que verifica la salud de todas las terminales
    */
   private async checkTerminalHealth(): Promise<void> {
+    if (this.isChecking) {
+      logger.warn('[TPV health] tick skipped — previous run still in progress')
+      return
+    }
+    this.isChecking = true
+
     try {
       logger.debug('Running TPV health check...')
 
@@ -71,6 +81,8 @@ export class TpvHealthMonitorJob {
       logger.debug('TPV health check completed successfully')
     } catch (error) {
       logger.error('Error during TPV health check:', error)
+    } finally {
+      this.isChecking = false
     }
   }
 
@@ -87,7 +99,7 @@ export class TpvHealthMonitorJob {
       isRunning: !!this.job,
       nextRun: null, // CronJob type issues, keeping simple for now
       lastRun: null, // CronJob type issues, keeping simple for now
-      cronPattern: '*/2 * * * *',
+      cronPattern: DATABASE_JOB_SCHEDULES.tpvHealthMonitor,
     }
   }
 }

@@ -12,8 +12,8 @@
  */
 
 import prisma from '../../../utils/prismaClient'
-import { Prisma } from '@prisma/client'
-import { MODULE_CODES } from '../../modules/module.service'
+import { ModuleScope, Prisma } from '@prisma/client'
+import { lockModuleScope, MODULE_CODES } from '../../modules/module.service'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
 import { startOfWeek } from 'date-fns'
@@ -81,36 +81,45 @@ interface StoredSalesGoal {
  * Access is controlled by permissions (commissions:read, etc.), not module gating.
  */
 async function getOrCreateVenueModule(venueId: string) {
-  // Auto-create the COMMISSIONS module if it doesn't exist (no manual seeding required)
-  const module = await prisma.module.upsert({
-    where: { code: MODULE_CODES.COMMISSIONS },
-    update: {},
-    create: {
-      code: MODULE_CODES.COMMISSIONS,
-      name: 'Commissions',
-      description: 'Staff commission and sales goal tracking',
-      defaultConfig: {},
-    },
-  })
+  return prisma.$transaction(async tx => {
+    // Definition creation and assignment stay in one transaction so the shared
+    // scope lock serializes this legacy writer with control-plane narrowing.
+    await tx.module.upsert({
+      where: { code: MODULE_CODES.COMMISSIONS },
+      update: {},
+      create: {
+        code: MODULE_CODES.COMMISSIONS,
+        name: 'Commissions',
+        description: 'Staff commission and sales goal tracking',
+        defaultConfig: {},
+      },
+    })
 
-  const venueModule = await prisma.venueModule.upsert({
-    where: {
-      venueId_moduleId: {
+    const module = await lockModuleScope(tx, { code: MODULE_CODES.COMMISSIONS })
+    if (!module) throw new Error(`Module ${MODULE_CODES.COMMISSIONS} not found after upsert`)
+    if (module.scope === ModuleScope.ORGANIZATION_ONLY) {
+      throw new BadRequestError(`El módulo ${MODULE_CODES.COMMISSIONS} tiene scope ORGANIZATION_ONLY y no admite VenueModule`)
+    }
+
+    // Empty update preserves existing salesGoals/config; only a missing row gets
+    // the backwards-compatible initial configuration after scope revalidation.
+    return tx.venueModule.upsert({
+      where: {
+        venueId_moduleId: {
+          venueId,
+          moduleId: module.id,
+        },
+      },
+      update: {},
+      create: {
         venueId,
         moduleId: module.id,
+        enabled: true,
+        config: { salesGoals: [] },
+        enabledBy: 'system',
       },
-    },
-    update: {},
-    create: {
-      venueId,
-      moduleId: module.id,
-      enabled: true,
-      config: { salesGoals: [] },
-      enabledBy: 'system',
-    },
+    })
   })
-
-  return venueModule
 }
 
 /**

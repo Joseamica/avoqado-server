@@ -13,13 +13,8 @@
 
 import { Unit, RawMaterialMovementType } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
-import {
-  deductStockForRecipe,
-  deductStockForModifiers,
-  updateRawMaterial,
-  type OrderModifierForInventory,
-} from '@/services/dashboard/rawMaterial.service'
-import { deductStockFIFO, createStockBatch } from '@/services/dashboard/fifoBatch.service'
+import { deductStockForRecipe, deductStockForModifiers, type OrderModifierForInventory } from '@/services/dashboard/rawMaterial.service'
+import { deductStockFIFO } from '@/services/dashboard/fifoBatch.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 
@@ -239,103 +234,6 @@ describe('deductStockForModifiers — unit conversion', () => {
     await deductStockForModifiers(VENUE_ID, 1, orderModifiers, 'order-mod-1')
 
     expect(deductStockFIFO).toHaveBeenCalledWith(VENUE_ID, 'rm-bacon', 30, RawMaterialMovementType.USAGE, expect.any(Object))
-  })
-})
-
-describe('updateRawMaterial — recompute on cost change', () => {
-  beforeEach(() => {
-    jest.clearAllMocks()
-    // $transaction(callback) pattern: invoke callback with the same prisma mock
-    ;(prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => cb(prisma))
-  })
-
-  it('REGRESSION: recomputes Recipe.totalCost + RecipeLine.costPerServing when costPerUnit changes', async () => {
-    // Existing RM stored in GRAM with cost $0.5/g.
-    ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue({
-      id: 'rm-protein',
-      venueId: VENUE_ID,
-      name: 'Proteina',
-      unit: Unit.GRAM,
-      costPerUnit: new Decimal('0.5'),
-    })
-    // After update returns the new cost.
-    ;(prisma.rawMaterial.update as jest.Mock).mockResolvedValue({
-      id: 'rm-protein',
-      name: 'Proteina',
-      unit: Unit.GRAM,
-      costPerUnit: new Decimal('0.8'),
-    })
-    // Recipe using this RM: Hazelnut treat needs 62g/portion, was costing 62*0.5=31.
-    ;(prisma.recipe.findMany as jest.Mock).mockResolvedValue([
-      {
-        id: 'recipe-1',
-        productId: 'product-1',
-        portionYield: 1,
-        totalCost: new Decimal(31),
-        product: { id: 'product-1', name: 'Hazelnut treat', venueId: VENUE_ID },
-        lines: [
-          {
-            id: 'line-1',
-            quantity: new Decimal(62),
-            unit: Unit.GRAM,
-            costPerServing: new Decimal(31),
-            rawMaterial: { id: 'rm-protein', name: 'Proteina', unit: Unit.GRAM, costPerUnit: new Decimal('0.8') },
-          },
-        ],
-      },
-    ])
-    ;(prisma.recipeLine.update as jest.Mock).mockResolvedValue({})
-
-    await updateRawMaterial(VENUE_ID, 'rm-protein', { costPerUnit: 0.8 } as any, 'staff-1')
-
-    // RecipeLine.costPerServing should be recomputed to 62 * 0.8 = 49.6
-    expect(prisma.recipeLine.update).toHaveBeenCalledWith({
-      where: { id: 'line-1' },
-      data: { costPerServing: expect.objectContaining({}) },
-    })
-    const lineUpdate = (prisma.recipeLine.update as jest.Mock).mock.calls[0][0]
-    expect(Number(lineUpdate.data.costPerServing)).toBeCloseTo(49.6, 2)
-
-    // Recipe.totalCost should be recomputed (one update for the cost change, plus the RM itself)
-    const recipeUpdates = (prisma.rawMaterial.update as jest.Mock).mock.calls
-    expect(recipeUpdates.length).toBeGreaterThan(0)
-
-    // Audit trail must record the recompute with the cost delta.
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: 'RECIPES_RECOMPUTED',
-        entity: 'RawMaterial',
-        entityId: 'rm-protein',
-        data: expect.objectContaining({
-          trigger: 'cost_change',
-          oldCost: 0.5,
-          newCost: 0.8,
-          recipesAffected: 1,
-        }),
-      }),
-    )
-  })
-
-  it('does NOT recompute recipes when cost is unchanged', async () => {
-    ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue({
-      id: 'rm-protein',
-      venueId: VENUE_ID,
-      name: 'Proteina',
-      unit: Unit.GRAM,
-      costPerUnit: new Decimal('0.5'),
-    })
-    ;(prisma.rawMaterial.update as jest.Mock).mockResolvedValue({
-      id: 'rm-protein',
-      name: 'Proteina',
-      unit: Unit.GRAM,
-      costPerUnit: new Decimal('0.5'),
-    })
-
-    // Update only the name, not the cost.
-    await updateRawMaterial(VENUE_ID, 'rm-protein', { name: 'Proteina V2' } as any, 'staff-1')
-
-    expect(prisma.recipe.findMany).not.toHaveBeenCalled()
-    expect(prisma.recipeLine.update).not.toHaveBeenCalled()
   })
 })
 

@@ -18,7 +18,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
 
   server.tool(
     'list_printers',
-    "List the physical printers of a venue (PRINT_STATIONS) plus its print gateway (the single always-on device that owns the printers on the LAN). Shows each printer's name, connection type, address, paper width, charset and last known status. Read-only — requires printers:read.",
+    "List the physical printers of a venue (PRINT_STATIONS) plus its print gateway (the single always-on device that owns the printers on the LAN). Shows each printer's name, connection type, address, paper width, charset and last known status. Also returns leftMarginChars: how many character columns the POS shifts printing to the right (ESC/POS `GS L`), which is how a narrow 58mm roll mounted with adapters inside an 80mm print head is kept on the paper — 0 means no shift, and a non-zero value on an 80mm printer means someone calibrated it for a narrow roll. Read-only — requires printers:read.",
     {
       venueId: z.string().describe('Venue to inspect (must be in your scope)'),
     },

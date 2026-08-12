@@ -1,22 +1,28 @@
 name: 📊 Service Monitoring & Health Checks
 
-# 💤 FREE TIER CONFIGURATION
-# This monitoring is configured for Render.com FREE tier services
-# - Hourly health checks (to avoid spam from sleeping services)
-# - Cold start tolerant (waits and retries)
-# - Friendly alerts (no panic for normal sleep behavior)
+# 🧠 WHAT THE SCHEDULE IS FOR
+# The cron drives ONLY `memory-alert-production`: a pre-OOM early warning that
+# samples /api/public/metrics and opens a `memory-alert` issue when RSS crosses
+# 80% of the container limit. Better Stack does NOT cover this — its 5 chart
+# alerts are all log-pattern based (see 🔐 Security Signals dashboard) and the
+# render log stream ingests no memory/RSS metric. Uptime is Better Stack's job;
+# memory is this job's.
 #
-# 🚀 TO UPGRADE TO PAID TIER:
-# 1. Change cron to '*/15 * * * *' (every 15 minutes)
-# 2. Remove cold start retry logic if desired
-# 3. Make alerts more strict
+# ⏱️ WHY EVERY 6 HOURS AND NOT EVERY 15 MINUTES
+# This is a *leak* detector, not a *spike* detector: an instantaneous poll can
+# never reliably catch a 2-minute analytics/export spike at ANY cadence, while a
+# slow climb toward the limit is visible hours ahead. Production sits at ~25% of
+# 2048MB and the alert has never fired, so headroom is wide. `*/15` was also
+# aspirational — GitHub throttles scheduled runs on this repo to roughly hourly.
+# The repo is PRIVATE, so every run consumes the account's Actions allowance.
+#
+# The legacy health/staging/database jobs stay manual-only (workflow_dispatch)
+# to avoid the historical hourly-email noise that caused the schedule to be
+# disabled in the first place.
 
 on:
-  # Schedule drives ONLY the memory-alert job (production is paid / always-on).
-  # The legacy health/staging/database jobs are gated to manual-only below to
-  # avoid the historical hourly-email noise that caused the schedule to be disabled.
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       check_type:

@@ -6,6 +6,13 @@ import { spawnSync } from 'node:child_process'
 describe('pre-deploy database safety contract', () => {
   const source = fs.readFileSync(path.resolve(process.cwd(), 'scripts/pre-deploy-check.sh'), 'utf8')
 
+  it('runs destructive migration replays before the ordinary integration project', () => {
+    const migrations = source.indexOf('npm run test:integration:migrations')
+    const ordinary = source.indexOf('npm run test:integration;', migrations + 1)
+    expect(migrations).toBeGreaterThanOrEqual(0)
+    expect(ordinary).toBeGreaterThan(migrations)
+  })
+
   it('preserves an existing DATABASE_URL while loading dotenv', () => {
     expect(source).toContain('DATABASE_URL_WAS_SET')
     expect(source).toContain('export DATABASE_URL="$DATABASE_URL_WAS_SET"')
@@ -55,11 +62,68 @@ describe('pre-deploy database safety contract', () => {
       expect(result.status).toBe(0)
       const childCalls = fs.readFileSync(captureFile, 'utf8').split('\n')
       expect(childCalls).toContain(`run test:integration|${testDatabaseUrl}|${testDatabaseUrl}`)
+      expect(childCalls).toContain(`run test:integration:migrations|${testDatabaseUrl}|${testDatabaseUrl}`)
       expect(childCalls).toContain(`run assistant:consistency|${testDatabaseUrl}|${testDatabaseUrl}`)
       expect(result.stdout).toContain('test DB configurada')
       expect(result.stdout).not.toContain(databaseUrl)
       expect(result.stdout).not.toContain(testDatabaseUrl)
       expect(result.stdout).not.toContain('dotenv-database-sensitive-sentinel')
+    } finally {
+      fs.rmSync(fixtureDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps caller-scrubbed remote database selectors ahead of dotenv', () => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avoqado-predeploy-remote-selectors-'))
+    const fakeBin = path.join(fixtureDir, 'bin')
+    const captureFile = path.join(fixtureDir, 'child-env.log')
+    const scriptPath = path.join(fixtureDir, 'pre-deploy-check.sh')
+
+    try {
+      fs.mkdirSync(fakeBin)
+      fs.writeFileSync(
+        path.join(fixtureDir, '.env'),
+        [
+          'USE_RENDER_DB=true',
+          'RENDER_DATABASE_URL=dotenv-render-selector',
+          'DIRECT_URL=dotenv-direct-selector',
+          'DIRECT_DATABASE_URL=dotenv-direct-database-selector',
+          'SHADOW_DATABASE_URL=dotenv-shadow-selector',
+        ].join('\n'),
+      )
+      fs.writeFileSync(scriptPath, source, { mode: 0o755 })
+
+      for (const command of ['npm', 'npx']) {
+        fs.writeFileSync(
+          path.join(fakeBin, command),
+          '#!/bin/sh\nprintf \'%s|%s|%s|%s|%s\\n\' "$USE_RENDER_DB" "$RENDER_DATABASE_URL" "$DIRECT_URL" "$DIRECT_DATABASE_URL" "$SHADOW_DATABASE_URL" >> "$CAPTURE_FILE"\n',
+          { mode: 0o755 },
+        )
+      }
+      fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+      const result = spawnSync('bash', [scriptPath], {
+        cwd: fixtureDir,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          CAPTURE_FILE: captureFile,
+          DATABASE_URL: 'caller-local-db',
+          TEST_DATABASE_URL: 'caller-local-db',
+          USE_RENDER_DB: 'false',
+          RENDER_DATABASE_URL: '',
+          DIRECT_URL: '',
+          DIRECT_DATABASE_URL: '',
+          SHADOW_DATABASE_URL: '',
+        },
+      })
+
+      expect(result.status).toBe(0)
+      const childCalls = fs.readFileSync(captureFile, 'utf8').trim().split('\n')
+      expect(childCalls.length).toBeGreaterThan(0)
+      expect(new Set(childCalls)).toEqual(new Set(['false||||']))
+      expect(result.stdout).not.toContain('dotenv-render-selector')
     } finally {
       fs.rmSync(fixtureDir, { recursive: true, force: true })
     }

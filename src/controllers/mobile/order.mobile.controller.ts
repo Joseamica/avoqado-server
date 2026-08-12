@@ -105,6 +105,20 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       }
     }
 
+    // 🔴 Propina NEGATIVA = descuento disfrazado. El servicio suma la propina al
+    // total SIN clamp (`tipDecimal = tip/100`), así que un tip de -500 rebajaba
+    // el total en silencio. El descuento sí se clampa (`max(0, discount)`); la
+    // propina debe recibir el mismo trato en la frontera. La ruta /fast ya lo
+    // valida por Zod (`tip: min(0)`, tpv.schema.ts) — estos dos endpoints eran
+    // los únicos sin la regla. Medido en full-testingv2 2026-08-09: tip -500
+    // aceptado con 200 dejó la orden inconciliable (paidAmount ≠ suma de pagos).
+    if (tip !== undefined && (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'tip no puede ser negativo (en centavos)',
+      })
+    }
+
     // Use authenticated user's ID if staffId not provided
     const effectiveStaffId = staffId || req.authContext?.userId
 
@@ -192,10 +206,33 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
     }
 
     // Validate required fields
-    if (!amount || typeof amount !== 'number' || amount <= 0) {
+    //
+    // 🔴 `amount === 0` SÍ es válido, y es el único caso nuevo: una cuenta
+    // cortesiada al 100% (o con un descuento que se come el total) vale $0 y
+    // tiene que poder CERRARSE. Antes se rechazaba junto con los negativos, y
+    // esas cuentas se quedaban abiertas para siempre: `compWholeOrder` deja los
+    // artículos en 0 pero nunca marca la orden como pagada, y este endpoint era
+    // la única salida. Medido: ORD-1785877370147 llevaba 5 días abierta en $0.
+    //
+    // Quien decide si el 0 es legítimo es el SERVICIO, comparando contra el
+    // saldo real de la orden — aquí sólo se deja pasar el tipo.
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) {
       return res.status(400).json({
         success: false,
-        message: 'amount es requerido y debe ser mayor a 0 (en centavos)',
+        message: 'amount es requerido y no puede ser negativo (en centavos)',
+      })
+    }
+
+    // 🔴 Propina NEGATIVA = descuento disfrazado (y peor: inconciliable).
+    // payCashOrder suma `previousTips + tip/100` al total sin clamp: un tip de
+    // -500 con 200 dejó una orden PAID con total mutado 45→40 y
+    // `paidAmount (40) ≠ suma de pagos (45)` — medido en full-testingv2
+    // 2026-08-09, la consulta de integridad subió 947→948 con UNA orden.
+    // /fast ya lo rechaza por Zod; este endpoint era el único agujero de pago.
+    if (tip !== undefined && (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'tip no puede ser negativo (en centavos)',
       })
     }
 

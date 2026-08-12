@@ -20,6 +20,7 @@ import { startGcalPushConsumer } from './communication/rabbitmq/gcal-push-consum
 import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { startStalePendingAlertJob } from './jobs/stalePendingAlert.job'
 import { startVenueChatInactivityCleanupJob } from './jobs/venueChatInactivityCleanup.job'
+import { startAreaTicketExternalReconciliationJob } from './jobs/areaTicketExternalReconciliation.job'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { planRenewalReminderJob } from './jobs/plan-renewal-reminder.job'
@@ -56,6 +57,9 @@ import { gcalHealthCheckJob } from './jobs/gcal-health-check.job'
 import { mercadoPagoTokenRefreshJob } from './jobs/mercadopago-token-refresh.job'
 import { cfdiGlobalJob } from './jobs/cfdiGlobal.job'
 import { cfdiReconcileJob } from './jobs/cfdiReconcile.job'
+import { catalogPublicationOutboxSweeperJob } from './jobs/catalog-publication-outbox-sweeper.job'
+import { catalogPublicationWatchdogJob } from './jobs/catalog-publication-watchdog.job'
+import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -126,6 +130,12 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop terminal-payment watchdog
       terminalPaymentWatchdogJob.stop()
+
+      // WHY: Publication delivery and expired attempts have independent
+      // durable recovery loops and both must stop before Prisma disconnects.
+      catalogPublicationOutboxSweeperJob.stop()
+      catalogPublicationWatchdogJob.stop()
+      shiftCloseWatchdogJob.stop()
 
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
@@ -398,11 +408,20 @@ const startApplication = async (retries = 3) => {
       startStalePendingAlertJob()
       startVenueChatInactivityCleanupJob()
 
+      // Start area-ticket external-charge reconciliation (opens UNCONFIRMED_CHARGE incidents)
+      startAreaTicketExternalReconciliationJob()
+
       // Start TPV health monitor
       tpvHealthMonitorJob.start()
 
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
       terminalPaymentWatchdogJob.start()
+
+      // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
+      // through these no-overlap durable workers after a process restart.
+      catalogPublicationOutboxSweeperJob.start()
+      catalogPublicationWatchdogJob.start()
+      shiftCloseWatchdogJob.start()
 
       // Start subscription cancellation job
       subscriptionCancellationJob.start()

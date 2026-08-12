@@ -9,6 +9,16 @@ DATABASE_URL_WAS_PRESENT="${DATABASE_URL+x}"
 DATABASE_URL_WAS_SET="${DATABASE_URL-}"
 TEST_DATABASE_URL_WAS_PRESENT="${TEST_DATABASE_URL+x}"
 TEST_DATABASE_URL_WAS_SET="${TEST_DATABASE_URL-}"
+USE_RENDER_DB_WAS_PRESENT="${USE_RENDER_DB+x}"
+USE_RENDER_DB_WAS_SET="${USE_RENDER_DB-}"
+RENDER_DATABASE_URL_WAS_PRESENT="${RENDER_DATABASE_URL+x}"
+RENDER_DATABASE_URL_WAS_SET="${RENDER_DATABASE_URL-}"
+DIRECT_URL_WAS_PRESENT="${DIRECT_URL+x}"
+DIRECT_URL_WAS_SET="${DIRECT_URL-}"
+DIRECT_DATABASE_URL_WAS_PRESENT="${DIRECT_DATABASE_URL+x}"
+DIRECT_DATABASE_URL_WAS_SET="${DIRECT_DATABASE_URL-}"
+SHADOW_DATABASE_URL_WAS_PRESENT="${SHADOW_DATABASE_URL+x}"
+SHADOW_DATABASE_URL_WAS_SET="${SHADOW_DATABASE_URL-}"
 
 # Load environment variables from .env file if it exists
 if [ -f .env ]; then
@@ -24,6 +34,25 @@ if [ -f .env ]; then
   done < .env
   echo "✅ Environment variables loaded"
   echo ""
+fi
+
+# A caller may deliberately scrub every remote selector before invoking this
+# gate. Preserve those exact values (including empty strings) so dotenv cannot
+# silently redirect a disposable local run to Render or a shadow database.
+if [ "$USE_RENDER_DB_WAS_PRESENT" = "x" ]; then
+  export USE_RENDER_DB="$USE_RENDER_DB_WAS_SET"
+fi
+if [ "$RENDER_DATABASE_URL_WAS_PRESENT" = "x" ]; then
+  export RENDER_DATABASE_URL="$RENDER_DATABASE_URL_WAS_SET"
+fi
+if [ "$DIRECT_URL_WAS_PRESENT" = "x" ]; then
+  export DIRECT_URL="$DIRECT_URL_WAS_SET"
+fi
+if [ "$DIRECT_DATABASE_URL_WAS_PRESENT" = "x" ]; then
+  export DIRECT_DATABASE_URL="$DIRECT_DATABASE_URL_WAS_SET"
+fi
+if [ "$SHADOW_DATABASE_URL_WAS_PRESENT" = "x" ]; then
+  export SHADOW_DATABASE_URL="$SHADOW_DATABASE_URL_WAS_SET"
 fi
 
 # Integration projects are destructive test boundaries. Only a non-empty
@@ -52,11 +81,8 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# 1. ESLint (auto-fix first, then check)
+# 1. ESLint (read-only verification)
 echo "📏 Step 1/10: Running ESLint..."
-echo "   Auto-fixing issues..."
-npm run lint:fix 2>/dev/null || true
-echo "   Checking for remaining issues..."
 if npm run lint; then
   echo -e "${GREEN}✅ ESLint passed!${NC}"
 else
@@ -136,7 +162,7 @@ else
   export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
   export DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
   echo "test DB configurada"
-  if npm run test:integration; then
+  if npm run test:integration:migrations && npm run test:integration; then
     echo -e "${GREEN}✅ Integration tests passed!${NC}"
   else
     echo -e "${RED}❌ Integration tests failed!${NC}"

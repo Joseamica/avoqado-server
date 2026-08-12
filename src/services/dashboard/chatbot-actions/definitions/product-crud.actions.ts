@@ -2,6 +2,7 @@ import prisma from '@/utils/prismaClient'
 import { ActionDefinition } from '../types'
 import * as productService from '../../product.dashboard.service'
 import * as productWizard from '../../productWizard.service'
+import { resolveLegacyCatalogActor } from '@/services/master-catalog/catalogGovernance.service'
 
 export const productCrudActions: ActionDefinition[] = [
   // ---------------------------------------------------------------------------
@@ -109,15 +110,19 @@ export const productCrudActions: ActionDefinition[] = [
       const finalSku = (sku as string) || name.toString().toUpperCase().replace(/\s+/g, '-').substring(0, 20)
 
       // Step 1: Create the product
-      const product = await productService.createProduct(context.venueId, {
-        name: name as string,
-        price: Number(price),
-        sku: finalSku,
-        gtin: gtin as string | undefined,
-        type: (type as any) || 'FOOD_AND_BEV',
-        categoryId: resolvedCategoryId,
-        description: description as string | undefined,
-      })
+      const product = await productService.createProduct(
+        context.venueId,
+        {
+          name: name as string,
+          price: Number(price),
+          sku: finalSku,
+          gtin: gtin as string | undefined,
+          type: (type as any) || 'FOOD_AND_BEV',
+          categoryId: resolvedCategoryId,
+          description: description as string | undefined,
+        },
+        resolveLegacyCatalogActor(context.userId, false),
+      )
 
       const productId = (product as any).id
 
@@ -243,16 +248,21 @@ export const productCrudActions: ActionDefinition[] = [
         resolvedCategoryId = category?.id
       }
 
-      return productService.updateProduct(context.venueId, entityId as string, {
-        name: name as string | undefined,
-        price: price !== undefined ? Number(price) : undefined,
-        description: description as string | undefined,
-        active: active !== undefined ? Boolean(active) : undefined,
-        categoryId: resolvedCategoryId,
-        kitchenName: kitchenName as string | undefined,
-        abbreviation: abbreviation as string | undefined,
-        isAlcoholic: isAlcoholic !== undefined ? Boolean(isAlcoholic) : undefined,
-      })
+      return productService.updateProduct(
+        context.venueId,
+        entityId as string,
+        {
+          name: name as string | undefined,
+          price: price !== undefined ? Number(price) : undefined,
+          description: description as string | undefined,
+          active: active !== undefined ? Boolean(active) : undefined,
+          categoryId: resolvedCategoryId,
+          kitchenName: kitchenName as string | undefined,
+          abbreviation: abbreviation as string | undefined,
+          isAlcoholic: isAlcoholic !== undefined ? Boolean(isAlcoholic) : undefined,
+        },
+        resolveLegacyCatalogActor(context.userId, false),
+      )
     },
     previewTemplate: {
       title: 'Actualizar producto: {{name}}',

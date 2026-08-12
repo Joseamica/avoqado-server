@@ -3,6 +3,8 @@
 import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
+import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 /**
  * Job que limpia órdenes abandonadas (vacías sin items)
@@ -26,7 +28,14 @@ export class AbandonedOrdersCleanupJob {
   private readonly CRON_PATTERN = '*/15 * * * *' // Every 15 minutes
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.cleanupAbandonedOrders.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob(
+      'abandoned-orders-cleanup',
+      this.CRON_PATTERN,
+      this.cleanupAbandonedOrders.bind(this),
+      null,
+      false,
+      'America/Mexico_City',
+    )
   }
 
   /**
@@ -70,24 +79,28 @@ export class AbandonedOrdersCleanupJob {
       logger.debug(`🧹 [CLEANUP] Checking for abandoned orders (empty, PENDING, TAKEOUT, created before ${thresholdDate.toISOString()})`)
 
       // Find abandoned orders
-      const abandonedOrders = await prisma.order.findMany({
-        where: {
-          type: 'TAKEOUT',
-          status: 'PENDING',
-          paymentStatus: 'PENDING',
-          createdAt: {
-            lt: thresholdDate,
-          },
-        },
-        include: {
-          items: true,
-          table: {
-            select: {
-              number: true,
+      const abandonedOrders = await retry(
+        () =>
+          prisma.order.findMany({
+            where: {
+              type: 'TAKEOUT',
+              status: 'PENDING',
+              paymentStatus: 'PENDING',
+              createdAt: {
+                lt: thresholdDate,
+              },
             },
-          },
-        },
-      })
+            include: {
+              items: true,
+              table: {
+                select: {
+                  number: true,
+                },
+              },
+            },
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'abandoned-orders-cleanup.findAbandoned' },
+      )
 
       // Filter to only orders with 0 items
       const emptyOrders = abandonedOrders.filter(order => order.items.length === 0)

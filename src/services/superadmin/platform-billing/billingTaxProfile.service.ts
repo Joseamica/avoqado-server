@@ -8,9 +8,12 @@
  */
 import prisma from '@/utils/prismaClient'
 import type { BillingTaxProfile } from '@prisma/client'
+import logger from '@/config/logger'
 import { buildStoragePath, deleteFileFromStorage, uploadFileToStorage } from '@/services/storage.service'
-import { PlatformBillingError } from './platformEmisor.service'
-import type { BillingCustomerKind, UpsertTaxProfileInput } from './types'
+import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
+import type { SatValidationResult } from '@/services/fiscal/providers/fiscal-provider.interface'
+import { getActivePlatformEmisor, PlatformBillingError } from './platformEmisor.service'
+import type { BillingCustomerKind, TaxProfileWithValidation, UpsertTaxProfileInput } from './types'
 
 const CONSTANCIA_EXT: Record<string, string> = { 'application/pdf': 'pdf', 'image/png': 'png', 'image/jpeg': 'jpg' }
 
@@ -65,6 +68,63 @@ export async function upsertBillingTaxProfile(input: UpsertTaxProfileInput): Pro
   return prisma.billingTaxProfile.create({
     data: { customerType: 'STANDALONE', displayName: input.displayName ?? null, ...common, createdById: input.performedById ?? null },
   })
+}
+
+/**
+ * Valida los datos fiscales del receptor contra el padrón del SAT vía el PAC, sin gastar timbre.
+ *
+ * BEST-EFFORT A PROPÓSITO: si no hay emisor, el CSD no sirve, o el PAC está caído, devuelve
+ * `validation: null` y deja `validationStatus` como estaba. Una caída del PAC no puede dejar
+ * al operador sin poder capturar ni corregir datos fiscales.
+ */
+export async function validateBillingTaxProfile(profileId: string): Promise<TaxProfileWithValidation> {
+  const profile = await prisma.billingTaxProfile.findUnique({ where: { id: profileId } })
+  if (!profile) throw new PlatformBillingError('Perfil fiscal del receptor no encontrado', 'NO_PROFILE')
+
+  const emisor = await getActivePlatformEmisor()
+  if (!emisor) return { profile, validation: null }
+
+  // Sólo la llamada al PAC es best-effort: un PAC caído o una llave rechazada no es un
+  // veredicto sobre los datos del receptor, así que se deja el status previo y se reporta
+  // "no validado" sin reventar.
+  let customerId: string
+  let validation: SatValidationResult
+  try {
+    const provider = resolveFiscalProvider({ provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc }, { sandbox: false })
+    customerId = await provider.upsertCustomer({
+      rfc: profile.rfc,
+      razonSocial: profile.razonSocial,
+      regimenFiscal: profile.regimenFiscal,
+      codigoPostal: profile.codigoPostal,
+      email: profile.email ?? undefined,
+      existingCustomerId: profile.facturapiCustomerId,
+    })
+    validation = await provider.validateCustomerTaxInfo(customerId)
+  } catch (err) {
+    logger.warn(`[platform-billing] no se pudo validar el perfil ${profile.id}: ${err instanceof Error ? err.message : String(err)}`)
+    return { profile, validation: null }
+  }
+
+  // El PAC SÍ respondió — ya tenemos un veredicto real del SAT. La escritura local queda
+  // FUERA del catch de arriba a propósito: si esta falla es un bug nuestro (dato mal
+  // formado, conexión a la BD, constraint), no una caída del proveedor, y el veredicto
+  // que YA obtuvimos no debe perderse ni confundirse con "PAC caído".
+  try {
+    const updated = await prisma.billingTaxProfile.update({
+      where: { id: profile.id },
+      data: {
+        facturapiCustomerId: customerId,
+        validationStatus: validation.valid ? 'VALID' : 'INVALID',
+        validatedAt: new Date(),
+      },
+    })
+    return { profile: updated, validation }
+  } catch (err) {
+    logger.error(
+      `[platform-billing] el SAT validó el perfil ${profile.id} pero no se pudo persistir el resultado: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return { profile, validation }
+  }
 }
 
 /**

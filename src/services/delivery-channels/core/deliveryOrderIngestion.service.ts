@@ -16,6 +16,10 @@ import { socketManager } from '../../../communication/sockets/managers/socketMan
 import { SocketEventType } from '../../../communication/sockets/types'
 import { dispatchOrderStatus } from './statusDispatcher.service'
 import { NormalizedDeliveryOrder } from './types'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../../master-catalog/catalogGovernance.service'
 
 const PLACEHOLDER_CATEGORY_SLUG = 'delivery-desconocido'
 
@@ -51,6 +55,17 @@ async function resolveProductId(
   if (existing) return existing.id
 
   logger.warn(`[🛵 DeliveryIngest] PLU/sku desconocido '${sku}' en venue ${venueId} — creando placeholder`)
+  await assertLegacyCatalogGovernanceForVenue(tx, {
+    venueId,
+    operation: 'CREATE',
+    willBeVendable: false,
+    actor: { type: 'SERVICE', servicePrincipalId: 'DELIVERY_INGESTION' },
+  })
+  // WHY: A concurrent ingestion may have created the same deterministic SKU
+  // while this transaction waited for the Venue fence; reuse it without a
+  // duplicate CREATE audit or a P2002 that would roll back the Order.
+  const createdWhileWaiting = await tx.product.findUnique({ where: { venueId_sku: { venueId, sku } } })
+  if (createdWhileWaiting) return createdWhileWaiting.id
 
   let category = await tx.menuCategory.findUnique({ where: { venueId_slug: { venueId, slug: PLACEHOLDER_CATEGORY_SLUG } } })
   if (!category) {
@@ -62,12 +77,18 @@ async function resolveProductId(
   const created = await tx.product.create({
     data: {
       venueId,
+      createdById: null,
       sku,
       name,
       price: new Prisma.Decimal(unitPrice),
       categoryId: category.id,
       active: false,
     },
+  })
+  await writeLegacyServiceProductCreationAuditForVenue(tx, {
+    venueId,
+    productId: created.id,
+    actor: { type: 'SERVICE', servicePrincipalId: 'DELIVERY_INGESTION' },
   })
   return created.id
 }

@@ -1,0 +1,30 @@
+-- H1A type vocabulary is isolated so later legacy ALTERs remain short and
+-- retryable. This expand-only phase creates no rows, grants, or runtime state.
+CREATE TYPE "ModuleScope" AS ENUM ('BOTH', 'ORGANIZATION_ONLY', 'VENUE_ONLY');
+CREATE TYPE "OrganizationEntitlementStatus" AS ENUM ('ACTIVE', 'REVOKED');
+CREATE TYPE "OrganizationEntitlementSource" AS ENUM ('CONTRACT', 'CUSTOM');
+CREATE TYPE "ActivityActorType" AS ENUM ('HUMAN', 'SERVICE');
+CREATE TYPE "CatalogReferenceStatus" AS ENUM ('ACTIVE', 'RETIRED');
+CREATE TYPE "CatalogItemKind" AS ENUM ('RETAIL_PRODUCT', 'PREPARED_DISH');
+CREATE TYPE "CatalogItemStatus" AS ENUM ('ACTIVE', 'RETIRED');
+CREATE TYPE "CatalogIepsMode" AS ENUM ('NONE', 'RATE', 'QUOTA', 'BOTH');
+CREATE TYPE "CatalogIdentifierType" AS ENUM ('CORPORATE_SKU');
+CREATE TYPE "CatalogIdentifierStatus" AS ENUM ('ACTIVE', 'RETIRED');
+CREATE TYPE "CatalogItemPriceKind" AS ENUM ('SALE_PRICE', 'PURCHASE_COST');
+CREATE TYPE "CatalogItemPriceScope" AS ENUM ('ORGANIZATION');
+CREATE TYPE "CatalogRegistryState" AS ENUM ('NOT_STARTED', 'PREFLIGHT_FAILED', 'READY_TO_BOOTSTRAP', 'BOOTSTRAPPING', 'READY');
+CREATE TYPE "CatalogAliasPublicationState" AS ENUM ('DISABLED', 'CLIENTS_NOT_READY', 'READY_TO_ENABLE', 'ENABLED', 'PAUSED');
+CREATE TYPE "CatalogGovernanceState" AS ENUM ('NOT_STARTED', 'CLIENTS_NOT_READY', 'READY_TO_ENFORCE', 'ENFORCED', 'PAUSED');
+CREATE TYPE "CatalogClientFamily" AS ENUM ('DASHBOARD', 'ANDROID', 'IOS', 'TPV', 'DESKTOP');
+CREATE TYPE "CatalogClientRequirementMode" AS ENUM ('REQUIRED', 'NOT_APPLICABLE');
+CREATE TYPE "CatalogReadinessOverrideStatus" AS ENUM ('NOT_STARTED', 'ACTIVE', 'REVOKED', 'EXPIRED');
+CREATE TYPE "CatalogVenueBindingStatus" AS ENUM ('NOT_STARTED', 'PENDING', 'LINKED', 'CONFLICT', 'UNLINKED');
+CREATE TYPE "CatalogVenueOverrideStatus" AS ENUM ('DETECTED', 'REQUESTED', 'APPROVED', 'REJECTED', 'SUPERSEDED');
+CREATE TYPE "CatalogOperationState" AS ENUM ('NOT_STARTED', 'PREVIEWED', 'APPLYING', 'APPLIED', 'FAILED', 'EXPIRED', 'SUPERSEDED');
+CREATE TYPE "CatalogImportLineStatus" AS ENUM ('NOT_STARTED', 'READY', 'INVALID', 'APPLIED', 'SKIPPED');
+CREATE TYPE "CatalogBindingLineStatus" AS ENUM ('NOT_STARTED', 'READY', 'CONFLICT', 'INVALID', 'STALE', 'APPLIED', 'SKIPPED');
+CREATE TYPE "CatalogBindingProposal" AS ENUM ('LINK', 'CREATE', 'SKIP');
+CREATE TYPE "CatalogPublicationLineStatus" AS ENUM ('NOT_STARTED', 'NO_CHANGE', 'READY', 'MISSING_BINDING', 'LOCAL_DIVERGENCE', 'APPROVED_OVERRIDE', 'INVALID', 'RECIPE_COST_STALE', 'STALE', 'APPLIED');
+CREATE TYPE "CatalogPublicationOutboxStatus" AS ENUM ('PENDING', 'DELIVERED', 'DEAD_LETTER');
+CREATE TYPE "CatalogPublicationFieldDecisionKind" AS ENUM ('PUBLISH_CORPORATE', 'APPROVE_LOCAL_OVERRIDE', 'UNDECIDED');
+CREATE TYPE "CatalogPublicationChangeKind" AS ENUM ('PUBLICATION', 'REVERSION');

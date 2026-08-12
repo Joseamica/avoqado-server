@@ -5,6 +5,10 @@ import { SocketEventType } from '../../../../src/communication/sockets/types'
 import { ingestDeliveryOrder } from '../../../../src/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { dispatchOrderStatus } from '../../../../src/services/delivery-channels/core/statusDispatcher.service'
 import { NormalizedDeliveryOrder } from '../../../../src/services/delivery-channels/core/types'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../../../../src/services/master-catalog/catalogGovernance.service'
 
 jest.mock('../../../../src/communication/sockets/managers/socketManager', () => ({
   socketManager: { broadcastToVenue: jest.fn() },
@@ -12,6 +16,11 @@ jest.mock('../../../../src/communication/sockets/managers/socketManager', () => 
 
 jest.mock('../../../../src/services/delivery-channels/core/statusDispatcher.service', () => ({
   dispatchOrderStatus: jest.fn(),
+}))
+
+jest.mock('../../../../src/services/master-catalog/catalogGovernance.service', () => ({
+  assertLegacyCatalogGovernanceForVenue: jest.fn().mockResolvedValue(undefined),
+  writeLegacyServiceProductCreationAuditForVenue: jest.fn().mockResolvedValue(undefined),
 }))
 
 const link: any = { id: 'link1', venueId: 'venue1', provider: 'DELIVERECT', orderAcceptanceMode: 'AUTO' }
@@ -255,6 +264,29 @@ describe('ingestDeliveryOrder', () => {
     expect(prisma.orderItem.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ productId: 'prod-placeholder' }) }),
     )
+    expect(writeLegacyServiceProductCreationAuditForVenue).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        venueId: 'venue1',
+        productId: 'prod-placeholder',
+        actor: { type: 'SERVICE', servicePrincipalId: 'DELIVERY_INGESTION' },
+      }),
+    )
+  })
+
+  it('reuses a placeholder created while waiting for the Venue fence without duplicate create/audit', async () => {
+    ;(prisma.product.findUnique as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'prod-concurrent', sku: 'TACO', name: 'Taco concurrente' })
+
+    await ingestDeliveryOrder(makeNormalized(), link)
+
+    expect(assertLegacyCatalogGovernanceForVenue).toHaveBeenCalled()
+    expect(prisma.product.create).not.toHaveBeenCalled()
+    expect(writeLegacyServiceProductCreationAuditForVenue).not.toHaveBeenCalled()
+    expect(prisma.orderItem.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ productId: 'prod-concurrent' }) }),
+    )
   })
 
   it('no vuelve a crear la categoría placeholder si ya existe (find-or-create)', async () => {
@@ -453,7 +485,12 @@ describe('ingestDeliveryOrder', () => {
     await ingestDeliveryOrder(normalized, link)
 
     const findSkus = (prisma.product.findUnique as jest.Mock).mock.calls.map((c: any[]) => c[0].where.venueId_sku.sku)
-    expect(findSkus).toEqual(['delivery-unknown-agua-mineral', 'delivery-unknown-coca-cola'])
+    expect(findSkus).toEqual([
+      'delivery-unknown-agua-mineral',
+      'delivery-unknown-agua-mineral',
+      'delivery-unknown-coca-cola',
+      'delivery-unknown-coca-cola',
+    ])
     expect(new Set(findSkus).size).toBe(2)
 
     const createSkus = (prisma.product.create as jest.Mock).mock.calls.map((c: any[]) => c[0].data.sku)
@@ -466,7 +503,7 @@ describe('ingestDeliveryOrder', () => {
   it('C1: item SIN PLU repetido en 2 pedidos distintos → el placeholder se REUSA (findUnique hit, create llamado 1 vez)', async () => {
     const placeholderProduct = { id: 'prod-agua-reused' }
     // Pedido 1: no existe todavía → se crea
-    ;(prisma.product.findUnique as jest.Mock).mockResolvedValueOnce(null)
+    ;(prisma.product.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValueOnce(null)
     ;(prisma.product.create as jest.Mock).mockResolvedValueOnce(placeholderProduct)
     const order1 = makeNormalized({
       externalId: 'UE-1',
@@ -492,7 +529,7 @@ describe('ingestDeliveryOrder', () => {
     // (si el fallback fuera `delivery-${Date.now()}`, la segunda búsqueda usaría otra key
     // y jamás encontraría el placeholder del pedido 1 en la DB real).
     const findSkus = (prisma.product.findUnique as jest.Mock).mock.calls.map((c: any[]) => c[0].where.venueId_sku.sku)
-    expect(findSkus[0]).toBe(findSkus[1])
+    expect(new Set(findSkus)).toEqual(new Set(['delivery-unknown-agua-mineral']))
     expect(findSkus[0]).toBe('delivery-unknown-agua-mineral')
   })
 

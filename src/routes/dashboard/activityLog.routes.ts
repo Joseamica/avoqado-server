@@ -34,6 +34,16 @@ router.get(
 )
 
 /**
+ * GET /api/v1/dashboard/venues/:venueId/activity-log/export
+ * Downloads the audit trail (csv | xlsx | pdf) honouring the screen's current filters.
+ *
+ * 🔴 Declared BEFORE any `/:param` route: Express would otherwise swallow "export" as a
+ * parameter value and this endpoint would be born dead — exactly what happened to
+ * `/purchase-orders/stats`.
+ */
+router.get('/export', checkFeatureAccess('VENUE_AUDIT_LOG'), checkPermission('activity:read'), activityLogController.exportActivityLog)
+
+/**
  * GET /api/v1/dashboard/venues/:venueId/activity-log/actions
  * Returns distinct action values for filter dropdowns.
  */

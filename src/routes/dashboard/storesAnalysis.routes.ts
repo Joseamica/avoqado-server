@@ -21,6 +21,9 @@ import * as salesGoalService from '../../services/dashboard/commission/sales-goa
 import * as goalResolutionService from '../../services/dashboard/commission/goal-resolution.service'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../../services/dashboard/activity-log.service'
+import { resolveStoresAnalysisVenueIds } from '../../services/organization-dashboard/storesAnalysisScope.service'
+import * as supervisorSalesExportService from '../../services/organization-dashboard/supervisorSalesExport.service'
+import { BadRequestError } from '../../errors/AppError'
 
 // mergeParams: true allows access to :venueId from parent route
 const router = Router({ mergeParams: true })
@@ -37,6 +40,13 @@ async function getOrgIdFromVenue(venueId: string): Promise<string | null> {
     select: { organizationId: true },
   })
   return venue?.organizationId || null
+}
+
+async function getOrgExportContextFromVenue(venueId: string): Promise<{ organizationId: string; timezone: string } | null> {
+  return prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { organizationId: true, timezone: true },
+  })
 }
 
 /**
@@ -320,22 +330,160 @@ router.get('/activity-feed', whiteLabelAccess, async (req: Request, res: Respons
       })
     }
 
-    const { limit = '50' } = req.query
+    const rawLimit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50
     const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : undefined
     const endDate = typeof req.query.endDate === 'string' ? req.query.endDate : undefined
     const filterVenueId = typeof req.query.filterVenueId === 'string' ? req.query.filterVenueId : undefined
-    const activityFeed = await organizationDashboardService.getActivityFeed(
-      orgId,
-      parseInt(limit as string, 10),
-      startDate,
-      endDate,
+    const userId = req.access?.userId || req.authContext?.userId
+    const role = req.access?.role || req.authContext?.role
+
+    if (!userId || !role) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Access context not found' })
+    }
+
+    const scopedVenueIds = await resolveStoresAnalysisVenueIds({
+      organizationId: orgId,
+      userId,
+      role,
       filterVenueId,
-    )
+    })
+    const activityFeed = await organizationDashboardService.getActivityFeed(orgId, limit, startDate, endDate, undefined, scopedVenueIds)
 
     res.json({
       success: true,
       data: activityFeed,
     })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/sales-export-rows
+ * Returns a lean, cursor-paginated sales dataset for browser-generated reports.
+ */
+router.get('/sales-export-rows', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || req.authContext?.venueId
+    if (!venueId) {
+      return res.status(400).json({ success: false, error: 'bad_request', message: 'Venue ID is required' })
+    }
+    const orgContext = await getOrgExportContextFromVenue(venueId)
+
+    if (!orgContext) {
+      return res.status(404).json({
+        success: false,
+        error: 'not_found',
+        message: 'Organization not found for this venue',
+      })
+    }
+    const { organizationId: orgId, timezone } = orgContext
+
+    const userId = req.access?.userId || req.authContext?.userId
+    const role = req.access?.role || req.authContext?.role
+    if (!userId || !role) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Access context not found' })
+    }
+
+    const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : ''
+    const endDate = typeof req.query.endDate === 'string' ? req.query.endDate : ''
+    const filterVenueId = typeof req.query.filterVenueId === 'string' ? req.query.filterVenueId : undefined
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
+    const requestedLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+    const limit = requestedLimit !== undefined && Number.isInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : undefined
+    const scopedVenueIds = await resolveStoresAnalysisVenueIds({
+      organizationId: orgId,
+      userId,
+      role,
+      filterVenueId,
+    })
+
+    const page = await supervisorSalesExportService.getSupervisorSalesExportPage({
+      organizationId: orgId,
+      scopedVenueIds,
+      timezone,
+      startDate,
+      endDate,
+      cursor,
+      limit,
+    })
+
+    res.json({ success: true, data: page })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * POST /dashboard/venues/:venueId/stores-analysis/sales-export-audit
+ * Records the browser-generated report after a successful download.
+ */
+router.post('/sales-export-audit', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || req.authContext?.venueId
+    if (!venueId) {
+      return res.status(400).json({ success: false, error: 'bad_request', message: 'Venue ID is required' })
+    }
+    const orgContext = await getOrgExportContextFromVenue(venueId)
+
+    if (!orgContext) {
+      return res.status(404).json({
+        success: false,
+        error: 'not_found',
+        message: 'Organization not found for this venue',
+      })
+    }
+    const { organizationId: orgId, timezone } = orgContext
+
+    const userId = req.access?.userId || req.authContext?.userId
+    const role = req.access?.role || req.authContext?.role
+    if (!userId || !role) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Access context not found' })
+    }
+
+    const { format, startDate, endDate, filterVenueId, rowCount } = req.body ?? {}
+    if (!['csv', 'excel', 'sheets'].includes(format)) {
+      throw new BadRequestError('format debe ser csv, excel o sheets')
+    }
+    if (!Number.isInteger(rowCount) || rowCount < 0 || rowCount > supervisorSalesExportService.SUPERVISOR_SALES_EXPORT_MAX_ROWS) {
+      throw new BadRequestError(
+        `rowCount debe ser un entero entre 0 y ${supervisorSalesExportService.SUPERVISOR_SALES_EXPORT_MAX_ROWS.toLocaleString('en-US')}`,
+      )
+    }
+    if (filterVenueId !== undefined && typeof filterVenueId !== 'string') {
+      throw new BadRequestError('filterVenueId no es válido')
+    }
+    if (typeof startDate !== 'string' || typeof endDate !== 'string') {
+      throw new BadRequestError('startDate y endDate deben ser fechas válidas')
+    }
+
+    supervisorSalesExportService.parseSupervisorSalesExportRange(startDate, endDate, timezone)
+    await resolveStoresAnalysisVenueIds({
+      organizationId: orgId,
+      userId,
+      role,
+      filterVenueId,
+    })
+
+    await logAction({
+      staffId: userId,
+      venueId,
+      action: 'SALES_REPORT_EXPORTED',
+      entity: 'SalesReport',
+      data: {
+        organizationId: orgId,
+        format,
+        startDate,
+        endDate,
+        filterVenueId: filterVenueId ?? null,
+        rowCount,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    })
+
+    res.status(204).send()
   } catch (error) {
     next(error)
   }

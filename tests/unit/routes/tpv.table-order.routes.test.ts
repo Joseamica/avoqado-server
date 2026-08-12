@@ -158,3 +158,64 @@ describe('anti-duplicación: superficie de descuentos/comp de Cobrar bajo /tpv',
     }
   })
 })
+
+/**
+ * DELETE service-charges (paridad Android, 2026-08-06).
+ *
+ * Bloque APARTE de `cases`: esta ruta lleva 6 capas (suma checkTableOwnership),
+ * y meterla en la tabla rompería el pin de "EXACTAMENTE 5 capas" de las otras.
+ * Deshacer es online-only a propósito — no existe intent REMOVE_SERVICE_CHARGE,
+ * así que esta ruta es el ÚNICO camino y su cadena es la única defensa.
+ */
+describe('DELETE /venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId', () => {
+  const PATH = '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId'
+  const { checkTableOwnership } = require('@/middlewares/checkTableOwnership.middleware')
+
+  it('existe, con auth + validateVenueAccess + permiso orders:update', () => {
+    const route = inspectRoute(tpvRouter, 'delete', PATH)
+    expect(route).toBeDefined()
+    expect(route!.hasAuthenticateToken).toBe(true)
+    expect(route!.hasValidateVenueAccess).toBe(true)
+    expect(route!.permission).toBe('orders:update')
+  })
+
+  it('lleva EXACTAMENTE 6 capas — la sexta es checkTableOwnership, igual que /mobile', () => {
+    const route = inspectRoute(tpvRouter, 'delete', PATH)
+    // checkTableOwnership('order') es una factory: la capa montada no es la funcion
+    // exportada sino su retorno. Se fija por conteo + descarte: 6 capas, y la quinta
+    // no es ninguna de las nombradas (auth/venueAccess/feature/permission/handler).
+    expect(route!.handlers).toHaveLength(6)
+    expect(route!.finalHandler).toBe(orderTableController.removeServiceCharge)
+    expect(typeof checkTableOwnership).toBe('function')
+  })
+})
+
+/**
+ * POST cancel (2026-08-07 — cierre de la última acción de mesa sin ruta
+ * online, ver `.superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/tpv-cancel-order-route.md`).
+ *
+ * Bloque APARTE de `cases` por la MISMA razón que el DELETE service-charges de
+ * arriba: 6 capas (suma checkTableOwnership) Y un permiso DISTINTO
+ * (`orders:cancel`, no `orders:update` — mismo nombre exacto que
+ * `requiredPermissionForIntent('CANCEL_ORDER')` en `sync.mobile.service.ts`,
+ * así que reproducir offline y pegarle online exigen el mismo permiso).
+ */
+describe('POST /venues/:venueId/orders/:orderId/cancel', () => {
+  const PATH = '/venues/:venueId/orders/:orderId/cancel'
+  const { checkTableOwnership } = require('@/middlewares/checkTableOwnership.middleware')
+
+  it('existe, con auth + validateVenueAccess + permiso orders:cancel (NO orders:update)', () => {
+    const route = inspectRoute(tpvRouter, 'post', PATH)
+    expect(route).toBeDefined()
+    expect(route!.hasAuthenticateToken).toBe(true)
+    expect(route!.hasValidateVenueAccess).toBe(true)
+    expect(route!.permission).toBe('orders:cancel')
+  })
+
+  it('lleva EXACTAMENTE 6 capas — la sexta es checkTableOwnership, igual que /mobile', () => {
+    const route = inspectRoute(tpvRouter, 'post', PATH)
+    expect(route!.handlers).toHaveLength(6)
+    expect(route!.finalHandler).toBe(orderTableController.cancelOrder)
+    expect(typeof checkTableOwnership).toBe('function')
+  })
+})

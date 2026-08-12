@@ -33,6 +33,7 @@ import {
   calculateFinalRate,
   applyCommissionBounds,
   calculateBaseAmount,
+  alreadyCommissionedItemBase,
   calculateCategoryFilteredAmount,
   calculateLeftoverAmount,
   validateStaffForCommission,
@@ -235,10 +236,15 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
   // 1) Category-scoped configs — each bills its own categories.
   for (const config of categoryScoped) {
     if (!payment.orderId) continue
-    let base = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
+    const orderBase = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
       includeTax: config.includeTax,
       includeDiscount: config.includeDiscount,
     })
+    // 🔴 MONEY: la base viene de los ITEMS DE LA ORDEN pero esto corre POR COBRO. Sin
+    // descontar lo ya comisionado, una orden con N cobros paga la misma venta N veces
+    // (bug real: Mindform, $34.20 sobre una venta de $380). Misma defensa del fix de
+    // descuentos apilados (268c5fc6): cobrar contra el REMANENTE, no contra el total.
+    let base = Math.max(0, Math.round((orderBase - (await alreadyCommissionedItemBase(payment.orderId, config.id))) * 100) / 100)
     const tip = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     if (config.includeTips) base += tip
     if (base <= 0) continue
@@ -263,10 +269,16 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
       )
       amounts = r
     } else if (payment.orderId) {
-      let base = await calculateLeftoverAmount(payment.orderId, claimed, {
+      const orderLeftover = await calculateLeftoverAmount(payment.orderId, claimed, {
         includeTax: generalConfig.includeTax,
         includeDiscount: generalConfig.includeDiscount,
       })
+      // 🔴 MONEY: mismo defecto que la rama category-scoped — el sobrante también es
+      // base DE ORDEN evaluada POR COBRO. Se descuenta lo que esta config ya cobró.
+      let base = Math.max(
+        0,
+        Math.round((orderLeftover - (await alreadyCommissionedItemBase(payment.orderId, generalConfig.id))) * 100) / 100,
+      )
       const tip = generalConfig.includeTips ? decimalToNumber(payment.tipAmount) : 0
       if (generalConfig.includeTips) base += tip
       amounts = { baseAmount: base, tipAmount: tip, discountAmount: 0, taxAmount: 0 }
@@ -1074,10 +1086,14 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
   let totalTaxAmount: number
 
   if (config.filterByCategories && config.categoryIds.length > 0 && payment.orderId) {
-    totalBaseAmount = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
+    const orderBase = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
       includeTax: config.includeTax,
       includeDiscount: config.includeDiscount,
     })
+    // 🔴 MONEY: mismo defecto que `createCommissionForPayment` — base DE ORDEN evaluada POR
+    // COBRO. Aquí las filas se reparten entre varios destinatarios, así que la suma de lo ya
+    // comisionado por esta config sobre esta orden ES la base ya cobrada.
+    totalBaseAmount = Math.max(0, Math.round((orderBase - (await alreadyCommissionedItemBase(payment.orderId, config.id))) * 100) / 100)
     totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     totalDiscountAmount = 0
     totalTaxAmount = 0

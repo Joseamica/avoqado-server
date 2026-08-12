@@ -10,6 +10,8 @@
 import { CronJob } from 'cron'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
+import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 const TIMEZONE = 'America/Mexico_City'
 const RETENTION_DAYS = 7
@@ -19,7 +21,8 @@ export class GcalPruningJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'gcal-pruning',
       '30 4 * * *',
       async () => {
         await this.process()
@@ -54,9 +57,15 @@ export class GcalPruningJob {
 
     try {
       const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400_000)
-      const result = await prisma.externalBusyBlock.deleteMany({
-        where: { endsAt: { lt: cutoff } },
-      })
+      // Idempotent delete-by-cutoff: re-running after a connection blip removes
+      // nothing extra, so it is safe inside the connection-retry wrapper.
+      const result = await retry(
+        () =>
+          prisma.externalBusyBlock.deleteMany({
+            where: { endsAt: { lt: cutoff } },
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'gcal-pruning.deleteExpired' },
+      )
       if (result.count > 0) {
         logger.info('🧹 Gcal Pruning: removed expired ExternalBusyBlock rows', { deleted: result.count, cutoff })
       }

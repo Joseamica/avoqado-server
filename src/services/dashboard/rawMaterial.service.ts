@@ -7,6 +7,24 @@ import { createStockBatch, deductStockFIFO } from './fifoBatch.service'
 import { sendLowStockAlertNotification } from './notification.service'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
+import { calculateRecipeCostV1, RecipeCostCalculationError } from './recipe-cost-calculator'
+import { acquireRecipeCostGraphVenueLockV1, lockRecipeCostGraphsForRawMaterialUpdateV1 } from './recipe-cost-graph-lock'
+
+function calculateRawMaterialRecipeCostV1(input: Parameters<typeof calculateRecipeCostV1>[0]) {
+  try {
+    return calculateRecipeCostV1(input)
+  } catch (error) {
+    // WHY: A cost edit must roll back cleanly when historical Recipe inputs are
+    // invalid; exposing a stable 422 avoids committing a partially fresh graph.
+    if (error instanceof RecipeCostCalculationError) {
+      throw new AppError('Recipe cost inputs are invalid', 422, true, 'RECIPE_COST_INPUT_INVALID', {
+        reason: error.code,
+        lineId: error.lineId,
+      })
+    }
+    throw error
+  }
+}
 
 /**
  * Convert a quantity to a raw material's storage unit. Recipes and modifiers can
@@ -53,19 +71,26 @@ export function getUnitType(unit: Unit): UnitType {
   return UnitType.COUNT
 }
 
+/** Filters a raw-material listing can be narrowed by. Shared by the screen and its export. */
+export interface RawMaterialFilters {
+  category?: string
+  /** Applied IN MEMORY (`currentStock <= reorderPoint` compares two columns). See below. */
+  lowStock?: boolean
+  active?: boolean
+  search?: string
+}
+
 /**
- * Get all raw materials for a venue
+ * The one place the raw-material filter is written. The screen listing and the export count
+ * both read from here on purpose: a second where-clause built for the export drifts from the
+ * one behind the screen, and then the file quietly disagrees with what the user is looking at.
+ *
+ * `lowStock` is deliberately NOT here — it compares two columns of the same row, which Prisma
+ * cannot express, so the listing applies it after the query. Anything counting with this
+ * clause therefore gets an UPPER BOUND when `lowStock` is on.
  */
-export async function getRawMaterials(
-  venueId: string,
-  filters?: {
-    category?: string
-    lowStock?: boolean
-    active?: boolean
-    search?: string
-  },
-): Promise<RawMaterial[]> {
-  const where: Prisma.RawMaterialWhereInput = {
+function buildRawMaterialsWhereClause(venueId: string, filters?: RawMaterialFilters): Prisma.RawMaterialWhereInput {
+  return {
     venueId,
     deletedAt: null, // Exclude soft-deleted records
     ...(filters?.category && { category: filters.category as any }),
@@ -74,6 +99,13 @@ export async function getRawMaterials(
       OR: [{ name: { contains: filters.search, mode: 'insensitive' } }, { sku: { contains: filters.search, mode: 'insensitive' } }],
     }),
   }
+}
+
+/**
+ * Get all raw materials for a venue
+ */
+export async function getRawMaterials(venueId: string, filters?: RawMaterialFilters): Promise<RawMaterial[]> {
+  const where = buildRawMaterialsWhereClause(venueId, filters)
 
   // Handle low stock filter separately
   let rawMaterials = await prisma.rawMaterial.findMany({
@@ -90,7 +122,10 @@ export async function getRawMaterials(
         },
       },
     },
-    orderBy: { name: 'asc' },
+    // `id` is the tie-breaker, not decoration: two raw materials can share a name, and a
+    // non-unique sort hands back a different arrangement per call — two exports taken minutes
+    // apart stop being comparable, and any future pagination would drop rows outright.
+    orderBy: [{ name: 'asc' }, { id: 'asc' }],
   })
 
   if (filters?.lowStock) {
@@ -254,14 +289,6 @@ export async function updateRawMaterial(
   data: UpdateRawMaterialDto,
   staffId?: string,
 ): Promise<RawMaterial> {
-  const existing = await prisma.rawMaterial.findFirst({
-    where: { id: rawMaterialId, venueId },
-  })
-
-  if (!existing) {
-    throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
-  }
-
   // Strip currentStock from update — stock changes must go through adjustStock()
   // to maintain StockBatch consistency
   const { currentStock: _stripStock, ...safeData } = data as any
@@ -276,28 +303,63 @@ export async function updateRawMaterial(
     updateData.unitType = getUnitType(unit)
   }
 
-  // If cost changed, every recipe that references this RM has stale
-  // costPerServing/totalCost. Recompute them inside the same transaction so
-  // the dashboard shows accurate margins immediately. The historical
-  // RawMaterialMovement.costImpact is intentionally NOT touched (it reflects
-  // the cost AT the moment of the movement).
-  const costChanging = data.costPerUnit !== undefined && !new Decimal(data.costPerUnit).equals(existing.costPerUnit)
+  const mutation = await prisma.$transaction(async tx => {
+    let lockedRecipeIds: string[] = []
+    let recomputedRecipes: Array<{ productName: string; oldTotal: number; newTotal: number }> = []
+    if (data.costPerUnit !== undefined || data.unit !== undefined) {
+      await acquireRecipeCostGraphVenueLockV1(tx, venueId)
+      const candidates = await tx.recipe.findMany({
+        where: { lines: { some: { rawMaterialId } }, product: { venueId } },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+      })
+      lockedRecipeIds = await lockRecipeCostGraphsForRawMaterialUpdateV1(
+        tx,
+        venueId,
+        candidates.map(recipe => recipe.id),
+        rawMaterialId,
+      )
+    }
 
-  const rawMaterial = await prisma.$transaction(async tx => {
+    // WHY: This live read follows the target RM UPDATE lock whenever either
+    // graph input is supplied, so cost/unit decisions never use a stale snapshot.
+    const existing = await tx.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId } })
+    if (!existing) throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
+    const costChanging = data.costPerUnit !== undefined && !new Decimal(data.costPerUnit).equals(existing.costPerUnit)
+    const unitChanging = data.unit !== undefined && data.unit !== existing.unit
     const updated = await tx.rawMaterial.update({
       where: { id: rawMaterialId },
       data: updateData,
     })
 
-    if (costChanging) {
-      await recomputeRecipesUsingRawMaterial(tx, venueId, rawMaterialId, staffId, {
-        oldCost: existing.costPerUnit,
-        newCost: updated.costPerUnit,
-      })
+    if (costChanging || unitChanging) {
+      recomputedRecipes = await recomputeRecipesUsingRawMaterial(tx, venueId, rawMaterialId, lockedRecipeIds)
     }
 
-    return updated
+    return { rawMaterial: updated, costChanging, unitChanging, oldCost: existing.costPerUnit, oldUnit: existing.unit, recomputedRecipes }
   })
+  const { rawMaterial, costChanging, unitChanging, oldCost, oldUnit, recomputedRecipes } = mutation
+
+  if (recomputedRecipes.length > 0) {
+    // WHY: The operational activity log uses the global best-effort logger, so
+    // it is emitted only after the graph transaction has committed successfully.
+    logAction({
+      venueId,
+      staffId,
+      action: 'RECIPES_RECOMPUTED',
+      entity: 'RawMaterial',
+      entityId: rawMaterialId,
+      data: {
+        trigger: 'raw_material_cost_or_unit_change',
+        oldCost: oldCost.toNumber(),
+        newCost: rawMaterial.costPerUnit.toNumber(),
+        oldUnit,
+        newUnit: rawMaterial.unit,
+        recipesAffected: recomputedRecipes.length,
+        recipes: recomputedRecipes,
+      },
+    })
+  }
 
   logAction({
     venueId,
@@ -308,8 +370,11 @@ export async function updateRawMaterial(
     data: {
       name: rawMaterial.name,
       costChanged: costChanging,
-      oldCostPerUnit: costChanging ? existing.costPerUnit.toNumber() : undefined,
+      unitChanged: unitChanging,
+      oldCostPerUnit: costChanging ? oldCost.toNumber() : undefined,
       newCostPerUnit: costChanging ? rawMaterial.costPerUnit.toNumber() : undefined,
+      oldUnit: unitChanging ? oldUnit : undefined,
+      newUnit: unitChanging ? rawMaterial.unit : undefined,
     },
   })
 
@@ -317,73 +382,49 @@ export async function updateRawMaterial(
 }
 
 /**
- * Recompute Recipe.totalCost + RecipeLine.costPerServing for every recipe that
- * uses a given RawMaterial. Called whenever the RM's costPerUnit changes so the
- * dashboard never shows stale costs (the bug where Hazelnut treat displayed
- * "$2,242 per dátil" because the recipe stored a frozen costPerServing).
+ * Recompute Recipe.totalCost + RecipeLine.costPerServing for locked, valid
+ * graphs changed through this dashboard editor. Non-cooperating transfer and
+ * offline recovery writers may still make readiness report H1 STALE; they are
+ * explicitly inventoried follow-up rather than a claimed global invariant.
  *
- * Logs a single RECIPES_RECOMPUTED activity entry summarizing the deltas.
+ * Returns the committed-delta summary so the caller can log after transaction.
  */
 async function recomputeRecipesUsingRawMaterial(
   tx: Prisma.TransactionClient,
   venueId: string,
   rawMaterialId: string,
-  staffId: string | undefined,
-  costChange: { oldCost: Decimal; newCost: Decimal },
-): Promise<void> {
+  lockedRecipeIds: readonly string[],
+): Promise<Array<{ productName: string; oldTotal: number; newTotal: number }>> {
   const recipes = await tx.recipe.findMany({
-    where: { lines: { some: { rawMaterialId } }, product: { venueId } },
+    where: { id: { in: [...lockedRecipeIds] }, lines: { some: { rawMaterialId } }, product: { venueId } },
     include: {
       product: { select: { id: true, name: true, venueId: true } },
-      lines: { include: { rawMaterial: { select: { id: true, name: true, unit: true, costPerUnit: true } } } },
+      lines: { include: { rawMaterial: true }, orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }] },
     },
+    orderBy: { id: 'asc' },
   })
 
   const recipeUpdates: Array<{ productName: string; oldTotal: number; newTotal: number }> = []
 
   for (const recipe of recipes) {
-    let newTotal = new Decimal(0)
-    const lineUpdates: Array<{ lineId: string; newCost: Decimal }> = []
-    for (const line of recipe.lines) {
-      const rm = line.rawMaterial
-      let qtyInRm: Decimal
-      if (line.unit === rm.unit) {
-        qtyInRm = line.quantity
-      } else if (areUnitsCompatible(line.unit, rm.unit)) {
-        qtyInRm = convertUnit(line.quantity, line.unit, rm.unit)
-      } else {
-        // Schema validation prevents this going forward; skip stale rows.
-        continue
-      }
-      const newCostPerServing = qtyInRm.mul(rm.costPerUnit).div(recipe.portionYield)
-      newTotal = newTotal.add(newCostPerServing)
-      lineUpdates.push({ lineId: line.id, newCost: newCostPerServing })
+    if (recipe.lines.some(line => line.rawMaterial.venueId !== venueId)) {
+      throw new AppError('Recipe contains an ingredient from another venue', 422, true, 'RECIPE_COST_INPUT_INVALID')
     }
-    for (const lu of lineUpdates) {
-      await tx.recipeLine.update({ where: { id: lu.lineId }, data: { costPerServing: lu.newCost } })
+    const calculated = calculateRawMaterialRecipeCostV1({ portionYield: recipe.portionYield, lines: recipe.lines })
+    for (const line of calculated.lines) {
+      await tx.recipeLine.update({ where: { id: line.id }, data: { costPerServing: line.costPerServing } })
     }
-    if (!newTotal.equals(recipe.totalCost)) {
-      await tx.recipe.update({ where: { id: recipe.id }, data: { totalCost: newTotal } })
-      recipeUpdates.push({ productName: recipe.product.name, oldTotal: recipe.totalCost.toNumber(), newTotal: newTotal.toNumber() })
+    await tx.recipe.update({ where: { id: recipe.id }, data: { totalCost: calculated.costPerPortion } })
+    if (!calculated.costPerPortion.equals(recipe.totalCost)) {
+      recipeUpdates.push({
+        productName: recipe.product.name,
+        oldTotal: recipe.totalCost.toNumber(),
+        newTotal: calculated.costPerPortion.toNumber(),
+      })
     }
   }
 
-  if (recipeUpdates.length > 0) {
-    logAction({
-      venueId,
-      staffId,
-      action: 'RECIPES_RECOMPUTED',
-      entity: 'RawMaterial',
-      entityId: rawMaterialId,
-      data: {
-        trigger: 'cost_change',
-        oldCost: costChange.oldCost.toNumber(),
-        newCost: costChange.newCost.toNumber(),
-        recipesAffected: recipeUpdates.length,
-        recipes: recipeUpdates,
-      },
-    })
-  }
+  return recipeUpdates
 }
 
 /**
@@ -793,32 +834,114 @@ export async function getRawMaterialRecipes(venueId: string, rawMaterialId: stri
   return Array.from(productsMap.values())
 }
 
+/** Date window a kardex query can be narrowed to. Shared by the screen and its export. */
+export interface StockMovementFilters {
+  startDate?: Date
+  endDate?: Date
+}
+
+/**
+ * The one place the kardex filter is written. The screen listing, the export count and the
+ * export fetch all read from here on purpose: a second where-clause built for the export
+ * drifts from the one behind the screen, and then the file quietly disagrees with what the
+ * user is looking at.
+ */
+function buildStockMovementsWhereClause(venueId: string, rawMaterialId: string, filters?: StockMovementFilters) {
+  return {
+    rawMaterialId,
+    venueId,
+    ...((filters?.startDate || filters?.endDate) && {
+      createdAt: {
+        ...(filters?.startDate && { gte: filters.startDate }),
+        ...(filters?.endDate && { lte: filters.endDate }),
+      },
+    }),
+  }
+}
+
 /**
  * Get stock movements for a raw material
  */
 export async function getStockMovements(
   venueId: string,
   rawMaterialId: string,
-  options?: {
-    startDate?: Date
-    endDate?: Date
+  options?: StockMovementFilters & {
     limit?: number
   },
 ) {
   const movements = await prisma.rawMaterialMovement.findMany({
-    where: {
-      rawMaterialId,
-      venueId,
-      ...(options?.startDate && { createdAt: { gte: options.startDate } }),
-      ...(options?.endDate && { createdAt: { lte: options.endDate } }),
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
+    where: buildStockMovementsWhereClause(venueId, rawMaterialId, options),
+    // `createdAt` alone is not unique — bulk movements written in the same transaction share a
+    // timestamp to the millisecond, and a non-unique sort drops rows across pages silently.
+    // `id` is the tiebreaker.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: options?.limit || 100,
   })
 
   return movements
+}
+
+/**
+ * Row count for the kardex export, using the SAME filter builder as the listing. The
+ * controller counts before building so it can refuse a file that would be truncated — a
+ * truncated export reads as complete, which is the failure nobody reports.
+ */
+export async function countStockMovementsForExport(
+  venueId: string,
+  rawMaterialId: string,
+  filters?: StockMovementFilters,
+): Promise<number> {
+  return prisma.rawMaterialMovement.count({
+    where: buildStockMovementsWhereClause(venueId, rawMaterialId, filters),
+  })
+}
+
+/**
+ * Kardex rows for the export: the SAME listing the screen calls, plus the two things the
+ * report is actually read for — WHICH material and WHO moved it.
+ *
+ * Both need resolving here rather than through an `include`: the listing returns bare
+ * movement rows, and `RawMaterialMovement.createdBy` is a plain staff id with no Prisma
+ * relation behind it, so the names take their own scoped lookups. `limit` comes from the
+ * caller's cap; leaving it out inherits the listing's default page size of 100 and hands
+ * over a fraction of the year as if it were the year.
+ */
+export async function fetchStockMovementsForExport(
+  venueId: string,
+  rawMaterialId: string,
+  filters: StockMovementFilters | undefined,
+  limit: number,
+) {
+  const movements = await getStockMovements(venueId, rawMaterialId, { ...filters, limit })
+
+  const staffIds = Array.from(new Set(movements.map(m => m.createdBy).filter((id): id is string => Boolean(id))))
+
+  // Scoped to the venue like every other query: a staff id read off a movement row still gets
+  // checked against this venue's roster before its name is printed. Skipped entirely when no
+  // movement carries an author, so a system-generated kardex costs one query, not two.
+  const staffPromise: Promise<{ id: string; firstName: string; lastName: string }[]> =
+    staffIds.length > 0
+      ? prisma.staff.findMany({
+          where: { id: { in: staffIds }, venues: { some: { venueId } } },
+          select: { id: true, firstName: true, lastName: true },
+        })
+      : Promise.resolve([])
+
+  const [rawMaterial, staff] = await Promise.all([
+    prisma.rawMaterial.findFirst({
+      where: { id: rawMaterialId, venueId },
+      select: { name: true },
+    }),
+    staffPromise,
+  ])
+
+  const staffNameById = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
+
+  return movements.map(movement => ({
+    ...movement,
+    rawMaterialName: rawMaterial?.name ?? '',
+    staffName: movement.createdBy ? (staffNameById.get(movement.createdBy) ?? '') : '',
+  }))
 }
 
 /**
@@ -1055,4 +1178,18 @@ export async function deductStockForRecipe(
       },
     })
   }
+}
+
+/**
+ * Row count for the export, using the SAME filter builder as `getRawMaterials`. The controller
+ * counts before building so it can refuse a file that would be truncated — a truncated export
+ * reads as complete, which is the failure nobody reports.
+ *
+ * ⚠️ With `lowStock` on this is an UPPER BOUND, not the row count: that filter is applied in
+ * memory (it compares `currentStock` against `reorderPoint`, two columns of the same row, which
+ * Prisma cannot express). Refusing on an upper bound would 413 a fifty-row file, so the caller
+ * has to fall back to counting the fetched rows — see `exportRawMaterials`.
+ */
+export async function countRawMaterialsForExport(venueId: string, filters?: RawMaterialFilters): Promise<number> {
+  return prisma.rawMaterial.count({ where: buildRawMaterialsWhereClause(venueId, filters) })
 }

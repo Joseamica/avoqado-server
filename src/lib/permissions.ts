@@ -78,6 +78,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'area-tickets:checkout': ['area-tickets:checkout', 'orders:read', 'orders:create', 'orders:update', 'payments:read', 'payments:create'],
   'area-tickets:cancel': ['area-tickets:cancel', 'area-tickets:checkout', 'orders:cancel', 'payments:read'],
   'area-tickets:deliver': ['area-tickets:deliver', 'orders:read', 'payments:read'],
+  // area-tickets:confirm-external (ruta EXTERNAL) SIN ENTRADA A PROPÓSITO — no es un olvido.
+  // Confirma un AreaTicketExternalSettlement usando datos ya congelados en el propio vale
+  // (AreaTicketLine.productNameSnapshot/skuSnapshot), así que no necesita menu:read/products:read
+  // como 'issue'. Y a diferencia de checkout/cancel/deliver, un vale de ruta EXTERNAL nunca tiene
+  // Order ni Payment (constraint en schema.prisma) — depender de orders:read/payments:read
+  // gatearía datos que estructuralmente no existen para este flujo.
   'area-tickets:configure': [
     'area-tickets:configure',
     'area-tickets:issue',
@@ -225,6 +231,9 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'platform-billing:configure': ['platform-billing:configure', 'platform-billing:view'],
   'platform-billing:issue': ['platform-billing:issue', 'platform-billing:view'],
   'platform-billing:delete': ['platform-billing:delete', 'platform-billing:view'],
+  // Datos fiscales del PROPIO venue como RECEPTOR de las facturas de Avoqado.
+  // No confundir con cfdi:* (el venue EMITIENDO a sus clientes) — esto no requiere CSD.
+  'venue-fiscal-profile:manage': ['venue-fiscal-profile:manage'],
   'billing:subscriptions:read': ['billing:subscriptions:read', 'billing:read', 'venues:read', 'features:read'],
   'billing:subscriptions:manage': [
     'billing:subscriptions:manage',
@@ -560,6 +569,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.VIEWER]: [
     'home:read',
+    'catalog-venue:read',
     'analytics:read',
     'menu:read',
     'orders:read',
@@ -705,6 +715,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.MANAGER]: [
     'home:read',
+    'catalog-venue:read',
+    'catalog-venue:request-override',
     'analytics:read',
     'analytics:export',
     'reports:read', // Dashboard reports (Sales Summary, Sales by Item, etc.)
@@ -727,6 +739,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'area-tickets:cancel',
     'area-tickets:deliver',
     'area-tickets:configure',
+    // Confirmar cobro en caja externa (ruta EXTERNAL): es una afirmación sobre dinero que
+    // alguien con autoridad hace a mano — trabajo de gerencia, no de cajero (ver CASHIER abajo).
+    'area-tickets:confirm-external',
     'scale:use',
     'scale:configure',
     // Reservations & class sessions — managers operate the calendar (Square-style:
@@ -847,6 +862,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.ADMIN]: [
     'home:*',
+    'catalog-venue:read',
+    'catalog-venue:request-override',
     'analytics:*',
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
@@ -964,6 +981,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.OWNER]: [
     'home:*',
+    'catalog-venue:read',
+    'catalog-venue:request-override',
     'activity:read', // Bitácora de auditoría por-venue (Pro-tier, owner-only)
     'analytics:*',
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
@@ -1073,6 +1092,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // B4Bit Crypto Payments — venue owners need to configure crypto
     // settings for their own venues. SUPERADMIN still has full access via *:*.
     'venue-crypto:manage',
+    // Datos fiscales del venue como receptor de las facturas de Avoqado (Constancia de
+    // Situación Fiscal). OWNER-only, NO ADMIN/MANAGER: son los datos legales del negocio
+    // (RFC, razón social, régimen fiscal) y el dueño es quien responde por ellos ante el SAT.
+    'venue-fiscal-profile:manage',
     // Facturación CFDI 4.0 (Pro-tier) — OWNER has full CFDI access
     'cfdi:configure',
     'cfdi:issue',
@@ -1463,8 +1486,9 @@ export function validatePermissionFormat(permission: string): string | null {
  * ⚠️ CRITICAL: This must match the frontend PERMISSION_CATEGORIES in:
  * `avoqado-web-dashboard/src/lib/permissions/roleHierarchy.ts`
  */
-const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
+export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   home: ['home:read'],
+  'catalog-venue': ['catalog-venue:read', 'catalog-venue:request-override'],
   activity: ['activity:read'],
   analytics: ['analytics:read', 'analytics:export'],
   settlements: ['settlements:read', 'settlements:simulate'],
@@ -1472,7 +1496,14 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],
-  'area-tickets': ['area-tickets:issue', 'area-tickets:checkout', 'area-tickets:cancel', 'area-tickets:deliver', 'area-tickets:configure'],
+  'area-tickets': [
+    'area-tickets:issue',
+    'area-tickets:checkout',
+    'area-tickets:cancel',
+    'area-tickets:deliver',
+    'area-tickets:configure',
+    'area-tickets:confirm-external', // Confirmar cobro en caja externa (ruta EXTERNAL — Avoqado nunca vio ese cobro)
+  ],
   scale: ['scale:use', 'scale:configure'],
   payments: ['payments:read', 'payments:create', 'payments:refund', 'payments:routing-read', 'payments:routing-manage'],
   printers: ['printers:read', 'printers:manage'],
@@ -1611,6 +1642,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   cfdi: ['cfdi:configure', 'cfdi:issue', 'cfdi:view'],
   // Platform billing CFDI (Avoqado factura a sus propios clientes) — superadmin-only back-office
   'platform-billing': ['platform-billing:view', 'platform-billing:configure', 'platform-billing:issue', 'platform-billing:delete'],
+  // Datos fiscales del venue como receptor de las facturas de Avoqado — OWNER-only (feature gratis/core)
+  'venue-fiscal-profile': ['venue-fiscal-profile:manage'],
   // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier, Task 10/11)
   'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage', 'delivery-channels:request'],
 }

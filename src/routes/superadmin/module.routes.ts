@@ -5,6 +5,12 @@ import { z } from 'zod'
 
 const router = Router()
 
+// Scope is optional for backward compatibility, but any supplied value is
+// closed over the three database enum values before the controller sees it.
+const moduleScopeSchema = z.enum(['BOTH', 'ORGANIZATION_ONLY', 'VENUE_ONLY'], {
+  errorMap: () => ({ message: 'El alcance debe ser BOTH, ORGANIZATION_ONLY o VENUE_ONLY' }),
+})
+
 /**
  * Module Routes
  * Base path: /api/v1/dashboard/superadmin/modules
@@ -46,6 +52,8 @@ const createModuleSchema = z.object({
     description: z.string().optional(),
     defaultConfig: z.record(z.any()).optional(),
     presets: z.record(z.any()).optional(),
+    configSchema: z.record(z.any()).optional(),
+    scope: moduleScopeSchema.optional(),
   }),
 })
 
@@ -58,6 +66,8 @@ const updateModuleSchema = z.object({
     description: z.string().optional().nullable(),
     defaultConfig: z.record(z.any()).optional(),
     presets: z.record(z.any()).optional(),
+    configSchema: z.record(z.any()).optional(),
+    scope: moduleScopeSchema.optional(),
   }),
 })
 

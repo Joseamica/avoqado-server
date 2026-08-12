@@ -25,6 +25,7 @@ import logger from '@/config/logger'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
+import { scheduleJob } from '../observability/jobContext'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -35,7 +36,7 @@ export class PlanRenewalReminderJob {
    * Start the daily renewal-reminder cron (09:00 America/Mexico_City).
    */
   start(): void {
-    this.job = new CronJob('0 9 * * *', () => this.runNow(), null, true, 'America/Mexico_City')
+    this.job = scheduleJob('plan-renewal-reminder', '0 9 * * *', () => this.runNow(), null, true, 'America/Mexico_City')
     logger.info('🗓️ Plan Renewal Reminder Job started - runs daily at 9:00 AM')
   }
 

@@ -33,7 +33,7 @@ export async function updateVenueSettings(req: Request<{ venueId: string }>, res
   try {
     const { venueId } = req.params
     const updates = req.body
-    const settings = await venueSettingsService.updateVenueSettings(venueId, updates)
+    const settings = await venueSettingsService.updateVenueSettings(venueId, updates, req.authContext?.userId)
     res.status(200).json(settings)
   } catch (error) {
     next(error)

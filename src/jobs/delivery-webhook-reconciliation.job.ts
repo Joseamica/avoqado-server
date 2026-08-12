@@ -8,6 +8,7 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { parseDeliverectOrder } from '../services/delivery-channels/providers/deliverect/deliverect.mapper'
 import { ingestDeliveryOrder } from '../services/delivery-channels/core/deliveryOrderIngestion.service'
 import { markEventResult } from '../services/delivery-channels/core/deliveryWebhookEvent.service'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Delivery order webhook reconciliation job.
@@ -78,7 +79,14 @@ export class DeliveryWebhookReconciliationJob {
 
   start(): void {
     if (this.job) return
-    this.job = new CronJob(this.CRON_PATTERN, () => void this.runOnce(), null, false, 'America/Mexico_City')
+    this.job = scheduleJob(
+      'delivery-webhook-reconciliation',
+      this.CRON_PATTERN,
+      () => void this.runOnce(),
+      null,
+      false,
+      'America/Mexico_City',
+    )
     this.job.start()
     logger.info(`🛵 Delivery webhook reconciliation job started — every 2min, batch ${this.BATCH_SIZE}`)
   }

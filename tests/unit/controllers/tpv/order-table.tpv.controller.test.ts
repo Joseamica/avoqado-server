@@ -19,9 +19,11 @@ import { BadRequestError } from '@/errors/AppError'
 import * as controller from '@/controllers/tpv/order-table.tpv.controller'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
 import * as serviceChargeMobileService from '@/services/mobile/service-charge.mobile.service'
+import * as tableTpvService from '@/services/tpv/table.tpv.service'
 
 jest.mock('@/services/mobile/order.mobile.service')
 jest.mock('@/services/mobile/service-charge.mobile.service')
+jest.mock('@/services/tpv/table.tpv.service')
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
 
 const mockRes = () => {
@@ -34,7 +36,9 @@ const mockRes = () => {
 const splitOrderItemsMock = orderMobileService.splitOrderItems as jest.Mock
 const splitOrderBySeatMock = orderMobileService.splitOrderBySeat as jest.Mock
 const mergeOrdersMock = orderMobileService.mergeOrders as jest.Mock
+const cancelOrderMock = orderMobileService.cancelOrder as jest.Mock
 const applyServiceChargeMock = serviceChargeMobileService.applyServiceCharge as jest.Mock
+const reconcileTableAfterOrderRemovedMock = tableTpvService.reconcileTableAfterOrderRemoved as jest.Mock
 
 beforeEach(() => jest.clearAllMocks())
 
@@ -175,6 +179,141 @@ describe('order-table.tpv.controller — mergeOrders', () => {
 
     expect(res.status).toHaveBeenCalledWith(400)
     expect(mergeOrdersMock).not.toHaveBeenCalled()
+  })
+
+  // 🔴 Fix 1 (zombie table): after the shared mergeOrders succeeds, the /tpv
+  // controller reconciles the source table itself — see
+  // table.tpv.service.ts::reconcileTableAfterOrderRemoved and
+  // table.tpv.service.reconcileTableAfterOrderRemoved.test.ts for the
+  // reconciliation logic itself. These tests protect the WIRING between them.
+  it('calls reconcileTableAfterOrderRemoved(venueId, sourceOrderId) AFTER the shared merge succeeds, and its result overrides tableFreed in the response', async () => {
+    mergeOrdersMock.mockResolvedValue({ target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: false })
+    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: true })
+    const req: any = {
+      params: { venueId: 'venue-a', orderId: 'orden-destino' },
+      body: { sourceOrderId: 'orden-origen' },
+      authContext: { userId: 'staff-real' },
+    }
+    const res = mockRes()
+
+    await controller.mergeOrders(req, res)
+
+    expect(reconcileTableAfterOrderRemovedMock).toHaveBeenCalledWith('venue-a', 'orden-origen')
+    // The reconciliation is authoritative: it overrides the shared service's
+    // OWN (possibly stale, currentOrderId-based) tableFreed value.
+    expect(res.json).toHaveBeenCalledWith({
+      success: true,
+      data: { target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: true },
+    })
+  })
+
+  it('never lets a reconciliation failure turn an already-committed merge into a 500 — falls back to the shared service tableFreed', async () => {
+    mergeOrdersMock.mockResolvedValue({ target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: false })
+    reconcileTableAfterOrderRemovedMock.mockRejectedValue(new Error('DB blip'))
+    const req: any = {
+      params: { venueId: 'venue-a', orderId: 'orden-destino' },
+      body: { sourceOrderId: 'orden-origen' },
+      authContext: { userId: 'staff-real' },
+    }
+    const res = mockRes()
+
+    await controller.mergeOrders(req, res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({
+      success: true,
+      data: { target: { id: 't' }, merged: { id: 'orden-origen' }, tableFreed: false },
+    })
+  })
+})
+
+describe('order-table.tpv.controller — cancelOrder', () => {
+  it('pasa el staffId del authContext, NO el del body', async () => {
+    cancelOrderMock.mockResolvedValue(undefined)
+    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: false })
+    const req: any = {
+      params: { venueId: 'venue-a', orderId: 'orden-1' },
+      body: { reason: 'Cliente se fue', staffId: 'ATACANTE' },
+      authContext: { userId: 'staff-real' },
+    }
+
+    await controller.cancelOrder(req, mockRes())
+
+    expect(cancelOrderMock).toHaveBeenCalledWith('venue-a', 'orden-1', 'Cliente se fue', 'staff-real')
+  })
+
+  it('delega los argumentos en el orden exacto (venueId, orderId, reason, staffId)', async () => {
+    cancelOrderMock.mockResolvedValue(undefined)
+    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: false })
+    const req: any = {
+      params: { venueId: 'venue-a', orderId: 'orden-1' },
+      body: { reason: 'Cliente se fue' },
+      authContext: { userId: 'staff-real' },
+    }
+
+    await controller.cancelOrder(req, mockRes())
+
+    expect(cancelOrderMock.mock.calls[0]).toEqual(['venue-a', 'orden-1', 'Cliente se fue', 'staff-real'])
+  })
+
+  it('pasa reason undefined (no un string vacío ni null) cuando el body no trae reason', async () => {
+    cancelOrderMock.mockResolvedValue(undefined)
+    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: false })
+    const req: any = { params: { venueId: 'v', orderId: 'o' }, body: {}, authContext: { userId: 's' } }
+
+    await controller.cancelOrder(req, mockRes())
+
+    expect(cancelOrderMock).toHaveBeenCalledWith('v', 'o', undefined, 's')
+  })
+
+  it('responde 400 en español cuando el servicio rechaza (p.ej. cuenta ya pagada)', async () => {
+    cancelOrderMock.mockRejectedValue(new BadRequestError('Cannot cancel a paid order'))
+    const req: any = { params: { venueId: 'v', orderId: 'o' }, body: {}, authContext: { userId: 's' } }
+    const res = mockRes()
+
+    await controller.cancelOrder(req, res)
+
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: false, message: 'Cannot cancel a paid order' }))
+    // A committed-nowhere rejection never reaches the reconciliation step.
+    expect(reconcileTableAfterOrderRemovedMock).not.toHaveBeenCalled()
+  })
+
+  // 🔴 Fix 1 (zombie table), mirrored from mergeOrders: after the shared
+  // cancelOrder succeeds, this controller reconciles the order's OWN table
+  // — see table.tpv.service.ts::reconcileTableAfterOrderRemoved and its
+  // dedicated test. These tests protect the WIRING between them.
+  it('calls reconcileTableAfterOrderRemoved(venueId, orderId) AFTER the shared cancel succeeds, and its result becomes tableFreed', async () => {
+    cancelOrderMock.mockResolvedValue(undefined)
+    reconcileTableAfterOrderRemovedMock.mockResolvedValue({ tableFreed: true })
+    const req: any = {
+      params: { venueId: 'venue-a', orderId: 'orden-1' },
+      body: { reason: 'Cliente se fue' },
+      authContext: { userId: 'staff-real' },
+    }
+    const res = mockRes()
+
+    await controller.cancelOrder(req, res)
+
+    expect(reconcileTableAfterOrderRemovedMock).toHaveBeenCalledWith('venue-a', 'orden-1')
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { tableFreed: true } })
+  })
+
+  it('never lets a reconciliation failure turn an already-committed cancel into a 500 — falls back to tableFreed: false', async () => {
+    cancelOrderMock.mockResolvedValue(undefined)
+    reconcileTableAfterOrderRemovedMock.mockRejectedValue(new Error('DB blip'))
+    const req: any = {
+      params: { venueId: 'venue-a', orderId: 'orden-1' },
+      body: {},
+      authContext: { userId: 'staff-real' },
+    }
+    const res = mockRes()
+
+    await controller.cancelOrder(req, res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { tableFreed: false } })
   })
 })
 

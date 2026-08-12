@@ -5,6 +5,7 @@ import logger from '../../config/logger'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
+import { deleteOrRetainStaffWithH1Provenance } from './staffDeletion.service'
 
 // ===========================================
 // TYPES
@@ -624,25 +625,21 @@ export async function deleteStaff(staffId: string, currentUserId: string, perfor
     throw new BadRequestError('No puedes eliminarte a ti mismo')
   }
 
-  const staff = await prisma.staff.findUnique({ where: { id: staffId } })
-  if (!staff) {
-    throw new NotFoundError('Usuario no encontrado')
-  }
+  const { staff, retainedForAudit } = await deleteOrRetainStaffWithH1Provenance(staffId)
 
-  await prisma.staff.delete({ where: { id: staffId } })
-
-  logger.info(`[STAFF-SUPERADMIN] Deleted staff: ${staff.email}`, { staffId })
+  if (retainedForAudit) logger.info('[STAFF-SUPERADMIN] Retained anonymized staff for immutable audit', { staffId })
+  else logger.info(`[STAFF-SUPERADMIN] Deleted staff: ${staff.email}`, { staffId })
 
   void logAction({
     staffId: performedBy ?? currentUserId ?? null,
     venueId: null,
-    action: 'STAFF_DELETED',
+    action: retainedForAudit ? 'STAFF_RETAINED_FOR_AUDIT' : 'STAFF_DELETED',
     entity: 'Staff',
     entityId: staffId,
-    data: { email: staff.email },
+    data: retainedForAudit ? { retainedForAudit: true } : { email: staff.email },
   })
 
-  return { success: true }
+  return retainedForAudit ? { success: true, retainedForAudit: true } : { success: true }
 }
 
 // ===========================================

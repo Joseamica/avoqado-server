@@ -36,6 +36,7 @@ describe('Area tickets v7 — PostgreSQL state machine', () => {
   let productId: string
   let normalProductId: string
   let inventoryId: string
+  let normalInventoryId: string
   let issueDeviceUid: string
   let checkoutDeviceUidA: string
   let checkoutDeviceUidB: string
@@ -169,7 +170,7 @@ describe('Area tickets v7 — PostgreSQL state machine', () => {
         tags: [],
         allergens: [],
         soldByWeight: false,
-        trackInventory: false,
+        trackInventory: true,
         inventoryMethod: InventoryMethod.QUANTITY,
         unit: Unit.PIECE,
       },
@@ -183,6 +184,14 @@ describe('Area tickets v7 — PostgreSQL state machine', () => {
       },
     })
     inventoryId = inventory.id
+    const normalInventory = await prisma.inventory.create({
+      data: {
+        venueId,
+        productId: normalProductId,
+        currentStock: new Prisma.Decimal('10.000'),
+      },
+    })
+    normalInventoryId = normalInventory.id
   })
 
   afterAll(async () => {
@@ -511,5 +520,72 @@ describe('Area tickets v7 — PostgreSQL state machine', () => {
     expect(paidOrder.remainingBalance.toFixed(2)).toBe('0.00')
     expect(paidTicket.status).toBe(AreaTicketStatus.PAID)
     expect(paymentCount).toBe(1)
+  })
+
+  it('descuenta el producto normal de una orden mixta sin duplicar la reserva del vale', async () => {
+    await Promise.all([
+      prisma.inventory.update({ where: { id: inventoryId }, data: { currentStock: new Prisma.Decimal('10.000') } }),
+      prisma.inventory.update({ where: { id: normalInventoryId }, data: { currentStock: new Prisma.Decimal('10.000') } }),
+    ])
+
+    const ticket = await issueAreaTicket(venueId, {
+      idempotencyKey: `mixed-issue-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      lines: [
+        {
+          clientLineId: `mixed-line-${suffix}`,
+          productId,
+          quantity: '1',
+          weightKg: '0.125',
+        },
+      ],
+    })
+    const checkout = await createAreaTicketCheckout(venueId, {
+      idempotencyKey: `mixed-checkout-${suffix}`,
+      deviceUid: checkoutDeviceUidA,
+      staffId,
+    })
+    await addTicketToCheckout(venueId, checkout.id, ticket.code, {
+      idempotencyKey: `mixed-claim-${suffix}`,
+      deviceUid: checkoutDeviceUidA,
+      staffId,
+    })
+    const materialized = await materializeAreaTicketCheckout(venueId, checkout.id, {
+      idempotencyKey: `mixed-materialize-${suffix}`,
+      deviceUid: checkoutDeviceUidA,
+      staffId,
+      source: 'AVOQADO_ANDROID',
+      normalItems: [{ productId: normalProductId, quantity: 2 }],
+    })
+
+    await payCashOrder(venueId, materialized.order.id, {
+      amount: 5050,
+      tip: 0,
+      staffId,
+      idempotencyKey: `mixed-payment-${suffix}`,
+    })
+
+    let normalStock = '10.000'
+    for (let attempt = 0; attempt < 40; attempt++) {
+      normalStock = (await prisma.inventory.findUniqueOrThrow({ where: { id: normalInventoryId } })).currentStock.toFixed(3)
+      if (normalStock === '8.000') break
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+
+    const [ticketInventory, reservation, normalMovements] = await Promise.all([
+      prisma.inventory.findUniqueOrThrow({ where: { id: inventoryId } }),
+      prisma.areaTicketInventoryReservation.findFirstOrThrow({ where: { areaTicketId: ticket.id } }),
+      prisma.inventoryMovement.findMany({ where: { inventoryId: normalInventoryId, reference: materialized.order.id } }),
+    ])
+    const ticketMovements = await prisma.inventoryMovement.findMany({
+      where: { inventoryId, reference: reservation.id },
+    })
+
+    expect(ticketInventory.currentStock.toFixed(3)).toBe('9.875')
+    expect(reservation.status).toBe(AreaTicketInventoryReservationStatus.CONSUMED)
+    expect(ticketMovements).toHaveLength(1)
+    expect(normalStock).toBe('8.000')
+    expect(normalMovements).toHaveLength(1)
   })
 })

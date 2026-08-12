@@ -9,6 +9,10 @@ import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/permissions'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
+import { logAction } from '../../services/dashboard/activity-log.service'
+import { verifyAccessToken } from '../../jwt.service'
+import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
+import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 
 /**
  * Simple deep merge for module config objects.
@@ -118,7 +122,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         createdAt: true,
         lastLoginAt: true,
         organizations: {
-          where: { isActive: true },
+          where: { isActive: true, leftAt: null },
           include: { organization: true },
           // Fetch all active organizations (not just primary) to find OWNER orgs
         },
@@ -194,7 +198,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
 
     if (!staff) {
       // 🔐 Special handling for Master TOTP login (synthetic SUPERADMIN user)
-      if (decoded.sub === 'MASTER_ADMIN') {
+      if (decoded.sub === MASTER_ADMIN_PRINCIPAL_ID) {
         logger.info('🔐 [AUTH STATUS] Master Admin session detected')
 
         // Fetch ALL venues for SUPERADMIN access
@@ -274,7 +278,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         return res.status(200).json({
           authenticated: true,
           user: {
-            id: 'MASTER_ADMIN',
+            id: MASTER_ADMIN_PRINCIPAL_ID,
             firstName: 'Master',
             lastName: 'Admin',
             email: process.env.MASTER_LOGIN_EMAIL || 'master@avoqado.io',
@@ -666,6 +670,39 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       }
     }
 
+    // WHY: This is a visibility hint, never an authorization cache. Reuse the
+    // same live tenant/entitlement/module/config authority as the endpoint so
+    // hidden or malformed organizations cause no catalog probe in the client.
+    const organizationMemberships = await Promise.all(
+      staff.organizations.map(async membership => {
+        let masterCatalogVisible = false
+        try {
+          const access = await resolveMasterCatalogAccess({
+            organizationId: membership.organizationId,
+            principal: { type: 'HUMAN', staffId: staff.id, impersonating: false },
+            capability: 'READ_CONTENT',
+            requiredGate: 'CORE',
+          })
+          masterCatalogVisible = access.reasonCode === 'ACCESSIBLE' && access.canRead
+        } catch (error) {
+          // WHY: this field is only a fail-closed navigation hint. A catalog
+          // dependency outage must hide that entry, never invalidate the
+          // user's otherwise healthy dashboard session.
+          logger.warn('[AUTH] Master catalog visibility unavailable', {
+            organizationId: membership.organizationId,
+            staffId: staff.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+        return {
+          organizationId: membership.organizationId,
+          organizationName: membership.organization.name,
+          role: membership.role,
+          masterCatalogVisible,
+        }
+      }),
+    )
+
     // Formatear respuesta
     const userPayload = {
       id: staff.id,
@@ -682,6 +719,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       createdAt: staff.createdAt,
       lastLogin: staff.lastLoginAt,
       venues: enrichedVenues, // Use enriched venues with permissions
+      organizationMemberships,
     }
 
     // Disable caching for sensitive auth status data
@@ -726,7 +764,10 @@ export async function dashboardLoginController(req: Request, res: Response, next
     const rememberMe = loginData.rememberMe === true
 
     // Llamar al servicio
-    const { accessToken, refreshToken, staff } = await authService.loginStaff(loginData)
+    const { accessToken, refreshToken, staff } = await authService.loginStaff(loginData, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    })
     logger.info('[AUTH] 🔐 Login service success', { staffId: staff.id, email: staff.email })
 
     // Cookie maxAge must match JWT expiration to prevent premature logout
@@ -774,6 +815,39 @@ export async function dashboardLoginController(req: Request, res: Response, next
 export const dashboardLogoutController = async (req: Request, res: Response) => {
   logger.info('[AUTH] 🚪 Logout request received')
   try {
+    // Sign-out audit entry. This route deliberately carries NO authentication middleware
+    // (logging out has to work even after the token has expired), so the identity is taken
+    // from the token by verifying its SIGNATURE. Never with `jwt.decode`: unverified,
+    // anyone could send a forged cookie and pollute the audit trail with sign-outs under
+    // someone else's name, which is worse than having no record at all.
+    // If there is no verifiable identity we write nothing — a row without an actor says
+    // nothing — and the logout proceeds as usual: this can never prevent signing out.
+    // The dedicated try/catch is NOT decorative: the catch below turns ANY exception into
+    // "Error al cerrar sesión", so without this guard a stumble while writing the audit
+    // entry would leave someone unable to sign out. The audit trail is best-effort;
+    // signing out is not.
+    try {
+      const authHeader = req.headers?.authorization
+      const logoutToken = req.cookies?.accessToken ?? (authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined)
+      if (logoutToken) {
+        const payload = verifyAccessToken(logoutToken)
+        if (payload?.sub) {
+          void logAction({
+            staffId: payload.sub,
+            venueId: payload.venueId ?? null,
+            action: 'STAFF_LOGOUT',
+            entity: 'Staff',
+            entityId: payload.sub,
+            data: { source: 'dashboard' },
+            ipAddress: req.ip,
+            userAgent: req.get?.('user-agent'),
+          })
+        }
+      }
+    } catch (auditLogError) {
+      logger.error('[AUTH] 🚪 Failed to record the sign-out in the audit log', auditLogError)
+    }
+
     // Limpiar cookies con las mismas opciones
     res.clearCookie('accessToken', {
       httpOnly: true,

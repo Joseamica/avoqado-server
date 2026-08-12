@@ -196,4 +196,23 @@ describe('integration setup database isolation', () => {
 
     expect(packageJson.scripts['test:integration']).toContain('--runInBand')
   })
+
+  it('runs destructive H1A migration replays in isolated Jest processes', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>
+    }
+
+    expect(packageJson.scripts['test:integration']).toContain('--testPathIgnorePatterns')
+    expect(packageJson.scripts['test:integration']).toContain('h1a-migration(?:-(?:lock-safety|replay))?')
+    expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration-replay.integration.test.ts')
+    expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration-lock-safety.integration.test.ts')
+    expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration.integration.test.ts')
+  })
+
+  it('disconnects the per-suite Prisma singleton before Jest loads the next integration file', () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), 'tests/__helpers__/integration-setup.ts'), 'utf8')
+
+    expect(source).toContain("await import('@/utils/prismaClient')")
+    expect(source).toContain('await prisma.$disconnect()')
+  })
 })

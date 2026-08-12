@@ -1,15 +1,13 @@
 import { Request, Response, NextFunction } from 'express'
-import prisma from '@/utils/prismaClient'
 import {
+  activateVenuePlan,
+  deactivateVenuePlan,
+  grantVenuePlanTrial,
   getSubscriptionOverview,
   getSubscriptionsForSuperadmin,
-  getVenueSubscription,
   adjustVenuePlanEndDate,
   type SubscriptionState,
 } from '@/services/superadmin/subscription.service'
-import { enableFeatureForVenue, disableFeatureForVenue, grantTrialForVenue } from '@/services/dashboard/superadmin.service'
-
-const PLAN_PRO = 'PLAN_PRO'
 
 /** GET /api/v1/superadmin/subscriptions/overview */
 export async function overview(_req: Request, res: Response, next: NextFunction) {
@@ -37,18 +35,8 @@ export async function activate(req: Request, res: Response, next: NextFunction) 
   try {
     const { venueId } = req.params
     const { userId } = (req as any).authContext
-    await enableFeatureForVenue(venueId, PLAN_PRO)
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId,
-        action: 'SUPERADMIN_PLAN_ACTIVATED',
-        entity: 'VenueFeature',
-        entityId: venueId,
-        data: { featureCode: PLAN_PRO },
-      },
-    })
-    res.json({ success: true, data: await getVenueSubscription(venueId) })
+    const data = await activateVenuePlan(venueId, userId)
+    res.json({ success: true, data })
   } catch (error) {
     next(error)
   }
@@ -59,18 +47,8 @@ export async function deactivate(req: Request, res: Response, next: NextFunction
   try {
     const { venueId } = req.params
     const { userId } = (req as any).authContext
-    await disableFeatureForVenue(venueId, PLAN_PRO)
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId,
-        action: 'SUPERADMIN_PLAN_DEACTIVATED',
-        entity: 'VenueFeature',
-        entityId: venueId,
-        data: { featureCode: PLAN_PRO },
-      },
-    })
-    res.json({ success: true, data: await getVenueSubscription(venueId) })
+    const data = await deactivateVenuePlan(venueId, userId)
+    res.json({ success: true, data })
   } catch (error) {
     next(error)
   }
@@ -82,18 +60,8 @@ export async function grantTrial(req: Request, res: Response, next: NextFunction
     const { venueId } = req.params
     const { days } = req.body as { days: number }
     const { userId } = (req as any).authContext
-    const { endDate } = await grantTrialForVenue(venueId, PLAN_PRO, days)
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId,
-        action: 'SUPERADMIN_PLAN_TRIAL_GRANTED',
-        entity: 'VenueFeature',
-        entityId: venueId,
-        data: { featureCode: PLAN_PRO, days, endDate: endDate.toISOString() },
-      },
-    })
-    res.json({ success: true, data: await getVenueSubscription(venueId) })
+    const data = await grantVenuePlanTrial(venueId, days, userId)
+    res.json({ success: true, data })
   } catch (error) {
     next(error)
   }
@@ -105,17 +73,7 @@ export async function adjustEndDate(req: Request, res: Response, next: NextFunct
     const { venueId } = req.params
     const { deltaDays } = req.body as { deltaDays: number }
     const { userId } = (req as any).authContext
-    const data = await adjustVenuePlanEndDate(venueId, deltaDays)
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId,
-        action: 'SUPERADMIN_PLAN_ENDDATE_ADJUSTED',
-        entity: 'VenueFeature',
-        entityId: venueId,
-        data: { featureCode: PLAN_PRO, deltaDays },
-      },
-    })
+    const data = await adjustVenuePlanEndDate(venueId, deltaDays, userId)
     res.json({ success: true, data })
   } catch (error) {
     next(error)

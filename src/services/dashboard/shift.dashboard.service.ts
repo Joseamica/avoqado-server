@@ -2,6 +2,7 @@ import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
+import { calculateCashReconciliation } from '../shared/cashReconciliation.service'
 
 interface ShiftFilters {
   staffId?: string
@@ -39,6 +40,21 @@ interface ShiftSummaryResponse {
     amount: number
     count: number
   }>
+}
+
+type ShiftCashValue = { toString(): string } | number | null | undefined
+
+/** Preserve zero as a real count/difference while keeping an absent count null. */
+export function serializeShiftCashReconciliation(shift: {
+  endingCash: ShiftCashValue
+  cashDeclared: ShiftCashValue
+  cashDifference: ShiftCashValue
+}): { endingCash: number | null; cashDeclared: number | null; cashDifference: number | null } {
+  return {
+    endingCash: shift.endingCash == null ? null : Number(shift.endingCash),
+    cashDeclared: shift.cashDeclared == null ? null : Number(shift.cashDeclared),
+    cashDifference: shift.cashDifference == null ? null : Number(shift.cashDifference),
+  }
 }
 
 export async function getShifts(
@@ -127,8 +143,7 @@ export async function getShifts(
       startTime: shift.startTime,
       endTime: shift.endTime,
       startingCash: Number(shift.startingCash),
-      endingCash: shift.endingCash ? Number(shift.endingCash) : null,
-      cashDifference: shift.cashDifference ? Number(shift.cashDifference) : null,
+      ...serializeShiftCashReconciliation(shift),
       totalSales: Number(shift.totalSales),
       totalTips: Number(shift.totalTips),
       totalOrders: shift.totalOrders,
@@ -499,8 +514,7 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
     startTime: shift.startTime,
     endTime: shift.endTime,
     startingCash: Number(shift.startingCash),
-    endingCash: shift.endingCash ? Number(shift.endingCash) : null,
-    cashDifference: shift.cashDifference ? Number(shift.cashDifference) : null,
+    ...serializeShiftCashReconciliation(shift),
     totalSales: finalTotalSales,
     totalTips: finalTotalTips,
     totalOrders: shift.orders.length,
@@ -729,6 +743,38 @@ export interface UpdateShiftData {
 }
 
 /**
+ * Cash over/short for a shift: what was counted minus what should be in the drawer.
+ *
+ * 🔴 This used to be `endingCash - startingCash`, which is not a cash difference at all —
+ * it is the net change in the drawer. A shift that sold $5,000 in cash and balanced to the
+ * peso reported "+$5,000 over". The number on the shift-difference report was noise, not
+ * control, and it read as a huge surplus on every shift that sold anything.
+ *
+ * A cash difference is COUNTED − EXPECTED, where expected is the float plus the cash the
+ * system recorded as taken in:
+ *
+ *     expected   = startingCash + cashSales
+ *     difference = counted − expected        (negative = short, positive = over)
+ *
+ * KNOWN LIMITATION, stated rather than hidden: pay-ins and pay-outs are not part of
+ * `expected`, because `CashDrawerSession` is not linked to `Shift` — it hangs off venue +
+ * staff, so drawer events cannot be attributed to a shift without guessing by time overlap,
+ * and guessing here mis-attributes real money. A venue that takes cash out mid-shift will
+ * therefore show a shortfall equal to what it took out. That is still strictly better than
+ * the old formula, and it is wrong in the direction that makes someone look, not the
+ * direction that hides a hole.
+ *
+ * Returns `null` when nobody counted the drawer. A fabricated 0 would read as "balanced",
+ * which is the one answer we must never invent.
+ */
+export function computeCashDifference(input: { countedCash: number | null; startingCash: number; cashSales: number }): number | null {
+  if (input.countedCash === null || input.countedCash === undefined) return null
+  const { difference } = calculateCashReconciliation(input.countedCash, input.startingCash, input.cashSales)
+  const rounded = difference.toDecimalPlaces(2).toNumber()
+  return Object.is(rounded, -0) ? 0 : rounded
+}
+
+/**
  * Update a shift by ID (SUPERADMIN only)
  * @param venueId Venue ID
  * @param shiftId Shift ID to update
@@ -782,13 +828,17 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
     updateData.staffId = data.staffId
   }
 
-  // Calculate cash difference if both startingCash and endingCash are available
   const effectiveStartingCash = data.startingCash !== undefined ? data.startingCash : Number(existingShift.startingCash)
   const effectiveEndingCash =
-    data.endingCash !== undefined ? data.endingCash : existingShift.endingCash ? Number(existingShift.endingCash) : null
+    data.endingCash !== undefined ? data.endingCash : existingShift.endingCash == null ? null : Number(existingShift.endingCash)
 
-  if (effectiveEndingCash !== null) {
-    updateData.cashDifference = effectiveEndingCash - effectiveStartingCash
+  const difference = computeCashDifference({
+    countedCash: effectiveEndingCash,
+    startingCash: effectiveStartingCash,
+    cashSales: Number(existingShift.totalCashPayments ?? 0),
+  })
+  if (difference !== null) {
+    updateData.cashDifference = difference
   }
 
   // Update the shift
@@ -835,8 +885,7 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
     startTime: updatedShift.startTime,
     endTime: updatedShift.endTime,
     startingCash: Number(updatedShift.startingCash),
-    endingCash: updatedShift.endingCash ? Number(updatedShift.endingCash) : null,
-    cashDifference: updatedShift.cashDifference ? Number(updatedShift.cashDifference) : null,
+    ...serializeShiftCashReconciliation(updatedShift),
     totalSales: Number(updatedShift.totalSales),
     totalTips: Number(updatedShift.totalTips),
     totalOrders: updatedShift.totalOrders,

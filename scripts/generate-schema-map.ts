@@ -62,6 +62,10 @@ const DOMAINS: Domain[] = [
     description: 'The catalog: what a venue sells and its variants/add-ons.',
   },
   {
+    name: 'Master Catalog & Publication',
+    description: 'Organization-owned catalog identity, validation, rollout, bindings, batch recovery, and publication outbox.',
+  },
+  {
     name: 'Inventory & Stock',
     description: 'Stock on hand, raw materials, recipes, suppliers, purchase orders, FIFO batches.',
   },
@@ -147,6 +151,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Module: 'Modules, Features & Billing',
   VenueModule: 'Modules, Features & Billing',
   OrganizationModule: 'Modules, Features & Billing',
+  OrganizationEntitlement: 'Modules, Features & Billing',
   Feature: 'Modules, Features & Billing',
   VenueFeature: 'Modules, Features & Billing',
   Invoice: 'Modules, Features & Billing',
@@ -200,7 +205,36 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Modifier: 'Menu, Products & Modifiers',
   ModifierGroup: 'Menu, Products & Modifiers',
 
-  // 6. Inventory & Stock
+  // 6. Master Catalog & Publication
+  // Keep the whole H1 aggregate together: runtime Product and Venue retain
+  // their legacy domains while corporate identity/publication stays explicit.
+  CatalogBrand: 'Master Catalog & Publication',
+  CatalogManufacturer: 'Master Catalog & Publication',
+  CatalogFamily: 'Master Catalog & Publication',
+  CatalogItem: 'Master Catalog & Publication',
+  CatalogItemBusinessType: 'Master Catalog & Publication',
+  CatalogProductTypeMapping: 'Master Catalog & Publication',
+  CatalogIdentifier: 'Master Catalog & Publication',
+  CatalogValidationProfile: 'Master Catalog & Publication',
+  CatalogItemPrice: 'Master Catalog & Publication',
+  CatalogVenueRollout: 'Master Catalog & Publication',
+  CatalogVenueClientRequirement: 'Master Catalog & Publication',
+  CatalogClientObservation: 'Master Catalog & Publication',
+  CatalogClientReadinessOverride: 'Master Catalog & Publication',
+  CatalogVenueBinding: 'Master Catalog & Publication',
+  CatalogVenueOverride: 'Master Catalog & Publication',
+  CatalogIdempotencyRecord: 'Master Catalog & Publication',
+  CatalogImportBatch: 'Master Catalog & Publication',
+  CatalogImportLine: 'Master Catalog & Publication',
+  CatalogBindingBatch: 'Master Catalog & Publication',
+  CatalogBindingLine: 'Master Catalog & Publication',
+  CatalogPublicationBatch: 'Master Catalog & Publication',
+  CatalogPublicationLine: 'Master Catalog & Publication',
+  CatalogPublicationFieldDecision: 'Master Catalog & Publication',
+  CatalogVenueEventSequence: 'Master Catalog & Publication',
+  CatalogPublicationOutbox: 'Master Catalog & Publication',
+
+  // 7. Inventory & Stock
   Inventory: 'Inventory & Stock',
   InventoryMovement: 'Inventory & Stock',
   InventoryTransfer: 'Inventory & Stock',
@@ -226,14 +260,14 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PurchaseOrder: 'Inventory & Stock',
   PurchaseOrderItem: 'Inventory & Stock',
 
-  // 7. Serialized Inventory
+  // 8. Serialized Inventory
   SerializedItem: 'Serialized Inventory',
   SerializedItemCustodyEvent: 'Serialized Inventory',
   SimRegistrationRequest: 'Serialized Inventory',
   SimRegistrationRequestItem: 'Serialized Inventory',
   SaleVerification: 'Serialized Inventory',
 
-  // 8. Orders, KDS & Cash
+  // 9. Orders, KDS & Cash
   Order: 'Orders, KDS & Cash',
   OrderItem: 'Orders, KDS & Cash',
   OrderItemModifier: 'Orders, KDS & Cash',
@@ -271,8 +305,10 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   AreaTicketPaymentAttempt: 'Orders, KDS & Cash',
   AreaTicketPrintAttempt: 'Orders, KDS & Cash',
   AreaTicketFulfillment: 'Orders, KDS & Cash',
+  AreaTicketExternalSettlement: 'Orders, KDS & Cash',
+  AreaTicketExternalIncident: 'Orders, KDS & Cash',
 
-  // 9. Payments & Fees
+  // 10. Payments & Fees
   Payment: 'Payments & Fees',
   PaymentAllocation: 'Payments & Fees',
   MerchantRoutingRule: 'Payments & Fees',
@@ -285,7 +321,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   FeeTier: 'Payments & Fees',
   TransactionCost: 'Payments & Fees',
 
-  // 10. Payment Providers & Settlement
+  // 11. Payment Providers & Settlement
   PaymentProvider: 'Payment Providers & Settlement',
   MerchantAccount: 'Payment Providers & Settlement',
   FinancialProvider: 'Payment Providers & Settlement',
@@ -312,7 +348,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   RateCorrectionBatch: 'Payment Providers & Settlement',
   RateCorrectionEntry: 'Payment Providers & Settlement',
 
-  // 11. Payment Links
+  // 12. Payment Links
   PaymentLink: 'Payment Links',
   PaymentLinkItem: 'Payment Links',
   PaymentLinkItemModifier: 'Payment Links',
@@ -342,7 +378,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   BillingTaxProfile: 'Facturación (CFDI)',
   PlatformCfdi: 'Facturación (CFDI)',
 
-  // 12. Pricing, Costs & Venue Lending
+  // 13. Pricing, Costs & Venue Lending
   PricingPolicy: 'Pricing, Costs & Venue Lending',
   OrganizationPricingStructure: 'Pricing, Costs & Venue Lending',
   VenuePricingStructure: 'Pricing, Costs & Venue Lending',
@@ -351,7 +387,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   VenueCreditAssessment: 'Pricing, Costs & Venue Lending',
   CreditOffer: 'Pricing, Costs & Venue Lending',
 
-  // 13. Discounts, Loyalty & Credit Packs
+  // 14. Discounts, Loyalty & Credit Packs
   Discount: 'Discounts, Loyalty & Credit Packs',
   CustomerDiscount: 'Discounts, Loyalty & Credit Packs',
   // Upsell "¿Algo más?" — vive aquí porque es la misma familia comercial que
@@ -375,7 +411,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   ReferralRewardGrant: 'Discounts, Loyalty & Credit Packs',
   ReferralTierUnlock: 'Discounts, Loyalty & Credit Packs',
 
-  // 14. Commissions & Sales Goals
+  // 15. Commissions & Sales Goals
   CommissionCalculation: 'Commissions & Sales Goals',
   CommissionClawback: 'Commissions & Sales Goals',
   CommissionConfig: 'Commissions & Sales Goals',
@@ -395,7 +431,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PromoterCommissionEntry: 'Commissions & Sales Goals',
   CashOutWithdrawal: 'Commissions & Sales Goals',
 
-  // 15. Reservations & Booking
+  // 16. Reservations & Booking
   Reservation: 'Reservations & Booking',
   ReservationSettings: 'Reservations & Booking',
   ReservationModifier: 'Reservations & Booking',
@@ -415,7 +451,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   GoogleOAuthSession: 'Reservations & Booking',
   CalendarSyncOutbox: 'Reservations & Booking',
 
-  // 16. Terminals / TPV Fleet
+  // 17. Terminals / TPV Fleet
   Terminal: 'Terminals / TPV Fleet',
   TerminalHealth: 'Terminals / TPV Fleet',
   TerminalLog: 'Terminals / TPV Fleet',
@@ -438,7 +474,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   VenueScaleSettings: 'Terminals / TPV Fleet',
   ScaleProfile: 'Terminals / TPV Fleet',
 
-  // 17. Notifications, WhatsApp & Marketing
+  // 18. Notifications, WhatsApp & Marketing
   Notification: 'Notifications, WhatsApp & Marketing',
   NotificationPreference: 'Notifications, WhatsApp & Marketing',
   NotificationTemplate: 'Notifications, WhatsApp & Marketing',
@@ -451,7 +487,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   MarketingCampaign: 'Notifications, WhatsApp & Marketing',
   CampaignDelivery: 'Notifications, WhatsApp & Marketing',
 
-  // 18. AI Chatbot (Text-to-SQL)
+  // 19. AI Chatbot (Text-to-SQL)
   ChatConversation: 'AI Chatbot (Text-to-SQL)',
   ChatMessage: 'AI Chatbot (Text-to-SQL)',
   ChatFeedback: 'AI Chatbot (Text-to-SQL)',
@@ -459,7 +495,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   ChatTrainingData: 'AI Chatbot (Text-to-SQL)',
   LearnedPatterns: 'AI Chatbot (Text-to-SQL)',
 
-  // 19. Customers, Consumers & Reviews
+  // 20. Customers, Consumers & Reviews
   Customer: 'Customers, Consumers & Reviews',
   CustomerGroup: 'Customers, Consumers & Reviews',
   Consumer: 'Customers, Consumers & Reviews',
@@ -467,7 +503,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OtpChallenge: 'Customers, Consumers & Reviews',
   Review: 'Customers, Consumers & Reviews',
 
-  // 20. System: Audit, Webhooks & Platform
+  // 21. System: Audit, Webhooks & Platform
   ActivityLog: 'System: Audit, Webhooks & Platform',
   WebhookEvent: 'System: Audit, Webhooks & Platform',
   WebhookSubscription: 'System: Audit, Webhooks & Platform',

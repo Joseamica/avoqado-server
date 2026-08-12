@@ -37,6 +37,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           ...(area ? { area: { name: { contains: area, mode: 'insensitive' as const } } } : {}),
         },
         select: {
+          id: true,
           number: true,
           capacity: true,
           status: true,
@@ -44,12 +45,44 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           currentOrder: {
             select: { orderNumber: true, total: true, paidAmount: true, remainingBalance: true, paymentStatus: true, createdAt: true },
           },
+          // 🔴 The LIVE checks decide occupancy — `Table.status` alone does not.
+          //
+          // `status` is a denormalized column that drifts from reality: the shared
+          // table-release step only frees a table when `Table.currentOrderId` equals
+          // the order being closed, which an order created by SPLIT_ORDER never
+          // satisfies (`currentOrderId` is never set for split children). So a table
+          // can sit at OCCUPIED with zero open checks — forever. Seen on a real
+          // device, twice.
+          //
+          // avoqado-android, avoqado-ios and avoqado-tpv all already derive
+          // free/occupied from the open checks for exactly this reason, so none of
+          // them shows the phantom. This tool was the only consumer still trusting
+          // the raw column — meaning an owner asking the assistant "¿cuántas mesas
+          // tengo ocupadas?" got an inflated count with no way to tell it was wrong.
+          orders: {
+            where: { status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+            select: { id: true },
+          },
         },
         orderBy: { number: 'asc' },
       })
 
+      /**
+       * Occupancy mirrored from the clients, by exact rule: a live check is the only
+       * truth about occupancy; `status` still rules for RESERVED and CLEANING, which
+       * are legitimate states without a check.
+       */
+      const effectiveStatus = (t: (typeof tables)[number]): string => {
+        if (t.status === 'RESERVED' || t.status === 'CLEANING') return t.status
+        const hasOpenCheck = t.orders.length > 0 || t.currentOrder !== null
+        return hasOpenCheck ? 'OCCUPIED' : 'AVAILABLE'
+      }
+
       const byStatus: Record<string, number> = {}
-      for (const t of tables) byStatus[t.status] = (byStatus[t.status] ?? 0) + 1
+      for (const t of tables) {
+        const s = effectiveStatus(t)
+        byStatus[s] = (byStatus[s] ?? 0) + 1
+      }
 
       // Propiedad de mesa (PRO): con el switch encendido, solo el mesero dueño
       // modifica/cierra sus mesas desde el POS (override: 'tables:manage-all').
@@ -67,7 +100,10 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           number: t.number,
           area: t.area?.name ?? null,
           capacity: t.capacity,
-          status: t.status,
+          status: effectiveStatus(t),
+          // Kept so a drifted row is diagnosable instead of silently corrected: when
+          // this differs from `status`, the denormalized column is stale for that table.
+          storedStatus: t.status,
           order: t.currentOrder
             ? {
                 orderNumber: t.currentOrder.orderNumber,

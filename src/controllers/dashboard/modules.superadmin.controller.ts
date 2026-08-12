@@ -1,7 +1,9 @@
 import { Request, Response, NextFunction } from 'express'
-import { moduleService, ModuleCode } from '../../services/modules/module.service'
+import { ModuleScope } from '@prisma/client'
+import { moduleService, ModuleCode, lockModuleScope } from '../../services/modules/module.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { BadRequestError } from '../../errors/AppError'
 
 /**
  * Modules Superadmin Controller
@@ -16,7 +18,7 @@ import logger from '../../config/logger'
  */
 export async function createModule(req: Request, res: Response, next: NextFunction) {
   try {
-    const { code, name, description, defaultConfig, presets } = req.body
+    const { code, name, description, defaultConfig, presets, configSchema, scope } = req.body
 
     // Check if module with code already exists
     const existingModule = await prisma.module.findUnique({
@@ -27,6 +29,8 @@ export async function createModule(req: Request, res: Response, next: NextFuncti
       return res.status(400).json({ error: `Module with code ${code} already exists` })
     }
 
+    // BOTH preserves every existing caller; only an explicit control-plane
+    // request may narrow a new definition to one assignment level.
     const module = await prisma.module.create({
       data: {
         code,
@@ -34,6 +38,8 @@ export async function createModule(req: Request, res: Response, next: NextFuncti
         description: description || null,
         defaultConfig: defaultConfig || {},
         presets: presets || {},
+        configSchema: configSchema || undefined,
+        scope: scope ?? ModuleScope.BOTH,
       },
     })
 
@@ -52,25 +58,43 @@ export async function createModule(req: Request, res: Response, next: NextFuncti
 export async function updateModule(req: Request, res: Response, next: NextFunction) {
   try {
     const { moduleId } = req.params
-    const { name, description, defaultConfig, presets } = req.body
+    const { name, description, defaultConfig, presets, configSchema, scope } = req.body
 
-    const existingModule = await prisma.module.findUnique({
-      where: { id: moduleId },
+    const module = await prisma.$transaction(async tx => {
+      const existingModule = await lockModuleScope(tx, { id: moduleId })
+      if (!existingModule) return null
+
+      // Count every assignment, including disabled rows: otherwise narrowing
+      // would hide a dormant override that could later resurrect.
+      if (scope === ModuleScope.ORGANIZATION_ONLY && existingModule.scope !== scope) {
+        const venueAssignments = await tx.venueModule.count({ where: { moduleId } })
+        if (venueAssignments > 0) {
+          throw new BadRequestError('No se puede cambiar a ORGANIZATION_ONLY mientras existan filas VenueModule')
+        }
+      }
+      if (scope === ModuleScope.VENUE_ONLY && existingModule.scope !== scope) {
+        const organizationAssignments = await tx.organizationModule.count({ where: { moduleId } })
+        if (organizationAssignments > 0) {
+          throw new BadRequestError('No se puede cambiar a VENUE_ONLY mientras existan filas OrganizationModule')
+        }
+      }
+
+      return tx.module.update({
+        where: { id: moduleId },
+        data: {
+          name: name ?? existingModule.name,
+          description: description !== undefined ? description : existingModule.description,
+          defaultConfig: defaultConfig ?? existingModule.defaultConfig,
+          presets: presets ?? existingModule.presets,
+          configSchema: configSchema ?? existingModule.configSchema,
+          scope: scope ?? existingModule.scope,
+        },
+      })
     })
 
-    if (!existingModule) {
+    if (!module) {
       return res.status(404).json({ error: `Module ${moduleId} not found` })
     }
-
-    const module = await prisma.module.update({
-      where: { id: moduleId },
-      data: {
-        name: name ?? existingModule.name,
-        description: description !== undefined ? description : existingModule.description,
-        defaultConfig: defaultConfig ?? existingModule.defaultConfig,
-        presets: presets ?? existingModule.presets,
-      },
-    })
 
     logger.info(`[MODULES] Updated module: ${module.code}`, { moduleId: module.id })
     return res.status(200).json({ module })
@@ -88,40 +112,38 @@ export async function deleteModule(req: Request, res: Response, next: NextFuncti
   try {
     const { moduleId } = req.params
 
-    const existingModule = await prisma.module.findUnique({
-      where: { id: moduleId },
-      include: {
-        venueModules: {
-          where: { enabled: true },
-          take: 1,
-        },
-      },
+    const deletion = await prisma.$transaction(async tx => {
+      const existingModule = await lockModuleScope(tx, { id: moduleId })
+      if (!existingModule) return { kind: 'missing' as const }
+
+      // Deletion never performs partial cleanup: any active or dormant assignment
+      // must be resolved explicitly before the shared definition can disappear.
+      const [venueAssignments, organizationAssignments] = await Promise.all([
+        tx.venueModule.count({ where: { moduleId } }),
+        tx.organizationModule.count({ where: { moduleId } }),
+      ])
+      if (venueAssignments > 0 || organizationAssignments > 0) {
+        return { kind: 'assigned' as const, existingModule }
+      }
+
+      await tx.module.delete({ where: { id: moduleId } })
+      return { kind: 'deleted' as const, existingModule }
     })
 
-    if (!existingModule) {
+    if (deletion.kind === 'missing') {
       return res.status(404).json({ error: `Module ${moduleId} not found` })
     }
 
-    if (existingModule.venueModules.length > 0) {
+    if (deletion.kind === 'assigned') {
       return res.status(400).json({
-        error: 'Cannot delete module that is enabled for venues. Disable it for all venues first.',
+        error: 'No se puede eliminar un módulo con assignments VenueModule u OrganizationModule existentes.',
       })
     }
 
-    // Delete all venue module records first
-    await prisma.venueModule.deleteMany({
-      where: { moduleId },
-    })
-
-    // Then delete the module
-    await prisma.module.delete({
-      where: { id: moduleId },
-    })
-
-    logger.info(`[MODULES] Deleted module: ${existingModule.code}`, { moduleId })
+    logger.info(`[MODULES] Deleted module: ${deletion.existingModule.code}`, { moduleId })
     return res.status(200).json({
       success: true,
-      message: `Module ${existingModule.code} deleted`,
+      message: `Module ${deletion.existingModule.code} deleted`,
     })
   } catch (error) {
     logger.error('[MODULES] Error deleting module', { error })
@@ -178,6 +200,12 @@ export async function getVenuesForModule(req: Request, res: Response, next: Next
       return res.status(404).json({ error: `Module ${moduleCode} not found` })
     }
 
+    // This endpoint enumerates venue assignments in both flat/grouped modes;
+    // organization-only modules must stay on organization control-plane APIs.
+    if (module.scope === ModuleScope.ORGANIZATION_ONLY) {
+      return res.status(400).json({ error: `Module ${moduleCode} is ORGANIZATION_ONLY and has no venue listing` })
+    }
+
     if (grouped) {
       // Return venues grouped by organization with org-level module status
       const organizations = await prisma.organization.findMany({
@@ -186,7 +214,9 @@ export async function getVenuesForModule(req: Request, res: Response, next: Next
           name: true,
           slug: true,
           organizationModules: {
-            where: { moduleId: module.id },
+            // Grouped venue state inherits only BOTH definitions. This relation
+            // guard suppresses any stale VENUE_ONLY organization assignment.
+            where: { moduleId: module.id, module: { scope: ModuleScope.BOTH } },
             select: {
               enabled: true,
               config: true,
@@ -320,6 +350,8 @@ export async function deleteVenueModuleOverride(req: Request, res: Response, nex
       return res.status(404).json({ error: `Venue ${venueId} not found` })
     }
 
+    // Repair exception: stale rows must remain deletable even after a module is
+    // organization-only, because disabled rows also block a safe scope transition.
     const venueModule = await prisma.venueModule.findFirst({
       where: { venueId, moduleId: module.id },
     })
@@ -366,6 +398,7 @@ export async function getModulesForVenue(req: Request, res: Response, next: Next
 
     // Get all modules with venue's enablement status
     const modules = await prisma.module.findMany({
+      where: { scope: { in: [ModuleScope.BOTH, ModuleScope.VENUE_ONLY] } },
       include: {
         venueModules: {
           where: { venueId },
@@ -381,6 +414,8 @@ export async function getModulesForVenue(req: Request, res: Response, next: Next
       description: module.description,
       defaultConfig: module.defaultConfig,
       presets: module.presets,
+      configSchema: module.configSchema,
+      scope: module.scope,
       enabled: module.venueModules.length > 0 && module.venueModules[0].enabled,
       config: module.venueModules[0]?.config || null,
       enabledAt: module.venueModules[0]?.enabledAt || null,
@@ -410,7 +445,7 @@ export async function enableModuleForVenue(req: Request, res: Response, next: Ne
     // Validate module exists in database (dynamic validation instead of hardcoded list)
     const moduleExists = await prisma.module.findUnique({
       where: { code: moduleCode },
-      select: { id: true, active: true },
+      select: { id: true, active: true, scope: true },
     })
 
     if (!moduleExists) {
@@ -419,6 +454,10 @@ export async function enableModuleForVenue(req: Request, res: Response, next: Ne
 
     if (!moduleExists.active) {
       return res.status(400).json({ error: `Module ${moduleCode} is not active` })
+    }
+
+    if (moduleExists.scope === ModuleScope.ORGANIZATION_ONLY) {
+      return res.status(400).json({ error: `Module ${moduleCode} is ORGANIZATION_ONLY and cannot be enabled for a venue` })
     }
 
     const venue = await prisma.venue.findUnique({
@@ -461,11 +500,15 @@ export async function disableModuleForVenue(req: Request, res: Response, next: N
     // Validate module exists in database (dynamic validation)
     const moduleExists = await prisma.module.findUnique({
       where: { code: moduleCode },
-      select: { id: true },
+      select: { id: true, scope: true },
     })
 
     if (!moduleExists) {
       return res.status(400).json({ error: `Invalid module code: ${moduleCode}` })
+    }
+
+    if (moduleExists.scope === ModuleScope.ORGANIZATION_ONLY) {
+      return res.status(400).json({ error: `Module ${moduleCode} is ORGANIZATION_ONLY and cannot be disabled for a venue` })
     }
 
     const venue = await prisma.venue.findUnique({
@@ -510,11 +553,15 @@ export async function updateModuleConfig(req: Request, res: Response, next: Next
     // Validate module exists in database (dynamic validation)
     const moduleExists = await prisma.module.findUnique({
       where: { code: moduleCode },
-      select: { id: true },
+      select: { id: true, scope: true },
     })
 
     if (!moduleExists) {
       return res.status(400).json({ error: `Invalid module code: ${moduleCode}` })
+    }
+
+    if (moduleExists.scope === ModuleScope.ORGANIZATION_ONLY) {
+      return res.status(400).json({ error: `Module ${moduleCode} is ORGANIZATION_ONLY and has no venue config` })
     }
 
     const venue = await prisma.venue.findUnique({

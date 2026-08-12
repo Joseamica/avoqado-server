@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express'
-import { v4 as uuidv4 } from 'uuid'
 import logger from '../config/logger' // Ajusta la ruta si es necesario
+import { runWithContext } from '../observability/executionContext'
+import { CORRELATION_HEADER, resolveCorrelationId } from '../observability/correlationId'
+import { normalizeEntrypoint } from '../observability/entrypoint'
 
 /**
  * Middleware para registrar todos los requests en el logger.
@@ -12,79 +14,86 @@ import logger from '../config/logger' // Ajusta la ruta si es necesario
  * un mensaje de advertencia en el logger.
  */
 export const requestLoggerMiddleware = (req: Request, res: Response, next: NextFunction) => {
-  const correlationId = req.headers['x-correlation-id'] || uuidv4()
-  req.correlationId = correlationId as string
+  // A client-supplied id is reused only when it is safe to (see correlationId.ts): it ends
+  // up in log fields, and Express hands back an array when a header arrives twice.
+  const correlationId = resolveCorrelationId(req.headers[CORRELATION_HEADER])
+  req.correlationId = correlationId
   res.setHeader('X-Correlation-ID', correlationId)
 
-  const start = process.hrtime()
-  const { method, url, ip } = req
+  // Everything below runs INSIDE the execution context, including the res listeners
+  // registered here. Wrapping only next() would leave the request-completion log — the one
+  // line people actually search — without a tenant.
+  runWithContext({ correlationId, source: 'http', entrypoint: normalizeEntrypoint(req.method, req.url) }, () => {
+    const start = process.hrtime()
+    const { method, url, ip } = req
 
-  // Skip logging health checks and heartbeats to reduce log noise (in all environments)
-  const isHealthCheck = url === '/health'
-  const isHeartbeat = url.includes('/heartbeat') || url.includes('/tpv/heartbeat')
-  const shouldSkipLogging = isHealthCheck || isHeartbeat
+    // Skip logging health checks and heartbeats to reduce log noise (in all environments)
+    const isHealthCheck = url === '/health'
+    const isHeartbeat = url.includes('/heartbeat') || url.includes('/tpv/heartbeat')
+    const shouldSkipLogging = isHealthCheck || isHeartbeat
 
-  const shouldLogStart = !shouldSkipLogging && process.env.NODE_ENV !== 'development'
+    const shouldLogStart = !shouldSkipLogging && process.env.NODE_ENV !== 'development'
 
-  if (shouldLogStart) {
-    logger.info(`Request Start: ${method} ${url}`, {
-      correlationId,
-      method,
-      url,
-      ip,
-      userAgent: req.headers['user-agent'],
-    })
-  }
-
-  res.on('finish', () => {
-    const diff = process.hrtime(start)
-    const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3) // milliseconds
-    const { statusCode } = res
-
-    const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
-
-    if (!shouldSkipLogging) {
-      // Enrich logs with auth context (available after auth middleware runs)
-      const authContext = (req as any).authContext
-      const authFields: Record<string, any> = {}
-      if (authContext) {
-        authFields.userId = authContext.userId
-        authFields.venueId = authContext.venueId
-        authFields.role = authContext.role
-        if (authContext.terminalSerialNumber) {
-          authFields.terminal = authContext.terminalSerialNumber
-        }
-      }
-
-      logger.log(level, `Request End: ${method} ${url} - ${statusCode} [${duration}ms]`, {
+    if (shouldLogStart) {
+      logger.info(`Request Start: ${method} ${url}`, {
         correlationId,
         method,
         url,
-        statusCode,
-        durationMs: parseFloat(duration),
-        ip,
-        ...authFields,
-      })
-    }
-  })
-
-  res.on('close', () => {
-    // Este evento se dispara si la conexión se cierra prematuramente (cliente se desconecta)
-    // 'finish' podría no dispararse en este caso.
-    if (!res.writableEnded && !shouldSkipLogging) {
-      // writableEnded es true si finish se disparó
-      const diff = process.hrtime(start)
-      const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3)
-      logger.warn(`Request Closed Prematurely: ${method} ${url} [after ${duration}ms]`, {
-        correlationId,
-        method,
-        url,
-        durationMs: parseFloat(duration),
         ip,
         userAgent: req.headers['user-agent'],
       })
     }
-  })
 
-  next()
+    res.on('finish', () => {
+      const diff = process.hrtime(start)
+      const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3) // milliseconds
+      const { statusCode } = res
+
+      const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
+
+      if (!shouldSkipLogging) {
+        // Enrich logs with auth context (available after auth middleware runs)
+        const authContext = (req as any).authContext
+        const authFields: Record<string, any> = {}
+        if (authContext) {
+          authFields.userId = authContext.userId
+          authFields.venueId = authContext.venueId
+          authFields.role = authContext.role
+          if (authContext.terminalSerialNumber) {
+            authFields.terminal = authContext.terminalSerialNumber
+          }
+        }
+
+        logger.log(level, `Request End: ${method} ${url} - ${statusCode} [${duration}ms]`, {
+          correlationId,
+          method,
+          url,
+          statusCode,
+          durationMs: parseFloat(duration),
+          ip,
+          ...authFields,
+        })
+      }
+    })
+
+    res.on('close', () => {
+      // Este evento se dispara si la conexión se cierra prematuramente (cliente se desconecta)
+      // 'finish' podría no dispararse en este caso.
+      if (!res.writableEnded && !shouldSkipLogging) {
+        // writableEnded es true si finish se disparó
+        const diff = process.hrtime(start)
+        const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3)
+        logger.warn(`Request Closed Prematurely: ${method} ${url} [after ${duration}ms]`, {
+          correlationId,
+          method,
+          url,
+          durationMs: parseFloat(duration),
+          ip,
+          userAgent: req.headers['user-agent'],
+        })
+      }
+    })
+
+    next()
+  })
 }

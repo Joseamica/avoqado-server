@@ -107,8 +107,11 @@ export async function getStockOverview(venueId: string, page: number, pageSize: 
     // El administrador veía "Hamburguesa de Pollo: 0" mientras el mesero la
     // vendía con "Disponible: 33". Dos pantallas de la misma app, dos
     // verdades distintas. (Encontrado en una D3, 2026-07-28.)
-    const { availableQuantity, limitingIngredient } = computeInventoryAvailability(p)
-    const currentStock = availableQuantity ?? (inv ? Number(inv.currentStock) : 0)
+    const { availableQuantity, availableQuantityExact, limitingIngredient } = computeInventoryAvailability(p)
+    // El exacto primero: en un producto por peso `availableQuantity` viene
+    // truncado a entero por compatibilidad, y la pantalla de Inventario es
+    // justo donde el dueño necesita ver los 8.065 kg, no "8".
+    const currentStock = availableQuantityExact ?? availableQuantity ?? (inv ? Number(inv.currentStock) : 0)
     return {
       id: p.id,
       name: p.name,

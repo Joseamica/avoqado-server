@@ -22,7 +22,7 @@ services:
     autoDeploy: false
     branch: develop
     buildCommand: >-
-      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npx prisma migrate deploy
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npm run migrate:deploy:bounded
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -69,6 +69,14 @@ services:
   # ============================================
   # PRODUCTION - Live service (main branch)
   # ============================================
+  #
+  # 🔴 UNA SOLA INSTANCIA A PROPÓSITO. Para aguantar más carga, SUBE EL PLAN
+  #    (vertical). NO subas el instance count ni prendas autoscaling aquí ni en
+  #    el dashboard de Render sin hacer antes las 4 piezas del checklist:
+  #    sockets sin adapter, crons duplicados (¡jobs de dinero!), rate limiters
+  #    en memoria y challenge store de auth. 3 de las 4 fallan EN SILENCIO.
+  #    → .claude/rules/una-sola-instancia.md
+  #
   - type: web
     name: avoqado-server
     env: node
@@ -77,7 +85,7 @@ services:
     autoDeploy: false
     branch: main
     buildCommand: >-
-      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npx prisma migrate deploy
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npm run migrate:deploy:bounded
     startCommand: npm start
     healthCheckPath: /health
     envVars:

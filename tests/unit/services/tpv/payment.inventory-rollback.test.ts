@@ -21,6 +21,14 @@ jest.mock('@/services/venueSalesGuard', () => ({
   assertVenueSalesEnabled: jest.fn(),
 }))
 
+const lockAreaTicketCheckoutMock = jest.fn()
+const finalizeAreaTicketPaymentMock = jest.fn()
+
+jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  lockAreaTicketCheckoutForPayment: (...args: unknown[]) => lockAreaTicketCheckoutMock(...args),
+  finalizeAreaTicketPaymentInTransaction: (...args: unknown[]) => finalizeAreaTicketPaymentMock(...args),
+}))
+
 import prisma from '@/utils/prismaClient'
 import * as paymentService from '@/services/tpv/payment.tpv.service'
 import * as productInventoryService from '@/services/dashboard/productInventoryIntegration.service'
@@ -32,13 +40,17 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     order: { findUnique: jest.fn(), update: jest.fn() },
-    payment: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn() },
+    payment: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn() },
     venueTransaction: { create: jest.fn() },
     shift: { findFirst: jest.fn(), update: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
     paymentAllocation: { create: jest.fn() },
     review: { create: jest.fn() },
     serializedItem: { updateMany: jest.fn() },
+    areaTicketInventoryReservation: { findMany: jest.fn() },
+    areaTicketCheckoutSession: { findFirst: jest.fn(), updateMany: jest.fn() },
+    areaTicketPaymentAttempt: { findFirst: jest.fn(), updateMany: jest.fn() },
+    rawMaterial: { findUnique: jest.fn() },
     orderCustomer: { findMany: jest.fn() },
     $transaction: jest.fn(),
   },
@@ -61,6 +73,10 @@ jest.mock('@/services/dashboard/inventoryRestock.service', () => ({
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({
   logAction: jest.fn(),
+}))
+
+jest.mock('@/services/referrals/referralQualification.service', () => ({
+  onOrderPaid: jest.fn().mockResolvedValue(undefined),
 }))
 
 jest.mock('@/services/tpv/digitalReceipt.tpv.service', () => ({
@@ -138,6 +154,11 @@ beforeEach(() => {
   ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
   ;(prisma.serializedItem.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
   ;(prisma.orderCustomer.findMany as jest.Mock).mockResolvedValue([])
+  ;(prisma.areaTicketInventoryReservation.findMany as jest.Mock).mockResolvedValue([])
+  ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue(null)
+  ;(prisma.areaTicketPaymentAttempt.findFirst as jest.Mock).mockResolvedValue(null)
+  lockAreaTicketCheckoutMock.mockResolvedValue(null)
+  finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: false })
   ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) => {
     const tx = {
       payment: { create: prisma.payment.create },
@@ -150,8 +171,15 @@ beforeEach(() => {
       // y no esté aquí sale undefined y el test truena con un TypeError en lugar
       // de su aserción real. findFirst devuelve null = "esta orden no es de area
       // tickets", que es el camino que estos tests ejercitan.
-      areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },
-      areaTicketPaymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
+      areaTicketCheckoutSession: {
+        findFirst: prisma.areaTicketCheckoutSession.findFirst,
+        updateMany: prisma.areaTicketCheckoutSession.updateMany,
+      },
+      areaTicketPaymentAttempt: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: prisma.areaTicketPaymentAttempt.findFirst,
+        updateMany: prisma.areaTicketPaymentAttempt.updateMany,
+      },
       $queryRaw: jest.fn().mockResolvedValue([]),
     }
     return callback(tx)
@@ -165,6 +193,75 @@ beforeEach(() => {
 })
 
 describe('recordOrderPayment — rollback compensatorio de inventario', () => {
+  it('en una orden mixta descuenta sólo líneas sin reserva, incluyendo vales NONE y peso efectivo', async () => {
+    const order = makeOrder([
+      { ...makeItem('item-held', 'prod-held', 1), areaTicketLineId: 'line-held', weightQuantity: new Decimal('0.125') },
+      { ...makeItem('item-normal', 'prod-normal', 2), areaTicketLineId: null, weightQuantity: null },
+      {
+        ...makeItem('item-ticket-none', 'prod-ticket-none', 1),
+        areaTicketLineId: 'line-without-reservation',
+        weightQuantity: new Decimal('0.375'),
+      },
+    ])
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue(order)
+    ;(prisma.areaTicketInventoryReservation.findMany as jest.Mock).mockResolvedValue([{ areaTicketLineId: 'line-held' }])
+    ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
+
+    await paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'mixed-area-payment' } as any, 'user-1')
+
+    expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalledTimes(2)
+    expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalledWith(VENUE_ID, 'prod-normal', 2, ORDER_ID, 'staff-1', [])
+    expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalledWith(
+      VENUE_ID,
+      'prod-ticket-none',
+      0.375,
+      ORDER_ID,
+      'staff-1',
+      [],
+    )
+    expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalledWith(
+      VENUE_ID,
+      'prod-held',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    )
+  })
+
+  it('rechaza el pago si un modificador inventariable no tiene stock aunque el producto base no rastree inventario', async () => {
+    const modifier = {
+      quantity: 1,
+      modifier: {
+        id: 'modifier-cheese',
+        name: 'Queso extra',
+        groupId: 'group-1',
+        rawMaterialId: 'raw-cheese',
+        quantityPerUnit: new Decimal('0.200'),
+        unit: 'KILOGRAM',
+        inventoryMode: 'ADDITION',
+      },
+    }
+    const order = makeOrder([{ ...makeItem('item-untracked', 'prod-untracked', 1), modifiers: [modifier] }])
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue({
+      inventoryMethod: null,
+      available: true,
+    })
+    ;(prisma.rawMaterial.findUnique as jest.Mock).mockResolvedValue({
+      id: 'raw-cheese',
+      name: 'Queso',
+      currentStock: new Decimal('0.100'),
+      unit: 'KILOGRAM',
+    })
+
+    await expect(paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, paymentData as any, 'user-1')).rejects.toThrow(
+      /insufficient inventory/i,
+    )
+    expect(prisma.payment.create).not.toHaveBeenCalled()
+  })
+
   it('al fallar la deducción de un item, restaura el stock de los items YA deducidos antes de regresar la orden a PENDING', async () => {
     const order = makeOrder([makeItem('item-1', 'prod-1', 2), makeItem('item-2', 'prod-2', 3)])
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
@@ -226,5 +323,158 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
     // No hubo rollback a PENDING
     const rollbackCalls = (prisma.order.update as jest.Mock).mock.calls.filter((c: any[]) => c[0]?.data?.status === 'PENDING')
     expect(rollbackCalls).toHaveLength(0)
+  })
+})
+
+describe('recordOrderPayment — consistencia post-captura de vales por área', () => {
+  function areaOrder() {
+    return {
+      ...makeOrder([
+        { ...makeItem('item-held', 'prod-held', 1), areaTicketLineId: 'line-held' },
+        { ...makeItem('item-normal', 'prod-normal', 1), areaTicketLineId: null },
+      ]),
+      serviceChargeAmount: new Decimal(0),
+    }
+  }
+
+  it('conserva el Payment capturado y congela el mismo intento si la finalización atómica falla', async () => {
+    const order = areaOrder()
+    ;(prisma.order.findUnique as jest.Mock).mockImplementation(async (args: any) => {
+      if (args.select?.paymentStatus) return { paymentStatus: 'PAID' }
+      return order
+    })
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, paymentStatus: 'PAID', status: 'COMPLETED' })
+    ;(prisma.areaTicketInventoryReservation.findMany as jest.Mock).mockResolvedValue([
+      {
+        areaTicketLineId: 'line-held',
+      },
+    ])
+    lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+    finalizeAreaTicketPaymentMock.mockRejectedValue(new Error('reserved capacity changed'))
+    ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
+
+    const result = await paymentService.recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData, idempotencyKey: 'area-capture-1' } as any,
+      'user-1',
+    )
+
+    expect(result).toMatchObject({ id: 'payment-1', areaTicketCheckoutState: 'RECONCILIATION_REQUIRED' })
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+    expect(prisma.order.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'PENDING' }) }))
+    expect(prisma.areaTicketPaymentAttempt.updateMany).toHaveBeenCalledWith({
+      where: { id: 'attempt-1', checkoutSessionId: 'session-1' },
+      data: expect.objectContaining({
+        status: 'UNKNOWN',
+        paymentId: 'payment-1',
+      }),
+    })
+    expect(prisma.areaTicketCheckoutSession.updateMany).toHaveBeenCalledWith({
+      where: { id: 'session-1', venueId: VENUE_ID },
+      data: expect.objectContaining({
+        status: 'RECONCILIATION_REQUIRED',
+        activePaymentAttemptId: 'attempt-1',
+      }),
+    })
+  })
+
+  it('reanuda el mismo intento por idempotencyKey sin crear un segundo cobro', async () => {
+    const existingPayment = {
+      id: 'payment-captured',
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      amount: new Decimal(100),
+      tipAmount: new Decimal(0),
+      status: 'COMPLETED',
+      receipts: [],
+    }
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(existingPayment)
+    ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
+      id: 'session-1',
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      status: 'RECONCILIATION_REQUIRED',
+      activePaymentAttemptId: 'attempt-1',
+    })
+    ;(prisma.areaTicketPaymentAttempt.findFirst as jest.Mock).mockResolvedValue({
+      id: 'attempt-1',
+      checkoutSessionId: 'session-1',
+      orderId: ORDER_ID,
+      idempotencyKey: 'area-capture-retry',
+      paymentId: 'payment-captured',
+      status: 'UNKNOWN',
+    })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({
+      areaTicketOrder: true,
+      sessionId: 'session-1',
+      fullyPaid: true,
+    })
+
+    const result = await paymentService.recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData, idempotencyKey: 'area-capture-retry' } as any,
+      'user-1',
+    )
+
+    expect(result).toMatchObject({ id: 'payment-captured', areaTicketCheckoutState: 'PAID' })
+    expect(prisma.payment.create).not.toHaveBeenCalled()
+    expect(lockAreaTicketCheckoutMock).not.toHaveBeenCalled()
+    expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        venueId: VENUE_ID,
+        orderId: ORDER_ID,
+        paymentId: 'payment-captured',
+        locked: { sessionId: 'session-1', attemptId: 'attempt-1' },
+      }),
+    )
+  })
+
+  it('un reintento PROCESSING no concilia ni finaliza el vale antes de que el dinero esté capturado', async () => {
+    const processingPayment = {
+      id: 'payment-processing',
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      amount: new Decimal(100),
+      tipAmount: new Decimal(0),
+      status: 'PROCESSING',
+      receipts: [],
+    }
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(processingPayment)
+    ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
+      id: 'session-1',
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      status: 'PAYMENT_PENDING',
+      activePaymentAttemptId: 'attempt-1',
+    })
+    ;(prisma.areaTicketPaymentAttempt.findFirst as jest.Mock).mockResolvedValue({
+      id: 'attempt-1',
+      checkoutSessionId: 'session-1',
+      orderId: ORDER_ID,
+      idempotencyKey: 'area-processing-retry',
+      paymentId: null,
+      status: 'PREPARED',
+    })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({
+      areaTicketOrder: true,
+      sessionId: 'session-1',
+      fullyPaid: false,
+    })
+
+    const result = await paymentService.recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData, status: 'PROCESSING', idempotencyKey: 'area-processing-retry' } as any,
+      'user-1',
+    )
+
+    expect(result).toMatchObject({ id: 'payment-processing', status: 'PROCESSING' })
+    expect(prisma.areaTicketCheckoutSession.findFirst).not.toHaveBeenCalled()
+    expect(prisma.areaTicketPaymentAttempt.findFirst).not.toHaveBeenCalled()
+    expect(finalizeAreaTicketPaymentMock).not.toHaveBeenCalled()
   })
 })

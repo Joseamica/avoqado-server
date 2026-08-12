@@ -247,27 +247,20 @@ const nonInventoriableMessage = {
   path: ['trackInventory'],
 }
 
-// APPOINTMENTS_SERVICE products need duration to compute slot windows. Until
-// April 2026 the dashboard form let admins save without it, producing legacy
-// rows with duration=null that crash the booking widget at submit time. New
-// products created via this CREATE path now MUST include a positive duration.
-// UpdateProductSchema intentionally skips this refine so a partial PATCH for
-// non-duration fields (e.g. just renaming a service) on a legacy broken row
-// still works — the dashboard form is the layer that forces a fix at edit time.
-const appointmentDurationRefine = <T extends { type?: string; duration?: number | null }>(data: T) => {
-  if (data.type !== 'APPOINTMENTS_SERVICE') return true
-  return typeof data.duration === 'number' && data.duration >= 5
-}
-const appointmentDurationMessage = {
-  message: 'La duración es obligatoria para citas (mínimo 5 minutos). Sin ella el widget no puede ofrecer horarios.',
-  path: ['duration'],
-}
-
+// La duración de un APPOINTMENTS_SERVICE es OPCIONAL a propósito (decisión de
+// producto, founder 2026-08-09): hay locales que no quieren fijar tiempos por
+// servicio, y obligarlos les impedía dar de alta el servicio.
+//
+// Es seguro porque el motor de reservas ya resuelve el caso sin duración propia:
+// `resolveAppointmentWindow` y `sumServiceDurations` caen al `defaultDurationMin`
+// del venue y NUNCA aportan cero minutos (ese cero fue el incidente RES-PY45XU de
+// Amaena, 2026-07-20, ya corregido). El rango 1..1440 se sigue validando en
+// `ProductBodyBase` cuando el usuario SÍ escribe un valor.
+//
+// Y no es silencioso: la lista de servicios del dashboard marca
+// "Usa la duración predeterminada del local" en los que no tienen una propia.
 export const CreateProductSchema = z.object({
-  body: ProductBodyBase.refine(nonInventoriableRefine, nonInventoriableMessage).refine(
-    appointmentDurationRefine,
-    appointmentDurationMessage,
-  ),
+  body: ProductBodyBase.refine(nonInventoriableRefine, nonInventoriableMessage),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
@@ -681,6 +674,12 @@ export const ImportMenuSchema = z.object({
                 'DONATION',
               ])
               .default('FOOD'), // Keep FOOD default for backwards compatibility
+            // Minutos del servicio con cita. OPCIONAL a propósito (decisión de
+            // producto): hay locales que no fijan tiempos y el motor de reservas
+            // cae al `defaultDurationMin` del venue. Sin esta línea Zod hacía
+            // strip del campo y NINGÚN import podía cargar duraciones — así
+            // nacieron las filas con duration=null del incidente RES-PY45XU.
+            duration: z.number().int().min(1).max(1440).optional().nullable(),
             tags: z.array(z.string()).optional(),
             allergens: z.array(z.string()).optional(),
             trackInventory: z.boolean().optional(),

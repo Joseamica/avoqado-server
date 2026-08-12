@@ -19,7 +19,7 @@
  * isolated venue per scenario.
  */
 
-import { Unit, BatchStatus, RawMaterialMovementType } from '@prisma/client'
+import { Unit, RawMaterialMovementType } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '@/utils/prismaClient'
 import { createStockBatch, deductStockFIFO } from '@/services/dashboard/fifoBatch.service'
@@ -503,9 +503,10 @@ describe('Inventory System — Destructive E2E', () => {
       await recalculateRecipeCost(recipeBefore!.id)
 
       const recipeAfter = await prisma.recipe.findUnique({ where: { productId: product.id }, include: { lines: true } })
-      // 500g × $10 = $5000 total, /8 = $625 per serving
+      // WHY: Recipe.totalCost and RecipeLine.costPerServing are both durable
+      // per-portion values: 500g × $10 / 8 portions = $625.0000.
       expect(Number(recipeAfter!.lines[0].costPerServing)).toBeCloseTo(625, 2)
-      expect(Number(recipeAfter!.totalCost)).toBeCloseTo(5000, 2)
+      expect(recipeAfter!.totalCost.toFixed(4)).toBe('625.0000')
     })
   })
 

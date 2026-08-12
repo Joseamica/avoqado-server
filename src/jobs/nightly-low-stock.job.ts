@@ -18,6 +18,7 @@ import { FRONTEND_URL, BASE_URL } from '../config/env'
 import { signUnsubscribeToken } from '../utils/unsubscribeToken'
 import { runAutoReorderForVenue, parseAutoReorderConfig } from '../services/dashboard/autoReorder.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { scheduleJob } from '../observability/jobContext'
 
 // ============================================================
 // Types
@@ -51,7 +52,8 @@ export class NightlyLowStockJob {
 
   constructor() {
     // Run daily at 10:33 PM Mexico City time (offset from */5 cron jobs to avoid Resend rate limits)
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'nightly-low-stock',
       '33 22 * * *',
       async () => {
         await this.sendLowStockDigests()

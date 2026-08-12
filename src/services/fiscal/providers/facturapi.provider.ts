@@ -12,13 +12,14 @@ import {
   PaymentComplementParams,
   PayrollReceiptParams,
   ProviderInvoiceSummary,
-  ReceptorInput,
-  ReceptorValidationResult,
+  SatValidationField,
+  SatValidationResult,
   SearchInvoicesParams,
   StampedInvoice,
   UpdateOrgLegalParams,
   UploadCsdParams,
   UploadCsdResult,
+  UpsertCustomerParams,
 } from './fiscal-provider.interface'
 
 const toPesos = (cents: number): number => Math.round(cents) / 100
@@ -70,21 +71,78 @@ export class FacturapiProvider implements FiscalProvider {
     return { csdExpiresAt: expiresAt ? new Date(expiresAt) : null }
   }
 
-  async validateReceptor(params: ReceptorInput): Promise<ReceptorValidationResult> {
-    const reasons: string[] = []
-    if (!/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i.test(params.rfc)) reasons.push('El RFC no tiene un formato válido.')
-    if (!/^\d{5}$/.test(params.codigoPostal)) reasons.push('El código postal debe tener 5 dígitos.')
-    if (!params.razonSocial?.trim()) reasons.push('La razón social es obligatoria.')
-    if (!params.regimenFiscal?.trim()) reasons.push('El régimen fiscal es obligatorio.')
-    // Format-level validation only here; the SDK will reject at createInvoice() time if SAT
-    // rejects the receptor data (e.g. RFC not found in registry, mismatched regimenFiscal).
-    return { valid: reasons.length === 0, reasons }
+  /**
+   * Normaliza el nombre del receptor justo antes de mandarlo al PAC — la última red antes
+   * del SAT. El padrón del SAT guarda las razones sociales en MAYÚSCULAS; un nombre bien
+   * escrito pero en minúsculas o con espacios de más puede rechazarse con "El campo Nombre
+   * del receptor debe pertenecer al nombre asociado al RFC" aunque el texto sea correcto.
+   *
+   * Sólo trim + colapso de espacios + MAYÚSCULAS. 🔴 NO quita el régimen de capital
+   * ("SA DE CV", "S DE RL") — el SAT lo prefiere fuera, pero hay contribuyentes registrados
+   * CON él en el padrón, así que quitarlo automáticamente rompería a esos.
+   */
+  private static normalizeReceptorName(nombre: string): string {
+    return nombre.trim().replace(/\s+/g, ' ').toUpperCase()
+  }
+
+  /**
+   * Mapea el `path` que devuelve Facturapi al campo del formulario. Los paths siguen la
+   * forma del payload de Customer (`legal_name`, `tax_id`, `tax_system`, `address.zip`),
+   * no los nombres del CFDI.
+   */
+  private static mapValidationPath(path: string): SatValidationField {
+    if (path.startsWith('legal_name')) return 'razonSocial'
+    if (path.startsWith('tax_id')) return 'rfc'
+    if (path.startsWith('tax_system')) return 'regimenFiscal'
+    if (path.startsWith('address')) return 'codigoPostal'
+    if (path.startsWith('email')) return 'email'
+    return 'otro'
+  }
+
+  async upsertCustomer(params: UpsertCustomerParams): Promise<string> {
+    const payload = {
+      // Normalizado: este mismo Customer es el que luego valida `validateCustomerTaxInfo()` contra
+      // el padrón del SAT, y ese padrón guarda las razones sociales en MAYÚSCULAS — sin esto la
+      // validación podía rechazar un nombre correcto solo por venir en minúsculas/espacios de más,
+      // mientras el timbrado (que sí normaliza) hubiera pasado igual con el mismo dato.
+      legal_name: FacturapiProvider.normalizeReceptorName(params.razonSocial),
+      tax_id: params.rfc,
+      tax_system: params.regimenFiscal,
+      address: { zip: params.codigoPostal },
+      ...(params.email ? { email: params.email } : {}),
+    }
+
+    if (params.existingCustomerId) {
+      try {
+        const updated = await this.client.customers.update(params.existingCustomerId, payload)
+        return updated.id
+      } catch (err) {
+        // El Customer guardado pudo borrarse en Facturapi (o venir de otra organización).
+        // Cualquier fallo al actualizar se resuelve creando uno nuevo; el id se re-persiste.
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!/404|not found/i.test(msg)) throw err
+      }
+    }
+
+    const created = await this.client.customers.create(payload)
+    return created.id
+  }
+
+  async validateCustomerTaxInfo(customerId: string): Promise<SatValidationResult> {
+    const res = await this.client.customers.validateTaxInfo(customerId)
+    return {
+      valid: Boolean(res.is_valid),
+      errors: (res.errors ?? []).map(e => ({
+        field: FacturapiProvider.mapValidationPath(e.path ?? ''),
+        message: e.message,
+      })),
+    }
   }
 
   async createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice> {
     const payload = {
       customer: {
-        legal_name: params.receptor.razonSocial,
+        legal_name: FacturapiProvider.normalizeReceptorName(params.receptor.razonSocial),
         tax_id: params.receptor.rfc,
         tax_system: params.receptor.regimenFiscal,
         address: { zip: params.receptor.codigoPostal },
@@ -227,7 +285,7 @@ export class FacturapiProvider implements FiscalProvider {
     const payload: any = {
       type: 'P', // CFDI tipo Pago (receptor uso CP01 — facturapi lo fija para type P)
       customer: {
-        legal_name: params.receptor.razonSocial,
+        legal_name: FacturapiProvider.normalizeReceptorName(params.receptor.razonSocial),
         tax_id: params.receptor.rfc,
         tax_system: params.receptor.regimenFiscal,
         address: { zip: params.receptor.codigoPostal },

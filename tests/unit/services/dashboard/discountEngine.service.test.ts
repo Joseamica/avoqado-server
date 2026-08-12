@@ -624,6 +624,63 @@ describe('Discount Engine Service', () => {
       await expect(evaluateAutomaticDiscounts('nonexistent')).rejects.toThrow(NotFoundError)
     })
 
+    /**
+     * Regression — reproduced on hardware (NEXGO, 2026-08-06): applying ANY catalog
+     * discount from the TPV picker always failed with "This discount cannot be
+     * applied to this order".
+     *
+     * `applyPredefinedDiscount` calls this function to price the discount the WAITER
+     * picked by hand. Without `forceDiscountId` the engine only returned discounts
+     * flagged `isAutomatic`, so a hand-picked one was never in the list and the
+     * caller always rejected. Nothing covered `applyPredefinedDiscount`, which is
+     * why it survived.
+     */
+    it('prices a hand-picked NON-automatic discount only when it is forced', async () => {
+      const mockOrder = {
+        id: 'order-123',
+        venueId: 'venue-123',
+        customerId: null,
+        subtotal: new Decimal(100),
+        items: [],
+        orderDiscounts: [],
+      }
+      const handPicked = createMockDbDiscount({ id: 'manual-1', isAutomatic: false })
+
+      prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.discount.findMany.mockResolvedValue([handPicked])
+
+      // Without forcing: invisible — this is the bug the TPV hit on every attempt.
+      const notForced = await evaluateAutomaticDiscounts('order-123')
+      expect(notForced).toHaveLength(0)
+
+      prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.discount.findMany.mockResolvedValue([handPicked])
+
+      // Forced: priced normally.
+      const forced = await evaluateAutomaticDiscounts('order-123', 'manual-1')
+      expect(forced).toHaveLength(1)
+      expect(forced[0].discountId).toBe('manual-1')
+    })
+
+    it('forcing an id that is NOT eligible still yields nothing', async () => {
+      const mockOrder = {
+        id: 'order-123',
+        venueId: 'venue-123',
+        customerId: null,
+        subtotal: new Decimal(100),
+        items: [],
+        orderDiscounts: [],
+      }
+
+      prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.discount.findMany.mockResolvedValue([]) // eligibility filtered it out
+
+      const result = await evaluateAutomaticDiscounts('order-123', 'does-not-qualify')
+
+      // forceDiscountId lifts ONLY the isAutomatic filter — it is not a bypass.
+      expect(result).toHaveLength(0)
+    })
+
     it('should skip already applied discounts', async () => {
       const mockOrder = {
         id: 'order-123',
@@ -839,6 +896,51 @@ describe('Discount Engine Service', () => {
           data: { currentUses: { decrement: 1 } },
         }),
       )
+    })
+
+    /**
+     * 🔴 MONEY regression — reproduced on hardware (NEXGO, 2026-08-06).
+     *
+     * The old formula was `subtotal - discount + tax + tip`, silently dropping
+     * `serviceChargeAmount`. Removing a discount from a check that ALSO carried a
+     * service charge wiped the charge from the stored total and the customer
+     * underpaid. Live repro: expected $35 -> $55, landed at $35.
+     *
+     * The pre-existing test above never caught it because its mock order has no
+     * `serviceChargeAmount` field at all — the bug only shows when one is present.
+     */
+    it('keeps the service charge in the total when a discount is removed', async () => {
+      const mockOrderDiscount = {
+        id: 'od-1',
+        orderId: 'order-123',
+        discountId: null,
+        amount: new Decimal(20),
+        taxReduction: new Decimal(0),
+        name: 'Descuento',
+      }
+      const mockOrder = {
+        id: 'order-123',
+        subtotal: new Decimal(35),
+        taxAmount: new Decimal(0),
+        discountAmount: new Decimal(20),
+        serviceChargeAmount: new Decimal(20), // <- the field the old formula ignored
+        tipAmount: new Decimal(0),
+        total: new Decimal(35),
+        paidAmount: new Decimal(0),
+      }
+
+      prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
+      prismaMock.orderDiscount.findFirst.mockResolvedValue(mockOrderDiscount)
+      prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.orderDiscount.delete.mockResolvedValue(mockOrderDiscount)
+      prismaMock.order.update.mockResolvedValue(mockOrder)
+
+      const result = await removeDiscountFromOrder('order-123', 'od-1')
+
+      expect(result.success).toBe(true)
+      // subtotal 35 - discount 0 + tax 0 + serviceCharge 20 + tip 0 = 55
+      expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ total: 55 }) }))
+      expect(result.newOrderTotal).toBe(55)
     })
 
     it('should return error for non-existent discount', async () => {

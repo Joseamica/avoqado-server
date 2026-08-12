@@ -6,6 +6,7 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { STRIPE_WEBHOOK_MAX_RETRIES, replayStripeWebhookEvent } from '../services/stripe.webhook.service'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Stripe PLATFORM webhook reconciliation job
@@ -70,7 +71,7 @@ export class StripeWebhookReconciliationJob {
   private readonly MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('stripe-webhook-reconciliation', this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {

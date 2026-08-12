@@ -6,6 +6,13 @@ import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
+import type { CatalogActor } from '../../types/master-catalog'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  assertLegacyProductReferencesForVenue,
+  assertLegacyCatalogProductUpdateGovernance,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../master-catalog/catalogGovernance.service'
 
 export interface CreateProductDto {
   name: string
@@ -354,30 +361,57 @@ function computeRecipeShortage(recipe: any): {
  */
 // Exported: el POS móvil (product.mobile.controller) reutiliza EXACTAMENTE este
 // cálculo para que iOS/Android expliquen QUÉ falta igual que el TPV/dashboard.
+/**
+ * Gramo entero: la báscula y `AreaTicketLine.weightKg` trabajan a 3 decimales,
+ * así que redondear ahí evita que un binario como 8.064999… se arrastre a la UI.
+ */
+function roundKilos(kg: number): number {
+  return Math.round(kg * 1000) / 1000
+}
+
 export function computeInventoryAvailability(product: any): {
   availableQuantity: number | null
+  /**
+   * Existencia sin truncar. Campo NUEVO y opcional: `availableQuantity` no puede
+   * dejar de ser entero sin romper las apps ya instaladas, así que el decimal
+   * viaja aparte y sólo lo lee quien lo entiende.
+   */
+  availableQuantityExact: number | null
   limitingIngredient: IngredientShortage | null
   insufficientIngredients: IngredientShortage[] | null
 } {
   if (!product.trackInventory) {
-    return { availableQuantity: null, limitingIngredient: null, insufficientIngredients: null }
+    return { availableQuantity: null, availableQuantityExact: null, limitingIngredient: null, insufficientIngredients: null }
   }
   if (product.inventoryMethod === 'QUANTITY') {
+    const currentStock = Number(product.inventory?.currentStock ?? 0)
+    const floored = Math.floor(currentStock)
+    // `availableQuantity` SIGUE SIENDO ENTERO a propósito: las apps instaladas
+    // lo deserializan como Int y un 8.065 las rompería. Lo único que cambia es
+    // que una existencia positiva jamás se reporta como 0 — 0.435 kg de jamón
+    // se veía "agotado" con casi medio kilo en el mostrador.
     return {
-      availableQuantity: Math.floor(Number(product.inventory?.currentStock ?? 0)),
+      availableQuantity: product.soldByWeight && currentStock > 0 ? Math.max(floored, 1) : floored,
+      // El valor real, para quien sepa leerlo. Por peso el decimal ES el
+      // inventario: 8.065 kg no es "8".
+      availableQuantityExact: product.soldByWeight ? roundKilos(currentStock) : floored,
       limitingIngredient: null,
       insufficientIngredients: null,
     }
   }
   if (product.inventoryMethod === 'RECIPE' && product.recipe) {
     const shortage = computeRecipeShortage(product.recipe)
+    const portions = calculateAvailablePortions(product.recipe)
     return {
-      availableQuantity: calculateAvailablePortions(product.recipe),
+      availableQuantity: portions,
+      // Las porciones ya son enteras; se expone igual para que el cliente no
+      // tenga que preguntarse por qué a veces falta el campo.
+      availableQuantityExact: portions,
       limitingIngredient: shortage.limitingIngredient,
       insufficientIngredients: shortage.insufficientIngredients,
     }
   }
-  return { availableQuantity: null, limitingIngredient: null, insufficientIngredients: null }
+  return { availableQuantity: null, availableQuantityExact: null, limitingIngredient: null, insufficientIngredients: null }
 }
 
 /**
@@ -524,7 +558,7 @@ export async function getProduct(venueId: string, productId: string): Promise<an
 /**
  * Create a new product
  */
-export async function createProduct(venueId: string, productData: CreateProductDto): Promise<Product> {
+export async function createProduct(venueId: string, productData: CreateProductDto, actor: CatalogActor): Promise<Product> {
   // ✅ Validate product data based on type (Square-aligned)
   validateProductByType(productData)
 
@@ -544,6 +578,12 @@ export async function createProduct(venueId: string, productData: CreateProductD
   const createProductInTransaction = async (): Promise<CreatedProductWithRelations> =>
     prisma.$transaction(
       async tx => {
+        await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
+        await assertLegacyProductReferencesForVenue(tx, {
+          venueId,
+          categoryId: productFields.categoryId,
+          printStationId: productFields.printStationId,
+        })
         const maxOrder = await tx.product.findFirst({
           where: { venueId },
           orderBy: { displayOrder: 'desc' },
@@ -552,7 +592,7 @@ export async function createProduct(venueId: string, productData: CreateProductD
 
         const displayOrder = (maxOrder?.displayOrder || 0) + 1
 
-        return tx.product.create({
+        const product = await tx.product.create({
           data: {
             // Basic fields
             name: productFields.name,
@@ -565,6 +605,7 @@ export async function createProduct(venueId: string, productData: CreateProductD
             categoryId: productFields.categoryId,
             printStationId: productFields.printStationId ?? null,
             venueId,
+            createdById: actor.type === 'HUMAN' ? actor.staffId : null,
             displayOrder,
             active: true,
 
@@ -628,6 +669,18 @@ export async function createProduct(venueId: string, productData: CreateProductD
             },
           },
         })
+
+        // WHY: SERVICE callers have no Staff FK, so their durable provenance must
+        // commit atomically with the Product instead of fabricating a HUMAN actor.
+        if (actor.type === 'SERVICE') {
+          await writeLegacyServiceProductCreationAuditForVenue(tx, {
+            venueId,
+            productId: product.id,
+            actor,
+          })
+        }
+
+        return product
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
@@ -719,7 +772,12 @@ export async function createProduct(venueId: string, productData: CreateProductD
 /**
  * Update an existing product
  */
-export async function updateProduct(venueId: string, productId: string, productData: UpdateProductDto): Promise<Product> {
+export async function updateProduct(
+  venueId: string,
+  productId: string,
+  productData: UpdateProductDto,
+  actor: CatalogActor,
+): Promise<Product> {
   // ✅ Validate product data based on type (Square-aligned)
   validateProductByType(productData, true)
 
@@ -788,17 +846,30 @@ export async function updateProduct(venueId: string, productId: string, productD
     }
   }
 
-  const product = await prisma.product.update({
-    where: { id: productId },
-    data: updateData,
-    include: {
-      category: true,
-      modifierGroups: {
-        include: {
-          group: true,
+  const product = await prisma.$transaction(async tx => {
+    await assertLegacyCatalogProductUpdateGovernance(tx, {
+      venueId,
+      productId,
+      requestedActive: productData.active === true,
+      actor,
+    })
+    await assertLegacyProductReferencesForVenue(tx, {
+      venueId,
+      categoryId: productData.categoryId,
+      printStationId: productData.printStationId,
+    })
+    return tx.product.update({
+      where: { id: productId },
+      data: updateData,
+      include: {
+        category: true,
+        modifierGroups: {
+          include: {
+            group: true,
+          },
         },
       },
-    },
+    })
   })
 
   // 🔌 REAL-TIME: Broadcast product update via Socket.IO
@@ -1117,7 +1188,7 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
  * ✅ BARCODE QUICK ADD: When scanning unknown barcode, create product on-the-fly
  * Creates minimal product with barcode as SKU
  */
-export async function createQuickAddProduct(venueId: string, quickAddData: QuickAddProductDto): Promise<Product> {
+export async function createQuickAddProduct(venueId: string, quickAddData: QuickAddProductDto, actor: CatalogActor): Promise<Product> {
   const { barcode, name, price, categoryId, trackInventory } = quickAddData
 
   // ✅ CategoryId is required by the database schema
@@ -1137,42 +1208,43 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
     throw new AppError(`Product with barcode ${barcode} already exists in venue ${venueId}`, 409)
   }
 
-  // Get the next display order
-  const maxOrder = await prisma.product.findFirst({
-    where: { venueId },
-    orderBy: { displayOrder: 'desc' },
-    select: { displayOrder: true },
-  })
-
-  const displayOrder = (maxOrder?.displayOrder || 0) + 1
-
-  // ✅ Create product with barcode as SKU
-  const product = await prisma.product.create({
-    data: {
-      name,
-      sku: barcode, // ✅ Barcode becomes the SKU
-      price,
-      venueId,
-      categoryId, // Validated above, always present
-      type: ProductType.OTHER, // Default type for quick-add
-      trackInventory: trackInventory || false,
-      inventoryMethod: trackInventory ? 'QUANTITY' : null,
-      displayOrder,
-      active: true,
-    },
-    include: {
-      category: true,
-      inventory: true,
-      modifierGroups: {
-        include: {
-          group: {
-            include: {
-              modifiers: { where: { active: true } },
+  const product = await prisma.$transaction(async tx => {
+    await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
+    await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId })
+    const maxOrder = await tx.product.findFirst({
+      where: { venueId },
+      orderBy: { displayOrder: 'desc' },
+      select: { displayOrder: true },
+    })
+    const displayOrder = (maxOrder?.displayOrder || 0) + 1
+    return tx.product.create({
+      data: {
+        name,
+        sku: barcode, // ✅ Barcode becomes the SKU
+        price,
+        venueId,
+        createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+        categoryId, // Validated above, always present
+        type: ProductType.OTHER, // Default type for quick-add
+        trackInventory: trackInventory || false,
+        inventoryMethod: trackInventory ? 'QUANTITY' : null,
+        displayOrder,
+        active: true,
+      },
+      include: {
+        category: true,
+        inventory: true,
+        modifierGroups: {
+          include: {
+            group: {
+              include: {
+                modifiers: { where: { active: true } },
+              },
             },
           },
         },
       },
-    },
+    })
   })
 
   // 🔌 REAL-TIME: Broadcast product creation via Socket.IO

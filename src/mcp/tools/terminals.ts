@@ -26,6 +26,7 @@ export interface TerminalInput {
   status: string
   config: unknown
   configOverrides: unknown
+  customerDisplayInverted: boolean
 }
 
 export interface TerminalConfigReport {
@@ -34,6 +35,8 @@ export interface TerminalConfigReport {
   status: string
   settings: { showCheckout?: boolean; showQuickPayment?: boolean; enableShifts?: boolean }
   flags: string[]
+  // Mostrador invertido: el cliente ve la pantalla grande y el cajero la chica. Por DISPOSITIVO.
+  customerDisplayInverted: boolean
 }
 
 /** Pure: merge config.settings + configOverrides, surface key TPV flags, detect known gaps. */
@@ -54,7 +57,14 @@ export function auditTerminalConfig(t: TerminalInput): TerminalConfigReport {
     flags.push('checkout_on_quickpay_off')
   }
 
-  return { name: t.name, serialNumber: t.serialNumber, status: t.status, settings, flags }
+  return {
+    name: t.name,
+    serialNumber: t.serialNumber,
+    status: t.status,
+    settings,
+    flags,
+    customerDisplayInverted: t.customerDisplayInverted,
+  }
 }
 
 export function registerTerminalTools(server: McpServer, scope: McpScope) {
@@ -75,6 +85,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           status: true,
           config: true,
           configOverrides: true,
+          customerDisplayInverted: true,
           venue: { select: { name: true } },
         },
         orderBy: { name: 'asc' },

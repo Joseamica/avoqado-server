@@ -3,6 +3,7 @@
 import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { markExpiredBatches } from '../services/dashboard/fifoBatch.service'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Job diario que expira lotes FIFO caducados.
@@ -24,7 +25,7 @@ export class BatchExpirationJob {
   private readonly CRON_PATTERN = '17 2 * * *' // Diario 02:17 America/Mexico_City
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.expireBatches.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('batch-expiration', this.CRON_PATTERN, this.expireBatches.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {

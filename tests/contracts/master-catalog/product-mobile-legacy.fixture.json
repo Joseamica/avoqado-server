@@ -1,0 +1,146 @@
+{
+  "surface": "mobile",
+  "contractVersion": "legacy-pre-h1a",
+  "list": {
+    "status": 200,
+    "body": {
+      "success": true,
+      "data": [
+        {
+          "id": "<product-id>",
+          "venueId": "<venue-id>",
+          "name": "Café americano",
+          "description": null,
+          "sku": "LEGACY-001",
+          "gtin": null,
+          "categoryId": "<category-id>",
+          "price": "42.5",
+          "cost": null,
+          "taxRate": "0.16",
+          "type": "FOOD",
+          "imageUrl": null,
+          "displayOrder": 3,
+          "featured": false,
+          "tags": [],
+          "allergens": [],
+          "trackInventory": false,
+          "inventoryMethod": null,
+          "unit": null,
+          "soldByWeight": false,
+          "active": true,
+          "category": {
+            "id": "<category-id>",
+            "venueId": "<venue-id>",
+            "name": "Bebidas",
+            "color": null,
+            "active": true,
+            "displayOrder": 1
+          },
+          "inventory": null,
+          "modifierGroups": [],
+          "recipe": null,
+          "availableQuantity": null,
+          "availableQuantityExact": null,
+          "limitingIngredient": null,
+          "insufficientIngredients": null
+        }
+      ]
+    }
+  },
+  "detail": null,
+  "create": {
+    "status": 201,
+    "body": {
+      "success": true,
+      "data": {
+        "id": "<product-id>",
+        "venueId": "<venue-id>",
+        "name": "Café americano",
+        "description": null,
+        "sku": "LEGACY-001",
+        "gtin": null,
+        "categoryId": "<category-id>",
+        "price": "42.5",
+        "cost": null,
+        "taxRate": "0.16",
+        "type": "FOOD",
+        "imageUrl": null,
+        "displayOrder": 3,
+        "featured": false,
+        "tags": [],
+        "allergens": [],
+        "trackInventory": false,
+        "inventoryMethod": null,
+        "unit": null,
+        "soldByWeight": false,
+        "active": true,
+        "category": {
+          "id": "<category-id>",
+          "venueId": "<venue-id>",
+          "name": "Bebidas",
+          "color": null,
+          "active": true,
+          "displayOrder": 1
+        },
+        "inventory": null,
+        "modifierGroups": [],
+        "recipe": null,
+        "availableQuantity": null,
+        "availableQuantityExact": null,
+        "limitingIngredient": null,
+        "insufficientIngredients": null
+      }
+    }
+  },
+  "update": {
+    "status": 200,
+    "body": {
+      "success": true,
+      "data": {
+        "id": "<product-id>",
+        "venueId": "<venue-id>",
+        "name": "Café americano",
+        "description": null,
+        "sku": "LEGACY-001",
+        "gtin": null,
+        "categoryId": "<category-id>",
+        "price": "42.5",
+        "cost": null,
+        "taxRate": "0.16",
+        "type": "FOOD",
+        "imageUrl": null,
+        "displayOrder": 3,
+        "featured": false,
+        "tags": [],
+        "allergens": [],
+        "trackInventory": false,
+        "inventoryMethod": null,
+        "unit": null,
+        "soldByWeight": false,
+        "active": true,
+        "category": {
+          "id": "<category-id>",
+          "venueId": "<venue-id>",
+          "name": "Bebidas",
+          "color": null,
+          "active": true,
+          "displayOrder": 1
+        },
+        "inventory": null,
+        "modifierGroups": [],
+        "recipe": null,
+        "availableQuantity": null,
+        "availableQuantityExact": null,
+        "limitingIngredient": null,
+        "insufficientIngredients": null
+      }
+    }
+  },
+  "validationError": {
+    "status": 400,
+    "body": {
+      "success": false,
+      "message": "name es requerido"
+    }
+  }
+}

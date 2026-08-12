@@ -7,6 +7,7 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
 import { getRoleDisplayName, DEFAULT_ROLE_DISPLAY_NAMES } from '../dashboard/venueRoleConfig.dashboard.service'
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
+import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 
 const TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30 // 30 days
 
@@ -168,6 +169,19 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
     staffId: staffVenue.staff.id,
     venueId,
     role: staffVenue.role,
+  })
+
+  // Owner-facing access log. The logger above goes to Better Stack and expires; the screen
+  // a manager audits reads ActivityLog. On top of that, terminal sign-in is by PIN and the
+  // device is shared, so the serial number is part of the answer to "who signed in, and
+  // from where?". Fire-and-forget: it can never hold up a sign-in.
+  void logAction({
+    staffId: staffVenue.staff.id,
+    venueId: staffVenue.venueId,
+    action: 'STAFF_LOGIN',
+    entity: 'Staff',
+    entityId: staffVenue.staff.id,
+    data: { source: 'tpv', method: 'pin', terminalSerialNumber: serialNumber, role: staffVenue.role },
   })
 
   // 🎁 Check if loyalty program is active for this venue (Toast/Square pattern)
@@ -367,6 +381,23 @@ export async function staffLogout(accessToken: string) {
     })
   }
 
+  // Owner-facing audit entry. It is written even when the StaffVenue no longer exists (a
+  // staff member removed while their session was still open): the identity comes from the
+  // token ALREADY verified above, so the row is attributable — and that case is precisely
+  // the one an auditor wants to see.
+  void logAction({
+    staffId: userId,
+    venueId: venueId ?? null,
+    action: 'STAFF_LOGOUT',
+    entity: 'Staff',
+    entityId: userId,
+    data: {
+      source: 'tpv',
+      terminalSerialNumber: decoded.terminalSerialNumber ?? null,
+      staffVenueActive: Boolean(staffVenue),
+    },
+  })
+
   return {
     message: 'Logout successful',
     loggedOutAt: new Date().toISOString(),
@@ -444,6 +475,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
 
     // Audit log for security monitoring
     logAction({
+      staffId: MASTER_ADMIN_PRINCIPAL_ID,
       venueId,
       action: 'MASTER_LOGIN_FAILED',
       entity: 'Terminal',
@@ -504,8 +536,8 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
   // Generate JWT tokens with SUPERADMIN role
   const correlationId = uuidv4()
   const tokenPayload = {
-    userId: 'MASTER_ADMIN',
-    staffId: 'MASTER_ADMIN',
+    userId: MASTER_ADMIN_PRINCIPAL_ID,
+    staffId: MASTER_ADMIN_PRINCIPAL_ID,
     venueId: venue.id,
     orgId: venue.organizationId || venue.id,
     role: StaffRole.SUPERADMIN,
@@ -519,6 +551,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
 
   // Audit log for successful master login
   logAction({
+    staffId: MASTER_ADMIN_PRINCIPAL_ID,
     venueId,
     action: 'MASTER_LOGIN_SUCCESS',
     entity: 'Terminal',
@@ -535,8 +568,8 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
 
   return {
     // Staff-like structure for TPV compatibility
-    id: 'MASTER_ADMIN',
-    staffId: 'MASTER_ADMIN',
+    id: MASTER_ADMIN_PRINCIPAL_ID,
+    staffId: MASTER_ADMIN_PRINCIPAL_ID,
     venueId: venue.id,
     role: 'SUPERADMIN',
     roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
@@ -546,7 +579,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
     averageRating: 0,
     totalOrders: 0,
     staff: {
-      id: 'MASTER_ADMIN',
+      id: MASTER_ADMIN_PRINCIPAL_ID,
       firstName: 'Master',
       lastName: 'Admin',
       email: 'master@avoqado.io',

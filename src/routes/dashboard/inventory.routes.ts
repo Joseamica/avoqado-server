@@ -19,8 +19,10 @@ import * as productWizardController from '../../controllers/dashboard/inventory/
 import * as productInventoryController from '../../controllers/dashboard/productInventory.controller'
 import * as productLabelController from '../../controllers/dashboard/inventory/productLabel.controller'
 import * as stockCountController from '../../controllers/dashboard/inventory/stockCount.controller'
+import * as stockBatchController from '../../controllers/dashboard/inventory/stockBatch.controller'
 import * as inventoryTransferController from '../../controllers/dashboard/inventory/inventoryTransfer.controller'
 import * as interVenueTransferController from '../../controllers/dashboard/inventory/interVenueTransfer.controller'
+import * as exportController from '../../controllers/dashboard/inventory/export.controller'
 import {
   ConsolidatedInterVenueInventorySchema,
   CreateInterVenueTransferSchema,
@@ -72,6 +74,7 @@ import {
   GetPMIXReportSchema,
   GetProfitabilityReportSchema,
   GetIngredientUsageReportSchema,
+  GetStockCoverageReportSchema,
   // NEW: Product Wizard schemas
   ProductWizardStep1Schema,
   ProductWizardStep2Schema,
@@ -89,6 +92,9 @@ import {
   // NEW: Modifier Inventory schemas
   ConfigureVariableIngredientSchema,
   GetGlobalMovementsQuerySchema,
+  // Batches: quarantine and release
+  QuarantineBatchSchema,
+  ReleaseBatchSchema,
 } from '../../schemas/dashboard/inventory.schema'
 
 const router = Router({ mergeParams: true })
@@ -130,6 +136,32 @@ router.get(
   validateRequest(GetRawMaterialsQuerySchema),
   rawMaterialController.getRawMaterials,
 )
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/raw-materials/export:
+ *   get:
+ *     tags: [Inventory - Raw Materials]
+ *     summary: Export current stock per raw material (CSV / XLSX / PDF)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: format, in: query, schema: { type: string, enum: [csv, xlsx, pdf] } }
+ *       - { name: columns, in: query, schema: { type: string } }
+ *       - { name: category, in: query, schema: { type: string } }
+ *       - { name: lowStock, in: query, schema: { type: string, enum: [true, false] } }
+ *       - { name: active, in: query, schema: { type: string, enum: [true, false] } }
+ *       - { name: search, in: query, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Export file
+ *       413:
+ *         description: Row count over the export cap
+ */
+// 🔴 Export routes go BEFORE any `/:param` in their family, or Express swallows "export" as
+// the parameter value and the route is born dead — exactly what happened to
+// `/purchase-orders/stats`.
+router.get('/raw-materials/export', checkPermission('inventory:read'), exportController.exportRawMaterials)
 
 /**
  * @openapi
@@ -247,12 +279,43 @@ router.put(
  *     tags: [Inventory - Raw Materials]
  *     summary: Adjust stock for a raw material
  */
+// Moving stock is NOT the same authority as editing a raw material's record: one is
+// catalogue, the other is money sitting in the warehouse. Both adjust-stock routes used to
+// be gated on `inventory:update`, so anyone who could rename an item could also move its
+// stock. `inventory:adjust` already existed and MANAGER+ satisfies it.
+// Grandfathering checked against production on 2026-08-07: zero VenueRolePermission rows
+// grant `inventory:update` without `inventory:adjust`, so nobody loses access.
 router.post(
   '/raw-materials/:rawMaterialId/adjust-stock',
-  checkPermission('inventory:update'),
+  checkPermission('inventory:adjust'),
   validateRequest(AdjustStockSchema),
   rawMaterialController.adjustStock,
 )
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/raw-materials/{rawMaterialId}/movements/export:
+ *   get:
+ *     tags: [Inventory - Raw Materials]
+ *     summary: Export the kardex (stock movements) of a raw material (CSV / XLSX / PDF)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: rawMaterialId, in: path, required: true, schema: { type: string } }
+ *       - { name: format, in: query, schema: { type: string, enum: [csv, xlsx, pdf] } }
+ *       - { name: columns, in: query, schema: { type: string } }
+ *       - { name: startDate, in: query, schema: { type: string } }
+ *       - { name: endDate, in: query, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Export file
+ *       413:
+ *         description: Row count over the export cap
+ */
+// 🔴 Declared BEFORE `/raw-materials/:rawMaterialId/movements` so the more specific path is
+// matched first — the same ordering discipline that `/raw-materials/export` needs, and that
+// `/purchase-orders/stats` did not get.
+router.get('/raw-materials/:rawMaterialId/movements/export', checkPermission('inventory:read'), exportController.exportStockMovements)
 
 /**
  * @openapi
@@ -280,6 +343,45 @@ router.get(
   checkPermission('inventory:read'),
   validateRequest(RawMaterialIdParamsSchema),
   rawMaterialController.getRawMaterialRecipes,
+)
+
+// ===========================================
+// STOCK BATCH ROUTES (batches: traceability, expiration and quarantine)
+// ===========================================
+//
+// All of this logic had been written and tested in `fifoBatch.service.ts` for a long time
+// and was UNREACHABLE: there was not a single route. Listing, fetching, statistics and
+// holding for quality all existed, and nobody could invoke them.
+//
+// 🔴 ORDER: `/batches/stats` goes BEFORE `/batches/:batchId`, or Express swallows "stats"
+// as if it were an id and the route is dead on arrival. Exactly what happened to
+// `/purchase-orders/stats`.
+
+router.get(
+  '/raw-materials/:rawMaterialId/batches',
+  checkPermission('inventory:read'),
+  validateRequest(RawMaterialIdParamsSchema),
+  stockBatchController.getBatchesForRawMaterial,
+)
+
+router.get('/batches/stats', checkPermission('inventory:read'), stockBatchController.getBatchStatistics)
+
+router.get('/batches/:batchId', checkPermission('inventory:read'), stockBatchController.getBatch)
+
+// Holding and releasing move available stock: they go behind the ADJUST permission, not
+// the read one and not the generic update one.
+router.post(
+  '/batches/:batchId/quarantine',
+  checkPermission('inventory:adjust'),
+  validateRequest(QuarantineBatchSchema),
+  stockBatchController.quarantineBatch,
+)
+
+router.post(
+  '/batches/:batchId/release',
+  checkPermission('inventory:adjust'),
+  validateRequest(ReleaseBatchSchema),
+  stockBatchController.releaseBatchFromQuarantine,
 )
 
 // ===========================================
@@ -529,6 +631,21 @@ router.get('/suppliers', checkPermission('inventory:read'), supplierController.g
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/suppliers/export:
+ *   get:
+ *     tags: [Inventory - Suppliers]
+ *     summary: Export the supplier directory (csv | xlsx | pdf)
+ *     responses:
+ *       413:
+ *         description: Row count over the export cap
+ */
+// 🔴 BEFORE `/suppliers/:supplierId`: declared after it, Express captures "export" as the id,
+// the cuid validation rejects it and the route is born dead — exactly what happened to
+// `/purchase-orders/stats`.
+router.get('/suppliers/export', checkPermission('inventory:read'), exportController.exportSuppliers)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/inventory/suppliers/{supplierId}:
  *   get:
  *     tags: [Inventory - Suppliers]
@@ -658,6 +775,19 @@ router.get(
 // la validación de cuid lo rechazaba y este endpoint era INALCANZABLE — devolvía 400
 // para todo el mundo. Cualquier ruta ESTÁTICA de este grupo tiene que quedar arriba.
 router.get('/purchase-orders/stats', checkPermission('inventory:read'), purchaseOrderController.getPurchaseOrderStats)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/export:
+ *   get:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Export purchase orders, one row per LINE (csv | xlsx | pdf)
+ *     responses:
+ *       413:
+ *         description: Row count over the export cap
+ */
+// 🔴 Same rule as `/purchase-orders/stats` right above: static BEFORE dynamic.
+router.get('/purchase-orders/export', checkPermission('inventory:read'), exportController.exportPurchaseOrders)
 
 /**
  * @openapi
@@ -1026,6 +1156,20 @@ router.get(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/reports/stock-coverage:
+ *   get:
+ *     tags: [Inventory - Reports]
+ *     summary: Days of stock coverage per raw material at the current consumption rate
+ */
+router.get(
+  '/reports/stock-coverage',
+  checkPermission('inventory:read'),
+  validateRequest(GetStockCoverageReportSchema),
+  reportController.getStockCoverageReport,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/inventory/reports/cost-variance:
  *   get:
  *     tags: [Inventory - Reports]
@@ -1209,7 +1353,7 @@ router.post(
  */
 router.post(
   '/products/:productId/adjust-stock',
-  checkPermission('inventory:update'),
+  checkPermission('inventory:adjust'), // same reasoning as the raw-material route above
   validateRequest(AdjustProductInventoryStockSchema),
   productInventoryController.adjustInventoryStockHandler,
 )

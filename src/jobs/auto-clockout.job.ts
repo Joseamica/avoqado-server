@@ -6,6 +6,7 @@ import logger from '../config/logger'
 import { TimeEntryStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { scheduleJob } from '../observability/jobContext'
 
 /**
  * Auto Clock-Out Job
@@ -23,7 +24,8 @@ export class AutoClockOutJob {
     // Run every 15 minutes
     // Cron pattern: minute hour day month dayOfWeek
     // '*/15 * * * *' = Every 15 minutes
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'auto-clockout',
       '*/15 * * * *',
       this.processAutoClockOuts.bind(this),
       null, // onComplete callback

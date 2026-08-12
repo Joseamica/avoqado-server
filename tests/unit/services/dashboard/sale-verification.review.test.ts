@@ -215,10 +215,41 @@ describe('reviewSaleVerification', () => {
         rejectionReasons: [],
         reviewNotes: '   ',
       }),
-    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/at least one reason or notes/i) })
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/mínimo 5 caracteres/i) })
 
     expect(mockedUpdate).not.toHaveBeenCalled()
     expect(mockedBroadcast).not.toHaveBeenCalled()
+  })
+
+  it('rejects REJECT with reasons but NO notes (un checkbox pelón no le dice al promotor qué corregir)', async () => {
+    mockedFindUnique.mockResolvedValue(baseExisting)
+
+    await expect(
+      reviewSaleVerification(VENUE_ID, {
+        saleVerificationId: VERIFICATION_ID,
+        reviewedById: REVIEWER_ID,
+        decision: 'REJECT',
+        rejectionReasons: ['REVIEW_ILLEGIBLE_IMAGES'],
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/mínimo 5 caracteres/i) })
+
+    expect(mockedUpdate).not.toHaveBeenCalled()
+  })
+
+  it('rejects REJECT when notes are shorter than 5 chars', async () => {
+    mockedFindUnique.mockResolvedValue(baseExisting)
+
+    await expect(
+      reviewSaleVerification(VENUE_ID, {
+        saleVerificationId: VERIFICATION_ID,
+        reviewedById: REVIEWER_ID,
+        decision: 'REJECT',
+        rejectionReasons: ['REVIEW_ILLEGIBLE_IMAGES'],
+        reviewNotes: 'mal',
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 })
+
+    expect(mockedUpdate).not.toHaveBeenCalled()
   })
 
   it('blocks double-review when status is already COMPLETED (409)', async () => {

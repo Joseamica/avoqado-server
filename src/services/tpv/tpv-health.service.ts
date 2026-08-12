@@ -21,6 +21,15 @@ const COMMAND_STATUS_UPDATES: Partial<Record<TpvCommandType, TerminalStatus>> = 
   REMOTE_ACTIVATE: TerminalStatus.ACTIVE, // Remote activation sets terminal to ACTIVE
 }
 
+// Un intento de autorización local reportado por el batching de telemetría del TPV
+// (Task 7). Sin datos de tarjeta ni montos — solo resultado/duración/riel/hora.
+export interface HeartbeatAuthAttempt {
+  code: string
+  durationMs: number
+  rail: string
+  timestamp?: string
+}
+
 export interface HeartbeatData {
   terminalId: string
   timestamp: string
@@ -32,6 +41,10 @@ export interface HeartbeatData {
     uptime?: number
     [key: string]: any
   }
+  // Additive/opcional (Task 7): lote de telemetría de autorización local piggybacked
+  // en el heartbeat periódico. Terminales viejas nunca lo envían — persistido dentro
+  // de Terminal.systemInfo (mismo campo Json que ya recibe "platform/memory/uptime, etc.").
+  authAttempts?: HeartbeatAuthAttempt[]
 }
 
 export interface TpvCommand {
@@ -65,7 +78,7 @@ export class TpvHealthService {
    * - Concurrent updates → Last write wins (acceptable for heartbeats)
    */
   async processHeartbeat(heartbeatData: HeartbeatData, clientIp?: string): Promise<void> {
-    const { terminalId, timestamp, status, version, systemInfo } = heartbeatData
+    const { terminalId, timestamp, status, version, systemInfo, authAttempts } = heartbeatData
     try {
       // Try to find terminal by multiple identifiers for compatibility
       // ✅ CASE-INSENSITIVE MATCHING: Android may send lowercase, DB stores uppercase
@@ -205,13 +218,24 @@ export class TpvHealthService {
       // ACTIVE → MAINTENANCE via MAINTENANCE_MODE command
       // This prevents race conditions with heartbeat
 
+      // Task 7: merge authAttempts (if the batch sent any) into the SAME systemInfo Json
+      // column that already stores platform/memory/uptime. Old TPVs that omit the field
+      // keep the previous fallback behavior untouched (systemInfo || terminal.systemInfo).
+      const mergedSystemInfo =
+        systemInfo || authAttempts
+          ? {
+              ...((systemInfo as any) || (terminal.systemInfo as any) || {}),
+              ...(authAttempts ? { authAttempts } : {}),
+            }
+          : terminal.systemInfo
+
       const updatedTerminal = await prisma.terminal.update({
         where: { id: terminal.id },
         data: {
           status: newStatus,
           lastHeartbeat: heartbeatDate,
           version: version || terminal.version,
-          systemInfo: (systemInfo as any) || terminal.systemInfo,
+          systemInfo: mergedSystemInfo as any,
           ipAddress: clientIp || terminal.ipAddress,
           updatedAt: new Date(),
         },
@@ -556,10 +580,42 @@ export class TpvHealthService {
         return []
       }
 
+      const now = new Date()
+
+      // Expire this terminal's stale in-flight commands, piggybacked on the heartbeat
+      // that is already here.
+      //
+      // A command is handed to the terminal exactly once (PENDING/QUEUED → SENT) and is
+      // never re-delivered, so one that is never acknowledged sits in SENT forever and
+      // the dashboard reads it as "in flight". `processExpiredCommands()` exists for this
+      // but nothing ever calls it — prod had 61 already-expired FACTORY_RESETs (some since
+      // April) still showing as SENT, which makes "the terminal was wiped" and "the command
+      // never landed" look identical.
+      //
+      // Scoped to THIS terminal on purpose: it rides traffic that already exists instead of
+      // a cron sweeping the whole table, it uses the terminalId index the query below
+      // already relies on, and it matches 0 rows on virtually every heartbeat. Each
+      // terminal heals its own backlog the next time it checks in.
+      //
+      // Trade-off: a terminal that never heartbeats again (stolen, dead) keeps its stale
+      // rows. That is the case where nobody is waiting on the status anyway, and a
+      // venue-scoped sweep on the dashboard list can close it if it ever matters.
+      await prisma.tpvCommandQueue.updateMany({
+        where: {
+          terminalId: terminal.id,
+          status: { in: ['SENT', 'RECEIVED', 'EXECUTING'] },
+          expiresAt: { lt: now },
+        },
+        data: {
+          status: 'EXPIRED',
+          resultStatus: 'TIMEOUT',
+          resultMessage: 'Command expired before execution',
+        },
+      })
+
       // Get pending/queued commands that haven't expired
       // Note: Commands are created with status 'QUEUED' when terminal is online,
       // 'PENDING' when terminal is offline. Both should be delivered via heartbeat.
-      const now = new Date()
       const pendingCommands = await prisma.tpvCommandQueue.findMany({
         where: {
           terminalId: terminal.id,

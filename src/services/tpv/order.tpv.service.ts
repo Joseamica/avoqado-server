@@ -1,5 +1,5 @@
 import prisma from '../../utils/prismaClient'
-import { Order, Prisma } from '@prisma/client'
+import { AreaTicketInventoryReservationStatus, Order, Prisma } from '@prisma/client'
 import { NotFoundError, BadRequestError, ConflictError, ValidationError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
@@ -721,10 +721,47 @@ async function fetchOrderForTpvResponse(orderId: string) {
 // Exported: also reused by the mobile cash path (payCashOrder in
 // order.mobile.service.ts), which historically never deducted inventory at all —
 // same never-throws contract there (payment success is never at risk).
+export async function getAreaTicketLineIdsCoveredByInventoryReservations(
+  venueId: string,
+  items: Array<{ areaTicketLineId?: string | null }>,
+): Promise<Set<string>> {
+  const areaTicketLineIds = [
+    ...new Set(
+      items
+        .map((item: any) => item.areaTicketLineId)
+        .filter((lineId: unknown): lineId is string => typeof lineId === 'string' && lineId.length > 0),
+    ),
+  ]
+  if (areaTicketLineIds.length === 0) return new Set<string>()
+
+  const reservations = await prisma.areaTicketInventoryReservation.findMany({
+    where: {
+      venueId,
+      areaTicketLineId: { in: areaTicketLineIds },
+      status: {
+        in: [AreaTicketInventoryReservationStatus.ACTIVE, AreaTicketInventoryReservationStatus.CONSUMED],
+      },
+    },
+    select: { areaTicketLineId: true },
+  })
+  return new Set(reservations.map(reservation => reservation.areaTicketLineId))
+}
+
 export async function deductTrackedInventoryForFreeCart(order: any, staffId: string): Promise<void> {
   const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
+  const coveredAreaTicketLines = await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items || [])
 
   for (const item of order.items || []) {
+    if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
+      logger.info('⏭️ [WITH ITEMS] Skipping generic deduction for area-ticket line covered by reservation', {
+        orderId: order.id,
+        orderItemId: item.id,
+        areaTicketLineId: item.areaTicketLineId,
+        reason: 'AREA_TICKET_RESERVATION',
+      })
+      continue
+    }
+
     if (!item.productId) {
       logger.info('⏭️ [WITH ITEMS] Skipping inventory deduction for custom line item', {
         orderId: order.id,
@@ -736,7 +773,10 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
     }
 
     const inventoryMethod = await getProductInventoryMethod(item.productId)
-    if (!inventoryMethod) {
+    const hasInventoryModifiers = item.modifiers?.some(
+      (orderModifier: any) => orderModifier.modifier?.rawMaterialId && orderModifier.modifier?.quantityPerUnit,
+    )
+    if (!inventoryMethod && !hasInventoryModifiers) {
       logger.info('⏭️ [WITH ITEMS] Skipping inventory deduction for untracked product', {
         orderId: order.id,
         orderItemId: item.id,
@@ -2805,11 +2845,27 @@ export async function applyDiscount(
   // Round to 2 decimal places
   discountAmount = Math.round(discountAmount * 100) / 100
 
-  logger.info(`  💰 Calculated discount: $${discountAmount}`)
+  // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
+  //
+  // Los topes de arriba miran el subtotal COMPLETO, y eso no basta cuando la
+  // cuenta YA traía descuento: los mismos pesos se regalan dos veces. Un
+  // descuento fijo de $253 sobre una cuenta de $253 que ya tenía 10% ($25.30)
+  // dejaba el acumulado en $278.30 —más que la mercancía— y el total en −$25.30.
+  // Reproducido en vivo el 2026-08-09: es el mismo mecanismo que rompió la mesa
+  // M13, sólo que por la vía del descuento manual en vez de la cortesía.
+  //
+  // `discount.tpv.service.ts` y `discountEngine.service.ts` ya recortaban contra
+  // este "disponible" (su `remainingDiscountable`); este camino era el único que
+  // faltaba. El `Math.max` del total es cinturón-y-tirantes: con el recorte ya
+  // no puede dar negativo.
+  const remainingDiscountable = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
+  discountAmount = Math.min(discountAmount, remainingDiscountable)
+
+  logger.info(`  💰 Calculated discount: $${discountAmount} (disponible: $${remainingDiscountable})`)
 
   // Update order: add to existing discount
   const newDiscountAmount = Number(order.discountAmount) + discountAmount
-  const newTotal = Number(order.subtotal) - newDiscountAmount
+  const newTotal = Math.max(0, Number(order.subtotal) - newDiscountAmount)
 
   // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)

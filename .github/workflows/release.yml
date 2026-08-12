@@ -83,7 +83,7 @@ jobs:
 
           ## 📊 Database Changes
           - $MIGRATION_FILES new migration(s) included
-          - Run \`npx prisma migrate deploy\` to apply changes
+          - Run \`npm run migrate:deploy:bounded\` to apply changes
 
           ## 🛠️ Technical Details
           - **Node.js Version**: 20.x
@@ -93,7 +93,7 @@ jobs:
           ## 📦 Installation
           \`\`\`bash
           npm install
-          npx prisma migrate deploy
+          npm run migrate:deploy:bounded
           npm run build
           npm start
           \`\`\`

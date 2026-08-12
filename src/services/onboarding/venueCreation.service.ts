@@ -15,6 +15,7 @@ import {
   StaffRole,
   VenueStatus,
   OrgRole,
+  Prisma,
 } from '@prisma/client'
 import { addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
@@ -27,6 +28,11 @@ import * as resendService from '@/services/resend.service'
 import logger from '@/config/logger'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  resolveLegacyCatalogActor,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../master-catalog/catalogGovernance.service'
 
 // Types
 export interface CreateVenueInput {
@@ -267,7 +273,7 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
   }
   // Handle real venue with menu data
   else if (menuData && menuData.categories && menuData.products) {
-    const { categoriesCreated, productsCreated } = await createMenuFromOnboarding(venue.id, menuData)
+    const { categoriesCreated, productsCreated } = await prisma.$transaction(tx => createMenuFromOnboarding(tx, venue.id, menuData, userId))
     result.categoriesCreated = categoriesCreated
     result.productsCreated = productsCreated
   }
@@ -529,17 +535,20 @@ async function slugExists(slug: string): Promise<boolean> {
  * @param menuData - Menu data from onboarding
  * @returns Number of categories and products created
  */
-async function createMenuFromOnboarding(
+export async function createMenuFromOnboarding(
+  tx: Prisma.TransactionClient,
   venueId: string,
   menuData: NonNullable<CreateVenueInput['menuData']>,
+  userId: string,
 ): Promise<{ categoriesCreated: number; productsCreated: number }> {
   const { categories = [], products = [] } = menuData
+  const actor = resolveLegacyCatalogActor(userId, false)
 
   // Create categories first
   const categoryMap = new Map<string, string>() // slug -> id
 
   for (const category of categories) {
-    const created = await prisma.menuCategory.create({
+    const created = await tx.menuCategory.create({
       data: {
         venueId,
         name: category.name,
@@ -552,6 +561,12 @@ async function createMenuFromOnboarding(
   }
 
   // Create products
+  await assertLegacyCatalogGovernanceForVenue(tx, {
+    venueId,
+    operation: 'CREATE',
+    willBeVendable: products.length > 0,
+    actor,
+  })
   for (const product of products) {
     const categoryId = categoryMap.get(product.categorySlug)
     if (!categoryId) {
@@ -559,9 +574,10 @@ async function createMenuFromOnboarding(
       continue
     }
 
-    await prisma.product.create({
+    const created = await tx.product.create({
       data: {
         venueId,
+        createdById: actor.type === 'HUMAN' ? actor.staffId : null,
         categoryId,
         name: product.name,
         sku: product.sku,
@@ -571,6 +587,9 @@ async function createMenuFromOnboarding(
         active: true,
       },
     })
+    if (actor.type === 'SERVICE') {
+      await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
+    }
   }
 
   return {

@@ -17,6 +17,7 @@ import { Prisma, CommissionCalcStatus, CommissionSummaryStatus, TierPeriod } fro
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber, getPeriodDateRange, getVenueTimezone } from './commission-utils'
 import { logAction } from '../activity-log.service'
+import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
 
 // ============================================
 // Type Definitions
@@ -251,16 +252,22 @@ export async function aggregateAllPendingCommissions(): Promise<{
   venues: number
   summarized: number
 }> {
-  // Get all venues with pending calculations
-  const venuesWithPending = await prisma.commissionCalculation.groupBy({
-    by: ['venueId'],
-    where: {
-      status: CommissionCalcStatus.CALCULATED,
-    },
-    _count: {
-      id: true,
-    },
-  })
+  // Get all venues with pending calculations. Entry read of the
+  // commission-aggregation cron — retried on transient connection errors per
+  // .claude/rules/cron-jobs.md.
+  const venuesWithPending = await retry(
+    () =>
+      prisma.commissionCalculation.groupBy({
+        by: ['venueId'],
+        where: {
+          status: CommissionCalcStatus.CALCULATED,
+        },
+        _count: {
+          id: true,
+        },
+      }),
+    { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'commission-aggregation.groupPending' },
+  )
 
   let totalSummarized = 0
 

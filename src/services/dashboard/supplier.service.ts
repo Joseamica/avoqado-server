@@ -5,18 +5,20 @@ import { CreateSupplierDto, UpdateSupplierDto } from '../../schemas/dashboard/in
 import { Decimal } from '@prisma/client/runtime/library'
 import { logAction } from './activity-log.service'
 
+/** Filters a supplier listing can be narrowed by. Shared by the screen and its export. */
+export interface SupplierFilters {
+  active?: boolean
+  search?: string
+  rating?: number
+}
+
 /**
- * Get all suppliers for a venue
+ * The one place the supplier filter is written. The screen listing and the export count both
+ * read from here on purpose: a second where-clause built for the export drifts from the one
+ * behind the screen, and then the file quietly disagrees with what the user is looking at.
  */
-export async function getSuppliers(
-  venueId: string,
-  filters?: {
-    active?: boolean
-    search?: string
-    rating?: number
-  },
-): Promise<Supplier[]> {
-  const where: Prisma.SupplierWhereInput = {
+function buildSuppliersWhereClause(venueId: string, filters?: SupplierFilters): Prisma.SupplierWhereInput {
+  return {
     venueId,
     deletedAt: null, // Exclude soft-deleted records
     ...(filters?.active !== undefined && { active: filters.active }),
@@ -29,6 +31,22 @@ export async function getSuppliers(
       ],
     }),
   }
+}
+
+/**
+ * Row count for the supplier export, using the SAME filter builder as the listing. The
+ * controller counts before fetching so it can refuse without first pulling every supplier —
+ * each of which drags its pricing rows and its five latest purchase orders along with it.
+ */
+export async function countSuppliersForExport(venueId: string, filters?: SupplierFilters): Promise<number> {
+  return prisma.supplier.count({ where: buildSuppliersWhereClause(venueId, filters) })
+}
+
+/**
+ * Get all suppliers for a venue
+ */
+export async function getSuppliers(venueId: string, filters?: SupplierFilters): Promise<Supplier[]> {
+  const where = buildSuppliersWhereClause(venueId, filters)
 
   const suppliers = await prisma.supplier.findMany({
     where,
@@ -61,7 +79,10 @@ export async function getSuppliers(
         take: 5,
       },
     },
-    orderBy: [{ rating: 'desc' }, { name: 'asc' }],
+    // `id` is the tie-breaker, not decoration: rating and name both repeat, and a non-unique
+    // sort hands back a different arrangement per call — two exports taken minutes apart
+    // stop being comparable, and any future pagination would drop rows outright.
+    orderBy: [{ rating: 'desc' }, { name: 'asc' }, { id: 'asc' }],
   })
 
   return suppliers as any
@@ -133,7 +154,10 @@ export async function createSupplier(venueId: string, data: CreateSupplierDto): 
  */
 export async function updateSupplier(venueId: string, supplierId: string, data: UpdateSupplierDto): Promise<Supplier> {
   const existing = await prisma.supplier.findFirst({
-    where: { id: supplierId, venueId },
+    // `deletedAt: null` is NOT cosmetic: without it a deleted supplier — one that no longer
+    // shows up in any listing — can still be edited by id and handed back `active: true`.
+    // That leaves an invisible but purchasable supplier, the exact opposite of deactivating it.
+    where: { id: supplierId, venueId, deletedAt: null },
   })
 
   if (!existing) {
@@ -340,6 +364,7 @@ export async function getSupplierRecommendations(
     where: {
       venueId,
       active: true,
+      deletedAt: null, // the auto-reorder cron buys from here: a deleted supplier must not supply
       pricing: {
         some: {
           rawMaterialId,
@@ -480,6 +505,15 @@ export async function getSupplierPerformance(venueId: string, supplierId: string
       totalSpent: 0,
       averageOrderValue: 0,
       onTimeDeliveryRate: 0,
+      // The new metrics go out as null, not 0: "there is nothing to compute it from" and
+      // "it filled 0%" are different things, and confusing them sinks a supplier that was
+      // just created. `onTimeDeliveryRate` stays at 0 because the dashboard already consumes
+      // it and changing its type would break deployed clients.
+      ordersWithoutCommittedDate: 0,
+      fillRate: null,
+      otifRate: null,
+      linesFullyDelivered: 0,
+      linesShort: 0,
       qualityScore: supplier.reliabilityScore?.toNumber() || 0,
     }
   }
@@ -488,13 +522,53 @@ export async function getSupplierPerformance(venueId: string, supplierId: string
   const totalSpent = purchaseOrders.reduce((sum, po) => sum.add(po.total), new Decimal(0))
   const averageOrderValue = totalSpent.div(purchaseOrders.length)
 
-  // Calculate on-time delivery rate
+  // On-time delivery (the "OT" in OTIF).
+  //
+  // 🔴 This used to return `false` when the committed date was missing, and that `false`
+  // dropped out of the numerator but STAYED in the denominator: a supplier nobody ever set a
+  // date for showed up at 0% on-time. This is a metric people use to decide who to buy from
+  // — grading someone badly over data that was never captured is worse than not grading them
+  // at all. Orders with no committed date are now left OUT of the calculation and reported
+  // separately, so the missing data is visible.
   const completedOrders = purchaseOrders.filter(po => po.status === 'RECEIVED')
-  const onTimeOrders = completedOrders.filter(po => {
-    if (!po.receivedDate || !po.expectedDeliveryDate) return false
-    return new Date(po.receivedDate) <= new Date(po.expectedDeliveryDate)
+  const ratableOrders = completedOrders.filter(po => po.receivedDate && po.expectedDeliveryDate)
+  const ordersWithoutCommittedDate = completedOrders.length - ratableOrders.length
+  const onTimeOrders = ratableOrders.filter(po => new Date(po.receivedDate!) <= new Date(po.expectedDeliveryDate!))
+  const onTimeDeliveryRate = ratableOrders.length > 0 ? (onTimeOrders.length / ratableOrders.length) * 100 : 0
+
+  // Fill rate (the "IF" in OTIF): out of what was ordered, how much actually arrived.
+  //
+  // It is capped PER LINE at 100%: if the supplier over-ships one item and under-ships
+  // another, the surplus CANNOT paper over the shortfall. Without that cap, an awful fill
+  // plus one over-delivery can come out at 100% and the buyer never finds out.
+  let totalOrdered = new Decimal(0)
+  let totalFilled = new Decimal(0)
+  let linesFullyDelivered = 0
+  let linesShort = 0
+
+  for (const po of completedOrders) {
+    for (const item of po.items) {
+      const ordered = new Decimal(item.quantityOrdered)
+      if (ordered.lessThanOrEqualTo(0)) continue
+      const received = new Decimal(item.quantityReceived ?? 0)
+      const credited = Decimal.min(received, ordered) // the per-line cap
+      totalOrdered = totalOrdered.add(ordered)
+      totalFilled = totalFilled.add(credited)
+      if (credited.equals(ordered)) linesFullyDelivered++
+      else linesShort++
+    }
+  }
+
+  const fillRate = totalOrdered.greaterThan(0) ? totalFilled.div(totalOrdered).mul(100).toNumber() : null
+
+  // OTIF: orders that arrived on time AND complete. It is the number a buyer actually uses,
+  // because "on time but incomplete" is no good to operate with.
+  const otifOrders = ratableOrders.filter(po => {
+    const onTime = new Date(po.receivedDate!) <= new Date(po.expectedDeliveryDate!)
+    const complete = po.items.every(i => new Decimal(i.quantityReceived ?? 0).greaterThanOrEqualTo(new Decimal(i.quantityOrdered)))
+    return onTime && complete
   })
-  const onTimeDeliveryRate = completedOrders.length > 0 ? (onTimeOrders.length / completedOrders.length) * 100 : 0
+  const otifRate = ratableOrders.length > 0 ? (otifOrders.length / ratableOrders.length) * 100 : null
 
   return {
     supplierId: supplier.id,
@@ -505,6 +579,14 @@ export async function getSupplierPerformance(venueId: string, supplierId: string
     totalSpent: totalSpent.toNumber(),
     averageOrderValue: averageOrderValue.toNumber(),
     onTimeDeliveryRate: Math.round(onTimeDeliveryRate * 10) / 10,
+    // How many received orders fell outside the on-time calculation for lacking a committed
+    // date. If this number is high, on-time delivery is not representative and whoever reads
+    // it has to know that.
+    ordersWithoutCommittedDate,
+    fillRate: fillRate === null ? null : Math.round(fillRate * 10) / 10,
+    otifRate: otifRate === null ? null : Math.round(otifRate * 10) / 10,
+    linesFullyDelivered,
+    linesShort,
     completedOrders: completedOrders.length,
     pendingOrders: purchaseOrders.filter(po => po.status === 'DRAFT' || po.status === 'SENT' || po.status === 'CONFIRMED').length,
     cancelledOrders: purchaseOrders.filter(po => po.status === 'CANCELLED').length,

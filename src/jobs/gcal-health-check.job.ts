@@ -19,6 +19,8 @@ import prisma from '../utils/prismaClient'
 import { buildOAuthClient } from '../services/google-calendar/oauth.service'
 import { decryptToken } from '../services/google-calendar/encryption.service'
 import { handleAuthError } from '../services/google-calendar/pull.service'
+import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 const TIMEZONE = 'America/Mexico_City'
 const QUIET_AFTER_MS = 24 * 3600_000
@@ -28,7 +30,8 @@ export class GcalHealthCheckJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'gcal-health-check',
       '0 5 * * *',
       async () => {
         await this.process()
@@ -63,12 +66,16 @@ export class GcalHealthCheckJob {
 
     try {
       const cutoff = new Date(Date.now() - QUIET_AFTER_MS)
-      const connections = await prisma.googleCalendarConnection.findMany({
-        where: {
-          status: 'CONNECTED',
-          OR: [{ lastSyncedAt: null }, { lastSyncedAt: { lt: cutoff } }],
-        },
-      })
+      const connections = await retry(
+        () =>
+          prisma.googleCalendarConnection.findMany({
+            where: {
+              status: 'CONNECTED',
+              OR: [{ lastSyncedAt: null }, { lastSyncedAt: { lt: cutoff } }],
+            },
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'gcal-health-check.findQuiet' },
+      )
 
       for (const conn of connections) {
         if (!conn.accessTokenCiphertext) continue

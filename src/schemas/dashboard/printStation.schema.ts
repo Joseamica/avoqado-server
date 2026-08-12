@@ -15,6 +15,16 @@ const CONNECTION_TYPES = ['NETWORK', 'BLUETOOTH', 'USB_SPOOLER', 'TERMINAL_INTER
 
 const paperWidth = z.union([z.literal(58), z.literal(80)], { message: 'Ancho de papel inválido (58 o 80 mm)' })
 
+// Corrimiento a la derecha, en columnas de fuente A (`GS L`). El tope son 16
+// porque ése es el desperdicio máximo posible: un cabezal de 80 mm imprime 48
+// columnas y un rollo de 58 mm ocupa 32. Pedir más recorrería el ticket fuera
+// del papel por el OTRO lado, que es el mismo bug al revés.
+const leftMarginChars = z
+  .number()
+  .int('El margen debe ser un número entero de columnas')
+  .min(0, 'El margen no puede ser negativo')
+  .max(16, 'El margen máximo es 16 columnas')
+
 // Host o host:puerto (IPv4/hostname; puerto opcional, 1-5 dígitos).
 const NETWORK_ADDRESS_REGEX =
   /^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?$/
@@ -42,6 +52,7 @@ export const createPrinterSchema = z.object({
       address: z.string().min(1, 'La dirección es requerida').max(120, 'Máximo 120 caracteres').optional(),
       stableKey: z.string().max(120, 'Máximo 120 caracteres').optional(),
       paperWidthMm: paperWidth.optional(),
+      leftMarginChars: leftMarginChars.optional(),
       charset: z.string().min(1).max(20, 'Máximo 20 caracteres').optional(),
     })
     .strict()
@@ -69,6 +80,7 @@ export const updatePrinterSchema = z.object({
       address: z.string().max(120, 'Máximo 120 caracteres').nullable().optional(),
       stableKey: z.string().max(120, 'Máximo 120 caracteres').nullable().optional(),
       paperWidthMm: paperWidth.optional(),
+      leftMarginChars: leftMarginChars.optional(),
       charset: z.string().min(1).max(20, 'Máximo 20 caracteres').optional(),
       active: z.boolean().optional(),
     })

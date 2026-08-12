@@ -23,6 +23,8 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { refreshIfExpiring } from '../services/mercado-pago/connection.service'
+import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 const TIMEZONE = 'America/Mexico_City'
 const REFRESH_THRESHOLD_DAYS = 30
@@ -40,7 +42,8 @@ export class MercadoPagoTokenRefreshJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'mercadopago-token-refresh',
       '0 3 * * *', // Daily at 03:00
       async () => {
         await this.process()
@@ -78,7 +81,12 @@ export class MercadoPagoTokenRefreshJob {
     this.isRunning = true
 
     try {
-      const provider = await prisma.paymentProvider.findUnique({ where: { code: 'MERCADO_PAGO' } })
+      const provider = await retry(() => prisma.paymentProvider.findUnique({ where: { code: 'MERCADO_PAGO' } }), {
+        retries: 2,
+        initialDelay: 1500,
+        shouldRetry: shouldRetryDbConnectionError,
+        context: 'mercadopago-token-refresh.findProvider',
+      })
       if (!provider) {
         logger.warn('MERCADO_PAGO PaymentProvider not seeded — skipping refresh job')
         return { total: 0, refreshed: 0, notNeeded: 0, noCredentials: 0, errors: 0 }

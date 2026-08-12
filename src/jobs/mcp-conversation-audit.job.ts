@@ -24,6 +24,7 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { getRecentMcpCalls, detectBadMcpExperiences, summarizeBadMcpReport, BadMcpExperienceReport } from '../services/mcp/mcpAudit.service'
+import { scheduleJob } from '../observability/jobContext'
 
 const WINDOW_HOURS = 12
 
@@ -32,7 +33,8 @@ export class McpConversationAuditJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'mcp-conversation-audit',
       '17 */12 * * *', // 00:17 and 12:17
       async () => {
         await this.runAudit()

@@ -523,7 +523,9 @@ export interface ProductPriceChangedPayload extends BaseEventPayload {
   oldPrice: number
   newPrice: number
   priceChange: number // Absolute difference
-  priceChangePercent: number // Percentage change
+  // Zero old price has no finite percentage; serializers emit null instead of
+  // leaking Infinity/NaN into Socket.IO JSON.
+  priceChangePercent: number | null // Percentage change
   categoryId: string
   categoryName: string
   updatedBy?: string // User ID who made the change
@@ -552,6 +554,8 @@ export interface ShiftEventPayload extends BaseEventPayload {
   endTime?: string
   startingCash?: number
   endingCash?: number
+  cashDeclared?: number
+  cashDifference?: number
   totalSales?: number
   totalTips?: number
   totalOrders?: number

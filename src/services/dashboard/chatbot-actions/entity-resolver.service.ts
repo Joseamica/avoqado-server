@@ -13,11 +13,14 @@ interface EntityTableConfig {
   hasActive: boolean
   hasSku: boolean
   nameField?: string // Override the default 'name' column (e.g., 'orderNumber' for PurchaseOrder)
+  serverOnlyFields?: readonly string[]
 }
 
 const ENTITY_TABLE_MAP: Record<SupportedEntity, EntityTableConfig> = {
   RawMaterial: { table: 'RawMaterial', hasActive: true, hasSku: true },
-  Product: { table: 'Product', hasActive: true, hasSku: true },
+  // Resolver queries use raw SELECT *, so Product provenance needs its own
+  // projection defense instead of relying on Prisma's global omit.
+  Product: { table: 'Product', hasActive: true, hasSku: true, serverOnlyFields: ['createdById'] },
   Supplier: { table: 'Supplier', hasActive: true, hasSku: false },
   PurchaseOrder: { table: 'PurchaseOrder', hasActive: false, hasSku: false, nameField: 'orderNumber' },
 }
@@ -70,12 +73,12 @@ export class EntityResolverService {
     // Step 1: Exact match
     const exactRows = await this.scopedFuzzySearch(tableConfig, searchTerm, venueId, operation, 'exact')
     if (exactRows.length === 1) {
-      const data = this.extractRowData(exactRows[0])
+      const data = this.extractRowData(exactRows[0], tableConfig)
       const match: EntityMatch = { id: exactRows[0].id, name: exactRows[0].name, score: 1.0, data }
       return { matches: 1, candidates: [match], exact: true, resolved: match }
     }
     if (exactRows.length > 1) {
-      const candidates = exactRows.map(r => ({ id: r.id, name: r.name, score: 1.0, data: this.extractRowData(r) }))
+      const candidates = exactRows.map(r => ({ id: r.id, name: r.name, score: 1.0, data: this.extractRowData(r, tableConfig) }))
       return { matches: candidates.length, candidates, exact: false }
     }
 
@@ -83,7 +86,7 @@ export class EntityResolverService {
     if (config.fuzzyMatch) {
       const fuzzyRows = await this.scopedFuzzySearch(tableConfig, searchTerm, venueId, operation, 'fuzzy')
       if (fuzzyRows.length === 1) {
-        const data = this.extractRowData(fuzzyRows[0])
+        const data = this.extractRowData(fuzzyRows[0], tableConfig)
         const match: EntityMatch = {
           id: fuzzyRows[0].id,
           name: fuzzyRows[0].name,
@@ -97,7 +100,7 @@ export class EntityResolverService {
           id: r.id,
           name: r.name,
           score: Number(r.score ?? 0),
-          data: this.extractRowData(r),
+          data: this.extractRowData(r, tableConfig),
         }))
         return { matches: candidates.length, candidates, exact: false }
       }
@@ -107,12 +110,17 @@ export class EntityResolverService {
     if (tableConfig.hasSku) {
       const skuRows = await this.scopedFuzzySearch(tableConfig, searchTerm, venueId, operation, 'sku')
       if (skuRows.length === 1) {
-        const data = this.extractRowData(skuRows[0])
+        const data = this.extractRowData(skuRows[0], tableConfig)
         const match: EntityMatch = { id: skuRows[0].id, name: skuRows[0].name, score: 0.5, data }
         return { matches: 1, candidates: [match], exact: false, resolved: match }
       }
       if (skuRows.length > 1) {
-        const candidates = skuRows.map(r => ({ id: r.id, name: r.name, score: 0.5, data: this.extractRowData(r) }))
+        const candidates = skuRows.map(r => ({
+          id: r.id,
+          name: r.name,
+          score: 0.5,
+          data: this.extractRowData(r, tableConfig),
+        }))
         return { matches: candidates.length, candidates, exact: false }
       }
     }
@@ -128,8 +136,11 @@ export class EntityResolverService {
   /**
    * Extracts all non-meta fields from a raw entity row as a data record for diff generation.
    */
-  private extractRowData(row: RawEntityRow): Record<string, unknown> {
+  private extractRowData(row: RawEntityRow, tableConfig: EntityTableConfig): Record<string, unknown> {
     const { id: _id, name: _name, score: _score, ...data } = row
+    // Per-entity removal avoids changing legitimate same-named fields on other
+    // resolver entities while keeping internal raw columns out of candidate diffs.
+    for (const field of tableConfig.serverOnlyFields ?? []) delete data[field]
     return data
   }
 

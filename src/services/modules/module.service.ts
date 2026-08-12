@@ -1,4 +1,4 @@
-import { PrismaClient, Module, VenueModule, OrganizationModule, Prisma } from '@prisma/client'
+import { PrismaClient, Module, VenueModule, OrganizationModule, Prisma, ModuleScope } from '@prisma/client'
 import Ajv from 'ajv'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -13,9 +13,40 @@ export const MODULE_CODES = {
   ATTENDANCE_TRACKING: 'ATTENDANCE_TRACKING',
   WHITE_LABEL_DASHBOARD: 'WHITE_LABEL_DASHBOARD',
   COMMISSIONS: 'COMMISSIONS',
+  MASTER_CATALOG: 'MASTER_CATALOG',
 } as const
 
 export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]
+
+// Direct VenueModule rows may use BOTH or VENUE_ONLY, but inheritance can only
+// come from BOTH: a stale VENUE_ONLY OrganizationModule must never reach TPV.
+const VENUE_ASSIGNMENT_SCOPES: ModuleScope[] = [ModuleScope.BOTH, ModuleScope.VENUE_ONLY]
+const VENUE_INHERITABLE_ORGANIZATION_SCOPES: ModuleScope[] = [ModuleScope.BOTH]
+// Organization projections similarly hide stale incompatible assignments while
+// repair workflows can still remove the underlying rows explicitly.
+const ORGANIZATION_COMPATIBLE_SCOPES: ModuleScope[] = [ModuleScope.BOTH, ModuleScope.ORGANIZATION_ONLY]
+
+function assertVenueCompatible(module: Module): void {
+  if (module.scope === ModuleScope.ORGANIZATION_ONLY) {
+    throw new BadRequestError(`El módulo ${module.code} tiene scope ORGANIZATION_ONLY y no admite VenueModule`)
+  }
+}
+
+function assertOrganizationCompatible(module: Module): void {
+  if (module.scope === ModuleScope.VENUE_ONLY) {
+    throw new BadRequestError(`El módulo ${module.code} tiene scope VENUE_ONLY y no admite OrganizationModule`)
+  }
+}
+
+// Assignment creation and scope narrowing share this row lock. PostgreSQL also
+// blocks FK key-share checks behind FOR UPDATE, closing the count/insert race.
+export async function lockModuleScope(tx: Prisma.TransactionClient, selector: { id: string } | { code: string }): Promise<Module | null> {
+  const modules =
+    'id' in selector
+      ? await tx.$queryRaw<Module[]>(Prisma.sql`SELECT * FROM "Module" WHERE "id" = ${selector.id} FOR UPDATE`)
+      : await tx.$queryRaw<Module[]>(Prisma.sql`SELECT * FROM "Module" WHERE "code" = ${selector.code} FOR UPDATE`)
+  return modules[0] ?? null
+}
 
 // ==========================================
 // MODULE INHERITANCE
@@ -69,6 +100,7 @@ export class ModuleService {
         module: {
           code: moduleCode,
           active: true, // Module must be globally active
+          scope: { in: VENUE_ASSIGNMENT_SCOPES },
         },
       },
     })
@@ -91,6 +123,7 @@ export class ModuleService {
         module: {
           code: moduleCode,
           active: true,
+          scope: { in: VENUE_INHERITABLE_ORGANIZATION_SCOPES },
         },
       },
     })
@@ -108,7 +141,10 @@ export class ModuleService {
     if (venueIds.length === 0) return enabled
 
     const venueModules = await this.db.venueModule.findMany({
-      where: { venueId: { in: venueIds }, module: { code: moduleCode, active: true } },
+      where: {
+        venueId: { in: venueIds },
+        module: { code: moduleCode, active: true, scope: { in: VENUE_ASSIGNMENT_SCOPES } },
+      },
       select: { venueId: true, enabled: true },
     })
     const explicit = new Map<string, boolean>()
@@ -125,7 +161,11 @@ export class ModuleService {
     const orgIds = [...new Set(venues.map(v => v.organizationId).filter((o): o is string => !!o))]
     if (orgIds.length === 0) return enabled
     const orgModules = await this.db.organizationModule.findMany({
-      where: { organizationId: { in: orgIds }, enabled: true, module: { code: moduleCode, active: true } },
+      where: {
+        organizationId: { in: orgIds },
+        enabled: true,
+        module: { code: moduleCode, active: true, scope: { in: VENUE_INHERITABLE_ORGANIZATION_SCOPES } },
+      },
       select: { organizationId: true },
     })
     const orgOn = new Set(orgModules.map(o => o.organizationId))
@@ -161,6 +201,7 @@ export class ModuleService {
       where: {
         code: moduleCode,
         active: true,
+        scope: { in: VENUE_ASSIGNMENT_SCOPES },
       },
     })
 
@@ -184,13 +225,18 @@ export class ModuleService {
     })
 
     // Check org-level (inherited)
-    const orgModule = await this.db.organizationModule.findFirst({
-      where: {
-        organizationId: venue.organizationId,
-        moduleId: module.id,
-        enabled: true,
-      },
-    })
+    // VENUE_ONLY is valid for a direct VenueModule but cannot inherit from an
+    // OrganizationModule, even if a stale incompatible row remains in storage.
+    const orgModule =
+      module.scope === ModuleScope.BOTH
+        ? await this.db.organizationModule.findFirst({
+            where: {
+              organizationId: venue.organizationId,
+              moduleId: module.id,
+              enabled: true,
+            },
+          })
+        : null
 
     // If neither level has the module enabled, return null
     if (!venueModule && !orgModule) return null
@@ -235,7 +281,7 @@ export class ModuleService {
       where: {
         venueId,
         enabled: true,
-        module: { active: true },
+        module: { active: true, scope: { in: VENUE_ASSIGNMENT_SCOPES } },
       },
       include: { module: true },
     })
@@ -245,7 +291,7 @@ export class ModuleService {
       where: {
         organizationId: venue.organizationId,
         enabled: true,
-        module: { active: true },
+        module: { active: true, scope: { in: VENUE_INHERITABLE_ORGANIZATION_SCOPES } },
       },
       include: { module: true },
     })
@@ -291,7 +337,7 @@ export class ModuleService {
       where: {
         venueId,
         enabled: true,
-        module: { active: true },
+        module: { active: true, scope: { in: VENUE_ASSIGNMENT_SCOPES } },
       },
       include: { module: { select: { code: true } } },
     })
@@ -301,7 +347,7 @@ export class ModuleService {
       where: {
         organizationId: venue.organizationId,
         enabled: true,
-        module: { active: true },
+        module: { active: true, scope: { in: VENUE_INHERITABLE_ORGANIZATION_SCOPES } },
       },
       include: { module: { select: { code: true } } },
     })
@@ -330,37 +376,37 @@ export class ModuleService {
     config?: Record<string, unknown>,
     preset?: string,
   ): Promise<VenueModule> {
-    const module = await this.db.module.findUnique({
-      where: { code: moduleCode },
-    })
+    return this.db.$transaction(async tx => {
+      const module = await lockModuleScope(tx, { code: moduleCode })
+      if (!module) throw new Error(`Module ${moduleCode} not found`)
+      assertVenueCompatible(module)
 
-    if (!module) throw new Error(`Module ${moduleCode} not found`)
-
-    // If preset specified, use preset configuration
-    let finalConfig: Prisma.InputJsonValue | undefined = config as Prisma.InputJsonValue | undefined
-    if (preset && module.presets) {
-      const presets = module.presets as Record<string, Prisma.InputJsonValue>
-      if (!(preset in presets)) {
-        throw new BadRequestError(`Preset ${preset} not found for module ${moduleCode}`)
+      // Presets are resolved only after the scope lock so a concurrent narrowing
+      // cannot validate against stale module metadata and then create an override.
+      let finalConfig: Prisma.InputJsonValue | undefined = config as Prisma.InputJsonValue | undefined
+      if (preset && module.presets) {
+        const presets = module.presets as Record<string, Prisma.InputJsonValue>
+        if (!(preset in presets)) {
+          throw new BadRequestError(`Preset ${preset} not found for module ${moduleCode}`)
+        }
+        finalConfig = presets[preset]
       }
-      finalConfig = presets[preset]
-    }
 
-    this.validateModuleConfig(module, finalConfig)
-
-    return this.db.venueModule.upsert({
-      where: { venueId_moduleId: { venueId, moduleId: module.id } },
-      create: {
-        venueId,
-        moduleId: module.id,
-        enabled: true,
-        config: finalConfig ?? Prisma.JsonNull,
-        enabledBy,
-      },
-      update: {
-        enabled: true,
-        config: finalConfig ?? Prisma.JsonNull,
-      },
+      this.validateModuleConfig(module, finalConfig)
+      return tx.venueModule.upsert({
+        where: { venueId_moduleId: { venueId, moduleId: module.id } },
+        create: {
+          venueId,
+          moduleId: module.id,
+          enabled: true,
+          config: finalConfig ?? Prisma.JsonNull,
+          enabledBy,
+        },
+        update: {
+          enabled: true,
+          config: finalConfig ?? Prisma.JsonNull,
+        },
+      })
     })
   }
 
@@ -368,21 +414,20 @@ export class ModuleService {
    * Disables a module for a venue.
    */
   async disableModule(venueId: string, moduleCode: ModuleCode): Promise<VenueModule | null> {
-    const module = await this.db.module.findUnique({
-      where: { code: moduleCode },
-    })
+    return this.db.$transaction(async tx => {
+      const module = await lockModuleScope(tx, { code: moduleCode })
+      if (!module) return null
+      assertVenueCompatible(module)
 
-    if (!module) return null
+      const venueModule = await tx.venueModule.findUnique({
+        where: { venueId_moduleId: { venueId, moduleId: module.id } },
+      })
+      if (!venueModule) return null
 
-    const venueModule = await this.db.venueModule.findUnique({
-      where: { venueId_moduleId: { venueId, moduleId: module.id } },
-    })
-
-    if (!venueModule) return null
-
-    return this.db.venueModule.update({
-      where: { id: venueModule.id },
-      data: { enabled: false },
+      return tx.venueModule.update({
+        where: { id: venueModule.id },
+        data: { enabled: false },
+      })
     })
   }
 
@@ -390,23 +435,21 @@ export class ModuleService {
    * Updates module configuration for a venue.
    */
   async updateModuleConfig(venueId: string, moduleCode: ModuleCode, config: Record<string, unknown>): Promise<VenueModule | null> {
-    const module = await this.db.module.findUnique({
-      where: { code: moduleCode },
-    })
+    return this.db.$transaction(async tx => {
+      const module = await lockModuleScope(tx, { code: moduleCode })
+      if (!module) return null
+      assertVenueCompatible(module)
 
-    if (!module) return null
+      const venueModule = await tx.venueModule.findUnique({
+        where: { venueId_moduleId: { venueId, moduleId: module.id } },
+      })
+      if (!venueModule) return null
 
-    const venueModule = await this.db.venueModule.findUnique({
-      where: { venueId_moduleId: { venueId, moduleId: module.id } },
-    })
-
-    if (!venueModule) return null
-
-    this.validateModuleConfig(module, config as Prisma.InputJsonValue)
-
-    return this.db.venueModule.update({
-      where: { id: venueModule.id },
-      data: { config: config as Prisma.InputJsonValue },
+      this.validateModuleConfig(module, config as Prisma.InputJsonValue)
+      return tx.venueModule.update({
+        where: { id: venueModule.id },
+        data: { config: config as Prisma.InputJsonValue },
+      })
     })
   }
 
@@ -430,6 +473,7 @@ export class ModuleService {
     defaultConfig: Record<string, unknown>
     presets?: Record<string, unknown>
     configSchema?: Record<string, unknown>
+    scope?: ModuleScope
   }): Promise<Module> {
     return this.db.module.create({
       data: {
@@ -439,6 +483,7 @@ export class ModuleService {
         defaultConfig: data.defaultConfig as Prisma.InputJsonValue,
         presets: data.presets as Prisma.InputJsonValue | undefined,
         configSchema: data.configSchema as Prisma.InputJsonValue | undefined,
+        scope: data.scope ?? ModuleScope.BOTH,
       },
     })
   }
@@ -464,37 +509,37 @@ export class ModuleService {
     config?: Record<string, unknown>,
     preset?: string,
   ): Promise<OrganizationModule> {
-    const module = await this.db.module.findUnique({
-      where: { code: moduleCode },
-    })
+    return this.db.$transaction(async tx => {
+      const module = await lockModuleScope(tx, { code: moduleCode })
+      if (!module) throw new Error(`Module ${moduleCode} not found`)
+      assertOrganizationCompatible(module)
 
-    if (!module) throw new Error(`Module ${moduleCode} not found`)
-
-    // If preset specified, use preset configuration
-    let finalConfig: Prisma.InputJsonValue | undefined = config as Prisma.InputJsonValue | undefined
-    if (preset && module.presets) {
-      const presets = module.presets as Record<string, Prisma.InputJsonValue>
-      if (!(preset in presets)) {
-        throw new BadRequestError(`Preset ${preset} not found for module ${moduleCode}`)
+      // Resolve config under the same scope lock used by the assignment write;
+      // otherwise a concurrent VENUE_ONLY transition could create a stale row.
+      let finalConfig: Prisma.InputJsonValue | undefined = config as Prisma.InputJsonValue | undefined
+      if (preset && module.presets) {
+        const presets = module.presets as Record<string, Prisma.InputJsonValue>
+        if (!(preset in presets)) {
+          throw new BadRequestError(`Preset ${preset} not found for module ${moduleCode}`)
+        }
+        finalConfig = presets[preset]
       }
-      finalConfig = presets[preset]
-    }
 
-    this.validateModuleConfig(module, finalConfig)
-
-    return this.db.organizationModule.upsert({
-      where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
-      create: {
-        organizationId,
-        moduleId: module.id,
-        enabled: true,
-        config: finalConfig ?? Prisma.JsonNull,
-        enabledBy,
-      },
-      update: {
-        enabled: true,
-        config: finalConfig ?? Prisma.JsonNull,
-      },
+      this.validateModuleConfig(module, finalConfig)
+      return tx.organizationModule.upsert({
+        where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
+        create: {
+          organizationId,
+          moduleId: module.id,
+          enabled: true,
+          config: finalConfig ?? Prisma.JsonNull,
+          enabledBy,
+        },
+        update: {
+          enabled: true,
+          config: finalConfig ?? Prisma.JsonNull,
+        },
+      })
     })
   }
 
@@ -503,21 +548,20 @@ export class ModuleService {
    * Note: This removes inheritance. Venues with explicit VenueModule will still have access.
    */
   async disableModuleForOrganization(organizationId: string, moduleCode: ModuleCode): Promise<OrganizationModule | null> {
-    const module = await this.db.module.findUnique({
-      where: { code: moduleCode },
-    })
+    return this.db.$transaction(async tx => {
+      const module = await lockModuleScope(tx, { code: moduleCode })
+      if (!module) return null
+      assertOrganizationCompatible(module)
 
-    if (!module) return null
+      const orgModule = await tx.organizationModule.findUnique({
+        where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
+      })
+      if (!orgModule) return null
 
-    const orgModule = await this.db.organizationModule.findUnique({
-      where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
-    })
-
-    if (!orgModule) return null
-
-    return this.db.organizationModule.update({
-      where: { id: orgModule.id },
-      data: { enabled: false },
+      return tx.organizationModule.update({
+        where: { id: orgModule.id },
+        data: { enabled: false },
+      })
     })
   }
 
@@ -530,23 +574,21 @@ export class ModuleService {
     moduleCode: ModuleCode,
     config: Record<string, unknown>,
   ): Promise<OrganizationModule | null> {
-    const module = await this.db.module.findUnique({
-      where: { code: moduleCode },
-    })
+    return this.db.$transaction(async tx => {
+      const module = await lockModuleScope(tx, { code: moduleCode })
+      if (!module) return null
+      assertOrganizationCompatible(module)
 
-    if (!module) return null
+      const orgModule = await tx.organizationModule.findUnique({
+        where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
+      })
+      if (!orgModule) return null
 
-    const orgModule = await this.db.organizationModule.findUnique({
-      where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
-    })
-
-    if (!orgModule) return null
-
-    this.validateModuleConfig(module, config as Prisma.InputJsonValue)
-
-    return this.db.organizationModule.update({
-      where: { id: orgModule.id },
-      data: { config: config as Prisma.InputJsonValue },
+      this.validateModuleConfig(module, config as Prisma.InputJsonValue)
+      return tx.organizationModule.update({
+        where: { id: orgModule.id },
+        data: { config: config as Prisma.InputJsonValue },
+      })
     })
   }
 
@@ -555,17 +597,18 @@ export class ModuleService {
    */
   async getOrganizationModules(
     organizationId: string,
-  ): Promise<Array<{ code: string; config: Record<string, unknown>; enabled: boolean }>> {
+  ): Promise<Array<{ code: string; scope: ModuleScope; config: Record<string, unknown>; enabled: boolean }>> {
     const orgModules = await this.db.organizationModule.findMany({
       where: {
         organizationId,
-        module: { active: true },
+        module: { active: true, scope: { in: ORGANIZATION_COMPATIBLE_SCOPES } },
       },
       include: { module: true },
     })
 
     return orgModules.map(om => ({
       code: om.module.code,
+      scope: om.module.scope,
       config: this.deepMerge(om.module.defaultConfig as Record<string, unknown>, (om.config as Record<string, unknown>) || {}),
       enabled: om.enabled,
     }))
@@ -582,6 +625,7 @@ export class ModuleService {
         module: {
           code: moduleCode,
           active: true,
+          scope: { in: ORGANIZATION_COMPATIBLE_SCOPES },
         },
       },
     })

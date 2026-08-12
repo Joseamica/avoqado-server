@@ -16,7 +16,11 @@
 
 import { createHash, randomInt } from 'node:crypto'
 import {
+  AreaSettlementRoute,
   AreaTicketCheckoutStatus,
+  AreaTicketDeliveryVerificationMode,
+  AreaTicketExternalHandoffState,
+  AreaTicketExternalSettlementStatus,
   AreaTicketFulfillmentMethod,
   AreaTicketInventoryReservationMode,
   AreaTicketInventoryReservationStatus,
@@ -25,8 +29,12 @@ import {
   AreaTicketPrintAttemptKind,
   AreaTicketPrintAttemptStatus,
   AreaTicketStatus,
+  ExternalDeliveryTracking,
+  FulfillmentMode,
+  MovementType,
   PaymentMethod,
   Prisma,
+  RawMaterialMovementType,
 } from '@prisma/client'
 
 import logger from '../../config/logger'
@@ -34,6 +42,7 @@ import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError
 import { areaTicketCheckDigit } from '../../lib/areaTicketCode'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { createStockBatch } from '../dashboard/fifoBatch.service'
 import { convertUnit } from '../../utils/unitConversion'
 import prisma from '../../utils/prismaClient'
 import { withSerializableRetry } from '../../utils/serializableRetry'
@@ -99,6 +108,10 @@ export interface FulfillAreaTicketInput extends CheckoutMutationInput {
   method: AreaTicketFulfillmentMethod
 }
 
+export interface CancelAreaTicketInput extends CheckoutMutationInput {
+  reason: string
+}
+
 interface SnapshotModifier {
   modifierId: string
   name: string
@@ -144,6 +157,9 @@ const ticketInclude = {
       terminal: { select: { id: true, name: true } },
     },
   },
+  // null en la ruta AVOQADO — issueAreaTicket sólo crea el settlement cuando el área
+  // es EXTERNAL (ver isExternal).
+  externalSettlement: true,
 } satisfies Prisma.AreaTicketInclude
 
 const checkoutInclude = {
@@ -167,7 +183,10 @@ const checkoutInclude = {
   },
 } satisfies Prisma.AreaTicketCheckoutSessionInclude
 
-function domainError(statusCode: number, code: string, message: string, details?: unknown): AppError {
+// Exportado: `areaTicketExternal.mobile.service.ts` (cobro externo, §caja
+// externa fase 1) lo reutiliza en vez de duplicar el mismo constructor de
+// error de dominio en un segundo archivo.
+export function domainError(statusCode: number, code: string, message: string, details?: unknown): AppError {
   return new AppError(message, statusCode, true, code, details)
 }
 
@@ -175,7 +194,24 @@ function checkoutStatusIn(status: AreaTicketCheckoutStatus, allowed: AreaTicketC
   return allowed.includes(status)
 }
 
-function requireIdempotencyKey(value: string | null | undefined): string {
+function assertDeliveryMethodAllowed(verificationMode: AreaTicketDeliveryVerificationMode, method: AreaTicketFulfillmentMethod): void {
+  const allowed =
+    verificationMode === AreaTicketDeliveryVerificationMode.PAPER_OR_SCAN ||
+    (verificationMode === AreaTicketDeliveryVerificationMode.PAPER_CONFIRMATION &&
+      method === AreaTicketFulfillmentMethod.PAPER_CONFIRMATION) ||
+    (verificationMode === AreaTicketDeliveryVerificationMode.RECEIPT_SCAN && method === AreaTicketFulfillmentMethod.RECEIPT_SCAN)
+  if (allowed) return
+  throw domainError(
+    409,
+    'AREA_TICKET_DELIVERY_METHOD_NOT_ALLOWED',
+    method === AreaTicketFulfillmentMethod.RECEIPT_SCAN
+      ? 'Este local no permite confirmar entregas escaneando el comprobante.'
+      : 'Este local no permite confirmar entregas con el vale de papel.',
+  )
+}
+
+// Exportado por el mismo motivo que `domainError` — ver comentario arriba.
+export function requireIdempotencyKey(value: string | null | undefined): string {
   const key = value?.trim()
   if (!key || key.length > 64) {
     throw new BadRequestError('idempotencyKey es requerido y debe tener máximo 64 caracteres.')
@@ -240,7 +276,11 @@ function mapTicket(ticket: any) {
     id: ticket.id,
     code: ticket.code,
     status: ticket.status,
-    fulfillmentArea: ticket.fulfillmentArea,
+    fulfillmentModeSnapshot: ticket.fulfillmentModeSnapshot,
+    // Ruta vigente AL EMITIR (§caja externa fase 1). AVOQADO para todo lo existente
+    // — el default no cambia nada de lo que ya funciona.
+    settlementRoute: ticket.settlementRoute,
+    fulfillmentArea: ticket.fulfillmentArea ? { ...ticket.fulfillmentArea, fulfillmentMode: ticket.fulfillmentModeSnapshot } : null,
     sourceTerminal: ticket.sourceTerminal,
     currency: ticket.currency,
     subtotal: money(ticket.subtotal),
@@ -287,6 +327,19 @@ function mapTicket(ticket: any) {
           terminal: ticket.fulfillment.terminal,
         }
       : null,
+    // Sólo existe si el área es EXTERNAL — null en la ruta AVOQADO.
+    externalSettlement: ticket.externalSettlement
+      ? {
+          id: ticket.externalSettlement.id,
+          status: ticket.externalSettlement.status,
+          handoffState: ticket.externalSettlement.handoffState,
+          confirmationMode: ticket.externalSettlement.confirmationMode,
+          referenceAmount: money(ticket.externalSettlement.referenceAmount),
+          externalAmount: ticket.externalSettlement.externalAmount == null ? null : money(ticket.externalSettlement.externalAmount),
+          externalReference: ticket.externalSettlement.externalReference,
+          confirmedAt: ticket.externalSettlement.confirmedAt,
+        }
+      : null,
   }
 }
 
@@ -323,7 +376,8 @@ function mapCheckout(session: any) {
   }
 }
 
-async function resolveTerminal(venueId: string, deviceUid: string | null | undefined, client: DbClient = prisma) {
+// Exportado por el mismo motivo que `domainError` — ver comentario arriba.
+export async function resolveTerminal(venueId: string, deviceUid: string | null | undefined, client: DbClient = prisma) {
   const uid = deviceUid?.trim()
   if (!uid) {
     throw new BadRequestError('Falta el identificador del dispositivo (X-Device-Id).')
@@ -358,7 +412,9 @@ async function resolveTerminal(venueId: string, deviceUid: string | null | undef
           active: true,
         },
       },
-      fulfillmentArea: { select: { id: true, name: true, fulfillmentMode: true, active: true } },
+      fulfillmentArea: {
+        select: { id: true, name: true, fulfillmentMode: true, active: true, settlementRoute: true, externalConfirmationMode: true },
+      },
     },
   })
   if (!terminal) {
@@ -409,9 +465,10 @@ export async function getScaleSettings(venueId: string, deviceUid: string) {
 }
 
 export async function getAreaTicketSettings(venueId: string, deviceUid: string) {
-  const [areaTicketsEntitled, scaleEntitled, settings, scaleSettings, terminal] = await Promise.all([
+  const [areaTicketsEntitled, scaleEntitled, variableBarcodeEntitled, settings, scaleSettings, terminal] = await Promise.all([
     venueHasFeatureAccess(venueId, 'AREA_TICKETS'),
     venueHasFeatureAccess(venueId, 'SCALE_INTEGRATION'),
+    venueHasFeatureAccess(venueId, 'VARIABLE_WEIGHT_BARCODE'),
     getSettingsRecord(venueId),
     prisma.venueScaleSettings.findUnique({ where: { venueId } }),
     resolveTerminal(venueId, deviceUid),
@@ -442,6 +499,12 @@ export async function getAreaTicketSettings(venueId: string, deviceUid: string) 
       defaultWorkspace: terminal.defaultWorkspace,
     },
     scaleIntegration: mapScaleIntegration(scaleEntitled, scaleSettings?.enabled === true, terminal.scaleProfile),
+    variableWeightBarcode: {
+      entitled: variableBarcodeEntitled,
+      enabled: variableBarcodeEntitled && scaleSettings?.variableBarcodeEnabled === true,
+      format: 'EAN13_PLU5_WEIGHT5',
+      prefix: scaleSettings?.variableBarcodePrefix ?? '20',
+    },
   }
 }
 
@@ -701,9 +764,19 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   if (!terminal.canIssueAreaTickets || !terminal.fulfillmentAreaId || !terminal.fulfillmentArea?.active) {
     throw new ForbiddenError('Esta terminal no está configurada para emitir vales de un área activa.', 'TERMINAL_AREA_MISMATCH')
   }
+  // El guard de arriba ya garantiza que ambos existen, pero TypeScript descarta el
+  // estrechamiento de PROPIEDADES al entrar al callback de `prisma.$transaction`
+  // (podrían mutar entre el chequeo y la ejecución). Fijarlos aquí es lo que hace
+  // que adentro se lean sin `!`: la garantía queda en una constante, no en una
+  // aserción que nadie vuelve a verificar.
+  const fulfillmentAreaId = terminal.fulfillmentAreaId
+  const fulfillmentArea = terminal.fulfillmentArea
+  // Ruta vigente AL EMITIR — se congela en el vale (y, si aplica, en su settlement).
+  // Cambiar la ruta del área después no reescribe vales ya emitidos.
+  const isExternal = fulfillmentArea.settlementRoute === AreaSettlementRoute.EXTERNAL
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   const normalizedItems = normalizeIssueLines(input.lines)
-  const { itemsData, subtotal, itemDiscountTotal } = await buildOrderItemsData(venueId, normalizedItems, terminal.fulfillmentAreaId)
+  const { itemsData, subtotal, itemDiscountTotal } = await buildOrderItemsData(venueId, normalizedItems, fulfillmentAreaId)
   const snapshots = buildSnapshotLines(input.lines, itemsData)
   const snapshotHash = canonicalSnapshotHash('MXN', snapshots)
   const total = new Prisma.Decimal(subtotal).sub(itemDiscountTotal)
@@ -728,7 +801,9 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
           const ticket = await tx.areaTicket.create({
             data: {
               venueId,
-              fulfillmentAreaId: terminal.fulfillmentAreaId!,
+              fulfillmentAreaId,
+              fulfillmentModeSnapshot: fulfillmentArea.fulfillmentMode,
+              settlementRoute: fulfillmentArea.settlementRoute,
               sourceTerminalId: terminal.id,
               issuedByStaffId: staffId ?? null,
               code,
@@ -766,17 +841,44 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
               }),
             )
           }
-          if (reservationSpecs.length > 0) {
-            await tx.areaTicketInventoryReservation.createMany({
-              data: reservationSpecs.map(spec => ({
+          if (isExternal) {
+            await tx.areaTicketExternalSettlement.create({
+              data: {
                 venueId,
                 areaTicketId: ticket.id,
-                areaTicketLineId: createdLines[spec.lineIndex].id,
-                inventoryKind: spec.inventoryKind,
-                inventoryId: spec.inventoryId,
-                quantityBaseUnits: spec.quantityBaseUnits,
-              })),
+                status: AreaTicketExternalSettlementStatus.PENDING,
+                handoffState: AreaTicketExternalHandoffState.PENDING,
+                // Se congela: la política puede cambiar mañana, este vale se emitió bajo la de hoy.
+                confirmationMode: fulfillmentArea.externalConfirmationMode,
+                referenceAmount: total,
+                idempotencyKey,
+              },
             })
+          }
+          if (reservationSpecs.length > 0) {
+            if (isExternal) {
+              // El producto ya salió del área al emitir (enmienda E3): la reserva nace
+              // CONSUMIDA con su movimiento en esta misma transacción, en vez de ACTIVA
+              // a la espera de un pago que Avoqado nunca observa (cobra otra caja).
+              await consumeReservationsAtIssue(
+                tx,
+                venueId,
+                ticket.id,
+                reservationSpecs.map(spec => ({ ...spec, areaTicketLineId: createdLines[spec.lineIndex].id })),
+                staffId ?? undefined,
+              )
+            } else {
+              await tx.areaTicketInventoryReservation.createMany({
+                data: reservationSpecs.map(spec => ({
+                  venueId,
+                  areaTicketId: ticket.id,
+                  areaTicketLineId: createdLines[spec.lineIndex].id,
+                  inventoryKind: spec.inventoryKind,
+                  inventoryId: spec.inventoryId,
+                  quantityBaseUnits: spec.quantityBaseUnits,
+                })),
+              })
+            }
           }
           return tx.areaTicket.findUniqueOrThrow({ where: { id: ticket.id }, include: ticketInclude })
         },
@@ -812,6 +914,179 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   })
   logger.info(`[AREA TICKETS v7] Vale emitido ${created.code}`, { venueId, ticketId: created.id })
   return mapTicket(created)
+}
+
+// Estados donde la otra caja YA cobró este vale, o se dio por cobrado sin que
+// nadie lo verificara — cancelar en cualquiera de estos dispara la reversa de
+// inventario (más abajo) sobre una venta que probablemente SÍ ocurrió.
+// CONFIRMED y DISCREPANCY: alguien AFIRMÓ que la otra caja cobró (con o sin
+// diferencia de importe, §caja externa fase 1 Task 7) — la devolución se hace
+// ahí, no aquí. ASSUMED: se dio por cobrado sin verificar — cancelar directo
+// sobre ese estado revertiría inventario de una venta que nadie ni confirmó
+// ni negó; la salida es declarar primero, con `markExternalNotCharged`
+// (archivo hermano, Task 8), que la otra caja NO cobró — eso mueve el
+// settlement a NOT_CHARGED, y ahí sí se puede cancelar. Amplía el guard
+// original de esta función (sólo CONFIRMED), que quedó corto en cuanto
+// DISCREPANCY y ASSUMED se volvieron estados alcanzables (Task 7).
+// Exportada (no module-private) porque es el criterio de elegibilidad de TODA la ruta
+// externa y ya se consume desde fuera de este archivo: `getOperations`
+// (`areaTicket.dashboard.service.ts`) lo necesita para que el panel de operación de la
+// oficina vea la misma cola que el piso. Una segunda lista literal en otro archivo
+// podría divergir en silencio, que es justo lo que la revisión de la Task 10 señaló
+// como el valor de tener UNA sola constante.
+export const YA_COBRADO_AFUERA: AreaTicketExternalSettlementStatus[] = [
+  AreaTicketExternalSettlementStatus.CONFIRMED,
+  AreaTicketExternalSettlementStatus.DISCREPANCY,
+  AreaTicketExternalSettlementStatus.ASSUMED,
+]
+
+// Un solo constructor para los DOS puntos del guard (abajo) — así no pueden
+// divergir en el mensaje. ASSUMED recibe una instrucción distinta de
+// CONFIRMED/DISCREPANCY: para ASSUMED nadie ha AFIRMADO un cobro todavía
+// (sólo se dio por hecho), así que decirle al usuario "la devolución se hace
+// ahí" presupondría un cobro que nadie confirmó — lo correcto es señalar el
+// paso previo real (`markExternalNotCharged`).
+function buildExternalAlreadyChargedError(status: AreaTicketExternalSettlementStatus): AppError {
+  if (status === AreaTicketExternalSettlementStatus.ASSUMED) {
+    return domainError(
+      409,
+      'AREA_TICKET_EXTERNAL_ALREADY_CHARGED',
+      'Este vale se dio por cobrado en la caja externa sin confirmarse. Antes de cancelarlo, declara si en realidad no se cobró.',
+    )
+  }
+  return domainError(409, 'AREA_TICKET_EXTERNAL_ALREADY_CHARGED', 'Este vale ya se cobró en la caja externa. La devolución se hace ahí.')
+}
+
+/**
+ * Cancela un vale ISSUED — el único estado cancelable hoy. No existía ninguna
+ * cancelación a nivel de vale individual antes de este cambio (sólo
+ * `cancelAreaTicketCheckout`, que cancela una SESIÓN de caja completa y nunca
+ * tocó `AreaTicketInventoryReservation`); esta función es nueva.
+ *
+ * Reservas `ACTIVE` (ruta AVOQADO, todavía sin pagar) sólo se sueltan — nunca
+ * tocaron `currentStock` (son un hold validado contra el DISPONIBLE, ver
+ * `lockAndValidateReservations`), así que soltarlas es 100% seguro.
+ *
+ * Reservas `CONSUMED` (ruta EXTERNAL, consumidas al emitir — Task 4) SÍ movieron
+ * stock de verdad, así que revertirlas es la parte peligrosa de esta función:
+ * o se devuelve el producto a existencia, o se registra como merma
+ * (`VenueAreaTicketSettings.recordWasteOnCancel`) y el stock se queda como está.
+ *
+ * Idempotencia en DOS capas: (1) si el vale ya está CANCELLED, se corta antes
+ * de tocar nada — ni siquiera se reabre la transacción; (2) por si acaso, cada
+ * reserva revisa su propio `reversalMovementId` antes de moverse. Un vale sólo
+ * se puede cancelar una vez, así que en la práctica la capa (1) sola ya
+ * garantiza "una sola reversa" — la (2) es la misma defensa en profundidad que
+ * pidió el brief.
+ */
+export async function cancelAreaTicket(venueId: string, ticketId: string, input: CancelAreaTicketInput) {
+  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
+  const reason = input.reason?.trim()
+  if (!reason) {
+    throw new BadRequestError('Escribe por qué se cancela este vale.')
+  }
+  await assertAreaTicketsEnabled(venueId)
+  // Sólo valida que el dispositivo pertenezca a este venue — igual que el
+  // resto de las mutaciones de este archivo. No exige `canIssueAreaTickets`:
+  // el brief no pide esa restricción y añadirla sin que nadie la pidiera
+  // arriesgaba bloquear una llamada legítima que mis propios tests no
+  // ejercitarían (yo mismo elijo qué probar).
+  await resolveTerminal(venueId, input.deviceUid)
+  const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
+
+  const existing = await prisma.areaTicket.findFirst({
+    where: { id: ticketId, venueId },
+    select: { id: true, status: true, externalSettlement: { select: { status: true } } },
+  })
+  if (!existing) {
+    throw domainError(404, 'AREA_TICKET_NOT_FOUND', 'No encontramos ese vale en este local.')
+  }
+  if (existing.status === AreaTicketStatus.CANCELLED) {
+    // Idempotente: ya cancelado. Ni siquiera se reabre la transacción — el
+    // trabajo de reversa ya ocurrió (o nunca hizo falta) la primera vez.
+    return mapTicket(await prisma.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, include: ticketInclude }))
+  }
+  if (existing.externalSettlement && YA_COBRADO_AFUERA.includes(existing.externalSettlement.status)) {
+    throw buildExternalAlreadyChargedError(existing.externalSettlement.status)
+  }
+  if (existing.status !== AreaTicketStatus.ISSUED) {
+    throw domainError(409, 'AREA_TICKET_CANNOT_CANCEL', `Este vale está en estado ${existing.status} y no admite cancelación.`)
+  }
+
+  const settings = await getSettingsRecord(venueId)
+  const wastes = settings?.recordWasteOnCancel === true
+
+  const cancelled = await prisma.$transaction(async tx => {
+    // Mismo patrón que cancelAreaTicketCheckout: lock pesimista + relectura
+    // dentro de la tx. Dos cancelaciones concurrentes del MISMO vale se
+    // serializan aquí — la segunda ve el estado ya actualizado por la primera
+    // y toma la rama idempotente de abajo.
+    await tx.$queryRaw`SELECT id FROM "AreaTicket" WHERE id = ${ticketId} AND "venueId" = ${venueId} FOR UPDATE`
+    const fresh = await tx.areaTicket.findFirst({
+      where: { id: ticketId, venueId },
+      include: { externalSettlement: { select: { status: true } } },
+    })
+    if (!fresh) throw new NotFoundError('No encontramos ese vale en este local.')
+    if (fresh.status === AreaTicketStatus.CANCELLED) {
+      return tx.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, include: ticketInclude })
+    }
+    if (fresh.externalSettlement && YA_COBRADO_AFUERA.includes(fresh.externalSettlement.status)) {
+      throw buildExternalAlreadyChargedError(fresh.externalSettlement.status)
+    }
+    if (fresh.status !== AreaTicketStatus.ISSUED) {
+      throw domainError(409, 'AREA_TICKET_CANNOT_CANCEL', `Este vale está en estado ${fresh.status} y no admite cancelación.`)
+    }
+
+    const reservations = await tx.areaTicketInventoryReservation.findMany({
+      where: {
+        areaTicketId: ticketId,
+        venueId,
+        status: { in: [AreaTicketInventoryReservationStatus.ACTIVE, AreaTicketInventoryReservationStatus.CONSUMED] },
+      },
+      orderBy: [{ inventoryKind: 'asc' }, { inventoryId: 'asc' }, { id: 'asc' }],
+    })
+
+    for (const reservation of reservations) {
+      if (reservation.status === AreaTicketInventoryReservationStatus.CONSUMED) {
+        // Ya revertida: un reintento no debe volver a mover inventario.
+        if (reservation.reversalMovementId) continue
+        if (reservation.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+          await releaseQuantityReservation(tx, venueId, reservation, ticketId, wastes, staffId ?? undefined)
+        } else {
+          await releaseRawMaterialReservation(tx, venueId, reservation, ticketId, wastes, staffId ?? undefined)
+        }
+      } else {
+        // ACTIVE: la ruta AVOQADO reserva sin pagar todavía. Nunca tocó
+        // currentStock (es sólo un hold), así que soltarla no mueve
+        // inventario — sólo libera el cupo para que otra venta lo use.
+        await tx.areaTicketInventoryReservation.update({
+          where: { id: reservation.id },
+          data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date() },
+        })
+      }
+    }
+
+    await tx.areaTicket.update({
+      where: { id: ticketId },
+      data: { status: AreaTicketStatus.CANCELLED, cancelledAt: new Date(), version: { increment: 1 } },
+    })
+
+    return tx.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, include: ticketInclude })
+  })
+
+  void logAction({
+    staffId,
+    venueId,
+    action: 'AREA_TICKET_CANCELLED',
+    entity: 'AreaTicket',
+    entityId: ticketId,
+    // El idempotencyKey de ESTA llamada queda en la bitácora para trazabilidad
+    // — el ancla real contra doble-reversa es `reversalMovementId` por
+    // reserva (columna @unique, Task 1), no esta llave.
+    data: { reason, idempotencyKey, settlementRoute: cancelled.settlementRoute, recordedAsWaste: wastes },
+  })
+  logger.info(`[AREA TICKETS v7] Vale cancelado ${cancelled.code}`, { venueId, ticketId })
+  return mapTicket(cancelled)
 }
 
 async function loadCheckout(venueId: string, sessionId: string) {
@@ -936,10 +1211,20 @@ export async function addTicketToCheckout(venueId: string, sessionId: string, ti
         checkoutSessionId: true,
         expiresAt: true,
         claimExpiresAt: true,
+        settlementRoute: true,
       },
     })
     if (!ticket) {
       throw domainError(404, 'AREA_TICKET_NOT_FOUND', 'No encontramos ese vale en este local.')
+    }
+    // Un vale EXTERNAL se cobra en la caja del otro POS, nunca en una de Avoqado.
+    // El CHECK "area_ticket_external_no_avoqado_circuit" ya lo impide en la base
+    // (un vale EXTERNAL no puede traer checkoutSessionId ni status CLAIMED), pero
+    // dejar que este código llegue al updateMany de abajo convierte esa defensa en
+    // un 500 crudo de Postgres para el cajero. Rechazar aquí, ANTES de cualquier
+    // escritura, es la puerta — el CHECK sigue siendo la red.
+    if (ticket.settlementRoute === AreaSettlementRoute.EXTERNAL) {
+      throw domainError(409, 'AREA_TICKET_IS_EXTERNAL', 'Este vale se cobra en la caja externa, no en Avoqado.')
     }
     if (ticket.checkoutSessionId === current.id && ticket.status === AreaTicketStatus.CLAIMED) {
       return
@@ -956,6 +1241,7 @@ export async function addTicketToCheckout(venueId: string, sessionId: string, ti
             checkoutSessionId: true,
             expiresAt: true,
             claimExpiresAt: true,
+            settlementRoute: true,
           },
         })
       }
@@ -1246,6 +1532,7 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
             }
             assertSnapshotIntegrity(ticket)
           }
+          const requiresDeliveryCode = fresh.tickets.some(ticket => ticket.fulfillmentModeSnapshot !== FulfillmentMode.IMMEDIATE)
 
           const order = await tx.order.create({
             data: {
@@ -1268,7 +1555,7 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
               total,
               paidAmount: new Prisma.Decimal(0),
               remainingBalance: total,
-              areaDeliveryCode: deliveryCode,
+              areaDeliveryCode: requiresDeliveryCode ? deliveryCode : null,
             },
           })
 
@@ -1601,16 +1888,22 @@ export async function resolveAreaTicketScan(
       where: { venueId_code: { venueId, code: normalized } },
       include: ticketInclude,
     }),
-    prisma.order.findUnique({
-      where: { venueId_areaDeliveryCode: { venueId, areaDeliveryCode: normalized } },
-      select: { id: true, orderNumber: true, paymentStatus: true, status: true, areaDeliveryCode: true },
-    }),
+    context === 'AREA_DELIVERY'
+      ? prisma.order.findUnique({
+          where: { venueId_areaDeliveryCode: { venueId, areaDeliveryCode: normalized } },
+          select: { id: true, orderNumber: true, paymentStatus: true, status: true, areaDeliveryCode: true },
+        })
+      : Promise.resolve(null),
   ])
   const moduleEnabled = entitled && settings?.enabled === true
+  const deliveryReceiptCandidate = moduleEnabled && context === 'AREA_DELIVERY' && deliveryOrder
+  if (deliveryReceiptCandidate) {
+    assertDeliveryMethodAllowed(settings.deliveryVerificationMode, AreaTicketFulfillmentMethod.RECEIPT_SCAN)
+  }
   const candidates = [
     ...(product ? ['PRODUCT'] : []),
     ...(moduleEnabled && ticket ? [ticket.status === AreaTicketStatus.PAID ? 'PAID_AREA_TICKET' : 'AREA_TICKET'] : []),
-    ...(moduleEnabled && deliveryOrder ? ['DELIVERY_RECEIPT'] : []),
+    ...(deliveryReceiptCandidate ? ['DELIVERY_RECEIPT'] : []),
   ]
   if (candidates.length === 0) return { type: 'UNKNOWN', code: normalized }
   if (candidates.length > 1) {
@@ -1638,11 +1931,14 @@ export async function resolveAreaTicketScan(
   }
 }
 
-function encodePendingCursor(ticket: { issuedAt: Date; id: string }): string {
+// Exportadas (Task 9, §caja externa fase 1): `areaTicketExternal.mobile.service.ts`
+// reutiliza este MISMO par encode/decode para la cola de cobros por confirmar,
+// en vez de duplicar el mecanismo de cursor estable en un segundo archivo.
+export function encodePendingCursor(ticket: { issuedAt: Date; id: string }): string {
   return Buffer.from(`${ticket.issuedAt.toISOString()}|${ticket.id}`).toString('base64url')
 }
 
-function decodePendingCursor(cursor?: string | null): { issuedAt: Date; id: string } | null {
+export function decodePendingCursor(cursor?: string | null): { issuedAt: Date; id: string } | null {
   if (!cursor) return null
   try {
     const [date, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|')
@@ -1673,14 +1969,35 @@ export async function listPendingAreaTicketFulfillment(
     where: {
       venueId,
       fulfillmentAreaId: terminal.fulfillmentAreaId!,
-      status: AreaTicketStatus.PAID,
+      fulfillmentModeSnapshot: { not: FulfillmentMode.IMMEDIATE },
       fulfillment: null,
-      order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
-      ...(cursor
-        ? {
-            OR: [{ issuedAt: { gt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { gt: cursor.id } }],
-          }
-        : {}),
+      // La lista es la UNIÓN, explícita por ruta — nunca "si no hay Order,
+      // inclúyelo". Nativos: pagados como siempre. Externos: cobro ya
+      // elegible (mismo conjunto que habilita entregar en `fulfillAreaTicket`)
+      // Y el área en modo TRACKED — un área UNTRACKED entrega mirando el
+      // papel y no debe acumular una cola que nadie va a vaciar.
+      AND: [
+        {
+          OR: [
+            {
+              settlementRoute: AreaSettlementRoute.AVOQADO,
+              status: AreaTicketStatus.PAID,
+              order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
+            },
+            {
+              settlementRoute: AreaSettlementRoute.EXTERNAL,
+              status: AreaTicketStatus.ISSUED,
+              fulfillmentArea: { externalDeliveryTracking: ExternalDeliveryTracking.TRACKED },
+              externalSettlement: { status: { in: YA_COBRADO_AFUERA } },
+            },
+          ],
+        },
+        // Segundo elemento de `AND` (no un `OR` en el mismo nivel que el de
+        // arriba): un objeto literal con dos claves `OR` colisionaría — la
+        // segunda pisaría a la primera en silencio — así que el cursor viaja
+        // en su PROPIA cláusula.
+        ...(cursor ? [{ OR: [{ issuedAt: { gt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { gt: cursor.id } }] }] : []),
+      ],
     },
     include: ticketInclude,
     orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
@@ -1697,6 +2014,11 @@ export async function listPendingAreaTicketFulfillment(
 
 export async function resolveAreaTicketFulfillment(venueId: string, deliveryCode: string, deviceUid: string) {
   const terminal = await assertDeliveryTerminal(venueId, deviceUid)
+  const settings = await getSettingsRecord(venueId)
+  assertDeliveryMethodAllowed(
+    settings?.deliveryVerificationMode ?? AreaTicketDeliveryVerificationMode.PAPER_OR_SCAN,
+    AreaTicketFulfillmentMethod.RECEIPT_SCAN,
+  )
   const order = await prisma.order.findUnique({
     where: { venueId_areaDeliveryCode: { venueId, areaDeliveryCode: deliveryCode.trim() } },
     select: {
@@ -1751,25 +2073,97 @@ export async function fulfillAreaTicket(venueId: string, ticketId: string, input
           order: {
             select: { id: true, paymentStatus: true, status: true },
           },
+          // Sólo la rama EXTERNAL de abajo la lee — null en la ruta AVOQADO,
+          // igual que en `ticketInclude` (issueAreaTicket sólo crea el
+          // settlement cuando el área es EXTERNAL).
+          externalSettlement: { select: { status: true } },
         },
       })
       if (!ticket) throw domainError(404, 'AREA_TICKET_NOT_FOUND', 'No encontramos ese vale en este local.')
-      if (ticket.fulfillment) {
-        return { fulfillment: ticket.fulfillment, created: false }
-      }
       if (ticket.fulfillmentAreaId !== terminal.fulfillmentAreaId) {
         throw new ForbiddenError('El vale pertenece a otra área.', 'TERMINAL_AREA_MISMATCH')
       }
-      if (!ticket.order || ticket.order.paymentStatus !== 'PAID' || ticket.status !== AreaTicketStatus.PAID) {
-        throw domainError(409, 'AREA_TICKET_NOT_PAID', 'Este vale todavía no está completamente pagado.')
+      if (ticket.fulfillment) {
+        return { fulfillment: ticket.fulfillment, created: false }
       }
-      if (ticket.order.status === 'CANCELLED' || ticket.order.status === 'DELETED') {
-        throw domainError(409, 'AREA_TICKET_ORDER_REFUNDED', 'La venta fue cancelada o reembolsada.')
+      if (ticket.fulfillmentModeSnapshot === FulfillmentMode.IMMEDIATE) {
+        throw domainError(409, 'AREA_TICKET_FULFILLMENT_NOT_REQUIRED', 'Este vale se entregó al momento y no requiere confirmación manual.')
       }
+      const settings = await getSettingsRecord(venueId, tx)
+      assertDeliveryMethodAllowed(settings?.deliveryVerificationMode ?? AreaTicketDeliveryVerificationMode.PAPER_OR_SCAN, input.method)
+
+      // Bifurcación EXPLÍCITA por ruta — nunca implícita ("si no hay orden,
+      // sáltate la validación"). Cada rama nombra su propia ruta y trae su
+      // propio predicado de elegibilidad; confundirlas convertiría cualquier
+      // `orderId` nulo ACCIDENTAL de la ruta nativa en una entrega gratis.
+      if (ticket.settlementRoute === AreaSettlementRoute.EXTERNAL) {
+        // Ruta externa: no hay Order que pagar — la autorización sale del
+        // cobro que alguien declaró en la caja externa. Mismo conjunto de
+        // estados que `YA_COBRADO_AFUERA` ya usa en `cancelAreaTicket` para
+        // "la otra caja cobró, o se dio por cobrado sin verificar": es el
+        // MISMO hecho visto desde el otro lado — ahí bloquea cancelar, aquí
+        // habilita entregar. DISCREPANCY entra a propósito: el producto ya se
+        // cobró en la otra caja, retenerlo castigaría al cliente por un error
+        // de captura del importe.
+        //
+        // Nota (Task 16, cierre de fase): esta rama NO revisa `ticket.status`
+        // — sólo el settlement. Hoy es IMPOSIBLE que un vale CANCELLED o
+        // EXPIRED llegue hasta aquí (es decir, con un settlement dentro de
+        // `YA_COBRADO_AFUERA`), verificado por tres vías independientes:
+        //   1. EXPIRED sólo se escribe en un sitio de todo el código:
+        //      `addTicketToCheckout` (este archivo, ~línea 1246). Esa MISMA
+        //      función rechaza cualquier vale EXTERNAL con
+        //      `AREA_TICKET_IS_EXTERNAL` (~línea 1220) ANTES de llegar a esa
+        //      escritura — mismo ticket, mismo bloque secuencial, sin
+        //      re-fetch entre medias. Ningún otro código pone EXPIRED.
+        //   2. Ida (elegible → CANCELLED): `cancelAreaTicket` (~líneas 1003 y
+        //      1027) bloquea cancelar en cuanto `externalSettlement.status`
+        //      ya está en `YA_COBRADO_AFUERA` — un vale que ya calificaría
+        //      para entregarse no se puede cancelar después.
+        //   3. Vuelta (CANCELLED → elegible): `confirmExternalSettlement`
+        //      (`areaTicketExternal.mobile.service.ts:255`) — la ÚNICA
+        //      función que escribe CONFIRMED o DISCREPANCY — exige
+        //      `ticket.status === ISSUED` ANTES de tocar el settlement, así
+        //      que un vale ya CANCELLED no puede volverse elegible después.
+        //      (El tercer miembro de `YA_COBRADO_AFUERA`, ASSUMED, hoy no lo
+        //      escribe ningún código de producción — Tasks 8/9.)
+        // Las vías 2 y 3 cubren los dos órdenes posibles de cancelar/confirmar;
+        // la 1 descarta EXPIRED sin importar el orden.
+        //
+        // El día que exista vencimiento de vales EXTERNAL (hoy NO existe: el
+        // job de conciliación de la Task 12 sólo LEE `status: ISSUED`, nunca
+        // escribe EXPIRED — `src/jobs/areaTicketExternalReconciliation.job.ts`),
+        // esta rama sí podría recibir un vale vencido con settlement ya
+        // confirmado, y hoy lo entregaría sin decir nada. Cuando eso se
+        // construya, hay que decidir a propósito: ¿se entrega igual porque el
+        // cliente ya pagó en la otra caja (bloquear castigaría un vencimiento
+        // de bookkeeping interno, no una falta de pago — mismo razonamiento
+        // que la Task 10 usó para dejar pasar DISCREPANCY), o se exige un paso
+        // de reactivación primero? No cambiar este comportamiento sin decidir
+        // esto explícitamente.
+        const externalStatus = ticket.externalSettlement?.status
+        if (!externalStatus || !YA_COBRADO_AFUERA.includes(externalStatus)) {
+          throw domainError(409, 'AREA_TICKET_EXTERNAL_NOT_CONFIRMED', 'Confirma el cobro en la caja antes de entregar este vale.')
+        }
+      } else {
+        // Ruta nativa (AVOQADO): idéntica a v7, sin tocar.
+        if (!ticket.order || ticket.order.paymentStatus !== 'PAID' || ticket.status !== AreaTicketStatus.PAID) {
+          throw domainError(409, 'AREA_TICKET_NOT_PAID', 'Este vale todavía no está completamente pagado.')
+        }
+        if (ticket.order.status === 'CANCELLED' || ticket.order.status === 'DELETED') {
+          throw domainError(409, 'AREA_TICKET_ORDER_REFUNDED', 'La venta fue cancelada o reembolsada.')
+        }
+      }
+
       const fulfillment = await tx.areaTicketFulfillment.create({
         data: {
           areaTicketId: ticket.id,
-          orderId: ticket.order.id,
+          // `?? null` cubre las DOS rutas con la misma línea: en AVOQADO el
+          // guard de arriba ya garantizó que `ticket.orderId` existe; en
+          // EXTERNAL el CHECK `area_ticket_external_no_avoqado_circuit`
+          // (Task 2) garantiza que siempre es null — esta ruta nunca crea Order.
+          orderId: ticket.orderId ?? null,
+          settlementRoute: ticket.settlementRoute,
           fulfillmentAreaId: terminal.fulfillmentAreaId!,
           method: input.method,
           idempotencyKey,
@@ -1781,18 +2175,27 @@ export async function fulfillAreaTicket(venueId: string, ticketId: string, input
           terminal: { select: { id: true, name: true } },
         },
       })
-      const transitioned = await tx.areaTicket.updateMany({
-        where: {
-          id: ticket.id,
-          venueId,
-          status: AreaTicketStatus.PAID,
-          version: ticket.version,
-        },
-        data: { status: AreaTicketStatus.DELIVERED, version: { increment: 1 } },
-      })
-      if (transitioned.count !== 1) {
-        throw domainError(409, 'AREA_TICKET_FULFILLMENT_CONFLICT', 'Otra terminal entregó el vale al mismo tiempo.')
+
+      if (ticket.settlementRoute !== AreaSettlementRoute.EXTERNAL) {
+        // Sólo la ruta nativa transiciona `AreaTicket.status` (PAID → DELIVERED),
+        // con concurrencia optimista sobre `version`. La ruta EXTERNAL NUNCA
+        // toca `status` — el CHECK de la Task 2 sólo permite
+        // ISSUED/CANCELLED/EXPIRED ahí; la entrega se lee de la EXISTENCIA del
+        // fulfillment que se acaba de crear arriba, no de un estado del vale.
+        const transitioned = await tx.areaTicket.updateMany({
+          where: {
+            id: ticket.id,
+            venueId,
+            status: AreaTicketStatus.PAID,
+            version: ticket.version,
+          },
+          data: { status: AreaTicketStatus.DELIVERED, version: { increment: 1 } },
+        })
+        if (transitioned.count !== 1) {
+          throw domainError(409, 'AREA_TICKET_FULFILLMENT_CONFLICT', 'Otra terminal entregó el vale al mismo tiempo.')
+        }
       }
+
       return { fulfillment, created: true }
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -1923,11 +2326,20 @@ export async function lockAreaTicketCheckoutForPayment(
   return { sessionId: session.id, attemptId: attempt.id }
 }
 
+/**
+ * `orderId` es NULLABLE a propósito: la ruta EXTERNAL consume al emitir y NUNCA tiene
+ * Order (lo prohíbe el CHECK `area_ticket_external_no_avoqado_circuit`). Antes esa ruta
+ * pasaba aquí el id del VALE para satisfacer un parámetro `string` — dos cuids del mismo
+ * tipo, así que el compilador no podía ver la mentira. Hoy es inocuo (el valor sólo se
+ * devuelve y ambos llamadores lo descartan), pero el día que alguien use `orderId` para
+ * escribir, la ruta externa metería un id de vale en un campo de orden. `null` dice la
+ * verdad: en esa ruta no hay orden a la cual atribuir el consumo.
+ */
 async function consumeQuantityReservation(
   tx: Prisma.TransactionClient,
   venueId: string,
   reservation: any,
-  orderId: string,
+  orderId: string | null,
   staffId?: string,
 ) {
   const updated = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; previousStock: Prisma.Decimal }>>`
@@ -2043,6 +2455,223 @@ async function consumeRawMaterialReservation(tx: Prisma.TransactionClient, venue
   })
 }
 
+/**
+ * Reversa de una reserva CONSUMED sobre `Inventory` (QUANTITY_INVENTORY) —
+ * cancelación de un vale externo (Task 5).
+ *
+ * El signo es el espejo exacto de `consumeQuantityReservation`, unas líneas
+ * arriba: ese helper resta con `"currentStock" - ${qty}` y registra
+ * `quantity: qty.neg()` (negativo). Aquí se SUMA (`"currentStock" + ${qty}`) y
+ * se registra `quantity: qty` en positivo — mismo patrón atómico
+ * UPDATE...RETURNING (evita el race de leer-y-luego-escribir por separado),
+ * sólo que en la dirección contraria. No hay una función de reversa
+ * preexistente que reutilizar tal cual: `restockItem`
+ * (`inventoryRestock.service.ts`, el restock por reembolso) resuelve por
+ * `productId` y abre su PROPIA transacción, así que no puede participar en
+ * ésta; pero de ahí sale el `MovementType` correcto para esto —
+ * `ADJUSTMENT`, no `RETURN`/`WASTE` (ninguno de los dos existe en
+ * `MovementType`; ver el enum real en schema.prisma:7215).
+ *
+ * `wastes=true` (merma, `VenueAreaTicketSettings.recordWasteOnCancel`): el
+ * producto YA salió de `currentStock` cuando se consumió al emitir
+ * (movimiento SALE de Task 4) — confirmarlo como merma NO es una segunda
+ * baja, es sólo reclasificar esa salida ya ocurrida. `currentStock` no se
+ * toca aquí; `previousStock`/`newStock` del movimiento quedan iguales a
+ * propósito (cero cambio real de stock), mientras que `quantity` sí lleva el
+ * signo negativo del monto perdido — así un reporte que sume `quantity`
+ * agrupado por `type=LOSS` cuenta la merma real, sin que esta fila mienta
+ * sobre el nivel de stock.
+ */
+async function releaseQuantityReservation(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  reservation: { id: string; inventoryId: string; quantityBaseUnits: Prisma.Decimal },
+  ticketId: string,
+  wastes: boolean,
+  staffId?: string,
+) {
+  const reference = `area-ticket-cancel:${ticketId}`
+
+  if (wastes) {
+    const current = await tx.inventory.findUniqueOrThrow({
+      where: { id: reservation.inventoryId },
+      select: { currentStock: true },
+    })
+    const movement = await tx.inventoryMovement.create({
+      data: {
+        inventoryId: reservation.inventoryId,
+        type: MovementType.LOSS,
+        quantity: new Prisma.Decimal(reservation.quantityBaseUnits).neg(),
+        previousStock: current.currentStock,
+        newStock: current.currentStock,
+        reason: 'Vale por área externo cancelado — merma confirmada',
+        reference,
+        createdBy: staffId,
+      },
+    })
+    await tx.areaTicketInventoryReservation.update({
+      where: { id: reservation.id },
+      data: { status: AreaTicketInventoryReservationStatus.WASTE, releasedAt: new Date(), reversalMovementId: movement.id },
+    })
+    return
+  }
+
+  const updated = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; previousStock: Prisma.Decimal }>>`
+    UPDATE "Inventory"
+    SET "currentStock" = "currentStock" + ${reservation.quantityBaseUnits},
+        "updatedAt" = NOW()
+    WHERE id = ${reservation.inventoryId}
+      AND "venueId" = ${venueId}
+    RETURNING id, "currentStock", ("currentStock" - ${reservation.quantityBaseUnits}) AS "previousStock"
+  `
+  if (updated.length !== 1) {
+    throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'No encontramos el inventario reservado para revertir.')
+  }
+  const movement = await tx.inventoryMovement.create({
+    data: {
+      inventoryId: reservation.inventoryId,
+      type: MovementType.ADJUSTMENT,
+      quantity: new Prisma.Decimal(reservation.quantityBaseUnits),
+      previousStock: updated[0].previousStock,
+      newStock: updated[0].currentStock,
+      reason: 'Reversa de vale por área externo cancelado',
+      reference,
+      createdBy: staffId,
+    },
+  })
+  await tx.areaTicketInventoryReservation.update({
+    where: { id: reservation.id },
+    data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date(), reversalMovementId: movement.id },
+  })
+}
+
+/**
+ * Reversa de una reserva CONSUMED sobre `RawMaterial` (RAW_MATERIAL) —
+ * cancelación de un vale externo (Task 5).
+ *
+ * 🔴 Fix round 1 (revisión, Finding 1): la primera versión leía
+ * `currentStock` con un `findFirst` normal — sin lock — y escribía de vuelta
+ * un `newStock` calculado en JS con un `update` separado. Dos cancelaciones
+ * CONCURRENTES de vales DISTINTOS que liberan reservas del MISMO
+ * `rawMaterialId` no tienen nada que las serialice (`cancelAreaTicket` sólo
+ * bloquea la fila de `AreaTicket`, que es distinta para cada una) — las dos
+ * podían leer el mismo `currentStock`, calcular por su cuenta, y la segunda
+ * escritura pisaba a la primera en silencio (lost update: se sub-acredita el
+ * stock). Detectable sólo en el conteo físico, nunca en un test secuencial.
+ *
+ * El fix: `SELECT … FOR UPDATE` sobre `RawMaterial` como PRIMERA operación,
+ * antes de leer `currentStock` y antes de `createStockBatch` — mismo patrón
+ * que ya usa `consumeRawMaterialReservation` (la hermana de consumo, un poco
+ * más arriba en este archivo). El lock serializa el cuerpo COMPLETO de la
+ * función entre dos cancelaciones que compiten por el mismo insumo, así que
+ * además cierra una segunda carrera que apareció al escribir el test de
+ * concurrencia: `createStockBatch` genera su `batchNumber` con su propio
+ * `SELECT` sin lock (`generateBatchNumber`, `fifoBatch.service.ts`), y dos
+ * llamadas concurrentes pueden calcular el MISMO número y chocar contra
+ * `@@unique([rawMaterialId, batchNumber])` (23505). Con el lock tomado
+ * primero, la segunda transacción no arranca su propio `createStockBatch`
+ * hasta que la primera ya commiteó — ve el lote nuevo y calcula el siguiente
+ * número correctamente. (`UPDATE … SET currentStock = currentStock + qty …
+ * RETURNING`, el patrón atómico de `releaseQuantityReservation`, habría
+ * cerrado SÓLO la carrera de `currentStock` — no la de `createStockBatch`,
+ * que ocurre antes del `UPDATE` y necesitaba su propia serialización de
+ * todos modos.)
+ *
+ * `!wastes`: reutiliza `createStockBatch` (ya usado por `adjustStock` en
+ * `rawMaterial.service.ts` para el caso hermano "reponer insumo por
+ * reembolso", ver `inventoryRestock.service.ts`) para abrir un lote nuevo al
+ * costo vigente, en vez de reconstruir a qué lote(s) FIFO exactos se dedujo
+ * — esa traza no se conserva hoy: `consumeRawMaterialReservation` puede
+ * repartir una sola reserva entre varios lotes y sólo guarda el id del
+ * PRIMER movimiento. `createStockBatch` acepta un `tx` externo (a diferencia
+ * de `adjustStock`/`deductStockFIFO`, que abren su propia transacción), así
+ * que sí participa atómicamente en la de `cancelAreaTicket` y bajo el MISMO
+ * lock adquirido arriba.
+ *
+ * `wastes`: igual que en QUANTITY_INVENTORY, no se toca `currentStock` — ya
+ * bajó al consumir. `SPOILAGE` es el tipo real de `RawMaterialMovementType`
+ * para esto (tampoco existe `WASTE` en ese enum).
+ */
+async function releaseRawMaterialReservation(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  reservation: { id: string; inventoryId: string; quantityBaseUnits: Prisma.Decimal },
+  ticketId: string,
+  wastes: boolean,
+  staffId?: string,
+) {
+  const reference = `area-ticket-cancel:${ticketId}`
+  const locked = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; unit: any; costPerUnit: Prisma.Decimal }>>`
+    SELECT id, "currentStock", unit, "costPerUnit"
+    FROM "RawMaterial"
+    WHERE id = ${reservation.inventoryId} AND "venueId" = ${venueId}
+    FOR UPDATE
+  `
+  if (locked.length !== 1) {
+    throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'No encontramos el insumo reservado para revertir.')
+  }
+  const material = locked[0]
+
+  if (wastes) {
+    const movement = await tx.rawMaterialMovement.create({
+      data: {
+        rawMaterialId: reservation.inventoryId,
+        venueId,
+        type: RawMaterialMovementType.SPOILAGE,
+        quantity: new Prisma.Decimal(reservation.quantityBaseUnits).neg(),
+        unit: material.unit,
+        previousStock: material.currentStock,
+        newStock: material.currentStock,
+        reason: 'Vale por área externo cancelado — merma confirmada',
+        reference,
+        createdBy: staffId,
+      },
+    })
+    await tx.areaTicketInventoryReservation.update({
+      where: { id: reservation.id },
+      data: { status: AreaTicketInventoryReservationStatus.WASTE, releasedAt: new Date(), reversalMovementId: movement.id },
+    })
+    return
+  }
+
+  const batch = await createStockBatch(
+    venueId,
+    reservation.inventoryId,
+    {
+      quantity: Number(reservation.quantityBaseUnits),
+      unit: material.unit,
+      costPerUnit: material.costPerUnit.toNumber(),
+      receivedDate: new Date(),
+    },
+    staffId,
+    tx,
+    { skipAudit: true },
+  )
+  const previousStock = material.currentStock
+  const newStock = previousStock.add(reservation.quantityBaseUnits)
+  await tx.rawMaterial.update({ where: { id: reservation.inventoryId }, data: { currentStock: newStock } })
+  const movement = await tx.rawMaterialMovement.create({
+    data: {
+      rawMaterialId: reservation.inventoryId,
+      venueId,
+      batchId: batch.id,
+      type: RawMaterialMovementType.ADJUSTMENT,
+      quantity: new Prisma.Decimal(reservation.quantityBaseUnits),
+      unit: material.unit,
+      previousStock,
+      newStock,
+      costImpact: batch.costPerUnit.mul(reservation.quantityBaseUnits),
+      reason: 'Reversa de vale por área externo cancelado',
+      reference,
+      createdBy: staffId,
+    },
+  })
+  await tx.areaTicketInventoryReservation.update({
+    where: { id: reservation.id },
+    data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date(), reversalMovementId: movement.id },
+  })
+}
+
 async function consumeAreaTicketReservations(
   tx: Prisma.TransactionClient,
   venueId: string,
@@ -2068,6 +2697,486 @@ async function consumeAreaTicketReservations(
 }
 
 /**
+ * Ruta externa: consume la reserva EN EL MOMENTO DE EMITIR, no de pagar (enmienda E3
+ * del spec — otro POS cobra en su propia caja y Avoqado nunca ve ese cobro). El
+ * producto ya se rebanó y salió del área; esperar un pago que nunca llega dejaría el
+ * stock inflado para siempre.
+ *
+ * Reutiliza `consumeQuantityReservation`/`consumeRawMaterialReservation` — las MISMAS
+ * funciones que la ruta nativa dispara al pagar — para que el efecto contable (signo,
+ * tipo de movimiento, orden FIFO de lotes) sea idéntico al de esa ruta. Lo único que
+ * cambia es CUÁNDO: aquí la reserva nace y se consume en la misma transacción de
+ * emisión, no al materializar/pagar un checkout.
+ */
+async function consumeReservationsAtIssue(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  ticketId: string,
+  specs: Array<ReservationSpec & { areaTicketLineId: string }>,
+  staffId?: string,
+): Promise<void> {
+  for (const spec of specs) {
+    const reservation = await tx.areaTicketInventoryReservation.create({
+      data: {
+        venueId,
+        areaTicketId: ticketId,
+        areaTicketLineId: spec.areaTicketLineId,
+        inventoryKind: spec.inventoryKind,
+        inventoryId: spec.inventoryId,
+        quantityBaseUnits: spec.quantityBaseUnits,
+      },
+    })
+    if (spec.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+      // `null`, no el ticketId: la ruta externa nunca tiene Order (lo prohíbe el CHECK
+      // `area_ticket_external_no_avoqado_circuit`) y meter un id de vale en un
+      // parámetro llamado `orderId` es una mentira que el compilador no puede atrapar
+      // — los dos son cuids `string`. El vale queda ligado al movimiento por
+      // `reservation.id` (el `reference`, igual que en la ruta nativa), que es el
+      // vínculo correcto.
+      await consumeQuantityReservation(tx, venueId, reservation, null, staffId)
+    } else {
+      await consumeRawMaterialReservation(tx, venueId, reservation, staffId)
+    }
+  }
+}
+
+/**
+ * Locks the complete inventory footprint of a v7 checkout before the first
+ * deduction. Reservations and ordinary cart lines can target the same rows in
+ * opposite combinations across two concurrent payments; locking each subset
+ * independently would allow a Z→A / A→Z deadlock. The union is therefore
+ * acquired once in the same deterministic kind/id order used at issuance.
+ */
+async function lockAreaOrderInventoryFootprint(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  sessionId: string,
+  orderId: string,
+): Promise<void> {
+  const reservations = await tx.areaTicketInventoryReservation.findMany({
+    where: {
+      venueId,
+      areaTicket: { checkoutSessionId: sessionId },
+      status: AreaTicketInventoryReservationStatus.ACTIVE,
+    },
+    select: {
+      inventoryKind: true,
+      inventoryId: true,
+    },
+  })
+  const unreservedDemands = await buildUnreservedAreaOrderInventoryDemands(tx, venueId, orderId)
+  const targets = new Map<string, { inventoryKind: AreaTicketInventoryTarget; inventoryId: string }>()
+  for (const target of [...reservations, ...unreservedDemands]) {
+    const key = `${target.inventoryKind}:${target.inventoryId}`
+    targets.set(key, {
+      inventoryKind: target.inventoryKind,
+      inventoryId: target.inventoryId,
+    })
+  }
+
+  for (const target of [...targets.values()].sort((a, b) =>
+    `${a.inventoryKind}:${a.inventoryId}`.localeCompare(`${b.inventoryKind}:${b.inventoryId}`),
+  )) {
+    const rows =
+      target.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY
+        ? await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT id
+            FROM "Inventory"
+            WHERE id = ${target.inventoryId} AND "venueId" = ${venueId}
+            FOR UPDATE
+          `
+        : await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT id
+            FROM "RawMaterial"
+            WHERE id = ${target.inventoryId} AND "venueId" = ${venueId}
+            FOR UPDATE
+          `
+    if (rows.length !== 1) {
+      throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', 'No se encontró uno de los inventarios de la orden.')
+    }
+
+    if (target.inventoryKind === AreaTicketInventoryTarget.RAW_MATERIAL) {
+      await tx.$queryRaw`
+        SELECT id
+        FROM "StockBatch"
+        WHERE "venueId" = ${venueId}
+          AND "rawMaterialId" = ${target.inventoryId}
+          AND status = 'ACTIVE'
+          AND "remainingQuantity" > 0
+        ORDER BY "receivedDate" ASC, id ASC
+        FOR UPDATE
+      `
+    }
+  }
+}
+
+interface AreaOrderInventoryDemand {
+  areaTicketLineId: string | null
+  orderItemId: string
+  inventoryKind: AreaTicketInventoryTarget
+  inventoryId: string
+  quantityBaseUnits: Prisma.Decimal
+  label: string
+}
+
+interface AggregatedAreaOrderInventoryDemand {
+  inventoryKind: AreaTicketInventoryTarget
+  inventoryId: string
+  quantityBaseUnits: Prisma.Decimal
+  label: string
+}
+
+interface LockedAreaOrderInventoryTarget extends AggregatedAreaOrderInventoryDemand {
+  currentStock: Prisma.Decimal
+  unit?: any
+  batches?: Array<{
+    id: string
+    remainingQuantity: Prisma.Decimal
+    costPerUnit: Prisma.Decimal
+  }>
+}
+
+/**
+ * Builds the inventory portion that was not already covered by an area-ticket
+ * reservation. Coverage is target-specific, not line-wide: if an old ticket
+ * reserved the base product but omitted an inventory modifier, the modifier is
+ * still consumed here.
+ */
+async function buildUnreservedAreaOrderInventoryDemands(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+): Promise<AggregatedAreaOrderInventoryDemand[]> {
+  const items = await tx.orderItem.findMany({
+    where: { orderId, order: { venueId } },
+    select: {
+      id: true,
+      areaTicketLineId: true,
+      quantity: true,
+      weightQuantity: true,
+      product: {
+        select: {
+          id: true,
+          name: true,
+          trackInventory: true,
+          inventoryMethod: true,
+          inventory: { select: { id: true } },
+          recipe: {
+            select: {
+              lines: {
+                select: {
+                  quantity: true,
+                  unit: true,
+                  isOptional: true,
+                  isVariable: true,
+                  linkedModifierGroupId: true,
+                  rawMaterial: { select: { id: true, name: true, unit: true } },
+                },
+              },
+            },
+          },
+        },
+      },
+      modifiers: {
+        select: {
+          quantity: true,
+          modifier: {
+            select: {
+              id: true,
+              groupId: true,
+              rawMaterialId: true,
+              quantityPerUnit: true,
+              unit: true,
+              inventoryMode: true,
+              rawMaterial: { select: { id: true, name: true, unit: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  const demands: AreaOrderInventoryDemand[] = []
+  for (const item of items) {
+    if (!item.product) continue
+    const effectiveQuantity = new Prisma.Decimal(item.weightQuantity ?? item.quantity)
+    if (effectiveQuantity.lessThanOrEqualTo(0)) continue
+    const consumedSubstitutionModifierIds = new Set<string>()
+
+    if (item.product.trackInventory && item.product.inventoryMethod === 'QUANTITY') {
+      if (!item.product.inventory) {
+        throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', `No existe inventario para "${item.product.name}".`)
+      }
+      demands.push({
+        areaTicketLineId: item.areaTicketLineId,
+        orderItemId: item.id,
+        inventoryKind: AreaTicketInventoryTarget.QUANTITY_INVENTORY,
+        inventoryId: item.product.inventory.id,
+        quantityBaseUnits: effectiveQuantity,
+        label: item.product.name,
+      })
+    } else if (item.product.trackInventory && item.product.inventoryMethod === 'RECIPE') {
+      if (!item.product.recipe) {
+        throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', `No existe receta para "${item.product.name}".`)
+      }
+      for (const recipeLine of item.product.recipe.lines) {
+        if (recipeLine.isOptional) continue
+        const substitution =
+          recipeLine.isVariable && recipeLine.linkedModifierGroupId
+            ? item.modifiers.find(
+                candidate =>
+                  candidate.modifier?.groupId === recipeLine.linkedModifierGroupId &&
+                  candidate.modifier.inventoryMode === 'SUBSTITUTION' &&
+                  candidate.modifier.rawMaterialId &&
+                  candidate.modifier.quantityPerUnit,
+              )
+            : undefined
+        if (substitution?.modifier) {
+          consumedSubstitutionModifierIds.add(substitution.modifier.id)
+          continue
+        }
+        const perSale = convertUnit(recipeLine.quantity, recipeLine.unit, recipeLine.rawMaterial.unit)
+        demands.push({
+          areaTicketLineId: item.areaTicketLineId,
+          orderItemId: item.id,
+          inventoryKind: AreaTicketInventoryTarget.RAW_MATERIAL,
+          inventoryId: recipeLine.rawMaterial.id,
+          quantityBaseUnits: perSale.mul(effectiveQuantity),
+          label: recipeLine.rawMaterial.name,
+        })
+      }
+    }
+
+    for (const orderModifier of item.modifiers) {
+      const modifier = orderModifier.modifier
+      if (!modifier?.rawMaterial || modifier.quantityPerUnit == null) continue
+      const consumesInventory = modifier.inventoryMode === 'ADDITION' || consumedSubstitutionModifierIds.has(modifier.id)
+      if (!consumesInventory) continue
+      const modifierUnit = modifier.unit ?? modifier.rawMaterial.unit
+      const perSelection = convertUnit(modifier.quantityPerUnit, modifierUnit, modifier.rawMaterial.unit)
+      demands.push({
+        areaTicketLineId: item.areaTicketLineId,
+        orderItemId: item.id,
+        inventoryKind: AreaTicketInventoryTarget.RAW_MATERIAL,
+        inventoryId: modifier.rawMaterial.id,
+        quantityBaseUnits: perSelection.mul(effectiveQuantity).mul(orderModifier.quantity),
+        label: modifier.rawMaterial.name,
+      })
+    }
+  }
+
+  // A single reservation can aggregate base + modifier demand for the same
+  // line/target, so aggregate before matching it against reservation coverage.
+  const byLineTarget = new Map<string, AreaOrderInventoryDemand>()
+  for (const demand of demands) {
+    const lineKey = demand.areaTicketLineId ?? `order-item:${demand.orderItemId}`
+    const key = `${lineKey}:${demand.inventoryKind}:${demand.inventoryId}`
+    const current = byLineTarget.get(key)
+    if (current) current.quantityBaseUnits = current.quantityBaseUnits.add(demand.quantityBaseUnits)
+    else byLineTarget.set(key, { ...demand })
+  }
+
+  const areaTicketLineIds = [...new Set(items.map(item => item.areaTicketLineId).filter((id): id is string => !!id))]
+  const coveredTargets = new Map<string, Prisma.Decimal>()
+  if (areaTicketLineIds.length > 0) {
+    const reservations = await tx.areaTicketInventoryReservation.findMany({
+      where: {
+        venueId,
+        areaTicketLineId: { in: areaTicketLineIds },
+        status: {
+          in: [AreaTicketInventoryReservationStatus.ACTIVE, AreaTicketInventoryReservationStatus.CONSUMED],
+        },
+      },
+      select: { areaTicketLineId: true, inventoryKind: true, inventoryId: true, quantityBaseUnits: true },
+    })
+    for (const reservation of reservations) {
+      const key = `${reservation.areaTicketLineId}:${reservation.inventoryKind}:${reservation.inventoryId}`
+      coveredTargets.set(key, (coveredTargets.get(key) ?? new Prisma.Decimal(0)).add(reservation.quantityBaseUnits))
+    }
+  }
+
+  const byTarget = new Map<string, AggregatedAreaOrderInventoryDemand>()
+  for (const demand of byLineTarget.values()) {
+    let uncoveredQuantity = demand.quantityBaseUnits
+    if (demand.areaTicketLineId) {
+      const coveredQuantity =
+        coveredTargets.get(`${demand.areaTicketLineId}:${demand.inventoryKind}:${demand.inventoryId}`) ?? new Prisma.Decimal(0)
+      uncoveredQuantity = Prisma.Decimal.max(new Prisma.Decimal(0), uncoveredQuantity.sub(coveredQuantity))
+    }
+    if (uncoveredQuantity.isZero()) continue
+    const key = `${demand.inventoryKind}:${demand.inventoryId}`
+    const current = byTarget.get(key)
+    if (current) current.quantityBaseUnits = current.quantityBaseUnits.add(uncoveredQuantity)
+    else {
+      byTarget.set(key, {
+        inventoryKind: demand.inventoryKind,
+        inventoryId: demand.inventoryId,
+        quantityBaseUnits: uncoveredQuantity,
+        label: demand.label,
+      })
+    }
+  }
+  return [...byTarget.values()].sort((a, b) => `${a.inventoryKind}:${a.inventoryId}`.localeCompare(`${b.inventoryKind}:${b.inventoryId}`))
+}
+
+/**
+ * Applies non-reserved order inventory with the same row-lock protocol used by
+ * reservation issuance. Every target is locked and validated before the first
+ * mutation, and the caller's transaction rolls back reservation, recipe and
+ * modifier writes together on any later failure.
+ */
+async function consumeUnreservedAreaOrderInventory(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  staffId?: string,
+): Promise<void> {
+  const demands = await buildUnreservedAreaOrderInventoryDemands(tx, venueId, orderId)
+  const lockedTargets: LockedAreaOrderInventoryTarget[] = []
+
+  for (const demand of demands) {
+    const rows =
+      demand.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY
+        ? await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
+            SELECT id, "currentStock"
+            FROM "Inventory"
+            WHERE id = ${demand.inventoryId} AND "venueId" = ${venueId}
+            FOR UPDATE
+          `
+        : await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; unit: any }>>`
+            SELECT id, "currentStock", unit
+            FROM "RawMaterial"
+            WHERE id = ${demand.inventoryId} AND "venueId" = ${venueId}
+            FOR UPDATE
+          `
+    if (rows.length !== 1) {
+      throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', `No se encontró inventario para "${demand.label}".`)
+    }
+
+    const reserved = await tx.areaTicketInventoryReservation.aggregate({
+      where: {
+        venueId,
+        inventoryKind: demand.inventoryKind,
+        inventoryId: demand.inventoryId,
+        status: AreaTicketInventoryReservationStatus.ACTIVE,
+      },
+      _sum: { quantityBaseUnits: true },
+    })
+    const currentStock = new Prisma.Decimal(rows[0].currentStock)
+    const available = currentStock.sub(reserved._sum.quantityBaseUnits ?? 0)
+    if (available.lessThan(demand.quantityBaseUnits)) {
+      throw domainError(
+        409,
+        'AREA_TICKET_INSUFFICIENT_STOCK',
+        `No hay existencia libre suficiente de "${demand.label}". Disponible: ${quantity(available)}; requerida: ${quantity(
+          demand.quantityBaseUnits,
+        )}.`,
+      )
+    }
+
+    if (demand.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+      lockedTargets.push({ ...demand, currentStock })
+      continue
+    }
+
+    const batches = await tx.$queryRaw<Array<{ id: string; remainingQuantity: Prisma.Decimal; costPerUnit: Prisma.Decimal }>>`
+      SELECT id, "remainingQuantity", "costPerUnit"
+      FROM "StockBatch"
+      WHERE "venueId" = ${venueId}
+        AND "rawMaterialId" = ${demand.inventoryId}
+        AND status = 'ACTIVE'
+        AND "remainingQuantity" > 0
+      ORDER BY "receivedDate" ASC, id ASC
+      FOR UPDATE
+    `
+    const batchStock = batches.reduce((sum, batch) => sum.add(batch.remainingQuantity), new Prisma.Decimal(0))
+    if (batchStock.lessThan(demand.quantityBaseUnits)) {
+      throw domainError(
+        409,
+        'AREA_TICKET_INSUFFICIENT_STOCK',
+        `Los lotes FIFO de "${demand.label}" no cubren la venta. Disponible: ${quantity(batchStock)}; requerida: ${quantity(
+          demand.quantityBaseUnits,
+        )}.`,
+      )
+    }
+    lockedTargets.push({ ...demand, currentStock, unit: (rows[0] as any).unit, batches })
+  }
+
+  for (const target of lockedTargets) {
+    if (target.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+      const updated = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; previousStock: Prisma.Decimal }>>`
+        UPDATE "Inventory"
+        SET "currentStock" = "currentStock" - ${target.quantityBaseUnits},
+            "updatedAt" = NOW()
+        WHERE id = ${target.inventoryId}
+          AND "venueId" = ${venueId}
+        RETURNING id, "currentStock", ("currentStock" + ${target.quantityBaseUnits}) AS "previousStock"
+      `
+      if (updated.length !== 1) {
+        throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'No pudimos aplicar el inventario de la orden.')
+      }
+      await tx.inventoryMovement.create({
+        data: {
+          inventoryId: target.inventoryId,
+          type: 'SALE',
+          quantity: target.quantityBaseUnits.neg(),
+          previousStock: updated[0].previousStock,
+          newStock: updated[0].currentStock,
+          reason: 'Venta de orden con vales por área',
+          reference: orderId,
+          createdBy: staffId,
+        },
+      })
+      continue
+    }
+
+    let remaining = new Prisma.Decimal(target.quantityBaseUnits)
+    let currentStock = new Prisma.Decimal(target.currentStock)
+    for (const batch of target.batches ?? []) {
+      if (remaining.lessThanOrEqualTo(0)) break
+      const batchAvailable = new Prisma.Decimal(batch.remainingQuantity)
+      const used = Prisma.Decimal.min(batchAvailable, remaining)
+      if (used.lessThanOrEqualTo(0)) continue
+      const previousStock = currentStock
+      currentStock = currentStock.sub(used)
+      const batchRemaining = batchAvailable.sub(used)
+      await tx.stockBatch.update({
+        where: { id: batch.id },
+        data: {
+          remainingQuantity: batchRemaining,
+          status: batchRemaining.isZero() ? 'DEPLETED' : 'ACTIVE',
+          depletedAt: batchRemaining.isZero() ? new Date() : null,
+        },
+      })
+      await tx.rawMaterialMovement.create({
+        data: {
+          rawMaterialId: target.inventoryId,
+          venueId,
+          batchId: batch.id,
+          type: 'USAGE',
+          quantity: used.neg(),
+          unit: target.unit,
+          previousStock,
+          newStock: currentStock,
+          costImpact: used.mul(batch.costPerUnit).neg(),
+          reason: 'Venta de orden con vales por área',
+          reference: orderId,
+          createdBy: staffId,
+        },
+      })
+      remaining = remaining.sub(used)
+    }
+    if (remaining.greaterThan(0)) {
+      throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'Los lotes FIFO cambiaron durante la venta.')
+    }
+    await tx.rawMaterial.update({
+      where: { id: target.inventoryId },
+      data: { currentStock },
+    })
+  }
+}
+
+/**
  * Se llama después de crear Payment pero antes del COMMIT. Payment, Order,
  * sesión, vales y reservas quedan confirmados o revertidos juntos.
  */
@@ -2079,27 +3188,37 @@ export async function finalizeAreaTicketPaymentInTransaction(
     paymentId: string
     fullyPaid: boolean
     staffId?: string
+    reconcileCapturedPayment?: boolean
     locked: LockedAreaTicketPayment | null
   },
-): Promise<{ areaTicketOrder: boolean; sessionId?: string }> {
+): Promise<{ areaTicketOrder: boolean; sessionId?: string; fullyPaid?: boolean }> {
   if (!input.locked) return { areaTicketOrder: false }
   await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${input.locked.sessionId} AND "venueId" = ${input.venueId} FOR UPDATE`
-  const ticketIds = await tx.areaTicket.findMany({
+  const tickets = await tx.areaTicket.findMany({
     where: { venueId: input.venueId, checkoutSessionId: input.locked.sessionId },
-    select: { id: true },
+    select: { id: true, fulfillmentModeSnapshot: true },
     orderBy: { id: 'asc' },
   })
-  if (ticketIds.length > 0) {
+  if (tickets.length > 0) {
     await tx.$queryRaw(
       Prisma.sql`SELECT id FROM "AreaTicket" WHERE "venueId" = ${input.venueId} AND id IN (${Prisma.join(
-        ticketIds.map(ticket => ticket.id),
+        tickets.map(ticket => ticket.id),
       )}) ORDER BY id FOR UPDATE`,
     )
   }
   await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`
   const lockedOrder = await tx.order.findFirst({
     where: { id: input.orderId, venueId: input.venueId },
-    select: { paymentStatus: true, status: true },
+    select: {
+      paymentStatus: true,
+      status: true,
+      subtotal: true,
+      discountAmount: true,
+      serviceChargeAmount: true,
+      servedById: true,
+      createdById: true,
+      areaTicketCode: true,
+    },
   })
   if (!lockedOrder) {
     throw domainError(409, 'CHECKOUT_ORDER_MISSING', 'La orden materializada de esta sesión ya no existe.')
@@ -2107,8 +3226,38 @@ export async function finalizeAreaTicketPaymentInTransaction(
   if (lockedOrder.paymentStatus === 'REFUNDED' || lockedOrder.status === 'CANCELLED' || lockedOrder.status === 'DELETED') {
     throw domainError(409, 'CHECKOUT_ORDER_NOT_PAYABLE', 'La orden materializada ya no admite pagos.')
   }
-  const orderIsFullyPaid = lockedOrder.paymentStatus === 'PAID'
-  if (orderIsFullyPaid !== input.fullyPaid) {
+  let finalFullyPaid = input.fullyPaid
+  if (input.reconcileCapturedPayment) {
+    const payments = await tx.payment.findMany({
+      where: { orderId: input.orderId, venueId: input.venueId, status: 'COMPLETED' },
+      select: { amount: true, tipAmount: true },
+    })
+    const totalPaid = payments.reduce((sum, payment) => sum.add(payment.amount).add(payment.tipAmount), new Prisma.Decimal(0))
+    const totalTip = payments.reduce((sum, payment) => sum.add(payment.tipAmount), new Prisma.Decimal(0))
+    const total = new Prisma.Decimal(lockedOrder.subtotal)
+      .sub(lockedOrder.discountAmount ?? 0)
+      .add(lockedOrder.serviceChargeAmount ?? 0)
+      .add(totalTip)
+    const remainingBalance = Prisma.Decimal.max(new Prisma.Decimal(0), total.sub(totalPaid))
+    finalFullyPaid = remainingBalance.lessThanOrEqualTo(new Prisma.Decimal('0.01'))
+    const paymentStatus = finalFullyPaid ? 'PAID' : totalPaid.greaterThan(0) ? 'PARTIAL' : 'PENDING'
+    await tx.order.update({
+      where: { id: input.orderId },
+      data: {
+        paymentStatus,
+        status: finalFullyPaid ? 'COMPLETED' : 'PENDING',
+        paidAmount: totalPaid,
+        remainingBalance,
+        tipAmount: totalTip,
+        total,
+        ...(finalFullyPaid ? { completedAt: new Date() } : {}),
+        ...(!lockedOrder.servedById && input.staffId
+          ? { servedById: input.staffId, createdById: lockedOrder.createdById ?? input.staffId }
+          : {}),
+        ...(finalFullyPaid && lockedOrder.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
+      },
+    })
+  } else if ((lockedOrder.paymentStatus === 'PAID') !== finalFullyPaid) {
     throw domainError(
       409,
       'CHECKOUT_PAYMENT_STATE_MISMATCH',
@@ -2125,19 +3274,34 @@ export async function finalizeAreaTicketPaymentInTransaction(
   if (!attempt) {
     throw domainError(409, 'CHECKOUT_PAYMENT_ATTEMPT_MISSING', 'No encontramos el intento de pago de esta sesión.')
   }
-  if (attempt.status !== AreaTicketPaymentAttemptStatus.SUCCEEDED) {
-    await tx.areaTicketPaymentAttempt.update({
-      where: { id: attempt.id },
-      data: {
-        status: AreaTicketPaymentAttemptStatus.SUCCEEDED,
-        paymentId: input.paymentId,
-        completedAt: new Date(),
-        lastCheckedAt: new Date(),
-      },
-    })
+  if (attempt.status === AreaTicketPaymentAttemptStatus.SUCCEEDED) {
+    if (attempt.paymentId !== input.paymentId) {
+      throw domainError(409, 'CHECKOUT_PAYMENT_ALREADY_FINALIZED', 'La sesión ya fue finalizada por otro pago; requiere conciliación.', {
+        paymentAttemptId: attempt.id,
+        paymentId: attempt.paymentId,
+      })
+    }
+    return {
+      areaTicketOrder: true,
+      sessionId: input.locked.sessionId,
+      ...(input.reconcileCapturedPayment ? { fullyPaid: finalFullyPaid } : {}),
+    }
   }
+  // Sin condición A PROPÓSITO: el bloque de arriba ya cubre el caso SUCCEEDED —
+  // o lanza CHECKOUT_PAYMENT_ALREADY_FINALIZED o retorna—, así que aquí el intento
+  // siempre está pendiente. El `if (status !== SUCCEEDED)` que había era una
+  // condición imposible de falsear, y leerla sugería una rama que nunca existió.
+  await tx.areaTicketPaymentAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      status: AreaTicketPaymentAttemptStatus.SUCCEEDED,
+      paymentId: input.paymentId,
+      completedAt: new Date(),
+      lastCheckedAt: new Date(),
+    },
+  })
 
-  if (!input.fullyPaid) {
+  if (!finalFullyPaid) {
     await tx.areaTicketCheckoutSession.update({
       where: { id: input.locked.sessionId },
       data: {
@@ -2146,25 +3310,48 @@ export async function finalizeAreaTicketPaymentInTransaction(
         version: { increment: 1 },
       },
     })
-    return { areaTicketOrder: true, sessionId: input.locked.sessionId }
+    return {
+      areaTicketOrder: true,
+      sessionId: input.locked.sessionId,
+      ...(input.reconcileCapturedPayment ? { fullyPaid: false } : {}),
+    }
   }
 
+  await lockAreaOrderInventoryFootprint(tx, input.venueId, input.locked.sessionId, input.orderId)
   await consumeAreaTicketReservations(tx, input.venueId, input.locked.sessionId, input.orderId, input.staffId)
+  await consumeUnreservedAreaOrderInventory(tx, input.venueId, input.orderId, input.staffId)
   const paidAt = new Date()
-  await tx.areaTicket.updateMany({
-    where: {
-      venueId: input.venueId,
-      checkoutSessionId: input.locked.sessionId,
-      orderId: input.orderId,
-      status: AreaTicketStatus.CLAIMED,
-    },
-    data: {
-      status: AreaTicketStatus.PAID,
-      paidAt,
-      claimExpiresAt: null,
-      version: { increment: 1 },
-    },
-  })
+  const immediateTicketIds = tickets.filter(ticket => ticket.fulfillmentModeSnapshot === FulfillmentMode.IMMEDIATE).map(ticket => ticket.id)
+  const deferredTicketIds = tickets.filter(ticket => ticket.fulfillmentModeSnapshot !== FulfillmentMode.IMMEDIATE).map(ticket => ticket.id)
+  const paidTicketUpdate = {
+    paidAt,
+    claimExpiresAt: null,
+    version: { increment: 1 },
+  }
+  if (immediateTicketIds.length > 0) {
+    await tx.areaTicket.updateMany({
+      where: {
+        id: { in: immediateTicketIds },
+        venueId: input.venueId,
+        checkoutSessionId: input.locked.sessionId,
+        orderId: input.orderId,
+        status: AreaTicketStatus.CLAIMED,
+      },
+      data: { ...paidTicketUpdate, status: AreaTicketStatus.DELIVERED },
+    })
+  }
+  if (deferredTicketIds.length > 0) {
+    await tx.areaTicket.updateMany({
+      where: {
+        id: { in: deferredTicketIds },
+        venueId: input.venueId,
+        checkoutSessionId: input.locked.sessionId,
+        orderId: input.orderId,
+        status: AreaTicketStatus.CLAIMED,
+      },
+      data: { ...paidTicketUpdate, status: AreaTicketStatus.PAID },
+    })
+  }
   await tx.areaTicketCheckoutSession.update({
     where: { id: input.locked.sessionId },
     data: {
@@ -2173,5 +3360,9 @@ export async function finalizeAreaTicketPaymentInTransaction(
       version: { increment: 1 },
     },
   })
-  return { areaTicketOrder: true, sessionId: input.locked.sessionId }
+  return {
+    areaTicketOrder: true,
+    sessionId: input.locked.sessionId,
+    ...(input.reconcileCapturedPayment ? { fullyPaid: true } : {}),
+  }
 }

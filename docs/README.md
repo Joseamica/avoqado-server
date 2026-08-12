@@ -26,6 +26,17 @@
 | Work on refunds              | [features/REFUNDS.md](./features/REFUNDS.md)                             |
 | Work on time/attendance      | [features/TIME_ENTRY_ATTENDANCE.md](./features/TIME_ENTRY_ATTENDANCE.md) |
 | Deploy to production         | [PRODUCTION_READINESS_CHECKLIST.md](./PRODUCTION_READINESS_CHECKLIST.md) |
+| Operate the H1A catalog      | [PITS-H1A-ROLLOUT-RUNBOOK.md](./PITS-H1A-ROLLOUT-RUNBOOK.md)             |
+
+## Master catalog H1A
+
+| Contract                                            | Document                                                               |
+| --------------------------------------------------- | ---------------------------------------------------------------------- |
+| HTTP API and authorization                          | [api/master-catalog-h1a.md](./api/master-catalog-h1a.md)               |
+| Customer MCP tools                                  | [mcp/master-catalog-h1a.md](./mcp/master-catalog-h1a.md)               |
+| Export workbooks                                    | [xlsx/catalog-master-v1.md](./xlsx/catalog-master-v1.md)               |
+| Import template and workflow                        | [xlsx/catalog-master-import-v1.md](./xlsx/catalog-master-import-v1.md) |
+| Rollout, observability, rollback, and PITS blockers | [PITS-H1A-ROLLOUT-RUNBOOK.md](./PITS-H1A-ROLLOUT-RUNBOOK.md)           |
 
 ---
 

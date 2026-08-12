@@ -707,3 +707,25 @@ export async function calculateLeftoverAmount(
   }
   return total
 }
+
+/**
+ * How much of THIS order's item base this config has already commissioned.
+ *
+ * 🔴 MONEY (bug real en prod, Mindform 2026-06-21/22): las bases de arriba se derivan de
+ * los ITEMS DE LA ORDEN, pero `createCommissionForPayment` se dispara POR COBRO. Una orden
+ * con 3 cobros recalculaba la MISMA base de $380 tres veces → $34.20 comisionados sobre
+ * una venta de $380. El guard de idempotencia existente es por PAGO, así que no lo detiene.
+ *
+ * `CommissionCalculation.baseAmount` guarda base + propina cuando `includeTips`, así que la
+ * porción de ITEMS ya cobrada es `baseAmount − tipAmount`. La propina es dinero POR COBRO y
+ * no debe consumir la base de la orden.
+ */
+export async function alreadyCommissionedItemBase(orderId: string, configId: string): Promise<number> {
+  const prior = await prisma.commissionCalculation.findMany({
+    where: { orderId, configId, voidedAt: null },
+    select: { baseAmount: true, tipAmount: true },
+  })
+
+  const total = prior.reduce((sum, calc) => sum + (decimalToNumber(calc.baseAmount) - decimalToNumber(calc.tipAmount)), 0)
+  return Math.round(Math.max(0, total) * 100) / 100
+}

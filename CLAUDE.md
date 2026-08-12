@@ -3,7 +3,10 @@
 Multi-tenant B2B SaaS for restaurant/venue management (POS, payments, inventory, staff). Express.js + TypeScript, PostgreSQL/Prisma,
 Socket.IO, Redis, RabbitMQ. Payments via Blumon (TPV + E-commerce) and Stripe (subscriptions).
 
-## 🔴 CRITICAL — Ask which payment tier BEFORE building or changing anything
+> **Reglas de entorno** — sesiones de IA en paralelo, y cuándo verificar según la carga de la máquina — están en el `CLAUDE.md` del
+> workspace (`../CLAUDE.md`), que auto-carga junto con este archivo. Léelas antes de correr builds/tests o de tocar git.
+
+## 🔴 CRITICAL — Ask which payment tier (and how it gets turned on) BEFORE building or changing anything
 
 Avoqado is a tier-gated SaaS (**FREE · PRO · PREMIUM · ENTERPRISE**). Whenever you add a new feature, modify existing behavior, or expose a
 new capability, **STOP and ask the founder which paid tier it falls under** — then wire the gating to match. A change shipped without a tier
@@ -18,10 +21,11 @@ decision is unfinished: it either leaks paid value into a lower tier or hides a 
   fallback); `Feature` codes (`INVENTORY_TRACKING`, `CFDI`, `ADVANCED_REPORTS`…) via `venueHasFeatureAccess`. **Every MCP
   serialized-inventory tool (`src/mcp/tools/`) MUST gate with `isModuleEnabled(SERIALIZED_INVENTORY)`** — never the Feature/tier resolver;
   only serialized tools carry it (per-tool gating, not coupled to white-label). Full rule: `.claude/rules/feature-gating.md`.
-- **Dashboard display/CTA map:** `avoqado-web-dashboard/src/config/plan-catalog.ts` (`TierId`, `PLAN_TIERS`, `getTierForFeature()` →
-  FeatureGate upsell).
-- **Enforcement status:** ✅ only **avoqado-web-dashboard** enforces tiers today. ⚠️ **avoqado-ios** and **avoqado-android** have NO tier
-  gating yet — they will mirror the backend feature codes by exact name. Treat tier codes like permissions: a name mismatch fails silently.
+- **Display/CTA map + enforcement:** `avoqado-web-dashboard/src/config/plan-catalog.ts` (`getTierForFeature()` → FeatureGate upsell) — the
+  dashboard is still the ONLY client enforcing tiers; iOS/Android will mirror the codes by exact name (a mismatch fails silently).
+- **Activación (regla completa en `../CLAUDE.md` + `.claude/rules/feature-gating.md`):** este repo es el gate EFECTIVO — compón tier **AND**
+  módulo **AND** ajuste del venue (`VenueSettings`) **AND** permiso. La respuesta 4xx debe decir QUÉ falta y CÓMO activarlo, para que cada
+  cliente pueda pintar el mensaje sin adivinar; un 403 pelón obliga a los 6 clientes a inventarse el texto.
 
 ## Sister Repos (this repo is the hub of 10)
 
@@ -147,6 +151,8 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 - `payments.md` - Payment/inventory rules (path-conditional: `src/services/tpv/**`, `src/services/dashboard/rawMaterial*`)
 - `cron-jobs.md` - Cron jobs MUST wrap entry DB read with `retry(..., shouldRetryDbConnectionError)` (path-conditional: `src/jobs/**`).
   Prevents top-of-hour P1001 stampede deaths. NO global Prisma retry.
+- `contexto-de-ejecucion.md` - AsyncLocalStorage: TODO `logger.*` de un request emite `venueId`/`userId`/`correlationId`/`entrypoint` sin
+  pasarlos. Un wrapper de contexto NUNCA atrapa errores. Cómo filtrar el log por negocio en vez de por reloj
 - `feature-gating.md` - Module vs Feature: two parallel gating systems, don't cross the resolvers
 - `playtelecom-vertical.md` - PlayTelecom white-label vertical: who's who (Bait/Walmart), generic vs bespoke, gotchas
 - `blumon-seriales-virtuales.md` - 🔴 el dígito extra en `MerchantAccount.blumonSerialNumber` NO es typo: es multi-merchant deliberado. "¿Es

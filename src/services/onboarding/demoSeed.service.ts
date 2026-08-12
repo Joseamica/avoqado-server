@@ -28,6 +28,10 @@ import {
 import { subDays, subHours } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import {
+  assertDemoSeedCatalogGovernance,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../master-catalog/catalogGovernance.service'
 
 /**
  * Seeds a venue with demo data
@@ -37,6 +41,14 @@ import logger from '@/config/logger'
  */
 export async function seedDemoVenue(venueId: string): Promise<{ categoriesCreated: number; productsCreated: number }> {
   logger.info(`🎬 Seeding demo data for venue: ${venueId}`)
+
+  // Keep the PRO reconciliation capability explicit/default-off even for demo data. `update: {}`
+  // deliberately preserves a founder/operator choice when the demo seed is rerun.
+  await prisma.venueSettings.upsert({
+    where: { venueId },
+    update: {},
+    create: { venueId, cashReconciliationEnabled: false },
+  })
 
   // 1. Create payment providers and merchant accounts (for multi-merchant support)
   const merchantAccounts = await seedPaymentProvidersAndMerchants(venueId)
@@ -321,7 +333,7 @@ async function seedMenuCategories(venueId: string) {
 /**
  * Seeds products
  */
-async function seedProducts(venueId: string, categories: Array<{ id: string; slug: string }>) {
+export async function seedProducts(venueId: string, categories: Array<{ id: string; slug: string }>) {
   // Find category IDs
   const bebidasCalientes = categories.find(c => c.slug === 'bebidas-calientes')!
   const bebidasFrias = categories.find(c => c.slug === 'bebidas-frias')!
@@ -442,25 +454,33 @@ async function seedProducts(venueId: string, categories: Array<{ id: string; slu
     },
   ]
 
-  const createdProducts = []
-  for (const product of products) {
-    const createdProduct = await prisma.product.create({
-      data: {
+  return prisma.$transaction(async tx => {
+    await assertDemoSeedCatalogGovernance(tx, venueId)
+    const createdProducts = []
+    for (const product of products) {
+      const createdProduct = await tx.product.create({
+        data: {
+          venueId,
+          createdById: null,
+          categoryId: product.categoryId,
+          name: product.name,
+          sku: product.sku,
+          description: product.description,
+          price: product.price,
+          type: product.type as any,
+          active: true,
+          isDemo: true, // Mark as demo data for cleanup
+        },
+      })
+      await writeLegacyServiceProductCreationAuditForVenue(tx, {
         venueId,
-        categoryId: product.categoryId,
-        name: product.name,
-        sku: product.sku,
-        description: product.description,
-        price: product.price,
-        type: product.type as any,
-        active: true,
-        isDemo: true, // Mark as demo data for cleanup
-      },
-    })
-    createdProducts.push(createdProduct)
-  }
-
-  return createdProducts
+        productId: createdProduct.id,
+        actor: { type: 'SERVICE', servicePrincipalId: 'DEMO_SEED' },
+      })
+      createdProducts.push(createdProduct)
+    }
+    return createdProducts
+  })
 }
 
 /**

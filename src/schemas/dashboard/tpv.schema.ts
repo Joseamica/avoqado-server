@@ -41,6 +41,8 @@ export type UpdateTpvBody = {
   model?: string // Hardware model (A910S, D220, etc.)
   lastHeartbeat?: Date
   config?: any // JSON field in Prisma
+  /** Mostrador invertido: el cliente ve la pantalla grande y el cajero la chica. Por dispositivo. */
+  customerDisplayInverted?: boolean
 }
 
 // Create TPV body payload

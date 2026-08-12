@@ -5,6 +5,7 @@ import { getUserAccess } from '@/services/access/access.service'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    staff: { findUnique: jest.fn() },
     staffOrganization: { findUnique: jest.fn() },
     venue: { findMany: jest.fn() },
     staffVenue: { findMany: jest.fn(), findFirst: jest.fn() },
@@ -16,6 +17,7 @@ jest.mock('@/services/access/access.service', () => ({
 }))
 
 const m = prisma as unknown as {
+  staff: { findUnique: jest.Mock }
   staffOrganization: { findUnique: jest.Mock }
   venue: { findMany: jest.Mock }
   staffVenue: { findMany: jest.Mock; findFirst: jest.Mock }
@@ -26,6 +28,7 @@ describe('resolveScope', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     m.staffVenue.findFirst.mockResolvedValue(null) // default: NOT a platform superadmin
+    m.staff.findUnique.mockResolvedValue({ active: true })
     mockGetUserAccess.mockImplementation(async (_s: string, venueId: string) => ({ venueId, corePermissions: ['venue:read'] }))
   })
 
@@ -101,6 +104,34 @@ describe('resolveScope', () => {
     const scope = await resolveScope('revoked', 'org-1')
     expect(scope.allowedVenueIds).toEqual([])
     expect(m.staffVenue.findMany).not.toHaveBeenCalled()
+  })
+
+  it('inactive Staff resolves no organization or venue authority', async () => {
+    m.staff.findUnique.mockResolvedValue({ active: false })
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true, leftAt: null })
+
+    const scope = await resolveScope('disabled-owner', 'org-1')
+
+    expect(scope.allowedVenueIds).toEqual([])
+    expect(scope.organizationId).toBeUndefined()
+    expect(scope.orgRole).toBeUndefined()
+  })
+
+  it('retains activeOrg while exposing only a current isActive/leftAt-null organization role', async () => {
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'ADMIN', isActive: true, leftAt: null })
+    m.staffVenue.findMany.mockResolvedValue([{ venueId: 'A' }])
+
+    const scope = await resolveScope('admin', 'org-1')
+
+    expect(scope).toMatchObject({ activeOrg: 'org-1', organizationId: 'org-1', orgRole: 'ADMIN' })
+    expect(m.staffOrganization.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({ isActive: true, leftAt: true, role: true }),
+      }),
+    )
+    expect(m.staffVenue.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ staffId: 'admin', active: true }) }),
+    )
   })
 
   // Perf-fix regression guards: per-venue access is resolved CONCURRENTLY in bounded batches

@@ -24,6 +24,7 @@ import { tokenBudgetService, TokenQueryType } from './token-budget.service'
 import { getUserAccess, hasPermission as hasEffectivePermission } from '@/services/access/access.service'
 import { CreateProductSchema } from '@/schemas/dashboard/menu.schema'
 import * as productService from './product.dashboard.service'
+import { resolveLegacyCatalogActor } from '@/services/master-catalog/catalogGovernance.service'
 
 // Action Engine
 import { ActionEngine } from './chatbot-actions/action-engine.service'
@@ -6147,14 +6148,18 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       response = `El producto "${productSummary.name}" ya existía con el SKU ${productSummary.sku}. Tomé la solicitud como confirmada.`
     } else {
       try {
-        const product = await productService.createProduct(query.venueId, {
-          name: validation.data.body.name,
-          price: validation.data.body.price,
-          sku: validation.data.body.sku,
-          categoryId: validation.data.body.categoryId,
-          type: validation.data.body.type,
-          modifierGroupIds: uniqueModifierGroupIds,
-        })
+        const product = await productService.createProduct(
+          query.venueId,
+          {
+            name: validation.data.body.name,
+            price: validation.data.body.price,
+            sku: validation.data.body.sku,
+            categoryId: validation.data.body.categoryId,
+            type: validation.data.body.type,
+            modifierGroupIds: uniqueModifierGroupIds,
+          },
+          resolveLegacyCatalogActor(query.userId, false),
+        )
 
         productSummary = {
           id: product.id,

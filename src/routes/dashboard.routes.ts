@@ -275,7 +275,10 @@ import commissionRoutes from './dashboard/commission.routes'
 import cashOutRoutes from './dashboard/cash-out.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import printStationRoutes from './dashboard/printStation.routes'
+import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
 import areaTicketRoutes from './dashboard/areaTicket.routes'
+import * as areaTicketController from '../controllers/dashboard/areaTicket.dashboard.controller'
+import { updateAreaSettlementRouteSchema } from '../schemas/dashboard/areaTicket.schema'
 import classSessionRoutes from './dashboard/classSession.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
@@ -297,6 +300,8 @@ import organizationDashboardRoutes from './dashboard/organizationDashboard.route
 import organizationConfigRoutes from './dashboard/organizationConfig.routes'
 import organizationStockControlRoutes from './dashboard/organizationStockControl.routes'
 import cashOutOrgRoutes from './dashboard/cash-out.org.routes'
+import masterCatalogRoutes from './dashboard/masterCatalog.routes'
+import masterCatalogVenueRoutes from './dashboard/masterCatalogVenue.routes'
 import simCustodyDashboardRoutes from './dashboard/simCustody.dashboard.routes'
 import simRegistrationDashboardRoutes from './dashboard/simRegistration.dashboard.routes'
 // Org-scoped sale verification routes (PlayTelecom back-office Walmart documentation approval)
@@ -4192,9 +4197,22 @@ router.use('/venues/:venueId/referrals', authenticateTokenMiddleware, checkFeatu
 router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), reservationRoutes)
 // PRINT_STATIONS — feature gratis/core (sin checkFeatureAccess); permission-gated dentro del sub-router.
 router.use('/venues/:venueId/print-stations', authenticateTokenMiddleware, printStationRoutes)
+// Datos fiscales del venue como RECEPTOR de las facturas de Avoqado — feature gratis/core
+// (sin checkFeatureAccess); permission-gated dentro del sub-router (venue-fiscal-profile:manage, OWNER-only).
+router.use('/venues/:venueId/fiscal-profile', authenticateTokenMiddleware, fiscalProfileRoutes)
 // Configuración explícita y operación de vales/básculas. El servicio aplica
 // entitlement al ACTIVAR; consultar permite mostrar por qué está deshabilitado.
 router.use('/venues/:venueId/area-tickets', authenticateTokenMiddleware, areaTicketRoutes)
+// Ruta de cobro externa de UN área (§caja externa fase 1) — vive fuera del mount de
+// arriba a propósito: es el switch canónico que cambia dónde entra el dinero de esa
+// área (otro POS cobra en su propia caja), no una preferencia más de "vales por área".
+router.patch(
+  '/venues/:venueId/fulfillment-areas/:areaId/settlement-route',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:configure'),
+  validateRequest(updateAreaSettlementRouteSchema),
+  areaTicketController.updateAreaSettlementRoute,
+)
 
 // Class Sessions (group classes / workshops) — part of the reservations/appointments product
 // (uses reservations:* permissions; attendees ARE reservations), so it shares the RESERVATIONS gate.
@@ -4236,6 +4254,10 @@ router.use('/venues/:venueId/org-item-categories', orgItemCategoryRoutes)
 
 // Organization Dashboard routes for PlayTelecom/White-Label dashboard
 // Provides organization-level aggregate metrics and vision global
+// Corporate catalog owns this literal segment; mount it before the generic
+// organization dashboard router so no future `/:orgId/:resource` can swallow it.
+router.use('/venues/:venueId/master-catalog', masterCatalogVenueRoutes)
+router.use('/organizations/:orgId/master-catalog', masterCatalogRoutes)
 router.use('/organizations', organizationDashboardRoutes)
 
 // Organization Config routes — org-level goals, attendance, TPV defaults, categories

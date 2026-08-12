@@ -7,7 +7,7 @@ jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
 import {
   computePlatformCfdiTotals,
-  humanizeStampError,
+  classifyStampError,
   issuePlatformCfdi,
   cancelPlatformCfdi,
   discardFailedPlatformCfdi,
@@ -75,32 +75,101 @@ describe('platformCfdi.service', () => {
     })
   })
 
-  describe('humanizeStampError (NEW)', () => {
-    it('translates a decrypt failure (bad/stale emisor key) to an actionable Spanish message', () => {
-      expect(humanizeStampError('Unsupported state or unable to authenticate data')).toMatch(/llave del emisor/i)
-      expect(humanizeStampError('bad decrypt')).toMatch(/llave del emisor/i)
+  describe('classifyStampError', () => {
+    const SAT_NOMBRE = 'El campo Nombre del receptor, debe pertenecer al nombre asociado al RFC registrado en el campo Rfc del Receptor.'
+
+    it('clasifica un rechazo del Nombre como razonSocial aunque el mensaje también mencione el RFC', () => {
+      const info = classifyStampError(SAT_NOMBRE)
+      expect(info.code).toBe('VALIDATION')
+      expect(info.field).toBe('razonSocial')
+      expect(info.message).toMatch(/razón social/i)
     })
 
-    it('translates an Unauthorized/401 (Facturapi rejected the key) to an actionable Spanish message', () => {
-      expect(humanizeStampError('Unauthorized')).toMatch(/facturapi rechazó la llave/i)
-      expect(humanizeStampError('Request failed with status code 401')).toMatch(/facturapi rechazó la llave/i)
+    it('conserva SIEMPRE el mensaje crudo del SAT dentro del mensaje al operador', () => {
+      expect(classifyStampError(SAT_NOMBRE).message).toContain(SAT_NOMBRE)
     })
 
-    it('translates an invalid SAT unit/product key error to an actionable Spanish message', () => {
-      expect(humanizeStampError('Couldn\'t find unit_key "Uno"')).toMatch(/clave sat o la unidad/i)
-      expect(humanizeStampError('Couldn\'t find product_key "XYZ"')).toMatch(/clave sat o la unidad/i)
+    it('clasifica DomicilioFiscalReceptor como codigoPostal', () => {
+      const info = classifyStampError(
+        'Validación de timbrado: El campo DomicilioFiscalReceptor del receptor, debe pertenecer al nombre asociado al RFC registrado en el campo Rfc del Receptor.',
+      )
+      expect(info.field).toBe('codigoPostal')
+      expect(info.code).toBe('VALIDATION')
     })
 
-    it('translates a receptor-data-mismatch validation error to an actionable Spanish message', () => {
-      expect(
-        humanizeStampError(
-          'Validación de timbrado: El campo DomicilioFiscalReceptor del receptor, debe pertenecer al nombre asociado al RFC registrado en el campo Rfc del Receptor.',
-        ),
-      ).toMatch(/datos fiscales del receptor no coinciden/i)
+    it('clasifica RegimenFiscalReceptor como regimenFiscal', () => {
+      const info = classifyStampError('El campo RegimenFiscalReceptor del receptor no es válido.')
+      expect(info.field).toBe('regimenFiscal')
     })
 
-    it('passes through an unrecognized message unchanged (no false-positive rewrite)', () => {
-      expect(humanizeStampError('Algo salió mal en el servidor')).toBe('Algo salió mal en el servidor')
+    it('clasifica un rechazo directo del Rfc como rfc', () => {
+      const info = classifyStampError('El campo Rfc del receptor no se encuentra en el listado del SAT.')
+      expect(info.field).toBe('rfc')
+    })
+
+    it('marca la llave del emisor como PROVIDER (falla de infraestructura, no dato corregible)', () => {
+      expect(classifyStampError('Unsupported state or unable to authenticate data')).toMatchObject({
+        code: 'PROVIDER',
+      })
+      expect(classifyStampError('bad decrypt').message).toMatch(/llave del emisor/i)
+    })
+
+    it('marca un 401 de Facturapi como PROVIDER', () => {
+      expect(classifyStampError('Request failed with status code 401')).toMatchObject({ code: 'PROVIDER' })
+      expect(classifyStampError('Unauthorized').message).toMatch(/facturapi rechazó la llave/i)
+    })
+
+    it('marca una clave SAT/unidad inexistente como VALIDATION, sin campo de receptor', () => {
+      const info = classifyStampError('Couldn\'t find unit_key "Uno"')
+      expect(info.code).toBe('VALIDATION')
+      expect(info.field).toBeUndefined()
+      expect(info.message).toMatch(/clave sat o la unidad/i)
+      expect(info.message).toContain('unit_key')
+    })
+
+    it('marca un rechazo del receptor sin campo identificable como VALIDATION sin field', () => {
+      const info = classifyStampError('Los datos del receptor no pudieron validarse.')
+      expect(info.code).toBe('VALIDATION')
+      expect(info.field).toBeUndefined()
+    })
+
+    it('deja pasar un mensaje desconocido tal cual, como PROVIDER', () => {
+      expect(classifyStampError('Algo salió mal en el servidor')).toEqual({
+        code: 'PROVIDER',
+        message: 'Algo salió mal en el servidor',
+      })
+    })
+
+    // ── Regresión Fase 1 (Important #1): el ancla de "401" no debe cazar subcadenas ──
+    // CFDI40147 es el código real del SAT para "Nombre del receptor no coincide". Contiene la
+    // subcadena "401". Antes del fix, `msg.includes('401')` clasificaba esto como PROVIDER (falla
+    // de credenciales) ANTES de siquiera llegar a RECEPTOR_RULES, perdiendo el mensaje crudo del
+    // SAT (las ramas PROVIDER de credenciales no llaman withRaw()). Este es el caso exacto que la
+    // Fase 1 existe para arreglar — reproducirlo sería reintroducir el bug original.
+    it('CFDI40147 (código SAT que contiene "401" como subcadena) clasifica VALIDATION razonSocial, no PROVIDER', () => {
+      const info = classifyStampError(
+        'CFDI40147 - El campo Nombre del receptor, debe pertenecer al nombre asociado al RFC registrado en el campo Rfc del Receptor.',
+      )
+      expect(info.code).toBe('VALIDATION')
+      expect(info.field).toBe('razonSocial')
+      expect(info.message).toContain('CFDI40147')
+    })
+
+    it('un monto como 1401.00 en el mensaje no lo desvía a PROVIDER por contener "401"', () => {
+      const info = classifyStampError('Los datos del receptor no pudieron validarse. Monto rechazado: 1401.00')
+      expect(info.code).toBe('VALIDATION')
+    })
+
+    it('guardarraíl: "Request failed with status code 401" (401 real, con límite de palabra) SIGUE clasificando PROVIDER', () => {
+      expect(classifyStampError('Request failed with status code 401')).toMatchObject({ code: 'PROVIDER' })
+    })
+
+    // ── Minor #3: RECEPTOR_RULES no debe cazar rechazos del EMISOR ──
+    it('un rechazo de Nombre del EMISOR (no receptor) no debe devolver field: razonSocial', () => {
+      const info = classifyStampError(
+        'El campo Nombre del emisor, debe pertenecer al nombre asociado al RFC registrado en el campo Rfc del Emisor.',
+      )
+      expect(info.field).not.toBe('razonSocial')
     })
   })
 
@@ -199,6 +268,41 @@ describe('platformCfdi.service', () => {
 
       expect(prismaMock.platformCfdi.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ status: 'STAMP_FAILED', lastError: 'Unauthorized' }) }),
+      )
+    })
+
+    it('un rechazo del Nombre por el SAT sale como VALIDATION con field=razonSocial', async () => {
+      const SAT = 'El campo Nombre del receptor, debe pertenecer al nombre asociado al RFC registrado en el campo Rfc del Receptor.'
+      prismaMock.platformCfdi.findUnique.mockResolvedValue(null)
+      prismaMock.platformEmisor.findFirst.mockResolvedValue(ACTIVE_EMISOR)
+      prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE)
+      prismaMock.platformCfdi.create.mockResolvedValue({ id: 'cfdiN', status: 'STAMPING' })
+      prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'cfdiN', ...args.data }))
+      mockResolve.mockReturnValue({ createInvoice: jest.fn().mockRejectedValue(new Error(SAT)) })
+
+      await expect(issuePlatformCfdi(baseInput)).rejects.toMatchObject({
+        code: 'VALIDATION',
+        field: 'razonSocial',
+        message: expect.stringMatching(/razón social/i),
+      })
+    })
+
+    it('el mensaje que ve el operador incluye el texto CRUDO del SAT, no sólo la guía', async () => {
+      const SAT = 'El campo Nombre del receptor, debe pertenecer al nombre asociado al RFC registrado en el campo Rfc del Receptor.'
+      prismaMock.platformCfdi.findUnique.mockResolvedValue(null)
+      prismaMock.platformEmisor.findFirst.mockResolvedValue(ACTIVE_EMISOR)
+      prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE)
+      prismaMock.platformCfdi.create.mockResolvedValue({ id: 'cfdiR', status: 'STAMPING' })
+      prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'cfdiR', ...args.data }))
+      mockResolve.mockReturnValue({ createInvoice: jest.fn().mockRejectedValue(new Error(SAT)) })
+
+      await expect(issuePlatformCfdi(baseInput)).rejects.toMatchObject({
+        message: expect.stringContaining(SAT),
+      })
+
+      // El crudo se sigue guardando tal cual en lastError.
+      expect(prismaMock.platformCfdi.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'STAMP_FAILED', lastError: SAT }) }),
       )
     })
   })

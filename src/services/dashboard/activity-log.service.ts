@@ -13,6 +13,7 @@ import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { fromZonedTime } from 'date-fns-tz'
+import { normalizeLegacyActivityActor, preserveUnknownStaffId } from '../../lib/activityAuditActor'
 
 export interface LogActionParams {
   staffId?: string | null
@@ -26,26 +27,21 @@ export interface LogActionParams {
 }
 
 /**
- * Sentinel strings callers pass as the actor of an action when the trigger
- * is not a real staff user. Persisting these would violate the staffId FK,
- * so we normalize them to null here.
- */
-const ACTOR_SENTINELS = new Set(['SYSTEM', 'CUSTOMER', 'PUBLIC', 'WEBHOOK'])
-
-/**
  * Best-effort audit log writer.
  * Wraps prisma.activityLog.create() in try/catch — NEVER throws.
  * Callers may await it when they need audit persistence attempted before
  * returning a response.
  */
 export async function logAction(params: LogActionParams): Promise<void> {
-  try {
-    // Normalize sentinel actor strings (SYSTEM, CUSTOMER, etc.) to null so we
-    // don't trip the ActivityLog_staffId_fkey constraint. The action itself
-    // (e.g. RESERVATION_NO_SHOW) records what happened; the absence of staffId
-    // already signals "no human did this".
-    const staffId = params.staffId && !ACTOR_SENTINELS.has(params.staffId) ? params.staffId : null
+  // Normalize sentinel actor strings (SYSTEM, CUSTOMER, etc.) to null so we
+  // don't trip the ActivityLog_staffId_fkey constraint. The action itself
+  // (e.g. RESERVATION_NO_SHOW) records what happened; the absence of staffId
+  // already signals "no human did this".
+  //
+  // Fuera del try a propósito: el catch lo necesita para el reintento sin actor.
+  const { staffId, data } = normalizeLegacyActivityActor(params.staffId, params.data)
 
+  try {
     await prisma.activityLog.create({
       data: {
         staffId,
@@ -53,12 +49,52 @@ export async function logAction(params: LogActionParams): Promise<void> {
         action: params.action,
         entity: params.entity ?? null,
         entityId: params.entityId ?? null,
-        data: params.data ?? undefined,
+        data,
         ipAddress: params.ipAddress ?? null,
         userAgent: params.userAgent ?? null,
       },
     })
   } catch (error) {
+    // 🔴 Un actor que ya no existe NO puede costarnos la entrada de auditoría.
+    //
+    // El caso real: un empleado dado de baja cuyo token sigue vigente intenta
+    // algo y recibe 403. El middleware manda su PERMISSION_DENIED a auditar, el
+    // FK `ActivityLog_staffId_fkey` revienta, y el intento queda SOLO en el log
+    // de texto — justo el registro que se necesita para investigar un acceso
+    // indebido. Se reintenta UNA vez sin actor: mejor "alguien sin identificar
+    // intentó esto" que ningún rastro. Medido en full-testingv2 2026-08-09.
+    // Se compara contra el NOMBRE de la constraint, que es estable, en vez de
+    // depender de la forma de `error.meta` (cambia entre versiones de Prisma:
+    // unas traen `field_name`, otras `constraint`, y el wrapper puede perderlo).
+    const fkMessage = error instanceof Error ? error.message : ''
+    const isMissingActorFk = staffId !== null && fkMessage.includes('ActivityLog_staffId_fkey')
+
+    if (isMissingActorFk) {
+      try {
+        await prisma.activityLog.create({
+          data: {
+            staffId: null,
+            venueId: params.venueId ?? null,
+            action: params.action,
+            entity: params.entity ?? null,
+            entityId: params.entityId ?? null,
+            // El actor desconocido se conserva en `data`: es lo único que queda
+            // para rastrear de quién era ese token.
+            data: preserveUnknownStaffId(params.data, staffId),
+            ipAddress: params.ipAddress ?? null,
+            userAgent: params.userAgent ?? null,
+          },
+        })
+        logger.warn('[ActivityLog] Actor desconocido — auditado sin staffId', {
+          action: params.action,
+          unknownStaffId: staffId,
+        })
+        return
+      } catch {
+        // cae al log de error de abajo
+      }
+    }
+
     logger.error('[ActivityLog] Failed to write audit log', {
       action: params.action,
       entity: params.entity,
@@ -102,63 +138,66 @@ export interface PaginatedActivityLogs {
   }
 }
 
-/**
- * Query activity logs for an organization with filters and pagination.
- * Fetches all org venue IDs, then queries by venueId IN (...).
- */
+/** Build the authoritative tenant predicate shared by organization list/dropdown queries. */
+export function buildOrganizationActivityLogTenantScope(organizationId: string, venueIds: string[]): Prisma.ActivityLogWhereInput {
+  // Classified rows use organizationId; only legacy null-attribution rows may
+  // fall back to the organization's current venue set.
+  return {
+    OR: [{ organizationId }, { organizationId: null, venueId: { in: venueIds } }],
+  }
+}
+
+/** Build organization scope and user filters without allowing either OR to replace the other. */
+export function buildOrganizationActivityLogWhere(params: QueryActivityLogsParams, venueIds: string[]): Prisma.ActivityLogWhereInput {
+  const and: Prisma.ActivityLogWhereInput[] = [buildOrganizationActivityLogTenantScope(params.organizationId, venueIds)]
+
+  if (params.venueId) {
+    and.push({ venueId: params.venueId })
+    // An explicit venue filter must itself belong to the route organization;
+    // this remains defense-in-depth even for newly classified rows.
+    and.push({ venueId: { in: venueIds } })
+  }
+  if (params.staffId) and.push({ staffId: params.staffId })
+  if (params.action) and.push({ action: params.action })
+  if (params.entity) and.push({ entity: params.entity })
+  if (params.search) {
+    and.push({
+      OR: [
+        { action: { contains: params.search, mode: 'insensitive' } },
+        { entity: { contains: params.search, mode: 'insensitive' } },
+        { entityId: { contains: params.search, mode: 'insensitive' } },
+      ],
+    })
+  }
+  if (params.startDate || params.endDate) {
+    const createdAt: Prisma.DateTimeFilter = {}
+    if (params.startDate) createdAt.gte = new Date(params.startDate)
+    if (params.endDate) createdAt.lte = new Date(params.endDate)
+    and.push({ createdAt })
+  }
+
+  return { AND: and }
+}
+
+/** Query activity logs for one organization with classified + legacy compatibility. */
 export async function queryActivityLogs(params: QueryActivityLogsParams): Promise<PaginatedActivityLogs> {
   const { organizationId, page = 1, pageSize = 25 } = params
 
-  // Get all venue IDs for this organization
   const orgVenues = await prisma.venue.findMany({
     where: { organizationId },
     select: { id: true, name: true },
   })
-
-  if (orgVenues.length === 0) {
-    return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
-  }
-
   const venueIds = orgVenues.map(v => v.id)
   const venueNameMap = new Map(orgVenues.map(v => [v.id, v.name]))
-
-  // Build where clause
-  const where: Record<string, unknown> = {
-    venueId: params.venueId ? { equals: params.venueId } : { in: venueIds },
-  }
-
-  if (params.staffId) {
-    where.staffId = params.staffId
-  }
-
-  if (params.action) {
-    where.action = params.action
-  }
-
-  if (params.entity) {
-    where.entity = params.entity
-  }
-
-  if (params.search) {
-    where.OR = [
-      { action: { contains: params.search, mode: 'insensitive' } },
-      { entity: { contains: params.search, mode: 'insensitive' } },
-      { entityId: { contains: params.search, mode: 'insensitive' } },
-    ]
-  }
-
-  if (params.startDate || params.endDate) {
-    const createdAt: Record<string, Date> = {}
-    if (params.startDate) createdAt.gte = new Date(params.startDate)
-    if (params.endDate) createdAt.lte = new Date(params.endDate)
-    where.createdAt = createdAt
-  }
+  // No zero-venue early return: H1 organization-level audit rows have no venue
+  // and must remain visible to the corporate audit screen.
+  const where = buildOrganizationActivityLogWhere(params, venueIds)
 
   // Count + fetch in parallel
   const [total, logs] = await Promise.all([
-    prisma.activityLog.count({ where: where as any }),
+    prisma.activityLog.count({ where }),
     prisma.activityLog.findMany({
-      where: where as any,
+      where,
       include: {
         staff: {
           select: { id: true, firstName: true, lastName: true },
@@ -210,12 +249,12 @@ export async function getDistinctActions(organizationId: string): Promise<string
     select: { id: true },
   })
 
-  if (orgVenues.length === 0) return []
-
   const venueIds = orgVenues.map(v => v.id)
 
   const results = await prisma.activityLog.findMany({
-    where: { venueId: { in: venueIds } },
+    // Reusing the exact tenant predicate keeps dropdown values from disclosing
+    // actions that the corresponding organization list can never display.
+    where: buildOrganizationActivityLogTenantScope(organizationId, venueIds),
     select: { action: true },
     distinct: ['action'],
     orderBy: { action: 'asc' },
@@ -240,16 +279,13 @@ export interface QueryVenueActivityLogsParams {
   pageSize?: number
 }
 
-/** Query activity logs for ONE venue with filters + pagination. */
-export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParams): Promise<PaginatedActivityLogs> {
-  const { venueId, page = 1, pageSize = 25 } = params
-
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, name: true, timezone: true } })
-  if (!venue) {
-    return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
-  }
-
-  const where: Record<string, unknown> = { venueId }
+/**
+ * The filter set, in ONE place. The listing and the export must never diverge: an export
+ * that quietly matches a different set of rows than the screen the user is looking at is a
+ * bug nobody reports, because the file looks plausible.
+ */
+export function buildVenueActivityLogWhere(params: QueryVenueActivityLogsParams, venueTimezone?: string | null): Record<string, unknown> {
+  const where: Record<string, unknown> = { venueId: params.venueId }
   if (params.staffId) where.staffId = params.staffId
   if (params.action) where.action = params.action
   if (params.entity) where.entity = params.entity
@@ -263,12 +299,25 @@ export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParam
   if (params.startDate || params.endDate) {
     // Parse the bare YYYY-MM-DD in the VENUE timezone (pass a STRING, not new Date()) so a
     // venue-local day range is correct under any host TZ (prod runs UTC). See critical-warnings.md.
-    const venueTz = venue.timezone || 'America/Mexico_City'
+    const venueTz = venueTimezone || 'America/Mexico_City'
     const createdAt: Record<string, Date> = {}
     if (params.startDate) createdAt.gte = fromZonedTime(`${params.startDate}T00:00:00.000`, venueTz)
     if (params.endDate) createdAt.lte = fromZonedTime(`${params.endDate}T23:59:59.999`, venueTz)
     where.createdAt = createdAt
   }
+  return where
+}
+
+/** Query activity logs for ONE venue with filters + pagination. */
+export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParams): Promise<PaginatedActivityLogs> {
+  const { venueId, page = 1, pageSize = 25 } = params
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, name: true, timezone: true } })
+  if (!venue) {
+    return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
+  }
+
+  const where = buildVenueActivityLogWhere(params, venue.timezone)
 
   const [total, logs] = await Promise.all([
     prisma.activityLog.count({ where: where as any }),
@@ -295,6 +344,45 @@ export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParam
   }))
 
   return { logs: enrichedLogs, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+}
+
+/**
+ * Every matching row for an export, capped. Deliberately NOT paginated: an export that
+ * silently returns page 1 is worse than one that refuses, so the caller counts first and
+ * rejects over the cap rather than truncating.
+ *
+ * `orderBy` carries `id` as a tiebreaker — two rows written in the same millisecond would
+ * otherwise come back in arbitrary order, and a file whose row order changes between
+ * downloads is indefensible in front of an auditor.
+ */
+export async function fetchVenueActivityLogsForExport(params: QueryVenueActivityLogsParams & { cap: number }): Promise<ActivityLogEntry[]> {
+  const venue = await prisma.venue.findUnique({ where: { id: params.venueId }, select: { name: true, timezone: true } })
+  if (!venue) return []
+
+  const logs = await prisma.activityLog.findMany({
+    where: buildVenueActivityLogWhere(params, venue.timezone),
+    include: { staff: { select: { id: true, firstName: true, lastName: true } } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: params.cap,
+  })
+
+  return logs.map(log => ({
+    id: log.id,
+    action: log.action,
+    entity: log.entity,
+    entityId: log.entityId,
+    data: log.data,
+    ipAddress: log.ipAddress,
+    createdAt: log.createdAt,
+    staff: log.staff,
+    venueName: venue.name,
+  }))
+}
+
+/** Row count for the same filters, so the caller can refuse before building a huge file. */
+export async function countVenueActivityLogsForExport(params: QueryVenueActivityLogsParams): Promise<number> {
+  const venue = await prisma.venue.findUnique({ where: { id: params.venueId }, select: { timezone: true } })
+  return prisma.activityLog.count({ where: buildVenueActivityLogWhere(params, venue?.timezone) as never })
 }
 
 /** Distinct action strings for ONE venue (filter dropdown). */

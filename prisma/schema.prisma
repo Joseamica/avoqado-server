@@ -38,6 +38,37 @@ model Organization {
   // Modules enabled at organization level (inherited by all venues)
   organizationModules OrganizationModule[]
 
+  // H1A master catalog is organization-owned and deliberately separate from
+  // venue Feature inheritance. Every child repeats organizationId so SQL-level
+  // composite FKs can reject cross-tenant batches, lines, values, and bindings.
+  organizationEntitlements         OrganizationEntitlement[]
+  catalogBrands                    CatalogBrand[]
+  catalogManufacturers             CatalogManufacturer[]
+  catalogFamilies                  CatalogFamily[]
+  catalogItems                     CatalogItem[]
+  catalogItemBusinessTypes         CatalogItemBusinessType[]
+  catalogProductTypeMappings       CatalogProductTypeMapping[]
+  catalogIdentifiers               CatalogIdentifier[]
+  catalogValidationProfiles        CatalogValidationProfile[]
+  catalogItemPrices                CatalogItemPrice[]
+  catalogVenueRollouts             CatalogVenueRollout[]
+  catalogVenueClientRequirements   CatalogVenueClientRequirement[]
+  catalogClientObservations        CatalogClientObservation[]
+  catalogClientReadinessOverrides  CatalogClientReadinessOverride[]
+  catalogVenueBindings             CatalogVenueBinding[]
+  catalogVenueOverrides            CatalogVenueOverride[]
+  catalogImportBatches             CatalogImportBatch[]
+  catalogImportLines               CatalogImportLine[]
+  catalogBindingBatches            CatalogBindingBatch[]
+  catalogBindingLines              CatalogBindingLine[]
+  catalogIdempotencyRecords        CatalogIdempotencyRecord[]
+  catalogPublicationBatches        CatalogPublicationBatch[]
+  catalogPublicationLines          CatalogPublicationLine[]
+  catalogPublicationFieldDecisions CatalogPublicationFieldDecision[]
+  catalogPublicationOutboxes       CatalogPublicationOutbox[]
+  catalogVenueEventSequences       CatalogVenueEventSequence[]
+  organizationScopedActivityLogs   ActivityLog[]
+
   // ✅ NEW: Onboarding tracking
   onboardingProgress    OnboardingProgress?
   onboardingCompletedAt DateTime?
@@ -202,6 +233,11 @@ model Venue {
   statusChangedAt  DateTime? // When status was last changed
   statusChangedBy  String? // Staff ID who changed the status
   suspensionReason String?     @db.Text // Reason for suspension (for audit trail)
+
+  // H1A reads this nullable scalar on legacy Product create/activate paths.
+  // Null is the byte-compatible NEVER_ENABLED path; the first non-null value
+  // is exact write-once state (the migration enforces it for SQL writers).
+  catalogGovernanceEnforcedAt DateTime?
 
   // NOTE: isOnboardingDemo and isLiveDemo fields were REMOVED on 2024-12-08
   // Use status field instead: TRIAL = demo during onboarding, LIVE_DEMO = ephemeral demo
@@ -405,6 +441,19 @@ model Venue {
   soldSerializedItems       SerializedItem[] @relation("SoldItems") // Items sold at this venue (org-level items)
   registeredSerializedItems SerializedItem[] @relation("RegisteredItems") // Audit: org-level items registered from this venue
 
+  // Master-catalog rollout/read models are additive; no row is created by the
+  // migration, and their state defaults keep every venue disabled.
+  catalogVenueRollouts            CatalogVenueRollout[]
+  catalogVenueClientRequirements  CatalogVenueClientRequirement[]
+  catalogClientObservations       CatalogClientObservation[]
+  catalogClientReadinessOverrides CatalogClientReadinessOverride[]
+  catalogVenueBindings            CatalogVenueBinding[]
+  catalogVenueOverrides           CatalogVenueOverride[]
+  catalogBindingLines             CatalogBindingLine[]
+  catalogPublicationLines         CatalogPublicationLine[]
+  catalogPublicationOutboxes      CatalogPublicationOutbox[]
+  catalogVenueEventSequences      CatalogVenueEventSequence[]
+
   // ==========================================
   // COMMISSION SYSTEM
   // ==========================================
@@ -494,11 +543,13 @@ model Venue {
   // ==========================================
   // Vales por área (AREA_TICKETS) — vales independientes + consolidación en caja
   // ==========================================
-  fulfillmentAreas           FulfillmentArea[]
-  areaTicketSettings         VenueAreaTicketSettings?
-  areaTickets                AreaTicket[]
-  areaTicketCheckoutSessions AreaTicketCheckoutSession[]
-  areaTicketReservations     AreaTicketInventoryReservation[]
+  fulfillmentAreas              FulfillmentArea[]
+  areaTicketSettings            VenueAreaTicketSettings?
+  areaTickets                   AreaTicket[]
+  areaTicketCheckoutSessions    AreaTicketCheckoutSession[]
+  areaTicketReservations        AreaTicketInventoryReservation[]
+  areaTicketExternalSettlements AreaTicketExternalSettlement[]
+  areaTicketExternalIncidents   AreaTicketExternalIncident[]
 
   // Básculas (SCALE_INTEGRATION) — capacidad y rollout independientes de vales.
   scaleSettings VenueScaleSettings?
@@ -555,6 +606,7 @@ model Venue {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([id, organizationId])
   @@index([organizationId])
   @@index([slug])
   @@index([active])
@@ -722,11 +774,12 @@ model VenueSettings {
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // Operations
-  autoCloseShifts     Boolean @default(false)
-  shiftDuration       Int     @default(8) // hours
-  enableShifts        Boolean @default(true) // Enable/disable shift system for venue
-  requirePinLogin     Boolean @default(true)
-  terminalPermissions Json? // Permissions for terminal session when requirePinLogin=false
+  autoCloseShifts           Boolean @default(false)
+  shiftDuration             Int     @default(8) // hours
+  enableShifts              Boolean @default(true) // Enable/disable shift system for venue
+  cashReconciliationEnabled Boolean @default(false) // PRO + explicit opt-in; effective gate is server-owned
+  requirePinLogin           Boolean @default(true)
+  terminalPermissions       Json? // Permissions for terminal session when requirePinLogin=false
 
   // Table service (PRO) — "Solo el propietario puede modificar sus mesas".
   // Encendido: solo el mesero dueño (Order.servedById) agrega/edita/descuenta/
@@ -847,7 +900,8 @@ model Staff {
   ordersCreated     Order[]             @relation("OrderCreatedBy")
   ordersServed      Order[]             @relation("OrderServedBy")
   paymentsProcessed Payment[]
-  activities        ActivityLog[]
+  activities        ActivityLog[]       @relation("ActivityLogLegacyStaff")
+  actorActivities   ActivityLog[]       @relation("ActivityLogDurableActorStaff")
   reviewsReceived   Review[]
   orderActions      OrderAction[] // Order modifications performed by this staff member
 
@@ -855,10 +909,12 @@ model Staff {
   /// es el "por Rosa" que ve el área al reintentar una entrega ya hecha.
   fulfillmentsDelivered OrderFulfillment[] @relation("OrderFulfillmentStaff")
 
-  areaTicketsIssued          AreaTicket[]                @relation("AreaTicketIssuedByStaff")
-  areaTicketCheckoutSessions AreaTicketCheckoutSession[] @relation("AreaTicketCheckoutStaff")
-  areaTicketPrintAttempts    AreaTicketPrintAttempt[]    @relation("AreaTicketPrintStaff")
-  areaTicketFulfillments     AreaTicketFulfillment[]     @relation("AreaTicketFulfillmentStaff")
+  areaTicketsIssued             AreaTicket[]                   @relation("AreaTicketIssuedByStaff")
+  areaTicketCheckoutSessions    AreaTicketCheckoutSession[]    @relation("AreaTicketCheckoutStaff")
+  areaTicketPrintAttempts       AreaTicketPrintAttempt[]       @relation("AreaTicketPrintStaff")
+  areaTicketFulfillments        AreaTicketFulfillment[]        @relation("AreaTicketFulfillmentStaff")
+  areaTicketExternalSettlements AreaTicketExternalSettlement[] @relation("AreaTicketExternalSettlementStaff")
+  areaTicketExternalIncidents   AreaTicketExternalIncident[]   @relation("AreaTicketExternalIncidentStaff")
 
   // Notifications
   notifications           Notification[]
@@ -994,11 +1050,45 @@ model Staff {
   // Delivery activation requests (self-serve intent) made by this staff member
   deliveryActivationRequests DeliveryActivationRequest[] @relation("DeliveryActivationRequestedBy")
 
-  // Email is now @unique on the field itself (globally unique)
-  @@index([email])
+  // H1A keeps actor FKs explicit for durable corporate audit. Product alone is
+  // nullable/SET NULL for legacy compatibility; catalog audit actors are
+  // RESTRICTed so deleting a Staff row cannot erase who approved a mutation.
+  productsCreated                        Product[]                        @relation("ProductCreatedBy")
+  organizationEntitlementsGranted        OrganizationEntitlement[]        @relation("OrganizationEntitlementGrantedBy")
+  catalogBrandsCreated                   CatalogBrand[]                   @relation("CatalogBrandCreatedBy")
+  catalogBrandsUpdated                   CatalogBrand[]                   @relation("CatalogBrandUpdatedBy")
+  catalogManufacturersCreated            CatalogManufacturer[]            @relation("CatalogManufacturerCreatedBy")
+  catalogManufacturersUpdated            CatalogManufacturer[]            @relation("CatalogManufacturerUpdatedBy")
+  catalogFamiliesCreated                 CatalogFamily[]                  @relation("CatalogFamilyCreatedBy")
+  catalogFamiliesUpdated                 CatalogFamily[]                  @relation("CatalogFamilyUpdatedBy")
+  catalogItemsCreated                    CatalogItem[]                    @relation("CatalogItemCreatedBy")
+  catalogItemsUpdated                    CatalogItem[]                    @relation("CatalogItemUpdatedBy")
+  catalogIdentifiersCreated              CatalogIdentifier[]              @relation("CatalogIdentifierCreatedBy")
+  catalogProductTypeMappingsCreated      CatalogProductTypeMapping[]      @relation("CatalogProductTypeMappingCreatedBy")
+  catalogValidationProfilesCreated       CatalogValidationProfile[]       @relation("CatalogValidationProfileCreatedBy")
+  catalogValidationProfilesUpdated       CatalogValidationProfile[]       @relation("CatalogValidationProfileUpdatedBy")
+  catalogItemPricesCreated               CatalogItemPrice[]               @relation("CatalogItemPriceCreatedBy")
+  catalogItemPricesUpdated               CatalogItemPrice[]               @relation("CatalogItemPriceUpdatedBy")
+  catalogVenueRolloutsCreated            CatalogVenueRollout[]            @relation("CatalogVenueRolloutCreatedBy")
+  catalogVenueRolloutsUpdated            CatalogVenueRollout[]            @relation("CatalogVenueRolloutUpdatedBy")
+  catalogVenueClientRequirementsCreated  CatalogVenueClientRequirement[]  @relation("CatalogVenueClientRequirementCreatedBy")
+  catalogVenueClientRequirementsUpdated  CatalogVenueClientRequirement[]  @relation("CatalogVenueClientRequirementUpdatedBy")
+  catalogClientReadinessOverridesCreated CatalogClientReadinessOverride[] @relation("CatalogClientReadinessOverrideCreatedBy")
+  catalogClientReadinessOverridesRevoked CatalogClientReadinessOverride[] @relation("CatalogClientReadinessOverrideRevokedBy")
+  catalogVenueBindingsCreated            CatalogVenueBinding[]            @relation("CatalogVenueBindingCreatedBy")
+  catalogVenueBindingsUpdated            CatalogVenueBinding[]            @relation("CatalogVenueBindingUpdatedBy")
+  catalogVenueOverridesRequested         CatalogVenueOverride[]           @relation("CatalogVenueOverrideRequestedBy")
+  catalogVenueOverridesDecided           CatalogVenueOverride[]           @relation("CatalogVenueOverrideDecidedBy")
+  catalogImportBatches                   CatalogImportBatch[]             @relation("CatalogImportBatchHumanActor")
+  catalogBindingBatches                  CatalogBindingBatch[]            @relation("CatalogBindingBatchHumanActor")
+  catalogIdempotencyRecords              CatalogIdempotencyRecord[]       @relation("CatalogIdempotencyRecordHumanActor")
+  catalogPublicationBatches              CatalogPublicationBatch[]        @relation("CatalogPublicationBatchHumanActor")
 
   // Reglas de upsell que este staff aprobó (ver nota en UpsellRule.approvedBy).
   upsellRulesApproved UpsellRule[] @relation("UpsellRuleApprovedBy")
+
+  // Email is now @unique on the field itself (globally unique)
+  @@index([email])
 }
 
 model StaffVenue {
@@ -1055,7 +1145,6 @@ model StaffVenue {
 
   // Referral Program
   referralsCaptured Referral[] @relation("ReferralsCaptured")
-
 
   @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
   @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
@@ -1568,6 +1657,12 @@ model Product {
   availableFrom  DateTime?
   availableUntil DateTime?
 
+  // Nullable by design: the migration never invents authors for historical
+  // Products. New authenticated writers populate it later; deleting that Staff
+  // row preserves the Product and clears only this attribution.
+  createdById String?
+  createdBy   Staff?  @relation("ProductCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
   // Soft delete
   deletedAt DateTime? // Soft delete timestamp
   deletedBy String? // Staff ID who deleted
@@ -1593,10 +1688,16 @@ model Product {
   commissionMilestones CommissionMilestone[]
 
   // Stock Counts
-  stockCountItems StockCountItem[]
+  stockCountItems    StockCountItem[]
   // Renglones de orden de compra que traen este producto como mercancía de reventa
   // (tienda de conveniencia). Los insumos de cocina van por RawMaterial.
   purchaseOrderItems PurchaseOrderItem[]
+
+  // Explicit corporate provenance; these relations never replace or re-ID the
+  // operational Product that orders, stock, recipes, and modifiers reference.
+  catalogVenueBindings    CatalogVenueBinding[]
+  catalogBindingLines     CatalogBindingLine[]
+  catalogPublicationLines CatalogPublicationLine[]
 
   // Reservations (product-based appointments/classes)
   reservations  Reservation[]
@@ -1635,6 +1736,7 @@ model Product {
   @@unique([venueId, sku])
   @@unique([venueId, gtin])
   @@unique([venueId, externalId])
+  @@unique([id, venueId])
   @@index([venueId])
   @@index([categoryId])
   @@index([active])
@@ -3886,13 +3988,20 @@ model Terminal {
   canDeliverAreaTickets  Boolean           @default(false)
   defaultWorkspace       TerminalWorkspace @default(STANDARD_POS)
 
+  /// Mostrador invertido: el cliente ve la pantalla grande y el cajero trabaja
+  /// en la chica. Es por DISPOSITIVO (así está armado ESE mostrador), no por
+  /// venue. El POS aplica su valor local y sincroniza con este; el dashboard lo
+  /// puede cambiar en remoto.
+  customerDisplayInverted Boolean @default(false)
+
   scaleProfileId String?
   scaleProfile   ScaleProfile? @relation(fields: [scaleProfileId], references: [id], onDelete: SetNull)
 
-  areaTicketsIssued          AreaTicket[]                @relation("AreaTicketSourceTerminal")
-  areaTicketCheckoutSessions AreaTicketCheckoutSession[] @relation("AreaTicketCheckoutTerminal")
-  areaTicketPrintAttempts    AreaTicketPrintAttempt[]    @relation("AreaTicketPrintTerminal")
-  areaTicketFulfillments     AreaTicketFulfillment[]     @relation("AreaTicketFulfillmentTerminal")
+  areaTicketsIssued             AreaTicket[]                   @relation("AreaTicketSourceTerminal")
+  areaTicketCheckoutSessions    AreaTicketCheckoutSession[]    @relation("AreaTicketCheckoutTerminal")
+  areaTicketPrintAttempts       AreaTicketPrintAttempt[]       @relation("AreaTicketPrintTerminal")
+  areaTicketFulfillments        AreaTicketFulfillment[]        @relation("AreaTicketFulfillmentTerminal")
+  areaTicketExternalSettlements AreaTicketExternalSettlement[] @relation("AreaTicketExternalSettlementTerminal")
 
   reviews Review[] // ✅ LÍNEA AGREGADA
 
@@ -5723,10 +5832,23 @@ model MonthlyVenueProfit {
 // ==========================================
 
 model ActivityLog {
-  id      String  @id @default(cuid())
-  staffId String?
-  staff   Staff?  @relation(fields: [staffId], references: [id])
-  venueId String?
+  id                 String             @id @default(cuid())
+  staffId            String?
+  staff              Staff?             @relation("ActivityLogLegacyStaff", fields: [staffId], references: [id], onDelete: SetNull)
+  // Classified HUMAN audit keeps a second durable principal reference. The
+  // legacy staffId relation remains SET NULL for historical writers.
+  actorStaffId       String?
+  actorStaff         Staff?             @relation("ActivityLogDurableActorStaff", fields: [actorStaffId], references: [id], onDelete: Restrict)
+  venueId            String?
+  organizationId     String?
+  // Every populated organization attribution is durable audit provenance.
+  // Pre-H1 rows keep organizationId null, so their legacy delete path remains.
+  organization       Organization?      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  actorType          ActivityActorType?
+  // Service identities are strings rather than invented Staff rows. The SQL
+  // CHECK validates HUMAN/SERVICE pairs only when actorType is classified, so
+  // legacy writers that still leave actorType null remain valid.
+  servicePrincipalId String?
 
   action   String
   entity   String?
@@ -5740,6 +5862,8 @@ model ActivityLog {
 
   @@index([staffId])
   @@index([venueId])
+  // Nullable H1 columns use raw partial concurrent indexes in migration SQL;
+  // declaring full Prisma indexes here would create unsafe drift substitutes.
   @@index([entity, entityId])
   @@index([createdAt])
 }
@@ -6354,7 +6478,7 @@ model UpsellRule {
   linkedDiscountId String?
   linkedDiscount   Discount? @relation("UpsellLinkedDiscount", fields: [linkedDiscountId], references: [id], onDelete: SetNull)
 
-  priority   Int      @default(0)
+  priority   Int     @default(0)
   daysOfWeek Int[] // vacío = todos. 0=domingo..6=sábado, igual que Discount.daysOfWeek
   timeFrom   String? // "HH:mm" hora LOCAL del venue
   timeUntil  String? // si timeUntil < timeFrom la ventana CRUZA medianoche
@@ -6438,7 +6562,7 @@ model UpsellAcceptance {
   ruleId String
   rule   UpsellRule @relation(fields: [ruleId], references: [id], onDelete: Restrict)
 
-  productId          String
+  productId           String
   orderItemExternalId String
 
   createdAt DateTime @default(now())
@@ -8747,6 +8871,10 @@ model Module {
   name        String // "Inventario Serializado"
   description String?
 
+  // Existing modules remain BOTH by default. MASTER_CATALOG will be seeded in
+  // Task 3 as ORGANIZATION_ONLY; this migration creates no module or grant row.
+  scope ModuleScope @default(BOTH)
+
   // Schema JSON for validating configuration
   configSchema Json? // JSON Schema
 
@@ -8820,6 +8948,1009 @@ model OrganizationModule {
 
   @@unique([organizationId, moduleId])
   @@index([organizationId])
+}
+
+// ==========================================
+// H1A MASTER CATALOG — ORGANIZATION IDENTITY + PUBLICATION SPINE
+// Expand-only: no legacy Product is backfilled or made dependent on these rows.
+// ==========================================
+
+enum ModuleScope {
+  BOTH
+  ORGANIZATION_ONLY
+  VENUE_ONLY
+}
+
+enum OrganizationEntitlementStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum OrganizationEntitlementSource {
+  CONTRACT
+  CUSTOM
+}
+
+enum ActivityActorType {
+  HUMAN
+  SERVICE
+}
+
+enum CatalogReferenceStatus {
+  ACTIVE
+  RETIRED
+}
+
+enum CatalogItemKind {
+  RETAIL_PRODUCT
+  PREPARED_DISH
+}
+
+enum CatalogItemStatus {
+  ACTIVE
+  RETIRED
+}
+
+enum CatalogIepsMode {
+  NONE
+  RATE
+  QUOTA
+  BOTH
+}
+
+// H1A reserves only the authoritative corporate-SKU projection. H1B extends
+// this enum for GS1/INTERNAL aliases without introducing a parallel registry.
+enum CatalogIdentifierType {
+  CORPORATE_SKU
+}
+
+enum CatalogIdentifierStatus {
+  ACTIVE
+  RETIRED
+}
+
+enum CatalogItemPriceKind {
+  SALE_PRICE
+  PURCHASE_COST
+}
+
+// H1A intentionally has no polymorphic scopeId. The organization FK is the
+// concrete owner; regional/venue value tables arrive in H1C.
+enum CatalogItemPriceScope {
+  ORGANIZATION
+}
+
+enum CatalogRegistryState {
+  NOT_STARTED
+  PREFLIGHT_FAILED
+  READY_TO_BOOTSTRAP
+  BOOTSTRAPPING
+  READY
+}
+
+enum CatalogAliasPublicationState {
+  DISABLED
+  CLIENTS_NOT_READY
+  READY_TO_ENABLE
+  ENABLED
+  PAUSED
+}
+
+enum CatalogGovernanceState {
+  NOT_STARTED
+  CLIENTS_NOT_READY
+  READY_TO_ENFORCE
+  ENFORCED
+  PAUSED
+}
+
+enum CatalogClientFamily {
+  DASHBOARD
+  ANDROID
+  IOS
+  TPV
+  DESKTOP
+}
+
+enum CatalogClientRequirementMode {
+  REQUIRED
+  NOT_APPLICABLE
+}
+
+enum CatalogReadinessOverrideStatus {
+  NOT_STARTED
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum CatalogVenueBindingStatus {
+  NOT_STARTED
+  PENDING
+  LINKED
+  CONFLICT
+  UNLINKED
+}
+
+enum CatalogVenueOverrideStatus {
+  DETECTED
+  REQUESTED
+  APPROVED
+  REJECTED
+  SUPERSEDED
+}
+
+enum CatalogOperationState {
+  NOT_STARTED
+  PREVIEWED
+  APPLYING
+  APPLIED
+  FAILED
+  EXPIRED
+  SUPERSEDED
+}
+
+enum CatalogImportLineStatus {
+  NOT_STARTED
+  READY
+  INVALID
+  APPLIED
+  SKIPPED
+}
+
+enum CatalogBindingLineStatus {
+  NOT_STARTED
+  READY
+  CONFLICT
+  INVALID
+  STALE
+  APPLIED
+  SKIPPED
+}
+
+enum CatalogBindingProposal {
+  LINK
+  CREATE
+  SKIP
+}
+
+enum CatalogPublicationLineStatus {
+  NOT_STARTED
+  NO_CHANGE
+  READY
+  MISSING_BINDING
+  LOCAL_DIVERGENCE
+  APPROVED_OVERRIDE
+  INVALID
+  RECIPE_COST_STALE
+  STALE
+  APPLIED
+}
+
+enum CatalogPublicationOutboxStatus {
+  PENDING
+  DELIVERED
+  DEAD_LETTER
+}
+
+// Publication keeps one normalized decision per managed field so a target can
+// publish corporate values and retain approved local values in the same batch.
+enum CatalogPublicationFieldDecisionKind {
+  PUBLISH_CORPORATE
+  APPROVE_LOCAL_OVERRIDE
+  UNDECIDED
+}
+
+enum CatalogPublicationChangeKind {
+  PUBLICATION
+  REVERSION
+}
+
+/// Commercial access is explicit and organization-scoped; a paid venue tier,
+/// demo, or grandfather flag cannot manufacture this row.
+model OrganizationEntitlement {
+  id             String                        @id @default(cuid())
+  organizationId String
+  organization   Organization                  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  featureCode    String
+  status         OrganizationEntitlementStatus @default(REVOKED)
+  source         OrganizationEntitlementSource
+  startsAt       DateTime                      @default(now())
+  endsAt         DateTime?
+  grantedById    String
+  grantedBy      Staff                         @relation("OrganizationEntitlementGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
+  reason         String                        @db.Text
+  createdAt      DateTime                      @default(now())
+  updatedAt      DateTime                      @updatedAt
+
+  @@unique([organizationId, featureCode])
+  @@index([organizationId, status])
+  @@index([featureCode, status])
+  @@index([endsAt])
+  @@index([grantedById])
+}
+
+/// Normalized reference values preserve their display name and retirement
+/// history. Composite IDs let CatalogItem prove the reference belongs to the
+/// same organization even for SQL-direct writes.
+model CatalogBrand {
+  id             String                 @id @default(cuid())
+  organizationId String
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  normalizedName String
+  status         CatalogReferenceStatus
+  revision       Int                    @default(1)
+  createdById    String
+  createdBy      Staff                  @relation("CatalogBrandCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById    String
+  updatedBy      Staff                  @relation("CatalogBrandUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  items CatalogItem[]
+
+  @@unique([organizationId, normalizedName])
+  @@unique([id, organizationId])
+  @@index([organizationId, status])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+model CatalogManufacturer {
+  id             String                 @id @default(cuid())
+  organizationId String
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  normalizedName String
+  status         CatalogReferenceStatus
+  revision       Int                    @default(1)
+  createdById    String
+  createdBy      Staff                  @relation("CatalogManufacturerCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById    String
+  updatedBy      Staff                  @relation("CatalogManufacturerUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  items CatalogItem[]
+
+  @@unique([organizationId, normalizedName])
+  @@unique([id, organizationId])
+  @@index([organizationId, status])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+/// Family hierarchy is tenant-safe: parentId is paired with organizationId,
+/// so a child cannot point at another organization's taxonomy.
+model CatalogFamily {
+  id             String                 @id @default(cuid())
+  organizationId String
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  normalizedName String
+  status         CatalogReferenceStatus
+  parentId       String?
+  parent         CatalogFamily?         @relation("CatalogFamilyHierarchy", fields: [parentId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  children       CatalogFamily[]        @relation("CatalogFamilyHierarchy")
+  revision       Int                    @default(1)
+  createdById    String
+  createdBy      Staff                  @relation("CatalogFamilyCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById    String
+  updatedBy      Staff                  @relation("CatalogFamilyUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  items CatalogItem[]
+
+  @@unique([organizationId, normalizedName])
+  @@unique([id, organizationId])
+  @@index([organizationId, status])
+  @@index([parentId, organizationId])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+/// Corporate identity is separate from operational Product. normalizedSku is
+/// the canonical normalization-v1 value used by the deferred SQL trigger; the
+/// service updates sku + normalizedSku + CatalogIdentifier atomically. A
+/// second deferred SQL invariant requires business type plus an active
+/// same-currency organization sale/cost pair before the aggregate can commit.
+model CatalogItem {
+  id                String              @id @default(cuid())
+  organizationId    String
+  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sku               String
+  normalizedSku     String
+  kind              CatalogItemKind
+  name              String
+  // CatalogItem has no DRAFT state: incomplete uploads remain in staging and
+  // only a fully reviewed baseline can enter the authoritative table.
+  description       String              @db.Text
+  imageUrl          String
+  brandId           String
+  brand             CatalogBrand        @relation(fields: [brandId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  manufacturerId    String
+  manufacturer      CatalogManufacturer @relation(fields: [manufacturerId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  familyId          String
+  family            CatalogFamily       @relation(fields: [familyId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  presentationLabel String
+  unit              Unit
+  taxRate           Decimal             @db.Decimal(5, 4)
+  satProductKey     String
+  satUnitKey        String
+  objetoImp         String
+  productType       ProductType
+  // IEPS must be chosen explicitly, including NONE, so omission cannot masquerade as a reviewed fiscal declaration.
+  iepsMode          CatalogIepsMode
+  iepsRate          Decimal?            @db.Decimal(7, 6)
+  iepsQuota         Decimal?            @db.Decimal(12, 4)
+  iepsQuotaUnit     Unit?
+  status            CatalogItemStatus
+  revision          Int                 @default(1)
+  // Child writers bump this internal CAS word immediately, acquiring the
+  // aggregate row lock before deferred exact-one/baseline validation.
+  invariantVersion  BigInt              @default(0)
+  createdById       String
+  createdBy         Staff               @relation("CatalogItemCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById       String
+  updatedBy         Staff               @relation("CatalogItemUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  businessTypes    CatalogItemBusinessType[]
+  identifiers      CatalogIdentifier[]
+  prices           CatalogItemPrice[]
+  bindings         CatalogVenueBinding[]
+  importLines      CatalogImportLine[]
+  bindingLines     CatalogBindingLine[]
+  publicationLines CatalogPublicationLine[]
+
+  @@unique([organizationId, normalizedSku])
+  @@unique([id, organizationId])
+  @@index([organizationId, status])
+  @@index([brandId, organizationId])
+  @@index([manufacturerId, organizationId])
+  @@index([familyId, organizationId])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+model CatalogItemBusinessType {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  catalogItemId  String
+  catalogItem    CatalogItem  @relation(fields: [catalogItemId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  businessType   BusinessType
+  createdAt      DateTime     @default(now())
+
+  @@unique([catalogItemId, businessType])
+  @@index([organizationId, businessType])
+}
+
+/// Immutable, versioned import aliases map organization vocabulary into the
+/// operational ProductType enum. CatalogItem stores the materialized enum and
+/// intentionally has no FK here, so later alias changes are not retroactive;
+/// SQL also permits only one active version per organization + alias.
+model CatalogProductTypeMapping {
+  id                 String       @id @default(cuid())
+  organizationId     String
+  organization       Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  catalogProductType String
+  productType        ProductType
+  mappingVersion     Int          @default(1)
+  active             Boolean      @default(false)
+  createdById        String
+  createdBy          Staff        @relation("CatalogProductTypeMappingCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@unique([organizationId, catalogProductType, mappingVersion])
+  @@index([organizationId, active])
+  @@index([createdById])
+}
+
+/// H1A exposes no independent writer for CORPORATE_SKU. SQL partial uniqueness
+/// and deferred triggers (in the migration) preserve exactly-one/equality/state
+/// even though Prisma cannot express those database objects.
+model CatalogIdentifier {
+  id             String                  @id @default(cuid())
+  organizationId String
+  organization   Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  catalogItemId  String
+  catalogItem    CatalogItem             @relation(fields: [catalogItemId, organizationId], references: [id, organizationId], onDelete: Cascade, map: "CatalogIdentifier_catalogItem_tenant_fkey")
+  code           String
+  normalizedCode String
+  type           CatalogIdentifierType
+  status         CatalogIdentifierStatus
+  createdById    String
+  createdBy      Staff                   @relation("CatalogIdentifierCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@unique([organizationId, normalizedCode])
+  @@index([catalogItemId, type])
+  @@index([organizationId, status])
+  @@index([createdById])
+}
+
+model CatalogValidationProfile {
+  id                 String                @id @default(cuid())
+  organizationId     String
+  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name               String
+  profileVersion     Int                   @default(1)
+  rulesSchemaVersion Int                   @default(1)
+  businessType       BusinessType?
+  operationalRole    VenueOperationalRole?
+  requiredFields     String[]              @default([])
+  additionalRules    Json?
+  active             Boolean               @default(false)
+  createdById        String
+  createdBy          Staff                 @relation("CatalogValidationProfileCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById        String
+  updatedBy          Staff                 @relation("CatalogValidationProfileUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  @@unique([organizationId, name, profileVersion])
+  // SQL adds a null-safe partial unique so only one version of a scope can be active.
+  @@index([organizationId, active])
+  @@index([businessType, operationalRole])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+/// H1A value rules are organization-owned only. There is intentionally no
+/// nullable scopeId whose tenant cannot be protected by a concrete FK.
+model CatalogItemPrice {
+  id             String                @id @default(cuid())
+  organizationId String
+  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  catalogItemId  String
+  catalogItem    CatalogItem           @relation(fields: [catalogItemId, organizationId], references: [id, organizationId], onDelete: Cascade, map: "CatalogItemPrice_catalogItem_tenant_fkey")
+  kind           CatalogItemPriceKind
+  scope          CatalogItemPriceScope @default(ORGANIZATION)
+  // Matches the service contract's 0.00–99,999,999.99 money range without admitting wider silent values.
+  amount         Decimal               @db.Decimal(10, 2)
+  currency       String
+  revision       Int                   @default(1)
+  active         Boolean               @default(false)
+  createdById    String
+  createdBy      Staff                 @relation("CatalogItemPriceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById    String
+  updatedBy      Staff                 @relation("CatalogItemPriceUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  // Separate currencies may coexist; the same organization value is unique within one currency.
+  @@unique([organizationId, catalogItemId, kind, scope, currency], map: "CatalogItemPrice_org_item_kind_scope_currency_key")
+  @@index([catalogItemId, organizationId, active, kind, currency], map: "CatalogItemPrice_item_org_active_kind_currency_idx")
+  @@index([organizationId, kind, active])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+/// Rollout is venue-by-venue and default-off. The scalar revision is reserved
+/// now so H1B identifier deltas extend this row instead of creating a second
+/// rollout state machine.
+model CatalogVenueRollout {
+  id                    String                       @id @default(cuid())
+  organizationId        String
+  organization          Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  venueId               String
+  venue                 Venue                        @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  registryState         CatalogRegistryState         @default(NOT_STARTED)
+  aliasPublicationState CatalogAliasPublicationState @default(DISABLED)
+  governanceState       CatalogGovernanceState       @default(NOT_STARTED)
+  identifierRevision    BigInt                       @default(0)
+  createdById           String
+  createdBy             Staff                        @relation("CatalogVenueRolloutCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById           String
+  updatedBy             Staff                        @relation("CatalogVenueRolloutUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+
+  @@unique([organizationId, venueId])
+  @@unique([id, organizationId])
+  @@index([organizationId, governanceState])
+  @@index([venueId, aliasPublicationState])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+model CatalogVenueClientRequirement {
+  id                    String                       @id @default(cuid())
+  organizationId        String
+  organization          Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  venueId               String
+  venue                 Venue                        @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  family                CatalogClientFamily
+  mode                  CatalogClientRequirementMode @default(NOT_APPLICABLE)
+  minimumVersion        String?
+  maxObservationAgeDays Int                          @default(30)
+  createdById           String
+  createdBy             Staff                        @relation("CatalogVenueClientRequirementCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById           String
+  updatedBy             Staff                        @relation("CatalogVenueClientRequirementUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+
+  @@unique([organizationId, venueId, family])
+  @@index([venueId, mode])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+/// deviceId is opaque and capabilities are observed facts, not grants. Stale
+/// or absent observations remain not-ready until the readiness service says
+/// otherwise; no row is synthesized by this migration.
+model CatalogClientObservation {
+  id             String              @id @default(cuid())
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  venueId        String
+  venue          Venue               @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  deviceId       String
+  family         CatalogClientFamily
+  appVersion     String
+  capabilities   Json
+  lastSeenAt     DateTime
+  source         String
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@unique([organizationId, venueId, deviceId, family])
+  @@index([venueId, family, lastSeenAt])
+}
+
+model CatalogClientReadinessOverride {
+  id               String                         @id @default(cuid())
+  organizationId   String
+  organization     Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  venueId          String
+  venue            Venue                          @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  family           CatalogClientFamily?
+  status           CatalogReadinessOverrideStatus @default(NOT_STARTED)
+  reason           String                         @db.Text
+  expiresAt        DateTime
+  createdById      String
+  createdBy        Staff                          @relation("CatalogClientReadinessOverrideCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  revokedById      String?
+  revokedBy        Staff?                         @relation("CatalogClientReadinessOverrideRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+  revokedAt        DateTime?
+  revocationReason String?                        @db.Text
+  createdAt        DateTime                       @default(now())
+  updatedAt        DateTime                       @updatedAt
+
+  @@index([organizationId, venueId, status])
+  @@index([expiresAt])
+  @@index([createdById])
+  @@index([revokedById])
+}
+
+/// Binding owns provenance only. The Product composite FK is NO ACTION and
+/// deferred so a whole Venue purge can remove both sides at COMMIT while an
+/// individual Product unlink cannot erase or orphan catalog provenance.
+model CatalogVenueBinding {
+  id                           String                    @id @default(cuid())
+  organizationId               String
+  organization                 Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  catalogItemId                String
+  catalogItem                  CatalogItem               @relation(fields: [catalogItemId, organizationId], references: [id, organizationId], onDelete: Restrict, map: "CatalogVenueBinding_catalogItem_tenant_fkey")
+  venueId                      String
+  venue                        Venue                     @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade, map: "CatalogVenueBinding_venue_tenant_fkey")
+  productId                    String?
+  product                      Product?                  @relation(fields: [productId, venueId], references: [id, venueId], onDelete: NoAction, map: "CatalogVenueBinding_product_venue_fkey")
+  status                       CatalogVenueBindingStatus @default(NOT_STARTED)
+  lastPublishedCatalogRevision Int?
+  lastPublishedManagedSnapshot Json?
+  managedFieldMask             String[]                  @default([])
+  managedHashVersion           Int?
+  lastPublishedManagedHash     String?
+  productUpdatedAtObserved     DateTime?
+  revision                     Int                       @default(1)
+  createdById                  String
+  createdBy                    Staff                     @relation("CatalogVenueBindingCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById                  String
+  updatedBy                    Staff                     @relation("CatalogVenueBindingUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt                    DateTime                  @default(now())
+  updatedAt                    DateTime                  @updatedAt
+
+  overrides        CatalogVenueOverride[]
+  publicationLines CatalogPublicationLine[]
+
+  @@unique([organizationId, catalogItemId, venueId])
+  @@unique([productId, venueId])
+  @@unique([id, organizationId])
+  @@unique([id, organizationId, venueId])
+  // Publication provenance binds the exact catalog/product target, not just
+  // an otherwise valid binding in the same tenant and Venue.
+  @@unique([id, organizationId, venueId, catalogItemId, productId], map: "CatalogVenueBinding_publication_target_key")
+  @@index([organizationId, status])
+  @@index([catalogItemId, organizationId])
+  @@index([venueId, organizationId])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+model CatalogVenueOverride {
+  id                     String                            @id @default(cuid())
+  organizationId         String
+  organization           Organization                      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bindingId              String
+  venueId                String
+  venue                  Venue                             @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  binding                CatalogVenueBinding               @relation(fields: [bindingId, organizationId, venueId], references: [id, organizationId, venueId], onDelete: NoAction, map: "CatalogVenueOverride_bindingId_organizationId_fkey")
+  field                  String
+  // SQL NULL means missing provenance; JSON null is a deliberate captured
+  // value and remains representable because the JSONB column is NOT NULL.
+  localValue             Json
+  reason                 String                            @db.Text
+  status                 CatalogVenueOverrideStatus
+  requestBatchId         String?
+  requestBatch           CatalogIdempotencyRecord?         @relation(fields: [requestBatchId, organizationId], references: [id, organizationId], onDelete: Restrict, map: "CatalogVenueOverride_request_batch_tenant_fkey")
+  requestedById          String?
+  requestedBy            Staff?                            @relation("CatalogVenueOverrideRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  decidedById            String?
+  decidedBy              Staff?                            @relation("CatalogVenueOverrideDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict)
+  requestedAt            DateTime?
+  decidedAt              DateTime?
+  supersededByOverrideId String?
+  supersededByOverride   CatalogVenueOverride?             @relation("CatalogVenueOverrideSupersession", fields: [supersededByOverrideId, organizationId, bindingId, field], references: [id, organizationId, bindingId, field], onDelete: NoAction, map: "CatalogVenueOverride_superseded_by_tenant_field_fkey")
+  supersedesOverrides    CatalogVenueOverride[]            @relation("CatalogVenueOverrideSupersession")
+  supersededAt           DateTime?
+  fieldDecisions         CatalogPublicationFieldDecision[]
+  createdAt              DateTime                          @default(now())
+  updatedAt              DateTime                          @updatedAt
+
+  @@unique([id, organizationId, bindingId, field])
+  @@index([organizationId, status])
+  @@index([bindingId, field])
+  @@index([venueId, organizationId])
+  @@index([requestBatchId, organizationId])
+  @@index([supersededByOverrideId, organizationId, bindingId, field], map: "CatalogVenueOverride_supersededByOverrideId_tenant_field_idx")
+  @@index([requestedById])
+  @@index([decidedById])
+}
+
+/// Generic operation recovery is shared by import, binding, publication,
+/// validation-profile previews, and later H1B/H1C commands. Optional preview
+/// fields let this row itself be profileBatchId without creating a parallel
+/// state machine; only the SHA-256 token hash is ever persisted.
+model CatalogIdempotencyRecord {
+  id                 String                @id @default(cuid())
+  organizationId     String
+  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  operation          String
+  idempotencyKey     String
+  requestHash        String
+  requestHashVersion Int                   @default(1)
+  state              CatalogOperationState @default(NOT_STARTED)
+  resourceType       String?
+  resourceId         String?
+  targetHash         String?
+  previewTokenHash   String?
+  previewExpiresAt   DateTime?
+  dependencies       Json?
+  result             Json?
+  actorType          ActivityActorType
+  staffId            String?
+  staff              Staff?                @relation("CatalogIdempotencyRecordHumanActor", fields: [staffId], references: [id], onDelete: Restrict)
+  servicePrincipalId String?
+  attemptId          String?
+  leaseExpiresAt     DateTime?
+  heartbeatAt        DateTime?
+  failureCode        String?
+  failureMessage     String?               @db.Text
+  completedAt        DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  overrideRequests CatalogVenueOverride[]
+
+  @@unique([organizationId, operation, idempotencyKey], map: "CatalogIdempotencyRecord_organizationId_operation_idemp_key")
+  @@unique([id, organizationId])
+  @@index([organizationId, state])
+  @@index([state, leaseExpiresAt])
+  @@index([previewExpiresAt])
+  @@index([resourceType, resourceId])
+  @@index([staffId])
+}
+
+/// Preview bearer tokens are cryptographically random outside the database;
+/// only previewTokenHash (SHA-256) is persisted. Raw tokens have no column and
+/// therefore cannot leak through ORM serialization or audit snapshots.
+model CatalogImportBatch {
+  id                 String                @id @default(cuid())
+  organizationId     String
+  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  state              CatalogOperationState @default(NOT_STARTED)
+  schemaVersion      Int                   @default(1)
+  fileSha256         String?
+  requestHash        String
+  requestHashVersion Int                   @default(1)
+  targetHash         String
+  previewTokenHash   String
+  previewExpiresAt   DateTime
+  dependencies       Json
+  actorType          ActivityActorType
+  staffId            String?
+  staff              Staff?                @relation("CatalogImportBatchHumanActor", fields: [staffId], references: [id], onDelete: Restrict)
+  servicePrincipalId String?
+  attemptId          String?
+  leaseExpiresAt     DateTime?
+  heartbeatAt        DateTime?
+  result             Json?
+  failureCode        String?
+  failureMessage     String?               @db.Text
+  appliedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  lines CatalogImportLine[]
+
+  @@unique([id, organizationId])
+  @@index([organizationId, state])
+  @@index([state, leaseExpiresAt])
+  @@index([previewExpiresAt])
+  @@index([staffId])
+}
+
+model CatalogImportLine {
+  id             String                  @id @default(cuid())
+  organizationId String
+  organization   Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  batchId        String
+  batch          CatalogImportBatch      @relation(fields: [batchId, organizationId], references: [id, organizationId], onDelete: Cascade, map: "CatalogImportLine_batch_tenant_fkey")
+  sourceSheet    String
+  sourceRow      Int
+  status         CatalogImportLineStatus @default(NOT_STARTED)
+  payload        Json
+  errors         Json?
+  catalogItemId  String?
+  catalogItem    CatalogItem?            @relation(fields: [catalogItemId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@unique([batchId, sourceSheet, sourceRow])
+  @@index([organizationId, status])
+  @@index([catalogItemId, organizationId])
+}
+
+model CatalogBindingBatch {
+  id                 String                @id @default(cuid())
+  organizationId     String
+  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  state              CatalogOperationState @default(NOT_STARTED)
+  schemaVersion      Int                   @default(1)
+  requestHash        String
+  requestHashVersion Int                   @default(1)
+  targetHash         String
+  previewTokenHash   String
+  previewExpiresAt   DateTime
+  dependencies       Json
+  actorType          ActivityActorType
+  staffId            String?
+  staff              Staff?                @relation("CatalogBindingBatchHumanActor", fields: [staffId], references: [id], onDelete: Restrict)
+  servicePrincipalId String?
+  attemptId          String?
+  leaseExpiresAt     DateTime?
+  heartbeatAt        DateTime?
+  result             Json?
+  failureCode        String?
+  failureMessage     String?               @db.Text
+  appliedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  lines CatalogBindingLine[]
+
+  @@unique([id, organizationId])
+  @@index([organizationId, state])
+  @@index([state, leaseExpiresAt])
+  @@index([previewExpiresAt])
+  @@index([staffId])
+}
+
+model CatalogBindingLine {
+  id             String                   @id @default(cuid())
+  organizationId String
+  organization   Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  batchId        String
+  batch          CatalogBindingBatch      @relation(fields: [batchId, organizationId], references: [id, organizationId], onDelete: Cascade, map: "CatalogBindingLine_batch_tenant_fkey")
+  catalogItemId  String
+  catalogItem    CatalogItem              @relation(fields: [catalogItemId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  venueId        String
+  venue          Venue                    @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  productId      String?
+  product        Product?                 @relation(fields: [productId, venueId], references: [id, venueId], onDelete: NoAction)
+  status         CatalogBindingLineStatus @default(NOT_STARTED)
+  proposal       CatalogBindingProposal
+  decision       CatalogBindingProposal?
+  before         Json?
+  after          Json?
+  error          Json?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  @@unique([batchId, catalogItemId, venueId])
+  @@index([organizationId, status])
+  @@index([catalogItemId, organizationId])
+  @@index([venueId, organizationId])
+  @@index([productId, venueId])
+}
+
+model CatalogPublicationBatch {
+  id                 String                @id @default(cuid())
+  organizationId     String
+  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  operation          String
+  state              CatalogOperationState @default(NOT_STARTED)
+  schemaVersion      Int                   @default(1)
+  requestHash        String
+  requestHashVersion Int                   @default(1)
+  targetHash         String
+  previewTokenHash   String
+  previewExpiresAt   DateTime
+  dependencies       Json
+  actorType          ActivityActorType
+  staffId            String?
+  staff              Staff?                @relation("CatalogPublicationBatchHumanActor", fields: [staffId], references: [id], onDelete: Restrict)
+  servicePrincipalId String?
+  attemptId          String?
+  leaseExpiresAt     DateTime?
+  heartbeatAt        DateTime?
+  result             Json?
+  failureCode        String?
+  failureMessage     String?               @db.Text
+  appliedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  lines  CatalogPublicationLine[]
+  outbox CatalogPublicationOutbox[]
+
+  @@unique([id, organizationId])
+  @@index([organizationId, operation, state])
+  @@index([state, leaseExpiresAt])
+  @@index([previewExpiresAt])
+  @@index([staffId])
+}
+
+/// Immutable target-level before/after detail lives here; ActivityLog stores a
+/// single transactional summary so a 10,000-target batch is still auditable
+/// without duplicating every snapshot.
+model CatalogPublicationLine {
+  id                       String                            @id @default(cuid())
+  organizationId           String
+  organization             Organization                      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  batchId                  String
+  batch                    CatalogPublicationBatch           @relation(fields: [batchId, organizationId], references: [id, organizationId], onDelete: Cascade, map: "CatalogPublicationLine_batch_tenant_fkey")
+  bindingId                String
+  binding                  CatalogVenueBinding               @relation(fields: [bindingId, organizationId, venueId, catalogItemId, productId], references: [id, organizationId, venueId, catalogItemId, productId], onDelete: NoAction, map: "CatalogPublicationLine_binding_tenant_fkey")
+  catalogItemId            String
+  catalogItem              CatalogItem                       @relation(fields: [catalogItemId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  venueId                  String
+  venue                    Venue                             @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  productId                String
+  product                  Product                           @relation(fields: [productId, venueId], references: [id, venueId], onDelete: NoAction)
+  status                   CatalogPublicationLineStatus      @default(NOT_STARTED)
+  fieldMask                String[]                          @default([])
+  decisionSchemaVersion    Int                               @default(1)
+  // Child decision writes bump this CAS word immediately so READY->APPLIED
+  // cannot write-skew against a concurrent decision delete/move.
+  decisionInvariantVersion BigInt                            @default(0)
+  changeKind               CatalogPublicationChangeKind
+  hashVersion              Int
+  canonicalTargetHash      String
+  before                   Json?
+  after                    Json?
+  sourceCatalogRevision    Int
+  bindingRevision          Int?
+  supersedesLineId         String?
+  supersedesLine           CatalogPublicationLine?           @relation("CatalogPublicationLineSupersession", fields: [supersedesLineId, organizationId, bindingId], references: [id, organizationId, bindingId], onDelete: NoAction, map: "CatalogPublicationLine_supersedes_tenant_binding_fkey")
+  supersededByLines        CatalogPublicationLine[]          @relation("CatalogPublicationLineSupersession")
+  reversesLineId           String?
+  reversesLine             CatalogPublicationLine?           @relation("CatalogPublicationLineReversion", fields: [reversesLineId, organizationId, bindingId], references: [id, organizationId, bindingId], onDelete: NoAction, map: "CatalogPublicationLine_reverses_tenant_binding_fkey")
+  reversedByLines          CatalogPublicationLine[]          @relation("CatalogPublicationLineReversion")
+  decisions                CatalogPublicationFieldDecision[]
+  createdAt                DateTime                          @default(now())
+  updatedAt                DateTime                          @updatedAt
+
+  @@unique([batchId, catalogItemId, venueId, productId])
+  @@unique([id, organizationId])
+  @@unique([id, organizationId, bindingId])
+  @@index([organizationId, status])
+  @@index([catalogItemId, organizationId])
+  @@index([bindingId, organizationId])
+  @@index([venueId, organizationId])
+  @@index([productId, venueId])
+  // Full indexes serve self-FK RI checks for READY rows; APPLIED-only raw
+  // unique indexes separately reserve durable successor/reversal slots.
+  @@index([supersedesLineId, organizationId, bindingId], map: "CatalogPublicationLine_supersedes_tenant_binding_idx")
+  @@index([reversesLineId, organizationId, bindingId], map: "CatalogPublicationLine_reverses_tenant_binding_idx")
+}
+
+/// JSONB values are required so a JSON null is preserved as a real before,
+/// proposal, or decision value instead of being confused with missing lineage.
+model CatalogPublicationFieldDecision {
+  id             String                              @id @default(cuid())
+  organizationId String
+  organization   Organization                        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lineId         String
+  bindingId      String
+  line           CatalogPublicationLine              @relation(fields: [lineId, organizationId, bindingId], references: [id, organizationId, bindingId], onDelete: Cascade, map: "CatalogPublicationFieldDecision_line_tenant_binding_fkey")
+  field          String
+  decision       CatalogPublicationFieldDecisionKind
+  before         Json
+  proposed       Json
+  after          Json
+  overrideId     String?
+  override       CatalogVenueOverride?               @relation(fields: [overrideId, organizationId, bindingId, field], references: [id, organizationId, bindingId, field], onDelete: NoAction, map: "CatalogPublicationFieldDecision_override_tenant_field_fkey")
+  reason         String?                             @db.Text
+  createdAt      DateTime                            @default(now())
+  updatedAt      DateTime                            @updatedAt
+
+  @@unique([lineId, field])
+  @@index([organizationId, lineId])
+  @@index([bindingId, field])
+  @@index([overrideId, organizationId, bindingId, field], map: "CatalogPublicationFieldDecision_override_tenant_field_idx")
+}
+
+/// A dedicated locked row owns sequence issuance, avoiding venue-row hot locks
+/// and making event ordering stable across every publication kind.
+model CatalogVenueEventSequence {
+  id                 String       @id @default(cuid())
+  organizationId     String
+  organization       Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  venueId            String
+  venue              Venue        @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  lastIssuedSequence BigInt       @default(0)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@unique([organizationId, venueId])
+  @@index([venueId])
+}
+
+/// Outbox rows are co-committed with Product writes. Claim/delivery fields make
+/// retries bounded and at-least-once while eventId (= id), venueSequence, and
+/// dedupeKey remain stable across emit-before-ack crashes.
+model CatalogPublicationOutbox {
+  id             String                         @id @default(cuid())
+  organizationId String
+  organization   Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  batchId        String
+  batch          CatalogPublicationBatch        @relation(fields: [batchId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  venueId        String
+  venue          Venue                          @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  venueSequence  BigInt
+  eventKind      String
+  payloadVersion Int                            @default(1)
+  payload        Json
+  dedupeKey      String                         @unique
+  status         CatalogPublicationOutboxStatus @default(PENDING)
+  attempts       Int                            @default(0)
+  nextAttemptAt  DateTime                       @default(now())
+  claimedBy      String?
+  claimedAt      DateTime?
+  claimExpiresAt DateTime?
+  deliveredAt    DateTime?
+  lastError      String?                        @db.Text
+  createdAt      DateTime                       @default(now())
+  updatedAt      DateTime                       @updatedAt
+
+  @@unique([organizationId, venueId, venueSequence])
+  // Task 9 consumes this exact conventional dequeue order.
+  @@index([status, nextAttemptAt, venueId, venueSequence], map: "CatalogPublicationOutbox_dequeue_idx")
+  @@index([status, claimExpiresAt])
+  @@index([batchId, organizationId])
+  @@index([venueId, venueSequence])
 }
 
 /// Categories for SerializedItems (NOT to be confused with MenuCategory).
@@ -11854,6 +12985,22 @@ model Printer {
   charset        String                @default("CP858") // ñ/acentos
   active         Boolean               @default(true)
 
+  /// Margen izquierdo en COLUMNAS de fuente A, para `GS L`. 0 = rollo pegado al
+  /// origen del cabezal (impresora nativa de 58 mm, o rollo alineado a la
+  /// izquierda) y es el default seguro.
+  ///
+  /// Existe porque un rollo angosto montado con adaptadores en un cabezal de
+  /// 80 mm NO queda en el origen, y NADA lo reporta: no hay sensor de ancho ni
+  /// de posición en esta categoría de impresora, así que de qué lado se puso el
+  /// adaptador sólo lo sabe quien lo puso. Sin este corrimiento el POS escribe
+  /// a la izquierda de donde empieza el papel y el ticket sale mocho.
+  ///
+  /// En COLUMNAS y no en mm a propósito: la fuente A mide 12 puntos de ancho
+  /// tanto a 180 como a 203 dpi, así que el número que se cuenta en la regla de
+  /// la página de prueba es el mismo que entra al comando, sin conversiones que
+  /// se rompan según el modelo.
+  leftMarginChars Int @default(0)
+
   // Mirror of the existing PRINTER_STATUS socket telemetry (ONLINE|OFFLINE|PAPER_LOW|PAPER_OUT|ERROR)
   lastStatus String?
   lastSeenAt DateTime?
@@ -11953,6 +13100,14 @@ model FulfillmentArea {
   /// Cómo trabaja el área (§5.6). El texto que ve el operador NUNCA es el enum:
   /// HOLD_UNTIL_PAID se muestra como "Lo guardamos hasta que pague".
   fulfillmentMode FulfillmentMode @default(IMMEDIATE)
+
+  /// Ruta de cobro externa (otro POS cobra en su propia caja) — §caja externa fase 1.
+  /// Los cuatro campos nacen con el default que reproduce el comportamiento actual:
+  /// ningún venue existente cambia de flujo hasta que alguien lo prenda a propósito.
+  settlementRoute          AreaSettlementRoute      @default(AVOQADO)
+  externalConfirmationMode ExternalConfirmationMode @default(MANUAL)
+  externalOfflinePolicy    ExternalOfflinePolicy    @default(BLOCK)
+  externalDeliveryTracking ExternalDeliveryTracking @default(TRACKED)
 
   active       Boolean @default(true)
   displayOrder Int     @default(0)
@@ -12077,6 +13232,13 @@ model AreaTicket {
   fulfillmentAreaId String
   fulfillmentArea   FulfillmentArea @relation(fields: [fulfillmentAreaId], references: [id], onDelete: Restrict)
 
+  /// Modo congelado al emitir el vale. Las ediciones posteriores del área no deben
+  /// cambiar si este vale se entrega al momento o requiere entrega manual.
+  fulfillmentModeSnapshot FulfillmentMode
+
+  /// Ruta vigente al emitir. Default AVOQADO — no cambia nada en lo existente.
+  settlementRoute AreaSettlementRoute @default(AVOQADO)
+
   code           String
   idempotencyKey String           @db.VarChar(64)
   status         AreaTicketStatus @default(ISSUED)
@@ -12112,6 +13274,9 @@ model AreaTicket {
   reservations  AreaTicketInventoryReservation[]
   printAttempts AreaTicketPrintAttempt[]
   fulfillment   AreaTicketFulfillment?
+
+  externalSettlement AreaTicketExternalSettlement?
+  externalIncidents  AreaTicketExternalIncident[]
 
   @@unique([venueId, code])
   @@unique([venueId, idempotencyKey])
@@ -12167,6 +13332,10 @@ model AreaTicketInventoryReservation {
   quantityBaseUnits   Decimal                              @db.Decimal(12, 3)
   status              AreaTicketInventoryReservationStatus @default(ACTIVE)
   inventoryMovementId String?                              @unique
+
+  /// Ancla de la REVERSA. Sin una segunda columna única, un reintento de cancelación
+  /// devuelve el producto a stock dos veces.
+  reversalMovementId String? @unique
 
   createdAt  DateTime  @default(now())
   consumedAt DateTime?
@@ -12257,8 +13426,17 @@ model AreaTicketFulfillment {
   id           String     @id @default(cuid())
   areaTicketId String     @unique
   areaTicket   AreaTicket @relation(fields: [areaTicketId], references: [id], onDelete: Restrict)
-  orderId      String
-  order        Order      @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// Nullable a nivel de tipo, pero SIGUE siendo obligatorio en la ruta AVOQADO: lo
+  /// exige `atf_order_required_for_avoqado_route` (CHECK, migración a mano) — la
+  /// invariante nativa se vuelve explícita en la base, no se debilita. Solo una
+  /// entrega EXTERNAL puede tener este campo en NULL (esa ruta nunca crea Order).
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// Ruta de cobro de ESTA entrega. Default AVOQADO — reproduce el comportamiento
+  /// actual (toda entrega existente ya trae orderId).
+  settlementRoute AreaSettlementRoute @default(AVOQADO)
 
   fulfillmentAreaId String
   fulfillmentArea   FulfillmentArea             @relation(fields: [fulfillmentAreaId], references: [id], onDelete: Restrict)
@@ -12281,9 +13459,11 @@ model VenueScaleSettings {
   venueId String @unique
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  enabled   Boolean  @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  enabled                Boolean  @default(false)
+  variableBarcodeEnabled Boolean  @default(false)
+  variableBarcodePrefix  String   @default("20") @db.VarChar(2)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 }
 
 model ScaleProfile {
@@ -12314,6 +13494,136 @@ model ScaleProfile {
 
   @@unique([venueId, name])
   @@index([venueId, active])
+}
+
+// ----------------------------------------------------------------------------
+// Ruta de cobro externa — otro POS cobra en SU caja, Avoqado no crea Order ni
+// Payment. Todo aditivo, default AVOQADO: ningún venue existente cambia de flujo.
+// ----------------------------------------------------------------------------
+
+enum AreaSettlementRoute {
+  /// Flujo v7: caja Avoqado, Order y Payment. Default de todo lo existente.
+  AVOQADO
+  /// Otro POS cobra en su caja. Avoqado NO crea Order ni Payment.
+  EXTERNAL
+}
+
+enum ExternalConfirmationMode {
+  /// Una persona con permiso confirma que la caja externa cobró.
+  MANUAL
+  /// Se da por ocurrido al imprimir. NO es "pagado": es "asumido".
+  ASSUME_ON_PRINT
+}
+
+enum ExternalOfflinePolicy {
+  ALLOW
+  BLOCK
+}
+
+enum ExternalDeliveryTracking {
+  /// Se registra la entrega y hay cola de pendientes.
+  TRACKED
+  /// El área entrega mirando el papel. Sin cola. Se pierde trazabilidad, nada más.
+  UNTRACKED
+}
+
+enum AreaTicketExternalSettlementStatus {
+  PENDING
+  ASSUMED
+  CONFIRMED
+  DISCREPANCY
+  NOT_CHARGED
+}
+
+enum AreaTicketExternalHandoffState {
+  PENDING
+  HANDED_OFF
+  RETURNED
+}
+
+enum AreaTicketExternalIncidentKind {
+  UNCONFIRMED_CHARGE
+  AMOUNT_VARIANCE
+  NEGATIVE_STOCK
+  CODE_MISMATCH
+  REPRINT_RISK
+}
+
+enum AreaTicketExternalIncidentStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+/// El cobro que ocurrió en la caja de OTRO sistema. No es un Payment y nunca debe
+/// convertirse en uno: Avoqado no vio ese dinero. `referenceAmount` es lo que Avoqado
+/// calculó; `externalAmount` es lo que alguien dice que la otra caja cobró.
+model AreaTicketExternalSettlement {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+
+  areaTicketId String     @unique
+  areaTicket   AreaTicket @relation(fields: [areaTicketId], references: [id], onDelete: Cascade)
+
+  status           AreaTicketExternalSettlementStatus @default(PENDING)
+  handoffState     AreaTicketExternalHandoffState     @default(PENDING)
+  /// Qué política estaba vigente al emitir. Se congela: cambiarla después no reescribe
+  /// la historia de un vale que ya se cobró bajo otra regla.
+  confirmationMode ExternalConfirmationMode
+
+  referenceAmount   Decimal  @db.Decimal(12, 2)
+  externalAmount    Decimal? @db.Decimal(12, 2)
+  externalReference String?
+
+  idempotencyKey     String    @db.VarChar(64)
+  confirmedByStaffId String?
+  confirmedByStaff   Staff?    @relation("AreaTicketExternalSettlementStaff", fields: [confirmedByStaffId], references: [id], onDelete: SetNull)
+  confirmedAt        DateTime?
+  terminalId         String?
+  terminal           Terminal? @relation("AreaTicketExternalSettlementTerminal", fields: [terminalId], references: [id], onDelete: SetNull)
+  notes              String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([areaTicketId, idempotencyKey])
+  @@index([venueId, status, createdAt])
+}
+
+/// Cola de trabajo de oficina. Deliberadamente NO es un estado del vale: una incidencia
+/// abierta jamás bloquea el piso.
+model AreaTicketExternalIncident {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  areaTicketId String?
+  areaTicket   AreaTicket? @relation(fields: [areaTicketId], references: [id], onDelete: Cascade)
+
+  kind   AreaTicketExternalIncidentKind
+  status AreaTicketExternalIncidentStatus @default(OPEN)
+  detail Json
+
+  openedAt          DateTime  @default(now())
+  /// Cuántas veces se ha abierto este problema para este vale. Arranca en 1 al crear
+  /// la fila; reabrir la incrementa en vez de insertar una fila nueva.
+  occurrenceCount   Int       @default(1)
+  /// Cuándo se reabrió por última vez. `null` mientras nunca se ha reabierto.
+  reopenedAt        DateTime?
+  resolvedAt        DateTime?
+  resolvedByStaffId String?
+  resolvedByStaff   Staff?    @relation("AreaTicketExternalIncidentStaff", fields: [resolvedByStaffId], references: [id], onDelete: SetNull)
+  resolution        String?
+
+  /// Una fila VIVA por (vale, tipo) — no una fila por ocurrencia. Reabrir un problema
+  /// que ya estaba RESOLVED/DISMISSED actualiza esta MISMA fila (`occurrenceCount++`,
+  /// `reopenedAt` pisado) en vez de insertar una nueva: es a propósito, no un bug del
+  /// unique. La conciliación (tareas 7 y 12) hace `upsert` sobre esta llave para ser
+  /// idempotente sin una carrera de `findFirst`+`create`; y un vale externo vive
+  /// horas, no meses, así que un historial de ocurrencias separadas no aporta.
+  @@unique([areaTicketId, kind])
+  @@index([venueId, status, kind, openedAt])
 }
 
 enum AreaTicketStatus {
@@ -13720,6 +15030,10 @@ model BillingTaxProfile {
   constanciaUrl    String? // PDF en Firebase Storage (opcional)
   validationStatus String    @default("PENDING") // PENDING | VALID | INVALID
   validatedAt      DateTime?
+
+  /// Id del Customer espejo en Facturapi. Necesario porque `customers.validateTaxInfo()`
+  /// valida contra el padrón del SAT por id, y el timbrado manda el receptor inline.
+  facturapiCustomerId String?
 
   createdById String?
   createdAt   DateTime @default(now())

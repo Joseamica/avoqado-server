@@ -27,6 +27,7 @@ import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import retry, { shouldRetryDbConnectionError } from '../utils/retry'
+import { scheduleJob } from '../observability/jobContext'
 
 interface AuditRow {
   id: string
@@ -66,12 +67,19 @@ export class BlumonPaymentAuditJob {
 
   start(): void {
     if (!this.job) {
-      this.job = new CronJob(this.CRON_PATTERN, () => void this.runOnce(), null, false, 'America/Mexico_City')
+      this.job = scheduleJob('blumon-payment-audit', this.CRON_PATTERN, () => void this.runOnce(), null, false, 'America/Mexico_City')
       this.job.start()
       logger.info('🪝 Blumon payment audit job started — every 10min, window 30min–48h')
     }
     if (!this.gapJob) {
-      this.gapJob = new CronJob(this.GAP_CRON_PATTERN, () => void this.reportWebhookGaps(), null, false, 'America/Mexico_City')
+      this.gapJob = scheduleJob(
+        'blumon-webhook-gaps',
+        this.GAP_CRON_PATTERN,
+        () => void this.reportWebhookGaps(),
+        null,
+        false,
+        'America/Mexico_City',
+      )
       this.gapJob.start()
       logger.info('🪝 Blumon webhook-gap report started — daily 08:00 America/Mexico_City')
     }

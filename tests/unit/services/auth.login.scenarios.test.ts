@@ -66,6 +66,7 @@ import prisma from '../../../src/utils/prismaClient'
 import * as jwtService from '../../../src/jwt.service'
 import { loginStaff } from '../../../src/services/dashboard/auth.service'
 import { logAction } from '../../../src/services/dashboard/activity-log.service' // globally mocked in tests/__helpers__/setup.ts
+import { MASTER_ADMIN_PRINCIPAL_ID } from '../../../src/lib/authPrincipals'
 
 // Type the mocks
 const mockPrisma = prisma as jest.Mocked<typeof prisma>
@@ -880,6 +881,7 @@ describe('Login Scenarios', () => {
 
       expect(logAction).toHaveBeenCalledWith(
         expect.objectContaining({
+          staffId: MASTER_ADMIN_PRINCIPAL_ID,
           action: 'MASTER_LOGIN_FAILED',
           entity: 'Dashboard',
           entityId: 'DASHBOARD_MASTER',

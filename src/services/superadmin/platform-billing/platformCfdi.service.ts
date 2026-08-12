@@ -25,34 +25,128 @@ import type {
 const DEFAULT_IVA_RATE = 0.16
 const MAX_PAGE_SIZE = 100
 
+/** Campo del formulario al que apunta un rechazo del SAT sobre los datos del receptor. */
+export type ReceptorField = 'razonSocial' | 'rfc' | 'regimenFiscal' | 'codigoPostal'
+
+export interface StampErrorInfo {
+  /** Lo que ve el operador: guía accionable + el mensaje crudo del SAT, SIEMPRE. */
+  message: string
+  /** 'VALIDATION' → dato corregible por el operador (422). 'PROVIDER' → falla del PAC (502). */
+  code: 'VALIDATION' | 'PROVIDER'
+  /** Campo culpable, cuando el SAT lo identifica. Lo consume la UI para marcarlo. */
+  field?: ReceptorField
+}
+
 /**
- * Traduce el error crudo del PAC/Facturapi (o de nuestra propia capa de descifrado) a un mensaje
- * en español accionable para el operador. El mensaje técnico original SIEMPRE se guarda tal cual
- * en `PlatformCfdi.lastError` (para soporte/debug); esta función solo afecta lo que ve el usuario
- * en el toast de error. Basado en los patrones reales vistos en producción y en pruebas (llave
- * inválida, clave SAT/unidad inexistente, datos del receptor que no coinciden con el SAT).
+ * El SAT nombra el campo que rechaza JUSTO DESPUÉS de "el campo". Ejemplo real de producción:
+ *
+ *   "El campo Nombre del receptor, debe pertenecer al nombre asociado al RFC
+ *    registrado en el campo Rfc del Receptor."
+ *
+ * El culpable es Nombre, no Rfc — aunque el mensaje mencione ambos. Por eso anclamos en
+ * `el campo <X>` y no en la mera presencia de la palabra: la regla anterior hacía
+ * `includes('receptor') && includes('rfc')` y mandaba al operador a revisar el RFC, que
+ * estaba correcto (incidente La Galeterie, 2026-08-07).
+ *
+ * El orden del arreglo importa: la primera regla que cace, gana.
  */
-export function humanizeStampError(rawMessage: string): string {
+const RECEPTOR_RULES: ReadonlyArray<{ pattern: RegExp; field: ReceptorField; hint: string }> = [
+  {
+    pattern: /el campo\s+nombre\b/i,
+    field: 'razonSocial',
+    hint: 'La Razón social del receptor no coincide con la registrada en el SAT. Cópiala tal cual de su Constancia de Situación Fiscal: en MAYÚSCULAS y sin el régimen de capital (sin "S.A. DE C.V.").',
+  },
+  {
+    pattern: /el campo\s+domiciliofiscalreceptor\b/i,
+    field: 'codigoPostal',
+    hint: 'El Código postal del receptor no coincide con su domicilio fiscal en el SAT. Cópialo de su Constancia de Situación Fiscal.',
+  },
+  {
+    pattern: /el campo\s+regimenfiscalreceptor\b/i,
+    field: 'regimenFiscal',
+    hint: 'El Régimen fiscal del receptor no coincide con el registrado en el SAT. Cópialo de su Constancia de Situación Fiscal.',
+  },
+  {
+    pattern: /el campo\s+rfc\b/i,
+    field: 'rfc',
+    hint: 'El RFC del receptor no está registrado en el SAT o no es válido.',
+  },
+]
+
+/** Anexa el mensaje crudo del PAC/SAT a la guía. Nunca se descarta: es el dato que permite diagnosticar. */
+function withRaw(hint: string, rawMessage: string): string {
+  return `${hint} · Mensaje del SAT: ${rawMessage}`
+}
+
+/**
+ * Traduce el error crudo del PAC/Facturapi (o de nuestra capa de descifrado) a un mensaje en
+ * español accionable, y lo clasifica para el mapeo HTTP. El mensaje técnico original SIEMPRE
+ * se guarda tal cual en `PlatformCfdi.lastError` y además viaja dentro de `message`.
+ */
+export function classifyStampError(rawMessage: string): StampErrorInfo {
   const msg = rawMessage.toLowerCase()
 
+  // ── Rechazo del receptor con campo identificable: corre PRIMERO, antes que CUALQUIER heurística
+  // de subcadena (401, unit_key, receptor genérico…). `el campo <X>` es el ancla MÁS específica que
+  // el SAT nos da — estrictamente más específica que cualquier `includes()`. Ejemplo real: el código
+  // de validación del SAT "CFDI40147" (rechazo de Nombre del receptor) contiene la subcadena "401".
+  // Sin este orden, ese caso —el que esta fase existe para arreglar— clasificaría como fallo de
+  // credenciales (401) ANTES de llegar aquí, y perdería el mensaje crudo del SAT (las ramas PROVIDER
+  // de credenciales no llaman withRaw()): la reproducción exacta del bug original.
+  //
+  // Guardado tras comprobar que el mensaje habla del RECEPTOR (Minor #3): "El campo Nombre del
+  // emisor…" (CFDI40146) usa el mismo patrón de campo pero apunta al EMISOR, no al receptor — sin
+  // este guard mandaríamos al operador a corregir el receptor equivocado.
+  if (/receptor/i.test(rawMessage)) {
+    for (const rule of RECEPTOR_RULES) {
+      if (rule.pattern.test(rawMessage)) {
+        return { code: 'VALIDATION', field: rule.field, message: withRaw(rule.hint, rawMessage) }
+      }
+    }
+  }
+
+  // ── Fallas de infraestructura/credenciales: el operador no puede corregirlas con datos. ──
   // Descifrado de la llave del emisor (AES-GCM) — nunca llega a Facturapi; error de Node crypto.
   if (msg.includes('unsupported state') || msg.includes('unable to authenticate data') || msg.includes('bad decrypt')) {
-    return 'La llave del emisor no se pudo leer (dañada o corresponde a otra configuración). Ve a "Configurar emisor" y vincula la llave de nuevo.'
+    return {
+      code: 'PROVIDER',
+      message:
+        'La llave del emisor no se pudo leer (dañada o corresponde a otra configuración). Ve a "Configurar emisor" y vincula la llave de nuevo.',
+    }
   }
-  // Autenticación contra Facturapi (llave rechazada — vencida, revocada, o de otra organización).
-  if (msg.includes('unauthorized') || msg.includes('invalid api key') || msg.includes('401')) {
-    return 'Facturapi rechazó la llave del emisor (vencida, revocada, o de otra organización). Ve a "Configurar emisor" y vincula una llave live vigente.'
+  // Autenticación contra Facturapi (llave vencida, revocada, o de otra organización).
+  // "401" va con límite de palabra: un código de validación del SAT (CFDI40147) o un monto
+  // (1401.00) contienen "401" como subcadena y NO son un fallo de credenciales — `\b` evita que
+  // "1401"/"40147" disparen esta rama (defensa independiente del orden de arriba).
+  if (msg.includes('unauthorized') || msg.includes('invalid api key') || /\b401\b/.test(rawMessage)) {
+    return {
+      code: 'PROVIDER',
+      message:
+        'Facturapi rechazó la llave del emisor (vencida, revocada, o de otra organización). Ve a "Configurar emisor" y vincula una llave live vigente.',
+    }
   }
+
+  // ── Datos corregibles por el operador → 422. ──
   // Clave de producto/servicio o de unidad del SAT inexistente en el catálogo.
   if (msg.includes('unit_key') || msg.includes('clave de unidad') || msg.includes('product_key') || msg.includes('clave de producto')) {
-    return 'La Clave SAT o la Unidad de un concepto no existe en el catálogo del SAT. Corrígela en la línea del concepto y vuelve a intentar.'
+    return {
+      code: 'VALIDATION',
+      message: withRaw(
+        'La Clave SAT o la Unidad de un concepto no existe en el catálogo del SAT. Corrígela en la línea del concepto.',
+        rawMessage,
+      ),
+    }
   }
-  // Validación de datos del receptor contra el registro del SAT (RFC, régimen, domicilio fiscal).
-  if (msg.includes('receptor') && (msg.includes('rfc') || msg.includes('regimen') || msg.includes('domicilio'))) {
-    return 'Los datos fiscales del receptor no coinciden con su registro en el SAT (revisa RFC, régimen fiscal o código postal) y vuelve a intentar.'
+  // Rechazo del receptor sin campo identificable.
+  if (msg.includes('receptor')) {
+    return {
+      code: 'VALIDATION',
+      message: withRaw('Los datos fiscales del receptor no coinciden con su registro en el SAT.', rawMessage),
+    }
   }
-  // Sin patrón conocido: se muestra el mensaje del proveedor tal cual (suele venir ya en español).
-  return rawMessage
+
+  // Sin patrón conocido: el mensaje del proveedor tal cual (suele venir ya en español).
+  return { code: 'PROVIDER', message: rawMessage }
 }
 
 /** Compute CFDI money totals from line items. All integer cents, IVA add-on. */
@@ -190,7 +284,8 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
       where: { id: row.id },
       data: { status: 'STAMP_FAILED', lastError: message, attempts: { increment: 1 } },
     })
-    throw new PlatformBillingError(`Error al timbrar el CFDI: ${humanizeStampError(message)}`, 'PROVIDER')
+    const info = classifyStampError(message)
+    throw new PlatformBillingError(`Error al timbrar el CFDI: ${info.message}`, info.code, info.field)
   }
 }
 
@@ -439,7 +534,8 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
       data: { status: 'STAMP_FAILED', lastError: message, attempts: { increment: 1 } },
     })
     if (err instanceof PlatformBillingError) throw err
-    throw new PlatformBillingError(`Error al timbrar el complemento de pago: ${humanizeStampError(message)}`, 'PROVIDER')
+    const info = classifyStampError(message)
+    throw new PlatformBillingError(`Error al timbrar el complemento de pago: ${info.message}`, info.code, info.field)
   }
 }
 

@@ -20,6 +20,8 @@ import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard
 import emailService from '../services/email.service'
 import { NotificationType, StaffRole, VenueStatus } from '@prisma/client'
 import { FRONTEND_URL } from '../config/env'
+import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 // ============================================================
 // Types
@@ -100,7 +102,8 @@ export class NightlySalesSummaryJob {
   constructor() {
     // Run daily at 10:02 PM Mexico City time (offset from */5 cron jobs to avoid Resend rate limits)
     // This gives time for most venues to close their business day
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'nightly-sales-summary',
       '2 22 * * *', // At 22:02 every day
       async () => {
         await this.sendSalesSummaries()
@@ -159,41 +162,45 @@ export class NightlySalesSummaryJob {
       logger.info('Starting nightly sales summary job...')
 
       // Get all active venues (or specific venue for testing)
-      const venues = await prisma.venue.findMany({
-        where: {
-          ...(specificVenueId ? { id: specificVenueId } : {}),
-          status: {
-            in: [VenueStatus.ACTIVE, VenueStatus.TRIAL, VenueStatus.LIVE_DEMO],
-          },
-        },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          timezone: true,
-          currency: true,
-          email: true,
-          staff: {
+      const venues = await retry(
+        () =>
+          prisma.venue.findMany({
             where: {
-              active: true,
-              role: {
-                in: [StaffRole.OWNER, StaffRole.ADMIN],
+              ...(specificVenueId ? { id: specificVenueId } : {}),
+              status: {
+                in: [VenueStatus.ACTIVE, VenueStatus.TRIAL, VenueStatus.LIVE_DEMO],
               },
             },
             select: {
-              role: true,
+              id: true,
+              name: true,
+              slug: true,
+              timezone: true,
+              currency: true,
+              email: true,
               staff: {
+                where: {
+                  active: true,
+                  role: {
+                    in: [StaffRole.OWNER, StaffRole.ADMIN],
+                  },
+                },
                 select: {
-                  id: true,
-                  email: true,
-                  firstName: true,
-                  lastName: true,
+                  role: true,
+                  staff: {
+                    select: {
+                      id: true,
+                      email: true,
+                      firstName: true,
+                      lastName: true,
+                    },
+                  },
                 },
               },
             },
-          },
-        },
-      })
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'nightly-sales-summary.findVenues' },
+      )
 
       logger.info(`Found ${venues.length} active venues to process`)
 

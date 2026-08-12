@@ -4,6 +4,15 @@ import * as svc from '../../services/dashboard/sale-verification.org.dashboard.s
 import logger from '../../config/logger'
 import { analyticsLimiter } from '../../utils/concurrencyLimiter'
 
+/** Motivos de revisión válidos. Compartido por el handler de review y el de edit. */
+const VALID_REJECTION_REASONS: SaleVerificationRejectionReason[] = [
+  'REVIEW_PORTABILIDAD',
+  'REVIEW_DUPLICATE_VINCULACION',
+  'REVIEW_ILLEGIBLE_IMAGES',
+  'REVIEW_MISSING_LINKING_IMAGE',
+  'OTHER',
+]
+
 // ============================================================
 // Org-Scoped Sale Verification Dashboard Controller
 // ============================================================
@@ -231,15 +240,8 @@ export async function reviewOrgSaleVerification(req: Request, res: Response): Pr
       return
     }
 
-    const validReasons: SaleVerificationRejectionReason[] = [
-      'REVIEW_PORTABILIDAD',
-      'REVIEW_DUPLICATE_VINCULACION',
-      'REVIEW_ILLEGIBLE_IMAGES',
-      'REVIEW_MISSING_LINKING_IMAGE',
-      'OTHER',
-    ]
     if (Array.isArray(rejectionReasons)) {
-      const invalid = rejectionReasons.filter(r => !validReasons.includes(r))
+      const invalid = rejectionReasons.filter(r => !VALID_REJECTION_REASONS.includes(r))
       if (invalid.length > 0) {
         res.status(400).json({ success: false, message: `Invalid rejectionReasons: ${invalid.join(', ')}` })
         return
@@ -313,12 +315,14 @@ export async function reopenOrgSaleVerification(req: Request, res: Response): Pr
 export async function editOrgSaleVerification(req: Request, res: Response): Promise<void> {
   try {
     const { orgId, id } = req.params
-    const { amount, paymentForm, isPortabilidad, status, reason } = req.body as {
+    const { amount, paymentForm, isPortabilidad, status, reason, reviewNotes, rejectionReasons } = req.body as {
       amount?: number
       paymentForm?: string
       isPortabilidad?: boolean
       status?: string
       reason?: string
+      reviewNotes?: string
+      rejectionReasons?: SaleVerificationRejectionReason[]
     }
 
     const editedById = (req as any).authContext?.userId
@@ -342,6 +346,13 @@ export async function editOrgSaleVerification(req: Request, res: Response): Prom
       res.status(400).json({ success: false, message: 'isPortabilidad debe ser booleano' })
       return
     }
+    if (Array.isArray(rejectionReasons)) {
+      const invalid = rejectionReasons.filter(r => !VALID_REJECTION_REASONS.includes(r))
+      if (invalid.length > 0) {
+        res.status(400).json({ success: false, message: `Invalid rejectionReasons: ${invalid.join(', ')}` })
+        return
+      }
+    }
 
     logger.info(`[ORG SALE VERIFICATION] PATCH ${id} (edit) org=${orgId} by=${editedById}`)
 
@@ -353,6 +364,8 @@ export async function editOrgSaleVerification(req: Request, res: Response): Prom
       isPortabilidad,
       status: status as SaleVerificationStatus | undefined,
       reason,
+      reviewNotes,
+      rejectionReasons,
     })
 
     res.status(200).json({ success: true, data: updated })

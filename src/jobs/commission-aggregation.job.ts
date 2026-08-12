@@ -16,6 +16,7 @@
 import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { aggregateAllPendingCommissions } from '../services/dashboard/commission/commission-aggregation.service'
+import { scheduleJob } from '../observability/jobContext'
 
 export class CommissionAggregationJob {
   private job: CronJob | null = null
@@ -24,7 +25,8 @@ export class CommissionAggregationJob {
   constructor() {
     // Run daily at 3:00 AM Mexico City time
     // This gives time for all venues to close their day
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'commission-aggregation',
       '0 3 * * *', // At 03:00 every day
       async () => {
         await this.aggregate()

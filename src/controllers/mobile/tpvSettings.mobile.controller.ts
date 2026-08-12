@@ -14,6 +14,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.service'
 import { TpvSettings, getTpvSettings } from '../../services/dashboard/tpv.dashboard.service'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 function requestDeviceUid(req: Request): string | null {
   const raw = req.headers?.['x-device-id']
@@ -60,6 +61,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
           canCheckoutAreaTickets: true,
           canDeliverAreaTickets: true,
           defaultWorkspace: true,
+          customerDisplayInverted: true,
         },
         orderBy: { name: 'asc' },
       }),
@@ -103,6 +105,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         canCheckoutAreaTickets: _canCheckoutAreaTickets,
         canDeliverAreaTickets: _canDeliverAreaTickets,
         defaultWorkspace: _defaultWorkspace,
+        customerDisplayInverted: _customerDisplayInverted,
         ...rest
       }) => rest,
     )
@@ -123,12 +126,62 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
               canCheckoutAreaTickets: deviceTerminal.canCheckoutAreaTickets,
               canDeliverAreaTickets: deviceTerminal.canDeliverAreaTickets,
               fulfillmentAreaId: deviceTerminal.fulfillmentAreaId,
+              customerDisplayInverted: deviceTerminal.customerDisplayInverted,
             }
           : null,
         ...(plan ? { plan } : {}),
       },
     })
   } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Set (or clear) whether THIS terminal has an inverted customer display —
+ * the customer sees the big screen and the cashier works the small one.
+ * Per-DEVICE (how that counter is physically wired), not per-venue. The POS
+ * applies its local value and syncs it here; the dashboard can change it
+ * remotely.
+ * @route PATCH /api/v1/mobile/venues/:venueId/terminals/:terminalId/display-mode
+ */
+export const updateDisplayMode = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, terminalId } = req.params
+    const { customerDisplayInverted } = req.body as { customerDisplayInverted: boolean }
+
+    // Verify the terminal belongs to THIS venue before writing — otherwise a
+    // valid token for venue A could reconfigure venue B's counter.
+    const terminal = await prisma.terminal.findFirst({
+      where: { id: terminalId, venueId },
+      select: { id: true, customerDisplayInverted: true },
+    })
+
+    if (!terminal) {
+      return res.status(404).json({
+        success: false,
+        message: 'La terminal no pertenece a este establecimiento',
+      })
+    }
+
+    const updated = await prisma.terminal.update({
+      where: { id: terminalId },
+      data: { customerDisplayInverted },
+      select: { id: true, customerDisplayInverted: true },
+    })
+
+    await logAction({
+      staffId: req.authContext?.userId ?? null,
+      venueId,
+      action: 'TERMINAL_DISPLAY_MODE_UPDATED',
+      entity: 'Terminal',
+      entityId: updated.id,
+      data: { from: terminal.customerDisplayInverted, to: updated.customerDisplayInverted },
+    })
+
+    return res.json({ success: true, data: updated })
+  } catch (error) {
+    logger.error('Error updating terminal display mode', { error })
     next(error)
   }
 }

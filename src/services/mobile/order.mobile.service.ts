@@ -1089,7 +1089,24 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
 
   const subtotal = Number(order.subtotal)
   const value = Number(discount.value)
-  const amount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
+
+  // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
+  //
+  // Topar contra el subtotal COMPLETO no basta cuando la cuenta ya trae
+  // descuentos: DOS descuentos fijos de $200 sobre una cuenta de $253 dejaban
+  // `discountAmount` en $425.30 — casi el doble de la mercancía. El total no
+  // sale negativo porque `recalculateOrderTotals` lo clampa, pero el número
+  // GUARDADO miente, y es el que alimenta reportes, comisiones y la factura
+  // (CFDI40111 exige que el descuento del comprobante sea la suma de los
+  // descuentos de los conceptos: $425.30 sobre conceptos que suman $253 es
+  // imposible de timbrar). Reproducido en vivo el 2026-08-09.
+  //
+  // Espejo de `applyDiscount` en order.tpv.service.ts y del
+  // `remainingDiscountable` que ya usan discount.tpv.service.ts y
+  // discountEngine.service.ts.
+  const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
+  const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
+  const amount = Math.min(rawAmount, remainingDiscountable)
 
   const row = await prisma.orderDiscount.create({
     data: {
@@ -1659,6 +1676,26 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     throw new BadRequestError('Las ventas con vales requieren idempotencyKey. Reintenta el mismo pago con una llave estable.')
   }
 
+  // 🔴 Cobro en $0 — cerrar una cuenta cortesiada al 100%.
+  //
+  // Una cuenta con artículos cuyo total quedó en 0 (cortesía completa, o un
+  // descuento que se come el total) NO tenía forma de cerrarse: `compWholeOrder`
+  // pone los artículos en 0 pero no toca `paymentStatus`, y este endpoint
+  // rechazaba `amount = 0`. Resultado: la mesa se quedaba ocupada para siempre.
+  //
+  // Anular la cuenta NO es equivalente y por eso no sirve como salida: el
+  // producto SÍ salió del almacén y la cortesía tiene que quedar registrada
+  // como venta en $0, no desaparecer del reporte.
+  //
+  // El 0 sólo se acepta si el saldo REALMENTE es 0. Si no, es un intento de
+  // cerrar gratis una cuenta que sí debe dinero.
+  if (amount === 0 && tip === 0) {
+    const balancePendiente = Number(order.remainingBalance ?? order.total ?? 0)
+    if (balancePendiente > 0.005) {
+      throw new BadRequestError(`Esta cuenta debe ${balancePendiente.toFixed(2)}. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.`)
+    }
+  }
+
   // 🛡️ IDEMPOTENCIA — defensa PRINCIPAL contra doble-cobro en reintentos del
   // outbox/cola offline. El guard `paymentStatus === 'PAID'` de abajo SOLO
   // protege pagos COMPLETOS; un pago PARCIAL re-encolado dejaría la orden en
@@ -1806,7 +1843,20 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // el cobro por servicio del total y el restante deja de cobrarlo.
         const orderServiceCharge = Number(fresh.serviceChargeAmount || 0)
         const totalTip = previousTips + tipDecimal
-        const newTotal = orderSubtotal - orderDiscount + orderServiceCharge + totalTip
+        // 🔴 MONEY: la MERCANCÍA se clampa a 0 ANTES de sumarle cargos y propina.
+        //
+        // Un `discountAmount` mayor que el subtotal es un estado que existe de
+        // verdad en la base (lo dejan cortesías de cuenta completa aplicadas
+        // sobre un descuento previo). Sin el clamp, COBRAR esa cuenta escribía un
+        // `Order.total` NEGATIVO y la marcaba PAGADA: una venta que RESTA del
+        // corte del día. Comprobado el 2026-08-09 cobrando en $0 la orden
+        // ORD-1779465117373 — entró con total −300.00 y salió PAID con −300.00.
+        //
+        // El clamp va sobre `subtotal − descuento`, NO sobre el total completo:
+        // la propina y el cargo por servicio son dinero aparte de la mercancía y
+        // un descuento excedente no debe comérselos. Mismo criterio que
+        // `recalculateOrderTotals` y que `recordOrderPayment` del TPV.
+        const newTotal = Math.max(0, orderSubtotal - orderDiscount) + orderServiceCharge + totalTip
         const totalPaidIncludingTip = previousPaid + amountDecimal + tipDecimal
         const remainingAfterPayment = newTotal - totalPaidIncludingTip
         const isFullyPaid = remainingAfterPayment <= 0.01 // float tolerance, same as TPV path
@@ -2001,16 +2051,22 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // logged, not thrown), and it only fires on the PENDING/PARTIAL → PAID
   // transition (re-calls are blocked above by the "already paid" guard).
   // Weighted lines (weightQuantity) deduct kilos; see spec venta-por-peso.
-  if (orderFullyPaid && !areaTicketOrder) {
+  if (orderFullyPaid) {
     void (async () => {
       try {
-        const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')
-        const paidOrder = await prisma.order.findUnique({
-          where: { id: orderId },
-          include: { items: { include: { modifiers: { include: { modifier: true } } } } },
-        })
-        if (paidOrder) {
-          await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId || '')
+        // V7 area-ticket orders already applied reservations, normal lines,
+        // recipes and modifiers inside the payment transaction. Running the
+        // legacy post-commit helper here would make retries crash-unsafe and
+        // could deduct the non-reserved portion twice.
+        if (!areaTicketOrder) {
+          const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')
+          const paidOrder = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { items: { include: { modifiers: { include: { modifier: true } } } } },
+          })
+          if (paidOrder) {
+            await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId || '')
+          }
         }
         // Real-time auto-reorder, mirroring recordOrderPayment: if this sale
         // left an ingredient at/below its reorder point, create the PO now.

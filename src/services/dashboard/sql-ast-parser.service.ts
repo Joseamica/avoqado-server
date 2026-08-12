@@ -189,8 +189,9 @@ export class SqlAstParserService {
       }
 
       // Step 10: SECURITY - Validate column-level access control
-      // ADMIN must still respect forbidden columns (API keys, credentials, PII).
-      if (options.userRole && options.userRole !== UserRole.SUPERADMIN) {
+      // Elevated table access never implies access to secrets or server-only
+      // provenance fields; their owning services must opt in outside raw SQL.
+      if (options.userRole) {
         const columnViolations = this.validateForbiddenColumns(ast, tables, options.userRole)
         if (columnViolations.length > 0) {
           columnViolations.forEach(violation => {
@@ -896,74 +897,138 @@ export class SqlAstParserService {
    */
   private validateForbiddenColumns(ast: AST, tables: string[], userRole: UserRole): Array<{ table: string; column: string }> {
     const violations: Array<{ table: string; column: string }> = []
+    const seenViolations = new Set<string>()
 
-    const extractColumns = (node: any): Array<{ table: string | null; column: string }> => {
-      const columns: Array<{ table: string | null; column: string }> = []
-      if (!node) return columns
-
-      // Handle SELECT columns
-      if (node.type === 'select' && node.columns) {
-        if (node.columns === '*') {
-          // SELECT * - check all forbidden columns for all tables
-          tables.forEach(table => {
-            const forbidden = TableAccessControlService.getForbiddenColumns(table)
-            forbidden.forEach(col => {
-              violations.push({ table, column: col })
-            })
-          })
-        } else if (Array.isArray(node.columns)) {
-          node.columns.forEach((col: any) => {
-            if (col.expr && col.expr.type === 'column_ref') {
-              const columnName = this.extractColumnNameFromRef(col.expr)
-              const tableName = col.expr.table || null
-              if (columnName) {
-                columns.push({ table: tableName, column: columnName })
-              }
-            }
-            // Handle aggregate functions like SUM(column), COUNT(column)
-            if (col.expr && col.expr.type === 'aggr_func' && col.expr.args) {
-              const args = col.expr.args
-              if (args.expr && args.expr.type === 'column_ref') {
-                const columnName = this.extractColumnNameFromRef(args.expr)
-                const tableName = args.expr.table || null
-                if (columnName) {
-                  columns.push({ table: tableName, column: columnName })
-                }
-              }
-            }
-          })
+    const normalizeIdentifier = (value: unknown): string | null => {
+      if (typeof value === 'string') return value
+      if (Array.isArray(value)) {
+        for (let index = value.length - 1; index >= 0; index -= 1) {
+          const normalized = normalizeIdentifier(value[index])
+          if (normalized) return normalized
         }
+        return null
+      }
+      if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>
+        return normalizeIdentifier(record.value) ?? normalizeIdentifier(record.expr) ?? normalizeIdentifier(record.name)
+      }
+      return null
+    }
+
+    const addViolation = (table: string, column: string): void => {
+      const key = `${table.toLowerCase()}:${column.toLowerCase()}`
+      if (seenViolations.has(key)) return
+      seenViolations.add(key)
+      violations.push({ table, column })
+    }
+
+    const addWildcardViolations = (targetTables: string[]): void => {
+      for (const table of targetTables) {
+        for (const column of TableAccessControlService.getForbiddenColumns(table)) addViolation(table, column)
+      }
+    }
+
+    const visitSelect = (node: any, inheritedAliases: Map<string, string> = new Map(), inheritedTables: string[] = []): void => {
+      if (!node || node.type !== 'select') return
+
+      const statementTables = Array.isArray(node.from)
+        ? node.from.flatMap((fromItem: any) => (typeof fromItem?.table === 'string' ? [fromItem.table] : []))
+        : []
+      const visibleTables = [...statementTables, ...inheritedTables]
+      const scopedTables = Array.from(new Set(visibleTables.length > 0 ? visibleTables : tables))
+      const aliasToTable = new Map(inheritedAliases)
+      for (const fromItem of node.from ?? []) {
+        if (typeof fromItem?.table !== 'string') continue
+        aliasToTable.set(fromItem.table.toLowerCase(), fromItem.table)
+        const alias = normalizeIdentifier(fromItem.as)
+        if (alias) aliasToTable.set(alias.toLowerCase(), fromItem.table)
       }
 
-      return columns
-    }
+      const resolveTargetTables = (columnRef: any): string[] => {
+        const qualifier = normalizeIdentifier(columnRef?.table)
+        if (!qualifier) return scopedTables
+        const resolved = aliasToTable.get(qualifier.toLowerCase())
+        // An unresolved qualifier cannot be trusted to bypass policy. Check all
+        // statement tables fail-closed, while resolved aliases remain precise.
+        return resolved ? [resolved] : scopedTables
+      }
 
-    // Extract columns from main query
-    let allColumns: Array<{ table: string | null; column: string }> = []
-    if (Array.isArray(ast)) {
-      ast.forEach(statement => {
-        allColumns = allColumns.concat(extractColumns(statement))
-      })
-    } else {
-      allColumns = extractColumns(ast)
-    }
-
-    // Check each column against forbidden columns for each table
-    allColumns.forEach(({ table: colTable, column }) => {
-      // If column has explicit table reference, check that table
-      if (colTable) {
-        if (TableAccessControlService.isColumnForbidden(colTable, column)) {
-          violations.push({ table: colTable, column })
+      const walkExpression = (expression: any, parent?: any): void => {
+        if (!expression) return
+        if (Array.isArray(expression)) {
+          expression.forEach(child => walkExpression(child, parent))
+          return
         }
-      } else {
-        // Column without table reference - check against all accessed tables
-        tables.forEach(table => {
-          if (TableAccessControlService.isColumnForbidden(table, column)) {
-            violations.push({ table, column })
+        if (typeof expression !== 'object') return
+        if (expression.type === 'select') {
+          // Correlated subqueries may legally reference outer aliases. Passing
+          // visible scope closes raw-field bypasses while local aliases shadow.
+          visitUnionChain(expression, aliasToTable, scopedTables)
+          return
+        }
+        if (expression.type === 'column_ref') {
+          const column = this.extractColumnNameFromRef(expression)
+          if (!column) return
+          const qualifier = normalizeIdentifier(expression.table)
+          const compositeTable = !qualifier ? aliasToTable.get(column.toLowerCase()) : undefined
+          if (compositeTable) {
+            // PostgreSQL treats SELECT alias / row_to_json(alias) as the full
+            // composite row, which exposes the same fields as alias.*.
+            addWildcardViolations([compositeTable])
+            return
           }
-        })
+          if (column === '*') {
+            const aggregateName = normalizeIdentifier(parent?.name)?.toLowerCase()
+            // COUNT(*) reveals only cardinality; projected wildcards reveal all
+            // fields and therefore expand to every forbidden column.
+            if (!(parent?.type === 'aggr_func' && aggregateName === 'count')) {
+              addWildcardViolations(resolveTargetTables(expression))
+            }
+            return
+          }
+          for (const table of resolveTargetTables(expression)) {
+            if (TableAccessControlService.isColumnForbidden(table, column)) addViolation(table, column)
+          }
+          return
+        }
+
+        for (const child of Object.values(expression)) walkExpression(child, expression)
       }
-    })
+
+      if (node.columns === '*') {
+        addWildcardViolations(scopedTables)
+      } else if (Array.isArray(node.columns)) {
+        node.columns.forEach((column: any) => walkExpression(column?.expr))
+      }
+
+      // Nested SELECTs own local aliases while retaining visible outer scope
+      // for correlated and LATERAL references.
+      for (const cte of node.with ?? []) visitUnionChain(cte?.stmt?.ast ?? cte?.stmt)
+      for (const fromItem of node.from ?? []) {
+        // Traverse the complete FROM node so current and future parser slots
+        // (derived queries, function args, JOIN ON, TABLESAMPLE) cannot hide data.
+        walkExpression(fromItem)
+      }
+      walkExpression(node.where)
+      walkExpression(node.having)
+      walkExpression(node.groupby)
+      walkExpression(node.orderby)
+      walkExpression(node.distinct)
+      walkExpression(node.window)
+      // PostgreSQL accepts scalar expressions and subqueries in LIMIT/OFFSET;
+      // walking the whole limit node closes that less-obvious projection path.
+      walkExpression(node.limit)
+    }
+
+    const visitUnionChain = (node: any, inheritedAliases: Map<string, string> = new Map(), inheritedTables: string[] = []): void => {
+      const unwrapped = node?.ast ?? node
+      if (!unwrapped) return
+      // UNION branches are linked through _next even inside CTEs, derived
+      // tables, and correlated subqueries; each branch still owns local aliases.
+      this.flattenUnion(unwrapped).forEach(branch => visitSelect(branch, inheritedAliases, inheritedTables))
+    }
+
+    visitUnionChain(ast)
 
     // Log if violations found
     if (violations.length > 0) {

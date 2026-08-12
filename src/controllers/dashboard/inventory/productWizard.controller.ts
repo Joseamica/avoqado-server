@@ -4,6 +4,7 @@ import * as productInventoryService from '../../../services/dashboard/productInv
 import * as costRecalculationService from '../../../services/dashboard/costRecalculationTrigger.service'
 import * as recipeRecalculationService from '../../../services/dashboard/recipeRecalculation.service'
 import logger from '@/config/logger'
+import { resolveLegacyCatalogActor } from '@/services/master-catalog/catalogGovernance.service'
 
 /**
  * Check if venue should use inventory (recommendations)
@@ -31,7 +32,11 @@ export async function createProductStep1(req: Request, res: Response, next: Next
     const { venueId } = req.params
     const data = req.body
 
-    const result = await productWizardService.createProductStep1(venueId, data)
+    const result = await productWizardService.createProductStep1(
+      venueId,
+      data,
+      resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating)),
+    )
 
     res.status(201).json({
       success: true,
@@ -129,7 +134,11 @@ export async function createProductWithInventory(req: Request, res: Response, ne
     const { venueId } = req.params
     const data = req.body
 
-    const result = await productWizardService.createProductWithInventory(venueId, data)
+    const result = await productWizardService.createProductWithInventory(
+      venueId,
+      data,
+      resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating)),
+    )
 
     res.status(201).json({
       success: true,

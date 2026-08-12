@@ -31,6 +31,8 @@ import logger from '../config/logger'
 import { processOutboxRow } from '../services/google-calendar/push.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { scheduleJob } from '../observability/jobContext'
 
 const TIMEZONE = 'America/Mexico_City'
 const BATCH_SIZE = 100
@@ -40,8 +42,9 @@ export class GcalOutboxSweeperJob {
   private isRunning = false
 
   constructor() {
-    this.job = new CronJob(
-      '*/30 * * * * *',
+    this.job = scheduleJob(
+      'gcal-outbox-sweeper',
+      DATABASE_JOB_SCHEDULES.gcalOutboxSweeper,
       async () => {
         await this.process()
       },
@@ -74,7 +77,10 @@ export class GcalOutboxSweeperJob {
     // Guard against overlapping ticks if the previous run is still draining a
     // batch (e.g. slow Google API). CronJob is single-threaded but its ticks
     // can stack if a run exceeds the 30s interval.
-    if (this.isRunning) return
+    if (this.isRunning) {
+      logger.warn('[Gcal outbox] tick skipped — previous run still in progress', { job: 'gcal-outbox-sweeper' })
+      return
+    }
     this.isRunning = true
 
     try {

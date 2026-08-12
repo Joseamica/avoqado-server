@@ -600,6 +600,82 @@ export async function moveOrderToTable(venueId: string, orderId: string, targetT
 }
 
 /**
+ * TABLE_SERVICE — reconcile a table's occupancy after one of its bound orders
+ * is removed by a path OTHER than moveOrderToTable (Fix 1, "zombie table",
+ * 2026-08-07 — `/tpv` layer only, see
+ * .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/zombie-table-and-staff-picker.md).
+ *
+ * 🔴 Root cause this closes: `mergeOrders`' own table-release step
+ * (`src/services/mobile/order.mobile.service.ts` — FROZEN, iOS/Android build
+ * against it in parallel sessions) only frees/repoints a table when
+ * `Table.currentOrderId === source.id`. A child order created by
+ * SPLIT_ORDER/SPLIT_BY_SEAT never gets `Table.currentOrderId` pointed at it
+ * (see splitOrderItems' own comment on that), so when that child is later the
+ * table's LAST open order and gets merged away, the lookup misses, the
+ * release silently no-ops, and the table stays OCCUPIED with openOrders: []
+ * forever — reproduced twice on hardware, endpoint even returns `tableFreed:
+ * false`.
+ *
+ * Since `/mobile` cannot be touched, this reconciles from the `/tpv` layer
+ * instead — called by order-table.tpv.controller.ts's `mergeOrders` AFTER the
+ * shared service succeeds. Mirrors `moveOrderToTable`'s sibling-reconciliation
+ * above: looks up the removed order's OWN `tableId` (the FK, always correct —
+ * unlike the denormalized `currentOrderId` pointer that caused the bug) and
+ * sets the table to whatever the remaining LIVE siblings on that table imply.
+ * Idempotent — safe to call even when the shared service already released the
+ * table correctly (no sibling found twice → same no-op write).
+ */
+export async function reconcileTableAfterOrderRemoved(venueId: string, removedOrderId: string): Promise<{ tableFreed: boolean }> {
+  const removedOrder = await prisma.order.findFirst({
+    where: { id: removedOrderId, venueId },
+    select: { tableId: true },
+  })
+  const tableId = removedOrder?.tableId
+  if (!tableId) return { tableFreed: false }
+
+  // Tenant isolation: re-verify the table belongs to THIS venue before writing
+  // to it — never trust a bare tableId, even one read off an order already
+  // scoped to venueId.
+  const table = await prisma.table.findFirst({
+    where: { id: tableId, venueId },
+    select: { id: true, number: true },
+  })
+  if (!table) return { tableFreed: false }
+
+  const sibling = await prisma.order.findFirst({
+    where: { venueId, tableId: table.id, id: { not: removedOrderId }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+    select: { id: true },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  await prisma.table.update({
+    where: { id: table.id },
+    data: sibling ? { status: 'OCCUPIED', currentOrderId: sibling.id } : { status: 'AVAILABLE', currentOrderId: null },
+  })
+
+  logger.info(
+    sibling
+      ? `✅ [TABLE SERVICE] Table ${table.number} repointed to sibling check after /tpv reconciliation`
+      : `✅ [TABLE SERVICE] Table ${table.number} released after /tpv reconciliation`,
+  )
+
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+      tableId: table.id,
+      tableNumber: table.number,
+      status: sibling ? 'OCCUPIED' : 'AVAILABLE',
+      orderId: sibling?.id ?? null,
+      orderNumber: null,
+      covers: null,
+      waiter: null,
+    })
+  }
+
+  return { tableFreed: !sibling }
+}
+
+/**
  * TABLE_SERVICE — reassign an OPEN check to another waiter (Square's
  * "Asignar"). Sales attribution (tips, corte) follows servedById.
  */

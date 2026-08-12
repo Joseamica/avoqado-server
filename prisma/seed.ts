@@ -541,6 +541,13 @@ async function main() {
       category: FeatureCategory.PAYMENTS,
       monthlyPrice: 0.0, // MXN - Free feature
     },
+    {
+      code: 'CASH_RECONCILIATION',
+      name: 'Conciliación de efectivo por turno',
+      description: 'Conteo ciego y cálculo de caja cuadrada, faltante o sobrante al cerrar un turno.',
+      category: FeatureCategory.OPERATIONS,
+      monthlyPrice: 0.0, // Bundled with PRO/PREMIUM; raw venue opt-in remains off by default
+    },
   ]
 
   // Usar upsert para crear o actualizar características

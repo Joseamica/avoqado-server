@@ -11,29 +11,18 @@ import prisma from '../../utils/prismaClient'
 import { computeInventoryAvailability } from '../../services/dashboard/product.dashboard.service'
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
+import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  assertLegacyProductReferencesForVenue,
+  assertLegacyCatalogProductUpdateGovernance,
+  resolveLegacyCatalogActor,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../../services/master-catalog/catalogGovernance.service'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Calculate how many portions can be made from a recipe's raw materials.
- * Returns the minimum across all ingredients (bottleneck).
- */
-function calculateAvailablePortions(recipe: any): number {
-  if (!recipe?.lines || recipe.lines.length === 0) {
-    return 0
-  }
-
-  const portionsPerIngredient = recipe.lines.map((line: any) => {
-    const stock = Number(line.rawMaterial?.currentStock ?? 0)
-    const needed = Number(line.quantity ?? 0)
-    if (needed === 0) return Infinity
-    return Math.floor(stock / needed)
-  })
-
-  return Math.min(...portionsPerIngredient)
-}
 
 /**
  * Shared Prisma include for product queries (matches dashboard shape).
@@ -72,7 +61,8 @@ const productInclude = {
  * old clients keep reading availableQuantity and ignore the rest.
  */
 function withAvailableQuantity(product: any) {
-  return { ...product, ...computeInventoryAvailability(product) }
+  const legacyProduct = toLegacyProductPayload(product)
+  return { ...legacyProduct, ...computeInventoryAvailability(legacyProduct) }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,32 +151,47 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
     const parsedUnit: Unit | undefined =
       typeof unit === 'string' && (Object.values(Unit) as string[]).includes(unit.trim()) ? (unit.trim() as Unit) : undefined
 
-    const product = await prisma.product.create({
-      data: {
-        name: name.trim(),
+    const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
+    const product = await prisma.$transaction(async tx => {
+      await assertLegacyCatalogGovernanceForVenue(tx, {
         venueId,
-        sku: finalSku,
-        gtin: gtin?.trim() || null,
-        description: description || null,
-        categoryId: finalCategoryId,
-        type: type || 'FOOD_AND_BEV',
-        price: price ? parseFloat(price) : 0,
-        taxRate: taxRate ?? 0.16,
-        trackInventory: trackInventory ?? false,
-        duration: duration ?? null,
-        durationMinutes: durationMinutes || null,
-        maxParticipants: maxParticipants ?? null,
-        layoutConfig: layoutConfig ?? undefined,
-        // Optional measurement unit (validated against the Prisma Unit enum;
-        // invalid values are ignored, not fatal — additive field, older
-        // clients that don't send it are unaffected).
-        unit: parsedUnit,
-        // Venta por peso: price becomes precio POR KG; the POS captures the
-        // weight at sale time. Forces KILOGRAM as unit when enabled.
-        soldByWeight: soldByWeight === true,
-        ...(soldByWeight === true ? { unit: 'KILOGRAM' as Unit } : {}),
-      },
-      include: productInclude,
+        operation: 'CREATE',
+        willBeVendable: true,
+        actor,
+      })
+      await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId: finalCategoryId })
+      const created = await tx.product.create({
+        data: {
+          name: name.trim(),
+          venueId,
+          createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+          sku: finalSku,
+          gtin: gtin?.trim() || null,
+          description: description || null,
+          categoryId: finalCategoryId,
+          type: type || 'FOOD_AND_BEV',
+          price: price ? parseFloat(price) : 0,
+          taxRate: taxRate ?? 0.16,
+          trackInventory: trackInventory ?? false,
+          duration: duration ?? null,
+          durationMinutes: durationMinutes || null,
+          maxParticipants: maxParticipants ?? null,
+          layoutConfig: layoutConfig ?? undefined,
+          // Optional measurement unit (validated against the Prisma Unit enum;
+          // invalid values are ignored, not fatal — additive field, older
+          // clients that don't send it are unaffected).
+          unit: parsedUnit,
+          // Venta por peso: price becomes precio POR KG; the POS captures the
+          // weight at sale time. Forces KILOGRAM as unit when enabled.
+          soldByWeight: soldByWeight === true,
+          ...(soldByWeight === true ? { unit: 'KILOGRAM' as Unit } : {}),
+        },
+        include: productInclude,
+      })
+      if (actor.type === 'SERVICE') {
+        await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
+      }
+      return created
     })
 
     return res.status(201).json({ success: true, data: withAvailableQuantity(product) })
@@ -216,7 +221,7 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     // Verify the product belongs to this venue and is not deleted
     const existing = await prisma.product.findFirst({
       where: { id: productId, venueId, deletedAt: null },
-      select: { id: true },
+      select: { id: true, active: true },
     })
 
     if (!existing) {
@@ -266,10 +271,19 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     if (data.cost !== undefined && data.cost !== null) data.cost = parseFloat(String(data.cost))
     if (data.taxRate !== undefined && data.taxRate !== null) data.taxRate = parseFloat(String(data.taxRate))
 
-    const product = await prisma.product.update({
-      where: { id: productId },
-      data,
-      include: productInclude,
+    const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
+    const product = await prisma.$transaction(async tx => {
+      await assertLegacyCatalogProductUpdateGovernance(tx, {
+        venueId,
+        productId,
+        requestedActive: data.active === true,
+        actor,
+      })
+      await assertLegacyProductReferencesForVenue(tx, {
+        venueId,
+        categoryId: typeof data.categoryId === 'string' ? data.categoryId : undefined,
+      })
+      return tx.product.update({ where: { id: productId }, data, include: productInclude })
     })
 
     return res.json({ success: true, data: withAvailableQuantity(product) })

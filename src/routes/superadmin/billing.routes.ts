@@ -31,6 +31,7 @@ import {
  *   PUT  /api/v1/superadmin/billing/tax-profiles
  *   GET  /api/v1/superadmin/billing/tax-profiles/:id
  *   POST /api/v1/superadmin/billing/tax-profiles/:id/constancia
+ *   POST /api/v1/superadmin/billing/tax-profiles/:id/validate
  *   POST /api/v1/superadmin/billing/invoices
  *   GET  /api/v1/superadmin/billing/invoices
  *   GET  /api/v1/superadmin/billing/invoices/:id
@@ -67,6 +68,7 @@ router.post(
   checkPermission('platform-billing:configure'),
   controller.attachConstanciaController,
 )
+router.post('/tax-profiles/:id/validate', checkPermission('platform-billing:configure'), controller.validateTaxProfile)
 
 // Facturas (CFDIs) — list route registered before the :id route
 router.post('/invoices', validateRequest(issueInvoiceSchema), checkPermission('platform-billing:issue'), controller.issueInvoice)

@@ -537,3 +537,127 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     expect((await p1).status).toBe('success')
   })
 })
+
+describe('TerminalPaymentService — el watchdog no cierra con el pago de otro', () => {
+  // 🔴 El watchdog reconcilia una solicitud vencida contra un Payment de la MISMA orden.
+  // Tenía dos guardas (no anterior a la solicitud, no reclamado por otra) pero NINGUNA
+  // sobre qué CLASE de pago es. Una orden lleva varios pagos por split/tender parcial, así
+  // que un efectivo posterior —o una tarjeta RECHAZADA— cerraba la solicitud como cobrada.
+  //
+  // El daño es el caro y silencioso: el POS le dice al cajero "ya se cobró", el cajero no
+  // cobra, y el comercio pierde la venta. Nadie reclama un cobro que no ocurrió.
+  //
+  // La dirección segura ya la eligió este archivo: si no consta, cae en UNKNOWN, que RETIENE
+  // la ranura y levanta alerta. Molesto y correcto — nunca liberar a ciegas.
+
+  const staleRow = (overrides: Record<string, unknown> = {}) => ({
+    id: 'row-1',
+    requestId: 'REQ-W1',
+    venueId: 'venue-1',
+    terminalId: 't-w1',
+    orderId: 'order-w1',
+    status: 'SENT',
+    createdAt: new Date('2026-08-11T10:00:00Z'),
+    ...overrides,
+  })
+
+  it('un pago RECHAZADO de la misma orden NO cierra la solicitud como cobrada', async () => {
+    tpr().findMany.mockResolvedValueOnce([staleRow()])
+    prismaMock.payment.findFirst.mockResolvedValueOnce(null) // el filtro lo descarta
+
+    const res = await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    expect(res.completed).toBe(0)
+    expect(res.unknown).toBe(1)
+    const where = prismaMock.payment.findFirst.mock.calls[0][0].where
+    expect(where.status).toBe('COMPLETED')
+  })
+
+  it('un pago en EFECTIVO de la misma orden tampoco la cierra — no prueba que la tarjeta pasó', async () => {
+    tpr().findMany.mockResolvedValueOnce([staleRow({ id: 'row-2', requestId: 'REQ-W2' })])
+    prismaMock.payment.findFirst.mockResolvedValueOnce(null)
+
+    await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    const where = prismaMock.payment.findFirst.mock.calls[0][0].where
+    expect(where.method).toEqual({ in: ['CREDIT_CARD', 'DEBIT_CARD'] })
+  })
+
+  it('un pago con TARJETA y COMPLETED sí la cierra — el camino bueno no se rompe', async () => {
+    tpr().findMany.mockResolvedValueOnce([staleRow({ id: 'row-3', requestId: 'REQ-W3' })])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-ok' })
+    tpr().findFirst.mockResolvedValueOnce(null) // no reclamado por otra solicitud
+    tpr().updateMany.mockResolvedValueOnce({ count: 1 })
+
+    const res = await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    expect(res.completed).toBe(1)
+    expect(res.unknown).toBe(0)
+  })
+})
+
+describe('TerminalPaymentService — un cobro que pasó pese al cancel SIEMPRE avisa', () => {
+  // 🔴 El mismo evento de dinero se descubre por DOS rutas, y sólo una avisaba.
+  //
+  // `closeRowFromPaymentTx` (la TPV registra el pago por REST) dispara el 🚨 cuando la fila
+  // venía cancelada: "a human must know a cancelled attempt actually took money".
+  // El WATCHDOG hace el mismo ascenso a COMPLETED y no avisaba nada — así que si el
+  // descubrimiento llegaba por ahí, nadie se enteraba de que el cajero canceló y el dinero
+  // se fue igual.
+  //
+  // Importa porque no hay forma de prevenirlo en la caja: medido en esta base, el registro
+  // tardío llega entre 65 s y 3 HORAS después. Retener la venta ese tiempo sería peor que el
+  // problema. Si no se puede prevenir, lo mínimo es que un humano se entere.
+
+  it('el watchdog también dispara la alerta cuando el dinero se movió pese a la cancelación', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    errSpy.mockClear()
+
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-c1',
+        requestId: 'REQ-C1',
+        venueId: 'venue-1',
+        terminalId: 't-c1',
+        orderId: 'order-c1',
+        status: 'CANCEL_REQUESTED',
+        createdAt: new Date('2026-08-11T10:00:00Z'),
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c1' })
+    tpr().findFirst.mockResolvedValueOnce(null)
+    tpr().updateMany.mockResolvedValueOnce({ count: 1 })
+
+    await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    const alerted = errSpy.mock.calls.some(c => String(c[0]).includes('🚨') && String(c[0]).toLowerCase().includes('cancel'))
+    expect(alerted).toBe(true)
+  })
+
+  it('un cobro normal que sólo llegó tarde NO dispara la alarma — no se cansa a nadie con ruido', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    errSpy.mockClear()
+
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-c2',
+        requestId: 'REQ-C2',
+        venueId: 'venue-1',
+        terminalId: 't-c2',
+        orderId: 'order-c2',
+        status: 'SENT', // nadie canceló: es una reconciliación normal
+        createdAt: new Date('2026-08-11T10:00:00Z'),
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c2' })
+    tpr().findFirst.mockResolvedValueOnce(null)
+    tpr().updateMany.mockResolvedValueOnce({ count: 1 })
+
+    await terminalPaymentService.reconcileStaleRequests(new Date('2026-08-11T10:10:00Z'))
+
+    const alerted = errSpy.mock.calls.some(c => String(c[0]).includes('🚨'))
+    expect(alerted).toBe(false)
+  })
+})

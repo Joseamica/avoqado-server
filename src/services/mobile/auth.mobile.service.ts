@@ -15,6 +15,7 @@ import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import * as jwtService from '../../jwt.service'
 import { getEffectiveRolePermissions } from '../../lib/permissions'
 import { getRoleDisplayNamesForVenues } from '../dashboard/venueRoleConfig.dashboard.service'
+import { logAction } from '../dashboard/activity-log.service'
 import logger from '@/config/logger'
 import {
   generateAuthenticationOptions,
@@ -244,6 +245,18 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
       failedLoginAttempts: 0,
       lockedUntil: null,
     },
+  })
+
+  // 8.1. Owner-facing access log. `lastLoginAt` only keeps the most recent sign-in: there
+  // is no history. Fire-and-forget write that does NOT touch the shape of the response, so
+  // there is no contract risk for iOS/Android.
+  void logAction({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    action: 'STAFF_LOGIN',
+    entity: 'Staff',
+    entityId: staff.id,
+    data: { source: 'mobile', method: 'passkey', role: selectedVenue.role },
   })
 
   // 9. Fetch custom role permissions
@@ -599,6 +612,16 @@ export async function loginWithEmail(email: string, password: string, rememberMe
       failedLoginAttempts: 0,
       lockedUntil: null,
     },
+  })
+
+  // 7.1. Owner-facing access log — see the note on the passkey sign-in above.
+  void logAction({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    action: 'STAFF_LOGIN',
+    entity: 'Staff',
+    entityId: staff.id,
+    data: { source: 'mobile', method: 'password', role: selectedVenue.role },
   })
 
   // 8. Fetch custom role permissions

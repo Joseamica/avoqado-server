@@ -1,5 +1,28 @@
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
+
+/**
+ * 🔴 These queries were WRITTEN IN snake_case (`o.venue_id`, `rmm.raw_material_id`,
+ * `rm.cost_per_unit`) against tables whose columns are camelCase. This schema does NOT map
+ * names — the only `@@map`s that exist belong to other tables: time_entries, tpv_messages,
+ * training_*, mcp_* — so PostgreSQL answered `column does not exist` and the THREE reports
+ * in this file (PMIX, ingredient usage and cost variance) blew up on every single call.
+ * Verified against the production database on 2026-08-07.
+ *
+ * Nobody noticed because PMIX and cost variance live behind the premium inventory gate and
+ * almost no venue ever opens them.
+ *
+ * Second defect, in the same place: the conditional fragments (LIMIT, OFFSET, raw material
+ * filter) were interpolated as `${cond ? `LIMIT ${n}` : ''}` INSIDE a tagged template. In a
+ * tagged template that does NOT concatenate SQL: it sends the text as a PARAMETER, so the
+ * query ended up as `ORDER BY ... DESC $4 $5` — a syntax error — and the raw material filter
+ * never filtered anything. They are now assembled with `Prisma.sql` and `Prisma.empty`,
+ * which is the correct way to compose parameterized SQL.
+ *
+ * When touching this: camelCase identifiers MUST be double-quoted, or PostgreSQL folds them
+ * to lowercase and the same error comes right back.
+ */
 
 /**
  * Product Mix (PMIX) Report - Sales volume and profitability analysis
@@ -26,24 +49,24 @@ export async function getPMIXReport(
     }>
   >`
     SELECT
-      oi.product_id,
+      oi."productId" as product_id,
       p.name as product_name,
       SUM(oi.quantity)::bigint as quantity_sold,
-      SUM(oi.unit_price * oi.quantity) as total_revenue,
-      r.total_cost as recipe_cost,
-      AVG(oi.unit_price) as avg_price
+      SUM(oi."unitPrice" * oi.quantity) as total_revenue,
+      r."totalCost" as recipe_cost,
+      AVG(oi."unitPrice") as avg_price
     FROM "OrderItem" oi
-    INNER JOIN "Order" o ON o.id = oi.order_id
-    INNER JOIN "Product" p ON p.id = oi.product_id
-    LEFT JOIN "Recipe" r ON r.product_id = p.id
-    WHERE o.venue_id = ${venueId}
-      AND o.created_at >= ${startDate}
-      AND o.created_at <= ${endDate}
+    INNER JOIN "Order" o ON o.id = oi."orderId"
+    INNER JOIN "Product" p ON p.id = oi."productId"
+    LEFT JOIN "Recipe" r ON r."productId" = p.id
+    WHERE o."venueId" = ${venueId}
+      AND o."createdAt" >= ${startDate}
+      AND o."createdAt" <= ${endDate}
       AND o.status = 'COMPLETED'
-    GROUP BY oi.product_id, p.name, r.total_cost
-    ORDER BY total_revenue DESC
-    ${options?.limit ? `LIMIT ${options.limit}` : ''}
-    ${options?.offset ? `OFFSET ${options.offset}` : ''}
+    GROUP BY oi."productId", p.name, r."totalCost"
+    ORDER BY total_revenue DESC, oi."productId" ASC
+    ${options?.limit ? Prisma.sql`LIMIT ${options.limit}` : Prisma.empty}
+    ${options?.offset ? Prisma.sql`OFFSET ${options.offset}` : Prisma.empty}
   `
 
   // Calculate totals for percentages
@@ -56,14 +79,14 @@ export async function getPMIXReport(
   >`
     SELECT
       SUM(oi.quantity)::bigint as total_quantity,
-      SUM(oi.unit_price * oi.quantity) as total_revenue,
-      SUM(COALESCE(r.total_cost, 0) * oi.quantity) as total_cost
+      SUM(oi."unitPrice" * oi.quantity) as total_revenue,
+      SUM(COALESCE(r."totalCost", 0) * oi.quantity) as total_cost
     FROM "OrderItem" oi
-    INNER JOIN "Order" o ON o.id = oi.order_id
-    LEFT JOIN "Recipe" r ON r.product_id = oi.product_id
-    WHERE o.venue_id = ${venueId}
-      AND o.created_at >= ${startDate}
-      AND o.created_at <= ${endDate}
+    INNER JOIN "Order" o ON o.id = oi."orderId"
+    LEFT JOIN "Recipe" r ON r."productId" = oi."productId"
+    WHERE o."venueId" = ${venueId}
+      AND o."createdAt" >= ${startDate}
+      AND o."createdAt" <= ${endDate}
       AND o.status = 'COMPLETED'
   `
 
@@ -286,7 +309,7 @@ export async function getIngredientUsageReport(
     }>
   >`
     SELECT
-      rmm.raw_material_id,
+      rmm."rawMaterialId" as raw_material_id,
       rm.name as raw_material_name,
       rm.category,
       rm.unit,
@@ -295,18 +318,18 @@ export async function getIngredientUsageReport(
       COALESCE(SUM(CASE WHEN rmm.type = 'ADJUSTMENT' THEN rmm.quantity ELSE 0 END), 0) as adjustments,
       COALESCE(SUM(CASE WHEN rmm.type = 'SPOILAGE' THEN ABS(rmm.quantity) ELSE 0 END), 0) as waste,
       COALESCE(SUM(rmm.quantity), 0) as net_change,
-      COALESCE(SUM(rmm.quantity * rm.cost_per_unit), 0) as total_cost,
-      rm.cost_per_unit as avg_cost_per_unit
+      COALESCE(SUM(rmm.quantity * rm."costPerUnit"), 0) as total_cost,
+      rm."costPerUnit" as avg_cost_per_unit
     FROM "RawMaterialMovement" rmm
-    INNER JOIN "RawMaterial" rm ON rm.id = rmm.raw_material_id
-    WHERE rmm.venue_id = ${venueId}
-      AND rmm.created_at >= ${startDate}
-      AND rmm.created_at <= ${endDate}
-      ${options?.rawMaterialId ? `AND rmm.raw_material_id = ${options.rawMaterialId}` : ''}
-    GROUP BY rmm.raw_material_id, rm.name, rm.category, rm.unit, rm.cost_per_unit
-    ORDER BY total_cost DESC
-    ${options?.limit ? `LIMIT ${options.limit}` : ''}
-    ${options?.offset ? `OFFSET ${options.offset}` : ''}
+    INNER JOIN "RawMaterial" rm ON rm.id = rmm."rawMaterialId"
+    WHERE rmm."venueId" = ${venueId}
+      AND rmm."createdAt" >= ${startDate}
+      AND rmm."createdAt" <= ${endDate}
+      ${options?.rawMaterialId ? Prisma.sql`AND rmm."rawMaterialId" = ${options.rawMaterialId}` : Prisma.empty}
+    GROUP BY rmm."rawMaterialId", rm.name, rm.category, rm.unit, rm."costPerUnit"
+    ORDER BY total_cost DESC, rmm."rawMaterialId" ASC
+    ${options?.limit ? Prisma.sql`LIMIT ${options.limit}` : Prisma.empty}
+    ${options?.offset ? Prisma.sql`OFFSET ${options.offset}` : Prisma.empty}
   `
 
   // Calculate totals
@@ -358,14 +381,14 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
     }>
   >`
     SELECT
-      COALESCE(SUM(COALESCE(r.total_cost, 0) * oi.quantity), 0) as expected_cost,
-      COALESCE(SUM(oi.unit_price * oi.quantity), 0) as actual_revenue
+      COALESCE(SUM(COALESCE(r."totalCost", 0) * oi.quantity), 0) as expected_cost,
+      COALESCE(SUM(oi."unitPrice" * oi.quantity), 0) as actual_revenue
     FROM "OrderItem" oi
-    INNER JOIN "Order" o ON o.id = oi.order_id
-    LEFT JOIN "Recipe" r ON r.product_id = oi.product_id
-    WHERE o.venue_id = ${venueId}
-      AND o.created_at >= ${startDate}
-      AND o.created_at <= ${endDate}
+    INNER JOIN "Order" o ON o.id = oi."orderId"
+    LEFT JOIN "Recipe" r ON r."productId" = oi."productId"
+    WHERE o."venueId" = ${venueId}
+      AND o."createdAt" >= ${startDate}
+      AND o."createdAt" <= ${endDate}
       AND o.status = 'COMPLETED'
   `
 
@@ -376,12 +399,12 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
     }>
   >`
     SELECT
-      COALESCE(SUM(ABS(rmm.quantity) * rm.cost_per_unit), 0) as actual_cost
+      COALESCE(SUM(ABS(rmm.quantity) * rm."costPerUnit"), 0) as actual_cost
     FROM "RawMaterialMovement" rmm
-    INNER JOIN "RawMaterial" rm ON rm.id = rmm.raw_material_id
-    WHERE rmm.venue_id = ${venueId}
-      AND rmm.created_at >= ${startDate}
-      AND rmm.created_at <= ${endDate}
+    INNER JOIN "RawMaterial" rm ON rm.id = rmm."rawMaterialId"
+    WHERE rmm."venueId" = ${venueId}
+      AND rmm."createdAt" >= ${startDate}
+      AND rmm."createdAt" <= ${endDate}
       AND rmm.type IN ('USAGE', 'SPOILAGE')
   `
 
@@ -509,5 +532,116 @@ export async function getInventoryValuation(
       offset: options?.offset,
       hasMore: options?.limit ? materialValues.length === options.limit : false,
     },
+  }
+}
+
+/**
+ * Days of coverage: at this consumption rate, how many days does the stock on hand last?
+ *
+ * It is the question a buyer asks before raising a purchase order, and the one that decides
+ * whether a reorder point is set right. A version of this already existed, but ONLY for
+ * serialized inventory (SIMs) in `stockDashboard.service` — for raw materials and
+ * merchandise there was nothing.
+ *
+ * Decisions that make the number usable instead of merely pretty:
+ *
+ * - Consumption counts USAGE **and** SPOILAGE. Spoilage is not "good" consumption, but it
+ *   DOES empty the warehouse: ignoring it yields optimistic coverage precisely on the goods
+ *   that spoil the most, which are the ones that tolerate a stockout the worst.
+ * - Zero consumption returns `null`, not infinity nor a giant number. "It hasn't moved" and
+ *   "it lasts forever" are different things, and an ∞ sorted in a table sends to the bottom
+ *   exactly what needs to be reviewed.
+ * - The window is rolling (N days back from now), so it does not depend on the server's
+ *   timezone — which in production runs in UTC.
+ */
+export async function getStockCoverageReport(
+  venueId: string,
+  options?: {
+    /** Days back to average consumption over. Defaults to 30. */
+    windowDays?: number
+    /** Only materials with coverage at or below this (for "what runs out first?"). */
+    maxDays?: number
+    limit?: number
+  },
+) {
+  const windowDays = options?.windowDays && options.windowDays > 0 ? Math.floor(options.windowDays) : 30
+  const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
+
+  const rows = await prisma.$queryRaw<
+    Array<{
+      raw_material_id: string
+      name: string
+      category: string
+      unit: string
+      current_stock: Decimal
+      reorder_point: Decimal | null
+      consumed: Decimal
+    }>
+  >`
+    SELECT
+      rm.id as raw_material_id,
+      rm.name,
+      rm.category,
+      rm.unit,
+      rm."currentStock" as current_stock,
+      rm."reorderPoint" as reorder_point,
+      COALESCE(SUM(ABS(rmm.quantity)) FILTER (WHERE rmm.type IN ('USAGE', 'SPOILAGE')), 0) as consumed
+    FROM "RawMaterial" rm
+    LEFT JOIN "RawMaterialMovement" rmm
+      ON rmm."rawMaterialId" = rm.id
+      AND rmm."venueId" = ${venueId}
+      AND rmm."createdAt" >= ${since}
+    WHERE rm."venueId" = ${venueId}
+      AND rm.active = true
+    GROUP BY rm.id, rm.name, rm.category, rm.unit, rm."currentStock", rm."reorderPoint"
+    ORDER BY rm.name ASC, rm.id ASC
+  `
+
+  const materials = rows
+    .map(row => {
+      const totalConsumed = new Decimal(row.consumed)
+      const dailyConsumption = totalConsumed.div(windowDays)
+      const stockOnHand = new Decimal(row.current_stock)
+      // Zero consumption ⇒ no data, not "it lasts forever".
+      const coverage = dailyConsumption.greaterThan(0) ? stockOnHand.div(dailyConsumption).toDecimalPlaces(1).toNumber() : null
+      const reorderPoint = row.reorder_point === null ? null : new Decimal(row.reorder_point)
+
+      return {
+        rawMaterialId: row.raw_material_id,
+        name: row.name,
+        category: row.category,
+        unit: row.unit,
+        currentStock: stockOnHand.toNumber(),
+        reorderPoint: reorderPoint ? reorderPoint.toNumber() : null,
+        consumedInWindow: totalConsumed.toNumber(),
+        avgDailyConsumption: dailyConsumption.toDecimalPlaces(3).toNumber(),
+        daysOfCoverage: coverage,
+        belowReorderPoint: reorderPoint ? stockOnHand.lessThanOrEqualTo(reorderPoint) : false,
+      }
+    })
+    .filter(m => (options?.maxDays === undefined ? true : m.daysOfCoverage !== null && m.daysOfCoverage <= options.maxDays))
+
+  // The ones that DO have data, from tightest to roomiest; the ones with no movement go last,
+  // because they are not urgent but they must not be hidden either.
+  materials.sort((a, b) => {
+    if (a.daysOfCoverage === null && b.daysOfCoverage === null) return a.name.localeCompare(b.name)
+    if (a.daysOfCoverage === null) return 1
+    if (b.daysOfCoverage === null) return -1
+    return a.daysOfCoverage - b.daysOfCoverage
+  })
+
+  const withData = materials.filter(m => m.daysOfCoverage !== null)
+
+  return {
+    windowDays,
+    asOf: new Date(),
+    summary: {
+      totalMaterials: materials.length,
+      withoutMovement: materials.length - withData.length,
+      belowReorderPoint: materials.filter(m => m.belowReorderPoint).length,
+      /** Median coverage: summarizes better than the average, which a single material skews. */
+      medianDaysOfCoverage: withData.length > 0 ? withData[Math.floor(withData.length / 2)].daysOfCoverage : null,
+    },
+    materials: options?.limit ? materials.slice(0, options.limit) : materials,
   }
 }

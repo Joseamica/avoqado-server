@@ -22,6 +22,8 @@ export class PlatformBillingError extends Error {
   constructor(
     message: string,
     public readonly code: PlatformBillingErrorCode = 'VALIDATION',
+    /** Campo del formulario culpable, cuando se pudo identificar. La UI lo usa para marcarlo. */
+    public readonly field?: string,
   ) {
     super(message)
     this.name = 'PlatformBillingError'

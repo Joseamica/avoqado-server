@@ -1,6 +1,14 @@
+import { fromZonedTime } from 'date-fns-tz'
 import {
+  AreaSettlementRoute,
   AreaTicketCheckoutStatus,
+  AreaTicketExternalIncidentKind,
+  AreaTicketExternalIncidentStatus,
+  AreaTicketExternalSettlementStatus,
   AreaTicketStatus,
+  ExternalConfirmationMode,
+  ExternalDeliveryTracking,
+  ExternalOfflinePolicy,
   FulfillmentMode,
   Prisma,
   ScaleContext,
@@ -13,14 +21,21 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/App
 import {
   CreateFulfillmentAreaInput,
   CreateScaleProfileInput,
+  ListExternalIncidentsQuery,
+  ListExternalSettlementsQuery,
+  UpdateAreaSettlementRouteInput,
   UpdateAreaTicketSettingsInput,
   UpdateAreaTicketTerminalInput,
   UpdateFulfillmentAreaInput,
   UpdateScaleProfileInput,
   UpdateScaleSettingsInput,
 } from '../../schemas/dashboard/areaTicket.schema'
+import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+// Criterio de "ya se cobró en la otra caja" — la MISMA constante que usan la autoridad
+// del dominio y el guard de cancelación, no una copia (ver `getOperations`).
+import { YA_COBRADO_AFUERA } from '../mobile/areaTicketV7.mobile.service'
 import { logAction } from './activity-log.service'
 
 const DEFAULT_SETTINGS = {
@@ -42,12 +57,17 @@ async function assertVenue(venueId: string): Promise<void> {
   if (!venue) throw new NotFoundError('Venue no encontrado')
 }
 
-async function assertFeature(venueId: string, featureCode: 'AREA_TICKETS' | 'SCALE_INTEGRATION'): Promise<void> {
+async function assertFeature(
+  venueId: string,
+  featureCode: 'AREA_TICKETS' | 'SCALE_INTEGRATION' | 'VARIABLE_WEIGHT_BARCODE',
+): Promise<void> {
   if (!(await venueHasFeatureAccess(venueId, featureCode))) {
     const message =
       featureCode === 'AREA_TICKETS'
         ? 'El plan de este local no incluye vales por área.'
-        : 'El plan de este local no incluye integración con básculas.'
+        : featureCode === 'SCALE_INTEGRATION'
+          ? 'El plan de este local no incluye integración con básculas.'
+          : 'El plan de este local no incluye etiquetas de peso variable.'
     throw new ForbiddenError(message, `${featureCode}_NOT_ENTITLED`)
   }
 }
@@ -84,6 +104,7 @@ export async function getOverview(venueId: string) {
   const [
     areaTicketsEntitled,
     scaleIntegrationEntitled,
+    variableWeightBarcodeEntitled,
     settings,
     scaleSettings,
     areas,
@@ -95,6 +116,7 @@ export async function getOverview(venueId: string) {
   ] = await Promise.all([
     venueHasFeatureAccess(venueId, 'AREA_TICKETS'),
     venueHasFeatureAccess(venueId, 'SCALE_INTEGRATION'),
+    venueHasFeatureAccess(venueId, 'VARIABLE_WEIGHT_BARCODE'),
     prisma.venueAreaTicketSettings.findUnique({ where: { venueId } }),
     prisma.venueScaleSettings.findUnique({ where: { venueId } }),
     prisma.fulfillmentArea.findMany({
@@ -139,13 +161,20 @@ export async function getOverview(venueId: string) {
     entitlements: {
       areaTickets: areaTicketsEntitled,
       scaleIntegration: scaleIntegrationEntitled,
+      variableWeightBarcode: variableWeightBarcodeEntitled,
     },
     effective: {
       areaTickets: areaTicketsEntitled && Boolean(settings?.enabled),
       scales: scaleIntegrationEntitled && Boolean(scaleSettings?.enabled),
+      variableWeightBarcode: variableWeightBarcodeEntitled && Boolean(scaleSettings?.variableBarcodeEnabled),
     },
     settings: settings ?? { venueId, ...DEFAULT_SETTINGS },
-    scaleSettings: scaleSettings ?? { venueId, enabled: false },
+    scaleSettings: scaleSettings ?? {
+      venueId,
+      enabled: false,
+      variableBarcodeEnabled: false,
+      variableBarcodePrefix: '20',
+    },
     areas,
     terminals,
     scaleProfiles,
@@ -244,10 +273,82 @@ export async function updateArea(venueId: string, areaId: string, input: UpdateF
   return area
 }
 
+/**
+ * Ruta de cobro externa de un área (§caja externa fase 1). Las cuatro políticas viajan
+ * SIEMPRE juntas — el Zod ya las hace todas requeridas — porque prenderlo cambia dónde
+ * entra el dinero de esta área: Avoqado deja de crear Order/Payment para sus vales.
+ * Audita con `{ from, to }` completos: es exactamente el tipo de cambio que un owner
+ * necesita poder reconstruir después ("¿desde cuándo cobra otra caja aquí?").
+ */
+export async function updateAreaSettlementRoute(
+  venueId: string,
+  areaId: string,
+  input: UpdateAreaSettlementRouteInput,
+  performedBy?: string,
+) {
+  const previous = await prisma.fulfillmentArea.findFirst({ where: { id: areaId, venueId } })
+  if (!previous) throw new NotFoundError('Área no encontrada')
+
+  const area = await prisma.fulfillmentArea.update({
+    where: { id: areaId },
+    data: {
+      settlementRoute: input.settlementRoute as AreaSettlementRoute,
+      externalConfirmationMode: input.externalConfirmationMode as ExternalConfirmationMode,
+      externalOfflinePolicy: input.externalOfflinePolicy as ExternalOfflinePolicy,
+      externalDeliveryTracking: input.externalDeliveryTracking as ExternalDeliveryTracking,
+    },
+  })
+  await logAction({
+    staffId: performedBy ?? null,
+    venueId,
+    action: 'AREA_SETTLEMENT_ROUTE_CHANGED',
+    entity: 'FulfillmentArea',
+    entityId: area.id,
+    data: {
+      from: {
+        settlementRoute: previous.settlementRoute,
+        externalConfirmationMode: previous.externalConfirmationMode,
+        externalOfflinePolicy: previous.externalOfflinePolicy,
+        externalDeliveryTracking: previous.externalDeliveryTracking,
+      },
+      to: {
+        settlementRoute: area.settlementRoute,
+        externalConfirmationMode: area.externalConfirmationMode,
+        externalOfflinePolicy: area.externalOfflinePolicy,
+        externalDeliveryTracking: area.externalDeliveryTracking,
+      },
+    } as unknown as Prisma.InputJsonValue,
+  })
+  return area
+}
+
 export async function updateTerminal(venueId: string, terminalId: string, input: UpdateAreaTicketTerminalInput, performedBy?: string) {
-  const terminal = await prisma.terminal.findFirst({ where: { id: terminalId, venueId }, select: { id: true } })
+  const terminal = await prisma.terminal.findFirst({
+    where: { id: terminalId, venueId },
+    select: {
+      id: true,
+      canIssueAreaTickets: true,
+      canCheckoutAreaTickets: true,
+      canDeliverAreaTickets: true,
+      defaultWorkspace: true,
+    },
+  })
   if (!terminal) throw new NotFoundError('Terminal no encontrada')
   await Promise.all([assertArea(venueId, input.fulfillmentAreaId), assertScaleProfile(venueId, input.scaleProfileId)])
+
+  const capabilityWasUpdated =
+    input.canIssueAreaTickets !== undefined || input.canCheckoutAreaTickets !== undefined || input.canDeliverAreaTickets !== undefined
+  const hasAreaTicketCapability =
+    (input.canIssueAreaTickets ?? terminal.canIssueAreaTickets) ||
+    (input.canCheckoutAreaTickets ?? terminal.canCheckoutAreaTickets) ||
+    (input.canDeliverAreaTickets ?? terminal.canDeliverAreaTickets)
+  const inferredWorkspace = capabilityWasUpdated
+    ? hasAreaTicketCapability
+      ? TerminalWorkspace.AREA_OPERATIONS
+      : terminal.defaultWorkspace === TerminalWorkspace.AREA_OPERATIONS
+        ? TerminalWorkspace.STANDARD_POS
+        : terminal.defaultWorkspace
+    : undefined
 
   const updated = await prisma.terminal.update({
     where: { id: terminalId },
@@ -256,7 +357,10 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
       canIssueAreaTickets: input.canIssueAreaTickets,
       canCheckoutAreaTickets: input.canCheckoutAreaTickets,
       canDeliverAreaTickets: input.canDeliverAreaTickets,
-      defaultWorkspace: input.defaultWorkspace as TerminalWorkspace | undefined,
+      // El dashboard presenta capacidades, no una opción técnica de workspace.
+      // Mantenerlos sincronizados evita que una terminal de cremería vuelva a
+      // abrir Mesas/POS estándar después de configurarla correctamente.
+      defaultWorkspace: (input.defaultWorkspace as TerminalWorkspace | undefined) ?? inferredWorkspace,
       scaleProfileId: input.scaleProfileId,
     },
     select: {
@@ -283,11 +387,12 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
 
 export async function updateScaleSettings(venueId: string, input: UpdateScaleSettingsInput, performedBy?: string) {
   await assertVenue(venueId)
-  if (input.enabled) await assertFeature(venueId, 'SCALE_INTEGRATION')
+  if (input.enabled === true) await assertFeature(venueId, 'SCALE_INTEGRATION')
+  if (input.variableBarcodeEnabled === true) await assertFeature(venueId, 'VARIABLE_WEIGHT_BARCODE')
   const settings = await prisma.venueScaleSettings.upsert({
     where: { venueId },
-    create: { venueId, enabled: input.enabled },
-    update: { enabled: input.enabled },
+    create: { venueId, ...input },
+    update: input,
   })
   await logAction({
     staffId: performedBy ?? null,
@@ -295,7 +400,7 @@ export async function updateScaleSettings(venueId: string, input: UpdateScaleSet
     action: 'SCALE_SETTINGS_UPDATED',
     entity: 'VenueScaleSettings',
     entityId: settings.id,
-    data: { enabled: settings.enabled },
+    data: { changes: input } as unknown as Prisma.InputJsonValue,
   })
   return settings
 }
@@ -374,12 +479,55 @@ export async function updateScaleProfile(venueId: string, profileId: string, inp
   return profile
 }
 
+/**
+ * Panel de operación de la oficina. `pendingDelivery` es la CUARTA superficie del mismo
+ * criterio de elegibilidad para entregar, y la última que quedaba ciega a la ruta
+ * externa: filtraba `status: PAID`, un estado que un vale EXTERNAL nunca alcanza (lo
+ * prohíbe el CHECK `area_ticket_external_no_avoqado_circuit`, Task 2). Resultado: el
+ * panel reportaba CERO pendientes mientras el piso tenía cola.
+ *
+ * El criterio de abajo es espejo de la autoridad del dominio,
+ * `listPendingAreaTicketFulfillment` (`areaTicketV7.mobile.service.ts`), y del tool
+ * `pending_area_ticket_deliveries` del MCP — mismo `fulfillmentModeSnapshot`, misma
+ * unión explícita por ruta, mismo `YA_COBRADO_AFUERA` (importado, no recopiado). Dos
+ * diferencias a propósito, las mismas que declara el tool del MCP:
+ *   - Sin `fulfillmentAreaId`: esta vista es del venue completo (la oficina), no de la
+ *     terminal de UN área.
+ *   - Sin cursor: siempre fue un `take: 100` simple; agregar paginación aquí sería un
+ *     cambio de contrato que nadie pidió.
+ *
+ * `orderBy` pasa de `paidAt` a `issuedAt` por la misma razón que en el MCP (Task 13): un
+ * vale EXTERNAL nunca tiene `paidAt`, y con `paidAt asc` los NULL se van al final —
+ * en un venue con volumen, el `take: 100` habría cortado justo la cola externa entera.
+ */
 export async function getOperations(venueId: string) {
   await assertVenue(venueId)
   const [pendingDelivery, reconciliation, recentlyIssued] = await Promise.all([
     prisma.areaTicket.findMany({
-      where: { venueId, status: AreaTicketStatus.PAID, fulfillment: null },
-      orderBy: { paidAt: 'asc' },
+      where: {
+        venueId,
+        fulfillment: null,
+        fulfillmentModeSnapshot: { not: FulfillmentMode.IMMEDIATE },
+        OR: [
+          {
+            settlementRoute: AreaSettlementRoute.AVOQADO,
+            status: AreaTicketStatus.PAID,
+            // Un vale marcado PAID cuya orden se canceló o borró DESPUÉS ya no es una
+            // entrega pendiente — `fulfillAreaTicket` lo rechaza con
+            // `AREA_TICKET_ORDER_REFUNDED`.
+            order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
+          },
+          {
+            settlementRoute: AreaSettlementRoute.EXTERNAL,
+            status: AreaTicketStatus.ISSUED,
+            // Un área UNTRACKED entrega mirando el papel y por diseño no acumula cola;
+            // ponerla aquí le daría a la oficina una lista que nadie va a vaciar.
+            fulfillmentArea: { externalDeliveryTracking: ExternalDeliveryTracking.TRACKED },
+            externalSettlement: { status: { in: YA_COBRADO_AFUERA } },
+          },
+        ],
+      },
+      orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
       take: 100,
       include: {
         fulfillmentArea: { select: { id: true, name: true } },
@@ -407,4 +555,238 @@ export async function getOperations(venueId: string) {
     }),
   ])
   return { pendingDelivery, reconciliation, recentlyIssued }
+}
+
+// ----------------------------------------------------------------------------
+// Colas de sólo lectura de la ruta EXTERNAL (§caja externa fase 1, Task 15) — qué
+// cobros nadie confirmó y qué incidencias quedaron abiertas. Ninguna de las dos
+// funciones de abajo confirma, resuelve ni reabre nada; eso vive en
+// `areaTicketExternal.mobile.service.ts` (piso) y en el job de conciliación
+// (Task 12). Sin estas dos pantallas el trabajo que ese job abre nadie lo ve.
+// ----------------------------------------------------------------------------
+
+const EXTERNAL_QUEUE_DEFAULT_PAGE_SIZE = 25
+const EXTERNAL_QUEUE_MAX_PAGE_SIZE = 100
+
+/**
+ * Cursor estable (fecha, id), en el MISMO formato que
+ * `encodePendingCursor`/`decodePendingCursor` (`areaTicketV7.mobile.service.ts`), pero
+ * copiado localmente a propósito: esas dos son del dominio MOBILE (una terminal, un
+ * área) y estas dos son de dashboard (oficina, venue completo) — cruzar esa frontera
+ * de capas por dos funciones de cuatro líneas no vale la acoplada.
+ */
+function encodeQueueCursor(row: { sortAt: Date; id: string }): string {
+  return Buffer.from(`${row.sortAt.toISOString()}|${row.id}`).toString('base64url')
+}
+
+function decodeQueueCursor(cursor?: string | null): { sortAt: Date; id: string } | null {
+  if (!cursor) return null
+  try {
+    const [date, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|')
+    const sortAt = new Date(date)
+    if (!id || Number.isNaN(sortAt.getTime())) throw new Error('invalid')
+    return { sortAt, id }
+  } catch {
+    throw new BadRequestError('El cursor de la lista no es válido.')
+  }
+}
+
+async function assertVenueTimezone(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  if (!venue) throw new NotFoundError('Venue no encontrado')
+  // `Venue.timezone` es NOT NULL con default en el schema — el `||` es
+  // cinturón-y-tirantes (mismo patrón defensivo que el job de conciliación,
+  // Task 12), no una rama alcanzable hoy.
+  return venue.timezone || DEFAULT_TIMEZONE
+}
+
+/**
+ * Filtro de fecha venue-local, opcional en ambos extremos. A propósito NO usa
+ * `parseDbDateRange` (que rellena un default de N días cuando no mandan fecha): estas
+ * son colas de trabajo pendiente, no un reporte por periodo — un cobro sin confirmar
+ * de hace tres semanas debe seguir apareciendo si nadie filtra por fecha. Mismo
+ * blindaje de timezone que el resto del repo: `fromZonedTime` sobre un STRING, nunca
+ * `new Date('YYYY-MM-DD')` (`.claude/rules/critical-warnings.md`).
+ */
+function dateRangeFilter(
+  dateFrom: string | undefined,
+  dateTo: string | undefined,
+  timezone: string,
+): { gte?: Date; lte?: Date } | undefined {
+  if (!dateFrom && !dateTo) return undefined
+  const range: { gte?: Date; lte?: Date } = {}
+  if (dateFrom) range.gte = fromZonedTime(`${dateFrom}T00:00:00.000`, timezone)
+  if (dateTo) range.lte = fromZonedTime(`${dateTo}T23:59:59.999`, timezone)
+  return range
+}
+
+const staffFullName = (staff: { firstName: string; lastName: string } | null): string | null =>
+  staff ? `${staff.firstName} ${staff.lastName}`.trim() : null
+
+/**
+ * Cola "Cobros por confirmar". Área/estado/fecha son filtros independientes y
+ * opcionales — sin `status`, trae TODOS los estados (incluyendo CONFIRMED/
+ * NOT_CHARGED, útil como historial); el default "sólo lo pendiente" lo pide el
+ * dashboard mandando `status=PENDING`, no esta función. Paginada por cursor estable
+ * (createdAt, id) sobre el mismo índice `@@index([venueId, status, createdAt])` que
+ * ya trae el modelo.
+ *
+ * 🔴 Sólo vales VIVOS (`areaTicket.status === ISSUED`), igual que las otras tres
+ * superficies del mismo dominio: `listPendingExternalConfirmation`
+ * (`areaTicketExternal.mobile.service.ts`), el tool `pending_external_confirmations`
+ * del MCP y el job de conciliación (`areaTicketExternalReconciliation.job.ts`, que
+ * explica el porqué en su propio comentario). Sin este filtro, un vale cancelado con
+ * el settlement en PENDING quedaba como fila PERMANENTE de esta pantalla: nadie puede
+ * resolverla — la pantalla es de sólo lectura y las dos mutaciones del piso
+ * (`confirmExternalSettlement`, `markExternalNotCharged`) rechazan con
+ * `AREA_TICKET_NOT_ISSUED`.
+ *
+ * `ISSUED` (igualdad) NO recorta el historial: en la ruta EXTERNAL el vale nunca
+ * transiciona de estado — el CHECK `area_ticket_external_no_avoqado_circuit` (Task 2)
+ * sólo admite ISSUED/CANCELLED/EXPIRED, y `fulfillAreaTicket` deja explícitamente el
+ * vale en ISSUED al entregar (la entrega se lee de la EXISTENCIA del
+ * `AreaTicketFulfillment`, no de un estado). O sea que aquí `ISSUED` es exactamente "no
+ * está muerto", y un cobro ya confirmado y entregado sigue viéndose en el historial.
+ *
+ * ⚠️ Esto es la DEFENSA, no la causa raíz: `cancelAreaTicket` todavía no cierra el
+ * settlement al cancelar un vale externo, así que la fila sigue diciendo PENDING en la
+ * base — sólo deja de contaminar esta cola. Cerrarla de verdad necesita un estado nuevo
+ * que se distinga de NOT_CHARGED ("una persona afirmó que la otra caja no cobró", que
+ * es un hecho operativo distinto); está levantado en el reporte de cierre de fase.
+ */
+export async function listExternalSettlements(venueId: string, filters: ListExternalSettlementsQuery) {
+  const timezone = await assertVenueTimezone(venueId)
+  const cursor = decodeQueueCursor(filters.cursor)
+  const take = Math.max(1, Math.min(filters.pageSize ?? EXTERNAL_QUEUE_DEFAULT_PAGE_SIZE, EXTERNAL_QUEUE_MAX_PAGE_SIZE))
+  const createdAtRange = dateRangeFilter(filters.dateFrom, filters.dateTo, timezone)
+
+  const rows = await prisma.areaTicketExternalSettlement.findMany({
+    where: {
+      venueId,
+      ...(filters.status ? { status: filters.status as AreaTicketExternalSettlementStatus } : {}),
+      // 🔴 UNA sola clave `areaTicket`: el filtro de vale vivo y el de área viajan
+      // juntos a propósito. Dos claves `areaTicket` en el mismo objeto literal se
+      // pisarían EN SILENCIO (gana la última) — es el mismo bug que la revisión de la
+      // Task 10 atrapó con dos `OR` en `listPendingAreaTicketFulfillment`, y aquí
+      // habría borrado justo el filtro que arregla esta cola.
+      areaTicket: {
+        status: AreaTicketStatus.ISSUED,
+        ...(filters.areaId ? { fulfillmentAreaId: filters.areaId } : {}),
+      },
+      ...(createdAtRange ? { createdAt: createdAtRange } : {}),
+      ...(cursor ? { OR: [{ createdAt: { gt: cursor.sortAt } }, { createdAt: cursor.sortAt, id: { gt: cursor.id } }] } : {}),
+    },
+    select: {
+      id: true,
+      status: true,
+      handoffState: true,
+      confirmationMode: true,
+      referenceAmount: true,
+      externalAmount: true,
+      externalReference: true,
+      notes: true,
+      createdAt: true,
+      confirmedAt: true,
+      confirmedByStaff: { select: { firstName: true, lastName: true } },
+      terminal: { select: { id: true, name: true } },
+      areaTicket: { select: { id: true, code: true, issuedAt: true, fulfillmentArea: { select: { id: true, name: true } } } },
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: take + 1,
+  })
+
+  const hasMore = rows.length > take
+  const page = hasMore ? rows.slice(0, take) : rows
+
+  return {
+    items: page.map(row => {
+      const reference = new Prisma.Decimal(row.referenceAmount)
+      const external = row.externalAmount === null ? null : new Prisma.Decimal(row.externalAmount)
+      return {
+        id: row.id,
+        status: row.status,
+        handoffState: row.handoffState,
+        confirmationMode: row.confirmationMode,
+        // Pesos 1:1, nunca centavos. `variance` se DERIVA aquí (externalAmount menos
+        // referenceAmount) — no existe como columna (ver el comentario del modelo en
+        // schema.prisma) — con el MISMO signo y redondeo que `confirmExternalSettlement`
+        // ya expone al confirmar, para que la oficina y quien confirmó en el piso
+        // nunca vean números distintos del mismo vale.
+        referenceAmount: reference.toFixed(2),
+        externalAmount: external === null ? null : external.toFixed(2),
+        variance: external === null ? null : external.sub(reference).toFixed(2),
+        externalReference: row.externalReference,
+        notes: row.notes,
+        createdAt: row.createdAt,
+        confirmedAt: row.confirmedAt,
+        confirmedBy: staffFullName(row.confirmedByStaff),
+        terminal: row.terminal,
+        areaTicket: { id: row.areaTicket.id, code: row.areaTicket.code, issuedAt: row.areaTicket.issuedAt },
+        area: row.areaTicket.fulfillmentArea,
+      }
+    }),
+    nextCursor: hasMore ? encodeQueueCursor({ sortAt: page[page.length - 1].createdAt, id: page[page.length - 1].id }) : null,
+  }
+}
+
+/**
+ * Cola "Incidencias". Misma regla que arriba: sin `status`, trae TODAS (abiertas y
+ * cerradas); el default "sólo lo abierto" lo pide el dashboard mandando
+ * `status=OPEN`. Cursor estable (openedAt, id) sobre el mismo índice
+ * `@@index([venueId, status, kind, openedAt])` que ya trae el modelo.
+ */
+export async function listExternalIncidents(venueId: string, filters: ListExternalIncidentsQuery) {
+  const timezone = await assertVenueTimezone(venueId)
+  const cursor = decodeQueueCursor(filters.cursor)
+  const take = Math.max(1, Math.min(filters.pageSize ?? EXTERNAL_QUEUE_DEFAULT_PAGE_SIZE, EXTERNAL_QUEUE_MAX_PAGE_SIZE))
+  const openedAtRange = dateRangeFilter(filters.dateFrom, filters.dateTo, timezone)
+
+  const rows = await prisma.areaTicketExternalIncident.findMany({
+    where: {
+      venueId,
+      ...(filters.kind ? { kind: filters.kind as AreaTicketExternalIncidentKind } : {}),
+      ...(filters.status ? { status: filters.status as AreaTicketExternalIncidentStatus } : {}),
+      ...(filters.areaId ? { areaTicket: { fulfillmentAreaId: filters.areaId } } : {}),
+      ...(openedAtRange ? { openedAt: openedAtRange } : {}),
+      ...(cursor ? { OR: [{ openedAt: { gt: cursor.sortAt } }, { openedAt: cursor.sortAt, id: { gt: cursor.id } }] } : {}),
+    },
+    select: {
+      id: true,
+      kind: true,
+      status: true,
+      detail: true,
+      openedAt: true,
+      occurrenceCount: true,
+      reopenedAt: true,
+      resolvedAt: true,
+      resolution: true,
+      resolvedByStaff: { select: { firstName: true, lastName: true } },
+      areaTicket: { select: { id: true, code: true, fulfillmentArea: { select: { id: true, name: true } } } },
+    },
+    orderBy: [{ openedAt: 'asc' }, { id: 'asc' }],
+    take: take + 1,
+  })
+
+  const hasMore = rows.length > take
+  const page = hasMore ? rows.slice(0, take) : rows
+
+  return {
+    items: page.map(row => ({
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      // Ya viene en pesos, formateada por quien la abrió (confirmar/declarar-no-cobrado
+      // en el piso, o el job de conciliación) — se reenvía tal cual, sin recalcularla.
+      detail: row.detail,
+      openedAt: row.openedAt,
+      occurrenceCount: row.occurrenceCount,
+      reopenedAt: row.reopenedAt,
+      resolvedAt: row.resolvedAt,
+      resolution: row.resolution,
+      resolvedBy: staffFullName(row.resolvedByStaff),
+      areaTicket: row.areaTicket ? { id: row.areaTicket.id, code: row.areaTicket.code } : null,
+      area: row.areaTicket?.fulfillmentArea ?? null,
+    })),
+    nextCursor: hasMore ? encodeQueueCursor({ sortAt: page[page.length - 1].openedAt, id: page[page.length - 1].id }) : null,
+  }
 }

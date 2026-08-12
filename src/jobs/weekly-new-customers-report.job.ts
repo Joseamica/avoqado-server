@@ -25,6 +25,7 @@ import logger from '../config/logger'
 import emailService from '../services/email.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { env } from '../config/env'
+import { scheduleJob } from '../observability/jobContext'
 
 const TIMEZONE = 'America/Mexico_City'
 const PAID_TIERS: PlanTier[] = [PlanTier.PRO, PlanTier.PREMIUM, PlanTier.ENTERPRISE]
@@ -52,7 +53,8 @@ export class WeeklyNewCustomersReportJob {
   constructor() {
     // Monday 8:07 AM Mexico City — offset off the hour/half-hour marks per
     // .claude/rules/cron-jobs.md (avoid the every-job-fires-at-:00 stampede).
-    this.job = new CronJob(
+    this.job = scheduleJob(
+      'weekly-new-customers-report',
       '7 8 * * 1', // 08:07 every Monday
       async () => {
         await this.runNow()

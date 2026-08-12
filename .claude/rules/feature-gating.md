@@ -22,6 +22,52 @@ ANTES de escribir código o plan**:
 5. **Si es de paga: ¿entra al split de white-label?** Registrar en `PERMISSION_TO_FEATURE_MAP` (`src/services/access/access.service.ts:73`)
    para que el filtrado por feature access en modo white-label funcione.
 
+6. **¿Cómo se PRENDE?** — el tier dice "¿lo pagó?", no "¿lo quiere prendido?". Ver "Activación" abajo. Sin esta respuesta el feature queda
+   con el founder de switch humano.
+
+## Activación: el switch (eje distinto del tier)
+
+Cuatro candados que se componen con **AND**, no se sustituyen. Caso vivo en el schema: `VenueSettings.cashReconciliationEnabled` = _"PRO +
+explicit opt-in"_.
+
+| Eje                  | Contesta                     | Quién lo prende      | Dónde vive                                      |
+| -------------------- | ---------------------------- | -------------------- | ----------------------------------------------- |
+| Tier                 | ¿lo pagó?                    | comercial (Stripe)   | `Feature` / `VenueFeature`                      |
+| Módulo               | ¿se lo habilitamos nosotros? | Avoqado (superadmin) | `Module` / `VenueModule` / `OrganizationModule` |
+| **Ajuste del venue** | **¿el cliente lo quiere?**   | **el owner/admin**   | **`VenueSettings`**                             |
+| Permiso              | ¿este usuario puede?         | el venue, por rol    | `PERMISSION_CATALOG`                            |
+
+### 1. ¿Merece switch? — la app NO se construye por toggles
+
+Un switch se justifica **solo si puedes nombrar dos clientes reales que quieran lo contrario** (uno quiere cierre de turno automático, otro
+no → `autoCloseShifts`). Si no puedes nombrar los dos, es comportamiento core y va **sin** switch: cada toggle duplica los caminos que hay
+que probar y las combinaciones en las que el producto puede romperse.
+
+### 2. ¿Dónde vive el switch?
+
+- **Canónico: SIEMPRE en `avoqado-web-dashboard`**, escribiendo el registro del server. Sin excepción.
+- **Espejo en Android + iOS: solo si se toca DURANTE el turno, desde el piso** (no desde la oficina). Si se espeja va en **las dos** apps
+  (la regla android↔iOS aplica igual) y edita el **mismo** registro del server — nunca una copia local. Costo real de espejar: 2
+  implementaciones + días de rollout, contra minutos del dashboard.
+- 🔴 **Nunca solo en la DB.** Un feature cuyo único switch es un `UPDATE` en Postgres está **incompleto** — deja al founder de switch humano
+  para cada cliente que lo pida.
+
+Referencia externa: Toast configura todo en Toast Web y **publica** a las terminales; Square deja editar desde la app solo un subconjunto
+acotado (ajustes del _modo_) y el resto solo en Dashboard. Ninguno hace "todo configurable en todos lados".
+
+### 3. El default (ON u OFF) lo decides tú, no el founder
+
+Mide el riesgo, **decláralo en el reporte** y sigue. **Pregunta al founder solo si toca dinero, fiscal, permisos, stock o algo
+irreversible** — ahí el default es **OFF** salvo que él diga lo contrario (precedente: `includeInGlobal` → `false` por riesgo de
+doble-facturación). Todo lo demás lo decides sin preguntar.
+
+### 4. Apagado se VE y se EXPLICA
+
+🔴 **Nunca desaparecer en silencio.** Ese es exactamente el bug de `Venue.status='ONBOARDING'`, que borra el venue y sus TPVs del dashboard
+de org sin avisar. Con el candado cerrado: punto de entrada **visible**, estado apagado, **qué hacer** para prenderlo, y **a quién
+pedírselo** si el usuario no tiene el permiso. Aplica a los cuatro ejes; solo cambia el texto — tier → upsell al plan; módulo → "pídelo a
+Avoqado"; ajuste → "actívalo en Ajustes"; permiso → "pídeselo a tu administrador".
+
 ## Por qué importa
 
 Avoqado tiene **dos sistemas paralelos** de gating (Module y Feature) con semántica distinta:

@@ -10,10 +10,13 @@
  */
 
 import prisma from '../../utils/prismaClient'
-import { NotFoundError } from '../../errors/AppError'
+import { ForbiddenError, NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 import { VenueSettings, Prisma } from '@prisma/client'
+import { CASH_RECONCILIATION_FEATURE } from '../access/cashReconciliationAccess.service'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { withSerializableRetry } from '../../utils/serializableRetry'
 
 /**
  * Default settings for new venues
@@ -27,6 +30,7 @@ export const DEFAULT_VENUE_SETTINGS = {
   autoCloseShifts: false,
   shiftDuration: 8,
   enableShifts: true, // Enable/disable shift system for venue
+  cashReconciliationEnabled: false, // PRO + explicit opt-in; no current venue is activated
   requirePinLogin: true,
   // Propiedad de mesa (PRO) — apagado por default: cualquier staff con permiso
   // puede tocar cualquier mesa (conducta histórica).
@@ -118,7 +122,11 @@ export async function getVenueSettings(venueId: string): Promise<VenueSettings> 
  * @param updates - Partial settings to update
  * @returns Updated VenueSettings object
  */
-export async function updateVenueSettings(venueId: string, updates: Prisma.VenueSettingsUpdateInput): Promise<VenueSettings> {
+export async function updateVenueSettings(
+  venueId: string,
+  updates: Prisma.VenueSettingsUpdateInput,
+  actorStaffId?: string,
+): Promise<VenueSettings> {
   // Verify venue exists
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
@@ -135,6 +143,10 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
     autoCloseShifts: DEFAULT_VENUE_SETTINGS.autoCloseShifts,
     shiftDuration: DEFAULT_VENUE_SETTINGS.shiftDuration,
     enableShifts: DEFAULT_VENUE_SETTINGS.enableShifts,
+    cashReconciliationEnabled:
+      typeof updates.cashReconciliationEnabled === 'boolean'
+        ? updates.cashReconciliationEnabled
+        : DEFAULT_VENUE_SETTINGS.cashReconciliationEnabled,
     requirePinLogin: DEFAULT_VENUE_SETTINGS.requirePinLogin,
     // Attendance — lateness detection
     expectedCheckInTime: DEFAULT_VENUE_SETTINGS.expectedCheckInTime,
@@ -162,6 +174,51 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
     inventoryDeduction: DEFAULT_VENUE_SETTINGS.inventoryDeduction,
     googleReviewLink: (updates.googleReviewLink as string | null | undefined) ?? null,
     // TPV Settings removed - now stored per-terminal in Terminal.config.settings
+  }
+
+  const hasCashReconciliationUpdate = Object.prototype.hasOwnProperty.call(updates, 'cashReconciliationEnabled')
+  if (hasCashReconciliationUpdate) {
+    const requestedValue = updates.cashReconciliationEnabled === true
+    // Only the OFF -> ON direction needs a paid entitlement check. OFF must remain available after
+    // downgrade, and lookup failures must surface as retryable rather than masquerading as a 403.
+    if (requestedValue) {
+      const entitled = await venueHasFeatureAccess(venueId, CASH_RECONCILIATION_FEATURE)
+      if (!entitled) {
+        throw new ForbiddenError('Cash reconciliation requires an eligible PRO plan or explicit grant.', 'CASH_RECONCILIATION_REQUIRES_PRO')
+      }
+    }
+
+    // The read, mutation, and audit share a serializable transaction. Concurrent toggles either
+    // observe the committed predecessor on retry or fail retryably; they cannot commit a stale
+    // previousValue in the audit trail.
+    return withSerializableRetry(async tx => {
+      const previousSettings = await tx.venueSettings.findUnique({
+        where: { venueId },
+        select: { id: true, cashReconciliationEnabled: true },
+      })
+
+      const settings = await tx.venueSettings.upsert({
+        where: { venueId },
+        create: createData,
+        update: updates,
+      })
+
+      await tx.activityLog.create({
+        data: {
+          staffId: actorStaffId ?? null,
+          venueId,
+          action: 'CASH_RECONCILIATION_SETTING_UPDATED',
+          entity: 'VenueSettings',
+          entityId: settings.id,
+          data: {
+            previousValue: previousSettings?.cashReconciliationEnabled ?? false,
+            newValue: requestedValue,
+          },
+        },
+      })
+
+      return settings
+    })
   }
 
   // Upsert settings (create if not exists, update if exists)

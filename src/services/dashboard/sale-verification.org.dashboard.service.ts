@@ -2,7 +2,12 @@ import { SaleVerificationStatus, SaleVerificationRejectionReason, PaymentMethod,
 import { fromZonedTime } from 'date-fns-tz'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
-import { reviewSaleVerification as reviewSaleVerificationVenue, type ReviewDecision } from './sale-verification.dashboard.service'
+import {
+  reviewSaleVerification as reviewSaleVerificationVenue,
+  PROMOTER_FEEDBACK_MIN_CHARS,
+  PROMOTER_FEEDBACK_REQUIRED_MESSAGE,
+  type ReviewDecision,
+} from './sale-verification.dashboard.service'
 import { monthBucketSql, dayBucketSql, weekLabelSql, isoWeekKeySql, buildRangeConditions } from './sale-verification.org.sql'
 import { venueCivilDate } from '../../utils/venueDateKeys'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
@@ -1273,6 +1278,10 @@ export async function editOrgSaleVerification(
     paymentForm?: EditableForm
     isPortabilidad?: boolean
     status?: SaleVerificationStatus
+    /** Comentario que el promotor lee en su TPV. OBLIGATORIO (>=5 chars) si el estado resultante es FAILED. */
+    reviewNotes?: string
+    /** Motivos categorizados (opcionales) para el reporte a Walmart. */
+    rejectionReasons?: SaleVerificationRejectionReason[]
     reason: string
   },
 ) {
@@ -1299,6 +1308,8 @@ export async function editOrgSaleVerification(
       paymentId: true,
       status: true,
       isPortabilidad: true,
+      reviewNotes: true,
+      rejectionReasons: true,
       payment: { select: { id: true, amount: true, method: true } },
       venue: { select: { organizationId: true } },
     },
@@ -1316,6 +1327,25 @@ export async function editOrgSaleVerification(
     method: existing.payment?.method ?? null,
   }
   const nextStatus: SaleVerificationStatus = params.status ?? existing.status
+
+  // Candado "Revisar por promotor": la venta no puede quedar en FAILED sin un
+  // comentario que le diga al promotor QUÉ corregir. Se satisface con el texto
+  // entrante O con el ya guardado — así, editar el monto de una venta que ya
+  // traía motivo no obliga a reescribirlo, pero los renglones legacy en blanco
+  // sí se tienen que rellenar la primera vez que alguien los toca.
+  let failedFeedback: { reviewNotes: string; rejectionReasons: SaleVerificationRejectionReason[] } | null = null
+  if (nextStatus === 'FAILED') {
+    const incoming = params.reviewNotes?.trim() ?? ''
+    const carried = existing.reviewNotes?.trim() ?? ''
+    const notes = incoming || carried
+    if (notes.length < PROMOTER_FEEDBACK_MIN_CHARS) {
+      throw createServiceError(PROMOTER_FEEDBACK_REQUIRED_MESSAGE, 400)
+    }
+    failedFeedback = {
+      reviewNotes: notes,
+      rejectionReasons: params.rejectionReasons ?? existing.rejectionReasons,
+    }
+  }
 
   const updated = await prisma.$transaction(async tx => {
     // 1. Payment (monto / forma de pago). Only rewrite `method` when the user
@@ -1337,13 +1367,20 @@ export async function editOrgSaleVerification(
     // Only touch reviewer metadata when the status actually TRANSITIONS — editing
     // data on an already-COMPLETED sale must not rewrite who/when it was approved.
     const statusChanged = nextStatus !== existing.status
-    const reviewMeta = !statusChanged
-      ? {}
-      : nextStatus === 'PENDING'
-        ? { reviewedById: null, reviewedAt: null, reviewNotes: null, rejectionReasons: [] }
-        : nextStatus === 'COMPLETED'
-          ? { reviewedById: params.editedById, reviewedAt: new Date(), rejectionReasons: [] }
-          : { reviewedById: params.editedById, reviewedAt: new Date(), reviewNotes: null, rejectionReasons: [] } // FAILED / REJECTED: stamp reviewer, clear stale notes/reasons (P1 doesn't collect a promoter note on edit)
+    // El sello de revisor sólo se reescribe cuando el estado TRANSICIONA — editar
+    // el monto de una venta ya revisada no debe cambiar quién/cuándo la revisó.
+    const reviewerStamp = statusChanged ? { reviewedById: params.editedById, reviewedAt: new Date() } : {}
+    const reviewMeta =
+      nextStatus === 'FAILED'
+        ? // "Revisar por promotor": el comentario SIEMPRE viaja (garantizado arriba).
+          { ...reviewerStamp, ...failedFeedback! }
+        : !statusChanged
+          ? {}
+          : nextStatus === 'PENDING'
+            ? { reviewedById: null, reviewedAt: null, reviewNotes: null, rejectionReasons: [] }
+            : nextStatus === 'COMPLETED'
+              ? { ...reviewerStamp, rejectionReasons: [] }
+              : { ...reviewerStamp, reviewNotes: null, rejectionReasons: [] } // REJECTED (terminal): sin feedback de corrección
 
     const sv = await tx.saleVerification.update({
       where: { id: existing.id },

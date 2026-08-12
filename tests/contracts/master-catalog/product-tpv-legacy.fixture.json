@@ -1,0 +1,88 @@
+{
+  "surface": "tpv",
+  "contractVersion": "legacy-pre-h1a",
+  "list": {
+    "status": 200,
+    "body": {
+      "message": "Products for venue <venue-id>",
+      "data": [
+        {
+          "id": "<product-id>",
+          "venueId": "<venue-id>",
+          "name": "Café americano",
+          "description": null,
+          "sku": "LEGACY-001",
+          "gtin": null,
+          "categoryId": "<category-id>",
+          "price": "42.5",
+          "cost": null,
+          "taxRate": "0.16",
+          "type": "FOOD",
+          "imageUrl": null,
+          "displayOrder": 3,
+          "featured": false,
+          "tags": [],
+          "allergens": [],
+          "calories": null,
+          "prepTime": null,
+          "cookingNotes": null,
+          "isAlcoholic": false,
+          "kitchenName": null,
+          "abbreviation": null,
+          "duration": null,
+          "durationMinutes": null,
+          "maxParticipants": null,
+          "layoutConfig": null,
+          "trackInventory": false,
+          "inventoryMethod": null,
+          "unit": null,
+          "soldByWeight": false,
+          "active": true,
+          "availableFrom": null,
+          "availableUntil": null,
+          "deletedAt": null,
+          "deletedBy": null,
+          "externalId": null,
+          "externalData": null,
+          "originSystem": "AVOQADO",
+          "syncStatus": "NOT_REQUIRED",
+          "lastSyncAt": null,
+          "satProductKey": null,
+          "satUnitKey": null,
+          "objetoImp": "02",
+          "printStationId": null,
+          "creditCost": null,
+          "upfrontPolicy": "inherit",
+          "isDemo": false,
+          "upsellEnabled": false,
+          "category": {
+            "id": "<category-id>",
+            "venueId": "<venue-id>",
+            "name": "Bebidas",
+            "color": null,
+            "active": true,
+            "displayOrder": 1
+          },
+          "inventory": null,
+          "modifierGroups": [],
+          "recipe": null,
+          "availableQuantity": null,
+          "availableQuantityExact": null,
+          "limitingIngredient": null,
+          "insufficientIngredients": null
+        }
+      ],
+      "correlationId": "<correlation-id>"
+    }
+  },
+  "detail": null,
+  "create": null,
+  "update": null,
+  "unsupportedOperations": ["detail", "create", "update"],
+  "error": {
+    "status": 500,
+    "body": {
+      "message": "Ocurrió un error inesperado en el servidor."
+    }
+  }
+}

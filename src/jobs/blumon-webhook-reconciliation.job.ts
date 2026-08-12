@@ -11,6 +11,9 @@ import {
   REVERSAL_OPERATION_TYPES,
   reconcileBlumonEvent,
 } from '../services/tpv/blumon-webhook.service'
+import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { scheduleJob } from '../observability/jobContext'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 /**
  * Blumon TPV webhook async reconciliation job
@@ -42,13 +45,14 @@ export class BlumonWebhookReconciliationJob {
   private job: CronJob | null = null
 
   /** Run every 30 seconds — sub-minute is fine, the work per pass is small. */
-  private readonly CRON_PATTERN = '*/30 * * * * *'
+  private readonly CRON_PATTERN = DATABASE_JOB_SCHEDULES.blumonWebhookReconciliation
+  private isRunning = false
 
   /** Cap per pass to avoid long transactions if a backlog builds up. */
   private readonly BATCH_SIZE = 100
 
   constructor() {
-    this.job = new CronJob(this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
+    this.job = scheduleJob('blumon-webhook-reconciliation', this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
   }
 
   start(): void {
@@ -68,6 +72,11 @@ export class BlumonWebhookReconciliationJob {
   }
 
   private async run(): Promise<void> {
+    if (this.isRunning) {
+      logger.warn('[Blumon recon] tick skipped — previous run still in progress')
+      return
+    }
+    this.isRunning = true
     const startedAt = Date.now()
     try {
       const reconciled = await this.reconcilePending()
@@ -84,6 +93,8 @@ export class BlumonWebhookReconciliationJob {
         error: err instanceof Error ? err.message : err,
         stack: err instanceof Error ? err.stack : undefined,
       })
+    } finally {
+      this.isRunning = false
     }
   }
 
@@ -93,24 +104,28 @@ export class BlumonWebhookReconciliationJob {
    */
   private async reconcilePending(): Promise<number> {
     const cutoff = new Date(Date.now() - BLUMON_WEBHOOK_PENDING_TTL_MS)
-    const pending = await prisma.providerEventLog.findMany({
-      where: {
-        provider: ProviderType.PAYMENT_PROCESSOR,
-        status: EventStatus.PENDING,
-        createdAt: { gte: cutoff },
-        // Only Blumon TPV events have eventId starting with 'blumon-tpv-'.
-        // Use a startsWith to leave room for other providers in the same table.
-        eventId: { startsWith: 'blumon-tpv-' },
-        // Reversals are informational — they must never enter the sale
-        // reconciliation path. Written as an explicit exclusion (rather than
-        // `type: 'VENTA'`) so rows typed 'UNKNOWN' or null — which ARE sales —
-        // keep being reconciled.
-        OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }],
-      },
-      take: this.BATCH_SIZE,
-      orderBy: { createdAt: 'asc' },
-      select: { id: true, payload: true },
-    })
+    const pending = await retry(
+      () =>
+        prisma.providerEventLog.findMany({
+          where: {
+            provider: ProviderType.PAYMENT_PROCESSOR,
+            status: EventStatus.PENDING,
+            createdAt: { gte: cutoff },
+            // Only Blumon TPV events have eventId starting with 'blumon-tpv-'.
+            // Use a startsWith to leave room for other providers in the same table.
+            eventId: { startsWith: 'blumon-tpv-' },
+            // Reversals are informational — they must never enter the sale
+            // reconciliation path. Written as an explicit exclusion (rather than
+            // `type: 'VENTA'`) so rows typed 'UNKNOWN' or null — which ARE sales —
+            // keep being reconciled.
+            OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }],
+          },
+          take: this.BATCH_SIZE,
+          orderBy: { createdAt: 'asc' },
+          select: { id: true, payload: true },
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'blumon-webhook-reconciliation.findPending' },
+    )
 
     if (pending.length === 0) return 0
 

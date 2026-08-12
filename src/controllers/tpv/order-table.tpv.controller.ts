@@ -1,17 +1,34 @@
 import { Request, Response } from 'express'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as serviceChargeMobileService from '../../services/mobile/service-charge.mobile.service'
+import * as tableTpvService from '../../services/tpv/table.tpv.service'
 import logger from '../../config/logger'
 
 /**
  * Ciclo de orden de mesa bajo `/tpv` (Plan B Task 4, 2026-07-27).
  *
- * Los 4 handlers de este archivo son wrappers delgados sobre los MISMOS servicios
+ * Los handlers de este archivo son wrappers delgados sobre los MISMOS servicios
  * puros que usa `/mobile` (`order.mobile.service.ts` / `service-charge.mobile.service.ts`):
  * reciben `(venueId, orderId, …, staffId?)` y no tocan `req`/`authContext`, así que
  * no hay lógica que extraer ni duplicar — solo leer el input y delegar. Reusarlos
  * desde acá deja `/mobile` byte-idéntico (iOS/Android se desarrollan en paralelo
  * contra ese contrato en otras sesiones).
+ *
+ * Excepción: `mergeOrders` y `cancelOrder` SÍ agregan un paso propio de este
+ * archivo después de delegar — `tableTpvService.reconcileTableAfterOrderRemoved`
+ * (Fix 1, "mesa fantasma", 2026-08-07). El release de mesa del servicio
+ * compartido vive en la zona FROZEN y tiene el MISMO hueco en ambos casos (no
+ * libera mesas cuya última cuenta viene de un SPLIT_ORDER — `cancelOrder`'s
+ * propio lookup usa `Table.currentOrderId === orderId`, idéntico al de
+ * `mergeOrders`); no se puede tocar `/mobile` para arreglarlo, así que se
+ * reconcilia acá. Ver el comentario en `reconcileTableAfterOrderRemoved` para
+ * el detalle.
+ *
+ * `cancelOrder` (POST orders/:orderId/cancel, 2026-08-07) es la ÚNICA acción
+ * de mesa que antes NO tenía ruta online bajo `/tpv` — viajaba siempre como
+ * intent (ver KDoc de `TablesRepository.cancelOrder` en avoqado-tpv, ahora
+ * desactualizado). Se agregó para poder cerrar el hueco de mesa fantasma
+ * también en cancelación, no solo en fusión.
  *
  * `openTable` (POST tables/:tableId/open) NO vive en este archivo: es un
  * re-export del controller de `/mobile` en `table.tpv.controller.ts` (mismo
@@ -22,8 +39,9 @@ import logger from '../../config/logger'
  * de cuenta o un cobro aplicado.
  *
  * Los servicios YA escriben su propio `ActivityLog` (`ORDER_SPLIT`,
- * `ORDER_SPLIT_BY_SEAT`, `ORDER_SERVICE_CHARGE_APPLIED`; `mergeOrders` audita vía
- * el mismo mecanismo) — no se agrega una segunda capa de auditoría aquí.
+ * `ORDER_SPLIT_BY_SEAT`, `ORDER_SERVICE_CHARGE_APPLIED`, `ORDER_CANCELLED`;
+ * `mergeOrders` audita vía el mismo mecanismo) — no se agrega una segunda capa
+ * de auditoría aquí.
  */
 
 /**
@@ -94,9 +112,71 @@ export async function mergeOrders(req: Request, res: Response): Promise<void> {
 
     const result = await orderMobileService.mergeOrders(venueId, orderId, sourceOrderId, staffId)
 
-    res.status(200).json({ success: true, data: result })
+    // 🔴 Fix 1 (zombie table, 2026-08-07 — see
+    // .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/zombie-table-and-staff-picker.md):
+    // the shared mergeOrders above (FROZEN /mobile) only frees the source table
+    // when Table.currentOrderId === sourceOrderId, which a SPLIT_ORDER/SPLIT_BY_SEAT
+    // child order never satisfies. Reconcile from THIS (/tpv) layer, unconditionally,
+    // by the order's own tableId — see table.tpv.service.ts::reconcileTableAfterOrderRemoved.
+    // Never let floor-plan bookkeeping fail an already-committed merge: on error, fall
+    // back to the shared service's own (possibly stale) tableFreed rather than 500ing.
+    let tableFreed = Boolean((result as any)?.tableFreed)
+    try {
+      const reconciled = await tableTpvService.reconcileTableAfterOrderRemoved(venueId, sourceOrderId)
+      tableFreed = reconciled.tableFreed
+    } catch (reconcileError: any) {
+      logger.error(`[ORDER-TABLE TPV] merge: table reconciliation failed for source ${sourceOrderId}: ${reconcileError.message}`)
+    }
+
+    res.status(200).json({ success: true, data: { ...result, tableFreed } })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] merge: ${error.message}`)
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+  }
+}
+
+/**
+ * POST /tpv/venues/:venueId/orders/:orderId/cancel
+ * "Cancelar cuenta": cancela una orden sin pagar y libera (o re-apunta) su
+ * mesa. Body: { reason?: string }
+ *
+ * Delega en el MISMO `orderMobileService.cancelOrder` que usa `/mobile` y el
+ * reducer de replay offline (`CANCEL_ORDER` intent) — rechaza (400) si la
+ * orden ya está pagada, o (409) si hay un cobro de terminal en curso que
+ * todavía podría aterrizar sobre esta orden.
+ *
+ * 🔴 Fix 1 (zombie table, 2026-08-07 — mismo patrón que `mergeOrders` arriba):
+ * el propio release de mesa de `cancelOrder` (FROZEN /mobile) busca la mesa
+ * por `Table.currentOrderId === orderId`, el mismo lookup con el mismo hueco
+ * que `mergeOrders` tenía — una orden nacida de SPLIT_ORDER/SPLIT_BY_SEAT
+ * nunca tiene `currentOrderId` apuntándole, así que cancelar la ÚLTIMA cuenta
+ * abierta de una mesa cuando esa cuenta es un hijo de split deja la mesa
+ * OCCUPIED con openOrders: [] para siempre. Se reconcilia acá, unconditionally,
+ * por el `tableId` propio de la orden — ver
+ * `table.tpv.service.ts::reconcileTableAfterOrderRemoved`. Nunca se deja que
+ * un fallo de reconciliación tumbe una cancelación ya aplicada: si
+ * `reconcileTableAfterOrderRemoved` truena, se reporta `tableFreed: false`
+ * (desconocido/posiblemente stale) en vez de 500ear una cancelación exitosa.
+ */
+export async function cancelOrder(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, orderId } = req.params
+    const { reason } = req.body || {}
+    const staffId = (req as any).authContext?.userId as string | undefined
+
+    await orderMobileService.cancelOrder(venueId, orderId, typeof reason === 'string' ? reason : undefined, staffId)
+
+    let tableFreed = false
+    try {
+      const reconciled = await tableTpvService.reconcileTableAfterOrderRemoved(venueId, orderId)
+      tableFreed = reconciled.tableFreed
+    } catch (reconcileError: any) {
+      logger.error(`[ORDER-TABLE TPV] cancel: table reconciliation failed for order ${orderId}: ${reconcileError.message}`)
+    }
+
+    res.status(200).json({ success: true, data: { tableFreed } })
+  } catch (error: any) {
+    logger.error(`[ORDER-TABLE TPV] cancel: ${error.message}`)
     res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
   }
 }
@@ -127,6 +207,38 @@ export async function applyServiceCharge(req: Request, res: Response): Promise<v
     res.status(200).json({ success: true, data: result })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] service-charges: ${error.message}`)
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+  }
+}
+
+/**
+ * DELETE /tpv/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId
+ *
+ * Quita un cobro por servicio YA aplicado. Cierra el hueco de paridad con Android
+ * (`avoqado-tpv/.superpowers/.../paridad-android-tpv.md` hallazgo #4, 2026-08-06):
+ * el servicio existía (`service-charge.mobile.service.ts::removeServiceCharge`)
+ * pero la ruta DELETE solo estaba montada bajo `/mobile` — la TPV, aislada a
+ * `/tpv`, no tenía cómo llamarla y su checkout quedó sin "quitar cargo".
+ *
+ * DESHACER es online-only A PROPÓSITO (regla offline §5): aplicar un cargo se
+ * puede encolar; quitarlo no. Por eso NO hay intent `REMOVE_SERVICE_CHARGE` en
+ * el reducer — esta ruta es el único camino, y sin red el cliente lo dice en
+ * vez de encolar.
+ *
+ * El id viene en el PATH (no body), así que no aplica el guard de undefined de
+ * `applyServiceCharge`: el servicio hace findFirst por [id, orderId] y rechaza
+ * si no existe. El actor sale del token, nunca del body.
+ */
+export async function removeServiceCharge(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, orderId, orderServiceChargeId } = req.params
+    const staffId = (req as any).authContext?.userId as string | undefined
+
+    const result = await serviceChargeMobileService.removeServiceCharge(venueId, orderId, orderServiceChargeId, staffId)
+
+    res.status(200).json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error(`[ORDER-TABLE TPV] remove service-charge: ${error.message}`)
     res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
   }
 }

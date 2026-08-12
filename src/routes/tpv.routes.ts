@@ -98,6 +98,7 @@ import {
 } from '../schemas/tpv.schema'
 import * as goalResolutionService from '../services/dashboard/commission/goal-resolution.service'
 import * as productService from '../services/dashboard/product.dashboard.service'
+import { toLegacyProductPayload } from '../utils/legacyProductPayload'
 import * as rolePermissionService from '../services/dashboard/rolePermission.service'
 import emailService from '../services/email.service'
 import { moduleService } from '../services/modules/module.service'
@@ -105,6 +106,12 @@ import { serializedInventoryService } from '../services/serialized-inventory/ser
 import { simRegistrationService } from '../services/serialized-inventory/simRegistration.service'
 import * as orderTpvService from '../services/tpv/order.tpv.service'
 import prisma from '../utils/prismaClient'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  assertLegacyProductReferencesForVenue,
+  resolveLegacyCatalogActor,
+  writeLegacyServiceProductCreationAuditForVenue,
+} from '../services/master-catalog/catalogGovernance.service'
 
 const router = express.Router()
 
@@ -1303,7 +1310,11 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *     tags:
  *       - TPV - Shifts
  *     summary: Close an existing shift
- *     description: Close an existing shift with cash reconciliation (works with both integrated POS and standalone mode)
+ *     description: >-
+ *       Atomically closes one shift. New opted-in clients send cashReconciliationAction with a
+ *       canonical Decimal(10,2) countedCash string. Existing top-level and nested cashDeclared
+ *       bodies remain supported with their legacy semantics. Reconciliation problems never block
+ *       the close; inspect the additive reconciliation outcome. Concurrent close attempts return 409.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -1330,8 +1341,7 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *             properties:
  *               cashDeclared:
  *                 type: number
- *                 description: Cash amount declared at closing
- *                 default: 0
+ *                 description: Legacy cash declaration (active Desktop/old clients; semantics unchanged)
  *               cardDeclared:
  *                 type: number
  *                 description: Card payment amount declared
@@ -1347,6 +1357,29 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *               notes:
  *                 type: string
  *                 description: Optional closing notes
+ *               closeData:
+ *                 type: object
+ *                 description: Legacy nested declaration shape used by older clients
+ *                 properties:
+ *                   cashDeclared:
+ *                     type: number
+ *                   cardDeclared:
+ *                     type: number
+ *                   vouchersDeclared:
+ *                     type: number
+ *                   otherDeclared:
+ *                     type: number
+ *                   notes:
+ *                     type: string
+ *               cashReconciliationAction:
+ *                 type: string
+ *                 enum: [COUNTED, SKIPPED]
+ *                 description: Explicit additive reconciliation action; when present it owns the request
+ *               countedCash:
+ *                 type: string
+ *                 pattern: '^(?:0|[1-9]\\d{0,7})(?:\\.\\d{1,2})?$'
+ *                 example: '6000.00'
+ *                 description: Total physical drawer cash including starting float; required only for COUNTED
  *     responses:
  *       200:
  *         description: Shift closed successfully
@@ -1383,6 +1416,20 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *                       type: number
  *                     cardDeclared:
  *                       type: number
+ *                     cashDifference:
+ *                       type: string
+ *                       nullable: true
+ *                       example: "0.00"
+ *                 reconciliation:
+ *                   type: object
+ *                   properties:
+ *                     outcome:
+ *                       type: string
+ *                       enum: [APPLIED, SKIPPED, LEGACY_APPLIED, IGNORED_DISABLED, IGNORED_INVALID, IGNORED_OVERFLOW, NOT_REQUESTED]
+ *                     countedCash:
+ *                       type: string
+ *                     cashDifference:
+ *                       type: string
  *       400:
  *         description: Bad request - Shift already closed
  *       401:
@@ -1391,6 +1438,8 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *         description: Forbidden - insufficient role permissions
  *       404:
  *         description: Shift not found
+ *       409:
+ *         description: Another request is closing this shift (code SHIFT_CLOSE_IN_PROGRESS)
  *       500:
  *         description: Internal server error
  */
@@ -3500,6 +3549,26 @@ router.get(
 )
 
 /**
+ * Get staff eligible for order/table reassignment — the ASSIGN_ORDER staff
+ * picker (Fix 2, "staff picker", 2026-08-07 — see
+ * .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/zombie-table-and-staff-picker.md).
+ *
+ * 🔴 Deliberately NOT `tpv-time-entries:read` (the route above, MANAGER+): that
+ * gate protects the time-clock MANAGER view (full attendance history). The
+ * ASSIGN_ORDER action itself only needs `orders:update` (WAITER has it by
+ * default — src/lib/permissions.ts), so a waiter who CAN reassign a table
+ * could not previously even see who to reassign it to. Same permission as the
+ * action it serves, on purpose — and `getAssignableStaff` returns only name +
+ * on-break flag, never a clock-in/out timestamp.
+ */
+router.get(
+  '/venues/:venueId/staff/assignable',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  timeEntryController.getAssignableStaff,
+)
+
+/**
  * @openapi
  * /tpv/venues/{venueId}/tables:
  *   get:
@@ -3739,9 +3808,10 @@ router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, valida
 // TABLE SERVICE — ORDER LIFECYCLE (Plan B Task 4, 2026-07-27)
 // ============================================
 // Ciclo de orden de mesa: separar cuenta, dividir por puesto, fusionar cuentas,
-// cobros por servicio, y abrir mesa. `split`/`split-by-seat`/`merge`/`service-charges`
-// son wrappers delgados en order-table.tpv.controller.ts sobre los MISMOS servicios
-// puros que usa /mobile (order.mobile.service.ts / service-charge.mobile.service.ts).
+// cancelar cuenta, cobros por servicio, y abrir mesa. `split`/`split-by-seat`/
+// `merge`/`cancel`/`service-charges` son wrappers delgados en
+// order-table.tpv.controller.ts sobre los MISMOS servicios puros que usa
+// /mobile (order.mobile.service.ts / service-charge.mobile.service.ts).
 // `openTable` es un re-export del controller de /mobile (ver table.tpv.controller.ts).
 //
 // Cadena de middleware — espejo EXACTO de /mobile por nombre de permiso
@@ -3749,8 +3819,12 @@ router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, valida
 // checkFeatureAccess (para que una sonda cross-tenant 403 por tenant, no por plan)
 // y checkPermission AL FINAL. A diferencia de las rutas genéricas de orden de
 // arriba (items/guest, deliberadamente NO gateadas por TABLE_SERVICE porque
-// también sirven OrderTypes sin mesa — ver task-2-report.md), estas 5 rutas SÍ
+// también sirven OrderTypes sin mesa — ver task-2-report.md), estas 6 rutas SÍ
 // llevan checkFeatureAccess('TABLE_SERVICE'): son EXCLUSIVAS de servicio a mesa.
+// `cancel` además lleva checkPermission('orders:cancel') (no 'orders:update' —
+// mismo permiso que exige el reducer offline para CANCEL_ORDER) y
+// checkTableOwnership('order'), espejo exacto de la ruta /mobile equivalente
+// (DELETE /mobile/venues/:venueId/orders/:orderId).
 //
 // NO se agregó discounts/comp aquí — /tpv YA tiene esa familia completa
 // (discounts/apply, discounts/manual, discounts/coupon, discounts/auto,
@@ -3799,6 +3873,34 @@ router.post(
 )
 
 /**
+ * POST /tpv/venues/{venueId}/orders/{orderId}/cancel
+ *
+ * "Cancelar cuenta" — la ÚNICA acción de mesa que hasta ahora NO tenía ruta
+ * online bajo `/tpv` (2026-08-07, ver
+ * .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/tpv-cancel-order-route.md):
+ * la TPV la mandaba SIEMPRE como intent (`CANCEL_ORDER`) aunque estuviera en
+ * línea, porque no había otro camino — verificado contra este archivo por
+ * `TablesRepository.cancelOrder` en avoqado-tpv. Body: { reason?: string }
+ *
+ * Cadena de permiso — mismo permiso que `requiredPermissionForIntent('CANCEL_ORDER')`
+ * en `sync.mobile.service.ts` (`orders:cancel`, NO `orders:update` como
+ * split/merge/service-charges: cancelar es más destructivo que actualizar, y
+ * el reducer offline ya lo trata distinto) + `checkTableOwnership('order')`,
+ * espejo EXACTO de la ruta `/mobile` equivalente (`DELETE
+ * /mobile/venues/:venueId/orders/:orderId`) y de la propia `assertOwnership`
+ * que corre el reducer antes de aplicar CUALQUIER `CANCEL_ORDER` reproducido.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/cancel',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:cancel'),
+  checkTableOwnership('order'),
+  orderTableController.cancelOrder,
+)
+
+/**
  * POST /tpv/venues/{venueId}/orders/{orderId}/service-charges
  * Aplica un cobro por servicio del catálogo (propina automática por comensales,
  * descorche, etc.) a la cuenta abierta. Body: { serviceChargeId: string }
@@ -3810,6 +3912,24 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   orderTableController.applyServiceCharge,
+)
+
+/**
+ * DELETE /tpv/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId
+ *
+ * Espejo de la ruta /mobile equivalente (mobile.routes.ts, DELETE service-charges):
+ * misma cadena INCLUIDO checkTableOwnership('order') — deshacer un cargo en la
+ * mesa de otro mesero es exactamente el cruce que ese guard existe para impedir.
+ * Ver el KDoc del controller: deshacer es online-only a propósito.
+ */
+router.delete(
+  '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  checkTableOwnership('order'),
+  orderTableController.removeServiceCharge,
 )
 
 /**
@@ -5499,7 +5619,7 @@ router.get(
 
       res.status(200).json({
         message: `Product found for barcode ${barcode}`,
-        data: product,
+        data: toLegacyProductPayload(product),
         correlationId: req.correlationId,
       })
     } catch (error) {
@@ -5602,48 +5722,55 @@ router.get(
  *       403:
  *         description: Forbidden (lacks menu:create permission)
  */
-router.post(
-  '/venues/:venueId/products/quick-add',
-  authenticateTokenMiddleware,
-  checkPermission('menu:create'),
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { venueId } = req.params
-      const { barcode, name, price, categoryId, trackInventory } = req.body
+export async function createTpvQuickAddProductHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const { barcode, name, price, categoryId, trackInventory } = req.body
 
-      // Validate required fields
-      if (!barcode || !name || price === undefined || !categoryId) {
-        return next(new AppError('Missing required fields: barcode, name, price, and categoryId are required', 400))
-      }
+    // Validate required fields
+    if (!barcode || !name || price === undefined || !categoryId) {
+      return next(new AppError('Missing required fields: barcode, name, price, and categoryId are required', 400))
+    }
 
-      logger.info(`📦 [TPV Quick Add] Creating product from barcode scan`, {
+    logger.info(`📦 [TPV Quick Add] Creating product from barcode scan`, {
+      correlationId: req.correlationId,
+      venueId,
+      barcode,
+      name,
+      price,
+      categoryId,
+    })
+
+    // Check if product already exists with this barcode
+    const existingProduct = await productService.getProductByBarcode(venueId, barcode)
+    if (existingProduct) {
+      logger.warn(`⚠️ [TPV Quick Add] Product already exists with barcode: ${barcode}`, {
         correlationId: req.correlationId,
-        venueId,
-        barcode,
-        name,
-        price,
-        categoryId,
+        existingProductId: existingProduct.id,
       })
 
-      // Check if product already exists with this barcode
-      const existingProduct = await productService.getProductByBarcode(venueId, barcode)
-      if (existingProduct) {
-        logger.warn(`⚠️ [TPV Quick Add] Product already exists with barcode: ${barcode}`, {
-          correlationId: req.correlationId,
-          existingProductId: existingProduct.id,
-        })
+      return res.status(409).json({
+        message: `Product already exists with barcode ${barcode}`,
+        data: toLegacyProductPayload(existingProduct),
+        correlationId: req.correlationId,
+      })
+    }
 
-        return res.status(409).json({
-          message: `Product already exists with barcode ${barcode}`,
-          data: existingProduct,
-          correlationId: req.correlationId,
-        })
-      }
-
-      // Create product using Prisma directly
-      const product = await prisma.product.create({
+    // Create product using Prisma directly
+    const product = await prisma.$transaction(async tx => {
+      const authContext = req.authContext!
+      const actor = resolveLegacyCatalogActor(authContext.userId, Boolean(authContext.isImpersonating))
+      await assertLegacyCatalogGovernanceForVenue(tx, {
+        venueId,
+        operation: 'CREATE',
+        willBeVendable: true,
+        actor,
+      })
+      await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId })
+      const created = await tx.product.create({
         data: {
           venueId,
+          createdById: actor.type === 'HUMAN' ? actor.staffId : null,
           sku: barcode, // ✅ Store barcode as SKU
           name,
           price: new Decimal(price),
@@ -5657,26 +5784,37 @@ router.post(
           inventory: true,
         },
       })
+      if (actor.type === 'SERVICE') {
+        await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
+      }
+      return created
+    })
 
-      logger.info(`✅ [TPV Quick Add] Product created successfully: ${product.name} (${product.id})`, {
-        correlationId: req.correlationId,
-        productId: product.id,
-        barcode,
-      })
+    logger.info(`✅ [TPV Quick Add] Product created successfully: ${product.name} (${product.id})`, {
+      correlationId: req.correlationId,
+      productId: product.id,
+      barcode,
+    })
 
-      res.status(201).json({
-        message: 'Product created successfully',
-        data: product,
-        correlationId: req.correlationId,
-      })
-    } catch (error) {
-      logger.error(`❌ [TPV Quick Add] Error creating product`, {
-        correlationId: req.correlationId,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      })
-      next(error)
-    }
-  },
+    res.status(201).json({
+      message: 'Product created successfully',
+      data: toLegacyProductPayload(product),
+      correlationId: req.correlationId,
+    })
+  } catch (error) {
+    logger.error(`❌ [TPV Quick Add] Error creating product`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+}
+
+router.post(
+  '/venues/:venueId/products/quick-add',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  createTpvQuickAddProductHandler,
 )
 
 /**

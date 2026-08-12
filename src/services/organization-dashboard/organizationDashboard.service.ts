@@ -1267,6 +1267,7 @@ class OrganizationDashboardService {
     startDate?: string,
     endDate?: string,
     filterVenueId?: string,
+    scopedVenueIds?: string[],
   ): Promise<OrgActivityFeed> {
     let rangeStart: Date
     let rangeEnd: Date | undefined
@@ -1280,12 +1281,14 @@ class OrganizationDashboardService {
       rangeStart = venueStartOfDay()
     }
 
-    // Get venues (filtered or all)
+    // Get venues (filtered or all). An explicit empty scopedVenueIds array means
+    // the caller has no active venue assignments and must receive no events.
+    const venueIdFilter = scopedVenueIds !== undefined ? { in: scopedVenueIds } : filterVenueId
     const venues = await prisma.venue.findMany({
       where: {
         organizationId: orgId,
         status: 'ACTIVE',
-        ...(filterVenueId ? { id: filterVenueId } : {}),
+        ...(venueIdFilter !== undefined ? { id: venueIdFilter } : {}),
       },
       select: { id: true, name: true },
     })

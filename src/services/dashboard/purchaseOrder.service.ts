@@ -493,12 +493,43 @@ export async function getPurchaseOrders(
         },
       },
     },
-    orderBy: {
-      orderDate: 'desc',
-    },
+    // `id` is the tie-breaker, not decoration: `orderDate` repeats across orders placed the
+    // same day, and a non-unique sort hands back a different arrangement per call — which is
+    // how a paginated or exported listing loses rows without anyone noticing.
+    orderBy: [{ orderDate: 'desc' }, { id: 'desc' }],
   })
 
   return purchaseOrders as any
+}
+
+/**
+ * Row count for the purchase-order export, using the SAME filters as `getPurchaseOrders`.
+ *
+ * It counts LINES, not orders, because the export ships one row per line — the cap governs
+ * rows in the file, and an order-level count would wave through a 200-order file with 40,000
+ * lines in it. The controller counts before building so it can refuse a file that would be
+ * truncated; a truncated export reads as complete, which is the failure nobody reports.
+ */
+export async function countPurchaseOrdersForExport(
+  venueId: string,
+  filters?: {
+    status?: PurchaseOrderStatus[]
+    supplierId?: string
+    startDate?: Date
+    endDate?: Date
+  },
+): Promise<number> {
+  return prisma.purchaseOrderItem.count({
+    where: {
+      purchaseOrder: {
+        venueId,
+        ...(filters?.status && filters.status.length > 0 && { status: { in: filters.status } }),
+        ...(filters?.supplierId && { supplierId: filters.supplierId }),
+        ...(filters?.startDate && { orderDate: { gte: filters.startDate } }),
+        ...(filters?.endDate && { orderDate: { lte: filters.endDate } }),
+      },
+    },
+  })
 }
 
 /**
@@ -606,6 +637,15 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
 
   if (!supplier) {
     throw new AppError(`Supplier with ID ${data.supplierId} not found`, 404)
+  }
+
+  // Deactivating a supplier is the ONLY real way to stop buying from them: deleting one is
+  // impossible the moment it has an order (deleteSupplier refuses), so if this gate does not
+  // check `active`, the deactivation means nothing and we keep buying from someone who should
+  // no longer supply us. A different message from "not found": whoever keys the order in has
+  // to be able to tell a wrong id apart from a purchasing decision.
+  if (!supplier.active || supplier.deletedAt) {
+    throw new AppError(`El proveedor "${supplier.name}" está dado de baja. Reactívalo en Proveedores si quieres volver a comprarle.`, 400)
   }
 
   await verificarRenglonesDelVenue(venueId, data.items)
@@ -1562,6 +1602,25 @@ async function applyProductItemReceiveStatusInTx(
   }
 
   const saldoAnterior = inventario.currentStock
+
+  // 🔴 A reversal cannot take back stock that has already been sold. The raw-material path
+  // guards this per batch (`newQtyInRmUnit < consumedTotal`); resale merchandise has no
+  // batches, so the exact equivalent is that the balance must never go below zero:
+  // 100 arrived, 40 sold, someone cancels the receipt → -60 on the shelf, which is not a
+  // number, it is a corrupted inventory that then poisons valuation and reordering.
+  //
+  // Cancelling and returning are different documents on purpose (this is how Odoo models it
+  // too): cancelling says "this never happened", returning says "it happened and we sent it
+  // back". Refusing here is what keeps that distinction honest.
+  if (saldoAnterior.add(delta).lessThan(0)) {
+    throw new AppError(
+      `No se puede revertir la recepción de "${producto.name}": ya se vendió parte de la mercancía. ` +
+        `Quedan ${saldoAnterior.toString()} ${producto.unit} y esta operación descontaría ${delta.abs().toString()}. ` +
+        `Registra una devolución al proveedor en vez de cancelar la recepción.`,
+      409,
+    )
+  }
+
   await tx.inventory.update({
     where: { id: inventario.id },
     data: {
@@ -2000,7 +2059,12 @@ export async function receiveAllItems(
 /**
  * Mark all items in a purchase order as NOT_PROCESSED
  */
-export async function receiveNoItems(venueId: string, purchaseOrderId: string, data: ReceiveNoItemsDto): Promise<PurchaseOrder> {
+export async function receiveNoItems(
+  venueId: string,
+  purchaseOrderId: string,
+  data: ReceiveNoItemsDto,
+  staffId?: string,
+): Promise<PurchaseOrder> {
   // Fetch purchase order
   const purchaseOrder = await prisma.purchaseOrder.findUnique({
     where: { id: purchaseOrderId, venueId },
@@ -2022,15 +2086,31 @@ export async function receiveNoItems(venueId: string, purchaseOrderId: string, d
   }
 
   await prisma.$transaction(async tx => {
-    // Update all items to NOT_PROCESSED
-    await tx.purchaseOrderItem.updateMany({
-      where: { purchaseOrderId },
-      data: {
-        receiveStatus: PurchaseOrderItemStatus.NOT_PROCESSED,
-        quantityReceived: 0,
-        notes: data.reason || 'Items not processed',
-      },
-    })
+    // 🔴 This used to be a blind `updateMany` that set every line to NOT_PROCESSED with
+    // `quantityReceived: 0` and NEVER touched stock. If goods had already been received, the
+    // warehouse kept them while the system declared they never arrived — the two silently
+    // stopped agreeing, and nothing surfaced it.
+    //
+    // Routing each line through `applyItemReceiveStatusInTx` instead of reimplementing the
+    // reversal is the whole point: that function ALREADY derives the delta from real state
+    // (live batches for raw materials, inventory movements for resale merchandise) rather
+    // than from `quantityReceived` — a mutable metadata column this very function zeroes
+    // out. Computing against that column is what made "receive 5 → receive none → receive
+    // all" leave 10 in stock for 5 delivered. It also already refuses when the goods were
+    // consumed, which is the case that must never silently drive stock negative.
+    //
+    // Sequential, not Promise.all: they share the transaction client, and two lines of the
+    // same product would race on the same inventory row.
+    for (const item of purchaseOrder.items) {
+      await applyItemReceiveStatusInTx(
+        tx,
+        venueId,
+        purchaseOrderId,
+        item.id,
+        { receiveStatus: PurchaseOrderItemStatus.NOT_PROCESSED, notes: data.reason || 'Items not processed' },
+        staffId,
+      )
+    }
 
     // Update purchase order status to CANCELLED
     await tx.purchaseOrder.update({
