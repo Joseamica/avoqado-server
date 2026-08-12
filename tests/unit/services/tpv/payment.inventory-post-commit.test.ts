@@ -247,7 +247,24 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
 
       // Y un mensaje en español, listo para pintarse, que NO miente sobre el dinero.
       expect(result.inventoryWarning.message).toMatch(/Hamburguesa/)
-      expect(result.inventoryWarning.message).toMatch(/cobro/i)
+    })
+
+    /**
+     * 🔴 ESTA es la propiedad que evita el doble cobro, y por eso se ancla al
+     * PRINCIPIO del string y no con un `/cobro/i` suelto.
+     *
+     * Un `toMatch(/cobro/i)` lo satisface también "Error de inventario, el cobro no
+     * se pudo completar" — o sea justo la mentira que manda al cajero a pasar la
+     * tarjeta otra vez. La primera frase es lo único que el POS garantiza pintar si
+     * trunca; tiene que CONFIRMAR el cobro, no negarlo.
+     */
+    it('🔴 la PRIMERA frase confirma el cobro — un mensaje que lo niegue rompe este test', async () => {
+      const result: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      expect(result.inventoryWarning.message).toMatch(/^El cobro se registró correctamente/)
+      // Y por si alguien reescribe el prefijo: la primera frase no puede negar el cobro.
+      const primeraFrase = result.inventoryWarning.message.split('.')[0]
+      expect(primeraFrase).not.toMatch(/\bno\b|error|falló|fallo|rechaz|cancel/i)
     })
 
     it('grita 🚨 y deja ActivityLog para que un humano lo revise', async () => {
@@ -304,10 +321,33 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
           expect.objectContaining({
             productId: 'prod-1',
             productName: 'Hamburguesa',
+            // El founder pidió los 4 datos: `requested` también viaja por esta puerta.
+            requested: 5,
             reason: expect.stringMatching(/insufficient stock/i),
           }),
         ]),
       )
+    })
+
+    it('🚨 esta puerta también grita: es la que deja el dinero adentro con la orden en PENDING', async () => {
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      const alertas = alertasDeInventario()
+      expect(alertas).not.toHaveLength(0)
+      expect(alertas[0][1]).toEqual(
+        expect.objectContaining({
+          orderId: ORDER_ID,
+          venueId: VENUE_ID,
+          paymentId: 'payment-1',
+          stage: 'DEDUCTION',
+        }),
+      )
+    })
+
+    it('la primera frase también confirma el cobro por esta puerta', async () => {
+      const result: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      expect(result.inventoryWarning.message).toMatch(/^El cobro se registró correctamente/)
     })
 
     it('REGRESIÓN: la compensación existente NO se toca — restock, ActivityLog y orden a PENDING', async () => {
@@ -368,6 +408,32 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
         expect.objectContaining({ venueId: VENUE_ID, productId: 'prod-1', quantity: 2 }),
       )
       expect(inventoryRestockService.restockItem).not.toHaveBeenCalledWith(expect.objectContaining({ productId: 'prod-2' }))
+    })
+  })
+
+  describe('TOCTOU completo: las DOS puertas disparan por el mismo producto', () => {
+    it('el cajero ve UNA línea por producto, con el número disponible del pre-flight', async () => {
+      const order = makeOrder()
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+      // Pre-flight PRE-cobro pasa; el POST-cobro ve el faltante (available: 1)…
+      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValueOnce(STOCK_OK).mockResolvedValue(STOCK_AGOTADO)
+      // …y acto seguido la deducción revienta por lo mismo (available: null).
+      ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockRejectedValue(
+        new Error('Insufficient stock. Needed: 5, Available: 1'),
+      )
+
+      const result: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      // Un producto = una línea. Sin dedup el cajero veía "Hamburguesa" dos veces.
+      expect(result.inventoryWarning.issues).toHaveLength(1)
+      expect(result.inventoryWarning.issues[0]).toEqual(
+        expect.objectContaining({ productId: 'prod-1', requested: 5, available: 1 }),
+      )
+      // Y el mensaje tampoco la repite
+      expect(result.inventoryWarning.message.match(/Hamburguesa/g)).toHaveLength(1)
+      // El estado operativo manda: el stock NO se movió
+      expect(result.inventoryWarning.inventoryDeducted).toBe(false)
     })
   })
 

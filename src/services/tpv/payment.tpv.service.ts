@@ -196,7 +196,24 @@ export interface OrderInventoryWarning {
  * si el POS sólo alcanza a pintar una línea, esa línea no puede ser la que lo
  * mande a pasar la tarjeta otra vez.
  */
-function buildInventoryWarning(issues: OrderInventoryWarning['issues'], inventoryDeducted: boolean): OrderInventoryWarning {
+function buildInventoryWarning(rawIssues: OrderInventoryWarning['issues'], inventoryDeducted: boolean): OrderInventoryWarning {
+  // En un TOCTOU real las DOS puertas reportan el MISMO producto: el pre-flight
+  // con el `available` numérico, y la deducción con `available: null` y su error.
+  // Sin esto el cajero ve la hamburguesa dos veces y no sabe si son dos problemas.
+  // Gana la primera (el pre-flight, que trae el número), y si a ella le faltaba el
+  // dato disponible, lo rellena la segunda. Un producto = una línea.
+  const porProducto = new Map<string, OrderInventoryWarning['issues'][number]>()
+  for (const issue of rawIssues) {
+    const previo = porProducto.get(issue.productId)
+    if (!previo) {
+      porProducto.set(issue.productId, { ...issue })
+      continue
+    }
+    if (previo.available == null && issue.available != null) previo.available = issue.available
+    if (previo.requested == null && issue.requested != null) previo.requested = issue.requested
+  }
+  const issues = [...porProducto.values()]
+
   const detalle = issues
     .map(issue => {
       const disponible = issue.available == null ? 'sin disponibilidad confirmada' : `disponibles ${issue.available}`
