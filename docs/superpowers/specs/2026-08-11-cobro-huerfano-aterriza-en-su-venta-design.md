@@ -108,15 +108,36 @@ lo resolvería distinto.
 
 ---
 
-## Parked: reembolso por TPV
+## ~~Parked~~ HECHO (2026-08-12): reembolso por TPV
 
-Idea del founder el mismo día. **Hoy no existe ninguna ruta de reembolso hacia la terminal**: el canal `terminal:*` sólo lleva cobros,
-cancelaciones e impresión (verificado por búsqueda en `src/`). Y la regla vigente es que la devolución a tarjeta sólo se hace a mano en la
-terminal, porque no hay API.
+Idea del founder el mismo día, construida el 2026-08-12. Lo que estaba parkeado era una pregunta —"¿el SDK puede devolver?"— y la respuesta
+resultó ser **sí, y de sobra**:
 
-La propuesta usa infraestructura existente: el mismo canal del cobro podría llevar un `terminal:refund_request`, y la TPV lo mostraría igual
-que un cobro — **sólo cuando el usuario elija explícitamente "reembolso por TPV"**, nunca automático.
+- **AngelPay** expone `refundTransaction` (ya integrado vía `AngelPaySdkPostOperationsAdapter`).
+- **Blumon** expone `CancelIcc` + `ValidateCancel` para devolver transacciones COMPLETED por operationID.
+- Y la TPV **ya tenía el flujo entero hecho** (`RefundConfirmation`), con los dos procesadores resueltos, entrando por el `paymentId` de
+  Avoqado.
 
-**Lo que hay que averiguar antes de prometerlo:** si el SDK de Nexgo/AngelPay expone una operación de devolución disparable así. Si no la
-expone, el techo es mandarle una _instrucción visible_ al cajero en la pantalla de la terminal — que ya sería mejor que hoy, pero es otra
-cosa y hay que decirlo con ese nombre.
+Lo único que faltaba era el canal: `terminal:*` llevaba cobros, cancelaciones e impresión, y ahora lleva un cuarto evento.
+
+**Lo construido** (server `5f1bebbb` · tpv `cdc8b4a` · android `70785cb` · ios `6ee0dce`):
+
+```
+POS "Abrir en la terminal" → POST /mobile/venues/:id/terminals/:id/refund-request
+                           → terminal:refund_request → la TPV abre ESE cobro
+                           → una persona lo confirma con la tarjeta
+                           → la TPV registra el reembolso por su ruta de siempre
+```
+
+🔑 **El evento abre una pantalla; no autoriza que se mueva dinero.** El ACK contesta `opened`/`rejected`, nunca "se devolvió": esperar a que
+alguien pase la tarjeta son minutos con el cajero congelado. Por lo mismo el POS **no** registra el reembolso — lo hace la TPV, o se contaría
+dos veces — y el éxito en pantalla dice explícitamente que todavía no se ha devuelto nada.
+
+Como abrir una pantalla es idempotente, no hace falta fila durable de arbitraje: un evento perdido o duplicado, en el peor caso, abre una
+pantalla de más.
+
+**Tier:** ninguno nuevo (decisión del founder, 2026-08-12) — el reembolso ya existía en todos los planes y ya se podía hacer a mano en el
+aparato; esto sólo evita la caminata. El control sigue siendo el permiso `payments:refund`.
+
+**Lo que sigue sin existir:** una devolución **automática** sin nadie en la terminal. No es una limitación del canal sino del medio: la
+tarjeta tiene que estar presente. No lo vendas como "reembolso remoto".
