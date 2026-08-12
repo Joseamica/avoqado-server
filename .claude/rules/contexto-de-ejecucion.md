@@ -5,22 +5,21 @@ venue y a qué usuario pertenece sin que su sitio de llamada pase nada. Todo viv
 
 ## Qué hay
 
-| Archivo               | Qué hace                                                                |
-| --------------------- | ----------------------------------------------------------------------- |
-| `executionContext.ts` | El `AsyncLocalStorage`: `runWithContext`, `getContext`, `enrichContext` |
-| `logContext.ts`       | Formato de winston que inyecta el contexto en **todo** registro         |
-| `correlationId.ts`    | `resolveCorrelationId` / `sanitizeCorrelationId` + `CORRELATION_HEADER` |
-| `entrypoint.ts`       | `normalizeEntrypoint`: ids → `:id`, borra el query string               |
-| `jobContext.ts`       | `scheduleJob` / `scheduleCron`: reemplazo directo de los schedulers     |
-| `socketContext.ts`    | `onWithContext`: reemplazo directo de `socket.on`                       |
+| Archivo               | Qué hace                                                                  |
+| --------------------- | ------------------------------------------------------------------------- |
+| `executionContext.ts` | El `AsyncLocalStorage`: `runWithContext`, `getContext`, `enrichContext`   |
+| `logContext.ts`       | Formato de winston que inyecta el contexto en **todo** registro           |
+| `correlationId.ts`    | `resolveCorrelationId` / `sanitizeCorrelationId` + `CORRELATION_HEADER`   |
+| `entrypoint.ts`       | `normalizeEntrypoint`: ids → `:id`, borra el query string                 |
+| `jobContext.ts`       | `scheduleJob` / `scheduleCron`: reemplazo directo de los schedulers       |
+| `socketContext.ts`    | `onWithContext`: reemplazo directo de `socket.on`                         |
 | `venueNames.ts`       | `getVenueName`: cache venueId → **nombre**, síncrono y tolerante a fallos |
-| `preserveContext.ts`  | Envuelve un middleware que rompe el contexto (multer)                   |
+| `preserveContext.ts`  | Envuelve un middleware que rompe el contexto (multer)                     |
 
 ## 🔴 El `venueId` solo no sirve: la línea lleva el NOMBRE
 
-Un cuid (`cms1qzg6o02jxi32bkm2ta66g`) no le dice nada a quien lee una alerta — obligaba a
-abrir la DB para saber de qué negocio era el error. Por eso el contexto lleva también
-`venueName`, y **ese es el campo que se lee y se filtra**:
+Un cuid (`cms1qzg6o02jxi32bkm2ta66g`) no le dice nada a quien lee una alerta — obligaba a abrir la DB para saber de qué negocio era el
+error. Por eso el contexto lleva también `venueName`, y **ese es el campo que se lee y se filtra**:
 
 ```bash
 grep "venueName: 'Testarudo Cafe'" "$LOG"
@@ -28,13 +27,12 @@ grep "venueName: 'Testarudo Cafe'" "$LOG"
 
 Cómo se resuelve, y por qué es seguro en el camino de autenticación:
 
-- **Lectura síncrona, cero I/O.** `primeVenueNames()` llena el cache al arrancar (`server.ts`);
-  después el refresco es perezoso y en segundo plano. La observabilidad NO puede añadir
-  latencia a un request que va a cobrar.
-- **Un fallo de DB es invisible.** Nunca lanza, y un refresco fallido **sigue sirviendo el
-  último nombre conocido** — un nombre viejo es infinitamente mejor que una alerta anónima.
-- **Un job que reporta por venue usa el MISMO campo `venueName`**, nunca uno propio (`venue`,
-  `venueNombre`…), o deja de poderse filtrar junto con el resto.
+- **Lectura síncrona, cero I/O.** `primeVenueNames()` llena el cache al arrancar (`server.ts`); después el refresco es perezoso y en segundo
+  plano. La observabilidad NO puede añadir latencia a un request que va a cobrar.
+- **Un fallo de DB es invisible.** Nunca lanza, y un refresco fallido **sigue sirviendo el último nombre conocido** — un nombre viejo es
+  infinitamente mejor que una alerta anónima.
+- **Un job que reporta por venue usa el MISMO campo `venueName`**, nunca uno propio (`venue`, `venueNombre`…), o deja de poderse filtrar
+  junto con el resto.
 
 ## 🔴 Middleware que consume el body (multer) ⇒ `preserveContext`
 
@@ -43,15 +41,12 @@ Cómo se resuelve, y por qué es seguro en el camino de autenticación:
 ✅ preserveContext(documentUpload.single('file'))
 ```
 
-Multer reanuda el request desde el stream del body, cuyo recurso async es **anterior** al
-contexto que abrió el request logger: `next()` corre fuera de él y todo lo de abajo pierde el
-venue. Medido en prod (2026-08-12): de 139 requests en 15 min, los **2** sin `source` ni
-`entrypoint` eran las 2 subidas de KYC, y su `logger.error` salió sin tenant — justo el log
-que alguien iba a leer.
+Multer reanuda el request desde el stream del body, cuyo recurso async es **anterior** al contexto que abrió el request logger: `next()`
+corre fuera de él y todo lo de abajo pierde el venue. Medido en prod (2026-08-12): de 139 requests en 15 min, los **2** sin `source` ni
+`entrypoint` eran las 2 subidas de KYC, y su `logger.error` salió sin tenant — justo el log que alguien iba a leer.
 
-`tests/unit/observability/multipartContext.test.ts` tiene un guardrail que recorre `src/` y
-falla si aparece un `.single/.array/.fields/.any` sin envolver. La lista no se puede ampliar
-en silencio.
+`tests/unit/observability/multipartContext.test.ts` tiene un guardrail que recorre `src/` y falla si aparece un
+`.single/.array/.fields/.any` sin envolver. La lista no se puede ampliar en silencio.
 
 ## Cómo se abre el contexto en cada camino
 

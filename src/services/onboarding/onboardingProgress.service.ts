@@ -8,6 +8,7 @@
 import { OnboardingType, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { uploadFileToStorage, buildStoragePath } from '@/services/storage.service'
+import { sendKycDocumentUploadedNotification } from '@/services/resend.service'
 import logger from '@/config/logger'
 
 // Types
@@ -488,6 +489,28 @@ export async function uploadKycDocument(
   })
 
   logger.info(`  ✅ Saved document URL to onboarding progress: ${urlField}`)
+
+  // Mail the document to the onboarding inbox as it arrives, attached. Same reasoning as the
+  // venue-side upload: the inbox should be enough to act on, without opening the dashboard.
+  // Fire-and-forget and AFTER the save — a mail failure can never lose a stored document.
+  const organization = await prisma.organization.findUnique({
+    where: { id: organizationId },
+    select: { name: true },
+  })
+
+  void sendKycDocumentUploadedNotification({
+    venueName: organization?.name || 'Alta en proceso',
+    venueId: organizationId,
+    venueSlug: organizationId,
+    origin: 'onboarding',
+    documentKey,
+    documentLabel: cleanName.replace(/_/g, ' '),
+    kycStatus: 'ONBOARDING',
+    fileName: `${cleanName}.${extension}`,
+    fileBuffer: file.buffer,
+    mimeType: file.mimetype,
+    downloadUrl,
+  }).catch(error => logger.error('KYC document notification failed', { organizationId, documentKey, error }))
 
   return {
     documentKey,
