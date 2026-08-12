@@ -150,11 +150,18 @@ describe('CatalogGovernance — real fence ordering and rollback', () => {
         actor: human(fixture),
       }),
     )
+    // Attach the rejection matcher in the SAME tick `writer` is created —
+    // not after the lock-wait poll / release / `transition` completion
+    // below. jest-circus flags a promise that rejects before anything is
+    // listening as an unhandled rejection and fails the test with the raw
+    // error, even though the `.rejects` below would have matched it
+    // correctly once `transition` releases the row lock.
+    const writerRejection = expect(writer).rejects.toMatchObject({ statusCode: 422, code: 'CATALOG_GOVERNANCE_REQUIRED' })
 
     await h().waitForLockWaiter(h().names.writerTwo, 'row')
     release()
     await transition
-    await expect(writer).rejects.toMatchObject({ statusCode: 422, code: 'CATALOG_GOVERNANCE_REQUIRED' })
+    await writerRejection
   })
 
   it('rolls back rollout and write-once cutoff when audit fails in the transition transaction', async () => {

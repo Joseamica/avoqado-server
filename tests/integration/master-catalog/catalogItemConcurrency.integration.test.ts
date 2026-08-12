@@ -176,6 +176,13 @@ describe('CatalogItem/reference shared mutation lock — real concurrency', () =
       .finally(() => {
         secondSettled = true
       })
+    // Attach the rejection matcher in the SAME tick `second` is created —
+    // not after the advisory-wait poll / release / `first` completion below.
+    // jest-circus flags a promise that rejects before anything is listening
+    // as an unhandled rejection and fails the test with the raw error, even
+    // though the `.rejects` below would have matched it correctly once
+    // `releaseFirst()` unblocks it.
+    const secondRejection = expect(second).rejects.toMatchObject({ statusCode: 422, code: 'CATALOG_FAMILY_HIERARCHY_INVALID' })
     await competingReady
     // WHY: Merely scheduling the second transaction could pass without a lock.
     // PostgreSQL must report tx2 waiting specifically on an advisory lock while
@@ -186,7 +193,7 @@ describe('CatalogItem/reference shared mutation lock — real concurrency', () =
     await first
     expect(advisoryWaitObserved).toBe(true)
     expect(settledWhileFirstHeld).toBe(false)
-    await expect(second).rejects.toMatchObject({ statusCode: 422, code: 'CATALOG_FAMILY_HIERARCHY_INVALID' })
+    await secondRejection
 
     await expect(
       client.catalogFamily.findMany({

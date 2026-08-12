@@ -531,13 +531,20 @@ describe('H1A aggregate invariant concurrency', () => {
         .finally(() => {
           requestSettled = true
         })
-      await delay(75)
-      expect(requestSettled).toBe(false)
-      await firstRequester.query('COMMIT')
-      await expect(competingRequest).rejects.toMatchObject({
+      // Attach the rejection matcher in the SAME tick `competingRequest` is
+      // created — not after the `delay`/COMMIT below. jest-circus flags a
+      // promise that rejects before anything is listening as an unhandled
+      // rejection and fails the test with the raw pg error, even though the
+      // `.rejects` below would have matched it correctly once COMMIT
+      // unblocks it.
+      const competingRequestRejection = expect(competingRequest).rejects.toMatchObject({
         code: '23505',
         constraint: 'CatalogVenueOverride_one_requested_field_key',
       })
+      await delay(75)
+      expect(requestSettled).toBe(false)
+      await firstRequester.query('COMMIT')
+      await competingRequestRejection
     } finally {
       await Promise.allSettled([firstRequester.query('ROLLBACK'), secondRequester.query('ROLLBACK')])
       await Promise.all([firstRequester.end(), secondRequester.end()])
