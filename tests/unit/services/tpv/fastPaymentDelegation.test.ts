@@ -35,6 +35,33 @@
  * ventas, validación de staff, sockets, costo de transacción, comisión, auto-reorder,
  * recibo digital e inventario. Todas están además envueltas en try/catch en el propio
  * código de producción ("no tumbar el pago por un efecto secundario").
+ *
+ * 🔴 Ronda 4 (2026-08-12) — POR QUÉ el throw POST-commit ya NO se simula con inventario:
+ *
+ * Estos tests nacieron usando el `BadRequestError` del pre-flight de inventario como
+ * vehículo para "truena DESPUÉS de comitear". Ese throw se ELIMINÓ a propósito en otra
+ * rama: era un doble cobro VIVO (el POS pintaba error de inventario sobre un cobro que
+ * sí pasó, el cajero volvía a pasar la tarjeta con llaves NUEVAS y la deduplicación no
+ * lo atrapaba). Hoy el faltante vuelve como `inventoryWarning` en la respuesta 201 y no
+ * lanza — ver `payment.inventory-post-commit.test.ts`.
+ *
+ * La protección de ESTA suite —no caer a FAST cuando el Payment ya aterrizó— NO es
+ * código muerto: sigue habiendo un throw post-commit real, y es el que ahora la ancla
+ * (`commitEnDuda`, abajo). El mapa completo de lo que puede tronar con el dinero ya
+ * adentro, a hoy:
+ *
+ *   1. `prisma.$transaction` rechazando con el COMMIT ya aplicado — commit en duda: se
+ *      pierde el ack, se cae la conexión, el pool corta al comitear. Prisma reporta
+ *      fallo sobre datos que YA quedaron escritos y `recordOrderPayment` relanza ese
+ *      error tal cual. ES EL QUE SE USA AQUÍ. (Misma familia que el doble cobro por
+ *      error de transporte que ya nos costó un P1: nunca concluir "no se cobró" desde
+ *      algo que no lo afirma.)
+ *   2. El `throw updateError` de la rama autónoma, que sólo relanza `BadRequestError` /
+ *      `NotFoundError`. Sigue en el código, pero HOY ninguna ruta post-commit produce
+ *      esos tipos: el inventario ya no lanza, y todo lo demás de
+ *      `updateOrderTotalsForStandalonePayment` o va en try/catch o lanza `Error`
+ *      pelón / errores de Prisma, que ese clause deja pasar de largo a propósito. Es
+ *      un guard latente, no una vía viva — por eso no se usa para anclar nada.
  */
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
@@ -88,7 +115,6 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
 import { getProductInventoryStatus } from '@/services/dashboard/productInventoryIntegration.service'
-import { BadRequestError } from '@/errors/AppError'
 
 const prismaMock = prisma as any
 const getProductInventoryStatusMock = getProductInventoryStatus as jest.Mock
@@ -147,6 +173,32 @@ function installFakes() {
     if (compound) return payments.find(p => whereMatches(p, compound)) ?? null
     return payments.find(p => whereMatches(p, where)) ?? null
   })
+
+  // Efectos secundarios post-commit que el código de producción ejecuta sin `await`
+  // (`void …create().catch()`) o cuyo resultado recorre: sin estos, un `undefined`
+  // revienta con TypeError, el catch de "modo autónomo" se lo traga, y el
+  // `inventoryWarning` nunca llega a asignarse. Son fixture, no aserción.
+  prismaMock.activityLog.create.mockResolvedValue({ id: 'log-1' })
+  // `orderCustomer` no existe en el prismaMock compartido (tests/__helpers__/setup.ts);
+  // se crea aquí en vez de tocar el helper global, que usan ~200 suites.
+  prismaMock.orderCustomer = prismaMock.orderCustomer ?? { findMany: jest.fn() }
+  prismaMock.orderCustomer.findMany.mockResolvedValue([])
+  prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
+  prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([])
+  prismaMock.order.update.mockResolvedValue(ordenActualizadaTrasCobro)
+}
+
+/**
+ * Un throw POST-commit que SÍ ocurre hoy: la transacción del Payment comitea en la base
+ * y el llamador ve un error igual (commit en duda). Es la vía que ancla la protección
+ * contra duplicar — ver la nota de "Ronda 4" arriba para el mapa completo y para por qué
+ * el rechazo de inventario ya no sirve como vehículo.
+ */
+function commitEnDuda(error: Error) {
+  prismaMock.$transaction.mockImplementationOnce(async (callback: any) => {
+    await callback(prismaMock) // el Payment SÍ queda escrito…
+    throw error // …y aun así el llamador ve un error
+  })
 }
 
 /** Orden real que hace COMPLETAR a recordOrderPayment sin disparar el pre-flight. */
@@ -161,7 +213,7 @@ const ordenQueCompleta = {
   externalId: null,
 }
 
-/** Segunda lectura, ya con la transacción comiteada: dispara el pre-flight que RECHAZA. */
+/** Segunda lectura, ya con la transacción comiteada: dispara el pre-flight con FALTANTE. */
 const ordenQueRechazaPorInventario = {
   id: 'order-real',
   venueId: 'venue-1',
@@ -183,6 +235,15 @@ const ordenQueRechazaPorInventario = {
   ],
   payments: [],
   customer: null,
+}
+
+/** Lo que devuelve `order.update` al marcar la cuenta pagada: la deducción itera SUS items. */
+const ordenActualizadaTrasCobro = {
+  ...ordenQueRechazaPorInventario,
+  status: 'COMPLETED',
+  paymentStatus: 'PAID',
+  total: 30, // lo lee la lealtad post-deducción; sin él revienta y el aviso se pierde
+  tableId: null,
 }
 
 describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () => {
@@ -310,18 +371,17 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
   })
 
   it('si recordOrderPayment truena DESPUÉS de comitear el pago, NO cae a FAST — no se duplica el cobro', async () => {
-    // Throw TARDÍO: la transacción YA escribió el Payment y el pre-flight de
-    // updateOrderTotalsForStandalonePayment (que corre DESPUÉS, fuera de la
-    // transacción) rechaza por inventario. Caer a FAST aquí duplicaría.
+    // Throw TARDÍO: la transacción YA escribió el Payment en la base y el llamador ve
+    // un error igual (commit en duda — se pierde el ack, se cae la conexión). Caer a
+    // FAST aquí duplicaría el cobro.
     arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'PENDING', paymentId: null }
-    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta).mockResolvedValueOnce(ordenQueRechazaPorInventario)
-    getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta)
+    const enDuda = new Error('Server has closed the connection.')
+    commitEnDuda(enDuda)
 
     let result: any
     let caughtError: unknown
     try {
-      // amount en CENTAVOS (totalAmount = amount/100): 3000 = $30, que calza con el
-      // subtotal 30 de la 2ª orden y dispara isFullyPaid = true.
       result = await recordFastPayment(
         'venue-1',
         { amount: 3000, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH', idempotencyKey: 'idem-post' } as any,
@@ -331,14 +391,56 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
       caughtError = err
     }
 
-    // El error ORIGINAL (inventario) sube tal cual — no uno inventado por FAST.
+    // El error ORIGINAL sube tal cual — no uno inventado por FAST.
     expect(result).toBeUndefined()
-    expect(caughtError).toBeInstanceOf(BadRequestError)
-    expect((caughtError as Error).message).toMatch(/insufficient inventory/i)
+    expect(caughtError).toBe(enDuda)
 
     // La señal inequívoca: un solo Payment y ninguna orden FAST encima.
     expect(payments).toHaveLength(1)
     expect(prismaMock.order.create).not.toHaveBeenCalled()
+
+    // El 🚨 con el que Better Stack se entera de que alguien tiene que mirar esto.
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('DESPUÉS de comitear'),
+      expect.objectContaining({ requestId: 'req-1', orderId: 'order-real' }),
+    )
+  })
+
+  it('🔴 el aviso de inventario del cobro delegado viaja INTACTO al POS — y el fallback ni se asoma', async () => {
+    // El cruce que ninguna de las dos ramas probó sola: el cobro llega por la ruta NUEVA
+    // (delegación desde recordFastPayment) y el faltante de inventario se detecta con el
+    // Payment YA comiteado. Como ese camino ya NO lanza, no hay nada a qué caer: el mismo
+    // objeto que devuelve recordOrderPayment —`inventoryWarning` incluido— sube tal cual.
+    //
+    // Antes de las dos ramas, este mismo escenario era el doble cobro: el POS veía un
+    // error, el cajero repasaba la tarjeta. Ahora ve el cobro confirmado + el faltante.
+    arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'PENDING', paymentId: null }
+    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta).mockResolvedValueOnce(ordenQueRechazaPorInventario)
+    // amount en CENTAVOS (totalAmount = amount/100): 3000 = $30, que calza con el
+    // subtotal 30 de la 2ª orden y dispara isFullyPaid = true.
+    getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+
+    const result: any = await recordFastPayment(
+      'venue-1',
+      { amount: 3000, tip: 0, terminalPaymentRequestId: 'req-1', method: 'CASH', idempotencyKey: 'idem-warn' } as any,
+      'user-1',
+    )
+
+    // El aviso llega al POS con el detalle, no sólo un código.
+    expect(result.inventoryWarning).toBeDefined()
+    expect(result.inventoryWarning.code).toBe('INSUFFICIENT_INVENTORY')
+    expect(result.inventoryWarning.issues).toEqual([
+      expect.objectContaining({ productId: 'prod-1', productName: 'Producto agotado', requested: 1, available: 0 }),
+    ])
+    // La PRIMERA frase confirma el cobro — si alguna vez lo niega, el cajero vuelve a
+    // pasar la tarjeta y estamos otra vez en el doble cobro.
+    expect(result.inventoryWarning.message).toMatch(/^El cobro se registró correctamente/)
+
+    // Y el fallback ni se asomó: un solo Payment, ninguna venta FAST, sin 🚨 de delegación.
+    expect(payments).toHaveLength(1)
+    expect(result).toMatchObject({ id: payments[0].id })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('[FastPayment]'), expect.anything())
   })
 
   // =========================================================================
@@ -403,8 +505,9 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     // Con un payload sin llave de identidad (el peor caso: la ruta FAST tampoco tendría
     // con qué deduplicar), leer la fila concluiría "no aterrizó" → FAST → DOS Payments.
     arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'COMPLETED', paymentId: null }
-    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta).mockResolvedValueOnce(ordenQueRechazaPorInventario)
-    getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta)
+    const enDuda = new Error('Server has closed the connection.')
+    commitEnDuda(enDuda)
     prismaMock.order.create.mockResolvedValueOnce({
       id: 'fast-order-i2',
       venueId: 'venue-1',
@@ -427,9 +530,10 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     expect(arbitrationRow!.paymentId).toBeNull()
 
     // Y aun así: UN solo Payment, ninguna orden FAST, y el error original arriba.
+    // Sin llave de identidad, la certeza viene del censo antes/después de la orden.
     expect(payments).toHaveLength(1)
     expect(prismaMock.order.create).not.toHaveBeenCalled()
-    expect(caughtError).toBeInstanceOf(BadRequestError)
+    expect(caughtError).toBe(enDuda)
   })
 
   it('🔴 la verificación pregunta por MI llave a la tabla Payment, no por el paymentId de la fila', async () => {
@@ -437,8 +541,8 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     // idempotencyKey en ESTA orden?". Si alguien la volviera a cambiar por una lectura
     // de `terminalPaymentRequest.paymentId`, este test cae.
     arbitrationRow = { requestId: 'req-1', orderId: 'order-real', venueId: 'venue-1', status: 'PENDING', paymentId: null }
-    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta).mockResolvedValueOnce(ordenQueRechazaPorInventario)
-    getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+    prismaMock.order.findUnique.mockResolvedValueOnce(ordenQueCompleta)
+    commitEnDuda(new Error('Server has closed the connection.'))
 
     await recordFastPayment(
       'venue-1',

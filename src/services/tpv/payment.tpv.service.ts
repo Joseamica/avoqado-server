@@ -2712,11 +2712,24 @@ export async function recordOrderPayment(
       // `updateOrderTotalsForStandalonePayment` ya no lanza por inventario: devuelve
       // un `inventoryWarning` que viaja en la respuesta 201.
       //
-      // El clause se conserva para el resto (p.ej. un `NotFoundError` que burbujee
-      // desde la rama de area tickets), y ésos se juzgan uno por uno. El único throw
-      // propio de esa función que sigue vivo es el `Error` de "order not found for
-      // total update", que NO es BadRequest/NotFound y por diseño cae abajo sin
+      // El clause se conserva como guard LATENTE, no como vía viva: a hoy (2026-08-12)
+      // NINGUNA ruta post-commit produce `BadRequestError`/`NotFoundError`. Se verificó
+      // una por una — el inventario ya no lanza; la rama de area tickets envuelve
+      // `finalizeCapturedAreaTicketPayment` en su propio try/catch y lo único que queda
+      // suelto ahí (`markAreaTicketPaymentForReconciliation`) sólo puede tronar con
+      // errores de Prisma; el resto de `updateOrderTotalsForStandalonePayment` va en
+      // try/catch. Su único throw propio vivo es el `Error` pelón de "order not found
+      // for total update", que NO es BadRequest/NotFound y por diseño cae abajo sin
       // tumbar el cobro.
+      //
+      // 🔴 Si algún día vuelves a meter aquí un `BadRequestError` post-commit, estás
+      // reabriendo el doble cobro: el POS pinta error sobre dinero que YA entró.
+      // Devuelve un aviso en la respuesta (`inventoryWarning`), no un error.
+      //
+      // Lo que SÍ puede tronar hoy con el Payment ya comiteado es el `throw error` del
+      // catch de `prisma.$transaction` (commit en duda: se pierde el ack, se cae la
+      // conexión). Por eso el fallback de `recordFastPayment` sigue siendo necesario y
+      // está anclado justo con ese escenario en `fastPaymentDelegation.test.ts`.
       if (updateError instanceof BadRequestError || updateError instanceof NotFoundError) {
         logger.error('❌ Payment rejected: Business validation failed', {
           paymentId: payment.id,
