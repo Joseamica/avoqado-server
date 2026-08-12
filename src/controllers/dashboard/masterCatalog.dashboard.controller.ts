@@ -136,12 +136,28 @@ function endpoint(handler: (req: Request, res: Response) => Promise<void>) {
 
 export const getAccess = endpoint(async (req, res) => {
   const context = await readContext(req)
-  const access = await resolveMasterCatalogAccess({
-    organizationId: context.organizationId,
-    principal: context.actor,
-    capability: 'READ_CONTENT',
-    requiredGate: 'CORE',
-  })
+  // The envelope reports one verdict per capability, so each one has to be
+  // asked for. `canMutateContent` only ever comes back true from a
+  // MUTATE_CONTENT resolution, so resolving READ_CONTENT alone reported every
+  // caller as read-only — including OWNER — and the writer screens never
+  // rendered for anyone.
+  const [read, mutate] = await Promise.all([
+    resolveMasterCatalogAccess({
+      organizationId: context.organizationId,
+      principal: context.actor,
+      capability: 'READ_CONTENT',
+      requiredGate: 'CORE',
+    }),
+    resolveMasterCatalogAccess({
+      organizationId: context.organizationId,
+      principal: context.actor,
+      capability: 'MUTATE_CONTENT',
+      requiredGate: 'CORE',
+    }),
+  ])
+  // Read is the floor: a caller who cannot see the catalog cannot write it,
+  // whatever the mutation resolver answers on its own.
+  const access = { ...read, canMutateContent: read.canRead && mutate.canMutateContent }
   res.status(200).json({ success: true, data: access })
 })
 
