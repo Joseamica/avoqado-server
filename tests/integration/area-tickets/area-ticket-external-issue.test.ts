@@ -5,12 +5,14 @@ import {
   InventoryMethod,
   MovementType,
   Prisma,
+  RawMaterialMovementType,
   StaffRole,
   TerminalStatus,
   TerminalType,
   Unit,
 } from '@prisma/client'
 
+import { createStockBatch } from '@/services/dashboard/fifoBatch.service'
 import { issueAreaTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
 
@@ -32,6 +34,10 @@ describe('Emisión en un área con ruta externa', () => {
   let externalInventoryId: string
   let issueDeviceUid: string
   let externalIssueDeviceUid: string
+  let rawMaterialId: string
+  let recipeProductId: string
+  let strandedRawMaterialId: string
+  let strandedRecipeProductId: string
 
   beforeAll(async () => {
     const organization = await prisma.organization.create({
@@ -159,16 +165,120 @@ describe('Emisión en un área con ruta externa', () => {
       },
     })
     externalInventoryId = inventory.id
+
+    // ── Rama RAW_MATERIAL (receta) ────────────────────────────────────────────
+    // La Task 5 cubrió la REVERSA de esta rama (cancelar); el CONSUMO al emitir se
+    // quedó sin cobertura, y es donde la enmienda E3 abrió un modo de falla nuevo:
+    // lo que antes tronaba al pagar ahora truena al EMITIR.
+    const rawMaterial = await prisma.rawMaterial.create({
+      data: {
+        venueId,
+        name: `Queso insumo emisión ${suffix}`,
+        sku: `EXT-EMIT-RM-${suffix}`,
+        category: 'OTHER',
+        currentStock: new Prisma.Decimal('5000.000'),
+        unit: Unit.GRAM,
+        unitType: 'WEIGHT',
+        minimumStock: new Prisma.Decimal('0'),
+        reorderPoint: new Prisma.Decimal('0'),
+        costPerUnit: new Prisma.Decimal('0.05'),
+        avgCostPerUnit: new Prisma.Decimal('0.05'),
+      },
+    })
+    rawMaterialId = rawMaterial.id
+    // El consumo asigna por FIFO de `StockBatch`, no contra `RawMaterial.currentStock`:
+    // sin un lote ACTIVE no hay de dónde asignar.
+    await createStockBatch(venueId, rawMaterialId, { quantity: 5000, unit: Unit.GRAM, costPerUnit: 0.05, receivedDate: new Date() })
+
+    const recipeProduct = await prisma.product.create({
+      data: {
+        venueId,
+        categoryId: category.id,
+        sku: `EXT-EMIT-RECIPE-${suffix}`,
+        name: 'Producto receta emisión externa',
+        price: new Prisma.Decimal('30.00'),
+        taxRate: new Prisma.Decimal(0),
+        tags: [],
+        allergens: [],
+        soldByWeight: false,
+        trackInventory: true,
+        inventoryMethod: InventoryMethod.RECIPE,
+        unit: Unit.PIECE,
+      },
+    })
+    recipeProductId = recipeProduct.id
+    await prisma.recipe.create({
+      data: {
+        productId: recipeProductId,
+        portionYield: 1,
+        totalCost: new Prisma.Decimal('5.00'),
+        lines: { create: [{ rawMaterialId, quantity: new Prisma.Decimal('100.000'), unit: Unit.GRAM, isOptional: false }] },
+      },
+    })
+
+    // Insumo DESFASADO a propósito: `currentStock` alto pero SIN ningún lote. Es el
+    // escenario que la revisión de la Task 4 nombró como modo de falla nuevo — la
+    // validación de disponibilidad mira `currentStock` y pasa; el FIFO no encuentra de
+    // dónde asignar y truena AL EMITIR, no al pagar.
+    const strandedMaterial = await prisma.rawMaterial.create({
+      data: {
+        venueId,
+        name: `Insumo sin lotes ${suffix}`,
+        sku: `EXT-EMIT-RM-NOBATCH-${suffix}`,
+        category: 'OTHER',
+        currentStock: new Prisma.Decimal('5000.000'),
+        unit: Unit.GRAM,
+        unitType: 'WEIGHT',
+        minimumStock: new Prisma.Decimal('0'),
+        reorderPoint: new Prisma.Decimal('0'),
+        costPerUnit: new Prisma.Decimal('0.05'),
+        avgCostPerUnit: new Prisma.Decimal('0.05'),
+      },
+    })
+    strandedRawMaterialId = strandedMaterial.id
+
+    const strandedProduct = await prisma.product.create({
+      data: {
+        venueId,
+        categoryId: category.id,
+        sku: `EXT-EMIT-RECIPE-NOBATCH-${suffix}`,
+        name: 'Producto receta sin lotes',
+        price: new Prisma.Decimal('30.00'),
+        taxRate: new Prisma.Decimal(0),
+        tags: [],
+        allergens: [],
+        soldByWeight: false,
+        trackInventory: true,
+        inventoryMethod: InventoryMethod.RECIPE,
+        unit: Unit.PIECE,
+      },
+    })
+    strandedRecipeProductId = strandedProduct.id
+    await prisma.recipe.create({
+      data: {
+        productId: strandedRecipeProductId,
+        portionYield: 1,
+        totalCost: new Prisma.Decimal('5.00'),
+        lines: {
+          create: [{ rawMaterialId: strandedRawMaterialId, quantity: new Prisma.Decimal('100.000'), unit: Unit.GRAM, isOptional: false }],
+        },
+      },
+    })
   })
 
   afterAll(async () => {
     if (!venueId) return
     await prisma.inventoryMovement.deleteMany({ where: { inventory: { venueId } } })
+    await prisma.rawMaterialMovement.deleteMany({ where: { venueId } })
+    await prisma.stockBatch.deleteMany({ where: { venueId } })
     await prisma.areaTicketInventoryReservation.deleteMany({ where: { venueId } })
     await prisma.areaTicketExternalSettlement.deleteMany({ where: { venueId } })
     await prisma.areaTicket.deleteMany({ where: { venueId } })
     await prisma.inventory.deleteMany({ where: { venueId } })
+    // El product cascada a Recipe → RecipeLine; el rawMaterial va DESPUÉS para que esas
+    // RecipeLine ya no lo referencien (su FK no cascada desde RawMaterial).
     await prisma.product.deleteMany({ where: { venueId } })
+    await prisma.rawMaterial.deleteMany({ where: { venueId } })
     await prisma.menuCategory.deleteMany({ where: { venueId } })
     await prisma.terminal.deleteMany({ where: { venueId } })
     await prisma.fulfillmentArea.deleteMany({ where: { venueId } })
@@ -267,6 +377,61 @@ describe('Emisión en un área con ruta externa', () => {
     expect(reservation).not.toBeNull()
     expect(await prisma.areaTicketInventoryReservation.count({ where: { areaTicketId: a.id } })).toBe(1)
     expect(await prisma.inventoryMovement.count({ where: { reference: reservation!.id } })).toBe(1)
+  })
+
+  it('RAW_MATERIAL: consume el insumo por FIFO AL EMITIR, con el movimiento en negativo', async () => {
+    const before = await prisma.rawMaterial.findUniqueOrThrow({ where: { id: rawMaterialId } })
+
+    const ticket = await issueAreaTicket(venueId, {
+      idempotencyKey: `ext-rm-${suffix}-1`,
+      deviceUid: externalIssueDeviceUid,
+      lines: [{ clientLineId: 'l1', productId: recipeProductId, quantity: '2' }],
+    })
+
+    // 2 porciones × 100 g de receta = 200 g.
+    const after = await prisma.rawMaterial.findUniqueOrThrow({ where: { id: rawMaterialId } })
+    expect(after.currentStock.toFixed(3)).toBe(before.currentStock.sub(200).toFixed(3))
+
+    const reservation = await prisma.areaTicketInventoryReservation.findFirstOrThrow({
+      where: { areaTicketId: ticket.id, inventoryKind: 'RAW_MATERIAL' },
+    })
+    expect(reservation.status).toBe('CONSUMED')
+    expect(reservation.inventoryMovementId).not.toBeNull()
+
+    // Mismo assert de signo que la rama QUANTITY, sobre el movimiento mismo: el
+    // descuento de `RawMaterial.currentStock` lo hace un `update` aparte, así que
+    // comparar sólo esa columna dejaría pasar un movimiento en positivo.
+    const movements = await prisma.rawMaterialMovement.findMany({ where: { reference: reservation.id } })
+    expect(movements).toHaveLength(1)
+    expect(movements[0].type).toBe(RawMaterialMovementType.USAGE)
+    expect(movements[0].quantity.toFixed(3)).toBe('-200.000')
+    expect(movements[0].previousStock.toFixed(3)).toBe(before.currentStock.toFixed(3))
+    expect(movements[0].newStock.toFixed(3)).toBe(after.currentStock.toFixed(3))
+    expect(movements[0].batchId).not.toBeNull()
+
+    // El lote FIFO también bajó — el consumo salió de existencias reales, no de un
+    // ajuste al aire.
+    const batch = await prisma.stockBatch.findUniqueOrThrow({ where: { id: movements[0].batchId! } })
+    expect(batch.remainingQuantity.toFixed(3)).toBe('4800.000')
+  })
+
+  it('RAW_MATERIAL sin lotes FIFO: la emisión FALLA y no deja vale a medias — el modo de falla se movió del pago a la emisión', async () => {
+    const before = await prisma.rawMaterial.findUniqueOrThrow({ where: { id: strandedRawMaterialId } })
+
+    await expect(
+      issueAreaTicket(venueId, {
+        idempotencyKey: `ext-rm-stranded-${suffix}-1`,
+        deviceUid: externalIssueDeviceUid,
+        lines: [{ clientLineId: 'l1', productId: strandedRecipeProductId, quantity: '1' }],
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED' })
+
+    // Todo el trabajo de emisión vive en UNA transacción: si el consumo truena, no
+    // queda ni vale, ni settlement, ni reserva, ni stock movido.
+    const after = await prisma.rawMaterial.findUniqueOrThrow({ where: { id: strandedRawMaterialId } })
+    expect(after.currentStock.toFixed(3)).toBe(before.currentStock.toFixed(3))
+    expect(await prisma.areaTicket.count({ where: { venueId, idempotencyKey: `ext-rm-stranded-${suffix}-1` } })).toBe(0)
+    expect(await prisma.areaTicketInventoryReservation.count({ where: { venueId, inventoryId: strandedRawMaterialId } })).toBe(0)
   })
 
   it('un área AVOQADO sigue sin settlement externo — la ruta nativa no cambió', async () => {
