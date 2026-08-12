@@ -25,7 +25,7 @@
     "test:unit:debug-handles": "NODE_OPTIONS='--max-old-space-size=4096' jest tests/unit --detectOpenHandles --runInBand",
     "test:integration": "jest --selectProjects=integration --runInBand --testPathIgnorePatterns='tests/integration/master-catalog/h1a-migration(?:-(?:lock-safety|replay))?\\.integration\\.test\\.ts$'",
     "test:integration:migrations": "jest --selectProjects=integration --runInBand --runTestsByPath tests/integration/master-catalog/h1a-migration-replay.integration.test.ts && jest --selectProjects=integration --runInBand --runTestsByPath tests/integration/master-catalog/h1a-migration-lock-safety.integration.test.ts && jest --selectProjects=integration --runInBand --runTestsByPath tests/integration/master-catalog/h1a-migration.integration.test.ts",
-    "test:api": "jest tests/api-tests --runInBand",
+    "test:api": "NODE_OPTIONS='--max-old-space-size=4096' jest tests/api-tests --runInBand",
     "test:workflows": "jest tests/workflows",
     "test:dashboard": "jest tests/unit/controllers/dashboard tests/unit/services/dashboard tests/api-tests/dashboard tests/workflows/dashboard-management",
     "test:pos-sync": "jest tests/unit/controllers/pos-sync tests/unit/services/pos-sync tests/api-tests/pos-sync tests/workflows/pos-sync",
