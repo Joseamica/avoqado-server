@@ -33,6 +33,7 @@ import {
   type ClientCountryEvidenceSource,
 } from '../payments/cardInternationality.service'
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
+import { resolveFastPaymentTarget } from './fastPaymentTarget'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -2607,6 +2608,40 @@ export async function recordOrderPayment(
  */
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
+
+  // 🔴 ¿Este dinero pertenece a una venta que YA existe? El cajero pudo mandar el cobro
+  // desde el POS, cancelar, y la terminal cobrar igual. Ese cobro es de la venta que lo
+  // originó —con sus productos—, no de una venta sintética vacía. La solicitud de
+  // arbitraje guarda el `orderId`; hasta hoy sólo se usaba para cerrar la fila.
+  //
+  // Fail-open a propósito: si la consulta truena, se sigue por FAST. Un fallo de infra
+  // jamás puede impedir registrar dinero que YA se cobró.
+  if (paymentData.terminalPaymentRequestId) {
+    let arbitrationRow: { orderId: string | null; venueId: string; status: string } | null = null
+    try {
+      arbitrationRow = await prisma.terminalPaymentRequest.findUnique({
+        where: { requestId: paymentData.terminalPaymentRequestId },
+        select: { orderId: true, venueId: true, status: true },
+      })
+    } catch (err) {
+      logger.error('⚠️ [FastPayment] No se pudo leer la solicitud de arbitraje — se sigue como venta rápida', {
+        requestId: paymentData.terminalPaymentRequestId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+
+    const target = resolveFastPaymentTarget(arbitrationRow)
+    if (target.kind === 'existingOrder') {
+      logger.info('🎯 [FastPayment] El cobro pertenece a una venta existente — no se crea venta rápida', {
+        requestId: paymentData.terminalPaymentRequestId,
+        orderId: target.orderId,
+        priorStatus: arbitrationRow?.status,
+      })
+      // recordOrderPayment ya sabe descontar inventario, cerrar la orden, actualizar el
+      // turno y cerrar la fila de arbitraje. No se reimplementa nada de eso aquí.
+      return recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+    }
+  }
 
   // ⏱️ SOLO MEDICIÓN (2026-08-09). Prod: mediana 4,471 ms / p95 4,971 ms contra
   // 130 ms de red real México→Oregon: ~97% del tiempo es trabajo del servidor,
