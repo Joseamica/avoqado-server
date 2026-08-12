@@ -261,3 +261,82 @@ describe('cobro externo (ruta EXTERNAL) en los tools de vales', () => {
     )
   })
 })
+
+// Task 15b: la cola de "cobros por confirmar" existe en el servicio desde la
+// Task 9 (`listPendingExternalConfirmation`) y tiene pantalla en el dashboard
+// desde la Task 15, pero el MCP nunca la expuso — un operador podía preguntar
+// "¿cómo va este vale?" (por código) y no "¿qué cobros me faltan confirmar?",
+// que es justo la pregunta que motiva la pantalla.
+describe('pending_external_confirmations', () => {
+  it('lista los cobros externos en PENDING, con su importe de referencia en pesos', async () => {
+    prismaMock.areaTicket.findMany.mockResolvedValueOnce([
+      {
+        id: 'ticket-ext-9',
+        code: '9000000090',
+        issuedAt: new Date('2026-08-10T09:00:00.000Z'),
+        fulfillmentArea: { id: 'area-1', name: 'Panadería' },
+        externalSettlement: {
+          referenceAmount: { toString: () => '168.00' },
+          handoffState: 'HANDED_OFF',
+          confirmationMode: 'MANUAL',
+        },
+      },
+    ])
+
+    const result = parse(await call('pending_external_confirmations', { venueId: 'venue-1', limit: 20 }))
+
+    expect(requirePermission).toHaveBeenCalledWith('area-tickets:configure', 'venue-1')
+    expect(result.count).toBe(1)
+    expect(result.items[0]).toMatchObject({
+      code: '9000000090',
+      // decimal string, dos posiciones — nunca centavos (168.00, no 16800)
+      referenceAmount: '168.00',
+      confirmationMode: 'MANUAL',
+    })
+  })
+
+  // El criterio vive en el `where` que se le manda a Prisma, no en un post-filtro
+  // en JS — `prismaMock` no lo ejecuta, así que la única forma honesta de
+  // verificarlo a nivel unitario es fijar el filtro que el CÓDIGO construye
+  // (mismo patrón que el test de arriba, "construye el where..."). ASSUMED se
+  // gana su propio test porque es el que se presta a confusión: nace de
+  // `ExternalConfirmationMode.ASSUME_ON_PRINT`, una política que por diseño NO
+  // exige confirmación humana — meterlo en esta cola le daría al operador una
+  // tarea que el propio local decidió que no hacía falta. Ver el comentario 🔴
+  // en la autoridad, `listPendingExternalConfirmation`
+  // (areaTicketExternal.mobile.service.ts:572-582).
+  it('excluye los ASSUMED — el venue se excluyó de confirmar por diseño', async () => {
+    await call('pending_external_confirmations', { venueId: 'venue-1', limit: 20 })
+
+    expect(prismaMock.areaTicket.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          externalSettlement: { status: 'PENDING' },
+        }),
+      }),
+    )
+  })
+
+  it('excluye confirmados, no-cobrados y cancelados', async () => {
+    await call('pending_external_confirmations', { venueId: 'venue-1', limit: 20 })
+
+    expect(prismaMock.areaTicket.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          settlementRoute: 'EXTERNAL',
+          // ISSUED excluye CANCELLED/EXPIRED ("cancelados"); PENDING en el
+          // settlement excluye CONFIRMED ("confirmados") y NOT_CHARGED
+          // ("no-cobrados") — el mismo criterio de tres partes que
+          // `listPendingExternalConfirmation`.
+          status: 'ISSUED',
+          externalSettlement: { status: 'PENDING' },
+        }),
+      }),
+    )
+  })
+
+  it('filtra por los venues del scope, no por todos', async () => {
+    await expect(call('pending_external_confirmations', { venueId: 'foreign', limit: 20 })).rejects.toThrow('out of scope')
+    expect(prismaMock.areaTicket.findMany).not.toHaveBeenCalled()
+  })
+})

@@ -362,4 +362,80 @@ export function registerAreaTicketTools(server: McpServer, scope: McpScope): voi
       })
     },
   )
+
+  server.tool(
+    'pending_external_confirmations',
+    'List EXTERNAL-route area tickets stuck waiting for a human to confirm the charge that happened in the OTHER register — Avoqado never saw that money move and has no independent proof of it. This is exactly the queue behind the dashboard\'s "cobros por confirmar" screen. Excludes tickets already CONFIRMED or in DISCREPANCY (someone already stated an outcome), NOT_CHARGED (already declared uncharged), ASSUMED (the venue opted out of confirming those — see ExternalConfirmationMode.ASSUME_ON_PRINT), and any ticket that is not ISSUED or not on the EXTERNAL route. Read-only — this tool never confirms anything. Requires area-tickets:configure.',
+    {
+      venueId: z.string().describe('Venue to inspect (must be in your scope)'),
+      limit: z.number().int().min(1).max(100).default(50),
+    },
+    async ({ venueId, limit }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('area-tickets:configure', venueId)
+
+      const tickets = await prisma.areaTicket.findMany({
+        where: {
+          venueId,
+          // Espejo campo por campo de la autoridad de este criterio,
+          // `listPendingExternalConfirmation` (Task 9,
+          // areaTicketExternal.mobile.service.ts:608-616) — tres condiciones,
+          // cada una descarta algo distinto:
+          settlementRoute: 'EXTERNAL', // la ruta AVOQADO nunca tiene cobro externo que confirmar
+          status: 'ISSUED', // CANCELLED/EXPIRED son vales muertos, nada que confirmar
+          externalSettlement: { status: 'PENDING' },
+          // ↑ deja fuera CONFIRMED y NOT_CHARGED (alguien ya declaró qué pasó) y —
+          // el que se presta a confusión — ASSUMED: nace de la política
+          // ExternalConfirmationMode.ASSUME_ON_PRINT, que por diseño NO exige
+          // verificación humana. Meterlo aquí le daría al operador una tarea que
+          // el propio local decidió que no hacía falta (ver el comentario 🔴 en
+          // la autoridad, líneas 572-582 del mismo archivo).
+          //
+          // Divergencia deliberada frente a la autoridad — nombrada, no un hueco:
+          // `listPendingExternalConfirmation` ADEMÁS filtra por el
+          // `fulfillmentAreaId` de la terminal autenticada que hace la llamada.
+          // Este tool no tiene esa sesión de dispositivo de la que derivar un
+          // área — un operador de MCP pregunta por el VENUE completo, no por "el
+          // área de mi terminal" — así que lista todas las áreas y expone `area`
+          // por fila para distinguirlas. Mismo patrón, misma razón, que ya
+          // declaró `pending_area_ticket_deliveries` arriba.
+        },
+        select: {
+          id: true,
+          code: true,
+          issuedAt: true,
+          fulfillmentArea: { select: { id: true, name: true } },
+          externalSettlement: { select: { referenceAmount: true, handoffState: true, confirmationMode: true } },
+        },
+        // Mismo orden que la autoridad: el más viejo primero, igual que se
+        // acumula la urgencia real de confirmar.
+        orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
+        // La autoridad pagina con cursor (`decodePendingCursor`) porque la
+        // consume un dispositivo con outbox propio. Este tool usa `limit`
+        // simple, igual que `pending_area_ticket_deliveries` arriba y por la
+        // misma razón: agregar paginación por cursor aquí sería un cambio de
+        // contrato que nadie pidió.
+        take: limit,
+      })
+
+      return text({
+        count: tickets.length,
+        items: tickets.map(ticket => {
+          const settlement = ticket.externalSettlement! // el WHERE de arriba ya garantiza que existe y está PENDING
+          return {
+            id: ticket.id,
+            code: ticket.code,
+            issuedAt: ticket.issuedAt,
+            area: ticket.fulfillmentArea?.name ?? null,
+            // Pesos 1:1, igual que sus vecinos — NUNCA centavos.
+            referenceAmount: decimal(settlement.referenceAmount),
+            handoffState: settlement.handoffState,
+            confirmationMode: settlement.confirmationMode,
+          }
+        }),
+        warning:
+          'Solo lectura. Confirmar un cobro externo, o declarar que no se cobró, se hace en el dashboard o el POS del área — ningún tool de este MCP lo hace. No infieras que un vale de esta lista ya tiene cobro confirmado o asumido: si aparece aquí es justamente porque nadie lo ha resuelto todavía.',
+      })
+    },
+  )
 }
