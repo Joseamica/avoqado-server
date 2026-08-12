@@ -397,6 +397,35 @@ export class SocketManager implements ISocketManager {
       }
     })
 
+    // Terminal Refund ACK (TPV → Server → POS HTTP response).
+    // Confirma que la terminal ABRIÓ la pantalla de devolución, no que el
+    // dinero se haya devuelto: eso lo registra la TPV por REST cuando ocurre.
+    onWithContext(socket, 'terminal:refund_result', (payload, callback) => {
+      try {
+        const { requestId, status, errorMessage } = payload
+        logger.info('↩️ Terminal refund ACK received', {
+          requestId,
+          status,
+          socketId: socket.id,
+        })
+
+        const handled = terminalPaymentService.handleRefundRequestResult({
+          requestId,
+          status,
+          errorMessage,
+        })
+
+        if (callback) callback({ success: handled })
+      } catch (error) {
+        logger.error('Error processing terminal refund ACK', {
+          socketId: socket.id,
+          payload,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        if (callback) callback({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+      }
+    })
+
     // TPV Message Events (Terminal → Server)
     // Handle message acknowledge/dismiss from terminal
     onWithContext(socket, SocketEventType.TPV_MESSAGE_ACK, async (payload, callback) => {

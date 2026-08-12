@@ -23,7 +23,8 @@ import prisma from '../utils/prismaClient'
 import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/terminal-registry'
 import socketManager from '../communication/sockets/managers/socketManager'
 import logger from '../config/logger'
-import { OrderAlreadyPaidError, TerminalBusyError } from '../errors/AppError'
+import { BadRequestError, OrderAlreadyPaidError, TerminalBusyError } from '../errors/AppError'
+import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 export interface TerminalPaymentRequest {
@@ -86,6 +87,29 @@ export interface TerminalReceiptPrintResult {
   errorMessage?: string
 }
 
+export interface TerminalRefundRequest {
+  terminalId: string
+  venueId: string
+  paymentId: string
+  requestedBy: string
+  requestId?: string
+  reason?: string
+}
+
+/**
+ * 🔑 El desenlace de este evento es "¿se abrió la devolución en la terminal?",
+ * NO "¿se devolvió el dinero?". La devolución la termina una persona en el
+ * aparato (en Blumon hay que volver a pasar la tarjeta) y puede tardar
+ * minutos; quedarse esperando eso congelaría al cajero. Cuando el dinero se
+ * mueve, la propia TPV lo registra por la ruta REST de reembolsos que ya
+ * existe, y ahí es donde aparece en Avoqado.
+ */
+export interface TerminalRefundResult {
+  requestId: string
+  status: 'opened' | 'rejected' | 'timeout'
+  errorMessage?: string
+}
+
 interface PendingPayment {
   resolve: (result: TerminalPaymentResult) => void
   reject: (error: Error) => void
@@ -93,6 +117,17 @@ interface PendingPayment {
   requestId: string
   terminalId: string
   venueId: string
+  createdAt: Date
+}
+
+interface PendingRefundRequest {
+  resolve: (result: TerminalRefundResult) => void
+  reject: (error: Error) => void
+  timeout: NodeJS.Timeout
+  requestId: string
+  terminalId: string
+  venueId: string
+  paymentId: string
   createdAt: Date
 }
 
@@ -108,6 +143,8 @@ interface PendingReceiptPrint {
 
 const PAYMENT_TIMEOUT_MS = 300_000 // 5 minutes
 const RECEIPT_PRINT_TIMEOUT_MS = 30_000 // 30 seconds
+// Sólo se espera el ACK de "abrí la pantalla", no que alguien pase la tarjeta.
+const REFUND_OPEN_TIMEOUT_MS = 20_000 // 20 seconds
 const CANCEL_GRACE_MS = 30_000 // watchdog grace before a CANCEL_REQUESTED row is resolved
 
 // Statuses that HOLD the per-terminal slot (must match the partial UNIQUE index
@@ -175,6 +212,7 @@ function resultFromRow(row: {
 class TerminalPaymentService {
   private pendingPayments = new Map<string, PendingPayment>()
   private pendingReceiptPrints = new Map<string, PendingReceiptPrint>()
+  private pendingRefundRequests = new Map<string, PendingRefundRequest>()
 
   /**
    * Whether the per-terminal busy REJECTION is enforced. Rollback flag: setting
@@ -774,6 +812,151 @@ class TerminalPaymentService {
       requestId: result.requestId,
       status: result.status,
       terminalId: pending.terminalId,
+    })
+
+    pending.resolve(result)
+    return true
+  }
+
+  /**
+   * Abrir en una terminal la devolución de un cobro con tarjeta.
+   *
+   * 🔴 Este evento NO autoriza que se mueva dinero: le dice a la terminal
+   * "abre la pantalla de devolución de ESTE cobro". Quien la completa es una
+   * persona en el aparato, y el registro en Avoqado sigue pasando por la ruta
+   * de reembolsos de siempre —con su candado de fila y su validación de monto
+   * reembolsable—. Por eso no hace falta una fila durable de arbitraje: si el
+   * evento se pierde o se duplica, lo peor que pasa es que se abre una
+   * pantalla de más, y ninguna devolución ocurre sin que alguien la confirme.
+   */
+  async requestRefundOnTerminal(request: TerminalRefundRequest): Promise<TerminalRefundResult> {
+    const { terminalId, venueId, paymentId } = request
+
+    const payment = await prisma.payment.findUnique({
+      where: { id: paymentId },
+      select: { id: true, venueId: true, status: true, method: true, amount: true, tipAmount: true, processorData: true },
+    })
+
+    const processorData = (payment?.processorData ?? {}) as { refundedAmount?: number | string }
+    const target = resolveTerminalRefundTarget(
+      payment
+        ? {
+            id: payment.id,
+            venueId: payment.venueId,
+            status: payment.status,
+            method: payment.method,
+            amount: Number(payment.amount),
+            tipAmount: Number(payment.tipAmount),
+            refundedAmount: Number(processorData.refundedAmount ?? 0),
+          }
+        : null,
+      venueId,
+    )
+
+    if (!target.eligible) {
+      logger.warn(`🚫 [TerminalRefund] Cobro no elegible para devolución en terminal`, {
+        paymentId,
+        venueId,
+        terminalId,
+        reason: target.reason,
+      })
+      throw new BadRequestError(target.message)
+    }
+
+    const terminalEntry = terminalRegistry.getTerminal(terminalId)
+    if (!terminalEntry) {
+      throw new Error(`La terminal ${terminalId} no está conectada`)
+    }
+    if (terminalEntry.venueId !== venueId) {
+      // Misma defensa que el cobro: nunca se le habla a la terminal de otro negocio.
+      throw new BadRequestError('La terminal no pertenece a este establecimiento')
+    }
+    if (!terminalEntry.socketId) {
+      throw new Error(`La terminal ${terminalId} está registrada pero no tiene conexión de socket. Reinicia la app de la terminal.`)
+    }
+    const socketId = terminalEntry.socketId
+
+    // Una terminal hace UNA transacción EMV a la vez: si está a media venta,
+    // abrirle una devolución encima le quitaría la pantalla al cliente que
+    // está pagando. Se reporta QUIÉN la tiene ocupada, igual que en el cobro,
+    // para que el cajero no se quede adivinando.
+    const blocker = await prisma.terminalPaymentRequest.findFirst({
+      where: { terminalId: normalizeTerminalId(terminalId), status: { in: SLOT_HELD } },
+      select: { requestId: true, amountCents: true, senderDevice: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (blocker) {
+      throw new TerminalBusyError(`La terminal ${terminalId} está ocupada con un cobro. Espera a que termine e inténtalo de nuevo.`, {
+        requestId: blocker.requestId,
+        amountCents: blocker.amountCents,
+        senderDevice: blocker.senderDevice ?? undefined,
+        ageSeconds: Math.max(0, Math.floor((Date.now() - blocker.createdAt.getTime()) / 1000)),
+      })
+    }
+
+    const io = socketManager.getServer()
+    if (!io) {
+      throw new Error('Servidor de Socket.IO no inicializado')
+    }
+
+    const requestId = request.requestId || uuidv4()
+
+    return new Promise<TerminalRefundResult>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingRefundRequests.delete(requestId)
+        logger.warn(`⏰ [TerminalRefund] La terminal no confirmó que abrió la devolución`, { requestId, terminalId, paymentId })
+        resolve({
+          requestId,
+          status: 'timeout',
+          errorMessage: 'La terminal no respondió. Revisa que la app esté abierta.',
+        })
+      }, REFUND_OPEN_TIMEOUT_MS)
+
+      this.pendingRefundRequests.set(requestId, {
+        resolve,
+        reject,
+        timeout,
+        requestId,
+        terminalId,
+        venueId,
+        paymentId,
+        createdAt: new Date(),
+      })
+
+      io.to(socketId).emit('terminal:refund_request', {
+        requestId,
+        terminalId,
+        venueId,
+        paymentId,
+        // Informativo para la pantalla de la terminal: lo que manda al validar
+        // es el servicio de reembolsos, no este número.
+        maxRefundableCents: target.remainingRefundableCents,
+        reason: request.reason,
+        requestedBy: request.requestedBy,
+        timestamp: new Date().toISOString(),
+      })
+      logger.info(`↩️ [TerminalRefund] Devolución enviada a la terminal`, { requestId, terminalId, paymentId, venueId })
+    })
+  }
+
+  /**
+   * ACK de la terminal: abrió (o no pudo abrir) la pantalla de devolución.
+   */
+  handleRefundRequestResult(result: TerminalRefundResult): boolean {
+    const pending = this.pendingRefundRequests.get(result.requestId)
+    if (!pending) {
+      logger.warn(`⚠️ [TerminalRefund] Llegó un ACK sin solicitud pendiente`, { requestId: result.requestId })
+      return false
+    }
+
+    clearTimeout(pending.timeout)
+    this.pendingRefundRequests.delete(result.requestId)
+
+    logger.info(`↩️ [TerminalRefund] ACK recibido`, {
+      requestId: result.requestId,
+      status: result.status,
+      terminalId: pending.terminalId,
+      paymentId: pending.paymentId,
     })
 
     pending.resolve(result)

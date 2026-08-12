@@ -1429,6 +1429,20 @@ router.post(
 )
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/terminals/:terminalId/refund-request
+ * Abrir en una terminal conectada la devolución de un cobro con tarjeta.
+ * Pide `payments:refund` —el mismo permiso que reembolsar desde el POS—, no
+ * `payments:create`: quien no puede devolver aquí tampoco puede mandarlo al
+ * aparato para que lo devuelvan por él.
+ */
+router.post(
+  '/venues/:venueId/terminals/:terminalId/refund-request',
+  authenticateTokenMiddleware,
+  checkPermission('payments:refund'),
+  terminalPaymentMobileController.requestRefundOnTerminal,
+)
+
+/**
  * GET /api/v1/mobile/venues/:venueId/terminal-payment/:requestId
  * Status of a terminal payment request — recovery after a dropped long-poll /
  * timeout. Trichotomy: terminal status / IN_PROGRESS / 404 NOT_FOUND. Clients
