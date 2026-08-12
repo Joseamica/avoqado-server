@@ -49,6 +49,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       'http://localhost:8080',
       'http://localhost:3000',
       'http://localhost:5177',
+      'http://localhost:5900', // Isolated dashboard instance for demo rehearsal, so it never fights the shared 5173
       'http://10.55.2.212:5173', // LAN IP — dashboard dev server accessed from another device on the network
     ], // ← Dashboard (5173), Backend for SDK (3000)
     staging: [

@@ -1,16 +1,21 @@
 # El cobro huérfano aterriza en SU venta — Plan de implementación
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que un cobro con tarjeta que sobrevive a una cancelación se registre en la venta que lo originó —con sus productos— en vez de en una venta sintética `FAST-…` vacía.
+**Goal:** Que un cobro con tarjeta que sobrevive a una cancelación se registre en la venta que lo originó —con sus productos— en vez de en
+una venta sintética `FAST-…` vacía.
 
-**Architecture:** El server ya recibe el `terminalPaymentRequestId` en la ruta de cobro rápido, y esa fila ya guarda el `orderId` de la venta real. El arreglo es una **decisión pura** ("¿a qué orden pertenece este dinero?") más un desvío: si hay orden, `recordFastPayment` delega en `recordOrderPayment`, que ya sabe descontar inventario, cerrar la orden y actualizar el turno. No se reimplementa nada de eso.
+**Architecture:** El server ya recibe el `terminalPaymentRequestId` en la ruta de cobro rápido, y esa fila ya guarda el `orderId` de la
+venta real. El arreglo es una **decisión pura** ("¿a qué orden pertenece este dinero?") más un desvío: si hay orden, `recordFastPayment`
+delega en `recordOrderPayment`, que ya sabe descontar inventario, cerrar la orden y actualizar el turno. No se reimplementa nada de eso.
 
 **Tech Stack:** TypeScript · Express · Prisma/PostgreSQL · Jest (unit, con `prisma as any` como mock)
 
 ## Global Constraints
 
-- **Alcance de este plan: SOLO avoqado-server.** La parte de POS (que el cajero decida entregar o devolver) va en un plan aparte: depende de que esto exista primero y no es necesaria para que este cambio aporte valor.
+- **Alcance de este plan: SOLO avoqado-server.** La parte de POS (que el cajero decida entregar o devolver) va en un plan aparte: depende de
+  que esto exista primero y no es necesaria para que este cambio aporte valor.
 - **avoqado-tpv NO se toca.** Manda `terminalPaymentRequestId` desde **v26 (2026-07-14)**. Verificado en `PendingPaymentEntity.kt:107`.
 - **El reembolso por TPV está fuera de alcance.** Parkeado en el spec.
 - **Rama: `develop`.** El merge a `main` lo hace el founder.
@@ -22,22 +27,24 @@
 
 ## File Structure
 
-| Archivo | Responsabilidad |
-|---|---|
-| `src/services/tpv/fastPaymentTarget.ts` *(nuevo)* | **Decisión pura**: dada la fila de arbitraje, ¿a qué orden pertenece el dinero? Sin Prisma, sin red. Espeja el patrón de `CardChargeDecision` del cliente: la corrección vive en una función testeable sola. |
-| `tests/unit/services/tpv/fastPaymentTarget.test.ts` *(nuevo)* | Tests de esa decisión. |
-| `src/services/tpv/payment.tpv.service.ts:2608` *(modificar)* | `recordFastPayment` consulta la fila y, si la decisión dice que hay orden, delega en `recordOrderPayment`. |
-| `tests/unit/services/tpv/fastPaymentDelegation.test.ts` *(nuevo)* | Test del desvío: con orden delega, sin orden sigue por FAST. |
+| Archivo                                                           | Responsabilidad                                                                                                                                                                                              |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/services/tpv/fastPaymentTarget.ts` _(nuevo)_                 | **Decisión pura**: dada la fila de arbitraje, ¿a qué orden pertenece el dinero? Sin Prisma, sin red. Espeja el patrón de `CardChargeDecision` del cliente: la corrección vive en una función testeable sola. |
+| `tests/unit/services/tpv/fastPaymentTarget.test.ts` _(nuevo)_     | Tests de esa decisión.                                                                                                                                                                                       |
+| `src/services/tpv/payment.tpv.service.ts:2608` _(modificar)_      | `recordFastPayment` consulta la fila y, si la decisión dice que hay orden, delega en `recordOrderPayment`.                                                                                                   |
+| `tests/unit/services/tpv/fastPaymentDelegation.test.ts` _(nuevo)_ | Test del desvío: con orden delega, sin orden sigue por FAST.                                                                                                                                                 |
 
 ---
 
 ## Task 1: La decisión pura — ¿a qué orden pertenece este dinero?
 
 **Files:**
+
 - Create: `src/services/tpv/fastPaymentTarget.ts`
 - Test: `tests/unit/services/tpv/fastPaymentTarget.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada (función pura, primer eslabón)
 - Produces: `resolveFastPaymentTarget(row: ArbitrationRowSnapshot | null): FastPaymentTarget` — usada por Task 2. Tipos exactos abajo.
 
@@ -78,8 +85,7 @@ describe('resolveFastPaymentTarget — a qué venta pertenece un cobro de termin
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/tpv/fastPaymentTarget.test.ts`
-Expected: FAIL — `Cannot find module '@/services/tpv/fastPaymentTarget'`
+Run: `npx jest tests/unit/services/tpv/fastPaymentTarget.test.ts` Expected: FAIL — `Cannot find module '@/services/tpv/fastPaymentTarget'`
 
 - [ ] **Step 3: Escribir la implementación mínima**
 
@@ -120,8 +126,7 @@ export function resolveFastPaymentTarget(row: ArbitrationRowSnapshot | null): Fa
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest tests/unit/services/tpv/fastPaymentTarget.test.ts`
-Expected: PASS — 5 tests
+Run: `npx jest tests/unit/services/tpv/fastPaymentTarget.test.ts` Expected: PASS — 5 tests
 
 - [ ] **Step 5: Commit**
 
@@ -135,10 +140,12 @@ git commit -m "feat(tpv): decision pura de a que venta pertenece un cobro de ter
 ## Task 2: El desvío — si hay orden, se paga ESA orden
 
 **Files:**
+
 - Modify: `src/services/tpv/payment.tpv.service.ts:2608` (inicio de `recordFastPayment`)
 - Test: `tests/unit/services/tpv/fastPaymentDelegation.test.ts`
 
 **Interfaces:**
+
 - Consumes: `resolveFastPaymentTarget(row)` de Task 1
 - Produces: nada nuevo hacia afuera — `recordFastPayment` conserva su firma
   `recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string)`
@@ -205,47 +212,47 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/tpv/fastPaymentDelegation.test.ts`
-Expected: FAIL — `recordOrderPayment` no fue llamado (hoy siempre crea la orden FAST)
+Run: `npx jest tests/unit/services/tpv/fastPaymentDelegation.test.ts` Expected: FAIL — `recordOrderPayment` no fue llamado (hoy siempre crea
+la orden FAST)
 
 - [ ] **Step 3: Escribir la implementación mínima**
 
 En `src/services/tpv/payment.tpv.service.ts`, justo después del `logger.info('Recording fast payment', …)` de la línea 2609:
 
 ```typescript
-  // 🔴 ¿Este dinero pertenece a una venta que YA existe? El cajero pudo mandar el cobro
-  // desde el POS, cancelar, y la terminal cobrar igual. Ese cobro es de la venta que lo
-  // originó —con sus productos—, no de una venta sintética vacía. La solicitud de
-  // arbitraje guarda el `orderId`; hasta hoy sólo se usaba para cerrar la fila.
-  //
-  // Fail-open a propósito: si la consulta truena, se sigue por FAST. Un fallo de infra
-  // jamás puede impedir registrar dinero que YA se cobró.
-  if (paymentData.terminalPaymentRequestId) {
-    let arbitrationRow: { orderId: string | null; venueId: string; status: string } | null = null
-    try {
-      arbitrationRow = await prisma.terminalPaymentRequest.findUnique({
-        where: { requestId: paymentData.terminalPaymentRequestId },
-        select: { orderId: true, venueId: true, status: true },
-      })
-    } catch (err) {
-      logger.error('⚠️ [FastPayment] No se pudo leer la solicitud de arbitraje — se sigue como venta rápida', {
-        requestId: paymentData.terminalPaymentRequestId,
-        error: err instanceof Error ? err.message : String(err),
-      })
-    }
-
-    const target = resolveFastPaymentTarget(arbitrationRow)
-    if (target.kind === 'existingOrder') {
-      logger.info('🎯 [FastPayment] El cobro pertenece a una venta existente — no se crea venta rápida', {
-        requestId: paymentData.terminalPaymentRequestId,
-        orderId: target.orderId,
-        priorStatus: arbitrationRow?.status,
-      })
-      // recordOrderPayment ya sabe descontar inventario, cerrar la orden, actualizar el
-      // turno y cerrar la fila de arbitraje. No se reimplementa nada de eso aquí.
-      return recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
-    }
+// 🔴 ¿Este dinero pertenece a una venta que YA existe? El cajero pudo mandar el cobro
+// desde el POS, cancelar, y la terminal cobrar igual. Ese cobro es de la venta que lo
+// originó —con sus productos—, no de una venta sintética vacía. La solicitud de
+// arbitraje guarda el `orderId`; hasta hoy sólo se usaba para cerrar la fila.
+//
+// Fail-open a propósito: si la consulta truena, se sigue por FAST. Un fallo de infra
+// jamás puede impedir registrar dinero que YA se cobró.
+if (paymentData.terminalPaymentRequestId) {
+  let arbitrationRow: { orderId: string | null; venueId: string; status: string } | null = null
+  try {
+    arbitrationRow = await prisma.terminalPaymentRequest.findUnique({
+      where: { requestId: paymentData.terminalPaymentRequestId },
+      select: { orderId: true, venueId: true, status: true },
+    })
+  } catch (err) {
+    logger.error('⚠️ [FastPayment] No se pudo leer la solicitud de arbitraje — se sigue como venta rápida', {
+      requestId: paymentData.terminalPaymentRequestId,
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
+
+  const target = resolveFastPaymentTarget(arbitrationRow)
+  if (target.kind === 'existingOrder') {
+    logger.info('🎯 [FastPayment] El cobro pertenece a una venta existente — no se crea venta rápida', {
+      requestId: paymentData.terminalPaymentRequestId,
+      orderId: target.orderId,
+      priorStatus: arbitrationRow?.status,
+    })
+    // recordOrderPayment ya sabe descontar inventario, cerrar la orden, actualizar el
+    // turno y cerrar la fila de arbitraje. No se reimplementa nada de eso aquí.
+    return recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+  }
+}
 ```
 
 Y el import arriba del archivo:
@@ -256,19 +263,15 @@ import { resolveFastPaymentTarget } from './fastPaymentTarget'
 
 - [ ] **Step 4: Correr los tests y verificar que pasan**
 
-Run: `npx jest tests/unit/services/tpv/`
-Expected: PASS — 8 tests (5 de Task 1 + 3 de éste)
+Run: `npx jest tests/unit/services/tpv/` Expected: PASS — 8 tests (5 de Task 1 + 3 de éste)
 
 - [ ] **Step 5: Correr la suite alrededor para no romper nada**
 
-Run: `npx jest tests/unit/services/terminal-payment tests/unit/services/tpv tests/unit/jobs`
-Expected: PASS — sin regresiones
+Run: `npx jest tests/unit/services/terminal-payment tests/unit/services/tpv tests/unit/jobs` Expected: PASS — sin regresiones
 
 - [ ] **Step 6: Verificar que compila**
 
-Run: `npm run build`
-Expected: sin errores.
-⚠️ **No usar `npx tsc --noEmit`**: revienta por memoria en este repo. Es un caso conocido.
+Run: `npm run build` Expected: sin errores. ⚠️ **No usar `npx tsc --noEmit`**: revienta por memoria en este repo. Es un caso conocido.
 
 - [ ] **Step 7: Commit**
 
@@ -281,12 +284,15 @@ git commit -m "fix(tpv): el cobro que sobrevive a un cancel aterriza en SU venta
 
 ## Task 3: Verificación contra Postgres real
 
-Los tests con mocks prueban la decisión y el desvío. **No prueban que la venta quede bien de verdad.** Hoy el bug se descubrió justamente porque una premisa equivocada estaba también en los tests — así que esta tarea es obligatoria.
+Los tests con mocks prueban la decisión y el desvío. **No prueban que la venta quede bien de verdad.** Hoy el bug se descubrió justamente
+porque una premisa equivocada estaba también en los tests — así que esta tarea es obligatoria.
 
 **Files:**
+
 - Create (temporal, se borra al final): `scripts/tmp-verificar-cobro-huerfano.ts`
 
 **Interfaces:**
+
 - Consumes: `recordFastPayment` ya modificada por Task 2
 - Produces: evidencia, no código
 
@@ -313,9 +319,14 @@ async function main() {
   // 2. Una solicitud de arbitraje que apunte a ella.
   await prisma.terminalPaymentRequest.create({
     data: {
-      requestId: `${MARCA}1`, venueId, terminalId: 'verif-huerfano',
-      status: 'CANCELLED', amountCents: Math.round(Number(orden.total) * 100), tipCents: 0,
-      orderId: orden.id, expiresAt: new Date(Date.now() - 3600_000),
+      requestId: `${MARCA}1`,
+      venueId,
+      terminalId: 'verif-huerfano',
+      status: 'CANCELLED',
+      amountCents: Math.round(Number(orden.total) * 100),
+      tipCents: 0,
+      orderId: orden.id,
+      expiresAt: new Date(Date.now() - 3600_000),
     },
   })
 
@@ -323,8 +334,11 @@ async function main() {
 
   // 3. La terminal registra el cobro, como haría de verdad.
   await recordFastPayment(venueId, {
-    amount: Number(orden.total), method: 'CREDIT_CARD', status: 'COMPLETED',
-    terminalPaymentRequestId: `${MARCA}1`, idempotencyKey: `${MARCA}idem-1`,
+    amount: Number(orden.total),
+    method: 'CREDIT_CARD',
+    status: 'COMPLETED',
+    terminalPaymentRequestId: `${MARCA}1`,
+    idempotencyKey: `${MARCA}idem-1`,
   } as any)
 
   // 4. Comprobar.
@@ -336,7 +350,9 @@ async function main() {
 
   const pagoEnLaOrdenReal = (ordenDespues?.payments.length ?? 0) > 0
   const noCreoFast = ordenesFastDespues === ordenesFastAntes
-  console.log(`${pagoEnLaOrdenReal ? '✅' : '❌'} el pago quedó en la orden REAL (${ordenDespues?.payments.length} pagos, status ${ordenDespues?.status})`)
+  console.log(
+    `${pagoEnLaOrdenReal ? '✅' : '❌'} el pago quedó en la orden REAL (${ordenDespues?.payments.length} pagos, status ${ordenDespues?.status})`,
+  )
   console.log(`${noCreoFast ? '✅' : '❌'} NO se creó venta FAST (antes ${ordenesFastAntes}, después ${ordenesFastDespues})`)
   console.log(`   la orden tenía ${orden._count.items} líneas de producto — eso es lo que antes se perdía`)
 
@@ -353,10 +369,11 @@ main().catch(async e => {
 
 - [ ] **Step 2: Correrlo**
 
-Run: `VENUE_ID=<id de un venue de pruebas> NODE_ENV=development npx tsx scripts/tmp-verificar-cobro-huerfano.ts`
-Expected: las dos líneas en ✅.
+Run: `VENUE_ID=<id de un venue de pruebas> NODE_ENV=development npx tsx scripts/tmp-verificar-cobro-huerfano.ts` Expected: las dos líneas en
+✅.
 
-⚠️ Si alguna sale ❌, **antes de tocar el código verifica que el escenario sea válido**: hoy un caso falló porque el pago elegido ya estaba reclamado por otra solicitud, no porque el arreglo estuviera mal.
+⚠️ Si alguna sale ❌, **antes de tocar el código verifica que el escenario sea válido**: hoy un caso falló porque el pago elegido ya estaba
+reclamado por otra solicitud, no porque el arreglo estuviera mal.
 
 - [ ] **Step 3: Borrar el script y comprobar que no quedó basura**
 
@@ -364,11 +381,13 @@ Expected: las dos líneas en ✅.
 rm scripts/tmp-verificar-cobro-huerfano.ts
 psql "$DATABASE_URL" -c "SELECT COUNT(*) FROM \"TerminalPaymentRequest\" WHERE \"requestId\" LIKE 'VERIF-%';"
 ```
+
 Expected: `0`, y `git status` sin el script.
 
 - [ ] **Step 4: Commit del reporte**
 
-Escribir `docs/superpowers/reports/2026-08-11-cobro-huerfano-aterriza-en-su-venta.md` con: la salida del script, cuántas líneas tenía la orden, y el conteo de FAST antes/después.
+Escribir `docs/superpowers/reports/2026-08-11-cobro-huerfano-aterriza-en-su-venta.md` con: la salida del script, cuántas líneas tenía la
+orden, y el conteo de FAST antes/después.
 
 ```bash
 git add docs/superpowers/reports/2026-08-11-cobro-huerfano-aterriza-en-su-venta.md
@@ -379,7 +398,8 @@ git commit -m "docs(report): verificacion contra Postgres del cobro huerfano"
 
 ## Fuera de alcance (planes aparte)
 
-1. **POS: que el cajero decida entregar o devolver.** Con el server arreglado, la pantalla de "Cobro anterior sin confirmar" puede ofrecer **Entregar** / **Devolver**. Depende de esto y no hace falta para que este cambio aporte valor. Android **e** iOS en el mismo trabajo.
+1. **POS: que el cajero decida entregar o devolver.** Con el server arreglado, la pantalla de "Cobro anterior sin confirmar" puede ofrecer
+   **Entregar** / **Devolver**. Depende de esto y no hace falta para que este cambio aporte valor. Android **e** iOS en el mismo trabajo.
 2. **Reembolso por TPV.** Parkeado. Antes hay que averiguar si el SDK de Nexgo/AngelPay expone una devolución disparable en remoto.
 3. **Datos históricos.** Las ventas `FAST` vacías que ya existen no se migran: este plan corrige de aquí en adelante.
 
@@ -387,8 +407,13 @@ git commit -m "docs(report): verificacion contra Postgres del cobro huerfano"
 
 ## Self-review
 
-**Cobertura del spec:** la raíz (server delega a la orden real) → Tasks 1-2. Las trampas del spec: idempotencia → se hereda de `recordOrderPayment`, que ya la tiene, en vez de duplicarla; orden `CANCELLED` → decidido explícitamente y con test (la orden manda: el dinero se movió); sólo la orden de ESA solicitud → la decisión sólo lee `row.orderId`; ventas rápidas legítimas → intactas, con test. La verificación contra Postgres → Task 3. El POS y el reembolso quedan declarados fuera, no olvidados.
+**Cobertura del spec:** la raíz (server delega a la orden real) → Tasks 1-2. Las trampas del spec: idempotencia → se hereda de
+`recordOrderPayment`, que ya la tiene, en vez de duplicarla; orden `CANCELLED` → decidido explícitamente y con test (la orden manda: el
+dinero se movió); sólo la orden de ESA solicitud → la decisión sólo lee `row.orderId`; ventas rápidas legítimas → intactas, con test. La
+verificación contra Postgres → Task 3. El POS y el reembolso quedan declarados fuera, no olvidados.
 
 **Placeholders:** ninguno — todos los pasos llevan código o comando ejecutable.
 
-**Consistencia de tipos:** `resolveFastPaymentTarget(row: ArbitrationRowSnapshot | null): FastPaymentTarget` se define en Task 1 y se usa con esa firma exacta en Task 2. `recordOrderPayment(venueId, orderId, paymentData, userId, _orgId)` coincide con la firma real de `payment.tpv.service.ts:1717`.
+**Consistencia de tipos:** `resolveFastPaymentTarget(row: ArbitrationRowSnapshot | null): FastPaymentTarget` se define en Task 1 y se usa
+con esa firma exacta en Task 2. `recordOrderPayment(venueId, orderId, paymentData, userId, _orgId)` coincide con la firma real de
+`payment.tpv.service.ts:1717`.
