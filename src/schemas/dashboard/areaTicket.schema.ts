@@ -90,6 +90,45 @@ export const updateAreaSettlementRouteSchema = z.object({
     .strict(),
 })
 
+const EXTERNAL_SETTLEMENT_STATUSES = ['PENDING', 'ASSUMED', 'CONFIRMED', 'DISCREPANCY', 'NOT_CHARGED'] as const
+const EXTERNAL_INCIDENT_KINDS = ['UNCONFIRMED_CHARGE', 'AMOUNT_VARIANCE', 'NEGATIVE_STOCK', 'CODE_MISMATCH', 'REPRINT_RISK'] as const
+const EXTERNAL_INCIDENT_STATUSES = ['OPEN', 'RESOLVED', 'DISMISSED'] as const
+const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha debe tener formato AAAA-MM-DD.')
+
+// Dos colas de sólo-lectura sobre la ruta EXTERNAL (§caja externa fase 1, Task 15):
+// qué cobros nadie confirmó y qué incidencias quedaron abiertas. Área/estado(o tipo)/
+// fecha son filtros independientes y opcionales — sin ninguno, la respuesta trae TODO
+// lo del venue paginado; cuál es el default "útil" (p.ej. status=PENDING en la pestaña
+// "Cobros por confirmar") lo decide el dashboard, no este schema.
+export const listExternalSettlementsSchema = z.object({
+  params: venueParams,
+  query: z
+    .object({
+      areaId: z.string().min(1).optional(),
+      status: z.enum(EXTERNAL_SETTLEMENT_STATUSES).optional(),
+      dateFrom: dateOnly.optional(),
+      dateTo: dateOnly.optional(),
+      cursor: z.string().min(1).max(512).optional(),
+      pageSize: z.coerce.number().int().min(1).max(100).optional(),
+    })
+    .strict(),
+})
+
+export const listExternalIncidentsSchema = z.object({
+  params: venueParams,
+  query: z
+    .object({
+      areaId: z.string().min(1).optional(),
+      kind: z.enum(EXTERNAL_INCIDENT_KINDS).optional(),
+      status: z.enum(EXTERNAL_INCIDENT_STATUSES).optional(),
+      dateFrom: dateOnly.optional(),
+      dateTo: dateOnly.optional(),
+      cursor: z.string().min(1).max(512).optional(),
+      pageSize: z.coerce.number().int().min(1).max(100).optional(),
+    })
+    .strict(),
+})
+
 export const updateAreaTicketTerminalSchema = z.object({
   params: venueParams.extend({ terminalId: z.string().min(1, 'La terminal es requerida') }),
   query: emptyQuery,
@@ -163,6 +202,8 @@ export type UpdateAreaTicketSettingsInput = z.infer<typeof updateAreaTicketSetti
 export type CreateFulfillmentAreaInput = z.infer<typeof createFulfillmentAreaSchema>['body']
 export type UpdateFulfillmentAreaInput = z.infer<typeof updateFulfillmentAreaSchema>['body']
 export type UpdateAreaSettlementRouteInput = z.infer<typeof updateAreaSettlementRouteSchema>['body']
+export type ListExternalSettlementsQuery = z.infer<typeof listExternalSettlementsSchema>['query']
+export type ListExternalIncidentsQuery = z.infer<typeof listExternalIncidentsSchema>['query']
 export type UpdateAreaTicketTerminalInput = z.infer<typeof updateAreaTicketTerminalSchema>['body']
 export type UpdateScaleSettingsInput = z.infer<typeof updateScaleSettingsSchema>['body']
 export type CreateScaleProfileInput = z.infer<typeof createScaleProfileSchema>['body']

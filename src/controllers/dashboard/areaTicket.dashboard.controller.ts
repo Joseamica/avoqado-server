@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as service from '../../services/dashboard/areaTicket.dashboard.service'
+import { ListExternalIncidentsQuery, ListExternalSettlementsQuery } from '../../schemas/dashboard/areaTicket.schema'
 
 const actor = (req: Request): string | undefined => (req as any).authContext?.userId
 
@@ -86,6 +87,28 @@ export async function updateScaleProfile(req: Request, res: Response, next: Next
 export async function getOperations(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     res.status(200).json({ success: true, data: await service.getOperations(req.params.venueId) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function listExternalSettlements(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    res.status(200).json({
+      success: true,
+      data: await service.listExternalSettlements(req.params.venueId, req.query as unknown as ListExternalSettlementsQuery),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function listExternalIncidents(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    res.status(200).json({
+      success: true,
+      data: await service.listExternalIncidents(req.params.venueId, req.query as unknown as ListExternalIncidentsQuery),
+    })
   } catch (error) {
     next(error)
   }

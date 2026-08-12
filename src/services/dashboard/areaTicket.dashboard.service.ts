@@ -1,6 +1,10 @@
+import { fromZonedTime } from 'date-fns-tz'
 import {
   AreaSettlementRoute,
   AreaTicketCheckoutStatus,
+  AreaTicketExternalIncidentKind,
+  AreaTicketExternalIncidentStatus,
+  AreaTicketExternalSettlementStatus,
   AreaTicketStatus,
   ExternalConfirmationMode,
   ExternalDeliveryTracking,
@@ -17,6 +21,8 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/App
 import {
   CreateFulfillmentAreaInput,
   CreateScaleProfileInput,
+  ListExternalIncidentsQuery,
+  ListExternalSettlementsQuery,
   UpdateAreaSettlementRouteInput,
   UpdateAreaTicketSettingsInput,
   UpdateAreaTicketTerminalInput,
@@ -24,6 +30,7 @@ import {
   UpdateScaleProfileInput,
   UpdateScaleSettingsInput,
 } from '../../schemas/dashboard/areaTicket.schema'
+import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { logAction } from './activity-log.service'
@@ -502,4 +509,207 @@ export async function getOperations(venueId: string) {
     }),
   ])
   return { pendingDelivery, reconciliation, recentlyIssued }
+}
+
+// ----------------------------------------------------------------------------
+// Colas de sólo lectura de la ruta EXTERNAL (§caja externa fase 1, Task 15) — qué
+// cobros nadie confirmó y qué incidencias quedaron abiertas. Ninguna de las dos
+// funciones de abajo confirma, resuelve ni reabre nada; eso vive en
+// `areaTicketExternal.mobile.service.ts` (piso) y en el job de conciliación
+// (Task 12). Sin estas dos pantallas el trabajo que ese job abre nadie lo ve.
+// ----------------------------------------------------------------------------
+
+const EXTERNAL_QUEUE_DEFAULT_PAGE_SIZE = 25
+const EXTERNAL_QUEUE_MAX_PAGE_SIZE = 100
+
+/**
+ * Cursor estable (fecha, id), en el MISMO formato que
+ * `encodePendingCursor`/`decodePendingCursor` (`areaTicketV7.mobile.service.ts`), pero
+ * copiado localmente a propósito: esas dos son del dominio MOBILE (una terminal, un
+ * área) y estas dos son de dashboard (oficina, venue completo) — cruzar esa frontera
+ * de capas por dos funciones de cuatro líneas no vale la acoplada.
+ */
+function encodeQueueCursor(row: { sortAt: Date; id: string }): string {
+  return Buffer.from(`${row.sortAt.toISOString()}|${row.id}`).toString('base64url')
+}
+
+function decodeQueueCursor(cursor?: string | null): { sortAt: Date; id: string } | null {
+  if (!cursor) return null
+  try {
+    const [date, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|')
+    const sortAt = new Date(date)
+    if (!id || Number.isNaN(sortAt.getTime())) throw new Error('invalid')
+    return { sortAt, id }
+  } catch {
+    throw new BadRequestError('El cursor de la lista no es válido.')
+  }
+}
+
+async function assertVenueTimezone(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  if (!venue) throw new NotFoundError('Venue no encontrado')
+  // `Venue.timezone` es NOT NULL con default en el schema — el `||` es
+  // cinturón-y-tirantes (mismo patrón defensivo que el job de conciliación,
+  // Task 12), no una rama alcanzable hoy.
+  return venue.timezone || DEFAULT_TIMEZONE
+}
+
+/**
+ * Filtro de fecha venue-local, opcional en ambos extremos. A propósito NO usa
+ * `parseDbDateRange` (que rellena un default de N días cuando no mandan fecha): estas
+ * son colas de trabajo pendiente, no un reporte por periodo — un cobro sin confirmar
+ * de hace tres semanas debe seguir apareciendo si nadie filtra por fecha. Mismo
+ * blindaje de timezone que el resto del repo: `fromZonedTime` sobre un STRING, nunca
+ * `new Date('YYYY-MM-DD')` (`.claude/rules/critical-warnings.md`).
+ */
+function dateRangeFilter(
+  dateFrom: string | undefined,
+  dateTo: string | undefined,
+  timezone: string,
+): { gte?: Date; lte?: Date } | undefined {
+  if (!dateFrom && !dateTo) return undefined
+  const range: { gte?: Date; lte?: Date } = {}
+  if (dateFrom) range.gte = fromZonedTime(`${dateFrom}T00:00:00.000`, timezone)
+  if (dateTo) range.lte = fromZonedTime(`${dateTo}T23:59:59.999`, timezone)
+  return range
+}
+
+const staffFullName = (staff: { firstName: string; lastName: string } | null): string | null =>
+  staff ? `${staff.firstName} ${staff.lastName}`.trim() : null
+
+/**
+ * Cola "Cobros por confirmar". Área/estado/fecha son filtros independientes y
+ * opcionales — sin `status`, trae TODOS los estados (incluyendo CONFIRMED/
+ * NOT_CHARGED, útil como historial); el default "sólo lo pendiente" lo pide el
+ * dashboard mandando `status=PENDING`, no esta función. Paginada por cursor estable
+ * (createdAt, id) sobre el mismo índice `@@index([venueId, status, createdAt])` que
+ * ya trae el modelo.
+ */
+export async function listExternalSettlements(venueId: string, filters: ListExternalSettlementsQuery) {
+  const timezone = await assertVenueTimezone(venueId)
+  const cursor = decodeQueueCursor(filters.cursor)
+  const take = Math.max(1, Math.min(filters.pageSize ?? EXTERNAL_QUEUE_DEFAULT_PAGE_SIZE, EXTERNAL_QUEUE_MAX_PAGE_SIZE))
+  const createdAtRange = dateRangeFilter(filters.dateFrom, filters.dateTo, timezone)
+
+  const rows = await prisma.areaTicketExternalSettlement.findMany({
+    where: {
+      venueId,
+      ...(filters.status ? { status: filters.status as AreaTicketExternalSettlementStatus } : {}),
+      ...(filters.areaId ? { areaTicket: { fulfillmentAreaId: filters.areaId } } : {}),
+      ...(createdAtRange ? { createdAt: createdAtRange } : {}),
+      ...(cursor ? { OR: [{ createdAt: { gt: cursor.sortAt } }, { createdAt: cursor.sortAt, id: { gt: cursor.id } }] } : {}),
+    },
+    select: {
+      id: true,
+      status: true,
+      handoffState: true,
+      confirmationMode: true,
+      referenceAmount: true,
+      externalAmount: true,
+      externalReference: true,
+      notes: true,
+      createdAt: true,
+      confirmedAt: true,
+      confirmedByStaff: { select: { firstName: true, lastName: true } },
+      terminal: { select: { id: true, name: true } },
+      areaTicket: { select: { id: true, code: true, issuedAt: true, fulfillmentArea: { select: { id: true, name: true } } } },
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: take + 1,
+  })
+
+  const hasMore = rows.length > take
+  const page = hasMore ? rows.slice(0, take) : rows
+
+  return {
+    items: page.map(row => {
+      const reference = new Prisma.Decimal(row.referenceAmount)
+      const external = row.externalAmount === null ? null : new Prisma.Decimal(row.externalAmount)
+      return {
+        id: row.id,
+        status: row.status,
+        handoffState: row.handoffState,
+        confirmationMode: row.confirmationMode,
+        // Pesos 1:1, nunca centavos. `variance` se DERIVA aquí (externalAmount menos
+        // referenceAmount) — no existe como columna (ver el comentario del modelo en
+        // schema.prisma) — con el MISMO signo y redondeo que `confirmExternalSettlement`
+        // ya expone al confirmar, para que la oficina y quien confirmó en el piso
+        // nunca vean números distintos del mismo vale.
+        referenceAmount: reference.toFixed(2),
+        externalAmount: external === null ? null : external.toFixed(2),
+        variance: external === null ? null : external.sub(reference).toFixed(2),
+        externalReference: row.externalReference,
+        notes: row.notes,
+        createdAt: row.createdAt,
+        confirmedAt: row.confirmedAt,
+        confirmedBy: staffFullName(row.confirmedByStaff),
+        terminal: row.terminal,
+        areaTicket: { id: row.areaTicket.id, code: row.areaTicket.code, issuedAt: row.areaTicket.issuedAt },
+        area: row.areaTicket.fulfillmentArea,
+      }
+    }),
+    nextCursor: hasMore ? encodeQueueCursor({ sortAt: page[page.length - 1].createdAt, id: page[page.length - 1].id }) : null,
+  }
+}
+
+/**
+ * Cola "Incidencias". Misma regla que arriba: sin `status`, trae TODAS (abiertas y
+ * cerradas); el default "sólo lo abierto" lo pide el dashboard mandando
+ * `status=OPEN`. Cursor estable (openedAt, id) sobre el mismo índice
+ * `@@index([venueId, status, kind, openedAt])` que ya trae el modelo.
+ */
+export async function listExternalIncidents(venueId: string, filters: ListExternalIncidentsQuery) {
+  const timezone = await assertVenueTimezone(venueId)
+  const cursor = decodeQueueCursor(filters.cursor)
+  const take = Math.max(1, Math.min(filters.pageSize ?? EXTERNAL_QUEUE_DEFAULT_PAGE_SIZE, EXTERNAL_QUEUE_MAX_PAGE_SIZE))
+  const openedAtRange = dateRangeFilter(filters.dateFrom, filters.dateTo, timezone)
+
+  const rows = await prisma.areaTicketExternalIncident.findMany({
+    where: {
+      venueId,
+      ...(filters.kind ? { kind: filters.kind as AreaTicketExternalIncidentKind } : {}),
+      ...(filters.status ? { status: filters.status as AreaTicketExternalIncidentStatus } : {}),
+      ...(filters.areaId ? { areaTicket: { fulfillmentAreaId: filters.areaId } } : {}),
+      ...(openedAtRange ? { openedAt: openedAtRange } : {}),
+      ...(cursor ? { OR: [{ openedAt: { gt: cursor.sortAt } }, { openedAt: cursor.sortAt, id: { gt: cursor.id } }] } : {}),
+    },
+    select: {
+      id: true,
+      kind: true,
+      status: true,
+      detail: true,
+      openedAt: true,
+      occurrenceCount: true,
+      reopenedAt: true,
+      resolvedAt: true,
+      resolution: true,
+      resolvedByStaff: { select: { firstName: true, lastName: true } },
+      areaTicket: { select: { id: true, code: true, fulfillmentArea: { select: { id: true, name: true } } } },
+    },
+    orderBy: [{ openedAt: 'asc' }, { id: 'asc' }],
+    take: take + 1,
+  })
+
+  const hasMore = rows.length > take
+  const page = hasMore ? rows.slice(0, take) : rows
+
+  return {
+    items: page.map(row => ({
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      // Ya viene en pesos, formateada por quien la abrió (confirmar/declarar-no-cobrado
+      // en el piso, o el job de conciliación) — se reenvía tal cual, sin recalcularla.
+      detail: row.detail,
+      openedAt: row.openedAt,
+      occurrenceCount: row.occurrenceCount,
+      reopenedAt: row.reopenedAt,
+      resolvedAt: row.resolvedAt,
+      resolution: row.resolution,
+      resolvedBy: staffFullName(row.resolvedByStaff),
+      areaTicket: row.areaTicket ? { id: row.areaTicket.id, code: row.areaTicket.code } : null,
+      area: row.areaTicket?.fulfillmentArea ?? null,
+    })),
+    nextCursor: hasMore ? encodeQueueCursor({ sortAt: page[page.length - 1].openedAt, id: page[page.length - 1].id }) : null,
+  }
 }
