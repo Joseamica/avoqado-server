@@ -164,9 +164,7 @@ describe('ProductInventoryIntegration Service', () => {
           product: {
             findUnique: jest.fn().mockResolvedValue(mockProduct),
           },
-          $queryRaw: jest
-            .fn()
-            .mockResolvedValue([{ id: mockInventory.id, currentStock: new Decimal(-5), previousStock: new Decimal(5) }]),
+          $queryRaw: jest.fn().mockResolvedValue([{ id: mockInventory.id, currentStock: new Decimal(-5), previousStock: new Decimal(5) }]),
           inventory: {
             findUnique: jest.fn().mockResolvedValue(mockInventory),
           },

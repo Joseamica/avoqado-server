@@ -18,7 +18,7 @@ import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
-import { mapDigitalReceiptResponse, resolveAutofacturaAvailable } from '../tpv/payment.tpv.service'
+import { mapDigitalReceiptResponse, resolveAutofacturaAvailable, type OrderInventoryWarning } from '../tpv/payment.tpv.service'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
@@ -1633,6 +1633,10 @@ export interface CashPaymentResponse {
   // if receipt generation failed (never blocks the payment). ADDITIVE — old app
   // versions ignore it; card payments already get their key from the terminal.
   digitalReceipt?: { accessKey: string; receiptUrl: string; autofacturaAvailable: boolean } | null
+  // Aviso de inventario post-cobro (Square-parity): el cobro SIEMPRE quedó
+  // registrado; esto dice si el stock quedó en negativo o no se pudo descontar.
+  // ADITIVO — las versiones viejas de la app lo ignoran.
+  inventoryWarning?: OrderInventoryWarning
 }
 
 /**
@@ -2051,30 +2055,49 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // logged, not thrown), and it only fires on the PENDING/PARTIAL → PAID
   // transition (re-calls are blocked above by the "already paid" guard).
   // Weighted lines (weightQuantity) deduct kilos; see spec venta-por-peso.
+  // La deducción se ESPERA (antes era fire-and-forget) para que la respuesta
+  // pueda traer `inventoryWarning` y el POS pinte el toast ámbar post-cobro
+  // (Square-parity, mismo contrato que el TPV). El cobro ya quedó commiteado
+  // arriba: un fallo aquí se loguea y la respuesta sale igual, sin aviso.
+  let inventoryWarning: OrderInventoryWarning | undefined
   if (orderFullyPaid) {
-    void (async () => {
-      try {
-        // V7 area-ticket orders already applied reservations, normal lines,
-        // recipes and modifiers inside the payment transaction. Running the
-        // legacy post-commit helper here would make retries crash-unsafe and
-        // could deduct the non-reserved portion twice.
-        if (!areaTicketOrder) {
-          const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')
-          const paidOrder = await prisma.order.findUnique({
-            where: { id: orderId },
-            include: { items: { include: { modifiers: { include: { modifier: true } } } } },
-          })
-          if (paidOrder) {
-            await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId || '')
+    try {
+      // V7 area-ticket orders already applied reservations, normal lines,
+      // recipes and modifiers inside the payment transaction. Running the
+      // legacy post-commit helper here would make retries crash-unsafe and
+      // could deduct the non-reserved portion twice.
+      if (!areaTicketOrder) {
+        const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')
+        const paidOrder = await prisma.order.findUnique({
+          where: { id: orderId },
+          include: { items: { include: { modifiers: { include: { modifier: true } } } } },
+        })
+        if (paidOrder) {
+          const issues = await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId || '')
+          if (Array.isArray(issues) && issues.length > 0) {
+            const { buildInventoryWarning } = await import('@/services/tpv/payment.tpv.service')
+            inventoryWarning = buildInventoryWarning(
+              issues,
+              issues.every(issue => issue.available != null),
+            )
           }
         }
-        // Real-time auto-reorder, mirroring recordOrderPayment: if this sale
-        // left an ingredient at/below its reorder point, create the PO now.
-        // Self-gated (feature + PREMIUM tier + config.enabled) and non-blocking.
+      }
+    } catch (err) {
+      logger.error('[ORDER.MOBILE] Post-payment inventory deduction failed (payment unaffected)', {
+        orderId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    // Real-time auto-reorder, mirroring recordOrderPayment: if this sale
+    // left an ingredient at/below its reorder point, create the PO now.
+    // Self-gated (feature + PREMIUM tier + config.enabled) and non-blocking.
+    void (async () => {
+      try {
         const { runAutoReorderForVenue } = await import('@/services/dashboard/autoReorder.service')
         await runAutoReorderForVenue(venueId)
       } catch (err) {
-        logger.error('[ORDER.MOBILE] Post-payment inventory deduction/auto-reorder failed (payment unaffected)', {
+        logger.error('[ORDER.MOBILE] Post-payment auto-reorder failed (payment unaffected)', {
           orderId,
           error: err instanceof Error ? err.message : String(err),
         })
@@ -2139,6 +2162,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     method: paymentMethod,
     status: 'COMPLETED',
     digitalReceipt,
+    ...(inventoryWarning ? { inventoryWarning } : {}),
   }
 }
 

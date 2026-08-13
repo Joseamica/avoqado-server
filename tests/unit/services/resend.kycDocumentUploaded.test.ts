@@ -8,7 +8,6 @@
  * Va ADJUNTO a propósito: la bandeja debe bastar para actuar, sin abrir el dashboard.
  */
 
-
 // A test file with no top-level import/export is a SCRIPT, not a module, so its
 // top-level `const`s land in the global scope and collide across files — two
 // suites both declaring `mockSend` broke the typecheck, not the tests. This

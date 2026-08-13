@@ -196,7 +196,7 @@ export interface OrderInventoryWarning {
  * si el POS sólo alcanza a pintar una línea, esa línea no puede ser la que lo
  * mande a pasar la tarjeta otra vez.
  */
-function buildInventoryWarning(rawIssues: OrderInventoryWarning['issues'], inventoryDeducted: boolean): OrderInventoryWarning {
+export function buildInventoryWarning(rawIssues: OrderInventoryWarning['issues'], inventoryDeducted: boolean): OrderInventoryWarning {
   // En un TOCTOU real las DOS puertas reportan el MISMO producto: el pre-flight
   // con el `available` numérico, y la deducción con `available: null` y su error.
   // Sin esto el cajero ve la hamburguesa dos veces y no sabe si son dos problemas.

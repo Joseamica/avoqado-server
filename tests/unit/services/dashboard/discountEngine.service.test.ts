@@ -80,6 +80,15 @@ const createMockOrderContext = (overrides: Record<string, any> = {}) => ({
   ...overrides,
 })
 
+// 🔴 El día de la semana se evalúa en la zona del VENUE, no en la del proceso
+// (`isWithinVenueSchedule`). Leerlo con `new Date().getDay()` pasa en una Mac en
+// CST y truena en CI, que corre en UTC: de 18:00 a medianoche en México ya es el
+// día siguiente en UTC y el descuento "de hoy" deja de aplicar.
+const venueDayOfWeek = (timezone = 'America/Mexico_City') => {
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(new Date())
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekday)
+}
+
 // Helper to create mock database discount
 const createMockDbDiscount = (overrides: Record<string, any> = {}) => ({
   id: 'discount-123',
@@ -250,7 +259,7 @@ describe('Discount Engine Service', () => {
     })
 
     it('should filter by day of week', async () => {
-      const today = new Date().getDay()
+      const today = venueDayOfWeek()
       const mockDiscounts = [
         createMockDbDiscount({
           id: 'd1',
@@ -258,6 +267,7 @@ describe('Discount Engine Service', () => {
         }),
       ]
 
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
       prismaMock.discount.findMany.mockResolvedValue(mockDiscounts)
 
       const result = await getEligibleDiscounts('venue-123')
@@ -266,7 +276,7 @@ describe('Discount Engine Service', () => {
     })
 
     it('should include discount when valid on current day', async () => {
-      const today = new Date().getDay()
+      const today = venueDayOfWeek()
       const mockDiscounts = [
         createMockDbDiscount({
           id: 'd1',
@@ -274,6 +284,7 @@ describe('Discount Engine Service', () => {
         }),
       ]
 
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
       prismaMock.discount.findMany.mockResolvedValue(mockDiscounts)
 
       const result = await getEligibleDiscounts('venue-123')

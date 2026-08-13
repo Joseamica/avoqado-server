@@ -100,9 +100,9 @@ describe('isWithinVenueSchedule — vigencia en la zona del negocio', () => {
     })
 
     it('una zona horaria basura cae al default del negocio en vez de tronar', () => {
-      expect(isWithinVenueSchedule({ daysOfWeek: [], timeFrom: '18:00', timeUntil: '20:00' }, utc('2026-08-13T01:00:00Z'), 'Marte/Olympus')).toBe(
-        true,
-      )
+      expect(
+        isWithinVenueSchedule({ daysOfWeek: [], timeFrom: '18:00', timeUntil: '20:00' }, utc('2026-08-13T01:00:00Z'), 'Marte/Olympus'),
+      ).toBe(true)
     })
   })
 })

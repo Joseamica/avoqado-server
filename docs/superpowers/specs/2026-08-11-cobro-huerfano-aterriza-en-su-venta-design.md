@@ -130,8 +130,8 @@ POS "Abrir en la terminal" → POST /mobile/venues/:id/terminals/:id/refund-requ
 ```
 
 🔑 **El evento abre una pantalla; no autoriza que se mueva dinero.** El ACK contesta `opened`/`rejected`, nunca "se devolvió": esperar a que
-alguien pase la tarjeta son minutos con el cajero congelado. Por lo mismo el POS **no** registra el reembolso — lo hace la TPV, o se contaría
-dos veces — y el éxito en pantalla dice explícitamente que todavía no se ha devuelto nada.
+alguien pase la tarjeta son minutos con el cajero congelado. Por lo mismo el POS **no** registra el reembolso — lo hace la TPV, o se
+contaría dos veces — y el éxito en pantalla dice explícitamente que todavía no se ha devuelto nada.
 
 Como abrir una pantalla es idempotente, no hace falta fila durable de arbitraje: un evento perdido o duplicado, en el peor caso, abre una
 pantalla de más.

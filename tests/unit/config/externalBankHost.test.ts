@@ -14,7 +14,6 @@
  *  2. No había ninguna señal cuando prod apuntaba a un host que no debe atender producción.
  */
 
-
 // A test file with no top-level import/export is a SCRIPT, not a module, so its
 // top-level `const`s land in the global scope and collide across files — two
 // suites both declaring `mockSend` broke the typecheck, not the tests. This

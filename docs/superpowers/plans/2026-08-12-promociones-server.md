@@ -3,23 +3,24 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
 > implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que el server sepa resolver una promoción a líneas de venta con precios netos exactos al centavo, aplicarla y retirarla de una orden
-de forma transaccional, y exponerla al POS y al MCP.
+**Goal:** Que el server sepa resolver una promoción a líneas de venta con precios netos exactos al centavo, aplicarla y retirarla de una
+orden de forma transaccional, y exponerla al POS y al MCP.
 
-**Architecture:** El corazón es una **decisión pura** (`resolvePromotionLines`) que convierte "esta promoción con estas opciones" en líneas con
-su bruto, su descuento y su neto — sin Prisma, sin red, probable sola. Todo lo demás es plomería alrededor: un modelo que guarda la definición,
-un servicio transaccional que escribe la instancia vendida, y rutas que la exponen. El POS nunca manda precios; manda **qué promoción y qué
-eligió la persona**, y el server hace la aritmética.
+**Architecture:** El corazón es una **decisión pura** (`resolvePromotionLines`) que convierte "esta promoción con estas opciones" en líneas
+con su bruto, su descuento y su neto — sin Prisma, sin red, probable sola. Todo lo demás es plomería alrededor: un modelo que guarda la
+definición, un servicio transaccional que escribe la instancia vendida, y rutas que la exponen. El POS nunca manda precios; manda **qué
+promoción y qué eligió la persona**, y el server hace la aritmética.
 
 **Tech Stack:** TypeScript · Express · Prisma/PostgreSQL · Jest (unit, con el mock global de `prisma`)
 
 ## Global Constraints
 
-- **Alcance de este plan: SOLO avoqado-server.** El dashboard (plan 2) y Android+iOS (plan 3) van después, sobre el contrato que este plan crea.
+- **Alcance de este plan: SOLO avoqado-server.** El dashboard (plan 2) y Android+iOS (plan 3) van después, sobre el contrato que este plan
+  crea.
 - **Rama: `develop`.** El merge a `main` lo hace el founder.
 - **Ruta de dinero y de stock: TDD obligatorio.** No negociable.
-- **Aditivo:** ninguna respuesta de API cambia de forma; ningún campo se renombra ni se quita. `promotionRef` en `ADD_ITEMS` es OPCIONAL — un
-  cliente que no lo mande se comporta EXACTAMENTE igual que hoy.
+- **Aditivo:** ninguna respuesta de API cambia de forma; ningún campo se renombra ni se quita. `promotionRef` en `ADD_ITEMS` es OPCIONAL —
+  un cliente que no lo mande se comporta EXACTAMENTE igual que hoy.
 - **Tier:** código `PROMOTIONS`, PRO. Nombre EXACTO, espejado después en dashboard, Android e iOS.
 - **Los 14 tipos de `SyncIntentType` NO cambian.** No se agrega ninguno.
 - **Vigencia:** se usa `isWithinVenueSchedule` de `src/utils/datetime.ts`. **No se escribe otro evaluador de horarios.**
@@ -31,17 +32,17 @@ eligió la persona**, y el server hace la aritmética.
 
 ## File Structure
 
-| Archivo | Responsabilidad |
-| --- | --- |
-| `src/services/promotions/resolvePromotionLines.ts` _(nuevo)_ | **Decisión pura**: promoción + opciones → líneas con bruto, descuento y neto. Sin Prisma. Aquí vive toda la corrección del dinero. |
-| `src/services/promotions/validatePromotion.ts` _(nuevo)_ | **Decisión pura**: ¿esta promoción se puede publicar? Consistencia tipo/estructura, rangos, tenant. |
-| `src/services/promotions/promotion.service.ts` _(nuevo)_ | Aplicar y retirar una promoción de una orden, en transacción. Usa las dos puras. |
-| `src/services/promotions/promotionCatalog.service.ts` _(nuevo)_ | Qué promociones están vigentes (y cuáles vienen) para un venue, usando `isWithinVenueSchedule`. |
-| `prisma/schema.prisma` _(modificar)_ | Modelos `Promotion`, `PromotionGroup`, `PromotionOption`, `OrderPromotion`; `orderPromotionId` en `OrderItem`. |
-| `src/services/mobile/sync.mobile.service.ts` _(modificar)_ | `promotionRef` opcional en `ADD_ITEMS` + ventana acotada offline. |
-| `src/services/dashboard/discountEngine.service.ts` _(modificar)_ | La base de los descuentos automáticos excluye líneas con `orderPromotionId`. |
-| `src/controllers/mobile/promotion.mobile.controller.ts` _(nuevo)_ | `GET /mobile/venues/:venueId/promotions`. |
-| `src/mcp/tools/promotions.ts` _(nuevo)_ | `list_promotions`, `create_promotion`, `promotion_status`. |
+| Archivo                                                           | Responsabilidad                                                                                                                    |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `src/services/promotions/resolvePromotionLines.ts` _(nuevo)_      | **Decisión pura**: promoción + opciones → líneas con bruto, descuento y neto. Sin Prisma. Aquí vive toda la corrección del dinero. |
+| `src/services/promotions/validatePromotion.ts` _(nuevo)_          | **Decisión pura**: ¿esta promoción se puede publicar? Consistencia tipo/estructura, rangos, tenant.                                |
+| `src/services/promotions/promotion.service.ts` _(nuevo)_          | Aplicar y retirar una promoción de una orden, en transacción. Usa las dos puras.                                                   |
+| `src/services/promotions/promotionCatalog.service.ts` _(nuevo)_   | Qué promociones están vigentes (y cuáles vienen) para un venue, usando `isWithinVenueSchedule`.                                    |
+| `prisma/schema.prisma` _(modificar)_                              | Modelos `Promotion`, `PromotionGroup`, `PromotionOption`, `OrderPromotion`; `orderPromotionId` en `OrderItem`.                     |
+| `src/services/mobile/sync.mobile.service.ts` _(modificar)_        | `promotionRef` opcional en `ADD_ITEMS` + ventana acotada offline.                                                                  |
+| `src/services/dashboard/discountEngine.service.ts` _(modificar)_  | La base de los descuentos automáticos excluye líneas con `orderPromotionId`.                                                       |
+| `src/controllers/mobile/promotion.mobile.controller.ts` _(nuevo)_ | `GET /mobile/venues/:venueId/promotions`.                                                                                          |
+| `src/mcp/tools/promotions.ts` _(nuevo)_                           | `list_promotions`, `create_promotion`, `promotion_status`.                                                                         |
 
 ---
 
@@ -235,8 +236,8 @@ describe('resolvePromotionLines — el dinero de una promoción, al centavo', ()
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/promotions/resolvePromotionLines.test.ts`
-Expected: FAIL — `Cannot find module '@/services/promotions/resolvePromotionLines'`
+Run: `npx jest tests/unit/services/promotions/resolvePromotionLines.test.ts` Expected: FAIL —
+`Cannot find module '@/services/promotions/resolvePromotionLines'`
 
 - [ ] **Step 3: Escribir la implementación**
 
@@ -335,14 +336,12 @@ export function resolvePromotionLines(input: PromotionPricingInput): ResolvedPro
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest tests/unit/services/promotions/resolvePromotionLines.test.ts`
-Expected: PASS — 12 tests
+Run: `npx jest tests/unit/services/promotions/resolvePromotionLines.test.ts` Expected: PASS — 12 tests
 
 - [ ] **Step 5: Verificar por mutación que los tests atrapan**
 
-Cambiar `allocateByWeights(discountCents, grossPerLine)` por
-`grossPerLine.map(() => Math.round(discountCents / grossPerLine.length))` (reparto en partes iguales) y correr.
-Expected: mueren "no pierde ni inventa un centavo" y "proporcional al bruto". **Revertir.**
+Cambiar `allocateByWeights(discountCents, grossPerLine)` por `grossPerLine.map(() => Math.round(discountCents / grossPerLine.length))`
+(reparto en partes iguales) y correr. Expected: mueren "no pierde ni inventa un centavo" y "proporcional al bruto". **Revertir.**
 
 - [ ] **Step 6: Commit**
 
@@ -364,8 +363,8 @@ git commit -m "feat(promociones): decision pura de a que precio entra cada linea
 **Interfaces:**
 
 - Consumes: nada
-- Produces: los modelos `Promotion`, `PromotionGroup`, `PromotionOption`, `OrderPromotion` y el campo `OrderItem.orderPromotionId`, usados por
-  Tasks 4, 5, 6, 8 y 10.
+- Produces: los modelos `Promotion`, `PromotionGroup`, `PromotionOption`, `OrderPromotion` y el campo `OrderItem.orderPromotionId`, usados
+  por Tasks 4, 5, 6, 8 y 10.
 
 - [ ] **Step 1: Agregar los enums y modelos a `schema.prisma`**
 
@@ -497,8 +496,8 @@ model OrderPromotion {
 }
 ```
 
-Y los dos ajustes de panel, que el dashboard escribe (plan 2) y los clientes leen (plan 3). Van en `VenueSettings` porque son preferencia del
-local, no capacidad vendible:
+Y los dos ajustes de panel, que el dashboard escribe (plan 2) y los clientes leen (plan 3). Van en `VenueSettings` porque son preferencia
+del local, no capacidad vendible:
 
 ```prisma
 enum PromotionPanelMode {
@@ -551,8 +550,7 @@ npm run schema:map
 
 - [ ] **Step 4: Verificar que compila**
 
-Run: `npm run build`
-Expected: sin errores TS.
+Run: `npm run build` Expected: sin errores TS.
 
 - [ ] **Step 5: Commit**
 
@@ -711,8 +709,7 @@ describe('validatePromotionForPublish — qué NO se publica', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/promotions/validatePromotion.test.ts`
-Expected: FAIL — módulo no encontrado.
+Run: `npx jest tests/unit/services/promotions/validatePromotion.test.ts` Expected: FAIL — módulo no encontrado.
 
 - [ ] **Step 3: Escribir la implementación**
 
@@ -812,8 +809,7 @@ export function validatePromotionForPublish(draft: PromotionDraft): ValidationRe
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest tests/unit/services/promotions/validatePromotion.test.ts`
-Expected: PASS — 13 tests
+Run: `npx jest tests/unit/services/promotions/validatePromotion.test.ts` Expected: PASS — 13 tests
 
 - [ ] **Step 5: Commit**
 
@@ -980,8 +976,7 @@ describe('applyPromotionToOrder', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/promotions/applyPromotion.test.ts`
-Expected: FAIL — módulo no encontrado.
+Run: `npx jest tests/unit/services/promotions/applyPromotion.test.ts` Expected: FAIL — módulo no encontrado.
 
 - [ ] **Step 3: Escribir la implementación**
 
@@ -1064,7 +1059,11 @@ export async function applyPromotionToOrder(params: ApplyPromotionParams): Promi
   // Fuera de vigencia: los productos entran igual, a precio de lista.
   const resolved = vigente
     ? resolvePromotionLines({ pricingMode: promotion.pricingMode, priceCents: promotion.priceCents, selections: chosen })
-    : resolvePromotionLines({ pricingMode: 'PER_UNIT', priceCents: 0, selections: chosen.map(c => ({ ...c, chargedQuantity: c.quantity })) })
+    : resolvePromotionLines({
+        pricingMode: 'PER_UNIT',
+        priceCents: 0,
+        selections: chosen.map(c => ({ ...c, chargedQuantity: c.quantity })),
+      })
 
   return prisma.$transaction(async tx => {
     const created = await tx.orderPromotion.create({
@@ -1107,13 +1106,12 @@ export async function applyPromotionToOrder(params: ApplyPromotionParams): Promi
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest tests/unit/services/promotions/applyPromotion.test.ts`
-Expected: PASS — 9 tests
+Run: `npx jest tests/unit/services/promotions/applyPromotion.test.ts` Expected: PASS — 9 tests
 
 - [ ] **Step 5: Verificar por mutación**
 
-Cambiar `needsReview: !vigente` por `needsReview: false` y correr.
-Expected: muere "fuera de horario, la venta ENTRA pero a precio de lista y marcada". **Revertir.**
+Cambiar `needsReview: !vigente` por `needsReview: false` y correr. Expected: muere "fuera de horario, la venta ENTRA pero a precio de lista
+y marcada". **Revertir.**
 
 - [ ] **Step 6: Commit**
 
@@ -1180,8 +1178,7 @@ describe('removePromotionFromOrder', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/promotions/removePromotion.test.ts`
-Expected: FAIL — `removePromotionFromOrder is not a function`
+Run: `npx jest tests/unit/services/promotions/removePromotion.test.ts` Expected: FAIL — `removePromotionFromOrder is not a function`
 
 - [ ] **Step 3: Agregar la implementación a `promotion.service.ts`**
 
@@ -1213,8 +1210,7 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest tests/unit/services/promotions/removePromotion.test.ts`
-Expected: PASS — 3 tests
+Run: `npx jest tests/unit/services/promotions/removePromotion.test.ts` Expected: PASS — 3 tests
 
 - [ ] **Step 5: Commit**
 
@@ -1340,8 +1336,7 @@ describe('los descuentos automáticos no alcanzan las líneas de promoción', ()
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/dashboard/discountEnginePromotions.test.ts`
-Expected: FAIL — el primero da 39.8 en vez de 20.
+Run: `npx jest tests/unit/services/dashboard/discountEnginePromotions.test.ts` Expected: FAIL — el primero da 39.8 en vez de 20.
 
 - [ ] **Step 3: Implementar**
 
@@ -1447,8 +1442,7 @@ describe('clampSoldAt — el reloj del cliente no manda solo', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/syncPromotionRef.test.ts`
-Expected: FAIL — `clampSoldAt is not a function`
+Run: `npx jest tests/unit/services/syncPromotionRef.test.ts` Expected: FAIL — `clampSoldAt is not a function`
 
 - [ ] **Step 3: Implementar `clampSoldAt` en `sync.mobile.service.ts`**
 
@@ -1475,31 +1469,30 @@ export function clampSoldAt(createdAtLocal: string | undefined, syncAt: Date): D
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest tests/unit/services/syncPromotionRef.test.ts`
-Expected: PASS — 5 tests
+Run: `npx jest tests/unit/services/syncPromotionRef.test.ts` Expected: PASS — 5 tests
 
 - [ ] **Step 5: Enganchar `promotionRef` en `applyAddItems`**
 
 En `applyAddItems`, después de la validación de `invalidAddItemsReason` y antes de `addItemsToOrder`, separar los items con promoción:
 
 ```typescript
-  // Los items con `promotionRef` NO pasan por el alta normal: su precio lo
-  // resuelve el server desde la definición de la promoción. Los demás siguen
-  // exactamente el camino de hoy.
-  const conPromocion = items.filter(it => it.promotionRef)
-  const normales = items.filter(it => !it.promotionRef)
+// Los items con `promotionRef` NO pasan por el alta normal: su precio lo
+// resuelve el server desde la definición de la promoción. Los demás siguen
+// exactamente el camino de hoy.
+const conPromocion = items.filter(it => it.promotionRef)
+const normales = items.filter(it => !it.promotionRef)
 
-  const soldAt = clampSoldAt(intent.payload.createdAtLocal as string | undefined, new Date())
-  for (const item of conPromocion) {
-    await applyPromotionToOrder({
-      venueId,
-      orderId,
-      promotionId: item.promotionRef.promotionId,
-      instanceId: item.promotionRef.promotionInstanceId,
-      selections: item.promotionRef.selections,
-      soldAt,
-    })
-  }
+const soldAt = clampSoldAt(intent.payload.createdAtLocal as string | undefined, new Date())
+for (const item of conPromocion) {
+  await applyPromotionToOrder({
+    venueId,
+    orderId,
+    promotionId: item.promotionRef.promotionId,
+    instanceId: item.promotionRef.promotionInstanceId,
+    selections: item.promotionRef.selections,
+    soldAt,
+  })
+}
 ```
 
 y usar `normales` donde hoy se usa `items` para construir `itemsWithKey`. Si `normales` queda vacío y hubo promociones, no llamar a
@@ -1507,8 +1500,8 @@ y usar `normales` donde hoy se usa `items` para construir `itemsWithKey`. Si `no
 
 - [ ] **Step 6: Correr la suite de sync completa**
 
-Run: `npx jest tests/unit/services/sync.mobile.service.test.ts`
-Expected: PASS — los 58 que ya estaban siguen verdes (nada cambia sin `promotionRef`).
+Run: `npx jest tests/unit/services/sync.mobile.service.test.ts` Expected: PASS — los 58 que ya estaban siguen verdes (nada cambia sin
+`promotionRef`).
 
 - [ ] **Step 7: Commit**
 
@@ -1618,8 +1611,7 @@ describe('listPromotionsForPos', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/promotions/promotionCatalog.test.ts`
-Expected: FAIL — módulo no encontrado.
+Run: `npx jest tests/unit/services/promotions/promotionCatalog.test.ts` Expected: FAIL — módulo no encontrado.
 
 - [ ] **Step 3: Escribir la implementación**
 
@@ -1652,7 +1644,10 @@ export interface PromotionCard {
  * encogiendo la cuadrícula que el cajero ya tiene memorizada — y decir "a las
  * 6 son 2x1" es una herramienta de venta.
  */
-export async function listPromotionsForPos(venueId: string, now: Date = new Date()): Promise<{ active: PromotionCard[]; upcoming: PromotionCard[] }> {
+export async function listPromotionsForPos(
+  venueId: string,
+  now: Date = new Date(),
+): Promise<{ active: PromotionCard[]; upcoming: PromotionCard[] }> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const timezone = venue?.timezone || DEFAULT_TIMEZONE
 
@@ -1706,8 +1701,7 @@ function toCard(promotion: any): PromotionCard {
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest tests/unit/services/promotions/promotionCatalog.test.ts`
-Expected: PASS — 5 tests
+Run: `npx jest tests/unit/services/promotions/promotionCatalog.test.ts` Expected: PASS — 5 tests
 
 - [ ] **Step 5: Agregar controller y ruta**
 
@@ -1749,8 +1743,7 @@ con `import * as promotionMobileController from '../controllers/mobile/promotion
 
 - [ ] **Step 6: Verificar que compila**
 
-Run: `npm run build`
-Expected: sin errores TS.
+Run: `npm run build` Expected: sin errores TS.
 
 - [ ] **Step 7: Commit**
 
@@ -1774,9 +1767,10 @@ git commit -m "feat(promociones): endpoint movil con vigentes y proximas"
 - Produces: la garantía, con test, de que `PROMOTIONS` es PRO. El cableado real es el `checkFeatureAccess('PROMOTIONS')` de la Task 8.
 
 🔑 **El gating aquí es allow-by-default, y por eso esta task casi no toca código.** `PREMIUM_ONLY_CODES` lista lo que PRO **NO** tiene;
-`FREE_TIER_CODES` lo que tiene todo el mundo. Un código que no está en ninguna de las dos **ya es PRO y PREMIUM** (`basePlan.service.ts:229-232`).
-`PROMOTIONS` no va en ninguna lista. Lo que sí hace falta es **anclar esa decisión con un test**, porque hoy nada impide que alguien meta
-`PROMOTIONS` en `PREMIUM_ONLY_CODES` sin darse cuenta de que deja fuera a los PRO — que son justo los que pelean por ticket promedio.
+`FREE_TIER_CODES` lo que tiene todo el mundo. Un código que no está en ninguna de las dos **ya es PRO y PREMIUM**
+(`basePlan.service.ts:229-232`). `PROMOTIONS` no va en ninguna lista. Lo que sí hace falta es **anclar esa decisión con un test**, porque
+hoy nada impide que alguien meta `PROMOTIONS` en `PREMIUM_ONLY_CODES` sin darse cuenta de que deja fuera a los PRO — que son justo los que
+pelean por ticket promedio.
 
 - [ ] **Step 1: Escribir el test que falla**
 
@@ -1798,8 +1792,8 @@ describe('PROMOTIONS es una feature PRO', () => {
 
 - [ ] **Step 2: Correr el test**
 
-Run: `npx jest tests/unit/services/access/promotionsFeature.test.ts`
-Expected: PASS de entrada — es un test de anclaje, no de cambio. Si FALLA, alguien ya metió el código en una lista y hay que sacarlo.
+Run: `npx jest tests/unit/services/access/promotionsFeature.test.ts` Expected: PASS de entrada — es un test de anclaje, no de cambio. Si
+FALLA, alguien ya metió el código en una lista y hay que sacarlo.
 
 - [ ] **Step 3: Dejar el rastro en el código**
 
@@ -1831,8 +1825,8 @@ git commit -m "test(promociones): anclar que PROMOTIONS es PRO, no PREMIUM"
 **Interfaces:**
 
 - Consumes: nada (función pura)
-- Produces: `netSubtotalForTipCents(items: TipBaseLine[]): number` — la base canónica. La consume el plan 3 (clientes) a través de la respuesta de
-  la orden; ningún cliente la calcula por su cuenta.
+- Produces: `netSubtotalForTipCents(items: TipBaseLine[]): number` — la base canónica. La consume el plan 3 (clientes) a través de la
+  respuesta de la orden; ningún cliente la calcula por su cuenta.
 
 - [ ] **Step 1: Escribir el test que falla**
 
@@ -1874,8 +1868,7 @@ describe('netSubtotalForTipCents — sobre qué se calcula la propina', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/promotions/tipBase.test.ts`
-Expected: FAIL — módulo no encontrado.
+Run: `npx jest tests/unit/services/promotions/tipBase.test.ts` Expected: FAIL — módulo no encontrado.
 
 - [ ] **Step 3: Escribir la implementación**
 
@@ -1903,8 +1896,7 @@ export function netSubtotalForTipCents(items: TipBaseLine[]): number {
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest tests/unit/services/promotions/tipBase.test.ts`
-Expected: PASS — 5 tests
+Run: `npx jest tests/unit/services/promotions/tipBase.test.ts` Expected: PASS — 5 tests
 
 - [ ] **Step 5: Commit**
 
@@ -1971,8 +1963,7 @@ describe('assertRefundableLines — una promoción no se reembolsa a pedazos', (
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest tests/unit/services/dashboard/refundPromotion.test.ts`
-Expected: FAIL — `assertRefundableLines is not a function`
+Run: `npx jest tests/unit/services/dashboard/refundPromotion.test.ts` Expected: FAIL — `assertRefundableLines is not a function`
 
 - [ ] **Step 3: Escribir la implementación en `refund.dashboard.service.ts`**
 
@@ -2015,13 +2006,13 @@ export function assertRefundableLines(lines: RefundableLine[], selectedIds: stri
 
 - [ ] **Step 4: Llamarlo desde el reembolso por artículo**
 
-En la función de reembolso por artículos de `refund.dashboard.service.ts`, después de cargar las líneas de la orden y antes de calcular montos,
-llamar `assertRefundableLines(orderItems, requestedItemIds)`.
+En la función de reembolso por artículos de `refund.dashboard.service.ts`, después de cargar las líneas de la orden y antes de calcular
+montos, llamar `assertRefundableLines(orderItems, requestedItemIds)`.
 
 - [ ] **Step 5: Correr los tests y verificar que pasan**
 
-Run: `npx jest tests/unit/services/dashboard/refundPromotion.test.ts tests/unit/services/dashboard/refund*.test.ts`
-Expected: PASS — los 5 nuevos y los que ya estaban.
+Run: `npx jest tests/unit/services/dashboard/refundPromotion.test.ts tests/unit/services/dashboard/refund*.test.ts` Expected: PASS — los 5
+nuevos y los que ya estaban.
 
 - [ ] **Step 6: Commit**
 
@@ -2220,13 +2211,11 @@ En el archivo donde se llaman los demás `register*Tools`, agregar `registerProm
 
 - [ ] **Step 3: Verificar que compila**
 
-Run: `npm run build`
-Expected: sin errores TS.
+Run: `npm run build` Expected: sin errores TS.
 
 - [ ] **Step 4: Correr la suite completa**
 
-Run: `npx jest --selectProjects unit`
-Expected: todo verde.
+Run: `npx jest --selectProjects unit` Expected: todo verde.
 
 - [ ] **Step 5: Commit**
 
@@ -2241,9 +2230,10 @@ git commit -m "feat(promociones): herramientas de MCP para listar, ver vigencia 
 
 Con este plan terminado, el server sabe todo lo que necesita y el contrato existe. Los otros dos planes se escriben sobre él:
 
-- **Plan 2 — dashboard:** sección Promociones (crear, editar, publicar, archivar, foto, grupos y opciones, vigencia) y los dos ajustes de panel.
-- **Plan 3 — Android + iOS:** el panel (lateral/pestaña/oculto con caída automática bajo ~960dp), la hoja de combo, los estados de "no aplica" y
-  la lectura de tier. Van en el MISMO trabajo por la regla de paridad.
+- **Plan 2 — dashboard:** sección Promociones (crear, editar, publicar, archivar, foto, grupos y opciones, vigencia) y los dos ajustes de
+  panel.
+- **Plan 3 — Android + iOS:** el panel (lateral/pestaña/oculto con caída automática bajo ~960dp), la hoja de combo, los estados de "no
+  aplica" y la lectura de tier. Van en el MISMO trabajo por la regla de paridad.
 
-Y las dos obligaciones del workspace, al cerrar los tres: la presentación de ventas (deck + one-pagers + **regenerar los tres PDFs**) y el mapa
-de esquema, que este plan ya cubre en la Task 2.
+Y las dos obligaciones del workspace, al cerrar los tres: la presentación de ventas (deck + one-pagers + **regenerar los tres PDFs**) y el
+mapa de esquema, que este plan ya cubre en la Task 2.
