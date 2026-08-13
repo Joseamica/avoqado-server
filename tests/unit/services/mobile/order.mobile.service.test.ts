@@ -22,12 +22,25 @@ jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({
   generateAndStoreReceipt: jest.fn().mockResolvedValue({ id: 'receipt-1' }),
 }))
 
+// payCashOrder importa este módulo dinámicamente para la deducción post-cobro;
+// el default [] (sin faltantes) mantiene el resto de la suite sin aviso.
+const mockDeductFreeCart = jest.fn()
+jest.mock('@/services/tpv/order.tpv.service', () => ({
+  __esModule: true,
+  deductTrackedInventoryForFreeCart: (...args: unknown[]) => mockDeductFreeCart(...args),
+}))
+jest.mock('@/services/dashboard/autoReorder.service', () => ({
+  __esModule: true,
+  runAutoReorderForVenue: jest.fn().mockResolvedValue(undefined),
+}))
+
 describe('order.mobile.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     // payCashOrder sums prior COMPLETED payments (split-the-bill); default: none.
     prismaMock.payment.findMany.mockResolvedValue([])
+    mockDeductFreeCart.mockResolvedValue([])
   })
 
   it('persists discountAmount and computes total as subtotal - discount + tip when creating an order', async () => {
@@ -703,6 +716,92 @@ describe('order.mobile.service', () => {
         }),
       }),
     )
+  })
+
+  // ── Aviso de inventario post-cobro (Square-parity, mockup ②) ──
+  // La deducción corre DESPUÉS de registrar el cobro y nunca lo bloquea; lo que
+  // cambia es que la respuesta ahora trae `inventoryWarning` para que el POS
+  // pinte el toast ámbar. El contrato es el mismo OrderInventoryWarning del TPV.
+  describe('payCashOrder — inventoryWarning post-cobro', () => {
+    const arrangeFullyPaid = () => {
+      prismaMock.order.findUnique.mockResolvedValue({
+        id: 'order-1',
+        orderNumber: 'ORD-1',
+        paymentStatus: 'PENDING',
+        subtotal: new Decimal(45),
+        discountAmount: new Decimal(0),
+        total: new Decimal(45),
+        remainingBalance: new Decimal(45),
+        venueId: 'venue-1',
+      })
+      prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+      prismaMock.shift.findFirst.mockResolvedValue(null)
+      prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
+      prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
+      prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
+      prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+    }
+
+    it('trae INSUFFICIENT_INVENTORY cuando la venta dejó stock en negativo (la deducción SÍ corrió)', async () => {
+      arrangeFullyPaid()
+      mockDeductFreeCart.mockResolvedValue([
+        { productId: 'p1', productName: 'Cerveza Corona', requested: 1, available: -1, reason: 'la venta dejó el stock en negativo' },
+      ])
+
+      const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })
+
+      expect(res.inventoryWarning).toBeDefined()
+      expect(res.inventoryWarning!.code).toBe('INSUFFICIENT_INVENTORY')
+      expect(res.inventoryWarning!.inventoryDeducted).toBe(true)
+      expect(res.inventoryWarning!.message).toContain('Cerveza Corona')
+      expect(res.status).toBe('COMPLETED')
+    })
+
+    it('trae INVENTORY_NOT_DEDUCTED cuando la deducción de un producto falló', async () => {
+      arrangeFullyPaid()
+      mockDeductFreeCart.mockResolvedValue([
+        { productId: 'p1', productName: 'Hamburguesa BBQ', requested: 2, available: null, reason: 'DB timeout' },
+      ])
+
+      const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })
+
+      expect(res.inventoryWarning!.code).toBe('INVENTORY_NOT_DEDUCTED')
+      expect(res.inventoryWarning!.inventoryDeducted).toBe(false)
+      expect(res.status).toBe('COMPLETED')
+    })
+
+    it('sin faltantes NO incluye inventoryWarning (campo aditivo)', async () => {
+      arrangeFullyPaid()
+      mockDeductFreeCart.mockResolvedValue([])
+
+      const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })
+
+      expect(res.inventoryWarning).toBeUndefined()
+      expect(res.status).toBe('COMPLETED')
+    })
+
+    it('si la deducción revienta, el cobro responde COMPLETED igual (never-throws)', async () => {
+      arrangeFullyPaid()
+      mockDeductFreeCart.mockRejectedValue(new Error('boom'))
+
+      const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })
+
+      expect(res.status).toBe('COMPLETED')
+      expect(res.inventoryWarning).toBeUndefined()
+    })
+
+    it('un pago PARCIAL no deduce ni trae aviso', async () => {
+      arrangeFullyPaid()
+      mockDeductFreeCart.mockResolvedValue([
+        { productId: 'p1', productName: 'Cerveza Corona', requested: 1, available: -1, reason: 'no debería llamarse' },
+      ])
+
+      const res = await payCashOrder('venue-1', 'order-1', { amount: 2000, tip: 0, staffId: 'staff-1' })
+
+      expect(mockDeductFreeCart).not.toHaveBeenCalled()
+      expect(res.inventoryWarning).toBeUndefined()
+    })
   })
 })
 

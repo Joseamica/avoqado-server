@@ -5,6 +5,8 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { resolveTerminalRefundTarget } from '@/services/tpv/terminalRefundTarget'
+import { terminalPaymentService } from '@/services/terminal-payment.service'
 
 /**
  * Un dispositivo cuenta como "en línea" si reportó en los últimos 5 minutos. Mismo
@@ -228,6 +230,76 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         unknownCount: rows.filter(r => r.status === TerminalPaymentRequestStatus.UNKNOWN).length,
         requests,
       })
+    },
+  )
+
+  server.tool(
+    'refund_card_on_terminal',
+    'Abre en una terminal física la devolución de un cobro con TARJETA, para que alguien la confirme ahí. Es la salida cuando `issue_refund` rechaza un pago con tarjeta: esta herramienta NO devuelve el dinero — sólo deja la pantalla lista en el aparato con ese cobro cargado, y una persona pone la tarjeta y confirma. Cuando el dinero se mueve, la TPV registra el reembolso sola. La terminal debe estar conectada y NO estar a media venta. Identifica el cobro por su paymentId (de list_payments) y la terminal por su id/serie (de list_devices). Requiere payments:refund.',
+    {
+      venueId: z.string().describe('Venue dueño del cobro y de la terminal (debe estar en tu alcance)'),
+      paymentId: z.string().min(1).describe('El id del cobro con tarjeta a devolver (de list_payments)'),
+      terminalId: z.string().min(1).describe('Serie o id de la terminal donde se abrirá la devolución (de list_devices)'),
+      reason: z.string().optional().describe('Motivo, para que el cajero vea en la terminal por qué se le pidió'),
+      confirm: z.boolean().optional().describe('Debe ser true para mandarlo de verdad; sin esto sólo obtienes una vista previa'),
+    },
+    async ({ venueId, paymentId, terminalId, reason, confirm }) => {
+      const base = guard.venueFilter(venueId) // lanza ScopeError si el venue no es tuyo
+      guard.requirePermission('payments:refund', venueId)
+
+      const payment = await prisma.payment.findFirst({
+        where: { id: paymentId, ...base },
+        select: { id: true, venueId: true, status: true, method: true, amount: true, tipAmount: true, processorData: true },
+      })
+      if (!payment) return text({ ok: false, error: 'No encontré ese cobro en tus locales.' })
+
+      const processorData = (payment.processorData ?? {}) as { refundedAmount?: number | string }
+      const target = resolveTerminalRefundTarget(
+        {
+          id: payment.id,
+          venueId: payment.venueId,
+          status: payment.status,
+          method: payment.method,
+          amount: Number(payment.amount),
+          tipAmount: Number(payment.tipAmount),
+          refundedAmount: Number(processorData.refundedAmount ?? 0),
+        },
+        venueId,
+      )
+      if (!target.eligible) return text({ ok: false, reason: target.reason, error: target.message })
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { paymentId, terminalId, maxRefundable: target.remainingRefundableCents / 100, reason: reason ?? null },
+          message: `Esto ABRIRÁ en la terminal ${terminalId} la devolución de hasta $${
+            target.remainingRefundableCents / 100
+          }. Nadie devuelve nada hasta que una persona lo confirme en el aparato. Vuelve a llamar con confirm:true para mandarlo.`,
+        })
+      }
+
+      try {
+        const result = await terminalPaymentService.requestRefundOnTerminal({
+          terminalId,
+          venueId,
+          paymentId,
+          requestedBy: scope.staffId,
+          reason,
+        })
+        return text({
+          ok: result.status === 'opened',
+          status: result.status,
+          requestId: result.requestId,
+          error: result.errorMessage,
+          message:
+            result.status === 'opened'
+              ? `Listo: la terminal ${terminalId} tiene abierta la devolución. Falta que alguien la confirme ahí — hasta entonces NO se ha devuelto nada.`
+              : `No se pudo abrir la devolución en la terminal ${terminalId}.`,
+        })
+      } catch (error) {
+        return text({ ok: false, error: error instanceof Error ? error.message : 'Error desconocido' })
+      }
     },
   )
 }

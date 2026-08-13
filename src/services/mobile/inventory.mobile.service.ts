@@ -364,6 +364,29 @@ export async function updateStockCount(countId: string, venueId: string, items: 
     throw new NotFoundError('Conteo no encontrado o ya completado')
   }
 
+  // Un conteo físico no puede ser negativo: nadie cuenta "menos siete
+  // cervezas" en el anaquel. (El DELTA del ajuste sí puede serlo — contaste
+  // menos de lo que el sistema creía; lo CONTADO, no.) Sin este guard, una
+  // báscula con la tara mal puesta o un signo colado dejaban el inventario en
+  // un valor imposible sin pasar por una venta — el único camino donde el
+  // negativo es señal legítima. Todo-o-nada, ANTES de escribir nada.
+  const negativo = items.find(item => item.counted < 0)
+  if (negativo) {
+    throw new BadRequestError('La cantidad contada no puede ser negativa')
+  }
+
+  // 🔴 Tenant isolation (audit Codex 2026-08-12): el conteo ya se validó contra
+  // el venue, pero las LÍNEAS llegaban por id pelón — un usuario del venue A
+  // podía mutar líneas de un conteo del venue B mandando sus ids en el body.
+  // Todo-o-nada, ANTES de escribir nada.
+  const lineasDelConteo = new Set(
+    (await prisma.stockCountItem.findMany({ where: { stockCountId: countId }, select: { id: true } })).map(item => item.id),
+  )
+  const ajena = items.find(item => !lineasDelConteo.has(item.id))
+  if (ajena) {
+    throw new BadRequestError('Una de las líneas no pertenece a este conteo')
+  }
+
   // Update each item's counted quantity
   await Promise.all(
     items.map(item =>
@@ -409,6 +432,14 @@ export async function confirmStockCount(countId: string, venueId: string, userId
   // sits at the default counted=0, and applying it would zero out real stock
   // (this bit the E2E test — 46 untouched ingredients started wiping stock).
   const countedItems = count.items.filter(item => item.countedAt !== null)
+
+  // Defensa en la frontera del EFECTO (audit Codex 2026-08-12): el update de
+  // hoy ya rechaza negativos, pero un negativo ALMACENADO antes del deploy —o
+  // colado por otra vía— no debe aplicarse jamás al inventario. Un conteo
+  // físico no puede ser negativo.
+  if (countedItems.some(item => Number(item.counted) < 0)) {
+    throw new BadRequestError('La cantidad contada no puede ser negativa. Corrige la línea y vuelve a confirmar.')
+  }
 
   // Ingredient lines: the physical count is the truth, so compute the delta
   // against the CURRENT stock (not `expected`, which may be stale if sales
@@ -466,17 +497,28 @@ export async function confirmStockCount(countId: string, venueId: string, userId
     throw new Error(`No se pudo ajustar ${ingredientFailures.length} insumo(s): ${ingredientFailures.map(f => f.name).join(', ')}`)
   }
 
-  // Apply adjustments for each product item
+  // Apply adjustments for each product item.
+  //
+  // El delta se mide contra el stock ACTUAL, NUNCA contra `expected` — que es
+  // la foto de cuando se ABRIÓ el conteo y envejece con cada venta, compra o
+  // conteo posterior. Es el mismo criterio que ya usaban los insumos arriba.
+  //
+  // Con `expected` pasaban dos cosas, ambas silenciosas (caso real en la DB:
+  // conteo abierto con expected=89 de Cerveza Corona cuando el stock ya era 32):
+  //   1. Contar 89 daba `89 − 89 = 0` → `continue` → el conteo se marcaba
+  //      COMPLETADO sin corregir nada y el inventario se quedaba en 32.
+  //   2. Cuando sí ajustaba, el movimiento guardaba una `quantity` que no
+  //      cuadraba con su propio `previousStock`/`newStock`.
   for (const item of countedItems) {
     if (!item.product) continue
-    const difference = Number(item.counted) - Number(item.expected)
-    if (difference === 0) continue
 
     const inventory = item.product.inventory
     if (!inventory) continue
 
     const previousStock = Number(inventory.currentStock)
     const newStock = Number(item.counted)
+    const difference = newStock - previousStock
+    if (difference === 0) continue
 
     await prisma.$transaction([
       prisma.inventory.update({

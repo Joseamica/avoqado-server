@@ -27,6 +27,18 @@ decision is unfinished: it either leaks paid value into a lower tier or hides a 
   módulo **AND** ajuste del venue (`VenueSettings`) **AND** permiso. La respuesta 4xx debe decir QUÉ falta y CÓMO activarlo, para que cada
   cliente pueda pintar el mensaje sin adivinar; un 403 pelón obliga a los 6 clientes a inventarse el texto.
 
+## Comparar con el mercado antes de decidir un diseño
+
+Regla completa en `../CLAUDE.md` (auto-carga con este archivo). En corto: **cuando una decisión admite más de una respuesta defendible, mira
+cómo la resuelve el referente del dominio y trae ambas versiones al reporte.** Aplica también aquí, no sólo a la UI: el caso que la originó
+fue de este repo —bloqueábamos la venta y revertíamos la orden a PENDING cuando el stock no alcanzaba, mientras Square deja el stock ir a
+negativo **a propósito** para no impedir un cobro; contradecía nuestra propia regla `payments.md` ("Non-blocking: payment succeeds even if
+deduction fails").
+
+**No aplica a un defecto objetivo** —dinero que no cuadra, fecha corrida, crash, tenant mal filtrado— ni a trabajo interno (refactor, tests,
+observabilidad, migraciones), ni a lo que no tiene equivalente: CFDI/SAT, Blumon, PlayTelecom, el MCP. Y **nunca bloquea**: timebox de ~15
+min, y si no hay evidencia se escribe "no encontré cómo lo resuelve X" y se sigue.
+
 ## Sister Repos (this repo is the hub of 10)
 
 `avoqado-server` is the backend hub; 9 client repos talk to it over `/api/v1/`. Full ecosystem map: workspace-root `../CLAUDE.md`.

@@ -25,6 +25,7 @@ const fullContext = {
   source: 'http' as const,
   entrypoint: 'POST /api/v1/tpv/payments',
   venueId: 'venue-1',
+  venueName: 'Testarudo Cafe',
   userId: 'user-1',
   role: 'WAITER',
   terminalSerial: 'AVQD-2841548624',
@@ -39,10 +40,28 @@ describe('logger context format', () => {
         source: 'http',
         entrypoint: 'POST /api/v1/tpv/payments',
         venueId: 'venue-1',
+        venueName: 'Testarudo Cafe',
         userId: 'user-1',
         role: 'WAITER',
         terminalSerial: 'AVQD-2841548624',
       })
+    })
+  })
+
+  it('🔴 carries the venue NAME, not just the cuid — that is what makes a line readable', () => {
+    // The whole point: someone reading an alert must know which business it is without
+    // running a query. `venueId` alone (`cms1qzg6o02jxi32bkm2ta66g`) tells a human nothing.
+    runWithContext(fullContext, () => {
+      expect(apply({ level: 'error', message: 'SOBREPAGO' }).venueName).toBe('Testarudo Cafe')
+    })
+  })
+
+  it('omits venueName when it could not be resolved, rather than stamping a placeholder', () => {
+    const { venueName: _dropped, ...withoutName } = fullContext
+    runWithContext(withoutName, () => {
+      const result = apply({ level: 'error', message: 'boom' })
+      expect('venueName' in result).toBe(false)
+      expect(result.venueId).toBe('venue-1')
     })
   })
 

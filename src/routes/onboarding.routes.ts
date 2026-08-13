@@ -10,6 +10,7 @@ import rateLimit from 'express-rate-limit'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import * as onboardingController from '../controllers/onboarding.controller'
+import { preserveContext } from '@/observability/preserveContext'
 import {
   SignupSchema,
   StartOnboardingSchema,
@@ -504,7 +505,7 @@ router.put('/organizations/:organizationId/step/4', validateRequest(UpdateStep4S
  *       400:
  *         description: CSV validation failed
  */
-router.post('/organizations/:organizationId/upload-menu-csv', upload.single('file'), onboardingController.uploadMenuCSV)
+router.post('/organizations/:organizationId/upload-menu-csv', preserveContext(upload.single('file')), onboardingController.uploadMenuCSV)
 
 /**
  * @openapi
@@ -674,7 +675,7 @@ router.put(
 router.put(
   '/organizations/:organizationId/kyc/document/:documentKey',
   authenticateTokenMiddleware,
-  documentUpload.single('file'),
+  preserveContext(documentUpload.single('file')),
   onboardingController.uploadKycDocument,
 )
 

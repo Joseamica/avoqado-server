@@ -80,6 +80,15 @@ const createMockOrderContext = (overrides: Record<string, any> = {}) => ({
   ...overrides,
 })
 
+// 🔴 El día de la semana se evalúa en la zona del VENUE, no en la del proceso
+// (`isWithinVenueSchedule`). Leerlo con `new Date().getDay()` pasa en una Mac en
+// CST y truena en CI, que corre en UTC: de 18:00 a medianoche en México ya es el
+// día siguiente en UTC y el descuento "de hoy" deja de aplicar.
+const venueDayOfWeek = (timezone = 'America/Mexico_City') => {
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(new Date())
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekday)
+}
+
 // Helper to create mock database discount
 const createMockDbDiscount = (overrides: Record<string, any> = {}) => ({
   id: 'discount-123',
@@ -250,7 +259,7 @@ describe('Discount Engine Service', () => {
     })
 
     it('should filter by day of week', async () => {
-      const today = new Date().getDay()
+      const today = venueDayOfWeek()
       const mockDiscounts = [
         createMockDbDiscount({
           id: 'd1',
@@ -258,6 +267,7 @@ describe('Discount Engine Service', () => {
         }),
       ]
 
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
       prismaMock.discount.findMany.mockResolvedValue(mockDiscounts)
 
       const result = await getEligibleDiscounts('venue-123')
@@ -266,7 +276,7 @@ describe('Discount Engine Service', () => {
     })
 
     it('should include discount when valid on current day', async () => {
-      const today = new Date().getDay()
+      const today = venueDayOfWeek()
       const mockDiscounts = [
         createMockDbDiscount({
           id: 'd1',
@@ -274,6 +284,7 @@ describe('Discount Engine Service', () => {
         }),
       ]
 
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
       prismaMock.discount.findMany.mockResolvedValue(mockDiscounts)
 
       const result = await getEligibleDiscounts('venue-123')
@@ -500,11 +511,15 @@ describe('Discount Engine Service', () => {
     })
 
     it('should calculate Buy 1 Get 1 50% off', () => {
+      // La config decía buyQuantity: 2 mientras el nombre dice "Buy 1 Get 1", y
+      // el número esperado sólo cuadraba porque el cálculo contaba la unidad
+      // regalada como comprada. Con buy=1/get=1 y 2 unidades sí hay una
+      // promoción completa, que es lo que este test siempre quiso probar.
       const discount = createMockEngineDiscount({
         type: 'PERCENTAGE',
         scope: 'QUANTITY',
-        buyQuantity: 2, // Buy 2 items
-        getQuantity: 1, // Get 1 at discount
+        buyQuantity: 1, // Buy 1 item...
+        getQuantity: 1, // ...get 1 at discount
         getDiscountPercent: 50, // 50% off
       })
       const context = createMockOrderContext({
@@ -560,6 +575,130 @@ describe('Discount Engine Service', () => {
       const result = calculateDiscountAmount(discount, context)
 
       expect(result.amount).toBe(5) // Free drink
+    })
+
+    /**
+     * 🔴 Las unidades REGALADAS también ocupan lugar en el carrito.
+     *
+     * `floor(totalBuyQty / buyQty)` contaba como "compradas" TODAS las unidades,
+     * incluidas las que iba a regalar. Con conjuntos que se traslapan —el caso
+     * normal de un 2x1 sobre el mismo producto— eso deja salir mercancía gratis
+     * que nadie pagó. Cuando los conjuntos son DISJUNTOS (compra pizzas, llevas
+     * refresco) la cuenta vieja sí era correcta y no cambia.
+     */
+    describe('las unidades regaladas no se cuentan como compradas', () => {
+      const bogo = (overrides: Record<string, any> = {}) =>
+        createMockEngineDiscount({
+          type: 'PERCENTAGE',
+          scope: 'QUANTITY',
+          buyQuantity: 1,
+          getQuantity: 1,
+          getDiscountPercent: 100,
+          ...overrides,
+        })
+
+      it('🔴 UNA cerveza con 2x1 no se regala sola', () => {
+        // El bug: floor(1/1) = 1 set → la única unidad salía gratis.
+        // Un 2x1 necesita DOS en el carrito para regalar una.
+        const context = createMockOrderContext({
+          items: [{ id: 'i1', productId: 'cerveza', categoryId: 'c1', quantity: 1, unitPrice: 50, total: 50, modifiers: [] }],
+          subtotal: 50,
+        })
+
+        expect(calculateDiscountAmount(bogo({ buyItemIds: ['cerveza'], getItemIds: ['cerveza'] }), context).amount).toBe(0)
+      })
+
+      it('dos cervezas con 2x1 regalan una', () => {
+        const context = createMockOrderContext({
+          items: [{ id: 'i1', productId: 'cerveza', categoryId: 'c1', quantity: 2, unitPrice: 50, total: 100, modifiers: [] }],
+          subtotal: 100,
+        })
+
+        expect(calculateDiscountAmount(bogo({ buyItemIds: ['cerveza'], getItemIds: ['cerveza'] }), context).amount).toBe(50)
+      })
+
+      it('tres cervezas con 2x1 siguen regalando UNA, no dos', () => {
+        // floor(3/2) = 1 promoción completa; la tercera se paga.
+        const context = createMockOrderContext({
+          items: [{ id: 'i1', productId: 'cerveza', categoryId: 'c1', quantity: 3, unitPrice: 50, total: 150, modifiers: [] }],
+          subtotal: 150,
+        })
+
+        expect(calculateDiscountAmount(bogo({ buyItemIds: ['cerveza'], getItemIds: ['cerveza'] }), context).amount).toBe(50)
+      })
+
+      it('cuatro cervezas con 2x1 regalan dos', () => {
+        const context = createMockOrderContext({
+          items: [{ id: 'i1', productId: 'cerveza', categoryId: 'c1', quantity: 4, unitPrice: 50, total: 200, modifiers: [] }],
+          subtotal: 200,
+        })
+
+        expect(calculateDiscountAmount(bogo({ buyItemIds: ['cerveza'], getItemIds: ['cerveza'] }), context).amount).toBe(100)
+      })
+
+      it('en un 2x1 se regala la MÁS BARATA, no la cara', () => {
+        // Regla de Square (exclude_strategy: LEAST_EXPENSIVE). Regalar la de
+        // $120 en vez de la de $50 son $70 perdidos por transacción.
+        const context = createMockOrderContext({
+          items: [
+            { id: 'i1', productId: 'cerveza', categoryId: 'c1', quantity: 1, unitPrice: 120, total: 120, modifiers: [] },
+            { id: 'i2', productId: 'cerveza', categoryId: 'c1', quantity: 1, unitPrice: 50, total: 50, modifiers: [] },
+          ],
+          subtotal: 170,
+        })
+
+        expect(calculateDiscountAmount(bogo({ buyItemIds: ['cerveza'], getItemIds: ['cerveza'] }), context).amount).toBe(50)
+      })
+
+      it('un 3x2 sobre el mismo producto necesita TRES unidades', () => {
+        const dos = bogo({ buyQuantity: 2, getQuantity: 1, buyItemIds: ['cerveza'], getItemIds: ['cerveza'] })
+        const conDos = createMockOrderContext({
+          items: [{ id: 'i1', productId: 'cerveza', categoryId: 'c1', quantity: 2, unitPrice: 50, total: 100, modifiers: [] }],
+          subtotal: 100,
+        })
+        const conTres = createMockOrderContext({
+          items: [{ id: 'i1', productId: 'cerveza', categoryId: 'c1', quantity: 3, unitPrice: 50, total: 150, modifiers: [] }],
+          subtotal: 150,
+        })
+
+        expect(calculateDiscountAmount(dos, conDos).amount).toBe(0)
+        expect(calculateDiscountAmount(dos, conTres).amount).toBe(50)
+      })
+
+      it('con conjuntos DISJUNTOS la cuenta no cambia: 1 pizza da 1 refresco', () => {
+        // Aquí el refresco no es del pool de compradas, así que una pizza basta.
+        const context = createMockOrderContext({
+          items: [
+            { id: 'i1', productId: 'pizza', categoryId: 'c1', quantity: 1, unitPrice: 150, total: 150, modifiers: [] },
+            { id: 'i2', productId: 'refresco', categoryId: 'c2', quantity: 1, unitPrice: 30, total: 30, modifiers: [] },
+          ],
+          subtotal: 180,
+        })
+
+        expect(calculateDiscountAmount(bogo({ buyItemIds: ['pizza'], getItemIds: ['refresco'] }), context).amount).toBe(30)
+      })
+
+      it('conjuntos disjuntos: no se regalan más refrescos de los que hay', () => {
+        const context = createMockOrderContext({
+          items: [
+            { id: 'i1', productId: 'pizza', categoryId: 'c1', quantity: 5, unitPrice: 150, total: 750, modifiers: [] },
+            { id: 'i2', productId: 'refresco', categoryId: 'c2', quantity: 1, unitPrice: 30, total: 30, modifiers: [] },
+          ],
+          subtotal: 780,
+        })
+
+        expect(calculateDiscountAmount(bogo({ buyItemIds: ['pizza'], getItemIds: ['refresco'] }), context).amount).toBe(30)
+      })
+
+      it('sin filtros (todo el catálogo califica) los conjuntos se traslapan', () => {
+        // buyItemIds/getItemIds vacíos = ambos pools son TODAS las líneas.
+        const context = createMockOrderContext({
+          items: [{ id: 'i1', productId: 'p1', categoryId: 'c1', quantity: 1, unitPrice: 80, total: 80, modifiers: [] }],
+          subtotal: 80,
+        })
+
+        expect(calculateDiscountAmount(bogo(), context).amount).toBe(0)
+      })
     })
 
     it('should return 0 when BOGO quantity not met', () => {

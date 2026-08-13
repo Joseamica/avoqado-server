@@ -13,6 +13,12 @@ export interface ExecutionContext {
   /** Human-readable entry point: 'POST /api/v1/tpv/payments', 'money-integrity-watchdog', 'socket:join-room'. */
   entrypoint: string
   venueId?: string
+  /**
+   * The venue's name. A cuid identifies the tenant for a query; the name is what lets a
+   * human read an alert and know which business it is. Resolved from an in-memory cache
+   * (`venueNames.ts`), so it is absent when the venue is not known yet.
+   */
+  venueName?: string
   userId?: string
   role?: string
   terminalSerial?: string

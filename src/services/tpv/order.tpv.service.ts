@@ -747,8 +747,20 @@ export async function getAreaTicketLineIdsCoveredByInventoryReservations(
   return new Set(reservations.map(reservation => reservation.areaTicketLineId))
 }
 
-export async function deductTrackedInventoryForFreeCart(order: any, staffId: string): Promise<void> {
+/** Espejo estructural de OrderInventoryWarning['issues'] (payment.tpv.service). */
+export type FreeCartInventoryIssue = {
+  productId: string
+  productName: string
+  requested: number | null
+  available: number | string | null
+  reason: string
+}
+
+export async function deductTrackedInventoryForFreeCart(order: any, staffId: string): Promise<FreeCartInventoryIssue[]> {
   const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
+  // Faltantes que el cajero debe ver (Square-parity): stock que quedó en
+  // negativo (la deducción SÍ corrió) o líneas que no se pudieron descontar.
+  const issues: FreeCartInventoryIssue[] = []
   const coveredAreaTicketLines = await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items || [])
 
   for (const item of order.items || []) {
@@ -806,7 +818,23 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
 
       // Weighted lines deduct the weighed kilos, not the (always-1) quantity.
       const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
-      await deductInventoryForProduct(order.venueId, item.productId, effectiveQuantity, order.id, staffId, orderModifiers)
+      const result: any = await deductInventoryForProduct(
+        order.venueId,
+        item.productId,
+        effectiveQuantity,
+        order.id,
+        staffId,
+        orderModifiers,
+      )
+      if (typeof result?.remainingStock === 'number' && result.remainingStock < 0) {
+        issues.push({
+          productId: item.productId,
+          productName: result.productName || item.product?.name || item.productName || 'Producto',
+          requested: effectiveQuantity ?? null,
+          available: result.remainingStock,
+          reason: 'la venta dejó el stock en negativo',
+        })
+      }
     } catch (error: any) {
       logger.error('❌ [WITH ITEMS] Failed to deduct inventory for free cart item', {
         orderId: order.id,
@@ -818,6 +846,13 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
         productId: item.productId,
         productName: item.product?.name || item.productName || 'Unknown',
         error: error.message,
+      })
+      issues.push({
+        productId: item.productId,
+        productName: item.product?.name || item.productName || 'Producto',
+        requested: item.weightQuantity != null ? Number(item.weightQuantity) : (item.quantity ?? null),
+        available: null,
+        reason: error.message,
       })
     }
   }
@@ -838,6 +873,8 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
       severity: 'reconcile_required',
     })
   }
+
+  return issues
 }
 
 export async function createOrderWithItems(

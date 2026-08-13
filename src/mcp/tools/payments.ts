@@ -367,7 +367,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           ok: false,
           cardRefundNotSupported: true,
           method: payment.method,
-          error: `Este pago es con TARJETA (${payment.method}). Los reembolsos de tarjeta NO se procesan por aquí: la tarjeta se reembolsa FÍSICAMENTE en la terminal (Blumon) con la tarjeta presente — no por API. Una vez hecho en la terminal, regístralo desde el dashboard. Por el MCP solo puedes reembolsar pagos en EFECTIVO/transferencia.`,
+          error: `Este pago es con TARJETA (${payment.method}). Los reembolsos de tarjeta NO se registran por aquí: el dinero se devuelve FÍSICAMENTE en la terminal, con alguien presente. Lo que SÍ puedes hacer es ABRIR esa devolución en la terminal con la herramienta 'refund_card_on_terminal' — deja la pantalla lista y una persona la confirma en el aparato; la TPV registra el reembolso sola cuando el dinero se mueve. Por el MCP solo puedes reembolsar directo pagos en EFECTIVO/transferencia.`,
+          useInstead: 'refund_card_on_terminal',
         })
       }
       const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))

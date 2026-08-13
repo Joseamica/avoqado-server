@@ -217,6 +217,75 @@ export async function printReceiptOnTerminal(req: Request, res: Response) {
 }
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/terminals/:terminalId/refund-request
+ *
+ * Abrir en una terminal la devolución de un cobro con tarjeta.
+ *
+ * La respuesta contesta "¿se abrió la pantalla en la terminal?", NO "¿se
+ * devolvió el dinero?": eso lo completa una persona en el aparato y se
+ * registra por la ruta de reembolsos de la TPV.
+ */
+export async function requestRefundOnTerminal(req: Request, res: Response) {
+  try {
+    const { venueId, terminalId } = req.params
+    const { paymentId, requestId, reason } = req.body
+    const userId = (req as any).authContext?.userId
+
+    if (!terminalId || !paymentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'terminalId y paymentId son requeridos',
+      })
+    }
+
+    const result = await terminalPaymentService.requestRefundOnTerminal({
+      terminalId,
+      venueId,
+      paymentId,
+      requestedBy: userId,
+      requestId,
+      reason,
+    })
+
+    const httpStatus = result.status === 'opened' ? 200 : result.status === 'timeout' ? 504 : 422
+    return res.status(httpStatus).json({
+      success: result.status === 'opened',
+      ...result,
+    })
+  } catch (error) {
+    if (error instanceof TerminalBusyError) {
+      return res.status(409).json({ success: false, message: error.message })
+    }
+
+    if (error instanceof BadRequestError) {
+      return res.status(400).json({ success: false, message: error.message })
+    }
+
+    const message = error instanceof Error ? error.message : 'Error desconocido'
+
+    if (message.includes('no está conectada')) {
+      return res.status(404).json({ success: false, message })
+    }
+
+    if (message.includes('no tiene conexión de socket')) {
+      return res.status(422).json({ success: false, message })
+    }
+
+    logger.error('Error in requestRefundOnTerminal', {
+      error: message,
+      stack: error instanceof Error ? error.stack : undefined,
+      venueId: req.params.venueId,
+      terminalId: req.params.terminalId,
+    })
+
+    return res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+    })
+  }
+}
+
+/**
  * POST /api/v1/mobile/venues/:venueId/terminal-payment/cancel
  *
  * Cancel a pending terminal payment and notify the terminal.

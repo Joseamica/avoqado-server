@@ -217,3 +217,75 @@ describe('deductTrackedInventoryForFreeCart — vales por área', () => {
     expect(deductInventoryMock).toHaveBeenCalledWith('venue-1', 'prod-untracked', 2, 'order-modifier', 'staff-1', modifiers)
   })
 })
+
+// ── Issues que la deducción devuelve al cajero (Square-parity, toast post-cobro) ──
+describe('deductTrackedInventoryForFreeCart — issues de inventario', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    getInventoryMethodMock.mockResolvedValue('QUANTITY')
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([])
+  })
+
+  const orderWith = (items: unknown[]) => ({ id: 'order-1', venueId: 'venue-1', items })
+
+  it('reporta el producto cuya venta dejó el stock en negativo', async () => {
+    deductInventoryMock.mockResolvedValue({ inventoryMethod: 'QUANTITY', remainingStock: -1, productName: 'Cerveza Corona' })
+
+    const issues = await deductTrackedInventoryForFreeCart(
+      orderWith([
+        {
+          id: 'i1',
+          areaTicketLineId: null,
+          productId: 'p1',
+          productName: 'Cerveza Corona',
+          quantity: 1,
+          weightQuantity: null,
+          modifiers: [],
+        },
+      ]),
+      'staff-1',
+    )
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0]).toMatchObject({ productId: 'p1', productName: 'Cerveza Corona', requested: 1, available: -1 })
+  })
+
+  it('reporta con available null la línea que no se pudo descontar, sin frenar las demás', async () => {
+    deductInventoryMock
+      .mockRejectedValueOnce(new Error('DB timeout'))
+      .mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', remainingStock: 5, productName: 'Coca-Cola' })
+
+    const issues = await deductTrackedInventoryForFreeCart(
+      orderWith([
+        {
+          id: 'i1',
+          areaTicketLineId: null,
+          productId: 'p1',
+          productName: 'Hamburguesa BBQ',
+          quantity: 2,
+          weightQuantity: null,
+          modifiers: [],
+        },
+        { id: 'i2', areaTicketLineId: null, productId: 'p2', productName: 'Coca-Cola', quantity: 1, weightQuantity: null, modifiers: [] },
+      ]),
+      'staff-1',
+    )
+
+    expect(deductInventoryMock).toHaveBeenCalledTimes(2)
+    expect(issues).toHaveLength(1)
+    expect(issues[0]).toMatchObject({ productId: 'p1', available: null, reason: 'DB timeout' })
+  })
+
+  it('devuelve [] cuando todo descontó con stock suficiente', async () => {
+    deductInventoryMock.mockResolvedValue({ inventoryMethod: 'QUANTITY', remainingStock: 10, productName: 'Coca-Cola' })
+
+    const issues = await deductTrackedInventoryForFreeCart(
+      orderWith([
+        { id: 'i1', areaTicketLineId: null, productId: 'p1', productName: 'Coca-Cola', quantity: 1, weightQuantity: null, modifiers: [] },
+      ]),
+      'staff-1',
+    )
+
+    expect(issues).toEqual([])
+  })
+})

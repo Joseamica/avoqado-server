@@ -1,6 +1,7 @@
 import { MovementType } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import AppError from '../../errors/AppError'
+import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { deductStockForModifiers, deductStockForRecipe, OrderModifierForInventory } from './rawMaterial.service'
 import { logAction } from './activity-log.service'
@@ -147,7 +148,7 @@ export async function deductInventoryForProduct(
  * - Creates movement log with correct values
  */
 async function deductSimpleStock(venueId: string, productId: string, quantity: number, orderId: string, staffId?: string) {
-  return await prisma.$transaction(async tx => {
+  const result = await prisma.$transaction(async tx => {
     // 1. Get product for metadata
     const product = await tx.product.findUnique({
       where: { id: productId },
@@ -157,33 +158,36 @@ async function deductSimpleStock(venueId: string, productId: string, quantity: n
       throw new AppError('Product not found', 404)
     }
 
-    // 2. CONDITIONAL ATOMIC DECREMENT — single SQL statement that decrements
-    // ONLY if currentStock >= quantity, returning the new value. If 0 rows
-    // were affected we know stock was insufficient. This is the only way to
-    // prevent the race condition where N concurrent sales pass the check
-    // independently and overdraw to negative stock (real bug found in
-    // destructive E2E test, 2026-04-27: 3×4u sales of 10u stock → -2).
+    // 2. UNCONDITIONAL ATOMIC DECREMENT — single SQL statement, race-safe by
+    // itself. El stock PUEDE quedar negativo, y es a propósito (decisión
+    // founder+Claude 2026-08-12, espejo de Square): una venta COBRADA es un
+    // hecho — el producto ya salió por la puerta — y el registro tiene que
+    // anotarla aunque el número guardado estuviera desfasado. El negativo ES
+    // la señal de descuadre que el dueño necesita ver ("vendiste 3 y yo tenía
+    // 2 anotadas: algo no se está capturando").
+    //
+    // 🔴 Historia, para que nadie lo "arregle" de vuelta: este decremento fue
+    // condicional (`AND currentStock >= qty`) y con stock insuficiente lanzaba
+    // "Insufficient stock" — lo que arriba REVERTÍA una orden ya cobrada a
+    // PENDING: cliente pagado, cuenta abierta, y sin señal en inventario. La
+    // condición nació de un E2E destructivo (2026-04-27) que trataba el
+    // negativo como corrupción; hoy el negativo es dato. La atomicidad del
+    // UPDATE único se conserva: dos ventas concurrentes siguen sin pisarse.
     const updateResult = await tx.$queryRaw<Array<{ id: string; currentStock: any; previousStock: any }>>`
       UPDATE "Inventory"
       SET "currentStock" = "currentStock" - ${new Decimal(quantity)},
           "updatedAt" = NOW()
       WHERE "productId" = ${productId}
-        AND "currentStock" >= ${new Decimal(quantity)}
       RETURNING id, "currentStock", ("currentStock" + ${new Decimal(quantity)}) AS "previousStock"
     `
 
     if (updateResult.length === 0) {
-      // Either no inventory row OR insufficient stock — distinguish for caller.
-      const inventory = await tx.inventory.findUnique({ where: { productId } })
-      if (!inventory) {
-        throw new AppError(
-          `No inventory record for product "${product.name}". Create inventory via Product Wizard or manual stock adjustment.`,
-          404,
-        )
-      }
+      // Sin condición de stock, cero filas sólo significa una cosa: el
+      // producto no tiene fila de Inventory. Eso sigue siendo error de
+      // configuración, no de existencias.
       throw new AppError(
-        `Insufficient stock for ${product.name}. Available: ${inventory.currentStock.toNumber()}, Requested: ${quantity}`,
-        400,
+        `No inventory record for product "${product.name}". Create inventory via Product Wizard or manual stock adjustment.`,
+        404,
       )
     }
 
@@ -211,9 +215,44 @@ async function deductSimpleStock(venueId: string, productId: string, quantity: n
       inventoryId: inventory.id,
       quantityDeducted: quantity,
       remainingStock: newStock.toNumber(),
+      previousStock: previousStock.toNumber(),
+      productName: product.name,
       message: `Deducted ${quantity} unit(s) from inventory tracking`,
     }
   })
+
+  // Cruzar a negativo es la ANOMALÍA que el dueño audita — se registra fuera
+  // de la transacción (logAction es fire-and-forget y jamás puede tumbar ni
+  // retrasar un cobro ya aprobado). El InventoryMovement de adentro ya guarda
+  // el detalle; esto lo hace visible en la bitácora del dueño (regla
+  // dual-write de ActivityLog).
+  if (result.remainingStock < 0) {
+    logger.warn('⚠️ [Inventario] La venta dejó el stock en NEGATIVO — señal de descuadre, la venta NO se bloquea', {
+      venueId,
+      productId,
+      productName: result.productName,
+      orderId,
+      previousStock: result.previousStock,
+      newStock: result.remainingStock,
+      quantitySold: quantity,
+    })
+    void logAction({
+      staffId: staffId ?? null,
+      venueId,
+      action: 'STOCK_WENT_NEGATIVE',
+      entity: 'Inventory',
+      entityId: productId,
+      data: {
+        productName: result.productName,
+        orderId,
+        previousStock: result.previousStock,
+        newStock: result.remainingStock,
+        quantitySold: quantity,
+      },
+    })
+  }
+
+  return result
 }
 
 /**

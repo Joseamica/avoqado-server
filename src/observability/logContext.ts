@@ -28,6 +28,7 @@ export const contextFormat = winston.format(info => {
     entrypoint: ctx.entrypoint,
   }
   if (ctx.venueId) injected.venueId = ctx.venueId
+  if (ctx.venueName) injected.venueName = ctx.venueName
   if (ctx.userId) injected.userId = ctx.userId
   if (ctx.role) injected.role = ctx.role
   if (ctx.terminalSerial) injected.terminalSerial = ctx.terminalSerial

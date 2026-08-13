@@ -94,6 +94,190 @@ interface KycDocumentsToBlumonData {
   blumonExcelUrl?: string | null
 }
 
+interface KycDocumentUploadedData {
+  venueName: string
+  venueId: string
+  venueSlug: string
+  /**
+   * Where the document came in from. During `onboarding` the venue does not exist yet (the
+   * id is the organization's), so the email carries no review CTA — a link to a KYC screen
+   * for a venue that has not been created is worse than no link at all.
+   */
+  origin?: 'venue' | 'onboarding'
+  /** Which document, as the Prisma field key (`comprobanteDomicilioUrl`, `ineUrl`…). */
+  documentKey: string
+  /** Human label for that key ("Comprobante de Domicilio"). */
+  documentLabel: string
+  /** The venue's KYC status at the time of the upload — VERIFIED means it arrived late. */
+  kycStatus: string
+  fileName: string
+  fileBuffer: Buffer
+  mimeType: string
+  downloadUrl: string
+}
+
+/** Resend rejects oversized payloads; past that, the email carries the link instead. */
+const MAX_KYC_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
+/**
+ * Mails a KYC document to the onboarding inbox the moment the venue uploads it.
+ *
+ * Why it exists: KYC is often approved by hand, before the papers are all in. Without this,
+ * a document uploaded afterwards landed in storage and nobody found out — the approval was
+ * already given and no screen was being watched. The document comes attached, so the inbox
+ * is enough to act on it without opening the dashboard.
+ *
+ * Returns false instead of throwing when the mail cannot go out: the document is already
+ * saved by then, and losing the upload over a mail failure would be the worse bug.
+ */
+export async function sendKycDocumentUploadedNotification(data: KycDocumentUploadedData): Promise<boolean> {
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping KYC document notification')
+    return false
+  }
+
+  try {
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const isOnboarding = data.origin === 'onboarding'
+    const dashboardUrl = `${process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'}/superadmin/kyc/${data.venueId}`
+    const uploadedAt = new Date().toLocaleString('es-MX', { dateStyle: 'long', timeStyle: 'short', timeZone: 'America/Mexico_City' })
+
+    // A document arriving when the venue is already approved is the case worth flagging:
+    // it means the manual approval ran ahead of the paperwork.
+    const isLate = data.kycStatus === 'VERIFIED'
+    const subject = `${data.documentLabel} de ${data.venueName}`
+
+    const attachable = data.fileBuffer.byteLength <= MAX_KYC_ATTACHMENT_BYTES
+    if (!attachable) {
+      logger.warn('KYC document too large to attach, sending link only', {
+        venueId: data.venueId,
+        documentKey: data.documentKey,
+        bytes: data.fileBuffer.byteLength,
+      })
+    }
+
+    const row = (label: string, value: string) => `
+          <tr>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; width: 160px; font-size: 13px; color: #666;">${label}</td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; font-size: 14px; color: #000;">${value}</td>
+          </tr>`
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <!-- Header with Logo -->
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <!-- Title Section -->
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">
+      ${data.venueName} subi&oacute; ${data.documentLabel}
+    </h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">
+      ${uploadedAt}
+    </p>
+
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #000;">
+      ${
+        attachable
+          ? 'El documento va adjunto en este correo.'
+          : 'El documento pesa demasiado para adjuntarlo; &aacute;brelo con el enlace de abajo.'
+      }${isLate ? ' Este negocio ya estaba <strong>verificado</strong> cuando lleg&oacute; el documento.' : ''}
+    </p>
+
+    <h2 style="margin: 0 0 12px 0; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.5px;">
+      Documento
+    </h2>
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
+      <tbody>
+        ${row('Negocio', data.venueName)}
+        ${row('Documento', data.documentLabel)}
+        ${row('Archivo', data.fileName)}
+        ${row('Estado del KYC', data.kycStatus)}
+        ${row('Enlace', `<a href="${data.downloadUrl}" style="color: #000; text-decoration: underline;">Abrir documento</a>`)}
+      </tbody>
+    </table>
+
+    <!-- CTA Button (black, per EMAIL_STANDARDS) -->
+    ${
+      isOnboarding
+        ? ''
+        : `<div style="margin: 32px 0; text-align: left;">
+      <a href="${dashboardUrl}" style="display: inline-block; background-color: #000000; color: #ffffff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Revisar el KYC
+      </a>
+    </div>`
+    }
+
+    <!-- Divider -->
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+
+    <!-- Footer -->
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        <a href="https://avoqado.io/privacidad" style="color: #666; text-decoration: underline;">Aviso de privacidad</a>
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `${data.venueName} subio ${data.documentLabel}
+${uploadedAt}
+
+${attachable ? 'El documento va adjunto en este correo.' : 'El documento pesa demasiado para adjuntarlo; abrelo con el enlace.'}${isLate ? ' Este negocio ya estaba VERIFICADO cuando llego el documento.' : ''}
+
+Negocio: ${data.venueName}
+Documento: ${data.documentLabel}
+Archivo: ${data.fileName}
+Estado del KYC: ${data.kycStatus}
+Enlace: ${data.downloadUrl}
+${isOnboarding ? '' : `\nRevisar el KYC: ${dashboardUrl}\n`}
+---
+Servicios Tecnologicos Avo S.A. de C.V.`
+
+    const result = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: ONBOARDING_EMAIL,
+      subject,
+      html,
+      text,
+      ...(attachable && {
+        attachments: [{ filename: data.fileName, content: data.fileBuffer }],
+      }),
+    })
+
+    if (result.error) {
+      logger.error('Failed to send KYC document notification', { venueId: data.venueId, error: result.error })
+      return false
+    }
+
+    logger.info(`✅ KYC document mailed to ${ONBOARDING_EMAIL} (${data.documentLabel} — ${data.venueName})`)
+    return true
+  } catch (error) {
+    logger.error('Error sending KYC document notification', { venueId: data.venueId, error })
+    return false
+  }
+}
+
 /**
  * Send KYC submission notification to admin team
  * Now sends to multiple recipients: all SUPERADMINs + venue OWNER

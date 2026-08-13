@@ -64,6 +64,7 @@ import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
 import { initializeFirebase } from './config/firebase'
+import { primeVenueNames } from './observability/venueNames'
 // Import Stripe feature sync startup
 import { ensureFeaturesAreSyncedToStripe } from './startup/stripe-sync.startup'
 // Import live demo cleanup service (DEMO MODE only)
@@ -326,6 +327,13 @@ const startApplication = async (retries = 3) => {
       logger.warn('⚠️  Firebase Admin SDK not initialized. File deletion from storage will be skipped.', error)
       // Continue startup even if Firebase is not configured
     }
+
+    // Load venue names into memory (non-blocking) so every log line can say WHICH venue an
+    // error belongs to, instead of a cuid nobody can read. Never throws: a failure here just
+    // means logs fall back to the raw venueId until the lazy refresh picks it up.
+    primeVenueNames().then(count => {
+      if (count > 0) logger.info(`✅ Venue names cached for logging (${count})`)
+    })
 
     // Sync features to Stripe (non-blocking)
     // Ensures all features have Stripe product/price IDs for subscriptions

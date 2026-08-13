@@ -6,6 +6,7 @@ import * as liveDemoService from '../services/liveDemo.service'
 import { isJtiRevoked } from '../utils/tokenRevocation'
 import { enforceImpersonationRules } from './impersonationGuard.middleware'
 import { enrichContext } from '../observability/executionContext'
+import { getVenueName } from '../observability/venueNames'
 
 export const authenticateTokenMiddleware = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
@@ -72,6 +73,9 @@ export const authenticateTokenMiddleware = async (req: Request, res: Response, n
     // belongs to, without a single call site passing it along.
     enrichContext({
       venueId: authContext.venueId,
+      // The NAME is what makes a log line readable without a database query. Resolved from
+      // an in-memory cache: synchronous, and undefined rather than slow when unknown.
+      venueName: getVenueName(authContext.venueId),
       userId: authContext.userId,
       role: authContext.role,
       terminalSerial: authContext.terminalSerialNumber,

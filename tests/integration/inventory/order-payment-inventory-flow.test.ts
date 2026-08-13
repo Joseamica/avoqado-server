@@ -124,7 +124,13 @@ describe('Order → Payment → Inventory Flow Integration', () => {
   })
 
   describe('Error Handling - Insufficient Stock', () => {
-    it('should fail payment and rollback order when stock is insufficient', async () => {
+    // (Square-parity 2026-08-12) Antes: el pago se rechazaba y la orden se
+    // revertía a PENDING — con el dinero físico ya cobrado, eso dejaba al
+    // cajero con la cuenta abierta y al cliente ya pagado. Ahora: el cobro se
+    // registra SIEMPRE, la orden queda COMPLETED, y el faltante de la receta
+    // viaja como aviso estructurado (el FIFO de insumos sigue sin deducir en
+    // corto — ese drift queda auditado, no escondido).
+    it('records the payment and keeps the order COMPLETED even when recipe stock is insufficient', async () => {
       // Setup: Product with limited stock
       const category = await prisma.menuCategory.create({
         data: {
@@ -144,36 +150,38 @@ describe('Order → Payment → Inventory Flow Integration', () => {
       // Create order for 5 burgers (10 KG needed, only 5 KG available)
       const order = await createOrder(testData.venue.id, testData.staff[0].id, [{ productId: scenario.product.id, quantity: 5 }])
 
-      // Try to process full payment (should fail due to insufficient stock)
-      await expect(
-        recordOrderPayment(
-          testData.venue.id,
-          order.id,
-          {
-            venueId: testData.venue.id,
-            amount: parseFloat(order.total.toString()) * 100,
-            tip: 0,
-            status: 'COMPLETED',
-            method: 'CASH',
-            source: 'TPV',
-            splitType: 'FULLPAYMENT',
-            tpvId: 'test-tpv',
-            staffId: testData.staff[0].id,
-            paidProductsId: [],
-            currency: 'MXN',
-            isInternational: false,
-          },
-          testData.staff[0].id,
-        ),
-      ).rejects.toThrow(/insufficient inventory/i)
+      // Process full payment: the money is a fact — it records and completes.
+      const result: any = await recordOrderPayment(
+        testData.venue.id,
+        order.id,
+        {
+          venueId: testData.venue.id,
+          amount: parseFloat(order.total.toString()) * 100,
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'FULLPAYMENT',
+          tpvId: 'test-tpv',
+          staffId: testData.staff[0].id,
+          paidProductsId: [],
+          currency: 'MXN',
+          isInternational: false,
+        },
+        testData.staff[0].id,
+      )
 
-      // Verify order was rolled back to PENDING
-      const rolledBackOrder = await prisma.order.findUnique({
+      // La orden queda CERRADA con el dinero adentro…
+      const settledOrder = await prisma.order.findUnique({
         where: { id: order.id },
       })
-      expect(rolledBackOrder?.status).toBe('PENDING')
-      expect(rolledBackOrder?.paymentStatus).toBe('PENDING') // No successful payment, so still PENDING
-      expect(rolledBackOrder?.completedAt).toBeNull()
+      expect(settledOrder?.status).toBe('COMPLETED')
+      expect(settledOrder?.paymentStatus).toBe('PAID')
+      expect(settledOrder?.completedAt).not.toBeNull()
+
+      // …y el faltante viaja como aviso estructurado, no como rechazo.
+      expect(result.inventoryWarning).toBeDefined()
+      expect(result.inventoryWarning.inventoryDeducted).toBe(false)
 
       // Verify no inventory was deducted (still 5 KG)
       const finalBatch = await prisma.stockBatch.findFirst({

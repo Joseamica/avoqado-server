@@ -12,6 +12,7 @@
 import logger from '@/config/logger'
 import { NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType } from '@prisma/client'
 import { logAction } from './activity-log.service'
 
@@ -126,7 +127,10 @@ export async function getEligibleDiscounts(
   orderTotal?: number,
 ): Promise<DiscountCandidate['discount'][]> {
   const now = new Date()
-  const currentDay = now.getDay() // 0 = Sunday, 6 = Saturday
+  // La vigencia se evalúa en la hora del NEGOCIO. El server corre en UTC; leer
+  // la hora del proceso corría cualquier happy hour 6 horas en México.
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const timezone = venue?.timezone || DEFAULT_TIMEZONE
 
   // Get all active discounts for the venue
   const discounts = await prisma.discount.findMany({
@@ -143,18 +147,10 @@ export async function getEligibleDiscounts(
   const eligibleDiscounts: DiscountCandidate['discount'][] = []
 
   for (const discount of discounts) {
-    // Check day of week
-    if (discount.daysOfWeek && discount.daysOfWeek.length > 0) {
-      if (!discount.daysOfWeek.includes(currentDay)) {
-        continue
-      }
-    }
-
-    // Check time window
-    if (discount.timeFrom && discount.timeUntil) {
-      if (!isWithinTimeWindow(discount.timeFrom, discount.timeUntil)) {
-        continue
-      }
+    // Día y ventana horaria, en la zona del venue y respetando la ventana que
+    // cruza la medianoche (un "martes 22:00-02:00" sigue vivo a la 1 am).
+    if (!isWithinVenueSchedule(discount, now, timezone)) {
+      continue
     }
 
     // Check usage limits
@@ -240,6 +236,8 @@ export async function getEligibleDiscounts(
  */
 export async function getCustomerDiscounts(venueId: string, customerId: string): Promise<DiscountCandidate['discount'][]> {
   const now = new Date()
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const timezone = venue?.timezone || DEFAULT_TIMEZONE
 
   const customerDiscounts = await prisma.customerDiscount.findMany({
     where: {
@@ -260,6 +258,13 @@ export async function getCustomerDiscounts(venueId: string, customerId: string):
     .filter(cd => {
       // Check usage limit for this assignment
       if (cd.maxUses !== null && cd.usageCount >= cd.maxUses) {
+        return false
+      }
+      // 🔴 Esta ruta NO evaluaba día ni hora: un happy hour asignado a un
+      // cliente aplicaba 24/7, mientras el mismo descuento por la ruta
+      // automática sí respetaba su horario. Dos respuestas distintas para el
+      // mismo descuento, según cómo llegara.
+      if (!isWithinVenueSchedule(cd.discount, now, timezone)) {
         return false
       }
       return true
@@ -486,14 +491,36 @@ function calculateBOGO(
     getItems = context.items.filter(i => discount.getItemIds.includes(i.productId))
   }
 
-  // Count total "buy" items
-  const totalBuyQty = buyItems.reduce((sum, i) => sum + i.quantity, 0)
+  // 🔴 Las unidades REGALADAS también ocupan lugar en el carrito.
+  //
+  // La cuenta vieja era `floor(totalBuyQty / buyQty)`, que trataba como
+  // "compradas" TODAS las unidades del pool — incluidas las que estaba a punto
+  // de regalar. Cuando los conjuntos se traslapan (el caso normal de un 2x1
+  // sobre el mismo producto, y también el de dejar ambos filtros vacíos, que
+  // hace que los dos pools sean TODO el carrito), eso regalaba la línea entera:
+  // con buy=1/get=1 y 4 cervezas daba floor(4/1)=4 sets → las 4 gratis.
+  //
+  // Con conjuntos DISJUNTOS (compra pizzas, llevas refresco) la cuenta vieja sí
+  // era correcta: el refresco nunca estuvo en el pool de compradas.
+  const getItemIdSet = new Set(getItems.map(i => i.id))
+  const poolsOverlap = buyItems.some(i => getItemIdSet.has(i.id))
 
-  // Calculate how many "get" items qualify
-  const qualifyingSets = Math.floor(totalBuyQty / buyQty)
-  const freeItemCount = qualifyingSets * getQty
+  let freeItemCount: number
+  if (poolsOverlap) {
+    // Cada promoción completa consume buyQty pagadas MÁS getQty regaladas del
+    // mismo montón, así que se cuenta sobre la unión de ambos pools.
+    const unionById = new Map<string, number>()
+    for (const item of [...buyItems, ...getItems]) unionById.set(item.id, item.quantity)
+    const totalUnits = [...unionById.values()].reduce((sum, qty) => sum + qty, 0)
+    freeItemCount = Math.floor(totalUnits / (buyQty + getQty)) * getQty
+  } else {
+    const totalBuyQty = buyItems.reduce((sum, i) => sum + i.quantity, 0)
+    const totalGetQty = getItems.reduce((sum, i) => sum + i.quantity, 0)
+    // Nunca se regalan más unidades de las que el cliente se está llevando.
+    freeItemCount = Math.min(Math.floor(totalBuyQty / buyQty) * getQty, totalGetQty)
+  }
 
-  if (freeItemCount === 0) {
+  if (freeItemCount <= 0) {
     return { amount: 0, taxReduction: 0, applicableItems: [] }
   }
 
@@ -1047,21 +1074,6 @@ export async function applyManualDiscount(
 // ==========================================
 // UTILITY FUNCTIONS
 // ==========================================
-
-/**
- * Check if current time is within a time window
- */
-function isWithinTimeWindow(timeFrom: string, timeUntil: string): boolean {
-  const now = new Date()
-  const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`
-
-  // Handle overnight windows (e.g., 22:00 - 02:00)
-  if (timeFrom > timeUntil) {
-    return currentTime >= timeFrom || currentTime <= timeUntil
-  }
-
-  return currentTime >= timeFrom && currentTime <= timeUntil
-}
 
 /**
  * Estimate average tax rate for applicable items

@@ -160,6 +160,61 @@ export function requiredPermissionForIntent(type: string): string | null {
   }
 }
 
+/**
+ * TODOS los permisos que exige un intent — los de su tipo MÁS los que dependen
+ * de lo que trae el payload.
+ *
+ * 🔴 El caso que tapa: la cortesía tiene permiso propio online (`orders:comp`)
+ * y `COMP_ORDER` ya lo pedía, pero la MISMA cortesía viaja dentro de un
+ * `ADD_ITEMS` (`isCortesia: true` deja la línea en total 0) y ese intent sólo
+ * pedía `orders:create`, que tiene cualquier mesero. La puerta estaba cerrada
+ * y la ventana abierta.
+ *
+ * Se agrega el permiso, NO se prohíbe el campo: mandar una línea ya de
+ * cortesía sin red es un flujo legítimo, y quitarlo dejaría al local sin poder
+ * comp-ear durante un apagón.
+ */
+export function requiredPermissionsForIntent(intent: SyncIntentInput): string[] {
+  const base = requiredPermissionForIntent(intent.type)
+  const permissions = base ? [base] : []
+
+  if (intent.type === 'ADD_ITEMS') {
+    const items = Array.isArray(intent.payload?.items) ? (intent.payload.items as any[]) : []
+    if (items.some(item => item?.isCortesia === true)) {
+      permissions.push('orders:comp')
+    }
+  }
+
+  return permissions
+}
+
+/**
+ * Valida las líneas de un ADD_ITEMS ANTES de aplicarlas.
+ *
+ * 🔴 El batch sólo se validaba en `id` y `type`: los items entraban como `any`.
+ * Una cantidad no positiva bajaba el total de la cuenta, y peor, la deducción
+ * de inventario multiplica por `quantity` (`payment.tpv.service.ts`), así que
+ * al cobrar SUMABA mercancía al stock en vez de restarla.
+ *
+ * Devuelve el motivo del rechazo, o null si las líneas son válidas.
+ */
+function invalidAddItemsReason(items: any[]): string | null {
+  for (const item of items) {
+    if (!Number.isInteger(item?.quantity) || item.quantity < 1) {
+      return 'La cantidad de cada artículo debe ser un entero mayor a cero'
+    }
+    if (item.customUnitPriceCents != null && (!Number.isInteger(item.customUnitPriceCents) || item.customUnitPriceCents < 0)) {
+      return 'El precio de una línea de monto libre no puede ser negativo'
+    }
+    // Venta por peso: los kilos alimentan la misma deducción de inventario, así
+    // que un peso cero o negativo tiene el mismo efecto que una cantidad mala.
+    if (item.weightQuantity != null && (typeof item.weightQuantity !== 'number' || !(item.weightQuantity > 0))) {
+      return 'El peso de un artículo vendido por peso debe ser mayor a cero'
+    }
+  }
+  return null
+}
+
 async function ackFromExisting(existing: any, intentId: string): Promise<SyncIntentAck> {
   if (existing.status !== 'PROCESSING') {
     return {
@@ -314,8 +369,9 @@ export async function processIntents(params: {
         message: 'La operación pertenece a otra sesión. Requiere revisión del gerente.',
       }
     } else {
-      const requiredPermission = requiredPermissionForIntent(intent.type)
-      if (requiredPermission && !authorizeIntent(intent, requiredPermission)) {
+      const requiredPermissions = requiredPermissionsForIntent(intent)
+      const missingPermission = requiredPermissions.find(permission => !authorizeIntent(intent, permission))
+      if (missingPermission) {
         ack = {
           id: intent.id,
           status: 'REJECTED',
@@ -328,7 +384,7 @@ export async function processIntents(params: {
           action: 'PERMISSION_DENIED',
           entity: 'pos-sync-intent',
           entityId: intent.id,
-          data: { permission: requiredPermission, intentType: intent.type, deviceId },
+          data: { permission: missingPermission, intentType: intent.type, deviceId },
         })
       } else {
         ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap })
@@ -605,6 +661,10 @@ async function applyAddItems(
   const items = Array.isArray(intent.payload.items) ? (intent.payload.items as any[]) : []
   if (!orderId || items.length === 0) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: 'ADD_ITEMS requiere orderId/localOrderId e items' }
+  }
+  const invalidReason = invalidAddItemsReason(items)
+  if (invalidReason) {
+    return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: invalidReason }
   }
   await assertOwnership(venueId, staffId, orderId)
 

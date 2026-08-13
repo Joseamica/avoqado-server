@@ -550,7 +550,10 @@ describe('Inventory System — Destructive E2E', () => {
       expect(Number(movement!.newStock)).toBe(47)
     })
 
-    it('selling more than available throws insufficient-stock and leaves inventory untouched', async () => {
+    it('selling more than available deducts to NEGATIVE (Square-parity 2026-08-12) with an honest movement', async () => {
+      // Antes: lanzaba "Insufficient stock" y arriba eso revertía una orden YA
+      // COBRADA a PENDING. La venta cobrada es un hecho: el stock queda en
+      // negativo y ese número ES la señal de descuadre.
       const product = await prisma.product.create({
         data: {
           venueId: v.id,
@@ -567,13 +570,22 @@ describe('Inventory System — Destructive E2E', () => {
         data: { productId: product.id, venueId: v.id, currentStock: new Decimal(2) },
       })
 
-      await expect(deductInventoryForProduct(v.id, product.id, 5, 'order-qty-fail', undefined)).rejects.toThrow(/insufficient/i)
+      const result: any = await deductInventoryForProduct(v.id, product.id, 5, 'order-qty-oversell', undefined)
+      expect(result.remainingStock).toBe(-3)
 
       const after = await prisma.inventory.findUnique({ where: { productId: product.id } })
-      expect(Number(after!.currentStock)).toBe(2) // untouched
+      expect(Number(after!.currentStock)).toBe(-3)
+
+      // El movimiento cuadra consigo mismo: antes/después reales, venta completa
+      const movement = await prisma.inventoryMovement.findFirst({
+        where: { inventoryId: after!.id, reference: 'order-qty-oversell' },
+      })
+      expect(Number(movement!.quantity)).toBe(-5)
+      expect(Number(movement!.previousStock)).toBe(2)
+      expect(Number(movement!.newStock)).toBe(-3)
     })
 
-    it('atomic decrement: 3 concurrent sales of 4 units each from stock of 10 → only 2 succeed', async () => {
+    it('atomic decrement: 3 concurrent sales of 4 units each from stock of 10 → ALL succeed, stock exact', async () => {
       const product = await prisma.product.create({
         data: {
           venueId: v.id,
@@ -590,17 +602,19 @@ describe('Inventory System — Destructive E2E', () => {
         data: { productId: product.id, venueId: v.id, currentStock: new Decimal(10) },
       })
 
+      // (Square-parity 2026-08-12) El decremento incondicional sigue siendo
+      // ATÓMICO: tres ventas concurrentes no se pisan — todas aplican y el
+      // resultado es EXACTO (10 − 12 = −2), no un valor corrupto intermedio.
       const results = await Promise.allSettled([
         deductInventoryForProduct(v.id, product.id, 4, 'race-1', undefined),
         deductInventoryForProduct(v.id, product.id, 4, 'race-2', undefined),
         deductInventoryForProduct(v.id, product.id, 4, 'race-3', undefined),
       ])
       const successes = results.filter(r => r.status === 'fulfilled').length
-      expect(successes).toBeLessThanOrEqual(2) // 4+4=8 ≤ 10 ✓, 4+4+4=12 > 10 ✗
+      expect(successes).toBe(3)
 
       const after = await prisma.inventory.findUnique({ where: { productId: product.id } })
-      expect(Number(after!.currentStock)).toBeGreaterThanOrEqual(0)
-      expect(Number(after!.currentStock)).toBeLessThanOrEqual(10)
+      expect(Number(after!.currentStock)).toBe(-2)
     })
 
     it('product without trackInventory deducts NOTHING (free-stock product)', async () => {

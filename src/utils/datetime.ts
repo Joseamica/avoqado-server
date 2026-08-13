@@ -599,3 +599,81 @@ export function formatVenueTime(date: Date | string, timezone: string = DEFAULT_
     timeZone: timezone,
   })
 }
+
+// ==========================================
+// VIGENCIA SEMANAL/HORARIA (descuentos, promociones, reglas de upsell)
+// ==========================================
+
+/** Ventana de vigencia recurrente: qué días y entre qué horas aplica algo. */
+export interface VenueSchedule {
+  /** 0 = domingo … 6 = sábado. Vacío = todos los días. */
+  daysOfWeek: number[]
+  /** "HH:mm" en hora del NEGOCIO. Null junto con timeUntil = todo el día. */
+  timeFrom: string | null
+  timeUntil: string | null
+}
+
+/** Hora "HH:mm" y día de la semana de un instante, leídos en una zona dada. */
+function venueLocalParts(instant: Date, timezone: string): { time: string; day: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    hour12: false,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(instant)
+
+  const get = (type: string) => parts.find(p => p.type === type)?.value ?? ''
+  // `hour12: false` devuelve "24" a medianoche en algunos entornos — es una
+  // trampa conocida de Intl y dejaría "24:30" fuera de cualquier ventana.
+  const hour = get('hour') === '24' ? '00' : get('hour')
+  const dayIndex = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(get('weekday'))
+
+  return { time: `${hour}:${get('minute')}`, day: dayIndex }
+}
+
+/**
+ * ¿Está vigente ahora una ventana semanal/horaria, en la hora del NEGOCIO?
+ *
+ * 🔴 Reemplaza a un `isWithinTimeWindow` privado que leía `new Date().getHours()`
+ * —la zona del PROCESO—. El server corre en UTC y los venues están en
+ * America/Mexico_City: un happy hour de 18:00 se evaluaba 6 horas corrido.
+ *
+ * 🔴 Y arregla la ventana que cruza la medianoche. Un "martes de 22:00 a 02:00"
+ * sigue vivo el miércoles a la 1:00 am: la ventana la abrió el martes. Validar
+ * `daysOfWeek` contra el día de HOY lo mataba a medianoche, que es justo cuando
+ * la gente lo está usando.
+ *
+ * Es pura y recibe el instante por parámetro para poder probarse sola.
+ */
+export function isWithinVenueSchedule(schedule: VenueSchedule, now: Date, timezone: string = DEFAULT_TIMEZONE): boolean {
+  let local: { time: string; day: number }
+  try {
+    local = venueLocalParts(now, timezone)
+  } catch {
+    // Una zona inválida en la base no puede apagar los descuentos de un local.
+    local = venueLocalParts(now, DEFAULT_TIMEZONE)
+  }
+
+  const days = schedule.daysOfWeek ?? []
+  const appliesOn = (day: number) => days.length === 0 || days.includes(day)
+
+  // Sin ventana completa no hay nada de hora que evaluar: manda sólo el día.
+  if (!schedule.timeFrom || !schedule.timeUntil) {
+    return appliesOn(local.day)
+  }
+
+  // Ventana normal dentro del mismo día.
+  if (schedule.timeFrom <= schedule.timeUntil) {
+    return appliesOn(local.day) && local.time >= schedule.timeFrom && local.time <= schedule.timeUntil
+  }
+
+  // Ventana que cruza la medianoche: el día que cuenta es el que la ABRIÓ.
+  if (local.time >= schedule.timeFrom) {
+    return appliesOn(local.day) // arrancó hoy
+  }
+  if (local.time <= schedule.timeUntil) {
+    return appliesOn((local.day + 6) % 7) // arrancó ayer
+  }
+  return false
+}

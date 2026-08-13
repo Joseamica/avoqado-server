@@ -9,7 +9,6 @@ import { socketManager } from '../../communication/sockets/managers/socketManage
 import { SocketEventType } from '../../communication/sockets/types'
 import { createTransactionCost } from '../payments/transactionCost.service'
 import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
-import { restockItem } from '../dashboard/inventoryRestock.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
 import { PhaseTimer } from '@/utils/phaseTimer'
@@ -33,6 +32,7 @@ import {
   type ClientCountryEvidenceSource,
 } from '../payments/cardInternationality.service'
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
+import { resolveFastPaymentTarget } from './fastPaymentTarget'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -151,6 +151,89 @@ function mapTpvRatingToNumeric(tpvRating: string): number | null {
   }
 
   return ratingMap[tpvRating.toUpperCase()] || null
+}
+
+/**
+ * 🔴 DINERO — Aviso de inventario que viaja PEGADO a un cobro que YA se registró.
+ *
+ * Existe porque el inventario se revisa DOS veces: una ANTES de cobrar
+ * (`validatePreFlightInventory`, que sí puede prevenir y sí rechaza) y otra
+ * DESPUÉS de que el Payment quedó comiteado. En la segunda ya no hay nada que
+ * prevenir: rechazar ahí no des-cobra la tarjeta, sólo le miente al cajero, que
+ * entonces vuelve a pasarla. Ese fue el doble cobro real.
+ *
+ * Mismo criterio que el bloque 🚨 [Sobrepago] de este archivo: el pago se
+ * registra SIEMPRE y lo que se elimina es la invisibilidad del problema.
+ *
+ * Se sirve como campo OPCIONAL de la respuesta de `recordOrderPayment` — con
+ * spread condicional, igual que `areaTicketCheckoutState`, así que la llave
+ * está AUSENTE (no `null`) cuando no hay nada que avisar y ningún cliente viejo
+ * cambia de comportamiento.
+ */
+export interface OrderInventoryWarning {
+  /**
+   * `INSUFFICIENT_INVENTORY` — se detectó faltante pero el descuento SÍ corrió.
+   * `INVENTORY_NOT_DEDUCTED` — el descuento falló y se revirtió; la causa puede ser
+   * falta de stock, concurrencia o una receta mal configurada, y va en `issues[].reason`.
+   */
+  code: 'INSUFFICIENT_INVENTORY' | 'INVENTORY_NOT_DEDUCTED'
+  /** El cobro SIEMPRE quedó registrado. Esto dice si el stock alcanzó a moverse. */
+  inventoryDeducted: boolean
+  /** Español, listo para pintarse al cajero. NO puede sugerir que el cobro falló. */
+  message: string
+  /** Los mismos 4 datos que antes se aplastaban en el string del error, ya estructurados. */
+  issues: Array<{
+    productId: string
+    productName: string
+    requested: number | null
+    available: number | string | null
+    reason: string
+  }>
+}
+
+/**
+ * Arma el aviso que ve el cajero. La PRIMERA frase siempre confirma el cobro:
+ * si el POS sólo alcanza a pintar una línea, esa línea no puede ser la que lo
+ * mande a pasar la tarjeta otra vez.
+ */
+export function buildInventoryWarning(rawIssues: OrderInventoryWarning['issues'], inventoryDeducted: boolean): OrderInventoryWarning {
+  // En un TOCTOU real las DOS puertas reportan el MISMO producto: el pre-flight
+  // con el `available` numérico, y la deducción con `available: null` y su error.
+  // Sin esto el cajero ve la hamburguesa dos veces y no sabe si son dos problemas.
+  // Gana la primera (el pre-flight, que trae el número), y si a ella le faltaba el
+  // dato disponible, lo rellena la segunda. Un producto = una línea.
+  const porProducto = new Map<string, OrderInventoryWarning['issues'][number]>()
+  for (const issue of rawIssues) {
+    const previo = porProducto.get(issue.productId)
+    if (!previo) {
+      porProducto.set(issue.productId, { ...issue })
+      continue
+    }
+    if (previo.available == null && issue.available != null) previo.available = issue.available
+    if (previo.requested == null && issue.requested != null) previo.requested = issue.requested
+  }
+  const issues = [...porProducto.values()]
+
+  const detalle = issues
+    .map(issue => {
+      const disponible = issue.available == null ? 'sin disponibilidad confirmada' : `disponibles ${issue.available}`
+      const pedido = issue.requested == null ? 'cantidad no determinada' : `se pidieron ${issue.requested}`
+      return `${issue.productName} (${pedido}, ${disponible} — ${issue.reason})`
+    })
+    .join('; ')
+
+  const cierre = inventoryDeducted
+    ? 'El inventario sí se descontó; revisa el stock de estos productos.'
+    : 'El inventario NO se descontó y la cuenta quedó marcada para revisión.'
+
+  return {
+    // El motivo real (falta de stock, concurrencia, receta mal configurada) viaja
+    // verbatim en `issues[].reason`; el código sólo resume qué pasó con el stock.
+    code: inventoryDeducted ? 'INSUFFICIENT_INVENTORY' : 'INVENTORY_NOT_DEDUCTED',
+    inventoryDeducted,
+    message: `El cobro se registró correctamente. Hubo un problema de inventario: ${detalle || 'sin detalle disponible'}. ${cierre}`,
+    issues,
+  }
 }
 
 /**
@@ -379,26 +462,23 @@ async function validatePreFlightInventory(
     const validation = await validateOrderInventoryAvailability(order.venueId, itemsToValidate)
 
     if (!validation.available) {
-      logger.error('❌ PRE-FLIGHT FAILED: Insufficient inventory - Payment rejected', {
+      // 🔴 Ya NO se rechaza (punto 1, Square-parity 2026-08-12): cuando la app
+      // registra el cobro, el dinero físico ya se movió — el cajero ya recibió
+      // el efectivo o la terminal ya aprobó. Rechazar el registro no des-vende
+      // nada; sólo deja la venta sin anotar. El faltante se detecta otra vez
+      // tras el commit (pre-flight post-commit) y viaja al cajero como aviso
+      // estructurado, y el stock QUANTITY queda en negativo como señal.
+      logger.warn('⚠️ [Inventario] PRE-FLIGHT detectó faltante — el cobro procede y el faltante viajará como aviso', {
         orderId: order.id,
         venueId: order.venueId,
         issues: validation.issues,
       })
-
-      // Format issues into error message
-      const issuesDescription = validation.issues
-        ?.map(issue => `${issue.productName}: requested ${issue.requested}, available ${issue.available} (${issue.reason})`)
-        .join('; ')
-
-      throw new BadRequestError(
-        `Cannot complete order - insufficient inventory. ${issuesDescription || 'Please check stock levels and try again.'}`,
-      )
+    } else {
+      logger.info('✅ PRE-FLIGHT PASSED: Inventory available, proceeding with payment', {
+        orderId: order.id,
+        venueId: order.venueId,
+      })
     }
-
-    logger.info('✅ PRE-FLIGHT PASSED: Inventory available, proceeding with payment', {
-      orderId: order.id,
-      venueId: order.venueId,
-    })
   } else {
     logger.info('⏭️ PRE-FLIGHT SKIPPED: Partial payment, inventory validation deferred', {
       orderId: order.id,
@@ -433,6 +513,8 @@ function mapPaymentSource(source?: string): PaymentSource {
  * @param tipAmount Tip amount from this payment (to calculate cumulative order.tipAmount)
  * @param currentPaymentId Current payment ID to exclude from calculation
  * @param staffId Optional staff ID who processed the payment (for loyalty points)
+ * @returns Aviso de inventario cuando hubo faltante, o `null`. NUNCA lanza por
+ *          inventario: cuando esta función corre el Payment ya está comiteado.
  */
 async function updateOrderTotalsForStandalonePayment(
   orderId: string,
@@ -441,7 +523,7 @@ async function updateOrderTotalsForStandalonePayment(
   currentPaymentId?: string,
   staffId?: string,
   options?: { areaTicketAlreadyFinalized?: boolean },
-): Promise<void> {
+): Promise<OrderInventoryWarning | null> {
   // Get current order with payment information
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -531,6 +613,22 @@ async function updateOrderTotalsForStandalonePayment(
   // esa invisibilidad sin cambiar el contrato de la API.
   const remainingAmount = Math.max(0, newTotal - totalPaid)
   const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+
+  // 🔴 ¿La cuenta YA estaba saldada ANTES de este pago? (audit Codex 2026-08-12, P1)
+  //
+  // Re-cobrar una orden ya COMPLETED —el gesto exacto del doble cobro del
+  // cajero, con idempotencyKey NUEVA que la dedup no atrapa— volvía a disparar
+  // `isFullyPaid` y con él TODO el loop de deducción: la mercancía se
+  // descontaba DOS veces (y sin el piso del decremento condicional, a
+  // negativo). El dinero sigue el criterio del bloque 🚨 [Sobrepago] de
+  // arriba: se registra SIEMPRE; lo que no se repite es el efecto de
+  // inventario, que ya ocurrió cuando la orden se saldó la primera vez.
+  // Se compara contra el total SIN la propina de este pago (previousTips, no
+  // totalTip): la propina nueva no convierte una cuenta saldada en pendiente.
+  // Y exige pagos PREVIOS: una orden 100% cortesía (total clampado a 0) sin
+  // pagos aún NO está saldada — su primer cobro de $0 sí debe deducir.
+  const settledBeforeThisPayment =
+    order.payments.length > 0 && previousPayments >= Math.max(0, orderSubtotal - orderDiscount) + previousTips - 0.01
   const coveredAreaTicketLines = isFullyPaid
     ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
     : new Set<string>()
@@ -582,9 +680,33 @@ async function updateOrderTotalsForStandalonePayment(
       })
   }
 
+  // 🚨 INVENTARIO INSUFICIENTE — detectar y gritar, NUNCA rechazar ni lanzar.
+  //
+  // Cuando este bloque corre, `prisma.$transaction` de `recordOrderPayment` YA
+  // retornó: el Payment está comiteado y la tarjeta ya se cobró en el proveedor.
+  // Un `throw` aquí NO des-cobra nada — sólo hace que el POS pinte "error de
+  // inventario" sobre un cobro que sí pasó. El cajero concluye que no se cobró y
+  // vuelve a pasar la tarjeta; ese segundo intento lleva `idempotencyKey` y
+  // `referenceNumber` NUEVOS, así que la deduplicación no lo atrapa. Doble cobro
+  // irrecuperable, medido en producción.
+  //
+  // La prevención de verdad ya existe y NO vive aquí: `validatePreFlightInventory`
+  // corre ANTES de la transacción y ahí sí rechaza sin haber cobrado. Este chequeo
+  // sólo puede disparar cuando el stock cambió entre ambos momentos (TOCTOU) o
+  // cuando los dos difieren al decidir "queda saldada" — y en los dos casos el
+  // dinero ya entró.
+  //
+  // Mismo razonamiento, línea por línea, que el bloque 🚨 [Sobrepago] de arriba.
+  const inventoryIssues: OrderInventoryWarning['issues'] = []
+  // true cuando la deducción REAL falló (no el pre-flight): decide el
+  // `inventoryDeducted` del aviso final. Vive aquí porque el return está fuera
+  // del bloque de deducción.
+  let deductionFailed = false
+
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
   // Validate inventory availability before marking order as complete
-  if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
+  // (skip si la orden ya estaba saldada: su inventario ya se validó y dedujo)
+  if (isFullyPaid && !settledBeforeThisPayment && !options?.areaTicketAlreadyFinalized) {
     // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
     // Items with paymentAllocations have already been "claimed" by a previous split payment
     // Also skip items with deleted products (productId is null - Toast/Square pattern)
@@ -609,26 +731,66 @@ async function updateOrderTotalsForStandalonePayment(
     )
 
     if (!validation.available) {
-      logger.error('❌ Pre-flight validation failed: Insufficient inventory', {
-        orderId,
-        venueId: order.venueId,
-        issues: validation.issues,
-      })
-
-      // Format issues into error message
+      // Se conserva el mismo detalle que antes viajaba en el mensaje del error
+      // (producto, cuánto se pidió, cuánto había, motivo) — ahora estructurado.
       const issuesDescription = validation.issues
         ?.map(issue => `${issue.productName}: requested ${issue.requested}, available ${issue.available} (${issue.reason})`)
         .join('; ')
 
-      throw new BadRequestError(
-        `Cannot complete order - insufficient inventory. ${issuesDescription || 'Please check stock levels and try again.'}`,
-      )
-    }
+      // 🚨 token estable que machea la regla de Better Stack — NO renombrar.
+      logger.error('🚨 [Inventario] Stock insuficiente detectado DESPUÉS de registrar el cobro — el pago se conserva, requiere revisión', {
+        orderId,
+        venueId: order.venueId,
+        paymentId: currentPaymentId ?? null,
+        staffId: staffId ?? null,
+        stage: 'PRE_DEDUCTION',
+        issues: validation.issues,
+        issuesDescription,
+      })
 
-    logger.info('✅ Pre-flight validation passed: All inventory available', {
-      orderId,
-      venueId: order.venueId,
-    })
+      // Fire-and-forget FUERA de toda transacción: una falla del audit jamás puede tocar el cobro.
+      void prisma.activityLog
+        .create({
+          data: {
+            action: 'INVENTARIO_INSUFICIENTE_AL_COBRAR',
+            entity: 'Order',
+            entityId: orderId,
+            staffId: staffId ?? null,
+            venueId: order.venueId,
+            data: {
+              stage: 'PRE_DEDUCTION',
+              paymentId: currentPaymentId ?? null,
+              issues: (validation.issues ?? []) as unknown as Prisma.InputJsonValue,
+            },
+          },
+        })
+        .catch(err => {
+          logger.error('🚨 [Inventario] No se pudo escribir el ActivityLog del faltante de inventario', {
+            orderId,
+            error: err instanceof Error ? err.message : err,
+          })
+        })
+
+      for (const issue of validation.issues ?? []) {
+        inventoryIssues.push({
+          productId: issue.productId,
+          productName: issue.productName,
+          requested: issue.requested,
+          available: issue.available,
+          reason: issue.reason,
+        })
+      }
+      // Sin `throw`: el cobro ya existe. Se sigue adelante para dejar la cuenta
+      // consistente con el dinero que SÍ entró, y el faltante viaja como aviso.
+    } else {
+      // En `else` a propósito: al quitar el `throw`, este log quedaba cayendo por
+      // gravedad y cantaba "All inventory available" JUSTO debajo de la alerta de
+      // faltante. Un log que se contradice a sí mismo cuesta una hora en un incidente.
+      logger.info('✅ Pre-flight validation passed: All inventory available', {
+        orderId,
+        venueId: order.venueId,
+      })
+    }
   }
 
   // Determine new payment status
@@ -708,11 +870,16 @@ async function updateOrderTotalsForStandalonePayment(
   })
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
-  // ✅ WORLD-CLASS PATTERN: Fail payment if inventory deduction fails (Shopify, Square, Toast)
-  if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
-    const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
-    // Items cuya deducción SÍ se aplicó — si otro item falla, esto es lo que
-    // hay que revertir antes de regresar la orden a PENDING.
+  // Non-blocking (payments.md): la venta cobrada nunca se revierte por
+  // inventario — el fallo viaja como aviso + 🚨 log, y QUANTITY llega a negativo
+  // en la fuente. (El comentario anterior decía "Fail payment if inventory
+  // deduction fails (Shopify, Square, Toast)" — falso: Square hace lo opuesto.)
+  // 🔴 `!settledBeforeThisPayment`: la mercancía de una orden ya saldada salió
+  // con el PRIMER cobro — repetir el loop la descontaba dos veces (audit Codex).
+  if (isFullyPaid && !settledBeforeThisPayment && !options?.areaTicketAlreadyFinalized) {
+    const deductionErrors: Array<{ productId: string; productName: string; requested: number; error: string }> = []
+    // Items cuya deducción SÍ se aplicó — se QUEDAN deducidos aunque otro item
+    // falle (se vendieron); van al log/ActivityLog como contexto del drift.
     const deductedItems: Array<{ productId: string; quantity: number }> = []
 
     logger.info('🎯 Starting inventory deduction for completed order', {
@@ -858,6 +1025,7 @@ async function updateOrderTotalsForStandalonePayment(
           deductionErrors.push({
             productId: item.productId!,
             productName: item.product?.name || item.productName || 'Unknown',
+            requested: item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity,
             error: deductionError.message,
           })
 
@@ -882,114 +1050,73 @@ async function updateOrderTotalsForStandalonePayment(
 
     // ✅ FIX: Rollback order if ANY critical inventory deduction failed
     if (deductionErrors.length > 0) {
-      logger.error('❌ CRITICAL: Inventory deduction failed, rolling back order completion', {
-        orderId,
-        failedProducts: deductionErrors,
-      })
+      deductionFailed = true
+      // 🔴 La venta cobrada SE QUEDA CERRADA (decisión founder+Claude 2026-08-12,
+      // espejo de Square y de la regla escrita en payments.md: "Non-blocking:
+      // payment succeeds even if deduction fails"). Antes este bloque restauraba
+      // lo ya deducido, regresaba los seriales a AVAILABLE y revertía la orden a
+      // PENDING/PARTIAL — con el cliente ya pagado y en la puerta: cuenta abierta,
+      // sin lealtad/cupones, y CERO señal en inventario. Revertir la orden no
+      // des-vende nada; sólo hace que el registro mienta.
+      //
+      // Con QUANTITY yendo a negativo en la fuente, lo que cae aquí son fallos de
+      // receta (FIFO/unidades), deadlocks agotados y errores de configuración: el
+      // faltante queda como drift para conciliación — igual que ya lo hace el
+      // flujo de carrito libre en order.tpv.service.ts ("We do NOT throw — the
+      // order is closed, customer is happy").
+      const errorDetails = deductionErrors.map(e => `${e.productName}: ${e.error}`).join('; ')
 
+      // Resumen a nivel orden. El detalle POR ITEM ya se auditó arriba con
+      // INVENTORY_DEDUCTION_FAILED en cada catch — nombre distinto a propósito
+      // para no duplicar entradas en la bitácora.
       logAction({
         staffId,
         venueId: updatedOrder.venueId,
-        action: 'INVENTORY_DEDUCTION_ROLLBACK',
+        action: 'INVENTORY_DEDUCTION_INCOMPLETE',
         entity: 'Order',
         entityId: orderId,
         data: {
           source: 'TPV',
           failedProducts: deductionErrors,
-          restoredProducts: deductedItems,
-          previousStatus: 'COMPLETED',
-          rolledBackTo: 'PENDING',
+          // Lo ya deducido se QUEDA deducido: esos items sí se vendieron.
+          keptDeducted: deductedItems,
+          orderStatus: 'COMPLETED',
         },
       })
 
-      // Compensación: restaura el stock de los items que SÍ alcanzaron a
-      // deducirse antes del fallo. Sin esto, el reintento del pago volvía a
-      // deducirlos (doble deducción permanente). Nota: los modificadores
-      // ADDITION no se reversan aquí — misma limitación documentada que el
-      // restock de refunds (inventoryRestock.service.ts).
-      for (const deducted of deductedItems) {
-        try {
-          await restockItem({
-            venueId: updatedOrder.venueId,
-            productId: deducted.productId,
-            quantity: deducted.quantity,
-            refundPaymentId: orderId,
-            staffId,
-            reason: `Reversa de inventario: fallo al completar la orden ${orderId}`,
-          })
-          logger.info('🔄 Restored deducted stock during rollback', {
-            orderId,
-            productId: deducted.productId,
-            quantity: deducted.quantity,
-          })
-        } catch (restoreError: any) {
-          logger.error('❌ Failed to restore deducted stock during rollback — stock drift, requires manual adjustment', {
-            orderId,
-            productId: deducted.productId,
-            quantity: deducted.quantity,
-            error: restoreError.message,
-          })
-        }
-      }
-
-      // Rollback serialized items that were marked as SOLD before the failure
-      // Without this, serials stay SOLD while the order reverts to PENDING (ghost SOLD bug)
-      // Uses orderItemId as the safe anchor — unique per item, works for both venue-level and org-level
-      for (const item of updatedOrder.items) {
-        if (!item.productId && item.productSku) {
-          try {
-            const rolledBack = await prisma.serializedItem.updateMany({
-              where: {
-                orderItemId: item.id,
-                status: 'SOLD',
-              },
-              data: {
-                status: 'AVAILABLE',
-                orderItemId: null,
-                soldAt: null,
-                sellingVenueId: null,
-              },
-            })
-            if (rolledBack.count > 0) {
-              logger.info('🔄 Rolled back serialized item to AVAILABLE', {
-                orderId,
-                serialNumber: item.productSku,
-              })
-            }
-          } catch (rollbackError: any) {
-            logger.error('❌ Failed to rollback serialized item', {
-              orderId,
-              serialNumber: item.productSku,
-              error: rollbackError.message,
-            })
-          }
-        }
-      }
-
-      // Rollback the order to PENDING state
-      await prisma.order.update({
-        where: { id: orderId },
-        data: {
-          status: 'PENDING',
-          paymentStatus: 'PARTIAL',
-          completedAt: null,
-        },
+      // 🚨 Segunda puerta del MISMO doble cobro: este bloque corre con el Payment
+      // ya comiteado, así que no puede lanzar. 🚨 token estable de Better Stack —
+      // NO renombrar.
+      logger.error('🚨 [Inventario] La deducción de stock falló DESPUÉS de registrar el cobro — el pago se conserva, requiere revisión', {
+        orderId,
+        venueId: updatedOrder.venueId,
+        paymentId: currentPaymentId ?? null,
+        staffId: staffId ?? null,
+        stage: 'DEDUCTION',
+        failedProducts: deductionErrors,
+        keptDeducted: deductedItems,
+        errorDetails,
       })
 
-      // Build user-friendly error message
-      const productNames = deductionErrors.map(e => e.productName).join(', ')
-      const errorDetails = deductionErrors.map(e => `${e.productName}: ${e.error}`).join('; ')
+      for (const failed of deductionErrors) {
+        inventoryIssues.push({
+          productId: failed.productId,
+          productName: failed.productName,
+          requested: failed.requested,
+          available: null,
+          reason: failed.error,
+        })
+      }
 
-      throw new BadRequestError(
-        `Payment could not be completed due to insufficient inventory for: ${productNames}. ` +
-          `Please reduce quantity or remove items from your order. Details: ${errorDetails}`,
-      )
+      // SIN `return`: la venta quedó completa, así que cupones, referidos,
+      // lealtad y la liberación de la mesa corren igual que en cualquier otro
+      // cobro. El aviso viaja en el retorno final de la función.
+    } else {
+      logger.info('🎯 Inventory deduction completed successfully for order', {
+        orderId,
+        totalItems: updatedOrder.items.length,
+      })
     }
-
-    logger.info('🎯 Inventory deduction completed successfully for order', {
-      orderId,
-      totalItems: updatedOrder.items.length,
-    })
 
     // 🎟️ COUPON FINALIZATION: Mark coupons as redeemed when order is fully paid
     // ✅ WORLD-CLASS PATTERN: Coupons are "applied" at checkout but only "redeemed" on payment (Toast, Square)
@@ -1119,10 +1246,10 @@ async function updateOrderTotalsForStandalonePayment(
 
   // 🪑 Liberar la mesa si ésta era su última cuenta viva.
   //
-  // Va al FINAL a propósito: si la deducción de inventario revirtió la orden a
-  // PENDING, `releaseTableIfSettled` la vuelve a ver abierta y no libera nada.
-  // Y va en try/catch porque el estado del plano es bookkeeping — jamás puede
-  // tumbar un cobro que el banco ya aprobó.
+  // Va en try/catch porque el estado del plano es bookkeeping — jamás puede
+  // tumbar un cobro que el banco ya aprobó. (Antes también dependía de que la
+  // deducción no hubiera revertido la orden; desde 2026-08-12 la venta cobrada
+  // nunca se revierte por inventario, así que la mesa se libera siempre.)
   //
   // Antes esto lo hacía SOLO el cliente (`finishTableAfterPayment` → HTTP
   // directo). Sin red, con la app matada, o cobrando desde otro dispositivo, la
@@ -1138,6 +1265,11 @@ async function updateOrderTotalsForStandalonePayment(
       })
     }
   }
+
+  // Todo faltante —del pre-flight o de la deducción misma— viaja como aviso.
+  // `inventoryDeducted: false` sólo cuando la deducción real falló: el cajero
+  // ve el problema, pero la venta cobrada nunca se revierte por inventario.
+  return inventoryIssues.length > 0 ? buildInventoryWarning(inventoryIssues, !deductionFailed) : null
 }
 
 interface PaymentFilters {
@@ -2006,6 +2138,9 @@ export async function recordOrderPayment(
   let payment: Awaited<ReturnType<typeof prisma.payment.create>>
   let lockedAreaCheckout: { sessionId: string; attemptId: string } | null = null
   let areaTicketCheckoutState: string | null = null
+  // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
+  // en la respuesta — nunca como error, o el cajero vuelve a pasar la tarjeta.
+  let inventoryWarning: OrderInventoryWarning | null = null
   try {
     payment = await prisma.$transaction(async tx => {
       if (paymentData.status === 'COMPLETED') {
@@ -2511,7 +2646,13 @@ export async function recordOrderPayment(
         // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
         // ⭐ LOYALTY: Pass staffId for loyalty points attribution
         // ✅ FIX: Pass tipAmount separately to update order.tipAmount
-        await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId)
+        inventoryWarning = await updateOrderTotalsForStandalonePayment(
+          activeOrder.id,
+          totalAmount + tipAmount,
+          tipAmount,
+          payment.id,
+          validatedStaffId,
+        )
       }
 
       logger.info('Order totals updated directly in backend (Standalone Mode)', {
@@ -2520,9 +2661,33 @@ export async function recordOrderPayment(
         paymentAmount: totalAmount + tipAmount,
       })
     } catch (updateError: any) {
-      // ✅ WORLD-CLASS PATTERN: Re-throw business validation errors (Stripe/Shopify/Toast pattern)
-      // Validation errors (insufficient inventory, etc.) should FAIL the payment
-      // Infrastructure errors (network, DB) can be logged but don't fail the payment
+      // ⚠️ Este re-throw ya NO puede alcanzar al inventario, y es a propósito.
+      //
+      // Decía "Validation errors should FAIL the payment", pero para cuando este
+      // catch corre el Payment lleva rato comiteado: fallar aquí no des-cobra la
+      // tarjeta, sólo le miente al cajero — que vuelve a pasarla con
+      // `idempotencyKey`/`referenceNumber` nuevos y produce el doble cobro. Por eso
+      // `updateOrderTotalsForStandalonePayment` ya no lanza por inventario: devuelve
+      // un `inventoryWarning` que viaja en la respuesta 201.
+      //
+      // El clause se conserva como guard LATENTE, no como vía viva: a hoy (2026-08-12)
+      // NINGUNA ruta post-commit produce `BadRequestError`/`NotFoundError`. Se verificó
+      // una por una — el inventario ya no lanza; la rama de area tickets envuelve
+      // `finalizeCapturedAreaTicketPayment` en su propio try/catch y lo único que queda
+      // suelto ahí (`markAreaTicketPaymentForReconciliation`) sólo puede tronar con
+      // errores de Prisma; el resto de `updateOrderTotalsForStandalonePayment` va en
+      // try/catch. Su único throw propio vivo es el `Error` pelón de "order not found
+      // for total update", que NO es BadRequest/NotFound y por diseño cae abajo sin
+      // tumbar el cobro.
+      //
+      // 🔴 Si algún día vuelves a meter aquí un `BadRequestError` post-commit, estás
+      // reabriendo el doble cobro: el POS pinta error sobre dinero que YA entró.
+      // Devuelve un aviso en la respuesta (`inventoryWarning`), no un error.
+      //
+      // Lo que SÍ puede tronar hoy con el Payment ya comiteado es el `throw error` del
+      // catch de `prisma.$transaction` (commit en duda: se pierde el ack, se cae la
+      // conexión). Por eso el fallback de `recordFastPayment` sigue siendo necesario y
+      // está anclado justo con ese escenario en `fastPaymentDelegation.test.ts`.
       if (updateError instanceof BadRequestError || updateError instanceof NotFoundError) {
         logger.error('❌ Payment rejected: Business validation failed', {
           paymentId: payment.id,
@@ -2586,6 +2751,10 @@ export async function recordOrderPayment(
   return {
     ...payment,
     ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
+    // Aditivo y con spread condicional (mismo criterio que `areaTicketCheckoutState`):
+    // la llave está AUSENTE cuando no hay nada que avisar, así que ninguna app vieja
+    // en la calle cambia de comportamiento.
+    ...(inventoryWarning ? { inventoryWarning } : {}),
     digitalReceipt: digitalReceipt
       ? {
           id: digitalReceipt.id,
@@ -2598,6 +2767,110 @@ export async function recordOrderPayment(
 }
 
 /**
+ * ¿El Payment de ESTA llamada quedó comiteado?
+ *
+ * - `landed`       — sí, con certeza. NO se cae a FAST (duplicaría).
+ * - `not-landed`   — no. Se cae a FAST (el dinero tiene que aterrizar en algún lado).
+ * - `unverifiable` — el payload no trae NINGUNA llave de identidad y tampoco se pudo
+ *                    censar la orden. Se cae a FAST: perder un cobro es peor que
+ *                    duplicar un registro (ver `verifyDelegatedPaymentLanded`).
+ */
+type DelegatedPaymentVerdict = 'landed' | 'not-landed' | 'unverifiable'
+
+/** ¿El payload trae con qué probar identidad? Hoy la TPV SIEMPRE manda `idempotencyKey`. */
+function hasPaymentIdentityKey(paymentData: PaymentCreationData): boolean {
+  return !!(paymentData.idempotencyKey || paymentData.referenceNumber)
+}
+
+/**
+ * Censo de los pagos que la orden YA tenía antes de delegar.
+ *
+ * Sólo se usa para payloads SIN llave de identidad — o sea, nunca en producción: la TPV
+ * manda `idempotencyKey` en todo cobro (`buildFastPaymentContext`) y las reposiciones de
+ * la cola offline mandan `referenceNumber`. Es la red para un cliente que no cumpla el
+ * contrato, no un camino caliente: con llave, esta consulta NO corre.
+ *
+ * Fail-open: si truena, devuelve null → el veredicto será `unverifiable` → FAST.
+ */
+async function snapshotOrderPaymentIds(venueId: string, orderId: string): Promise<Set<string> | null> {
+  try {
+    const rows = await prisma.payment.findMany({ where: { venueId, orderId }, select: { id: true } })
+    return new Set(rows.map(r => r.id))
+  } catch (err) {
+    logger.error('⚠️ [FastPayment] No se pudo censar los pagos de la orden antes de delegar', {
+      venueId,
+      orderId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
+  }
+}
+
+/**
+ * ¿MI pago comiteó? Se le pregunta a la tabla `Payment` por IDENTIDAD.
+ *
+ * 🔴 Por qué NO se le pregunta a la fila de arbitraje: `TerminalPaymentRequest.paymentId`
+ * es un binding HEURÍSTICO por diseño de este repo, no una prueba de identidad.
+ *   · El watchdog (`terminal-payment.service.ts`) ata CUALQUIER Payment COMPLETED + tarjeta
+ *     + posterior a la fila sobre esa orden; su propio comentario dice que un binding
+ *     exacto "tendría que venir de una referencia request↔payment, no de aritmética".
+ *   · `closeRow` escribe el paymentId que reporte la terminal por socket, y ese campo del
+ *     resultado es opcional.
+ *   · En el schema es `paymentId String?` "(soft ref)", sin FK.
+ *
+ * Leer EXISTENCIA en esa fila contesta "¿hay ALGÚN paymentId?", no "¿está el MÍO?" — y se
+ * equivoca en las DOS direcciones, las dos caras:
+ *   · paymentId AJENO + throw TEMPRANO (nada escrito) → creeríamos que aterrizó, no
+ *     caeríamos a FAST, y el cobro no quedaría registrado en NINGÚN lado. Ésa es
+ *     exactamente la regresión que este fallback vino a evitar.
+ *   · Fila ya COMPLETED con paymentId NULO + throw POST-commit → creeríamos que no
+ *     aterrizó y caeríamos a FAST: DOS Payments. Y no es teórico ni raro:
+ *     `closeRowFromPaymentTx` retorna SIN escribir cuando la fila ya está COMPLETED
+ *     (deliberado y ya testeado en `terminal-payment.service.test.ts`), y un resultado por
+ *     socket con `status:'success'` sin paymentId deja la fila justo así ANTES de que la
+ *     TPV registre por REST. Es una vía MAINLINE.
+ *
+ * La llave con la que se verifica aquí es la MISMA con la que la ruta FAST deduplica más
+ * abajo, así que un falso negativo NO duplica: FAST encuentra el pago ya comiteado y lo
+ * devuelve. Por eso, ante la duda, caer a FAST es la dirección segura.
+ *
+ * Sin ninguna llave, el último recurso es el censo antes/después de la orden: si apareció
+ * un pago que no estaba, fue el nuestro.
+ */
+async function verifyDelegatedPaymentLanded(
+  venueId: string,
+  orderId: string,
+  paymentData: PaymentCreationData,
+  paymentIdsBeforeDelegation: Set<string> | null,
+): Promise<DelegatedPaymentVerdict> {
+  // Identidad exacta: `@@unique([venueId, idempotencyKey])` en Payment.
+  if (paymentData.idempotencyKey) {
+    const mine = await prisma.payment.findFirst({
+      where: { venueId, orderId, idempotencyKey: paymentData.idempotencyKey },
+      select: { id: true },
+    })
+    return mine ? 'landed' : 'not-landed'
+  }
+
+  // Igual que el Check 2 de idempotencia de FAST: los refunds comparten
+  // `referenceNumber` con el original, por eso se excluyen.
+  if (paymentData.referenceNumber) {
+    const mine = await prisma.payment.findFirst({
+      where: { venueId, orderId, referenceNumber: paymentData.referenceNumber, type: { not: 'REFUND' } },
+      select: { id: true },
+    })
+    return mine ? 'landed' : 'not-landed'
+  }
+
+  if (paymentIdsBeforeDelegation) {
+    const after = await prisma.payment.findMany({ where: { venueId, orderId }, select: { id: true } })
+    return after.some(p => !paymentIdsBeforeDelegation.has(p.id)) ? 'landed' : 'not-landed'
+  }
+
+  return 'unverifiable'
+}
+
+/**
  * Record a fast payment (without specific table association)
  * @param venueId Venue ID
  * @param paymentData Payment creation data
@@ -2607,6 +2880,147 @@ export async function recordOrderPayment(
  */
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
+
+  // 🔴 ¿Este dinero pertenece a una venta que YA existe? El cajero pudo mandar el cobro
+  // desde el POS, cancelar, y la terminal cobrar igual. Ese cobro es de la venta que lo
+  // originó —con sus productos—, no de una venta sintética vacía. La solicitud de
+  // arbitraje guarda el `orderId`; hasta hoy sólo se usaba para cerrar la fila.
+  //
+  // Fail-open a propósito: si la consulta truena, se sigue por FAST. Un fallo de infra
+  // jamás puede impedir registrar dinero que YA se cobró.
+  if (paymentData.terminalPaymentRequestId) {
+    let arbitrationRow: { orderId: string | null; venueId: string; status: string } | null = null
+    try {
+      arbitrationRow = await prisma.terminalPaymentRequest.findUnique({
+        where: { requestId: paymentData.terminalPaymentRequestId },
+        select: { orderId: true, venueId: true, status: true },
+      })
+    } catch (err) {
+      logger.error('⚠️ [FastPayment] No se pudo leer la solicitud de arbitraje — se sigue como venta rápida', {
+        requestId: paymentData.terminalPaymentRequestId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+
+    const target = resolveFastPaymentTarget(arbitrationRow, venueId)
+
+    // 🔴 `requestId` es `@unique` GLOBAL y lo genera el cliente: una colisión entre
+    // inquilinos devolvería el `orderId` de OTRO negocio. Se degrada a venta rápida —
+    // el dinero se registra en el venue del token, nunca cruzando la frontera — y se
+    // alerta, porque una colisión así no debería ocurrir jamás.
+    if (target.kind === 'fastOrder' && target.reason === 'venueMismatch') {
+      logger.error(
+        '🚨 [FastPayment] La solicitud de arbitraje pertenece a OTRO venue — se ignora su orden y se registra como venta rápida',
+        {
+          requestId: paymentData.terminalPaymentRequestId,
+          expectedVenueId: venueId,
+          rowVenueId: arbitrationRow?.venueId,
+        },
+      )
+    }
+
+    if (target.kind === 'existingOrder') {
+      logger.info('🎯 [FastPayment] El cobro pertenece a una venta existente — no se crea venta rápida', {
+        requestId: paymentData.terminalPaymentRequestId,
+        orderId: target.orderId,
+        priorStatus: arbitrationRow?.status,
+      })
+      // recordOrderPayment ya sabe descontar inventario, cerrar la orden, actualizar el
+      // turno y cerrar la fila de arbitraje. No se reimplementa nada de eso aquí.
+      //
+      // 🔴 `return await` (no `return` a secas): así el try/catch de abajo SÍ atrapa
+      // un rechazo de esta promesa. Con `return recordOrderPayment(...)` a secas, el
+      // catch nunca vería el error — se propagaría directo al llamador.
+      const requestId = paymentData.terminalPaymentRequestId
+      // Sólo para payloads SIN llave de identidad (nunca en producción — ver
+      // `snapshotOrderPaymentIds`): con llave, esta consulta NO corre.
+      const paymentIdsBeforeDelegation = hasPaymentIdentityKey(paymentData) ? null : await snapshotOrderPaymentIds(venueId, target.orderId)
+      try {
+        return await recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+      } catch (err) {
+        // 🔴 La tarjeta YA se cobró. Antes de esta delegación, ese dinero por lo menos
+        // aterrizaba en una venta FAST. Si recordOrderPayment truena por dentro —
+        // pre-flight de inventario rechazando por stock insuficiente, venue con
+        // ventas deshabilitadas, split incompatible, orden no encontrada— y se deja
+        // propagar el error, el cobro no aterriza en NINGÚN lado: sería una regresión
+        // que introduciríamos nosotros, dejando el sistema peor que antes de este
+        // cambio. Una venta FAST vacía es mala; ninguna venta es peor. Por eso se cae
+        // a la ruta FAST de siempre en vez de propagar... PERO SÓLO si el pago no
+        // aterrizó ya. Ver el chequeo de abajo.
+        //
+        // 🔴 [Ronda 2] recordOrderPayment puede tronar DESPUÉS de que su propia
+        // transacción ya comitió el Payment: `updateOrderTotalsForStandalonePayment`
+        // corre un pre-flight de inventario FUERA de la transacción (rama "autónoma"
+        // — MODO AUTÓNOMO más abajo en recordOrderPayment) y, si rechaza por stock
+        // insuficiente, el catch de recordOrderPayment relanza BadRequestError /
+        // NotFoundError con el Payment YA escrito en firme. Caer a FAST en ESE caso
+        // duplicaría el cobro — y sólo se salvaría si paymentData trae
+        // idempotencyKey/referenceNumber (los checks de idempotencia de FAST, arriba
+        // en esta misma función, encontrarían el pago ya comitteado y lo devolverían
+        // en vez de duplicar). Que la TPV siempre mande uno de los dos es una
+        // suposición operativa, no una invariante forzada — no basta como red.
+        //
+        // La señal real NO es la fila de arbitraje: su `paymentId` es un binding
+        // heurístico que ni prueba que MI pago comiteó (puede traer uno AJENO) ni
+        // prueba que no (llega a COMPLETED con paymentId nulo por vía mainline). Se
+        // le pregunta a la tabla `Payment` por IDENTIDAD — el razonamiento completo,
+        // con las dos formas de equivocarse y lo que cuesta cada una, está en
+        // `verifyDelegatedPaymentLanded`.
+        let verdict: DelegatedPaymentVerdict = 'unverifiable'
+        try {
+          verdict = await verifyDelegatedPaymentLanded(venueId, target.orderId, paymentData, paymentIdsBeforeDelegation)
+        } catch (checkErr) {
+          // No se pudo verificar. Fail-open consistente con el resto de esta función
+          // (nunca perder un cobro por un fallo de infraestructura): se sigue a FAST,
+          // donde los checks de idempotencia vuelven a mirar por la MISMA llave y
+          // devuelven el pago existente en vez de duplicarlo.
+          logger.error(
+            '🚨 [FastPayment] No se pudo confirmar si el pago ya aterrizó tras el fallo de recordOrderPayment — se sigue a FAST bajo incertidumbre',
+            {
+              requestId,
+              orderId: target.orderId,
+              originalError: err instanceof Error ? err.message : String(err),
+              verificationError: checkErr instanceof Error ? checkErr.message : String(checkErr),
+            },
+          )
+        }
+
+        if (verdict === 'landed') {
+          // El dinero SÍ quedó registrado en su venta real — el fallo es del
+          // pre-flight posterior (inventario, etc.), no del cobro en sí. Se deja
+          // subir el error ORIGINAL tal cual para que el llamador vea la razón real,
+          // en vez de disfrazarlo con un segundo Payment.
+          //
+          // 🚨 = el token estable que Better Stack usa para alertar (mismo patrón
+          // que terminal-payment.service.ts).
+          logger.error('🚨 [FastPayment] recordOrderPayment tronó DESPUÉS de comitear el pago — NO se cae a FAST (evita duplicar)', {
+            requestId,
+            orderId: target.orderId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          throw err
+        }
+
+        // 🚨 = el token estable que Better Stack usa para alertar (mismo patrón que
+        // terminal-payment.service.ts) — un cobro que no pudo aterrizar en su venta
+        // real necesita que alguien lo revise, aunque el dinero SÍ quede registrado.
+        //
+        // `unverifiable` se distingue del `not-landed` limpio: significa que el
+        // payload no traía NINGUNA llave de identidad (contrato incumplido — la TPV
+        // siempre manda `idempotencyKey`) y tampoco hubo censo. Se cae a FAST igual,
+        // porque perder el cobro es peor: el POS le diría al cajero que la venta
+        // sigue sin pagar y volvería a pasar la tarjeta — un doble cobro REAL. Sin
+        // llave, además, FAST no tiene con qué deduplicar, así que el residual de
+        // duplicar el REGISTRO se acepta a cambio de no perder el DINERO.
+        logger.error('🚨 [FastPayment] recordOrderPayment tronó al delegar — el cobro cae a venta rápida para no perderse', {
+          requestId,
+          orderId: target.orderId,
+          verdict,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+  }
 
   // ⏱️ SOLO MEDICIÓN (2026-08-09). Prod: mediana 4,471 ms / p95 4,971 ms contra
   // 130 ms de red real México→Oregon: ~97% del tiempo es trabajo del servidor,

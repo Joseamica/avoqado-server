@@ -72,6 +72,7 @@ import * as venueFeatureController from '../controllers/dashboard/venueFeature.d
 import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
 import * as cryptoConfigController from '../controllers/dashboard/cryptoConfig.dashboard.controller'
 import * as tpvMessageController from '../controllers/dashboard/tpv-message.dashboard.controller'
+import { preserveContext } from '@/observability/preserveContext'
 import {
   issueCfdiForOrderController,
   listCfdisController,
@@ -2693,7 +2694,7 @@ router.post(
   '/venues/:venueId/upload-document',
   authenticateTokenMiddleware,
   checkPermission('venues:manage'),
-  documentUpload.single('file'),
+  preserveContext(documentUpload.single('file')),
   venueController.uploadVenueDocument,
 )
 
@@ -2701,7 +2702,7 @@ router.post(
 router.put(
   '/venues/:venueId/kyc/document/:documentKey',
   authenticateTokenMiddleware,
-  documentUpload.single('file'),
+  preserveContext(documentUpload.single('file')),
   venueKycController.uploadSingleKycDocument,
 )
 
@@ -2712,14 +2713,16 @@ router.post('/venues/:venueId/kyc/submit', authenticateTokenMiddleware, venueKyc
 router.post(
   '/venues/:venueId/kyc/resubmit',
   authenticateTokenMiddleware,
-  documentUpload.fields([
-    { name: 'ineUrl', maxCount: 1 },
-    { name: 'rfcDocumentUrl', maxCount: 1 },
-    { name: 'comprobanteDomicilioUrl', maxCount: 1 },
-    { name: 'caratulaBancariaUrl', maxCount: 1 },
-    { name: 'actaDocumentUrl', maxCount: 1 },
-    { name: 'poderLegalUrl', maxCount: 1 },
-  ]),
+  preserveContext(
+    documentUpload.fields([
+      { name: 'ineUrl', maxCount: 1 },
+      { name: 'rfcDocumentUrl', maxCount: 1 },
+      { name: 'comprobanteDomicilioUrl', maxCount: 1 },
+      { name: 'caratulaBancariaUrl', maxCount: 1 },
+      { name: 'actaDocumentUrl', maxCount: 1 },
+      { name: 'poderLegalUrl', maxCount: 1 },
+    ]),
+  ),
   venueKycController.resubmitKycDocuments,
 )
 
@@ -4163,7 +4166,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('BANK_RECONCILIATION'),
   checkPermission('accounting:reconcile'),
-  bankStatementUpload.single('file'),
+  preserveContext(bankStatementUpload.single('file')),
   bankReconciliationController.uploadBankStatement,
 )
 router.get(
@@ -4856,7 +4859,7 @@ router.get('/venues/:venueId/tpv-orders/:id', authenticateTokenMiddleware, termi
 router.post(
   '/venues/:venueId/tpv-orders/:id/upload-proof',
   authenticateTokenMiddleware,
-  documentUpload.single('proof'),
+  preserveContext(documentUpload.single('proof')),
   terminalOrderController.uploadProofHandler,
 )
 

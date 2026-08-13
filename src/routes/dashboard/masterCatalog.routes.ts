@@ -4,6 +4,7 @@ import * as controller from '../../controllers/dashboard/masterCatalog.dashboard
 import * as exportController from '../../controllers/dashboard/masterCatalogExport.dashboard.controller'
 import multer from 'multer'
 import AppError from '../../errors/AppError'
+import { preserveContext } from '@/observability/preserveContext'
 
 const router = Router({ mergeParams: true })
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } })
@@ -12,7 +13,7 @@ const multipartParserCodes = new Map([
   ['Unexpected end of form', 'UNEXPECTED_END_OF_FORM'],
 ])
 const catalogImportUpload = (req: Request, res: Response, next: NextFunction) => {
-  upload.single('file')(req, res, error => {
+  preserveContext(upload.single('file'))(req, res, error => {
     if (error instanceof multer.MulterError) {
       return next(
         new AppError('Solicitud multipart de catálogo no válida', 422, true, 'CATALOG_IMPORT_REQUEST_INVALID', {

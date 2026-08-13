@@ -9,6 +9,7 @@ import logger from '@/config/logger'
 import { uploadFileToStorage, buildStoragePath } from '@/services/storage.service'
 
 import { notifySuperadminsNewKycSubmission } from '@/services/superadmin/kycReview.service'
+import { sendKycDocumentUploadedNotification } from '@/services/resend.service'
 import { BadRequestError, ForbiddenError } from '@/errors/AppError'
 import { logAction } from './activity-log.service'
 
@@ -27,6 +28,17 @@ const DOCUMENT_KEY_TO_PRISMA: Record<string, string> = {
   comprobanteDomicilioUrl: 'comprobanteDomicilioUrl',
   caratulaBancariaUrl: 'caratulaBancariaUrl',
   poderLegalUrl: 'poderLegalUrl',
+}
+
+// Document key to human label — what a person reads in the notification email.
+const DOCUMENT_KEY_TO_LABEL: Record<string, string> = {
+  ineUrl: 'INE',
+  taxDocumentUrl: 'Constancia de Situación Fiscal',
+  actaDocumentUrl: 'Acta Constitutiva',
+  rfcDocumentUrl: 'RFC',
+  comprobanteDomicilioUrl: 'Comprobante de Domicilio',
+  caratulaBancariaUrl: 'Carátula Bancaria',
+  poderLegalUrl: 'Poder Legal',
 }
 
 // Document key to clean file name mapping
@@ -88,12 +100,17 @@ export async function uploadSingleKycDocument(venueId: string, userId: string, d
       throw new ForbiddenError('Only superadmins, venue owners, or admins can upload KYC documents')
     }
 
-    // Verify venue KYC is in a status that allows document upload
-    // NOT_SUBMITTED: First time submission (can upload freely)
-    // REJECTED: Resubmission after rejection (can only modify rejected docs)
-    if (venue.kycStatus !== 'REJECTED' && venue.kycStatus !== 'NOT_SUBMITTED') {
-      throw new BadRequestError(`Cannot upload documents. Current KYC status: ${venue.kycStatus}`)
-    }
+    // Uploading a document is allowed in EVERY KYC status, on purpose.
+    //
+    // The KYC is often approved by hand before the venue has finished sending its papers —
+    // so the venue ends up VERIFIED with documents still missing. Blocking the upload there
+    // (what this code used to do) left the business with no way in at all: it could not
+    // upload, and it had nothing to resubmit. Two real attempts failed that way on
+    // 2026-08-12.
+    //
+    // This is safe because an upload does NOT touch `kycStatus` — a manual approval stays
+    // approved. Every upload writes an ActivityLog row and mails the document to the
+    // onboarding inbox, so a late change is visible rather than silent.
 
     // For REJECTED status, check if this specific document was rejected
     if (venue.kycStatus === 'REJECTED') {
@@ -134,6 +151,22 @@ export async function uploadSingleKycDocument(venueId: string, userId: string, d
     })
 
     logger.info(`  ✅ Uploaded ${cleanName}: ${downloadUrl}`)
+
+    // Mail the document to the onboarding inbox, attached. Fire-and-forget and AFTER the
+    // save: the document is already stored, so a mail failure must never turn a successful
+    // upload into an error for the venue.
+    void sendKycDocumentUploadedNotification({
+      venueName: venue.name,
+      venueId,
+      venueSlug: venue.slug,
+      documentKey,
+      documentLabel: DOCUMENT_KEY_TO_LABEL[documentKey] || cleanName,
+      kycStatus: venue.kycStatus,
+      fileName: `${venue.slug}-${cleanName}.${extension}`,
+      fileBuffer: file.buffer,
+      mimeType: file.mimetype,
+      downloadUrl,
+    }).catch(error => logger.error('KYC document notification failed', { venueId, documentKey, error }))
 
     return {
       documentKey,

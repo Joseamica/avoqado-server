@@ -3,6 +3,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import * as trainingController from '../../controllers/superadmin/training.superadmin.controller'
 import { validateRequest } from '../../middlewares/validation'
+import { preserveContext } from '@/observability/preserveContext'
 import {
   listTrainingsQuerySchema,
   trainingIdParamSchema,
@@ -43,7 +44,7 @@ router.get('/', validateRequest(listTrainingsQuerySchema), trainingController.li
 router.post('/', validateRequest(createTrainingSchema), trainingController.createTraining)
 
 // Upload media file
-router.post('/upload', mediaUpload.single('file'), trainingController.uploadMedia)
+router.post('/upload', preserveContext(mediaUpload.single('file')), trainingController.uploadMedia)
 
 // Get single training detail
 router.get('/:trainingId', validateRequest(trainingIdParamSchema), trainingController.getTraining)
