@@ -375,6 +375,18 @@ export async function updateStockCount(countId: string, venueId: string, items: 
     throw new BadRequestError('La cantidad contada no puede ser negativa')
   }
 
+  // 🔴 Tenant isolation (audit Codex 2026-08-12): el conteo ya se validó contra
+  // el venue, pero las LÍNEAS llegaban por id pelón — un usuario del venue A
+  // podía mutar líneas de un conteo del venue B mandando sus ids en el body.
+  // Todo-o-nada, ANTES de escribir nada.
+  const lineasDelConteo = new Set(
+    (await prisma.stockCountItem.findMany({ where: { stockCountId: countId }, select: { id: true } })).map(item => item.id),
+  )
+  const ajena = items.find(item => !lineasDelConteo.has(item.id))
+  if (ajena) {
+    throw new BadRequestError('Una de las líneas no pertenece a este conteo')
+  }
+
   // Update each item's counted quantity
   await Promise.all(
     items.map(item =>
@@ -420,6 +432,14 @@ export async function confirmStockCount(countId: string, venueId: string, userId
   // sits at the default counted=0, and applying it would zero out real stock
   // (this bit the E2E test — 46 untouched ingredients started wiping stock).
   const countedItems = count.items.filter(item => item.countedAt !== null)
+
+  // Defensa en la frontera del EFECTO (audit Codex 2026-08-12): el update de
+  // hoy ya rechaza negativos, pero un negativo ALMACENADO antes del deploy —o
+  // colado por otra vía— no debe aplicarse jamás al inventario. Un conteo
+  // físico no puede ser negativo.
+  if (countedItems.some(item => Number(item.counted) < 0)) {
+    throw new BadRequestError('La cantidad contada no puede ser negativa. Corrige la línea y vuelve a confirmar.')
+  }
 
   // Ingredient lines: the physical count is the truth, so compute the delta
   // against the CURRENT stock (not `expected`, which may be stale if sales

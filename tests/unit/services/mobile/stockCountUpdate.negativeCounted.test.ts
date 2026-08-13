@@ -18,6 +18,8 @@ describe('updateStockCount — lo contado nunca es negativo', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.stockCount.findFirst.mockResolvedValue({ id: COUNT, venueId: VENUE, status: 'IN_PROGRESS' } as any)
+    // Las líneas que SÍ pertenecen al conteo (para el guard de tenant).
+    prismaMock.stockCountItem.findMany.mockResolvedValue([{ id: 'item-1' }, { id: 'item-2' }] as any)
     prismaMock.stockCountItem.update.mockResolvedValue({} as any)
     prismaMock.stockCount.update.mockResolvedValue({} as any)
   })
@@ -51,5 +53,60 @@ describe('updateStockCount — lo contado nunca es negativo', () => {
       ]),
     ).resolves.toEqual({ success: true })
     expect(prismaMock.stockCountItem.update).toHaveBeenCalledTimes(2)
+  })
+
+  // ── Tenant isolation (audit Codex 2026-08-12, P1) ────────────────────────
+  // El servicio validaba que el CONTEO fuera del venue, pero actualizaba las
+  // líneas por `id` pelón: un usuario del venue A podía mutar líneas de un
+  // conteo del venue B mandando sus ids en el body.
+  it('rechaza TODO el lote si una línea no pertenece a este conteo', async () => {
+    // El conteo sólo tiene item-1 e item-2; item-ajeno es de otro conteo/venue.
+    prismaMock.stockCountItem.findMany.mockResolvedValue([{ id: 'item-1' }, { id: 'item-2' }] as any)
+
+    await expect(
+      updateStockCount(COUNT, VENUE, [
+        { id: 'item-1', counted: 5 },
+        { id: 'item-ajeno', counted: 5 },
+      ]),
+    ).rejects.toThrow(/no pertenece/)
+
+    expect(prismaMock.stockCountItem.update).not.toHaveBeenCalled()
+  })
+})
+
+// ── Confirm: la validación vive también en la frontera del EFECTO ──────────
+// Un negativo ya almacenado (capturado antes del deploy, o metido por el hueco
+// de tenant) no debe aplicarse al inventario aunque el update de hoy lo rechace.
+describe('confirmStockCount — un negativo almacenado no se aplica', () => {
+  const COUNT = 'count-1'
+  const VENUE = 'venue-1'
+
+  it('rechaza confirmar si alguna línea contada quedó negativa', async () => {
+    prismaMock.stockCount.findFirst.mockResolvedValue({
+      id: COUNT,
+      venueId: VENUE,
+      status: 'IN_PROGRESS',
+      items: [
+        {
+          id: 'item-1',
+          productId: 'prod-1',
+          rawMaterialId: null,
+          rawMaterial: null,
+          expected: 10,
+          counted: -5, // almacenado ANTES de que el update validara
+          countedAt: new Date(),
+          product: { id: 'prod-1', name: 'Cerveza', inventory: { id: 'inv-1', currentStock: 10 } },
+        },
+      ],
+    } as any)
+
+    const { confirmStockCount } = await import('@/services/mobile/inventory.mobile.service')
+    await expect(confirmStockCount(COUNT, VENUE, 'staff-1')).rejects.toThrow(/no puede ser negativa/)
+
+    // Nada se aplicó al inventario
+    expect(prismaMock.inventory.update).not.toHaveBeenCalled()
+    expect(prismaMock.stockCount.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED' }) }),
+    )
   })
 })

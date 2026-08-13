@@ -415,6 +415,46 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
     })
   })
 
+  describe('Orden YA saldada: el dinero se registra, el inventario NO se vuelve a tocar', () => {
+    // Hallazgo del audit Codex 2026-08-12 (P1): sin este guard, re-cobrar una
+    // orden ya COMPLETED —el gesto exacto del doble cobro del cajero, con
+    // idempotencyKey NUEVA que la dedup no atrapa— volvía a correr el loop de
+    // deducción completo y descontaba la mercancía DOS veces. El dinero sigue
+    // el criterio del bloque 🚨 [Sobrepago]: se registra siempre; lo que no se
+    // repite es el efecto de inventario, que ya ocurrió con el primer cobro.
+    const ordenSaldada = () =>
+      makeOrder({
+        status: 'COMPLETED',
+        paymentStatus: 'PAID',
+        payments: [{ amount: new Decimal(100), tipAmount: new Decimal(0), status: 'COMPLETED' }],
+      })
+
+    it('re-cobrar una orden saldada NO vuelve a deducir inventario', async () => {
+      const order = ordenSaldada()
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      // El dinero se registró (criterio Sobrepago)…
+      expect(prisma.payment.create).toHaveBeenCalled()
+      // …pero la mercancía ya salió con el PRIMER cobro: ni pre-flight ni deducción.
+      expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+    })
+
+    it('el primer saldado de una orden normal SIGUE deduciendo (regresión)', async () => {
+      const order = makeOrder() // sin pagos previos
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalled()
+    })
+  })
+
   describe('TOCTOU completo: las DOS puertas disparan por el mismo producto', () => {
     it('el cajero ve UNA línea por producto, con el número disponible del pre-flight', async () => {
       const order = makeOrder()

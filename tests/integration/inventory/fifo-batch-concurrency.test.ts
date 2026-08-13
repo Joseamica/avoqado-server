@@ -109,18 +109,20 @@ describe('FIFO Batch Concurrency - Race Condition Prevention', () => {
       // Execute concurrently
       const results = await Promise.allSettled([payment1Promise, payment2Promise])
 
-      // Verify: One payment succeeds, one fails
+      // (Square-parity 2026-08-12) Antes: uno cobraba y el otro se RECHAZABA
+      // con insufficient inventory. Ahora los DOS cobros se registran (el
+      // dinero es un hecho); el FIFO de insumos sigue siendo la barrera física:
+      // el primero en tomar el lote deduce sus 8 KG, el segundo va corto y su
+      // faltante viaja como aviso estructurado en vez de rechazo.
       const succeeded = results.filter(r => r.status === 'fulfilled')
-      const failed = results.filter(r => r.status === 'rejected')
+      expect(succeeded.length).toBe(2)
 
-      expect(succeeded.length).toBe(1)
-      expect(failed.length).toBe(1)
+      const warnings = succeeded
+        .map(r => (r as PromiseFulfilledResult<any>).value?.inventoryWarning)
+        .filter(w => w && w.inventoryDeducted === false)
+      expect(warnings.length).toBe(1)
 
-      // Verify: Failed payment mentions insufficient inventory
-      const failedResult = failed[0] as PromiseRejectedResult
-      expect(failedResult.reason.message).toMatch(/insufficient inventory/i)
-
-      // Verify: Stock is correct (10 - 8 = 2 KG remaining)
+      // Verify: Stock is correct (10 - 8 = 2 KG remaining — el corto NO dedujo)
       const finalBatch = await prisma.stockBatch.findFirst({
         where: { venueId: testData.venue.id },
         orderBy: { createdAt: 'desc' },

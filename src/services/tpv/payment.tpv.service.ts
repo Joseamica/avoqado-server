@@ -613,6 +613,22 @@ async function updateOrderTotalsForStandalonePayment(
   // esa invisibilidad sin cambiar el contrato de la API.
   const remainingAmount = Math.max(0, newTotal - totalPaid)
   const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+
+  // 🔴 ¿La cuenta YA estaba saldada ANTES de este pago? (audit Codex 2026-08-12, P1)
+  //
+  // Re-cobrar una orden ya COMPLETED —el gesto exacto del doble cobro del
+  // cajero, con idempotencyKey NUEVA que la dedup no atrapa— volvía a disparar
+  // `isFullyPaid` y con él TODO el loop de deducción: la mercancía se
+  // descontaba DOS veces (y sin el piso del decremento condicional, a
+  // negativo). El dinero sigue el criterio del bloque 🚨 [Sobrepago] de
+  // arriba: se registra SIEMPRE; lo que no se repite es el efecto de
+  // inventario, que ya ocurrió cuando la orden se saldó la primera vez.
+  // Se compara contra el total SIN la propina de este pago (previousTips, no
+  // totalTip): la propina nueva no convierte una cuenta saldada en pendiente.
+  // Y exige pagos PREVIOS: una orden 100% cortesía (total clampado a 0) sin
+  // pagos aún NO está saldada — su primer cobro de $0 sí debe deducir.
+  const settledBeforeThisPayment =
+    order.payments.length > 0 && previousPayments >= Math.max(0, orderSubtotal - orderDiscount) + previousTips - 0.01
   const coveredAreaTicketLines = isFullyPaid
     ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
     : new Set<string>()
@@ -689,7 +705,8 @@ async function updateOrderTotalsForStandalonePayment(
 
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
   // Validate inventory availability before marking order as complete
-  if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
+  // (skip si la orden ya estaba saldada: su inventario ya se validó y dedujo)
+  if (isFullyPaid && !settledBeforeThisPayment && !options?.areaTicketAlreadyFinalized) {
     // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
     // Items with paymentAllocations have already been "claimed" by a previous split payment
     // Also skip items with deleted products (productId is null - Toast/Square pattern)
@@ -857,7 +874,9 @@ async function updateOrderTotalsForStandalonePayment(
   // inventario — el fallo viaja como aviso + 🚨 log, y QUANTITY llega a negativo
   // en la fuente. (El comentario anterior decía "Fail payment if inventory
   // deduction fails (Shopify, Square, Toast)" — falso: Square hace lo opuesto.)
-  if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
+  // 🔴 `!settledBeforeThisPayment`: la mercancía de una orden ya saldada salió
+  // con el PRIMER cobro — repetir el loop la descontaba dos veces (audit Codex).
+  if (isFullyPaid && !settledBeforeThisPayment && !options?.areaTicketAlreadyFinalized) {
     const deductionErrors: Array<{ productId: string; productName: string; requested: number; error: string }> = []
     // Items cuya deducción SÍ se aplicó — se QUEDAN deducidos aunque otro item
     // falle (se vendieron); van al log/ActivityLog como contexto del drift.

@@ -64,41 +64,42 @@ describe('Pre-Flight Validation - Inventory Check Before Payment', () => {
         { productId: scenario.product.id, quantity: 10 }, // 10 KG needed, only 5 available
       ])
 
-      // Try to process full payment (should fail during pre-flight validation)
-      await expect(
-        recordOrderPayment(
-          testData.venue.id,
-          order.id,
-          {
-            venueId: testData.venue.id,
-            amount: parseFloat(order.total.toString()) * 100, // cents
-            tip: 0,
-            status: 'COMPLETED',
-            method: 'CASH',
-            source: 'TPV',
-            splitType: 'FULLPAYMENT',
-            tpvId: 'test-tpv',
-            staffId: testData.staff[0].id,
-            paidProductsId: [],
-            currency: 'MXN',
-            isInternational: false,
-          },
-          testData.staff[0].id,
-        ),
-      ).rejects.toThrow(/insufficient inventory/i)
+      // (Square-parity 2026-08-12) El pre-flight ya NO rechaza: el dinero
+      // físico ya se movió cuando la app registra. El cobro procede y el
+      // faltante viaja como aviso estructurado.
+      const result: any = await recordOrderPayment(
+        testData.venue.id,
+        order.id,
+        {
+          venueId: testData.venue.id,
+          amount: parseFloat(order.total.toString()) * 100, // cents
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'FULLPAYMENT',
+          tpvId: 'test-tpv',
+          staffId: testData.staff[0].id,
+          paidProductsId: [],
+          currency: 'MXN',
+          isInternational: false,
+        },
+        testData.staff[0].id,
+      )
 
-      // Verify: No payment was created (pre-flight validation failed)
+      // El pago SÍ se registró…
       const payments = await prisma.payment.findMany({
         where: { orderId: order.id, status: 'COMPLETED' },
       })
-      expect(payments.length).toBe(0)
+      expect(payments.length).toBe(1)
 
-      // Verify: Order remains PENDING
+      // …la orden quedó cerrada, y el faltante viaja como aviso.
       const finalOrder = await prisma.order.findUnique({
         where: { id: order.id },
       })
-      expect(finalOrder?.status).toBe('PENDING')
-      expect(finalOrder?.paymentStatus).toBe('PENDING')
+      expect(finalOrder?.status).toBe('COMPLETED')
+      expect(result.inventoryWarning).toBeDefined()
+      expect(finalOrder?.paymentStatus).toBe('PAID')
     })
 
     it('should allow payment when all items have sufficient stock', async () => {
@@ -189,30 +190,29 @@ describe('Pre-Flight Validation - Inventory Check Before Payment', () => {
         { productId: scenario2.product.id, quantity: 10 }, // 5 KG fries (insufficient - only 3 KG available)
       ])
 
-      // Try to process payment (should fail due to fries)
-      await expect(
-        recordOrderPayment(
-          testData.venue.id,
-          order.id,
-          {
-            venueId: testData.venue.id,
-            amount: parseFloat(order.total.toString()) * 100,
-            tip: 0,
-            status: 'COMPLETED',
-            method: 'CASH',
-            source: 'TPV',
-            splitType: 'FULLPAYMENT',
-            tpvId: 'test-tpv',
-            staffId: testData.staff[0].id,
-            paidProductsId: [],
-            currency: 'MXN',
-            isInternational: false,
-          },
-          testData.staff[0].id,
-        ),
-      ).rejects.toThrow(/insufficient inventory/i)
+      // (Square-parity 2026-08-12) El cobro procede aunque un producto vaya
+      // corto: la hamburguesa (con insumo suficiente) SÍ se deduce, las papas
+      // fallan en el FIFO y viajan como aviso — deducción parcial honesta.
+      const result: any = await recordOrderPayment(
+        testData.venue.id,
+        order.id,
+        {
+          venueId: testData.venue.id,
+          amount: parseFloat(order.total.toString()) * 100,
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'FULLPAYMENT',
+          tpvId: 'test-tpv',
+          staffId: testData.staff[0].id,
+          paidProductsId: [],
+          currency: 'MXN',
+          isInternational: false,
+        },
+        testData.staff[0].id,
+      )
 
-      // Verify: No inventory was deducted for either product
       const burgerStock = await prisma.rawMaterial.findFirst({
         where: { venueId: testData.venue.id, name: scenario1.rawMaterial.name },
       })
@@ -220,8 +220,12 @@ describe('Pre-Flight Validation - Inventory Check Before Payment', () => {
         where: { venueId: testData.venue.id, name: scenario2.rawMaterial.name },
       })
 
-      expect(parseFloat(burgerStock!.currentStock.toString())).toBe(20) // No deduction
-      expect(parseFloat(friesStock!.currentStock.toString())).toBe(3) // No deduction
+      // La hamburguesa se dedujo (2 KG de 20); las papas no (FIFO corto).
+      expect(parseFloat(burgerStock!.currentStock.toString())).toBe(18)
+      expect(parseFloat(friesStock!.currentStock.toString())).toBe(3)
+      // Y el aviso nombra el faltante de las papas.
+      expect(result.inventoryWarning).toBeDefined()
+      expect(result.inventoryWarning.inventoryDeducted).toBe(false)
     })
 
     it('should succeed if all products have sufficient stock', async () => {
@@ -347,35 +351,34 @@ describe('Pre-Flight Validation - Inventory Check Before Payment', () => {
       expect(partialOrder?.status).toBe('PENDING')
       expect(partialOrder?.paymentStatus).toBe('PARTIAL')
 
-      // Try to complete with second payment (should NOW fail validation)
-      await expect(
-        recordOrderPayment(
-          testData.venue.id,
-          order.id,
-          {
-            venueId: testData.venue.id,
-            amount: orderTotal * 0.5 * 100, // Remaining 50%
-            tip: 0,
-            status: 'COMPLETED',
-            method: 'CASH',
-            source: 'TPV',
-            splitType: 'EQUALPARTS',
-            tpvId: 'test-tpv',
-            staffId: testData.staff[0].id,
-            paidProductsId: [],
-            currency: 'MXN',
-            isInternational: false,
-          },
-          testData.staff[0].id,
-        ),
-      ).rejects.toThrow(/insufficient inventory/i)
+      // (Square-parity 2026-08-12) El segundo pago —el que salda— también
+      // procede: el faltante viaja como aviso y la cuenta queda cerrada.
+      const result: any = await recordOrderPayment(
+        testData.venue.id,
+        order.id,
+        {
+          venueId: testData.venue.id,
+          amount: orderTotal * 0.5 * 100, // Remaining 50%
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'EQUALPARTS',
+          tpvId: 'test-tpv',
+          staffId: testData.staff[0].id,
+          paidProductsId: [],
+          currency: 'MXN',
+          isInternational: false,
+        },
+        testData.staff[0].id,
+      )
 
-      // Verify: Order is still PENDING (payment failed due to validation)
       const finalOrder = await prisma.order.findUnique({
         where: { id: order.id },
       })
-      expect(finalOrder?.status).toBe('PENDING')
-      expect(finalOrder?.paymentStatus).toBe('PARTIAL') // First payment succeeded, second failed
+      expect(finalOrder?.status).toBe('COMPLETED')
+      expect(finalOrder?.paymentStatus).toBe('PAID')
+      expect(result.inventoryWarning).toBeDefined()
     })
   })
 
