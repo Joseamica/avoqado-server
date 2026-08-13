@@ -56,6 +56,26 @@ jest.mock('@/utils/prismaClient', () => ({
     activityLog: {
       create: jest.fn().mockResolvedValue({}),
     },
+    // Con el cobro ya NO rechazándose por inventario (Square-parity 2026-08-12),
+    // el flujo post-cobro corre completo y toca estos modelos; sin ellos el
+    // helper muere en un TypeError silencioso y el aviso se pierde.
+    serializedItem: {
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
+    orderCustomer: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    areaTicketInventoryReservation: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    areaTicketCheckoutSession: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
+    areaTicketPaymentAttempt: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
     $transaction: jest.fn(),
   },
 }))
@@ -199,6 +219,7 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
         venueId: mockVenueId,
         orderNumber: 'ORD-001',
         total: new Decimal(100),
+        subtotal: new Decimal(100),
         paymentStatus: 'PENDING',
         source: 'TPV',
         externalId: null,
@@ -245,22 +266,19 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       }
 
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue(mockOrder)
       ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(mockInventoryStatus)
+      ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
       ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 100 })
 
-      // Execute & Verify
-      await expect((paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')).rejects.toThrow(
-        BadRequestError,
-      )
+      // (Square-parity 2026-08-12) Antes esto rechazaba con BadRequestError sin
+      // cobrar. El dinero físico ya se movió cuando la app registra: el cobro
+      // procede y el faltante de la receta viaja como aviso estructurado.
+      const result: any = await (paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')
 
-      await expect((paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')).rejects.toThrow(
-        /insufficient inventory/i,
-      )
-
-      // Verify - Payment was NOT created
-      expect(prisma.payment.create).not.toHaveBeenCalled()
-      // Verify - Inventory was NOT deducted
-      expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+      expect(prisma.payment.create).toHaveBeenCalled()
+      expect(result.inventoryWarning).toEqual(expect.objectContaining({ code: 'INSUFFICIENT_INVENTORY' }))
+      expect(result.inventoryWarning.issues).toEqual(expect.arrayContaining([expect.objectContaining({ productId: 'prod-1' })]))
     })
 
     it('should reject payment when inventory validation fails (QUANTITY method)', async () => {
@@ -270,6 +288,7 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
         venueId: mockVenueId,
         orderNumber: 'ORD-001',
         total: new Decimal(100),
+        subtotal: new Decimal(100),
         paymentStatus: 'PENDING',
         source: 'TPV',
         externalId: null,
@@ -309,17 +328,19 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       }
 
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue(mockOrder)
       ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(mockInventoryStatus)
+      ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
       ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 100 })
 
-      // Execute & Verify
-      await expect((paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')).rejects.toThrow(
-        BadRequestError,
-      )
+      // (Square-parity 2026-08-12) Antes rechazaba con el detalle en el error.
+      // El mismo detalle (producto, pedido, disponible) viaja ahora en el aviso
+      // estructurado — y el cobro procede.
+      const result: any = await (paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')
 
-      // Verify - Error message includes product details
-      await expect((paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')).rejects.toThrow(
-        /Camisa.*requested 10.*available 3/i,
+      expect(prisma.payment.create).toHaveBeenCalled()
+      expect(result.inventoryWarning.issues).toEqual(
+        expect.arrayContaining([expect.objectContaining({ productName: 'Camisa', requested: 10, available: 3 })]),
       )
     })
 

@@ -37,7 +37,9 @@ describe('deductSimpleStock — la venta cobrada deja el stock en negativo, no t
       const sql = Array.isArray(strings) ? strings.join('$') : String(strings)
       if (sql.includes('>=')) {
         // Decremento condicional: sin stock suficiente no afecta filas.
-        return Promise.resolve(stockActual >= cantidad ? [{ id: 'inv-1', currentStock: stockActual - cantidad, previousStock: stockActual }] : [])
+        return Promise.resolve(
+          stockActual >= cantidad ? [{ id: 'inv-1', currentStock: stockActual - cantidad, previousStock: stockActual }] : [],
+        )
       }
       // Decremento incondicional: siempre afecta la fila (puede quedar negativa).
       return Promise.resolve([{ id: 'inv-1', currentStock: stockActual - cantidad, previousStock: stockActual }])
@@ -81,9 +83,7 @@ describe('deductSimpleStock — la venta cobrada deja el stock en negativo, no t
 
     await deductInventoryForProduct(VENUE, PRODUCT, 3, ORDER, 'staff-1')
 
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'STOCK_WENT_NEGATIVE', venueId: VENUE, entityId: PRODUCT }),
-    )
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'STOCK_WENT_NEGATIVE', venueId: VENUE, entityId: PRODUCT }))
   })
 
   // ── Regresión: lo que ya funcionaba sigue igual ──────────────────────────

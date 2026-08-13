@@ -13,8 +13,10 @@
  * tarjeta. El segundo intento lleva `idempotencyKey` y `referenceNumber`
  * NUEVOS, así que la deduplicación no lo atrapa. Doble cobro irrecuperable.
  *
- * La prevención real ya existe y NO se toca: `validatePreFlightInventory` corre
- * ANTES de la transacción y ahí sí rechaza sin cobrar (regresión al final).
+ * (Actualización 2026-08-12, Square-parity: el pre-flight PRE-transacción
+ * tampoco rechaza ya — cuando la app registra, el dinero físico ya se movió.
+ * Detecta, loguea y deja que el faltante viaje como aviso; el stock QUANTITY
+ * queda en negativo como señal. Regresión al final.)
  *
  * Decisión de diseño — es LA MISMA que el bloque 🚨 [Sobrepago] 40 líneas
  * arriba en este mismo archivo (caso Mindform): cuando este código corre la
@@ -429,9 +431,7 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
 
       // Un producto = una línea. Sin dedup el cajero veía "Hamburguesa" dos veces.
       expect(result.inventoryWarning.issues).toHaveLength(1)
-      expect(result.inventoryWarning.issues[0]).toEqual(
-        expect.objectContaining({ productId: 'prod-1', requested: 5, available: 1 }),
-      )
+      expect(result.inventoryWarning.issues[0]).toEqual(expect.objectContaining({ productId: 'prod-1', requested: 5, available: 1 }))
       // Y el mensaje tampoco la repite
       expect(result.inventoryWarning.message.match(/Hamburguesa/g)).toHaveLength(1)
       // El estado operativo manda: el stock NO se movió

@@ -659,3 +659,94 @@ describe('sync.mobile.service processIntents', () => {
     })
   })
 })
+
+/**
+ * 🔴 El replay NO es puerta trasera — la versión que faltaba.
+ *
+ * `requiredPermissionForIntent` ya impedía comp-ear con un COMP_ORDER sin
+ * `orders:comp`. Pero la MISMA cortesía viaja dentro de un `ADD_ITEMS`
+ * (`isCortesia: true` deja la línea en total 0), y ese intent sólo pedía
+ * `orders:create` — que tiene cualquier mesero. La puerta seguía abierta por
+ * la ventana.
+ *
+ * Y el payload del batch sólo se validaba en `id` y `type`: los items entraban
+ * como `any`, así que una cantidad no positiva bajaba el total de la cuenta y
+ * después la deducción de inventario, que multiplica por `quantity`, SUMABA
+ * mercancía al stock.
+ */
+describe('ADD_ITEMS — la cortesía y las cantidades no se cuelan por el replay', () => {
+  const addItems = (items: any[]) => baseParams([{ id: 'i-add', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items } }])
+
+  beforeEach(() => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ id: 'order-1', version: 4 })
+  })
+
+  it('una línea de cortesía exige orders:comp ADEMÁS de orders:create', async () => {
+    const params = addItems([{ productId: 'p1', quantity: 1, isCortesia: true, cortesiaReason: 'Cliente molesto' }])
+    params.authorizeIntent.mockImplementation((_i: any, perm: string) => perm !== 'orders:comp')
+
+    const acks = await processIntents(params)
+
+    expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'ADD_ITEMS' }), 'orders:comp')
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
+    expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
+  })
+
+  it('con orders:comp la cortesía offline SÍ pasa — no se rompe el flujo legítimo', async () => {
+    const params = addItems([{ productId: 'p1', quantity: 1, isCortesia: true, cortesiaReason: 'Cliente molesto' }])
+
+    const acks = await processIntents(params)
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalled()
+  })
+
+  it('una ronda normal no pide orders:comp', async () => {
+    const params = addItems([{ productId: 'p1', quantity: 2 }])
+
+    const acks = await processIntents(params)
+
+    expect(params.authorizeIntent).not.toHaveBeenCalledWith(expect.anything(), 'orders:comp')
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+  })
+
+  it.each([
+    ['cero', 0],
+    ['negativa', -1],
+    ['fraccionaria', 1.5],
+    ['no numérica', 'dos'],
+  ])('cantidad %s → REJECTED sin tocar la orden', async (_label, quantity) => {
+    const acks = await processIntents(addItems([{ productId: 'p1', quantity }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
+  })
+
+  it('un precio custom negativo → REJECTED (restaría del total de la cuenta)', async () => {
+    const acks = await processIntents(addItems([{ customName: 'Ajuste', customUnitPriceCents: -5000, quantity: 1 }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
+  })
+
+  it('una línea de monto libre legítima sigue pasando', async () => {
+    const acks = await processIntents(addItems([{ customName: 'Corcho', customUnitPriceCents: 15000, quantity: 1 }]))
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalled()
+  })
+
+  it('un peso no positivo → REJECTED (la deducción de inventario usa ese número)', async () => {
+    const acks = await processIntents(addItems([{ productId: 'p1', quantity: 1, weightQuantity: 0 }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
+  })
+
+  it('un peso legítimo sigue pasando', async () => {
+    const acks = await processIntents(addItems([{ productId: 'p1', quantity: 1, weightQuantity: 0.75 }]))
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+  })
+})
