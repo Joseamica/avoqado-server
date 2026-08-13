@@ -68,7 +68,7 @@ const baseParams = (intents: any[]) => ({
   staffId: STAFF,
   deviceId: DEVICE,
   intents,
-  authorizeIntent: jest.fn(() => true),
+  authorizeIntent: jest.fn((_intent: any, _permission: string) => true),
 })
 
 describe('sync.mobile.service processIntents', () => {
