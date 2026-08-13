@@ -364,6 +364,17 @@ export async function updateStockCount(countId: string, venueId: string, items: 
     throw new NotFoundError('Conteo no encontrado o ya completado')
   }
 
+  // Un conteo físico no puede ser negativo: nadie cuenta "menos siete
+  // cervezas" en el anaquel. (El DELTA del ajuste sí puede serlo — contaste
+  // menos de lo que el sistema creía; lo CONTADO, no.) Sin este guard, una
+  // báscula con la tara mal puesta o un signo colado dejaban el inventario en
+  // un valor imposible sin pasar por una venta — el único camino donde el
+  // negativo es señal legítima. Todo-o-nada, ANTES de escribir nada.
+  const negativo = items.find(item => item.counted < 0)
+  if (negativo) {
+    throw new BadRequestError('La cantidad contada no puede ser negativa')
+  }
+
   // Update each item's counted quantity
   await Promise.all(
     items.map(item =>

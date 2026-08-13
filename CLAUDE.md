@@ -27,6 +27,15 @@ decision is unfinished: it either leaks paid value into a lower tier or hides a 
   módulo **AND** ajuste del venue (`VenueSettings`) **AND** permiso. La respuesta 4xx debe decir QUÉ falta y CÓMO activarlo, para que cada
   cliente pueda pintar el mensaje sin adivinar; un 403 pelón obliga a los 6 clientes a inventarse el texto.
 
+## 🔴 Comparar contra Square ANTES de juzgar una feature o un bug
+
+Regla completa en `../CLAUDE.md` (auto-carga con este archivo). En corto: **investiga cómo lo hace
+Square, compáralo con lo nuestro, y trae las dos versiones al reporte — la decisión se toma entre el
+founder y tú.** Aplica también aquí, no sólo a la UI: el caso que originó la regla fue de este repo
+—bloqueábamos la venta y revertíamos la orden a PENDING cuando el stock no alcanzaba, mientras Square
+deja el stock ir a negativo **a propósito** para no impedir un cobro. Contradecía nuestra propia regla
+`payments.md` ("Non-blocking: payment succeeds even if deduction fails").
+
 ## Sister Repos (this repo is the hub of 10)
 
 `avoqado-server` is the backend hub; 9 client repos talk to it over `/api/v1/`. Full ecosystem map: workspace-root `../CLAUDE.md`.

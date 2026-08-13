@@ -9,7 +9,6 @@ import { socketManager } from '../../communication/sockets/managers/socketManage
 import { SocketEventType } from '../../communication/sockets/types'
 import { createTransactionCost } from '../payments/transactionCost.service'
 import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
-import { restockItem } from '../dashboard/inventoryRestock.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
 import { PhaseTimer } from '@/utils/phaseTimer'
@@ -463,26 +462,23 @@ async function validatePreFlightInventory(
     const validation = await validateOrderInventoryAvailability(order.venueId, itemsToValidate)
 
     if (!validation.available) {
-      logger.error('❌ PRE-FLIGHT FAILED: Insufficient inventory - Payment rejected', {
+      // 🔴 Ya NO se rechaza (punto 1, Square-parity 2026-08-12): cuando la app
+      // registra el cobro, el dinero físico ya se movió — el cajero ya recibió
+      // el efectivo o la terminal ya aprobó. Rechazar el registro no des-vende
+      // nada; sólo deja la venta sin anotar. El faltante se detecta otra vez
+      // tras el commit (pre-flight post-commit) y viaja al cajero como aviso
+      // estructurado, y el stock QUANTITY queda en negativo como señal.
+      logger.warn('⚠️ [Inventario] PRE-FLIGHT detectó faltante — el cobro procede y el faltante viajará como aviso', {
         orderId: order.id,
         venueId: order.venueId,
         issues: validation.issues,
       })
-
-      // Format issues into error message
-      const issuesDescription = validation.issues
-        ?.map(issue => `${issue.productName}: requested ${issue.requested}, available ${issue.available} (${issue.reason})`)
-        .join('; ')
-
-      throw new BadRequestError(
-        `Cannot complete order - insufficient inventory. ${issuesDescription || 'Please check stock levels and try again.'}`,
-      )
+    } else {
+      logger.info('✅ PRE-FLIGHT PASSED: Inventory available, proceeding with payment', {
+        orderId: order.id,
+        venueId: order.venueId,
+      })
     }
-
-    logger.info('✅ PRE-FLIGHT PASSED: Inventory available, proceeding with payment', {
-      orderId: order.id,
-      venueId: order.venueId,
-    })
   } else {
     logger.info('⏭️ PRE-FLIGHT SKIPPED: Partial payment, inventory validation deferred', {
       orderId: order.id,
@@ -686,6 +682,10 @@ async function updateOrderTotalsForStandalonePayment(
   //
   // Mismo razonamiento, línea por línea, que el bloque 🚨 [Sobrepago] de arriba.
   const inventoryIssues: OrderInventoryWarning['issues'] = []
+  // true cuando la deducción REAL falló (no el pre-flight): decide el
+  // `inventoryDeducted` del aviso final. Vive aquí porque el return está fuera
+  // del bloque de deducción.
+  let deductionFailed = false
 
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
   // Validate inventory availability before marking order as complete
@@ -853,11 +853,14 @@ async function updateOrderTotalsForStandalonePayment(
   })
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
-  // ✅ WORLD-CLASS PATTERN: Fail payment if inventory deduction fails (Shopify, Square, Toast)
+  // Non-blocking (payments.md): la venta cobrada nunca se revierte por
+  // inventario — el fallo viaja como aviso + 🚨 log, y QUANTITY llega a negativo
+  // en la fuente. (El comentario anterior decía "Fail payment if inventory
+  // deduction fails (Shopify, Square, Toast)" — falso: Square hace lo opuesto.)
   if (isFullyPaid && !options?.areaTicketAlreadyFinalized) {
     const deductionErrors: Array<{ productId: string; productName: string; requested: number; error: string }> = []
-    // Items cuya deducción SÍ se aplicó — si otro item falla, esto es lo que
-    // hay que revertir antes de regresar la orden a PENDING.
+    // Items cuya deducción SÍ se aplicó — se QUEDAN deducidos aunque otro item
+    // falle (se vendieron); van al log/ActivityLog como contexto del drift.
     const deductedItems: Array<{ productId: string; quantity: number }> = []
 
     logger.info('🎯 Starting inventory deduction for completed order', {
@@ -1028,107 +1031,43 @@ async function updateOrderTotalsForStandalonePayment(
 
     // ✅ FIX: Rollback order if ANY critical inventory deduction failed
     if (deductionErrors.length > 0) {
-      logger.error('❌ CRITICAL: Inventory deduction failed, rolling back order completion', {
-        orderId,
-        failedProducts: deductionErrors,
-      })
+      deductionFailed = true
+      // 🔴 La venta cobrada SE QUEDA CERRADA (decisión founder+Claude 2026-08-12,
+      // espejo de Square y de la regla escrita en payments.md: "Non-blocking:
+      // payment succeeds even if deduction fails"). Antes este bloque restauraba
+      // lo ya deducido, regresaba los seriales a AVAILABLE y revertía la orden a
+      // PENDING/PARTIAL — con el cliente ya pagado y en la puerta: cuenta abierta,
+      // sin lealtad/cupones, y CERO señal en inventario. Revertir la orden no
+      // des-vende nada; sólo hace que el registro mienta.
+      //
+      // Con QUANTITY yendo a negativo en la fuente, lo que cae aquí son fallos de
+      // receta (FIFO/unidades), deadlocks agotados y errores de configuración: el
+      // faltante queda como drift para conciliación — igual que ya lo hace el
+      // flujo de carrito libre en order.tpv.service.ts ("We do NOT throw — the
+      // order is closed, customer is happy").
+      const errorDetails = deductionErrors.map(e => `${e.productName}: ${e.error}`).join('; ')
 
+      // Resumen a nivel orden. El detalle POR ITEM ya se auditó arriba con
+      // INVENTORY_DEDUCTION_FAILED en cada catch — nombre distinto a propósito
+      // para no duplicar entradas en la bitácora.
       logAction({
         staffId,
         venueId: updatedOrder.venueId,
-        action: 'INVENTORY_DEDUCTION_ROLLBACK',
+        action: 'INVENTORY_DEDUCTION_INCOMPLETE',
         entity: 'Order',
         entityId: orderId,
         data: {
           source: 'TPV',
           failedProducts: deductionErrors,
-          restoredProducts: deductedItems,
-          previousStatus: 'COMPLETED',
-          rolledBackTo: 'PENDING',
+          // Lo ya deducido se QUEDA deducido: esos items sí se vendieron.
+          keptDeducted: deductedItems,
+          orderStatus: 'COMPLETED',
         },
       })
 
-      // Compensación: restaura el stock de los items que SÍ alcanzaron a
-      // deducirse antes del fallo. Sin esto, el reintento del pago volvía a
-      // deducirlos (doble deducción permanente). Nota: los modificadores
-      // ADDITION no se reversan aquí — misma limitación documentada que el
-      // restock de refunds (inventoryRestock.service.ts).
-      for (const deducted of deductedItems) {
-        try {
-          await restockItem({
-            venueId: updatedOrder.venueId,
-            productId: deducted.productId,
-            quantity: deducted.quantity,
-            refundPaymentId: orderId,
-            staffId,
-            reason: `Reversa de inventario: fallo al completar la orden ${orderId}`,
-          })
-          logger.info('🔄 Restored deducted stock during rollback', {
-            orderId,
-            productId: deducted.productId,
-            quantity: deducted.quantity,
-          })
-        } catch (restoreError: any) {
-          logger.error('❌ Failed to restore deducted stock during rollback — stock drift, requires manual adjustment', {
-            orderId,
-            productId: deducted.productId,
-            quantity: deducted.quantity,
-            error: restoreError.message,
-          })
-        }
-      }
-
-      // Rollback serialized items that were marked as SOLD before the failure
-      // Without this, serials stay SOLD while the order reverts to PENDING (ghost SOLD bug)
-      // Uses orderItemId as the safe anchor — unique per item, works for both venue-level and org-level
-      for (const item of updatedOrder.items) {
-        if (!item.productId && item.productSku) {
-          try {
-            const rolledBack = await prisma.serializedItem.updateMany({
-              where: {
-                orderItemId: item.id,
-                status: 'SOLD',
-              },
-              data: {
-                status: 'AVAILABLE',
-                orderItemId: null,
-                soldAt: null,
-                sellingVenueId: null,
-              },
-            })
-            if (rolledBack.count > 0) {
-              logger.info('🔄 Rolled back serialized item to AVAILABLE', {
-                orderId,
-                serialNumber: item.productSku,
-              })
-            }
-          } catch (rollbackError: any) {
-            logger.error('❌ Failed to rollback serialized item', {
-              orderId,
-              serialNumber: item.productSku,
-              error: rollbackError.message,
-            })
-          }
-        }
-      }
-
-      // Rollback the order to PENDING state
-      await prisma.order.update({
-        where: { id: orderId },
-        data: {
-          status: 'PENDING',
-          paymentStatus: 'PARTIAL',
-          completedAt: null,
-        },
-      })
-
-      const errorDetails = deductionErrors.map(e => `${e.productName}: ${e.error}`).join('; ')
-
-      // 🚨 Segunda puerta del MISMO doble cobro: este bloque también corre con el
-      // Payment ya comiteado, así que tampoco puede lanzar. Toda la compensación
-      // de arriba (restock, seriales, orden a PENDING) se conserva intacta; lo
-      // único que cambia es que el cajero se entera SIN que se le mienta sobre el
-      // dinero. 🚨 token estable de Better Stack — NO renombrar.
+      // 🚨 Segunda puerta del MISMO doble cobro: este bloque corre con el Payment
+      // ya comiteado, así que no puede lanzar. 🚨 token estable de Better Stack —
+      // NO renombrar.
       logger.error('🚨 [Inventario] La deducción de stock falló DESPUÉS de registrar el cobro — el pago se conserva, requiere revisión', {
         orderId,
         venueId: updatedOrder.venueId,
@@ -1136,7 +1075,7 @@ async function updateOrderTotalsForStandalonePayment(
         staffId: staffId ?? null,
         stage: 'DEDUCTION',
         failedProducts: deductionErrors,
-        restoredProducts: deductedItems,
+        keptDeducted: deductedItems,
         errorDetails,
       })
 
@@ -1150,16 +1089,15 @@ async function updateOrderTotalsForStandalonePayment(
         })
       }
 
-      // `return` y no `throw`: se conserva EXACTAMENTE el corte de flujo que había
-      // (cupones, referidos, lealtad y auto-reorder siguen sin ejecutarse cuando la
-      // orden se revirtió a PENDING), pero el cobro ya no se reporta como fallido.
-      return buildInventoryWarning(inventoryIssues, false)
+      // SIN `return`: la venta quedó completa, así que cupones, referidos,
+      // lealtad y la liberación de la mesa corren igual que en cualquier otro
+      // cobro. El aviso viaja en el retorno final de la función.
+    } else {
+      logger.info('🎯 Inventory deduction completed successfully for order', {
+        orderId,
+        totalItems: updatedOrder.items.length,
+      })
     }
-
-    logger.info('🎯 Inventory deduction completed successfully for order', {
-      orderId,
-      totalItems: updatedOrder.items.length,
-    })
 
     // 🎟️ COUPON FINALIZATION: Mark coupons as redeemed when order is fully paid
     // ✅ WORLD-CLASS PATTERN: Coupons are "applied" at checkout but only "redeemed" on payment (Toast, Square)
@@ -1289,10 +1227,10 @@ async function updateOrderTotalsForStandalonePayment(
 
   // 🪑 Liberar la mesa si ésta era su última cuenta viva.
   //
-  // Va al FINAL a propósito: si la deducción de inventario revirtió la orden a
-  // PENDING, `releaseTableIfSettled` la vuelve a ver abierta y no libera nada.
-  // Y va en try/catch porque el estado del plano es bookkeeping — jamás puede
-  // tumbar un cobro que el banco ya aprobó.
+  // Va en try/catch porque el estado del plano es bookkeeping — jamás puede
+  // tumbar un cobro que el banco ya aprobó. (Antes también dependía de que la
+  // deducción no hubiera revertido la orden; desde 2026-08-12 la venta cobrada
+  // nunca se revierte por inventario, así que la mesa se libera siempre.)
   //
   // Antes esto lo hacía SOLO el cliente (`finishTableAfterPayment` → HTTP
   // directo). Sin red, con la app matada, o cobrando desde otro dispositivo, la
@@ -1309,9 +1247,10 @@ async function updateOrderTotalsForStandalonePayment(
     }
   }
 
-  // El faltante detectado por el pre-flight post-commit viaja como aviso. Aquí
-  // la deducción SÍ corrió (si hubiera fallado se habría regresado arriba).
-  return inventoryIssues.length > 0 ? buildInventoryWarning(inventoryIssues, true) : null
+  // Todo faltante —del pre-flight o de la deducción misma— viaja como aviso.
+  // `inventoryDeducted: false` sólo cuando la deducción real falló: el cajero
+  // ve el problema, pero la venta cobrada nunca se revierte por inventario.
+  return inventoryIssues.length > 0 ? buildInventoryWarning(inventoryIssues, !deductionFailed) : null
 }
 
 interface PaymentFilters {

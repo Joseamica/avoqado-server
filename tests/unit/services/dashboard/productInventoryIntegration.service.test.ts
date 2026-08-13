@@ -99,13 +99,16 @@ describe('ProductInventoryIntegration Service', () => {
       )
 
       // Verify result structure
-      expect(result).toEqual({
-        inventoryMethod: 'QUANTITY',
-        inventoryId: 'inventory-123',
-        quantityDeducted: 2,
-        remainingStock: 98,
-        message: 'Deducted 2 unit(s) from inventory tracking',
-      })
+      expect(result).toEqual(
+        expect.objectContaining({
+          inventoryMethod: 'QUANTITY',
+          inventoryId: 'inventory-123',
+          quantityDeducted: 2,
+          remainingStock: 98,
+          previousStock: 100,
+          message: 'Deducted 2 unit(s) from inventory tracking',
+        }),
+      )
     })
 
     it('should throw 404 error when no Inventory record exists', async () => {
@@ -138,7 +141,10 @@ describe('ProductInventoryIntegration Service', () => {
       ).rejects.toThrow(/No inventory record for product/)
     })
 
-    it('should throw 400 error when insufficient stock', async () => {
+    it('con stock insuficiente deduce a NEGATIVO en vez de lanzar (Square-parity 2026-08-12)', async () => {
+      // Antes este test fijaba el throw de "Insufficient stock" — que arriba
+      // revertía una orden YA COBRADA a PENDING. La venta cobrada es un hecho:
+      // el stock queda negativo y ese número ES la señal de descuadre.
       const mockProduct = createMockProduct({
         inventoryMethod: 'QUANTITY',
         trackInventory: true,
@@ -151,24 +157,29 @@ describe('ProductInventoryIntegration Service', () => {
       // Mock top-level product.findUnique (called by getProductInventoryMethod)
       prismaMock.product.findUnique.mockResolvedValue(mockProduct as any)
 
-      // Mock interactive transaction - conditional UPDATE returns 0 rows (insufficient)
+      const movementCreate = jest.fn().mockResolvedValue({})
+      // Unconditional UPDATE: siempre afecta la fila, aunque quede negativa
       prismaMock.$transaction.mockImplementation(async (callback: any) => {
         const txMock = {
           product: {
             findUnique: jest.fn().mockResolvedValue(mockProduct),
           },
-          $queryRaw: jest.fn().mockResolvedValue([]),
+          $queryRaw: jest
+            .fn()
+            .mockResolvedValue([{ id: mockInventory.id, currentStock: new Decimal(-5), previousStock: new Decimal(5) }]),
           inventory: {
             findUnique: jest.fn().mockResolvedValue(mockInventory),
           },
+          inventoryMovement: { create: movementCreate },
         }
         return callback(txMock)
       })
 
-      // Try to deduct 10 units (more than available)
-      await expect(
-        productInventoryIntegrationService.deductInventoryForProduct('venue-123', 'product-123', 10, 'order-123'),
-      ).rejects.toThrow(/Insufficient stock/)
+      // Deduct 10 units (more than the 5 available) → -5, sin error
+      const result: any = await productInventoryIntegrationService.deductInventoryForProduct('venue-123', 'product-123', 10, 'order-123')
+
+      expect(result.remainingStock).toBe(-5)
+      expect(movementCreate).toHaveBeenCalledTimes(1)
     })
 
     it('should create InventoryMovement with correct audit data', async () => {

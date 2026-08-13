@@ -46,6 +46,7 @@ jest.mock('@/utils/prismaClient', () => ({
     paymentAllocation: { create: jest.fn() },
     review: { create: jest.fn() },
     serializedItem: { updateMany: jest.fn() },
+    activityLog: { create: jest.fn().mockResolvedValue({}) },
     areaTicketInventoryReservation: { findMany: jest.fn() },
     areaTicketCheckoutSession: { findFirst: jest.fn(), updateMany: jest.fn() },
     areaTicketPaymentAttempt: { findFirst: jest.fn(), updateMany: jest.fn() },
@@ -229,7 +230,10 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
     )
   })
 
-  it('rechaza el pago si un modificador inventariable no tiene stock aunque el producto base no rastree inventario', async () => {
+  it('un modificador sin stock ya NO rechaza el pago: cobra y el faltante viaja como aviso (punto 1, Square-parity)', async () => {
+    // (2026-08-12) Antes rechazaba antes de crear el Payment. El queso extra que
+    // el cliente ya se comió no se des-come rechazando el registro — el faltante
+    // del insumo es señal de descuadre, igual que el del producto.
     const modifier = {
       quantity: 1,
       modifier: {
@@ -244,6 +248,7 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
     }
     const order = makeOrder([{ ...makeItem('item-untracked', 'prod-untracked', 1), modifiers: [modifier] }])
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue(order)
     ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue({
       inventoryMethod: null,
       available: true,
@@ -254,46 +259,50 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
       currentStock: new Decimal('0.100'),
       unit: 'KILOGRAM',
     })
+    ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: null })
 
-    await expect(paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, paymentData as any, 'user-1')).rejects.toThrow(
-      /insufficient inventory/i,
+    const result: any = await paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, paymentData as any, 'user-1')
+
+    expect(prisma.payment.create).toHaveBeenCalled()
+    // INSUFFICIENT_INVENTORY: la deducción corrió; el aviso informa el faltante.
+    expect(result.inventoryWarning).toEqual(expect.objectContaining({ code: 'INSUFFICIENT_INVENTORY' }))
+    expect(result.inventoryWarning.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ reason: expect.stringContaining('modifier') })]),
     )
-    expect(prisma.payment.create).not.toHaveBeenCalled()
   })
 
-  it('al fallar la deducción de un item, restaura el stock de los items YA deducidos antes de regresar la orden a PENDING', async () => {
+  it('al fallar la deducción de un item, la venta COBRADA se queda cerrada: sin restock compensatorio y sin regresar a PENDING', async () => {
     const order = makeOrder([makeItem('item-1', 'prod-1', 2), makeItem('item-2', 'prod-2', 3)])
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue(order)
-    // prod-1 se deduce OK; prod-2 falla por stock insuficiente
+    // prod-1 se deduce OK; prod-2 falla (con QUANTITY ya no existe "insufficient",
+    // pero recetas/deadlocks siguen pudiendo fallar aquí)
     ;(productInventoryService.deductInventoryForProduct as jest.Mock)
       .mockResolvedValueOnce({ inventoryMethod: 'QUANTITY' })
-      .mockRejectedValueOnce(new Error('Insufficient stock. Needed: 3, Available: 1'))
+      .mockRejectedValueOnce(new Error('Transaction failed due to a write conflict or a deadlock'))
 
-    // 🔴 Antes esto era `.rejects.toThrow(BadRequestError)`. Esa aserción codificaba el
-    // bug: cuando la deducción falla, el Payment YA está comiteado, así que fallar el
-    // cobro no des-cobra nada — sólo hace que el cajero vuelva a pasar la tarjeta
-    // (doble cobro). El propósito del test —que la compensación ocurra— NO cambió.
+    // 🔴 Historia de este test, porque codifica DOS decisiones:
+    //  1) (doble cobro, 2026-06) fallar el cobro no des-cobra nada — por eso no lanza.
+    //  2) (Square-parity, 2026-08-12) revertir la orden tampoco des-vende nada: el
+    //     cliente ya pagó y se fue. Antes esto restauraba lo deducido y regresaba la
+    //     orden a PENDING → cuenta abierta con el dinero ya adentro. Ahora la venta se
+    //     queda COMPLETED, lo deducido se queda deducido, y el faltante viaja como
+    //     aviso estructurado + log 🚨 para conciliación.
     const result: any = await paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, paymentData as any, 'user-1')
     expect(result.inventoryWarning).toEqual(expect.objectContaining({ code: 'INVENTORY_NOT_DEDUCTED', inventoryDeducted: false }))
 
-    // La deducción exitosa de prod-1 se revierte (antes: quedaba deducida para siempre)
-    expect(inventoryRestockService.restockItem).toHaveBeenCalledWith(
-      expect.objectContaining({ venueId: VENUE_ID, productId: 'prod-1', quantity: 2 }),
-    )
-    // prod-2 nunca se dedujo — no se restaura
-    expect(inventoryRestockService.restockItem).not.toHaveBeenCalledWith(expect.objectContaining({ productId: 'prod-2' }))
+    // prod-1 se vendió de verdad: su deducción NO se revierte
+    expect(inventoryRestockService.restockItem).not.toHaveBeenCalled()
 
-    // Y la orden regresa a PENDING
-    expect(prisma.order.update).toHaveBeenCalledWith(
+    // Y la orden NUNCA regresa a PENDING
+    expect(prisma.order.update).not.toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: ORDER_ID },
         data: expect.objectContaining({ status: 'PENDING' }),
       }),
     )
   })
 
-  it('un error UNKNOWN (p.ej. unidades incompatibles en la receta) es crítico: se reporta al cajero y revierte la orden, en vez de tragarse en silencio', async () => {
+  it('un error UNKNOWN (p.ej. unidades incompatibles en la receta) no se traga en silencio, pero TAMPOCO revierte la venta cobrada', async () => {
     const order = makeOrder([makeItem('item-1', 'prod-1', 2)])
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue(order)
@@ -301,19 +310,18 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
       new Error('Recipe/modifier unit KILOGRAM is incompatible with raw material "Harina" stored in GRAM'),
     )
 
-    // 🔴 Antes: `.rejects.toThrow(BadRequestError)`. El propósito del test es que un
-    // UNKNOWN no se TRAGUE en silencio, y eso se sigue cumpliendo — ahora se reporta
-    // como aviso estructurado con el motivo verbatim en vez de como cobro fallido.
+    // El propósito original del test —que un UNKNOWN no se TRAGUE— se mantiene: el
+    // motivo viaja verbatim en el aviso. Lo que cambió (Square-parity 2026-08-12) es
+    // que la orden ya no se revierte: el error es de CONFIGURACIÓN de la receta, y
+    // castigar al cajero dejándole la cuenta abierta no arregla la receta.
     const result: any = await paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, paymentData as any, 'user-1')
     expect(result.inventoryWarning.issues).toEqual(
       expect.arrayContaining([expect.objectContaining({ productId: 'prod-1', reason: expect.stringContaining('incompatible') })]),
     )
 
-    // Nada se dedujo → nada que restaurar, pero la orden sí se revierte
     expect(inventoryRestockService.restockItem).not.toHaveBeenCalled()
-    expect(prisma.order.update).toHaveBeenCalledWith(
+    expect(prisma.order.update).not.toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: ORDER_ID },
         data: expect.objectContaining({ status: 'PENDING' }),
       }),
     )

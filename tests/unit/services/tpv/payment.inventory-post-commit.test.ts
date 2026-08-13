@@ -350,23 +350,25 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
       expect(result.inventoryWarning.message).toMatch(/^El cobro se registró correctamente/)
     })
 
-    it('REGRESIÓN: la compensación existente NO se toca — restock, ActivityLog y orden a PENDING', async () => {
+    it('la venta cobrada se queda COMPLETED y el rastro auditable se escribe (por item + resumen de orden)', async () => {
+      // (Square-parity 2026-08-12) Antes esta regresión fijaba el rollback: orden a
+      // PENDING + INVENTORY_DEDUCTION_ROLLBACK. Revertir una venta ya cobrada dejaba
+      // al cajero con la cuenta abierta y el dinero adentro — ahora la orden se queda
+      // cerrada y el fallo viaja como auditoría + aviso.
       await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
 
-      // El rollback de la orden sigue ocurriendo (no se deduce nada con la orden dada por COMPLETED)
-      expect(prisma.order.update).toHaveBeenCalledWith(
+      expect(prisma.order.update).not.toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: ORDER_ID },
           data: expect.objectContaining({ status: 'PENDING' }),
         }),
       )
 
-      // Y el rastro auditable que ya existía sigue escribiéndose
+      // Detalle por item + resumen a nivel orden (nombres distintos, sin duplicar)
       expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: 'INVENTORY_DEDUCTION_FAILED' }))
-      expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: 'INVENTORY_DEDUCTION_ROLLBACK' }))
+      expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: 'INVENTORY_DEDUCTION_INCOMPLETE' }))
     })
 
-    it('REGRESIÓN: sigue restaurando el stock de los items YA deducidos (sin doble deducción)', async () => {
+    it('lo YA deducido se queda deducido: esos items sí se vendieron (sin restock compensatorio)', async () => {
       const order = makeOrder({
         items: [
           {
@@ -404,10 +406,10 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
 
       await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
 
-      expect(inventoryRestockService.restockItem).toHaveBeenCalledWith(
-        expect.objectContaining({ venueId: VENUE_ID, productId: 'prod-1', quantity: 2 }),
-      )
-      expect(inventoryRestockService.restockItem).not.toHaveBeenCalledWith(expect.objectContaining({ productId: 'prod-2' }))
+      // La hamburguesa (prod-1) se vendió de verdad: su deducción NO se revierte.
+      // (Antes se restauraba para que el reintento del pago no doble-dedujera;
+      // sin reversión a PENDING ya no hay reintento que temer.)
+      expect(inventoryRestockService.restockItem).not.toHaveBeenCalled()
     })
   })
 
@@ -438,19 +440,25 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
   })
 
   describe('REGRESIÓN: nada de esto debilita la prevención ni ensucia el camino feliz', () => {
-    it('el pre-flight PRE-transacción sigue RECHAZANDO sin cobrar (ahí sí se puede prevenir)', async () => {
+    it('el pre-flight PRE-transacción ya NO rechaza: cobra y el faltante viaja como aviso (punto 1, Square-parity)', async () => {
+      // (2026-08-12) Antes esto rechazaba el cobro "porque ahí sí se puede
+      // prevenir". Pero el dinero físico ya se movió cuando la app registra
+      // (el cajero ya recibió el efectivo / la terminal ya aprobó), y el
+      // founder aprobó vender con stock en 0: el registro tiene que anotar la
+      // realidad y avisar, nunca impedirla.
       const order = makeOrder()
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
-      // Falla ya en la 1ª consulta → el rechazo ocurre ANTES de crear el Payment
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
       ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_AGOTADO)
 
-      await expect((paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')).rejects.toThrow(
-        /insufficient inventory/i,
-      )
+      const result: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
 
-      // Lo que hace legítimo el rechazo: NO hay dinero registrado
-      expect(prisma.payment.create).not.toHaveBeenCalled()
-      expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+      // El dinero se registró y el faltante viaja como aviso estructurado.
+      // Código INSUFFICIENT_INVENTORY (no NOT_DEDUCTED): la deducción en sí
+      // funcionó — el stock simplemente quedó corto/negativo y se informa.
+      expect(prisma.payment.create).toHaveBeenCalled()
+      expect(result.inventoryWarning).toEqual(expect.objectContaining({ code: 'INSUFFICIENT_INVENTORY', inventoryDeducted: true }))
+      expect(result.inventoryWarning.issues).toEqual(expect.arrayContaining([expect.objectContaining({ productId: 'prod-1' })]))
     })
 
     it('con stock suficiente NO hay warning, NI alerta 🚨, NI ActivityLog de inventario', async () => {

@@ -207,8 +207,31 @@ export async function getGlobalMovements(
         }
       : {}
 
-  // Filter by type if provided (need to map specific types if necessary)
-  const typeFilter = type && type !== 'ALL' ? { type: type as any } : {}
+  // Filtro por tipo. La UI habla en su propio vocabulario ("RECEIVED") y cada
+  // tabla tiene su enum: productos usan `MovementType`, insumos
+  // `RawMaterialMovementType`. Traducir por tabla NO es opcional:
+  //   - `RECEIVED` no existe en NINGUNO de los dos: en ambos se llama PURCHASE.
+  //     Mandarlo crudo a los insumos hacía que Prisma rechazara la consulta y
+  //     el historial reventara en vez de filtrar.
+  //   - `SALE` no existe en insumos (no se venden, se consumen) → sin resultados.
+  //   - `WASTE` es LOSS en productos y SPOILAGE en insumos.
+  const wanted = type && type !== 'ALL' ? type : null
+
+  const productTypeFilter = (() => {
+    if (!wanted) return {}
+    const map: Record<string, string | null> = { RECEIVED: 'PURCHASE', WASTE: 'LOSS', RETURN: null }
+    const mapped = wanted in map ? map[wanted] : wanted
+    // Un tipo que este lado no conoce (p. ej. RETURN, que sólo existe en
+    // insumos) NO puede quedar sin filtro: eso devolvía el historial completo.
+    return mapped ? { type: mapped as any } : { id: { in: [] as string[] } }
+  })()
+
+  const rawMaterialTypeFilter = (() => {
+    if (!wanted) return {}
+    const map: Record<string, string | null> = { RECEIVED: 'PURCHASE', WASTE: 'SPOILAGE', SALE: null }
+    const mapped = wanted in map ? map[wanted] : wanted
+    return mapped ? { type: mapped as any } : { id: { in: [] as string[] } }
+  })()
 
   // 2. Fetch InventoryMovements (Products)
   const productMovementsPromise = prisma.inventoryMovement.findMany({
@@ -222,11 +245,7 @@ export async function getGlobalMovements(
           : undefined,
       },
       ...dateFilter,
-      ...(type === 'SALE' || type === 'ALL' || type === undefined
-        ? {}
-        : type === 'RECEIVED'
-          ? { type: 'PURCHASE' } // Map generic types if needed
-          : typeFilter),
+      ...productTypeFilter,
     },
     include: {
       inventory: {
@@ -249,20 +268,52 @@ export async function getGlobalMovements(
           }
         : undefined,
       ...dateFilter,
-      // Apply type filter if compatible, otherwise ignore or adapt
-      ...(type === 'SALE'
-        ? { type: { in: [] } } // Raw materials don't have direct SALES usually (they are consumed), maybe USAGE
-        : typeFilter),
+      ...rawMaterialTypeFilter,
     },
     include: {
       rawMaterial: true,
-      batch: true,
+      // El proveedor sólo se puede saber por el lote que entró con una orden de
+      // compra. La columna "Proveedor" del dashboard lo esperaba y el backend
+      // nunca lo mandaba, así que TODO salía "Sin proveedor".
+      batch: { include: { purchaseOrderItem: { include: { purchaseOrder: { include: { supplier: true } } } } } },
     },
     orderBy: { createdAt: 'desc' },
     take: limit * page,
   })
 
-  const [productMovements, rawMaterialMovements] = await Promise.all([productMovementsPromise, rawMaterialMovementsPromise])
+  // Totales REALES. Antes se devolvía el literal 1000 ("Dummy total"), así que
+  // la UI paginaba sobre un número inventado y no había forma de saber cuántos
+  // movimientos existían de verdad.
+  const productCountPromise = prisma.inventoryMovement.count({
+    where: {
+      inventory: {
+        venueId,
+        product: search
+          ? { OR: [{ name: { contains: search, mode: 'insensitive' } }, { sku: { contains: search, mode: 'insensitive' } }] }
+          : undefined,
+      },
+      ...dateFilter,
+      ...productTypeFilter,
+    },
+  })
+
+  const rawMaterialCountPromise = prisma.rawMaterialMovement.count({
+    where: {
+      venueId,
+      rawMaterial: search
+        ? { OR: [{ name: { contains: search, mode: 'insensitive' } }, { sku: { contains: search, mode: 'insensitive' } }] }
+        : undefined,
+      ...dateFilter,
+      ...rawMaterialTypeFilter,
+    },
+  })
+
+  const [productMovements, rawMaterialMovements, productCount, rawMaterialCount] = await Promise.all([
+    productMovementsPromise,
+    rawMaterialMovementsPromise,
+    productCountPromise,
+    rawMaterialCountPromise,
+  ])
 
   // 4. Normalize and Merge
   const combined = [
@@ -276,7 +327,14 @@ export async function getGlobalMovements(
       quantity: m.quantity.toNumber(),
       unit: m.inventory.product.unit || 'UNIT',
       cost: m.inventory.product.cost?.toNumber() || 0,
-      totalCost: (m.inventory.product.cost?.toNumber() || 0) * Math.abs(m.quantity.toNumber()),
+      // CON SIGNO. Con `Math.abs` perder 10 cervezas y comprar 10 se veían
+      // idénticos en la columna de costo — el historial no distinguía una
+      // merma de una entrada.
+      totalCost: (m.inventory.product.cost?.toNumber() || 0) * m.quantity.toNumber(),
+      // Un movimiento de PRODUCTO no cuelga de una orden de compra, así que no
+      // hay proveedor que mostrar. Se declara `null` en vez de omitirlo: la UI
+      // pinta "Sin proveedor" a propósito, no por un campo que nunca llegó.
+      supplierName: null as string | null,
       reason: m.reason,
       reference: m.reference,
       previousStock: m.previousStock.toNumber(),
@@ -293,7 +351,10 @@ export async function getGlobalMovements(
       quantity: m.quantity.toNumber(),
       unit: m.unit,
       cost: m.rawMaterial.costPerUnit.toNumber(),
-      totalCost: m.costImpact?.toNumber() || 0,
+      // `costImpact` ya viene firmado desde el movimiento; si falta, se deriva
+      // de la cantidad (que también lleva signo).
+      totalCost: m.costImpact?.toNumber() ?? m.rawMaterial.costPerUnit.toNumber() * m.quantity.toNumber(),
+      supplierName: (m as any).batch?.purchaseOrderItem?.purchaseOrder?.supplier?.name ?? null,
       reason: m.reason,
       reference: m.reference,
       previousStock: m.previousStock.toNumber(),
@@ -307,11 +368,6 @@ export async function getGlobalMovements(
   // Proper solution would be SQL UNION query or a dedicated history table.
   combined.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
 
-  // Calculate generic total estimate (sum of both counts is upper bound)
-  // To get *real* total we'd need count() queries, but for now length is fine (but length is capped by take)
-  // Actually, we can't return real total without count queries. We'll return -1 or just combined.length if less than request.
-  // For scrolling UI, we often just need "has more".
-
   // Slice correct page window
   const startIndex = (page - 1) * limit
   const paginated = combined.slice(startIndex, startIndex + limit)
@@ -319,7 +375,7 @@ export async function getGlobalMovements(
   return {
     data: paginated,
     meta: {
-      total: 1000, // Dummy total to allow pagination in UI (since we don't count everything for perf)
+      total: productCount + rawMaterialCount,
       page,
       limit,
     },
