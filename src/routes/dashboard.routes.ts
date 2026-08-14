@@ -56,6 +56,7 @@ import * as venueRoleConfigController from '../controllers/dashboard/venueRoleCo
 import * as venueSettingsController from '../controllers/dashboard/venueSettings.dashboard.controller'
 import * as loyaltyController from '../controllers/dashboard/loyalty.dashboard.controller'
 import * as discountController from '../controllers/dashboard/discount.dashboard.controller'
+import * as promotionDashboardController from '../controllers/dashboard/promotion.dashboard.controller'
 import * as couponController from '../controllers/dashboard/coupon.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
@@ -198,6 +199,13 @@ import {
   discountParamsSchema,
   venueParamsSchema as DiscountVenueParamsSchema,
 } from '../schemas/dashboard/discount.schema'
+import {
+  createPromotionBodySchema,
+  getPromotionsQuerySchema,
+  promotionParamsSchema,
+  promotionVenueParamsSchema,
+  updatePromotionBodySchema,
+} from '../schemas/dashboard/promotion.schema'
 import {
   getCouponsQuerySchema,
   getRedemptionsQuerySchema,
@@ -10267,6 +10275,77 @@ router.get(
     }),
   ),
   discountController.getCustomerDiscounts,
+)
+
+// ============================================================================
+// Promotion Routes (combos, bundles, 2x1) — tier PRO 'PROMOTIONS'
+// El gate de plan va al GRUPO, igual que discounts. checkPermission por ruta
+// corre DESPUÉS del auth del use() — el 403 de plan sólo lo ve un miembro.
+// ============================================================================
+router.use('/venues/:venueId/promotions', authenticateTokenMiddleware, checkFeatureAccess('PROMOTIONS'))
+
+router.get(
+  '/venues/:venueId/promotions',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:read'),
+  validateRequest(z.object({ params: promotionVenueParamsSchema, query: getPromotionsQuerySchema })),
+  promotionDashboardController.getPromotions,
+)
+
+router.post(
+  '/venues/:venueId/promotions',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:create'),
+  validateRequest(z.object({ params: promotionVenueParamsSchema, body: createPromotionBodySchema })),
+  promotionDashboardController.createPromotion,
+)
+
+router.get(
+  '/venues/:venueId/promotions/:promotionId',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:read'),
+  validateRequest(z.object({ params: promotionParamsSchema })),
+  promotionDashboardController.getPromotionById,
+)
+
+router.put(
+  '/venues/:venueId/promotions/:promotionId',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:update'),
+  validateRequest(z.object({ params: promotionParamsSchema, body: updatePromotionBodySchema })),
+  promotionDashboardController.updatePromotion,
+)
+
+router.post(
+  '/venues/:venueId/promotions/:promotionId/publish',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:update'),
+  validateRequest(z.object({ params: promotionParamsSchema })),
+  promotionDashboardController.publishPromotion,
+)
+
+router.post(
+  '/venues/:venueId/promotions/:promotionId/archive',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:update'),
+  validateRequest(z.object({ params: promotionParamsSchema })),
+  promotionDashboardController.archivePromotion,
+)
+
+router.post(
+  '/venues/:venueId/promotions/:promotionId/unarchive',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:update'),
+  validateRequest(z.object({ params: promotionParamsSchema })),
+  promotionDashboardController.unarchivePromotion,
+)
+
+router.delete(
+  '/venues/:venueId/promotions/:promotionId',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:delete'),
+  validateRequest(z.object({ params: promotionParamsSchema })),
+  promotionDashboardController.deletePromotion,
 )
 
 // ============================================================================
