@@ -153,6 +153,51 @@ function collectExistingRefundedItems(refundRows: RefundPaymentRow[]): Map<strin
   return byOrderItemId
 }
 
+export interface RefundableLine {
+  id: string
+  orderPromotionId: string | null
+  total: number | { toString(): string }
+}
+
+/**
+ * Una promoción se reembolsa COMPLETA o no se reembolsa.
+ *
+ * 🔴 Devolver un componente suelto dejaría el resto cobrado a precio de
+ * promoción —hamburguesa + papas por $99— y no hay regla escrita de cómo se
+ * reprecia lo que queda. Peor: el reembolso por artículo usa `OrderItem.total`
+ * y no sabría si la unidad devuelta era la pagada o la regalada de un 2x1.
+ */
+/**
+ * 🔴 Una línea de promoción se reembolsa con su cantidad COMPLETA: en un 2x1 la
+ * línea (quantity 2) mezcla una unidad pagada y una regalada; reembolsar 1
+ * prorratearía neto/2 sin saber CUÁL unidad regresó — la ambigüedad
+ * pagada-vs-regalada que el todo-o-nada de la promoción existe para bloquear.
+ */
+export function assertPromotionLineFullQuantity(line: { orderPromotionId?: string | null; quantity: number }, refundQty: number): void {
+  if (line.orderPromotionId && refundQty !== line.quantity) {
+    throw new BadRequestError('Las líneas de una promoción se reembolsan completas: devuelve la promoción entera, no una parte.')
+  }
+}
+
+export function assertRefundableLines(lines: RefundableLine[], selectedIds: string[]): void {
+  const selected = new Set(selectedIds)
+  const porPromocion = new Map<string, RefundableLine[]>()
+
+  for (const line of lines) {
+    if (!line.orderPromotionId) continue
+    const grupo = porPromocion.get(line.orderPromotionId) ?? []
+    grupo.push(line)
+    porPromocion.set(line.orderPromotionId, grupo)
+  }
+
+  for (const [, grupo] of porPromocion) {
+    const elegidas = grupo.filter(l => selected.has(l.id)).length
+    if (elegidas > 0 && elegidas < grupo.length) {
+      throw new BadRequestError('Una promoción se reembolsa completa. Selecciona todos sus artículos o ninguno.')
+    }
+  }
+}
+
 export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundResult> {
   logger.info('[REFUND.DASHBOARD] Issuing refund', {
     venueId: input.venueId,
@@ -243,12 +288,20 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       const orderItemIds = input.items!.map(i => i.orderItemId)
       const orderItems = await tx.orderItem.findMany({
         where: { id: { in: orderItemIds }, orderId: original.orderId },
-        select: { id: true, productId: true, productName: true, quantity: true, total: true },
+        select: { id: true, productId: true, productName: true, quantity: true, total: true, orderPromotionId: true },
       })
 
       if (orderItems.length !== orderItemIds.length) {
         throw new BadRequestError('One or more orderItemIds do not belong to this payment order')
       }
+
+      // Una promoción se reembolsa completa o nada: se evalúa contra TODAS las
+      // líneas de la orden, no sólo las seleccionadas.
+      const allOrderLines = await tx.orderItem.findMany({
+        where: { orderId: original.orderId },
+        select: { id: true, orderPromotionId: true, total: true },
+      })
+      assertRefundableLines(allOrderLines, orderItemIds)
 
       for (const req of input.items!) {
         const orderItem = orderItems.find(o => o.id === req.orderItemId)!
@@ -262,6 +315,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         if (refundQty > orderItem.quantity) {
           throw new BadRequestError(`Invalid refund quantity ${refundQty} for item ${orderItem.id} (ordered ${orderItem.quantity})`)
         }
+        assertPromotionLineFullQuantity(orderItem as any, refundQty)
         if (alreadyRefundedQty + refundQty > orderItem.quantity) {
           throw new BadRequestError(
             `Refund quantity ${refundQty} for item ${orderItem.id} exceeds remaining refundable quantity (${orderItem.quantity - alreadyRefundedQty})`,
