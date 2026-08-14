@@ -764,6 +764,54 @@ describe('Discount Engine Service', () => {
     })
 
     /**
+     * 🔴 Audit max 2026-08-13: el guard anti doble-descuento de
+     * calculateDiscountAmount filtra por `orderPromotionId`, pero ESTE mapeo
+     * (el único constructor de OrderContext en producción) no lo copiaba — el
+     * guard era código muerto y el 20% se calculaba sobre subtotal CON el
+     * combo ($39.80 en vez de $20) mientras el unit test armado a mano pasaba.
+     */
+    it('🔴 el contexto de producción excluye las líneas de promoción del descuento automático', async () => {
+      const mockOrder = {
+        id: 'order-123',
+        venueId: 'venue-123',
+        customerId: null,
+        subtotal: new Decimal(199), // $100 normales + $99 de combo
+        items: [
+          {
+            id: 'item-1',
+            productId: 'p1',
+            quantity: 1,
+            unitPrice: new Decimal(100),
+            total: new Decimal(100),
+            orderPromotionId: null,
+            product: { id: 'p1', categoryId: 'c1', taxRate: new Decimal(0.16) },
+            modifiers: [],
+          },
+          {
+            id: 'item-promo',
+            productId: 'p2',
+            quantity: 1,
+            unitPrice: new Decimal(99),
+            total: new Decimal(99),
+            orderPromotionId: 'op-1', // línea nacida de una promoción
+            product: { id: 'p2', categoryId: 'c1', taxRate: new Decimal(0.16) },
+            modifiers: [],
+          },
+        ],
+        orderDiscounts: [],
+      }
+
+      prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.discount.findMany.mockResolvedValue([createMockDbDiscount({ id: 'd1', isAutomatic: true })])
+
+      const result = await evaluateAutomaticDiscounts('order-123')
+
+      expect(result).toHaveLength(1)
+      // 10% de los $100 elegibles — NUNCA de los $199 con el combo adentro.
+      expect(result[0].amount).toBe(10)
+    })
+
+    /**
      * Regression — reproduced on hardware (NEXGO, 2026-08-06): applying ANY catalog
      * discount from the TPV picker always failed with "This discount cannot be
      * applied to this order".

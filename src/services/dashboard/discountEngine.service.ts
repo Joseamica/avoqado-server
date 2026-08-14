@@ -36,6 +36,8 @@ interface OrderItemContext {
   quantity: number
   unitPrice: number
   total: number
+  /** Si viene de una promoción, ningún descuento automático la toca. */
+  orderPromotionId?: string | null
   modifiers: Array<{
     id: string
     modifierGroupId: string
@@ -316,6 +318,24 @@ export async function getCustomerDiscounts(venueId: string, customerId: string):
  * @param context - Order context (items, subtotal, etc.)
  */
 export function calculateDiscountAmount(discount: DiscountCandidate['discount'], context: OrderContext): DiscountCalculationResult {
+  // 🔴 Las líneas nacidas de una promoción quedan FUERA de todo descuento
+  // automático: la promo ya trae su precio negociado y nada se le encima solo.
+  //
+  // No basta con filtrar `items`: el subtotal es la base de los porcentajes de
+  // orden, y al agregar artículos se recalcula sobre el subtotal NUEVO — así
+  // que un 20% subía de $20 a $39.80 al meter un combo de $99.
+  // Sólo se reconstruye el contexto cuando SÍ hay líneas de promoción: una
+  // orden sin promos conserva su subtotal tal cual (que no siempre es la suma
+  // de las líneas — órdenes legacy y contextos parciales dependen de eso).
+  if (context.items.some(i => i.orderPromotionId)) {
+    const elegibles = context.items.filter(i => !i.orderPromotionId)
+    context = {
+      ...context,
+      items: elegibles,
+      subtotal: elegibles.reduce((sum, i) => sum + i.total, 0),
+    }
+  }
+
   let amount = 0
   let applicableItems: string[] = []
   let taxReduction = 0
@@ -638,6 +658,9 @@ export async function evaluateAutomaticDiscounts(orderId: string, forceDiscountI
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
+        // Sin esto, el guard anti doble-descuento de calculateDiscountAmount
+        // era código muerto: el contexto de producción nunca traía la marca.
+        orderPromotionId: item.orderPromotionId ?? null,
         modifiers: item.modifiers
           .filter(m => m.modifier) // Skip modifiers that were deleted
           .map(m => ({
