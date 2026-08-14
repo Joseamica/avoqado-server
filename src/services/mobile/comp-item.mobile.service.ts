@@ -142,8 +142,12 @@ export async function recalculateOrderTotals(
   // la mutación y el recálculo caigan o persistan JUNTOS (auditoría 2026-07-18).
   db: Prisma.TransactionClient | typeof prisma = prisma,
 ) {
-  const items = await db.orderItem.findMany({ where: { orderId }, select: { total: true } })
+  const items = await db.orderItem.findMany({ where: { orderId }, select: { total: true, orderPromotionId: true } })
   const newSubtotal = items.reduce((sum, i) => sum + Number(i.total), 0)
+  // 🔴 Las líneas nacidas de una promoción quedan FUERA de la base de los
+  // descuentos % de orden: la promo ya trae su precio negociado — re-derivar
+  // el 20% sobre subtotal CON el combo subía $20 → $39.80 (doble descuento).
+  const discountBase = items.filter(i => !i.orderPromotionId).reduce((sum, i) => sum + Number(i.total), 0)
 
   const orderDiscounts = await db.orderDiscount.findMany({ where: { orderId } })
 
@@ -158,7 +162,7 @@ export async function recalculateOrderTotals(
     const isItemScoped = (od.appliedToItemIds?.length ?? 0) > 0
     const value = Number(od.value || 0)
     if (!isItemScoped && od.type === 'PERCENTAGE' && value > 0) {
-      const amount = Math.round(((newSubtotal * value) / 100) * 100) / 100
+      const amount = Math.round(((discountBase * value) / 100) * 100) / 100
       await db.orderDiscount.update({ where: { id: od.id }, data: { amount } })
       newDiscountAmount += amount
     } else {

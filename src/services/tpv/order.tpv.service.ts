@@ -1894,6 +1894,11 @@ export async function addItemsToOrder(
     where: { orderId: order.id },
   })
   const newSubtotal = allItemsFromDb.reduce((sum, item) => sum + Number(item.total), 0)
+  // 🔴 Las líneas de promoción NO entran a la base de los descuentos % de
+  // orden: la promo ya es un precio negociado — incluirla re-descuenta lo ya
+  // descontado ($20 → $39.80 al meter un combo de $99). Mismo criterio que el
+  // discountEngine y recalculateOrderTotals.
+  const discountBase = allItemsFromDb.filter(item => !(item as any).orderPromotionId).reduce((sum, item) => sum + Number(item.total), 0)
 
   // 🔄 Recalculate percentage-based discounts when items are added
   // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
@@ -1913,7 +1918,7 @@ export async function addItemsToOrder(
 
     if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
       // Recalculate percentage based on NEW subtotal
-      const recalculatedAmount = (newSubtotal * discountValue) / 100
+      const recalculatedAmount = (discountBase * discountValue) / 100
       const roundedAmount = Math.round(recalculatedAmount * 100) / 100
 
       logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
@@ -2254,6 +2259,8 @@ export async function removeOrderItem(
   // Calculate new totals
   const remainingItems = order.items.filter(item => item.id !== orderItemId)
   const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
+  // Misma exclusión de líneas de promo que en addItemsToOrder (ver arriba).
+  const discountBase = remainingItems.filter(item => !(item as any).orderPromotionId).reduce((sum, item) => sum + Number(item.total), 0)
 
   // 🔄 Recalculate percentage-based discounts when items are removed
   // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
@@ -2273,7 +2280,7 @@ export async function removeOrderItem(
 
     if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
       // Recalculate percentage based on NEW subtotal
-      const recalculatedAmount = (newSubtotal * discountValue) / 100
+      const recalculatedAmount = (discountBase * discountValue) / 100
       const roundedAmount = Math.round(recalculatedAmount * 100) / 100
 
       logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
