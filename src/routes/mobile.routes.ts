@@ -7,6 +7,7 @@
 
 import { Router } from 'express'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
+import * as promotionMobileController from '../controllers/mobile/promotion.mobile.controller'
 import * as orderMobileController from '../controllers/mobile/order.mobile.controller'
 import * as timeEntryMobileController from '../controllers/mobile/time-entry.mobile.controller'
 import * as staffMobileController from '../controllers/mobile/staff.mobile.controller'
@@ -1617,6 +1618,22 @@ router.get(
   checkPermission('upsells:read'),
   checkFeatureAccess('UPSELL'),
   upsellMobileController.listUpsellRules,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/promotions
+ * Promociones vigentes y las que abren en las próximas 4 horas.
+ *
+ * `requireVenueMembership` va ANTES del candado de plan por la misma razón
+ * documentada arriba para upsell: un extraño no se entera del plan de un
+ * negocio ajeno antes de que se le diga que no pertenece.
+ */
+router.get(
+  '/venues/:venueId/promotions',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkFeatureAccess('PROMOTIONS'),
+  promotionMobileController.getPromotions,
 )
 
 router.post(
