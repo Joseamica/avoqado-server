@@ -136,6 +136,41 @@ describe('promotion.dashboard.service', () => {
 
       await expect(updatePromotion('venue-ajeno', 'promo-1', { name: 'x' } as any)).rejects.toThrow(NotFoundError)
     })
+
+    it('🔴 editar una PUBLISHED a un estado inválido se rechaza con TODOS los errores', async () => {
+      prismaMock.promotion.findFirst.mockResolvedValue(filaPromo({ status: 'PUBLISHED' }))
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'p1', venueId: 'venue-1', active: true, name: 'Hamburguesa' }])
+      const body = crearBody({
+        groups: [{ name: 'Plato', options: [{ productId: 'p1', quantity: 1, chargedQuantity: 3, priceDelta: 0 }] }],
+      })
+
+      await expect(updatePromotion('venue-1', 'promo-1', body as any, 'staff-1')).rejects.toMatchObject({
+        message: expect.stringMatching(/cobra más unidades/i),
+      })
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    })
+
+    it('editar una PUBLISHED a un estado VÁLIDO pasa', async () => {
+      prismaMock.promotion.findFirst.mockResolvedValue(filaPromo({ status: 'PUBLISHED' }))
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'p1', venueId: 'venue-1', active: true, name: 'Hamburguesa' }])
+
+      await updatePromotion('venue-1', 'promo-1', crearBody() as any, 'staff-1')
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+      expect(prismaMock.promotion.update).toHaveBeenCalled()
+    })
+
+    it('editar un DRAFT a un estado incompleto SÍ se permite (los borradores pueden estar incompletos)', async () => {
+      prismaMock.promotion.findFirst.mockResolvedValue(filaPromo({ status: 'DRAFT' }))
+      const body = crearBody({
+        groups: [{ name: 'Plato', options: [{ productId: 'p1', quantity: 1, chargedQuantity: 3, priceDelta: 0 }] }],
+      })
+
+      await updatePromotion('venue-1', 'promo-1', body as any, 'staff-1')
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+      expect(prismaMock.promotion.update).toHaveBeenCalled()
+    })
   })
 
   describe('publishPromotion', () => {

@@ -151,7 +151,7 @@ export async function createPromotion(venueId: string, data: CreatePromotionRequ
 }
 
 export async function updatePromotion(venueId: string, promotionId: string, data: UpdatePromotionRequest, staffId?: string) {
-  await findOwnedOrThrow(venueId, promotionId)
+  const row = await findOwnedOrThrow(venueId, promotionId)
 
   if (data.groups) {
     await assertProductsBelongToVenue(
@@ -173,6 +173,74 @@ export async function updatePromotion(venueId: string, promotionId: string, data
     ...(data.daysOfWeek !== undefined && { daysOfWeek: data.daysOfWeek }),
     ...(data.timeFrom !== undefined && { timeFrom: data.timeFrom }),
     ...(data.timeUntil !== undefined && { timeUntil: data.timeUntil }),
+  }
+
+  // 🔴 Editar una PUBLISHED pasa por el MISMO validador que publicarla — si no,
+  // "publicar" y luego "editar" es una ruta que nunca vuelve a pisar
+  // validatePromotionForPublish, y deja viva una promo que cobra de más
+  // (ej. un 2x1 editado a chargedQuantity:3). DRAFT/ARCHIVED siguen editables
+  // libres: un borrador puede estar incompleto a propósito.
+  if (row.status === 'PUBLISHED') {
+    const resultingType = data.type ?? (row.type as PromotionDraft['type'])
+    const resultingPricingMode = data.pricingMode ?? (row.pricingMode as PromotionDraft['pricingMode'])
+    const resultingPriceCents = data.price !== undefined ? Math.round(data.price * 100) : row.priceCents
+    const resultingGroups = data.groups
+      ? data.groups.map(g => ({
+          name: g.name,
+          minSelect: 1,
+          maxSelect: 1,
+          options: g.options.map(o => ({
+            productId: o.productId,
+            quantity: o.quantity,
+            chargedQuantity: o.chargedQuantity,
+            priceDeltaCents: Math.round((o.priceDelta ?? 0) * 100),
+          })),
+        }))
+      : row.groups.map(g => ({
+          name: g.name,
+          minSelect: g.minSelect,
+          maxSelect: g.maxSelect,
+          options: g.options.map(o => ({
+            productId: o.productId,
+            quantity: o.quantity,
+            chargedQuantity: o.chargedQuantity,
+            priceDeltaCents: o.priceDeltaCents,
+          })),
+        }))
+
+    const productIds = resultingGroups.flatMap(g => g.options.map(o => o.productId))
+    const productos = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+      select: { id: true, venueId: true, active: true },
+    })
+    const porId = new Map(productos.map(p => [p.id, p]))
+
+    const draft: PromotionDraft = {
+      venueId,
+      type: resultingType,
+      pricingMode: resultingPricingMode,
+      priceCents: resultingPriceCents,
+      groups: resultingGroups.map(g => ({
+        name: g.name,
+        minSelect: g.minSelect,
+        maxSelect: g.maxSelect,
+        options: g.options.map(o => ({
+          productId: o.productId,
+          productVenueId: porId.get(o.productId)?.venueId ?? 'desconocido',
+          productActive: porId.get(o.productId)?.active ?? false,
+          quantity: o.quantity,
+          chargedQuantity: o.chargedQuantity,
+          priceDeltaCents: o.priceDeltaCents,
+        })),
+      })),
+    }
+
+    const result = validatePromotionForPublish(draft)
+    if (!result.ok) {
+      // Mismo contrato que publishPromotion: el controller convierte el
+      // BadRequestError en { errors: [...] } con TODOS los motivos juntos.
+      throw new BadRequestError(result.errors.join('\n'))
+    }
   }
 
   // Con groups: estructura completa se REEMPLAZA en una transacción (el editor

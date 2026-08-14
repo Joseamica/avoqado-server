@@ -41,6 +41,13 @@ export async function updatePromotion(req: Request, res: Response, next: NextFun
     const { venueId, promotionId } = req.params
     res.json(await promotionService.updatePromotion(venueId, promotionId, req.body, actor(req)))
   } catch (error) {
+    // 🔴 Mismo contrato que publishPromotion: editar una PUBLISHED revalida con
+    // el MISMO validador de publicar, y el dashboard ya lee errors[] en ese
+    // flujo — para que la lista de promociones pinte todos los motivos juntos.
+    if (error instanceof BadRequestError) {
+      res.status(400).json({ errors: error.message.split('\n') })
+      return
+    }
     next(error)
   }
 }
