@@ -603,6 +603,9 @@ model Venue {
   upsellImpressions UpsellImpression[]
   upsellAiRuns      UpsellAiRun[]
 
+  // Promociones del POS (tier PRO, código PROMOTIONS)
+  promotions Promotion[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -827,6 +830,13 @@ model VenueSettings {
   allowReservations Boolean @default(false)
   allowTakeout      Boolean @default(false)
   allowDelivery     Boolean @default(false)
+
+  /// Dónde salen las promociones en la pantalla del cajero y en la del cliente.
+  /// El local de autoservicio quiere el panel (las promos SON el menú); el
+  /// mostrador con fila quiere el ancho para la cuadrícula. Los clientes caen
+  /// solos a TAB por debajo de ~960dp: ahí SIDE_PANEL no cabe.
+  promotionsPanelCashier  PromotionPanelMode @default(TAB)
+  promotionsPanelCustomer PromotionPanelMode @default(SIDE_PANEL)
 
   // Payment
   acceptCash          Boolean            @default(true)
@@ -1733,6 +1743,9 @@ model Product {
   // Reglas de upsell que sugieren ESTE producto.
   upsellSuggestedBy UpsellRule[] @relation("UpsellSuggestedProduct")
 
+  // Opciones de promoción que ofrecen ESTE producto.
+  promotionOptions PromotionOption[]
+
   @@unique([venueId, sku])
   @@unique([venueId, gtin])
   @@unique([venueId, externalId])
@@ -2464,6 +2477,11 @@ model StockCountItem {
   // applies ONLY lines with countedAt — an untouched line (counted=0 by
   // default) must never zero out real stock.
   countedAt DateTime?
+  // Sello DURABLE de aplicación, escrito EN LA MISMA transacción que el ajuste
+  // de la línea. Un re-claim del conteo (APPLYING huérfano) salta las líneas
+  // con appliedAt: re-aplicar una línea ya aplicada re-SETearía el stock al
+  // valor contado y borraría las ventas ocurridas después del crash.
+  appliedAt DateTime?
 
   @@index([stockCountId])
   @@index([productId])
@@ -3199,6 +3217,9 @@ model Order {
   updatedAt   DateTime  @updatedAt
   completedAt DateTime?
 
+  // Instancias de promoción vendidas en esta orden.
+  promotions OrderPromotion[]
+
   @@unique([venueId, externalId])
   @@unique([venueId, areaTicketCode])
   @@unique([venueId, areaDeliveryCode])
@@ -3278,6 +3299,11 @@ model OrderItem {
   appliedDiscountId String?
   appliedDiscount   Discount? @relation("OrderItemAppliedDiscount", fields: [appliedDiscountId], references: [id], onDelete: SetNull)
 
+  /// La promoción de la que nació esta línea. Las líneas de promoción quedan
+  /// FUERA de los descuentos automáticos y se retiran juntas.
+  orderPromotionId String?
+  orderPromotion   OrderPromotion? @relation(fields: [orderPromotionId], references: [id], onDelete: Cascade)
+
   notes String?
 
   // TABLE_SERVICE courses (Square's "Organización por platos"): the course/
@@ -3354,6 +3380,7 @@ model OrderItem {
   @@index([externalId]) // ✅ NUEVO
   @@index([syncStatus]) // ✅ NUEVO
   @@index([fulfillmentAreaId]) // pantalla "vales pendientes" por área
+  @@index([orderPromotionId]) // retiro de promoción completa borra por aquí
 }
 
 // ==========================================
@@ -6519,6 +6546,9 @@ model Discount {
 
   // Reglas de upsell que traen este descuento como sello (no se lee en v1).
   upsellRules UpsellRule[] @relation("UpsellLinkedDiscount")
+
+  // Promociones tipo DISCOUNT que apuntan a este descuento.
+  promotions Promotion[]
 
   @@index([venueId])
   @@index([isAutomatic])
@@ -15281,4 +15311,141 @@ model PosSyncIntent {
   @@unique([venueId, deviceId, seq])
   @@index([venueId, localRef])
   @@index([venueId, deviceId, createdAt])
+}
+
+// ==========================================
+// PROMOCIONES DEL POS (tier PRO, código PROMOTIONS)
+// Spec: docs/superpowers/specs/2026-08-12-promociones-en-el-pos-design.md
+// ==========================================
+
+enum PromotionType {
+  BUNDLE // grupo fijo: todos los grupos tienen 1 opción
+  COMBO // el cliente elige
+  DISCOUNT // sin grupos; apunta a un Discount existente
+}
+
+enum PromotionPricingMode {
+  FIXED_TOTAL // cuesta `priceCents` (+ los priceDelta elegidos)
+  PER_UNIT // 2x1: el precio sale del producto elegido
+}
+
+enum PromotionStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum PromotionPanelMode {
+  HIDDEN
+  TAB
+  SIDE_PANEL
+}
+
+model Promotion {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String? @db.Text
+  imageUrl    String?
+
+  type        PromotionType
+  pricingMode PromotionPricingMode
+  /// Precio base en CENTAVOS. Sólo se usa en FIXED_TOTAL.
+  priceCents  Int                  @default(0)
+
+  /// Sólo para type = DISCOUNT: el descuento que aplica al carrito.
+  discountId String?
+  discount   Discount? @relation(fields: [discountId], references: [id], onDelete: SetNull)
+
+  // Vigencia — MISMA forma que Discount, para poder evaluarla con el MISMO
+  // predicado (`isWithinVenueSchedule`). No inventar otro esquema de horarios.
+  validFrom  DateTime?
+  validUntil DateTime?
+  daysOfWeek Int[]
+  timeFrom   String?
+  timeUntil  String?
+
+  status       PromotionStatus @default(DRAFT)
+  displayOrder Int             @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  groups          PromotionGroup[]
+  orderPromotions OrderPromotion[]
+
+  @@index([venueId, status])
+  @@index([venueId, displayOrder])
+}
+
+model PromotionGroup {
+  id          String    @id @default(cuid())
+  promotionId String
+  promotion   Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+
+  name         String // "Elige tu plato"
+  displayOrder Int    @default(0)
+  /// v1: siempre 1 y 1. Los campos existen para no migrar después.
+  minSelect    Int    @default(1)
+  maxSelect    Int    @default(1)
+
+  options PromotionOption[]
+
+  @@index([promotionId])
+}
+
+model PromotionOption {
+  id      String         @id @default(cuid())
+  groupId String
+  group   PromotionGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  /// Unidades que ENTRAN al carrito. El inventario descuenta por aquí.
+  quantity        Int @default(1)
+  /// Unidades que se COBRAN. 2x1 = quantity 2, chargedQuantity 1.
+  chargedQuantity Int @default(1)
+  /// Sobreprecio en CENTAVOS. Sólo se usa en FIXED_TOTAL.
+  priceDeltaCents Int @default(0)
+
+  displayOrder Int @default(0)
+
+  @@index([groupId])
+  @@index([productId])
+}
+
+/// La INSTANCIA vendida. Guarda el snapshot de lo que se cobró para que editar
+/// o archivar la promoción NUNCA cambie un reporte histórico.
+model OrderPromotion {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  promotionId String
+  promotion   Promotion @relation(fields: [promotionId], references: [id], onDelete: Restrict)
+
+  /// UUID generado por el POS. Es lo que hace idempotente el replay offline.
+  instanceId String
+
+  /// Snapshot: nombre, modo, precio y opciones elegidas, tal como se cobraron.
+  snapshotJson Json
+
+  grossCents    Int
+  discountCents Int
+  netCents      Int
+
+  /// El desenlace no pudo validarse al sincronizar (promo archivada, reloj
+  /// movido). La venta entró igual; esto la marca para revisión.
+  needsReview  Boolean @default(false)
+  reviewReason String?
+
+  createdAt DateTime @default(now())
+
+  items OrderItem[]
+
+  @@unique([orderId, instanceId])
+  @@index([promotionId])
 }

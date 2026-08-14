@@ -398,6 +398,12 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   UpsellImpression: 'Discounts, Loyalty & Credit Packs',
   UpsellAcceptance: 'Discounts, Loyalty & Credit Packs',
   UpsellAiRun: 'Discounts, Loyalty & Credit Packs',
+  // Promociones del POS (bundle/combo/2x1) — misma familia comercial.
+  Promotion: 'Discounts, Loyalty & Credit Packs',
+  PromotionGroup: 'Discounts, Loyalty & Credit Packs',
+  PromotionOption: 'Discounts, Loyalty & Credit Packs',
+  // La instancia vendida vive con las órdenes: es dinero cobrado, no catálogo.
+  OrderPromotion: 'Orders, KDS & Cash',
   CouponCode: 'Discounts, Loyalty & Credit Packs',
   CouponRedemption: 'Discounts, Loyalty & Credit Packs',
   LoyaltyConfig: 'Discounts, Loyalty & Credit Packs',
