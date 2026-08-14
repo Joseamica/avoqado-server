@@ -15,6 +15,15 @@ import { validatePromotionForPublish } from '@/services/promotions/validatePromo
  * `create_promotion` crea SIEMPRE en DRAFT y detrás de confirmación: una promo
  * mal armada cobra de menos en cada venta, así que publicarla es un paso
  * deliberado del dashboard, nunca de un asistente interpretando una frase.
+ *
+ * 🔴 El ciclo de vida (publicar/archivar/desarchivar) y la EDICIÓN de
+ * promociones son actos deliberados del dashboard, NO del MCP — cambiar o
+ * apagar una promoción altera lo que ven los CLIENTES del negocio, exactamente
+ * la clase de escritura que la regla del MCP manda mantener detrás de una
+ * decisión humana en pantalla (mismo criterio que `upsell.ts`). El MCP LEE
+ * (list/status) y CREA EN DRAFT; todo lo demás vive en el dashboard. Si algún
+ * día se pide operar el ciclo de vida por MCP, va confirm-gated con preview
+ * current→new.
  */
 export function registerPromotionTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
