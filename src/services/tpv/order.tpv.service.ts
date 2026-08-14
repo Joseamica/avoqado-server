@@ -945,6 +945,9 @@ export async function createOrderWithItems(
   if (!staffVenue?.staff || !staffVenue.active || !staffVenue.staff.active) {
     throw new NotFoundError('Active staff member not found for this venue')
   }
+  // Referencia ya validada: el narrowing del guard de arriba no entra a la
+  // función interna de la transacción (TS no propaga narrowings a closures).
+  const activeStaffVenue = staffVenue
 
   const productIds = [...new Set(input.items.map(item => item.productId).filter((id): id is string => !!id))]
   const products = productIds.length
@@ -1199,7 +1202,7 @@ export async function createOrderWithItems(
                 .map(item => item.line.input.cortesiaReason)
                 .filter(Boolean)
                 .join('; ') || 'Cortesía',
-            appliedById: staffVenue.id,
+            appliedById: activeStaffVenue.id,
             appliedToItemIds: cortesiaItems.map(item => item.id),
           },
         })
@@ -1212,7 +1215,7 @@ export async function createOrderWithItems(
             itemId: item.id,
             discount: item.line.appliedDiscount!,
             discountAmountPesos: item.line.lineDiscountPesos,
-            appliedById: staffVenue.id,
+            appliedById: activeStaffVenue.id,
           }),
         })
       }
@@ -1230,7 +1233,7 @@ export async function createOrderWithItems(
             isComp: orderDiscount.type === 'COMP',
             isManual: true,
             compReason: orderDiscount.type === 'COMP' ? orderDiscount.compReason || orderDiscount.name : null,
-            appliedById: staffVenue.id,
+            appliedById: activeStaffVenue.id,
             appliedToItemIds: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
           },
         })
