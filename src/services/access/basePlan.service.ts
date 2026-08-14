@@ -21,6 +21,11 @@ export const PAID_PLAN_TIER_CODES = ['PLAN_PRO', 'PLAN_PREMIUM'] as const
  * means the server blanket-grants to Pro something the catalog sells as Premium.
  * Codes without a Feature row are still valid here: the gate works off the code
  * string (the explicit-grant lookup simply finds nothing).
+ *
+ * PROMOTIONS (combos, bundles, 2x1) es PRO a propósito y por eso NO aparece
+ * aquí: el gating es allow-by-default. Ver promotionsFeature.test.ts, que ancla
+ * la decisión — meterlo en esta lista dejaría fuera a los PRO, que son los que
+ * más pelean por ticket promedio.
  */
 export const PREMIUM_ONLY_CODES = [
   'CFDI',
