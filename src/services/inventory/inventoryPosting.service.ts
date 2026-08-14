@@ -135,6 +135,30 @@ export async function createSalePostingInTx(
           productId: i.productId,
           quantity: i.quantity,
           weightQuantity: i.weightQuantity != null ? String(i.weightQuantity) : null,
+          // Congelado AL COBRAR: la recuperación post-crash clasifica el grupo
+          // de efectos con este valor, no con la relación viva — un modificador
+          // borrado después (onDelete: SetNull) haría parecer "sin
+          // modificadores" a una línea que sí los dedujo a medias.
+          hasInventoryModifiers: itemHasInventoryModifiers(i),
+          // El PAYLOAD completo de los modificadores, no solo su presencia
+          // (audit ronda 4): un apply diferido (sweeper) que dependiera de la
+          // relación viva deduciría solo el producto base si el modificador se
+          // borró después de la venta — la venta ES un hecho congelado, el
+          // aplicador deduce lo que se vendió, no lo que sobrevive en el menú.
+          modifiers: (i.modifiers ?? [])
+            .filter(m => m.modifier)
+            .map(m => ({
+              quantity: m.quantity,
+              modifier: {
+                id: (m.modifier as any).id,
+                name: (m.modifier as any).name,
+                groupId: (m.modifier as any).groupId,
+                rawMaterialId: (m.modifier as any).rawMaterialId ?? null,
+                quantityPerUnit: (m.modifier as any).quantityPerUnit != null ? String((m.modifier as any).quantityPerUnit) : null,
+                unit: (m.modifier as any).unit ?? null,
+                inventoryMode: (m.modifier as any).inventoryMode ?? null,
+              },
+            })),
         })),
       },
       ...(lines.length > 0 ? { lines: { create: lines } } : {}),
@@ -163,6 +187,10 @@ export async function applySalePosting(
   postingId: string,
   staffId?: string | null,
 ): Promise<{ postingId: string; applied: boolean; issues: InventoryPostingIssue[] } | null> {
+  // El sello del claim funciona como CERCA COOPERATIVA: si otro worker
+  // re-reclama (lease vencido), cambia updatedAt; el dueño original lo detecta
+  // antes de cada línea y se retira en vez de deducir en paralelo.
+  const claimStamp = new Date()
   const claim = await prisma.inventoryPosting.updateMany({
     where: {
       id: postingId,
@@ -174,7 +202,7 @@ export async function applySalePosting(
         { status: 'APPLYING', updatedAt: { lt: new Date(Date.now() - APPLYING_LEASE_MS) } },
       ],
     },
-    data: { status: 'APPLYING', attempts: { increment: 1 }, updatedAt: new Date() },
+    data: { status: 'APPLYING', attempts: { increment: 1 }, updatedAt: claimStamp },
   })
   if (claim.count === 0) return null
 
@@ -196,6 +224,40 @@ export async function applySalePosting(
   for (const line of posting.lines) {
     if (line.status === 'APPLIED' || line.status === 'SKIPPED') continue
 
+    // 🛡️ Cerca cooperativa: si otro worker re-reclamó este posting (nuestro
+    // sello ya no coincide), nos retiramos ANTES de deducir — dos workers
+    // deduciendo el mismo posting en paralelo es justo el doble-descuento que
+    // el claim existe para impedir. El nuevo dueño termina el trabajo.
+    const owner = await prisma.inventoryPosting.findUnique({ where: { id: postingId }, select: { updatedAt: true } })
+    if (owner?.updatedAt && owner.updatedAt.getTime() !== claimStamp.getTime()) {
+      logger.warn('🛡️ [InventoryPosting] Claim re-reclamado por otro worker — este apply se retira', {
+        postingId,
+        lineId: line.id,
+      })
+      return null
+    }
+
+    const item = itemsById.get(line.orderItemId ?? line.effectKey)
+    // El snapshot congelado al cobrar es la fuente de verdad de la VENTA: si
+    // el OrderItem vivo ya no existe (cleanup/edición en la ventana del
+    // sweeper), el snapshot basta para deducir — la venta pagada es un hecho.
+    const snapshotItem = ((posting.payloadSnapshot as any)?.items ?? []).find((si: any) => si?.id === (line.orderItemId ?? line.effectKey))
+    if ((!item && !snapshotItem) || !line.productId) {
+      // Ni la tabla viva NI el snapshot conocen esta línea — se marca VISIBLE,
+      // no se inventa. (Antes bastaba que faltara el item vivo para SKIPPED:
+      // un apply diferido perdía la deducción en silencio.)
+      await prisma.inventoryPostingLine.update({
+        where: { id: line.id },
+        data: { status: 'SKIPPED', reason: 'ORPHAN_LINE' },
+      })
+      logger.warn('⚠️ [InventoryPosting] Línea huérfana: sin item vivo ni snapshot — SKIPPED', {
+        postingId,
+        lineId: line.id,
+        productId: line.productId,
+      })
+      continue
+    }
+
     // 🔴 Guard anti doble-deducción: la deducción commitea en SU transacción y
     // el flip de la línea a APPLIED corre DESPUÉS — un crash (o un error
     // transitorio del update) en esa ventana deja la línea PENDING/FAILED con
@@ -208,6 +270,47 @@ export async function applySalePosting(
       prisma.rawMaterialMovement.count({ where: { postingLineId: line.id } }),
     ])
     if (invMovements + rawMovements > 0) {
+      // La recuperación exacta SOLO aplica cuando la línea tiene UN grupo
+      // atómico de efectos: producto QUANTITY sin modificadores (su movimiento
+      // commitea con el stock en una tx) o receta sin modificadores (todo-o-
+      // nada en una tx Serializable). Con modificadores inventariables los
+      // sub-efectos commitean por separado: ver movimientos NO prueba que TODOS
+      // ocurrieron — marcar APPLIED perdería el modificador en silencio, y
+      // re-deducir duplicaría el producto. Esa línea va a conciliación manual.
+      //
+      // Se clasifica con el SNAPSHOT congelado al cobrar (fallback: relación
+      // viva, para postings anteriores a este campo): un modificador borrado
+      // después del cobro pondría la relación en null y haría pasar por
+      // "sin modificadores" una línea con efectos parciales.
+      const lineHasInventoryModifiers =
+        typeof snapshotItem?.hasInventoryModifiers === 'boolean'
+          ? snapshotItem.hasInventoryModifiers
+          : item
+            ? itemHasInventoryModifiers(item as any)
+            : false
+      if (lineHasInventoryModifiers) {
+        anyFailed = true
+        issues.push({
+          productId: line.productId,
+          productName: (item as any)?.productName || 'Producto',
+          requested: Number(line.expectedQuantityBase),
+          available: null,
+          reason: 'PARTIAL_EFFECTS_MANUAL_RECONCILE',
+        })
+        await prisma.inventoryPostingLine.update({
+          where: { id: line.id },
+          data: { status: 'FAILED', reason: 'PARTIAL_EFFECTS_MANUAL_RECONCILE' },
+        })
+        logger.error('🚨 [InventoryPosting] Línea con efectos PARCIALES (producto+modificadores) — requiere conciliación manual', {
+          postingId,
+          lineId: line.id,
+          productId: line.productId,
+          invMovements,
+          rawMovements,
+        })
+        continue
+      }
+
       await prisma.inventoryPostingLine.update({
         where: { id: line.id },
         data: { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: 'RECOVERED_FROM_MOVEMENTS' },
@@ -222,31 +325,41 @@ export async function applySalePosting(
       continue
     }
 
-    const item = itemsById.get(line.orderItemId ?? line.effectKey)
-    if (!item || !line.productId) {
-      // La línea apunta a un item que ya no existe — se marca, no se inventa.
-      await prisma.inventoryPostingLine.update({
-        where: { id: line.id },
-        data: { status: 'SKIPPED', reason: 'ORPHAN_LINE' },
-      })
-      continue
-    }
-
-    const orderModifiers =
-      item.modifiers
-        ?.filter((m: any) => m.modifier)
-        .map((m: any) => ({
-          quantity: m.quantity,
-          modifier: {
-            id: m.modifier.id,
-            name: m.modifier.name,
-            groupId: m.modifier.groupId,
-            rawMaterialId: m.modifier.rawMaterialId,
-            quantityPerUnit: m.modifier.quantityPerUnit,
-            unit: m.modifier.unit,
-            inventoryMode: m.modifier.inventoryMode,
-          },
-        })) ?? []
+    // Los modificadores salen del SNAPSHOT congelado al cobrar (fallback:
+    // relación viva, para postings anteriores al campo). La venta es un hecho:
+    // el aplicador deduce lo que se vendió, aunque el modificador ya no exista
+    // en el menú (onDelete: SetNull dejaba la relación en null y un apply
+    // diferido deducía solo el producto base, perdiendo el efecto en silencio).
+    const orderModifiers = Array.isArray(snapshotItem?.modifiers)
+      ? snapshotItem.modifiers
+          .filter((m: any) => m?.modifier)
+          .map((m: any) => ({
+            quantity: m.quantity,
+            modifier: {
+              id: m.modifier.id,
+              name: m.modifier.name,
+              groupId: m.modifier.groupId,
+              rawMaterialId: m.modifier.rawMaterialId,
+              // El snapshot guarda el Decimal como string — se revive aquí.
+              quantityPerUnit: m.modifier.quantityPerUnit != null ? new Prisma.Decimal(m.modifier.quantityPerUnit) : null,
+              unit: m.modifier.unit,
+              inventoryMode: m.modifier.inventoryMode,
+            },
+          }))
+      : (item?.modifiers
+          ?.filter((m: any) => m.modifier)
+          .map((m: any) => ({
+            quantity: m.quantity,
+            modifier: {
+              id: m.modifier.id,
+              name: m.modifier.name,
+              groupId: m.modifier.groupId,
+              rawMaterialId: m.modifier.rawMaterialId,
+              quantityPerUnit: m.modifier.quantityPerUnit,
+              unit: m.modifier.unit,
+              inventoryMode: m.modifier.inventoryMode,
+            },
+          })) ?? [])
 
     const effectiveQuantity = Number(line.expectedQuantityBase)
 
@@ -277,7 +390,7 @@ export async function applySalePosting(
       anyFailed = true
       issues.push({
         productId: line.productId,
-        productName: (item as any).productName || 'Producto',
+        productName: (item as any)?.productName || 'Producto',
         requested: effectiveQuantity,
         available: null,
         reason: error.message,
@@ -295,12 +408,22 @@ export async function applySalePosting(
     }
   }
 
-  await prisma.inventoryPosting.update({
-    where: { id: postingId },
+  // 🛡️ El cierre también va CERCADO con el sello del claim: un worker que se
+  // atoró después de su última línea no puede pisar el resultado de un
+  // reemplazo que ya re-reclamó, reintentó la línea fallida y marcó APPLIED —
+  // sobreescribirlo con un PARTIAL_FAILED stale re-encolaría trabajo ya hecho.
+  const finalized = await prisma.inventoryPosting.updateMany({
+    where: { id: postingId, updatedAt: claimStamp },
     data: anyFailed
       ? { status: 'PARTIAL_FAILED', lastError: issues.find(i => i.available === null)?.reason ?? 'línea fallida' }
       : { status: 'APPLIED', appliedAt: new Date(), lastError: null },
   })
+  if (finalized.count === 0) {
+    logger.warn('🛡️ [InventoryPosting] Cierre perdido: otro worker re-reclamó el posting — el nuevo dueño decide el estado final', {
+      postingId,
+    })
+    return null
+  }
 
   return { postingId, applied: !anyFailed, issues }
 }

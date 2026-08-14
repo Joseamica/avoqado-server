@@ -79,6 +79,9 @@ describe('confirmStockCount — claim atómico y relectura en tx', () => {
     prismaMock.$transaction.mockImplementation(async (arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg)))
     prismaMock.stockCount.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.stockCount.update.mockResolvedValue({})
+    prismaMock.stockCountItem.update.mockResolvedValue({})
+    // Claim por línea: por default se gana (appliedAt era NULL).
+    prismaMock.stockCountItem.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.inventory.update.mockResolvedValue({})
     prismaMock.inventoryMovement.create.mockResolvedValue({})
     prismaMock.rawMaterial.update.mockResolvedValue({})
@@ -119,13 +122,65 @@ describe('confirmStockCount — claim atómico y relectura en tx', () => {
 
     await confirmStockCount(COUNT_ID, VENUE_ID, USER_ID)
 
-    const completedCall = prismaMock.stockCount.update.mock.calls.find((c: any[]) => c[0]?.data?.status === 'COMPLETED')
+    const completedCall = prismaMock.stockCount.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.status === 'COMPLETED')
     expect(completedCall).toBeDefined()
     expect(completedCall![0].data).toMatchObject({ status: 'COMPLETED', applyingAt: null })
+    // El cierre va CERCADO por el sello del claim (un worker resucitado no
+    // puede pisar el estado del reemplazo).
+    expect(completedCall![0].where).toMatchObject({ id: COUNT_ID, status: 'APPLYING', applyingAt: expect.any(Date) })
     // Y ocurre DESPUÉS de aplicar el ajuste (si no, no protege nada).
-    const completeOrder = prismaMock.stockCount.update.mock.invocationCallOrder.slice(-1)[0]
+    const completeOrder = prismaMock.stockCount.updateMany.mock.invocationCallOrder.slice(-1)[0]
     const applyOrder = prismaMock.inventoryMovement.create.mock.invocationCallOrder[0]
     expect(applyOrder).toBeLessThan(completeOrder)
+  })
+
+  it('🔴 una línea con appliedAt (ya aplicada en un intento anterior) se SALTA en el re-claim', async () => {
+    // Idempotencia por línea: el worker aplicó la línea A y murió; una VENTA
+    // bajó el stock antes del lease. Re-aplicar A re-SETearía el stock al valor
+    // contado y borraría esa venta. El sello durable la excluye del reintento.
+    armarConteo([
+      { ...productItem({ counted: 30, snapshotStock: 32 }), appliedAt: new Date('2026-08-13T10:00:00.000Z') },
+      ingredientItem({ counted: 9, snapshotStock: 10 }),
+    ])
+    prismaMock.$queryRaw.mockResolvedValue([
+      { currentStock: new Decimal(7), unit: 'GRAM', costPerUnit: new Decimal('0.05'), perishable: false, shelfLifeDays: null },
+    ])
+    ;(createStockBatch as jest.Mock).mockResolvedValue({ id: 'batch-1', batchNumber: 'B-1', costPerUnit: new Decimal('0.05') })
+
+    await confirmStockCount(COUNT_ID, VENUE_ID, USER_ID)
+
+    // La línea de producto (ya aplicada) NO se toca; el insumo sí se aplica.
+    expect(prismaMock.inventory.update).not.toHaveBeenCalled()
+    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
+    expect(prismaMock.rawMaterialMovement.create).toHaveBeenCalled()
+  })
+
+  it('🔴 el sello appliedAt es un CLAIM condicional (NULL→now) dentro de la MISMA tx que el ajuste', async () => {
+    armarConteo([productItem({ counted: 30, snapshotStock: 32 })])
+    prismaMock.$queryRaw.mockResolvedValue([{ currentStock: 32 }])
+
+    await confirmStockCount(COUNT_ID, VENUE_ID, USER_ID)
+
+    // Claim condicionado a appliedAt NULL: cerca contra un worker resucitado
+    // cuyo pre-read traía appliedAt stale — solo quien voltea NULL→now aplica.
+    expect(prismaMock.stockCountItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'item-prod', appliedAt: null },
+        data: expect.objectContaining({ appliedAt: expect.any(Date) }),
+      }),
+    )
+  })
+
+  it('🛡️ si OTRO worker ya selló la línea (claim perdido), no se aplica ningún ajuste', async () => {
+    armarConteo([productItem({ counted: 30, snapshotStock: 32 })])
+    prismaMock.$queryRaw.mockResolvedValue([{ currentStock: 32 }])
+    // El claim por línea pierde: el reemplazo ya la aplicó.
+    prismaMock.stockCountItem.updateMany.mockResolvedValue({ count: 0 })
+
+    await confirmStockCount(COUNT_ID, VENUE_ID, USER_ID)
+
+    expect(prismaMock.inventory.update).not.toHaveBeenCalled()
+    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
   })
 
   it('un APPLYING huérfano (lease vencido) se puede re-reclamar: el conteo físico no se pierde', async () => {
@@ -207,9 +262,9 @@ describe('confirmStockCount — claim atómico y relectura en tx', () => {
 
     await expect(confirmStockCount(COUNT_ID, VENUE_ID, USER_ID)).rejects.toThrow()
 
-    expect(prismaMock.stockCount.update).toHaveBeenCalledWith(
+    expect(prismaMock.stockCount.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: COUNT_ID },
+        where: expect.objectContaining({ id: COUNT_ID, status: 'APPLYING' }),
         data: expect.objectContaining({ status: 'IN_PROGRESS' }),
       }),
     )

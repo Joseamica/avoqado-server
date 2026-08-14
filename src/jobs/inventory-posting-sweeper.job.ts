@@ -1,5 +1,6 @@
 import type { CronJob } from 'cron'
 import logger from '../config/logger'
+import { logAction } from '../services/dashboard/activity-log.service'
 import { scheduleJob } from '../observability/jobContext'
 import { applySalePosting } from '../services/inventory/inventoryPosting.service'
 import prisma from '../utils/prismaClient'
@@ -135,6 +136,29 @@ export class InventoryPostingSweeperJob {
             })
           } else {
             partial += 1
+            // 🚨 Tope de veneno VISIBLE (audit max 2026-08-13): al intento 15 el
+            // WHERE del barrido excluye el posting para SIEMPRE. Sin esto, la
+            // exclusión era silenciosa — la deducción-perdida-invisible exacta
+            // que el outbox nació para eliminar. Se grita en el log Y en el
+            // ActivityLog del venue (la bitácora que el dueño sí audita).
+            if (candidate.attempts + 1 >= MAX_ATTEMPTS) {
+              logger.error(
+                '🚨 [InventoryPostingSweeper] Posting ABANDONADO: alcanzó el tope de reintentos — requiere conciliación manual',
+                {
+                  postingId: candidate.id,
+                  venueId: candidate.venueId,
+                  attempts: candidate.attempts + 1,
+                  maxAttempts: MAX_ATTEMPTS,
+                },
+              )
+              void logAction({
+                venueId: candidate.venueId,
+                action: 'INVENTORY_POSTING_ABANDONED',
+                entity: 'InventoryPosting',
+                entityId: candidate.id,
+                data: { attempts: candidate.attempts + 1, maxAttempts: MAX_ATTEMPTS, previousStatus: candidate.status },
+              })
+            }
           }
         } catch (error) {
           errors += 1
@@ -143,6 +167,36 @@ export class InventoryPostingSweeperJob {
             venueId: candidate.venueId,
             error,
           })
+          // Si el claim alcanzó a incrementar attempts al tope, el WHERE del
+          // próximo barrido excluye el posting para siempre — el abandono se
+          // audita también por este camino, no solo por el de PARTIAL_FAILED
+          // limpio. Se verifica el attempts ALMACENADO: un error ANTES del
+          // claim (p.ej. conexión caída en el propio updateMany) deja attempts
+          // sin incrementar y el posting sigue elegible — auditarlo como
+          // abandonado sería un registro permanente falso.
+          if (candidate.attempts + 1 >= MAX_ATTEMPTS) {
+            const stored = await this.dependencies.prisma.inventoryPosting
+              .findUnique({ where: { id: candidate.id }, select: { attempts: true } })
+              .catch(() => null)
+            if (stored && stored.attempts >= MAX_ATTEMPTS) {
+              logger.error(
+                '🚨 [InventoryPostingSweeper] Posting ABANDONADO: alcanzó el tope de reintentos — requiere conciliación manual',
+                {
+                  postingId: candidate.id,
+                  venueId: candidate.venueId,
+                  attempts: stored.attempts,
+                  maxAttempts: MAX_ATTEMPTS,
+                },
+              )
+              void logAction({
+                venueId: candidate.venueId,
+                action: 'INVENTORY_POSTING_ABANDONED',
+                entity: 'InventoryPosting',
+                entityId: candidate.id,
+                data: { attempts: stored.attempts, maxAttempts: MAX_ATTEMPTS, previousStatus: candidate.status, viaError: true },
+              })
+            }
+          }
         }
       }
 

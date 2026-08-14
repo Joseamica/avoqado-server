@@ -155,6 +155,13 @@ describe('applySalePosting', () => {
     prismaMock.orderItem.findMany.mockResolvedValue(items as any)
   }
 
+  // El cierre del posting ahora es un updateMany CERCADO por el sello del
+  // claim (updatedAt = claimStamp) — este helper encuentra esa llamada final.
+  const finalStateCall = () =>
+    (prismaMock.inventoryPosting.updateMany.mock.calls as any[]).find(
+      c => c[0]?.data?.status === 'APPLIED' || c[0]?.data?.status === 'PARTIAL_FAILED',
+    )?.[0]
+
   it('aplica todas las líneas y deja el posting APPLIED con el kardex ligado', async () => {
     prismaMock.inventoryPosting.findUnique.mockResolvedValue(posting([line()]) as any)
     wireOrderItems([{ id: 'oi-1', productId: 'p1', quantity: 2, weightQuantity: null, modifiers: [] }])
@@ -171,9 +178,7 @@ describe('applySalePosting', () => {
       [],
       expect.objectContaining({ postingLineId: 'line-1' }),
     )
-    expect(prismaMock.inventoryPosting.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'APPLIED' }) }),
-    )
+    expect(finalStateCall()?.data).toMatchObject({ status: 'APPLIED' })
     expect(result?.issues).toEqual([])
   })
 
@@ -193,9 +198,7 @@ describe('applySalePosting', () => {
 
     const first = await applySalePosting('post-1', 'staff-1')
     expect(first?.issues).toHaveLength(1)
-    expect(prismaMock.inventoryPosting.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'PARTIAL_FAILED' }) }),
-    )
+    expect(finalStateCall()?.data).toMatchObject({ status: 'PARTIAL_FAILED' })
 
     // Reintento: la línea 1 ya está APPLIED; solo la 2 se re-aplica.
     jest.clearAllMocks()
@@ -237,9 +240,7 @@ describe('applySalePosting', () => {
 
     const result = await applySalePosting('post-1', 'staff-1')
 
-    expect(prismaMock.inventoryPosting.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'APPLIED' }) }),
-    )
+    expect(finalStateCall()?.data).toMatchObject({ status: 'APPLIED' })
     expect(result?.issues).toHaveLength(1)
     expect(result?.issues[0]).toMatchObject({ productId: 'p1', available: -1 })
   })
@@ -271,6 +272,53 @@ describe('applySalePosting', () => {
     expect(staleClause.updatedAt.lt.getTime()).toBeLessThan(Date.now())
   })
 
+  it('🛡️ cerca cooperativa: si otro worker re-reclamó el posting, este apply se retira sin deducir', async () => {
+    // El posting trae un updatedAt DISTINTO al sello de nuestro claim (otro
+    // worker lo re-reclamó tras el lease): deducir en paralelo sería el
+    // doble-descuento que el claim existe para impedir.
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue({
+      ...posting([line()]),
+      updatedAt: new Date('2020-01-01T00:00:00.000Z'),
+    } as any)
+    wireOrderItems([{ id: 'oi-1', productId: 'p1', quantity: 2, weightQuantity: null, modifiers: [] }])
+
+    const result = await applySalePosting('post-1', 'staff-1')
+
+    expect(result).toBeNull()
+    expect(deductInventoryMock).not.toHaveBeenCalled()
+  })
+
+  it('🚨 línea con MODIFICADORES y movimientos parciales va a conciliación manual (ni pierde el modificador ni re-deduce el producto)', async () => {
+    // Producto QUANTITY + modificador ADDITION: el movimiento del producto
+    // commiteó pero el del modificador no (crash en medio). Ver movimientos NO
+    // prueba que TODO ocurrió: marcar APPLIED perdería el modificador en
+    // silencio y re-deducir duplicaría el producto. FAILED + razón durable.
+    const modLine = line()
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue(posting([modLine]) as any)
+    wireOrderItems([
+      {
+        id: 'oi-1',
+        productId: 'p1',
+        quantity: 2,
+        weightQuantity: null,
+        modifiers: [{ quantity: 1, modifier: { id: 'mod-1', rawMaterialId: 'rm-1', quantityPerUnit: 10 } }],
+      },
+    ])
+    prismaMock.inventoryMovement.count.mockResolvedValue(1 as any) // producto ya deducido
+
+    const result = await applySalePosting('post-1', 'staff-1')
+
+    expect(deductInventoryMock).not.toHaveBeenCalled()
+    expect(prismaMock.inventoryPostingLine.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'line-1' },
+        data: expect.objectContaining({ status: 'FAILED', reason: 'PARTIAL_EFFECTS_MANUAL_RECONCILE' }),
+      }),
+    )
+    expect(finalStateCall()?.data).toMatchObject({ status: 'PARTIAL_FAILED' })
+    expect(result?.issues[0]).toMatchObject({ reason: 'PARTIAL_EFFECTS_MANUAL_RECONCILE' })
+  })
+
   it('línea con movimientos existentes se RECUPERA sin re-deducir (crash entre deducción y flip)', async () => {
     // 🔴 El P1 de la doble deducción: la deducción commitea en SU transacción y
     // el flip a APPLIED corre después. Si el proceso muere en esa ventana, la
@@ -290,9 +338,7 @@ describe('applySalePosting', () => {
         data: expect.objectContaining({ status: 'APPLIED', reason: 'RECOVERED_FROM_MOVEMENTS' }),
       }),
     )
-    expect(prismaMock.inventoryPosting.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'APPLIED' }) }),
-    )
+    expect(finalStateCall()?.data).toMatchObject({ status: 'APPLIED' })
     expect(result?.issues).toEqual([])
   })
 })

@@ -93,6 +93,15 @@ describe('syncEvents — idempotencia del cajón', () => {
     expect(res.events[0]).toMatchObject({ id: 'evt-db-1', type: 'CASH_SALE', amount: 50 })
   })
 
+  it('🔴 TODO el lote va en UNA transacción (un fallo a media lista no deja filas commiteadas)', async () => {
+    // Sin la tx envolvente, un create sin llave que falla a la mitad dejaba los
+    // anteriores commiteados aunque el request regresara error — y el reintento
+    // del cliente los reinsertaba (sin llave no hay dedupe): efectivo inventado.
+    await syncEvents(VENUE, [evento('evt-1', 30), evento(undefined, 50)] as any)
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+  })
+
   it('lote MIXTO: los con llave van por createMany y los sin llave se devuelven igual', async () => {
     ;(prismaMock as any).cashDrawerEvent.createMany.mockResolvedValue({ count: 1 })
     ;(prismaMock as any).cashDrawerEvent.findMany.mockResolvedValue([

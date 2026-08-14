@@ -27,6 +27,8 @@ describe('confirmStockCount — el ajuste se mide contra el stock ACTUAL, no con
     prismaMock.stockCount.update.mockResolvedValue({ id: countId } as any)
     // Claim atómico (fase 3): quien gana el updateMany condicional aplica.
     prismaMock.stockCount.updateMany.mockResolvedValue({ count: 1 } as any)
+    // Claim por línea (ronda 3): por default se gana (appliedAt era NULL).
+    prismaMock.stockCountItem.updateMany.mockResolvedValue({ count: 1 } as any)
     prismaMock.$transaction.mockImplementation(async (ops: any) => (Array.isArray(ops) ? ops : ops(prismaMock)))
   })
 
@@ -119,7 +121,7 @@ describe('confirmStockCount — el ajuste se mide contra el stock ACTUAL, no con
     expect(claimArgs.data.status).toBe('APPLYING')
     expect(claimArgs.where.OR.map((c: any) => c.status)).toContain('IN_PROGRESS')
     // …y COMPLETED se estampa después de aplicar.
-    const completedCall = prismaMock.stockCount.update.mock.calls.find((c: any[]) => c[0]?.data?.status === 'COMPLETED')
+    const completedCall = prismaMock.stockCount.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.status === 'COMPLETED')
     expect(completedCall).toBeDefined()
   })
 })

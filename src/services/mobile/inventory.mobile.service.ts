@@ -5,7 +5,8 @@
  */
 
 import prisma from '../../utils/prismaClient'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import logger from '../../config/logger'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { MovementType, RawMaterialMovementType } from '@prisma/client'
 import { checkAndCreateLowStockAlert } from '../dashboard/rawMaterial.service'
 import { createStockBatch, deductStockFIFOInTx } from '../dashboard/fifoBatch.service'
@@ -479,6 +480,9 @@ export async function confirmStockCount(countId: string, venueId: string, userId
 
   // Claim atómico ANTES de aplicar: mata el doble-confirm en la raíz. El claim
   // es APPLYING (no COMPLETED): completar se gana aplicando, no reclamando.
+  // El sello es también la CERCA del padre: el revert y el COMPLETED de este
+  // worker solo proceden si su applyingAt sigue siendo el dueño del claim.
+  const claimStamp = new Date()
   const claim = await prisma.stockCount.updateMany({
     where: {
       id: countId,
@@ -490,7 +494,7 @@ export async function confirmStockCount(countId: string, venueId: string, userId
         { status: 'APPLYING', applyingAt: { lt: new Date(Date.now() - STOCK_COUNT_APPLYING_LEASE_MS) } },
       ],
     },
-    data: { status: 'APPLYING', applyingAt: new Date() },
+    data: { status: 'APPLYING', applyingAt: claimStamp },
   })
   if (claim.count === 0) {
     throw new NotFoundError('Conteo no encontrado, en proceso o ya completado')
@@ -511,6 +515,11 @@ export async function confirmStockCount(countId: string, venueId: string, userId
     const ingredientFailures: { rawMaterialId: string; name: string; error: string }[] = []
     for (const item of countedItems) {
       if (!item.rawMaterialId || !item.rawMaterial) continue
+      // 🔴 Idempotencia por línea (audit 2026-08-13): una línea con sello
+      // appliedAt YA aplicó en un intento anterior — re-aplicarla re-SETearía
+      // el stock al valor contado y borraría las ventas ocurridas después del
+      // crash del worker original.
+      if (item.appliedAt) continue
       const rawMaterialId = item.rawMaterialId
       const counted = Number(item.counted)
       const reason = `Conteo de inventario #${countId}`
@@ -518,105 +527,122 @@ export async function confirmStockCount(countId: string, venueId: string, userId
       try {
         const applied = await withSerializableRetry(
           async tx => {
-            // Relectura CON CANDADO: el delta se mide contra el stock del
-            // momento de aplicar, no contra el snapshot de la apertura.
-            const rows = await tx.$queryRaw<
-              Array<{ currentStock: unknown; unit: string; costPerUnit: unknown; perishable: boolean; shelfLifeDays: number | null }>
-            >`
+            // 🛡️ CLAIM por línea DENTRO de la tx (cerca contra el worker
+            // original resucitado): el `item.appliedAt` del pre-read puede ser
+            // stale — un reemplazo pudo aplicar esta línea después de que este
+            // worker la cargó. Solo quien voltea appliedAt NULL→now aplica; el
+            // sello y el efecto commitean (o se revierten) JUNTOS, y el row
+            // lock del updateMany serializa a los dos workers.
+            const lineClaim = await tx.stockCountItem.updateMany({
+              where: { id: item.id, appliedAt: null },
+              data: { appliedAt: new Date() },
+            })
+            if (lineClaim.count === 0) {
+              return { delta: 0, previous: 0, batch: null as any }
+            }
+            const lineResult = await (async () => {
+              // Relectura CON CANDADO: el delta se mide contra el stock del
+              // momento de aplicar, no contra el snapshot de la apertura.
+              const rows = await tx.$queryRaw<
+                Array<{ currentStock: unknown; unit: string; costPerUnit: unknown; perishable: boolean; shelfLifeDays: number | null }>
+              >`
               SELECT "currentStock", unit, "costPerUnit", perishable, "shelfLifeDays"
               FROM "RawMaterial"
               WHERE id = ${rawMaterialId} AND "venueId" = ${venueId}
               FOR UPDATE
             `
-            if (rows.length === 0) {
-              throw new NotFoundError(`Insumo ${rawMaterialId} no encontrado en esta sucursal`)
-            }
-            const fresh = rows[0]
-            const current = Number(fresh.currentStock)
-            const delta = counted - current
+              if (rows.length === 0) {
+                throw new NotFoundError(`Insumo ${rawMaterialId} no encontrado en esta sucursal`)
+              }
+              const fresh = rows[0]
+              const current = Number(fresh.currentStock)
+              const delta = counted - current
 
-            if (delta === 0) {
-              await tx.rawMaterial.update({ where: { id: rawMaterialId }, data: { lastCountAt: new Date() } })
-              return { delta, previous: current, batch: null as any }
-            }
-
-            if (delta < 0) {
-              try {
-                await deductStockFIFOInTx(tx, venueId, rawMaterialId, Math.abs(delta), RawMaterialMovementType.COUNT, {
-                  reason,
-                  createdBy: userId,
-                })
+              if (delta === 0) {
                 await tx.rawMaterial.update({ where: { id: rawMaterialId }, data: { lastCountAt: new Date() } })
                 return { delta, previous: current, batch: null as any }
-              } catch (error) {
-                // Fallback SOLO para el hueco legítimo: insumo seed/legacy con
-                // saldo pero sin lotes ACTIVE (o con menos lote que saldo). El
-                // catch-all anterior tragaba CUALQUIER error y rompía el
-                // invariante currentStock == Σ lotes ACTIVE sin avisar.
-                const message = error instanceof Error ? error.message : String(error)
-                const isBatchGap = message.includes('No active batches') || message.includes('Insufficient stock')
-                if (!isBatchGap) throw error
-
-                await tx.rawMaterial.update({
-                  where: { id: rawMaterialId },
-                  data: { currentStock: counted, lastCountAt: new Date() },
-                })
-                await tx.rawMaterialMovement.create({
-                  data: {
-                    rawMaterialId,
-                    venueId,
-                    type: RawMaterialMovementType.COUNT,
-                    quantity: delta,
-                    unit: (fresh.unit as any) ?? 'PIECE',
-                    previousStock: current,
-                    newStock: counted,
-                    reason: `${reason} (ajuste directo, sin lotes)`,
-                    createdBy: userId,
-                  },
-                })
-                return { delta, previous: current, batch: null as any }
               }
-            }
 
-            // delta > 0: el excedente contado entra como lote nuevo (misma
-            // mecánica que adjustStock) para conservar currentStock == Σ lotes.
-            const created = await createStockBatch(
-              venueId,
-              rawMaterialId,
-              {
-                quantity: delta,
-                unit: fresh.unit as any,
-                costPerUnit: Number(fresh.costPerUnit ?? 0),
-                receivedDate: new Date(),
-                expirationDate:
-                  fresh.perishable && fresh.shelfLifeDays ? new Date(Date.now() + fresh.shelfLifeDays * 24 * 60 * 60 * 1000) : undefined,
-              },
-              userId,
-              tx,
-              { skipAudit: true },
-            )
+              if (delta < 0) {
+                try {
+                  await deductStockFIFOInTx(tx, venueId, rawMaterialId, Math.abs(delta), RawMaterialMovementType.COUNT, {
+                    reason,
+                    createdBy: userId,
+                  })
+                  await tx.rawMaterial.update({ where: { id: rawMaterialId }, data: { lastCountAt: new Date() } })
+                  return { delta, previous: current, batch: null as any }
+                } catch (error) {
+                  // Fallback SOLO para el hueco legítimo: insumo seed/legacy con
+                  // saldo pero sin lotes ACTIVE (o con menos lote que saldo). El
+                  // catch-all anterior tragaba CUALQUIER error y rompía el
+                  // invariante currentStock == Σ lotes ACTIVE sin avisar.
+                  const message = error instanceof Error ? error.message : String(error)
+                  const isBatchGap = message.includes('No active batches') || message.includes('Insufficient stock')
+                  if (!isBatchGap) throw error
 
-            await tx.rawMaterial.update({
-              where: { id: rawMaterialId },
-              data: { currentStock: { increment: delta }, lastCountAt: new Date() },
-            })
+                  await tx.rawMaterial.update({
+                    where: { id: rawMaterialId },
+                    data: { currentStock: counted, lastCountAt: new Date() },
+                  })
+                  await tx.rawMaterialMovement.create({
+                    data: {
+                      rawMaterialId,
+                      venueId,
+                      type: RawMaterialMovementType.COUNT,
+                      quantity: delta,
+                      unit: (fresh.unit as any) ?? 'PIECE',
+                      previousStock: current,
+                      newStock: counted,
+                      reason: `${reason} (ajuste directo, sin lotes)`,
+                      createdBy: userId,
+                    },
+                  })
+                  return { delta, previous: current, batch: null as any }
+                }
+              }
 
-            await tx.rawMaterialMovement.create({
-              data: {
-                rawMaterialId,
+              // delta > 0: el excedente contado entra como lote nuevo (misma
+              // mecánica que adjustStock) para conservar currentStock == Σ lotes.
+              const created = await createStockBatch(
                 venueId,
-                batchId: created.id,
-                type: RawMaterialMovementType.COUNT,
-                quantity: delta,
-                unit: fresh.unit as any,
-                previousStock: current,
-                newStock: counted,
-                costImpact: Number(fresh.costPerUnit ?? 0) * delta,
-                reason,
-                createdBy: userId,
-              },
-            })
-            return { delta, previous: current, batch: created }
+                rawMaterialId,
+                {
+                  quantity: delta,
+                  unit: fresh.unit as any,
+                  costPerUnit: Number(fresh.costPerUnit ?? 0),
+                  receivedDate: new Date(),
+                  expirationDate:
+                    fresh.perishable && fresh.shelfLifeDays ? new Date(Date.now() + fresh.shelfLifeDays * 24 * 60 * 60 * 1000) : undefined,
+                },
+                userId,
+                tx,
+                { skipAudit: true },
+              )
+
+              await tx.rawMaterial.update({
+                where: { id: rawMaterialId },
+                data: { currentStock: { increment: delta }, lastCountAt: new Date() },
+              })
+
+              await tx.rawMaterialMovement.create({
+                data: {
+                  rawMaterialId,
+                  venueId,
+                  batchId: created.id,
+                  type: RawMaterialMovementType.COUNT,
+                  quantity: delta,
+                  unit: fresh.unit as any,
+                  previousStock: current,
+                  newStock: counted,
+                  costImpact: Number(fresh.costPerUnit ?? 0) * delta,
+                  reason,
+                  createdBy: userId,
+                },
+              })
+              return { delta, previous: current, batch: created }
+            })()
+
+            return lineResult
           },
           { timeoutMs: 10_000, maxRetries: 3, baseDelayMs: 40 },
         )
@@ -666,12 +692,23 @@ export async function confirmStockCount(countId: string, venueId: string, userId
     // ── Productos: SET contra relectura FOR UPDATE dentro de su tx ──────────
     for (const item of countedItems) {
       if (!item.product) continue
+      // Idempotencia por línea: ya aplicada en un intento anterior (ver arriba).
+      if (item.appliedAt) continue
 
       const inventory = item.product.inventory
       if (!inventory) continue
 
       const counted = Number(item.counted)
       const applied = await prisma.$transaction(async tx => {
+        // 🛡️ CLAIM por línea dentro de la tx (mismo patrón que los insumos):
+        // el appliedAt del pre-read puede ser stale para un worker resucitado;
+        // solo quien voltea NULL→now aplica, y sello+efecto commitean juntos.
+        const lineClaim = await tx.stockCountItem.updateMany({
+          where: { id: item.id, appliedAt: null },
+          data: { appliedAt: new Date() },
+        })
+        if (lineClaim.count === 0) return null
+
         const rows = await tx.$queryRaw<Array<{ currentStock: unknown }>>`
           SELECT "currentStock" FROM "Inventory" WHERE id = ${inventory.id} FOR UPDATE
         `
@@ -715,18 +752,38 @@ export async function confirmStockCount(countId: string, venueId: string, userId
     // inmediato. Si este revert también falla, el conteo queda APPLYING — que
     // NO es terminal: tras el lease se puede volver a reclamar. Nunca queda un
     // COMPLETED mentiroso con líneas sin aplicar.
+    //
+    // 🛡️ CERCADO con el sello del claim (audit ronda 4): un worker resucitado
+    // cuyo lease ya fue re-reclamado NO puede regresar a IN_PROGRESS el conteo
+    // que el reemplazo tiene APPLYING (o ya completó) — eso reabría la edición
+    // de un conteo cuyas líneas selladas ya no se re-aplican.
     await prisma.stockCount
-      .update({ where: { id: countId }, data: { status: 'IN_PROGRESS', completedAt: null, applyingAt: null } })
+      .updateMany({
+        where: { id: countId, status: 'APPLYING', applyingAt: claimStamp },
+        data: { status: 'IN_PROGRESS', completedAt: null, applyingAt: null },
+      })
       .catch(() => undefined)
     throw error
   }
 
   // 🔴 COMPLETED se estampa DESPUÉS de aplicar todo: si el proceso muere antes
   // de esta línea, el conteo queda APPLYING (recuperable), no "completado".
-  await prisma.stockCount.update({
-    where: { id: countId },
+  // 🛡️ También cercado por el sello: si otro worker re-reclamó, él decide.
+  const completed = await prisma.stockCount.updateMany({
+    where: { id: countId, status: 'APPLYING', applyingAt: claimStamp },
     data: { status: 'COMPLETED', completedAt: new Date(), applyingAt: null },
   })
+  if (completed.count === 0) {
+    logger.warn('🛡️ [StockCount] Cierre perdido: otro worker re-reclamó el conteo — el nuevo dueño decide el estado final', {
+      countId,
+      venueId,
+    })
+    // 🔴 NO se reporta éxito ni se audita STOCK_COUNT_CONFIRMED: el reemplazo
+    // sigue aplicando (o puede revertir) — decir "completado" aquí mentiría al
+    // cliente y a la bitácora. Las líneas que ESTE worker sí aplicó quedan
+    // selladas (appliedAt) y el dueño del claim termina el trabajo.
+    throw new ConflictError('Otro dispositivo está aplicando este conteo. Verifica su estado en unos segundos.', 'STOCK_COUNT_RECLAIMED')
+  }
 
   logAction({
     staffId: userId,

@@ -700,14 +700,43 @@ export async function settleOrder(
   const settledAmount = await prisma.$transaction(async tx => {
     const fresh = await tx.order.findFirst({
       where: { id: orderId, venueId },
-      select: { total: true, remainingBalance: true, paymentStatus: true, version: true },
+      select: { total: true, remainingBalance: true, tipAmount: true, paymentStatus: true, version: true },
     })
     if (!fresh) return null
     const freshRemaining = Number(fresh.remainingBalance)
     if (freshRemaining <= 0 || fresh.paymentStatus === 'PAID') return null
 
+    // 🔴 La FUENTE DE VERDAD del saldo son los Payments, no el denormalizado
+    // de la orden (audit ronda 3): el escritor legacy del TPV
+    // (updateOrderTotalsForStandalonePayment, payment.tpv.service.ts:810)
+    // commitea el Payment PRIMERO y escribe los totales de la orden DESPUÉS,
+    // a ciegas — un settle en esa ventana veía remainingBalance intacto y
+    // cobraba el saldo completo encima del pago recién commiteado. El monto a
+    // liquidar es el MÍNIMO entre el saldo denormalizado y (total − Σ pagos
+    // COMPLETED): nunca puede exceder lo que los pagos reales dejan pendiente,
+    // aunque el escritor legacy no participe de ningún candado.
+    const paidAgg = await tx.payment.aggregate({
+      where: { orderId, venueId, status: 'COMPLETED' },
+      _sum: { amount: true, tipAmount: true },
+    })
+    const paidSum = Number(paidAgg._sum.amount ?? 0)
+    // `Order.total` incluye propinas acumuladas (así lo escribe el TPV); se
+    // comparan peras con peras restando la propina de ambos lados.
+    const orderTotalSansTips = Number(fresh.total) - Number(fresh.tipAmount ?? 0)
+    const remainingByPayments = Math.max(0, Number((orderTotalSansTips - paidSum).toFixed(2)))
+    const toSettle = Math.min(freshRemaining, remainingByPayments)
+    if (toSettle <= 0) return null
+
+    // El CAS va amarrado a `version` Y a `remainingBalance`: cerca a los
+    // escritores que sí incrementan version y a cualquier update ya visible.
     const transition = await tx.order.updateMany({
-      where: { id: orderId, venueId, paymentStatus: { in: ['PENDING', 'PARTIAL'] }, version: fresh.version },
+      where: {
+        id: orderId,
+        venueId,
+        paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+        version: fresh.version,
+        remainingBalance: fresh.remainingBalance as any,
+      },
       data: {
         paymentStatus: 'PAID',
         paidAmount: fresh.total,
@@ -724,18 +753,18 @@ export async function settleOrder(
       data: {
         venueId,
         orderId,
-        amount: freshRemaining,
+        amount: toSettle,
         tipAmount: 0,
         method: 'CASH', // Default to cash for manual settlements
         status: 'COMPLETED',
         feePercentage: 0,
         feeAmount: 0,
-        netAmount: freshRemaining,
+        netAmount: toSettle,
         source: 'OTHER',
         processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
       },
     })
-    return freshRemaining
+    return toSettle
   })
 
   if (settledAmount === null) {

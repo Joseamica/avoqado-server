@@ -190,6 +190,8 @@ describe('order.dashboard.service — settleOrder atómico', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+    // La fuente de verdad del saldo son los Payments: por default no hay pagos.
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: 0, tipAmount: 0 } } as any)
   })
 
   const ORDER = {
@@ -256,7 +258,40 @@ describe('order.dashboard.service — settleOrder atómico', () => {
     expect(res.settledAmount).toBe(40)
     // Y la transición va amarrada a la versión releída: si algo cambia después
     // de la relectura, el CAS pierde y no se cobra nada.
-    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ version: 7 }) }))
+    // Amarrado a version Y remainingBalance: no todos los escritores
+    // incrementan version (updateOrderTotalsForStandalonePayment no lo hace),
+    // pero ninguno aterriza un pago sin mover remainingBalance.
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ version: 7, remainingBalance: 40 }) }),
+    )
+  })
+
+  // 🔴 Ronda 3 del audit: el escritor legacy del TPV commitea el Payment
+  // PRIMERO y actualiza los totales de la orden DESPUÉS, sin CAS ni version.
+  // En esa ventana el denormalizado (remainingBalance=100) miente; la SUMA de
+  // Payments es la fuente de verdad y limita el monto a liquidar.
+  it('🔴 escritor legacy tardío: el monto se limita por la SUMA de Payments, no por el denormalizado', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(ORDER as any) // la orden aún dice 100 pendientes
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: 60, tipAmount: 0 } } as any) // pero ya hay $60 cobrados
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.payment.create.mockResolvedValue({ id: 'pay-1' } as any)
+
+    const res = await settleOrder('venue-1', 'order-1')
+
+    expect(prismaMock.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ amount: 40, netAmount: 40 }) }),
+    )
+    expect(res.settledAmount).toBe(40)
+  })
+
+  it('si los Payments ya cubren el total (denormalizado stale), NO se crea ningún pago', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(ORDER as any)
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: 100, tipAmount: 0 } } as any)
+
+    const res = await settleOrder('venue-1', 'order-1')
+
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(res.settledAmount).toBe(0)
   })
 
   it('si la orden cambia ENTRE la relectura y el CAS (version pisada), no se crea pago', async () => {

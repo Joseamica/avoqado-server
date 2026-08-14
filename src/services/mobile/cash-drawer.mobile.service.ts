@@ -425,15 +425,6 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
   const keyed = events.filter(event => Boolean(event.localId))
   const unkeyed = events.filter(event => !event.localId)
 
-  let insertedCount = 0
-  if (keyed.length > 0) {
-    const result = await prisma.cashDrawerEvent.createMany({
-      data: keyed.map(toRow),
-      skipDuplicates: true,
-    })
-    insertedCount += result.count
-  }
-
   // 🔴 Apps viejas sin `localId` (contrato /mobile: las versiones ya
   // distribuidas siguen funcionando): tras un `createMany` no hay llave para
   // RELEER sus filas, y responder `events: []` rompía a los clientes que
@@ -442,11 +433,37 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
   // efectivo inventado causado por el propio cambio de forma. Se insertan una
   // a una (el comportamiento que esas apps siempre tuvieron) para poder
   // devolverlas.
-  const unkeyedRows = [] as Awaited<ReturnType<typeof prisma.cashDrawerEvent.create>>[]
-  for (const event of unkeyed) {
-    unkeyedRows.push(await prisma.cashDrawerEvent.create({ data: toRow(event) }))
-  }
-  insertedCount += unkeyedRows.length
+  //
+  // 🔴 TODO el lote va en UNA transacción (audit 2026-08-13): con inserts
+  // sueltos, un fallo a media lista dejaba los primeros commiteados aunque el
+  // request regresara error — el reintento del cliente los reinsertaba (los
+  // sin llave no tienen dedupe) y el cajón inventaba efectivo. Todo-o-nada:
+  // o entra el lote completo, o el reintento parte de cero.
+  const { insertedCount, unkeyedRows } = await prisma.$transaction(
+    async tx => {
+      let inserted = 0
+      if (keyed.length > 0) {
+        const result = await tx.cashDrawerEvent.createMany({
+          data: keyed.map(toRow),
+          skipDuplicates: true,
+        })
+        inserted += result.count
+      }
+
+      const createdUnkeyed = [] as Awaited<ReturnType<typeof prisma.cashDrawerEvent.create>>[]
+      for (const event of unkeyed) {
+        createdUnkeyed.push(await tx.cashDrawerEvent.create({ data: toRow(event) }))
+      }
+      inserted += createdUnkeyed.length
+
+      return { insertedCount: inserted, unkeyedRows: createdUnkeyed }
+    },
+    // Timeout explícito (audit max): el default de 5s de la tx interactiva no
+    // aguanta el lote de una app vieja que reconecta tras un día offline
+    // (~cientos de creates secuenciales sin llave). Un P2028 aquí revertía el
+    // lote completo y el cliente lo reintentaba idéntico por siempre.
+    { timeout: 30_000 },
+  )
 
   logAction({
     staffId: events[0]?.staffId,

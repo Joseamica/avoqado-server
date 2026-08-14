@@ -57,28 +57,43 @@ export async function createRefund(params: CreateRefundParams) {
   const amountDecimal = centsToDecimal(amount) // positive (e.g., 50.00)
   const negativeAmount = new Decimal((-Number(amountDecimal)).toFixed(2)) // negative (e.g., -50.00)
 
-  // 🔴 El turno del cajero, resuelto IGUAL que el refund del TPV
-  // (`refund.tpv.service.ts:219`) y que el cobro (`order.mobile.service.ts:1751`).
-  // Sin `shiftId` el Payment REFUND era invisible para el CIERRE DE TURNO, que
-  // selecciona por `{ shiftId, status: 'COMPLETED' }` (`shift.tpv.service.ts:1342`)
-  // — el efectivo esperado no bajaba y el conteo acusaba un faltante al cajero,
-  // exactamente el bug que la convención COMPLETED+REFUND decía arreglar (solo
-  // el cierre de CAJA, que filtra por ventana de tiempo, quedaba cubierto).
-  const currentShift = await prisma.shift.findFirst({
-    where: {
-      venueId,
-      staffId,
-      status: 'OPEN',
-      endTime: null,
-    },
-    orderBy: { startTime: 'desc' },
-  })
-  const shiftId = currentShift?.id ?? null
-
   // Steps 1-3 + decremento del turno en UNA transacción: un reembolso a medias
   // (Payment sin VenueTransaction, o turno sin decrementar) descuadra dinero.
   const orderNumber = `REF-${Date.now()}`
   const { order, payment } = await prisma.$transaction(async tx => {
+    // 🔴 El turno del cajero, resuelto IGUAL que el refund del TPV
+    // (`refund.tpv.service.ts:219`) y que el cobro (`order.mobile.service.ts:1751`).
+    // Sin `shiftId` el Payment REFUND era invisible para el CIERRE DE TURNO, que
+    // selecciona por `{ shiftId, status: 'COMPLETED' }` (`shift.tpv.service.ts:1342`).
+    //
+    // Se resuelve y se RECLAMA DENTRO de la transacción (audit 2026-08-13): leerlo
+    // afuera dejaba una ventana en la que el turno cerraba en medio y el refund se
+    // estampaba en un turno YA CERRADO — con el decremento llegando después del
+    // reporte. El updateMany condicional (status OPEN) es el candado: si el turno
+    // cerró entre la lectura y el claim, count=0 y el refund entra SIN turno (lo
+    // recoge el cierre de caja por ventana de tiempo), nunca en uno cerrado.
+    let shiftId: string | null = null
+    const currentShift = await tx.shift.findFirst({
+      where: {
+        venueId,
+        staffId,
+        status: 'OPEN',
+        endTime: null,
+      },
+      orderBy: { startTime: 'desc' },
+    })
+    if (currentShift) {
+      // El claim ES el decremento (espejo del refund TPV): el cierre usa también
+      // los contadores denormalizados; sin esto el reporte sobrestima ventas.
+      const claimed = await tx.shift.updateMany({
+        where: { id: currentShift.id, status: 'OPEN', endTime: null },
+        data: { totalSales: { decrement: amountDecimal } },
+      })
+      if (claimed.count === 1) {
+        shiftId = currentShift.id
+      }
+    }
+
     // Step 1: Create a refund placeholder order
     const order = await tx.order.create({
       data: {
@@ -149,15 +164,6 @@ export async function createRefund(params: CreateRefundParams) {
         netAmount: negativeAmount,
       },
     })
-
-    // Step 3.5: espejo del refund TPV — el cierre usa también los contadores
-    // denormalizados del turno; sin este decremento el reporte sobrestima ventas.
-    if (shiftId) {
-      await tx.shift.update({
-        where: { id: shiftId },
-        data: { totalSales: { decrement: amountDecimal } },
-      })
-    }
 
     return { order, payment }
   })

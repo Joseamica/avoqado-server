@@ -89,9 +89,9 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
   // selecciona por `{ shiftId, status: 'COMPLETED' }` — sin shiftId el reembolso
   // seguía invisible y el faltante se le achacaba al cajero.
   describe('shiftId — visible para el cierre de turno', () => {
-    it('estampa el turno ABIERTO del cajero en el Payment y decrementa totalSales', async () => {
+    it('estampa el turno ABIERTO del cajero en el Payment y decrementa totalSales (claim condicional)', async () => {
       prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-1' } as any)
-      prismaMock.shift.update.mockResolvedValue({} as any)
+      prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as any)
 
       await refundCash()
 
@@ -101,11 +101,11 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
         }),
       )
       expect(createdPayment.shiftId).toBe('shift-1')
-      // Espejo del refund TPV: los contadores denormalizados del turno también
-      // tienen que reflejar el reembolso.
-      expect(prismaMock.shift.update).toHaveBeenCalledWith(
+      // El claim ES el decremento, condicionado a que el turno SIGA abierto —
+      // así el refund nunca se estampa en un turno que cerró en la ventana.
+      expect(prismaMock.shift.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'shift-1' },
+          where: { id: 'shift-1', status: 'OPEN', endTime: null },
           data: { totalSales: { decrement: new Decimal('50.00') } },
         }),
       )
@@ -117,7 +117,17 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
       await refundCash()
 
       expect(createdPayment.shiftId).toBeUndefined()
-      expect(prismaMock.shift.update).not.toHaveBeenCalled()
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 si el turno CIERRA entre la lectura y el claim, el refund entra SIN shiftId (nunca en un turno cerrado)', async () => {
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-1' } as any)
+      // El updateMany condicional pierde: el turno ya no está OPEN.
+      prismaMock.shift.updateMany.mockResolvedValue({ count: 0 } as any)
+
+      await refundCash()
+
+      expect(createdPayment.shiftId).toBeUndefined()
     })
   })
 })
