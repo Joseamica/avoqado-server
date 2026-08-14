@@ -174,8 +174,8 @@ export async function updateVenueSettings(
     inventoryDeduction: DEFAULT_VENUE_SETTINGS.inventoryDeduction,
     googleReviewLink: (updates.googleReviewLink as string | null | undefined) ?? null,
     // TPV Settings removed - now stored per-terminal in Terminal.config.settings
-    ...(updates.promotionsPanelCashier !== undefined && { promotionsPanelCashier: updates.promotionsPanelCashier }),
-    ...(updates.promotionsPanelCustomer !== undefined && { promotionsPanelCustomer: updates.promotionsPanelCustomer }),
+    ...(typeof updates.promotionsPanelCashier === 'string' && { promotionsPanelCashier: updates.promotionsPanelCashier }),
+    ...(typeof updates.promotionsPanelCustomer === 'string' && { promotionsPanelCustomer: updates.promotionsPanelCustomer }),
   }
 
   const hasCashReconciliationUpdate = Object.prototype.hasOwnProperty.call(updates, 'cashReconciliationEnabled')
