@@ -12,4 +12,5 @@ export const DATABASE_JOB_SCHEDULES = {
   catalogPublicationOutboxSweeper: '29,59 * * * * *',
   catalogPublicationWatchdog: '32 * * * * *',
   shiftCloseWatchdog: '35 * * * * *',
+  inventoryPostingSweeper: '44 */2 * * * *',
 } as const

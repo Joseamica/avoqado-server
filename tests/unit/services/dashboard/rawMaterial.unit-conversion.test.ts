@@ -14,7 +14,7 @@
 import { Unit, RawMaterialMovementType } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { deductStockForRecipe, deductStockForModifiers, type OrderModifierForInventory } from '@/services/dashboard/rawMaterial.service'
-import { deductStockFIFO } from '@/services/dashboard/fifoBatch.service'
+import { deductStockFIFO, deductStockFIFOInTx } from '@/services/dashboard/fifoBatch.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 
@@ -23,6 +23,11 @@ jest.mock('@/services/dashboard/fifoBatch.service', () => {
   return {
     ...actual,
     deductStockFIFO: jest.fn(),
+    // La receta ahora deduce dentro de UNA tx envolvente (fase 3): el mock
+    // intercepta la variante transaccional; la conversión de unidades que este
+    // archivo fija ocurre ANTES de llamarla, así que las aserciones son las
+    // mismas con el `tx` como primer argumento.
+    deductStockFIFOInTx: jest.fn(),
     createStockBatch: jest.fn(),
   }
 })
@@ -58,6 +63,9 @@ const PRODUCT_ID = 'product-test'
 describe('deductStockForRecipe — unit conversion', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // La receta corre en una tx envolvente: el mock ejecuta el callback con el
+    // propio cliente mockeado como `tx`.
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => (typeof cb === 'function' ? cb(prisma) : Promise.all(cb)))
     ;(prisma.lowStockAlert.findFirst as jest.Mock).mockResolvedValue(null)
     ;(prisma.rawMaterial.findUnique as jest.Mock).mockResolvedValue({
       id: 'rm-protein',
@@ -90,8 +98,9 @@ describe('deductStockForRecipe — unit conversion', () => {
 
     await deductStockForRecipe(VENUE_ID, PRODUCT_ID, 1, 'order-1')
 
-    expect(deductStockFIFO).toHaveBeenCalledTimes(1)
-    expect(deductStockFIFO).toHaveBeenCalledWith(
+    expect(deductStockFIFOInTx).toHaveBeenCalledTimes(1)
+    expect(deductStockFIFOInTx).toHaveBeenCalledWith(
+      expect.anything(), // tx envolvente
       VENUE_ID,
       'rm-protein',
       62, // ← critical: 0.062 KG converted to 62 GRAM, NOT 0.062
@@ -121,7 +130,14 @@ describe('deductStockForRecipe — unit conversion', () => {
 
     await deductStockForRecipe(VENUE_ID, PRODUCT_ID, 1, 'order-2')
 
-    expect(deductStockFIFO).toHaveBeenCalledWith(VENUE_ID, 'rm-milk', 0.25, RawMaterialMovementType.USAGE, expect.any(Object))
+    expect(deductStockFIFOInTx).toHaveBeenCalledWith(
+      expect.anything(),
+      VENUE_ID,
+      'rm-milk',
+      0.25,
+      RawMaterialMovementType.USAGE,
+      expect.any(Object),
+    )
   })
 
   it('multiplies by portions sold AFTER converting units', async () => {
@@ -146,7 +162,14 @@ describe('deductStockForRecipe — unit conversion', () => {
 
     await deductStockForRecipe(VENUE_ID, PRODUCT_ID, 3, 'order-3')
 
-    expect(deductStockFIFO).toHaveBeenCalledWith(VENUE_ID, 'rm-protein', 186, RawMaterialMovementType.USAGE, expect.any(Object))
+    expect(deductStockFIFOInTx).toHaveBeenCalledWith(
+      expect.anything(),
+      VENUE_ID,
+      'rm-protein',
+      186,
+      RawMaterialMovementType.USAGE,
+      expect.any(Object),
+    )
   })
 
   it('rejects dimensionally incompatible recipe units (mass vs volume)', async () => {
@@ -169,7 +192,7 @@ describe('deductStockForRecipe — unit conversion', () => {
     })
 
     await expect(deductStockForRecipe(VENUE_ID, PRODUCT_ID, 1, 'order-bad')).rejects.toThrow(/incompatible/i)
-    expect(deductStockFIFO).not.toHaveBeenCalled()
+    expect(deductStockFIFOInTx).not.toHaveBeenCalled()
   })
 
   it('skips optional ingredients (no deduction call)', async () => {
@@ -193,7 +216,7 @@ describe('deductStockForRecipe — unit conversion', () => {
 
     await deductStockForRecipe(VENUE_ID, PRODUCT_ID, 1, 'order-opt')
 
-    expect(deductStockFIFO).not.toHaveBeenCalled()
+    expect(deductStockFIFOInTx).not.toHaveBeenCalled()
   })
 })
 
@@ -238,7 +261,10 @@ describe('deductStockForModifiers — unit conversion', () => {
 })
 
 describe('deductStockForRecipe — ActivityLog audit trail', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => (typeof cb === 'function' ? cb(prisma) : Promise.all(cb)))
+  })
 
   it('writes a single INVENTORY_DEDUCTED_FOR_SALE entry per order', async () => {
     ;(prisma.recipe.findUnique as jest.Mock).mockResolvedValue({

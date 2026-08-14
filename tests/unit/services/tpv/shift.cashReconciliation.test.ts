@@ -331,10 +331,7 @@ describe('closeShiftForVenueWithResult — propina en efectivo en el arqueo', ()
   })
 
   it('mezcla efectivo y tarjeta: sólo la propina en efectivo mueve el cajón', async () => {
-    mockPrisma.payment.findMany.mockResolvedValue([
-      paymentWithTip('5000.00', '500.00'),
-      paymentWithTip('2000.00', '300.00', 'CREDIT_CARD'),
-    ])
+    mockPrisma.payment.findMany.mockResolvedValue([paymentWithTip('5000.00', '500.00'), paymentWithTip('2000.00', '300.00', 'CREDIT_CARD')])
 
     // Cajón = fondo 1000 + venta efectivo 5000 + propina efectivo 500 = 6500.
     const result = await closeCounting('6500.00')

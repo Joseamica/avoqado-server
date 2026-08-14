@@ -504,11 +504,16 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
                 },
               })) || []
 
+          // Venta por peso (fase 3, 2026-08-13): las líneas pesadas llevan
+          // quantity=1 y los kilos en weightQuantity — deducir quantity hacía
+          // que 435 g descontaran 1 kilo. Mismo cálculo que TPV y pagos.
+          const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
+
           // ✅ FIX: Use deductInventoryForProduct to handle BOTH Quantity and Recipe + Modifiers
           await deductInventoryForProduct(
             updatedOrder.venueId,
             item.productId,
-            item.quantity,
+            effectiveQuantity,
             orderId,
             updatedOrder.servedById || undefined,
             orderModifiers,
@@ -518,7 +523,7 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
             orderId,
             productId: item.productId,
             productName: item.product?.name || item.productName,
-            quantity: item.quantity,
+            quantity: effectiveQuantity,
             modifiersCount: orderModifiers.length,
           })
         } catch (deductionError: any) {
@@ -685,18 +690,33 @@ export async function settleOrder(
   // fuera de la transacción, así que dos settles concurrentes lo pasaban los
   // dos y creaban DOS pagos CASH por el mismo saldo. Solo quien gana el CAS
   // (PENDING/PARTIAL → PAID) crea el Payment; el perdedor sale sin efecto.
-  const settled = await prisma.$transaction(async tx => {
+  //
+  // 🔴 Y el MONTO se relee DENTRO de la tx amarrado a `version` (auditoría
+  // 2026-08-13): el snapshot de arriba podía quedar viejo — un pago parcial
+  // concurrente (TPV) dejaba la orden PARTIAL, el CAS de estados seguía
+  // pasando, y el Payment se creaba por el saldo VIEJO: $160 de pagos contra
+  // una orden de $100, con paidAmount pisado. Con el CAS sobre `version`, un
+  // cambio entre la relectura y la transición hace count=0 y no se cobra nada.
+  const settledAmount = await prisma.$transaction(async tx => {
+    const fresh = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { total: true, remainingBalance: true, paymentStatus: true, version: true },
+    })
+    if (!fresh) return null
+    const freshRemaining = Number(fresh.remainingBalance)
+    if (freshRemaining <= 0 || fresh.paymentStatus === 'PAID') return null
+
     const transition = await tx.order.updateMany({
-      where: { id: orderId, venueId, paymentStatus: { in: ['PENDING', 'PARTIAL'] } },
+      where: { id: orderId, venueId, paymentStatus: { in: ['PENDING', 'PARTIAL'] }, version: fresh.version },
       data: {
         paymentStatus: 'PAID',
-        paidAmount: order.total,
+        paidAmount: fresh.total,
         remainingBalance: 0,
         version: { increment: 1 },
       },
     })
     if (transition.count === 0) {
-      return false
+      return null
     }
 
     // Create a payment record to track the settlement
@@ -704,21 +724,21 @@ export async function settleOrder(
       data: {
         venueId,
         orderId,
-        amount: remainingBalance,
+        amount: freshRemaining,
         tipAmount: 0,
         method: 'CASH', // Default to cash for manual settlements
         status: 'COMPLETED',
         feePercentage: 0,
         feeAmount: 0,
-        netAmount: remainingBalance,
+        netAmount: freshRemaining,
         source: 'OTHER',
         processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
       },
     })
-    return true
+    return freshRemaining
   })
 
-  if (!settled) {
+  if (settledAmount === null) {
     return {
       orderId: order.id,
       orderNumber: order.orderNumber,
@@ -739,7 +759,7 @@ export async function settleOrder(
     venueId,
     orderId,
     orderNumber: order.orderNumber,
-    settledAmount: remainingBalance,
+    settledAmount,
     notes,
   })
 
@@ -748,13 +768,13 @@ export async function settleOrder(
     action: 'ORDER_SETTLED',
     entity: 'Order',
     entityId: order.id,
-    data: { settledAmount: remainingBalance, orderNumber: order.orderNumber },
+    data: { settledAmount, orderNumber: order.orderNumber },
   })
 
   return {
     orderId: order.id,
     orderNumber: order.orderNumber,
-    settledAmount: remainingBalance,
-    message: `Successfully settled order ${order.orderNumber} for ${remainingBalance}`,
+    settledAmount,
+    message: `Successfully settled order ${order.orderNumber} for ${settledAmount}`,
   }
 }

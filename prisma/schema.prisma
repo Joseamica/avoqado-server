@@ -1905,7 +1905,8 @@ model InventoryPostingLine {
   appliedQuantityBase  Decimal @default(0) @db.Decimal(12, 3)
   reason               String?
 
-  movements InventoryMovement[]
+  movements    InventoryMovement[]
+  rawMovements RawMaterialMovement[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2371,9 +2372,16 @@ model RawMaterialMovement {
   createdBy String? // Staff ID
   createdAt DateTime @default(now())
 
+  // Línea de posting que originó este movimiento (espejo del mismo campo en
+  // InventoryMovement): permite al aplicador del outbox probar "esta línea YA
+  // dedujo" tras un crash, en vez de volver a deducir la receta/modificador.
+  postingLineId String?
+  postingLine   InventoryPostingLine? @relation(fields: [postingLineId], references: [id], onDelete: SetNull)
+
   @@index([rawMaterialId])
   @@index([venueId])
   @@index([type])
+  @@index([postingLineId])
   @@index([batchId])
   @@index([createdAt])
 }
@@ -2426,6 +2434,9 @@ model StockCount {
   createdByUser Staff?    @relation("StockCountCreatedBy", fields: [createdById], references: [id])
   createdAt     DateTime  @default(now())
   completedAt   DateTime?
+  // Sello del claim APPLYING: permite re-reclamar un conteo cuyo worker murió
+  // a media aplicación (lease vencido) en vez de dejarlo atorado para siempre.
+  applyingAt    DateTime?
 
   @@index([venueId])
   @@index([status])
@@ -2466,6 +2477,11 @@ enum StockCountType {
 
 enum StockCountStatus {
   IN_PROGRESS
+  // Claim del confirm: los ajustes se están aplicando. Un crash a media
+  // aplicación deja el conteo AQUÍ (re-reclamable tras el lease), nunca en
+  // COMPLETED con ajustes a medias. A los clientes /mobile se les mapea como
+  // IN_PROGRESS — las apps distribuidas no conocen este valor.
+  APPLYING
   COMPLETED
 }
 

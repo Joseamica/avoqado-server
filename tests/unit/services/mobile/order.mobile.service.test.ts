@@ -752,7 +752,9 @@ describe('order.mobile.service', () => {
       mockApplySalePosting.mockResolvedValue({
         postingId: 'posting-1',
         applied: true,
-        issues: [{ productId: 'p1', productName: 'Cerveza Corona', requested: 1, available: -1, reason: 'la venta dejó el stock en negativo' }],
+        issues: [
+          { productId: 'p1', productName: 'Cerveza Corona', requested: 1, available: -1, reason: 'la venta dejó el stock en negativo' },
+        ],
       })
 
       const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })

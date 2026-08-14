@@ -9,7 +9,7 @@
 
 import prisma from '@/utils/prismaClient'
 import { Prisma } from '@prisma/client'
-import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
 import { logAction } from './activity-log.service'
@@ -2179,11 +2179,27 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       orderId: session.sessionId,
     })
   } catch (error) {
-    // Soltar el claim para que el cliente pueda reintentar; si este revert
-    // falla, la sesión queda CHARGING (atorada pero segura, nunca doble cargo).
-    await prisma.checkoutSession
-      .updateMany({ where: { id: session.id, status: 'CHARGING' }, data: { status: 'PROCESSING' } })
-      .catch(() => undefined)
+    // 🔴 El claim SOLO se suelta en rechazos DEFINITIVOS del proveedor
+    // (declinada, fondos insuficientes: Blumon respondió que NO). Un timeout o
+    // corte de red después de mandar el charge deja el resultado DESCONOCIDO —
+    // el cargo pudo aprobarse y perderse solo la respuesta. Soltar el claim ahí
+    // rehabilitaba exactamente el doble cargo que este claim vino a matar: el
+    // cliente reintenta, gana PROCESSING→CHARGING otra vez y autoriza una
+    // SEGUNDA vez con otro transactionId. Con resultado desconocido la sesión
+    // se queda CHARGING (atorada pero segura) para reconciliación manual.
+    const outcomeUnknown = error instanceof PaymentOutcomeUnknownError
+    if (!outcomeUnknown) {
+      await prisma.checkoutSession
+        .updateMany({ where: { id: session.id, status: 'CHARGING' }, data: { status: 'PROCESSING' } })
+        .catch(() => undefined)
+    } else {
+      logger.error('🚨 [PaymentLink] Resultado del cobro DESCONOCIDO — sesión retenida en CHARGING para reconciliación', {
+        sessionId: session.sessionId,
+        paymentLinkId: session.paymentLink?.id,
+        venueId: session.paymentLink?.venueId,
+        amount: Number(session.amount),
+      })
+    }
     throw error
   }
 

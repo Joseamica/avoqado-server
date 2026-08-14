@@ -350,7 +350,7 @@ export async function allocateStockFIFO(
  *
  * Used by: Shopify, Stripe, GitHub for inventory/resource allocation
  *
- * 🔴 EL REINTENTO VA AQUÍ Y SOLO AQUÍ — no lo subas de nivel.
+ * 🔴 EL REINTENTO VIVE EN QUIEN POSEE LA TRANSACCIÓN — nunca fuera de ella.
  *
  * Bug real (Mindform, 17-18 jul 2026): un cajero tocó "Cobrar" 3 veces en 8s;
  * cada toque corrió su propia pasada de deducción sobre los mismos insumos.
@@ -359,16 +359,18 @@ export async function allocateStockFIFO(
  * clasificó 'UNKNOWN' → tumbó la orden. Una venta cancelada por un tropiezo de
  * milisegundos.
  *
- * Esta función es el ÚNICO nivel donde reintentar es seguro, porque es el único
- * que es atómico: un solo insumo, dentro de una transacción Serializable. Si
- * choca, Postgres deshizo TODO lo de ese insumo, así que el reintento rehace
- * exactamente lo que no pasó.
+ * Reintentar sólo es seguro en el nivel que es ATÓMICO: si el intento chocó,
+ * Postgres deshizo TODO lo de esa transacción, así que el reintento rehace
+ * exactamente lo que no pasó. Hay dos poseedores legítimos:
  *
- * Subir el reintento a `deductStockForRecipe` o `deductInventoryForProduct`
- * DESCONTARÍA DOBLE: la receta de un producto (~10 insumos) recorre sus líneas
- * llamando aquí una por una, SIN transacción que las agrupe. Si el insumo #5
- * choca, los 4 anteriores ya se commitearon; reintentar el producto los vuelve
- * a descontar y el inventario queda mal en silencio.
+ *   - deductStockFIFO (aquí): un solo insumo en su propia tx Serializable.
+ *   - deductStockForRecipe: la receta COMPLETA en UNA tx Serializable, llamando
+ *     a deductStockFIFOInTx por línea. Ahí el reintento de la receta entera es
+ *     seguro porque ninguna línea commitea por separado (fase 3, 2026-08-13).
+ *
+ * Lo que sigue PROHIBIDO es reintentar un nivel que agrupa transacciones YA
+ * commiteadas (p. ej. deductInventoryForProduct reintentando producto+modifiers):
+ * eso descuenta doble.
  *
  * Sólo se reintentan conflictos TRANSITORIOS (P2034 / 40001 / 55P03). Falta de
  * stock real, insumo de otro venue y "sin lotes activos" siguen fallando en el
@@ -387,93 +389,11 @@ export async function deductStockFIFO(
     reason?: string
     reference?: string
     createdBy?: string
+    postingLineId?: string
   },
 ): Promise<any[]> {
   return await withSerializableRetry(
-    async tx => {
-      // 0. El rawMaterial debe pertenecer al venue que deduce — venueId no es
-      // decorativo. Sin esto, cualquier caller interno con un rawMaterialId
-      // ajeno cruzaba tenants.
-      const rawMaterial = await tx.rawMaterial.findFirst({
-        where: { id: rawMaterialId, venueId },
-      })
-
-      if (!rawMaterial) {
-        throw new AppError(`Raw material not found`, 404)
-      }
-
-      // 1. Lock batches FIRST (inside transaction) - prevents race conditions
-      const lockedBatches = await lockBatchesForAllocation(tx, rawMaterialId, venueId)
-
-      if (lockedBatches.length === 0) {
-        throw new AppError(`No active batches available for raw material ${rawMaterialId}`, 400)
-      }
-
-      // 2. Calculate FIFO allocations from locked batches
-      const result = calculateFIFOAllocations(lockedBatches, quantityToDeduct)
-
-      if (result.remainingToAllocate.greaterThan(0)) {
-        throw new AppError(`Insufficient stock. Needed: ${quantityToDeduct}, Available: ${result.totalAvailable.toNumber()}`, 400)
-      }
-
-      const movements: any[] = []
-      let cumulativeStock = rawMaterial.currentStock
-
-      // 4. Process each allocation (update batches + create movements)
-      for (const allocation of result.allocations) {
-        const previousStock = cumulativeStock
-        const newStock = previousStock.sub(allocation.quantityToDeduct)
-        cumulativeStock = newStock
-
-        // Update batch remaining quantity
-        await tx.stockBatch.update({
-          where: { id: allocation.batchId },
-          data: {
-            remainingQuantity: allocation.remainingAfter,
-            status: allocation.remainingAfter.equals(0) ? BatchStatus.DEPLETED : BatchStatus.ACTIVE,
-            depletedAt: allocation.remainingAfter.equals(0) ? new Date() : undefined,
-          },
-        })
-
-        // Create movement record for this batch allocation
-        const movement = await tx.rawMaterialMovement.create({
-          data: {
-            rawMaterialId,
-            venueId,
-            batchId: allocation.batchId,
-            type: movementType,
-            quantity: allocation.quantityToDeduct.neg(), // Negative for deductions
-            unit: rawMaterial.unit,
-            previousStock,
-            newStock,
-            costImpact: allocation.costImpact.neg(), // Negative cost impact for deductions
-            reason: metadata.reason,
-            reference: metadata.reference,
-            createdBy: metadata.createdBy,
-          },
-          include: {
-            batch: {
-              select: {
-                batchNumber: true,
-              },
-            },
-          },
-        })
-
-        movements.push(movement)
-      }
-
-      // 5. Update raw material total stock
-      await tx.rawMaterial.update({
-        where: { id: rawMaterialId },
-        data: {
-          currentStock: cumulativeStock,
-        },
-      })
-
-      // Transaction commits here - locks released automatically
-      return movements
-    },
+    async tx => deductStockFIFOInTx(tx, venueId, rawMaterialId, quantityToDeduct, movementType, metadata),
     {
       // Serializable lo fija withSerializableRetry — no se pasa aquí.
       timeoutMs: 10_000, // 10s max (evita transacciones largas)
@@ -485,6 +405,120 @@ export async function deductStockFIFO(
       baseDelayMs: 40,
     },
   )
+}
+
+/**
+ * Core FIFO deduction running against a CALLER-OWNED transaction client.
+ *
+ * Extraída de deductStockFIFO (fase 3, 2026-08-13) para que deductStockForRecipe
+ * pueda deducir TODAS las líneas de una receta dentro de UNA sola transacción
+ * Serializable (todo-o-nada). Quien llama es dueño de la transacción y del
+ * reintento; esta función no abre ni una ni otro.
+ *
+ * Reglas para usarla:
+ *   - `tx` DEBE ser una transacción Serializable (withSerializableRetry) — el
+ *     FOR UPDATE NOWAIT de lockBatchesForAllocation lanza 55P03 bajo contención
+ *     y el poseedor de la tx debe reintentarla completa.
+ *   - No escribas nada ANTES en la misma tx que no pueda reintentarse junto.
+ *
+ * @throws AppError(404) raw material not found in this venue
+ * @throws AppError(400) no active batches / insufficient stock
+ */
+export async function deductStockFIFOInTx(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  rawMaterialId: string,
+  quantityToDeduct: number,
+  movementType: RawMaterialMovementType,
+  metadata: {
+    reason?: string
+    reference?: string
+    createdBy?: string
+    postingLineId?: string
+  },
+): Promise<any[]> {
+  // 0. El rawMaterial debe pertenecer al venue que deduce — venueId no es
+  // decorativo. Sin esto, cualquier caller interno con un rawMaterialId
+  // ajeno cruzaba tenants.
+  const rawMaterial = await tx.rawMaterial.findFirst({
+    where: { id: rawMaterialId, venueId },
+  })
+
+  if (!rawMaterial) {
+    throw new AppError(`Raw material not found`, 404)
+  }
+
+  // 1. Lock batches FIRST (inside transaction) - prevents race conditions
+  const lockedBatches = await lockBatchesForAllocation(tx, rawMaterialId, venueId)
+
+  if (lockedBatches.length === 0) {
+    throw new AppError(`No active batches available for raw material ${rawMaterialId}`, 400)
+  }
+
+  // 2. Calculate FIFO allocations from locked batches
+  const result = calculateFIFOAllocations(lockedBatches, quantityToDeduct)
+
+  if (result.remainingToAllocate.greaterThan(0)) {
+    throw new AppError(`Insufficient stock. Needed: ${quantityToDeduct}, Available: ${result.totalAvailable.toNumber()}`, 400)
+  }
+
+  const movements: any[] = []
+  let cumulativeStock = rawMaterial.currentStock
+
+  // 4. Process each allocation (update batches + create movements)
+  for (const allocation of result.allocations) {
+    const previousStock = cumulativeStock
+    const newStock = previousStock.sub(allocation.quantityToDeduct)
+    cumulativeStock = newStock
+
+    // Update batch remaining quantity
+    await tx.stockBatch.update({
+      where: { id: allocation.batchId },
+      data: {
+        remainingQuantity: allocation.remainingAfter,
+        status: allocation.remainingAfter.equals(0) ? BatchStatus.DEPLETED : BatchStatus.ACTIVE,
+        depletedAt: allocation.remainingAfter.equals(0) ? new Date() : undefined,
+      },
+    })
+
+    // Create movement record for this batch allocation
+    const movement = await tx.rawMaterialMovement.create({
+      data: {
+        rawMaterialId,
+        venueId,
+        batchId: allocation.batchId,
+        type: movementType,
+        quantity: allocation.quantityToDeduct.neg(), // Negative for deductions
+        unit: rawMaterial.unit,
+        previousStock,
+        newStock,
+        costImpact: allocation.costImpact.neg(), // Negative cost impact for deductions
+        reason: metadata.reason,
+        reference: metadata.reference,
+        createdBy: metadata.createdBy,
+        postingLineId: metadata.postingLineId ?? null,
+      },
+      include: {
+        batch: {
+          select: {
+            batchNumber: true,
+          },
+        },
+      },
+    })
+
+    movements.push(movement)
+  }
+
+  // 5. Update raw material total stock
+  await tx.rawMaterial.update({
+    where: { id: rawMaterialId },
+    data: {
+      currentStock: cumulativeStock,
+    },
+  })
+
+  return movements
 }
 
 /**

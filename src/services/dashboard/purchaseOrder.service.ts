@@ -1030,11 +1030,14 @@ export async function receivePurchaseOrder(
     throw new AppError(`Can only receive orders with status CONFIRMED, SHIPPED, or PARTIAL. Current status: ${order.status}`, 400)
   }
 
-  // Build transaction operations
-  const operations = []
-
-  // Track created batches for linking to movements
-  const batchCreations: Array<{ itemId: string; batchPromise: Promise<any> }> = []
+  // Validate EVERY line first (pure reads) so nothing is written when any
+  // renglón is invalid — the tx below assumes the whole batch is applicable.
+  const validatedItems: Array<{
+    receivedItem: (typeof data.items)[number]
+    orderItem: (typeof order.items)[number]
+    totalReceived: Decimal
+    expirationDate: Date | undefined
+  }> = []
 
   for (const receivedItem of data.items) {
     const orderItem = order.items.find(item => item.id === receivedItem.purchaseOrderItemId)
@@ -1043,11 +1046,9 @@ export async function receivePurchaseOrder(
       throw new AppError(`Purchase order item ${receivedItem.purchaseOrderItemId} not found`, 404)
     }
 
-    // Este camino LEGACY sólo maneja insumos de cocina y NO se va a extender: usa la
-    // forma de arreglo de `$transaction`, que no expone el cliente `tx` y por eso deja
-    // los lotes fuera de la transacción (ver docs/DEMO-PITS-2026-08-BITACORA.md §2).
-    // La mercancía de reventa se recibe por `applyItemReceiveStatusInTx`, que sí es
-    // transaccional. Rechazar explícito es mejor que fallar raro más adelante.
+    // Este camino LEGACY sólo maneja insumos de cocina y NO se va a extender.
+    // La mercancía de reventa se recibe por `applyItemReceiveStatusInTx`.
+    // Rechazar explícito es mejor que fallar raro más adelante.
     if (orderItem.productId) {
       throw new AppError(
         `El renglón de "${orderItem.product?.name ?? 'producto'}" es mercancía de reventa y debe recibirse por renglón, no con "Recibir todo" del flujo anterior.`,
@@ -1075,106 +1076,87 @@ export async function receivePurchaseOrder(
       expirationDate.setDate(expirationDate.getDate() + orderItemRawMaterial.shelfLifeDays)
     }
 
-    // Presentación de compra (CEDIS): si la línea se compró en "caja", se
-    // convierte AQUÍ, en el borde, y todo lo de abajo (batch, stock, movimiento)
-    // sigue viendo la unidad base como siempre.
-    const purchased = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived, orderItemRawMaterial)
+    validatedItems.push({ receivedItem, orderItem, totalReceived, expirationDate })
+  }
 
-    // Create FIFO batch for this received quantity. createStockBatch normalizes
-    // (quantity, unit, costPerUnit) to the raw material's storage unit
-    // internally — we still need to compute the same normalized quantity here
-    // because RawMaterial.currentStock and the movement record use the RM unit.
-    const batchPromise = createStockBatch(
-      venueId,
-      orderItemRawMaterial.id,
-      {
-        purchaseOrderItemId: orderItem.id,
-        quantity: purchased.batch.quantity.toNumber(),
-        unit: purchased.batch.unit,
-        costPerUnit: purchased.batch.costPerUnit.toNumber(),
-        receivedDate: new Date(data.receivedDate),
-        expirationDate,
-      },
-      staffId,
-    )
+  // 🔴 TODO EN UNA TRANSACCIÓN (fase 3, 2026-08-13). Antes esta función usaba la
+  // forma de ARREGLO de `$transaction` y `createStockBatch` corría FUERA: si la
+  // transacción fallaba después, los lotes ya estaban commiteados — inventario
+  // fantasma en FIFO sin saldo ni movimiento que los respalde (misma clase de
+  // bug que la firma #27 de adjustStock). La forma de callback mete lote +
+  // renglón + saldo + kardex + metadata en la MISMA transacción.
+  const createdBatches = await prisma.$transaction(async tx => {
+    const batches: any[] = []
 
-    batchCreations.push({ itemId: orderItem.id, batchPromise })
+    for (const { receivedItem, orderItem, totalReceived, expirationDate } of validatedItems) {
+      const orderItemRawMaterial = orderItem.rawMaterial!
 
-    const receivedInRmUnit = purchased.baseQuantity
+      // Presentación de compra (CEDIS): si la línea se compró en "caja", se
+      // convierte AQUÍ, en el borde, y todo lo de abajo (batch, stock,
+      // movimiento) sigue viendo la unidad base como siempre.
+      const purchased = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived, orderItemRawMaterial)
 
-    // Update order item quantity received and set receiveStatus
-    operations.push(
-      prisma.purchaseOrderItem.update({
+      // Create FIFO batch for this received quantity. createStockBatch
+      // normalizes (quantity, unit, costPerUnit) to the raw material's storage
+      // unit internally. skipAudit: el caller audita DESPUÉS del commit para no
+      // dejar un STOCK_BATCH_CREATED fantasma si la tx se revierte.
+      const batch = await createStockBatch(
+        venueId,
+        orderItemRawMaterial.id,
+        {
+          purchaseOrderItemId: orderItem.id,
+          quantity: purchased.batch.quantity.toNumber(),
+          unit: purchased.batch.unit,
+          costPerUnit: purchased.batch.costPerUnit.toNumber(),
+          receivedDate: new Date(data.receivedDate),
+          expirationDate,
+        },
+        staffId,
+        tx,
+        { skipAudit: true },
+      )
+
+      const receivedInRmUnit = purchased.baseQuantity
+
+      // Update order item quantity received and set receiveStatus
+      await tx.purchaseOrderItem.update({
         where: { id: orderItem.id },
         data: {
           quantityReceived: totalReceived,
           receiveStatus: PurchaseOrderItemStatus.RECEIVED,
         },
-      }),
-    )
+      })
 
-    // Update raw material stock — must add the RM-unit-converted quantity, not
-    // the raw PO quantity, otherwise receiving "1 KG" of a GRAM raw material
-    // would only bump currentStock by 1 (interpreted as 1 GRAM) while the
-    // batch correctly stores 1000g.
-    //
-    // 🔴 INCREMENTO ATÓMICO, NO ASIGNACIÓN. Antes esto calculaba
-    // `orderItemRawMaterial.currentStock.add(recibido)` desde la lectura hecha al
-    // inicio de la función —FUERA de la transacción— y lo escribía como valor
-    // absoluto. Dos renglones del mismo insumo en la misma OC, o dos recepciones
-    // concurrentes de dos paradores distintos, y la segunda escritura PISA a la
-    // primera: se pierde una recepción completa y nadie se entera.
-    //
-    // `increment` se traduce a un `SET currentStock = currentStock + n` que la base
-    // resuelve atómicamente, así que el orden de llegada deja de importar. No basta
-    // con meterlo en una transacción: con el aislamiento por defecto de PostgreSQL
-    // (READ COMMITTED) un leer-modificar-escribir sigue perdiendo actualizaciones.
-    operations.push(
-      prisma.rawMaterial.update({
+      // Update raw material stock — must add the RM-unit-converted quantity, not
+      // the raw PO quantity, otherwise receiving "1 KG" of a GRAM raw material
+      // would only bump currentStock by 1 (interpreted as 1 GRAM) while the
+      // batch correctly stores 1000g.
+      //
+      // 🔴 INCREMENTO ATÓMICO, NO ASIGNACIÓN. Dos renglones del mismo insumo en
+      // la misma OC, o dos recepciones concurrentes de dos paradores distintos,
+      // y una asignación absoluta PISA a la primera escritura: se pierde una
+      // recepción completa y nadie se entera. `increment` se traduce a un
+      // `SET currentStock = currentStock + n` que la base resuelve atómicamente.
+      // No basta con estar en una transacción: con el aislamiento por defecto de
+      // PostgreSQL (READ COMMITTED) un leer-modificar-escribir sigue perdiendo
+      // actualizaciones.
+      const updatedRm = await tx.rawMaterial.update({
         where: { id: orderItemRawMaterial.id },
         data: {
           currentStock: { increment: receivedInRmUnit },
         },
-      }),
-    )
-  }
+      })
 
-  // Wait for all batches to be created (outside transaction to avoid nesting)
-  const createdBatches = await Promise.all(batchCreations.map(bc => bc.batchPromise))
+      // Movement records linked to batches. Movement.quantity, unit,
+      // previousStock, newStock and costImpact must all reference the RM unit so
+      // they reconcile cleanly with RawMaterial.currentStock and StockBatch
+      // (both also normalized). previousStock/newStock salen del RESULTADO del
+      // increment — la lectura del inicio de la función mentiría bajo
+      // concurrencia y rompería la cadena previousStock[i] == newStock[i-1].
+      const newStockAtomic = updatedRm.currentStock
+      const previousStockAtomic = newStockAtomic.sub(receivedInRmUnit)
 
-  // Create movement records linked to batches. Movement.quantity, unit,
-  // previousStock, newStock and costImpact must all reference the RM unit so
-  // they reconcile cleanly with RawMaterial.currentStock and StockBatch
-  // (both also normalized).
-  //
-  // ⚠️ DEUDA CONOCIDA, ya acotada — `previousStock` y `newStock` de abajo salen de la
-  // lectura hecha al INICIO de la función, no del valor real al momento de aplicar. El
-  // saldo guardado en `RawMaterial.currentStock` queda CORRECTO (arriba se usa
-  // `increment`); lo que puede quedar desfasado son estas dos columnas del kardex.
-  //
-  // El caso que lo disparaba SIN concurrencia —dos renglones del mismo insumo en la
-  // misma orden— ya no es alcanzable: `verificarRenglonesDelVenue` rechaza artículos
-  // repetidos al crear y al editar. Queda sólo la ventana de dos recepciones
-  // CONCURRENTES de la misma orden, que es mucho más estrecha.
-  //
-  // No se corrige aquí porque esta función usa la forma de ARREGLO de `$transaction`,
-  // que no expone el cliente `tx` necesario para releer adentro; arreglarlo obliga a
-  // convertirla a la forma de callback (~185 líneas).
-  //
-  // El camino moderno (`applyItemReceiveStatusInTx`) ya corre en forma de callback
-  // y no tiene este problema. Toda funcionalidad nueva —incluida la recepción de
-  // mercancía de reventa— debe construirse ahí, NO aquí.
-  // Ver docs/DEMO-PITS-2026-08-BITACORA.md §2.
-  for (let i = 0; i < data.items.length; i++) {
-    const receivedItem = data.items[i]
-    const orderItem = order.items.find(item => item.id === receivedItem.purchaseOrderItemId)!
-    // Ya se validó arriba que todos los renglones de este camino son de insumo.
-    const orderItemRawMaterial = orderItem.rawMaterial!
-    const batch = createdBatches[i]
-    const receivedInRmUnit = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived, orderItemRawMaterial).baseQuantity
-
-    operations.push(
-      prisma.rawMaterialMovement.create({
+      await tx.rawMaterialMovement.create({
         data: {
           rawMaterialId: orderItemRawMaterial.id,
           venueId,
@@ -1182,31 +1164,43 @@ export async function receivePurchaseOrder(
           type: RawMaterialMovementType.PURCHASE,
           quantity: receivedInRmUnit,
           unit: orderItemRawMaterial.unit,
-          previousStock: orderItemRawMaterial.currentStock,
-          newStock: orderItemRawMaterial.currentStock.add(receivedInRmUnit),
+          previousStock: previousStockAtomic,
+          newStock: newStockAtomic,
           // batch.costPerUnit is already per-RM-unit (createStockBatch normalized it).
           costImpact: batch.costPerUnit.mul(receivedInRmUnit),
           reason: `Purchase order ${order.orderNumber} received (Batch: ${batch.batchNumber})`,
           reference: order.id,
           createdBy: staffId,
         },
-      }),
-    )
-  }
+      })
 
-  // Update purchase order metadata
-  operations.push(
-    prisma.purchaseOrder.update({
+      batches.push({ batch, rawMaterialId: orderItemRawMaterial.id, quantity: purchased.batch.quantity.toNumber() })
+    }
+
+    // Update purchase order metadata
+    await tx.purchaseOrder.update({
       where: { id: purchaseOrderId },
       data: {
         receivedDate: new Date(data.receivedDate),
         receivedBy: staffId,
       },
-    }),
-  )
+    })
 
-  // Execute all operations in a transaction
-  await prisma.$transaction(operations)
+    return batches
+  })
+
+  // Audit AFTER commit (fire-and-forget): createStockBatch skipped its internal
+  // log inside the tx, so a rolled-back batch never leaves a phantom entry.
+  for (const { batch, rawMaterialId, quantity } of createdBatches) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'STOCK_BATCH_CREATED',
+      entity: 'StockBatch',
+      entityId: batch.id,
+      data: { batchNumber: batch.batchNumber, rawMaterialId, quantity, costPerUnit: batch.costPerUnit?.toNumber?.() ?? batch.costPerUnit },
+    })
+  }
 
   // Update order status based on item statuses (considers RECEIVED, DAMAGED, NOT_PROCESSED)
   await updatePurchaseOrderStatusBasedOnItems(purchaseOrderId, staffId)

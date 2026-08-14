@@ -72,6 +72,20 @@ export class ServiceUnavailableError extends AppError {
   }
 }
 
+/**
+ * 502 — el proveedor de pagos NO contestó (timeout, red caída, 5xx del
+ * gateway) DESPUÉS de que le mandamos la autorización: el cargo pudo haberse
+ * aprobado del otro lado. Es la categoría opuesta a un rechazo definitivo
+ * (declinada, fondos insuficientes → BadRequestError): aquí REINTENTAR puede
+ * COBRAR DOS VECES. Quien atrape este error debe dejar la operación en su
+ * estado "en curso" para reconciliación, nunca liberarla para reintento.
+ */
+export class PaymentOutcomeUnknownError extends AppError {
+  constructor(message: string = 'No se pudo confirmar el resultado del cobro. No lo intentes de nuevo: verifica el estado del pago.') {
+    super(message, 502, true, 'PAYMENT_OUTCOME_UNKNOWN')
+  }
+}
+
 // Consider re-adding other specific error classes if they were used elsewhere and are now missing:
 export class AuthenticationError extends AppError {
   constructor(message: string = 'No autenticado') {

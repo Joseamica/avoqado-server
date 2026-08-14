@@ -45,7 +45,7 @@ import {
   getSessionStatus,
 } from '../../../../src/services/dashboard/paymentLink.service'
 import { prismaMock } from '../../../__helpers__/setup'
-import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
+import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // ==========================================
@@ -551,7 +551,7 @@ describe('PaymentLink Service', () => {
       expect(mockBlumonService.authorizePayment).not.toHaveBeenCalled()
     })
 
-    it('si el proveedor FALLA, la sesión regresa a PROCESSING (reintentable) y el error se propaga', async () => {
+    it('si el proveedor FALLA antes de mandar el cargo, la sesión regresa a PROCESSING (reintentable)', async () => {
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
       mockBlumonService.authorizePayment.mockRejectedValueOnce(new Error('provider timeout'))
 
@@ -563,6 +563,36 @@ describe('PaymentLink Service', () => {
           data: expect.objectContaining({ status: 'PROCESSING' }),
         }),
       )
+    })
+
+    it('un rechazo DEFINITIVO del proveedor (declinada) suelta el claim para reintentar con otra tarjeta', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      mockBlumonService.authorizePayment.mockRejectedValueOnce(new BadRequestError('Tarjeta declinada'))
+
+      await expect(completeCharge('abc12345', 'cs_pl_test123')).rejects.toThrow('Tarjeta declinada')
+
+      expect(prismaMock.checkoutSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: 'CHARGING' }),
+          data: expect.objectContaining({ status: 'PROCESSING' }),
+        }),
+      )
+    })
+
+    it('🔴 resultado DESCONOCIDO (timeout post-envío) NO suelta el claim — la sesión queda CHARGING', async () => {
+      // El doble cargo del audit: Blumon aprueba pero la respuesta se pierde.
+      // Si el claim se soltara aquí, el cliente reintenta, gana el CAS otra vez
+      // y autoriza una SEGUNDA vez con otro transactionId. La sesión debe
+      // quedarse CHARGING (atorada pero segura) para reconciliación.
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      mockBlumonService.authorizePayment.mockRejectedValueOnce(new PaymentOutcomeUnknownError())
+
+      await expect(completeCharge('abc12345', 'cs_pl_test123')).rejects.toThrow(PaymentOutcomeUnknownError)
+
+      // El ÚNICO updateMany permitido es el claim PROCESSING→CHARGING; jamás el
+      // revert CHARGING→PROCESSING.
+      const revertCalls = prismaMock.checkoutSession.updateMany.mock.calls.filter((call: any[]) => call[0]?.data?.status === 'PROCESSING')
+      expect(revertCalls).toHaveLength(0)
     })
 
     it('should charge and create Order for ITEM link', async () => {

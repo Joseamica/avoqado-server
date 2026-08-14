@@ -73,6 +73,49 @@ export async function getProductInventoryMethod(productId: string): Promise<Inve
 }
 
 /**
+ * Batch variant of getProductInventoryMethod: classifies N products with ONE
+ * query. Nació para createSalePostingInTx, que clasificaba item por item
+ * DENTRO de la transacción del cobro (N+1 sobre la ruta del dinero, contra el
+ * timeout de 5s de la tx interactiva). Un producto inexistente simplemente no
+ * aparece en el mapa — el caller decide (el posting lo trata como no-deducible).
+ *
+ * @param client - pásale la tx cuando corras dentro de una transacción; así la
+ *                 consulta usa la MISMA conexión en vez de pedir otra al pool.
+ */
+export async function getProductInventoryMethods(
+  productIds: string[],
+  client: Pick<typeof prisma, 'product'> = prisma,
+): Promise<Map<string, InventoryMethod | null>> {
+  const methods = new Map<string, InventoryMethod | null>()
+  const uniqueIds = [...new Set(productIds)].filter(Boolean)
+  if (uniqueIds.length === 0) return methods
+
+  const products = await client.product.findMany({
+    where: { id: { in: uniqueIds } },
+    select: {
+      id: true,
+      trackInventory: true,
+      inventoryMethod: true,
+      recipe: { select: { id: true } },
+    },
+  })
+
+  for (const product of products) {
+    if (!product.trackInventory) {
+      methods.set(product.id, null)
+    } else if (product.inventoryMethod) {
+      methods.set(product.id, product.inventoryMethod)
+    } else if (product.recipe) {
+      methods.set(product.id, 'RECIPE')
+    } else {
+      methods.set(product.id, null)
+    }
+  }
+
+  return methods
+}
+
+/**
  * Process inventory deduction when a product is sold
  * Automatically determines the correct method based on inventory configuration
  *
@@ -95,12 +138,30 @@ export async function deductInventoryForProduct(
 ) {
   const inventoryMethod = await getProductInventoryMethod(productId)
 
+  // Venta por peso (fase 3, 2026-08-13): en una línea pesada los callers pasan
+  // `quantity` = KILOS pesados (effectiveQuantity), y esas líneas siempre
+  // llevan quantity=1. Los modificadores ADDITION son POR LÍNEA (una selección
+  // por renglón): escalar "extra salsa" por los kilos deducía 0.435× o 2.5× lo
+  // configurado. La receta/el stock del producto SÍ escalan por kilos — solo
+  // la escala del modificador se corrige. Se resuelve AQUÍ para cubrir a todos
+  // los callers (TPV, pagos, payment links, dashboard) sin tocarlos.
+  let modifierScaleQuantity = quantity
+  if (orderModifiers?.length) {
+    const productScale = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { soldByWeight: true },
+    })
+    if (productScale?.soldByWeight) {
+      modifierScaleQuantity = 1
+    }
+  }
+
   // No inventory tracking for product
   if (!inventoryMethod) {
     // ✅ Still process ADDITION modifiers even if product doesn't track inventory
     // Example: "Extra Bacon" on a product without recipe tracking
     if (orderModifiers?.length) {
-      await deductStockForModifiers(venueId, quantity, orderModifiers, orderId, staffId)
+      await deductStockForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options?.postingLineId)
     }
     return {
       inventoryMethod: null,
@@ -113,17 +174,25 @@ export async function deductInventoryForProduct(
       const result = await deductSimpleStock(venueId, productId, quantity, orderId, staffId, options?.postingLineId)
       // ✅ Also deduct ADDITION modifiers for QUANTITY products
       if (orderModifiers?.length) {
-        await deductStockForModifiers(venueId, quantity, orderModifiers, orderId, staffId)
+        await deductStockForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options?.postingLineId)
       }
       return result
     }
 
     case 'RECIPE': {
       // ✅ Pass modifiers to recipe deduction (handles SUBSTITUTION)
-      const result = await deductRecipeBasedInventory(venueId, productId, quantity, orderId, staffId, orderModifiers)
+      const result = await deductRecipeBasedInventory(
+        venueId,
+        productId,
+        quantity,
+        orderId,
+        staffId,
+        orderModifiers,
+        options?.postingLineId,
+      )
       // ✅ Also deduct ADDITION modifiers (SUBSTITUTION handled in deductStockForRecipe)
       if (orderModifiers?.length) {
-        await deductStockForModifiers(venueId, quantity, orderModifiers, orderId, staffId)
+        await deductStockForModifiers(venueId, modifierScaleQuantity, orderModifiers, orderId, staffId, options?.postingLineId)
       }
       return result
     }
@@ -281,9 +350,10 @@ async function deductRecipeBasedInventory(
   orderId: string,
   staffId?: string,
   orderModifiers?: OrderModifierForInventory[],
+  postingLineId?: string,
 ) {
   // Use existing recipe deduction logic with modifier support
-  await deductStockForRecipe(venueId, productId, quantity, orderId, staffId, orderModifiers)
+  await deductStockForRecipe(venueId, productId, quantity, orderId, staffId, orderModifiers, postingLineId)
 
   return {
     inventoryMethod: 'RECIPE',

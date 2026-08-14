@@ -19,9 +19,11 @@ import { prismaMock } from '../../../__helpers__/setup'
 
 const deductInventoryMock = jest.fn()
 const getInventoryMethodMock = jest.fn()
+const getInventoryMethodsMock = jest.fn()
 jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({
   deductInventoryForProduct: (...args: unknown[]) => deductInventoryMock(...args),
   getProductInventoryMethod: (...args: unknown[]) => getInventoryMethodMock(...args),
+  getProductInventoryMethods: (...args: unknown[]) => getInventoryMethodsMock(...args),
 }))
 
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
@@ -32,7 +34,10 @@ const ORDER = 'order-1'
 describe('createSalePostingInTx', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    getInventoryMethodMock.mockResolvedValue('QUANTITY')
+    // Clasificación en batch (UNA consulta para todos los productos del ticket).
+    getInventoryMethodsMock.mockImplementation(async (ids: string[]) => new Map(ids.map(id => [id, 'QUANTITY'])))
+    // Pre-check de duplicado: por default no existe posting previo.
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue(null as any)
   })
 
   const items = [
@@ -65,7 +70,7 @@ describe('createSalePostingInTx', () => {
   })
 
   it('sin items deducibles crea el posting SKIPPED con razón durable NO_ITEMS', async () => {
-    getInventoryMethodMock.mockResolvedValue(null)
+    getInventoryMethodsMock.mockResolvedValue(new Map())
     prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-2', status: 'SKIPPED' } as any)
 
     await createSalePostingInTx(prismaMock as any, {
@@ -80,9 +85,11 @@ describe('createSalePostingInTx', () => {
     expect(createArg.data.skipReason).toBe('NO_ITEMS')
   })
 
-  it('el duplicado (P2002 del UNIQUE) devuelve el posting existente sin tronar', async () => {
-    const p2002 = new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'test' } as any)
-    prismaMock.inventoryPosting.create.mockRejectedValue(p2002)
+  it('el duplicado se detecta con pre-check ANTES del create (nunca 25P02 en la tx del cobro)', async () => {
+    // 🔴 Regresión real: el fallback viejo atrapaba P2002 y hacía findUnique en
+    // la MISMA tx interactiva — pero Postgres ya la había abortado, así que el
+    // "camino idempotente" moría con 25P02 y tiraba el cobro completo. El
+    // pre-check corre antes de tocar el UNIQUE: cero abort, cero re-deducción.
     prismaMock.inventoryPosting.findUnique.mockResolvedValue({ id: 'post-existente', status: 'APPLIED' } as any)
 
     const posting = await createSalePostingInTx(prismaMock as any, {
@@ -93,6 +100,22 @@ describe('createSalePostingInTx', () => {
     })
 
     expect(posting).toMatchObject({ id: 'post-existente' })
+    expect(prismaMock.inventoryPosting.create).not.toHaveBeenCalled()
+  })
+
+  it('clasifica los productos en UNA llamada batch (no N+1 dentro de la tx del cobro)', async () => {
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-1', status: 'PENDING' } as any)
+
+    await createSalePostingInTx(prismaMock as any, {
+      venueId: VENUE,
+      orderId: ORDER,
+      items: items as any,
+      staffId: 'staff-1',
+    })
+
+    expect(getInventoryMethodsMock).toHaveBeenCalledTimes(1)
+    expect(getInventoryMethodsMock.mock.calls[0][0]).toEqual(['p1', 'p3'])
+    expect(getInventoryMethodMock).not.toHaveBeenCalled()
   })
 })
 
@@ -103,6 +126,9 @@ describe('applySalePosting', () => {
     prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 1 } as any)
     prismaMock.inventoryPostingLine.update.mockResolvedValue({} as any)
     prismaMock.inventoryPosting.update.mockResolvedValue({} as any)
+    // Guard anti doble-deducción: por default la línea NO tiene movimientos.
+    prismaMock.inventoryMovement.count.mockResolvedValue(0 as any)
+    prismaMock.rawMaterialMovement.count.mockResolvedValue(0 as any)
   })
 
   const posting = (lines: any[]) => ({
@@ -136,7 +162,15 @@ describe('applySalePosting', () => {
 
     const result = await applySalePosting('post-1', 'staff-1')
 
-    expect(deductInventoryMock).toHaveBeenCalledWith(VENUE, 'p1', 2, ORDER, 'staff-1', [], expect.objectContaining({ postingLineId: 'line-1' }))
+    expect(deductInventoryMock).toHaveBeenCalledWith(
+      VENUE,
+      'p1',
+      2,
+      ORDER,
+      'staff-1',
+      [],
+      expect.objectContaining({ postingLineId: 'line-1' }),
+    )
     expect(prismaMock.inventoryPosting.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'APPLIED' }) }),
     )
@@ -144,7 +178,10 @@ describe('applySalePosting', () => {
   })
 
   it('una línea fallida deja PARTIAL_FAILED y el reintento NO re-deduce la aplicada', async () => {
-    const lines = [line(), line({ id: 'line-2', effectKey: 'oi-2', orderItemId: 'oi-2', productId: 'p2', expectedQuantityBase: new Prisma.Decimal(1) })]
+    const lines = [
+      line(),
+      line({ id: 'line-2', effectKey: 'oi-2', orderItemId: 'oi-2', productId: 'p2', expectedQuantityBase: new Prisma.Decimal(1) }),
+    ]
     prismaMock.inventoryPosting.findUnique.mockResolvedValue(posting(lines) as any)
     wireOrderItems([
       { id: 'oi-1', productId: 'p1', quantity: 2, weightQuantity: null, modifiers: [] },
@@ -166,8 +203,20 @@ describe('applySalePosting', () => {
     prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 1 } as any)
     prismaMock.inventoryPostingLine.update.mockResolvedValue({} as any)
     prismaMock.inventoryPosting.update.mockResolvedValue({} as any)
+    prismaMock.inventoryMovement.count.mockResolvedValue(0 as any)
+    prismaMock.rawMaterialMovement.count.mockResolvedValue(0 as any)
     prismaMock.inventoryPosting.findUnique.mockResolvedValue(
-      posting([line({ status: 'APPLIED' }), line({ id: 'line-2', effectKey: 'oi-2', orderItemId: 'oi-2', productId: 'p2', status: 'FAILED', expectedQuantityBase: new Prisma.Decimal(1) })]) as any,
+      posting([
+        line({ status: 'APPLIED' }),
+        line({
+          id: 'line-2',
+          effectKey: 'oi-2',
+          orderItemId: 'oi-2',
+          productId: 'p2',
+          status: 'FAILED',
+          expectedQuantityBase: new Prisma.Decimal(1),
+        }),
+      ]) as any,
     )
     wireOrderItems([
       { id: 'oi-1', productId: 'p1', quantity: 2, weightQuantity: null, modifiers: [] },
@@ -202,5 +251,48 @@ describe('applySalePosting', () => {
 
     expect(result).toBeNull()
     expect(deductInventoryMock).not.toHaveBeenCalled()
+  })
+
+  it('el claim CAS puede rescatar un APPLYING huérfano (lease vencido)', async () => {
+    // Un crash entre el CAS y el update final dejaba el posting APPLYING para
+    // siempre: ni este predicado ni el sweeper podían volver a tocarlo. El
+    // claim ahora acepta APPLYING con updatedAt más viejo que el lease.
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue(posting([line()]) as any)
+    wireOrderItems([{ id: 'oi-1', productId: 'p1', quantity: 2, weightQuantity: null, modifiers: [] }])
+    deductInventoryMock.mockResolvedValue({ inventoryMethod: 'QUANTITY', remainingStock: 5, productName: 'Coca' })
+
+    await applySalePosting('post-1', 'staff-1')
+
+    const claimWhere = (prismaMock.inventoryPosting.updateMany.mock.calls[0][0] as any).where
+    const staleClause = claimWhere.OR.find((c: any) => c.status === 'APPLYING')
+    expect(staleClause).toBeDefined()
+    expect(staleClause.updatedAt.lt).toBeInstanceOf(Date)
+    // El lease es de 10 min: el corte tiene que estar en el pasado.
+    expect(staleClause.updatedAt.lt.getTime()).toBeLessThan(Date.now())
+  })
+
+  it('línea con movimientos existentes se RECUPERA sin re-deducir (crash entre deducción y flip)', async () => {
+    // 🔴 El P1 de la doble deducción: la deducción commitea en SU transacción y
+    // el flip a APPLIED corre después. Si el proceso muere en esa ventana, la
+    // línea queda PENDING con el stock ya descontado. El kardex (postingLineId
+    // en los movimientos) prueba que ya ocurrió: se recupera el estado, no se
+    // repite el efecto.
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue(posting([line()]) as any)
+    wireOrderItems([{ id: 'oi-1', productId: 'p1', quantity: 2, weightQuantity: null, modifiers: [] }])
+    prismaMock.rawMaterialMovement.count.mockResolvedValue(3 as any) // receta ya deducida
+
+    const result = await applySalePosting('post-1', 'staff-1')
+
+    expect(deductInventoryMock).not.toHaveBeenCalled()
+    expect(prismaMock.inventoryPostingLine.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'line-1' },
+        data: expect.objectContaining({ status: 'APPLIED', reason: 'RECOVERED_FROM_MOVEMENTS' }),
+      }),
+    )
+    expect(prismaMock.inventoryPosting.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'APPLIED' }) }),
+    )
+    expect(result?.issues).toEqual([])
   })
 })

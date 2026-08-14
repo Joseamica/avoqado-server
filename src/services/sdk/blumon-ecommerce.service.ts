@@ -22,7 +22,7 @@
 
 import axios, { AxiosInstance } from 'axios'
 import logger from '@/config/logger'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, PaymentOutcomeUnknownError } from '@/errors/AppError'
 import {
   IBlumonEcommerceService,
   BlumonTokenizeRequest,
@@ -264,6 +264,12 @@ export class BlumonEcommerceService implements IBlumonEcommerceService {
         authorizationCode: data.dataResponse?.authorization,
       }
     } catch (error: any) {
+      // El rechazo de negocio de arriba (Blumon respondió status:false) ya
+      // viene tipado — se propaga tal cual: ES un rechazo definitivo.
+      if (error instanceof BadRequestError) {
+        throw error
+      }
+
       logger.error('❌ Payment charge failed', {
         error: error.message,
         statusCode: error.response?.status,
@@ -275,6 +281,19 @@ export class BlumonEcommerceService implements IBlumonEcommerceService {
           url: error.config?.url,
         }),
       })
+
+      // 🔴 Clasificación decline-vs-desconocido (auditoría 2026-08-13): un
+      // timeout/corte de red DESPUÉS de mandar /ecommerce/charge NO dice que el
+      // cargo falló — Blumon pudo aprobarlo y perderse solo la respuesta.
+      // Colapsar eso en BadRequestError hacía que completeCharge soltara el
+      // claim CHARGING y el cliente reintentara: doble cargo real. Solo una
+      // respuesta HTTP 4xx del proveedor es un rechazo definitivo; sin
+      // respuesta (ECONNRESET/ETIMEDOUT/abort) o con 5xx del gateway, el
+      // resultado es DESCONOCIDO y el caller debe quedarse fail-closed.
+      const providerResponded = error.response?.status != null && error.response.status < 500
+      if (!providerResponded) {
+        throw new PaymentOutcomeUnknownError()
+      }
 
       throw new BadRequestError(error.response?.data?.message || error.message || 'Failed to charge payment')
     }

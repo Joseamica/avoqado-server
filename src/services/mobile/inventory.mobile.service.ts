@@ -7,7 +7,9 @@
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { MovementType, RawMaterialMovementType } from '@prisma/client'
-import { adjustStock as adjustRawMaterialStock } from '../dashboard/rawMaterial.service'
+import { checkAndCreateLowStockAlert } from '../dashboard/rawMaterial.service'
+import { createStockBatch, deductStockFIFOInTx } from '../dashboard/fifoBatch.service'
+import { withSerializableRetry } from '../../utils/serializableRetry'
 import { logAction } from '../dashboard/activity-log.service'
 import { computeInventoryAvailability } from '../dashboard/product.dashboard.service'
 
@@ -150,6 +152,14 @@ export async function getStockOverview(venueId: string, page: number, pageSize: 
 }
 
 /**
+ * APPLYING es un estado interno del server (claim del confirm). Las apps
+ * distribuidas solo conocen IN_PROGRESS/COMPLETED — mandarles un valor nuevo
+ * rompe sus decoders (contrato /mobile: nunca cambiar valores de respuesta).
+ * Para el cliente, un conteo aplicándose sigue "en progreso".
+ */
+const clientStockCountStatus = (status: string): string => (status === 'APPLYING' ? 'IN_PROGRESS' : status)
+
+/**
  * Get stock counts for a venue.
  */
 export async function getStockCounts(venueId: string) {
@@ -170,7 +180,7 @@ export async function getStockCounts(venueId: string) {
   return counts.map(c => ({
     id: c.id,
     type: c.type,
-    status: c.status,
+    status: clientStockCountStatus(c.status),
     note: c.note,
     createdAt: c.createdAt.toISOString(),
     createdBy: c.createdByUser ? `${c.createdByUser.firstName} ${c.createdByUser.lastName}` : null,
@@ -343,7 +353,7 @@ export async function createStockCount(
   return {
     id: count.id,
     type: count.type,
-    status: count.status,
+    status: clientStockCountStatus(count.status),
     note: count.note,
     createdAt: count.createdAt.toISOString(),
     createdBy: null,
@@ -410,10 +420,37 @@ export async function updateStockCount(countId: string, venueId: string, items: 
 
 /**
  * Confirm a stock count - applies inventory adjustments.
+ *
+ * 🔴 CLAIM ATÓMICO + SET EN TX CON RELECTURA (fase 3, 2026-08-13):
+ *
+ * - Doble-confirm: dos confirmaciones concurrentes pasaban ambas el check de
+ *   status (leído fuera de toda transacción) y aplicaban los ajustes DOS veces.
+ *   Ahora el claim IN_PROGRESS→COMPLETED es un updateMany condicional: solo
+ *   quien lo gana aplica; el perdedor recibe 404.
+ * - TOCTOU: el delta se calculaba contra el snapshot cargado al ABRIR la
+ *   confirmación; una venta en la ventana quedaba pisada por el SET y el
+ *   movimiento guardaba un previousStock mentiroso. Ahora cada línea relee su
+ *   stock DENTRO de su transacción con FOR UPDATE y aplica contra ese valor.
+ * - Si la aplicación falla, el claim se revierte a IN_PROGRESS (mejor esfuerzo)
+ *   para que el cajero pueda reintentar; re-confirmar es seguro porque cada
+ *   línea vuelve a medir su delta contra el stock fresco.
+ * - 🔴 COMPLETED se estampa AL FINAL, no como claim (auditoría 2026-08-13): el
+ *   claim ahora es IN_PROGRESS→APPLYING. Antes el claim marcaba COMPLETED
+ *   primero; un crash a media aplicación (o un revert fallido) dejaba un conteo
+ *   "completado" con cero ajustes aplicados y SIN camino de reintento — el
+ *   propio guard del claim respondía "ya completado". Un APPLYING huérfano
+ *   (lease vencido) sí puede re-reclamarse: re-aplicar es seguro porque cada
+ *   línea mide su delta contra el stock fresco (las ya aplicadas dan delta 0).
  */
+
+/** Un APPLYING más viejo que esto es un worker muerto: el conteo se re-reclama. */
+const STOCK_COUNT_APPLYING_LEASE_MS = 2 * 60 * 1000
+
 export async function confirmStockCount(countId: string, venueId: string, userId: string) {
   const count = await prisma.stockCount.findFirst({
-    where: { id: countId, venueId, status: 'IN_PROGRESS' },
+    // APPLYING entra al pre-read para que el reintento tras un crash pueda
+    // cargar el conteo; el claim de abajo decide si de verdad puede aplicarlo.
+    where: { id: countId, venueId, status: { in: ['IN_PROGRESS', 'APPLYING'] } },
     include: {
       items: {
         include: {
@@ -433,131 +470,263 @@ export async function confirmStockCount(countId: string, venueId: string, userId
   // (this bit the E2E test — 46 untouched ingredients started wiping stock).
   const countedItems = count.items.filter(item => item.countedAt !== null)
 
-  // Defensa en la frontera del EFECTO (audit Codex 2026-08-12): el update de
-  // hoy ya rechaza negativos, pero un negativo ALMACENADO antes del deploy —o
-  // colado por otra vía— no debe aplicarse jamás al inventario. Un conteo
-  // físico no puede ser negativo.
+  // Defensa en la frontera del EFECTO (audit Codex 2026-08-12): un negativo
+  // ALMACENADO antes del deploy —o colado por otra vía— no debe aplicarse
+  // jamás al inventario. Un conteo físico no puede ser negativo.
   if (countedItems.some(item => Number(item.counted) < 0)) {
     throw new BadRequestError('La cantidad contada no puede ser negativa. Corrige la línea y vuelve a confirmar.')
   }
 
-  // Ingredient lines: the physical count is the truth, so compute the delta
-  // against the CURRENT stock (not `expected`, which may be stale if sales
-  // happened mid-count) and delegate to adjustStock — it handles FIFO batch
-  // deduction/creation, the COUNT movement and low-stock alerts. Seed/legacy
-  // ingredients may have stock but NO active batches, where FIFO deduction
-  // throws — fall back to a direct set + COUNT movement (no batch link).
-  const ingredientFailures: { rawMaterialId: string; name: string; error: string }[] = []
-  for (const item of countedItems) {
-    if (!item.rawMaterialId || !item.rawMaterial) continue
-    const current = Number(item.rawMaterial.currentStock)
-    const counted = Number(item.counted)
-    const delta = counted - current
-    try {
-      await adjustRawMaterialStock(
-        venueId,
-        item.rawMaterialId,
-        { quantity: delta, type: RawMaterialMovementType.COUNT, reason: `Conteo de inventario #${countId}` },
-        userId,
-      )
-    } catch {
+  // Claim atómico ANTES de aplicar: mata el doble-confirm en la raíz. El claim
+  // es APPLYING (no COMPLETED): completar se gana aplicando, no reclamando.
+  const claim = await prisma.stockCount.updateMany({
+    where: {
+      id: countId,
+      venueId,
+      OR: [
+        { status: 'IN_PROGRESS' },
+        // Rescate: un worker que murió a media aplicación dejó APPLYING; tras
+        // el lease, el reintento del cajero puede volver a reclamarlo.
+        { status: 'APPLYING', applyingAt: { lt: new Date(Date.now() - STOCK_COUNT_APPLYING_LEASE_MS) } },
+      ],
+    },
+    data: { status: 'APPLYING', applyingAt: new Date() },
+  })
+  if (claim.count === 0) {
+    throw new NotFoundError('Conteo no encontrado, en proceso o ya completado')
+  }
+
+  // Ajustes realmente aplicados (con el stock fresco de cada tx) — es lo que
+  // se audita; el resumen contra `expected` mentía e incluía líneas no contadas.
+  const appliedAdjustments: Array<{
+    productId: string | null
+    productName: string
+    previous: number
+    counted: number
+    difference: number
+  }> = []
+
+  try {
+    // ── Insumos: la verdad es el conteo físico → SET contra relectura ────────
+    const ingredientFailures: { rawMaterialId: string; name: string; error: string }[] = []
+    for (const item of countedItems) {
+      if (!item.rawMaterialId || !item.rawMaterial) continue
+      const rawMaterialId = item.rawMaterialId
+      const counted = Number(item.counted)
+      const reason = `Conteo de inventario #${countId}`
+
       try {
-        await prisma.$transaction([
-          prisma.rawMaterial.update({
-            where: { id: item.rawMaterialId },
-            data: { currentStock: counted, lastCountAt: new Date() },
-          }),
-          prisma.rawMaterialMovement.create({
-            data: {
-              rawMaterialId: item.rawMaterialId,
+        const applied = await withSerializableRetry(
+          async tx => {
+            // Relectura CON CANDADO: el delta se mide contra el stock del
+            // momento de aplicar, no contra el snapshot de la apertura.
+            const rows = await tx.$queryRaw<
+              Array<{ currentStock: unknown; unit: string; costPerUnit: unknown; perishable: boolean; shelfLifeDays: number | null }>
+            >`
+              SELECT "currentStock", unit, "costPerUnit", perishable, "shelfLifeDays"
+              FROM "RawMaterial"
+              WHERE id = ${rawMaterialId} AND "venueId" = ${venueId}
+              FOR UPDATE
+            `
+            if (rows.length === 0) {
+              throw new NotFoundError(`Insumo ${rawMaterialId} no encontrado en esta sucursal`)
+            }
+            const fresh = rows[0]
+            const current = Number(fresh.currentStock)
+            const delta = counted - current
+
+            if (delta === 0) {
+              await tx.rawMaterial.update({ where: { id: rawMaterialId }, data: { lastCountAt: new Date() } })
+              return { delta, previous: current, batch: null as any }
+            }
+
+            if (delta < 0) {
+              try {
+                await deductStockFIFOInTx(tx, venueId, rawMaterialId, Math.abs(delta), RawMaterialMovementType.COUNT, {
+                  reason,
+                  createdBy: userId,
+                })
+                await tx.rawMaterial.update({ where: { id: rawMaterialId }, data: { lastCountAt: new Date() } })
+                return { delta, previous: current, batch: null as any }
+              } catch (error) {
+                // Fallback SOLO para el hueco legítimo: insumo seed/legacy con
+                // saldo pero sin lotes ACTIVE (o con menos lote que saldo). El
+                // catch-all anterior tragaba CUALQUIER error y rompía el
+                // invariante currentStock == Σ lotes ACTIVE sin avisar.
+                const message = error instanceof Error ? error.message : String(error)
+                const isBatchGap = message.includes('No active batches') || message.includes('Insufficient stock')
+                if (!isBatchGap) throw error
+
+                await tx.rawMaterial.update({
+                  where: { id: rawMaterialId },
+                  data: { currentStock: counted, lastCountAt: new Date() },
+                })
+                await tx.rawMaterialMovement.create({
+                  data: {
+                    rawMaterialId,
+                    venueId,
+                    type: RawMaterialMovementType.COUNT,
+                    quantity: delta,
+                    unit: (fresh.unit as any) ?? 'PIECE',
+                    previousStock: current,
+                    newStock: counted,
+                    reason: `${reason} (ajuste directo, sin lotes)`,
+                    createdBy: userId,
+                  },
+                })
+                return { delta, previous: current, batch: null as any }
+              }
+            }
+
+            // delta > 0: el excedente contado entra como lote nuevo (misma
+            // mecánica que adjustStock) para conservar currentStock == Σ lotes.
+            const created = await createStockBatch(
               venueId,
-              type: RawMaterialMovementType.COUNT,
-              quantity: delta,
-              unit: (item.rawMaterial as any).unit ?? 'PIECE',
-              previousStock: current,
-              newStock: counted,
-              reason: `Conteo de inventario #${countId} (ajuste directo, sin lotes)`,
-              createdBy: userId,
-            },
-          }),
-        ])
-      } catch (fallbackError) {
+              rawMaterialId,
+              {
+                quantity: delta,
+                unit: fresh.unit as any,
+                costPerUnit: Number(fresh.costPerUnit ?? 0),
+                receivedDate: new Date(),
+                expirationDate:
+                  fresh.perishable && fresh.shelfLifeDays ? new Date(Date.now() + fresh.shelfLifeDays * 24 * 60 * 60 * 1000) : undefined,
+              },
+              userId,
+              tx,
+              { skipAudit: true },
+            )
+
+            await tx.rawMaterial.update({
+              where: { id: rawMaterialId },
+              data: { currentStock: { increment: delta }, lastCountAt: new Date() },
+            })
+
+            await tx.rawMaterialMovement.create({
+              data: {
+                rawMaterialId,
+                venueId,
+                batchId: created.id,
+                type: RawMaterialMovementType.COUNT,
+                quantity: delta,
+                unit: fresh.unit as any,
+                previousStock: current,
+                newStock: counted,
+                costImpact: Number(fresh.costPerUnit ?? 0) * delta,
+                reason,
+                createdBy: userId,
+              },
+            })
+            return { delta, previous: current, batch: created }
+          },
+          { timeoutMs: 10_000, maxRetries: 3, baseDelayMs: 40 },
+        )
+
+        // Post-commit (fire-and-forget): auditoría y alertas fuera de la tx.
+        if (applied.batch) {
+          void logAction({
+            staffId: userId,
+            venueId,
+            action: 'STOCK_BATCH_CREATED',
+            entity: 'StockBatch',
+            entityId: applied.batch.id,
+            data: { batchNumber: applied.batch.batchNumber, rawMaterialId, quantity: applied.delta },
+          })
+        }
+        if (applied.delta !== 0) {
+          void logAction({
+            staffId: userId,
+            venueId,
+            action: 'STOCK_ADJUSTED',
+            entity: 'RawMaterial',
+            entityId: rawMaterialId,
+            data: { name: (item.rawMaterial as any).name ?? rawMaterialId, quantity: applied.delta, type: RawMaterialMovementType.COUNT },
+          })
+          await checkAndCreateLowStockAlert(venueId, rawMaterialId)
+          appliedAdjustments.push({
+            productId: rawMaterialId,
+            productName: (item.rawMaterial as any).name ?? rawMaterialId,
+            previous: applied.previous,
+            counted,
+            difference: applied.delta,
+          })
+        }
+      } catch (error) {
         ingredientFailures.push({
-          rawMaterialId: item.rawMaterialId,
-          name: (item.rawMaterial as any).name ?? item.rawMaterialId,
-          error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+          rawMaterialId,
+          name: (item.rawMaterial as any).name ?? rawMaterialId,
+          error: error instanceof Error ? error.message : String(error),
         })
       }
     }
+
+    if (ingredientFailures.length > 0) {
+      throw new Error(`No se pudo ajustar ${ingredientFailures.length} insumo(s): ${ingredientFailures.map(f => f.name).join(', ')}`)
+    }
+
+    // ── Productos: SET contra relectura FOR UPDATE dentro de su tx ──────────
+    for (const item of countedItems) {
+      if (!item.product) continue
+
+      const inventory = item.product.inventory
+      if (!inventory) continue
+
+      const counted = Number(item.counted)
+      const applied = await prisma.$transaction(async tx => {
+        const rows = await tx.$queryRaw<Array<{ currentStock: unknown }>>`
+          SELECT "currentStock" FROM "Inventory" WHERE id = ${inventory.id} FOR UPDATE
+        `
+        const previousStock = rows.length > 0 ? Number(rows[0].currentStock) : Number(inventory.currentStock)
+        const difference = counted - previousStock
+        if (difference === 0) return null
+
+        await tx.inventory.update({
+          where: { id: inventory.id },
+          data: {
+            currentStock: counted,
+            lastCountedAt: new Date(),
+          },
+        })
+        await tx.inventoryMovement.create({
+          data: {
+            inventoryId: inventory.id,
+            type: MovementType.COUNT,
+            quantity: difference,
+            previousStock,
+            newStock: counted,
+            reason: `Conteo de inventario #${countId}`,
+            createdBy: userId,
+          },
+        })
+        return { previousStock, difference }
+      })
+
+      if (applied) {
+        appliedAdjustments.push({
+          productId: item.productId,
+          productName: (item.product as any)?.name ?? item.productId ?? '',
+          previous: applied.previousStock,
+          counted,
+          difference: applied.difference,
+        })
+      }
+    }
+  } catch (error) {
+    // Revertir el claim (mejor esfuerzo) para que el cajero pueda reintentar de
+    // inmediato. Si este revert también falla, el conteo queda APPLYING — que
+    // NO es terminal: tras el lease se puede volver a reclamar. Nunca queda un
+    // COMPLETED mentiroso con líneas sin aplicar.
+    await prisma.stockCount
+      .update({ where: { id: countId }, data: { status: 'IN_PROGRESS', completedAt: null, applyingAt: null } })
+      .catch(() => undefined)
+    throw error
   }
 
-  if (ingredientFailures.length > 0) {
-    // Leave the count IN_PROGRESS so the cashier can retry; already-applied
-    // lines are safe to re-confirm (delta is computed against CURRENT stock).
-    throw new Error(`No se pudo ajustar ${ingredientFailures.length} insumo(s): ${ingredientFailures.map(f => f.name).join(', ')}`)
-  }
-
-  // Apply adjustments for each product item.
-  //
-  // El delta se mide contra el stock ACTUAL, NUNCA contra `expected` — que es
-  // la foto de cuando se ABRIÓ el conteo y envejece con cada venta, compra o
-  // conteo posterior. Es el mismo criterio que ya usaban los insumos arriba.
-  //
-  // Con `expected` pasaban dos cosas, ambas silenciosas (caso real en la DB:
-  // conteo abierto con expected=89 de Cerveza Corona cuando el stock ya era 32):
-  //   1. Contar 89 daba `89 − 89 = 0` → `continue` → el conteo se marcaba
-  //      COMPLETADO sin corregir nada y el inventario se quedaba en 32.
-  //   2. Cuando sí ajustaba, el movimiento guardaba una `quantity` que no
-  //      cuadraba con su propio `previousStock`/`newStock`.
-  for (const item of countedItems) {
-    if (!item.product) continue
-
-    const inventory = item.product.inventory
-    if (!inventory) continue
-
-    const previousStock = Number(inventory.currentStock)
-    const newStock = Number(item.counted)
-    const difference = newStock - previousStock
-    if (difference === 0) continue
-
-    await prisma.$transaction([
-      prisma.inventory.update({
-        where: { id: inventory.id },
-        data: {
-          currentStock: newStock,
-          lastCountedAt: new Date(),
-        },
-      }),
-      prisma.inventoryMovement.create({
-        data: {
-          inventoryId: inventory.id,
-          type: MovementType.COUNT,
-          quantity: difference,
-          previousStock,
-          newStock,
-          reason: `Conteo de inventario #${countId}`,
-          createdBy: userId,
-        },
-      }),
-    ])
-  }
-
-  // Mark count as completed
+  // 🔴 COMPLETED se estampa DESPUÉS de aplicar todo: si el proceso muere antes
+  // de esta línea, el conteo queda APPLYING (recuperable), no "completado".
   await prisma.stockCount.update({
     where: { id: countId },
-    data: { status: 'COMPLETED', completedAt: new Date() },
+    data: { status: 'COMPLETED', completedAt: new Date(), applyingAt: null },
   })
-
-  // Log adjustments applied
-  const adjustments = count.items
-    .filter(item => Number(item.counted) - Number(item.expected) !== 0)
-    .map(item => ({
-      productId: item.productId ?? item.rawMaterialId,
-      productName: (item.product as any)?.name ?? (item.rawMaterial as any)?.name ?? item.productId,
-      expected: Number(item.expected),
-      counted: Number(item.counted),
-      difference: Number(item.counted) - Number(item.expected),
-    }))
 
   logAction({
     staffId: userId,
@@ -565,7 +734,7 @@ export async function confirmStockCount(countId: string, venueId: string, userId
     action: 'STOCK_COUNT_CONFIRMED',
     entity: 'StockCount',
     entityId: countId,
-    data: { adjustmentsCount: adjustments.length, adjustments, source: 'MOBILE' },
+    data: { adjustmentsCount: appliedAdjustments.length, adjustments: appliedAdjustments, source: 'MOBILE' },
   })
 
   return { success: true }

@@ -23,10 +23,7 @@
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
-import {
-  deductInventoryForProduct,
-  getProductInventoryMethod,
-} from '../dashboard/productInventoryIntegration.service'
+import { deductInventoryForProduct, getProductInventoryMethods } from '../dashboard/productInventoryIntegration.service'
 
 /** Mismo shape estructural que OrderInventoryWarning['issues'] (payment.tpv). */
 export type InventoryPostingIssue = {
@@ -72,6 +69,30 @@ export async function createSalePostingInTx(
   const { venueId, orderId, skipReason } = params
   const items = params.items ?? []
 
+  // 🔴 El pre-check va ANTES del create, no en un catch de P2002: dentro de una
+  // transacción interactiva Postgres ABORTA la tx entera al violar el UNIQUE, y
+  // cualquier query posterior (el findUnique del fallback viejo) muere con
+  // 25P02 "current transaction is aborted" — tirando el cobro completo en vez
+  // de devolver el duplicado. Con el pre-check en la MISMA tx, el replay
+  // secuencial (orden re-cobrada tras un refund) encuentra el posting original
+  // sin tocar el UNIQUE. Dos cobros verdaderamente concurrentes siguen chocando
+  // en el índice, pero esa carrera ya la pierde la transacción del pago misma
+  // (idempotencyKey) antes de llegar aquí.
+  const existing = await tx.inventoryPosting.findUnique({
+    where: {
+      venueId_sourceKind_sourceId_effectKind: {
+        venueId,
+        sourceKind: 'ORDER',
+        sourceId: orderId,
+        effectKind: 'SALE',
+      },
+    },
+  })
+  if (existing) {
+    logger.warn('🔄 [InventoryPosting] Posting duplicado — devolviendo el existente', { venueId, orderId })
+    return existing
+  }
+
   const lines: Array<{
     effectKey: string
     orderItemId: string
@@ -80,9 +101,14 @@ export async function createSalePostingInTx(
   }> = []
 
   if (!skipReason) {
+    // UNA consulta clasifica todos los productos (antes: un findUnique con
+    // includes POR ITEM, secuencial, dentro de la tx del cobro — N+1 contra el
+    // timeout de 5s). Se usa la tx para no pedirle otra conexión al pool.
+    const productIds = items.map(i => i.productId).filter((id): id is string => !!id)
+    const methods = await getProductInventoryMethods(productIds, tx as any)
     for (const item of items) {
       if (!item.productId) continue
-      const method = await getProductInventoryMethod(item.productId)
+      const method = methods.get(item.productId) ?? null
       if (!method && !itemHasInventoryModifiers(item)) continue
       lines.push({
         effectKey: item.id,
@@ -95,44 +121,25 @@ export async function createSalePostingInTx(
 
   const resolvedSkip = skipReason ?? (lines.length === 0 ? 'NO_ITEMS' : undefined)
 
-  try {
-    return await tx.inventoryPosting.create({
-      data: {
-        venueId,
-        sourceKind: 'ORDER',
-        sourceId: orderId,
-        effectKind: 'SALE',
-        orderId,
-        ...(resolvedSkip ? { status: 'SKIPPED', skipReason: resolvedSkip } : {}),
-        payloadSnapshot: {
-          items: items.map(i => ({
-            id: i.id,
-            productId: i.productId,
-            quantity: i.quantity,
-            weightQuantity: i.weightQuantity != null ? String(i.weightQuantity) : null,
-          })),
-        },
-        ...(lines.length > 0 ? { lines: { create: lines } } : {}),
+  return await tx.inventoryPosting.create({
+    data: {
+      venueId,
+      sourceKind: 'ORDER',
+      sourceId: orderId,
+      effectKind: 'SALE',
+      orderId,
+      ...(resolvedSkip ? { status: 'SKIPPED', skipReason: resolvedSkip } : {}),
+      payloadSnapshot: {
+        items: items.map(i => ({
+          id: i.id,
+          productId: i.productId,
+          quantity: i.quantity,
+          weightQuantity: i.weightQuantity != null ? String(i.weightQuantity) : null,
+        })),
       },
-    })
-  } catch (error) {
-    // El UNIQUE hace el trabajo: un segundo cobro/replay de la misma venta
-    // encuentra el posting original en vez de duplicar la deducción.
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      logger.warn('🔄 [InventoryPosting] Posting duplicado — devolviendo el existente', { venueId, orderId })
-      return tx.inventoryPosting.findUnique({
-        where: {
-          venueId_sourceKind_sourceId_effectKind: {
-            venueId,
-            sourceKind: 'ORDER',
-            sourceId: orderId,
-            effectKind: 'SALE',
-          },
-        },
-      })
-    }
-    throw error
-  }
+      ...(lines.length > 0 ? { lines: { create: lines } } : {}),
+    },
+  })
 }
 
 /**
@@ -144,13 +151,30 @@ export async function createSalePostingInTx(
  * @returns null si otro worker tiene el claim; si no, los issues para el aviso
  *          del POS (negativos y fallos) y si quedó completamente aplicado.
  */
+/**
+ * Un claim APPLYING más viejo que esto se considera huérfano (el worker murió
+ * entre el CAS y el update final) y puede re-reclamarse. 10 min >> cualquier
+ * aplicación real (segundos), y la idempotencia por línea + el guard de
+ * movimientos hacen seguro el re-claim aunque el worker original siguiera vivo.
+ */
+const APPLYING_LEASE_MS = 10 * 60 * 1000
+
 export async function applySalePosting(
   postingId: string,
   staffId?: string | null,
 ): Promise<{ postingId: string; applied: boolean; issues: InventoryPostingIssue[] } | null> {
   const claim = await prisma.inventoryPosting.updateMany({
-    where: { id: postingId, status: { in: ['PENDING', 'PARTIAL_FAILED'] } },
-    data: { status: 'APPLYING', attempts: { increment: 1 } },
+    where: {
+      id: postingId,
+      OR: [
+        { status: { in: ['PENDING', 'PARTIAL_FAILED'] } },
+        // Rescate de claims huérfanos: un crash entre el CAS y el update final
+        // dejaba el posting APPLYING para siempre — ni este predicado ni el job
+        // de respaldo podían volver a tocarlo, y la venta quedaba sin deducir.
+        { status: 'APPLYING', updatedAt: { lt: new Date(Date.now() - APPLYING_LEASE_MS) } },
+      ],
+    },
+    data: { status: 'APPLYING', attempts: { increment: 1 }, updatedAt: new Date() },
   })
   if (claim.count === 0) return null
 
@@ -171,6 +195,32 @@ export async function applySalePosting(
 
   for (const line of posting.lines) {
     if (line.status === 'APPLIED' || line.status === 'SKIPPED') continue
+
+    // 🔴 Guard anti doble-deducción: la deducción commitea en SU transacción y
+    // el flip de la línea a APPLIED corre DESPUÉS — un crash (o un error
+    // transitorio del update) en esa ventana deja la línea PENDING/FAILED con
+    // el stock YA descontado, y el reintento volvería a descontarlo. Los
+    // movimientos llevan postingLineId (InventoryMovement para QUANTITY,
+    // RawMaterialMovement para receta/modificadores): si existen, la deducción
+    // ya ocurrió — se recupera el estado en vez de repetir el efecto.
+    const [invMovements, rawMovements] = await Promise.all([
+      prisma.inventoryMovement.count({ where: { postingLineId: line.id } }),
+      prisma.rawMaterialMovement.count({ where: { postingLineId: line.id } }),
+    ])
+    if (invMovements + rawMovements > 0) {
+      await prisma.inventoryPostingLine.update({
+        where: { id: line.id },
+        data: { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: 'RECOVERED_FROM_MOVEMENTS' },
+      })
+      logger.warn('🩹 [InventoryPosting] Línea recuperada de movimientos existentes — NO se re-deduce', {
+        postingId,
+        lineId: line.id,
+        productId: line.productId,
+        invMovements,
+        rawMovements,
+      })
+      continue
+    }
 
     const item = itemsById.get(line.orderItemId ?? line.effectKey)
     if (!item || !line.productId) {

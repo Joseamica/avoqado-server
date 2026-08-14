@@ -234,4 +234,38 @@ describe('order.dashboard.service — settleOrder atómico', () => {
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     expect(res.settledAmount).toBe(0)
   })
+
+  // 🔴 Auditoría 2026-08-13: el CAS de estados protegía la transición pero el
+  // MONTO venía del snapshot pre-tx. Un pago parcial concurrente ($60 en la
+  // TPV) dejaba la orden PARTIAL con $40 restantes; el settle seguía pasando
+  // (PARTIAL está permitido) y creaba un Payment por los $100 VIEJOS: $160 de
+  // pagos contra una orden de $100.
+  it('el monto sale de la RELECTURA dentro de la tx, no del snapshot viejo', async () => {
+    prismaMock.order.findFirst
+      .mockResolvedValueOnce(ORDER as any) // snapshot pre-tx: $100 restantes
+      .mockResolvedValueOnce({ ...ORDER, paymentStatus: 'PARTIAL', remainingBalance: 40, version: 7 } as any) // dentro de la tx: ya entró un parcial de $60
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.payment.create.mockResolvedValue({ id: 'pay-1' } as any)
+
+    const res = await settleOrder('venue-1', 'order-1')
+
+    // El Payment y la respuesta reflejan los $40 REALES, nunca los $100 viejos.
+    expect(prismaMock.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ amount: 40, netAmount: 40 }) }),
+    )
+    expect(res.settledAmount).toBe(40)
+    // Y la transición va amarrada a la versión releída: si algo cambia después
+    // de la relectura, el CAS pierde y no se cobra nada.
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ version: 7 }) }))
+  })
+
+  it('si la orden cambia ENTRE la relectura y el CAS (version pisada), no se crea pago', async () => {
+    prismaMock.order.findFirst.mockResolvedValueOnce(ORDER as any).mockResolvedValueOnce({ ...ORDER, version: 3 } as any)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any) // la versión ya no coincide
+
+    const res = await settleOrder('venue-1', 'order-1')
+
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(res.settledAmount).toBe(0)
+  })
 })

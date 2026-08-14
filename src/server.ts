@@ -60,6 +60,7 @@ import { cfdiReconcileJob } from './jobs/cfdiReconcile.job'
 import { catalogPublicationOutboxSweeperJob } from './jobs/catalog-publication-outbox-sweeper.job'
 import { catalogPublicationWatchdogJob } from './jobs/catalog-publication-watchdog.job'
 import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
+import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -137,6 +138,7 @@ const gracefulShutdown = async (signal: string) => {
       catalogPublicationOutboxSweeperJob.stop()
       catalogPublicationWatchdogJob.stop()
       shiftCloseWatchdogJob.stop()
+      inventoryPostingSweeperJob.stop()
 
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
@@ -430,6 +432,9 @@ const startApplication = async (retries = 3) => {
       catalogPublicationOutboxSweeperJob.start()
       catalogPublicationWatchdogJob.start()
       shiftCloseWatchdogJob.start()
+      // El outbox de deducciones de inventario recupera lo que un crash dejó
+      // PENDING/APPLYING — sin este job el posting durable es solo un registro.
+      inventoryPostingSweeperJob.start()
 
       // Start subscription cancellation job
       subscriptionCancellationJob.start()

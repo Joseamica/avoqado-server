@@ -3,7 +3,8 @@ import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '../../utils/prismaClient'
 import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateRawMaterialDto, UpdateRawMaterialDto, AdjustStockDto } from '../../schemas/dashboard/inventory.schema'
-import { createStockBatch, deductStockFIFO } from './fifoBatch.service'
+import { createStockBatch, deductStockFIFO, deductStockFIFOInTx } from './fifoBatch.service'
+import { withSerializableRetry } from '../../utils/serializableRetry'
 import { sendLowStockAlertNotification } from './notification.service'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
@@ -662,13 +663,26 @@ export async function adjustStock(venueId: string, rawMaterialId: string, data: 
         { skipAudit: true },
       )
 
+      // 🔴 INCREMENTO ATÓMICO, NO ASIGNACIÓN (fase 3, 2026-08-13). Antes esto
+      // escribía `newStock` calculado desde la lectura hecha al INICIO de la
+      // función: dos ajustes concurrentes (o un ajuste cruzado con una
+      // recepción de OC) leían el mismo saldo y la segunda escritura PISABA a
+      // la primera. Estar dentro de la transacción no lo previene — con READ
+      // COMMITTED un leer-modificar-escribir sigue perdiendo actualizaciones;
+      // sólo delegar la suma a la base (`increment`) lo evita.
       const updatedRm = await tx.rawMaterial.update({
         where: { id: rawMaterialId },
         data: {
-          currentStock: newStock,
+          currentStock: { increment: data.quantity },
           lastCountAt: data.type === RawMaterialMovementType.COUNT ? new Date() : rawMaterial.lastCountAt,
         },
       })
+
+      // El kardex deriva previousStock/newStock del RESULTADO del update — la
+      // lectura vieja mentiría bajo concurrencia y rompería la cadena
+      // previousStock[i] == newStock[i-1] con la que se reconstruye el saldo.
+      const newStockAtomic = updatedRm.currentStock
+      const previousStockAtomic = newStockAtomic.sub(data.quantity)
 
       await tx.rawMaterialMovement.create({
         data: {
@@ -678,8 +692,8 @@ export async function adjustStock(venueId: string, rawMaterialId: string, data: 
           type: data.type,
           quantity: data.quantity,
           unit: rawMaterial.unit,
-          previousStock,
-          newStock,
+          previousStock: previousStockAtomic,
+          newStock: newStockAtomic,
           costImpact: created.costPerUnit.mul(data.quantity),
           reason: data.reason || `Manual addition (Batch: ${created.batchNumber})`,
           reference: data.reference,
@@ -974,6 +988,7 @@ export async function deductStockForModifiers(
   orderModifiers: OrderModifierForInventory[],
   orderId: string,
   staffId?: string,
+  postingLineId?: string,
 ): Promise<void> {
   for (const orderModifier of orderModifiers) {
     const { modifier, quantity: modifierQty } = orderModifier
@@ -999,6 +1014,7 @@ export async function deductStockForModifiers(
       reason: `Modifier: ${modifier.name}`,
       reference: orderId,
       createdBy: staffId,
+      postingLineId,
     })
 
     // Check for low stock after deduction
@@ -1007,9 +1023,11 @@ export async function deductStockForModifiers(
 }
 
 /**
- * Helper function to check and create low stock alerts
+ * Helper function to check and create low stock alerts.
+ * Exported so post-commit callers (e.g. el conteo físico móvil, que ya no
+ * delega en adjustStock) generen la misma alerta que el resto del motor.
  */
-async function checkAndCreateLowStockAlert(venueId: string, rawMaterialId: string): Promise<void> {
+export async function checkAndCreateLowStockAlert(venueId: string, rawMaterialId: string): Promise<void> {
   const rawMaterial = await prisma.rawMaterial.findUnique({
     where: { id: rawMaterialId },
   })
@@ -1058,6 +1076,14 @@ async function checkAndCreateLowStockAlert(venueId: string, rawMaterialId: strin
  *
  * ✅ WORLD-CLASS: Supports variable ingredients that can be substituted by modifiers
  * Example: Recipe has "Whole Milk" but customer chose "Almond Milk" modifier
+ *
+ * 🔴 TODO-O-NADA (fase 3, 2026-08-13): las líneas de la receta se deducen dentro
+ * de UNA sola transacción Serializable. Antes cada línea abría (y commiteaba) su
+ * propia transacción vía deductStockFIFO: si la 5ª fallaba, las 4 anteriores ya
+ * estaban deducidas y el inventario quedaba mal en silencio. El reintento por
+ * conflicto transitorio vive AQUÍ (la receta completa) porque con la tx
+ * envolvente nada commitea por separado — ver el comentario largo en
+ * fifoBatch.service.ts.
  */
 export async function deductStockForRecipe(
   venueId: string,
@@ -1066,6 +1092,7 @@ export async function deductStockForRecipe(
   orderId: string,
   staffId?: string,
   orderModifiers?: OrderModifierForInventory[],
+  postingLineId?: string,
 ) {
   const recipe = await prisma.recipe.findUnique({
     where: { productId },
@@ -1085,79 +1112,101 @@ export async function deductStockForRecipe(
     return
   }
 
+  const applicableLines = recipe.lines.filter(line => !line.isOptional)
+  if (applicableLines.length === 0) {
+    return
+  }
+
   // Capture per-ingredient deductions for the audit log so the activity feed
   // can show "Sold 1x Hazelnut treat → 62g Proteina, 21g Sarais, 125g Dátiles".
-  const deductionTrace: Array<{ rawMaterialId: string; ingredient: string; quantity: number; unit: string }> = []
+  // Construida DENTRO del intento de transacción: un reintento la reinicia, así
+  // el trace nunca duplica líneas de un intento abortado.
+  const deductionTrace = await withSerializableRetry(
+    async tx => {
+      const trace: Array<{ rawMaterialId: string; ingredient: string; quantity: number; unit: string }> = []
 
-  // Process each ingredient in the recipe using FIFO
-  for (const line of recipe.lines) {
-    if (line.isOptional) continue // Skip optional ingredients
+      for (const line of applicableLines) {
+        // ✅ Check if this is a variable ingredient that can be substituted
+        if (line.isVariable && line.linkedModifierGroupId && orderModifiers?.length) {
+          // Find a SUBSTITUTION modifier from the linked group
+          const substitutionModifier = orderModifiers.find(
+            om =>
+              om.modifier.groupId === line.linkedModifierGroupId &&
+              om.modifier.inventoryMode === 'SUBSTITUTION' &&
+              om.modifier.rawMaterialId &&
+              om.modifier.quantityPerUnit,
+          )
 
-    // ✅ Check if this is a variable ingredient that can be substituted
-    if (line.isVariable && line.linkedModifierGroupId && orderModifiers?.length) {
-      // Find a SUBSTITUTION modifier from the linked group
-      const substitutionModifier = orderModifiers.find(
-        om =>
-          om.modifier.groupId === line.linkedModifierGroupId &&
-          om.modifier.inventoryMode === 'SUBSTITUTION' &&
-          om.modifier.rawMaterialId &&
-          om.modifier.quantityPerUnit,
-      )
+          if (substitutionModifier) {
+            // Use modifier's ingredient instead of recipe default. Convert from
+            // modifier.unit → rawMaterial.unit (modifier may declare grams while
+            // the raw material is stored in kilograms or vice-versa).
+            const subRawMaterial = await tx.rawMaterial.findUniqueOrThrow({
+              where: { id: substitutionModifier.modifier.rawMaterialId! },
+              select: { id: true, name: true, unit: true },
+            })
+            const subModifierUnit = substitutionModifier.modifier.unit ?? subRawMaterial.unit
+            const totalQtyInRecipeUnit = substitutionModifier.modifier.quantityPerUnit!.mul(quantity).mul(substitutionModifier.quantity)
+            const totalQty = toRawMaterialUnit(totalQtyInRecipeUnit, subModifierUnit, subRawMaterial)
 
-      if (substitutionModifier) {
-        // Use modifier's ingredient instead of recipe default. Convert from
-        // modifier.unit → rawMaterial.unit (modifier may declare grams while
-        // the raw material is stored in kilograms or vice-versa).
-        const subRawMaterial = await prisma.rawMaterial.findUniqueOrThrow({
-          where: { id: substitutionModifier.modifier.rawMaterialId! },
-          select: { id: true, name: true, unit: true },
-        })
-        const subModifierUnit = substitutionModifier.modifier.unit ?? subRawMaterial.unit
-        const totalQtyInRecipeUnit = substitutionModifier.modifier.quantityPerUnit!.mul(quantity).mul(substitutionModifier.quantity)
-        const totalQty = toRawMaterialUnit(totalQtyInRecipeUnit, subModifierUnit, subRawMaterial)
+            await deductStockFIFOInTx(tx, venueId, substitutionModifier.modifier.rawMaterialId!, totalQty, RawMaterialMovementType.USAGE, {
+              reason: `Substitution: ${substitutionModifier.modifier.name} for ${recipe.product?.name}`,
+              reference: orderId,
+              createdBy: staffId,
+              postingLineId,
+            })
 
-        await deductStockFIFO(venueId, substitutionModifier.modifier.rawMaterialId!, totalQty, RawMaterialMovementType.USAGE, {
-          reason: `Substitution: ${substitutionModifier.modifier.name} for ${recipe.product?.name}`,
+            trace.push({
+              rawMaterialId: substitutionModifier.modifier.rawMaterialId!,
+              ingredient: `${subRawMaterial.name} (substituted via ${substitutionModifier.modifier.name})`,
+              quantity: totalQty,
+              unit: subRawMaterial.unit,
+            })
+
+            continue // Skip default ingredient - it was substituted
+          }
+        }
+
+        // Use default recipe ingredient (no substitution or not a variable ingredient).
+        // Convert RecipeLine.unit → rawMaterial.unit so that "0.062 KILOGRAM"
+        // becomes "62 GRAM" when the raw material is stored in grams.
+        const deductionInRecipeUnit = line.quantity.mul(quantity) // quantity per portion × portions sold
+        const deductionQuantity = toRawMaterialUnit(deductionInRecipeUnit, line.unit, line.rawMaterial)
+
+        // Use FIFO to deduct from oldest batches — within the enveloping tx
+        await deductStockFIFOInTx(tx, venueId, line.rawMaterialId, deductionQuantity, RawMaterialMovementType.USAGE, {
+          reason: `Sold ${quantity}x ${recipe.product?.name || 'product'}`,
           reference: orderId,
           createdBy: staffId,
+          postingLineId,
         })
 
-        deductionTrace.push({
-          rawMaterialId: substitutionModifier.modifier.rawMaterialId!,
-          ingredient: `${subRawMaterial.name} (substituted via ${substitutionModifier.modifier.name})`,
-          quantity: totalQty,
-          unit: subRawMaterial.unit,
+        trace.push({
+          rawMaterialId: line.rawMaterialId,
+          ingredient: line.rawMaterial.name,
+          quantity: deductionQuantity,
+          unit: line.rawMaterial.unit,
         })
-
-        // Check for low stock on the substituted ingredient
-        await checkAndCreateLowStockAlert(venueId, substitutionModifier.modifier.rawMaterialId!)
-
-        continue // Skip default ingredient - it was substituted
       }
-    }
 
-    // Use default recipe ingredient (no substitution or not a variable ingredient).
-    // Convert RecipeLine.unit → rawMaterial.unit so that "0.062 KILOGRAM"
-    // becomes "62 GRAM" when the raw material is stored in grams.
-    const deductionInRecipeUnit = line.quantity.mul(quantity) // quantity per portion × portions sold
-    const deductionQuantity = toRawMaterialUnit(deductionInRecipeUnit, line.unit, line.rawMaterial)
+      return trace
+    },
+    {
+      // La receta completa (~10 insumos) comparte una tx: presupuesto un poco
+      // mayor que el de un insumo suelto, mismo criterio de pocos reintentos
+      // cortos (esto vive en la ruta del cobro).
+      timeoutMs: 15_000,
+      maxRetries: 3,
+      baseDelayMs: 40,
+    },
+  )
 
-    // Use FIFO to deduct from oldest batches
-    await deductStockFIFO(venueId, line.rawMaterialId, deductionQuantity, RawMaterialMovementType.USAGE, {
-      reason: `Sold ${quantity}x ${recipe.product?.name || 'product'}`,
-      reference: orderId,
-      createdBy: staffId,
-    })
-
-    deductionTrace.push({
-      rawMaterialId: line.rawMaterialId,
-      ingredient: line.rawMaterial.name,
-      quantity: deductionQuantity,
-      unit: line.rawMaterial.unit,
-    })
-
-    // Check for low stock after deduction
-    await checkAndCreateLowStockAlert(venueId, line.rawMaterialId)
+  // Las alertas de stock bajo se revisan DESPUÉS del commit: dentro de la tx
+  // leerían estado sin commitear (o de un intento abortado) y mandan
+  // notificaciones que no se pueden deshacer con un rollback.
+  const alertedMaterialIds = new Set(deductionTrace.map(d => d.rawMaterialId))
+  for (const rawMaterialId of alertedMaterialIds) {
+    await checkAndCreateLowStockAlert(venueId, rawMaterialId)
   }
 
   // Single audit entry per order/product for the whole deduction. This is the

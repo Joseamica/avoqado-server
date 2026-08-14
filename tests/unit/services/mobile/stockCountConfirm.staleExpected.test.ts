@@ -25,6 +25,8 @@ describe('confirmStockCount — el ajuste se mide contra el stock ACTUAL, no con
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.stockCount.update.mockResolvedValue({ id: countId } as any)
+    // Claim atómico (fase 3): quien gana el updateMany condicional aplica.
+    prismaMock.stockCount.updateMany.mockResolvedValue({ count: 1 } as any)
     prismaMock.$transaction.mockImplementation(async (ops: any) => (Array.isArray(ops) ? ops : ops(prismaMock)))
   })
 
@@ -51,6 +53,9 @@ describe('confirmStockCount — el ajuste se mide contra el stock ACTUAL, no con
         },
       ],
     } as any)
+    // Relectura FOR UPDATE dentro de la tx (fase 3): el "stock de hoy" que la
+    // aplicación usa sale de aquí, no del snapshot del include.
+    prismaMock.$queryRaw.mockResolvedValue([{ currentStock: opciones.currentStock }])
   }
 
   it('ajusta cuando lo contado coincide con la foto vieja pero NO con el stock de hoy', async () => {
@@ -104,13 +109,17 @@ describe('confirmStockCount — el ajuste se mide contra el stock ACTUAL, no con
     })
   })
 
-  it('marca el conteo como COMPLETED', async () => {
+  it('reclama con APPLYING y marca COMPLETED hasta el FINAL (claim atómico condicional)', async () => {
     armarConteo({ expected: 89, counted: 89, currentStock: 32 })
 
     await confirmStockCount(countId, venueId, userId)
 
-    expect(prismaMock.stockCount.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED' }) }),
-    )
+    // El claim es APPLYING (un crash a media aplicación queda recuperable)…
+    const claimArgs = prismaMock.stockCount.updateMany.mock.calls[0][0] as any
+    expect(claimArgs.data.status).toBe('APPLYING')
+    expect(claimArgs.where.OR.map((c: any) => c.status)).toContain('IN_PROGRESS')
+    // …y COMPLETED se estampa después de aplicar.
+    const completedCall = prismaMock.stockCount.update.mock.calls.find((c: any[]) => c[0]?.data?.status === 'COMPLETED')
+    expect(completedCall).toBeDefined()
   })
 })

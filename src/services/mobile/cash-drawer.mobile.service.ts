@@ -401,35 +401,52 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
     throw new BadRequestError('No hay eventos para sincronizar')
   }
 
-  // 🔴 `createMany` + `skipDuplicates` en vez de un `create` por evento.
+  const toRow = (event: SyncEvent) => ({
+    sessionId: session.id,
+    venueId,
+    type: event.type,
+    amount: dollarsToDecimal(event.amount),
+    note: event.note || null,
+    staffId: event.staffId,
+    staffName: event.staffName,
+    orderId: event.orderId || null,
+    localId: event.localId || null,
+    createdAt: event.createdAt ? new Date(event.createdAt) : new Date(),
+  })
+
+  // 🔴 `createMany` + `skipDuplicates` en vez de un `create` por evento — SOLO
+  // para los eventos que traen `localId`.
   //
   // Las apps mandan el lote fire-and-forget y sin cola de reintento: si la respuesta se
   // pierde, el MISMO lote vuelve. El `create` ciego insertaba las filas otra vez y el cajón
   // terminaba con efectivo inventado — que el arqueo daba por bueno. Con la llave
   // `localId` del POS y el índice `@@unique([venueId, localId])`, el reintento choca y
   // Postgres lo salta en vez de duplicar.
-  //
-  // Un evento sin `localId` (app vieja) entra igual: varios NULL conviven en un índice
-  // único de Postgres. No gana la protección, pero tampoco se rompe.
-  const result = await prisma.cashDrawerEvent.createMany({
-    data: events.map(event => ({
-      sessionId: session.id,
-      venueId,
-      type: event.type,
-      amount: dollarsToDecimal(event.amount),
-      note: event.note || null,
-      staffId: event.staffId,
-      staffName: event.staffName,
-      orderId: event.orderId || null,
-      localId: event.localId || null,
-      createdAt: event.createdAt ? new Date(event.createdAt) : new Date(),
-    })),
-    skipDuplicates: true,
-  })
+  const keyed = events.filter(event => Boolean(event.localId))
+  const unkeyed = events.filter(event => !event.localId)
 
-  // Se reporta lo que ENTRÓ de verdad, no lo que se mandó: si el cliente reenvió un lote ya
-  // aplicado, `syncedCount` es 0 y eso es la respuesta correcta, no un error.
-  const insertedCount = result.count
+  let insertedCount = 0
+  if (keyed.length > 0) {
+    const result = await prisma.cashDrawerEvent.createMany({
+      data: keyed.map(toRow),
+      skipDuplicates: true,
+    })
+    insertedCount += result.count
+  }
+
+  // 🔴 Apps viejas sin `localId` (contrato /mobile: las versiones ya
+  // distribuidas siguen funcionando): tras un `createMany` no hay llave para
+  // RELEER sus filas, y responder `events: []` rompía a los clientes que
+  // marcan su outbox local con el eco de la respuesta — re-mandaban el lote
+  // completo en cada sync, y sin llave el índice único no puede deduplicarlo:
+  // efectivo inventado causado por el propio cambio de forma. Se insertan una
+  // a una (el comportamiento que esas apps siempre tuvieron) para poder
+  // devolverlas.
+  const unkeyedRows = [] as Awaited<ReturnType<typeof prisma.cashDrawerEvent.create>>[]
+  for (const event of unkeyed) {
+    unkeyedRows.push(await prisma.cashDrawerEvent.create({ data: toRow(event) }))
+  }
+  insertedCount += unkeyedRows.length
 
   logAction({
     staffId: events[0]?.staffId,
@@ -440,16 +457,19 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
     data: { eventCount: insertedCount, receivedCount: events.length, source: 'MOBILE' },
   })
 
-  // `createMany` no devuelve las filas: se releen las del lote por su `localId` para
-  // conservar el shape de la respuesta que ya consumen las apps.
-  const localIds = events.map(e => e.localId).filter((id): id is string => Boolean(id))
-  const syncedEvents = localIds.length
+  // `createMany` no devuelve las filas: las del lote con llave se releen por su
+  // `localId` (incluye las que un lote anterior ya había insertado — el cliente
+  // necesita el eco de TODO lo que mandó para marcar su outbox como sincronizado).
+  const localIds = keyed.map(e => e.localId as string)
+  const keyedRows = localIds.length
     ? await prisma.cashDrawerEvent.findMany({ where: { venueId, localId: { in: localIds } }, orderBy: { createdAt: 'asc' } })
     : []
 
+  const allRows = [...keyedRows, ...unkeyedRows].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+
   return {
     syncedCount: insertedCount,
-    events: syncedEvents.map(formatEvent),
+    events: allRows.map(formatEvent),
   }
 }
 

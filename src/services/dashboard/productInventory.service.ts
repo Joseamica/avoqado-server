@@ -54,55 +54,63 @@ export async function adjustInventoryStock(
   }
 
   const inventory = product.inventory
-  const previousStock = inventory.currentStock
-  const newStock = previousStock.add(data.quantity)
 
-  // Prevent negative stock
-  if (newStock.lessThan(0)) {
-    throw new AppError(`Insufficient stock. Current: ${previousStock}, Requested adjustment: ${data.quantity}`, 400)
-  }
-
-  // Update inventory and create movement record in transaction
-  const operations: Prisma.PrismaPromise<any>[] = [
-    // Update inventory
-    prisma.inventory.update({
+  // 🔴 INCREMENTO ATÓMICO + guardia calculada sobre el RESULTADO (fase 3,
+  // 2026-08-13). Antes esto leía `currentStock` FUERA de la transacción y
+  // escribía `previousStock + qty` como valor absoluto: un ajuste concurrente
+  // con una venta (o con otro ajuste) se pisaba en silencio (lost update).
+  // `increment` delega la suma a la base; previousStock/newStock del kardex se
+  // derivan del resultado del update, así la cadena previousStock[i] ==
+  // newStock[i-1] no miente bajo concurrencia.
+  const { previousStock, newStock } = await prisma.$transaction(async tx => {
+    const updated = await tx.inventory.update({
       where: { id: inventory.id },
       data: {
-        currentStock: newStock,
+        currentStock: { increment: data.quantity },
         lastCountedAt: data.type === 'COUNT' ? new Date() : inventory.lastCountedAt,
       },
-    }),
+    })
 
-    // Create movement record
-    prisma.inventoryMovement.create({
+    const newStockAtomic = updated.currentStock
+    const previousStockAtomic = newStockAtomic.sub(data.quantity)
+
+    // La VENTA deja stock negativo a propósito (Square-parity 2026-08-12), así
+    // que un producto en −3 tiene que poderse CORREGIR con ajustes manuales en
+    // ambas direcciones. Lo único que sigue prohibido es que un ajuste manual
+    // lleve un stock ≥ 0 a negativo — eso es un typo, no una corrección; el
+    // camino legítimo hacia negativo es la venta. El throw dentro de la tx
+    // revierte el increment.
+    if (newStockAtomic.lessThan(0) && previousStockAtomic.greaterThanOrEqualTo(0)) {
+      throw new AppError(`Insufficient stock. Current: ${previousStockAtomic}, Requested adjustment: ${data.quantity}`, 400)
+    }
+
+    await tx.inventoryMovement.create({
       data: {
         inventoryId: inventory.id,
         type: data.type,
         quantity: new Prisma.Decimal(data.quantity),
-        previousStock,
-        newStock,
+        previousStock: previousStockAtomic,
+        newStock: newStockAtomic,
         reason: data.reason,
         reference: data.reference,
         unitCost: data.unitCost ? new Prisma.Decimal(data.unitCost) : undefined,
         supplier: data.supplier,
         createdBy: staffId,
       },
-    }),
-  ]
+    })
 
-  // Update Product.cost if this is a PURCHASE with unitCost
-  if (data.type === 'PURCHASE' && data.unitCost) {
-    operations.push(
-      prisma.product.update({
+    // Update Product.cost if this is a PURCHASE with unitCost
+    if (data.type === 'PURCHASE' && data.unitCost) {
+      await tx.product.update({
         where: { id: productId },
         data: {
           cost: new Prisma.Decimal(data.unitCost),
         },
-      }),
-    )
-  }
+      })
+    }
 
-  await prisma.$transaction(operations)
+    return { previousStock: previousStockAtomic, newStock: newStockAtomic }
+  })
 
   logger.info(`✅ Inventory adjusted for product ${productId}: ${previousStock} → ${newStock}`, {
     venueId,

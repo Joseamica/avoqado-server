@@ -111,7 +111,9 @@ describe('deductStockForRecipe — receta todo-o-nada (una sola transacción)', 
     armarReceta([makeRecipeLine('rm-1', 'Harina', 10), makeRecipeLine('rm-2', 'Queso', 5)])
 
     // rm-1 sano; rm-2 sin lotes activos → AppError 400
-    rawMaterialFindFirst.mockResolvedValueOnce(makeRawMaterial('rm-1', 'Harina', 100)).mockResolvedValueOnce(makeRawMaterial('rm-2', 'Queso', 100))
+    rawMaterialFindFirst
+      .mockResolvedValueOnce(makeRawMaterial('rm-1', 'Harina', 100))
+      .mockResolvedValueOnce(makeRawMaterial('rm-2', 'Queso', 100))
     lockQuery.mockResolvedValueOnce([makeBatch('b-1', 50)]).mockResolvedValueOnce([])
 
     await expect(deductStockForRecipe(venueId, productId, 1, orderId)).rejects.toThrow(/No active batches/)
@@ -123,7 +125,9 @@ describe('deductStockForRecipe — receta todo-o-nada (una sola transacción)', 
   it('la receta completa corre en UNA sola transacción', async () => {
     armarReceta([makeRecipeLine('rm-1', 'Harina', 10), makeRecipeLine('rm-2', 'Queso', 5)])
 
-    rawMaterialFindFirst.mockResolvedValueOnce(makeRawMaterial('rm-1', 'Harina', 100)).mockResolvedValueOnce(makeRawMaterial('rm-2', 'Queso', 100))
+    rawMaterialFindFirst
+      .mockResolvedValueOnce(makeRawMaterial('rm-1', 'Harina', 100))
+      .mockResolvedValueOnce(makeRawMaterial('rm-2', 'Queso', 100))
     lockQuery.mockResolvedValueOnce([makeBatch('b-1', 50)]).mockResolvedValueOnce([makeBatch('b-2', 50)])
 
     await deductStockForRecipe(venueId, productId, 1, orderId)
@@ -143,14 +147,12 @@ describe('deductStockForRecipe — receta todo-o-nada (una sola transacción)', 
 
     const conflicto: any = new Error('write conflict')
     conflicto.code = 'P2034'
-    prismaMock.$transaction
-      .mockRejectedValueOnce(conflicto)
-      .mockImplementation(async (arg: any) => {
-        if (typeof arg !== 'function') return Promise.all(arg)
-        const result = await arg(buildTx())
-        committedTransactions += 1
-        return result
-      })
+    prismaMock.$transaction.mockRejectedValueOnce(conflicto).mockImplementation(async (arg: any) => {
+      if (typeof arg !== 'function') return Promise.all(arg)
+      const result = await arg(buildTx())
+      committedTransactions += 1
+      return result
+    })
 
     await deductStockForRecipe(venueId, productId, 1, orderId)
 
@@ -159,9 +161,7 @@ describe('deductStockForRecipe — receta todo-o-nada (una sola transacción)', 
   })
 
   it('la sustitución (SUBSTITUTION) se deduce dentro de la MISMA transacción', async () => {
-    armarReceta([
-      makeRecipeLine('rm-leche', 'Leche entera', 100, { isVariable: true, linkedModifierGroupId: 'grupo-leches' }),
-    ])
+    armarReceta([makeRecipeLine('rm-leche', 'Leche entera', 100, { isVariable: true, linkedModifierGroupId: 'grupo-leches' })])
 
     const orderModifiers = [
       {

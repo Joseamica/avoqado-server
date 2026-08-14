@@ -882,6 +882,21 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
   return issues
 }
 
+/**
+ * Forma canónica de respuesta de createOrderWithItems: la orden completa
+ * (items, modificadores aplanados, pagos, staff) + tableName. Los caminos
+ * idempotentes (duplicado por pre-check, perdedor de la carrera P2002) DEBEN
+ * devolver esta misma forma — la TPV lee los items de la respuesta.
+ */
+async function buildCreateOrderResponse(orderId: string): Promise<Order & { tableName: string | null }> {
+  const fullOrder = await fetchOrderForTpvResponse(orderId)
+  const tableName = fullOrder.table ? `Mesa ${fullOrder.table.number}` : null
+  return {
+    ...flattenOrderModifiers(fullOrder),
+    tableName,
+  }
+}
+
 export async function createOrderWithItems(
   venueId: string,
   input: TpvCreateOrderWithItemsInput,
@@ -895,12 +910,14 @@ export async function createOrderWithItems(
   if (externalId) {
     const existingOrder = await prisma.order.findUnique({
       where: { venueId_externalId: { venueId, externalId } },
-      include: { table: { select: { number: true } } },
+      select: { id: true },
     })
     if (existingOrder) {
       logger.warn(`🔄 [WITH ITEMS] Duplicate createOrderWithItems detected (externalId=${externalId}) — returning existing order`)
-      const { table, ...order } = existingOrder as any
-      return { ...order, tableName: table ? `Mesa ${table.number}` : null }
+      // 🔴 MISMA forma que el camino normal (items/modifiers/pagos aplanados):
+      // devolver solo los escalares de Order rompía a la TPV que lee los items
+      // de la respuesta — un retry tras perder la respuesta cambiaba el shape.
+      return buildCreateOrderResponse(existingOrder.id)
     }
   }
 
@@ -1060,228 +1077,253 @@ export async function createOrderWithItems(
   }
 
   const orderNumber = `ORD-${Date.now()}`
-  const createdOrder = await prisma.$transaction(async tx => {
-    const currentShift = await tx.shift.findFirst({
-      where: {
-        venueId,
-        staffId: input.staffId,
-        status: 'OPEN',
-        endTime: null,
-      },
-      orderBy: {
-        startTime: 'desc',
-      },
-    })
+  let createdOrder
+  try {
+    createdOrder = await runCreateOrderTransaction()
+  } catch (err: any) {
+    // 🛡️ Carrera idempotente (espejo del sibling /mobile, payCashOrder): dos
+    // retries con el MISMO externalId pueden pasar ambos el pre-check de arriba
+    // (ninguno había commiteado aún); el perdedor choca con el UNIQUE
+    // (venueId, externalId) → P2002. Antes se propagaba como 500 a la terminal
+    // y la app reintentaba OTRA vez — justo el loop que la llave vino a matar.
+    // Se devuelve la orden ganadora con la misma forma que el camino normal.
+    if (err?.code === 'P2002' && externalId) {
+      const winner = await prisma.order.findUnique({
+        where: { venueId_externalId: { venueId, externalId } },
+        select: { id: true },
+      })
+      if (winner) {
+        logger.warn(`🔄 [WITH ITEMS] Carrera idempotente (P2002, externalId=${externalId}) — devuelvo la orden ganadora ${winner.id}`)
+        return buildCreateOrderResponse(winner.id)
+      }
+    }
+    throw err
+  }
 
-    // New Cobrar V1 keeps total/subtotal gross-net semantics explicit:
-    // OrderItem.total and Order.subtotal are gross, reductions live in discountAmount.
-    const isFreeCart = totalPesos === 0
-    const order = await tx.order.create({
-      data: {
-        venueId,
-        tableId: input.tableId || null,
-        customerId: input.customerId || null,
-        covers: 1,
-        orderNumber,
-        // Estampar la llave de idempotencia: sin esto el dedup del retry
-        // nunca encontraría la orden original.
-        externalId,
-        servedById: input.staffId,
-        createdById: input.staffId,
-        terminalId: resolvedTerminalId,
-        status: isFreeCart ? 'COMPLETED' : 'PENDING',
-        paymentStatus: isFreeCart ? 'PAID' : 'PENDING',
-        kitchenStatus: 'PENDING',
-        type: input.orderType || 'TAKEOUT',
-        source: input.source || 'TPV',
-        subtotal: decimalFromPesos(grossSubtotalPesos),
-        discountAmount: decimalFromPesos(discountAmountPesos),
-        taxAmount: 0,
-        tipAmount: 0,
-        total: decimalFromPesos(totalPesos),
-        paidAmount: 0,
-        remainingBalance: decimalFromPesos(totalPesos),
-        completedAt: isFreeCart ? new Date() : null,
-        specialRequests: normalizeNotes(input.note),
-        version: 1,
-      },
-    })
-
-    const createdItems: Array<{ id: string; line: PreparedCheckoutLine }> = []
-
-    for (const line of preparedLines) {
-      const item = await tx.orderItem.create({
-        data: {
-          orderId: order.id,
-          productId: line.product?.id || null,
-          productName: line.product?.name || line.input.name || 'Otro importe',
-          productSku: line.product?.sku || null,
-          categoryName: line.product?.category?.name || null,
-          quantity: line.input.quantity,
-          unitPrice: line.product ? line.product.price : decimalFromPesos(Number(line.input.unitPrice || 0)),
-          discountAmount: decimalFromPesos(line.lineDiscountPesos),
-          taxAmount: 0,
-          total: decimalFromPesos(line.lineGrossPesos),
-          isCortesia: !!line.input.isCortesia,
-          cortesiaReason: line.input.isCortesia ? normalizeNotes(line.input.cortesiaReason) : null,
-          appliedDiscountId: line.appliedDiscount?.id || null,
-          notes: normalizeNotes(line.input.notes),
-          modifiers: {
-            create: line.modifierRows.map(modifier => ({
-              modifierId: modifier.id,
-              name: modifier.name,
-              quantity: 1,
-              price: modifier.price,
-            })),
-          },
+  async function runCreateOrderTransaction() {
+    return prisma.$transaction(async tx => {
+      const currentShift = await tx.shift.findFirst({
+        where: {
+          venueId,
+          staffId: input.staffId,
+          status: 'OPEN',
+          endTime: null,
+        },
+        orderBy: {
+          startTime: 'desc',
         },
       })
 
-      createdItems.push({ id: item.id, line })
-    }
-
-    const cortesiaItems = createdItems.filter(item => item.line.input.isCortesia)
-    if (cortesiaItems.length > 0) {
-      const cortesiaAmountPesos = roundPesos(cortesiaItems.reduce((sum, item) => sum + item.line.lineGrossPesos, 0))
-      await tx.orderDiscount.create({
-        data: {
-          orderId: order.id,
-          type: 'COMP',
-          name: 'Cortesía',
-          value: new Prisma.Decimal(100),
-          amount: decimalFromPesos(cortesiaAmountPesos),
-          taxReduction: 0,
-          isComp: true,
-          isManual: true,
-          compReason:
-            cortesiaItems
-              .map(item => item.line.input.cortesiaReason)
-              .filter(Boolean)
-              .join('; ') || 'Cortesía',
-          appliedById: staffVenue.id,
-          appliedToItemIds: cortesiaItems.map(item => item.id),
-        },
-      })
-    }
-
-    for (const item of createdItems.filter(item => item.line.appliedDiscount)) {
-      await tx.orderDiscount.create({
-        data: buildItemDiscountRow({
-          orderId: order.id,
-          itemId: item.id,
-          discount: item.line.appliedDiscount!,
-          discountAmountPesos: item.line.lineDiscountPesos,
-          appliedById: staffVenue.id,
-        }),
-      })
-    }
-
-    if (orderDiscount && orderDiscountPesos > 0) {
-      await tx.orderDiscount.create({
-        data: {
-          orderId: order.id,
-          discountId: orderDiscount.id,
-          type: orderDiscount.type,
-          name: orderDiscount.name,
-          value: orderDiscount.value,
-          amount: decimalFromPesos(orderDiscountPesos),
-          taxReduction: 0,
-          isComp: orderDiscount.type === 'COMP',
-          isManual: true,
-          compReason: orderDiscount.type === 'COMP' ? orderDiscount.compReason || orderDiscount.name : null,
-          appliedById: staffVenue.id,
-          appliedToItemIds: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
-        },
-      })
-    }
-
-    const usedDiscountIds = [...new Set(createdItems.map(item => item.line.appliedDiscount?.id).filter(Boolean) as string[])]
-    if (orderDiscount?.id) usedDiscountIds.push(orderDiscount.id)
-    if (usedDiscountIds.length > 0) {
-      await tx.discount.updateMany({
-        where: { id: { in: [...new Set(usedDiscountIds)] } },
-        data: { currentUses: { increment: 1 } },
-      })
-    }
-
-    for (const item of cortesiaItems) {
-      await tx.orderAction.create({
-        data: {
-          orderId: order.id,
-          actionType: 'COMP',
-          performedById: input.staffId,
-          reason: item.line.input.cortesiaReason || 'Cortesía',
-          metadata: {
-            orderItemId: item.id,
-            productId: item.line.product?.id || null,
-            productName: item.line.product?.name || item.line.input.name || 'Otro importe',
-            lineSubtotalGivenAway: roundPesos(item.line.lineGrossPesos),
-            cortesiaReason: item.line.input.cortesiaReason,
-          },
-        },
-      })
-    }
-
-    if (input.customerId) {
-      await tx.orderCustomer.create({
-        data: {
-          orderId: order.id,
-          customerId: input.customerId,
-          isPrimary: true,
-        },
-      })
-    }
-
-    if (isFreeCart) {
-      // A $0 cortesía cart still needs a Payment row so financial views can
-      // distinguish a completed free cart from an abandoned pending order.
-      const payment = await tx.payment.create({
+      // New Cobrar V1 keeps total/subtotal gross-net semantics explicit:
+      // OrderItem.total and Order.subtotal are gross, reductions live in discountAmount.
+      const isFreeCart = totalPesos === 0
+      const order = await tx.order.create({
         data: {
           venueId,
-          orderId: order.id,
-          shiftId: currentShift?.id,
-          processedById: input.staffId,
-          amount: 0,
+          tableId: input.tableId || null,
+          customerId: input.customerId || null,
+          covers: 1,
+          orderNumber,
+          // Estampar la llave de idempotencia: sin esto el dedup del retry
+          // nunca encontraría la orden original.
+          externalId,
+          servedById: input.staffId,
+          createdById: input.staffId,
+          terminalId: resolvedTerminalId,
+          status: isFreeCart ? 'COMPLETED' : 'PENDING',
+          paymentStatus: isFreeCart ? 'PAID' : 'PENDING',
+          kitchenStatus: 'PENDING',
+          type: input.orderType || 'TAKEOUT',
+          source: input.source || 'TPV',
+          subtotal: decimalFromPesos(grossSubtotalPesos),
+          discountAmount: decimalFromPesos(discountAmountPesos),
+          taxAmount: 0,
           tipAmount: 0,
-          method: 'OTHER',
-          source: 'TPV',
-          status: 'COMPLETED',
-          splitType: 'FULLPAYMENT',
-          type: 'REGULAR',
-          processor: 'AVOQADO',
-          processorData: {
-            type: 'FREE_CART',
-            reason: 'total_zero_cortesia_or_discount',
-          },
-          feePercentage: 0,
-          feeAmount: 0,
-          netAmount: 0,
-          posRawData: {
-            source: 'TPV_COBRAR_WITH_ITEMS',
-          },
+          total: decimalFromPesos(totalPesos),
+          paidAmount: 0,
+          remainingBalance: decimalFromPesos(totalPesos),
+          completedAt: isFreeCart ? new Date() : null,
+          specialRequests: normalizeNotes(input.note),
+          version: 1,
         },
       })
 
-      await tx.paymentAllocation.create({
-        data: {
-          paymentId: payment.id,
-          orderId: order.id,
-          amount: 0,
-        },
-      })
+      const createdItems: Array<{ id: string; line: PreparedCheckoutLine }> = []
 
-      if (currentShift) {
-        await tx.shift.update({
-          where: { id: currentShift.id },
+      for (const line of preparedLines) {
+        const item = await tx.orderItem.create({
           data: {
-            totalOrders: { increment: 1 },
+            orderId: order.id,
+            productId: line.product?.id || null,
+            productName: line.product?.name || line.input.name || 'Otro importe',
+            productSku: line.product?.sku || null,
+            categoryName: line.product?.category?.name || null,
+            quantity: line.input.quantity,
+            unitPrice: line.product ? line.product.price : decimalFromPesos(Number(line.input.unitPrice || 0)),
+            discountAmount: decimalFromPesos(line.lineDiscountPesos),
+            taxAmount: 0,
+            total: decimalFromPesos(line.lineGrossPesos),
+            isCortesia: !!line.input.isCortesia,
+            cortesiaReason: line.input.isCortesia ? normalizeNotes(line.input.cortesiaReason) : null,
+            appliedDiscountId: line.appliedDiscount?.id || null,
+            notes: normalizeNotes(line.input.notes),
+            modifiers: {
+              create: line.modifierRows.map(modifier => ({
+                modifierId: modifier.id,
+                name: modifier.name,
+                quantity: 1,
+                price: modifier.price,
+              })),
+            },
+          },
+        })
+
+        createdItems.push({ id: item.id, line })
+      }
+
+      const cortesiaItems = createdItems.filter(item => item.line.input.isCortesia)
+      if (cortesiaItems.length > 0) {
+        const cortesiaAmountPesos = roundPesos(cortesiaItems.reduce((sum, item) => sum + item.line.lineGrossPesos, 0))
+        await tx.orderDiscount.create({
+          data: {
+            orderId: order.id,
+            type: 'COMP',
+            name: 'Cortesía',
+            value: new Prisma.Decimal(100),
+            amount: decimalFromPesos(cortesiaAmountPesos),
+            taxReduction: 0,
+            isComp: true,
+            isManual: true,
+            compReason:
+              cortesiaItems
+                .map(item => item.line.input.cortesiaReason)
+                .filter(Boolean)
+                .join('; ') || 'Cortesía',
+            appliedById: staffVenue.id,
+            appliedToItemIds: cortesiaItems.map(item => item.id),
           },
         })
       }
-    }
 
-    return order
-  })
+      for (const item of createdItems.filter(item => item.line.appliedDiscount)) {
+        await tx.orderDiscount.create({
+          data: buildItemDiscountRow({
+            orderId: order.id,
+            itemId: item.id,
+            discount: item.line.appliedDiscount!,
+            discountAmountPesos: item.line.lineDiscountPesos,
+            appliedById: staffVenue.id,
+          }),
+        })
+      }
+
+      if (orderDiscount && orderDiscountPesos > 0) {
+        await tx.orderDiscount.create({
+          data: {
+            orderId: order.id,
+            discountId: orderDiscount.id,
+            type: orderDiscount.type,
+            name: orderDiscount.name,
+            value: orderDiscount.value,
+            amount: decimalFromPesos(orderDiscountPesos),
+            taxReduction: 0,
+            isComp: orderDiscount.type === 'COMP',
+            isManual: true,
+            compReason: orderDiscount.type === 'COMP' ? orderDiscount.compReason || orderDiscount.name : null,
+            appliedById: staffVenue.id,
+            appliedToItemIds: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
+          },
+        })
+      }
+
+      const usedDiscountIds = [...new Set(createdItems.map(item => item.line.appliedDiscount?.id).filter(Boolean) as string[])]
+      if (orderDiscount?.id) usedDiscountIds.push(orderDiscount.id)
+      if (usedDiscountIds.length > 0) {
+        await tx.discount.updateMany({
+          where: { id: { in: [...new Set(usedDiscountIds)] } },
+          data: { currentUses: { increment: 1 } },
+        })
+      }
+
+      for (const item of cortesiaItems) {
+        await tx.orderAction.create({
+          data: {
+            orderId: order.id,
+            actionType: 'COMP',
+            performedById: input.staffId,
+            reason: item.line.input.cortesiaReason || 'Cortesía',
+            metadata: {
+              orderItemId: item.id,
+              productId: item.line.product?.id || null,
+              productName: item.line.product?.name || item.line.input.name || 'Otro importe',
+              lineSubtotalGivenAway: roundPesos(item.line.lineGrossPesos),
+              cortesiaReason: item.line.input.cortesiaReason,
+            },
+          },
+        })
+      }
+
+      if (input.customerId) {
+        await tx.orderCustomer.create({
+          data: {
+            orderId: order.id,
+            customerId: input.customerId,
+            isPrimary: true,
+          },
+        })
+      }
+
+      if (isFreeCart) {
+        // A $0 cortesía cart still needs a Payment row so financial views can
+        // distinguish a completed free cart from an abandoned pending order.
+        const payment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId: order.id,
+            shiftId: currentShift?.id,
+            processedById: input.staffId,
+            amount: 0,
+            tipAmount: 0,
+            method: 'OTHER',
+            source: 'TPV',
+            status: 'COMPLETED',
+            splitType: 'FULLPAYMENT',
+            type: 'REGULAR',
+            processor: 'AVOQADO',
+            processorData: {
+              type: 'FREE_CART',
+              reason: 'total_zero_cortesia_or_discount',
+            },
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 0,
+            posRawData: {
+              source: 'TPV_COBRAR_WITH_ITEMS',
+            },
+          },
+        })
+
+        await tx.paymentAllocation.create({
+          data: {
+            paymentId: payment.id,
+            orderId: order.id,
+            amount: 0,
+          },
+        })
+
+        if (currentShift) {
+          await tx.shift.update({
+            where: { id: currentShift.id },
+            data: {
+              totalOrders: { increment: 1 },
+            },
+          })
+        }
+      }
+
+      return order
+    })
+  }
 
   const fullOrder = await fetchOrderForTpvResponse(createdOrder.id)
 

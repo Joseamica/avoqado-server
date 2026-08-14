@@ -34,20 +34,14 @@ describe('buildPaymentBreakdown — desglose del corte por método real', () => 
   })
 
   it('🔴 el porcentaje por marca usa SÓLO tarjetas como denominador (no puede dar 100000%)', () => {
-    const { cardBrandBreakdown } = buildPaymentBreakdown([
-      pago('CREDIT_CARD', 1000, 0, 'VISA'),
-      pago('CASH', 500),
-    ])
+    const { cardBrandBreakdown } = buildPaymentBreakdown([pago('CREDIT_CARD', 1000, 0, 'VISA'), pago('CASH', 500)])
 
     const visa = cardBrandBreakdown.find(b => b.brand === 'VISA')
     expect(visa?.percentage).toBe(100)
   })
 
   it('reparte el porcentaje entre marcas de forma que sume 100', () => {
-    const { cardBrandBreakdown } = buildPaymentBreakdown([
-      pago('CREDIT_CARD', 750, 0, 'VISA'),
-      pago('DEBIT_CARD', 250, 0, 'MASTERCARD'),
-    ])
+    const { cardBrandBreakdown } = buildPaymentBreakdown([pago('CREDIT_CARD', 750, 0, 'VISA'), pago('DEBIT_CARD', 250, 0, 'MASTERCARD')])
 
     expect(cardBrandBreakdown.find(b => b.brand === 'VISA')?.percentage).toBe(75)
     expect(cardBrandBreakdown.find(b => b.brand === 'MASTERCARD')?.percentage).toBe(25)
@@ -79,10 +73,7 @@ describe('buildPaymentBreakdown — desglose del corte por método real', () => 
   })
 
   it('las propinas se reportan por método real, no revueltas', () => {
-    const { paymentMethodBreakdown, totalTips } = buildPaymentBreakdown([
-      pago('CASH', 100, 20),
-      pago('CREDIT_CARD', 200, 30, 'VISA'),
-    ])
+    const { paymentMethodBreakdown, totalTips } = buildPaymentBreakdown([pago('CASH', 100, 20), pago('CREDIT_CARD', 200, 30, 'VISA')])
 
     expect(paymentMethodBreakdown.find(m => m.method === 'CASH')?.tips).toBe(20)
     expect(paymentMethodBreakdown.find(m => m.method === 'CREDIT_CARD')?.tips).toBe(30)

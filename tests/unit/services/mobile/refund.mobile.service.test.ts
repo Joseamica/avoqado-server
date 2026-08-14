@@ -44,8 +44,7 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
     prismaMock.cashDrawerEvent.create.mockResolvedValue({ id: 'evt-1' })
   })
 
-  const refundCash = () =>
-    createRefund({ venueId: VENUE, amount: 5000, reason: 'Producto defectuoso', method: 'CASH', staffId: STAFF })
+  const refundCash = () => createRefund({ venueId: VENUE, amount: 5000, reason: 'Producto defectuoso', method: 'CASH', staffId: STAFF })
 
   it('guarda el reembolso como COMPLETED + REFUND para que los cortes lo vean', async () => {
     await refundCash()
@@ -83,5 +82,42 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
     expect(prismaMock.cashDrawerEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ type: 'PAY_OUT', amount: new Decimal('50.00') }) }),
     )
+  })
+
+  // 🔴 Regresión del audit 2026-08-13: la convención COMPLETED+REFUND arreglaba
+  // el cierre de CAJA (filtra por ventana de tiempo), pero el cierre de TURNO
+  // selecciona por `{ shiftId, status: 'COMPLETED' }` — sin shiftId el reembolso
+  // seguía invisible y el faltante se le achacaba al cajero.
+  describe('shiftId — visible para el cierre de turno', () => {
+    it('estampa el turno ABIERTO del cajero en el Payment y decrementa totalSales', async () => {
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-1' } as any)
+      prismaMock.shift.update.mockResolvedValue({} as any)
+
+      await refundCash()
+
+      expect(prismaMock.shift.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ venueId: VENUE, staffId: STAFF, status: 'OPEN', endTime: null }),
+        }),
+      )
+      expect(createdPayment.shiftId).toBe('shift-1')
+      // Espejo del refund TPV: los contadores denormalizados del turno también
+      // tienen que reflejar el reembolso.
+      expect(prismaMock.shift.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'shift-1' },
+          data: { totalSales: { decrement: new Decimal('50.00') } },
+        }),
+      )
+    })
+
+    it('sin turno abierto, el reembolso se crea sin shiftId y no toca contadores', async () => {
+      prismaMock.shift.findFirst.mockResolvedValue(null as any)
+
+      await refundCash()
+
+      expect(createdPayment.shiftId).toBeUndefined()
+      expect(prismaMock.shift.update).not.toHaveBeenCalled()
+    })
   })
 })
