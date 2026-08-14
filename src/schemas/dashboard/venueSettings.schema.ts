@@ -112,6 +112,11 @@ export const UpdateVenueSettingsSchema = z.object({
 
     // Sidebar visibility (superadmin toggle per venue)
     hiddenSidebarItems: z.array(z.string()).optional(),
+
+    // Dónde salen las promociones en el POS (pantalla del cajero / del cliente).
+    // HIDDEN es preferencia de layout del propio local, NO el candado de tier.
+    promotionsPanelCashier: z.enum(['HIDDEN', 'TAB', 'SIDE_PANEL'], { message: 'Valor de panel inválido' }).optional(),
+    promotionsPanelCustomer: z.enum(['HIDDEN', 'TAB', 'SIDE_PANEL'], { message: 'Valor de panel inválido' }).optional(),
   }),
 })
 
