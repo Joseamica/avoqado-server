@@ -11,8 +11,6 @@
  * - Orders and OrderItems
  * - Payments
  * - Reviews
- * - RawMaterialMovement (inventory movements)
- * - StockBatch (FIFO batches)
  * - Demo MerchantAccounts (if externalMerchantId contains 'demo')
  * - Demo Customers
  *
@@ -30,6 +28,7 @@
  * - CustomerGroup
  * - LoyaltyConfig
  * - RawMaterial
+ * - RawMaterialMovement / StockBatch (only those belonging to demo raw materials)
  *
  * What gets DELETED (payment config - ONLY if demo accounts):
  * - VenuePaymentConfig (only if linked to demo merchant accounts)
@@ -38,6 +37,10 @@
  *
  * What gets KEPT:
  * - All data created by the user (isDemo: false)
+ * - User-captured inventory: Inventory/RawMaterial stock levels, their
+ *   StockBatches (FIFO chain) and RawMaterialMovements are NEVER touched.
+ *   (A previous version zeroed non-demo stock and deleted all movements
+ *   and batches of the venue — that wiped real trial-captured inventory.)
  * - Staff/team members
  * - Real VenuePaymentConfig (post-KYC setup with real merchant accounts)
  * - Real VenuePricingStructure (configured for real accounts)
@@ -70,9 +73,6 @@ interface CleanupResult {
   deletedCustomerGroups: number
   deletedLoyaltyConfig: number
   deletedRawMaterials: number
-  // Reset counts
-  resetRawMaterials: number
-  resetInventory: number
 }
 
 /**
@@ -106,8 +106,6 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
     deletedCustomerGroups: 0,
     deletedLoyaltyConfig: 0,
     deletedRawMaterials: 0,
-    resetRawMaterials: 0,
-    resetInventory: 0,
   }
 
   // Use transaction to ensure atomicity
@@ -152,19 +150,23 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       result.deletedReviews = deletedReviews.count
       logger.info(`  ✓ Deleted ${deletedReviews.count} reviews`)
 
-      // 5. Delete RawMaterialMovement (inventory movements)
+      // 5. Delete RawMaterialMovements of DEMO raw materials only.
+      // Movements of user (non-demo) raw materials are the audit trail of
+      // real stock the user captured during the trial — never delete them.
       const deletedMovements = await tx.rawMaterialMovement.deleteMany({
-        where: { venueId },
+        where: { venueId, rawMaterial: { isDemo: true } },
       })
       result.deletedMovements = deletedMovements.count
-      logger.info(`  ✓ Deleted ${deletedMovements.count} inventory movements`)
+      logger.info(`  ✓ Deleted ${deletedMovements.count} demo inventory movements`)
 
-      // 6. Delete StockBatch (FIFO batches)
+      // 6. Delete StockBatches of DEMO raw materials only.
+      // Batches of real raw materials must survive: deleting them while
+      // keeping currentStock breaks the FIFO invariant (stock == Σ batches).
       const deletedBatches = await tx.stockBatch.deleteMany({
-        where: { venueId },
+        where: { venueId, rawMaterial: { isDemo: true } },
       })
       result.deletedBatches = deletedBatches.count
-      logger.info(`  ✓ Deleted ${deletedBatches.count} stock batches`)
+      logger.info(`  ✓ Deleted ${deletedBatches.count} demo stock batches`)
 
       // 7. Delete demo MerchantAccounts for THIS venue only
       const venuePaymentConfig = await tx.venuePaymentConfig.findUnique({
@@ -444,21 +446,7 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       result.deletedLoyaltyConfig = deletedLoyaltyConfig.count
       logger.info(`  ✓ Deleted ${deletedLoyaltyConfig.count} demo loyalty configs`)
 
-      // 25. Reset non-demo RawMaterial stock to 0 (keep the records)
-      const resetRawMaterials = await tx.rawMaterial.updateMany({
-        where: {
-          venueId,
-          isDemo: false,
-        },
-        data: {
-          currentStock: 0,
-          avgCostPerUnit: 0,
-        },
-      })
-      result.resetRawMaterials = resetRawMaterials.count
-      logger.info(`  ✓ Reset ${resetRawMaterials.count} user raw materials to 0 stock`)
-
-      // 26. Delete demo RawMaterials
+      // 25. Delete demo RawMaterials
       const deletedRawMaterials = await tx.rawMaterial.deleteMany({
         where: {
           venueId,
@@ -468,19 +456,9 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       result.deletedRawMaterials = deletedRawMaterials.count
       logger.info(`  ✓ Deleted ${deletedRawMaterials.count} demo raw materials`)
 
-      // 27. Reset non-demo Inventory to 0 (keep the records)
-      const resetInventory = await tx.inventory.updateMany({
-        where: {
-          venueId,
-          isDemo: false,
-        },
-        data: {
-          currentStock: 0,
-          reservedStock: 0,
-        },
-      })
-      result.resetInventory = resetInventory.count
-      logger.info(`  ✓ Reset ${resetInventory.count} user inventory records to 0 stock`)
+      // NOTE: non-demo Inventory and RawMaterial stock is intentionally NOT
+      // reset. The user captured that stock during the trial — it is real
+      // data and must survive the conversion untouched.
     },
     {
       timeout: 120000, // 2 minute timeout for comprehensive cleanup
@@ -492,7 +470,7 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
   logger.info(
     `   Business Setup: ${result.deletedProducts} products, ${result.deletedMenuCategories} categories, ${result.deletedRecipes} recipes`,
   )
-  logger.info(`   User data preserved: ${result.resetRawMaterials} raw materials reset, ${result.resetInventory} inventory reset`)
+  logger.info(`   User data preserved: non-demo inventory, raw materials, movements and batches untouched`)
 
   return result
 }

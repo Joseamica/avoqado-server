@@ -382,6 +382,12 @@ interface SyncEvent {
   staffName: string
   orderId?: string
   createdAt?: string // ISO date
+  /**
+   * Llave de idempotencia del POS: el id con el que la app guarda el evento en su base
+   * local (Android `CashDrawerEventEntity.id`, un UUID estable). Opcional para no romper
+   * apps viejas — sin ella el reintento no se puede deduplicar.
+   */
+  localId?: string
 }
 
 /**
@@ -395,23 +401,35 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
     throw new BadRequestError('No hay eventos para sincronizar')
   }
 
-  const createdEvents = await prisma.$transaction(
-    events.map(event =>
-      prisma.cashDrawerEvent.create({
-        data: {
-          sessionId: session.id,
-          venueId,
-          type: event.type,
-          amount: dollarsToDecimal(event.amount),
-          note: event.note || null,
-          staffId: event.staffId,
-          staffName: event.staffName,
-          orderId: event.orderId || null,
-          createdAt: event.createdAt ? new Date(event.createdAt) : new Date(),
-        },
-      }),
-    ),
-  )
+  // 🔴 `createMany` + `skipDuplicates` en vez de un `create` por evento.
+  //
+  // Las apps mandan el lote fire-and-forget y sin cola de reintento: si la respuesta se
+  // pierde, el MISMO lote vuelve. El `create` ciego insertaba las filas otra vez y el cajón
+  // terminaba con efectivo inventado — que el arqueo daba por bueno. Con la llave
+  // `localId` del POS y el índice `@@unique([venueId, localId])`, el reintento choca y
+  // Postgres lo salta en vez de duplicar.
+  //
+  // Un evento sin `localId` (app vieja) entra igual: varios NULL conviven en un índice
+  // único de Postgres. No gana la protección, pero tampoco se rompe.
+  const result = await prisma.cashDrawerEvent.createMany({
+    data: events.map(event => ({
+      sessionId: session.id,
+      venueId,
+      type: event.type,
+      amount: dollarsToDecimal(event.amount),
+      note: event.note || null,
+      staffId: event.staffId,
+      staffName: event.staffName,
+      orderId: event.orderId || null,
+      localId: event.localId || null,
+      createdAt: event.createdAt ? new Date(event.createdAt) : new Date(),
+    })),
+    skipDuplicates: true,
+  })
+
+  // Se reporta lo que ENTRÓ de verdad, no lo que se mandó: si el cliente reenvió un lote ya
+  // aplicado, `syncedCount` es 0 y eso es la respuesta correcta, no un error.
+  const insertedCount = result.count
 
   logAction({
     staffId: events[0]?.staffId,
@@ -419,12 +437,19 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
     action: 'CASH_DRAWER_SYNC',
     entity: 'CashDrawerSession',
     entityId: session.id,
-    data: { eventCount: createdEvents.length, source: 'MOBILE' },
+    data: { eventCount: insertedCount, receivedCount: events.length, source: 'MOBILE' },
   })
 
+  // `createMany` no devuelve las filas: se releen las del lote por su `localId` para
+  // conservar el shape de la respuesta que ya consumen las apps.
+  const localIds = events.map(e => e.localId).filter((id): id is string => Boolean(id))
+  const syncedEvents = localIds.length
+    ? await prisma.cashDrawerEvent.findMany({ where: { venueId, localId: { in: localIds } }, orderBy: { createdAt: 'asc' } })
+    : []
+
   return {
-    syncedCount: createdEvents.length,
-    events: createdEvents.map(formatEvent),
+    syncedCount: insertedCount,
+    events: syncedEvents.map(formatEvent),
   }
 }
 

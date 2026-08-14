@@ -186,6 +186,8 @@ const prismaMock: any = {
   // Inventory models (QUANTITY method)
   inventory: createMockModel(),
   inventoryMovement: createMockModel(),
+  inventoryPosting: createMockModel(),
+  inventoryPostingLine: createMockModel(),
   // Stock counts (conteo de existencias)
   stockCount: createMockModel(),
   stockCountItem: createMockModel(),
@@ -194,6 +196,7 @@ const prismaMock: any = {
   recipeLine: createMockModel(),
   stockBatch: createMockModel(),
   rawMaterialMovement: createMockModel(),
+  lowStockAlert: createMockModel(),
   rawMaterialPresentation: createMockModel(), // Presentaciones de compra/salida (caja, cono, kilo)
   // Compras (un modelo sin registrar aquí revienta con "Cannot read properties of undefined")
   supplier: createMockModel(),
@@ -320,6 +323,9 @@ prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
 // Tests that don't exercise migration badges shouldn't have to mock it — default to
 // no in-flight migrations so the result is iterable and the "Migrando…" badge is off.
 prismaMock.tpvCommandQueue.findMany.mockResolvedValue([])
+prismaMock.orderItem.findMany.mockResolvedValue([])
+prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', status: 'PENDING' })
+prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
 // Plan-tier gating (checkFeatureAccess middleware → getVenueBaseTier in
 // src/services/access/basePlan.service.ts) iterates the rows returned by
 // prisma.venueFeature.findMany. A bare jest.fn() resolves undefined and the

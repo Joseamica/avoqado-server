@@ -426,6 +426,14 @@ export const createOrderWithItemsSchema = z.object({
       subtotal: z.number().nonnegative({ message: 'El subtotal debe ser un número no negativo en pesos.' }),
       total: z.number().nonnegative({ message: 'El total debe ser un número no negativo en pesos.' }),
       note: z.string().optional().nullable(),
+      // Llave de idempotencia del cliente (retry-safety). ADITIVO: los TPV
+      // viejos no la mandan y el comportamiento no cambia.
+      externalId: z
+        .string()
+        .min(1, { message: 'externalId no puede estar vacío.' })
+        .max(255, { message: 'externalId no puede exceder 255 caracteres.' })
+        .optional()
+        .nullable(),
     })
     .refine(data => data.taxAmount === 0, {
       message: 'taxAmount debe ser 0 en V1 del nuevo Cobrar (la fórmula del payment service aún no incluye tax).',

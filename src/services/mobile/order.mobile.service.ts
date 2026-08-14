@@ -1789,7 +1789,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   //   · si quedó PARTIAL        → cobra el restante real, no el que leyó primero ✅
   // Tres intentos: la contención real es de 2-4 dispositivos, no de cientos.
   const MAX_PAYMENT_CAS_ATTEMPTS = 3
-  let paymentResult: { newPayment: any; isFullyPaid: boolean; areaTicketOrder: boolean; areaTicketSessionId?: string } | undefined
+  let paymentResult:
+    | { newPayment: any; isFullyPaid: boolean; areaTicketOrder: boolean; areaTicketSessionId?: string; postingId?: string | null }
+    | undefined
 
   for (let attempt = 1; attempt <= MAX_PAYMENT_CAS_ATTEMPTS; attempt++) {
     try {
@@ -1962,11 +1964,35 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           locked: lockedAreaCheckout,
         })
 
+        // 🔴 Posting durable (fase 2, auditoría 2026-08-12): el "vale de
+        // deducción" nace EN ESTA transacción — si el proceso muere después del
+        // commit y antes de deducir, queda un posting PENDING visible que el
+        // job de respaldo reaplica, en vez de una deducción perdida invisible.
+        // Área-tickets ya dedujeron dentro de su propia finalización → SKIPPED
+        // con razón durable, nunca silencio.
+        let postingId: string | null = null
+        if (isFullyPaid) {
+          const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
+          const txItems = await tx.orderItem.findMany({
+            where: { orderId },
+            include: { modifiers: { include: { modifier: true } } },
+          })
+          const posting = await createSalePostingInTx(tx, {
+            venueId,
+            orderId,
+            items: txItems as any,
+            staffId: effectiveStaffId,
+            skipReason: areaFinalization.areaTicketOrder ? 'AREA_TICKET_TRANSACTIONAL' : undefined,
+          })
+          postingId = posting?.id ?? null
+        }
+
         return {
           newPayment,
           isFullyPaid,
           areaTicketOrder: areaFinalization.areaTicketOrder,
           areaTicketSessionId: areaFinalization.sessionId,
+          postingId,
         }
       })
       break // ganamos la transición
@@ -2044,7 +2070,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // Inalcanzable: el bucle o devuelve, o asigna, o lanza. Guard para el tipo.
     throw new ConflictError('No se pudo registrar el cobro. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
   }
-  const { newPayment: payment, isFullyPaid: orderFullyPaid, areaTicketOrder } = paymentResult
+  const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId } = paymentResult
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
 
@@ -2060,38 +2086,32 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // (Square-parity, mismo contrato que el TPV). El cobro ya quedó commiteado
   // arriba: un fallo aquí se loguea y la respuesta sale igual, sin aviso.
   let inventoryWarning: OrderInventoryWarning | undefined
-  if (orderFullyPaid) {
+  if (orderFullyPaid && postingId) {
     try {
-      // V7 area-ticket orders already applied reservations, normal lines,
-      // recipes and modifiers inside the payment transaction. Running the
-      // legacy post-commit helper here would make retries crash-unsafe and
-      // could deduct the non-reserved portion twice.
-      if (!areaTicketOrder) {
-        const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')
-        const paidOrder = await prisma.order.findUnique({
-          where: { id: orderId },
-          include: { items: { include: { modifiers: { include: { modifier: true } } } } },
-        })
-        if (paidOrder) {
-          const issues = await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId || '')
-          if (Array.isArray(issues) && issues.length > 0) {
-            const { buildInventoryWarning } = await import('@/services/tpv/payment.tpv.service')
-            inventoryWarning = buildInventoryWarning(
-              issues,
-              issues.every(issue => issue.available != null),
-            )
-          }
-        }
+      // Fase 2 (posting durable): la deducción corre APLICANDO el posting que
+      // nació en la transacción del cobro. Un posting SKIPPED (área-tickets:
+      // ya dedujeron en su finalización transaccional) no pasa el claim y no
+      // deduce. Reintentable por línea; el job de respaldo recoge lo que un
+      // crash deje a medias.
+      const { applySalePosting } = await import('@/services/inventory/inventoryPosting.service')
+      const applied = await applySalePosting(postingId, effectiveStaffId || input.staffId || null)
+      if (applied && applied.issues.length > 0) {
+        const { buildInventoryWarning } = await import('@/services/tpv/payment.tpv.service')
+        inventoryWarning = buildInventoryWarning(applied.issues, applied.applied)
       }
     } catch (err) {
-      logger.error('[ORDER.MOBILE] Post-payment inventory deduction failed (payment unaffected)', {
+      logger.error('[ORDER.MOBILE] Post-payment inventory posting failed (payment unaffected)', {
         orderId,
+        postingId,
         error: err instanceof Error ? err.message : String(err),
       })
     }
+  }
+  if (orderFullyPaid) {
     // Real-time auto-reorder, mirroring recordOrderPayment: if this sale
     // left an ingredient at/below its reorder point, create the PO now.
     // Self-gated (feature + PREMIUM tier + config.enabled) and non-blocking.
+    // Corre con la venta pagada aunque el posting sea SKIPPED (área-tickets).
     void (async () => {
       try {
         const { runAutoReorderForVenue } = await import('@/services/dashboard/autoReorder.service')

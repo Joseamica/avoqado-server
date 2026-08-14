@@ -1429,11 +1429,15 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
             })
 
             if (existingInventory) {
-              // Update existing inventory
+              // 🔴 El re-import NUNCA toca `currentStock` de un inventario existente
+              // (auditoría 2026-08-12): antes escribía `currentStock || 0`, así que un
+              // re-import de catálogo sin ese campo BORRABA el stock de todo el venue,
+              // sin InventoryMovement ni bitácora. El saldo solo se mueve por ventas,
+              // conteos, recepciones y ajustes — caminos que sí dejan rastro.
+              // `minimumStock` sí se actualiza: es configuración, no saldo.
               await tx.inventory.update({
                 where: { id: existingInventory.id },
                 data: {
-                  currentStock: productData.currentStock || 0,
                   minimumStock: productData.minStock || 0,
                 },
               })

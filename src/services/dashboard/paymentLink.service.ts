@@ -2151,15 +2151,41 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
     throw new BadRequestError('Token de tarjeta no encontrado en la sesión')
   }
 
+  // 2.5 🔴 Claim atómico ANTES de autorizar (auditoría 2026-08-12): el check de
+  // arriba lee fuera de transacción, así que dos llamadas concurrentes lo pasaban
+  // las dos y AUTORIZABAN DOS VECES con el proveedor (cada autorización trae su
+  // propio transactionId, así que ni la llave del Payment colisionaba: doble
+  // cargo + doble deducción). Solo quien gana PROCESSING→CHARGING autoriza.
+  // Si el proveedor falla, se regresa a PROCESSING (reintentable); un crash a
+  // media autorización deja CHARGING — fail-closed: una sesión atorada es
+  // infinitamente más barata que un doble cargo.
+  const claim = await prisma.checkoutSession.updateMany({
+    where: { id: session.id, status: 'PROCESSING' },
+    data: { status: 'CHARGING' },
+  })
+  if (claim.count === 0) {
+    throw new BadRequestError('Este cobro ya se está procesando. Espera el resultado; no lo intentes de nuevo.')
+  }
+
   // 3. Resolve provider and charge
   const provider = getProvider(session.ecommerceMerchant)
-  const chargeResult = await provider.authorizeCardPayment(session.ecommerceMerchant, {
-    amount: Number(session.amount),
-    currency: session.currency === 'MXN' ? '484' : session.currency,
-    cardToken,
-    cvv,
-    orderId: session.sessionId,
-  })
+  let chargeResult
+  try {
+    chargeResult = await provider.authorizeCardPayment(session.ecommerceMerchant, {
+      amount: Number(session.amount),
+      currency: session.currency === 'MXN' ? '484' : session.currency,
+      cardToken,
+      cvv,
+      orderId: session.sessionId,
+    })
+  } catch (error) {
+    // Soltar el claim para que el cliente pueda reintentar; si este revert
+    // falla, la sesión queda CHARGING (atorada pero segura, nunca doble cargo).
+    await prisma.checkoutSession
+      .updateMany({ where: { id: session.id, status: 'CHARGING' }, data: { status: 'PROCESSING' } })
+      .catch(() => undefined)
+    throw error
+  }
 
   // 4. Update session and payment link + create Order for ITEM links.
   // Bundle line items were snapshotted onto CheckoutSession.metadata at

@@ -89,6 +89,9 @@ export async function deductInventoryForProduct(
   orderId: string,
   staffId?: string,
   orderModifiers?: OrderModifierForInventory[],
+  // Fase 2 (posting durable): liga los movimientos QUANTITY a su línea de
+  // posting. Opcional y aditivo — los callers legacy no cambian.
+  options?: { postingLineId?: string },
 ) {
   const inventoryMethod = await getProductInventoryMethod(productId)
 
@@ -107,7 +110,7 @@ export async function deductInventoryForProduct(
 
   switch (inventoryMethod) {
     case 'QUANTITY': {
-      const result = await deductSimpleStock(venueId, productId, quantity, orderId, staffId)
+      const result = await deductSimpleStock(venueId, productId, quantity, orderId, staffId, options?.postingLineId)
       // ✅ Also deduct ADDITION modifiers for QUANTITY products
       if (orderModifiers?.length) {
         await deductStockForModifiers(venueId, quantity, orderModifiers, orderId, staffId)
@@ -147,7 +150,14 @@ export async function deductInventoryForProduct(
  * - Decrements stock atomically
  * - Creates movement log with correct values
  */
-async function deductSimpleStock(venueId: string, productId: string, quantity: number, orderId: string, staffId?: string) {
+async function deductSimpleStock(
+  venueId: string,
+  productId: string,
+  quantity: number,
+  orderId: string,
+  staffId?: string,
+  postingLineId?: string,
+) {
   const result = await prisma.$transaction(async tx => {
     // 1. Get product for metadata
     const product = await tx.product.findUnique({
@@ -207,6 +217,8 @@ async function deductSimpleStock(venueId: string, productId: string, quantity: n
         reason: `Sold ${quantity}x ${product.name}`,
         reference: orderId,
         createdBy: staffId,
+        // Liga al posting durable (fase 2) — null en los callers legacy.
+        postingLineId: postingLineId ?? null,
       },
     })
 

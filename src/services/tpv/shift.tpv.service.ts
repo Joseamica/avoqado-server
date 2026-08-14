@@ -1355,6 +1355,21 @@ async function closeShiftUsingRequest(
     let totalOtherPayments = new Decimal(0)
     let totalSales = new Decimal(0)
     let totalTips = new Decimal(0)
+    // 🔴 Propina cobrada EN EFECTIVO — se lleva aparte de `totalCashPayments` a propósito.
+    //
+    // `totalCashPayments` es la cifra de VENTAS en efectivo y la consumen el MCP
+    // (`src/mcp/tools/shifts.ts`), `cashSales` del dashboard y `salesTotal`
+    // (`shared-query.service.ts`). Sumarle la propina ahí arreglaría el arqueo inflando
+    // las ventas — cambiar un bug por otro peor.
+    //
+    // Pero el billete de propina SÍ entró físicamente al cajón junto con la venta, así
+    // que el efectivo esperado tiene que incluirlo o el cierre reporta un sobrante falso
+    // del tamaño de las propinas (era la contradicción contra
+    // `cashCloseout.dashboard.service.ts`, que sí las sumaba). El dueño cuenta, ve el
+    // desglose en el ticket y reparte DESPUÉS: por eso no hace falta registrar un egreso.
+    //
+    // La propina de TARJETA no entra aquí: ese dinero llega por el depósito del banco.
+    let totalCashTips = new Decimal(0)
 
     shiftPayments.forEach(payment => {
       const amount = new Decimal(payment.amount || 0)
@@ -1365,6 +1380,7 @@ async function closeShiftUsingRequest(
       switch (payment.method) {
         case 'CASH':
           totalCashPayments = totalCashPayments.add(amount)
+          totalCashTips = totalCashTips.add(tipAmount)
           break
         case 'CREDIT_CARD':
         case 'DEBIT_CARD':
@@ -1487,16 +1503,21 @@ async function closeShiftUsingRequest(
       },
     }
 
-    const expectedCash = new Decimal(shift.startingCash || 0).add(totalCashPayments)
+    // Lo que HAY en el cajón por este turno: ventas en efectivo + propina cobrada en
+    // efectivo. Es la cifra del arqueo, distinta de `totalCashPayments` (ventas) que
+    // alimenta los reportes. Ver el comentario largo donde se acumula `totalCashTips`.
+    const cashInDrawer = totalCashPayments.add(totalCashTips)
+
+    const expectedCash = new Decimal(shift.startingCash || 0).add(cashInDrawer)
     let outcome: CashReconciliationOutcome = request.outcome
     let ignoreReason = request.ignoreReason ?? request.reason
-    let endingCash = totalCashPayments
+    let endingCash = cashInDrawer
     let cashDeclared: Decimal | null = null
     let cashDifference: Decimal | null = null
     let calculatedDifference: Decimal | null = null
 
     if (request.source === 'NEW' && request.action === 'COUNTED' && request.countedCash && outcome === 'APPLIED') {
-      const calculation = calculateCashReconciliation(request.countedCash, shift.startingCash || 0, totalCashPayments)
+      const calculation = calculateCashReconciliation(request.countedCash, shift.startingCash || 0, cashInDrawer)
       endingCash = new Decimal(request.countedCash)
       cashDeclared = new Decimal(request.countedCash)
       calculatedDifference = new Decimal(calculation.difference)
@@ -1531,6 +1552,7 @@ async function closeShiftUsingRequest(
       totalOrders: orderItems.length,
       notes: legacy?.notes || null,
       totalCashPayments,
+      totalCashTips,
       totalCardPayments,
       totalVoucherPayments,
       totalOtherPayments,

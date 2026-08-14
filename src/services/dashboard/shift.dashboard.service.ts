@@ -289,70 +289,15 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
   // ============================================================
   // Calculate Payment Method Breakdown
   // ============================================================
-  const paymentMethodMap = new Map<string, { total: number; tips: number; count: number }>()
-  const cardBrandMap = new Map<string, { total: number; count: number }>()
-
-  let calculatedTotalSales = 0
-  let calculatedTotalTips = 0
-
-  for (const payment of shift.payments) {
-    const amount = Number(payment.amount || 0)
-    const tipAmount = Number(payment.tipAmount || 0)
-
-    calculatedTotalSales += amount
-    calculatedTotalTips += tipAmount
-
-    // Group by payment method (CASH vs CARD)
-    const methodKey = payment.method === 'CASH' ? 'CASH' : 'CARD'
-    if (paymentMethodMap.has(methodKey)) {
-      const existing = paymentMethodMap.get(methodKey)!
-      existing.total += amount
-      existing.tips += tipAmount
-      existing.count += 1
-    } else {
-      paymentMethodMap.set(methodKey, { total: amount, tips: tipAmount, count: 1 })
-    }
-
-    // Group by card brand (only for card payments)
-    if (payment.method !== 'CASH') {
-      // Get card brand from cardBrand field or processorData
-      const cardBrand =
-        payment.cardBrand || (payment.processorData as any)?.cardBrand || (payment.processorData as any)?.card_brand || 'OTHER'
-
-      const normalizedBrand = cardBrand.toUpperCase()
-
-      if (cardBrandMap.has(normalizedBrand)) {
-        const existing = cardBrandMap.get(normalizedBrand)!
-        existing.total += amount
-        existing.count += 1
-      } else {
-        cardBrandMap.set(normalizedBrand, { total: amount, count: 1 })
-      }
-    }
-  }
-
-  // Convert payment method map to array with percentages
-  const totalPayments = calculatedTotalSales || 1 // Avoid division by zero
-  const paymentMethodBreakdown = Array.from(paymentMethodMap.entries())
-    .map(([method, data]) => ({
-      method,
-      total: Number(data.total.toFixed(2)),
-      tips: Number(data.tips.toFixed(2)),
-      count: data.count,
-      percentage: Number(((data.total / totalPayments) * 100).toFixed(1)),
-    }))
-    .sort((a, b) => b.total - a.total)
-
-  // Convert card brand map to array with percentages
-  const totalCardPayments = paymentMethodMap.get('CARD')?.total || 1
-  const cardBrandBreakdown = Array.from(cardBrandMap.entries())
-    .map(([brand, data]) => ({
-      brand,
-      total: Number(data.total.toFixed(2)),
-      count: data.count,
-      percentage: Number(((data.total / totalCardPayments) * 100).toFixed(1)),
-    }))
-    .sort((a, b) => b.total - a.total)
+  // Toda la lógica vive en `buildPaymentBreakdown` (función pura, con tests): desglosa por
+  // método REAL —débito y crédito por separado— y calcula el porcentaje por marca contra la
+  // suma de tarjetas, no contra una cubeta 'CARD' que ya no existe.
+  const {
+    paymentMethodBreakdown,
+    cardBrandBreakdown,
+    totalSales: calculatedTotalSales,
+    totalTips: calculatedTotalTips,
+  } = buildPaymentBreakdown(shift.payments as any)
 
   // ============================================================
   // Calculate Staff Breakdown (sales per employee)
@@ -767,9 +712,140 @@ export interface UpdateShiftData {
  * Returns `null` when nobody counted the drawer. A fabricated 0 would read as "balanced",
  * which is the one answer we must never invent.
  */
-export function computeCashDifference(input: { countedCash: number | null; startingCash: number; cashSales: number }): number | null {
+/** Cómo debe pintarse el método, para que la UI no adivine con "todo lo que no es efectivo". */
+export type PaymentMethodKind = 'CASH' | 'CARD' | 'OTHER'
+
+const METHOD_KIND: Record<string, PaymentMethodKind> = {
+  CASH: 'CASH',
+  CREDIT_CARD: 'CARD',
+  DEBIT_CARD: 'CARD',
+}
+
+const METHOD_LABEL: Record<string, string> = {
+  CASH: 'Efectivo',
+  CREDIT_CARD: 'Tarjeta de crédito',
+  DEBIT_CARD: 'Tarjeta de débito',
+  DIGITAL_WALLET: 'Monedero digital',
+  BANK_TRANSFER: 'Transferencia',
+  CRYPTOCURRENCY: 'Cripto',
+  OTHER: 'Otro',
+}
+
+export interface PaymentMethodBreakdownRow {
+  /** El método REAL (`CREDIT_CARD`, `DEBIT_CARD`…), no la cubeta vieja 'CASH'|'CARD'. */
+  method: string
+  kind: PaymentMethodKind
+  /** Español, listo para pintar — evita que cada cliente invente su propia traducción. */
+  label: string
+  total: number
+  tips: number
+  count: number
+  percentage: number
+}
+
+/**
+ * Desglose del corte por método de pago REAL + marcas de tarjeta.
+ *
+ * Antes agrupaba con `payment.method === 'CASH' ? 'CASH' : 'CARD'`, así que el dueño no veía
+ * débito contra crédito aunque la base ya lo guardaba por separado, y una transferencia se
+ * pintaba como tarjeta.
+ *
+ * 🔴 Por qué esto es una función aparte y con tests: el cambio "obvio" de una línea NO era
+ * seguro. El denominador de los porcentajes por marca era `paymentMethodMap.get('CARD')`; al
+ * desaparecer esa llave el denominador caía a 1 y una venta VISA de $1,000 se pintaba como
+ * **100000%**. Aquí el denominador es la suma de los pagos con tarjeta de verdad.
+ *
+ * Además, las marcas se recogen SÓLO de pagos con tarjeta: antes cualquier pago que no fuera
+ * efectivo entraba al mapa de marcas, así que una transferencia inventaba una marca "OTHER".
+ */
+export function buildPaymentBreakdown(
+  payments: Array<{ amount: unknown; tipAmount: unknown; method: string; cardBrand?: string | null; processorData?: unknown }>,
+): {
+  paymentMethodBreakdown: PaymentMethodBreakdownRow[]
+  cardBrandBreakdown: Array<{ brand: string; total: number; count: number; percentage: number }>
+  totalSales: number
+  totalTips: number
+} {
+  const methodMap = new Map<string, { total: number; tips: number; count: number }>()
+  const cardBrandMap = new Map<string, { total: number; count: number }>()
+  let totalSales = 0
+  let totalTips = 0
+  let cardTotal = 0
+
+  for (const payment of payments) {
+    const amount = Number(payment.amount || 0)
+    const tipAmount = Number(payment.tipAmount || 0)
+    totalSales += amount
+    totalTips += tipAmount
+
+    const method = payment.method || 'OTHER'
+    const kind = METHOD_KIND[method] ?? 'OTHER'
+
+    const existing = methodMap.get(method)
+    if (existing) {
+      existing.total += amount
+      existing.tips += tipAmount
+      existing.count += 1
+    } else {
+      methodMap.set(method, { total: amount, tips: tipAmount, count: 1 })
+    }
+
+    // Marcas: SÓLO de pagos con tarjeta real.
+    if (kind === 'CARD') {
+      cardTotal += amount
+      const processorData = payment.processorData as any
+      const brand = payment.cardBrand || processorData?.cardBrand || processorData?.card_brand || 'OTHER'
+      const normalizedBrand = String(brand).toUpperCase()
+      const brandEntry = cardBrandMap.get(normalizedBrand)
+      if (brandEntry) {
+        brandEntry.total += amount
+        brandEntry.count += 1
+      } else {
+        cardBrandMap.set(normalizedBrand, { total: amount, count: 1 })
+      }
+    }
+  }
+
+  const salesDenominator = totalSales || 1
+  const cardDenominator = cardTotal || 1
+
+  return {
+    paymentMethodBreakdown: Array.from(methodMap.entries())
+      .map(([method, data]) => ({
+        method,
+        kind: METHOD_KIND[method] ?? 'OTHER',
+        label: METHOD_LABEL[method] ?? method,
+        total: Number(data.total.toFixed(2)),
+        tips: Number(data.tips.toFixed(2)),
+        count: data.count,
+        percentage: Number(((data.total / salesDenominator) * 100).toFixed(1)),
+      }))
+      .sort((a, b) => b.total - a.total),
+    cardBrandBreakdown: Array.from(cardBrandMap.entries())
+      .map(([brand, data]) => ({
+        brand,
+        total: Number(data.total.toFixed(2)),
+        count: data.count,
+        percentage: Number(((data.total / cardDenominator) * 100).toFixed(1)),
+      }))
+      .sort((a, b) => b.total - a.total),
+    totalSales,
+    totalTips,
+  }
+}
+
+export function computeCashDifference(input: {
+  countedCash: number | null
+  startingCash: number
+  /**
+   * Lo que ENTRÓ AL CAJÓN por el turno: ventas en efectivo **más la propina cobrada en
+   * efectivo**. NO es la cifra de ventas — el billete de propina también está físicamente
+   * adentro, así que excluirlo reportaba un sobrante falso del tamaño de las propinas.
+   */
+  cashInDrawer: number
+}): number | null {
   if (input.countedCash === null || input.countedCash === undefined) return null
-  const { difference } = calculateCashReconciliation(input.countedCash, input.startingCash, input.cashSales)
+  const { difference } = calculateCashReconciliation(input.countedCash, input.startingCash, input.cashInDrawer)
   const rounded = difference.toDecimalPlaces(2).toNumber()
   return Object.is(rounded, -0) ? 0 : rounded
 }
@@ -835,7 +911,8 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
   const difference = computeCashDifference({
     countedCash: effectiveEndingCash,
     startingCash: effectiveStartingCash,
-    cashSales: Number(existingShift.totalCashPayments ?? 0),
+    // Ventas en efectivo + propina en efectivo: lo que hay físicamente en el cajón.
+    cashInDrawer: Number(existingShift.totalCashPayments ?? 0) + Number(existingShift.totalCashTips ?? 0),
   })
   if (difference !== null) {
     updateData.cashDifference = difference

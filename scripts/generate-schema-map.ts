@@ -237,6 +237,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 7. Inventory & Stock
   Inventory: 'Inventory & Stock',
   InventoryMovement: 'Inventory & Stock',
+  InventoryPosting: 'Inventory & Stock',
+  InventoryPostingLine: 'Inventory & Stock',
   InventoryTransfer: 'Inventory & Stock',
   InterVenueTransfer: 'Inventory & Stock',
   InterVenueTransferItem: 'Inventory & Stock',

@@ -21,38 +21,38 @@ describe('computeCashDifference', () => {
   it('🔴 REGRESSION: a shift that balanced to the peso reports 0, not the cash sales', () => {
     // Float 1,000 + 5,000 in cash sales = 6,000 expected. Counted 6,000 → balanced.
     // The old formula returned 5,000 here and called it a surplus.
-    expect(computeCashDifference({ countedCash: 6000, startingCash: 1000, cashSales: 5000 })).toBe(0)
+    expect(computeCashDifference({ countedCash: 6000, startingCash: 1000, cashInDrawer: 5000 })).toBe(0)
   })
 
   it('a shortfall comes out negative', () => {
-    expect(computeCashDifference({ countedCash: 5900, startingCash: 1000, cashSales: 5000 })).toBe(-100)
+    expect(computeCashDifference({ countedCash: 5900, startingCash: 1000, cashInDrawer: 5000 })).toBe(-100)
   })
 
   it('a surplus comes out positive', () => {
-    expect(computeCashDifference({ countedCash: 6050, startingCash: 1000, cashSales: 5000 })).toBe(50)
+    expect(computeCashDifference({ countedCash: 6050, startingCash: 1000, cashInDrawer: 5000 })).toBe(50)
   })
 
   it('🔴 nobody counted the drawer → null, never 0', () => {
     // A fabricated 0 reads as "balanced", which is the one answer we must never invent.
     // This is the live case for every TPV-closed shift today.
-    expect(computeCashDifference({ countedCash: null, startingCash: 1000, cashSales: 5000 })).toBeNull()
+    expect(computeCashDifference({ countedCash: null, startingCash: 1000, cashInDrawer: 5000 })).toBeNull()
   })
 
   it('a shift with no cash sales still reconciles against the float', () => {
-    expect(computeCashDifference({ countedCash: 1000, startingCash: 1000, cashSales: 0 })).toBe(0)
-    expect(computeCashDifference({ countedCash: 940, startingCash: 1000, cashSales: 0 })).toBe(-60)
+    expect(computeCashDifference({ countedCash: 1000, startingCash: 1000, cashInDrawer: 0 })).toBe(0)
+    expect(computeCashDifference({ countedCash: 940, startingCash: 1000, cashInDrawer: 0 })).toBe(-60)
   })
 
   it('rounds to cents instead of leaking floating-point dust', () => {
     // 0.1 + 0.2 in float is 0.30000000000000004. A centavo appearing from nowhere in a
     // cash-difference report sends someone to count a drawer for no reason.
-    expect(computeCashDifference({ countedCash: 0.3, startingCash: 0.1, cashSales: 0.2 })).toBe(0)
+    expect(computeCashDifference({ countedCash: 0.3, startingCash: 0.1, cashInDrawer: 0.2 })).toBe(0)
   })
 
   it('counting zero is a real count, not a missing one', () => {
     // An empty drawer with 1,000 expected is a 1,000 shortfall — the single most important
     // case for this report to get right.
-    expect(computeCashDifference({ countedCash: 0, startingCash: 1000, cashSales: 0 })).toBe(-1000)
+    expect(computeCashDifference({ countedCash: 0, startingCash: 1000, cashInDrawer: 0 })).toBe(-1000)
   })
 })
 

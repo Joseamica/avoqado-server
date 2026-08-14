@@ -40,12 +40,20 @@ jest.mock('@/services/tpv/payment.tpv.service', () => ({
   resolveAutofacturaAvailable: jest.fn().mockResolvedValue(false),
 }))
 
-// payCashOrder pulls these lazily (dynamic import) for the post-payment
-// deduction hook — jest's module registry intercepts dynamic imports too.
-const deductMock = jest.fn().mockResolvedValue(undefined)
-jest.mock('@/services/tpv/order.tpv.service', () => ({
+// payCashOrder pulls these lazily (dynamic import) — jest's module registry intercepta
+// los imports dinámicos también.
+//
+// La deducción post-cobro ya NO usa `deductTrackedInventoryForFreeCart`: ahora nace un
+// POSTING DURABLE dentro de la transacción del cobro (`createSalePostingInTx`) que se
+// aplica después del commit (`applySalePosting`), para que un proceso que muera a medias
+// deje un posting PENDING visible en vez de una deducción perdida. La INTENCIÓN de esta
+// suite no cambia —al pagar completo se descuenta, en parcial no— sólo el mecanismo.
+const createPostingMock = jest.fn().mockResolvedValue({ id: 'posting-1', status: 'PENDING' })
+const applyPostingMock = jest.fn().mockResolvedValue({ postingId: 'posting-1', applied: true, issues: [] })
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   __esModule: true,
-  deductTrackedInventoryForFreeCart: (...args: unknown[]) => deductMock(...args),
+  createSalePostingInTx: (...args: unknown[]) => createPostingMock(...args),
+  applySalePosting: (...args: unknown[]) => applyPostingMock(...args),
 }))
 const autoReorderMock = jest.fn().mockResolvedValue({ ran: false })
 jest.mock('@/services/dashboard/autoReorder.service', () => ({
@@ -283,8 +291,10 @@ describe('venta por peso — payCashOrder full-payment inventory deduction hook'
     await payCashOrder('venue-1', 'order-1', { venueId: 'venue-1', amount: 18270, tip: 0, staffId: 'staff-1' } as any)
     await flushAsync()
 
-    expect(deductMock).toHaveBeenCalledTimes(1)
-    expect(deductMock.mock.calls[0][0]).toMatchObject({ id: 'order-1' })
+    // El posting nace en la transacción del cobro y se aplica después del commit.
+    expect(createPostingMock).toHaveBeenCalledTimes(1)
+    expect(createPostingMock.mock.calls[0][1]).toMatchObject({ venueId: 'venue-1', orderId: 'order-1' })
+    expect(applyPostingMock).toHaveBeenCalledTimes(1)
     expect(autoReorderMock).toHaveBeenCalledWith('venue-1')
   })
 
@@ -295,7 +305,8 @@ describe('venta por peso — payCashOrder full-payment inventory deduction hook'
     await payCashOrder('venue-1', 'order-1', { venueId: 'venue-1', amount: 9000, tip: 0, staffId: 'staff-1' } as any)
     await flushAsync()
 
-    expect(deductMock).not.toHaveBeenCalled()
+    expect(createPostingMock).not.toHaveBeenCalled()
+    expect(applyPostingMock).not.toHaveBeenCalled()
     expect(autoReorderMock).not.toHaveBeenCalled()
   })
 })

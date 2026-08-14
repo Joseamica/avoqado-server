@@ -130,3 +130,108 @@ describe('order.dashboard.service — mapOrderPaymentsWithRefunds', () => {
     expect(r1.refunds).toHaveLength(0)
   })
 })
+
+// ── deleteOrder: guard contra borrar órdenes con dinero (auditoría 2026-08-12) ──
+// El DELETE del dashboard cancelaba CUALQUIER orden sin mirar paymentStatus: una
+// orden PAGADA (dinero cobrado + stock deducido) quedaba CANCELLED — invisible
+// para reportes, sin reembolso y sin reposición. El guard exige reembolsar primero.
+import { deleteOrder } from '@/services/dashboard/order.dashboard.service'
+import { prismaMock } from '../../../__helpers__/setup'
+
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+
+describe('order.dashboard.service — deleteOrder guard de pagos', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const arrange = (order: Record<string, unknown>, completedPayments = 0) => {
+    prismaMock.order.findFirst.mockResolvedValue(order as any)
+    prismaMock.payment.count.mockResolvedValue(completedPayments as any)
+    prismaMock.order.update.mockResolvedValue({ id: 'order-1', venueId: 'venue-1', status: 'CANCELLED' } as any)
+  }
+
+  it('rechaza cancelar una orden PAID', async () => {
+    arrange({ id: 'order-1', paymentStatus: 'PAID' })
+
+    await expect(deleteOrder('venue-1', 'order-1')).rejects.toThrow(/pago|reembols/i)
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+  })
+
+  it('rechaza cancelar una orden PARTIAL (ya tiene dinero adentro)', async () => {
+    arrange({ id: 'order-1', paymentStatus: 'PARTIAL' })
+
+    await expect(deleteOrder('venue-1', 'order-1')).rejects.toThrow(/pago|reembols/i)
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+  })
+
+  it('rechaza si hay Payments COMPLETED aunque el paymentStatus diga PENDING (estado inconsistente)', async () => {
+    arrange({ id: 'order-1', paymentStatus: 'PENDING' }, 1)
+
+    await expect(deleteOrder('venue-1', 'order-1')).rejects.toThrow(/pago|reembols/i)
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+  })
+
+  it('sigue cancelando una orden PENDING sin pagos (regresión)', async () => {
+    arrange({ id: 'order-1', paymentStatus: 'PENDING' }, 0)
+
+    const res = await deleteOrder('venue-1', 'order-1')
+
+    expect(res.status).toBe('CANCELLED')
+    expect(prismaMock.order.update).toHaveBeenCalled()
+  })
+})
+
+// ── settleOrder: CAS atómico — dos settles concurrentes = UN solo pago ──
+// (auditoría 2026-08-12, hallazgo 7 de Codex: el guard leía fuera de la
+// transacción y el update era ciego; dos settles simultáneos creaban dos
+// Payments CASH por el mismo saldo.)
+import { settleOrder } from '@/services/dashboard/order.dashboard.service'
+
+describe('order.dashboard.service — settleOrder atómico', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+  })
+
+  const ORDER = {
+    id: 'order-1',
+    orderNumber: 'ORD-1',
+    total: 100,
+    remainingBalance: 100,
+    paymentStatus: 'PENDING',
+  }
+
+  it('liquida con CAS: transición condicional + UN pago por el restante', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(ORDER as any)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.payment.create.mockResolvedValue({ id: 'pay-1' } as any)
+
+    const res = await settleOrder('venue-1', 'order-1')
+
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'order-1', venueId: 'venue-1', paymentStatus: { in: ['PENDING', 'PARTIAL'] } }),
+      }),
+    )
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(res.settledAmount).toBe(100)
+  })
+
+  it('el settle que PIERDE la carrera no crea un segundo pago', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(ORDER as any)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    const res = await settleOrder('venue-1', 'order-1')
+
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(res.settledAmount).toBe(0)
+  })
+
+  it('orden ya PAID no crea pago (regresión)', async () => {
+    prismaMock.order.findFirst.mockResolvedValue({ ...ORDER, paymentStatus: 'PAID', remainingBalance: 0 } as any)
+
+    const res = await settleOrder('venue-1', 'order-1')
+
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(res.settledAmount).toBe(0)
+  })
+})

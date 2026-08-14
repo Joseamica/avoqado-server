@@ -514,6 +514,57 @@ describe('PaymentLink Service', () => {
 
   // ─── COMPLETE CHARGE (ITEM LINK) ─────────────────
   describe('completeCharge', () => {
+    beforeEach(() => {
+      // Claim atómico PROCESSING→CHARGING (auditoría 2026-08-12): por default el
+      // CAS "gana" (count 1) para que el happy path fluya; cada test de carrera
+      // lo pisa con count 0.
+      prismaMock.checkoutSession.updateMany.mockResolvedValue({ count: 1 } as any)
+    })
+
+    it('reclama la sesión con CAS (PROCESSING→CHARGING) ANTES de autorizar con el proveedor', async () => {
+      const session = createMockCheckoutSession()
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(session)
+      prismaMock.checkoutSession.update.mockResolvedValueOnce({})
+      prismaMock.paymentLink.update.mockResolvedValueOnce({})
+      prismaMock.order.create.mockResolvedValueOnce({ id: 'order-123', orderNumber: 'PL-123' })
+      prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-123' })
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(prismaMock.checkoutSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: session.id, status: 'PROCESSING' }),
+          data: expect.objectContaining({ status: 'CHARGING' }),
+        }),
+      )
+      // El claim ocurre ANTES de la autorización (si no, no protege nada).
+      const claimOrder = prismaMock.checkoutSession.updateMany.mock.invocationCallOrder[0]
+      const authOrder = mockBlumonService.authorizePayment.mock.invocationCallOrder[0]
+      expect(claimOrder).toBeLessThan(authOrder)
+    })
+
+    it('la llamada concurrente que PIERDE el CAS no autoriza ni cobra doble', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      prismaMock.checkoutSession.updateMany.mockResolvedValueOnce({ count: 0 } as any)
+
+      await expect(completeCharge('abc12345', 'cs_pl_test123')).rejects.toThrow(BadRequestError)
+      expect(mockBlumonService.authorizePayment).not.toHaveBeenCalled()
+    })
+
+    it('si el proveedor FALLA, la sesión regresa a PROCESSING (reintentable) y el error se propaga', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      mockBlumonService.authorizePayment.mockRejectedValueOnce(new Error('provider timeout'))
+
+      await expect(completeCharge('abc12345', 'cs_pl_test123')).rejects.toThrow('provider timeout')
+
+      expect(prismaMock.checkoutSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: 'CHARGING' }),
+          data: expect.objectContaining({ status: 'PROCESSING' }),
+        }),
+      )
+    })
+
     it('should charge and create Order for ITEM link', async () => {
       const itemSession = createMockCheckoutSession({
         paymentLink: {

@@ -36,7 +36,9 @@ interface CreateRefundParams {
  *
  * Flow:
  * 1. Create a refund order placeholder (status COMPLETED, paymentStatus REFUNDED)
- * 2. Create a Payment record with status REFUNDED, negative amount
+ * 2. Create a Payment record with negative amount, status COMPLETED + type REFUND
+ *    (convención canónica: así lo ven el cierre de turno, el de caja y el reporte
+ *    de reembolsos — ver el comentario largo en el paso 2)
  * 3. Create a VenueTransaction with type REFUND
  * 4. If there's an open CashDrawerSession, create a PAY_OUT event
  * 5. Return the refund details
@@ -86,8 +88,21 @@ export async function createRefund(params: CreateRefundParams) {
       // no había forma de saber por dónde se devolvió.
       method: method as any,
       source: 'POS',
-      status: 'REFUNDED',
-      type: 'REGULAR',
+      // 🔴 Convención CANÓNICA de reembolso: monto negativo + COMPLETED + REFUND, igual
+      // que el TPV (`refund.tpv.service.ts:276`) y el dashboard (`refund.dashboard.service.ts:403`).
+      //
+      // Antes se guardaba `status: 'REFUNDED'` + `type: 'REGULAR'`, y eso lo volvía
+      // INVISIBLE para el cierre de turno y el cierre de caja, que consultan
+      // `status: 'COMPLETED'` (`shift.tpv.service.ts:1342`, `cashCloseout.dashboard.service.ts:74`).
+      // El dinero SÍ salía del cajón —abajo se crea el PAY_OUT— pero el efectivo esperado
+      // no bajaba: el conteo acusaba un FALTANTE del tamaño del reembolso, o sea que le
+      // echaba la culpa al cajero. Con `type: REGULAR` tampoco salía en el reporte de
+      // reembolsos, que exige `type: 'REFUND'` (`refunds.dashboard.service.ts:87`).
+      //
+      // La ORDEN sigue marcándose `paymentStatus: 'REFUNDED'` (arriba) — es otro campo y
+      // `areaTicketV7.mobile.service.ts:2038` depende de él.
+      status: 'COMPLETED',
+      type: 'REFUND',
       feePercentage: new Decimal('0.0000'),
       feeAmount: new Decimal('0.00'),
       netAmount: negativeAmount,

@@ -1,0 +1,87 @@
+import { Decimal } from '@prisma/client/runtime/library'
+import { createRefund } from '@/services/mobile/refund.mobile.service'
+import { prismaMock } from '../../../__helpers__/setup'
+
+jest.mock('@/communication/sockets', () => ({
+  __esModule: true,
+  default: { getBroadcastingService: jest.fn(() => null) },
+}))
+
+const VENUE = 'venue-1'
+const STAFF = 'staff-1'
+
+/**
+ * 🔴 El reembolso móvil tiene que quedar guardado con la MISMA convención que el del
+ * TPV y el del dashboard (`refund.tpv.service.ts:276`, `refund.dashboard.service.ts:403`):
+ * monto NEGATIVO + `status: COMPLETED` + `type: REFUND`.
+ *
+ * Guardarlo como `status: REFUNDED` lo volvía INVISIBLE para el cierre de turno y el
+ * cierre de caja, que consultan `status: 'COMPLETED'` (`shift.tpv.service.ts:1342`,
+ * `cashCloseout.dashboard.service.ts:74`). El dinero SÍ salía del cajón —se crea un
+ * `PAY_OUT`— pero el efectivo esperado no bajaba, así que el conteo acusaba un
+ * FALTANTE del tamaño del reembolso. Le echaba la culpa al cajero.
+ *
+ * Y con `type: REGULAR` tampoco aparecía en el reporte de reembolsos, que exige
+ * `type: 'REFUND'` (`refunds.dashboard.service.ts:87`).
+ */
+describe('createRefund (móvil) — convención canónica de reembolso', () => {
+  let createdPayment: any
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    createdPayment = undefined
+    // El prismaMock compartido (tests/__helpers__/setup.ts) no declara los modelos del
+    // cajón. Se agregan AQUÍ y no allá para no tocar un helper que otras sesiones editan.
+    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn() }
+    ;(prismaMock as any).cashDrawerEvent = { create: jest.fn() }
+    prismaMock.order.create.mockResolvedValue({ id: 'order-ref-1', orderNumber: 'REF-1' })
+    prismaMock.payment.create.mockImplementation(async (args: any) => {
+      createdPayment = args.data
+      return { id: 'payment-ref-1', createdAt: new Date('2026-08-13T12:00:00.000Z'), ...args.data }
+    })
+    prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
+    prismaMock.cashDrawerSession.findFirst.mockResolvedValue(null)
+    prismaMock.cashDrawerEvent.create.mockResolvedValue({ id: 'evt-1' })
+  })
+
+  const refundCash = () =>
+    createRefund({ venueId: VENUE, amount: 5000, reason: 'Producto defectuoso', method: 'CASH', staffId: STAFF })
+
+  it('guarda el reembolso como COMPLETED + REFUND para que los cortes lo vean', async () => {
+    await refundCash()
+
+    expect(createdPayment.status).toBe('COMPLETED')
+    expect(createdPayment.type).toBe('REFUND')
+  })
+
+  it('el monto es NEGATIVO, para que reste del efectivo esperado', async () => {
+    await refundCash()
+
+    expect(Number(createdPayment.amount)).toBe(-50)
+    expect(Number(createdPayment.netAmount)).toBe(-50)
+  })
+
+  it('conserva el método real del reembolso (una devolución en terminal no es salida de efectivo)', async () => {
+    await createRefund({ venueId: VENUE, amount: 5000, reason: 'x', method: 'CREDIT_CARD', staffId: STAFF })
+
+    expect(createdPayment.method).toBe('CREDIT_CARD')
+  })
+
+  it('la ORDEN sigue marcándose paymentStatus REFUNDED (regresión: areaTicketV7 lo lee)', async () => {
+    await refundCash()
+
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ paymentStatus: 'REFUNDED' }) }),
+    )
+  })
+
+  it('saca el efectivo del cajón con un PAY_OUT sólo cuando el reembolso fue en efectivo', async () => {
+    prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+    await refundCash()
+
+    expect(prismaMock.cashDrawerEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ type: 'PAY_OUT', amount: new Decimal('50.00') }) }),
+    )
+  })
+})

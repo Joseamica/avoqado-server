@@ -613,6 +613,11 @@ type TpvCreateOrderWithItemsInput = {
   note?: string | null
   terminalId?: string | null
   deviceSerialNumber?: string | null
+  /** Llave de idempotencia del cliente (retry-safety): repetir venueId+externalId
+   *  devuelve la orden original en vez de crear otra — mismo contrato que el
+   *  createOrderWithItems del mobile. Crítico en free-cart ($0): sin esto un
+   *  retry creaba segunda orden Y segunda deducción de inventario. */
+  externalId?: string | null
 }
 
 type PreparedCheckoutLine = {
@@ -883,6 +888,22 @@ export async function createOrderWithItems(
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`🧾 [WITH ITEMS] Creating TPV order with ${input.items.length} item(s) | venue=${venueId}`)
 
+  // Idempotencia ANTES de cualquier validación/creación (auditoría 2026-08-12):
+  // un cliente que reintenta tras perder la respuesta debe recuperar SU orden,
+  // no crear otra (que en free-cart significaba segunda deducción de stock).
+  const externalId = input.externalId?.trim() || null
+  if (externalId) {
+    const existingOrder = await prisma.order.findUnique({
+      where: { venueId_externalId: { venueId, externalId } },
+      include: { table: { select: { number: true } } },
+    })
+    if (existingOrder) {
+      logger.warn(`🔄 [WITH ITEMS] Duplicate createOrderWithItems detected (externalId=${externalId}) — returning existing order`)
+      const { table, ...order } = existingOrder as any
+      return { ...order, tableName: table ? `Mesa ${table.number}` : null }
+    }
+  }
+
   await assertVenueSalesEnabled(venueId)
 
   if (Math.abs(input.taxAmount) > PESOS_TOLERANCE) {
@@ -1062,6 +1083,9 @@ export async function createOrderWithItems(
         customerId: input.customerId || null,
         covers: 1,
         orderNumber,
+        // Estampar la llave de idempotencia: sin esto el dedup del retry
+        // nunca encontraría la orden original.
+        externalId,
         servedById: input.staffId,
         createdById: input.staffId,
         terminalId: resolvedTerminalId,

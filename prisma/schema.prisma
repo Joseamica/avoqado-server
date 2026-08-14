@@ -1805,10 +1805,113 @@ model InventoryMovement {
   createdBy String?
   createdAt DateTime @default(now())
 
+  // Línea de posting que originó este movimiento (fase 2 del plan de
+  // inventario): liga el kardex al "vale de deducción" durable, para que la
+  // reconciliación pueda probar Σ(movimientos de la línea) == esperado.
+  postingLineId String?
+  postingLine   InventoryPostingLine? @relation(fields: [postingLineId], references: [id], onDelete: SetNull)
+
   @@index([inventoryId])
   @@index([type])
   @@index([createdAt])
   @@index([purchaseOrderItemId])
+  @@index([postingLineId])
+}
+
+// ==========================================
+// INVENTORY POSTING — outbox durable de deducciones
+// ==========================================
+// Cada transición de venta a PAID crea su posting EN LA MISMA transacción; un
+// worker lo aplica de inmediato y el job de respaldo reintenta los pendientes.
+// "¿Esta venta ya dedujo?" deja de inferirse: se consulta. Diseño de la
+// auditoría de inventario 2026-08-12 (segunda opinión Codex xhigh).
+
+enum InventoryPostingSourceKind {
+  ORDER
+  CHECKOUT_SESSION
+  DELIVERY_ORDER
+  REFUND_PAYMENT
+}
+
+enum InventoryPostingEffectKind {
+  SALE
+  CUSTOMER_RETURN
+  CANCELLATION
+}
+
+enum InventoryPostingStatus {
+  PENDING
+  APPLYING
+  APPLIED
+  PARTIAL_FAILED
+  SKIPPED
+}
+
+enum InventoryPostingLineStatus {
+  PENDING
+  APPLIED
+  FAILED
+  SKIPPED
+}
+
+model InventoryPosting {
+  id      String @id @default(cuid())
+  venueId String // tenant scope (escalar a propósito: el posting es infraestructura interna)
+
+  sourceKind InventoryPostingSourceKind
+  sourceId   String // id del Order / CheckoutSession / etc. según sourceKind
+  effectKind InventoryPostingEffectKind
+
+  orderId String? // denormalizado para consulta directa cuando la fuente es una orden
+
+  status InventoryPostingStatus @default(PENDING)
+  // Por qué NO se aplicó cuando status=SKIPPED (visible, nunca silencioso):
+  // NO_ITEMS | TRACKING_DISABLED | EXTERNAL_INVENTORY_AUTHORITY | CUSTOM_ITEM
+  skipReason String?
+
+  // Snapshot del payload al crearse (items y cantidades): el aplicador no
+  // depende de releer una orden que pudo mutar después del cobro.
+  payloadSnapshot Json?
+
+  attempts  Int       @default(0)
+  lastError String?
+  appliedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines InventoryPostingLine[]
+
+  @@unique([venueId, sourceKind, sourceId, effectKind])
+  @@index([venueId, status])
+  @@index([status, createdAt])
+  @@index([orderId])
+}
+
+model InventoryPostingLine {
+  id        String           @id @default(cuid())
+  postingId String
+  posting   InventoryPosting @relation(fields: [postingId], references: [id], onDelete: Cascade)
+
+  // Clave estable de la línea dentro del posting (normalmente el orderItemId).
+  effectKey   String
+  orderItemId String?
+  productId   String?
+
+  status InventoryPostingLineStatus @default(PENDING)
+
+  // Cantidad esperada en la unidad BASE del efecto (piezas; kg para peso).
+  expectedQuantityBase Decimal @db.Decimal(12, 3)
+  appliedQuantityBase  Decimal @default(0) @db.Decimal(12, 3)
+  reason               String?
+
+  movements InventoryMovement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([postingId, effectKey])
+  @@index([productId])
 }
 
 // ==========================================
@@ -2732,6 +2835,13 @@ model Shift {
   // Summary
   totalSales  Decimal @default(0) @db.Decimal(12, 2)
   totalTips   Decimal @default(0) @db.Decimal(10, 2)
+  /// Propina cobrada EN EFECTIVO durante el turno. Se persiste aparte porque el arqueo
+  /// necesita `totalCashPayments + totalCashTips` (lo que hay físicamente en el cajón),
+  /// mientras que `totalCashPayments` debe seguir siendo la cifra de VENTAS en efectivo
+  /// que consumen el MCP, `cashSales` del dashboard y `salesTotal`. Guardarlo evita que
+  /// dos pantallas lo recalculen con filtros distintos — así nació el descuadre.
+  /// La propina de TARJETA NO entra: ese dinero llega por el depósito del banco.
+  totalCashTips Decimal @default(0) @db.Decimal(10, 2)
   totalOrders Int     @default(0)
 
   // Automatic calculation fields (FASE 1 - Shift Management)
@@ -7361,6 +7471,7 @@ enum PaymentMethod {
 enum CheckoutStatus {
   PENDING // Session created, waiting for customer
   PROCESSING // Customer redirected to Blumon, payment in progress
+  CHARGING // Claim atomico: una llamada gano el CAS y esta autorizando con el proveedor (evita doble cargo)
   COMPLETED // Payment successful
   EXPIRED // Session expired (24 hours)
   CANCELLED // Customer cancelled or merchant cancelled
@@ -12638,8 +12749,17 @@ model CashDrawerEvent {
   staffId   String
   staffName String
   orderId   String?
+  /// Llave de idempotencia generada por el POS: el UUID con el que la app guarda el evento
+  /// en su base local (Android: `CashDrawerEventEntity.id`). Las apps mandan los eventos a
+  /// `/sync` en lote, fire-and-forget y sin cola de reintento; si la respuesta se pierde,
+  /// el MISMO lote se reenvía. Sin esta llave el server insertaba las filas otra vez y el
+  /// cajón quedaba con dinero que nunca existió, con el arqueo dándolo por bueno.
+  /// Nullable a propósito: una app vieja que no la manda sigue sincronizando igual
+  /// (Postgres permite varios NULL en un índice único), sólo sin la protección.
+  localId   String?
   createdAt DateTime            @default(now())
 
+  @@unique([venueId, localId])
   @@index([sessionId])
 }
 

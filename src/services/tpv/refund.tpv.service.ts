@@ -440,10 +440,17 @@ export async function recordRefund(
           select: { amount: true },
         })
         const totalRefundedSale = orderRefunds.reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0)
-        const beforeThisRefund = totalRefundedSale - salesRefund
-        // Only the refund that crosses the threshold restocks → idempotent across
-        // multiple partial refunds that cumulatively reach the order total.
-        const crossedToFullyRefunded = beforeThisRefund < orderTotal - 0.01 && totalRefundedSale >= orderTotal - 0.01
+        // 🔴 El umbral compara MERCANCÍA contra refunds de VENTA (auditoría
+        // 2026-08-12): `Order.total` incluye la propina acumulada, pero los
+        // refunds suman solo `Payment.amount` (la parte de venta — la propina
+        // viaja aparte en tipAmount). Comparar contra el total con propina
+        // hacía que una orden CON propina jamás cruzara y jamás repusiera stock.
+        const crossedToFullyRefunded = crossedFullRefundThreshold({
+          orderTotal,
+          orderTipAmount: Number(originalPayment.order.tipAmount || 0),
+          totalRefundedSale,
+          salesRefundThisTime: salesRefund,
+        })
         if (crossedToFullyRefunded) {
           const summary = await restockOrderItems({
             venueId,
@@ -566,4 +573,27 @@ function mapEntryMode(mode?: string | null): CardEntryMode | null {
   }
 
   return modeMap[mode.toUpperCase()] || CardEntryMode.CHIP
+}
+
+/**
+ * ¿Este refund CRUZA el umbral de "orden completamente reembolsada" (y por
+ * tanto debe reponer inventario)?
+ *
+ * La mercancía se mide como `max(0, total − propina)`: `Order.total` incluye la
+ * propina acumulada, mientras los refunds suman solo la parte de VENTA
+ * (`Payment.amount`; la propina reembolsada viaja aparte). Cruza exactamente UNA
+ * vez: el refund cuyo acumulado alcanza la mercancía; los siguientes ya no
+ * (idempotencia del restock entre parciales). Mercancía 0 (cuenta 100% propina)
+ * jamás repone.
+ */
+export function crossedFullRefundThreshold(params: {
+  orderTotal: number
+  orderTipAmount: number
+  totalRefundedSale: number
+  salesRefundThisTime: number
+}): boolean {
+  const merchandiseTotal = Math.max(0, params.orderTotal - params.orderTipAmount)
+  if (merchandiseTotal <= 0.01) return false
+  const beforeThisRefund = params.totalRefundedSale - params.salesRefundThisTime
+  return beforeThisRefund < merchandiseTotal - 0.01 && params.totalRefundedSale >= merchandiseTotal - 0.01
 }

@@ -1,6 +1,6 @@
 // services/dashboard/order.dashboard.service.ts
 
-import { NotFoundError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -591,14 +591,28 @@ export async function deleteOrder(venueId: string, orderId: string) {
       id: orderId,
       venueId,
     },
-    select: { id: true },
+    select: { id: true, paymentStatus: true },
   })
 
   if (!existingOrder) {
     throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
   }
 
-  // Podrías añadir lógica aquí para asegurar que solo se borren órdenes canceladas, etc.
+  // 🔴 Una orden con dinero adentro NO se cancela por aquí (auditoría 2026-08-12):
+  // cancelarla la volvía invisible para reportes con el cobro registrado y el
+  // stock ya deducido — sin reembolso ni reposición. El camino correcto es
+  // reembolsar primero. Se revisan paymentStatus Y los Payments reales porque
+  // hay estados inconsistentes históricos (PENDING con pagos COMPLETED).
+  if (existingOrder.paymentStatus === 'PAID' || existingOrder.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.')
+  }
+  const completedPayments = await prisma.payment.count({
+    where: { orderId, venueId, status: 'COMPLETED', type: 'REGULAR' },
+  })
+  if (completedPayments > 0) {
+    throw new BadRequestError('Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.')
+  }
+
   const cancelledOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
@@ -667,17 +681,23 @@ export async function settleOrder(
     }
   }
 
-  // Update order and create payment record in a transaction
-  await prisma.$transaction(async tx => {
-    // Update order payment status
-    await tx.order.update({
-      where: { id: orderId },
+  // 🔴 Transición CONDICIONAL (auditoría 2026-08-12): el guard de arriba lee
+  // fuera de la transacción, así que dos settles concurrentes lo pasaban los
+  // dos y creaban DOS pagos CASH por el mismo saldo. Solo quien gana el CAS
+  // (PENDING/PARTIAL → PAID) crea el Payment; el perdedor sale sin efecto.
+  const settled = await prisma.$transaction(async tx => {
+    const transition = await tx.order.updateMany({
+      where: { id: orderId, venueId, paymentStatus: { in: ['PENDING', 'PARTIAL'] } },
       data: {
         paymentStatus: 'PAID',
         paidAmount: order.total,
         remainingBalance: 0,
+        version: { increment: 1 },
       },
     })
+    if (transition.count === 0) {
+      return false
+    }
 
     // Create a payment record to track the settlement
     await tx.payment.create({
@@ -695,7 +715,17 @@ export async function settleOrder(
         processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
       },
     })
+    return true
   })
+
+  if (!settled) {
+    return {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      settledAmount: 0,
+      message: 'Order has no pending balance to settle',
+    }
+  }
 
   // REFERRAL HOOK: trigger referral qualification if this order had a pending referral
   try {

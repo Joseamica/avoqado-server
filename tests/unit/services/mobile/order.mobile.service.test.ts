@@ -22,12 +22,14 @@ jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({
   generateAndStoreReceipt: jest.fn().mockResolvedValue({ id: 'receipt-1' }),
 }))
 
-// payCashOrder importa este módulo dinámicamente para la deducción post-cobro;
-// el default [] (sin faltantes) mantiene el resto de la suite sin aviso.
-const mockDeductFreeCart = jest.fn()
-jest.mock('@/services/tpv/order.tpv.service', () => ({
+// Fase 2 (posting durable): payCashOrder crea el posting EN la tx del cobro y
+// lo aplica post-commit. Defaults: posting creado + aplicado sin faltantes.
+const mockCreateSalePosting = jest.fn()
+const mockApplySalePosting = jest.fn()
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   __esModule: true,
-  deductTrackedInventoryForFreeCart: (...args: unknown[]) => mockDeductFreeCart(...args),
+  createSalePostingInTx: (...args: unknown[]) => mockCreateSalePosting(...args),
+  applySalePosting: (...args: unknown[]) => mockApplySalePosting(...args),
 }))
 jest.mock('@/services/dashboard/autoReorder.service', () => ({
   __esModule: true,
@@ -40,7 +42,9 @@ describe('order.mobile.service', () => {
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     // payCashOrder sums prior COMPLETED payments (split-the-bill); default: none.
     prismaMock.payment.findMany.mockResolvedValue([])
-    mockDeductFreeCart.mockResolvedValue([])
+    prismaMock.orderItem.findMany.mockResolvedValue([])
+    mockCreateSalePosting.mockResolvedValue({ id: 'posting-1', status: 'PENDING' })
+    mockApplySalePosting.mockResolvedValue({ postingId: 'posting-1', applied: true, issues: [] })
   })
 
   it('persists discountAmount and computes total as subtotal - discount + tip when creating an order', async () => {
@@ -745,9 +749,11 @@ describe('order.mobile.service', () => {
 
     it('trae INSUFFICIENT_INVENTORY cuando la venta dejó stock en negativo (la deducción SÍ corrió)', async () => {
       arrangeFullyPaid()
-      mockDeductFreeCart.mockResolvedValue([
-        { productId: 'p1', productName: 'Cerveza Corona', requested: 1, available: -1, reason: 'la venta dejó el stock en negativo' },
-      ])
+      mockApplySalePosting.mockResolvedValue({
+        postingId: 'posting-1',
+        applied: true,
+        issues: [{ productId: 'p1', productName: 'Cerveza Corona', requested: 1, available: -1, reason: 'la venta dejó el stock en negativo' }],
+      })
 
       const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })
 
@@ -760,9 +766,11 @@ describe('order.mobile.service', () => {
 
     it('trae INVENTORY_NOT_DEDUCTED cuando la deducción de un producto falló', async () => {
       arrangeFullyPaid()
-      mockDeductFreeCart.mockResolvedValue([
-        { productId: 'p1', productName: 'Hamburguesa BBQ', requested: 2, available: null, reason: 'DB timeout' },
-      ])
+      mockApplySalePosting.mockResolvedValue({
+        postingId: 'posting-1',
+        applied: false,
+        issues: [{ productId: 'p1', productName: 'Hamburguesa BBQ', requested: 2, available: null, reason: 'DB timeout' }],
+      })
 
       const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })
 
@@ -773,17 +781,19 @@ describe('order.mobile.service', () => {
 
     it('sin faltantes NO incluye inventoryWarning (campo aditivo)', async () => {
       arrangeFullyPaid()
-      mockDeductFreeCart.mockResolvedValue([])
+      mockApplySalePosting.mockResolvedValue({ postingId: 'posting-1', applied: true, issues: [] })
 
       const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })
 
       expect(res.inventoryWarning).toBeUndefined()
       expect(res.status).toBe('COMPLETED')
+      // El posting nació DENTRO de la transacción del cobro.
+      expect(mockCreateSalePosting).toHaveBeenCalled()
     })
 
     it('si la deducción revienta, el cobro responde COMPLETED igual (never-throws)', async () => {
       arrangeFullyPaid()
-      mockDeductFreeCart.mockRejectedValue(new Error('boom'))
+      mockApplySalePosting.mockRejectedValue(new Error('boom'))
 
       const res = await payCashOrder('venue-1', 'order-1', { amount: 4500, tip: 0, staffId: 'staff-1' })
 
@@ -793,13 +803,12 @@ describe('order.mobile.service', () => {
 
     it('un pago PARCIAL no deduce ni trae aviso', async () => {
       arrangeFullyPaid()
-      mockDeductFreeCart.mockResolvedValue([
-        { productId: 'p1', productName: 'Cerveza Corona', requested: 1, available: -1, reason: 'no debería llamarse' },
-      ])
 
       const res = await payCashOrder('venue-1', 'order-1', { amount: 2000, tip: 0, staffId: 'staff-1' })
 
-      expect(mockDeductFreeCart).not.toHaveBeenCalled()
+      // Pago PARCIAL: ni posting ni aplicación.
+      expect(mockCreateSalePosting).not.toHaveBeenCalled()
+      expect(mockApplySalePosting).not.toHaveBeenCalled()
       expect(res.inventoryWarning).toBeUndefined()
     })
   })

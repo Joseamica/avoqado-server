@@ -127,9 +127,10 @@ export interface CashReconciliationCalculation {
 export function calculateCashReconciliation(
   countedCash: Prisma.Decimal | string | number,
   startingCash: Prisma.Decimal | string | number,
-  cashSales: Prisma.Decimal | string | number,
+  /** Lo que entró al cajón: ventas en efectivo **+ propina cobrada en efectivo**. */
+  cashInDrawer: Prisma.Decimal | string | number,
 ): CashReconciliationCalculation {
-  const expectedCash = new Prisma.Decimal(startingCash).add(new Prisma.Decimal(cashSales))
+  const expectedCash = new Prisma.Decimal(startingCash).add(new Prisma.Decimal(cashInDrawer))
   const difference = new Prisma.Decimal(countedCash).sub(expectedCash)
   return {
     expectedCash,
