@@ -1420,8 +1420,13 @@ export async function addItemsToOrder(
     logger.warn(
       `⚠️ [ORDER SERVICE] Version mismatch! Expected: ${expectedVersion}, Got: ${order.version}. Order was modified by another request.`,
     )
+    // 🔴 Con code: el reducer offline clasifica VERSION_CONFLICT como
+    // TRANSITORIO (RETRY). Sin code, este mismatch caía al fallback
+    // BUSINESS_RULE y el intent se iba a cuarentena — un conflicto de
+    // concurrencia convertido en pérdida permanente.
     throw new ConflictError(
       `Order was modified by another request. Please refresh and try again. (Expected version: ${expectedVersion}, Current: ${order.version})`,
+      'VERSION_CONFLICT',
     )
   }
 
@@ -2233,8 +2238,13 @@ export async function removeOrderItem(
     logger.warn(
       `⚠️ [ORDER SERVICE] Version mismatch! Expected: ${expectedVersion}, Got: ${order.version}. Order was modified by another request.`,
     )
+    // 🔴 Con code: el reducer offline clasifica VERSION_CONFLICT como
+    // TRANSITORIO (RETRY). Sin code, este mismatch caía al fallback
+    // BUSINESS_RULE y el intent se iba a cuarentena — un conflicto de
+    // concurrencia convertido en pérdida permanente.
     throw new ConflictError(
       `Order was modified by another request. Please refresh and try again. (Expected version: ${expectedVersion}, Current: ${order.version})`,
+      'VERSION_CONFLICT',
     )
   }
 
