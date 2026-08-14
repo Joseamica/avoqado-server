@@ -66,9 +66,9 @@ describe('deductInventoryForProduct — escala del modificador ADDITION en venta
     await deductInventoryForProduct(VENUE_ID, PRODUCT_ID, 0.435, ORDER_ID, 'staff-1', [additionModifier] as any)
 
     // La receta consume por kilo → recibe los kilos pesados.
-    expect(deductStockForRecipe).toHaveBeenCalledWith(VENUE_ID, PRODUCT_ID, 0.435, ORDER_ID, 'staff-1', expect.anything())
+    expect(deductStockForRecipe).toHaveBeenCalledWith(VENUE_ID, PRODUCT_ID, 0.435, ORDER_ID, 'staff-1', expect.anything(), undefined)
     // El modificador es por línea → escala 1, no 0.435.
-    expect(deductStockForModifiers).toHaveBeenCalledWith(VENUE_ID, 1, expect.anything(), ORDER_ID, 'staff-1')
+    expect(deductStockForModifiers).toHaveBeenCalledWith(VENUE_ID, 1, expect.anything(), ORDER_ID, 'staff-1', undefined)
   })
 
   it('producto NO pesado (RECIPE): el modificador sigue escalando por unidades de la línea', async () => {
@@ -76,8 +76,8 @@ describe('deductInventoryForProduct — escala del modificador ADDITION en venta
 
     await deductInventoryForProduct(VENUE_ID, PRODUCT_ID, 3, ORDER_ID, 'staff-1', [additionModifier] as any)
 
-    expect(deductStockForRecipe).toHaveBeenCalledWith(VENUE_ID, PRODUCT_ID, 3, ORDER_ID, 'staff-1', expect.anything())
-    expect(deductStockForModifiers).toHaveBeenCalledWith(VENUE_ID, 3, expect.anything(), ORDER_ID, 'staff-1')
+    expect(deductStockForRecipe).toHaveBeenCalledWith(VENUE_ID, PRODUCT_ID, 3, ORDER_ID, 'staff-1', expect.anything(), undefined)
+    expect(deductStockForModifiers).toHaveBeenCalledWith(VENUE_ID, 3, expect.anything(), ORDER_ID, 'staff-1', undefined)
   })
 
   it('producto pesado SIN tracking: los modificadores también escalan por línea', async () => {
@@ -88,7 +88,7 @@ describe('deductInventoryForProduct — escala del modificador ADDITION en venta
     await deductInventoryForProduct(VENUE_ID, PRODUCT_ID, 2.5, ORDER_ID, 'staff-1', [additionModifier] as any)
 
     expect(deductStockForRecipe).not.toHaveBeenCalled()
-    expect(deductStockForModifiers).toHaveBeenCalledWith(VENUE_ID, 1, expect.anything(), ORDER_ID, 'staff-1')
+    expect(deductStockForModifiers).toHaveBeenCalledWith(VENUE_ID, 1, expect.anything(), ORDER_ID, 'staff-1', undefined)
   })
 
   it('sin modificadores no consulta soldByWeight ni llama a deductStockForModifiers (regresión)', async () => {
