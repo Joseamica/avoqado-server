@@ -1198,7 +1198,7 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
       servedById: true,
       type: true,
       paidAmount: true,
-      items: { select: { id: true } },
+      items: { select: { id: true, orderPromotionId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
@@ -1226,6 +1226,27 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
   if (toMove.length === 0) throw new BadRequestError('Los artículos no pertenecen a esta cuenta')
   if (toMove.length >= sourceItemIds.size) {
     throw new BadRequestError('Debe quedar al menos un artículo en la cuenta original')
+  }
+
+  // 🔴 Una promoción se mueve COMPLETA o no se mueve (audit 2026-08-13): mover
+  // sólo el refresco de un combo dejaría la instancia (OrderPromotion) en el
+  // origen mientras sus líneas viven en dos cheques — cada uno vería un
+  // subconjunto "completo" y el guard de reembolso dejaría de proteger.
+  const movingSet = new Set(toMove)
+  const promoLineCount = new Map<string, { total: number; moving: number }>()
+  for (const item of source.items) {
+    if (!item.orderPromotionId) continue
+    const entry = promoLineCount.get(item.orderPromotionId) ?? { total: 0, moving: 0 }
+    entry.total += 1
+    if (movingSet.has(item.id)) entry.moving += 1
+    promoLineCount.set(item.orderPromotionId, entry)
+  }
+  const movedPromotionIds: string[] = []
+  for (const [orderPromotionId, count] of promoLineCount) {
+    if (count.moving > 0 && count.moving < count.total) {
+      throw new BadRequestError('Una promoción se mueve completa a la otra cuenta: selecciona todos sus artículos o ninguno.')
+    }
+    if (count.moving === count.total && count.moving > 0) movedPromotionIds.push(orderPromotionId)
   }
 
   // 🔴 Atómico (auditoría): crear + mover + AMBOS recálculos en UNA transacción.
@@ -1256,6 +1277,16 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
       where: { id: { in: toMove }, orderId: source.id },
       data: { orderId: created.id },
     })
+
+    // La INSTANCIA de cada promoción movida completa sigue a sus líneas: si se
+    // quedara en el origen, el histórico y el guard de reembolso apuntarían a
+    // un cheque que ya no tiene esas líneas.
+    if (movedPromotionIds.length > 0) {
+      await tx.orderPromotion.updateMany({
+        where: { id: { in: movedPromotionIds }, orderId: source.id },
+        data: { orderId: created.id },
+      })
+    }
 
     const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
     const dst = await recalculateOrderTotals(created.id, 0, 0, tx)
