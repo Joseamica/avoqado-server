@@ -33,6 +33,7 @@ import { isTableOwnershipEnforced, staffCanManageAllTables } from '../../middlew
 import * as tableService from '../tpv/table.tpv.service'
 import * as orderTpvService from '../tpv/order.tpv.service'
 import * as orderMobileService from './order.mobile.service'
+import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { logAction } from '../dashboard/activity-log.service'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
@@ -521,6 +522,21 @@ async function assertTableService(venueId: string): Promise<void> {
 }
 
 /**
+ * El MISMO candado que la ruta online del catálogo (checkFeatureAccess
+ * PROMOTIONS en mobile.routes): sincronizar NO es puerta trasera — un venue
+ * degradado a FREE no aplica promos por el canal offline aunque su outbox
+ * traiga intents con promotionRef.
+ */
+async function assertPromotionsFeature(venueId: string): Promise<void> {
+  const access = await hasFeatureAccess(venueId, 'PROMOTIONS')
+  if (!access.hasAccess) {
+    const err: any = new Error('Las promociones requieren el plan PRO')
+    err.errorCode = 'FEATURE_LOCKED'
+    throw err
+  }
+}
+
+/**
  * OPEN_TABLE — payload: { tableId, covers?, localOrderId }
  * Reutiliza assignTable (misma función que la ruta online): reusa la orden
  * activa de la mesa o crea una nueva. El ack mapea localOrderId → orderId.
@@ -644,11 +660,38 @@ async function resolveFromSplitResult(venueId: string, localRef: string): Promis
   return typeof match?.orderId === 'string' ? match.orderId : null
 }
 
+const OFFLINE_GRACE_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Cuándo se vendió de verdad, sin dejar que el reloj del cliente mande solo.
+ *
+ * 🔴 Si el POS vende a las 19:59 sin red y sincroniza a las 20:30, evaluar la
+ * vigencia contra "ahora" tumbaría el precio de una venta ya entregada. Pero
+ * confiar ciegamente en `createdAtLocal` deja mover el reloj para revivir una
+ * promoción vencida. Se acota a `[sync − 24h, sync]`: una venta legítima de
+ * más temprano el mismo día se honra, y un reloj movido más no compra nada.
+ *
+ * Acepta el epoch ms del outbox (`SyncIntentInput.createdAtLocal`) o un ISO
+ * string de clientes que manden la fecha en el payload.
+ */
+export function clampSoldAt(createdAtLocal: string | number | undefined, syncAt: Date): Date {
+  const parsed = createdAtLocal !== undefined && createdAtLocal !== null ? new Date(createdAtLocal) : null
+  if (!parsed || Number.isNaN(parsed.getTime())) return syncAt
+
+  const floor = syncAt.getTime() - OFFLINE_GRACE_MS
+  return new Date(Math.min(Math.max(parsed.getTime(), floor), syncAt.getTime()))
+}
+
 /**
  * ADD_ITEMS — payload: { orderId | localOrderId, items: AddOrderItemInput[] }
  * Ronda nueva (asNewRound=true, semántica Square). La versión optimista se lee
  * del server AL APLICAR: el orden lo garantiza el FIFO por dispositivo, no el
  * baseVersion viejo del cliente offline (evitaría 409 fantasma en todo replay).
+ *
+ * `items[].promotionRef` es OPCIONAL: un item que lo traiga NO pasa por el alta
+ * normal — su precio lo resuelve el server desde la definición de la promoción
+ * (applyPromotionToOrder). Un cliente que no lo mande se comporta EXACTAMENTE
+ * igual que hoy.
  */
 async function applyAddItems(
   venueId: string,
@@ -662,7 +705,10 @@ async function applyAddItems(
   if (!orderId || items.length === 0) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: 'ADD_ITEMS requiere orderId/localOrderId e items' }
   }
-  const invalidReason = invalidAddItemsReason(items)
+  // Las líneas con promotionRef no llevan cantidades propias — las define el
+  // server desde la promoción — así que la validación de líneas aplica sólo a
+  // las normales.
+  const invalidReason = invalidAddItemsReason(items.filter(it => !it.promotionRef))
   if (invalidReason) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: invalidReason }
   }
@@ -673,6 +719,51 @@ async function applyAddItems(
     return { id: intent.id, status: 'REJECTED', errorCode: 'ORDER_NOT_FOUND', message: 'La orden ya no existe' }
   }
 
+  // Los items con `promotionRef` NO pasan por el alta normal: su precio lo
+  // resuelve el server desde la definición de la promoción (idempotente por
+  // instanceId, así que el replay de este intent no duplica). Los demás siguen
+  // exactamente el camino de hoy.
+  const conPromocion = items.filter(it => it.promotionRef)
+  const normales = items.filter(it => !it.promotionRef)
+
+  const soldAt = clampSoldAt(intent.createdAtLocal ?? (intent.payload.createdAtLocal as string | number | undefined), new Date())
+  if (conPromocion.length > 0) {
+    // Mismo candado que la ruta online del catálogo: el reducer gatea POR
+    // INTENT, igual que el resto (regla offline-first del repo).
+    await assertPromotionsFeature(venueId)
+  }
+  // 🔴 La compensación descubre por instanceId, NUNCA por "las creadas en esta
+  // llamada" (audit 2026-08-14): el replay tras un RETRY regresa created:false
+  // y un rastreo de recién-creadas quedaría vacío, dejando huérfanas las promos
+  // del intento anterior del MISMO intent.
+  const promoInstanceIds = conPromocion
+    .map(it => it.promotionRef?.promotionInstanceId)
+    .filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
+
+  try {
+    for (const item of conPromocion) {
+      await applyPromotionToOrder({
+        venueId,
+        orderId,
+        promotionId: item.promotionRef.promotionId,
+        instanceId: item.promotionRef.promotionInstanceId,
+        selections: item.promotionRef.selections,
+        soldAt,
+      })
+    }
+  } catch (error: any) {
+    // 🔴 El loop también compensa (audit 2026-08-14): si la promo #2 truena en
+    // DEFINITIVO, la #1 ya commiteó — sin esto, la excepción brincaba la
+    // compensación del alta normal y la cuarentena decía "no se aplicó nada"
+    // con el combo #1 vivo en la orden. En un error TRANSITORIO no se toca
+    // nada: el replay es idempotente por instanceId.
+    const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
+    if (!RETRYABLE_ERROR_CODES.has(errorCode)) {
+      await removeIntentPromotions(venueId, orderId, promoInstanceIds)
+    }
+    throw error
+  }
+
   // 🛡️ Idempotencia de la RONDA: un externalId determinista por item
   // (intent.id + índice) hace que un replay de este ADD_ITEMS actualice las
   // MISMAS filas en vez de crear duplicados (addItemsToOrder ya deduplica por
@@ -680,13 +771,46 @@ async function applyAddItems(
   // Sin esto, un reintento tras "efecto aplicado pero ack no persistido"
   // duplicaba la ronda en cocina y en la cuenta. Solo se inyecta si el cliente
   // no mandó uno propio.
-  const itemsWithKey = items.map((it, idx) => (it.externalId ? it : { ...it, externalId: `sync:${intent.id}:${idx}` }))
+  const itemsWithKey = normales.map((it, idx) => (it.externalId ? it : { ...it, externalId: `sync:${intent.id}:${idx}` }))
 
-  const updated = await orderTpvService.addItemsToOrder(venueId, orderId, itemsWithKey, current.version, true)
-  return {
-    id: intent.id,
-    status: 'ACKED',
-    result: { orderId, version: (updated as any).version ?? current.version + 1, total: Number((updated as any).total ?? 0) },
+  if (itemsWithKey.length === 0) {
+    // La ronda fue puras promociones: no hay alta normal que hacer.
+    const after = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true, total: true } })
+    return {
+      id: intent.id,
+      status: 'ACKED',
+      result: { orderId, version: after?.version ?? current.version, total: Number(after?.total ?? 0) },
+    }
+  }
+
+  try {
+    // 🔴 Aplicar promociones recalcula totales y BUMPEA Order.version dentro
+    // de su propia tx — la versión leída al inicio quedó VIEJA y el CAS de
+    // addItemsToOrder perdería siempre (ronda mixta imposible). Se relee.
+    const versionForAdd =
+      conPromocion.length > 0
+        ? ((await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true } }))?.version ?? current.version)
+        : current.version
+    const updated = await orderTpvService.addItemsToOrder(venueId, orderId, itemsWithKey, versionForAdd, true)
+    return {
+      id: intent.id,
+      status: 'ACKED',
+      result: { orderId, version: (updated as any).version ?? current.version + 1, total: Number((updated as any).total ?? 0) },
+    }
+  } catch (error: any) {
+    // 🔴 Ronda mixta TODO-o-nada (audit max 2026-08-13): las promos ya
+    // commitearon cada una en su tx. Si el alta normal rechaza en DEFINITIVO,
+    // el intent va a cuarentena como "no aplicado" — dejar las líneas de promo
+    // vivas era una ronda a medias que la cuarentena negaba. Se compensan las
+    // promos del INTENT por instanceId (audit 2026-08-14: cubre el replay con
+    // created:false, que dejaba huérfanas las del intento anterior); el retiro
+    // ya recalcula totales dentro de su propia tx. En un error TRANSITORIO
+    // (RETRY) no se toca nada: el replay es idempotente por instanceId.
+    const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
+    if (!RETRYABLE_ERROR_CODES.has(errorCode) && promoInstanceIds.length > 0) {
+      await removeIntentPromotions(venueId, orderId, promoInstanceIds)
+    }
+    throw error
   }
 }
 
