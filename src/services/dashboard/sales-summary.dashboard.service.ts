@@ -30,6 +30,7 @@ import { formatInTimeZone } from 'date-fns-tz'
 
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
+import { foldGiveawaysIntoSummary, HIDDEN_COMP_LINE_WHERE } from '@/services/dashboard/salesGiveaways'
 import { projectPaymentSettlement } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import {
   MINDFORM_NEW_VENUE_ID,
@@ -812,6 +813,35 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // because some orders synced from POS don't have OrderItem records)
   // NOTE: items = grossSalesResult._sum.subtotal (already queried above)
 
+  // 1b. Hidden giveaways (Square-style Discounts & Comps). Promotion lines and
+  // mobile/TABLE_SERVICE cortesías follow the NET convention: their giveaway is
+  // in neither Order.subtotal nor Order.discountAmount, so the report showed a
+  // $200-catalog combo sold at $99 as $99 gross / $0 discounts. Both aggregates
+  // scope through the SAME order filter as grossSalesResult so the numbers stay
+  // coherent. Cobrar cortesías are excluded by total=0 (they already create an
+  // OrderDiscount COMP row — counting them here would double-count).
+  const giveawayOrderScope = {
+    venueId,
+    ...dateFilter,
+    status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] as any },
+    paymentStatus: { notIn: ['REFUNDED'] as any },
+    ...merchantOrderFilter,
+  }
+  const [promoGiveawayResult, compGiveawayResult] = !isFiltered
+    ? await Promise.all([
+        prisma.orderPromotion.aggregate({
+          where: { order: giveawayOrderScope },
+          _sum: { discountCents: true },
+        }),
+        prisma.orderItem.aggregate({
+          where: { ...HIDDEN_COMP_LINE_WHERE, order: giveawayOrderScope },
+          _sum: { discountAmount: true },
+        }),
+      ])
+    : [null, null]
+  const promoDiscountCents = Number(promoGiveawayResult?._sum.discountCents || 0)
+  const hiddenCompPesos = Number(compGiveawayResult?._sum.discountAmount || 0)
+
   // 3. Refunds — sum of refund Payments (type=REFUND, status=COMPLETED).
   // The legacy query filtered `status='REFUNDED'` which matched a handful of
   // pre-sprint hack records (original Payments flipped to status=REFUNDED with
@@ -921,9 +951,17 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Gross Sales = Item subtotals (Order.subtotal) + service costs
   // Does NOT include taxes or tips (those are shown separately)
   // This follows standard accounting where taxes are pass-through, not revenue
-  const grossSales = grossSalesResult ? Number(grossSalesResult._sum.subtotal || 0) : null
-  const items = grossSalesResult ? Number(grossSalesResult._sum.subtotal || 0) : null
-  const discounts = grossSalesResult ? Number(grossSalesResult._sum.discountAmount || 0) : null
+  // Square-style: gross shows the catalog price and the giveaway shows in
+  // Discounts — folding the SAME amount into both keeps netSales untouched.
+  const { grossSales, items, discounts } = foldGiveawaysIntoSummary(
+    {
+      grossSales: grossSalesResult ? Number(grossSalesResult._sum.subtotal || 0) : null,
+      items: grossSalesResult ? Number(grossSalesResult._sum.subtotal || 0) : null,
+      discounts: grossSalesResult ? Number(grossSalesResult._sum.discountAmount || 0) : null,
+    },
+    promoDiscountCents,
+    hiddenCompPesos,
+  )
   const taxes = grossSalesResult ? Number(grossSalesResult._sum.taxAmount || 0) : null
   const deferredSales = deferredResult ? Number(deferredResult._sum.remainingBalance || 0) : null
   // Service costs = any revenue beyond item sales (delivery fees, service charges, etc.)
@@ -1509,14 +1547,28 @@ async function calculateTimePeriodMetrics(
 
   // Query order metrics grouped by period
   // Using subtotal for gross_sales (not total) to match accounting standards
+  // The two lateral sums are the HIDDEN giveaways (promotions + NET-convention
+  // cortesías with total=0 — same discriminator as HIDDEN_COMP_LINE_WHERE);
+  // they get folded into gross_sales/discounts per row with the SAME
+  // foldGiveawaysIntoSummary the headline uses, so the bars keep summing to it.
   const orderMetricsQuery = `
     SELECT
       ${groupByExpression} as period,
       COALESCE(SUM(subtotal), 0) as gross_sales,
       COALESCE(SUM("taxAmount"), 0) as taxes,
       COALESCE(SUM("discountAmount"), 0) as discounts,
+      COALESCE(SUM(promo."discount_cents"), 0) as promo_discount_cents,
+      COALESCE(SUM(comp."given_away"), 0) as comp_given_away,
       COUNT(*) as order_count
     FROM "Order"
+    LEFT JOIN LATERAL (
+      SELECT SUM("discountCents") AS discount_cents
+      FROM "OrderPromotion" WHERE "orderId" = "Order".id
+    ) promo ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT SUM("discountAmount") AS given_away
+      FROM "OrderItem" WHERE "orderId" = "Order".id AND "isCortesia" = TRUE AND total = 0
+    ) comp ON TRUE
     WHERE "venueId" = $1
       AND "createdAt" >= $2::timestamp
       AND "createdAt" <= $3::timestamp
@@ -1649,9 +1701,27 @@ async function calculateTimePeriodMetrics(
   // results would be misleading because a single order can't be split per method.
   const [orderMetrics, paymentMetrics, refundsMetrics, deferredMetrics, platformFeesMetrics, staffCommissionsMetrics] = await Promise.all([
     isFiltered
-      ? Promise.resolve([] as Array<{ period: Date | number; gross_sales: number; taxes: number; discounts: number; order_count: bigint }>)
+      ? Promise.resolve(
+          [] as Array<{
+            period: Date | number
+            gross_sales: number
+            taxes: number
+            discounts: number
+            promo_discount_cents: number
+            comp_given_away: number
+            order_count: bigint
+          }>,
+        )
       : prisma.$queryRawUnsafe<
-          Array<{ period: Date | number; gross_sales: number; taxes: number; discounts: number; order_count: bigint }>
+          Array<{
+            period: Date | number
+            gross_sales: number
+            taxes: number
+            discounts: number
+            promo_discount_cents: number
+            comp_given_away: number
+            order_count: bigint
+          }>
         >(orderMetricsQuery, ...queryParams),
     prisma.$queryRawUnsafe<Array<{ period: Date | number; payment_amount: number; tips: number; transaction_count: bigint }>>(
       paymentMetricsQuery,
@@ -1754,8 +1824,17 @@ async function calculateTimePeriodMetrics(
     // Order-derived metrics are null when filtered (order rows can't be honestly
     // split per payment bucket). When NOT filtered, legacy sold real food so its
     // amount folds into grossSales (and therefore items/netSales).
-    const grossSales = isFiltered ? null : Number(order?.gross_sales || 0) + legacyAmount
-    const discounts = isFiltered ? null : Number(order?.discounts || 0)
+    // Hidden giveaways (promos + NET-convention comps) fold with the SAME
+    // function as the headline so the period bars keep summing to it.
+    const { grossSales, discounts } = foldGiveawaysIntoSummary(
+      {
+        grossSales: isFiltered ? null : Number(order?.gross_sales || 0) + legacyAmount,
+        items: null,
+        discounts: isFiltered ? null : Number(order?.discounts || 0),
+      },
+      Number(order?.promo_discount_cents || 0),
+      Number(order?.comp_given_away || 0),
+    )
     const taxes = isFiltered ? null : Number(order?.taxes || 0)
     const deferredSales = isFiltered ? null : Number(deferred?.deferred_sales || 0)
 
