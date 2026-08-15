@@ -111,3 +111,33 @@ describe('importMenu — el re-import no pisa stock existente', () => {
     )
   })
 })
+
+// El import que CREA inventario también deja su movimiento de apertura
+// (audit Codex xhigh 2026-08-14): crear saldo sin movimiento rompe el kardex
+// desde el nacimiento del producto y hace imposible la reconciliación.
+describe('importMenu — el inventario nuevo nace con su movimiento de apertura', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('producto nuevo con stock inicial crea el InventoryMovement (0 → 24)', async () => {
+    wirePrisma({ existingProduct: null, existingInventory: null })
+    prismaMock.inventory.create.mockResolvedValue({ id: 'inv-nuevo', currentStock: 24 } as any)
+    prismaMock.inventoryMovement.create.mockResolvedValue({ id: 'mov-1' } as any)
+
+    await menuService.importMenu(VENUE, importPayload({ trackInventory: true, currentStock: 24 }) as any, ACTOR as any)
+
+    expect(prismaMock.inventoryMovement.create).toHaveBeenCalled()
+    const mov = (prismaMock.inventoryMovement.create.mock.calls[0][0] as any).data
+    expect(Number(mov.previousStock)).toBe(0)
+    expect(Number(mov.newStock)).toBe(24)
+    expect(mov.type).toBe('ADJUSTMENT')
+  })
+
+  it('producto nuevo SIN stock inicial no inventa un movimiento de cero', async () => {
+    wirePrisma({ existingProduct: null, existingInventory: null })
+    prismaMock.inventory.create.mockResolvedValue({ id: 'inv-nuevo', currentStock: 0 } as any)
+
+    await menuService.importMenu(VENUE, importPayload({ trackInventory: true }) as any, ACTOR as any)
+
+    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
+  })
+})

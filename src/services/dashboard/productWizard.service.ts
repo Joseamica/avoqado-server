@@ -259,24 +259,44 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
     },
   })
 
-  if (existingInventory) {
-    // Update existing
-    await prisma.inventory.update({
-      where: { id: existingInventory.id },
+  // 🔴 Todo cambio de saldo deja movimiento (audit Codex xhigh 2026-08-14). Antes
+  // este paso escribía `currentStock` a secas —incluso PISANDO un inventario que
+  // ya tenía saldo— sin `InventoryMovement`: el kardex nacía roto y la
+  // reconciliación (`saldo == apertura + Σ deltas`) era imposible de cumplir.
+  // Ése era el origen REAL del descuadre medido, no las ventas.
+  const nuevoSaldo = new Decimal(data.initialStock)
+  const saldoPrevio = existingInventory ? new Decimal(existingInventory.currentStock) : new Decimal(0)
+  const delta = nuevoSaldo.minus(saldoPrevio)
+
+  const inventory = existingInventory
+    ? await prisma.inventory.update({
+        where: { id: existingInventory.id },
+        data: {
+          currentStock: nuevoSaldo,
+          minimumStock: new Decimal(data.reorderPoint),
+        },
+      })
+    : await prisma.inventory.create({
+        data: {
+          productId,
+          venueId,
+          currentStock: nuevoSaldo,
+          minimumStock: new Decimal(data.reorderPoint),
+          reservedStock: new Decimal(0),
+        },
+      })
+
+  // Sin cambio de saldo no se inventa un movimiento de cero (sería ruido en el
+  // kardex); re-correr el asistente con el mismo número no ensucia el historial.
+  if (!delta.isZero()) {
+    await prisma.inventoryMovement.create({
       data: {
-        currentStock: new Decimal(data.initialStock),
-        minimumStock: new Decimal(data.reorderPoint),
-      },
-    })
-  } else {
-    // Create new
-    await prisma.inventory.create({
-      data: {
-        productId,
-        venueId,
-        currentStock: new Decimal(data.initialStock),
-        minimumStock: new Decimal(data.reorderPoint),
-        reservedStock: new Decimal(0),
+        inventoryId: inventory.id,
+        type: 'ADJUSTMENT',
+        quantity: delta,
+        previousStock: saldoPrevio,
+        newStock: nuevoSaldo,
+        reason: existingInventory ? 'Ajuste de existencias (asistente de producto)' : 'Saldo inicial (asistente de producto)',
       },
     })
   }

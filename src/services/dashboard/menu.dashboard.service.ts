@@ -1443,7 +1443,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               })
             } else {
               // Create new inventory entry
-              await tx.inventory.create({
+              const nuevoInventario = await tx.inventory.create({
                 data: {
                   productId: product.id,
                   venueId,
@@ -1451,6 +1451,25 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                   minimumStock: productData.minStock || 0,
                 },
               })
+
+              // 🔴 El saldo de apertura deja movimiento (audit Codex xhigh
+              // 2026-08-14): un inventario que nace con saldo pero sin kardex
+              // hace imposible la reconciliación `saldo == apertura + Σ deltas`
+              // desde el día uno. Sin saldo inicial no se inventa un movimiento
+              // de cero — sería ruido.
+              const saldoInicial = productData.currentStock || 0
+              if (saldoInicial !== 0) {
+                await tx.inventoryMovement.create({
+                  data: {
+                    inventoryId: nuevoInventario.id,
+                    type: 'ADJUSTMENT',
+                    quantity: saldoInicial,
+                    previousStock: 0,
+                    newStock: saldoInicial,
+                    reason: 'Saldo inicial (importación de menú)',
+                  },
+                })
+              }
             }
           }
 

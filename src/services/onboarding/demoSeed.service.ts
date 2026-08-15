@@ -518,6 +518,25 @@ async function seedProductInventory(venueId: string, products: Array<{ id: strin
       },
     })
 
+    // 🔴 El saldo de apertura deja movimiento, también en los datos demo
+    // (audit Codex xhigh 2026-08-14): si el seed nace sin kardex, el venue de
+    // demostración arranca descuadrado y la reconciliación nocturna reportaría
+    // ruido desde el primer día. `prisma/seed.ts` ya lo hacía bien; esto lo
+    // empareja. Los productos "hechos al momento" (stock 0) no generan
+    // movimiento — no habría nada que registrar.
+    if (invProduct.currentStock !== 0) {
+      await prisma.inventoryMovement.create({
+        data: {
+          inventoryId: inventory.id,
+          type: 'ADJUSTMENT',
+          quantity: invProduct.currentStock,
+          previousStock: 0,
+          newStock: invProduct.currentStock,
+          reason: 'Saldo inicial (datos de demostración)',
+        },
+      })
+    }
+
     // Update product to use QUANTITY inventory method
     await prisma.product.update({
       where: { id: product.id },
