@@ -175,6 +175,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PermissionSet: 'Staff, Auth, Permissions & Time',
   VenueRoleConfig: 'Staff, Auth, Permissions & Time',
   VenueRolePermission: 'Staff, Auth, Permissions & Time',
+  PermissionOverride: 'Staff, Auth, Permissions & Time',
   Invitation: 'Staff, Auth, Permissions & Time',
   OAuthState: 'Staff, Auth, Permissions & Time',
   DeviceToken: 'Staff, Auth, Permissions & Time',

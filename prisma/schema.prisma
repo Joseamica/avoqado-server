@@ -791,6 +791,12 @@ model VenueSettings {
   // iOS/Android. Enforcement: checkTableOwnership middleware (mobile routes).
   enforceTableOwnership Boolean @default(false)
 
+  /// PIN de autorización de gerente: cuando un rol sin permiso intenta una acción,
+  /// el POS ofrece un teclado para que alguien CON ese permiso la autorice una vez.
+  /// 🔴 Nace OFF — ningún venue existente amanece pidiendo PINs. Core, sin candado
+  /// de plan. Switch canónico en el dashboard; el POS sólo lo lee.
+  managerPinOverrideEnabled Boolean @default(false)
+
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
 
@@ -1248,6 +1254,30 @@ model VenueRolePermission {
   @@index([modifiedBy])
   @@index([venueId, updatedAt]) // Audit trail: recent changes per venue
   @@index([modifiedBy, updatedAt]) // Audit trail: who changed what when
+}
+
+/// Token de elevación de UN SOLO USO para el "PIN de autorización de gerente".
+/// Es token Y bitácora en la misma tabla: la fila sobrevive al consumo y deja
+/// escrito quién autorizó qué, en qué ruta y cuándo.
+///
+/// 🔴 `authorizedById` y `requestedById` son ids de StaffVenue SIN llave foránea
+/// a propósito: si mañana se da de baja a ese empleado, la fila de auditoría NO
+/// puede desaparecer con él (el mismo tropiezo que ya costó entradas de
+/// ActivityLog por el FK `ActivityLog_staffId_fkey`).
+model PermissionOverride {
+  id             String    @id @default(cuid())
+  venueId        String
+  token          String    @unique /// uuid v4, viaja en el header X-Permission-Override
+  permission     String /// el permiso EXACTO que habilita, p.ej. 'orders:merge'
+  authorizedById String /// StaffVenue.id de quien tecleó el PIN
+  requestedById  String? /// StaffVenue.id de quien estaba bloqueado (null si no se pudo resolver)
+  expiresAt      DateTime /// createdAt + 60 s
+  consumedAt     DateTime? /// null = sin usar. El consumo es un updateMany atómico.
+  consumedRoute  String? /// "POST /api/v1/mobile/venues/:venueId/orders/:orderId/merge"
+  createdAt      DateTime  @default(now())
+
+  @@index([venueId, createdAt])
+  @@index([expiresAt])
 }
 
 // ==========================================

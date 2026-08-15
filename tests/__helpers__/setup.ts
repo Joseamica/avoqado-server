@@ -89,6 +89,7 @@ const prismaMock: any = {
   staff: createMockModel(),
   venue: createMockModel(),
   venueRolePermission: createMockModel(),
+  permissionOverride: createMockModel(),
   notification: createMockModel(),
   notificationPreference: createMockModel(),
   notificationTemplate: createMockModel(),
