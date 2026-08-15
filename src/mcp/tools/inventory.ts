@@ -759,4 +759,71 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       }
     },
   )
+
+  // ── Postings de inventario (fase 2): el "¿esta venta ya descontó?" consultable ──
+  // Antes esa pregunta sólo se podía inferir leyendo logs. Cada venta pagada deja
+  // un posting con su estado; este tool lo expone para soporte y conciliación.
+  server.tool(
+    'inventory_postings',
+    'Estado de la DEDUCCIÓN de inventario de las ventas de un venue ("¿esta venta sí descontó del almacén?"). Cada venta pagada genera un posting: APPLIED = descontó completo · PARTIAL_FAILED = alguna línea falló (el sweeper la reintenta) · PENDING/APPLYING = en curso · SKIPPED = no aplicaba (venta sin productos rastreados, o vales que ya descontaron en su propia transacción; el motivo viene en skipReason). Sirve para responder "¿por qué el stock no bajó con esta venta?" y para detectar deducciones atoradas. Filtra por estado y rango de fechas; más recientes primero. PREMIUM (INVENTORY_TRACKING).',
+    {
+      venueId: z.string().describe('Venue cuyos postings leer (debe estar en tu alcance)'),
+      status: z
+        .enum(['PENDING', 'APPLYING', 'APPLIED', 'PARTIAL_FAILED', 'SKIPPED'])
+        .optional()
+        .describe('Sólo postings en este estado. PARTIAL_FAILED = deducciones que quedaron a medias. Omite para todos.'),
+      orderId: z.string().optional().describe('Sólo el posting de esta orden'),
+      limit: z.number().int().positive().max(200).optional().describe('Máximo de postings a devolver (default 50)'),
+    },
+    async ({ venueId, status, orderId, limit }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      try {
+        const postings = await prisma.inventoryPosting.findMany({
+          where: { venueId, ...(status ? { status } : {}), ...(orderId ? { orderId } : {}) },
+          include: {
+            lines: { select: { effectKey: true, productId: true, status: true, expectedQuantityBase: true, reason: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: limit ?? 50,
+        })
+
+        // `InventoryPosting.orderId` es escalar (sin relación de vuelta): el folio
+        // se resuelve en UNA consulta extra para que la respuesta sea legible.
+        const orderIds = postings.map(p => p.orderId).filter((id): id is string => !!id)
+        const orders = orderIds.length
+          ? await prisma.order.findMany({ where: { id: { in: orderIds }, venueId }, select: { id: true, orderNumber: true } })
+          : []
+        const folioById = new Map(orders.map(o => [o.id, o.orderNumber]))
+
+        return text({
+          ok: true,
+          total: postings.length,
+          postings: postings.map(p => ({
+            id: p.id,
+            orderId: p.orderId,
+            orderNumber: p.orderId ? (folioById.get(p.orderId) ?? null) : null,
+            status: p.status,
+            skipReason: p.skipReason,
+            attempts: p.attempts,
+            lastError: p.lastError,
+            appliedAt: p.appliedAt,
+            createdAt: p.createdAt,
+            lines: p.lines.map(l => ({
+              productId: l.productId,
+              status: l.status,
+              // Cantidad en unidad base: piezas, o kilos en venta por peso.
+              expected: Number(l.expectedQuantityBase),
+              reason: l.reason,
+            })),
+          })),
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
 }
