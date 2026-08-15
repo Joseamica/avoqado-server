@@ -97,7 +97,11 @@ export async function getPromotions(venueId: string, page = 1, pageSize = 20, st
     prisma.promotion.findMany({
       where,
       include: includeEstructura,
-      orderBy: [{ status: 'asc' }, { displayOrder: 'asc' }, { name: 'asc' }],
+      // `id` al final como desempate: sin una clave ÚNICA en el orderBy, dos
+      // promociones con el mismo status/displayOrder/name pueden intercambiarse
+      // entre páginas y una fila se pierde de la lista sin que nadie lo note
+      // (guardrail: tests/unit/services/pagination-stability.guard.test.ts).
+      orderBy: [{ status: 'asc' }, { displayOrder: 'asc' }, { name: 'asc' }, { id: 'asc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
     }),
