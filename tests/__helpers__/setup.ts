@@ -337,6 +337,14 @@ prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
 // a feature gate. Default to [] (= no base-plan rows → FREE tier); tests that
 // exercise tiers override with their own mockResolvedValue per test.
 prismaMock.venueFeature.findMany.mockResolvedValue([])
+// Mobile venue-settings promotions block (getVenueTpvSettings, src/controllers/mobile/
+// tpvSettings.mobile.controller.ts) calls prisma.venueSettings.findUnique(...).catch(...).
+// A bare jest.fn() resolves undefined (not a Promise), so `.catch` on it throws
+// "Cannot read properties of undefined (reading 'catch')" in ANY test that reaches this
+// endpoint without knowing about `promotions` — same class of bug as venueFeature.findMany
+// above. Default to null (= no VenueSettings row → design defaults TAB/SIDE_PANEL); tests
+// that exercise the promotions block override with their own mockResolvedValue/mockRejectedValue.
+prismaMock.venueSettings.findUnique.mockResolvedValue(null)
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

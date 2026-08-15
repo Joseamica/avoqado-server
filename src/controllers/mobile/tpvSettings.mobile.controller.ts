@@ -38,7 +38,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
     //    venue's plan-tier info (additive `plan` field — POS apps gate UI by plan).
     //    RESILIENT: a plan-lookup failure must NEVER break venue-select on the POS — log it
     //    and return the settings WITHOUT the plan field (apps fail open).
-    const [terminals, plan] = await Promise.all([
+    const [terminals, plan, venueSettings] = await Promise.all([
       prisma.terminal.findMany({
         where: { venueId },
         select: {
@@ -69,6 +69,15 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         logger.error('Failed to resolve plan info for mobile venue settings — returning settings without plan', { venueId, error })
         return undefined
       }),
+      // Dónde pinta el POS el panel de promociones. Es preferencia de LAYOUT del
+      // venue (VenueSettings), no configuración de terminal — por eso va en su
+      // propio bloque y no dentro de `settings`, que es TpvSettings por terminal.
+      prisma.venueSettings
+        .findUnique({ where: { venueId }, select: { promotionsPanelCashier: true, promotionsPanelCustomer: true } })
+        .catch(error => {
+          logger.error('Failed to resolve promotions panel settings — returning defaults', { venueId, error })
+          return null
+        }),
     ])
 
     // 2. Prefer the terminal that made this request. A venue can have an area
@@ -130,6 +139,12 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
             }
           : null,
         ...(plan ? { plan } : {}),
+        // Aditivo y opcional (mismo contrato que `plan`): un POS viejo lo
+        // ignora, uno nuevo sin este campo cae a estos mismos defaults.
+        promotions: {
+          panelCashier: venueSettings?.promotionsPanelCashier ?? 'TAB',
+          panelCustomer: venueSettings?.promotionsPanelCustomer ?? 'SIDE_PANEL',
+        },
       },
     })
   } catch (error) {
