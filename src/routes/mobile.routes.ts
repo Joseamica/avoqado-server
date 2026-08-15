@@ -48,6 +48,8 @@ import * as printMobileController from '../controllers/mobile/print.mobile.contr
 import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
 import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
 import * as areaTicketExternalMobileController from '../controllers/mobile/areaTicketExternal.mobile.controller'
+import * as permissionOverrideMobileController from '../controllers/mobile/permission-override.mobile.controller'
+import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -892,6 +894,27 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   transactionMobileController.getTransaction,
+)
+
+// ============================================================================
+// PIN DE AUTORIZACIÓN DE GERENTE (manager override)
+// ============================================================================
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/permission-overrides
+ * Cambia el PIN de alguien CON el permiso por un token de un solo uso (60 s)
+ * para ESE permiso y ESE venue. No ejecuta nada: el POS reintenta su request
+ * original con el header `X-Permission-Override`.
+ *
+ * Mismo rate limit que el login por PIN (prod: 10/15 min por IP, 20 por venue).
+ */
+router.post(
+  '/venues/:venueId/permission-overrides',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  pinLoginRateLimiter,
+  validateRequest(createPermissionOverrideSchema),
+  permissionOverrideMobileController.createOverride,
 )
 
 // ============================================================================
