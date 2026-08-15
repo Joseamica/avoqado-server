@@ -184,6 +184,15 @@ export function requiredPermissionsForIntent(intent: SyncIntentInput): string[] 
     if (items.some(item => item?.isCortesia === true)) {
       permissions.push('orders:comp')
     }
+
+    // Aplicar una promoción regala mercancía: mismo permiso que aplicar un
+    // descuento online (decisión del founder 2026-08-15 — se reusa
+    // `discounts:apply`, no se crea uno nuevo). Sin esto, el ADD_ITEMS con
+    // promotionRef pasaría con `orders:create`, que tiene cualquier mesero:
+    // el mismo hueco que la cortesía de arriba.
+    if (items.some(item => item?.promotionRef)) {
+      permissions.push('discounts:apply')
+    }
   }
 
   return permissions
