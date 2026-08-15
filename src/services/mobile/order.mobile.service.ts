@@ -25,6 +25,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 
 // MARK: - Types
@@ -46,6 +47,17 @@ export interface CreateOrderItemInput {
    *  computes total = round(product.price × weightQuantity, 2); the client
    *  never dictates the price. Spec: 2026-07-18-venta-por-peso-bascula.md */
   weightQuantity?: number | null
+  /**
+   * Promoción tocada en el POS. OPCIONAL y sin precios: lleva QUÉ promoción y
+   * QUÉ eligió la persona; la aritmética la hace el server (mismo contrato que
+   * `items[].promotionRef` del reducer de ADD_ITEMS — deben permanecer iguales,
+   * un nombre distinto entre los dos caminos falla en silencio).
+   */
+  promotionRef?: {
+    promotionId: string
+    promotionInstanceId: string
+    selections: Array<{ groupId: string; optionId: string }>
+  }
 }
 
 export interface CreateOrderInput {
@@ -619,11 +631,34 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     }
   }
 
+  // Una venta tiene que traer ALGO. Lo exigía buildOrderItemsData, que a partir
+  // de aquí sólo ve las líneas normales — sin este guard, un body vacío crearía
+  // una orden de $0 en vez de rechazarse.
+  if (input.items.length === 0) {
+    throw new BadRequestError('Se requiere al menos un artículo o una promoción')
+  }
+
   await assertVenueSalesEnabled(venueId)
 
   const validatedStaffId = await validateStaffVenue(input.staffId, venueId)
 
-  const { itemsData, subtotal, itemDiscountTotal, discounts } = await buildOrderItemsData(venueId, input.items)
+  // Los items con `promotionRef` NO pasan por el alta normal: su precio lo
+  // resuelve el motor de promociones (espejo exacto de applyAddItems en
+  // sync.mobile.service.ts). Un item sin promotionRef se comporta igual que hoy.
+  const itemsConPromocion = input.items.filter(it => it.promotionRef)
+  const itemsNormales = input.items.filter(it => !it.promotionRef)
+
+  // Dedupe defensivo por instancia: dos líneas con el mismo instanceId son la
+  // MISMA promoción (un doble tap del cajero), no dos combos.
+  const promocionesUnicas = [...new Map(itemsConPromocion.map(it => [it.promotionRef!.promotionInstanceId, it.promotionRef!])).values()]
+
+  // 🔴 buildOrderItemsData lanza 'At least one item is required' con lista
+  // vacía. Una venta de PURAS promociones (el combo ES la venta) es legítima,
+  // así que se salta cuando no hay líneas normales.
+  const { itemsData, subtotal, itemDiscountTotal, discounts } =
+    itemsNormales.length > 0
+      ? await buildOrderItemsData(venueId, itemsNormales)
+      : { itemsData: [] as any[], subtotal: 0, itemDiscountTotal: 0, discounts: [] as Array<{ id: string; [key: string]: any }> }
 
   // Generate order number
   const orderNumber = `ORD-${Date.now()}`
@@ -808,6 +843,42 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
         error: (error as Error).message,
       })
     }
+  }
+
+  // Las promociones se aplican sobre la orden YA creada, con el MISMO servicio
+  // transaccional que usa el reducer offline (applyAddItems): crea sus líneas,
+  // reparte el descuento al centavo y RECALCULA los totales de la orden. Va
+  // ANTES del broadcast para que el evento lleve el total con el combo dentro.
+  if (promocionesUnicas.length > 0) {
+    const orderId = order.id
+    const instanceIds = promocionesUnicas.map(ref => ref.promotionInstanceId)
+    try {
+      for (const ref of promocionesUnicas) {
+        await applyPromotionToOrder({
+          venueId,
+          orderId,
+          promotionId: ref.promotionId,
+          instanceId: ref.promotionInstanceId,
+          selections: ref.selections,
+          // Venta EN LÍNEA: el instante es ahora. El acotado de reloj
+          // (clampSoldAt) es del camino offline, donde el cliente propone la hora.
+          soldAt: new Date(),
+        })
+      }
+    } catch (error) {
+      // 🔴 Todo-o-nada, igual que el reducer: cada promoción commitea en SU
+      // propia transacción, así que si la #2 truena la #1 ya quedó viva. Y aquí
+      // nadie la va a reintentar — un retry del POS con el mismo externalId
+      // entra por el corto de idempotencia y devolvería esa orden a medias, con
+      // un combo cobrado y el otro no. Se retiran las de ESTA venta (best-effort,
+      // por instanceId) y se propaga el error original.
+      await removeIntentPromotions(venueId, orderId, instanceIds)
+      throw error
+    }
+    // Los totales cambiaron dentro de applyPromotionToOrder — se relee la orden
+    // para no devolverle al POS un total viejo (el POS lo muestra al cobrar).
+    order = (await prisma.order.findUnique({ where: { id: orderId }, include: createdOrderInclude }))!
+    logger.info(`🎁 [ORDER.MOBILE] ${promocionesUnicas.length} promoción(es) aplicadas | order=${orderId} | total=${Number(order.total)}`)
   }
 
   // Emit Socket.IO event for real-time order creation

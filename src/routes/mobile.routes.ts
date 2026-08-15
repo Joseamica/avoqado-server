@@ -5,7 +5,7 @@
  * Base path: /api/v1/mobile
  */
 
-import { Router } from 'express'
+import { Router, type Request, type Response, type NextFunction } from 'express'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
 import * as promotionMobileController from '../controllers/mobile/promotion.mobile.controller'
 import * as orderMobileController from '../controllers/mobile/order.mobile.controller'
@@ -581,7 +581,38 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  *       401:
  *         description: Not authenticated
  */
-router.post('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermission('orders:create'), orderMobileController.createOrder)
+/**
+ * Candados que dependen del BODY, no de la ruta: sólo corren si la venta trae
+ * al menos un `items[].promotionRef`.
+ *
+ * 1. `discounts:apply` — aplicar una promoción regala mercancía, igual que
+ *    aplicar un descuento. Es el espejo online del guard del reducer
+ *    (sync.mobile.service.ts → requiredPermissionsForIntent); sin él, la venta
+ *    rápida sería la puerta de atrás de ese permiso.
+ * 2. `PROMOTIONS` (plan PRO) — el MISMO candado que el catálogo de promociones
+ *    del POS (checkFeatureAccess más abajo) y que el reducer
+ *    (assertPromotionsFeature): un venue degradado a FREE tampoco aplica
+ *    promociones por aquí.
+ *
+ * El permiso va ANTES del plan a propósito: a quien no puede aplicar
+ * promociones no se le revela el plan del negocio.
+ *
+ * Una venta sin `promotionRef` no paga ninguna consulta extra y se comporta
+ * EXACTAMENTE igual que antes.
+ */
+const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFunction) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : []
+  if (!items.some((item: any) => item?.promotionRef)) return next()
+  return checkPermission('discounts:apply')(req, res, () => checkFeatureAccess('PROMOTIONS')(req, res, next))
+}
+
+router.post(
+  '/venues/:venueId/orders',
+  authenticateTokenMiddleware,
+  checkPermission('orders:create'),
+  checkPromotionGuardsIfPresent,
+  orderMobileController.createOrder,
+)
 
 router.get('/venues/:venueId/staff', authenticateTokenMiddleware, checkPermission('teams:read'), staffMobileController.getActiveStaff)
 

@@ -80,9 +80,36 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
     }
 
     // Validate each item has required fields.
-    // Accepts either a product item (with productId) or a custom line item
-    // (no productId, but must have name + unitPrice — e.g. "Otro importe").
+    // Accepts either a product item (with productId), a custom line item
+    // (no productId, but must have name + unitPrice — e.g. "Otro importe"),
+    // or a promotion line (promotionRef).
     for (const item of items) {
+      // Una línea de promoción no trae productId ni precio: trae QUÉ promoción
+      // tocó el cajero y QUÉ eligió la persona (el cliente NUNCA manda precios
+      // de promoción — el server resuelve sus líneas), así que las reglas de
+      // abajo —quantity, productId o (name + unitPrice)— no le aplican.
+      //
+      // 🔴 El criterio es el MISMO que el del servicio y el de la ruta: basta
+      // que `promotionRef` venga. Y si viene, su FORMA se valida aquí, en la
+      // frontera — un promotionRef a medias que pasara de largo entraría al
+      // motor con ids undefined y reventaría como 500 DESPUÉS de crear la
+      // orden, en vez de decirle al POS qué mandó mal.
+      if (item?.promotionRef) {
+        const ref = item.promotionRef
+        const formaValida =
+          typeof ref.promotionId === 'string' &&
+          ref.promotionId.length > 0 &&
+          typeof ref.promotionInstanceId === 'string' &&
+          ref.promotionInstanceId.length > 0 &&
+          Array.isArray(ref.selections)
+        if (!formaValida) {
+          return res.status(400).json({
+            success: false,
+            message: 'promotionRef requiere promotionId, promotionInstanceId y selections',
+          })
+        }
+        continue
+      }
       if (!item.quantity || item.quantity < 1) {
         return res.status(400).json({
           success: false,
