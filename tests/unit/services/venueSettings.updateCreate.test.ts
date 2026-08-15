@@ -41,3 +41,31 @@ describe('updateVenueSettings — googleReviewLink on the CREATE branch', () => 
     expect(callArg.create.googleReviewLink ?? null).toBeNull()
   })
 })
+
+describe('updateVenueSettings — managerPinOverrideEnabled on the CREATE branch', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  // 🔴 Un venue SIN fila de VenueSettings toma la rama CREATE. Si el campo no
+  // viaja ahí, el switch del dashboard se ve encendido y la fila nace en false:
+  // el POS nunca ofrecería el PIN y nadie sabría por qué.
+  it('lo incluye en el payload CREATE (un venue sin fila de settings también lo persiste)', async () => {
+    mockedPrisma.venue.findUnique.mockResolvedValue({ id: 'v1' })
+    mockedPrisma.venueSettings.upsert.mockResolvedValue({ id: 's1', venueId: 'v1', managerPinOverrideEnabled: true })
+
+    await updateVenueSettings('v1', { managerPinOverrideEnabled: true } as any)
+
+    const callArg = mockedPrisma.venueSettings.upsert.mock.calls[0][0]
+    expect(callArg.create.managerPinOverrideEnabled).toBe(true)
+    expect(callArg.update.managerPinOverrideEnabled).toBe(true)
+  })
+
+  it('nace apagado cuando el update no lo menciona', async () => {
+    mockedPrisma.venue.findUnique.mockResolvedValue({ id: 'v1' })
+    mockedPrisma.venueSettings.upsert.mockResolvedValue({ id: 's1', venueId: 'v1' })
+
+    await updateVenueSettings('v1', { notifyBadReviews: false } as any)
+
+    const callArg = mockedPrisma.venueSettings.upsert.mock.calls[0][0]
+    expect(callArg.create.managerPinOverrideEnabled ?? false).toBe(false)
+  })
+})

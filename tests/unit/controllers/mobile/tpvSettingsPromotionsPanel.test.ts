@@ -99,7 +99,13 @@ describe('GET /mobile/venues/:venueId/settings — bloque promotions', () => {
     expect(body.success).toBe(true)
     expect(body.data.promotions).toEqual({ panelCashier: 'TAB', panelCustomer: 'SIDE_PANEL' })
     expect(body.data.terminals).toBeDefined()
+    // La misma lectura sirve al PIN de autorización de gerente: si falla, se
+    // asume apagado — nunca se ofrece un PIN que el server no podría validar.
+    expect(body.data.managerPinOverrideEnabled).toBe(false)
     // ...y la falla queda visible en logs (mismo patrón que la resiliencia de `plan`).
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('promotions panel'), expect.objectContaining({ venueId: 'venue-1' }))
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('venue-level POS settings'),
+      expect.objectContaining({ venueId: 'venue-1' }),
+    )
   })
 })

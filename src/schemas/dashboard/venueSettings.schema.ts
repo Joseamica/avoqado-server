@@ -49,6 +49,10 @@ export const UpdateVenueSettingsSchema = z.object({
     // Propiedad de mesa (PRO): solo el mesero dueño modifica/cierra sus mesas;
     // override = permiso 'tables:manage-all'. Enforcement en mobile routes.
     enforceTableOwnership: z.boolean().optional(),
+    // PIN de autorización de gerente: el switch canónico vive aquí (dashboard);
+    // el POS sólo lo lee. Sin esta línea el PUT descartaba el campo en silencio
+    // y el switch parecería funcionar sin guardar nada.
+    managerPinOverrideEnabled: z.boolean().optional(),
     requireClockInPhoto: z.boolean().optional(), // Anti-fraud: require photo on clock-in
     trackPromoterLocation: z.boolean().optional(), // "Cambaceo": emit/accept periodic promoter location pings
 

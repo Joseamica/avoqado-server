@@ -176,6 +176,10 @@ export async function updateVenueSettings(
     // TPV Settings removed - now stored per-terminal in Terminal.config.settings
     ...(typeof updates.promotionsPanelCashier === 'string' && { promotionsPanelCashier: updates.promotionsPanelCashier }),
     ...(typeof updates.promotionsPanelCustomer === 'string' && { promotionsPanelCustomer: updates.promotionsPanelCustomer }),
+    // PIN de autorización de gerente. Un venue SIN fila de settings toma esta
+    // rama: sin esta línea el switch se vería encendido en el dashboard y la
+    // fila nacería en false — el POS nunca ofrecería el PIN.
+    ...(typeof updates.managerPinOverrideEnabled === 'boolean' && { managerPinOverrideEnabled: updates.managerPinOverrideEnabled }),
   }
 
   const hasCashReconciliationUpdate = Object.prototype.hasOwnProperty.call(updates, 'cashReconciliationEnabled')

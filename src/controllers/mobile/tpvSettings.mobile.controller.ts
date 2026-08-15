@@ -73,9 +73,12 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
       // venue (VenueSettings), no configuración de terminal — por eso va en su
       // propio bloque y no dentro de `settings`, que es TpvSettings por terminal.
       prisma.venueSettings
-        .findUnique({ where: { venueId }, select: { promotionsPanelCashier: true, promotionsPanelCustomer: true } })
+        .findUnique({
+          where: { venueId },
+          select: { promotionsPanelCashier: true, promotionsPanelCustomer: true, managerPinOverrideEnabled: true },
+        })
         .catch(error => {
-          logger.error('Failed to resolve promotions panel settings — returning defaults', { venueId, error })
+          logger.error('Failed to resolve venue-level POS settings — returning defaults', { venueId, error })
           return null
         }),
     ])
@@ -145,6 +148,11 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
           panelCashier: venueSettings?.promotionsPanelCashier ?? 'TAB',
           panelCustomer: venueSettings?.promotionsPanelCustomer ?? 'SIDE_PANEL',
         },
+        // PIN de autorización de gerente. Aditivo y opcional (mismo contrato que
+        // `plan`): un POS viejo lo ignora; uno nuevo sin el campo cae a false, que
+        // es el comportamiento de hoy. Es de VENUE, no de terminal — por eso vive
+        // aquí y no dentro de `settings`.
+        managerPinOverrideEnabled: venueSettings?.managerPinOverrideEnabled ?? false,
       },
     })
   } catch (error) {
