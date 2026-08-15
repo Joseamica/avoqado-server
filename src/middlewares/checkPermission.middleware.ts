@@ -4,6 +4,7 @@ import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { consumePermissionOverride, isManagerPinOverrideEnabled } from '@/services/mobile/permission-override.mobile.service'
 
 type RoleResolutionSource = 'token' | 'staffVenue' | 'orgOwner' | 'none'
 
@@ -275,6 +276,69 @@ export const checkPermission = (requiredPermission: string) => {
       }
 
       if (!authorized) {
+        // 🔴 PIN de autorización de gerente. Este es el ÚNICO punto de integración
+        // del override: cubre las ~200 rutas con checkPermission de hoy y las que
+        // vengan. Cero cambios por-acción, igual que lo resuelve Square.
+        const overrideToken = req.headers?.['x-permission-override']
+        if (typeof overrideToken === 'string' && overrideToken.length > 0) {
+          const consumed = await consumePermissionOverride({
+            token: overrideToken,
+            venueId,
+            permission: requiredPermission,
+            route: `${req.method} ${req.originalUrl}`,
+          })
+
+          if (consumed) {
+            ;(req as any).authContext.overrideAuthorizedBy = consumed.authorizedById
+
+            // La acción queda en la bitácora con QUIÉN la autorizó. Es lo que se
+            // lee después por el MCP `get_activity_log`.
+            try {
+              void logAction({
+                staffId: authContext.userId,
+                venueId,
+                action: 'PERMISSION_OVERRIDE_USED',
+                entity: 'permission',
+                entityId: requiredPermission,
+                data: {
+                  permission: requiredPermission,
+                  userRole,
+                  authorizedByStaffVenueId: consumed.authorizedById,
+                  method: req.method,
+                  path: req.originalUrl,
+                },
+                ipAddress: req.ip,
+                userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+              })
+            } catch (auditErr) {
+              logger.error('checkPermission: audit log construction failed (non-fatal)', auditErr)
+            }
+
+            logger.info(
+              `checkPermission: '${requiredPermission}' autorizado por override (StaffVenue ${consumed.authorizedById}) en venue ${venueId}`,
+            )
+            return next()
+          }
+
+          // Token reusado, expirado, de otro permiso o de otro venue. No es un
+          // 500 ni un mensaje distinto: se cae al 403 de siempre y el POS vuelve
+          // a pedir el PIN.
+          try {
+            void logAction({
+              staffId: authContext.userId,
+              venueId,
+              action: 'PERMISSION_OVERRIDE_REJECTED',
+              entity: 'permission',
+              entityId: requiredPermission,
+              data: { permission: requiredPermission, userRole, reason: 'token_invalido_o_consumido' },
+              ipAddress: req.ip,
+              userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+            })
+          } catch (auditErr) {
+            logger.error('checkPermission: audit log construction failed (non-fatal)', auditErr)
+          }
+        }
+
         logger.warn(
           `checkPermission: User ${authContext.userId} (${userRole}) denied access to '${requiredPermission}' in venue ${venueId}`,
         )
@@ -305,11 +369,18 @@ export const checkPermission = (requiredPermission: string) => {
           logger.error('checkPermission: audit log construction failed (non-fatal)', auditErr)
         }
 
+        // `overridable` es ADITIVO y sólo aparece con el switch del venue ON.
+        // Nunca se toca error/message/required/userRole: apps viejas los leen.
+        // El 403 de MEMBRESÍA (arriba) y el de TIER (checkFeatureAccess, otro
+        // middleware) no pasan por aquí — ningún PIN los arregla.
+        const overridable = await isManagerPinOverrideEnabled(venueId)
+
         return res.status(403).json({
           error: 'Forbidden',
           message: `Permission '${requiredPermission}' required`,
           required: requiredPermission,
           userRole,
+          ...(overridable ? { overridable: true } : {}),
         })
       }
 

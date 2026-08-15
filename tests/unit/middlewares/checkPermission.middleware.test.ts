@@ -31,11 +31,19 @@ jest.mock('@/utils/prismaClient', () => ({
     venueRolePermission: {
       findUnique: jest.fn(),
     },
+    venueSettings: {
+      findUnique: jest.fn(),
+    },
+    permissionOverride: {
+      updateMany: jest.fn(),
+      findUnique: jest.fn(),
+    },
   },
 }))
 
 jest.mock('@/lib/permissions', () => ({
   hasPermission: jest.fn(),
+  evaluatePermissionList: jest.fn(),
 }))
 
 jest.mock('@/config/logger', () => ({
@@ -343,6 +351,153 @@ describe('checkPermission Middleware', () => {
           error: 'Internal Server Error',
         }),
       )
+    })
+  })
+
+  describe('PIN de autorización de gerente (override)', () => {
+    beforeEach(() => {
+      // Por default: el switch APAGADO y sin token en el header.
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: false })
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+      ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(false)
+      ;(mockReq as any).headers = {}
+      ;(mockReq as any).method = 'POST'
+      ;(mockReq as any).originalUrl = '/api/v1/mobile/venues/venue_123/orders/o1/merge'
+    })
+
+    // 1. NUEVO
+    it('switch OFF → el 403 NO lleva overridable', async () => {
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(statusMock).toHaveBeenCalledWith(403)
+      const body = jsonMock.mock.calls[0][0]
+      expect(body).toEqual({
+        error: 'Forbidden',
+        message: "Permission 'orders:merge' required",
+        required: 'orders:merge',
+        userRole: 'MANAGER',
+      })
+      expect(body.overridable).toBeUndefined()
+      expect(mockNext).not.toHaveBeenCalled()
+    })
+
+    it('switch ON → el 403 lleva overridable: true SIN perder ningún campo viejo', async () => {
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(jsonMock).toHaveBeenCalledWith({
+        error: 'Forbidden',
+        message: "Permission 'orders:merge' required",
+        required: 'orders:merge',
+        userRole: 'MANAGER',
+        overridable: true,
+      })
+    })
+
+    it('🔴 el 403 de MEMBRESÍA nunca lleva overridable (ningún PIN arregla no pertenecer al venue)', async () => {
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(null)
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org_999' })
+      ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
+      ;(mockReq as any).authContext = { userId: 'user_123', venueId: 'otro_venue', orgId: 'org_123', role: undefined }
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(jsonMock).toHaveBeenCalledWith({ error: 'Forbidden', message: 'No access to this venue' })
+    })
+
+    it('token válido en el header → deja pasar y expone quién autorizó', async () => {
+      ;(mockReq as any).headers = { 'x-permission-override': 'tok_abc' }
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_manager' })
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((mockReq as any).authContext.overrideAuthorizedBy).toBe('sv_manager')
+    })
+
+    it('el consumo exige token + venue + permiso, sin usar y sin expirar', async () => {
+      ;(mockReq as any).headers = { 'x-permission-override': 'tok_abc' }
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_manager' })
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      const where = (prisma.permissionOverride.updateMany as jest.Mock).mock.calls[0][0].where
+      expect(where).toMatchObject({
+        token: 'tok_abc',
+        venueId: 'venue_123',
+        permission: 'orders:merge',
+        consumedAt: null,
+      })
+      expect(where.expiresAt.gt).toBeInstanceOf(Date)
+    })
+
+    it('🔴 token ya usado o expirado (count 0) → 403, NO pasa', async () => {
+      ;(mockReq as any).headers = { 'x-permission-override': 'tok_usado' }
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).not.toHaveBeenCalled()
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(jsonMock.mock.calls[0][0]).toMatchObject({ required: 'orders:merge', overridable: true })
+    })
+
+    it('token de OTRO permiso no sirve (el WHERE lo filtra → count 0 → 403)', async () => {
+      ;(mockReq as any).headers = { 'x-permission-override': 'tok_de_refund' }
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect((prisma.permissionOverride.updateMany as jest.Mock).mock.calls[0][0].where.permission).toBe('orders:merge')
+    })
+
+    it('un fallo al leer el switch NO convierte el 403 en 500', async () => {
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockRejectedValue(new Error('db down'))
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(statusMock).not.toHaveBeenCalledWith(500)
+    })
+
+    it('un fallo al consumir el token NO convierte el 403 en 500', async () => {
+      ;(mockReq as any).headers = { 'x-permission-override': 'tok_abc' }
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockRejectedValue(new Error('db down'))
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(statusMock).not.toHaveBeenCalledWith(500)
+      expect(mockNext).not.toHaveBeenCalled()
+    })
+
+    // 2. REGRESIÓN
+    it('con permiso, el override ni se consulta', async () => {
+      ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(true)
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalled()
+      expect(prisma.venueSettings.findUnique).not.toHaveBeenCalled()
+      expect(prisma.permissionOverride.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('SUPERADMIN sigue pasando sin tocar nada del override', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv_super' })
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalled()
+      expect(prisma.permissionOverride.updateMany).not.toHaveBeenCalled()
     })
   })
 })
