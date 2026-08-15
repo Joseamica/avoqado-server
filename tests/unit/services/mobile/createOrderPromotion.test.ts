@@ -87,9 +87,17 @@ describe('createOrderWithItems — líneas de promoción', () => {
     ])
     prismaMock.modifier.findMany.mockResolvedValue([])
     prismaMock.order.create.mockResolvedValue(orderRow([lineaProducto], 100))
-    // Relectura posterior a aplicar la promoción: el motor ya recalculó los
-    // totales de la orden y agregó SUS líneas.
-    prismaMock.order.findUnique.mockResolvedValue(orderRow([lineaProducto, lineaDeCombo], 165))
+    // Lo que `recalculateOrderTotals` deja en la DB tras aplicar la promoción:
+    // el subtotal SÍ crece con las líneas del combo, pero `total` y
+    // `discountAmount` quedan pisados SIN la propina ni el descuento de orden.
+    // Este endpoint relee sólo lo que sigue siendo autoridad del motor.
+    prismaMock.order.findFirst.mockResolvedValue({
+      subtotal: new Decimal(165),
+      serviceChargeAmount: new Decimal(0),
+      paidAmount: new Decimal(0),
+    })
+    // La reafirmación de los términos propios del endpoint devuelve la orden final.
+    prismaMock.order.update.mockResolvedValue(orderRow([lineaProducto, lineaDeCombo], 165))
 
     apply = jest.spyOn(promotionService, 'applyPromotionToOrder').mockResolvedValue({
       orderPromotionId: 'op-1',
@@ -137,9 +145,108 @@ describe('createOrderWithItems — líneas de promoción', () => {
       ],
     } as any)
 
-    expect(prismaMock.order.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'order-1' } }))
+    // La relectura filtra por venue: es la invariante de tenant del repo, y ésta
+    // es justo la línea que alguien va a copiar.
+    expect(prismaMock.order.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'order-1', venueId: 'venue-1' } }))
     expect(result.total).toBe(165)
     expect(result.items).toHaveLength(2)
+  })
+
+  // ── 🔴 DINERO: los términos que recalculateOrderTotals no conoce ──
+
+  it('🔴 la PROPINA sobrevive a la promoción: el total la incluye y remainingBalance cuadra', async () => {
+    // recalculateOrderTotals reconstruye total = subtotal − descuento + cargos,
+    // SIN término de propina, y pisa total y remainingBalance. Sin la
+    // reafirmación, la venta se cerraba PAGADA con una propina que nadie cobró
+    // (Order.tipAmount vivo, total corto por esos $5) y el corte no cuadraba.
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [
+        { productId: 'p1', quantity: 1 },
+        { promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } },
+      ],
+      tip: 500, // $5
+    } as any)
+
+    // subtotal 165 (con el combo) − descuento 0 + propina 5 = 170
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'order-1' },
+        data: expect.objectContaining({
+          total: new Decimal(170),
+          remainingBalance: new Decimal(170),
+          discountAmount: new Decimal(0),
+        }),
+      }),
+    )
+  })
+
+  it('🔴 el descuento de ORDEN sobrevive junto a un descuento de artículo: no se le cobra de más al cliente', async () => {
+    // recalculateOrderTotals sólo respeta el descuento de orden por su fallback,
+    // y ese fallback SOLO aplica cuando no hay filas OrderDiscount. Este
+    // endpoint escribe una fila por descuento de ARTÍCULO, así que en cuanto hay
+    // uno el fallback muere y los $20 de orden se perdían: el cliente pagaba
+    // $155 en vez de $135.
+    prismaMock.discount.findMany.mockResolvedValue([
+      {
+        id: 'd1',
+        venueId: 'venue-1',
+        name: 'Descuento empleado',
+        type: 'FIXED_AMOUNT',
+        value: new Decimal(10),
+        scope: 'ITEM',
+        targetItemIds: [],
+        targetCategoryIds: [],
+        active: true,
+        currentUses: 0,
+        maxTotalUses: null,
+        validFrom: null,
+        validUntil: null,
+        minPurchaseAmount: null,
+        maxDiscountAmount: null,
+        compReason: null,
+      },
+    ])
+    // La orden creada trae la línea con su descuento aplicado (dispara la fila
+    // OrderDiscount, que es lo que mata al fallback del recálculo).
+    prismaMock.order.create.mockResolvedValue(
+      orderRow([{ ...lineaProducto, appliedDiscountId: 'd1', discountAmount: new Decimal(10) }], 100),
+    )
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [
+        { productId: 'p1', quantity: 1, discountId: 'd1' },
+        { promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } },
+      ],
+      discount: 2000, // $20 de descuento a toda la venta
+    } as any)
+
+    // descuento = $10 del artículo + $20 de la orden; total = 165 − 30 = 135
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          discountAmount: new Decimal(30),
+          total: new Decimal(135),
+          remainingBalance: new Decimal(135),
+        }),
+      }),
+    )
+  })
+
+  it('si la compensación truena, NO tapa el error de negocio original', async () => {
+    // La compensación arranca con una query: si lo que tronó fue la DB, truena
+    // también. El cajero perdería el único texto accionable a cambio de un
+    // error crudo de Prisma.
+    jest.spyOn(promotionService, 'removeIntentPromotions').mockRejectedValue(new Error('Connection pool timeout'))
+    apply.mockRejectedValue(new Error('Esa promoción no está publicada.'))
+
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        items: [{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }],
+      } as any),
+    ).rejects.toThrow('Esa promoción no está publicada.')
   })
 
   it('una orden de PURAS promociones se crea igual (sin items normales)', async () => {
@@ -200,7 +307,7 @@ describe('createOrderWithItems — líneas de promoción', () => {
 
   // ── REGRESIÓN: la venta rápida de siempre no cambia en nada ──
 
-  it('una orden SIN promotionRef no toca el motor de promociones ni relee la orden', async () => {
+  it('una orden SIN promotionRef no toca el motor, ni relee, ni reescribe el dinero de la orden', async () => {
     const result = await createOrderWithItems('venue-1', {
       staffId: 'staff-1',
       items: [{ productId: 'p1', quantity: 1 }],
@@ -208,6 +315,10 @@ describe('createOrderWithItems — líneas de promoción', () => {
 
     expect(apply).not.toHaveBeenCalled()
     expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
+    // 🔴 La venta de siempre NO pasa por la reafirmación de dinero: su total lo
+    // sigue escribiendo el `order.create` original, byte por byte como antes.
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
     expect(result.total).toBe(100)
   })
 

@@ -108,6 +108,21 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
             message: 'promotionRef requiere promotionId, promotionInstanceId y selections',
           })
         }
+        // 🔴 Una línea es promoción O producto, nunca las dos. El servicio manda
+        // al motor todo lo que traiga promotionRef, así que un item mixto
+        // perdería su producto EN SILENCIO: se cobraría el combo y no la
+        // hamburguesa que el cajero también capturó. Es subcobro, así que se
+        // rechaza en vez de adivinar cuál de los dos quiso decir.
+        const traeLineaNormal =
+          (typeof item.productId === 'string' && item.productId.length > 0) ||
+          (typeof item.name === 'string' && item.name.length > 0) ||
+          typeof item.unitPrice === 'number'
+        if (traeLineaNormal) {
+          return res.status(400).json({
+            success: false,
+            message: 'Un item no puede ser producto y promoción a la vez: manda la promoción en su propia línea',
+          })
+        }
         continue
       }
       if (!item.quantity || item.quantity < 1) {

@@ -872,13 +872,66 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       // entra por el corto de idempotencia y devolvería esa orden a medias, con
       // un combo cobrado y el otro no. Se retiran las de ESTA venta (best-effort,
       // por instanceId) y se propaga el error original.
-      await removeIntentPromotions(venueId, orderId, instanceIds)
+      //
+      // 🔴 La compensación NUNCA puede sustituir al error original: su primera
+      // sentencia es una query, así que si lo que tronó fue la DB, la
+      // compensación truena también y el cajero perdería el único texto
+      // accionable ("Esa promoción no está publicada.", "Falta elegir una
+      // opción de …") a cambio de un error crudo de Prisma.
+      try {
+        await removeIntentPromotions(venueId, orderId, instanceIds)
+      } catch (compensationError) {
+        logger.error('❌ [ORDER.MOBILE] Falló la compensación de promociones — se conserva el error original', {
+          orderId,
+          instanceIds,
+          compensationError: compensationError instanceof Error ? compensationError.message : String(compensationError),
+        })
+      }
       throw error
     }
-    // Los totales cambiaron dentro de applyPromotionToOrder — se relee la orden
-    // para no devolverle al POS un total viejo (el POS lo muestra al cobrar).
-    order = (await prisma.order.findUnique({ where: { id: orderId }, include: createdOrderInclude }))!
-    logger.info(`🎁 [ORDER.MOBILE] ${promocionesUnicas.length} promoción(es) aplicadas | order=${orderId} | total=${Number(order.total)}`)
+
+    // 🔴 DINERO. `applyPromotionToOrder` recalcula los totales con
+    // `recalculateOrderTotals`, que es COMPARTIDO y sólo sabe de líneas,
+    // OrderDiscount y cargos por servicio. Ignora dos términos que son propios
+    // de ESTE endpoint, y al sobrescribir `total`/`remainingBalance` los borra:
+    //
+    //   a) la PROPINA (`input.tip`): no existe en esa función, así que el total
+    //      quedaba corto por la propina — la orden se cerraba PAGADA con una
+    //      propina que nadie cobró, y el corte no cuadraba.
+    //   b) el descuento de ORDEN (`input.discount`): sólo se respeta cuando NO
+    //      hay filas OrderDiscount (su fallback). Con un descuento de artículo
+    //      presente hay filas, el fallback no aplica y el descuento de orden se
+    //      perdía — cobrándole de MÁS al cliente.
+    //
+    // Aquí se reafirman los términos que este endpoint sí conoce. No se toca la
+    // función compartida (la usan comp/split/descuentos), y una venta SIN
+    // promociones nunca pasa por aquí: sigue comportándose igual que siempre.
+    const recalculada = await prisma.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { subtotal: true, serviceChargeAmount: true, paidAmount: true },
+    })
+    if (!recalculada) {
+      throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
+    }
+    // El subtotal SÍ es autoridad del motor (ya trae las líneas del combo). El
+    // descuento vuelve a ser el de la venta: `itemDiscountTotal` (ya prorrateado
+    // por línea) + el de orden, que es exactamente `discountDecimal`.
+    const subtotalConPromociones = Number(recalculada.subtotal)
+    const serviceChargeAmount = Number(recalculada.serviceChargeAmount ?? 0)
+    const totalFinal = Math.round((Math.max(0, subtotalConPromociones - discountDecimal) + serviceChargeAmount + tipDecimal) * 100) / 100
+    order = await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        discountAmount: new Prisma.Decimal(discountDecimal),
+        total: new Prisma.Decimal(totalFinal),
+        remainingBalance: new Prisma.Decimal(Math.max(0, totalFinal - Number(recalculada.paidAmount ?? 0))),
+        version: { increment: 1 },
+      },
+      include: createdOrderInclude,
+    })
+    logger.info(
+      `🎁 [ORDER.MOBILE] ${promocionesUnicas.length} promoción(es) aplicadas | order=${orderId} | subtotal=${subtotalConPromociones} | descuento=${discountDecimal} | propina=${tipDecimal} | total=${totalFinal}`,
+    )
   }
 
   // Emit Socket.IO event for real-time order creation

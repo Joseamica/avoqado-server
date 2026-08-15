@@ -89,6 +89,28 @@ describe('createOrder — frontera de las líneas de promoción', () => {
     expect(createOrderWithItemsMock).not.toHaveBeenCalled()
   })
 
+  it('🔴 rechaza un item que es producto Y promoción a la vez (si no, el producto se pierde en silencio)', async () => {
+    // El servicio manda al motor TODO lo que traiga promotionRef, así que un
+    // item mixto perdería su producto sin avisar: se cobra el combo y no la
+    // hamburguesa que el cajero también capturó. Es subcobro.
+    const res = buildRes()
+
+    await createOrder(buildReq([{ productId: 'p1', quantity: 1, promotionRef }]), res, next)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.payload.message).toContain('no puede ser producto y promoción a la vez')
+    expect(createOrderWithItemsMock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 rechaza también el mixto con línea custom (name + unitPrice) y promotionRef', async () => {
+    const res = buildRes()
+
+    await createOrder(buildReq([{ name: 'Otro importe', unitPrice: 2500, quantity: 1, promotionRef }]), res, next)
+
+    expect(res.statusCode).toBe(400)
+    expect(createOrderWithItemsMock).not.toHaveBeenCalled()
+  })
+
   it('rechaza un promotionRef con selections que no es arreglo', async () => {
     const res = buildRes()
 
