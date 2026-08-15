@@ -9,7 +9,7 @@
  * - Per Venue: 10 login attempts per 15 minutes
  *
  * SECURITY FEATURES:
- * - Prevents brute force PIN enumeration (4-6 digit PINs = 10k-1M combinations)
+ * - Prevents brute force PIN enumeration (4-10 digit PINs = 10k-10B combinations)
  * - Protects individual venues from targeted attacks
  * - Fail-fast with 429 status (no waiting, immediate rejection)
  * - Audit logging for security monitoring

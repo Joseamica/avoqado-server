@@ -60,9 +60,13 @@ export const createStaffSchema = z.object({
         errorMap: () => ({ message: 'Rol de sucursal inválido' }),
       })
       .optional(),
+    // 4-10 dígitos: mismo rango que tpv.schema.ts e invitation.schema.ts.
+    // El PIN se guarda en claro a propósito (decisión founder 2026-08-15), así
+    // que su única defensa es poder ser LARGO — caparlo a 6 aquí dejaba fuera
+    // del alta por superadmin justo a los PINs que sostienen esa premisa.
     pin: z
       .string()
-      .regex(/^\d{4,6}$/, 'El PIN debe tener entre 4 y 6 dígitos')
+      .regex(/^\d{4,10}$/, 'El PIN debe tener entre 4 y 10 dígitos')
       .optional(),
   }),
 })
@@ -108,9 +112,10 @@ export const assignVenueSchema = z.object({
     role: z.enum(['SUPERADMIN', 'OWNER', 'ADMIN', 'MANAGER', 'WAITER', 'CASHIER', 'KITCHEN', 'HOST', 'VIEWER'], {
       errorMap: () => ({ message: 'Rol de sucursal inválido' }),
     }),
+    // 4-10 dígitos: mismo rango que tpv.schema.ts e invitation.schema.ts.
     pin: z
       .string()
-      .regex(/^\d{4,6}$/, 'El PIN debe tener entre 4 y 6 dígitos')
+      .regex(/^\d{4,10}$/, 'El PIN debe tener entre 4 y 10 dígitos')
       .optional(),
   }),
 })
@@ -126,9 +131,10 @@ export const updateVenueAssignmentSchema = z.object({
         errorMap: () => ({ message: 'Rol de sucursal inválido' }),
       })
       .optional(),
+    // 4-10 dígitos: mismo rango que tpv.schema.ts e invitation.schema.ts.
     pin: z
       .string()
-      .regex(/^\d{4,6}$/, 'El PIN debe tener entre 4 y 6 dígitos')
+      .regex(/^\d{4,10}$/, 'El PIN debe tener entre 4 y 10 dígitos')
       .optional()
       .nullable(),
     active: z.boolean().optional(),

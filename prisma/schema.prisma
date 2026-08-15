@@ -1110,7 +1110,7 @@ model StaffVenue {
   venue      Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // ✅ PIN específico por venue
-  pin String? // 4-6 digits for TPV access per venue
+  pin String? // 4-10 digits for TPV access per venue. Plain text on purpose (founder decision 2026-08-15).
 
   role        StaffRole
   permissions Json? // Custom permissions override
