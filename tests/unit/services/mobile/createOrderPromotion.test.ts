@@ -234,6 +234,103 @@ describe('createOrderWithItems — líneas de promoción', () => {
     )
   })
 
+  it('🔴 puras promociones + descuento de orden: el descuento se topa contra el subtotal CON el combo', async () => {
+    // El tope se calculaba contra el subtotal SIN promociones (0 en una venta de
+    // puras promos), así que el descuento del cajero desaparecía completo y el
+    // cliente pagaba precio lleno. Sin error y sin rastro.
+    prismaMock.order.create.mockResolvedValue(orderRow([], 0))
+    prismaMock.order.findFirst.mockResolvedValue({
+      subtotal: new Decimal(65),
+      serviceChargeAmount: new Decimal(0),
+      paidAmount: new Decimal(0),
+    })
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }],
+      discount: 2000, // $20 sobre un combo de $65
+    } as any)
+
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          discountAmount: new Decimal(20),
+          total: new Decimal(45),
+          remainingBalance: new Decimal(45),
+        }),
+      }),
+    )
+  })
+
+  // ── 🔴 La llave de idempotencia no puede quedar envenenada ──
+
+  it('🔴 si la promoción falla, se libera el externalId y la orden huérfana queda ANULADA', async () => {
+    // Sin esto: order.create commitea, la promo truena, sale 4xx… y el reintento
+    // del POS con el MISMO externalId entra por el corto de idempotencia y
+    // devuelve 201 con la orden SIN el combo. En venta de puras promociones esa
+    // orden vale $0 y el combo sale gratis. Es durable, no una carrera.
+    prismaMock.order.findUnique.mockResolvedValue(null) // no hay orden previa con esa llave
+    apply.mockRejectedValue(new Error('Esa promoción no está publicada.'))
+    jest.spyOn(promotionService, 'removeIntentPromotions').mockResolvedValue(0)
+
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        externalId: 'ticket-1',
+        items: [{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }],
+      } as any),
+    ).rejects.toThrow('Esa promoción no está publicada.')
+
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'order-1' },
+        data: expect.objectContaining({ externalId: null, status: 'CANCELLED' }),
+      }),
+    )
+  })
+
+  it('🔴 tras ese fallo, el reintento con el MISMO externalId crea una venta nueva — no devuelve la orden sin combo', async () => {
+    // La secuencia COMPLETA, con la llave simulada como en la DB: crear la orden
+    // TOMA la llave, y sólo liberarla explícitamente la suelta. Sin el fix, el
+    // segundo intento entra por el corto de idempotencia y devuelve la orden
+    // huérfana (sin combo, $0) como si fuera una venta buena.
+    const dbLlave = { tomada: false }
+    const ordenHuerfana = orderRow([], 0)
+    prismaMock.order.findUnique.mockImplementation(async () => (dbLlave.tomada ? ordenHuerfana : null))
+    prismaMock.order.create.mockImplementation(async () => {
+      dbLlave.tomada = true
+      return ordenHuerfana
+    })
+    prismaMock.order.update.mockImplementation(async ({ data }: any) => {
+      if (data.externalId === null) dbLlave.tomada = false
+      return orderRow([lineaProducto, lineaDeCombo], 165)
+    })
+    apply.mockRejectedValueOnce(new Error('Esa promoción no está publicada.'))
+    jest.spyOn(promotionService, 'removeIntentPromotions').mockResolvedValue(0)
+
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        externalId: 'ticket-1',
+        items: [{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }],
+      } as any),
+    ).rejects.toThrow()
+
+    const creacionesTrasElFallo = (prismaMock.order.create as jest.Mock).mock.calls.length
+    apply.mockResolvedValue({ orderPromotionId: 'op-1', netCents: 6500, created: true })
+
+    const result = await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      externalId: 'ticket-1',
+      items: [{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }],
+    } as any)
+
+    // Se creó una orden NUEVA (no se devolvió la huérfana) y trae el combo.
+    expect((prismaMock.order.create as jest.Mock).mock.calls.length).toBe(creacionesTrasElFallo + 1)
+    expect(apply).toHaveBeenCalledTimes(2)
+    expect(result.total).toBe(165)
+  })
+
   it('si la compensación truena, NO tapa el error de negocio original', async () => {
     // La compensación arranca con una query: si lo que tronó fue la DB, truena
     // también. El cajero perdería el único texto accionable a cambio de un

@@ -887,6 +887,35 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
           compensationError: compensationError instanceof Error ? compensationError.message : String(compensationError),
         })
       }
+
+      // 🔴 La llave de idempotencia NO puede quedar envenenada. `order.create`
+      // YA commiteó, así que si salimos con un 4xx y el POS corrige y reintenta
+      // con el MISMO externalId —que es exactamente para lo que existe—, el
+      // corto de idempotencia le devolvería 201 con ESTA orden, sin el combo:
+      // en una venta de puras promociones vale $0 y el combo sale gratis; en
+      // una mixta se cobra sólo lo suelto. Y es DURABLE, no una carrera: todos
+      // los reintentos futuros con esa llave repetirían la venta incompleta.
+      //
+      // Se libera la llave Y se anula la orden. Sólo soltar el externalId
+      // dejaría una cuenta viva de $0 en el piso; sólo anularla dejaría la
+      // llave tomada y el reintento chocaría contra el corto igual.
+      // Best-effort: nada de esto puede sustituir al error de negocio original.
+      try {
+        await prisma.order.update({
+          where: { id: orderId },
+          data: {
+            externalId: null,
+            status: 'CANCELLED',
+            specialRequests: 'Cancelled: la promoción no se pudo aplicar',
+          },
+        })
+      } catch (cleanupError) {
+        logger.error('❌ [ORDER.MOBILE] No se pudo liberar la llave de una orden con promoción fallida', {
+          orderId,
+          externalId,
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        })
+      }
       throw error
     }
 
@@ -913,24 +942,34 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     if (!recalculada) {
       throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
     }
-    // El subtotal SÍ es autoridad del motor (ya trae las líneas del combo). El
-    // descuento vuelve a ser el de la venta: `itemDiscountTotal` (ya prorrateado
-    // por línea) + el de orden, que es exactamente `discountDecimal`.
+    // El subtotal SÍ es autoridad del motor (ya trae las líneas del combo).
     const subtotalConPromociones = Number(recalculada.subtotal)
     const serviceChargeAmount = Number(recalculada.serviceChargeAmount ?? 0)
-    const totalFinal = Math.round((Math.max(0, subtotalConPromociones - discountDecimal) + serviceChargeAmount + tipDecimal) * 100) / 100
+
+    // 🔴 El tope del descuento de ORDEN se recalcula contra el subtotal CON
+    // promociones. Al crear la orden el combo todavía no existía —en una venta
+    // de puras promociones el subtotal era 0—, así que el descuento del cajero
+    // se capaba al valor de los artículos sueltos, o desaparecía COMPLETO sin
+    // error y sin rastro. Nunca cobraba de menos: cobraba de MÁS que lo que el
+    // cajero aplicó.
+    const topeDescuentoDeOrden = Math.max(0, subtotalConPromociones - itemDiscountTotal)
+    const descuentoDeOrdenFinal = Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))
+    const descuentoFinal = itemDiscountTotal + descuentoDeOrdenFinal
+
+    const totalFinal = Math.round((Math.max(0, subtotalConPromociones - descuentoFinal) + serviceChargeAmount + tipDecimal) * 100) / 100
+    const remainingFinal = Math.round(Math.max(0, totalFinal - Number(recalculada.paidAmount ?? 0)) * 100) / 100
     order = await prisma.order.update({
       where: { id: orderId },
       data: {
-        discountAmount: new Prisma.Decimal(discountDecimal),
+        discountAmount: new Prisma.Decimal(descuentoFinal),
         total: new Prisma.Decimal(totalFinal),
-        remainingBalance: new Prisma.Decimal(Math.max(0, totalFinal - Number(recalculada.paidAmount ?? 0))),
+        remainingBalance: new Prisma.Decimal(remainingFinal),
         version: { increment: 1 },
       },
       include: createdOrderInclude,
     })
     logger.info(
-      `🎁 [ORDER.MOBILE] ${promocionesUnicas.length} promoción(es) aplicadas | order=${orderId} | subtotal=${subtotalConPromociones} | descuento=${discountDecimal} | propina=${tipDecimal} | total=${totalFinal}`,
+      `🎁 [ORDER.MOBILE] ${promocionesUnicas.length} promoción(es) aplicadas | order=${orderId} | subtotal=${subtotalConPromociones} | descuento=${descuentoFinal} | propina=${tipDecimal} | total=${totalFinal}`,
     )
   }
 

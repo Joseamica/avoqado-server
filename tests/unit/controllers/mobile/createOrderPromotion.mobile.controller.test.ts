@@ -111,6 +111,27 @@ describe('createOrder — frontera de las líneas de promoción', () => {
     expect(createOrderWithItemsMock).not.toHaveBeenCalled()
   })
 
+  it('🔴 rechaza una promoción con cantidad > 1 (3 combos se cobrarían como 1)', async () => {
+    // El motor cobra UNA instancia por promotionRef: `quantity` se ignora. Sin
+    // este 400, pedir 3 combos cobraba 1 — subcobro de 2/3 del valor.
+    const res = buildRes()
+
+    await createOrder(buildReq([{ promotionRef, quantity: 3 }]), res, next)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.payload.message).toContain('una línea por combo')
+    expect(createOrderWithItemsMock).not.toHaveBeenCalled()
+  })
+
+  it('acepta quantity 1 en una promoción (un combo = una instancia; es lo que emite un carrito normal)', async () => {
+    const res = buildRes()
+
+    await createOrder(buildReq([{ promotionRef, quantity: 1 }]), res, next)
+
+    expect(res.statusCode).toBe(201)
+    expect(createOrderWithItemsMock).toHaveBeenCalled()
+  })
+
   it('rechaza un promotionRef con selections que no es arreglo', async () => {
     const res = buildRes()
 

@@ -190,7 +190,7 @@ export function requiredPermissionsForIntent(intent: SyncIntentInput): string[] 
     // `discounts:apply`, no se crea uno nuevo, espejando el gate de
     // APPLY_DISCOUNT). A diferencia de `orders:comp` (que ningún rol trae de
     // fábrica), WAITER y CASHIER YA traen `discounts:apply` por default
-    // (permissions.ts:647,690) — con roles de fábrica este guard no le quita
+    // (permissions.ts:652,695) — con roles de fábrica este guard no le quita
     // nada a un mesero. Protege de verdad a los venues con roles
     // personalizados o recortados: sin esto, quitarle `discounts:apply` a un
     // WAITER se evadiría metiendo la promoción dentro de un ADD_ITEMS, que
@@ -225,6 +225,39 @@ function invalidAddItemsReason(items: any[]): string | null {
     // que un peso cero o negativo tiene el mismo efecto que una cantidad mala.
     if (item.weightQuantity != null && (typeof item.weightQuantity !== 'number' || !(item.weightQuantity > 0))) {
       return 'El peso de un artículo vendido por peso debe ser mayor a cero'
+    }
+  }
+  return null
+}
+
+/**
+ * Valida las líneas de PROMOCIÓN de un ADD_ITEMS — espejo EXACTO de lo que
+ * rechaza el camino online (`order.mobile.controller.ts` createOrder).
+ *
+ * Los dos caminos tienen que decir que NO a lo mismo: Android e iOS se escriben
+ * contra un solo modelo mental, y una asimetría aquí significa que el mismo
+ * carrito cobra distinto según haya red o no.
+ *
+ * Ambos casos son SUBCOBRO, y por eso se rechaza en vez de adivinar:
+ *  - **Mixto**: `applyAddItems` manda el item ENTERO a la rama de promoción, así
+ *    que el `productId` que el cajero capturó se evapora sin cobrarse.
+ *  - **Cantidad**: el motor cobra UNA instancia por `promotionRef`, así que
+ *    `quantity: 3` cobraba 1 combo de 3. El contrato es una línea (un
+ *    `promotionInstanceId`) por combo; `quantity: 1` se tolera porque es lo que
+ *    emite un carrito normal y no cambia un centavo.
+ */
+function invalidPromotionLinesReason(items: any[]): string | null {
+  for (const item of items) {
+    const traeLineaNormal =
+      (typeof item.productId === 'string' && item.productId.length > 0) ||
+      (typeof item.name === 'string' && item.name.length > 0) ||
+      item.unitPrice != null ||
+      item.customUnitPriceCents != null
+    if (traeLineaNormal) {
+      return 'Un item no puede ser producto y promoción a la vez: manda la promoción en su propia línea'
+    }
+    if (item.quantity != null && item.quantity !== 1) {
+      return 'Una promoción no lleva cantidad: manda una línea por combo, cada una con su propio promotionInstanceId'
     }
   }
   return null
@@ -725,6 +758,13 @@ async function applyAddItems(
   const invalidReason = invalidAddItemsReason(items.filter(it => !it.promotionRef))
   if (invalidReason) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: invalidReason }
+  }
+  // Y las de promoción tienen su propia validación, idéntica a la online. Es
+  // rechazo de NEGOCIO permanente (REJECTED → cuarentena visible), nunca RETRY:
+  // reintentar el mismo payload malo daría exactamente el mismo resultado.
+  const invalidPromoReason = invalidPromotionLinesReason(items.filter(it => it.promotionRef))
+  if (invalidPromoReason) {
+    return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: invalidPromoReason }
   }
   await assertOwnership(venueId, staffId, orderId)
 

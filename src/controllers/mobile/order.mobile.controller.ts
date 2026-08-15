@@ -123,6 +123,17 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
             message: 'Un item no puede ser producto y promoción a la vez: manda la promoción en su propia línea',
           })
         }
+        // 🔴 El motor cobra UNA instancia por `promotionRef` y la cantidad se
+        // ignora: 3 combos entraban al ticket como 1 — subcobro de 2/3 del
+        // valor. El contrato es una instancia por combo. Se tolera `quantity: 1`
+        // porque es lo que emite un carrito normal (su modelo de línea trae
+        // quantity=1 por default) y no cambia un centavo.
+        if (item.quantity != null && item.quantity !== 1) {
+          return res.status(400).json({
+            success: false,
+            message: 'Una promoción no lleva cantidad: manda una línea por combo, cada una con su propio promotionInstanceId',
+          })
+        }
         continue
       }
       if (!item.quantity || item.quantity < 1) {

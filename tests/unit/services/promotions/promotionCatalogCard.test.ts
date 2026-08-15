@@ -45,7 +45,7 @@ describe('listPromotionsForPos — la tarjeta trae lo necesario para pintarse', 
         priceDeltaCents: 0,
         quantity: 2,
         chargedQuantity: 1,
-        product: { name: 'Cerveza Corona', price: new Prisma.Decimal('65.00') },
+        product: { name: 'Cerveza Corona', price: new Prisma.Decimal('65.00'), venueId: 'venue-1' },
       }),
     ])
 
@@ -60,6 +60,28 @@ describe('listPromotionsForPos — la tarjeta trae lo necesario para pintarse', 
       productName: 'Cerveza Corona',
       productPriceCents: 6500, // Decimal de PESOS -> centavos, al centavo
     })
+  })
+
+  it('🔴 un producto de OTRO venue se trata como borrado: no se filtra su nombre ni su precio', async () => {
+    // Promotion→Venue y PromotionOption→Product son FKs independientes, así que
+    // el schema NO garantiza que el producto de una opción sea de este venue.
+    // La escritura lo valida; esta es la verificación del lado de LECTURA, que
+    // es la regla dura del repo (toda query se verifica contra el tenant).
+    prismaMock.promotion.findMany.mockResolvedValue([
+      promoWithOption({
+        id: 'o1',
+        productId: 'p1',
+        priceDeltaCents: 0,
+        quantity: 2,
+        chargedQuantity: 1,
+        product: { name: 'Producto ajeno', price: new Prisma.Decimal('999.00'), venueId: 'venue-DE-OTRO' },
+      }),
+    ])
+
+    const { active } = await listPromotionsForPos('venue-1')
+
+    expect(active[0].groups[0].options[0].productName).toBe('')
+    expect(active[0].groups[0].options[0].productPriceCents).toBe(0)
   })
 
   it('no se cae si la opción viene sin producto cargado', async () => {

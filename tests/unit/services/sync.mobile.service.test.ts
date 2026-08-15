@@ -713,6 +713,55 @@ describe('ADD_ITEMS — la cortesía y las cantidades no se cuelan por el replay
     expect(promotionService.applyPromotionToOrder).not.toHaveBeenCalled()
   })
 
+  // ── Paridad con el camino online (review final de la rama de promociones) ──
+  // El controller online ya rechaza estos dos payloads; el reducer los aceptaba
+  // y perdía dinero en silencio. 3B escribe Android e iOS contra el MISMO
+  // modelo mental, así que los dos caminos tienen que rechazar igual.
+
+  it('🔴 un item mixto (producto + promoción) se RECHAZA: el productId se evaporaba en silencio', async () => {
+    // applyAddItems mandaba el item ENTERO a la rama de promoción, así que el
+    // producto que el cajero capturó no se cobraba nunca. Subcobro.
+    const params = addItems([
+      { productId: 'p1', quantity: 1, promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } },
+    ])
+
+    const acks = await processIntents(params)
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(promotionService.applyPromotionToOrder).not.toHaveBeenCalled()
+    expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una promoción con cantidad > 1 se RECHAZA: 3 combos se cobraban como 1', async () => {
+    // El motor cobra UNA instancia por promotionRef y `quantity` se ignoraba:
+    // 3 combos entraban al ticket como 1. Subcobro de 2/3 del valor.
+    const params = addItems([{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] }, quantity: 3 }])
+
+    const acks = await processIntents(params)
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(promotionService.applyPromotionToOrder).not.toHaveBeenCalled()
+  })
+
+  it('el rechazo es PERMANENTE (REJECTED → cuarentena), nunca RETRY ni ACKED', async () => {
+    // Un payload malo no mejora reintentándolo: convertirlo en RETRY lo dejaría
+    // girando para siempre, y ACKearlo lo perdería sin que nadie lo vea.
+    const params = addItems([{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] }, quantity: 3 }])
+
+    const acks = await processIntents(params)
+
+    expect(acks[0].status).toBe('REJECTED')
+  })
+
+  it('una promoción con quantity 1 SÍ pasa (un combo = una instancia; es lo que emite un carrito normal)', async () => {
+    const params = addItems([{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] }, quantity: 1 }])
+
+    const acks = await processIntents(params)
+
+    expect(acks[0].errorCode).not.toBe('INVALID_PAYLOAD')
+    expect(promotionService.applyPromotionToOrder).toHaveBeenCalled()
+  })
+
   it('con orders:comp la cortesía offline SÍ pasa — no se rompe el flujo legítimo', async () => {
     const params = addItems([{ productId: 'p1', quantity: 1, isCortesia: true, cortesiaReason: 'Cliente molesto' }])
 

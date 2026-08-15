@@ -73,7 +73,12 @@ export async function listPromotionsForPos(
     },
     include: {
       groups: {
-        include: { options: { include: { product: { select: { name: true, price: true } } } } },
+        // `venueId` va en el select por la regla dura del repo: toda lectura se
+        // verifica contra el tenant. Los FKs Promotion→Venue y
+        // PromotionOption→Product son independientes, así que el schema NO
+        // garantiza que el producto de una opción sea de este venue (la
+        // escritura sí lo valida — esto es el cinturón del lado de lectura).
+        include: { options: { include: { product: { select: { name: true, price: true, venueId: true } } } } },
         orderBy: { displayOrder: 'asc' },
       },
     },
@@ -93,7 +98,7 @@ export async function listPromotionsForPos(
   const upcoming: PromotionCard[] = []
 
   for (const promotion of ordered) {
-    const card = toCard(promotion)
+    const card = toCard(promotion, venueId)
     if (isLiveAt(promotion, now)) {
       active.push(card)
       continue
@@ -121,7 +126,11 @@ function localHHmm(at: Date | null, timezone: string): string | undefined {
   }
 }
 
-function toCard(promotion: any): PromotionCard {
+/**
+ * `venueId` se pasa explícito para poder verificar el tenant del producto de
+ * cada opción: es la regla dura del repo y aquí no llega por contexto.
+ */
+function toCard(promotion: any, venueId: string): PromotionCard {
   return {
     id: promotion.id,
     name: promotion.name,
@@ -139,10 +148,15 @@ function toCard(promotion: any): PromotionCard {
         priceDeltaCents: o.priceDeltaCents,
         quantity: o.quantity,
         chargedQuantity: o.chargedQuantity,
-        // Un producto borrado NO puede dejar al cajero sin panel.
-        productName: o.product?.name ?? '',
-        // Product.price es Decimal en PESOS -> centavos del contrato POS.
-        productPriceCents: o.product?.price != null ? Math.round(Number(o.product.price) * 100) : 0,
+        // Un producto borrado NO puede dejar al cajero sin panel — y uno de
+        // OTRO venue se trata igual que borrado: no se pinta su nombre ni su
+        // precio. Nunca se filtra dato de otro tenant por un panel de POS.
+        productName: o.product?.venueId === venueId ? (o.product?.name ?? '') : '',
+        productPriceCents:
+          o.product?.venueId === venueId && o.product?.price != null
+            ? // Product.price es Decimal en PESOS -> centavos del contrato POS.
+              Math.round(Number(o.product.price) * 100)
+            : 0,
       })),
     })),
   }
