@@ -70,6 +70,11 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'orders:cancel',
     'payments:read', // Need to see if refund is needed
   ],
+  // "Fusionar cuentas": permiso propio desde el día uno (divergencia deliberada
+  // de Square, que no lo separa). Junta el dinero de dos cheques en uno solo y
+  // cierra el origen — si sale mal, no hay "deshacer" que devuelva las líneas
+  // a su cheque original. Por eso NO viaja con orders:update.
+  'orders:merge': ['orders:read', 'orders:update', 'orders:merge', 'tables:read'],
 
   // ===========================
   // AREA TICKETS + SCALES
@@ -734,6 +739,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:create',
     'orders:update',
     'orders:cancel',
+    'orders:merge', // Fusionar cuentas — MANAGER+; WAITER queda a un PIN de distancia
     'area-tickets:issue',
     'area-tickets:checkout',
     'area-tickets:cancel',
@@ -1495,7 +1501,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   accounting: ['accounting:read', 'accounting:reconcile', 'accounting:manage'],
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
-  orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],
+  orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void', 'orders:merge'],
   'area-tickets': [
     'area-tickets:issue',
     'area-tickets:checkout',

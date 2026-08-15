@@ -2023,12 +2023,14 @@ router.post(
 /**
  * POST /api/v1/mobile/venues/:venueId/orders/:orderId/merge
  * "Fusionar cuentas" (Square's merge): el inverso de dividir.
+ * 🔴 Permiso PROPIO desde 2026-08: junta el dinero de dos cheques y cierra el
+ * origen. WAITER no lo trae — el POS ofrece PIN de gerente si el venue lo activó.
  */
 router.post(
   '/venues/:venueId/orders/:orderId/merge',
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:update'),
+  checkPermission('orders:merge'),
   checkTableOwnership('order'),
   orderMobileController.mergeOrders,
 )
