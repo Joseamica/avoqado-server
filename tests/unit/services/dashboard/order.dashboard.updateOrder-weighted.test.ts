@@ -1,11 +1,26 @@
 /**
- * updateOrder (dashboard) — deducción por peso, fase 3 del plan de inventario.
+ * updateOrder (dashboard) — este camino YA NO deduce inventario.
  *
- * Al completar una orden desde el dashboard, la deducción pasaba
- * `item.quantity` (siempre 1 en líneas pesadas) en vez de
- * `item.weightQuantity` (los kilos): vender 435 g deducía 1 kilo. El TPV y los
- * pagos ya calculan `effectiveQuantity = weightQuantity ?? quantity`; el
- * dashboard era el único camino sin la corrección.
+ * HISTORIA (importante para no reintroducirlo):
+ * La fase 3 del plan de inventario arregló aquí un bug real: al completar una
+ * orden desde el dashboard, la deducción pasaba `item.quantity` (siempre 1 en
+ * líneas pesadas) en vez de `item.weightQuantity` (los kilos), así que vender
+ * 435 g descontaba 1 kilo. Ese fix fue correcto para el bug que atacaba.
+ *
+ * La fase 3.5 (audit Codex gpt-5.6-sol xhigh, 2026-08-14) fue más al fondo:
+ * `updateOrder` NO debería deducir en absoluto. Dos razones:
+ *
+ *   1. `Order.status` es estado OPERATIVO, no evidencia de pago. Deducir al
+ *      pasar a COMPLETED contradice la regla del repo — "el stock se descuenta
+ *      sólo cuando la orden queda pagada" (.claude/rules/payments.md).
+ *   2. Lo hacía SIN posting: movimientos con `postingLineId: null` que el UNIQUE
+ *      del vale durable no puede ver. Una orden marcada COMPLETED a mano y luego
+ *      liquidada con `settleOrder` se deducía DOS VECES.
+ *
+ * Por eso este archivo pasó de "deduce los kilos correctos" a "no deduce".
+ * La corrección de peso sigue viva donde SÍ se deduce: los caminos de cobro
+ * (`payment.tpv.service.ts`, `payCashOrder`) y el aplicador de postings, que
+ * calculan `effectiveQuantity = weightQuantity ?? quantity`.
  */
 
 import { Decimal } from '@prisma/client/runtime/library'
@@ -31,37 +46,27 @@ const makeItem = (overrides: Record<string, any> = {}) => ({
   ...overrides,
 })
 
-describe('updateOrder — la línea pesada deduce los KILOS, no quantity', () => {
+describe('updateOrder — ya no toca inventario (ni pesado ni normal)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.order.findFirst.mockResolvedValue({ status: 'PENDING', venueId: VENUE_ID })
+    prismaMock.order.findFirst.mockResolvedValue({ status: 'PENDING', venueId: VENUE_ID } as any)
   })
 
-  it('línea pesada: pasa weightQuantity (0.435 kg) a la deducción', async () => {
-    prismaMock.order.update.mockResolvedValue({
-      id: ORDER_ID,
-      venueId: VENUE_ID,
-      status: 'COMPLETED',
-      servedById: 'staff-1',
-      items: [makeItem({ quantity: 1, weightQuantity: new Decimal('0.435') })],
-    })
+  it('línea PESADA: completar desde el dashboard no deduce (antes deducía los kilos)', async () => {
+    const items = [makeItem({ weightQuantity: new Decimal('0.435') })]
+    prismaMock.order.update.mockResolvedValue({ id: ORDER_ID, venueId: VENUE_ID, status: 'COMPLETED', items } as any)
 
-    await updateOrder(VENUE_ID, ORDER_ID, { status: 'COMPLETED' } as any)
+    await updateOrder(VENUE_ID, ORDER_ID, { status: 'COMPLETED', staffId: 'staff-1' } as any)
 
-    expect(deductInventoryForProduct).toHaveBeenCalledWith(VENUE_ID, 'product-1', 0.435, ORDER_ID, 'staff-1', expect.anything())
+    expect(deductInventoryForProduct).not.toHaveBeenCalled()
   })
 
-  it('línea normal: sigue pasando quantity (regresión)', async () => {
-    prismaMock.order.update.mockResolvedValue({
-      id: ORDER_ID,
-      venueId: VENUE_ID,
-      status: 'COMPLETED',
-      servedById: 'staff-1',
-      items: [makeItem({ quantity: 3, weightQuantity: null })],
-    })
+  it('línea NORMAL: completar desde el dashboard tampoco deduce', async () => {
+    const items = [makeItem({ quantity: 3 })]
+    prismaMock.order.update.mockResolvedValue({ id: ORDER_ID, venueId: VENUE_ID, status: 'COMPLETED', items } as any)
 
-    await updateOrder(VENUE_ID, ORDER_ID, { status: 'COMPLETED' } as any)
+    await updateOrder(VENUE_ID, ORDER_ID, { status: 'COMPLETED', staffId: 'staff-1' } as any)
 
-    expect(deductInventoryForProduct).toHaveBeenCalledWith(VENUE_ID, 'product-1', 3, ORDER_ID, 'staff-1', expect.anything())
+    expect(deductInventoryForProduct).not.toHaveBeenCalled()
   })
 })

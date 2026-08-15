@@ -1,4 +1,11 @@
 import { PaymentType } from '@prisma/client'
+
+const deductInventoryForProductMock = jest.fn()
+jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({
+  deductInventoryForProduct: (...a: unknown[]) => deductInventoryForProductMock(...a),
+  getProductInventoryMethod: jest.fn(),
+  getProductInventoryMethods: jest.fn(),
+}))
 import { mapOrderPaymentsWithRefunds } from '@/services/dashboard/order.dashboard.service'
 
 describe('order.dashboard.service — mapOrderPaymentsWithRefunds', () => {
@@ -135,7 +142,7 @@ describe('order.dashboard.service — mapOrderPaymentsWithRefunds', () => {
 // El DELETE del dashboard cancelaba CUALQUIER orden sin mirar paymentStatus: una
 // orden PAGADA (dinero cobrado + stock deducido) quedaba CANCELLED — invisible
 // para reportes, sin reembolso y sin reposición. El guard exige reembolsar primero.
-import { deleteOrder } from '@/services/dashboard/order.dashboard.service'
+import { deleteOrder, updateOrder } from '@/services/dashboard/order.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
@@ -302,5 +309,45 @@ describe('order.dashboard.service — settleOrder atómico', () => {
 
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     expect(res.settledAmount).toBe(0)
+  })
+})
+
+// ── updateOrder ya NO deduce inventario por cambio de status ──
+// (audit Codex xhigh 2026-08-14) `Order.status` es estado OPERATIVO, no evidencia
+// de pago: deducir ahí contradice la regla del repo ("el stock se descuenta sólo
+// al quedar pagada", payments.md) y —peor— lo hacía SIN posting, con movimientos
+// `postingLineId: null` que el UNIQUE del vale no puede ver. Una orden marcada
+// COMPLETED a mano y luego liquidada con settleOrder se deducía DOS veces.
+describe('order.dashboard.service — updateOrder no toca inventario', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+  })
+
+  const orderConItems = (status: string) => ({
+    id: 'order-1',
+    venueId: 'venue-1',
+    status,
+    paymentStatus: 'PENDING',
+    items: [{ id: 'oi-1', productId: 'p1', quantity: 3, weightQuantity: null, modifiers: [] }],
+  })
+
+  it('pasar a COMPLETED NO deduce inventario', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(orderConItems('PENDING') as any)
+    prismaMock.order.update.mockResolvedValue(orderConItems('COMPLETED') as any)
+
+    await updateOrder('venue-1', 'order-1', { status: 'COMPLETED' } as any)
+
+    expect(deductInventoryForProductMock).not.toHaveBeenCalled()
+  })
+
+  it('sigue actualizando la orden (regresión: el cambio de status funciona)', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(orderConItems('PENDING') as any)
+    prismaMock.order.update.mockResolvedValue(orderConItems('COMPLETED') as any)
+
+    const res = await updateOrder('venue-1', 'order-1', { status: 'COMPLETED' } as any)
+
+    expect(prismaMock.order.update).toHaveBeenCalled()
+    expect(res.status).toBe('COMPLETED')
   })
 })

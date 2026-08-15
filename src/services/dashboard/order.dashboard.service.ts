@@ -5,8 +5,6 @@ import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
-import { deductInventoryForProduct } from './productInventoryIntegration.service'
-import { OrderModifierForInventory } from './rawMaterial.service'
 import { logAction } from './activity-log.service'
 
 /**
@@ -463,118 +461,14 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
   })
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
-  const isNewlyCompleted = currentOrder.status !== 'COMPLETED' && status === 'COMPLETED'
-
-  if (isNewlyCompleted) {
-    try {
-      logger.info('🎯 Starting inventory deduction for completed order (dashboard)', {
-        orderId,
-        venueId: updatedOrder.venueId,
-        itemCount: updatedOrder.items.length,
-        previousStatus: currentOrder.status,
-        newStatus: status,
-      })
-
-      // Deduct stock for each product in the order
-      for (const item of updatedOrder.items) {
-        // Skip items where product was deleted (Toast/Square pattern)
-        if (!item.productId) {
-          logger.info('⏭️ Skipping stock deduction for deleted product', {
-            orderId,
-            productName: item.productName, // Use denormalized name
-          })
-          continue
-        }
-
-        try {
-          // ✅ FIX: Map modifiers to inventory format (same as TPV)
-          const orderModifiers: OrderModifierForInventory[] =
-            item.modifiers
-              ?.filter(m => m.modifier)
-              .map(m => ({
-                quantity: m.quantity,
-                modifier: {
-                  id: m.modifier!.id,
-                  name: m.modifier!.name,
-                  groupId: m.modifier!.groupId,
-                  rawMaterialId: m.modifier!.rawMaterialId,
-                  quantityPerUnit: m.modifier!.quantityPerUnit,
-                  unit: m.modifier!.unit,
-                  inventoryMode: m.modifier!.inventoryMode,
-                },
-              })) || []
-
-          // Venta por peso (fase 3, 2026-08-13): las líneas pesadas llevan
-          // quantity=1 y los kilos en weightQuantity — deducir quantity hacía
-          // que 435 g descontaran 1 kilo. Mismo cálculo que TPV y pagos.
-          const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
-
-          // ✅ FIX: Use deductInventoryForProduct to handle BOTH Quantity and Recipe + Modifiers
-          await deductInventoryForProduct(
-            updatedOrder.venueId,
-            item.productId,
-            effectiveQuantity,
-            orderId,
-            updatedOrder.servedById || undefined,
-            orderModifiers,
-          )
-
-          logger.info('✅ Stock deducted successfully for product (dashboard)', {
-            orderId,
-            productId: item.productId,
-            productName: item.product?.name || item.productName,
-            quantity: effectiveQuantity,
-            modifiersCount: orderModifiers.length,
-          })
-        } catch (deductionError: any) {
-          const errorReason = deductionError.message.includes('does not have a recipe')
-            ? 'NO_RECIPE'
-            : deductionError.message.includes('Insufficient stock')
-              ? 'INSUFFICIENT_STOCK'
-              : 'UNKNOWN'
-
-          // Log individual product deduction errors but continue with other products
-          logger.warn('⚠️ Failed to deduct stock for product - continuing with order (dashboard)', {
-            orderId,
-            productId: item.productId,
-            productName: item.product?.name || item.productName,
-            quantity: item.quantity,
-            error: deductionError.message,
-            reason: errorReason,
-          })
-
-          if (errorReason !== 'NO_RECIPE') {
-            logAction({
-              staffId: updatedOrder.servedById || undefined,
-              venueId: updatedOrder.venueId,
-              action: 'INVENTORY_DEDUCTION_FAILED',
-              entity: 'Order',
-              entityId: orderId,
-              data: {
-                source: 'DASHBOARD',
-                productId: item.productId,
-                productName: item.product?.name || item.productName || 'Unknown',
-                quantity: item.quantity,
-                reason: errorReason,
-                error: deductionError.message,
-              },
-            })
-          }
-        }
-      }
-      logger.info('🎯 Inventory deduction completed for order (dashboard)', {
-        orderId,
-        totalItems: updatedOrder.items.length,
-      })
-    } catch (inventoryError) {
-      // Log overall inventory deduction errors but don't fail the order update
-      logger.error('❌ Failed to complete inventory deduction for order (dashboard)', {
-        orderId,
-        error: inventoryError,
-      })
-      // Order update is still successful - inventory deduction failure is logged but not critical
-    }
-  }
+  // 🔴 La deducción por CAMBIO DE STATUS se retiró (audit Codex xhigh 2026-08-14).
+  // `Order.status` es estado OPERATIVO, no evidencia de pago: deducir aquí
+  // contradecía la regla del repo ("el stock se descuenta sólo cuando la orden
+  // queda pagada", .claude/rules/payments.md) y lo hacía SIN posting — con
+  // movimientos `postingLineId: null` que el UNIQUE del vale no puede ver. Una
+  // orden marcada COMPLETED a mano y luego liquidada con `settleOrder` se
+  // deducía DOS VECES. La deducción vive donde debe: en los caminos de cobro,
+  // vía posting durable.
 
   logAction({
     venueId: updatedOrder.venueId,
