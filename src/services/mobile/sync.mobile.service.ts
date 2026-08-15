@@ -187,9 +187,14 @@ export function requiredPermissionsForIntent(intent: SyncIntentInput): string[] 
 
     // Aplicar una promoción regala mercancía: mismo permiso que aplicar un
     // descuento online (decisión del founder 2026-08-15 — se reusa
-    // `discounts:apply`, no se crea uno nuevo). Sin esto, el ADD_ITEMS con
-    // promotionRef pasaría con `orders:create`, que tiene cualquier mesero:
-    // el mismo hueco que la cortesía de arriba.
+    // `discounts:apply`, no se crea uno nuevo, espejando el gate de
+    // APPLY_DISCOUNT). A diferencia de `orders:comp` (que ningún rol trae de
+    // fábrica), WAITER y CASHIER YA traen `discounts:apply` por default
+    // (permissions.ts:647,690) — con roles de fábrica este guard no le quita
+    // nada a un mesero. Protege de verdad a los venues con roles
+    // personalizados o recortados: sin esto, quitarle `discounts:apply` a un
+    // WAITER se evadiría metiendo la promoción dentro de un ADD_ITEMS, que
+    // sólo pedía `orders:create`.
     if (items.some(item => item?.promotionRef)) {
       permissions.push('discounts:apply')
     }

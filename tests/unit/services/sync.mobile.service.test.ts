@@ -12,6 +12,7 @@ import prisma from '@/utils/prismaClient'
 import * as tableService from '@/services/tpv/table.tpv.service'
 import * as orderTpvService from '@/services/tpv/order.tpv.service'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
+import * as promotionService from '@/services/promotions/promotion.service'
 import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
 import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
 
@@ -48,6 +49,7 @@ jest.mock('@/services/mobile/order.mobile.service', () => ({
 }))
 jest.mock('@/services/mobile/comp-item.mobile.service', () => ({ compWholeOrder: jest.fn() }))
 jest.mock('@/services/mobile/service-charge.mobile.service', () => ({ applyServiceCharge: jest.fn() }))
+jest.mock('@/services/promotions/promotion.service', () => ({ applyPromotionToOrder: jest.fn(), removeIntentPromotions: jest.fn() }))
 jest.mock('@/middlewares/checkFeatureAccess.middleware', () => ({ hasFeatureAccess: jest.fn() }))
 jest.mock('@/middlewares/checkTableOwnership.middleware', () => ({
   isTableOwnershipEnforced: jest.fn(),
@@ -691,6 +693,24 @@ describe('ADD_ITEMS — la cortesía y las cantidades no se cuelan por el replay
     expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'ADD_ITEMS' }), 'orders:comp')
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
     expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
+  })
+
+  // Mismo patrón que la cortesía de arriba, pero para promociones (Task 3 del
+  // plan 2026-08-15): el guard puro (`requiredPermissionsForIntent`) ya tenía
+  // cobertura unitaria en `syncPromotionPermission.test.ts`, pero eso sólo
+  // probaba que la LISTA trae el permiso — no que el reducer COMPLETO bloquea
+  // el efecto. Sin este test, un refactor futuro de `processIntents` /
+  // `applyIntent` / `applyAddItems` podría reintroducir el mismo hueco P1 sin
+  // que ninguna suite lo note.
+  it('una línea con promotionRef exige discounts:apply ADEMÁS de orders:create — y bloquea el efecto', async () => {
+    const params = addItems([{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }])
+    params.authorizeIntent.mockImplementation((_i: any, perm: string) => perm !== 'discounts:apply')
+
+    const acks = await processIntents(params)
+
+    expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'ADD_ITEMS' }), 'discounts:apply')
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
+    expect(promotionService.applyPromotionToOrder).not.toHaveBeenCalled()
   })
 
   it('con orders:comp la cortesía offline SÍ pasa — no se rompe el flujo legítimo', async () => {
