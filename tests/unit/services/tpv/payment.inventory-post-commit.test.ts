@@ -33,6 +33,15 @@ jest.mock('@/services/venueSalesGuard', () => ({
   assertVenueSalesEnabled: jest.fn(),
 }))
 
+// El posting durable (fase 2/3.5) nace dentro de la tx del cobro. Esta suite no
+// lo prueba — su atomicidad vive en payment.posting-atomicity.test.ts — así que
+// se mockea para no tener que declarar el modelo en cada tx mock de aquí.
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: jest.fn().mockResolvedValue({ id: 'posting-test', status: 'PENDING' }),
+  applySalePosting: jest.fn(),
+}))
+
 const lockAreaTicketCheckoutMock = jest.fn()
 const finalizeAreaTicketPaymentMock = jest.fn()
 
@@ -65,6 +74,8 @@ jest.mock('@/utils/prismaClient', () => ({
     rawMaterial: { findUnique: jest.fn() },
     orderCustomer: { findMany: jest.fn() },
     activityLog: { create: jest.fn().mockResolvedValue({}) },
+    inventoryPosting: { findUnique: jest.fn(), create: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    inventoryPostingLine: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn() },
     $transaction: jest.fn(),
   },
 }))

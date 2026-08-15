@@ -67,6 +67,14 @@ jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
   assertVenueSalesEnabled: jest.fn().mockResolvedValue(undefined),
 }))
+
+// El posting durable nace dentro de la tx del cobro (fase 3.5); esta suite
+// prueba la delegación, no el posting.
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: jest.fn().mockResolvedValue({ id: 'posting-test', status: 'PENDING' }),
+  applySalePosting: jest.fn(),
+}))
 jest.mock('@/utils/staff-venue.util', () => ({
   __esModule: true,
   // recordOrderPayment/recordFastPayment llaman a un wrapper LOCAL (mismo módulo,

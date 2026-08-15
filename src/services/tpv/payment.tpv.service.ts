@@ -805,52 +805,88 @@ async function updateOrderTotalsForStandalonePayment(
   // ⭐ KIOSK MODE FIX: If servedById is null, assign the staff who processed the payment
   const shouldAssignServer = !order.servedById && staffId
 
+  // 🔴 ATOMICIDAD del vale (audit Codex xhigh 2026-08-14): la transición a PAID y
+  // el posting van en la MISMA transacción, para que valga el invariante
+  //
+  //     orden PAID  ⟺  posting existe
+  //
+  // Antes eran dos commits: si el proceso moría entre ellos, la orden quedaba
+  // pagada SIN vale, y el sweeper no puede rescatar un posting que nunca nació
+  // (sólo reintenta los existentes) — la deducción se perdía invisible.
+  //
+  // Trade-off aceptado: si el insert del vale falla, la transición a PAID se
+  // revierte. NO es una regresión de "el inventario nunca bloquea un cobro":
+  // el Payment YA está commiteado y el dinero registrado; lo que queda es una
+  // orden sin marcar como pagada, estado que el watchdog de integridad ya
+  // vigila (pago sin orden pagada) — visible y recuperable, a diferencia de la
+  // deducción perdida en silencio. Los dos modos de falla realistas del vale ya
+  // están cerrados aguas arriba: el UNIQUE con pre-check y la clasificación en
+  // lote (nada de N+1 dentro de la transacción del dinero).
+  const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
+  let tpvPostingId: string | null = null
+  const debeRegistrarPosting = isFullyPaid && !settledBeforeThisPayment && !options?.areaTicketAlreadyFinalized
+
   const updatedOrder = options?.areaTicketAlreadyFinalized
     ? order
-    : await prisma.order.update({
-        where: { id: orderId },
-        data: {
-          paymentStatus: newPaymentStatus,
-          // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
-          paidAmount: totalPaid,
-          remainingBalance: remainingAmount,
-          // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
-          tipAmount: totalTip,
-          // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
-          total: newTotal,
-          // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
-          ...(shouldAssignServer && {
-            servedById: staffId,
-            createdById: order.createdById || staffId, // Also set createdById if null
-          }),
-          ...(isFullyPaid && {
-            status: 'COMPLETED',
-            completedAt: new Date(),
-          }),
-        },
-        include: {
-          items: {
-            include: {
-              product: true,
-              // ✅ Include modifiers with inventory-related fields for stock deduction
-              modifiers: {
-                include: {
-                  modifier: {
-                    select: {
-                      id: true,
-                      name: true,
-                      groupId: true,
-                      rawMaterialId: true,
-                      quantityPerUnit: true,
-                      unit: true,
-                      inventoryMode: true,
+    : await prisma.$transaction(async tx => {
+        const updated = await tx.order.update({
+          where: { id: orderId },
+          data: {
+            paymentStatus: newPaymentStatus,
+            // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
+            paidAmount: totalPaid,
+            remainingBalance: remainingAmount,
+            // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
+            tipAmount: totalTip,
+            // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
+            total: newTotal,
+            // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
+            ...(shouldAssignServer && {
+              servedById: staffId,
+              createdById: order.createdById || staffId, // Also set createdById if null
+            }),
+            ...(isFullyPaid && {
+              status: 'COMPLETED',
+              completedAt: new Date(),
+            }),
+          },
+          include: {
+            items: {
+              include: {
+                product: true,
+                // ✅ Include modifiers with inventory-related fields for stock deduction
+                modifiers: {
+                  include: {
+                    modifier: {
+                      select: {
+                        id: true,
+                        name: true,
+                        groupId: true,
+                        rawMaterialId: true,
+                        quantityPerUnit: true,
+                        unit: true,
+                        inventoryMode: true,
+                      },
                     },
                   },
                 },
               },
             },
           },
-        },
+        })
+
+        // El vale nace aquí dentro: mismo commit que la transición a PAID.
+        if (debeRegistrarPosting) {
+          const posting = await createSalePostingInTx(tx, {
+            venueId: updated.venueId,
+            orderId,
+            items: updated.items as any,
+            staffId,
+          })
+          tpvPostingId = posting?.id ?? null
+        }
+
+        return updated
       })
 
   logger.info('Order totals updated for standalone payment', {
@@ -881,6 +917,31 @@ async function updateOrderTotalsForStandalonePayment(
     // Items cuya deducción SÍ se aplicó — se QUEDAN deducidos aunque otro item
     // falle (se vendieron); van al log/ActivityLog como contexto del drift.
     const deductedItems: Array<{ productId: string; quantity: number }> = []
+
+    // 🔴 Posting durable (fase 2, atomizado en la 3.5): el vale YA nació en la
+    // transacción que marcó la orden PAID (arriba) — aquí sólo se RECLAMA para
+    // deducir: se leen sus líneas y se marca APPLYING. Cada línea se marca
+    // APPLIED/FAILED conforme el loop avanza, así el sweeper sólo reintenta lo
+    // que quedó pendiente y nunca re-deduce lo ya aplicado. El loop de abajo NO
+    // se toca: lo comparten 8 features del cobro y está probado en producción.
+    let tpvPostingLines = new Map<string, string>()
+    try {
+      if (tpvPostingId) {
+        const lines = await prisma.inventoryPostingLine.findMany({ where: { postingId: tpvPostingId } })
+        tpvPostingLines = new Map(lines.map(l => [l.effectKey, l.id]))
+        await prisma.inventoryPosting.updateMany({
+          where: { id: tpvPostingId, status: 'PENDING' },
+          data: { status: 'APPLYING', attempts: { increment: 1 } },
+        })
+      }
+    } catch (postingError: any) {
+      // El posting es OBSERVABILIDAD durable: si falla, la deducción sigue igual
+      // que antes de la fase 2 — jamás puede impedir que la mercancía se descuente.
+      logger.error('[InventoryPosting] No se pudo registrar el posting del cobro TPV (la deducción continúa)', {
+        orderId,
+        error: postingError?.message,
+      })
+    }
 
     logger.info('🎯 Starting inventory deduction for completed order', {
       orderId,
@@ -965,6 +1026,7 @@ async function updateOrderTotalsForStandalonePayment(
         // always 1 on them); the same effective quantity feeds the compensation
         // restock below so a rollback returns exactly what was deducted.
         const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
+        const tpvLineId = tpvPostingLines.get(item.id)
         await deductInventoryForProduct(
           updatedOrder.venueId,
           item.productId,
@@ -972,7 +1034,19 @@ async function updateOrderTotalsForStandalonePayment(
           orderId,
           staffId, // staffId for tracking who processed the order
           orderModifiers,
+          tpvLineId ? { postingLineId: tpvLineId } : undefined,
         )
+
+        // Línea aplicada: el sweeper ya no la reintenta. Fire-and-forget — el
+        // estado del posting nunca puede tumbar un cobro ya registrado.
+        if (tpvLineId) {
+          void prisma.inventoryPostingLine
+            .update({
+              where: { id: tpvLineId },
+              data: { status: 'APPLIED', appliedQuantityBase: new Prisma.Decimal(effectiveQuantity) },
+            })
+            .catch(() => undefined)
+        }
 
         deductedItems.push({ productId: item.productId, quantity: effectiveQuantity })
 
@@ -1007,6 +1081,14 @@ async function updateOrderTotalsForStandalonePayment(
                 deductionError.message.includes('Conflicto de concurrencia persistente')
               ? 'CONCURRENT_TRANSACTION'
               : 'UNKNOWN'
+
+        // Línea fallida: queda FAILED para que el sweeper la reintente sola.
+        const failedLineId = tpvPostingLines.get(item.id)
+        if (failedLineId) {
+          void prisma.inventoryPostingLine
+            .update({ where: { id: failedLineId }, data: { status: 'FAILED', reason: deductionError.message } })
+            .catch(() => undefined)
+        }
 
         logger.error('❌ Failed to deduct stock for product', {
           orderId,
@@ -1046,6 +1128,21 @@ async function updateOrderTotalsForStandalonePayment(
           })
         }
       }
+    }
+
+    // Estado final del posting: APPLIED si todo aplicó, PARTIAL_FAILED si algo
+    // quedó pendiente (el sweeper lo recoge). Cercado por el claim APPLYING para
+    // no pisar a otro worker.
+    if (tpvPostingId) {
+      void prisma.inventoryPosting
+        .updateMany({
+          where: { id: tpvPostingId, status: 'APPLYING' },
+          data:
+            deductionErrors.length > 0
+              ? { status: 'PARTIAL_FAILED', lastError: deductionErrors[0]?.error ?? 'línea fallida' }
+              : { status: 'APPLIED', appliedAt: new Date(), lastError: null },
+        })
+        .catch(() => undefined)
     }
 
     // ✅ FIX: Rollback order if ANY critical inventory deduction failed

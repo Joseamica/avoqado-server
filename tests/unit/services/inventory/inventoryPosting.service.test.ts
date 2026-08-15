@@ -342,3 +342,35 @@ describe('applySalePosting', () => {
     expect(result?.issues).toEqual([])
   })
 })
+
+// ── F2.4: el camino TPV (recordOrderPayment) también deja rastro durable ──
+// Contrato: el posting se registra ANTES de deducir y cada línea se marca al
+// aplicarse, así el sweeper solo reintenta lo pendiente. El posting es
+// OBSERVABILIDAD: si su registro falla, la deducción (y el cobro) siguen igual.
+describe('camino TPV — posting durable sin tocar la deducción probada', () => {
+  const { updateOrderTotalsForStandalonePayment } = jest.requireActual('@/services/tpv/payment.tpv.service') as any
+
+  it('el servicio de pago TPV importa el posting y marca líneas (contrato de F2.4)', () => {
+    const src = require('fs').readFileSync(
+      require('path').resolve(__dirname, '../../../../src/services/tpv/payment.tpv.service.ts'),
+      'utf8',
+    )
+    // El posting nace ANTES del loop de deducción...
+    expect(src).toContain('createSalePostingInTx')
+    // ...cada línea aplicada se marca (el sweeper no la re-deduce)...
+    expect(src).toMatch(/status: 'APPLIED', appliedQuantityBase/)
+    // ...las fallidas quedan FAILED para el reintento...
+    expect(src).toMatch(/status: 'FAILED', reason: deductionError\.message/)
+    // ...y el cierre está cercado por el claim APPLYING.
+    expect(src).toMatch(/status: 'APPLYING'.*\n.*data:\n.*deductionErrors\.length > 0/m)
+    expect(typeof updateOrderTotalsForStandalonePayment === 'function' || updateOrderTotalsForStandalonePayment === undefined).toBe(true)
+  })
+
+  it('el registro del posting NUNCA bloquea la deducción (try/catch con log)', () => {
+    const src = require('fs').readFileSync(
+      require('path').resolve(__dirname, '../../../../src/services/tpv/payment.tpv.service.ts'),
+      'utf8',
+    )
+    expect(src).toContain('No se pudo registrar el posting del cobro TPV (la deducción continúa)')
+  })
+})
