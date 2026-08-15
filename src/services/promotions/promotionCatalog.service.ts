@@ -20,7 +20,23 @@ export interface PromotionCard {
   priceCents: number
   /** Sólo en las próximas: a qué hora abre, para poder decirlo en la tarjeta. */
   startsAt?: string
-  groups: Array<{ id: string; name: string; options: Array<{ id: string; productId: string; priceDeltaCents: number }> }>
+  groups: Array<{
+    id: string
+    name: string
+    options: Array<{
+      id: string
+      productId: string
+      priceDeltaCents: number
+      /** Unidades que ENTRAN al carrito (2 en un 2x1). El POS las necesita para el gancho y el preview. */
+      quantity: number
+      /** Unidades que se COBRAN (1 en un 2x1). */
+      chargedQuantity: number
+      /** Denormalizados para que la tarjeta se pinte sin cruzar el catálogo local. */
+      productName: string
+      /** Precio de lista en CENTAVOS. Sólo para el estimado que se muestra; el precio real lo calcula el server al aplicar. */
+      productPriceCents: number
+    }>
+  }>
 }
 
 /**
@@ -55,7 +71,12 @@ export async function listPromotionsForPos(
         { OR: [{ validUntil: null }, { validUntil: { gte: now } }] },
       ],
     },
-    include: { groups: { include: { options: true }, orderBy: { displayOrder: 'asc' } } },
+    include: {
+      groups: {
+        include: { options: { include: { product: { select: { name: true, price: true } } } } },
+        orderBy: { displayOrder: 'asc' },
+      },
+    },
     orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
   })
 
@@ -112,7 +133,17 @@ function toCard(promotion: any): PromotionCard {
     groups: (promotion.groups ?? []).map((g: any) => ({
       id: g.id,
       name: g.name,
-      options: (g.options ?? []).map((o: any) => ({ id: o.id, productId: o.productId, priceDeltaCents: o.priceDeltaCents })),
+      options: (g.options ?? []).map((o: any) => ({
+        id: o.id,
+        productId: o.productId,
+        priceDeltaCents: o.priceDeltaCents,
+        quantity: o.quantity,
+        chargedQuantity: o.chargedQuantity,
+        // Un producto borrado NO puede dejar al cajero sin panel.
+        productName: o.product?.name ?? '',
+        // Product.price es Decimal en PESOS -> centavos del contrato POS.
+        productPriceCents: o.product?.price != null ? Math.round(Number(o.product.price) * 100) : 0,
+      })),
     })),
   }
 }
