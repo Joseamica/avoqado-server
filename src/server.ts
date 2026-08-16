@@ -60,6 +60,7 @@ import { cfdiReconcileJob } from './jobs/cfdiReconcile.job'
 import { catalogPublicationOutboxSweeperJob } from './jobs/catalog-publication-outbox-sweeper.job'
 import { catalogPublicationWatchdogJob } from './jobs/catalog-publication-watchdog.job'
 import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
+import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
 import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
@@ -138,6 +139,7 @@ const gracefulShutdown = async (signal: string) => {
       catalogPublicationOutboxSweeperJob.stop()
       catalogPublicationWatchdogJob.stop()
       shiftCloseWatchdogJob.stop()
+      cashDrawerAutoCloseJob.stop()
       inventoryPostingSweeperJob.stop()
 
       // Stop subscription cancellation job
@@ -432,6 +434,11 @@ const startApplication = async (retries = 3) => {
       catalogPublicationOutboxSweeperJob.start()
       catalogPublicationWatchdogJob.start()
       shiftCloseWatchdogJob.start()
+      // Cierra las cajas que nadie cerró, en el corte del día de negocio (04:00
+      // hora del venue, como Toast). Sin esto se acumulan zombis —en producción
+      // había una abierta desde el 2026-04-28— y el arqueo deja de significar
+      // algo. NUNCA inventa un conteo: cierra sin `actualAmount` ni `overShort`.
+      cashDrawerAutoCloseJob.start()
       // El outbox de deducciones de inventario recupera lo que un crash dejó
       // PENDING/APPLYING — sin este job el posting durable es solo un registro.
       inventoryPostingSweeperJob.start()
