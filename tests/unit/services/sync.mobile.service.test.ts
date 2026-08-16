@@ -326,6 +326,51 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1' } })
   })
 
+  it('🔴 PAY_CASH propaga el saldo autoritativo al ack (el cobro parcial OFFLINE también lo necesita)', async () => {
+    // El ack se arma A MANO, así que no hereda los campos nuevos de la respuesta
+    // de payCashOrder. Sin esto, el contrato nuevo NO existe justo en el flujo
+    // que este trabajo arregla: venta de mostrador de $100, se abona $40 sin red,
+    // el intent se reproduce al reconectar, y el ack llega sin saldo → el POS
+    // vuelve a adivinar los $60 con aritmética local del carrito.
+    //
+    // ADITIVO: no cambia la forma del ack ni sus tres estados
+    // (`.claude/rules/offline-first-y-hub-lan.md` §2.2), sólo agrega campos.
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-parcial',
+      orderNumber: 'A-5003',
+      digitalReceipt: null,
+      remainingBalanceCents: 6000,
+      orderPaymentStatus: 'PARTIAL',
+      orderTotalCents: 10000,
+      totalPaidCents: 4000,
+    })
+    const acks = await processIntents(baseParams([{ id: 'i9c', type: 'PAY_CASH', payload: { orderId: 'order-6', amountCents: 4000 } }]))
+    expect(acks[0]).toMatchObject({
+      status: 'ACKED',
+      result: {
+        paymentId: 'pay-parcial',
+        remainingBalanceCents: 6000,
+        orderPaymentStatus: 'PARTIAL',
+        orderTotalCents: 10000,
+        totalPaidCents: 4000,
+      },
+    })
+  })
+
+  it('PAY_CASH omite el saldo en el ack cuando el server no lo pudo resolver', async () => {
+    // Espejo de "ausente es honesto, cero es mentira": si payCashOrder no
+    // devolvió saldo, el ack tampoco lo inventa.
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-sin-saldo',
+      orderNumber: 'A-5004',
+      digitalReceipt: null,
+    })
+    const acks = await processIntents(baseParams([{ id: 'i9d', type: 'PAY_CASH', payload: { orderId: 'order-7', amountCents: 4000 } }]))
+    expect(acks[0].status).toBe('ACKED')
+    expect(acks[0].result).not.toHaveProperty('remainingBalanceCents')
+    expect(acks[0].result).not.toHaveProperty('orderPaymentStatus')
+  })
+
   it('PAY_CASH con tarjeta de terminal ajena conserva el método al reproducirse', async () => {
     // Sin esto, un cobro con terminal externa hecho SIN RED se replay-earía
     // como efectivo y el corte pediría dinero que nunca entró al cajón.

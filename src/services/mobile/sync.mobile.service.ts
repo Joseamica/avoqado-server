@@ -937,6 +937,22 @@ async function applyPayCash(
       paymentId: payment.paymentId,
       orderNumber: payment.orderNumber,
       digitalReceipt: payment.digitalReceipt ?? null,
+      // 🔴 El saldo autoritativo TAMBIÉN por aquí. El ack se arma a mano, así
+      // que no heredaba los campos nuevos de `payCashOrder` y el contrato nuevo
+      // no existía justo en el flujo que más lo necesita: un abono parcial hecho
+      // SIN RED se reproduce al reconectar y el POS volvía a deducir el restante
+      // con aritmética local del carrito.
+      //
+      // ADITIVO puro: no cambia la forma del ack ni sus tres estados
+      // (`.claude/rules/offline-first-y-hub-lan.md` §2.2), no toca
+      // `SyncIntentType`, y un cliente viejo simplemente los ignora.
+      //
+      // Se omiten (no se ponen en 0) cuando el server no pudo resolver el saldo
+      // — mismo criterio que la respuesta en línea: ausente es honesto.
+      ...(payment.remainingBalanceCents !== undefined ? { remainingBalanceCents: payment.remainingBalanceCents } : {}),
+      ...(payment.orderPaymentStatus !== undefined ? { orderPaymentStatus: payment.orderPaymentStatus } : {}),
+      ...(payment.orderTotalCents !== undefined ? { orderTotalCents: payment.orderTotalCents } : {}),
+      ...(payment.totalPaidCents !== undefined ? { totalPaidCents: payment.totalPaidCents } : {}),
     },
   }
 }

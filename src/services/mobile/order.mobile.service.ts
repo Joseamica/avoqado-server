@@ -15,6 +15,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
+import { resolveTenderForCharge, computeTenderCommission } from '../dashboard/tenderType.dashboard.service'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -1834,6 +1835,19 @@ export interface CashPaymentInput {
    */
   method?: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'BANK_TRANSFER' | 'OTHER'
   /**
+   * Tipo de pago del catálogo del venue (VenueTenderType) — "Terminal BBVA",
+   * "Vale de despensa", "Uber Eats". EXCLUYENTE con `method`: o el cliente manda
+   * uno de los métodos fijos de siempre, o referencia un tender del catálogo.
+   *
+   * 🔴 Sólo viaja la REFERENCIA `{id, revision}`. La comisión, el "¿entra al
+   * cajón?" y la forma SAT los resuelve el SERVER desde `VenueTenderTypeRevision`
+   * (hallazgo P0 del audit v4): un POS con bug no puede inventarse una comisión.
+   * La revisión se honra POR NÚMERO, así que un cobro encolado sin red conserva
+   * la semántica que regía cuando se cobró, no la de hoy.
+   */
+  tenderTypeId?: string
+  tenderRevision?: number
+  /**
    * Quién procesó el cobro cuando NO fue Avoqado ("Clip", "terminal del
    * negocio", "transferencia BBVA"). Se guarda en Payment.externalSource, que
    * ya existía para anotaciones manuales. Es lo que permite responder cuánto
@@ -1860,6 +1874,122 @@ export interface CashPaymentResponse {
   // registrado; esto dice si el stock quedó en negativo o no se pudo descontar.
   // ADITIVO — las versiones viejas de la app lo ignoran.
   inventoryWarning?: OrderInventoryWarning
+
+  // ── Saldo autoritativo de la orden (ADITIVO, opcional) ─────────────────────
+  //
+  // El server ya sabía todo esto dentro de la transacción del cobro y no lo
+  // devolvía: el POS tenía que adivinar el restante con aritmética local del
+  // carrito, que se desvía hasta centavos con promociones y cargos por
+  // servicio, y no tenía forma de saber que la orden quedó PARTIAL.
+  //
+  // 🔴🔴 UNIDADES DE ESTA RESPUESTA: **TODO EN CENTAVOS, ENTEROS.**
+  //
+  //   Esta respuesta ES una frontera externa, y esta frontera habla centavos en
+  //   las DOS direcciones: el cliente manda `amount`/`tip` en centavos (ver
+  //   `order.mobile.controller.ts`: "amount es requerido ... (en centavos)") y
+  //   el servicio los convierte con `amount / 100`. Internamente el cálculo
+  //   sigue siendo pesos/`Decimal` como manda `.claude/rules/critical-warnings.md`;
+  //   la conversión a centavos ocurre SÓLO al serializar, aquí.
+  //
+  //   ⚠️ `amount` y `tipAmount`, arriba, TAMBIÉN son centavos aunque su nombre no
+  //   lo diga — son legado y no se pueden renombrar (hay APKs viejos en la calle).
+  //   Los campos nuevos sí llevan el sufijo `Cents` para que nadie tenga que
+  //   deducirlo. No "uniformes" ninguno de los dos grupos a pesos: romperías el
+  //   contrato viejo o el nuevo.
+  //
+  //   Enteros SIEMPRE: se redondean con `pesosToCents`. Un `* 100` pelón sobre un
+  //   importe de 2 decimales deja basura de float en ~13% de los casos
+  //   (`0.55 * 100 === 55.00000000000001`), y el cliente no debe recibir eso en
+  //   un campo de dinero.
+  //
+  // Opcionales porque son ADITIVOS: los clientes viejos los ignoran. El server
+  // los llena SIEMPRE, en los cuatro caminos de retorno (cobro nuevo, reintento
+  // idempotente, ganador de la carrera P2002, CAS perdida con llave propia).
+  /** Lo que falta por cobrar de ESTA orden, en CENTAVOS enteros, clampeado a 0. */
+  remainingBalanceCents?: number
+  /** El estado en que quedó la orden tras este cobro. Sin unidad — no lo toques. */
+  orderPaymentStatus?: 'PAID' | 'PARTIAL'
+  /** Total recalculado (mercancía − descuento + cargo + propina), en CENTAVOS enteros. */
+  orderTotalCents?: number
+  /** Pagado acumulado de la orden, propinas incluidas, en CENTAVOS enteros. */
+  totalPaidCents?: number
+}
+
+/**
+ * Pesos (unidad interna) → centavos ENTEROS (unidad de esta frontera).
+ *
+ * El redondeo NO es opcional ni cosmético: `Number(decimal) * 100` sobre un
+ * importe limpio de 2 decimales devuelve un no-entero en ~13% de los valores
+ * (`0.55 * 100 === 55.00000000000001`, `0.29 * 100 === 28.999999999999996`), y
+ * peor aún sobre el resultado de una RESTA (`133.45 - 50 → 83.44999999999999`).
+ * Mismo criterio que ya usan los otros serializadores a centavos del namespace
+ * `/mobile` (p. ej. `purchase-order.mobile.service.ts`) y equivalente al
+ * `ROUND_HALF_UP` de `toStripeAmount` en la frontera de Stripe.
+ */
+function pesosToCents(pesos: number): number {
+  return Math.round(pesos * 100)
+}
+
+/**
+ * Los cuatro campos de saldo, ya resueltos. Se arma una sola vez y se esparce
+ * (`...snapshot`) en cada retorno para que ningún camino pueda olvidar uno.
+ *
+ * 🔴 CENTAVOS ENTEROS — ya convertidos, listos para serializar.
+ */
+interface OrderBalanceSnapshot {
+  remainingBalanceCents: number
+  orderPaymentStatus: 'PAID' | 'PARTIAL'
+  orderTotalCents: number
+  totalPaidCents: number
+}
+
+/**
+ * Saldo REAL de la orden para los caminos que devuelven un pago que YA existía:
+ * reintento con la misma `idempotencyKey`, ganador de la carrera P2002, y CAS
+ * perdida cuando nuestro propio reintento anterior sí había commiteado.
+ *
+ * Se RELEE de la base a propósito, en vez de reusar la lectura de arriba: esos
+ * dos últimos caminos corren DESPUÉS de la transacción, así que la lectura
+ * inicial ya está vieja y el ganador movió el saldo. Un cliente reintentando
+ * tiene que ver el MISMO saldo que vio el que sí entró — devolver 0 le diría
+ * que la cuenta quedó saldada cuando todavía debe.
+ */
+async function readOrderBalanceSnapshot(venueId: string, orderId: string): Promise<Partial<OrderBalanceSnapshot>> {
+  // 🔴 El `venueId` NO es decorativo: aislamiento de tenant es regla dura
+  // (`.claude/rules/critical-warnings.md`). Hay un test que recorre TODAS las
+  // lecturas de orden de este flujo y falla si a alguna le falta.
+  const fresh = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { paymentStatus: true, total: true, paidAmount: true, remainingBalance: true },
+  })
+
+  // 🔴 AUSENTE ES HONESTO; CERO ES MENTIRA.
+  //
+  // Si la orden no se puede leer (se borró, no es de este venue, la lectura
+  // falló) NO se inventa un snapshot: un `{remaining 0, status 'PARTIAL'}` le
+  // pinta al cajero "falta por cobrar $0.00" sobre una cuenta que no existe —
+  // y cero-con-PARTIAL es justo la combinación que rompe a un cliente que
+  // ramifica por estado. Omitir los campos es exactamente lo que responde un
+  // server viejo, así que el cliente cae solo a su fallback.
+  if (!fresh) {
+    logger.warn(`⚠️ [ORDER.MOBILE] No se pudo leer la orden ${orderId} para el saldo — se omiten los campos de saldo en la respuesta`)
+    return {}
+  }
+
+  // Pesos mientras se calcula; a centavos sólo al construir la respuesta.
+  const orderTotal = Number(fresh.total ?? 0)
+  const totalPaid = Number(fresh.paidAmount ?? 0)
+  // `remainingBalance` es la columna autoritativa; el resto sólo cubre filas
+  // viejas que la tengan en null.
+  const remaining = fresh.remainingBalance != null ? Number(fresh.remainingBalance) : orderTotal - totalPaid
+  return {
+    remainingBalanceCents: pesosToCents(Math.max(0, remaining)),
+    // Sólo PAID es PAID. PENDING no debería existir aquí (hay un pago), pero si
+    // apareciera, "falta dinero" es la lectura honesta y segura.
+    orderPaymentStatus: fresh.paymentStatus === 'PAID' ? 'PAID' : 'PARTIAL',
+    orderTotalCents: pesosToCents(orderTotal),
+    totalPaidCents: pesosToCents(totalPaid),
+  }
 }
 
 /**
@@ -1941,8 +2071,15 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         paymentId: existingByKey.id,
         orderId,
         orderNumber: order.orderNumber,
-        amount: Number(existingByKey.amount) * 100,
-        tipAmount: Number(existingByKey.tipAmount) * 100,
+        // 🔴 `pesosToCents`, no un `* 100` pelón. Reconstruir estos dos desde el
+        // Decimal guardado dejaba ruido de float en el 13% de los importes, y en
+        // el 6.6% POR DEBAJO del entero (`19.99 → 1998.9999999999998`): un cliente
+        // que trunca al parsear leía $19.98 sobre un cobro de $19.99, y un decoder
+        // estricto lanzaba excepción y perdía el reintento entero. Redondear no
+        // cambia nombre, tipo ni unidad — sólo devuelve el entero que siempre se
+        // quiso devolver, y nadie puede depender del ruido.
+        amount: pesosToCents(Number(existingByKey.amount)),
+        tipAmount: pesosToCents(Number(existingByKey.tipAmount)),
         // El método REAL del pago que ya existe: devolver 'CASH' fijo haría
         // que el reintento de un cobro con tarjeta se reportara como efectivo.
         method: existingByKey.method as CashPaymentResponse['method'],
@@ -1950,6 +2087,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         digitalReceipt: existingByKey.receipts?.[0]
           ? mapDigitalReceiptResponse(existingByKey.receipts[0], await resolveAutofacturaAvailable(orderId))
           : null,
+        // El saldo REAL de la orden ahora mismo, no 0: quien reintenta la parte 1
+        // de un cobro dividido tiene que seguir viendo lo que falta.
+        ...(await readOrderBalanceSnapshot(venueId, orderId)),
       }
     }
   }
@@ -2013,7 +2153,17 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // Tres intentos: la contención real es de 2-4 dispositivos, no de cientos.
   const MAX_PAYMENT_CAS_ATTEMPTS = 3
   let paymentResult:
-    | { newPayment: any; isFullyPaid: boolean; areaTicketOrder: boolean; areaTicketSessionId?: string; postingId?: string | null }
+    | {
+        newPayment: any
+        isFullyPaid: boolean
+        areaTicketOrder: boolean
+        areaTicketSessionId?: string
+        postingId?: string | null
+        // El saldo que la transacción YA calculó — antes se quedaba dentro y el
+        // código de abajo (respuesta, broadcast, hook de referidos) tenía que
+        // adivinarlo o mentir. Mismo patrón que `postingId`.
+        balance: OrderBalanceSnapshot
+      }
     | undefined
 
   for (let attempt = 1; attempt <= MAX_PAYMENT_CAS_ATTEMPTS; attempt++) {
@@ -2118,13 +2268,27 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
         // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
         //    insert nunca ocurre — que es exactamente lo que evita el segundo cobro.
+        // 🔑 Semántica de dinero SERVER-OWNED: si el POS referenció un tender del
+        // catálogo, el método fiscal y los snapshots salen de la revisión congelada,
+        // no de lo que mandó el cliente.
+        const resolvedTender =
+          input.tenderTypeId != null && input.tenderRevision != null
+            ? await resolveTenderForCharge(venueId, input.tenderTypeId, input.tenderRevision, tx)
+            : null
+
+        // Propina prohibida en un tender configurado sin propina: el POS no debería
+        // ofrecerla, pero la frontera del sistema no confía en la UI.
+        if (resolvedTender && !resolvedTender.tenderCaptureTip && tipDecimal > 0) {
+          throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
+        }
+
         const newPayment = await tx.payment.create({
           data: {
             venueId,
             orderId,
             amount: amountDecimal,
             tipAmount: tipDecimal,
-            method: paymentMethod,
+            method: resolvedTender?.method ?? paymentMethod,
             status: 'COMPLETED',
             type: 'REGULAR',
             splitType: 'FULLPAYMENT',
@@ -2141,6 +2305,24 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             feePercentage: 0,
             feeAmount: 0,
             netAmount: amountDecimal + tipDecimal,
+            // Snapshots inmutables del tender (todos resueltos por el server). Editar
+            // el catálogo mañana NO reinterpreta este cobro.
+            ...(resolvedTender
+              ? {
+                  tenderTypeId: resolvedTender.tenderTypeId,
+                  tenderRevision: resolvedTender.tenderRevision,
+                  tenderLabel: resolvedTender.tenderLabel,
+                  tenderCountsAsCash: resolvedTender.tenderCountsAsCash,
+                  tenderCaptureTip: resolvedTender.tenderCaptureTip,
+                  tenderSatFormaPago: resolvedTender.tenderSatFormaPago,
+                  tenderCommissionPercent: resolvedTender.tenderCommissionPercent,
+                  tenderCommissionAmount: computeTenderCommission(
+                    resolvedTender.tenderCommissionPercent,
+                    new Prisma.Decimal(amountDecimal),
+                  ),
+                  fundsFlow: resolvedTender.fundsFlow,
+                }
+              : {}),
           },
         })
 
@@ -2216,6 +2398,15 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           areaTicketOrder: areaFinalization.areaTicketOrder,
           areaTicketSessionId: areaFinalization.sessionId,
           postingId,
+          // 🔴 Los MISMOS valores que se acaban de persistir arriba (que van en
+          // pesos), no un recálculo: la respuesta no puede contradecir a la
+          // base. `pesosToCents` es la única conversión, ya en la frontera.
+          balance: {
+            remainingBalanceCents: pesosToCents(Math.max(0, remainingAfterPayment)),
+            orderPaymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
+            orderTotalCents: pesosToCents(newTotal),
+            totalPaidCents: pesosToCents(totalPaidIncludingTip),
+          },
         }
       })
       break // ganamos la transición
@@ -2235,13 +2426,17 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             paymentId: winner.id,
             orderId,
             orderNumber: order.orderNumber,
-            amount: Number(winner.amount) * 100,
-            tipAmount: Number(winner.tipAmount) * 100,
+            // Enteros, igual que el camino idempotente de arriba.
+            amount: pesosToCents(Number(winner.amount)),
+            tipAmount: pesosToCents(Number(winner.tipAmount)),
             method: winner.method as CashPaymentResponse['method'],
             status: 'COMPLETED',
             digitalReceipt: winner.receipts?.[0]
               ? mapDigitalReceiptResponse(winner.receipts[0], await resolveAutofacturaAvailable(orderId))
               : null,
+            // Relectura obligada: el ganador ya movió el saldo y la lectura de
+            // arriba (previa a la transacción) quedó vieja.
+            ...(await readOrderBalanceSnapshot(venueId, orderId)),
           }
         }
       }
@@ -2262,13 +2457,16 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               paymentId: mine.id,
               orderId,
               orderNumber: order.orderNumber,
-              amount: Number(mine.amount) * 100,
-              tipAmount: Number(mine.tipAmount) * 100,
+              // Enteros, igual que los otros dos caminos idempotentes.
+              amount: pesosToCents(Number(mine.amount)),
+              tipAmount: pesosToCents(Number(mine.tipAmount)),
               method: mine.method as CashPaymentResponse['method'],
               status: 'COMPLETED',
               digitalReceipt: mine.receipts?.[0]
                 ? mapDigitalReceiptResponse(mine.receipts[0], await resolveAutofacturaAvailable(orderId))
                 : null,
+              // Igual que arriba: nuestro propio commit anterior ya movió el saldo.
+              ...(await readOrderBalanceSnapshot(venueId, orderId)),
             }
           }
         }
@@ -2293,7 +2491,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // Inalcanzable: el bucle o devuelve, o asigna, o lanza. Guard para el tipo.
     throw new ConflictError('No se pudo registrar el cobro. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
   }
-  const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId } = paymentResult
+  const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId, balance } = paymentResult
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
 
@@ -2404,11 +2602,20 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   // REFERRAL HOOK: trigger referral qualification if this order has a pending referral
   // (idempotent: no-ops if no PENDING Referral matches this orderId)
-  try {
-    const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
-    await onOrderPaid({ orderId, venueId })
-  } catch (err) {
-    console.error('[referral hook] onOrderPaid failed for order', orderId, err)
+  //
+  // 🔴 SÓLO cuando la orden quedó realmente PAGADA. Antes corría tras CUALQUIER
+  // abono en efectivo, y `onOrderPaid` reclama el referido (PENDING → QUALIFIED)
+  // mirando sólo `qualifyingOrderId`, sin revalidar el estado de la orden: un
+  // abono de $1 sobre una cuenta de $500 calificaba el referido y emitía sus
+  // recompensas. El nombre del hook lo dice — "onOrderPaid", no "onPayment".
+  // El try/catch se conserva: un fallo del hook jamás puede tumbar un cobro.
+  if (orderFullyPaid) {
+    try {
+      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+      await onOrderPaid({ orderId, venueId })
+    } catch (err) {
+      console.error('[referral hook] onOrderPaid failed for order', orderId, err)
+    }
   }
 
   // Emit Socket.IO events for real-time updates
@@ -2424,10 +2631,13 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       status: 'completed',
     })
 
+    // 🔴 El estado REAL, no un literal. Emitir 'PAID' fijo hacía que el
+    // dashboard —y cualquier otro cliente escuchando— pintara como pagada una
+    // cuenta que apenas recibió un abono.
     broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
       orderId,
       orderNumber: order.orderNumber,
-      paymentStatus: 'PAID',
+      paymentStatus: balance.orderPaymentStatus,
     })
   }
 
@@ -2441,6 +2651,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     status: 'COMPLETED',
     digitalReceipt,
     ...(inventoryWarning ? { inventoryWarning } : {}),
+    // Saldo autoritativo, en centavos enteros como el resto de esta respuesta.
+    // El POS ya no tiene que deducirlo del carrito.
+    ...balance,
   }
 }
 
