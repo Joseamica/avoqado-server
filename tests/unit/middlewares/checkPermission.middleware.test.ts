@@ -494,11 +494,17 @@ describe('checkPermission Middleware', () => {
     })
 
     it('un fallo al consumir el token NO convierte el 403 en 500', async () => {
+      // 🔴 El switch ENCENDIDO es parte del caso: con el default OFF de este
+      // describe, el consumo ni siquiera llega al updateMany que aquí se hace
+      // fallar, y el test pasaba sin probar nada de lo que su nombre promete.
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
       ;(mockReq as any).headers = { 'x-permission-override': 'tok_abc' }
       ;(prisma.permissionOverride.updateMany as jest.Mock).mockRejectedValue(new Error('db down'))
 
       await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
 
+      // Se intentó de verdad: si esto no se cumple, el resto del test es humo.
+      expect(prisma.permissionOverride.updateMany).toHaveBeenCalled()
       expect(statusMock).toHaveBeenCalledWith(403)
       expect(statusMock).not.toHaveBeenCalledWith(500)
       expect(mockNext).not.toHaveBeenCalled()

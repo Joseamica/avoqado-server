@@ -12,6 +12,8 @@ const mockTableFindFirst = jest.fn()
 const mockAudit = jest.fn()
 const mockSplitOrderBySeat = jest.fn()
 const mockMergeOrders = jest.fn()
+/** Permisos que los tools pidieron, en orden. Ver el mock de `requirePermission`. */
+const requiredPermissions: string[] = []
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -19,8 +21,12 @@ jest.mock('@/mcp/guard', () => ({
       if (v === 'foreign') throw new Error('ScopeError: venue out of scope')
       return { venueId: { in: [v] } }
     },
-    requirePermission: (_perm: string, v: string) => {
-      if (v === 'no-perm') throw new Error('Forbidden: missing orders:update')
+    // 🔴 Registra QUÉ permiso pidió cada tool. Antes se ignoraba el argumento,
+    // así que revertir el guard a `orders:update` seguía pasando el test — el
+    // candado del MCP no estaba protegido por nada.
+    requirePermission: (perm: string, v: string) => {
+      requiredPermissions.push(perm)
+      if (v === 'no-perm') throw new Error(`Forbidden: missing ${perm}`)
     },
   }),
 }))
@@ -53,7 +59,10 @@ const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[
 beforeAll(() => {
   registerTableTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  requiredPermissions.length = 0
+})
 
 describe('split_table_check_by_seat', () => {
   it('rejects a venue outside the caller scope', async () => {
@@ -109,9 +118,15 @@ describe('merge_table_check', () => {
     expect(mockMergeOrders).not.toHaveBeenCalled()
   })
 
-  it('rejects when the caller lacks orders:update', async () => {
+  it('rejects when the caller lacks orders:merge', async () => {
     await expect(call('merge_table_check', { venueId: 'no-perm', targetNumber: '12', sourceNumber: '8' })).rejects.toThrow('Forbidden')
     expect(mockMergeOrders).not.toHaveBeenCalled()
+    // 🔴 El permiso EXACTO, no uno cualquiera: fusionar tiene el suyo desde
+    // 2026-08 y por las rutas HTTP ya se exige. Sin esta aserción, revertir el
+    // guard a `orders:update` volvía a abrir el atajo por el MCP sin que ningún
+    // test se quejara.
+    expect(requiredPermissions).toContain('orders:merge')
+    expect(requiredPermissions).not.toContain('orders:update')
   })
 
   it('errors (no write) when the target table has no open check', async () => {
