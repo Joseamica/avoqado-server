@@ -9,6 +9,7 @@ import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.s
 
 import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment.schema'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
+import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -21,8 +22,13 @@ import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
  *      subtotal=amount, paymentStatus=PAID, no items. Revenue reports keep it,
  *      operational reports (kitchen, KDS) can filter by type.
  *
+ * Inventario (fase 5.6): el modo 1 deja su vale durable (`InventoryPosting`) en
+ * la MISMA transacción que marca la orden PAID, y lo aplica tras el commit.
+ * Antes no descontaba nada — la orden se marcaba pagada y la mercancía salía
+ * sin bajar del almacén. El modo 2 crea una orden sombra SIN renglones, así que
+ * su vale nace SKIPPED: no hay qué descontar, pero queda constancia.
+ *
  * Side effects NOT handled here (by design — out of V1 scope):
- *   - Inventory FIFO deduction on final payment
  *   - Socket.io broadcast
  *   - Receipt email
  */
@@ -94,6 +100,9 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
   // Stored in a holder object so TypeScript doesn't narrow the closure
   // assignment to `never` after the async transaction callback.
   const metricsState: { orderTotal: Prisma.Decimal | null } = { orderTotal: null }
+  // Mismo motivo que metricsState: un holder evita que TS estreche la
+  // asignación dentro del callback async de la transacción a `never`.
+  const postingState: { id: string | null } = { id: null }
 
   const result = await prisma.$transaction(
     async tx => {
@@ -106,6 +115,10 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       // can recompute Order.total = subtotal - discount + cumulative tips.
       let orderSubtotal: Prisma.Decimal = new Prisma.Decimal(0)
       let orderDiscount: Prisma.Decimal = new Prisma.Decimal(0)
+      // Renglones de la orden existente: el vale de inventario los necesita
+      // para nacer en ESTA misma transacción cuando el pago la salda.
+      let orderItems: unknown[] = []
+      let yaEstabaPagada = false
 
       // Link payment to the cashier's currently open shift (if any). Match the
       // TPV pattern exactly: filter by staffId + status='OPEN' + endTime=null so
@@ -130,6 +143,9 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
           include: {
             payments: { where: { status: TransactionStatus.COMPLETED } },
             orderCustomers: { select: { customerId: true, isPrimary: true } },
+            // Sin los renglones el vale nacería vacío y la venta seguiría sin
+            // descontar del almacén — que es justo el hueco que este include cierra.
+            items: { include: { modifiers: { include: { modifier: true } } } },
           },
         })
 
@@ -151,6 +167,8 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
         // reuse them without re-fetching.
         orderSubtotal = new Prisma.Decimal(order.subtotal)
         orderDiscount = new Prisma.Decimal(order.discountAmount ?? 0)
+        orderItems = order.items ?? []
+        yaEstabaPagada = order.paymentStatus === 'PAID'
 
         // ✅ TPV ALIGNMENT: paidSoFar sums (amount + tip) for prior COMPLETED payments,
         // matching how TPV's totalPaid is computed. Without including tips, partial
@@ -393,6 +411,20 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
             ...(fullyPaid ? { status: 'COMPLETED', completedAt: new Date() } : {}),
           },
         })
+
+        // Vale durable de inventario, atómico con la transición a PAID. Sólo al
+        // SALDAR (un abono parcial no descuenta, igual que en el TPV) y sólo si
+        // la orden no venía ya pagada, para no abrir un segundo vale sobre una
+        // venta que ya dedujo.
+        if (fullyPaid && !yaEstabaPagada) {
+          const posting = await createSalePostingInTx(tx, {
+            venueId,
+            orderId: anchorOrderId,
+            items: orderItems as any,
+            staffId,
+          })
+          postingState.id = posting?.id ?? null
+        }
       }
       // Reference unused vars so TS doesn't complain — they're captured for
       // possible future expansion (per-payment breakdown, audit detail).
@@ -461,6 +493,21 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
   // loyalty resolved a primary customer (orderCustomers all isPrimary=false +
   // no input.customerId + no legacy order.customerId would otherwise leave
   // loyaltyOrderTotal at 0 while metrics still fire).
+  // Aplicar el vale de inventario YA COMMITEADO el cobro. Nunca puede tumbar un
+  // pago registrado: si truena, el posting queda pendiente y el sweeper lo
+  // retoma — el dinero es un hecho, la deducción es reintentable.
+  if (postingState.id) {
+    try {
+      await applySalePosting(postingState.id, staffId)
+    } catch (deductionError: any) {
+      logger.error('⚠️ Failed to apply inventory posting on manual payment (payment still succeeded)', {
+        orderId: loyaltyOrderId,
+        postingId: postingState.id,
+        error: deductionError?.message ?? String(deductionError),
+      })
+    }
+  }
+
   if (metricsCustomerIds.size > 0 && metricsState.orderTotal) {
     const metricsAmount = Number(metricsState.orderTotal.toString())
     for (const customerId of metricsCustomerIds) {

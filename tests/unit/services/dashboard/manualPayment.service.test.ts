@@ -32,6 +32,16 @@ jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
   updateCustomerMetrics: (...args: any[]) => updateCustomerMetricsMock(...args),
 }))
 
+// El outbox durable de inventario, mockeado para observar CON QUÉ cliente de
+// transacción nace el vale y que el aplicador corra tras el commit.
+const createSalePostingInTxMock = jest.fn()
+const applySalePostingMock = jest.fn()
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: (...args: any[]) => createSalePostingInTxMock(...args),
+  applySalePosting: (...args: any[]) => applySalePostingMock(...args),
+}))
+
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -52,6 +62,8 @@ describe('manualPayment.service', () => {
     // staffVenue.findFirst returns multiple shapes — waiter validation gets {staffId},
     // post-tx StaffVenue resolution gets {id}. Default returns both.
     ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ staffId: 'waiter-1', id: 'sv-1' })
+    createSalePostingInTxMock.mockResolvedValue({ id: 'posting-mp-1', status: 'PENDING' })
+    applySalePostingMock.mockResolvedValue({ postingId: 'posting-mp-1', applied: true, issues: [] })
   })
 
   describe('createManualPayment', () => {
@@ -188,6 +200,110 @@ describe('manualPayment.service', () => {
           where: { id: ORDER_ID },
           data: expect.objectContaining({ paymentStatus: 'PAID' }),
         }),
+      )
+    })
+  })
+
+  // ─── INVENTARIO (fase 5.6) ───────────────────────────────────────────────
+  //
+  // Un pago manual adjunto a una orden REAL la marca PAID/COMPLETED y hasta
+  // ahora NO descontaba nada del almacén — el propio docstring del servicio lo
+  // declaraba "fuera del alcance de la V1". Con el vale durable ya existente,
+  // ese hueco es un defecto y no una decisión: la mercancía salió. La
+  // deducción va SOLO en la transición final a PAID, igual que en el TPV.
+  describe('inventario — el pago manual que salda una orden deja su vale', () => {
+    const ordenConProductos = (overrides: Record<string, any> = {}) => ({
+      id: ORDER_ID,
+      venueId: VENUE_ID,
+      subtotal: new Prisma.Decimal(100),
+      taxAmount: new Prisma.Decimal(0),
+      discountAmount: new Prisma.Decimal(0),
+      total: new Prisma.Decimal(100),
+      paymentStatus: 'PARTIAL',
+      payments: [{ amount: new Prisma.Decimal(70), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
+      orderCustomers: [],
+      items: [{ id: 'oi-1', productId: 'prod-1', quantity: 2, weightQuantity: null, modifiers: [] }],
+      ...overrides,
+    })
+
+    const armarTx = (order: any) => {
+      const txClient: any = {
+        order: { findFirst: jest.fn().mockResolvedValue(order), update: jest.fn() },
+        payment: { create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
+        shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
+        orderCustomer: { create: jest.fn() },
+        venueTransaction: { create: jest.fn() },
+        paymentAllocation: { create: jest.fn() },
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) => cb(txClient))
+      return txClient
+    }
+
+    const pagoQueSalda = {
+      orderId: ORDER_ID,
+      amount: '30',
+      tipAmount: '0',
+      method: 'CASH' as const,
+      source: 'OTHER' as const,
+      externalSource: 'BUQ',
+    }
+
+    it('el vale nace con el MISMO cliente de transacción que marcó la orden PAID', async () => {
+      const txClient = armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(createSalePostingInTxMock).toHaveBeenCalled()
+      expect(createSalePostingInTxMock.mock.calls[0][0]).toBe(txClient)
+      expect(createSalePostingInTxMock.mock.calls[0][1]).toEqual(expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID }))
+    })
+
+    it('aplicar el vale ocurre DESPUÉS del commit, no dentro de la transacción', async () => {
+      const order = ordenConProductos()
+      let aplicadoDentroDeLaTx = false
+      const txClient: any = {
+        order: { findFirst: jest.fn().mockResolvedValue(order), update: jest.fn() },
+        payment: { create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
+        shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
+        orderCustomer: { create: jest.fn() },
+        venueTransaction: { create: jest.fn() },
+        paymentAllocation: { create: jest.fn() },
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) => {
+        const r = await cb(txClient)
+        aplicadoDentroDeLaTx = applySalePostingMock.mock.calls.length > 0
+        return r
+      })
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(aplicadoDentroDeLaTx).toBe(false)
+      expect(applySalePostingMock).toHaveBeenCalledWith('posting-mp-1', expect.anything())
+    })
+
+    it('un pago PARCIAL no deduce — la deducción es al saldar, como en el TPV', async () => {
+      armarTx(ordenConProductos({ payments: [] })) // 30 de 100 → sigue PARTIAL
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
+    })
+
+    it('si aplicar el vale truena, el pago registrado NO se cae', async () => {
+      armarTx(ordenConProductos())
+      applySalePostingMock.mockRejectedValueOnce(new Error('pool agotado'))
+
+      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).resolves.toBeDefined()
+    })
+
+    it('la orden se lee CON sus renglones — sin ellos el vale nacería vacío', async () => {
+      const txClient = armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(txClient.order.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ include: expect.objectContaining({ items: expect.anything() }) }),
       )
     })
   })
