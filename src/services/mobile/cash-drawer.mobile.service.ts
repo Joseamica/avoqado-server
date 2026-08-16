@@ -608,6 +608,29 @@ function formatSession(session: any) {
   }
 }
 
+/**
+ * 🔴 `localId` SALE EN LA RESPUESTA: sin él los clientes fusionan por INFERENCIA.
+ *
+ * La llave ya se guardaba —la manda el POS al sincronizar y el servidor la deriva del
+ * `paymentId` para lo que escribe él (`srv-cash-sale:` / `srv-refund:`, ver
+ * `services/shared/cashDrawerPosting.ts`)— pero NUNCA se devolvía. El cliente recibía el
+ * evento del servidor sin forma de reconocer que ERA EL SUYO, así que lo insertaba al lado
+ * del que ya tenía en su base local: el MISMO movimiento, dos filas, dos veces en el arqueo.
+ *
+ * Medido en Android: un PAY_IN de $100 que ya estaba en Room antes de actualizar la app deja
+ * el esperado del cajero en **$5,330.00 en vez de $5,230.00 — +$100**, el tamaño exacto del
+ * movimiento heredado (con un PAY_OUT el error va al otro lado: faltante inventado). No se
+ * cura solo: la limpieza por tipo del cliente excluye PAY_IN/PAY_OUT a propósito (un retiro
+ * sin red debe sobrevivir) y su promoción sólo corre al ESCRIBIR el evento, así que jamás
+ * alcanza filas que ya estaban en la base. Es PERMANENTE.
+ *
+ * Con la llave la fusión es exacta: `localId` que el cliente reconoce → es suyo, la fila local
+ * adopta el id del servidor (UNA fila); `localId` desconocido o null → es de otro aparato o lo
+ * escribió el servidor, entra por su id.
+ *
+ * ADITIVO y OPCIONAL (contrato /mobile — nunca se quita ni se renombra un campo): `null`
+ * cuando la fila no tiene llave, y una app vieja que no lo lee se comporta idéntico a hoy.
+ */
 function formatEvent(event: any) {
   return {
     id: event.id,
@@ -618,6 +641,7 @@ function formatEvent(event: any) {
     staffId: event.staffId,
     staffName: event.staffName,
     orderId: event.orderId,
+    localId: event.localId ?? null,
     createdAt: event.createdAt.toISOString(),
   }
 }
