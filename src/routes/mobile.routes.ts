@@ -1513,11 +1513,17 @@ router.get(
 /**
  * GET /api/v1/mobile/venues/:venueId/terminals/online
  * List terminals currently connected via Socket.IO.
+ *
+ * Pide `payments:create` —el mismo permiso que mandar el cobro a la terminal—,
+ * no `tpv:read`: ver qué aparato está prendido es parte de COBRAR, no de
+ * ADMINISTRAR terminales (listarlas y ver su salud desde el dashboard). Con
+ * `tpv:read` un CASHIER, cuyo trabajo es justamente cobrar, recibía «No tienes
+ * permiso» a media pantalla de propina porque la app consulta esta ruta sola.
  */
 router.get(
   '/venues/:venueId/terminals/online',
   authenticateTokenMiddleware,
-  checkPermission('tpv:read'),
+  checkPermission('payments:create'),
   terminalPaymentMobileController.getOnlineTerminals,
 )
 
