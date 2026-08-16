@@ -57,7 +57,7 @@ import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateVenueAccess, requireVenueMembership } from '../middlewares/validateVenueAccess.middleware'
-import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
+import { pinLoginRateLimiter, pinOverrideRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -943,7 +943,10 @@ router.post(
   '/venues/:venueId/permission-overrides',
   authenticateTokenMiddleware,
   requireVenueMembership,
-  pinLoginRateLimiter,
+  // 🔴 Cubeta PROPIA, no la del login: compartirla hacía que un cambio de turno
+  // dejara al local sin poder autorizar, y que las autorizaciones dejaran al
+  // personal sin poder checar entrada. Mismos topes, presupuesto separado.
+  pinOverrideRateLimiter,
   validateRequest(createPermissionOverrideSchema),
   permissionOverrideMobileController.createOverride,
 )

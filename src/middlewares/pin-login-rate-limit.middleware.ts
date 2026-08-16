@@ -147,3 +147,66 @@ export const venueRateLimiter: RateLimitRequestHandler = rateLimit({
  * )
  */
 export const pinLoginRateLimiter = [ipRateLimiter, venueRateLimiter]
+
+/**
+ * Autorización con PIN de gerente — CUBETA PROPIA.
+ *
+ * 🔴 Montar `pinLoginRateLimiter` aquí ponía las autorizaciones en el MISMO
+ * contador que el login de TPV y los cinco endpoints del reloj checador: sus
+ * llaves son fijas (`pin-login:ip:` / `pin-login:venue:`) y no distinguen la
+ * ruta. Como todas las terminales de un local salen por una sola IP (NAT), un
+ * cambio de turno con once checadas dejaba al negocio sin poder autorizar
+ * durante quince minutos — y al revés, una tarde con varias autorizaciones
+ * dejaba al personal sin poder checar entrada.
+ *
+ * Peor aún, el 429 mentía sobre la causa: hablaba de "intentos de inicio de
+ * sesión" a alguien que nunca intentó entrar. Aquí el mensaje dice lo que pasó.
+ *
+ * Los topes son los mismos; lo que cambia es que el presupuesto ya no se comparte.
+ */
+const overrideIpRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: RATE_LIMIT_CONFIG.IP.windowMs,
+  max: RATE_LIMIT_CONFIG.IP.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown'
+    return `pin-override:ip:${ip}`
+  },
+  handler: (req: Request, res: Response) => {
+    logger.warn('🚨 Rate limit de autorización por PIN excedido (por IP)', {
+      ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
+      venueId: req.params.venueId || 'unknown',
+      endpoint: req.path,
+      userAgent: req.get('user-agent'),
+    })
+    res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Demasiados intentos de autorización. Espera 15 minutos.',
+      retryAfter: 15 * 60,
+    })
+  },
+})
+
+const overrideVenueRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: RATE_LIMIT_CONFIG.VENUE.windowMs,
+  max: RATE_LIMIT_CONFIG.VENUE.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => `pin-override:venue:${req.params.venueId || 'unknown'}`,
+  skip: (req: Request) => !req.params.venueId,
+  handler: (req: Request, res: Response) => {
+    logger.warn('🚨 Rate limit de autorización por PIN excedido (por venue)', {
+      venueId: req.params.venueId || 'unknown',
+      ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
+      endpoint: req.path,
+    })
+    res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Demasiados intentos de autorización. Espera 15 minutos.',
+      retryAfter: 15 * 60,
+    })
+  },
+})
+
+export const pinOverrideRateLimiter = [overrideIpRateLimiter, overrideVenueRateLimiter]
