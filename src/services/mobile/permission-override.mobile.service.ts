@@ -28,6 +28,23 @@ export class OverrideInvalidPinError extends Error {
   }
 }
 
+/**
+ * El venue no tiene activada la autorización por PIN.
+ *
+ * 🔴 Existe porque el switch tiene que valer en el SERVER, no sólo en el POS.
+ * Antes sólo se consultaba para adornar el 403 con `overridable`, así que un
+ * negocio con la función apagada seguía emitiendo y aceptando tokens para
+ * cualquiera que mandara la petición a mano (curl, un APK viejo). "Apagado"
+ * ahora significa apagado.
+ */
+export class OverrideDisabledError extends Error {
+  readonly code = 'OVERRIDE_DISABLED' as const
+  constructor() {
+    super('Este negocio no tiene activada la autorización con código de encargado')
+    this.name = 'OverrideDisabledError'
+  }
+}
+
 export class OverrideInsufficientError extends Error {
   readonly code = 'OVERRIDE_INSUFFICIENT' as const
   /**
@@ -81,6 +98,13 @@ export async function createPermissionOverride(params: {
 }): Promise<{ token: string; expiresAt: Date; authorizedBy: { id: string; name: string } }> {
   const { venueId, pin, permission, requestedById = null } = params
   const now = params.now ?? new Date()
+
+  // 🔴 La puerta va ANTES de mirar el PIN: si el negocio no activó la función,
+  // ni siquiera se compara un código. Fail-closed — `isManagerPinOverrideEnabled`
+  // ya devuelve false si la lectura truena.
+  if (!(await isManagerPinOverrideEnabled(venueId))) {
+    throw new OverrideDisabledError()
+  }
 
   const staffVenue = await prisma.staffVenue.findFirst({
     where: { venueId, pin, active: true },
@@ -159,6 +183,15 @@ export async function consumePermissionOverride(params: {
   const now = params.now ?? new Date()
 
   try {
+    // 🔴 El switch también manda al CONSUMIR, no sólo al emitir: si el negocio
+    // apagó la función, un token vivo emitido hace 40 s deja de servir. Va antes
+    // del updateMany a propósito — apagar el switch no puede QUEMAR los tokens
+    // de quien alcanzó a pedirlos, sólo dejarlos sin efecto.
+    if (!(await isManagerPinOverrideEnabled(venueId))) {
+      logger.warn('Token de override presentado en un venue con la función apagada', { venueId, permission, route })
+      return null
+    }
+
     const claimed = await prisma.permissionOverride.updateMany({
       where: { token, venueId, permission, consumedAt: null, expiresAt: { gt: now } },
       data: { consumedAt: now, consumedRoute: route },

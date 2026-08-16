@@ -6,6 +6,7 @@ import {
   isManagerPinOverrideEnabled,
   OverrideInvalidPinError,
   OverrideInsufficientError,
+  OverrideDisabledError,
   OVERRIDE_TTL_MS,
 } from '@/services/mobile/permission-override.mobile.service'
 
@@ -46,6 +47,56 @@ beforeEach(() => {
   jest.clearAllMocks()
   ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue(null)
   ;(prisma.permissionOverride.create as jest.Mock).mockImplementation(async ({ data }: any) => data)
+  // El switch del venue ENCENDIDO es la precondición de todo el flujo. Los casos
+  // con el switch apagado lo sobreescriben explícitamente.
+  ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+})
+
+/**
+ * 🔴 El switch NO es una pista para el cliente: es la puerta.
+ *
+ * Antes sólo se consultaba para adornar el 403 con `overridable`, así que un
+ * venue con la función APAGADA seguía emitiendo y aceptando tokens para quien
+ * mandara la petición a mano. "Apagado" tiene que significar apagado en el
+ * server, no sólo que el POS deje de ofrecer el teclado.
+ */
+describe('el switch del venue manda (apagado = apagado)', () => {
+  it('con el switch APAGADO no se emite token, aunque el PIN sea de alguien con el permiso', async () => {
+    ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: false })
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(managerStaffVenue)
+
+    await expect(
+      createPermissionOverride({ venueId: VENUE, pin: '1234', permission: 'orders:merge', now: NOW }),
+    ).rejects.toBeInstanceOf(OverrideDisabledError)
+    expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
+  })
+
+  it('con el switch APAGADO un token ya emitido tampoco se consume', async () => {
+    ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: false })
+    ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+
+    const result = await consumePermissionOverride({
+      token: 'tok_1',
+      venueId: VENUE,
+      permission: 'orders:merge',
+      route: 'POST /api/v1/mobile/venues/:venueId/orders/:orderId/merge',
+      now: NOW,
+    })
+
+    expect(result).toBeNull()
+    // No basta con devolver null: el token NO puede quedar marcado como usado,
+    // o apagar el switch quemaría los tokens vivos de quien sí los pidió antes.
+    expect(prisma.permissionOverride.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('si la lectura del switch falla, se cierra la puerta (fail-closed)', async () => {
+    ;(prisma.venueSettings.findUnique as jest.Mock).mockRejectedValue(new Error('db caída'))
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(managerStaffVenue)
+
+    await expect(
+      createPermissionOverride({ venueId: VENUE, pin: '1234', permission: 'orders:merge', now: NOW }),
+    ).rejects.toBeInstanceOf(OverrideDisabledError)
+  })
 })
 
 describe('createPermissionOverride', () => {

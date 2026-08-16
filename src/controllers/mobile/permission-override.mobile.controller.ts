@@ -11,6 +11,7 @@ import logger from '../../config/logger'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import {
   createPermissionOverride,
+  OverrideDisabledError,
   OverrideInsufficientError,
   OverrideInvalidPinError,
 } from '../../services/mobile/permission-override.mobile.service'
@@ -52,6 +53,12 @@ export const createOverride = async (req: Request, res: Response, next: NextFunc
       },
     })
   } catch (error) {
+    // El negocio no activó la función: no es un PIN malo ni un permiso que falte,
+    // así que no puede contarse como intento sospechoso ni pintarse como "código
+    // incorrecto". 403 con código propio para que el POS lo distinga.
+    if (error instanceof OverrideDisabledError) {
+      return res.status(403).json({ success: false, code: 'OVERRIDE_DISABLED', message: error.message })
+    }
     if (error instanceof OverrideInvalidPinError) {
       return res.status(401).json({ success: false, code: 'OVERRIDE_INVALID_PIN', message: error.message })
     }

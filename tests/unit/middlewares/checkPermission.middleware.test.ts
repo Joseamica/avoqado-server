@@ -409,7 +409,29 @@ describe('checkPermission Middleware', () => {
       expect(jsonMock).toHaveBeenCalledWith({ error: 'Forbidden', message: 'No access to this venue' })
     })
 
+    /**
+     * 🔴 Este test fijaba lo contrario hasta 2026-08-16: con el switch APAGADO
+     * (el default de este describe) daba por bueno el token. Documentaba el bug
+     * — el server aceptaba autorizaciones en negocios que nunca activaron la
+     * función. Ahora el switch es la puerta, así que los casos del token tienen
+     * que encenderlo explícitamente.
+     */
+    it('switch OFF → un token válido en el header TAMPOCO deja pasar', async () => {
+      ;(mockReq as any).headers = { 'x-permission-override': 'tok_abc' }
+      ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_manager' })
+
+      await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).not.toHaveBeenCalled()
+      expect(statusMock).toHaveBeenCalledWith(403)
+      // Y el token NO se marca como usado: apagar el switch no puede quemar los
+      // tokens de quien alcanzó a pedirlos.
+      expect(prisma.permissionOverride.updateMany).not.toHaveBeenCalled()
+    })
+
     it('token válido en el header → deja pasar y expone quién autorizó', async () => {
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
       ;(mockReq as any).headers = { 'x-permission-override': 'tok_abc' }
       ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_manager' })
@@ -422,6 +444,7 @@ describe('checkPermission Middleware', () => {
     })
 
     it('el consumo exige token + venue + permiso, sin usar y sin expirar', async () => {
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
       ;(mockReq as any).headers = { 'x-permission-override': 'tok_abc' }
       ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_manager' })
@@ -451,6 +474,7 @@ describe('checkPermission Middleware', () => {
     })
 
     it('token de OTRO permiso no sirve (el WHERE lo filtra → count 0 → 403)', async () => {
+      ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
       ;(mockReq as any).headers = { 'x-permission-override': 'tok_de_refund' }
       ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
 
