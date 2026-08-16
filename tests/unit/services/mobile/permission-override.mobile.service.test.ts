@@ -65,9 +65,9 @@ describe('el switch del venue manda (apagado = apagado)', () => {
     ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: false })
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(managerStaffVenue)
 
-    await expect(
-      createPermissionOverride({ venueId: VENUE, pin: '1234', permission: 'orders:merge', now: NOW }),
-    ).rejects.toBeInstanceOf(OverrideDisabledError)
+    await expect(createPermissionOverride({ venueId: VENUE, pin: '1234', permission: 'orders:merge', now: NOW })).rejects.toBeInstanceOf(
+      OverrideDisabledError,
+    )
     expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
   })
 
@@ -117,9 +117,9 @@ describe('el switch del venue manda (apagado = apagado)', () => {
     ;(prisma.venueSettings.findUnique as jest.Mock).mockRejectedValue(new Error('db caída'))
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(managerStaffVenue)
 
-    await expect(
-      createPermissionOverride({ venueId: VENUE, pin: '1234', permission: 'orders:merge', now: NOW }),
-    ).rejects.toBeInstanceOf(OverrideDisabledError)
+    await expect(createPermissionOverride({ venueId: VENUE, pin: '1234', permission: 'orders:merge', now: NOW })).rejects.toBeInstanceOf(
+      OverrideDisabledError,
+    )
   })
 })
 
