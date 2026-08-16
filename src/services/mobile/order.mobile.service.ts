@@ -101,11 +101,26 @@ export interface CreatedOrderResponse {
     total: number
     discountAmount: number
     appliedDiscountId: string | null
+    /** Ata la línea a la promoción que la creó. null = línea normal. */
+    orderPromotionId: string | null
     modifiers: Array<{
       id: string
       name: string
       price: number
     }>
+  }>
+  /** Promociones vendidas en esta orden — el POS las usa para agrupar sus
+   *  líneas y etiquetarlas (p.ej. "Combo del día"). El nombre sale del
+   *  SNAPSHOT (lo que se cobró), nunca de la promoción viva, que pudo
+   *  editarse después. netCents/discountCents son centavos internos del
+   *  contrato — se exponen tal cual, no en pesos. */
+  promotions: Array<{
+    id: string
+    instanceId: string
+    name: string
+    netCents: number
+    discountCents: number
+    needsReview: boolean
   }>
   createdAt: Date
 }
@@ -342,6 +357,10 @@ const createdOrderInclude = {
       },
     },
   },
+  // Las promociones vendidas en esta orden. El POS las usa para agrupar sus
+  // líneas y etiquetarlas; el nombre sale del SNAPSHOT (lo que se cobró), no
+  // de la promoción viva, que pudo editarse después.
+  promotions: { select: { id: true, instanceId: true, snapshotJson: true, netCents: true, discountCents: true, needsReview: true } },
 } as const
 
 function toCreatedOrderResponse(order: any): CreatedOrderResponse {
@@ -364,7 +383,17 @@ function toCreatedOrderResponse(order: any): CreatedOrderResponse {
       total: Number(item.total),
       discountAmount: Number(item.discountAmount || 0),
       appliedDiscountId: item.appliedDiscountId || null,
+      /** Ata la línea a la promoción que la creó. null = línea normal. */
+      orderPromotionId: item.orderPromotionId ?? null,
       modifiers: item.modifiers || [],
+    })),
+    promotions: (flattenedOrder.promotions ?? []).map((p: any) => ({
+      id: p.id,
+      instanceId: p.instanceId,
+      name: (p.snapshotJson as any)?.name ?? '',
+      netCents: p.netCents,
+      discountCents: p.discountCents,
+      needsReview: p.needsReview,
     })),
     createdAt: flattenedOrder.createdAt,
   }
