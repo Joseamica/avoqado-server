@@ -107,7 +107,12 @@ export async function createPermissionOverride(params: {
   }
 
   const staffVenue = await prisma.staffVenue.findFirst({
-    where: { venueId, pin, active: true },
+    // 🔴 Las DOS banderas, igual que el reloj checador
+    // (`time-entry.mobile.service.ts`, sus cinco búsquedas): `active` es la
+    // membresía en ESTE venue, `staff.active` es la cuenta de la persona. Con
+    // sólo la primera, a un gerente dado de baja se le impedía checar entrada
+    // mientras su código seguía autorizando reembolsos.
+    where: { venueId, pin, active: true, staff: { active: true } },
     select: {
       id: true,
       role: true,

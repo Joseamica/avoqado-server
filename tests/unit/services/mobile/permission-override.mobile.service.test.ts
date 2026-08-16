@@ -89,6 +89,30 @@ describe('el switch del venue manda (apagado = apagado)', () => {
     expect(prisma.permissionOverride.updateMany).not.toHaveBeenCalled()
   })
 
+  /**
+   * 🔴 "Este PIN es de alguien que TODAVÍA trabaja aquí" tiene que significar lo
+   * mismo aquí que en el reloj checador. `time-entry.mobile.service.ts` exige
+   * las DOS banderas (StaffVenue.active y staff.active) en sus cinco búsquedas;
+   * si aquí sólo se mira la primera, a un gerente dado de baja a nivel Staff se
+   * le impide checar entrada pero su código sigue autorizando reembolsos.
+   */
+  it('el PIN sólo cuenta si la persona sigue activa TAMBIÉN como empleado', async () => {
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(managerStaffVenue)
+
+    await createPermissionOverride({ venueId: VENUE, pin: '1234', permission: 'orders:merge', now: NOW })
+
+    expect(prisma.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          venueId: VENUE,
+          pin: '1234',
+          active: true,
+          staff: { active: true },
+        }),
+      }),
+    )
+  })
+
   it('si la lectura del switch falla, se cierra la puerta (fail-closed)', async () => {
     ;(prisma.venueSettings.findUnique as jest.Mock).mockRejectedValue(new Error('db caída'))
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(managerStaffVenue)
