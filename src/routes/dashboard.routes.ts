@@ -56,6 +56,13 @@ import * as venueRoleConfigController from '../controllers/dashboard/venueRoleCo
 import * as venueSettingsController from '../controllers/dashboard/venueSettings.dashboard.controller'
 import * as loyaltyController from '../controllers/dashboard/loyalty.dashboard.controller'
 import * as discountController from '../controllers/dashboard/discount.dashboard.controller'
+import * as tenderTypeController from '../controllers/dashboard/tenderType.dashboard.controller'
+import {
+  tenderTypeVenueParamsSchema,
+  tenderTypeParamsSchema,
+  createTenderTypeBodySchema,
+  updateTenderTypeBodySchema,
+} from '../schemas/dashboard/tenderType.schema'
 import * as promotionDashboardController from '../controllers/dashboard/promotion.dashboard.controller'
 import * as couponController from '../controllers/dashboard/coupon.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
@@ -11519,6 +11526,68 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('venues:manage'),
   venueChatDashController.deactivate,
+)
+
+// ==========================================
+// TENDER TYPES (tipos de pago personalizados — VenueTenderType catalog, slice A1)
+// NOT /payment-methods: that path already means Stripe billing cards.
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tender-types:
+ *   get:
+ *     tags: [TenderTypes]
+ *     summary: List the venue tender-type catalog (system + custom, incl. disabled)
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Tender type catalog }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/tender-types',
+  authenticateTokenMiddleware,
+  checkPermission('tender-types:read'),
+  validateRequest(z.object({ params: tenderTypeVenueParamsSchema })),
+  tenderTypeController.listTenderTypes,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tender-types:
+ *   post:
+ *     tags: [TenderTypes]
+ *     summary: Create a custom tender type (baseMethod is always OTHER, server-enforced)
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       201: { description: Created tender type }
+ *       409: { description: Duplicate name in this venue }
+ */
+router.post(
+  '/venues/:venueId/tender-types',
+  authenticateTokenMiddleware,
+  checkPermission('tender-types:manage'),
+  validateRequest(z.object({ params: tenderTypeVenueParamsSchema, body: createTenderTypeBodySchema })),
+  tenderTypeController.createTenderType,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tender-types/{tenderTypeId}:
+ *   patch:
+ *     tags: [TenderTypes]
+ *     summary: Update a tender type (optimistic via expectedRevision; 409 on stale editor)
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Updated tender type }
+ *       409: { description: Revision changed underneath the editor }
+ */
+router.patch(
+  '/venues/:venueId/tender-types/:tenderTypeId',
+  authenticateTokenMiddleware,
+  checkPermission('tender-types:manage'),
+  validateRequest(z.object({ params: tenderTypeParamsSchema, body: updateTenderTypeBodySchema })),
+  tenderTypeController.updateTenderType,
 )
 
 export default router

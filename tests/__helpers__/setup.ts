@@ -223,6 +223,9 @@ const prismaMock: any = {
   // Field-promoter geolocation ("cambaceo" tracking)
   promoterLocationPing: createMockModel(),
   venueSettings: createMockModel(),
+  // Custom tender types (VenueTenderType catalog + append-only revisions)
+  venueTenderType: createMockModel(),
+  venueTenderTypeRevision: createMockModel(),
   // Organization dashboard models
   cashDeposit: createMockModel(),
   stockAlertConfig: createMockModel(),

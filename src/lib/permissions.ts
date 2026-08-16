@@ -369,6 +369,8 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'customers:read', // Need to see customers for customer discounts
   ],
   'discounts:create': ['discounts:read', 'discounts:create', 'products:read', 'customers:read'],
+  // Managing the tender-type catalog implies being able to read it.
+  'tender-types:manage': ['tender-types:read', 'tender-types:manage'],
   'discounts:update': ['discounts:read', 'discounts:update'],
   'discounts:delete': ['discounts:read', 'discounts:delete'],
   // Upsell "¿Algo más?" — sugerencias en la pantalla del cliente y la franja del cajero.
@@ -729,6 +731,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'settlements:simulate',
     'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
     'payments:routing-read', // MERCHANT_ROUTING_RULES: ver reglas de enrutamiento de merchants (editar = ADMIN+ vía payments:*)
+    'tender-types:read', // Tipos de pago personalizados: ver el catálogo (editar = ADMIN+)
     'printers:read', // PRINT_STATIONS: ver impresoras, estaciones y ruteo de comandas
     'printers:manage', // PRINT_STATIONS: configurar impresoras, estaciones y ruteo (operativo — MANAGER+)
     'menu:read',
@@ -880,6 +883,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:*',
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'payments:*',
+    'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
     'area-tickets:*', // Operate and configure multi-area retail tickets
     'scale:*', // Use and configure connected scales
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
@@ -1003,6 +1007,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'menu:*',
     'orders:*',
     'payments:*',
+    'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
     'area-tickets:*', // Operate and configure multi-area retail tickets
     'scale:*', // Use and configure connected scales
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
@@ -1512,6 +1517,9 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   ],
   scale: ['scale:use', 'scale:configure'],
   payments: ['payments:read', 'payments:create', 'payments:refund', 'payments:routing-read', 'payments:routing-manage'],
+  // Tipos de pago personalizados (VenueTenderType) — catálogo de tenders del venue.
+  // NO confundir con billing:payment-methods (tarjetas Stripe de facturación).
+  'tender-types': ['tender-types:read', 'tender-types:manage'],
   printers: ['printers:read', 'printers:manage'],
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],

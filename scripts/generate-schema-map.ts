@@ -314,6 +314,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 10. Payments & Fees
   Payment: 'Payments & Fees',
   PaymentAllocation: 'Payments & Fees',
+  VenueTenderType: 'Payments & Fees',
+  VenueTenderTypeRevision: 'Payments & Fees',
   MerchantRoutingRule: 'Payments & Fees',
   VenueTransaction: 'Payments & Fees',
   BankStatement: 'Payments & Fees',

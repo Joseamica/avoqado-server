@@ -50,6 +50,7 @@ import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPrinterTools } from './tools/printers'
+import { registerTenderTypeTools } from './tools/tenderTypes'
 import { registerAreaTicketTools } from './tools/areaTickets'
 import { registerCashOutTools } from './tools/cash-out'
 import { registerWhiteLabelOpsTools } from './tools/whiteLabelOps'
@@ -130,6 +131,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerActivityLogTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPrinterTools(server, scope)
+  registerTenderTypeTools(server, scope)
   registerAreaTicketTools(server, scope)
 
   if (flags.catalogEnabled) registerMasterCatalogTools(server, scope)

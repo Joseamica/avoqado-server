@@ -354,6 +354,7 @@ model Venue {
   promoterLocationPings PromoterLocationPing[]
   orders                Order[]
   payments              Payment[]
+  tenderTypes           VenueTenderType[]
   transactions          VenueTransaction[]
   reviews               Review[]
   terminals             Terminal[]
@@ -3636,10 +3637,26 @@ model Payment {
   ecommerceMerchantId String?
   ecommerceMerchant   EcommerceMerchant? @relation(fields: [ecommerceMerchantId], references: [id], onDelete: SetNull)
 
-  // Fee calculation
+  // Fee calculation — PROCESSOR/application fee ONLY (what Stripe/Blumon/Avoqado keep).
+  // Commercial tender commission (Uber's ~30%) lives in tenderCommission* below — never here.
   feePercentage Decimal @db.Decimal(5, 4)
   feeAmount     Decimal @db.Decimal(10, 2)
   netAmount     Decimal @db.Decimal(12, 2)
+
+  // 🏷️ Custom tender type (VenueTenderType) — all nullable/additive; legacy clients keep
+  // sending `method` only. Clients reference {tenderTypeId, tenderRevision}; the SERVER
+  // resolves and freezes these snapshots at charge time from VenueTenderTypeRevision, so
+  // later catalog edits never reinterpret recorded payments. The composite FK
+  // [venueId, tenderTypeId] makes cross-venue references impossible.
+  tenderTypeId            String?
+  tenderType              VenueTenderType? @relation(fields: [venueId, tenderTypeId], references: [venueId, id], onDelete: Restrict)
+  tenderRevision          Int?
+  tenderLabel             String?          @db.VarChar(80)
+  tenderCountsAsCash      Boolean?
+  tenderCaptureTip        Boolean?
+  tenderSatFormaPago      String?          @db.VarChar(2)
+  tenderCommissionPercent Decimal?         @db.Decimal(5, 2)
+  tenderCommissionAmount  Decimal?         @db.Decimal(10, 2)
 
   // Receipt
   receipts DigitalReceipt[]
@@ -3701,6 +3718,100 @@ model Payment {
   @@index([merchantAccountId, createdAt])
   @@index([venueId, externalSource])
   @@index([ecommerceMerchantId])
+  @@index([venueId, tenderTypeId])
+}
+
+/// Venue-defined tender type ("Uber Eats", "Vale de despensa"): a reporting/settlement
+/// label layered ON TOP of the fiscal `PaymentMethod` enum — never a replacement for it.
+/// System rows (isSystem) mirror the built-in methods; custom rows ALWAYS resolve to
+/// `baseMethod = OTHER` (Square-parity: the real tender stays "Other", the name is a
+/// reporting layer). Money/fiscal-semantic edits bump `revision` and append a
+/// VenueTenderTypeRevision row so historical payments are never reinterpreted.
+model VenueTenderType {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  name           String @db.VarChar(80)
+  /// Server-computed (lowercase/trimmed/accent-stripped) — the per-venue uniqueness key.
+  /// Clients never supply it.
+  normalizedName String @db.VarChar(80)
+
+  /// System rows: CASH / CREDIT_CARD / DEBIT_CARD / BANK_TRANSFER. Custom rows: ALWAYS OTHER.
+  /// Immutable after creation (service-enforced).
+  baseMethod PaymentMethod
+  isSystem   Boolean       @default(false)
+
+  /// Does money received with this tender physically enter the cash drawer?
+  /// (Vale de despensa: yes — it's counted at closeout. Uber Eats: no — informational only.)
+  countsAsPhysicalCash Boolean       @default(false)
+  /// Square-parity: whether the POS captures a tip with this tender.
+  captureTip           Boolean       @default(true)
+  /// Toast-parity: a tender can exist for reconciliation without being shown to cashiers.
+  showOnPos            Boolean       @default(true)
+  /// Square-parity charge-screen layout: PRIMARY = first-level row, MORE = behind "Más ›".
+  posSection           TenderSection @default(MORE)
+  displayOrder         Int           @default(0)
+
+  /// COMMERCIAL commission the platform/issuer keeps (e.g. Uber ~30%). Snapshotted into
+  /// Payment.tenderCommission* for the PRO commissions report — NEVER written into the
+  /// processor fee fields (feePercentage/feeAmount/netAmount), which mean something else.
+  commissionPercent Decimal? @db.Decimal(5, 2)
+
+  /// Real SAT c_FormaPago code for CFDI (voucher card = '05', paper voucher = '08',
+  /// transfer = '03'). '99' is forbidden here (service-enforced). NULL = payments with
+  /// this tender are not individually invoiceable (blocked with a visible explanation).
+  satFormaPago String? @db.VarChar(2)
+
+  /// Optional channel bridge (Soft Restaurant-style): picking this tender also tags the
+  /// order's source, so channel and tender stay consistent with one cashier action.
+  linkedOrderSource OrderSource?
+
+  /// Soft-disable only — payments FK here with onDelete: Restrict and rows are never
+  /// hard-deleted, so offline replays can always resolve their reference.
+  active Boolean @default(true)
+
+  /// Bumped on every edit of money/fiscal-semantic fields (name, countsAsPhysicalCash,
+  /// captureTip, commissionPercent, satFormaPago). Each bump appends a revision row in
+  /// the SAME transaction. Also the optimistic-concurrency precondition for updates.
+  revision Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  revisions VenueTenderTypeRevision[]
+  payments  Payment[]
+
+  @@unique([venueId, normalizedName])
+  @@unique([venueId, id]) // enables the composite FK from Payment (cross-venue-proof)
+  @@index([venueId, active])
+}
+
+/// Append-only frozen copy of a VenueTenderType's money/fiscal-semantic fields at each
+/// revision. Clients reference {tenderTypeId, revision}; the SERVER resolves everything
+/// from this table — no client ever supplies money semantics (a buggy or malicious POS
+/// cannot invent a commission or a cash-drawer classification). Rows are never updated
+/// or deleted.
+model VenueTenderTypeRevision {
+  id           String @id @default(cuid())
+  venueId      String
+  tenderTypeId String
+  revision     Int
+
+  name                 String   @db.VarChar(80)
+  countsAsPhysicalCash Boolean
+  captureTip           Boolean
+  commissionPercent    Decimal? @db.Decimal(5, 2)
+  satFormaPago         String?  @db.VarChar(2)
+
+  createdAt DateTime @default(now())
+  /// Staff who made the edit (ActivityLog carries the full request context).
+  createdBy String?
+
+  tenderType VenueTenderType @relation(fields: [venueId, tenderTypeId], references: [venueId, id], onDelete: Cascade)
+
+  @@unique([tenderTypeId, revision])
+  @@index([venueId, tenderTypeId])
 }
 
 model PaymentAllocation {
@@ -7542,6 +7653,12 @@ enum PaymentMethod {
   BANK_TRANSFER
   CRYPTOCURRENCY // B4Bit crypto payments (BTC, ETH, USDT, etc.)
   OTHER
+}
+
+/// Square-parity layout of the POS charge screen for VenueTenderType rows.
+enum TenderSection {
+  PRIMARY // first-level row on the charge screen
+  MORE // behind the "Más ›" button (second level)
 }
 
 enum CheckoutStatus {
