@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { PIN_REGEX, PIN_ERROR_MESSAGE } from './common/pin.schema'
 
 // Authentication schemas
 // NOTE: Allows 4-10 digits for flexible PIN length
@@ -12,7 +13,7 @@ export const pinLoginSchema = z.object({
       .string()
       .min(4, { message: 'El PIN debe tener al menos 4 dígitos.' })
       .max(10, { message: 'El PIN no puede tener más de 10 dígitos.' })
-      .regex(/^\d{4,10}$/, { message: 'El PIN debe contener solo números (4-10 dígitos).' }),
+      .regex(PIN_REGEX, { message: PIN_ERROR_MESSAGE }),
     serialNumber: z
       .string()
       .min(1, { message: 'El número de serie es requerido.' })

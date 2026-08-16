@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { PIN_REGEX } from '../common/pin.schema'
 
 /**
  * PIN de autorización de gerente. El PIN viaja UNA vez por request, sobre TLS,
@@ -11,7 +12,7 @@ export const createPermissionOverrideSchema = z.object({
   body: z.object({
     // 4-10 dígitos: el mismo rango que tpv.schema.ts, invitation.schema.ts y el
     // alta por superadmin. Un rango distinto aquí rechazaría PINs válidos.
-    pin: z.string().regex(/^\d{4,10}$/, { message: 'El código debe tener entre 4 y 10 dígitos.' }),
+    pin: z.string().regex(PIN_REGEX, { message: 'El código debe tener entre 4 y 10 dígitos.' }),
     permission: z
       .string()
       .min(3, { message: 'El permiso es requerido.' })

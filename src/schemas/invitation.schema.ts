@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { PIN_REGEX, PIN_ERROR_MESSAGE } from './common/pin.schema'
 
 // Schema for validating invitation token in URL params
 export const InvitationTokenParamsSchema = z.object({
@@ -22,7 +23,7 @@ export const AcceptInvitationSchema = z.object({
     password: z.string().min(1, 'La contraseña es requerida').optional(),
     pin: z
       .string()
-      .regex(/^\d{4,10}$/, 'El PIN debe tener entre 4 y 10 dígitos')
+      .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
       .optional()
       .nullable(),
   }),

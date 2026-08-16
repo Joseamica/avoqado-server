@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { PIN_ERROR_MESSAGE, PIN_REGEX } from '../common/pin.schema'
 
 // ===========================================
 // PARAM SCHEMAS
@@ -66,7 +67,7 @@ export const createStaffSchema = z.object({
     // del alta por superadmin justo a los PINs que sostienen esa premisa.
     pin: z
       .string()
-      .regex(/^\d{4,10}$/, 'El PIN debe tener entre 4 y 10 dígitos')
+      .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
       .optional(),
   }),
 })
@@ -115,7 +116,7 @@ export const assignVenueSchema = z.object({
     // 4-10 dígitos: mismo rango que tpv.schema.ts e invitation.schema.ts.
     pin: z
       .string()
-      .regex(/^\d{4,10}$/, 'El PIN debe tener entre 4 y 10 dígitos')
+      .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
       .optional(),
   }),
 })
@@ -134,7 +135,7 @@ export const updateVenueAssignmentSchema = z.object({
     // 4-10 dígitos: mismo rango que tpv.schema.ts e invitation.schema.ts.
     pin: z
       .string()
-      .regex(/^\d{4,10}$/, 'El PIN debe tener entre 4 y 10 dígitos')
+      .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
       .optional()
       .nullable(),
     active: z.boolean().optional(),

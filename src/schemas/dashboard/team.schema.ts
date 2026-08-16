@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { StaffRole } from '@prisma/client'
+import { PIN_ERROR_MESSAGE, PIN_REGEX, optionalClearablePinSchema } from '../common/pin.schema'
 
 // Helper: Accept CUID, CUID2, and UUID formats (for legacy data compatibility)
 // CUID: starts with 'c', 25 chars total
@@ -56,7 +57,7 @@ export const InviteTeamMemberSchema = z.object({
       type: z.enum(['email', 'tpv-only']).optional().default('email'),
       pin: z
         .string()
-        .regex(/^\d{4,10}$/, 'PIN must be 4-10 digits')
+        .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
         .optional(),
       // When true and role is OWNER, creates StaffVenue for all organization venues
       inviteToAllVenues: z.boolean().optional(),
@@ -94,7 +95,10 @@ export const UpdateTeamMemberSchema = z.object({
         .refine(role => role !== StaffRole.SUPERADMIN, 'Cannot assign SUPERADMIN role')
         .optional(),
       active: z.boolean().optional(),
-      pin: z.union([z.string().regex(/^\d{4,6}$/, 'PIN must be 4-6 digits'), z.literal(''), z.null()]).optional(),
+      // Rango compartido: ver src/schemas/common/pin.schema.ts. Aquí decía 4-6
+      // mientras el resto ya era 4-10, así que esta pantalla —la que los venues
+      // usan para alargar el PIN de su gerente— rechazaba los códigos largos.
+      pin: optionalClearablePinSchema,
     })
     .refine(data => Object.keys(data).length > 0, 'At least one field is required for update'),
 })
