@@ -42,6 +42,15 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   applySalePosting: (...args: any[]) => applySalePostingMock(...args),
 }))
 
+// 🔴 El cajón: saldar una orden a mano EN EFECTIVO también mete el billete a la
+// caja. Sin esto, el pago manual era el único camino de efectivo que restaba
+// (por el reembolso) y nunca sumaba — un faltante inventado en el arqueo.
+const postCashSaleToDrawerMock = jest.fn()
+jest.mock('@/services/shared/cashDrawerPosting', () => ({
+  __esModule: true,
+  postCashSaleToDrawer: (...args: any[]) => postCashSaleToDrawerMock(...args),
+}))
+
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -280,6 +289,55 @@ describe('manualPayment.service', () => {
       expect(aplicadoDentroDeLaTx).toBe(false)
       expect(applySalePostingMock).toHaveBeenCalledWith('posting-mp-1', expect.anything())
     })
+
+    /**
+     * 🔴 El pago manual era el ÚNICO camino de efectivo que no tocaba el cajón.
+     * El reembolso en efectivo SÍ resta (PAY_OUT automático), así que un negocio
+     * que saldaba órdenes a mano veía puro faltante inventado en el arqueo.
+     */
+    it('saldar en EFECTIVO mete el billete al cajón, después del commit', async () => {
+      let posteadoDentroDeLaTx = false
+      const txClient: any = {
+        order: { findFirst: jest.fn().mockResolvedValue(ordenConProductos()), update: jest.fn() },
+        payment: { create: jest.fn().mockResolvedValue({ id: 'pay-cash-1', method: 'CASH', orderId: ORDER_ID }) },
+        shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
+        orderCustomer: { create: jest.fn() },
+        venueTransaction: { create: jest.fn() },
+        paymentAllocation: { create: jest.fn() },
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) => {
+        const r = await cb(txClient)
+        posteadoDentroDeLaTx = postCashSaleToDrawerMock.mock.calls.length > 0
+        return r
+      })
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      // Fuera de la tx: si el cajón falla, el pago YA cobrado no se revierte.
+      expect(posteadoDentroDeLaTx).toBe(false)
+      expect(postCashSaleToDrawerMock).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, method: 'CASH' }),
+      )
+    })
+
+    it('el helper decide si entró al cajón — el servicio no filtra por método', async () => {
+      const txClient: any = {
+        order: { findFirst: jest.fn().mockResolvedValue(ordenConProductos()), update: jest.fn() },
+        payment: { create: jest.fn().mockResolvedValue({ id: 'pay-card-1', method: 'CARD', orderId: ORDER_ID }) },
+        shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
+        orderCustomer: { create: jest.fn() },
+        venueTransaction: { create: jest.fn() },
+        paymentAllocation: { create: jest.fn() },
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) => cb(txClient))
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      // Se llama SIEMPRE: `tenderSemantics` es quien sabe si el dinero es físico
+      // (un vale con countsAsPhysicalCash entra al cajón y no es method CASH).
+      expect(postCashSaleToDrawerMock).toHaveBeenCalled()
+    })
+
 
     it('un pago PARCIAL no deduce — la deducción es al saldar, como en el TPV', async () => {
       armarTx(ordenConProductos({ payments: [] })) // 30 de 100 → sigue PARTIAL

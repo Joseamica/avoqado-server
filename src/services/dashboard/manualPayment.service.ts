@@ -10,6 +10,7 @@ import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.s
 import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment.schema'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
+import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -470,6 +471,33 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   )
+
+  // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO (simétrico con el PAY_OUT del reembolso).
+  //
+  // Saldar una orden a mano era el ÚLTIMO camino de efectivo que no tocaba el
+  // cajón: el reembolso SÍ resta automáticamente, así que un negocio que cobra
+  // por aquí veía puro faltante inventado en su arqueo.
+  //
+  // Va FUERA de la tx a propósito, igual que los otros tres enganches: si la
+  // escritura del cajón fallara, el pago ya cobrado no puede revertirse por eso.
+  // `postCashSaleToDrawer` nunca lanza y es idempotente por paymentId, y es él
+  // —vía `tenderSemantics`— quien decide si ese dinero entró de verdad al cajón;
+  // aquí NO se filtra por `method === 'CASH'` (un vale con `countsAsPhysicalCash`
+  // también es billete en la caja).
+  await postCashSaleToDrawer({
+    venueId,
+    paymentId: result.id,
+    method: result.method,
+    fundsFlow: result.fundsFlow,
+    tenderTypeId: result.tenderTypeId,
+    tenderCountsAsCash: result.tenderCountsAsCash,
+    status: result.status,
+    type: result.type,
+    amount: result.amount,
+    tipAmount: result.tipAmount,
+    staffId,
+    orderId: result.orderId,
+  })
 
   // Customer metrics + loyalty side-effects run OUTSIDE the tx so any failure
   // (config missing, downstream service down) does NOT roll back the payment
