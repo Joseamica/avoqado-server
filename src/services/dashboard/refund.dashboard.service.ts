@@ -18,8 +18,22 @@ import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { createRefundCommission } from './commission/commission-calculation.service'
 import { createRefundTransactionCost } from '../payments/transactionCost.service'
 import { logAction } from './activity-log.service'
+import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 
 export type RefundReason = 'RETURNED_GOODS' | 'ACCIDENTAL_CHARGE' | 'CANCELLED_ORDER' | 'FRAUDULENT_CHARGE' | 'OTHER'
+
+/**
+ * El motivo, en español, para la nota del movimiento de caja: ese texto lo IMPRIME el
+ * ticket del corte del POS. Un "Reembolso: RETURNED_GOODS" en el papel que le queda al
+ * dueño para cuadrar su caja no le dice nada.
+ */
+const REFUND_REASON_LABEL_ES: Record<RefundReason, string> = {
+  RETURNED_GOODS: 'Devolución de producto',
+  ACCIDENTAL_CHARGE: 'Cobro por error',
+  CANCELLED_ORDER: 'Pedido cancelado',
+  FRAUDULENT_CHARGE: 'Cargo fraudulento',
+  OTHER: 'Otro motivo',
+}
 
 export interface RefundItemInput {
   orderItemId: string
@@ -75,6 +89,11 @@ interface LockedPaymentRow {
   shiftId: string | null
   merchantAccountId: string | null
   processorData: Prisma.JsonValue | null
+  // Proyección de `tenderSemantics`: la ÚNICA autoridad sobre "¿este dinero estaba
+  // en el cajón?". Se leen del pago ORIGINAL porque el reembolso hereda su método.
+  fundsFlow: string | null
+  tenderTypeId: string | null
+  tenderCountsAsCash: boolean | null
 }
 
 interface RefundPaymentRow {
@@ -243,7 +262,10 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         "orderId",
         "shiftId",
         "merchantAccountId",
-        "processorData"
+        "processorData",
+        "fundsFlow",
+        "tenderTypeId",
+        "tenderCountsAsCash"
       FROM "Payment"
       WHERE id = ${input.paymentId}
       FOR UPDATE
@@ -485,8 +507,55 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       refundedItems,
       remainingAfterCents: Math.max(0, remainingBeforeCents - refundCents),
       refundAmountCents: refundCents,
+      // Semántica del pago ORIGINAL, para el movimiento de caja de abajo.
+      originalTender: {
+        method: original.method,
+        fundsFlow: original.fundsFlow,
+        tenderTypeId: original.tenderTypeId,
+        tenderCountsAsCash: original.tenderCountsAsCash,
+      },
     }
   })
+
+  // 🔴 EL CAJÓN RESTA EL REEMBOLSO (el defecto medido en hardware el 2026-08-16).
+  //
+  // Este servicio es el que la app usa DE VERDAD (`POST /mobile/venues/:venueId/
+  // payments/:paymentId/refund`) y no tocaba la caja: el arqueo marcaba $50,380 con
+  // $50,230 físicos — un sobrante inventado exactamente del tamaño de lo devuelto,
+  // que el cierre convierte en una acusación silenciosa contra el cajero.
+  //
+  // Va DESPUÉS del commit y FUERA de la transacción, igual que los demás enganches:
+  // una falla del cajón jamás puede revertir una devolución ya hecha.
+  // `postCashRefundToDrawer` no lanza —devuelve el resultado— y es idempotente por
+  // `localId` derivado del id del reembolso, así que un reintento no resta dos veces.
+  //
+  // 🔴 Se resta IGUAL cuando la orden viene del dashboard web o del MCP, donde no hay
+  // cajón enfrente: el evento mide dinero FÍSICO del local, no desde qué pantalla se
+  // tecleó. El razonamiento completo y lo que se acepta a cambio están en
+  // `services/shared/cashDrawerPosting.ts` (`postCashRefundToDrawer`).
+  //
+  // ⚠️ CROSS-REPO: mientras Android siga mandando su propio PAY_OUT
+  // (`IssueRefundSheet.kt`) tras un reembolso, el cajón restaría DOS veces — la llave
+  // del cliente es un UUID local y no colisiona con la nuestra. Ese parche se retira
+  // en el mismo trabajo; iOS hace lo propio con su escritura local.
+  try {
+    await postCashRefundToDrawer({
+      venueId: input.venueId,
+      refundPaymentId: result.refundPaymentId,
+      ...result.originalTender,
+      // El efectivo que sale es el TOTAL devuelto (venta + propina): el split
+      // interno es contable, el cajón sólo ve billetes.
+      amount: centsToNumber(result.refundAmountCents),
+      staffId: input.staffId ?? null,
+      orderId: result.originalOrderId,
+      reason: REFUND_REASON_LABEL_ES[input.reason] ?? input.reason,
+    })
+  } catch (err) {
+    logger.error('[REFUND.DASHBOARD] Cash drawer posting failed (refund unaffected)', {
+      refundPaymentId: result.refundPaymentId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
 
   // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
   // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)

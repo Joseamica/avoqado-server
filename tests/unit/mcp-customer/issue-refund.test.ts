@@ -85,6 +85,37 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     expect(mockIssue).not.toHaveBeenCalled()
   })
 
+  /**
+   * 🔴 Desde 2026-08-16 un reembolso en efectivo RESTA del cajón del local
+   * (`postCashRefundToDrawer`). Quien opera por MCP no está frente a esa caja: la
+   * vista previa tiene que decirle que va a mover dinero FÍSICO de un local, o
+   * confirma a ciegas algo que alguien tendrá que sacar del cajón.
+   */
+  it('la vista previa AVISA que el efectivo sale del cajón del local', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    const out = parse(await call(base))
+    expect(out.preview.saleDeCajonDeEfectivo).toBe(true)
+    expect(out.message).toMatch(/cajón/i)
+  })
+
+  it('un cobro que NO estaba en el cajón (transferencia) no promete mover efectivo', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'BANK_TRANSFER' })
+    const out = parse(await call(base))
+    expect(out.preview.saleDeCajonDeEfectivo).toBe(false)
+    expect(out.message).not.toMatch(/cajón/i)
+  })
+
+  it('un vale que cuenta como efectivo físico también avisa (tenderSemantics, no method===CASH)', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({
+      ...completedPayment,
+      method: 'OTHER',
+      tenderTypeId: 'tender-vale',
+      tenderCountsAsCash: true,
+    })
+    const out = parse(await call(base))
+    expect(out.preview.saleDeCajonDeEfectivo).toBe(true)
+  })
+
   it('BLOCKS card payments — Blumon card refunds are done on the terminal, not via API', async () => {
     for (const method of ['CREDIT_CARD', 'DEBIT_CARD']) {
       mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method })

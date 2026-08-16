@@ -8,6 +8,7 @@
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
+import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // ============================================================================
@@ -168,27 +169,31 @@ export async function createRefund(params: CreateRefundParams) {
     return { order, payment }
   })
 
-  // Step 4: If there's an open CashDrawerSession, create PAY_OUT event
-  if (method === 'CASH') {
-    const openSession = await prisma.cashDrawerSession.findFirst({
-      where: { venueId, status: 'OPEN' },
-    })
-
-    if (openSession) {
-      await prisma.cashDrawerEvent.create({
-        data: {
-          sessionId: openSession.id,
-          venueId,
-          type: 'PAY_OUT',
-          amount: amountDecimal, // positive amount for the pay-out
-          staffId,
-          staffName: staffName || 'Staff',
-          note: `Reembolso: ${reason}`,
-          orderId: order.id,
-        },
-      })
-    }
-  }
+  // Step 4: el reembolso en efectivo sale del cajón.
+  //
+  // 🔴 Migrado al helper compartido (2026-08-16). Antes esto vivía aquí con un
+  // `if (method === 'CASH')` donde `method` venía del CUERPO que manda el cliente:
+  // un cliente que lo omitiera saltaba el movimiento EN SILENCIO (comprobado con
+  // curl), y un vale que cuenta como efectivo físico se quedaba fuera del arqueo.
+  // Ahora la pregunta la contesta `tenderSemantics`, igual que el enganche de ventas.
+  //
+  // La razón de fondo para compartir el código: la OTRA ruta de reembolso —la que la
+  // app usa de verdad, `refund.dashboard.service`— no restaba nada, y el cajón
+  // inventaba un sobrante del tamaño de lo devuelto. Con las dos entrando por el
+  // mismo helper hay UN solo lugar que sabe restar, y no puede volver a separarse.
+  //
+  // El comportamiento visible NO cambia: mismo PAY_OUT, mismo monto, misma nota. Lo
+  // que se gana es la llave de idempotencia derivada del id del reembolso.
+  await postCashRefundToDrawer({
+    venueId,
+    refundPaymentId: payment.id,
+    method,
+    amount: amountDecimal,
+    staffId,
+    staffName: staffName || 'Staff',
+    orderId: order.id,
+    reason,
+  })
 
   logAction({
     staffId,

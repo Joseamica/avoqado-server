@@ -9,6 +9,7 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dashboard.service'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
+import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 
 // Maps the tool's friendly reasons to the service's RefundReason values.
 const REFUND_REASON_MAP: Record<string, RefundReason> = {
@@ -347,7 +348,9 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         select: {
           amount: true,
           tipAmount: true,
-          method: true,
+          // `TENDER_SEMANTICS_SELECT`: para saber si el dinero salía del CAJÓN del local
+          // (`method` solo no basta — un vale puede contar como efectivo físico).
+          ...TENDER_SEMANTICS_SELECT,
           status: true,
           type: true,
           createdAt: true,
@@ -376,6 +379,13 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         return text({ ok: false, error: `El reembolso ($${amount}) excede el total original del pago ($${originalTotal}).` })
       }
 
+      // 🔴 Desde 2026-08-16 el reembolso en efectivo RESTA del cajón del local
+      // (`postCashRefundToDrawer`). Quien opera por MCP no está frente a esa caja, así
+      // que la vista previa tiene que decirlo: está autorizando que alguien saque
+      // billetes de un cajón físico, no sólo un apunte contable. La pregunta la
+      // contesta `tenderSemantics`, nunca un `method === 'CASH'` local.
+      const saleDeCajonDeEfectivo = paymentCountsAsDrawerCash(payment)
+
       if (!confirm) {
         return text({
           ok: false,
@@ -391,8 +401,14 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             refundAmount: amount,
             reason: REFUND_REASON_MAP[reason],
             note: note ?? null,
+            saleDeCajonDeEfectivo,
           },
-          message: `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}). Vuelve a llamar con confirm:true para ejecutar.`,
+          message:
+            `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}).` +
+            (saleDeCajonDeEfectivo
+              ? ` Ese dinero estaba en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
+              : '') +
+            ' Vuelve a llamar con confirm:true para ejecutar.',
         })
       }
 

@@ -18,6 +18,11 @@ describe('refund.dashboard.service', () => {
     prismaMock.shift.findFirst.mockResolvedValue(null)
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
     prismaMock.payment.update.mockResolvedValue({ id: 'payment-original' })
+    // El prismaMock compartido no declara los modelos del cajón. Se agregan aquí
+    // (mismo patrón que `refund.mobile.service.test.ts`) para no tocar un helper
+    // que otras sesiones editan.
+    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(null) }
+    ;(prismaMock as any).cashDrawerEvent = { createMany: jest.fn().mockResolvedValue({ count: 1 }) }
   })
 
   it('rejects refund quantity that exceeds previously refunded quantity for the same order item', async () => {
@@ -223,5 +228,165 @@ describe('refund.dashboard.service', () => {
         }),
       }),
     )
+  })
+
+  /**
+   * 🔴 EL DEFECTO DE DINERO MEDIDO EN HARDWARE EL 2026-08-16.
+   *
+   * Este servicio es el que usa la app de verdad (`POST /mobile/venues/:venueId/
+   * payments/:paymentId/refund`), y NO tocaba el cajón: el arqueo marcaba $50,380
+   * con $50,230 físicos — un sobrante inventado exactamente del tamaño de lo
+   * reembolsado. El gemelo de `/mobile/.../refunds` sí restaba, pero ningún
+   * cliente lo llama.
+   */
+  describe('cajón de efectivo — el reembolso en efectivo RESTA', () => {
+    const pagoOriginal = (over: Record<string, unknown> = {}) => ({
+      id: 'payment-original',
+      venueId: 'venue-1',
+      status: TransactionStatus.COMPLETED,
+      type: PaymentType.REGULAR,
+      method: 'CASH',
+      source: 'APP',
+      amount: 10,
+      tipAmount: 0,
+      orderId: 'order-1',
+      shiftId: null,
+      merchantAccountId: null,
+      processorData: {},
+      fundsFlow: null,
+      tenderTypeId: null,
+      tenderCountsAsCash: null,
+      ...over,
+    })
+
+    const reembolsar = (over: Record<string, unknown> = {}) =>
+      issueRefund({
+        venueId: 'venue-1',
+        paymentId: 'payment-original',
+        amount: 15000, // cents → $150.00
+        reason: 'RETURNED_GOODS',
+        staffId: 'staff-9',
+        ...over,
+      })
+
+    beforeEach(() => {
+      prismaMock.payment.create.mockResolvedValue({ id: 'refund-cash-1' })
+    })
+
+    it('🔴 con caja ABIERTA crea un PAY_OUT por lo devuelto (era el sobrante inventado)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      const result = await reembolsar()
+
+      expect(result.amount).toBe(150)
+      const args = (prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0]
+      expect(args.data[0]).toMatchObject({ sessionId: 'session-1', venueId: 'venue-1', type: 'PAY_OUT' })
+      expect(Number(args.data[0].amount)).toBe(150)
+    })
+
+    it('🔴 la propina devuelta también sale del cajón (el efectivo físico la incluía)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 100, tipAmount: 20 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      // $120 = $100 de venta + $20 de propina: el split interno no debe cambiar
+      // lo que sale de la caja, que es el efectivo total entregado.
+      await reembolsar({ amount: 12000 })
+
+      expect(Number((prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].data[0].amount)).toBe(120)
+    })
+
+    it('🔴 un reembolso de un cobro con TARJETA no toca el cajón', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ method: 'CREDIT_CARD', amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await reembolsar()
+
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 la decisión sale de tenderSemantics sobre el pago REAL, no de un método del cuerpo del cliente', async () => {
+      // Vale de despensa: method=OTHER pero cuenta como efectivo físico.
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([pagoOriginal({ method: 'OTHER', tenderTypeId: 'tender-vale', tenderCountsAsCash: true, amount: 200 })])
+        .mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await reembolsar()
+
+      expect(Number((prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].data[0].amount)).toBe(150)
+    })
+
+    it('🔴 SIN caja abierta el reembolso se emite igual (fail-open: la caja no autoriza devoluciones)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue(null)
+
+      await expect(reembolsar()).resolves.toMatchObject({ refundId: 'refund-cash-1', amount: 150, status: 'COMPLETED' })
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 si la escritura del cajón REVIENTA, el reembolso sigue devolviendo COMPLETED', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+      ;(prismaMock as any).cashDrawerEvent.createMany.mockRejectedValue(new Error('DB caída'))
+
+      await expect(reembolsar()).resolves.toMatchObject({ status: 'COMPLETED' })
+    })
+
+    it('🔴 idempotente: la llave se deriva del id del reembolso, un reintento no resta dos veces', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await reembolsar()
+
+      const args = (prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0]
+      expect(args.data[0].localId).toBe('srv-refund:refund-cash-1')
+      expect(args.skipDuplicates).toBe(true)
+    })
+
+    it('la nota del movimiento arranca con "Reembolso:" (el corte del POS clasifica por ese prefijo)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await reembolsar()
+
+      expect((prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].data[0].note).toMatch(/^Reembolso: /)
+    })
+
+    // ── REGRESIÓN: el enganche del cajón no puede romper las 8 cosas del servicio ──
+
+    it('🔴 sigue creando el Payment negativo, el VenueTransaction y el ActivityLog', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await reembolsar()
+
+      expect(prismaMock.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ type: PaymentType.REFUND, status: TransactionStatus.COMPLETED, amount: new Decimal(-150) }),
+        }),
+      )
+      expect(prismaMock.venueTransaction.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ type: 'REFUND' }) }),
+      )
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'REFUND_CREATED' }))
+    })
+
+    it('🔴 sigue respetando el límite de lo que queda por devolver (candado contra doble reembolso)', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([pagoOriginal({ amount: 100 })])
+        .mockResolvedValueOnce([{ id: 'refund-prev', amount: -100, createdAt: new Date(), status: 'COMPLETED', processorData: {} }])
+
+      await expect(reembolsar({ amount: 10000 })).rejects.toThrow(/exceeds remaining refundable/i)
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 un reembolso RECHAZADO no mueve el cajón (no hay dinero que devolver)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ status: 'PENDING' })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await expect(reembolsar()).rejects.toThrow(/Cannot refund payment with status/i)
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
   })
 })

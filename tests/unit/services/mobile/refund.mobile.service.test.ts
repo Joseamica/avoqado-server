@@ -33,7 +33,10 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
     // El prismaMock compartido (tests/__helpers__/setup.ts) no declara los modelos del
     // cajón. Se agregan AQUÍ y no allá para no tocar un helper que otras sesiones editan.
     ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn() }
-    ;(prismaMock as any).cashDrawerEvent = { create: jest.fn() }
+    // Desde la extracción del helper compartido (`services/shared/cashDrawerPosting`),
+    // el movimiento entra por `createMany` + `skipDuplicates` en vez de un `create`
+    // ciego: mismo movimiento, ahora con llave de idempotencia.
+    ;(prismaMock as any).cashDrawerEvent = { create: jest.fn(), createMany: jest.fn().mockResolvedValue({ count: 1 }) }
     prismaMock.order.create.mockResolvedValue({ id: 'order-ref-1', orderNumber: 'REF-1' })
     prismaMock.payment.create.mockImplementation(async (args: any) => {
       createdPayment = args.data
@@ -42,6 +45,7 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
     prismaMock.cashDrawerSession.findFirst.mockResolvedValue(null)
     prismaMock.cashDrawerEvent.create.mockResolvedValue({ id: 'evt-1' })
+    prismaMock.staff = { findUnique: jest.fn().mockResolvedValue(null) } as any
   })
 
   const refundCash = () => createRefund({ venueId: VENUE, amount: 5000, reason: 'Producto defectuoso', method: 'CASH', staffId: STAFF })
@@ -74,14 +78,58 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
     )
   })
 
-  it('saca el efectivo del cajón con un PAY_OUT sólo cuando el reembolso fue en efectivo', async () => {
-    prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+  /**
+   * 🔴 Migrado al helper compartido `postCashRefundToDrawer` (2026-08-16) para que
+   * exista UN solo lugar que sabe restar del cajón — el otro camino de reembolso
+   * (`refund.dashboard.service`, que es el que la app usa de verdad) no restaba y
+   * el arqueo inventaba un sobrante del tamaño de lo devuelto.
+   *
+   * El COMPORTAMIENTO no cambia: mismo PAY_OUT, mismo monto, misma nota, y sólo
+   * cuando el dinero salió del cajón. Lo que se gana es la llave de idempotencia.
+   */
+  describe('cajón de efectivo (helper compartido)', () => {
+    const eventoDelCajon = () => (prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].data[0]
 
-    await refundCash()
+    it('saca el efectivo del cajón con un PAY_OUT sólo cuando el reembolso fue en efectivo', async () => {
+      prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
 
-    expect(prismaMock.cashDrawerEvent.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ type: 'PAY_OUT', amount: new Decimal('50.00') }) }),
-    )
+      await refundCash()
+
+      expect(eventoDelCajon()).toMatchObject({ type: 'PAY_OUT', sessionId: 'session-1', venueId: VENUE, staffId: STAFF })
+      expect(new Decimal(eventoDelCajon().amount).toFixed(2)).toBe('50.00')
+    })
+
+    it('conserva la nota "Reembolso: <motivo>" (el corte del POS clasifica por ese prefijo)', async () => {
+      prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await refundCash()
+
+      expect(eventoDelCajon().note).toBe('Reembolso: Producto defectuoso')
+    })
+
+    it('una devolución hecha en la TERMINAL no toca el cajón', async () => {
+      prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await createRefund({ venueId: VENUE, amount: 5000, reason: 'x', method: 'CREDIT_CARD', staffId: STAFF })
+
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+
+    it('sin caja abierta no se registra movimiento y el reembolso se emite igual', async () => {
+      prismaMock.cashDrawerSession.findFirst.mockResolvedValue(null)
+
+      await expect(refundCash()).resolves.toMatchObject({ refundId: 'payment-ref-1' })
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 ahora el movimiento trae llave de idempotencia derivada del reembolso', async () => {
+      prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await refundCash()
+
+      expect(eventoDelCajon().localId).toBe('srv-refund:payment-ref-1')
+      expect((prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].skipDuplicates).toBe(true)
+    })
   })
 
   // 🔴 Regresión del audit 2026-08-13: la convención COMPLETED+REFUND arreglaba

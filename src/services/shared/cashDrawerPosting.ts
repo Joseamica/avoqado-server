@@ -1,7 +1,14 @@
 // src/services/shared/cashDrawerPosting.ts
 
 /**
- * 🔴 EL LADO QUE FALTABA DEL CAJÓN: la venta en efectivo.
+ * 🔴 LOS DOS LADOS DEL CAJÓN, EN UN SOLO ARCHIVO: la venta suma, el reembolso resta.
+ *
+ * `postCashSaleToDrawer` (2026-08-16) cerró el lado de la VENTA. El mismo día, con la
+ * app y con `curl`, se midió el defecto espejo: el reembolso que la app usa de verdad
+ * (`refund.dashboard.service`) tampoco restaba, así que el cajón inventaba un SOBRANTE
+ * del tamaño de lo devuelto. Ver `postCashRefundToDrawer`, abajo.
+ *
+ * ── El lado de la VENTA ───────────────────────────────────────────────────────
  *
  * Un reembolso en efectivo crea automáticamente un `CashDrawerEvent` PAY_OUT
  * (`refund.mobile.service.ts`), pero NINGÚN servicio del servidor creaba el evento
@@ -56,9 +63,32 @@ import { paymentCountsAsDrawerCash, TenderSemanticsPayment } from './tenderSeman
  */
 const SERVER_CASH_SALE_LOCAL_ID_PREFIX = 'srv-cash-sale:'
 
+/**
+ * Prefijo de la llave del movimiento de un REEMBOLSO creado por el SERVIDOR.
+ * Distinto del de la venta a propósito: un mismo id jamás debe colisionar entre
+ * las dos direcciones del dinero.
+ */
+const SERVER_REFUND_LOCAL_ID_PREFIX = 'srv-refund:'
+
+/**
+ * 🔴 CONTRATO CON EL POS, NO COSMÉTICA. El corte de caja del POS separa los
+ * reembolsos del resto de los retiros por el PREFIJO de la nota
+ * (`CorteTicketBuilder.PREFIJO_REEMBOLSO` en Android, misma cadena en iOS:
+ * `note.startsWith("Reembolso:")`). Si el servidor escribe otra cosa, el dinero
+ * sí baja del cajón pero el ticket del corte lo cuenta como un retiro a mano y el
+ * dueño no puede explicar el hueco. Por eso la nota la arma ESTE archivo y no cada
+ * llamador: un solo lugar puede romper —o mantener— el contrato.
+ */
+export const DRAWER_REFUND_NOTE_PREFIX = 'Reembolso:'
+
 /** La llave del movimiento de caja de un pago. Determinista: mismo pago → misma llave. */
 export function cashSaleDrawerLocalId(paymentId: string): string {
   return `${SERVER_CASH_SALE_LOCAL_ID_PREFIX}${paymentId}`
+}
+
+/** La llave del movimiento de caja de un reembolso. Determinista: mismo reembolso → misma llave. */
+export function cashRefundDrawerLocalId(refundPaymentId: string): string {
+  return `${SERVER_REFUND_LOCAL_ID_PREFIX}${refundPaymentId}`
 }
 
 export interface CashSaleDrawerPosting extends TenderSemanticsPayment {
@@ -177,6 +207,152 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
     logger.error('❌ [CASH-DRAWER] No se pudo sumar la venta en efectivo al cajón (el cobro NO se ve afectado)', {
       venueId: posting.venueId,
       paymentId: posting.paymentId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return 'FAILED'
+  }
+}
+
+// ============================================================================
+// EL OTRO LADO: EL REEMBOLSO EN EFECTIVO
+// ============================================================================
+
+/**
+ * 🔴 EL CAJÓN SUMABA LA VENTA PERO NO RESTABA EL REEMBOLSO QUE LA APP USA DE VERDAD.
+ *
+ * Medido con la app y con `curl` contra el backend el 2026-08-16: el cajón marcaba
+ * $50,380 con $50,230 físicos. El SOBRANTE inventado era exactamente lo reembolsado
+ * ($150) — el espejo del faltante que arregló `postCashSaleToDrawer`, y con el mismo
+ * costo: el arqueo acusa al cajero por dinero que no está.
+ *
+ * Había DOS rutas de reembolso y sólo la que nadie llama movía la caja:
+ *   · `POST /mobile/venues/:venueId/refunds` → `refund.mobile.service` → SÍ creaba el
+ *     PAY_OUT… pero NINGÚN cliente consume esa ruta.
+ *   · `POST /mobile/venues/:venueId/payments/:paymentId/refund` → `refund.dashboard.service`
+ *     → NO tocaba el cajón. ES LA QUE USA LA APP.
+ *
+ * El arreglo NO fue mandar la app a la ruta gemela —sería un retroceso: el servicio del
+ * dashboard trae candado contra doble reembolso, límite de lo que queda por devolver,
+ * reembolso por artículo, reposición de inventario, reversa de comisión, recibo digital,
+ * manejo de propina y el costo negativo para que liquidación cuadre—. Fue darle el cajón.
+ * Y para que no vuelva a haber dos definiciones de "salió efectivo", el gemelo de mobile
+ * también entra por aquí: UN solo lugar sabe restar.
+ */
+
+export interface CashRefundDrawerPosting extends TenderSemanticsPayment {
+  venueId: string
+  /** Id del `Payment` de tipo REFUND. De él se DERIVA la llave de idempotencia. */
+  refundPaymentId: string
+  /**
+   * Efectivo devuelto, en unidades mayores (pesos). Se normaliza a POSITIVO: el
+   * `Payment` del reembolso viaja en negativo y `calculateExpectedAmount` resta los
+   * PAY_OUT, así que un monto negativo SUMARÍA al cajón — el mismo signo invertido
+   * que originó este bug. Incluye la propina devuelta: salió del mismo cajón.
+   */
+  amount: Decimal | number | string
+  staffId?: string | null
+  staffName?: string | null
+  orderId?: string | null
+  /** Motivo, ya legible. La nota final la arma este archivo con el prefijo del contrato. */
+  reason?: string | null
+}
+
+export type CashRefundDrawerOutcome = CashSaleDrawerOutcome
+
+/**
+ * Registra el reembolso en efectivo como salida de caja. Devuelve SIEMPRE, nunca lanza.
+ *
+ * 🔴 DECISIÓN — SÍ RESTA AUNQUE LA ORDEN VENGA DEL DASHBOARD WEB O DEL MCP, donde no hay
+ * un cajón físico enfrente. Razón: el `CashDrawerEvent` mide DINERO FÍSICO DEL LOCAL, y la
+ * pregunta que contesta es "¿salió efectivo de esa caja?", no "¿desde qué pantalla se
+ * tecleó?". Si un cobro en efectivo se devuelve en efectivo, el dinero salió del cajón del
+ * local — lo haya capturado el cajero en la tablet o el dueño desde su casa.
+ *
+ * La alternativa (restar sólo cuando el actor está en el POS) exige saber dónde está
+ * parado quien opera, cosa que el servidor no puede saber; y su modo de fallar es
+ * justamente el defecto que este archivo arregla: el caso más común —el dueño devolviendo
+ * desde la laptop del mostrador, con la caja de ese mismo local abierta— volvería a
+ * inventar un SOBRANTE mudo.
+ *
+ * CONSECUENCIA que se acepta a cambio, acotada por dos guardas que ya existen:
+ * (a) sólo se registra si el dinero ORIGINAL estaba en el cajón —una devolución de tarjeta
+ * nunca lo toca— y (b) sólo si hay una caja ABIERTA, así que un reembolso capturado a la
+ * 1 AM con el local cerrado no mueve nada. Queda el caso raro del dueño que registra a
+ * distancia un reembolso en efectivo que NO salió de esa caja: ahí el arqueo mostrará un
+ * faltante… pero con un movimiento fechado, con nombre y con motivo que lo explica. Un
+ * faltante explicado es infinitamente más barato que el sobrante mudo de hoy.
+ *
+ * ⚠️ LÍMITE CONOCIDO (defecto separado, NO se arregla aquí): el sistema asume que el dinero
+ * se devolvió POR DONDE ENTRÓ. La semántica se resuelve sobre el pago ORIGINAL porque es lo
+ * único que el servidor recibe —la app no manda cómo se entregó el dinero—. Si se cobró con
+ * tarjeta y se devolvió en efectivo (o al revés), el corte descuadra en ambas direcciones.
+ */
+export async function postCashRefundToDrawer(posting: CashRefundDrawerPosting): Promise<CashRefundDrawerOutcome> {
+  try {
+    // 🔴 La ÚNICA respuesta válida a "¿este dinero salió del cajón?" — evaluada sobre la
+    // semántica del pago REAL (fundsFlow → snapshot del tender → legacy), nunca sobre un
+    // `method === 'CASH'` que venga del cuerpo del cliente. Ese check frágil es lo que
+    // tenía el gemelo de mobile: un cliente que omitiera `method` saltaba el movimiento
+    // EN SILENCIO (comprobado con curl), y un vale que cuenta como efectivo físico
+    // (`tenderCountsAsCash`) se quedaba fuera del arqueo.
+    if (!paymentCountsAsDrawerCash(posting)) return 'NOT_DRAWER_CASH'
+
+    // El Payment del reembolso es negativo; el PAY_OUT siempre es positivo.
+    const total = new Decimal(String(posting.amount ?? 0)).abs()
+    if (total.lessThanOrEqualTo(0)) return 'NOT_DRAWER_CASH'
+
+    const session = await prisma.cashDrawerSession.findFirst({
+      where: { venueId: posting.venueId, status: 'OPEN' },
+      select: { id: true },
+    })
+    // 🔴 FAIL-OPEN: sin caja abierta no pasa nada y el reembolso sigue su curso. La caja
+    // jamás puede impedir devolverle su dinero a un cliente.
+    if (!session) return 'NO_OPEN_DRAWER'
+
+    const staffName = posting.staffName || (await resolveStaffName(posting.staffId))
+    const note = posting.reason ? `${DRAWER_REFUND_NOTE_PREFIX} ${posting.reason}` : DRAWER_REFUND_NOTE_PREFIX
+
+    // `createMany` + `skipDuplicates`: el reembolso YA está commiteado cuando se llega
+    // aquí, así que un P2002 de un reintento sería un error en la respuesta de una
+    // devolución que sí ocurrió. El índice `@@unique([venueId, localId])` es el candado.
+    const result = await prisma.cashDrawerEvent.createMany({
+      data: [
+        {
+          sessionId: session.id,
+          venueId: posting.venueId,
+          type: 'PAY_OUT',
+          amount: total,
+          staffId: posting.staffId || 'SYSTEM',
+          staffName,
+          orderId: posting.orderId || null,
+          note,
+          localId: cashRefundDrawerLocalId(posting.refundPaymentId),
+        },
+      ],
+      skipDuplicates: true,
+    })
+
+    if (result.count === 0) {
+      logger.info('💸 [CASH-DRAWER] Reembolso en efectivo ya registrado en el cajón (reintento) — no se resta dos veces', {
+        venueId: posting.venueId,
+        refundPaymentId: posting.refundPaymentId,
+      })
+      return 'ALREADY_POSTED'
+    }
+
+    logger.info('💸 [CASH-DRAWER] Reembolso en efectivo restado del cajón', {
+      venueId: posting.venueId,
+      refundPaymentId: posting.refundPaymentId,
+      sessionId: session.id,
+      amount: total.toFixed(2),
+    })
+    return 'POSTED'
+  } catch (error) {
+    // 🔴 El reembolso YA está commiteado. Propagar convertiría una devolución exitosa en
+    // una pantalla de Error y el cajero devolvería el dinero otra vez.
+    logger.error('❌ [CASH-DRAWER] No se pudo restar el reembolso del cajón (el reembolso NO se ve afectado)', {
+      venueId: posting.venueId,
+      refundPaymentId: posting.refundPaymentId,
       error: error instanceof Error ? error.message : String(error),
     })
     return 'FAILED'
