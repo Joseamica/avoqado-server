@@ -2297,6 +2297,41 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
 
+  // 🔴 EL CAJÓN SUMA LA VENTA (simétrico con el PAY_OUT del reembolso).
+  //
+  // Este servicio es el punto por el que pasa TODO cobro manual del POS móvil: la
+  // ruta en línea y la reproducción del outbox offline (intent `PAY_CASH` →
+  // `applyPayCash` → aquí). Un solo enganche cubre los dos.
+  //
+  // Va DESPUÉS del commit y no dentro de la transacción a propósito: una falla del
+  // cajón jamás puede revertir un cobro. `postCashSaleToDrawer` no lanza —devuelve
+  // el resultado— y es idempotente por `localId` derivado del paymentId, así que un
+  // replay del outbox no duplica el movimiento. El `catch` es cinturón sobre tirantes.
+  //
+  // Los retornos idempotentes de arriba (llave repetida, ganador de la carrera P2002)
+  // NO llaman aquí a propósito: el movimiento lo creó la llamada que sí cobró.
+  try {
+    const { postCashSaleToDrawer } = await import('@/services/shared/cashDrawerPosting')
+    await postCashSaleToDrawer({
+      venueId,
+      paymentId: payment.id,
+      // El método REAL: un cobro declarado a mano (terminal ajena, transferencia)
+      // viaja por este mismo servicio y NUNCA entró al cajón.
+      method: paymentMethod,
+      status: 'COMPLETED',
+      type: 'REGULAR',
+      amount: amountDecimal,
+      tipAmount: tipDecimal,
+      staffId: effectiveStaffId || input.staffId || null,
+      orderId,
+    })
+  } catch (err) {
+    logger.error('[ORDER.MOBILE] Cash drawer posting failed (payment unaffected)', {
+      paymentId: payment.id,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
   // Inventory deduction on full payment (platform rule: stock deducts ONLY when
   // fully paid). This path historically skipped deduction entirely — cash sales
   // from desktop/tablets never lowered stock. Reuses the never-throws helper

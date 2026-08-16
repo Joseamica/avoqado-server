@@ -19,11 +19,18 @@ const VENUE = 'venue-1'
  *
  * ADITIVO: una app vieja que no manda `localId` sigue funcionando igual que antes (Postgres
  * permite varios NULL en un índice único) — simplemente no gana la protección.
+ *
+ * NOTA (2026-08-16): los ejemplos de este archivo usaban `CASH_SALE` como tipo por defecto.
+ * Ya no sirve como muestra: desde que el servidor crea el movimiento de la venta al cobrar
+ * (`services/shared/cashDrawerPosting.ts`), `syncEvents` DESCARTA los `CASH_SALE` del cliente
+ * para no contar la misma venta dos veces (ver `cash-drawer.arqueo.test.ts`). El sujeto de
+ * estas pruebas —la idempotencia del lote por `localId`— no cambió: sólo el tipo de evento,
+ * ahora PAY_IN/PAY_OUT, que siguen siendo del cliente.
  */
 describe('syncEvents — idempotencia del cajón', () => {
   const sesion = { id: 'session-1', venueId: VENUE, status: 'OPEN' }
 
-  const evento = (localId: string | undefined, amount: number, type: 'CASH_SALE' | 'PAY_OUT' = 'CASH_SALE') => ({
+  const evento = (localId: string | undefined, amount: number, type: 'PAY_IN' | 'PAY_OUT' = 'PAY_IN') => ({
     localId,
     type,
     amount,
@@ -90,7 +97,7 @@ describe('syncEvents — idempotencia del cajón', () => {
     const res = await syncEvents(VENUE, [evento(undefined, 50)] as any)
 
     expect(res.events).toHaveLength(1)
-    expect(res.events[0]).toMatchObject({ id: 'evt-db-1', type: 'CASH_SALE', amount: 50 })
+    expect(res.events[0]).toMatchObject({ id: 'evt-db-1', type: 'PAY_IN', amount: 50 })
   })
 
   it('🔴 TODO el lote va en UNA transacción (un fallo a media lista no deja filas commiteadas)', async () => {
@@ -108,7 +115,7 @@ describe('syncEvents — idempotencia del cajón', () => {
       {
         id: 'evt-db-keyed',
         sessionId: 'session-1',
-        type: 'CASH_SALE',
+        type: 'PAY_IN',
         amount: 30,
         note: null,
         staffId: 'staff-1',

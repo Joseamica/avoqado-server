@@ -6,6 +6,7 @@
  */
 
 import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -375,6 +376,11 @@ export async function getTenderBreakdown(venueId: string, from: Date, to: Date) 
 // ============================================================================
 
 interface SyncEvent {
+  /**
+   * `CASH_SALE` sigue en la unión porque las apps ya desplegadas lo mandan y el contrato
+   * `/mobile` no rompe versiones viejas — pero el servidor lo DESCARTA (ver `syncEvents`):
+   * la venta en efectivo ya crea su propio movimiento al cobrar.
+   */
   type: 'PAY_IN' | 'PAY_OUT' | 'CASH_SALE'
   amount: number // dollars
   note?: string
@@ -401,6 +407,42 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
     throw new BadRequestError('No hay eventos para sincronizar')
   }
 
+  // 🔴 EL SERVIDOR ES DUEÑO DEL `CASH_SALE` — el cliente ya no lo puede empujar.
+  //
+  // Desde que el cobro en efectivo crea su propio movimiento de caja en el servidor
+  // (`services/shared/cashDrawerPosting.ts`, enganchado en `payCashOrder`,
+  // `recordOrderPayment` y `recordFastPayment`), aceptar además el `CASH_SALE` que las
+  // apps YA DESPLEGADAS empujan a este endpoint contaría la MISMA venta dos veces: un
+  // SOBRANTE inventado, el mismo defecto que veníamos a arreglar pero al revés.
+  //
+  // No se puede deduplicar contra el evento del servidor: la app manda un UUID local
+  // propio, no el `paymentId`, y un cheque partido en dos cobros iguales haría
+  // indistinguibles el duplicado y el legítimo. Se descartan y punto.
+  //
+  // No se pierde nada: TODA venta en efectivo de un POS pasa por uno de esos tres
+  // servicios, así que el movimiento nace igual —y ahora también cuando la app estaba
+  // sin red, porque el intent `PAY_CASH` del outbox llega por `payCashOrder`. El push
+  // del cliente era fire-and-forget SIN cola de reintento: si la respuesta se perdía,
+  // el movimiento no existía nunca.
+  //
+  // PAY_IN y PAY_OUT siguen siendo del cliente: no nacen de un cobro.
+  const droppedCashSales = events.filter(event => event.type === 'CASH_SALE').length
+  const acceptedEvents = events.filter(event => event.type !== 'CASH_SALE')
+
+  if (droppedCashSales > 0) {
+    logger.info('💵 [CASH-DRAWER] CASH_SALE del cliente ignorado — el servidor ya lo registra al cobrar', {
+      venueId,
+      sessionId: session.id,
+      droppedCashSales,
+    })
+  }
+
+  if (acceptedEvents.length === 0) {
+    // 200 con lote vacío, no error: el push del cliente es fire-and-forget y un 4xx
+    // aquí lo haría reintentar para siempre algo que nunca vamos a aceptar.
+    return { syncedCount: 0, events: [] }
+  }
+
   const toRow = (event: SyncEvent) => ({
     sessionId: session.id,
     venueId,
@@ -422,8 +464,8 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
   // terminaba con efectivo inventado — que el arqueo daba por bueno. Con la llave
   // `localId` del POS y el índice `@@unique([venueId, localId])`, el reintento choca y
   // Postgres lo salta en vez de duplicar.
-  const keyed = events.filter(event => Boolean(event.localId))
-  const unkeyed = events.filter(event => !event.localId)
+  const keyed = acceptedEvents.filter(event => Boolean(event.localId))
+  const unkeyed = acceptedEvents.filter(event => !event.localId)
 
   // 🔴 Apps viejas sin `localId` (contrato /mobile: las versiones ya
   // distribuidas siguen funcionando): tras un `createMany` no hay llave para
@@ -466,7 +508,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
   )
 
   logAction({
-    staffId: events[0]?.staffId,
+    staffId: acceptedEvents[0]?.staffId,
     venueId,
     action: 'CASH_DRAWER_SYNC',
     entity: 'CashDrawerSession',
@@ -506,6 +548,20 @@ async function getOpenSession(venueId: string) {
   return session
 }
 
+/**
+ * Efectivo que DEBERÍA haber en el cajón: inicial + PAY_IN + CASH_SALE − PAY_OUT.
+ *
+ * Los tres tipos que suman/restan tienen dueño y ninguno se cuenta dos veces:
+ *   · `CASH_SALE` — lo crea el SERVIDOR al cobrar (`services/shared/cashDrawerPosting.ts`,
+ *     enganchado en `payCashOrder`, `recordOrderPayment` y `recordFastPayment`), con una
+ *     llave derivada del `paymentId`. Reproducir el mismo pago del outbox no duplica nada,
+ *     y `syncEvents` descarta los `CASH_SALE` que empujan las apps para no sumar dos veces.
+ *     Incluye la propina en efectivo, igual que `cashCloseout.dashboard.service.ts`.
+ *   · `PAY_OUT` — retiros a mano Y el reembolso en efectivo (`refund.mobile.service.ts`),
+ *     que es el ÚNICO que mueve el cajón por un reembolso: el Payment negativo del refund
+ *     no vuelve a entrar por el enganche de ventas.
+ *   · `PAY_IN` — entradas a mano; siguen siendo del cliente.
+ */
 function calculateExpectedAmount(session: any): number {
   let expected = Number(session.startingAmount)
 

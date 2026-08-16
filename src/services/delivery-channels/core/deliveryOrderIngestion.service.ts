@@ -15,6 +15,7 @@ import {
 import { socketManager } from '../../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../../communication/sockets/types'
 import { dispatchOrderStatus } from './statusDispatcher.service'
+import { applySalePosting, createSalePostingInTx } from '../../inventory/inventoryPosting.service'
 import { NormalizedDeliveryOrder } from './types'
 import {
   assertLegacyCatalogGovernanceForVenue,
@@ -129,6 +130,8 @@ export async function ingestDeliveryOrder(
     where: { venueId_externalId: { venueId: venue.id, externalId: normalized.externalId } },
   })
   const isNew = !existing
+  // Holder para que TS no estreche la asignación dentro del callback async.
+  const postingState: { id: string | null } = { id: null }
 
   const order = await prisma.$transaction(async tx => {
     const order = await tx.order.upsert({
@@ -161,6 +164,9 @@ export async function ingestDeliveryOrder(
     })
 
     if (isNew) {
+      // Renglones recién creados: el vale de inventario se arma con ELLOS (ids
+      // reales), no con los items normalizados del canal.
+      const createdItems: unknown[] = []
       // Índice explícito (no forEach con await): distintos pedidos con payloads idénticos
       // reintentados producen el MISMO índice por línea → externalId sigue siendo idempotente.
       // Necesario porque un pedido puede repetir el mismo PLU en 2 líneas (p.ej. "Taco" solo +
@@ -185,7 +191,7 @@ export async function ingestDeliveryOrder(
         )
         const modifierNotes = item.modifiers.map(m => `+ ${m.quantity}x ${m.name}`)
         const notes = [item.notes, ...modifierNotes].filter(Boolean).join(' | ') || undefined
-        await tx.orderItem.create({
+        const createdItem = await tx.orderItem.create({
           data: {
             orderId: order.id,
             productId,
@@ -199,6 +205,7 @@ export async function ingestDeliveryOrder(
             notes,
           },
         })
+        createdItems.push(createdItem)
       }
 
       // Fix C4 (audit, spec §10.1.2): SOLO crear el Payment externo si el proveedor
@@ -234,10 +241,47 @@ export async function ingestDeliveryOrder(
             data: { amount: payment.amount, payment: { connect: { id: payment.id } }, order: { connect: { id: order.id } } },
           })
         }
+
+        // Inventario: el pedido entra PAGADO con renglones resueltos a productos
+        // REALES del catálogo, así que descuenta como cualquier otra venta —
+        // decisión del founder (2026-08-16) con paridad Toast/Square, donde un
+        // pedido de tercero es una orden más y deplete el stock igual. Antes no
+        // descontaba nada: la comida salía de la cocina y el almacén no se movía.
+        //
+        // El vale nace en ESTA transacción (si la ingesta se cae, no queda un
+        // descuento huérfano) y se aplica tras el commit. Sólo cuando el canal
+        // confirmó el pago: un pedido no-pagado no descuenta, igual que en el
+        // resto de la plataforma ("stock deduction ONLY when fully paid").
+        //
+        // ⚠️ Límite conocido: el mapper v1 guarda los modificadores como TEXTO
+        // en `notes`, sin filas OrderItemModifier — se descuenta el producto
+        // base, no los insumos del modificador. Se cierra cuando el mapper
+        // resuelva los PLUs MOD-*.
+        const posting = await createSalePostingInTx(tx, {
+          venueId: venue.id,
+          orderId: order.id,
+          items: createdItems as any,
+        })
+        postingState.id = posting?.id ?? null
       }
     }
     return order
   })
+
+  // Aplicar el descuento YA COMMITEADA la ingesta. Nunca puede tumbar un pedido
+  // que el canal ya cobró: si truena, el vale queda pendiente y el sweeper lo
+  // retoma. El pedido es un hecho; la deducción es reintentable.
+  if (postingState.id) {
+    try {
+      await applySalePosting(postingState.id, null)
+    } catch (error) {
+      logger.error('⚠️ No se pudo aplicar el descuento de inventario del pedido de delivery (el pedido sigue en pie)', {
+        orderId: order.id,
+        postingId: postingState.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
 
   try {
     socketManager.broadcastToVenue(venue.id, isNew ? SocketEventType.ORDER_CREATED : SocketEventType.ORDER_UPDATED, {

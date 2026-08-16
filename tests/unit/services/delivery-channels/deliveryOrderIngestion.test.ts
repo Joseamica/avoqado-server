@@ -23,6 +23,14 @@ jest.mock('../../../../src/services/master-catalog/catalogGovernance.service', (
   writeLegacyServiceProductCreationAuditForVenue: jest.fn().mockResolvedValue(undefined),
 }))
 
+const createSalePostingInTxMock = jest.fn()
+const applySalePostingMock = jest.fn()
+jest.mock('../../../../src/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: (...a: any[]) => createSalePostingInTxMock(...a),
+  applySalePosting: (...a: any[]) => applySalePostingMock(...a),
+}))
+
 const link: any = { id: 'link1', venueId: 'venue1', provider: 'DELIVERECT', orderAcceptanceMode: 'AUTO' }
 
 const baseNormalized: NormalizedDeliveryOrder = {
@@ -67,7 +75,15 @@ describe('ingestDeliveryOrder', () => {
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prisma.product.findUnique as jest.Mock).mockResolvedValue({ id: 'prod1', sku: 'TACO', name: 'Taco' })
     ;(prisma.order.upsert as jest.Mock).mockResolvedValue(existingOrderRow)
-    ;(prisma.orderItem.create as jest.Mock).mockResolvedValue({ id: 'item1' })
+    // Devuelve la fila COMPLETA (como Prisma): el vale de inventario se arma con
+    // los renglones recién creados, así que necesita id + productId + cantidad.
+    ;(prisma.orderItem.create as jest.Mock).mockResolvedValue({
+      id: 'item1',
+      productId: 'prod1',
+      productName: 'Taco',
+      quantity: 2,
+      weightQuantity: null,
+    })
     ;(prisma.payment.count as jest.Mock).mockResolvedValue(0)
     ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'pay1', amount: 114.4 })
     ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({ id: 'alloc1' })
@@ -76,6 +92,8 @@ describe('ingestDeliveryOrder', () => {
     ;(prisma.menuCategory.create as jest.Mock).mockResolvedValue({ id: 'cat-placeholder', slug: 'delivery-desconocido' })
     ;(prisma.product.create as jest.Mock).mockResolvedValue({ id: 'prod-placeholder' })
     ;(dispatchOrderStatus as jest.Mock).mockResolvedValue(undefined)
+    createSalePostingInTxMock.mockResolvedValue({ id: 'posting-del-1', status: 'PENDING' })
+    applySalePostingMock.mockResolvedValue({ postingId: 'posting-del-1', applied: true, issues: [] })
   })
 
   // ============================================================
@@ -377,6 +395,71 @@ describe('ingestDeliveryOrder', () => {
     expect(prisma.paymentAllocation.create).not.toHaveBeenCalled()
     // La orden sigue siendo "nueva" → los items sí se procesan
     expect(prisma.orderItem.create).toHaveBeenCalled()
+  })
+
+  // ============================================================
+  // 6b. Inventario: el pedido pagado DESCUENTA del almacén (fase 5.8)
+  // ============================================================
+  //
+  // Un pedido de agregador entra ya PAGADO y con renglones resueltos a
+  // productos REALES del catálogo (resolveProductId), pero no descontaba nada:
+  // la comida salía de la cocina y el almacén no se movía. Decisión del founder
+  // (2026-08-16), con paridad Toast/Square —donde un pedido de tercero es una
+  // orden más y deplete el stock igual—: Avoqado descuenta.
+  //
+  // Límite conocido: el mapper v1 guarda los modificadores como TEXTO en notes,
+  // sin filas OrderItemModifier, así que se descuenta el producto base y no los
+  // insumos del modificador. Eso es del mapper, no de este camino.
+  describe('inventario — el pedido pagado descuenta del almacén', () => {
+    it('un pedido YA PAGADO deja vale CON sus renglones (no SKIPPED)', async () => {
+      await ingestDeliveryOrder(makeNormalized(), link)
+
+      expect(createSalePostingInTxMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ venueId: 'venue1', orderId: 'order1' }),
+      )
+      const params = createSalePostingInTxMock.mock.calls[0][1]
+      expect(params.skipReason).toBeUndefined()
+      // Los renglones tienen que ser los OrderItem REALES recién creados: con
+      // una lista vacía el vale nacería SKIPPED y no descontaría nada.
+      expect(params.items).toEqual([expect.objectContaining({ id: 'item1', productId: 'prod1', quantity: 2 })])
+    })
+
+    it('aplica el vale DESPUÉS del commit, no dentro de la transacción', async () => {
+      let aplicadoDentroDeLaTx = false
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+        const r = await fn(prisma)
+        aplicadoDentroDeLaTx = applySalePostingMock.mock.calls.length > 0
+        return r
+      })
+
+      await ingestDeliveryOrder(makeNormalized(), link)
+
+      expect(aplicadoDentroDeLaTx).toBe(false)
+      // staffId null a propósito: un pedido de agregador no lo cobró nadie del
+      // negocio. Inventar un actor falsearía la atribución del movimiento.
+      expect(applySalePostingMock).toHaveBeenCalledWith('posting-del-1', null)
+    })
+
+    it('un pedido NO pagado todavía no deja vale — nada que descontar aún', async () => {
+      await ingestDeliveryOrder(makeNormalized({ raw: { any: 'payload', orderIsAlreadyPaid: false } }), link)
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+    })
+
+    it('un webhook repetido sobre una orden existente no abre un segundo vale', async () => {
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(existingOrderRow)
+
+      await ingestDeliveryOrder(makeNormalized(), link)
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+    })
+
+    it('si aplicar el vale truena, la ingesta NO se cae (el pedido ya está pagado)', async () => {
+      applySalePostingMock.mockRejectedValueOnce(new Error('pool agotado'))
+
+      await expect(ingestDeliveryOrder(makeNormalized(), link)).resolves.toBeDefined()
+    })
   })
 
   // ============================================================

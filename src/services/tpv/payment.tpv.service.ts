@@ -26,6 +26,7 @@ import { terminalPaymentService } from '../terminal-payment.service'
 // Sin ciclo: table.tpv.service NO importa este archivo (verificado 2026-08-03).
 import * as tableService from './table.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
   classifyCardInternationality,
   type CardInternationalityDecision,
@@ -2468,6 +2469,24 @@ export async function recordOrderPayment(
   })
   logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
 
+  // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO (simétrico con el PAY_OUT del reembolso).
+  // Ver `services/shared/cashDrawerPosting.ts`: decide con `tenderSemantics` si el
+  // dinero entró al cajón, no lanza nunca, y es idempotente por paymentId.
+  await postCashSaleToDrawer({
+    venueId,
+    paymentId: payment.id,
+    method: payment.method,
+    fundsFlow: payment.fundsFlow,
+    tenderTypeId: payment.tenderTypeId,
+    tenderCountsAsCash: payment.tenderCountsAsCash,
+    status: payment.status,
+    type: payment.type,
+    amount: payment.amount,
+    tipAmount: payment.tipAmount,
+    staffId: payment.processedById,
+    orderId: activeOrder.id,
+  })
+
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {
     const costResult = await createTransactionCost(payment.id)
@@ -3578,6 +3597,24 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     netAmount: payment.netAmount,
   })
   logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
+
+  // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO. Esta función NO es sólo de la TPV: el POS
+  // móvil también cobra la venta rápida por aquí (`POST /mobile/venues/:venueId/fast`),
+  // así que sin este enganche la venta sin cuenta se quedaba fuera del arqueo.
+  await postCashSaleToDrawer({
+    venueId,
+    paymentId: payment.id,
+    method: payment.method,
+    fundsFlow: payment.fundsFlow,
+    tenderTypeId: payment.tenderTypeId,
+    tenderCountsAsCash: payment.tenderCountsAsCash,
+    status: payment.status,
+    type: payment.type,
+    amount: payment.amount,
+    tipAmount: payment.tipAmount,
+    staffId: payment.processedById,
+    orderId: fastOrder.id,
+  })
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {
