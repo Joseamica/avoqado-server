@@ -478,4 +478,41 @@ describe('ProductInventoryIntegration Service', () => {
       expect(prismaMock.rawMaterial.findUnique).not.toHaveBeenCalled()
     })
   })
+
+  // ── Guard de tenant en la clasificación en lote (fase 5, audit Codex) ──
+  // El clasificador filtraba SÓLO por productId. Al conectar más caminos de
+  // cobro al posting (varios aceptan un orderId externo sin verificar el venue),
+  // eso permitiría crear una línea de deducción contra el producto de OTRO
+  // negocio. El venueId es obligatorio en la consulta, no opcional en la lectura.
+  describe('getProductInventoryMethods — aislamiento por venue', () => {
+    beforeEach(() => jest.clearAllMocks())
+
+    it('filtra por venueId cuando se le pasa', async () => {
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'p1', trackInventory: true, inventoryMethod: 'QUANTITY', recipe: null }] as any)
+
+      await productInventoryIntegrationService.getProductInventoryMethods(['p1'], undefined, 'venue-1')
+
+      expect(prismaMock.product.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ venueId: 'venue-1' }) }),
+      )
+    })
+
+    it('un producto de OTRO venue no queda clasificado (no genera línea de deducción)', async () => {
+      // La consulta acotada por venue simplemente no lo devuelve.
+      prismaMock.product.findMany.mockResolvedValue([] as any)
+
+      const methods = await productInventoryIntegrationService.getProductInventoryMethods(['p-ajeno'], undefined, 'venue-1')
+
+      expect(methods.get('p-ajeno')).toBeUndefined()
+    })
+
+    it('sin venueId se comporta como antes (compat con los callers legacy)', async () => {
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'p1', trackInventory: true, inventoryMethod: 'QUANTITY', recipe: null }] as any)
+
+      await productInventoryIntegrationService.getProductInventoryMethods(['p1'])
+
+      const where = (prismaMock.product.findMany.mock.calls[0][0] as any).where
+      expect(where.venueId).toBeUndefined()
+    })
+  })
 })

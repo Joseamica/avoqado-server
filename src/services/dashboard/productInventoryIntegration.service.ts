@@ -85,13 +85,19 @@ export async function getProductInventoryMethod(productId: string): Promise<Inve
 export async function getProductInventoryMethods(
   productIds: string[],
   client: Pick<typeof prisma, 'product'> = prisma,
+  // 🔴 Aislamiento por tenant (fase 5, audit Codex): sin este filtro la
+  // clasificación sólo miraba el productId, así que un camino de cobro que
+  // acepta un `orderId` externo sin verificar el negocio (B4BIT, links) podía
+  // acabar creando una línea de deducción contra el producto de OTRO venue.
+  // Opcional para no romper los callers legacy; los caminos de venta SÍ lo pasan.
+  venueId?: string,
 ): Promise<Map<string, InventoryMethod | null>> {
   const methods = new Map<string, InventoryMethod | null>()
   const uniqueIds = [...new Set(productIds)].filter(Boolean)
   if (uniqueIds.length === 0) return methods
 
   const products = await client.product.findMany({
-    where: { id: { in: uniqueIds } },
+    where: { id: { in: uniqueIds }, ...(venueId ? { venueId } : {}) },
     select: {
       id: true,
       trackInventory: true,

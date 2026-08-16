@@ -1910,7 +1910,13 @@ model InventoryPosting {
 
   status InventoryPostingStatus @default(PENDING)
   // Por qué NO se aplicó cuando status=SKIPPED (visible, nunca silencioso):
-  // NO_ITEMS | TRACKING_DISABLED | EXTERNAL_INVENTORY_AUTHORITY | CUSTOM_ITEM
+  // NO_ITEMS | NO_TRACKED_ITEMS | CUSTOM_ITEM | EXTERNAL_INVENTORY_AUTHORITY
+  //   · NO_ITEMS          — la venta no trae renglones (cobro de puro monto)
+  //   · NO_TRACKED_ITEMS  — hay productos, pero ninguno lleva inventario
+  //   · CUSTOM_ITEM       — sólo importes libres, ninguno del catálogo
+  //   · EXTERNAL_INVENTORY_AUTHORITY — el stock lo lleva otro sistema
+  // (el resto de los valores los fija el sitio de llamada, p.ej. área-tickets
+  //  que ya dedujeron en su propia transacción)
   skipReason String?
 
   // Snapshot del payload al crearse (items y cantidades): el aplicador no

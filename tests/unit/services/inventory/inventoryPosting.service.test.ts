@@ -69,20 +69,55 @@ describe('createSalePostingInTx', () => {
     expect(lines.find((l: any) => l.effectKey === 'oi-1').expectedQuantityBase.toString()).toBe('2')
   })
 
-  it('sin items deducibles crea el posting SKIPPED con razón durable NO_ITEMS', async () => {
+  // ── El motivo del skip distingue casos que NO son lo mismo (fase 5) ──
+  // "NO_ITEMS" para todo escondía tres realidades distintas: una venta sin
+  // renglones, una de puro importe libre, y un catálogo con el rastreo apagado.
+  // La tercera es la que importa: significa "este negocio no lleva inventario
+  // aquí", no "no había qué descontar".
+  it('venta SIN renglones → NO_ITEMS', async () => {
     getInventoryMethodsMock.mockResolvedValue(new Map())
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-2', status: 'SKIPPED' } as any)
+
+    await createSalePostingInTx(prismaMock as any, { venueId: VENUE, orderId: ORDER, items: [] as any, staffId: 'staff-1' })
+
+    const createArg = prismaMock.inventoryPosting.create.mock.calls[0][0] as any
+    expect(createArg.data.status).toBe('SKIPPED')
+    expect(createArg.data.skipReason).toBe('NO_ITEMS')
+  })
+
+  it('venta de puro importe libre (sin producto de catálogo) → CUSTOM_ITEM', async () => {
+    getInventoryMethodsMock.mockResolvedValue(new Map())
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-2', status: 'SKIPPED' } as any)
+
+    await createSalePostingInTx(prismaMock as any, { venueId: VENUE, orderId: ORDER, items: [items[1]] as any, staffId: 'staff-1' })
+
+    const createArg = prismaMock.inventoryPosting.create.mock.calls[0][0] as any
+    expect(createArg.data.skipReason).toBe('CUSTOM_ITEM')
+  })
+
+  it('productos de catálogo pero SIN rastreo de inventario → NO_TRACKED_ITEMS', async () => {
+    getInventoryMethodsMock.mockResolvedValue(new Map([['p1', null]]))
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-2', status: 'SKIPPED' } as any)
+
+    await createSalePostingInTx(prismaMock as any, { venueId: VENUE, orderId: ORDER, items: [items[0]] as any, staffId: 'staff-1' })
+
+    const createArg = prismaMock.inventoryPosting.create.mock.calls[0][0] as any
+    expect(createArg.data.skipReason).toBe('NO_TRACKED_ITEMS')
+  })
+
+  it('un skipReason explícito del caller manda sobre el inferido', async () => {
     prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-2', status: 'SKIPPED' } as any)
 
     await createSalePostingInTx(prismaMock as any, {
       venueId: VENUE,
       orderId: ORDER,
-      items: [items[1]] as any,
+      items: items as any,
       staffId: 'staff-1',
+      skipReason: 'EXTERNAL_INVENTORY_AUTHORITY',
     })
 
     const createArg = prismaMock.inventoryPosting.create.mock.calls[0][0] as any
-    expect(createArg.data.status).toBe('SKIPPED')
-    expect(createArg.data.skipReason).toBe('NO_ITEMS')
+    expect(createArg.data.skipReason).toBe('EXTERNAL_INVENTORY_AUTHORITY')
   })
 
   it('el duplicado se detecta con pre-check ANTES del create (nunca 25P02 en la tx del cobro)', async () => {
@@ -116,6 +151,21 @@ describe('createSalePostingInTx', () => {
     expect(getInventoryMethodsMock).toHaveBeenCalledTimes(1)
     expect(getInventoryMethodsMock.mock.calls[0][0]).toEqual(['p1', 'p3'])
     expect(getInventoryMethodMock).not.toHaveBeenCalled()
+  })
+
+  it('acota la clasificación al venue del posting (aislamiento de tenant)', async () => {
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-1', status: 'PENDING' } as any)
+
+    await createSalePostingInTx(prismaMock as any, {
+      venueId: VENUE,
+      orderId: ORDER,
+      items: items as any,
+      staffId: 'staff-1',
+    })
+
+    // 3er argumento = venueId. Sin él, un producto de otro negocio podría
+    // clasificarse y generar una línea de deducción ajena.
+    expect(getInventoryMethodsMock.mock.calls[0][2]).toBe(VENUE)
   })
 })
 

@@ -105,7 +105,11 @@ export async function createSalePostingInTx(
     // includes POR ITEM, secuencial, dentro de la tx del cobro — N+1 contra el
     // timeout de 5s). Se usa la tx para no pedirle otra conexión al pool.
     const productIds = items.map(i => i.productId).filter((id): id is string => !!id)
-    const methods = await getProductInventoryMethods(productIds, tx as any)
+    // El venueId acota la clasificación al negocio del posting: un producto de
+    // OTRO venue nunca queda clasificado y por tanto nunca genera línea de
+    // deducción (audit Codex fase 5 — varios caminos aceptan un orderId externo
+    // sin verificar a quién pertenece).
+    const methods = await getProductInventoryMethods(productIds, tx as any, venueId)
     for (const item of items) {
       if (!item.productId) continue
       const method = methods.get(item.productId) ?? null
@@ -119,7 +123,16 @@ export async function createSalePostingInTx(
     }
   }
 
-  const resolvedSkip = skipReason ?? (lines.length === 0 ? 'NO_ITEMS' : undefined)
+  // 🔴 El motivo del skip distingue casos que NO son lo mismo (fase 5, audit
+  // Codex). "NO_ITEMS" para todo escondía tres realidades:
+  //   · NO_ITEMS         — la venta no trae renglones (cobro de puro monto)
+  //   · CUSTOM_ITEM      — sólo importes libres, ninguno del catálogo
+  //   · NO_TRACKED_ITEMS — sí hay productos, pero ninguno lleva inventario
+  // La tercera es la que importa al conciliar: significa "este negocio no
+  // rastrea inventario aquí", no "no había qué descontar".
+  const resolvedSkip =
+    skipReason ??
+    (lines.length > 0 ? undefined : items.length === 0 ? 'NO_ITEMS' : items.some(i => i.productId) ? 'NO_TRACKED_ITEMS' : 'CUSTOM_ITEM')
 
   return await tx.inventoryPosting.create({
     data: {
