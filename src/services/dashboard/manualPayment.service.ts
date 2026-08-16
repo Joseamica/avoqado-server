@@ -1,4 +1,4 @@
-import { Prisma, TransactionStatus } from '@prisma/client'
+import { PaymentFundsFlow, Prisma, TransactionStatus } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -325,6 +325,14 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
           method: input.method,
           source: input.source,
           externalSource: input.externalSource ?? null,
+          // 🔑 Clasificación financiera SERVER-OWNED (auditoría 2026-08-15): este endpoint
+          // registra dinero que Avoqado NO procesó — una terminal ajena (BBVA), una
+          // transferencia directa, un cobro en otra app. La VENTA sí se registra (Avoqado
+          // centraliza use o no la TPV) y cuenta en ventas, corte, inventario y reportes;
+          // lo que NUNCA debe hacer es sumar al saldo "por depositar", porque ese dinero
+          // ya lo tiene el negocio o se lo deposita el otro banco.
+          // Efectivo capturado a mano sí entra al cajón; el resto es registro externo.
+          fundsFlow: input.method === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED,
           status: TransactionStatus.COMPLETED,
           processedById: staffId,
           // Fee fields are required on Payment model — manual payments have no processor fees.

@@ -45,4 +45,28 @@ describe('tenderSemantics', () => {
       expect(paymentIsAvoqadoSettled({ method: 'OTHER', fundsFlow: 'CASH_DRAWER' })).toBe(false)
     })
   })
+
+  describe('caso real: terminal ajena (BBVA) — Avoqado centraliza la VENTA, no el depósito', () => {
+    // El negocio cobró con su terminal BBVA y lo registra en Avoqado para que la venta
+    // exista (corte, inventario, reportes). Ese dinero lo deposita BBVA, no Avoqado.
+    const bbva = { method: 'CREDIT_CARD', fundsFlow: 'EXTERNAL_RECORDED' as const }
+
+    it('NO entra al saldo por depositar', () => {
+      expect(paymentIsAvoqadoSettled(bbva)).toBe(false)
+    })
+
+    it('tampoco entra al cajón de efectivo (no es efectivo)', () => {
+      expect(paymentCountsAsDrawerCash(bbva)).toBe(false)
+    })
+
+    it('un cobro con NUESTRA terminal sí entra al saldo', () => {
+      expect(paymentIsAvoqadoSettled({ method: 'CREDIT_CARD', fundsFlow: 'AVOQADO_PROCESSED' })).toBe(true)
+    })
+
+    it('efectivo capturado a mano entra al cajón, no al saldo por depositar', () => {
+      const efectivoManual = { method: 'CASH', fundsFlow: 'CASH_DRAWER' as const }
+      expect(paymentCountsAsDrawerCash(efectivoManual)).toBe(true)
+      expect(paymentIsAvoqadoSettled(efectivoManual)).toBe(false)
+    })
+  })
 })

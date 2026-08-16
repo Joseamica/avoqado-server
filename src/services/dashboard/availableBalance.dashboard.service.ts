@@ -9,6 +9,7 @@ import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import { projectPaymentSettlement, type ActiveConfig } from './settlementCalendar.dashboard.service'
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { getLastCloseoutDate } from './cashCloseout.dashboard.service'
+import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
 
 // Extended card type that includes CASH (for frontend compatibility)
 // CASH is not in Prisma enum but we treat it as a synthetic type
@@ -105,7 +106,16 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   const venueTimezone = venueRecord?.timezone || DEFAULT_TIMEZONE
 
   // Get all completed card payments with settlement info
-  const cardPayments = await prisma.payment.findMany({
+  //
+  // 🔑 El saldo disponible es la promesa "Avoqado te va a depositar esto", así que
+  // sólo puede contener dinero que Avoqado PROCESÓ. Una venta cobrada con una
+  // terminal ajena (BBVA) o registrada como transferencia directa SÍ se registra en
+  // Avoqado —centraliza use o no la TPV— y cuenta en ventas, corte, inventario y
+  // reportes; pero ese dinero ya lo tiene el negocio o se lo deposita el otro banco.
+  // El filtro por `paymentIsAvoqadoSettled` va DESPUÉS del query a propósito: un
+  // `not:` de Prisma sobre un enum nullable deja fuera los NULL (todo lo histórico),
+  // que es justo lo que NO queremos cambiar. Ver `shared/tenderSemantics.ts`.
+  const cardPaymentsRaw = await prisma.payment.findMany({
     where: {
       venueId,
       status: 'COMPLETED',
@@ -125,6 +135,11 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
       },
     },
   })
+
+  // Dinero que Avoqado NO procesó (terminal ajena, transferencia directa, tender
+  // personalizado) queda fuera del saldo. Con `fundsFlow` sin estampar —todo lo
+  // histórico— el predicado cae al comportamiento legacy y el número no se mueve.
+  const cardPayments = cardPaymentsRaw.filter(paymentIsAvoqadoSettled)
 
   // Settlement dates/nets for still-PENDING money are RECOMPUTED live via the same
   // shared engine as the week strip / settlement calendar / timeline — NOT read from
