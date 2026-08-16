@@ -709,6 +709,33 @@ It does NOT affect:
 - TPV auth (PIN login)
 - Login/logout flow
 
+## Manager-PIN override (2026-08)
+
+Cuando `checkPermission` deniega y el venue tiene `VenueSettings.managerPinOverrideEnabled = true`, el 403 incluye el campo aditivo
+`overridable: true`. El POS pide entonces el PIN de alguien CON ese permiso a `POST /api/v1/mobile/venues/:venueId/permission-overrides`,
+recibe un token de **un solo uso, 60 s, atado a ese permiso y ese venue**, y reintenta la request original con el header
+`X-Permission-Override`.
+
+- **Un solo punto de integración.** Cubre toda ruta con `checkPermission`, presente y futura.
+- **Nunca eleva la terminal.** El token muere al usarse (`updateMany` atómico sobre `consumedAt`).
+- **No aplica a:** el 403 de membresía (`No access to this venue`) ni al 403 de tier (`checkFeatureAccess`, que lleva `featureCode` y va al
+  upsell). Ningún PIN los arregla.
+- **Core, en todos los planes**, pero **nace OFF**: el switch canónico se prende en el dashboard (ajustes del venue) y el POS sólo lo lee.
+- **Auditoría:** `PermissionOverride` guarda token + quién autorizó + ruta consumida; y en `ActivityLog` quedan tres acciones, todas
+  visibles por el MCP `get_activity_log`:
+
+  | Acción                             | Qué pasó                                                                                                           |
+  | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+  | `PERMISSION_OVERRIDE_USED`         | Se autorizó y se ejecutó. `data.authorizedByStaffVenueId` = quién autorizó.                                        |
+  | `PERMISSION_OVERRIDE_INSUFFICIENT` | El PIN existe pero tampoco trae ese permiso. Señal clásica de que alguien está probando el código de un compañero. |
+  | `PERMISSION_OVERRIDE_REJECTED`     | Token vencido, reusado, de otro permiso o de otro venue.                                                           |
+
+  (`PERMISSION_DENIED` sigue siendo la denegación normal, sin intento de PIN.)
+
+- 🔴 **Límite honesto:** los PINs se guardan en texto plano por decisión explícita del founder (2026-08-15). Quien tenga lectura de la base
+  puede usar el PIN de un gerente y la bitácora diría su nombre igual. La auditoría sirve para **reconstruir qué pasó**, no como prueba de
+  quién autorizó. No se vende como autorización indiscutible.
+
 ## Related Documentation
 
 - **Root CLAUDE.md** - Architecture overview and authentication flow

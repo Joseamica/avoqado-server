@@ -11,10 +11,15 @@ export function registerActivityLogTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
     'get_activity_log',
-    'Audit trail for your venue(s): who did what and when — orders (comp/void/discount), payments, refunds, shifts, staff/access changes, inventory receiving and SIM custody, config changes. Most recent first. Pass venueId to focus one venue; filter by action code or date range. Requires the activity:read permission (owner-level).',
+    'Audit trail for your venue(s): who did what and when — orders (comp/void/discount), payments, refunds, shifts, staff/access changes, inventory receiving and SIM custody, config changes, and manager-PIN authorizations (PERMISSION_OVERRIDE_USED = a manager authorized a blocked action for someone else, one action and one time; the approver is in data.authorizedByStaffVenueId. PERMISSION_OVERRIDE_INSUFFICIENT = someone typed a valid PIN that does NOT carry that permission — the classic internal-fraud signal. PERMISSION_OVERRIDE_REJECTED = an expired or already-used token. PERMISSION_DENIED = a plain denial, no PIN attempted). Most recent first. Pass venueId to focus one venue; filter by action code or date range. Requires the activity:read permission (owner-level).',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
-      action: z.string().optional().describe('Filter by exact action code, e.g. PAYMENT_COMPLETED or SIM_CUSTODY_ASSIGNED_TO_PROMOTER'),
+      action: z
+        .string()
+        .optional()
+        .describe(
+          'Filter by exact action code, e.g. PAYMENT_COMPLETED, SIM_CUSTODY_ASSIGNED_TO_PROMOTER or PERMISSION_OVERRIDE_USED (manager-PIN approvals; the approver is in data.authorizedByStaffVenueId)',
+        ),
       startDate: z.string().optional().describe('ISO date lower bound (inclusive), venue-local'),
       endDate: z.string().optional().describe('ISO date upper bound (inclusive), venue-local'),
       limit: z.number().int().min(1).max(100).default(25).describe('Max rows'),
