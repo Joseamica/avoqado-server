@@ -6,6 +6,7 @@ import prisma from '../../utils/prismaClient'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import socketManager from '../../communication/sockets'
 import { logAction } from '../dashboard/activity-log.service'
+import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { isCashReconciliationEnabled } from '../access/cashReconciliationAccess.service'
 import {
   calculateCashReconciliation,
@@ -1346,6 +1347,10 @@ async function closeShiftUsingRequest(
         amount: true,
         tipAmount: true,
         method: true,
+        // tenderSemantics inputs — a cash-counting voucher tender must reach the drawer math.
+        fundsFlow: true,
+        tenderTypeId: true,
+        tenderCountsAsCash: true,
       },
     })
 
@@ -1370,12 +1375,21 @@ async function closeShiftUsingRequest(
     //
     // La propina de TARJETA no entra aquí: ese dinero llega por el depósito del banco.
     let totalCashTips = new Decimal(0)
+    // Dinero que SÍ está en el cajón sin ser venta en efectivo: tender personalizado con
+    // countsAsPhysicalCash (vale de despensa, method=OTHER). Entra al efectivo esperado
+    // pero NUNCA a `totalCashPayments` (que es la cifra de VENTAS en efectivo — ver arriba).
+    // Con la data actual (sin tender snapshots) esto es siempre 0: comportamiento idéntico.
+    let totalDrawerExtra = new Decimal(0)
 
     shiftPayments.forEach(payment => {
       const amount = new Decimal(payment.amount || 0)
       const tipAmount = new Decimal(payment.tipAmount || 0)
       totalSales = totalSales.add(amount)
       totalTips = totalTips.add(tipAmount)
+
+      if (payment.method !== 'CASH' && paymentCountsAsDrawerCash(payment)) {
+        totalDrawerExtra = totalDrawerExtra.add(amount).add(tipAmount)
+      }
 
       switch (payment.method) {
         case 'CASH':
@@ -1504,9 +1518,10 @@ async function closeShiftUsingRequest(
     }
 
     // Lo que HAY en el cajón por este turno: ventas en efectivo + propina cobrada en
-    // efectivo. Es la cifra del arqueo, distinta de `totalCashPayments` (ventas) que
-    // alimenta los reportes. Ver el comentario largo donde se acumula `totalCashTips`.
-    const cashInDrawer = totalCashPayments.add(totalCashTips)
+    // efectivo + tenders que cuentan como efectivo físico (vales). Es la cifra del
+    // arqueo, distinta de `totalCashPayments` (ventas) que alimenta los reportes.
+    // Ver los comentarios donde se acumulan `totalCashTips` y `totalDrawerExtra`.
+    const cashInDrawer = totalCashPayments.add(totalCashTips).add(totalDrawerExtra)
 
     const expectedCash = new Decimal(shift.startingCash || 0).add(cashInDrawer)
     let outcome: CashReconciliationOutcome = request.outcome

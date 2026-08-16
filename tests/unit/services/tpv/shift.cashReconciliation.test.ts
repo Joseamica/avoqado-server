@@ -321,6 +321,32 @@ describe('closeShiftForVenueWithResult — propina en efectivo en el arqueo', ()
     expect(finalWrite.data.totalTips.toString()).toBe('500')
   })
 
+  it('un tender que cuenta como efectivo (vale, method OTHER) entra al cajón SIN inflar las ventas en efectivo', async () => {
+    // Venta $5,000 efectivo + vale de despensa $800 (tender custom countsAsCash).
+    // Cajón = fondo 1000 + 5000 + 800 = 6800; las ventas en efectivo siguen en 5000.
+    mockPrisma.payment.findMany.mockResolvedValue([
+      paymentWithTip('5000.00', '0.00'),
+      { ...paymentWithTip('800.00', '0.00', 'OTHER'), tenderTypeId: 'tt-vale', tenderCountsAsCash: true },
+    ])
+
+    const result = await closeCounting('6800.00')
+
+    expect(result.reconciliation).toEqual({ outcome: 'APPLIED', countedCash: '6800.00', cashDifference: '0.00' })
+    expect(finalWrite.data.totalCashPayments.toString()).toBe('5000')
+  })
+
+  it('un tender custom que NO cuenta como efectivo (Uber) no mueve el cajón', async () => {
+    mockPrisma.payment.findMany.mockResolvedValue([
+      paymentWithTip('5000.00', '0.00'),
+      { ...paymentWithTip('1200.00', '0.00', 'OTHER'), tenderTypeId: 'tt-uber', tenderCountsAsCash: false },
+    ])
+
+    // Cajón = fondo 1000 + 5000. El dinero de Uber jamás pasó por la caja.
+    const result = await closeCounting('6000.00')
+
+    expect(result.reconciliation).toEqual({ outcome: 'APPLIED', countedCash: '6000.00', cashDifference: '0.00' })
+  })
+
   it('la propina de TARJETA no entra al cajón', async () => {
     // El dinero de la propina con tarjeta llega por el depósito del banco, no al cajón.
     mockPrisma.payment.findMany.mockResolvedValue([paymentWithTip('5000.00', '500.00', 'CREDIT_CARD')])

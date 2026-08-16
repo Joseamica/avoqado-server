@@ -3651,6 +3651,9 @@ model Payment {
   tenderTypeId            String?
   tenderType              VenueTenderType? @relation(fields: [venueId, tenderTypeId], references: [venueId, id], onDelete: Restrict)
   tenderRevision          Int?
+  /// Who moves this money (server-stamped at the entry point). Null = legacy row;
+  /// readers fall back to the historical inference so old numbers never shift.
+  fundsFlow               PaymentFundsFlow?
   tenderLabel             String?          @db.VarChar(80)
   tenderCountsAsCash      Boolean?
   tenderCaptureTip        Boolean?
@@ -7659,6 +7662,16 @@ enum PaymentMethod {
 enum TenderSection {
   PRIMARY // first-level row on the charge screen
   MORE // behind the "Más ›" button (second level)
+}
+
+/// Server-owned classification of WHO moves this payment's money (audit v4 finding #1:
+/// the absence of `externalSource` is NOT financial authority). Stamped by the entry
+/// point that processed the charge — never inferred from client-supplied strings.
+/// Null = legacy row (readers fall back to the historical inference, unchanged).
+enum PaymentFundsFlow {
+  AVOQADO_PROCESSED // Blumon/Stripe/MercadoPago through us → settled & depositable by Avoqado
+  CASH_DRAWER // physically enters the venue's cash drawer (cash, cash-counting vouchers)
+  EXTERNAL_RECORDED // recorded for reporting only (Uber Eats, manual transfer, POS-sync import) — Avoqado never touches this money
 }
 
 enum CheckoutStatus {

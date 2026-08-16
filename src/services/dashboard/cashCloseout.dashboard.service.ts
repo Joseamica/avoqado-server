@@ -1,5 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { PaymentMethod, DepositMethod } from '@prisma/client'
+import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 
@@ -69,15 +70,21 @@ export async function getExpectedCashAmount(venueId: string): Promise<{
   // naturally subtracts refunds from the expected cash in the drawer. Since
   // 2026-04-19 refunds split across `amount` (sale) and `tipAmount` (tip), so
   // we must sum both fields to capture the full cash impact.
-  const cashPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      method: PaymentMethod.CASH,
-      status: 'COMPLETED',
-      createdAt: { gt: periodStart },
-    },
-    select: { amount: true, tipAmount: true },
-  })
+  // Drawer membership is decided by the SHARED predicate (tenderSemantics), never a
+  // local method check: a cash-counting voucher tender (method=OTHER,
+  // tenderCountsAsCash=true) sits in the drawer too. With no tender snapshots in
+  // existing data this matches the old `method === CASH` filter exactly.
+  const cashPayments = (
+    await prisma.payment.findMany({
+      where: {
+        venueId,
+        OR: [{ method: PaymentMethod.CASH }, { tenderCountsAsCash: true }, { fundsFlow: 'CASH_DRAWER' }],
+        status: 'COMPLETED',
+        createdAt: { gt: periodStart },
+      },
+      select: { amount: true, tipAmount: true, method: true, fundsFlow: true, tenderTypeId: true, tenderCountsAsCash: true },
+    })
+  ).filter(paymentCountsAsDrawerCash)
 
   const expectedAmount = cashPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount ?? 0), 0)
   const daysSinceLastCloseout = Math.floor((Date.now() - periodStart.getTime()) / (1000 * 60 * 60 * 24))
