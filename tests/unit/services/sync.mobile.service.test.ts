@@ -645,7 +645,11 @@ describe('sync.mobile.service processIntents', () => {
       ['ASSIGN_ORDER', 'orders:update'],
       ['SPLIT_ORDER', 'orders:update'],
       ['SPLIT_BY_SEAT', 'orders:update'],
-      ['MERGE_ORDERS', 'orders:update'],
+      // 🔴 Fusionar tiene permiso PROPIO desde 2026-08. Con el genérico
+      // orders:update, apagar el WiFi era la puerta trasera: online el mesero
+      // recibe el teclado del PIN, y offline el mismo toque se aplicaba solo al
+      // reconectar, sin autorización y sin PERMISSION_OVERRIDE_USED.
+      ['MERGE_ORDERS', 'orders:merge'],
     ])('%s → %s', (type, permission) => {
       expect(requiredPermissionForIntent(type)).toBe(permission)
     })

@@ -154,8 +154,13 @@ export function requiredPermissionForIntent(type: string): string | null {
     case 'ASSIGN_ORDER':
     case 'SPLIT_ORDER':
     case 'SPLIT_BY_SEAT':
-    case 'MERGE_ORDERS':
       return 'orders:update'
+    // 🔴 Fusionar cuentas tiene permiso PROPIO — el mismo que exige la ruta
+    // online. Con el genérico `orders:update` bastaba apagar el WiFi para
+    // saltarse el candado: el toque se encolaba y el reducer lo aplicaba al
+    // reconectar sin PIN de gerente y sin dejar fila en la bitácora.
+    case 'MERGE_ORDERS':
+      return 'orders:merge'
     default:
       return null
   }
