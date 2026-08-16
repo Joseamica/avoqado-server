@@ -13,7 +13,7 @@ import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError, Unauthorize
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
 import { logAction } from './activity-log.service'
-import { deductInventoryForProduct } from '@/services/dashboard/productInventoryIntegration.service'
+import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import { isEcommerceMerchantChargeable } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
@@ -1410,6 +1410,7 @@ export async function finalizePaymentLinkCheckout(args: {
   const primaryStaffId = attributedStaffIds[0] ?? null // for Payment.processedById
   let paymentIdForCommission: string | null = null
   let orderIdForReferral: string | null = null
+  let postingId: string | null = null
 
   await prisma.$transaction(async tx => {
     // 1. Mark session COMPLETED + record Stripe paymentIntent for reconciliation
@@ -1492,7 +1493,23 @@ export async function finalizePaymentLinkCheckout(args: {
           },
         }),
       },
+      // Los renglones con su id (y sus modificadores) son lo que el vale de
+      // inventario necesita para nacer dentro de esta misma transacción.
+      include: { items: { include: { modifiers: { include: { modifier: true } } } } },
     })
+
+    // 3b. Vale durable de inventario, en la MISMA transacción que la orden PAID.
+    //     Antes se deducía en un `for` fuera de la transacción y con
+    //     `session.sessionId` como orderId: un crash entre el commit y ese loop
+    //     dejaba la venta cobrada, sin deducir y sin rastro. Ahora el vale nace
+    //     atómico con la venta y el sweeper rescata lo que no se aplique.
+    const posting = await createSalePostingInTx(tx, {
+      venueId,
+      orderId: order.id,
+      items: (order.items ?? []) as any,
+      staffId: primaryStaffId ?? session.paymentLink!.createdById,
+    })
+    postingId = posting?.id ?? null
 
     // 4. Create a Payment row linked to the Order. This is what the
     //    /payments dashboard reads — without it, the transaction shows in
@@ -1593,22 +1610,18 @@ export async function finalizePaymentLinkCheckout(args: {
     })
   }
 
-  // 4. Inventory deduction outside the transaction (best-effort, matches
-  //    Blumon's completeCharge behavior). Loop through each bundle line —
-  //    deduct quantity × productId independently. We swallow per-product
-  //    errors so one bad line doesn't block the others.
-  if (isItemLink) {
-    for (const it of sessionItems) {
-      try {
-        await deductInventoryForProduct(venueId, it.productId, it.quantity, session.sessionId)
-      } catch (deductionError: any) {
-        logger.error('Failed to deduct inventory for Stripe payment-link bundle item', {
-          paymentLinkId: session.paymentLink.id,
-          productId: it.productId,
-          quantity: it.quantity,
-          error: deductionError.message,
-        })
-      }
+  // 4. Aplicar el vale de inventario, YA COMMITEADO el cobro. El aplicador es
+  //    reintentable por línea y nunca puede tumbar una venta cobrada: si truena
+  //    aquí, el posting queda PENDING/PARTIAL_FAILED y el sweeper lo retoma.
+  if (postingId) {
+    try {
+      await applySalePosting(postingId, primaryStaffId ?? session.paymentLink.createdById)
+    } catch (deductionError: any) {
+      logger.error('Failed to apply inventory posting for Stripe payment-link', {
+        paymentLinkId: session.paymentLink.id,
+        postingId,
+        error: deductionError?.message ?? String(deductionError),
+      })
     }
   }
 
@@ -2218,6 +2231,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   const primaryStaffId = attributedStaffIds[0] ?? null
   let paymentIdForCommission: string | null = null
   let orderIdForReferral: string | null = null
+  let postingId: string | null = null
 
   await prisma.$transaction(async tx => {
     // Update checkout session
@@ -2318,7 +2332,21 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
             },
           }),
         },
+        // Los renglones con su id (y sus modificadores) son lo que el vale de
+        // inventario necesita para nacer dentro de esta misma transacción.
+        include: { items: { include: { modifiers: { include: { modifier: true } } } } },
       })
+
+      // Vale durable de inventario, atómico con la orden PAID — mismo motivo
+      // que en el camino Stripe: antes se deducía fuera de la transacción y
+      // contra el id de la sesión de checkout, no contra la orden.
+      const posting = await createSalePostingInTx(tx, {
+        venueId,
+        orderId: order.id,
+        items: (order.items ?? []) as any,
+        staffId: primaryStaffId ?? session.paymentLink!.createdById,
+      })
+      postingId = posting?.id ?? null
 
       logger.info('Order created for payment link (Blumon)', {
         orderId: order.id,
@@ -2390,50 +2418,34 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
     })
   }
 
-  // 5. Deduct inventory AFTER transaction (non-blocking, same pattern as TPV).
-  // Loop through each bundle line independently. Per-line errors are logged
-  // but don't abort the others.
-  if (isItemLink) {
-    for (const it of sessionItems) {
-      try {
-        await deductInventoryForProduct(venueId, it.productId, it.quantity, session.sessionId)
-        logger.info('Inventory deducted for payment-link bundle item', {
-          paymentLinkId: session.paymentLink!.id,
-          productId: it.productId,
-          quantity: it.quantity,
+  // 5. Aplicar el vale de inventario, YA COMMITEADO el cobro (no bloqueante,
+  // mismo patrón que TPV). El aplicador es reintentable por línea y jamás puede
+  // tumbar una venta cobrada: si truena, el posting queda PENDING/PARTIAL_FAILED
+  // y el sweeper lo retoma. La bitácora se ancla a la ORDEN, no a la sesión de
+  // checkout, que es lo que antes hacía inconciliable el rastro.
+  if (postingId) {
+    try {
+      const outcome = await applySalePosting(postingId, primaryStaffId ?? session.paymentLink!.createdById)
+      if (outcome && !outcome.applied) {
+        logAction({
+          venueId,
+          action: 'INVENTORY_DEDUCTION_FAILED',
+          entity: 'Order',
+          entityId: orderIdForReferral ?? session.sessionId,
+          data: {
+            source: 'PAYMENT_LINK',
+            postingId,
+            issues: outcome.issues,
+            paymentLinkId: session.paymentLink!.id,
+          },
         })
-      } catch (deductionError: any) {
-        logger.error('Failed to deduct inventory for payment-link bundle item', {
-          paymentLinkId: session.paymentLink!.id,
-          productId: it.productId,
-          quantity: it.quantity,
-          error: deductionError.message,
-        })
-
-        const errorReason = deductionError.message.includes('Insufficient stock')
-          ? 'INSUFFICIENT_STOCK'
-          : deductionError.message.includes('does not have a recipe')
-            ? 'NO_RECIPE'
-            : 'UNKNOWN'
-
-        if (errorReason !== 'NO_RECIPE') {
-          logAction({
-            venueId,
-            action: 'INVENTORY_DEDUCTION_FAILED',
-            entity: 'Order',
-            entityId: session.sessionId,
-            data: {
-              source: 'PAYMENT_LINK',
-              productId: it.productId,
-              productName: it.productName,
-              quantity: it.quantity,
-              reason: errorReason,
-              error: deductionError.message,
-              paymentLinkId: session.paymentLink!.id,
-            },
-          })
-        }
       }
+    } catch (deductionError: any) {
+      logger.error('Failed to apply inventory posting for payment-link', {
+        paymentLinkId: session.paymentLink!.id,
+        postingId,
+        error: deductionError?.message ?? String(deductionError),
+      })
     }
   }
 
@@ -3083,7 +3095,9 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
     where: { sessionId: args.sessionId },
     include: {
       ecommerceMerchant: { select: { id: true, venueId: true } },
-      paymentLink: { select: { id: true, venueId: true, createdById: true } },
+      // `purpose` decide si la venta trae productos: sin él, TODO cobro por
+      // MercadoPago se guardaba como entrada manual sin renglones.
+      paymentLink: { select: { id: true, venueId: true, createdById: true, purpose: true } },
     },
   })
   if (!session) {
@@ -3104,8 +3118,15 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
   const netAmount = subtotal.sub(feeAmount).gte(0) ? subtotal.sub(feeAmount) : new Prisma.Decimal(0)
   const feePercentage = subtotal.gt(0) ? feeAmount.div(subtotal).toDecimalPlaces(4) : new Prisma.Decimal(0)
   const processorId = String(args.mpPaymentId)
+  // Snapshot de renglones congelado al crear la intención de pago — el mismo
+  // que usan los caminos Stripe y Blumon. Sin esto, una liga de PRODUCTOS
+  // pagada con MercadoPago se guardaba sin renglones: cero inventario y la
+  // venta contada como entrada manual (que los reportes operativos filtran).
+  const sessionItems: BundleItemSnapshot[] = Array.isArray(metadata.items) ? metadata.items : []
+  const isItemLink = isLink && session.paymentLink!.purpose === 'ITEM' && sessionItems.length > 0
 
   let orderIdForReferral: string | null = null
+  let postingId: string | null = null
   try {
     await prisma.$transaction(async tx => {
       // Re-check inside the tx so two concurrent finalizers (optimistic + IPN)
@@ -3117,7 +3138,7 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
         data: {
           venueId,
           orderNumber: `${isLink ? 'PL' : 'VC'}-${Date.now()}`,
-          type: 'MANUAL_ENTRY',
+          type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
           source: isLink ? 'PAYMENT_LINK' : 'WEB',
           createdById: session.paymentLink?.createdById ?? undefined,
           customerEmail: session.customerEmail,
@@ -3131,8 +3152,49 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           status: 'COMPLETED',
           paymentStatus: 'PAID',
           completedAt: new Date(),
+          ...(isItemLink && {
+            items: {
+              create: sessionItems.map(it => {
+                const mods = it.modifiers ?? []
+                const modSumPerUnit = mods.reduce((s, m) => s + m.price * m.quantity, 0)
+                const lineTotal = new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity)
+                return {
+                  productId: it.productId,
+                  productName: it.productName,
+                  quantity: it.quantity,
+                  unitPrice: new Prisma.Decimal(it.unitPrice),
+                  discountAmount: 0,
+                  taxAmount: 0,
+                  total: lineTotal,
+                  modifiers:
+                    mods.length > 0
+                      ? {
+                          create: mods.map(m => ({
+                            modifierId: m.modifierId,
+                            name: m.modifierName,
+                            quantity: m.quantity,
+                            price: new Prisma.Decimal(m.price),
+                          })),
+                        }
+                      : undefined,
+                }
+              }),
+            },
+          }),
         },
+        include: { items: { include: { modifiers: { include: { modifier: true } } } } },
       })
+
+      // Vale durable de inventario, atómico con la orden PAID (igual que
+      // Stripe/Blumon). Para un cobro de puro monto nace SKIPPED, que es lo que
+      // mantiene el invariante "orden PAID ⟺ vale existe".
+      const posting = await createSalePostingInTx(tx, {
+        venueId,
+        orderId: order.id,
+        items: (order.items ?? []) as any,
+        staffId: session.paymentLink?.createdById ?? null,
+      })
+      postingId = posting?.id ?? null
 
       const createdPayment = await tx.payment.create({
         data: {
@@ -3144,7 +3206,9 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           method: 'CREDIT_CARD',
           source: 'WEB',
           status: 'COMPLETED',
-          type: 'FAST',
+          // FAST significa "sin inventario ni cumplimiento operativo"; una
+          // venta de productos sí los tiene, igual que en Stripe y Blumon.
+          type: isItemLink ? 'REGULAR' : 'FAST',
           processor: 'mercadopago',
           processorId,
           feePercentage,
@@ -3166,6 +3230,20 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
 
       orderIdForReferral = order.id
     })
+
+    // Aplicar el vale YA COMMITEADO el cobro. Nunca puede tumbar una venta
+    // cobrada: si truena, el posting queda pendiente y el sweeper lo retoma.
+    if (postingId) {
+      try {
+        await applySalePosting(postingId, session.paymentLink?.createdById ?? null)
+      } catch (deductionError: any) {
+        logger.error('Failed to apply inventory posting for MercadoPago checkout', {
+          sessionId: args.sessionId,
+          postingId,
+          error: deductionError?.message ?? String(deductionError),
+        })
+      }
+    }
 
     // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
     if (orderIdForReferral) {

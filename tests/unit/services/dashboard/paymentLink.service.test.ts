@@ -34,6 +34,17 @@ jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({
   deductInventoryForProduct: mockDeductInventory,
 }))
 
+// El outbox durable de inventario se mockea para poder observar CON QUÉ cliente
+// de transacción nace el vale (el invariante "orden PAID ⟺ posting existe") y
+// que el aplicador corra DESPUÉS del commit, nunca dentro.
+const mockCreateSalePostingInTx = jest.fn()
+const mockApplySalePosting = jest.fn()
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: (...a: unknown[]) => mockCreateSalePostingInTx(...a),
+  applySalePosting: (...a: unknown[]) => mockApplySalePosting(...a),
+}))
+
 import {
   createPaymentLink,
   getPaymentLinks,
@@ -42,6 +53,8 @@ import {
   archivePaymentLink,
   getPaymentLinkByShortCode,
   completeCharge,
+  finalizePaymentLinkCheckout,
+  finalizeMercadoPagoCheckout,
   getSessionStatus,
 } from '../../../../src/services/dashboard/paymentLink.service'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -164,6 +177,11 @@ const createMockCheckoutSession = (overrides: Record<string, any> = {}) => ({
 // ==========================================
 
 describe('PaymentLink Service', () => {
+  beforeEach(() => {
+    mockCreateSalePostingInTx.mockResolvedValue({ id: 'posting-pl-1', status: 'PENDING' })
+    mockApplySalePosting.mockResolvedValue({ postingId: 'posting-pl-1', applied: true, issues: [] })
+  })
+
   // ─── CREATE ──────────────────────────────────────
   describe('createPaymentLink', () => {
     it('should create a PAYMENT link with FIXED amount', async () => {
@@ -656,8 +674,14 @@ describe('PaymentLink Service', () => {
         }),
       )
 
-      // Inventory deducted per-line (loop matches the service's new behavior).
-      expect(mockDeductInventory).toHaveBeenCalledWith(VENUE_ID, PRODUCT_ID, 2, 'cs_pl_test123')
+      // El inventario ya NO se deduce a mano fuera de la transacción: nace un
+      // vale durable atado a la orden real y se aplica tras el commit.
+      expect(mockDeductInventory).not.toHaveBeenCalled()
+      expect(mockCreateSalePostingInTx).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ venueId: VENUE_ID, orderId: 'order-123' }),
+      )
+      expect(mockApplySalePosting).toHaveBeenCalledWith('posting-pl-1', expect.anything())
     })
 
     it('should charge and create MANUAL_ENTRY Order for PAYMENT link', async () => {
@@ -702,7 +726,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('should not fail payment if inventory deduction fails', async () => {
-      mockDeductInventory.mockRejectedValueOnce(new Error('Insufficient stock'))
+      mockApplySalePosting.mockRejectedValueOnce(new Error('Insufficient stock'))
 
       const itemSession = createMockCheckoutSession({
         paymentLink: {
@@ -733,6 +757,220 @@ describe('PaymentLink Service', () => {
       // Should NOT throw — inventory failure is non-blocking
       const result = await completeCharge('abc12345', 'cs_pl_test123')
       expect(result.status).toBe('COMPLETED')
+    })
+  })
+
+  // ─── INVENTARIO POR VALE DURABLE (fase 5.4) ─────
+  //
+  // Antes: los dos webhooks de liga de pago deducían inventario FUERA de la
+  // transacción, best-effort, y le pasaban al movimiento `session.sessionId`
+  // como si fuera el id de la orden. Dos daños distintos:
+  //   1. Un crash entre el commit del cobro y el `for` de deducción dejaba la
+  //      venta cobrada y SIN deducir, sin rastro consultable.
+  //   2. El movimiento quedaba apuntando a un id de sesión de checkout, no a
+  //      una orden — el kardex no se podía conciliar contra la venta.
+  // Ahora el vale nace en la MISMA transacción que la orden PAID y el
+  // aplicador corre después del commit (y el sweeper rescata lo que falle).
+  describe('ligas de pago — el inventario pasa por el vale durable', () => {
+    const itemLinkSession = () =>
+      createMockCheckoutSession({
+        paymentLink: {
+          id: 'pl-123',
+          shortCode: 'abc12345',
+          venueId: VENUE_ID,
+          purpose: 'ITEM',
+          createdById: STAFF_ID,
+          attributions: [],
+        },
+        metadata: {
+          cardToken: 'tok_test_123',
+          maskedPan: '424242******4242',
+          cardBrand: 'VISA',
+          cvv: '123',
+          purpose: 'ITEM',
+          items: [{ productId: PRODUCT_ID, productName: 'Test Product', quantity: 2, unitPrice: 250, modifiers: [] }],
+        },
+        amount: new Decimal(500),
+      })
+
+    const armarCobro = (orderId = 'order-123') => {
+      prismaMock.checkoutSession.update.mockResolvedValueOnce({})
+      prismaMock.paymentLink.update.mockResolvedValueOnce({})
+      prismaMock.order.create.mockResolvedValueOnce({
+        id: orderId,
+        orderNumber: 'PL-123',
+        items: [{ id: 'oi-1', productId: PRODUCT_ID, quantity: 2, weightQuantity: null, modifiers: [] }],
+      })
+      prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-123' })
+    }
+
+    it('Blumon: el vale nace con el MISMO cliente de transacción que creó la orden', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(itemLinkSession())
+      armarCobro()
+
+      // Cliente de transacción distinguible del prisma global: si el vale se
+      // creara en su propia transacción (o fuera de una), este objeto no sería
+      // el primer argumento y la ventana de "cobrado sin deducir" seguiría viva.
+      const txClient: any = { ...prismaMock, __tx: true }
+      prismaMock.$transaction.mockImplementationOnce((cb: any) => cb(txClient))
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(mockCreateSalePostingInTx).toHaveBeenCalled()
+      expect(mockCreateSalePostingInTx.mock.calls[0][0]).toBe(txClient)
+    })
+
+    it('Blumon: el vale se ata a la ORDEN, nunca al id de la sesión de checkout', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(itemLinkSession())
+      armarCobro('order-real-999')
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      const params = mockCreateSalePostingInTx.mock.calls[0][1]
+      expect(params.orderId).toBe('order-real-999')
+      expect(params.orderId).not.toBe('cs_pl_test123')
+    })
+
+    it('Blumon: aplicar el vale ocurre DESPUÉS del commit, no dentro de la transacción', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(itemLinkSession())
+      armarCobro()
+
+      let aplicadoDentroDeLaTx = false
+      prismaMock.$transaction.mockImplementationOnce(async (cb: any) => {
+        const r = await cb(prismaMock)
+        aplicadoDentroDeLaTx = mockApplySalePosting.mock.calls.length > 0
+        return r
+      })
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(aplicadoDentroDeLaTx).toBe(false)
+      expect(mockApplySalePosting).toHaveBeenCalledWith('posting-pl-1', expect.anything())
+    })
+
+    it('Blumon: una liga de PAGO (sin productos) igual deja vale — orden PAID ⟺ vale existe', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      // Sin renglones el vale nace SKIPPED por el propio servicio de posting;
+      // lo que este test fija es que la orden cobrada nunca se queda sin vale.
+      expect(mockCreateSalePostingInTx).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ orderId: 'order-123' }))
+    })
+
+    it('Stripe: el vale nace en la transacción del cobro y se aplica después', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({
+        ...itemLinkSession(),
+        // Sin connectAccountId el servicio se salta la llamada a Stripe.
+        ecommerceMerchant: { id: 'merchant-123', providerCredentials: {}, provider: { code: 'STRIPE_CONNECT' } },
+      })
+      armarCobro('order-stripe-1')
+
+      const txClient: any = { ...prismaMock, __tx: true }
+      prismaMock.$transaction.mockImplementationOnce((cb: any) => cb(txClient))
+
+      await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })
+
+      expect(mockDeductInventory).not.toHaveBeenCalled()
+      expect(mockCreateSalePostingInTx.mock.calls[0][0]).toBe(txClient)
+      expect(mockCreateSalePostingInTx.mock.calls[0][1]).toEqual(expect.objectContaining({ orderId: 'order-stripe-1' }))
+      expect(mockApplySalePosting).toHaveBeenCalledWith('posting-pl-1', expect.anything())
+    })
+
+    // MercadoPago era el caso más roto de los tres: creaba SIEMPRE una orden
+    // MANUAL_ENTRY / pago FAST y SIN renglones, aunque la liga fuera de
+    // productos. Consecuencias: cero inventario descontado y la venta contada
+    // como "entrada manual" (que por definición se filtra de los reportes
+    // operativos). Aquí se fija que una liga de productos se materialice igual
+    // que en Stripe y Blumon.
+    describe('MercadoPago', () => {
+      const mpSession = (overrides: Record<string, any> = {}) => ({
+        id: 'session-db-123',
+        sessionId: 'mp_sess_1',
+        amount: new Decimal(500),
+        applicationFeeCents: 0,
+        customerEmail: 'john@example.com',
+        paymentId: null,
+        metadata: {
+          items: [{ productId: PRODUCT_ID, productName: 'Test Product', quantity: 2, unitPrice: 250, modifiers: [] }],
+        },
+        ecommerceMerchant: { id: 'merchant-123', venueId: VENUE_ID },
+        paymentLink: { id: 'pl-123', venueId: VENUE_ID, createdById: STAFF_ID, purpose: 'ITEM' },
+        ...overrides,
+      })
+
+      const armarMp = (orderId = 'order-mp-1') => {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({ paymentId: null })
+        prismaMock.order.create.mockResolvedValueOnce({
+          id: orderId,
+          items: [{ id: 'oi-1', productId: PRODUCT_ID, quantity: 2, weightQuantity: null, modifiers: [] }],
+        })
+        prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-mp-1' })
+        prismaMock.checkoutSession.update.mockResolvedValueOnce({})
+        prismaMock.paymentLink.update.mockResolvedValueOnce({})
+      }
+
+      it('una liga de PRODUCTOS materializa sus renglones en la orden', async () => {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
+        armarMp()
+
+        await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
+
+        const args = prismaMock.order.create.mock.calls[0][0]
+        expect(args.data.items).toBeDefined()
+        expect(args.data.items.create).toHaveLength(1)
+        expect(args.data.items.create[0]).toEqual(expect.objectContaining({ productId: PRODUCT_ID, quantity: 2 }))
+      })
+
+      it('una liga de PRODUCTOS es TAKEOUT, no una entrada manual', async () => {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
+        armarMp()
+
+        await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
+
+        expect(prismaMock.order.create).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ type: 'TAKEOUT' }) }),
+        )
+      })
+
+      it('el vale nace en la transacción del cobro y se aplica después', async () => {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
+        armarMp('order-mp-9')
+
+        const txClient: any = { ...prismaMock, __tx: true }
+        prismaMock.$transaction.mockImplementationOnce((cb: any) => cb(txClient))
+
+        await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
+
+        expect(mockCreateSalePostingInTx.mock.calls[0][0]).toBe(txClient)
+        expect(mockCreateSalePostingInTx.mock.calls[0][1]).toEqual(expect.objectContaining({ orderId: 'order-mp-9' }))
+        expect(mockApplySalePosting).toHaveBeenCalledWith('posting-pl-1', expect.anything())
+      })
+
+      it('un cobro de puro monto (sin productos) sigue siendo entrada manual', async () => {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
+          mpSession({ metadata: {}, paymentLink: { id: 'pl-123', venueId: VENUE_ID, createdById: STAFF_ID, purpose: 'PAYMENT' } }),
+        )
+        armarMp()
+
+        await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
+
+        expect(prismaMock.order.create).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ type: 'MANUAL_ENTRY' }) }),
+        )
+      })
+    })
+
+    it('Stripe: si aplicar el vale truena, el cobro NO se cae', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({
+        ...itemLinkSession(),
+        ecommerceMerchant: { id: 'merchant-123', providerCredentials: {}, provider: { code: 'STRIPE_CONNECT' } },
+      })
+      armarCobro()
+      mockApplySalePosting.mockRejectedValueOnce(new Error('pool agotado'))
+
+      await expect(finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })).resolves.not.toThrow()
     })
   })
 
