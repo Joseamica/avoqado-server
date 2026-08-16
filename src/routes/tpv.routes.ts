@@ -3863,12 +3863,18 @@ router.post(
  * "Fusionar cuentas" (Square's merge): vuelca los artículos de sourceOrderId en
  * esta cuenta y cancela el origen. Body: { sourceOrderId: string }
  */
+// 🔴 Permiso PROPIO, igual que la ruta de mobile: junta el dinero de dos
+// cheques y cierra el origen. Antes pedía `orders:update` y el candado quedaba
+// aplicado en 2 de las 3 superficies POS — el mesero bloqueado en la tablet
+// caminaba a la PAX y fusionaba sin PIN. La TPV no sabe presentar el teclado de
+// autorización, así que aquí el "no" es definitivo: quien necesite fusionar en
+// la terminal necesita el permiso en su rol.
 router.post(
   '/venues/:venueId/orders/:orderId/merge',
   authenticateTokenMiddleware,
   validateVenueAccess,
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:update'),
+  checkPermission('orders:merge'),
   orderTableController.mergeOrders,
 )
 

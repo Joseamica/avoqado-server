@@ -74,7 +74,9 @@ describe('table-order routes mounted under /tpv (Plan B Task 4)', () => {
   const cases: Array<[string, string, string, keyof typeof orderTableController]> = [
     ['post', '/venues/:venueId/orders/:orderId/split', 'orders:update', 'splitOrder'],
     ['post', '/venues/:venueId/orders/:orderId/split-by-seat', 'orders:update', 'splitOrderBySeat'],
-    ['post', '/venues/:venueId/orders/:orderId/merge', 'orders:update', 'mergeOrders'],
+    // Fusionar migró a permiso propio en /mobile (2026-08); esta fila es la que
+    // mantiene a la TPV en el mismo candado y evita que la PAX sea el atajo.
+    ['post', '/venues/:venueId/orders/:orderId/merge', 'orders:merge', 'mergeOrders'],
     ['post', '/venues/:venueId/orders/:orderId/service-charges', 'orders:update', 'applyServiceCharge'],
   ]
 
