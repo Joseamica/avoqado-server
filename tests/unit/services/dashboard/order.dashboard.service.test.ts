@@ -351,3 +351,49 @@ describe('order.dashboard.service — updateOrder no toca inventario', () => {
     expect(res.status).toBe('COMPLETED')
   })
 })
+
+// ── settleOrder: el fiado liquidado también deduce (fase 5) ──
+// El pay-later crea órdenes con items REALES; la mercancía salió cuando se
+// sirvió. Bajo la regla vigente ("se descuenta al quedar pagada"), liquidar es
+// justo ese momento — y hasta ahora era el único camino de cobro que no lo hacía.
+const createSalePostingSettleMock = jest.fn()
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: (...a: unknown[]) => createSalePostingSettleMock(...a),
+  applySalePosting: jest.fn().mockResolvedValue({ postingId: 'p-1', applied: true, issues: [] }),
+}))
+
+describe('settleOrder — crea el vale de deducción', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+    createSalePostingSettleMock.mockResolvedValue({ id: 'posting-settle-1' })
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      { id: 'oi-1', productId: 'p1', quantity: 2, weightQuantity: null, modifiers: [] },
+    ] as any)
+  })
+
+  const ORDEN_FIADO = { id: 'order-1', orderNumber: 'ORD-1', total: 100, remainingBalance: 100, paymentStatus: 'PENDING' }
+
+  it('el vale nace en la MISMA transacción del CAS que marca PAID', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(ORDEN_FIADO as any)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.payment.create.mockResolvedValue({ id: 'pay-1' } as any)
+
+    await settleOrder('venue-1', 'order-1')
+
+    expect(createSalePostingSettleMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1' }),
+    )
+  })
+
+  it('quien PIERDE el CAS no crea vale (no puede deducir dos veces)', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(ORDEN_FIADO as any)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    await settleOrder('venue-1', 'order-1')
+
+    expect(createSalePostingSettleMock).not.toHaveBeenCalled()
+  })
+})

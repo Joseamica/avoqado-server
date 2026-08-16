@@ -6,6 +6,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
+import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -591,6 +592,7 @@ export async function settleOrder(
   // pasando, y el Payment se creaba por el saldo VIEJO: $160 de pagos contra
   // una orden de $100, con paidAmount pisado. Con el CAS sobre `version`, un
   // cambio entre la relectura y la transición hace count=0 y no se cobra nada.
+  let postingId: string | null = null
   const settledAmount = await prisma.$transaction(async tx => {
     const fresh = await tx.order.findFirst({
       where: { id: orderId, venueId },
@@ -658,6 +660,25 @@ export async function settleOrder(
         processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
       },
     })
+
+    // 🔴 El fiado liquidado TAMBIÉN descuenta (fase 5). Las órdenes pay-later
+    // nacen con items reales y la mercancía salió cuando se sirvió; bajo la
+    // regla vigente ("se descuenta al quedar pagada"), liquidar ES ese momento.
+    // Era el único camino de cobro que marcaba PAID sin tocar inventario.
+    // El vale nace DENTRO del CAS: quien pierde la carrera no llega aquí, así
+    // que dos liquidaciones concurrentes no pueden descontar dos veces.
+    const itemsParaPosting = await tx.orderItem.findMany({
+      where: { orderId },
+      include: { modifiers: { include: { modifier: true } } },
+    })
+    const posting = await createSalePostingInTx(tx, {
+      venueId,
+      orderId,
+      items: itemsParaPosting as any,
+      staffId: null,
+    })
+    postingId = posting?.id ?? null
+
     return toSettle
   })
 
@@ -667,6 +688,21 @@ export async function settleOrder(
       orderNumber: order.orderNumber,
       settledAmount: 0,
       message: 'Order has no pending balance to settle',
+    }
+  }
+
+  // Aplicar el vale ya commiteado. Nunca lanza hacia arriba: la liquidación
+  // (dinero) está hecha, y un fallo aquí deja el posting PENDING para que el
+  // sweeper lo reintente — visible, no perdido.
+  if (postingId) {
+    try {
+      await applySalePosting(postingId, null)
+    } catch (err) {
+      logger.error('[InventoryPosting] Falló la deducción al liquidar (la liquidación NO se afecta)', {
+        orderId,
+        postingId,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 

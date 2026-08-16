@@ -12,6 +12,7 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { PaymentStatus } from '@prisma/client'
 import { logAction } from './activity-log.service'
+import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -718,19 +719,29 @@ export async function settleCustomerBalance(
   const totalSettledAmount = pendingOrders.reduce((sum, oc) => sum + Number(oc.order.remainingBalance), 0)
 
   // Update all pending orders to mark them as paid and create payment records
+  //
+  // 🔴 CAS por orden (fase 5, audit Codex): el update era CIEGO, así que esta
+  // liquidación masiva competía con `settleOrder` y con los cobros del TPV —
+  // dos caminos podían crear DOS pagos por la MISMA orden. Ahora sólo quien
+  // gana la transición PENDING/PARTIAL → PAID crea el Payment.
+  //
+  // 🔴 Y también deduce: marcaba PAID sin tocar inventario. El vale nace dentro
+  // del mismo CAS, así que el perdedor tampoco puede descontar.
+  const postingIds: string[] = []
   await prisma.$transaction(async tx => {
     for (const oc of pendingOrders) {
       const remainingBalance = Number(oc.order.remainingBalance)
 
-      // Update order payment status
-      await tx.order.update({
-        where: { id: oc.order.id },
+      const transition = await tx.order.updateMany({
+        where: { id: oc.order.id, venueId, paymentStatus: { in: ['PENDING', 'PARTIAL'] } },
         data: {
           paymentStatus: 'PAID',
           paidAmount: oc.order.total,
           remainingBalance: 0,
+          version: { increment: 1 },
         },
       })
+      if (transition.count === 0) continue
 
       // Create a payment record to track the settlement
       await tx.payment.create({
@@ -748,8 +759,34 @@ export async function settleCustomerBalance(
           processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
         },
       })
+
+      const itemsParaPosting = await tx.orderItem.findMany({
+        where: { orderId: oc.order.id },
+        include: { modifiers: { include: { modifier: true } } },
+      })
+      const posting = await createSalePostingInTx(tx, {
+        venueId,
+        orderId: oc.order.id,
+        items: itemsParaPosting as any,
+        staffId: null,
+      })
+      if (posting?.id) postingIds.push(posting.id)
     }
   })
+
+  // Aplicar los vales ya commiteados. Un fallo aquí NO afecta la liquidación:
+  // el posting queda pendiente y el sweeper lo reintenta.
+  for (const postingId of postingIds) {
+    try {
+      await applySalePosting(postingId, null)
+    } catch (err) {
+      logger.error('[InventoryPosting] Falló la deducción al liquidar el saldo del cliente', {
+        customerId,
+        postingId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   // REFERRAL HOOK: each settled order may have had a pending referral — trigger qualification
   // (idempotent: no-ops if no PENDING Referral matches each orderId)

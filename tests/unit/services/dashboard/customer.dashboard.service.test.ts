@@ -1,4 +1,5 @@
 import {
+  settleCustomerBalance,
   getCustomers,
   getCustomerById,
   createCustomer,
@@ -644,5 +645,61 @@ describe('Customer Dashboard Service', () => {
         }),
       })
     })
+  })
+})
+
+// ── settleCustomerBalance: CAS + vale (fase 5, audit Codex) ──
+// Liquidación MASIVA del saldo de un cliente. Tenía dos huecos: (1) el update
+// de cada orden era ciego, así que competía con settleOrder y podía crear DOS
+// pagos por la misma orden; (2) marcaba PAID sin descontar inventario.
+const createSalePostingMasivoMock = jest.fn()
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  __esModule: true,
+  createSalePostingInTx: (...a: unknown[]) => createSalePostingMasivoMock(...a),
+  applySalePosting: jest.fn().mockResolvedValue({ postingId: 'p-1', applied: true, issues: [] }),
+}))
+
+describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
+  const CLIENTE = 'cust-1'
+  const ORDEN = { id: 'order-1', orderNumber: 'ORD-1', remainingBalance: new Decimal(100), total: new Decimal(100) }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+    prismaMock.customer.findFirst.mockResolvedValue({
+      id: CLIENTE,
+      orderAssociations: [{ order: ORDEN }],
+    } as any)
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      { id: 'oi-1', productId: 'p1', quantity: 1, weightQuantity: null, modifiers: [] },
+    ] as any)
+    createSalePostingMasivoMock.mockResolvedValue({ id: 'posting-masivo-1' })
+    prismaMock.payment.create.mockResolvedValue({ id: 'pay-1' } as any)
+  })
+
+  it('usa CAS por orden: la que ya fue liquidada por otro camino no genera segundo pago', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    await settleCustomerBalance('venue-1', CLIENTE)
+
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'order-1', paymentStatus: { in: ['PENDING', 'PARTIAL'] } }),
+      }),
+    )
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(createSalePostingMasivoMock).not.toHaveBeenCalled()
+  })
+
+  it('la orden que SÍ gana el CAS crea su pago y su vale', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+
+    await settleCustomerBalance('venue-1', CLIENTE)
+
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(createSalePostingMasivoMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1' }),
+    )
   })
 })
