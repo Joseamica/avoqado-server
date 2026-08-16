@@ -417,7 +417,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'merge_table_check',
-    "TABLE_SERVICE: merge two open checks into one (Square's \"Fusionar\") — every item from the SOURCE table's check moves onto the TARGET table's check, and the source check is cancelled and its table freed. Use when two tables' groups combine. Blocked if either check already has a payment, or if the source check has discounts/manual service charges (their amount was calculated over that check alone — remove them first, then merge). This WRITES; requires orders:update. Pass venueId + the target table (whose check survives) + the source table (whose check disappears into it).",
+    "TABLE_SERVICE: merge two open checks into one (Square's \"Fusionar\") — every item from the SOURCE table's check moves onto the TARGET table's check, and the source check is cancelled and its table freed. Use when two tables' groups combine. Blocked if either check already has a payment, or if the source check has discounts/manual service charges (their amount was calculated over that check alone — remove them first, then merge). This WRITES; requires orders:merge (its OWN permission since 2026-08 — WAITER/CASHIER do not hold it, so the POS asks a manager for a PIN instead; there is no such prompt here). Pass venueId + the target table (whose check survives) + the source table (whose check disappears into it).",
     {
       venueId: z.string().describe('Venue that owns both tables (must be in your scope)'),
       targetNumber: z.string().min(1).describe('Table number whose check ABSORBS the other and survives, e.g. "12"'),
@@ -425,7 +425,10 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, targetNumber, sourceNumber }) => {
       const where = guard.venueFilter(venueId)
-      guard.requirePermission('orders:update', venueId)
+      // 🔴 Espejo EXACTO de la ruta HTTP (mobile y tpv). Con `orders:update` el
+      // MCP era el tercer atajo alrededor del candado: un agente con permiso
+      // genérico de edición fusionaba cheques que en el POS piden PIN.
+      guard.requirePermission('orders:merge', venueId)
       const target = await prisma.table.findFirst({
         where: { ...where, number: targetNumber, active: true },
         select: { id: true, currentOrderId: true },
