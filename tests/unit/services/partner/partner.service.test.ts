@@ -9,7 +9,7 @@
  *   Req 3 — `ciudad` is never null (readable default).
  */
 
-import { resolvePartnerBoundary, toPartnerSaleRecord } from '@/services/partner/partner.service'
+import { matchSaleLocation, resolvePartnerBoundary, saleLocationCandidate, toPartnerSaleRecord } from '@/services/partner/partner.service'
 
 // The pure functions under test never call the DB, but importing the module
 // pulls in prismaClient — stub it so no client is instantiated.
@@ -28,18 +28,41 @@ function buildItem(overrides: any = {}) {
     category: { name: 'SIM de intercambio' },
     sellingVenue: { id: 'v1', slug: 'bae-pozos', name: 'BAE POZOS', city: 'San Luis Potosí', state: 'San Luis Potosí', zipCode: '78280' },
     venue: null,
+    sellingVenueId: 'v1',
+    venueId: 'v_owner',
     orderItem: {
       unitPrice: 100,
       order: {
         orderNumber: 'TXN-998822',
+        source: 'TPV',
         createdById: 'staff_1',
+        servedById: 'staff_1',
+        terminalId: 'term_1',
         createdBy: { id: 'staff_1', firstName: 'Juan', lastName: 'Pérez' },
-        terminal: { serialNumber: 'TPV-102', lastLatitude: 20.5888, lastLongitude: -100.3899 },
+        terminal: { serialNumber: 'TPV-102' },
         payments: [
-          { method: 'CASH', status: 'COMPLETED', saleVerification: { photos: ['https://x/registro.pdf'], isPortabilidad: false } },
+          {
+            method: 'CASH',
+            status: 'COMPLETED',
+            saleVerification: { staffId: 'staff_1', photos: ['https://x/registro.pdf'], isPortabilidad: false },
+          },
         ],
       },
     },
+    ...overrides,
+  }
+}
+
+// Ping shaped like the service's promoterLocationPing select returns.
+function buildPing(overrides: any = {}) {
+  return {
+    venueId: 'v1',
+    staffId: 'staff_1',
+    terminalId: 'term_1',
+    latitude: 20.5888,
+    longitude: -100.3899,
+    accuracy: 25,
+    capturedAt: new Date('2026-04-15T10:00:00.000Z'), // 30 min before the sale
     ...overrides,
   }
 }
@@ -157,6 +180,14 @@ describe('Partner Sales API', () => {
       expect(rec.metodo_pago).toBe('CASH')
       expect(rec.iccid).toBe('8952104000012345678')
       expect(rec.estado_transaccion).toBe('exitosa')
+      // latitud/longitud stay in the contract (string | null) but now come from
+      // sale-time promoter pings, not the never-written Terminal columns.
+      expect(rec.latitud).toBeNull()
+      expect(rec.longitud).toBeNull()
+    })
+
+    it('fills latitud/longitud from a resolved sale-time location, as strings', () => {
+      const rec = toPartnerSaleRecord(buildItem(), { latitud: '20.5888', longitud: '-100.3899' })
       expect(rec.latitud).toBe('20.5888')
       expect(rec.longitud).toBe('-100.3899')
     })
@@ -168,6 +199,106 @@ describe('Partner Sales API', () => {
       const rec = toPartnerSaleRecord(item)
       expect(rec.transaction_id).toBe('item_1')
       expect(rec.estado_transaccion).toBe('cancelada')
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // Sale-time location correlation (latitud/longitud from promoter pings)
+  // ---------------------------------------------------------------------------
+  describe('saleLocationCandidate (seller identity + manual exclusion)', () => {
+    it('builds a candidate from a normal TPV sale (verification staff == servedBy)', () => {
+      const c = saleLocationCandidate(buildItem())
+      expect(c).toEqual({
+        venueId: 'v1',
+        sellerId: 'staff_1',
+        terminalId: 'term_1',
+        soldAt: new Date('2026-04-15T10:30:00.000Z'),
+      })
+    })
+
+    it('falls back to the owning venue when there is no selling venue', () => {
+      const c = saleLocationCandidate(buildItem({ sellingVenueId: null }))
+      expect(c?.venueId).toBe('v_owner')
+    })
+
+    it('returns null for DASHBOARD_MANUAL sales — their noon soldAt is not a real sale time', () => {
+      const item = buildItem()
+      item.orderItem.order.source = 'DASHBOARD_MANUAL'
+      expect(saleLocationCandidate(item)).toBeNull()
+    })
+
+    it('returns null when verification staff and servedBy disagree (ambiguous seller)', () => {
+      const item = buildItem()
+      item.orderItem.order.servedById = 'staff_other'
+      expect(saleLocationCandidate(item)).toBeNull()
+    })
+
+    it('uses servedById when there is no sale verification', () => {
+      const item = buildItem()
+      item.orderItem.order.payments[0].saleVerification = null
+      const c = saleLocationCandidate(item)
+      expect(c?.sellerId).toBe('staff_1')
+    })
+
+    it('returns null when there is no seller identity or no soldAt', () => {
+      const noSeller = buildItem()
+      noSeller.orderItem.order.servedById = null
+      noSeller.orderItem.order.payments[0].saleVerification = null
+      expect(saleLocationCandidate(noSeller)).toBeNull()
+      expect(saleLocationCandidate(buildItem({ soldAt: null }))).toBeNull()
+    })
+  })
+
+  describe('matchSaleLocation (causal window + terminal + accuracy gates)', () => {
+    const candidate = saleLocationCandidate(buildItem())!
+
+    it('returns the latest ping at or before the sale, within 60 minutes', () => {
+      const older = buildPing({ capturedAt: new Date('2026-04-15T09:45:00.000Z'), latitude: 1, longitude: 1 })
+      const latest = buildPing({ capturedAt: new Date('2026-04-15T10:15:00.000Z') })
+      const loc = matchSaleLocation(candidate, [older, latest])
+      expect(loc).toEqual({ latitud: '20.5888', longitud: '-100.3899' })
+    })
+
+    it('never uses a ping captured AFTER the sale', () => {
+      const after = buildPing({ capturedAt: new Date('2026-04-15T10:31:00.000Z') })
+      expect(matchSaleLocation(candidate, [after])).toBeNull()
+    })
+
+    it('rejects pings older than 60 minutes (stale)', () => {
+      const stale = buildPing({ capturedAt: new Date('2026-04-15T09:29:59.000Z') })
+      expect(matchSaleLocation(candidate, [stale])).toBeNull()
+    })
+
+    it('rejects pings from another venue, another staff, or another terminal', () => {
+      expect(matchSaleLocation(candidate, [buildPing({ venueId: 'v2' })])).toBeNull()
+      expect(matchSaleLocation(candidate, [buildPing({ staffId: 'staff_2' })])).toBeNull()
+      expect(matchSaleLocation(candidate, [buildPing({ terminalId: 'term_2' })])).toBeNull()
+      // A terminal sale never matches a ping with no terminal attribution.
+      expect(matchSaleLocation(candidate, [buildPing({ terminalId: null })])).toBeNull()
+    })
+
+    it('accepts any-terminal pings when the sale has no terminal (cambaceo)', () => {
+      const noTerminal = { ...candidate, terminalId: null }
+      const ping = buildPing({ terminalId: null })
+      expect(matchSaleLocation(noTerminal, [ping])).toEqual({ latitud: '20.5888', longitud: '-100.3899' })
+    })
+
+    it('rejects pings with accuracy worse than 1,000 m and accepts unknown accuracy', () => {
+      expect(matchSaleLocation(candidate, [buildPing({ accuracy: 1500 })])).toBeNull()
+      expect(matchSaleLocation(candidate, [buildPing({ accuracy: null })])).not.toBeNull()
+    })
+
+    it('treats coordinate 0 as a valid value, not as missing', () => {
+      const equator = buildPing({ latitude: 0, longitude: -100.3899 })
+      expect(matchSaleLocation(candidate, [equator])).toEqual({ latitud: '0', longitud: '-100.3899' })
+    })
+
+    it('converts Prisma Decimal coordinates via toNumber()', () => {
+      const decimalish = buildPing({
+        latitude: { toNumber: () => 20.5888 },
+        longitude: { toNumber: () => -100.3899 },
+      })
+      expect(matchSaleLocation(candidate, [decimalish])).toEqual({ latitud: '20.5888', longitud: '-100.3899' })
     })
   })
 })

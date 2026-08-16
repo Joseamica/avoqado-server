@@ -83,6 +83,99 @@ export function resolvePartnerBoundary(value: string, edge: 'start' | 'end'): Da
   return new Date(value)
 }
 
+// ---------------------------------------------------------------------------
+// Sale-time location (latitud/longitud)
+//
+// `Terminal.lastLatitude/lastLongitude` were introduced for geofencing but no
+// code ever writes them (0 rows populated in prod) — reading them sent null to
+// the partner on 100% of sales. The real location lives in
+// `promoter_location_pings` (written by recordPromoterPing, gated by the
+// promoter-tracking venue/terminal flags). A sale's coordinates are resolved
+// from the promoter's OWN pings around the sale instant, under strict gates so
+// we never fabricate a location:
+//   - same venue + same seller, and same terminal when the sale has one
+//   - latest ping AT OR BEFORE soldAt, at most SALE_LOCATION_MAX_AGE_MS old
+//   - accuracy unknown or ≤ SALE_LOCATION_MAX_ACCURACY_M (cell-only fixes on
+//     TPVs without WiFi/GPS report worse and are discarded)
+//   - DASHBOARD_MANUAL sales never match: their soldAt is a synthesized
+//     venue-local noon, not a real sale time
+// No match ⇒ null, which is honest. Contract unchanged: string | null.
+// ---------------------------------------------------------------------------
+
+export const SALE_LOCATION_MAX_AGE_MS = 60 * 60 * 1000 // 60 min
+export const SALE_LOCATION_MAX_ACCURACY_M = 1000
+
+export interface SaleLocationCandidate {
+  venueId: string
+  sellerId: string
+  terminalId: string | null
+  soldAt: Date
+}
+
+interface PingLite {
+  venueId: string
+  staffId: string
+  terminalId: string | null
+  latitude: any // number | Prisma.Decimal
+  longitude: any
+  accuracy: number | null
+  capturedAt: Date
+}
+
+export interface ResolvedSaleLocation {
+  latitud: string
+  longitud: string
+}
+
+/**
+ * Extract the correlation key for a sale, or null when the sale must not be
+ * location-matched. Seller identity prefers the sale verification's staff and
+ * the order's servedBy; when both exist and DISAGREE the seller is ambiguous
+ * and we return null rather than guess (manual/Cubre uploads set createdById
+ * to the dashboard uploader, so createdById is deliberately NOT used).
+ */
+export function saleLocationCandidate(item: any): SaleLocationCandidate | null {
+  const order = item.orderItem?.order
+  if (!order || order.source === 'DASHBOARD_MANUAL') return null
+
+  const verificationStaffId = order.payments?.[0]?.saleVerification?.staffId ?? null
+  const servedById = order.servedById ?? null
+  if (verificationStaffId && servedById && verificationStaffId !== servedById) return null
+  const sellerId = verificationStaffId ?? servedById
+  const venueId = item.sellingVenueId ?? item.venueId ?? null
+  if (!sellerId || !venueId || !item.soldAt) return null
+
+  return { venueId, sellerId, terminalId: order.terminalId ?? null, soldAt: item.soldAt }
+}
+
+const pingCoord = (v: any): number => (v != null && typeof v.toNumber === 'function' ? v.toNumber() : Number(v))
+
+/**
+ * Pure matcher: latest qualifying ping at or before the sale. `pings` may be
+ * any superset (the service passes one batched page-wide fetch).
+ */
+export function matchSaleLocation(candidate: SaleLocationCandidate | null, pings: PingLite[]): ResolvedSaleLocation | null {
+  if (!candidate) return null
+  const soldAtMs = candidate.soldAt.getTime()
+
+  let best: PingLite | null = null
+  for (const ping of pings) {
+    if (ping.venueId !== candidate.venueId || ping.staffId !== candidate.sellerId) continue
+    // A terminal sale only trusts pings attributed to that same terminal.
+    if (candidate.terminalId && ping.terminalId !== candidate.terminalId) continue
+    if (ping.accuracy != null && ping.accuracy > SALE_LOCATION_MAX_ACCURACY_M) continue
+    const age = soldAtMs - ping.capturedAt.getTime()
+    if (age < 0 || age > SALE_LOCATION_MAX_AGE_MS) continue // causal + fresh only
+    if (!best || ping.capturedAt > best.capturedAt) best = ping
+  }
+  if (!best) return null
+
+  const lat = pingCoord(best.latitude)
+  const lng = pingCoord(best.longitude)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+  return { latitud: String(lat), longitud: String(lng) }
+}
+
 /**
  * Pure mapper: SerializedItem (with includes) → PlayTelecom/BAIT sale record.
  * Exported so the response contract can be unit-tested without the DB.
@@ -91,7 +184,7 @@ export function resolvePartnerBoundary(value: string, edge: 'start' | 'end'): Da
  * New fields (estado, codigo_postal, tipo_venta, promotor*, supervisor*) are
  * additive. `ciudad` is the one type tightening — it can no longer be null.
  */
-export function toPartnerSaleRecord(item: any): PartnerSaleRecord {
+export function toPartnerSaleRecord(item: any, location?: ResolvedSaleLocation | null): PartnerSaleRecord {
   const order = item.orderItem?.order
   const payment = order?.payments?.[0]
   const verification = payment?.saleVerification
@@ -136,8 +229,8 @@ export function toPartnerSaleRecord(item: any): PartnerSaleRecord {
     supervisor,
     supervisor_id: item.assignedSupervisorId || null,
     registro_url: verification?.photos?.[0] || null,
-    latitud: terminal?.lastLatitude ? String(terminal.lastLatitude) : null,
-    longitud: terminal?.lastLongitude ? String(terminal.lastLongitude) : null,
+    latitud: location?.latitud ?? null,
+    longitud: location?.longitud ?? null,
     evidencia_portabilidad_url: isPort && verification?.photos?.[1] ? verification.photos[1] : null,
   }
 }
@@ -188,12 +281,15 @@ class PartnerService {
     // Count total for pagination
     const total = await prisma.serializedItem.count({ where })
 
-    // Main query with all joins
+    // Main query with all joins.
+    // `id` tiebreaker: soldAt alone is not unique (manual imports share the
+    // synthesized noon timestamp), and a non-unique orderBy silently skips or
+    // duplicates rows across pages — the partner's ETL would lose sales.
     const items = await prisma.serializedItem.findMany({
       where,
       skip,
       take: limit,
-      orderBy: { soldAt: 'desc' },
+      orderBy: [{ soldAt: 'desc' }, { id: 'desc' }],
       include: {
         category: { select: { name: true } },
         sellingVenue: { select: { id: true, slug: true, name: true, city: true, state: true, zipCode: true } },
@@ -207,7 +303,10 @@ class PartnerService {
             order: {
               select: {
                 orderNumber: true,
+                source: true,
                 createdById: true,
+                servedById: true,
+                terminalId: true,
                 createdBy: {
                   select: {
                     id: true,
@@ -218,8 +317,6 @@ class PartnerService {
                 terminal: {
                   select: {
                     serialNumber: true,
-                    lastLatitude: true,
-                    lastLongitude: true,
                   },
                 },
                 payments: {
@@ -228,6 +325,7 @@ class PartnerService {
                     status: true,
                     saleVerification: {
                       select: {
+                        staffId: true,
                         photos: true,
                         isPortabilidad: true,
                       },
@@ -242,8 +340,37 @@ class PartnerService {
       },
     })
 
-    // Map to PlayTelecom response format
-    const data: PartnerSaleRecord[] = items.map(toPartnerSaleRecord)
+    // Resolve sale-time locations in ONE batched query (never per-sale N+1).
+    const candidates = new Map<string, SaleLocationCandidate>()
+    for (const item of items) {
+      const candidate = saleLocationCandidate(item)
+      if (candidate) candidates.set(item.id, candidate)
+    }
+
+    let pings: PingLite[] = []
+    if (candidates.size > 0) {
+      const all = [...candidates.values()]
+      const soldAtTimes = all.map(c => c.soldAt.getTime())
+      pings = await prisma.promoterLocationPing.findMany({
+        where: {
+          // Venue ids come from the org-scoped items above, so this stays
+          // inside the partner's own organization.
+          venueId: { in: [...new Set(all.map(c => c.venueId))] },
+          staffId: { in: [...new Set(all.map(c => c.sellerId))] },
+          capturedAt: {
+            gte: new Date(Math.min(...soldAtTimes) - SALE_LOCATION_MAX_AGE_MS),
+            lte: new Date(Math.max(...soldAtTimes)),
+          },
+        },
+        select: { venueId: true, staffId: true, terminalId: true, latitude: true, longitude: true, accuracy: true, capturedAt: true },
+      })
+    }
+
+    // Map to PlayTelecom response format. A failed location match degrades to
+    // null coordinates — it never drops or alters the sale row itself.
+    const data: PartnerSaleRecord[] = items.map(item =>
+      toPartnerSaleRecord(item, matchSaleLocation(candidates.get(item.id) ?? null, pings)),
+    )
 
     return {
       data,
