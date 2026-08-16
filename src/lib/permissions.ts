@@ -453,6 +453,28 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'coupons:redeem': ['coupons:read', 'coupons:redeem', 'orders:read', 'orders:update'],
 
   // ===========================
+  // CREDIT PACKS (paquetes y membresías prepagadas)
+  // ===========================
+  // Dos ejes distintos, deliberadamente separados (decisión del founder, 2026-08-16):
+  //   ADMINISTRAR el catálogo → create / update / delete (precio y número de sesiones).
+  //   OPERAR con él en el mostrador → sell / redeem, espejo exacto de `coupons:redeem`.
+  // Antes, vender exigía `creditPacks:create` (que en el dashboard CREA un paquete nuevo
+  // en el catálogo) y canjear exigía `creditPacks:update`: para entregarle al socio la
+  // clase que ya pagó había que poder cambiarle el precio al paquete.
+  'creditPacks:read': ['creditPacks:read'],
+  // Los dos puentes de abajo evitan un rename a ciegas: quien YA administraba paquetes
+  // —incluidos los roles personalizados que guardaron la lista expandida sin wildcard—
+  // conserva vender y canjear cuando las rutas pasan a los permisos acotados.
+  'creditPacks:create': ['creditPacks:read', 'creditPacks:create', 'creditPacks:sell'],
+  'creditPacks:update': ['creditPacks:read', 'creditPacks:update', 'creditPacks:redeem'],
+  'creditPacks:delete': ['creditPacks:read', 'creditPacks:delete'],
+  // Vender en persona: hay que ver el catálogo de paquetes y encontrar al cliente.
+  // NO arrastra `payments:create` — el cobro se gatea en su propia ruta.
+  'creditPacks:sell': ['creditPacks:sell', 'creditPacks:read', 'customers:read'],
+  // Canjear una sesión: mismo par de lecturas, cero autoridad sobre el catálogo.
+  'creditPacks:redeem': ['creditPacks:redeem', 'creditPacks:read', 'customers:read'],
+
+  // ===========================
   // ROLE CONFIG (Custom Role Display Names)
   // ===========================
   'role-config:read': ['role-config:read'],
@@ -607,6 +629,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reservations:update',
     'reservations:cancel',
     'customers:read', // Phase 1: Customer System
+    // Alta de cliente desde recepción / reservas (founder, 2026-08-16). Sin esto la
+    // recepcionista llena nombre y teléfono con el cliente enfrente y truena al guardar.
+    // Editar y borrar el directorio SE QUEDA en MANAGER+.
+    'customers:create',
     'loyalty:read', // Phase 1b: Loyalty System
     'referral:read', // Referral Program: read-only access
     'teams:read',
@@ -648,12 +674,20 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tables:update',
     'reviews:read',
     'customers:read', // Phase 1: Customer System
+    // Alta de cliente en el cobro (founder, 2026-08-16). Sin esto la venta queda anónima:
+    // sin historial, sin lealtad y sin a quién facturar. Editar/borrar se queda en MANAGER+.
+    'customers:create',
     'loyalty:read', // Phase 1b: Loyalty System
     'discounts:read', // Phase 2: Can view discounts
     'upsells:read', // Upsell: el POS necesita leer las sugerencias
     'discounts:apply', // Phase 2: Can apply discounts to orders
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
+    // Paquetes y membresías (founder, 2026-08-16): el mostrador VENDE y CANJEA, no
+    // administra el catálogo. `creditPacks:create/update/delete` se quedan en MANAGER+.
+    'creditPacks:read', // Ver el catálogo de paquetes y el saldo de créditos del cliente
+    'creditPacks:sell', // Vender un paquete en persona (cobrado por el POS)
+    'creditPacks:redeem', // Descontar una sesión/clase ya pagada
     'referral:read', // Referral Program: read-only access
     'commissions:view_own', // Can view own commission earnings
     'teams:read',
@@ -691,12 +725,20 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tables:read',
     'reviews:read',
     'customers:read', // Phase 1: Customer System
+    // Alta de cliente en el cobro (founder, 2026-08-16). Sin esto la venta queda anónima:
+    // sin historial, sin lealtad y sin a quién facturar. Editar/borrar se queda en MANAGER+.
+    'customers:create',
     'loyalty:read', // Phase 1b: Loyalty System
     'discounts:read', // Phase 2: Can view discounts
     'upsells:read', // Upsell: el POS necesita leer las sugerencias
     'discounts:apply', // Phase 2: Can apply discounts to orders
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
+    // Paquetes y membresías (founder, 2026-08-16): en gym/estética/spa el paquete ES la
+    // venta principal. El mostrador VENDE y CANJEA; el catálogo se queda en MANAGER+.
+    'creditPacks:read', // Ver el catálogo de paquetes y el saldo de créditos del cliente
+    'creditPacks:sell', // Vender un paquete en persona (cobrado por el POS)
+    'creditPacks:redeem', // Descontar una sesión/clase ya pagada
     'referral:read', // Referral Program: read-only access
     'commissions:view_own', // Can view own commission earnings
     'teams:read',
@@ -1563,7 +1605,17 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete', 'coupons:redeem'],
   // Credit packs / bundles — venue-level credit packages (e.g. class packs, prepaid plans).
   // Routes live in dashboard/creditPack.routes.ts.
-  creditPacks: ['creditPacks:read', 'creditPacks:create', 'creditPacks:update', 'creditPacks:delete'],
+  // `sell` y `redeem` son los permisos de MOSTRADOR (operar); create/update/delete son los
+  // de CATÁLOGO (administrar). Sin estas dos líneas el permiso existiría en el backend y
+  // sería inasignable desde el editor de roles del dashboard.
+  creditPacks: [
+    'creditPacks:read',
+    'creditPacks:create',
+    'creditPacks:update',
+    'creditPacks:delete',
+    'creditPacks:sell',
+    'creditPacks:redeem',
+  ],
   // Referral Program (was missing from the catalog entirely — pre-existing
   // CATALOG_GAP for the 5 perms below; adding this key fixes all of them
   // as a side effect of registering the new `referral:fulfill-courtesy`).

@@ -44,7 +44,11 @@ router.get('/transactions', checkPermission('creditPacks:read'), validateRequest
 
 // ---- Balances (MUST be before /:packId to avoid shadowing) ----
 
-router.post('/balances/:balanceId/redeem', checkPermission('creditPacks:update'), validateRequest(redeemBodySchema), controller.redeemItem)
+// Canjear una sesión es OPERAR, no administrar el catálogo — mismo permiso acotado que
+// usa el POS (`creditPacks:redeem`). Nadie pierde acceso: `creditPacks:update` lo implica
+// vía PERMISSION_DEPENDENCIES, y MANAGER+ entra por el wildcard `creditPacks:*`.
+// El `adjust` de abajo SÍ se queda en `:update`: corregir un saldo a mano es administrar.
+router.post('/balances/:balanceId/redeem', checkPermission('creditPacks:redeem'), validateRequest(redeemBodySchema), controller.redeemItem)
 
 router.post(
   '/balances/:balanceId/adjust',

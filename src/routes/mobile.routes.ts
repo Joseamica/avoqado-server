@@ -1339,17 +1339,21 @@ router.get(
   creditPackMobileController.getBalance,
 )
 // Sell a pack to a customer in person (paid through the POS, not Stripe).
+// `creditPacks:sell`, NO `:create` — esta ruta vende un paquete YA existente; `:create`
+// es la llave de crear uno nuevo en el CATÁLOGO (precio y sesiones) desde el dashboard.
 router.post(
   '/venues/:venueId/credit-packs/:packId/sell',
   authenticateTokenMiddleware,
-  checkPermission('creditPacks:create'),
+  checkPermission('creditPacks:sell'),
   creditPackMobileController.sellPack,
 )
 // Redeem one credit from a balance.
+// `creditPacks:redeem`, NO `:update` — descontar la clase que el socio ya pagó no puede
+// costar el permiso de editarle el precio al paquete (founder, 2026-08-16).
 router.post(
   '/venues/:venueId/credit-balances/:balanceId/redeem',
   authenticateTokenMiddleware,
-  checkPermission('creditPacks:update'),
+  checkPermission('creditPacks:redeem'),
   creditPackMobileController.redeemCredit,
 )
 

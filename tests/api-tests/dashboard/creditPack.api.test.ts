@@ -131,12 +131,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when WAITER role has no creditPacks:read permission', async () => {
+    it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
       const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
@@ -147,12 +146,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when CASHIER role has no creditPacks:read permission', async () => {
+    it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
       const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
@@ -383,12 +381,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when WAITER role has no creditPacks:read permission', async () => {
+    it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
       const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
@@ -399,12 +396,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when CASHIER role has no creditPacks:read permission', async () => {
+    it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
       const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
@@ -663,12 +659,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when WAITER role has no creditPacks:read permission', async () => {
+    it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
       const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
@@ -679,12 +674,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when CASHIER role has no creditPacks:read permission', async () => {
+    it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
       const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
@@ -741,12 +735,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when WAITER role has no creditPacks:read permission', async () => {
+    it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
       const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
@@ -757,12 +750,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when CASHIER role has no creditPacks:read permission', async () => {
+    it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
       const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
@@ -819,12 +811,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when WAITER role has no creditPacks:read permission', async () => {
+    it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
       const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
@@ -835,12 +826,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when CASHIER role has no creditPacks:read permission', async () => {
+    it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
       const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
@@ -899,12 +889,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when WAITER role has no creditPacks:update permission', async () => {
+    it('should ALLOW WAITER by default — canjear la clase ya pagada es operar, no administrar (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
       const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:update permission', async () => {
@@ -915,12 +904,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
 
-    it('should return 403 when CASHIER role has no creditPacks:update permission', async () => {
+    it('should ALLOW CASHIER by default — canjear la clase ya pagada es operar, no administrar (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
       const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
-      expect(res.status).toBe(403)
-      expect(res.body).toHaveProperty('error', 'Forbidden')
+      expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:update via custom permissions', async () => {
@@ -948,11 +936,12 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('type', 'REDEEM')
     })
 
-    it('should return 403 when CASHIER role only has creditPacks:read via custom permissions (not update)', async () => {
-      // CASHIER lacks creditPacks:* in defaults; custom read-only grant must
-      // NOT allow redeem (requires creditPacks:update).
+    it('should return 403 when KITCHEN role only has creditPacks:read via custom permissions (not redeem)', async () => {
+      // Leer NO es canjear: un grant de sólo lectura no alcanza para consumir un crédito.
+      // Se usa KITCHEN y ya no CASHIER porque desde 2026-08-16 el mostrador trae
+      // `creditPacks:redeem` por default (merge mode: el custom suma, nunca resta).
       mockCustomPermissions(['creditPacks:read'])
-      const token = makeToken('CASHIER')
+      const token = makeToken('KITCHEN')
       const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
@@ -1364,7 +1353,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
   // ---- Cross-role access summary ----
 
   describe('Role access matrix (comprehensive)', () => {
-    const rolesWithoutAccess = ['CASHIER', 'WAITER', 'KITCHEN', 'VIEWER']
+    // Desde 2026-08-16 (decisión del founder) el MOSTRADOR —CASHIER y WAITER— trae por
+    // default `creditPacks:read`, `:sell` y `:redeem`: en gym/estética/spa el paquete ES
+    // la venta principal. Lo que NO trae es el CATÁLOGO (create/update/delete) ni las
+    // correcciones de saldo (adjust) ni el reembolso. Por eso ya no está en esta lista.
+    const rolesWithoutAccess = ['KITCHEN', 'VIEWER']
 
     rolesWithoutAccess.forEach(role => {
       it(`should deny ${role} access to GET /credit-packs without custom permissions`, async () => {
@@ -1448,6 +1441,70 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
         const token = makeToken(role)
         const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
         expect(res.status).toBe(200)
+      })
+    })
+
+    // ---- El MOSTRADOR: opera con los paquetes, NO administra el catálogo ----
+    // (decisión del founder, 2026-08-16 — auditoría de permisos de piso, casos #5/#6/#7)
+    const counterRoles = ['CASHIER', 'WAITER']
+
+    counterRoles.forEach(role => {
+      it(`should ALLOW ${role} to GET /credit-packs by default (ver qué paquetes vende)`, async () => {
+        clearCustomPermissions()
+        const token = makeToken(role)
+        const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+        expect(res.status).toBe(200)
+      })
+
+      it(`should ALLOW ${role} to POST /balances/:balanceId/redeem by default (canjear la clase ya pagada)`, async () => {
+        clearCustomPermissions()
+        const token = makeToken(role)
+        const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
+        expect(res.status).toBe(200)
+      })
+
+      it(`🔴 should DENY ${role} POST /credit-packs — crear un paquete es CATÁLOGO`, async () => {
+        clearCustomPermissions()
+        const token = makeToken(role)
+        const res = await request(app)
+          .post(BASE)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ name: 'Test', price: 100, items: [{ productId: 'p1', quantity: 1 }] })
+        expect(res.status).toBe(403)
+      })
+
+      it(`🔴 should DENY ${role} PATCH /credit-packs/:packId — editar precio/sesiones es CATÁLOGO`, async () => {
+        clearCustomPermissions()
+        const token = makeToken(role)
+        const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ name: 'Updated' })
+        expect(res.status).toBe(403)
+      })
+
+      it(`🔴 should DENY ${role} DELETE /credit-packs/:packId`, async () => {
+        clearCustomPermissions()
+        const token = makeToken(role)
+        const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+        expect(res.status).toBe(403)
+      })
+
+      it(`🔴 should DENY ${role} POST /balances/:balanceId/adjust — corregir un saldo a mano es administrar`, async () => {
+        clearCustomPermissions()
+        const token = makeToken(role)
+        const res = await request(app)
+          .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ quantity: 1, reason: 'test' })
+        expect(res.status).toBe(403)
+      })
+
+      it(`🔴 should DENY ${role} POST /purchases/:purchaseId/refund — devolver dinero se queda en MANAGER+`, async () => {
+        clearCustomPermissions()
+        const token = makeToken(role)
+        const res = await request(app)
+          .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ reason: 'test' })
+        expect(res.status).toBe(403)
       })
     })
 

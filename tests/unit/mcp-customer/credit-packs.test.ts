@@ -146,7 +146,7 @@ describe('customer_credit_balance (read, creditPacks:read)', () => {
   })
 })
 
-describe('redeem_credit (write, confirm-gated, creditPacks:update)', () => {
+describe('redeem_credit (write, confirm-gated, creditPacks:redeem)', () => {
   const balance = (over: Record<string, unknown> = {}) => ({
     id: 'bal1',
     remainingQuantity: 6,

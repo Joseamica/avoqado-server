@@ -116,7 +116,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'redeem_credit',
-    'Redeem ONE prepaid credit from a customer\'s pack in a venue you can access — e.g. mark that they used a class/session today ("redime una clase a Juan"). Find the customer by name/email/phone; if their pack covers several services pass `product` to pick which credit to use. Because it CONSUMES a prepaid credit (customer value, not trivially reversible), by DEFAULT it only PREVIEWS (remaining → remaining-1); call again with confirm:true to apply. This WRITES — requires creditPacks:update.',
+    'Redeem ONE prepaid credit from a customer\'s pack in a venue you can access — e.g. mark that they used a class/session today ("redime una clase a Juan"). Find the customer by name/email/phone; if their pack covers several services pass `product` to pick which credit to use. Because it CONSUMES a prepaid credit (customer value, not trivially reversible), by DEFAULT it only PREVIEWS (remaining → remaining-1); call again with confirm:true to apply. This WRITES — requires creditPacks:redeem.',
     {
       venueId: z.string().describe('Venue that owns the customer (must be in your scope)'),
       search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
@@ -129,7 +129,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, search, product, reason, confirm }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
-      guard.requirePermission('creditPacks:update', venueId) // write gate (per-venue role)
+      guard.requirePermission('creditPacks:redeem', venueId) // permiso de MOSTRADOR, espejo de la ruta del POS (no el de catálogo)
 
       const matches = await prisma.customer.findMany({
         where: {
@@ -248,7 +248,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'sell_credit_pack',
-    'Sell a prepaid pack to a customer IN PERSON in a venue you can access — grants the credits after they pay at the POS ("véndele el paquete de 10 clases a Juan"). Find the customer by name/email/phone and the pack by name. Because it CREATES a paid purchase (records amountPaid + grants credits), by DEFAULT it only PREVIEWS; call again with confirm:true to apply. amountPaid defaults to the pack list price. This WRITES — requires creditPacks:create.',
+    'Sell a prepaid pack to a customer IN PERSON in a venue you can access — grants the credits after they pay at the POS ("véndele el paquete de 10 clases a Juan"). Find the customer by name/email/phone and the pack by name. Because it CREATES a paid purchase (records amountPaid + grants credits), by DEFAULT it only PREVIEWS; call again with confirm:true to apply. amountPaid defaults to the pack list price. This WRITES — requires creditPacks:sell.',
     {
       venueId: z.string().describe('Venue that owns the customer + pack (must be in your scope)'),
       customerSearch: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
@@ -259,7 +259,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, customerSearch, packSearch, amountPaid, note, confirm }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
-      guard.requirePermission('creditPacks:create', venueId) // write gate (per-venue role)
+      guard.requirePermission('creditPacks:sell', venueId) // permiso de MOSTRADOR, espejo de la ruta del POS (no el de catálogo)
 
       // NOTE: intentionally NOT gated on canVenueChargeOnline / an e-commerce
       // merchant. This is an IN-PERSON sale — the customer pays at the POS
