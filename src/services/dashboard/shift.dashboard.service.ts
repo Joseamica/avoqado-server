@@ -200,6 +200,10 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
           amount: true,
           tipAmount: true,
           method: true,
+          // Etiqueta del tipo de pago para el desglose "expande Otros".
+          // `externalSource` es el fallback de lo histórico (antes del catálogo).
+          tenderLabel: true,
+          externalSource: true,
           cardBrand: true,
           maskedPan: true,
           processorData: true,
@@ -741,6 +745,17 @@ export interface PaymentMethodBreakdownRow {
   tips: number
   count: number
   percentage: number
+  /**
+   * Desglose por NOMBRE del tipo de pago dentro de este método — el "expande Otros"
+   * de Square. Sólo aparece cuando hay más de una etiqueta bajo el mismo método
+   * (típicamente `OTHER`: "Uber Eats", "Terminal BBVA", "Vale de despensa").
+   *
+   * ADITIVO: las filas de arriba no cambian, así que el dashboard, el MCP
+   * (`src/mcp/tools/shifts.ts`) y el corte del TPV siguen leyendo lo mismo.
+   * Para pagos viejos sin tender cae a `externalSource`, que era la única pista
+   * que existía antes del catálogo.
+   */
+  children?: Array<{ label: string; total: number; tips: number; count: number }>
 }
 
 /**
@@ -759,7 +774,15 @@ export interface PaymentMethodBreakdownRow {
  * efectivo entraba al mapa de marcas, así que una transferencia inventaba una marca "OTHER".
  */
 export function buildPaymentBreakdown(
-  payments: Array<{ amount: unknown; tipAmount: unknown; method: string; cardBrand?: string | null; processorData?: unknown }>,
+  payments: Array<{
+    amount: unknown
+    tipAmount: unknown
+    method: string
+    cardBrand?: string | null
+    processorData?: unknown
+    tenderLabel?: string | null
+    externalSource?: string | null
+  }>,
 ): {
   paymentMethodBreakdown: PaymentMethodBreakdownRow[]
   cardBrandBreakdown: Array<{ brand: string; total: number; count: number; percentage: number }>
@@ -767,6 +790,9 @@ export function buildPaymentBreakdown(
   totalTips: number
 } {
   const methodMap = new Map<string, { total: number; tips: number; count: number }>()
+  // método → etiqueta → totales. La etiqueta viene del snapshot del tender (congelado
+  // al cobrar) y, para lo histórico, del `externalSource` de texto libre.
+  const labelMap = new Map<string, Map<string, { total: number; tips: number; count: number }>>()
   const cardBrandMap = new Map<string, { total: number; count: number }>()
   let totalSales = 0
   let totalTips = 0
@@ -788,6 +814,20 @@ export function buildPaymentBreakdown(
       existing.count += 1
     } else {
       methodMap.set(method, { total: amount, tips: tipAmount, count: 1 })
+    }
+
+    const tenderLabel = payment.tenderLabel || payment.externalSource
+    if (tenderLabel) {
+      const byLabel = labelMap.get(method) ?? new Map()
+      const le = byLabel.get(tenderLabel)
+      if (le) {
+        le.total += amount
+        le.tips += tipAmount
+        le.count += 1
+      } else {
+        byLabel.set(tenderLabel, { total: amount, tips: tipAmount, count: 1 })
+      }
+      labelMap.set(method, byLabel)
     }
 
     // Marcas: SÓLO de pagos con tarjeta real.
@@ -819,6 +859,18 @@ export function buildPaymentBreakdown(
         tips: Number(data.tips.toFixed(2)),
         count: data.count,
         percentage: Number(((data.total / salesDenominator) * 100).toFixed(1)),
+        ...(labelMap.has(method)
+          ? {
+              children: Array.from(labelMap.get(method)!.entries())
+                .map(([label, d]) => ({
+                  label,
+                  total: Number(d.total.toFixed(2)),
+                  tips: Number(d.tips.toFixed(2)),
+                  count: d.count,
+                }))
+                .sort((a, b) => b.total - a.total),
+            }
+          : {}),
       }))
       .sort((a, b) => b.total - a.total),
     cardBrandBreakdown: Array.from(cardBrandMap.entries())

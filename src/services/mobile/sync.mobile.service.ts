@@ -908,6 +908,34 @@ async function applyPayCash(
       message: `PAY_CASH: method inválido (${String(method)})`,
     }
   }
+  const tenderTypeId = intent.payload.tenderTypeId
+  const tenderRevision = intent.payload.tenderRevision
+  if (tenderTypeId !== undefined && (typeof tenderTypeId !== 'string' || !Number.isInteger(tenderRevision))) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: 'PAY_CASH: tenderTypeId requiere tenderRevision entero',
+    }
+  }
+  if (tenderTypeId !== undefined && method !== undefined) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: 'PAY_CASH: manda method o tenderTypeId, no ambos',
+    }
+  }
+  // Espejo del guard HTTP: una propina negativa es un descuento disfrazado e
+  // inconciliable. El reducer no lo validaba y era el hueco por donde entraba.
+  if (!Number.isFinite(tipCents) || tipCents < 0) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: 'PAY_CASH: tipCents no puede ser negativo',
+    }
+  }
   if (!orderId || !Number.isFinite(amountCents) || amountCents <= 0) {
     return {
       id: intent.id,
@@ -928,6 +956,15 @@ async function applyPayCash(
     idempotencyKey: intent.id,
     method,
     externalSource: typeof intent.payload.externalSource === 'string' ? intent.payload.externalSource : undefined,
+    // 🔴 El tipo de pago del catálogo viajaba y se TIRABA aquí: una venta con "Uber
+    // Eats" cobrada sin red se reproducía como EFECTIVO, en silencio, y la
+    // idempotencia impedía repararla después. Ahora se reenvía con la revisión que
+    // el cajero tenía enfrente.
+    tenderTypeId: typeof intent.payload.tenderTypeId === 'string' ? intent.payload.tenderTypeId : undefined,
+    tenderRevision: Number.isInteger(intent.payload.tenderRevision) ? (intent.payload.tenderRevision as number) : undefined,
+    // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
+    // mientras el dispositivo estaba sin red.
+    isOfflineReplay: true,
   })
   return {
     id: intent.id,

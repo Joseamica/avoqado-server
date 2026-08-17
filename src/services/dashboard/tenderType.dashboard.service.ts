@@ -23,7 +23,7 @@
  *   offline replays must always resolve their reference).
  */
 
-import { OrderSource, Prisma, TenderSection } from '@prisma/client'
+import { OrderSource, PaymentFundsFlow, PaymentMethod, Prisma, TenderSection } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from './activity-log.service'
@@ -358,4 +358,110 @@ export async function updateTenderType(
     data: { changes: JSON.parse(JSON.stringify(input)), touchesMoney },
   })
   return updated
+}
+
+/** Lo que el SERVIDOR resuelve al cobrar con un tender. El cliente no manda nada de esto. */
+export interface ResolvedTenderCharge {
+  tenderTypeId: string
+  tenderRevision: number
+  method: PaymentMethod
+  tenderLabel: string
+  tenderCountsAsCash: boolean
+  tenderCaptureTip: boolean
+  tenderSatFormaPago: string | null
+  tenderCommissionPercent: Prisma.Decimal | null
+  fundsFlow: PaymentFundsFlow
+}
+
+/**
+ * Resuelve la semántica de dinero de un cobro a partir de `{tenderTypeId, revision}`.
+ *
+ * 🔴 Invariante P0 de la auditoría v4: **el cliente NUNCA manda comisión, "entra al
+ * cajón" ni forma SAT**. Un POS con bug o alterado podría reportar comisión cero y
+ * descuadrar los reportes sin que nadie lo note. El POS sólo dice CUÁL tender y en
+ * QUÉ versión lo vio; todo lo demás sale de `VenueTenderTypeRevision`, que es
+ * append-only, así que editar el catálogo mañana no reinterpreta este cobro.
+ *
+ * La revisión se lee POR SU NÚMERO, no "la vigente": un cobro encolado sin red se
+ * registra con la semántica que regía CUANDO se cobró, no con la de hoy.
+ *
+ * @param expectedRevision revisión que el POS tenía a la vista. Si ya no existe, el
+ *   cobro se rechaza (referencia fabricada) en vez de adivinar.
+ */
+export async function resolveTenderForCharge(
+  venueId: string,
+  tenderTypeId: string,
+  expectedRevision: number,
+  tx: Prisma.TransactionClient | typeof prisma = prisma,
+  /**
+   * `'online'` (default) — cobro EN VIVO: se exige el tender activo y en su revisión
+   * VIGENTE. Si el catálogo cambió, el POS refresca y reintenta; nadie cobra con la
+   * comisión de ayer.
+   *
+   * `'replay'` — venta que YA OCURRIÓ y viene de la cola offline. **El dinero ya se
+   * cobró: rechazarla sería perder una venta legítima.** Se honra la revisión que el
+   * cajero tenía enfrente al cobrar, aunque hoy exista una más nueva o el tipo se haya
+   * apagado después. Misma lección que el 409: un desenlace ya ocurrido es un hecho,
+   * no se re-litiga. Lo único que se sigue exigiendo es que esa revisión EXISTA — una
+   * referencia inventada se rechaza y cae en cuarentena visible.
+   */
+  mode: 'online' | 'replay' = 'online',
+): Promise<ResolvedTenderCharge> {
+  // La FK compuesta hace imposible cruzar venues, pero el filtro explícito mantiene
+  // el aislamiento en la FRONTERA del efecto, no sólo en el esquema.
+  const tender = await tx.venueTenderType.findFirst({
+    where: { id: tenderTypeId, venueId },
+    select: { id: true, baseMethod: true, active: true, revision: true, name: true },
+  })
+  if (!tender) throw new NotFoundError('Tipo de pago no encontrado en este negocio.')
+
+  // 🔴 Se consultaba `active` y nunca se evaluaba: un POS con la lista vieja seguía
+  // cobrando con un tipo apagado indefinidamente. Apagar un tipo tiene que surtir
+  // efecto en el siguiente cobro, no cuando al POS se le ocurra refrescar.
+  if (mode === 'online' && !tender.active) {
+    throw new BadRequestError(`El tipo de pago "${tender.name}" está desactivado. Refresca los tipos de pago en el punto de venta.`)
+  }
+
+  // 🔴 Y aceptaba CUALQUIER revisión existente: un POS rancio (o alterado) podía cobrar
+  // para siempre con la revisión que tenía comisión 0% antes de que se subiera a 30%.
+  // ONLINE se exige la revisión VIGENTE — si el catálogo cambió, el POS refresca y
+  // reintenta. (El replay OFFLINE necesita su propia política verificable; hasta que
+  // exista, el reducer no acepta tenders — ver sync.mobile.service.)
+  if (mode === 'online' && tender.revision !== expectedRevision) {
+    throw new BadRequestError(
+      `El tipo de pago "${tender.name}" cambió (versión ${expectedRevision} → ${tender.revision}). Refresca los tipos de pago en el punto de venta e intenta de nuevo.`,
+    )
+  }
+
+  const revision = await tx.venueTenderTypeRevision.findFirst({
+    where: { tenderTypeId, venueId, revision: expectedRevision },
+  })
+  if (!revision) {
+    // Referencia fabricada o de otro venue: NO se adivina con la revisión vigente,
+    // porque eso aplicaría una comisión que el cajero nunca vio.
+    throw new BadRequestError(
+      `El tipo de pago cambió o no existe la versión ${expectedRevision}. Refresca los tipos de pago en el punto de venta e intenta de nuevo.`,
+    )
+  }
+
+  return {
+    tenderTypeId: tender.id,
+    tenderRevision: revision.revision,
+    // El método fiscal lo decide el CATÁLOGO, nunca el cliente.
+    method: tender.baseMethod,
+    tenderLabel: revision.name,
+    tenderCountsAsCash: revision.countsAsPhysicalCash,
+    tenderCaptureTip: revision.captureTip,
+    tenderSatFormaPago: revision.satFormaPago,
+    tenderCommissionPercent: revision.commissionPercent,
+    // Un tender que entra al cajón es efectivo físico; el resto es dinero que
+    // Avoqado NO procesó (terminal ajena, plataforma de delivery, vale).
+    fundsFlow: revision.countsAsPhysicalCash ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED,
+  }
+}
+
+/** Comisión comercial del tender sobre la VENTA (sin propina), 2 decimales. */
+export function computeTenderCommission(percent: Prisma.Decimal | null, amount: Prisma.Decimal): Prisma.Decimal | null {
+  if (percent == null) return null
+  return amount.mul(percent).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
 }

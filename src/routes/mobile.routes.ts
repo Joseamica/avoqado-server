@@ -8,6 +8,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
 import * as promotionMobileController from '../controllers/mobile/promotion.mobile.controller'
+import * as tenderTypeMobileController from '../controllers/mobile/tenderType.mobile.controller'
 import * as orderMobileController from '../controllers/mobile/order.mobile.controller'
 import * as timeEntryMobileController from '../controllers/mobile/time-entry.mobile.controller'
 import * as staffMobileController from '../controllers/mobile/staff.mobile.controller'
@@ -615,6 +616,18 @@ router.post(
 )
 
 router.get('/venues/:venueId/staff', authenticateTokenMiddleware, checkPermission('teams:read'), staffMobileController.getActiveStaff)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/tender-types
+ * Catálogo de tipos de pago que el POS pinta en "ya pagó de otra forma".
+ * Sólo lectura. `payments:read` — cualquier rol que pueda cobrar puede listarlos.
+ */
+router.get(
+  '/venues/:venueId/tender-types',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  tenderTypeMobileController.listTenderTypesForPos,
+)
 
 /**
  * @openapi

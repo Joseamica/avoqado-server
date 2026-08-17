@@ -1,4 +1,7 @@
+import { Prisma } from '@prisma/client'
 import {
+  resolveTenderForCharge,
+  computeTenderCommission,
   normalizeTenderName,
   SYSTEM_TENDER_SEEDS,
   ensureSystemTenderTypes,
@@ -213,6 +216,141 @@ describe('tenderType.dashboard.service', () => {
       // Stable orderBy (paginación-inestable guard): id as final tiebreak.
       expect(q.orderBy[q.orderBy.length - 1]).toEqual({ id: 'asc' })
       expect(out).toEqual([{ id: 'tt-1' }])
+    })
+  })
+
+  /**
+   * 🔴 El invariante P0 de la auditoría v4: al cobrar, el POS sólo dice CUÁL tender y
+   * en QUÉ versión lo vio. Comisión, "entra al cajón" y forma SAT los resuelve el
+   * SERVER desde la revisión congelada — un POS con bug no puede inventar dinero.
+   */
+  describe('resolveTenderForCharge — el servidor manda, no el cliente', () => {
+    const rev = {
+      revision: 2,
+      name: 'Uber Eats',
+      countsAsPhysicalCash: false,
+      captureTip: false,
+      commissionPercent: new Prisma.Decimal('30.00'),
+      satFormaPago: null,
+    }
+
+    it('toma la semántica de la REVISIÓN, no del catálogo vigente', async () => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: true, revision: 2, name: 'Uber Eats' } as any)
+      prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue(rev as any)
+
+      const out = await resolveTenderForCharge(VENUE, 'tt-1', 2)
+
+      expect(out).toMatchObject({
+        method: 'OTHER',
+        tenderLabel: 'Uber Eats',
+        tenderCountsAsCash: false,
+        tenderCaptureTip: false,
+        tenderRevision: 2,
+        fundsFlow: 'EXTERNAL_RECORDED',
+      })
+      // Pidió la revisión POR NÚMERO: un cobro encolado sin red conserva su semántica.
+      expect(prismaMock.venueTenderTypeRevision.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ revision: 2, venueId: VENUE }) }),
+      )
+    })
+
+    it('un vale que cuenta como efectivo entra al cajón (CASH_DRAWER)', async () => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-2', baseMethod: 'OTHER', active: true, revision: 2, name: 'Vale' } as any)
+      prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue({ ...rev, name: 'Vale', countsAsPhysicalCash: true, satFormaPago: '05' } as any)
+
+      const out = await resolveTenderForCharge(VENUE, 'tt-2', 2)
+
+      expect(out.fundsFlow).toBe('CASH_DRAWER')
+      expect(out.tenderCountsAsCash).toBe(true)
+      expect(out.tenderSatFormaPago).toBe('05')
+    })
+
+    it('tender de OTRO venue: NotFound, nunca resuelve', async () => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue(null)
+
+      await expect(resolveTenderForCharge('venue-OTRO', 'tt-1', 2)).rejects.toThrow(NotFoundError)
+      expect(prismaMock.venueTenderTypeRevision.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('🔴 revisión inexistente NO cae a la vigente — rechaza', async () => {
+      // Adivinar con la revisión de hoy aplicaría una comisión que el cajero nunca vio.
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: true, revision: 2, name: 'Uber Eats' } as any)
+      prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue(null)
+
+      await expect(resolveTenderForCharge(VENUE, 'tt-1', 99)).rejects.toThrow(BadRequestError)
+    })
+  })
+
+  describe('computeTenderCommission', () => {
+    it('calcula sobre la VENTA (sin propina) con 2 decimales', () => {
+      expect(computeTenderCommission(new Prisma.Decimal('30'), new Prisma.Decimal('100'))!.toString()).toBe('30')
+      expect(computeTenderCommission(new Prisma.Decimal('30'), new Prisma.Decimal('45.55'))!.toString()).toBe('13.67')
+    })
+
+    it('sin comisión configurada devuelve null, no cero', () => {
+      // null y 0 significan cosas distintas en el reporte: "no aplica" vs "0%".
+      expect(computeTenderCommission(null, new Prisma.Decimal('100'))).toBeNull()
+    })
+  })
+
+  describe('resolveTenderForCharge — candados temporales (hallazgo P0 del audit del código)', () => {
+    it('🔴 tender DESACTIVADO se rechaza, aunque su revisión exista', async () => {
+      // Antes se consultaba `active` y no se evaluaba: un POS rancio cobraba para siempre.
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: false, revision: 2, name: 'Uber Eats' } as any)
+
+      await expect(resolveTenderForCharge(VENUE, 'tt-1', 2)).rejects.toThrow(BadRequestError)
+      expect(prismaMock.venueTenderTypeRevision.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('🔴 revisión VIEJA se rechaza online (no se cobra con la comisión de ayer)', async () => {
+      // El caso que costaba dinero: comisión 0% → 30%, y un POS sin refrescar seguía en 0%.
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: true, revision: 3, name: 'Uber Eats' } as any)
+
+      await expect(resolveTenderForCharge(VENUE, 'tt-1', 2)).rejects.toThrow(/cambió/)
+      expect(prismaMock.venueTenderTypeRevision.findFirst).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('resolveTenderForCharge — modo REPLAY (la venta sin red YA ocurrió)', () => {
+    const revVieja = {
+      revision: 1,
+      name: 'TEST',
+      countsAsPhysicalCash: false,
+      captureTip: true,
+      commissionPercent: null,
+      satFormaPago: null,
+    }
+
+    it('🔑 honra la revisión que el cajero vio, aunque el catálogo ya cambió', async () => {
+      // Cobró a las 2pm con rev 1. A las 3pm el dueño subió la comisión (rev 2).
+      // A las 4pm vuelve el internet: esa venta es legítima y NO se rechaza.
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: true, revision: 2, name: 'TEST' } as any)
+      prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue(revVieja as any)
+
+      const out = await resolveTenderForCharge(VENUE, 'tt-1', 1, undefined, 'replay')
+
+      expect(out.tenderRevision).toBe(1)
+      expect(out.tenderLabel).toBe('TEST')
+    })
+
+    it('honra la venta aunque el tipo se haya APAGADO después de cobrar', async () => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: false, revision: 1, name: 'TEST' } as any)
+      prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue(revVieja as any)
+
+      await expect(resolveTenderForCharge(VENUE, 'tt-1', 1, undefined, 'replay')).resolves.toMatchObject({ tenderLabel: 'TEST' })
+    })
+
+    it('pero una referencia INVENTADA sigue rechazándose (cuarentena visible)', async () => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: true, revision: 2, name: 'TEST' } as any)
+      prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue(null)
+
+      await expect(resolveTenderForCharge(VENUE, 'tt-1', 77, undefined, 'replay')).rejects.toThrow(BadRequestError)
+    })
+
+    it('regresión: ONLINE sigue exigiendo la revisión vigente', async () => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: true, revision: 2, name: 'TEST' } as any)
+
+      await expect(resolveTenderForCharge(VENUE, 'tt-1', 1)).rejects.toThrow(/cambió/)
     })
   })
 })

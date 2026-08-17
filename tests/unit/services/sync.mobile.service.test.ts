@@ -317,13 +317,64 @@ describe('sync.mobile.service processIntents', () => {
     const acks = await processIntents(
       baseParams([{ id: 'i9', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 25000, tipCents: 2500 } }]),
     )
-    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(VENUE, 'order-5', {
-      amount: 25000,
-      tip: 2500,
-      staffId: STAFF,
-      idempotencyKey: 'i9',
-    })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({
+        amount: 25000,
+        tip: 2500,
+        staffId: STAFF,
+        idempotencyKey: 'i9',
+        // 🔑 Una venta que viene de la cola YA ocurrió: se honra la revisión del tender
+        // que el cajero tenía enfrente al cobrar, no la vigente hoy.
+        isOfflineReplay: true,
+      }),
+    )
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1' } })
+  })
+
+
+  it('🔴 PAY_CASH reenvía el tipo de pago del catálogo (antes lo TIRABA y aterrizaba como efectivo)', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-2', orderNumber: 'A-2' })
+
+    await processIntents(
+      baseParams([
+        {
+          id: 'i10',
+          type: 'PAY_CASH',
+          payload: { orderId: 'order-6', amountCents: 15000, tenderTypeId: 'tt-uber', tenderRevision: 3 },
+        },
+      ]),
+    )
+
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-6',
+      expect.objectContaining({ tenderTypeId: 'tt-uber', tenderRevision: 3, isOfflineReplay: true }),
+    )
+  })
+
+  it('PAY_CASH rechaza tenderTypeId sin revisión (referencia incompleta)', async () => {
+    const acks = await processIntents(
+      baseParams([{ id: 'i11', type: 'PAY_CASH', payload: { orderId: 'order-7', amountCents: 100, tenderTypeId: 'tt-x' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+  })
+
+  it('PAY_CASH rechaza method y tenderTypeId juntos (ambigüedad de dinero)', async () => {
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i12', type: 'PAY_CASH', payload: { orderId: 'order-8', amountCents: 100, method: 'CASH', tenderTypeId: 'tt-x', tenderRevision: 1 } },
+      ]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+  })
+
+  it('PAY_CASH rechaza propina NEGATIVA (el reducer se saltaba el guard HTTP)', async () => {
+    const acks = await processIntents(
+      baseParams([{ id: 'i13', type: 'PAY_CASH', payload: { orderId: 'order-9', amountCents: 1000, tipCents: -500 } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
   })
 
   it('🔴 PAY_CASH propaga el saldo autoritativo al ack (el cobro parcial OFFLINE también lo necesita)', async () => {

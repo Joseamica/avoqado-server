@@ -93,4 +93,49 @@ describe('buildPaymentBreakdown — desglose del corte por método real', () => 
     expect(cardBrandBreakdown).toEqual([])
     expect(totalSales).toBe(0)
   })
+
+  describe('desglose por tipo de pago (el "expande Otros" de Square)', () => {
+    it('separa Uber Eats de Terminal BBVA aunque ambos sean method=OTHER', () => {
+      // Era el pedido original del founder: "cuánto vendí en Uber Eats o Rappi".
+      // Sin esto los dos caían juntos en una sola bolsa "Otro".
+      const { paymentMethodBreakdown } = buildPaymentBreakdown([
+        { amount: 300, tipAmount: 0, method: 'OTHER', tenderLabel: 'Uber Eats' },
+        { amount: 200, tipAmount: 0, method: 'OTHER', tenderLabel: 'Uber Eats' },
+        { amount: 100, tipAmount: 0, method: 'OTHER', tenderLabel: 'Terminal BBVA' },
+      ] as any)
+
+      const otros = paymentMethodBreakdown.find(r => r.method === 'OTHER')!
+      expect(otros.total).toBe(600)
+      expect(otros.children).toEqual([
+        { label: 'Uber Eats', total: 500, tips: 0, count: 2 },
+        { label: 'Terminal BBVA', total: 100, tips: 0, count: 1 },
+      ])
+    })
+
+    it('lo histórico cae a externalSource cuando no hay tender', () => {
+      const { paymentMethodBreakdown } = buildPaymentBreakdown([
+        { amount: 250, tipAmount: 0, method: 'OTHER', externalSource: 'Clip' },
+      ] as any)
+
+      expect(paymentMethodBreakdown[0].children).toEqual([{ label: 'Clip', total: 250, tips: 0, count: 1 }])
+    })
+
+    it('un pago sin etiqueta NO inventa children (efectivo se queda liso)', () => {
+      const { paymentMethodBreakdown } = buildPaymentBreakdown([{ amount: 100, tipAmount: 10, method: 'CASH' }] as any)
+
+      expect(paymentMethodBreakdown[0].children).toBeUndefined()
+      expect(paymentMethodBreakdown[0].total).toBe(100)
+    })
+
+    it('regresión: los totales y filas de siempre NO cambian', () => {
+      const { paymentMethodBreakdown, totalSales } = buildPaymentBreakdown([
+        { amount: 100, tipAmount: 5, method: 'CASH' },
+        { amount: 400, tipAmount: 0, method: 'OTHER', tenderLabel: 'Uber Eats' },
+      ] as any)
+
+      expect(totalSales).toBe(500)
+      const otros = paymentMethodBreakdown.find(r => r.method === 'OTHER')!
+      expect(otros).toMatchObject({ method: 'OTHER', kind: 'OTHER', total: 400, percentage: 80 })
+    })
+  })
 })

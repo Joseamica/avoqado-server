@@ -1848,6 +1848,12 @@ export interface CashPaymentInput {
   tenderTypeId?: string
   tenderRevision?: number
   /**
+   * `true` cuando la venta viene de la cola offline: ya ocurrió, así que se honra la
+   * revisión que el cajero vio al cobrar en vez de exigir la vigente. Lo pone el
+   * reducer (`sync.mobile.service`), NUNCA un cliente por HTTP.
+   */
+  isOfflineReplay?: boolean
+  /**
    * Quién procesó el cobro cuando NO fue Avoqado ("Clip", "terminal del
    * negocio", "transferencia BBVA"). Se guarda en Payment.externalSource, que
    * ya existía para anotaciones manuales. Es lo que permite responder cuánto
@@ -2100,6 +2106,13 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   // Cómo pagó el cliente. Sin `method` (clientes viejos) sigue siendo efectivo.
   const paymentMethod = input.method ?? 'CASH'
+  // 🔴 El tender se resuelve DENTRO de la transacción, pero el cajón, el socket y la
+  // respuesta corren FUERA. Sin sacarlo por un holder, todos ellos veían el fallback
+  // 'CASH' y un cobro de Uber Eats creaba un CASH_SALE falso: el corte acusaba un
+  // faltante del tamaño de la venta. Mismo patrón de holder que `postingState`.
+  const tenderState: { resolved: import('../dashboard/tenderType.dashboard.service').ResolvedTenderCharge | null } = {
+    resolved: null,
+  }
   // Sólo el efectivo entra al cajón; lo cobrado por fuera se marca como manual
   // para que el arqueo y la atribución de ingresos no lo confundan con nuestro
   // procesamiento.
@@ -2273,8 +2286,15 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // no de lo que mandó el cliente.
         const resolvedTender =
           input.tenderTypeId != null && input.tenderRevision != null
-            ? await resolveTenderForCharge(venueId, input.tenderTypeId, input.tenderRevision, tx)
+            ? await resolveTenderForCharge(
+                venueId,
+                input.tenderTypeId,
+                input.tenderRevision,
+                tx,
+                input.isOfflineReplay ? 'replay' : 'online',
+              )
             : null
+        tenderState.resolved = resolvedTender
 
         // Propina prohibida en un tender configurado sin propina: el POS no debería
         // ofrecerla, pero la frontera del sistema no confía en la UI.
@@ -2514,8 +2534,12 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       venueId,
       paymentId: payment.id,
       // El método REAL: un cobro declarado a mano (terminal ajena, transferencia)
-      // viaja por este mismo servicio y NUNCA entró al cajón.
-      method: paymentMethod,
+      // o con un tender del catálogo viaja por este mismo servicio y NUNCA entró al
+      // cajón — salvo que el tender diga explícitamente que sí (vale de despensa).
+      method: tenderState.resolved?.method ?? paymentMethod,
+      tenderCountsAsCash: tenderState.resolved?.tenderCountsAsCash ?? null,
+      fundsFlow: tenderState.resolved?.fundsFlow ?? null,
+      tenderTypeId: tenderState.resolved?.tenderTypeId ?? null,
       status: 'COMPLETED',
       type: 'REGULAR',
       amount: amountDecimal,

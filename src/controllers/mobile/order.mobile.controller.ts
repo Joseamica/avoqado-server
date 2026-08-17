@@ -244,12 +244,28 @@ export const getOrder = async (req: Request, res: Response, next: NextFunction) 
 export const payCash = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { amount, tip, staffId, idempotencyKey, method, externalSource } = req.body
+    const { amount, tip, staffId, idempotencyKey, method, externalSource, tenderTypeId, tenderRevision } = req.body
 
     // Métodos que el POS puede registrar a mano. NO incluye los que Avoqado
     // procesa de verdad (DIGITAL_WALLET, CRYPTOCURRENCY): esos los escribe el
     // flujo del procesador, y dejar que un cliente los declare aquí
     // inventaría ingresos procesados que nunca pasaron por nosotros.
+    // 🔴 XOR: o un método fijo de siempre, o un tender del catálogo — nunca los dos.
+    // Mandar ambos deja al server eligiendo cuál gana, que es justo la ambigüedad que
+    // la auditoría marcó como P0. Mejor un 400 explícito que una precedencia silenciosa.
+    if (tenderTypeId !== undefined && method !== undefined) {
+      return res.status(400).json({
+        success: false,
+        message: 'Manda `method` o `tenderTypeId`, no ambos.',
+      })
+    }
+    if (tenderTypeId !== undefined && typeof tenderRevision !== 'number') {
+      return res.status(400).json({
+        success: false,
+        message: '`tenderRevision` es requerido junto con `tenderTypeId`.',
+      })
+    }
+
     const MANUAL_METHODS = ['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'BANK_TRANSFER', 'OTHER'] as const
     if (method !== undefined && !MANUAL_METHODS.includes(method)) {
       return res.status(400).json({
@@ -303,6 +319,8 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       // que las versiones viejas de la app no cambian de comportamiento.
       method,
       externalSource: typeof externalSource === 'string' ? externalSource : undefined,
+      tenderTypeId: typeof tenderTypeId === 'string' ? tenderTypeId : undefined,
+      tenderRevision: typeof tenderRevision === 'number' ? tenderRevision : undefined,
     })
 
     res.status(200).json({
