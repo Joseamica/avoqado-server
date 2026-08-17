@@ -364,7 +364,11 @@ const defaultDeps: IssueGlobalDeps = {
           where: { status: 'COMPLETED' },
           take: 1,
           orderBy: { createdAt: 'desc' },
-          select: { method: true },
+          // `tenderSatFormaPago`: la forma SAT que el NEGOCIO declaró en su tipo de pago.
+          // Sin ella, un ticket cobrado con un tipo del catálogo (method = OTHER) entra a
+          // la global como '99' (por definir) y arrastra a TODA la factura al genérico
+          // cuando se mezcla con otras formas.
+          select: { method: true, tenderSatFormaPago: true },
         },
         // Items carry each product's real tax treatment (rate + objetoImp) so the global lines
         // declare the actual IVA per product instead of assuming 16% for the whole ticket.
@@ -387,7 +391,7 @@ const defaultDeps: IssueGlobalDeps = {
     return orders.flatMap((o): GlobalInvoiceLine[] => {
       const priceIncludesIva = peso(o.taxAmount) === 0
       const method = o.payments[0]?.method
-      const formaPago = method ? mapFormaPago(method) : '99'
+      const formaPago = method ? mapFormaPago(method, o.payments[0]?.tenderSatFormaPago) : '99'
       const meta = { orderId: o.id, orderNumber: o.orderNumber, formaPago, priceIncludesIva }
 
       // Preferred path: derive per-product tax groups from the items.

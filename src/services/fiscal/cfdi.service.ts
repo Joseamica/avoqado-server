@@ -136,6 +136,12 @@ export interface LoadedOrderBundle {
   facturacionEnabled: boolean
   autofacturaEnabled: boolean
   paymentMethod: PaymentMethod
+  /**
+   * Forma SAT que el NEGOCIO declaró en su tipo de pago, congelada en el cobro. Gana sobre
+   * el mapa por método: un cobro con tipo del catálogo es `method = OTHER` → '99' (por
+   * definir), y sin esto la factura salía "por definir" con el dato correcto en la base.
+   */
+  tenderSatFormaPago?: string | null
   metodoPago: 'PUE' | 'PPD'
   subtotalCents: number
   taxCents: number
@@ -193,6 +199,7 @@ export async function issueCfdiForOrder(
   const saleInput = assembleSaleInput(bundle.order, {
     receptor: params.receptor,
     paymentMethod: bundle.paymentMethod,
+    tenderSatFormaPago: bundle.tenderSatFormaPago ?? null,
     metodoPago: bundle.metodoPago,
     serie: bundle.emisor.serie ?? undefined,
     idempotencyKey,
@@ -370,7 +377,7 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
         // tarjeta) hay que ver si ALGÚN pago fue en efectivo, no solo el más reciente.
         where: { status: 'COMPLETED' },
         orderBy: { createdAt: 'desc' },
-        select: { method: true, merchantAccountId: true, ecommerceMerchantId: true },
+        select: { method: true, merchantAccountId: true, ecommerceMerchantId: true, tenderSatFormaPago: true },
       },
       items: {
         select: {
@@ -487,6 +494,7 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
     facturacionEnabled: cfg.facturacionEnabled,
     autofacturaEnabled: cfg.autofacturaEnabled,
     paymentMethod: pay.method,
+    tenderSatFormaPago: pay.tenderSatFormaPago ?? null,
     metodoPago: 'PUE', // POS = PUE (PPD/REP deferred)
     subtotalCents,
     taxCents,

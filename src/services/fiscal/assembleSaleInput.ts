@@ -33,6 +33,8 @@ export interface LoadedOrderForCfdi {
 export interface AssembleOptions {
   receptor: AvoqadoSaleInput['receptor']
   paymentMethod: PaymentMethod
+  /** Forma SAT declarada por el negocio en su tipo de pago, congelada en el cobro. */
+  tenderSatFormaPago?: string | null
   metodoPago: 'PUE' | 'PPD'
   serie?: string
   idempotencyKey: string
@@ -65,6 +67,7 @@ export function assembleSaleInput(order: LoadedOrderForCfdi, opts: AssembleOptio
     venueType: order.venueType,
     receptor: opts.receptor,
     paymentMethod: opts.paymentMethod,
+    tenderSatFormaPago: opts.tenderSatFormaPago ?? null,
     metodoPago: opts.metodoPago,
     tipCents: centsOf(order.tipAmount),
     serie: opts.serie,

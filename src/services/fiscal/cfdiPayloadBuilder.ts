@@ -30,6 +30,11 @@ export interface AvoqadoSaleInput {
   venueType: VenueType
   receptor: CreateInvoiceParams['receptor']
   paymentMethod: PaymentMethod
+  /**
+   * Forma SAT declarada por el negocio en su tipo de pago, congelada en el cobro. Gana sobre
+   * el mapa por método — ver `mapFormaPago`. Opcional: un cobro clásico no la trae.
+   */
+  tenderSatFormaPago?: string | null
   metodoPago: 'PUE' | 'PPD'
   tipCents?: number // EXCLUDED from the CFDI (D2) — present only so callers can pass the full sale
   serie?: string
@@ -61,7 +66,7 @@ export function buildCreateInvoiceParams(input: AvoqadoSaleInput): CreateInvoice
   return {
     receptor: input.receptor,
     items: input.items.map(it => resolveItem(it, input.venueType)),
-    formaPago: mapFormaPago(input.paymentMethod),
+    formaPago: mapFormaPago(input.paymentMethod, input.tenderSatFormaPago),
     metodoPago: input.metodoPago,
     serie: input.serie,
     idempotencyKey: input.idempotencyKey,
