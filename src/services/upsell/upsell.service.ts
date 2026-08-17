@@ -476,12 +476,31 @@ export async function updateRule(venueId: string, ruleId: string, input: UpdateR
   return updated
 }
 
+/**
+ * 🔴 Ronda 1 de correcciones (2026-08-16): el dashboard tiene un `suggestabilityOf`
+ * que espeja los mismos filtros que `UpsellResolver` del POS (upsellEnabled,
+ * active, isOutOfStock, soldByWeight, modifierGroups obligatorios) para que su
+ * badge de "no sugerible" diga el motivo REAL — pero este `select` sólo traía
+ * `upsellEnabled`, así que ese badge sólo podía detectar el veto y mentía por
+ * omisión sobre las otras razones. Reusa el shape de `PRODUCT_VALIDATION_SELECT`
+ * (mismo `soldByWeight`/`modifierGroups` que usa el resto de este archivo) y le
+ * suma `active`, que ese select no necesitaba para SU propósito (validar
+ * modificadores) pero el dashboard sí necesita para el suyo.
+ */
 export async function listRules(venueId: string, status?: UpsellRuleStatus) {
   return prisma.upsellRule.findMany({
     where: { venueId, ...(status ? { status } : {}) },
     orderBy: [{ status: 'asc' }, { priority: 'desc' }, { createdAt: 'desc' }],
     include: {
-      suggestedProduct: { select: { id: true, name: true, price: true, imageUrl: true, upsellEnabled: true } },
+      suggestedProduct: {
+        select: {
+          ...PRODUCT_VALIDATION_SELECT,
+          name: true,
+          price: true,
+          imageUrl: true,
+          active: true,
+        },
+      },
     },
   })
 }

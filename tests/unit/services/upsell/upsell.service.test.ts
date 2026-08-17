@@ -11,7 +11,7 @@
  *  4. Las tres perillas tienen default seguro cuando la columna está en NULL.
  */
 
-import { UpsellOrigin, UpsellTriggerType } from '@prisma/client'
+import { UpsellOrigin, UpsellRuleStatus, UpsellTriggerType } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import logger from '../../../../src/config/logger'
 import {
@@ -19,6 +19,7 @@ import {
   parseUpsellSurfaces,
   createRule,
   updateRule,
+  listRules,
   listActiveRulesForPos,
 } from '../../../../src/services/upsell/upsell.service'
 import { isHoldout, HOLDOUT_PERCENT } from '../../../../src/services/upsell/upsellImpression.service'
@@ -590,5 +591,56 @@ describe('listActiveRulesForPos — el POS recibe la selección RESUELTA', () =>
     // 🟡 Degradar en silencio es indebuggeable en un local: el fail-open queda,
     // pero deja línea con qué regla y qué venue.
     expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ ruleId: 'r_stale', venueId: 'v1' }))
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Ronda 1 de correcciones (2026-08-16): el select de `listRules` sólo traía
+// `upsellEnabled` en `suggestedProduct` — el badge del dashboard (`suggestabilityOf`,
+// avoqado-web-dashboard) sólo podía detectar el veto y mentía por omisión sobre
+// las otras 4 razones (desactivado, sin existencias, por peso, pide opciones).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('listRules — el select de `suggestedProduct` trae lo que necesita el badge del dashboard', () => {
+  it('🟠 incluye active, soldByWeight y modifierGroups — no sólo upsellEnabled', async () => {
+    ;(prisma.upsellRule.findMany as jest.Mock).mockResolvedValue([])
+
+    await listRules('v1')
+
+    expect(prisma.upsellRule.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { venueId: 'v1' },
+        include: {
+          suggestedProduct: {
+            select: expect.objectContaining({
+              id: true,
+              name: true,
+              price: true,
+              imageUrl: true,
+              upsellEnabled: true,
+              active: true,
+              soldByWeight: true,
+              modifierGroups: expect.objectContaining({
+                select: expect.objectContaining({
+                  group: expect.objectContaining({
+                    select: expect.objectContaining({ required: true }),
+                  }),
+                }),
+              }),
+            }),
+          },
+        },
+      }),
+    )
+  })
+
+  it('con status filtra por ese status además del venue (no rompe lo de hoy)', async () => {
+    ;(prisma.upsellRule.findMany as jest.Mock).mockResolvedValue([])
+
+    await listRules('v1', UpsellRuleStatus.ACTIVE)
+
+    expect(prisma.upsellRule.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: 'v1', status: UpsellRuleStatus.ACTIVE } }),
+    )
   })
 })
