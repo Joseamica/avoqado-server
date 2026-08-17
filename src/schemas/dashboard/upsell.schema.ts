@@ -21,6 +21,21 @@ const daysOfWeekField = z
   .max(7, 'No puede haber más de 7 días')
   .optional()
 
+/**
+ * Selección de opciones obligatorias (spec 2026-08-16, B3). `nullable()` porque
+ * `null` es la forma explícita de LIMPIAR una selección (p. ej. al cambiar de
+ * producto sugerido en `updateUpsellRuleSchema`); `optional()` porque omitirla
+ * del todo = "no toco la selección actual".
+ *
+ * 🔴 Sin esto en el schema, `z.object()` strippea la llave y
+ * `src/middlewares/validation.ts` reemplaza `req.body` con el resultado ya sin
+ * ella — el servicio nunca la ve, por perfecta que esté su validación.
+ */
+const suggestedModifiersField = z
+  .array(z.object({ groupId: z.string().min(1), modifierId: z.string().min(1) }))
+  .nullable()
+  .optional()
+
 export const createUpsellRuleSchema = z.object({
   body: z
     .object({
@@ -30,6 +45,7 @@ export const createUpsellRuleSchema = z.object({
       triggerProductIds: z.array(z.string().min(1)).optional(),
       triggerCategoryIds: z.array(z.string().min(1)).optional(),
       suggestedProductId: z.string().min(1, 'El producto sugerido es requerido'),
+      suggestedModifiers: suggestedModifiersField,
       headline: z.string().max(120, 'El gancho no puede pasar de 120 caracteres').nullable().optional(),
       priority: z.number().int().min(0, 'La prioridad no puede ser negativa').max(1000, 'La prioridad máxima es 1000').optional(),
       daysOfWeek: daysOfWeekField,
@@ -53,6 +69,8 @@ export const createUpsellRuleSchema = z.object({
 
 export const updateUpsellRuleSchema = z.object({
   body: z.object({
+    suggestedProductId: z.string().min(1, 'El producto sugerido es requerido').optional(),
+    suggestedModifiers: suggestedModifiersField,
     headline: z.string().max(120, 'El gancho no puede pasar de 120 caracteres').nullable().optional(),
     priority: z.number().int().min(0, 'La prioridad no puede ser negativa').max(1000, 'La prioridad máxima es 1000').optional(),
     daysOfWeek: daysOfWeekField,

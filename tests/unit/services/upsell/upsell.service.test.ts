@@ -13,6 +13,7 @@
 
 import { UpsellOrigin, UpsellTriggerType } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
+import logger from '../../../../src/config/logger'
 import {
   computeDedupeKey,
   parseUpsellSurfaces,
@@ -331,6 +332,142 @@ describe('updateRule — revalida si cambia el producto o la selección (spec B3
       }),
     )
   })
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Ronda 1 de correcciones (2026-08-16): dedupeKey y selección huérfana.
+  // Ambos bugs estaban latentes porque el zod de la ruta ni dejaba llegar
+  // `suggestedProductId` a `updateRule` — con ese hueco cerrado, se vuelven
+  // reales en el mismo commit.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it('🟠 cambiar el producto recalcula el dedupeKey (si no, la regla miente sobre su propia identidad)', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({
+      id: 'r1',
+      origin: 'OWNER',
+      triggerType: 'ALWAYS',
+      triggerProductIds: [],
+      triggerCategoryIds: [],
+      suggestedProductId: 'prod_coca',
+      suggestedModifiers: [],
+      linkedDiscountId: null,
+      dedupeKey: 'OWNER:ALWAYS::prod_coca',
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue({
+      id: 'prod_agua',
+      soldByWeight: false,
+      upsellEnabled: true,
+      modifierGroups: [],
+    })
+    ;(prisma.upsellRule.findUnique as jest.Mock).mockResolvedValue(null) // sin colisión
+    ;(prisma.upsellRule.update as jest.Mock).mockResolvedValue({ id: 'r1' })
+
+    await updateRule('v1', 'r1', { suggestedProductId: 'prod_agua' }, 'staff_1')
+
+    expect(prisma.upsellRule.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ suggestedProductId: 'prod_agua', dedupeKey: 'OWNER:ALWAYS::prod_agua' }),
+      }),
+    )
+  })
+
+  it('🟠 cambiar el producto a uno que ya tiene una regla con el mismo disparador rechaza como duplicado', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({
+      id: 'r1',
+      origin: 'OWNER',
+      triggerType: 'ALWAYS',
+      triggerProductIds: [],
+      triggerCategoryIds: [],
+      suggestedProductId: 'prod_coca',
+      suggestedModifiers: [],
+      linkedDiscountId: null,
+      dedupeKey: 'OWNER:ALWAYS::prod_coca',
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue({
+      id: 'prod_agua',
+      soldByWeight: false,
+      upsellEnabled: true,
+      modifierGroups: [],
+    })
+    // OTRA regla ya ocupa la identidad "OWNER:ALWAYS::prod_agua".
+    ;(prisma.upsellRule.findUnique as jest.Mock).mockResolvedValue({ id: 'r_otra' })
+
+    await expect(updateRule('v1', 'r1', { suggestedProductId: 'prod_agua' }, 'staff_1')).rejects.toThrow(/Ya existe una regla/)
+    expect(prisma.upsellRule.update).not.toHaveBeenCalled()
+  })
+
+  it('🟠 cambiar el producto SIN traer una selección nueva limpia la selección vieja (huérfana)', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({
+      id: 'r1',
+      origin: 'OWNER',
+      triggerType: 'ALWAYS',
+      triggerProductIds: [],
+      triggerCategoryIds: [],
+      suggestedProductId: 'prod_agua',
+      // Selección vigente para AGUA ("Tamaño") — apuntaría a un grupo AJENO si se
+      // queda así tras cambiar el producto sugerido.
+      suggestedModifiers: [{ groupId: 'g_tam', modifierId: 'm_gr' }],
+      linkedDiscountId: null,
+      dedupeKey: 'OWNER:ALWAYS::prod_agua',
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue({
+      // Leche no tiene obligatorios: la validación pasa SIN mirar la selección vieja.
+      id: 'prod_leche',
+      soldByWeight: false,
+      upsellEnabled: true,
+      modifierGroups: [],
+    })
+    ;(prisma.upsellRule.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.upsellRule.update as jest.Mock).mockResolvedValue({ id: 'r1' })
+
+    await updateRule('v1', 'r1', { suggestedProductId: 'prod_leche' }, 'staff_1')
+
+    expect(prisma.upsellRule.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ suggestedProductId: 'prod_leche', suggestedModifiers: [] }),
+      }),
+    )
+  })
+
+  it('cambiar el producto CON una selección nueva usa esa selección — no la limpia', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({
+      id: 'r1',
+      origin: 'OWNER',
+      triggerType: 'ALWAYS',
+      triggerProductIds: [],
+      triggerCategoryIds: [],
+      suggestedProductId: 'prod_coca',
+      suggestedModifiers: [],
+      linkedDiscountId: null,
+      dedupeKey: 'OWNER:ALWAYS::prod_coca',
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue({
+      id: 'prod_agua',
+      soldByWeight: false,
+      upsellEnabled: true,
+      modifierGroups: [
+        { group: { id: 'g_tam', name: 'Tamaño', required: true, modifiers: [{ id: 'm_gr', name: 'Grande', price: 15, active: true }] } },
+      ],
+    })
+    ;(prisma.upsellRule.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.upsellRule.update as jest.Mock).mockResolvedValue({ id: 'r1' })
+
+    await updateRule(
+      'v1',
+      'r1',
+      { suggestedProductId: 'prod_agua', suggestedModifiers: [{ groupId: 'g_tam', modifierId: 'm_gr' }] },
+      'staff_1',
+    )
+
+    expect(prisma.upsellRule.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          suggestedProductId: 'prod_agua',
+          suggestedModifiers: [{ groupId: 'g_tam', modifierId: 'm_gr' }],
+          dedupeKey: 'OWNER:ALWAYS::prod_agua',
+        }),
+      }),
+    )
+  })
 })
 
 describe('listActiveRulesForPos — el POS recibe la selección RESUELTA', () => {
@@ -450,5 +587,8 @@ describe('listActiveRulesForPos — el POS recibe la selección RESUELTA', () =>
       { groupId: 'g_tam', modifierId: 'm_gr', name: 'Grande', price: 15 },
     ])
     expect(dtos.find(d => d.id === 'r_stale')!.suggestedModifiers).toEqual([])
+    // 🟡 Degradar en silencio es indebuggeable en un local: el fail-open queda,
+    // pero deja línea con qué regla y qué venue.
+    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ ruleId: 'r_stale', venueId: 'v1' }))
   })
 })

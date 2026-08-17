@@ -19,6 +19,7 @@
 
 import { Prisma, UpsellOrigin, UpsellRuleStatus, UpsellTriggerType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
 import {
   validateAndResolveModifiers,
@@ -125,12 +126,21 @@ const PRODUCT_VALIDATION_SELECT = {
  * (le pusieron un obligatorio nuevo, desactivaron la opción elegida) no puede
  * tumbar la respuesta de TODAS las demás y dejar al local sin upsell. Devuelve []
  * y el POS la descarta sola, que es exactamente el comportamiento de hoy.
+ *
+ * 🟡 El fail-open queda — pero degradar en TOTAL silencio es indebuggeable en un
+ * local: sin esta línea, "la tarjeta del agua dejó de aparecer" no tiene rastro
+ * en ningún lado.
  */
-function resolveForDto(product: ProductForValidation | undefined, selection: unknown): ResolvedModifier[] {
+function resolveForDto(product: ProductForValidation | undefined, selection: unknown, ruleId: string, venueId: string): ResolvedModifier[] {
   if (!product) return []
   try {
     return validateAndResolveModifiers(product, selection as SuggestedModifierSelection[] | null)
-  } catch {
+  } catch (error) {
+    logger.warn('Regla de upsell con selección inválida — se sirve sin modificadores obligatorios', {
+      ruleId,
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
     return []
   }
 }
@@ -179,7 +189,7 @@ export async function listActiveRulesForPos(venueId: string): Promise<PosUpsellR
     ...rule,
     // Decimal → number. Es un ratio de ordenamiento, no dinero.
     lift: rule.lift === null ? null : Number(rule.lift),
-    suggestedModifiers: resolveForDto(porId.get(rule.suggestedProductId), rule.suggestedModifiers),
+    suggestedModifiers: resolveForDto(porId.get(rule.suggestedProductId), rule.suggestedModifiers, rule.id, venueId),
   }))
 }
 
@@ -412,7 +422,39 @@ export async function updateRule(venueId: string, ruleId: string, input: UpdateR
   }
 
   const data: Prisma.UpsellRuleUncheckedUpdateInput = {}
+  const suggestedProductChanged = input.suggestedProductId !== undefined && input.suggestedProductId !== rule.suggestedProductId
   if (input.suggestedProductId !== undefined) data.suggestedProductId = input.suggestedProductId
+
+  if (suggestedProductChanged) {
+    // 🟠 El producto entra en el dedupeKey (`computeDedupeKey`): si cambia y no se
+    // recalcula, la regla miente sobre su propia identidad — deja crear un
+    // duplicado real del producto nuevo y bloquea uno legítimo del viejo. Ronda 1
+    // de correcciones, latente hasta ahora porque el zod de la ruta ni dejaba
+    // llegar `suggestedProductId` hasta aquí.
+    const newDedupeKey = computeDedupeKey({
+      origin: rule.origin,
+      triggerType: rule.triggerType,
+      triggerProductIds: rule.triggerProductIds,
+      triggerCategoryIds: rule.triggerCategoryIds,
+      suggestedProductId: input.suggestedProductId!,
+      linkedDiscountId: rule.linkedDiscountId,
+    })
+    const collision = await prisma.upsellRule.findUnique({
+      where: { venueId_dedupeKey: { venueId, dedupeKey: newDedupeKey } },
+      select: { id: true },
+    })
+    if (collision && collision.id !== ruleId) {
+      throw new UpsellValidationError('Ya existe una regla con ese disparador y ese producto sugerido.', 'DUPLICATE_RULE')
+    }
+    data.dedupeKey = newDedupeKey
+
+    // 🟠 El producto cambió: una selección vieja apunta a grupos de OTRO
+    // producto y quedaría huérfana en la DB. Se limpia a [] salvo que esta
+    // misma llamada ya traiga su propia selección para el producto nuevo (la
+    // línea de abajo la sobreescribe con el valor correcto en ese caso).
+    if (input.suggestedModifiers === undefined) data.suggestedModifiers = [] as unknown as Prisma.InputJsonValue
+  }
+
   if (input.suggestedModifiers !== undefined) data.suggestedModifiers = (input.suggestedModifiers ?? []) as unknown as Prisma.InputJsonValue
   if (input.headline !== undefined) data.headline = input.headline
   if (input.priority !== undefined) data.priority = input.priority
