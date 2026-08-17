@@ -6762,6 +6762,16 @@ model UpsellRule {
   suggestedProductId String
   suggestedProduct   Product @relation("UpsellSuggestedProduct", fields: [suggestedProductId], references: [id], onDelete: Cascade)
 
+  /// Opciones OBLIGATORIAS ya resueltas para esta sugerencia (spec 2026-08-16, B3).
+  /// Forma: [{ groupId, modifierId }]. NULL/vacío = el producto no pide nada.
+  ///
+  /// 🔴 Vive en la REGLA y no en el producto a propósito: la misma bebida puede
+  /// sugerirse chica en una regla y grande en otra sin tocar el catálogo. Por eso
+  /// NO se agregó un `Modifier.isDefault`.
+  ///
+  /// Aditivo: las reglas existentes quedan en NULL y se comportan como hoy.
+  suggestedModifiers Json?
+
   /// Gancho mostrado al cliente. Null = se usa el nombre del producto.
   headline String? @db.Text
 
