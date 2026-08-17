@@ -97,3 +97,61 @@ describe('recordPaymentBodySchema terminalPaymentRequestId length', () => {
     ).toThrow()
   })
 })
+
+// 🔴 DINERO. Bug REAL encontrado en el D3 (2026-08-17): el POS cobró con un tipo de
+// pago del catálogo ("Uber Eats") y el server respondió 400 "Método de pago inválido".
+// El cliente manda la REFERENCIA {tenderTypeId, tenderRevision} y OMITE `method` a
+// propósito — la semántica de dinero la resuelve el server desde la revisión congelada —
+// pero este schema exigía `method` siempre. Resultado: la venta rápida con tipo propio
+// era IMPOSIBLE, con el cajero viendo "Error en el pago" y sin salida.
+describe('recordPaymentBodySchema — referencia a un tipo de pago del catálogo', () => {
+  const tenderPayment = {
+    venueId: 'cmn3acoxt000mn227k1vdgj95',
+    amount: 5000,
+    tip: 0,
+    status: 'COMPLETED',
+    source: 'AVOQADO_ANDROID',
+    splitType: 'FULLPAYMENT',
+    staffId: 'staff-1',
+    paidProductsId: [],
+    tenderTypeId: 'cmn3a6xr8000kn227eg8zeh41',
+    tenderRevision: 1,
+  }
+
+  it('acepta la referencia SIN method (el server resuelve el método fiscal)', () => {
+    const parsed = recordPaymentBodySchema.parse({ body: tenderPayment })
+
+    expect(parsed.body.tenderTypeId).toBe('cmn3a6xr8000kn227eg8zeh41')
+    expect(parsed.body.tenderRevision).toBe(1)
+    expect(parsed.body.method).toBeUndefined()
+  })
+
+  // Sin tender, `method` sigue siendo obligatorio: un cobro sin método ni referencia
+  // no tiene forma de saber si entra al cajón.
+  it('sigue exigiendo method cuando NO hay referencia a un tipo de pago', () => {
+    const { tenderTypeId: _t, tenderRevision: _r, ...sinTender } = tenderPayment
+    expect(() => recordPaymentBodySchema.parse({ body: sinTender })).toThrow()
+  })
+
+  // Ambigüedad de dinero: si llegan los dos, ¿manda el catálogo o el cliente? Se
+  // rechaza en la frontera en vez de elegir en silencio.
+  it('rechaza method y tenderTypeId JUNTOS (ambigüedad de dinero)', () => {
+    expect(() => recordPaymentBodySchema.parse({ body: { ...tenderPayment, method: 'CASH' } })).toThrow()
+  })
+
+  it('rechaza tenderTypeId sin su revisión (una referencia a medias no es verificable)', () => {
+    const { tenderRevision: _r, ...sinRevision } = tenderPayment
+    expect(() => recordPaymentBodySchema.parse({ body: sinRevision })).toThrow()
+  })
+
+  it('rechaza una revisión negativa', () => {
+    expect(() => recordPaymentBodySchema.parse({ body: { ...tenderPayment, tenderRevision: -1 } })).toThrow()
+  })
+
+  // REGRESIÓN: el refine de merchant lee data.method. Con method ausente no debe
+  // reventar (leía `.includes(data.method)` sobre un undefined).
+  it('no rompe la regla de merchant cuando method viene ausente', () => {
+    const parsed = recordPaymentBodySchema.parse({ body: tenderPayment })
+    expect(parsed.body.merchantAccountId).toBeUndefined()
+  })
+})

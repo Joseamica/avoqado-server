@@ -321,6 +321,12 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       externalSource: typeof externalSource === 'string' ? externalSource : undefined,
       tenderTypeId: typeof tenderTypeId === 'string' ? tenderTypeId : undefined,
       tenderRevision: typeof tenderRevision === 'number' ? tenderRevision : undefined,
+      // 🔴 "Esta venta YA OCURRIÓ y viene de mi cola." Sólo lo manda la cola de
+      // reintentos del POS. Con un tipo del catálogo se honra la revisión que el cajero
+      // tenía enfrente al cobrar: si el negocio le subió la comisión el martes, las
+      // ventas del lunes que no habían sincronizado NO pueden quedar atoradas para
+      // siempre. Un desenlace ya ocurrido es un hecho, no se re-litiga.
+      isOfflineReplay: req.body.isOfflineReplay === true,
     })
 
     res.status(200).json({

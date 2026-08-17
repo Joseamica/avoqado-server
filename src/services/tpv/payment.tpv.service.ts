@@ -19,6 +19,8 @@ import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
+import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { isRetryableDbError } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
@@ -34,6 +36,7 @@ import {
 } from '../payments/cardInternationality.service'
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
+import { linkCustomerToExistingOrder, resolveFastOrderCustomer } from './fastPaymentCustomer'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -1597,7 +1600,17 @@ interface PaymentCreationData {
   amount: number // Amount in cents
   tip: number // Tip in cents
   status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'PROCESSING' | 'REFUNDED'
-  method: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'OTHER'
+  // Ausente SÓLO cuando viaja `tenderTypeId`: ahí el método fiscal lo resuelve el
+  // server desde la revisión congelada del catálogo. El schema exige exactamente uno
+  // de los dos, así que un payload sin ninguno nunca llega hasta aquí.
+  method?: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'OTHER'
+  // Referencia al tipo de pago del negocio. Sólo la referencia: la semántica de dinero
+  // (comisión, cajón, forma SAT) la congela el server desde `VenueTenderTypeRevision`.
+  tenderTypeId?: string
+  tenderRevision?: number
+  // Sólo la cola de reintentos del POS. Honra la revisión que el cajero vio al cobrar:
+  // una venta ya ocurrida no se rechaza porque el catálogo cambió después.
+  isOfflineReplay?: boolean
   // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
   // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
   externalSource?: string | null
@@ -1606,6 +1619,11 @@ interface PaymentCreationData {
   tpvId: string
   staffId: string
   paidProductsId: string[]
+
+  // 🔴 El CLIENTE de la venta rápida. Opcional/aditivo: los POS que no lo mandan se
+  // comportan exactamente igual que antes. Un id inválido NUNCA rechaza el cobro — ver
+  // `fastPaymentCustomer.ts` para el porqué completo.
+  customerId?: string | null
 
   // Snapshot de MERCHANT_ROUTING_RULES evaluado por la TPV para este cobro
   // (auditoría). Opcional — APKs viejos no lo envían.
@@ -1953,6 +1971,17 @@ export async function recordOrderPayment(
 ) {
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
 
+  // 🔴 Este camino cobra CONTRA UNA ORDEN desde la terminal, y la terminal es un
+  // aparato de tarjeta: sus medios son efectivo y tarjeta, no el catálogo de tipos
+  // propios del negocio ("Uber Eats", vales). Ese catálogo vive en el POS, que cobra
+  // por `payCashOrder` / `recordFastPayment`. Rechazar aquí es explícito a propósito:
+  // si algún día alguien conecta el catálogo a esta ruta, tiene que hacerlo estampando
+  // los snapshots — no colándose con un `method` a medias.
+  const classicMethod = paymentData.method
+  if (paymentData.tenderTypeId != null || classicMethod == null) {
+    throw new BadRequestError('Esta ruta de cobro no acepta tipos de pago del catálogo. Usa el punto de venta.')
+  }
+
   // 🛡️ IDEMPOTENCY CHECK - Layered defense (Stripe/Square/Toast pattern)
   // See recordFastPayment for full explanation. Both checks run in sequence to
   // handle the legacy→new TPV transition correctly.
@@ -2154,7 +2183,7 @@ export async function recordOrderPayment(
       logger.error(`❌ MerchantAccount not found: ${merchantAccountId}`, {
         venueId,
         orderId,
-        paymentMethod: paymentData.method,
+        paymentMethod: classicMethod,
         providedId: merchantAccountId,
         blumonSerialNumber: paymentData.blumonSerialNumber,
         hint: 'Android may have stale config. Attempting TIER 2 recovery from blumonSerialNumber.',
@@ -2191,7 +2220,7 @@ export async function recordOrderPayment(
       logger.warn(`⚠️ MerchantAccount ${merchantAccountId} is inactive`, {
         venueId,
         orderId,
-        paymentMethod: paymentData.method,
+        paymentMethod: classicMethod,
         blumonSerialNumber: paymentData.blumonSerialNumber,
       })
 
@@ -2248,7 +2277,7 @@ export async function recordOrderPayment(
           orderId: activeOrder.id,
           idempotencyKey: paymentData.idempotencyKey,
           amount: new Prisma.Decimal(totalAmount),
-          method: paymentData.method as PaymentMethod,
+          method: classicMethod as PaymentMethod,
         })
       }
 
@@ -2259,10 +2288,10 @@ export async function recordOrderPayment(
           orderId: activeOrder.id,
           amount: totalAmount,
           tipAmount,
-          method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
+          method: classicMethod as PaymentMethod, // Cast to PaymentMethod enum
           // Mismo criterio que la venta rápida: el detalle declarado a mano sólo se
           // guarda cuando el dinero NO pasó por Avoqado.
-          externalSource: paymentData.method === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
+          externalSource: classicMethod === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
           status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
           splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
@@ -2336,6 +2365,16 @@ export async function recordOrderPayment(
       })
 
       // Create VenueTransaction for financial tracking and settlement
+      //
+      // 🔴 `PENDING` significa "Avoqado todavía le debe este dinero al negocio". Estaba
+      // FIJO, así que el efectivo del cajón —y ahora un cobro de Uber Eats, que Avoqado
+      // jamás va a depositar— entraban a la cola de liquidación como saldo por depositar.
+      // El lado de lectura (`availableBalance`) ya filtra con este mismo predicado, o sea
+      // que el número que ve el dueño estaba bien; la FILA era la que mentía, y cualquier
+      // consumidor nuevo la leería mal. "¿Esto lo deposita Avoqado?" tiene UNA autoridad:
+      // `paymentIsAvoqadoSettled`. Sin tender reproduce el histórico para tarjeta
+      // (PENDING) y corrige el efectivo a SETTLED — que es justo lo que ya hace el cobro
+      // en efectivo del POS ("Cash is immediately settled").
       await tx.venueTransaction.create({
         data: {
           venueId,
@@ -2344,7 +2383,8 @@ export async function recordOrderPayment(
           grossAmount: totalAmount + tipAmount,
           feeAmount: newPayment.feeAmount,
           netAmount: newPayment.netAmount,
-          status: 'PENDING', // Will be updated to SETTLED by settlement process
+          // Lo que no pasa por Avoqado no tiene nada pendiente: nace liquidado.
+          status: paymentIsAvoqadoSettled(newPayment) ? 'PENDING' : 'SETTLED',
         },
       })
 
@@ -2682,7 +2722,7 @@ export async function recordOrderPayment(
           paymentData: {
             amount: totalAmount,
             tip: tipAmount,
-            posPaymentMethodId: mapPaymentMethodToPOS(paymentData.method),
+            posPaymentMethodId: mapPaymentMethodToPOS(classicMethod),
             reference: paymentData.mentaOperationId || paymentData.authorizationNumber || '',
             isPartial: isPartialPayment,
           },
@@ -3052,7 +3092,13 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // `snapshotOrderPaymentIds`): con llave, esta consulta NO corre.
       const paymentIdsBeforeDelegation = hasPaymentIdentityKey(paymentData) ? null : await snapshotOrderPaymentIds(venueId, target.orderId)
       try {
-        return await recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+        const delegated = await recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+        // El cliente que eligió el cajero también cuenta cuando el cobro pertenece a una
+        // venta que YA existe. Sólo RELLENA (nunca reasigna) y nunca lanza, así que no
+        // altera la semántica del catch de abajo. Así `customerLink` viaja en TODAS las
+        // respuestas exitosas de `/fast` y el cliente móvil no tiene que adivinar.
+        const customerLink = await linkCustomerToExistingOrder(venueId, target.orderId, paymentData.customerId)
+        return { ...delegated, customerLink }
       } catch (err) {
         // 🔴 La tarjeta YA se cobró. Antes de esta delegación, ese dinero por lo menos
         // aterrizaba en una venta FAST. Si recordOrderPayment truena por dentro —
@@ -3177,7 +3223,16 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         idempotencyKey: paymentData.idempotencyKey,
         existingPaymentId: existingByKey.id,
       })
-      return { ...existingByKey, digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]) }
+      // 🔑 El reintento NO vuelve a cobrar, pero SÍ puede rellenar el cliente que faltaba:
+      // si el primer intento entró anónimo, sin esto la venta se quedaba sin cliente para
+      // siempre (la idempotencia devuelve el pago y nadie vuelve a mirar). Rellenar es
+      // aditivo y no toca dinero; reasignar está prohibido (ver `fastPaymentCustomer.ts`).
+      const customerLink = await linkCustomerToExistingOrder(venueId, existingByKey.orderId, paymentData.customerId)
+      return {
+        ...existingByKey,
+        digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
+        customerLink,
+      }
     }
   }
 
@@ -3208,9 +3263,13 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       })
 
       // Return existing payment with receipt (safe retry - client gets same response)
+      // Mismo relleno de cliente que el check por `idempotencyKey`: un reintento legacy
+      // (TPV < v1.10.10, sin llave) también puede traer el cliente que faltaba.
+      const customerLink = await linkCustomerToExistingOrder(venueId, existingPayment.orderId, paymentData.customerId)
       return {
         ...existingPayment,
         digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
+        customerLink,
       }
     }
   }
@@ -3348,6 +3407,18 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   const internationalityShadow = classifyPaymentInternationalityShadow(paymentData)
   const internationalityClassifiedAt = internationalityShadow ? new Date() : undefined
 
+  // 🔴 EL CLIENTE DE LA VENTA. Se resuelve ANTES de abrir la transacción (para no tener
+  // una consulta de lectura dentro del bloqueo del cobro) y su resultado se escribe
+  // DENTRO del mismo `order.create` de abajo — nunca en un attach posterior, que podría
+  // fallar DESPUÉS de registrar el dinero y dejar la venta sin cliente, que es justo el
+  // defecto que esto vino a arreglar.
+  //
+  // Un cliente inválido NO tumba el cobro: devuelve `orderData.customerId = null` y un
+  // aviso en la respuesta. El dinero ya está en la caja. Detalle en `fastPaymentCustomer.ts`.
+  const { link: customerLink, orderData: customerOrderData } = await t.time('resolveFastOrderCustomer', () =>
+    resolveFastOrderCustomer(venueId, paymentData.customerId),
+  )
+
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   //
@@ -3357,6 +3428,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // the concurrent retry behave exactly like an idempotent success.
   let payment: Awaited<ReturnType<typeof prisma.payment.create>> & { processedBy: any }
   let fastOrder: Awaited<ReturnType<typeof prisma.order.create>>
+  // 🔑 El tender resuelto se saca de la transacción a propósito: la respuesta al POS y
+  // todo lo posterior tienen que ver el método REAL del cobro, no el que mandó el
+  // cliente. (Aquí no hace falta para `payment.method` —ya viene del registro creado—
+  // pero sí para no volver a leer el catálogo fuera de la tx.)
+  const tenderState: { resolved: ResolvedTenderCharge | null } = { resolved: null }
   try {
     t.mark('turnoMerchantYTerminal')
     const result = await prisma.$transaction(async tx => {
@@ -3388,8 +3464,37 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           splitType: paymentData.splitType as any, // Set splitType for fast orders
           createdById: validatedStaffId, // Track which staff created the fast order
           servedById: validatedStaffId, // ⭐ KIOSK MODE FIX: Also set server to payment processor
+          // 🔴 El cliente, en la MISMA transacción que el dinero: `Order.customerId`
+          // (vínculo legacy) + `OrderCustomer` primario (vínculo moderno) — exactamente
+          // lo que hace `POST /orders`. Sin cliente el objeto es vacío y la orden nace
+          // idéntica a como nacía antes de este cambio.
+          ...(customerOrderData ?? {}),
         },
       })
+
+      // 🔑 Semántica de dinero SERVER-OWNED: si el POS referenció un tipo de pago del
+      // catálogo, el método fiscal, la comisión, el cajón y la forma SAT salen de la
+      // revisión CONGELADA — nunca de lo que mandó el cliente. Editar el catálogo
+      // mañana no reinterpreta este cobro.
+      const resolvedTender =
+        paymentData.tenderTypeId != null && paymentData.tenderRevision != null
+          ? await resolveTenderForCharge(
+              venueId,
+              paymentData.tenderTypeId,
+              paymentData.tenderRevision,
+              tx,
+              paymentData.isOfflineReplay ? 'replay' : 'online',
+            )
+          : null
+      tenderState.resolved = resolvedTender
+
+      // Propina prohibida en un tipo configurado sin propina (Uber Eats ya la cobró en
+      // su app). El POS no debería ofrecerla, pero la frontera no confía en la UI.
+      if (resolvedTender && !resolvedTender.tenderCaptureTip && tipAmount > 0) {
+        throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
+      }
+
+      const effectiveMethod = (resolvedTender?.method ?? paymentData.method) as PaymentMethod
 
       // Create the fast payment record
       const newPayment = await tx.payment.create({
@@ -3398,10 +3503,30 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           orderId: order.id, // Fast payment - no order association
           amount: totalAmount,
           tipAmount,
-          method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
+          method: effectiveMethod,
           // El detalle del cobro declarado a mano sólo tiene sentido si el dinero NO
           // pasó por Avoqado; en efectivo se guarda null para no ensuciar el arqueo.
-          externalSource: paymentData.method === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
+          // Con un tipo del catálogo el nombre vive en `tenderLabel`, no aquí: mezclarlos
+          // haría que el desglose del corte contara el mismo cobro dos veces.
+          externalSource: resolvedTender
+            ? null
+            : paymentData.method === 'CASH'
+              ? null
+              : paymentData.externalSource?.trim()?.slice(0, 50) || null,
+          // Snapshots inmutables del tender, todos resueltos por el server.
+          ...(resolvedTender
+            ? {
+                tenderTypeId: resolvedTender.tenderTypeId,
+                tenderRevision: resolvedTender.tenderRevision,
+                tenderLabel: resolvedTender.tenderLabel,
+                tenderCountsAsCash: resolvedTender.tenderCountsAsCash,
+                tenderCaptureTip: resolvedTender.tenderCaptureTip,
+                tenderSatFormaPago: resolvedTender.tenderSatFormaPago,
+                tenderCommissionPercent: resolvedTender.tenderCommissionPercent,
+                tenderCommissionAmount: computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(totalAmount)),
+                fundsFlow: resolvedTender.fundsFlow,
+              }
+            : {}),
           status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
           splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
@@ -3468,6 +3593,16 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       })
 
       // Create VenueTransaction for financial tracking and settlement
+      //
+      // 🔴 `PENDING` significa "Avoqado todavía le debe este dinero al negocio". Estaba
+      // FIJO, así que el efectivo del cajón —y ahora un cobro de Uber Eats, que Avoqado
+      // jamás va a depositar— entraban a la cola de liquidación como saldo por depositar.
+      // El lado de lectura (`availableBalance`) ya filtra con este mismo predicado, o sea
+      // que el número que ve el dueño estaba bien; la FILA era la que mentía, y cualquier
+      // consumidor nuevo la leería mal. "¿Esto lo deposita Avoqado?" tiene UNA autoridad:
+      // `paymentIsAvoqadoSettled`. Sin tender reproduce el histórico para tarjeta
+      // (PENDING) y corrige el efectivo a SETTLED — que es justo lo que ya hace el cobro
+      // en efectivo del POS ("Cash is immediately settled").
       await tx.venueTransaction.create({
         data: {
           venueId,
@@ -3476,7 +3611,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           grossAmount: totalAmount + tipAmount,
           feeAmount: newPayment.feeAmount,
           netAmount: newPayment.netAmount,
-          status: 'PENDING', // Will be updated to SETTLED by settlement process
+          // Lo que no pasa por Avoqado no tiene nada pendiente: nace liquidado.
+          status: paymentIsAvoqadoSettled(newPayment) ? 'PENDING' : 'SETTLED',
         },
       })
 
@@ -3578,7 +3714,14 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         })
 
         if (winner) {
-          return { ...winner, digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]) }
+          // La carrera la ganó otra petición: su orden ya existe, así que el cliente se
+          // rellena (nunca se reasigna) igual que en cualquier reintento idempotente.
+          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, winner.orderId, paymentData.customerId)
+          return {
+            ...winner,
+            digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),
+            customerLink: winnerCustomerLink,
+          }
         }
 
         logger.error('🚨 [recordFastPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
@@ -3827,6 +3970,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           autofacturaAvailable,
         }
       : null,
+    // Campo ADITIVO: qué pasó con el cliente de esta venta. Un POS viejo lo ignora; los
+    // nuevos pueden avisar al cajero y ofrecerle reasignar sin volver a cobrar.
+    customerLink,
   }
 }
 

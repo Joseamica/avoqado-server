@@ -152,9 +152,33 @@ export const recordPaymentBodySchema = z.object({
       // rápida rechazaba el cobro con 400 y la única salida del mesero era marcarlo
       // efectivo — justo lo que descuadra el arqueo. CRYPTOCURRENCY y DIGITAL_WALLET
       // NO se aceptan a mano a propósito: los escribe el flujo del procesador.
-      method: z.enum(['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET', 'BANK_TRANSFER', 'OTHER'], {
-        message: 'Método de pago inválido.',
-      }),
+      // 🔑 OPCIONAL desde 2026-08-17, y sólo cuando viaja `tenderTypeId`: con un tipo de
+      // pago del catálogo el método fiscal lo decide el SERVER desde la revisión
+      // congelada, no el cliente. El refine de abajo exige exactamente uno de los dos.
+      method: z
+        .enum(['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET', 'BANK_TRANSFER', 'OTHER'], {
+          message: 'Método de pago inválido.',
+        })
+        .optional(),
+
+      // 🔑 Referencia al tipo de pago del negocio ("Uber Eats", "Vale de despensa").
+      // Viaja SOLO la referencia {id, revisión}: comisión, cajón y forma SAT los
+      // resuelve el server desde `VenueTenderTypeRevision`, para que editar el
+      // catálogo mañana NO reinterprete un cobro de hoy.
+      tenderTypeId: z.string().cuid({ message: 'El ID del tipo de pago debe ser un CUID válido.' }).optional(),
+      // La revisión que el cajero tenía enfrente. Sin ella la referencia no es
+      // verificable y el server no podría congelar la semántica correcta.
+      tenderRevision: z.number().int().nonnegative({ message: 'La versión del tipo de pago debe ser un entero no negativo.' }).optional(),
+      // 🔴 "Esta venta YA OCURRIÓ y viene de mi cola offline."
+      //
+      // Sólo lo manda la cola de reintentos del POS, nunca un cobro en vivo. Cambia una
+      // cosa: con un tipo del catálogo se honra la revisión que el cajero tenía enfrente
+      // al cobrar, aunque hoy exista una más nueva o el tipo se haya apagado después.
+      // Sin esto, subir la comisión de un tipo el martes RECHAZA para siempre las ventas
+      // del lunes que no habían sincronizado — atoradas en la cola, con un banner que el
+      // cajero no puede quitar. Un desenlace ya ocurrido es un hecho, no se re-litiga.
+      // Lo que NO relaja: la revisión referenciada tiene que EXISTIR.
+      isOfflineReplay: z.boolean().optional(),
       // Detalle legible del cobro declarado a mano ("Tarjeta (terminal externa)").
       // nullable() NO es cosmético: iOS manda `externalSource: null` explícito en los
       // cobros normales, así que exigir string|undefined rechazaría cada cobro en
@@ -164,6 +188,40 @@ export const recordPaymentBodySchema = z.object({
       splitType: z.enum(['PERPRODUCT', 'EQUALPARTS', 'CUSTOMAMOUNT', 'FULLPAYMENT'], { message: 'Tipo de división inválido.' }),
       staffId: z.string().min(1, { message: 'El ID del staff es requerido.' }),
       paidProductsId: z.array(z.string()).default([]),
+
+      // 🔴 EL CLIENTE DE LA VENTA (2026-08-17). Hasta hoy este campo NO estaba declarado
+      // y `validation.ts` REEMPLAZA `req.body` con el resultado de Zod: un `customerId`
+      // enviado por el POS se DESCARTABA EN SILENCIO y la orden `FAST-*` nacía sin
+      // cliente aunque el cajero lo hubiera seleccionado. Se perdían historial, CFDI y
+      // atribución (verificado en un POS Android real: cobro de $100 con cliente → orden
+      // con `customerId NULL`).
+      //
+      // 🔑 Deliberadamente NO es `.cuid()` como en los demás schemas de este archivo:
+      // aquí el dinero YA se recibió cuando llega la petición, y un 400 por el FORMATO de
+      // un id manda el cobro a la cola de reintentos con un error permanente. Es la misma
+      // trampa que ya costó un cobro atorado para siempre en `terminalPaymentRequestId`
+      // (min(1), no min(8)). Forma solamente; que exista y sea de ESTE venue lo decide el
+      // servicio, que ante un cliente inválido registra la venta anónima y avisa.
+      //
+      // `nullable()` porque los clientes mandan `null` explícito en la venta anónima
+      // (mismo patrón que `externalSource`): exigir string|undefined rechazaría cada
+      // cobro sin cliente del iPad.
+      //
+      // 🔑 `.max(64)` DENTRO de `.catch(undefined)`, no como rechazo. La cota es real y
+      // necesaria (con `BODY_JSON_LIMIT` de 1 MB, sin ella un cliente empuja ~1 MB de
+      // string al `findUnique` y al meta del logger en CADA cobro); pero convertirla en
+      // un 400 reintroduciría justo el modo de falla que este campo evita. Con `.catch`
+      // un valor absurdo se DESCARTA —la venta se registra anónima— en vez de tumbar el
+      // cobro. Mismo patrón que `issuerCountryCode` arriba: "evidencia inválida se
+      // descarta en vez de rechazar un pago ya aprobado". Un cuid mide 25.
+      customerId: z
+        .string()
+        .trim()
+        .min(1, { message: 'El ID del cliente no puede estar vacío.' })
+        .max(64, { message: 'El ID del cliente es demasiado largo.' })
+        .nullable()
+        .optional()
+        .catch(undefined),
 
       // Card payment fields (optional)
       cardBrand: z.string().optional(),
@@ -284,6 +342,9 @@ export const recordPaymentBodySchema = z.object({
         // ✅ Business rule: Card payments need merchantAccountId OR blumonSerialNumber (for TIER 2 recovery)
         // TIER 1: merchantAccountId provided directly
         // TIER 2: blumonSerialNumber allows backend to infer merchantAccountId (SOURCE OF TRUTH)
+        // Sin `method` explícito manda el catálogo (tenderTypeId): la regla de merchant
+        // no aplica — un tipo propio nunca cobra por una terminal de Avoqado.
+        if (data.method == null) return true
         if (['CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET'].includes(data.method)) {
           const hasMerchantId = data.merchantAccountId != null && data.merchantAccountId !== ''
           const hasBlumonSerial = data.blumonSerialNumber != null && data.blumonSerialNumber !== ''
@@ -300,7 +361,50 @@ export const recordPaymentBodySchema = z.object({
           'Card payments require merchantAccountId OR blumonSerialNumber for merchant resolution. Cash payments should not have merchantAccountId.',
         path: ['merchantAccountId'],
       },
-    ),
+    )
+    // 🔴 DINERO: exactamente UNA fuente de verdad para la semántica del cobro.
+    //
+    // Con `tenderTypeId` manda el CATÁLOGO (comisión, cajón, forma SAT salen de la
+    // revisión congelada); sin él manda `method`. Aceptar los dos obligaría al server
+    // a elegir en silencio cuál gana — y esa elección decide si el dinero entra al
+    // arqueo de efectivo o no. Se rechaza en la frontera.
+    .superRefine((data, ctx) => {
+      const tieneTender = data.tenderTypeId != null
+
+      if (tieneTender && data.method != null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'No envíes method junto con tenderTypeId: el tipo de pago del catálogo ya define el método.',
+          path: ['method'],
+        })
+      }
+
+      if (!tieneTender && data.method == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Método de pago inválido.',
+          path: ['method'],
+        })
+      }
+
+      // Una referencia a medias no es verificable: sin revisión el server no sabe
+      // QUÉ versión del tipo tenía el cajero enfrente al cobrar.
+      if (tieneTender && data.tenderRevision == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Falta la versión del tipo de pago (tenderRevision).',
+          path: ['tenderRevision'],
+        })
+      }
+
+      if (!tieneTender && data.tenderRevision != null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'tenderRevision sin tenderTypeId no identifica ningún tipo de pago.',
+          path: ['tenderTypeId'],
+        })
+      }
+    }),
 })
 
 // Payment routing schemas

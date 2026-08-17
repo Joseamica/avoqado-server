@@ -119,6 +119,7 @@ jest.mock('@/services/referrals/referralQualification.service', () => ({
   onOrderPaid: jest.fn().mockResolvedValue(undefined),
 }))
 
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
@@ -267,7 +268,10 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
 
     // No se mockea `order.findUnique` con una orden completa a propósito: el punto
     // de este test es sólo probar A QUIÉN se le pregunta.
-    await recordFastPayment('venue-1', { amount: 30, terminalPaymentRequestId: 'req-1' } as any, 'user-1').catch(() => {})
+    // `method` va explícito porque el schema exige method O tenderTypeId: un payload
+    // sin ninguno de los dos no existe en producción, y la ruta de orden lo rechaza
+    // de entrada (la terminal no cobra con tipos del catálogo).
+    await recordFastPayment('venue-1', { amount: 30, method: 'CASH', terminalPaymentRequestId: 'req-1' } as any, 'user-1').catch(() => {})
 
     expect(prismaMock.order.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ id: 'order-real', venueId: 'venue-1' }) }),
@@ -593,5 +597,217 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
       expect.stringContaining('🚨'),
       expect.objectContaining({ expectedVenueId: 'venue-1', rowVenueId: 'venue-2' }),
     )
+  })
+})
+
+/**
+ * 🔴 DINERO — venta rápida con un TIPO DE PAGO DEL CATÁLOGO ("Uber Eats").
+ *
+ * Bug REAL, encontrado cobrando en el D3 (2026-08-17): el POS mostraba los tipos del
+ * negocio, el cajero elegía "Uber Eats" y el server respondía **400 "Método de pago
+ * inválido"**. La referencia {tenderTypeId, tenderRevision} viaja SIN `method` a
+ * propósito —la semántica de dinero la resuelve el server desde la revisión congelada—
+ * pero la venta rápida nunca se conectó al catálogo: exigía `method` y no sabía
+ * resolver el tender. La feature era invisible en el único camino que el mostrador usa.
+ *
+ * Lo que estos tests fijan, y por qué cada uno importa:
+ *  - el método fiscal sale del CATÁLOGO, no del cliente;
+ *  - el cobro NO cuenta como efectivo del cajón (si lo contara, el arqueo exigiría al
+ *    cajero un dinero que Uber Eats nunca le dio);
+ *  - la comisión se congela como MONTO, no como porcentaje vivo.
+ */
+describe('recordFastPayment — venta rápida con un tipo de pago del catálogo', () => {
+  const REVISION_UBER = {
+    id: 'rev-uber-1',
+    tenderTypeId: 'tender-uber',
+    venueId: 'venue-1',
+    revision: 3,
+    name: 'Uber Eats',
+    countsAsPhysicalCash: false,
+    captureTip: false,
+    satFormaPago: '99',
+    commissionPercent: new Prisma.Decimal(30),
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    arbitrationRow = null
+    payments = []
+    installFakes()
+
+    // La venta rápida crea su propia orden sintética antes del Payment. Los tests de
+    // delegación de arriba nunca llegan aquí, así que el mock compartido no la trae.
+    prismaMock.order.create.mockResolvedValue({ id: 'fast-order-1', venueId: 'venue-1', total: 50, items: [] })
+
+    prismaMock.venueTenderType = prismaMock.venueTenderType ?? { findFirst: jest.fn() }
+    prismaMock.venueTenderTypeRevision = prismaMock.venueTenderTypeRevision ?? { findFirst: jest.fn() }
+    prismaMock.venueTenderType.findFirst.mockResolvedValue({
+      id: 'tender-uber',
+      baseMethod: 'OTHER',
+      active: true,
+      revision: 3,
+      name: 'Uber Eats',
+    })
+    prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue(REVISION_UBER)
+  })
+
+  const cobroUber = {
+    amount: 5000, // $50.00
+    tip: 0,
+    status: 'COMPLETED',
+    splitType: 'FULLPAYMENT',
+    staffId: 'staff-1',
+    tenderTypeId: 'tender-uber',
+    tenderRevision: 3,
+  }
+
+  it('registra el cobro con el método y los snapshots que dice el CATÁLOGO, no el cliente', async () => {
+    await recordFastPayment('venue-1', cobroUber as any, 'user-1')
+
+    expect(payments).toHaveLength(1)
+    const pago = payments[0]
+    // El método fiscal lo decide el catálogo (`baseMethod`), nunca el POS.
+    expect(pago.method).toBe('OTHER')
+    expect(pago.tenderTypeId).toBe('tender-uber')
+    expect(pago.tenderRevision).toBe(3)
+    expect(pago.tenderLabel).toBe('Uber Eats')
+  })
+
+  it('🔴 NO cuenta como efectivo del cajón — el arqueo no puede exigir un dinero que no entró', async () => {
+    await recordFastPayment('venue-1', cobroUber as any, 'user-1')
+
+    expect(payments[0].tenderCountsAsCash).toBe(false)
+    expect(payments[0].fundsFlow).toBe('EXTERNAL_RECORDED')
+  })
+
+  it('congela la comisión como MONTO ($50 × 30% = $15), no como porcentaje vivo', async () => {
+    await recordFastPayment('venue-1', cobroUber as any, 'user-1')
+
+    expect(Number(payments[0].tenderCommissionAmount)).toBe(15)
+    expect(Number(payments[0].tenderCommissionPercent)).toBe(30)
+  })
+
+  it('no ensucia externalSource: el nombre del tipo vive en tenderLabel (si no, el corte lo contaría dos veces)', async () => {
+    await recordFastPayment('venue-1', { ...cobroUber, externalSource: 'Uber Eats' } as any, 'user-1')
+
+    expect(payments[0].externalSource).toBeNull()
+    expect(payments[0].tenderLabel).toBe('Uber Eats')
+  })
+
+  it('rechaza propina en un tipo configurado sin propina (Uber ya la cobró en su app)', async () => {
+    await expect(recordFastPayment('venue-1', { ...cobroUber, tip: 1000 } as any, 'user-1')).rejects.toThrow(/no acepta propina/i)
+
+    expect(payments).toHaveLength(0)
+  })
+
+  // 🔴 El catálogo cambió DESPUÉS de que el cajero cobró. En vivo se rechaza (que
+  // refresque y reintente); desde la cola offline se HONRA la revisión que él vio —
+  // esa venta ya ocurrió y rechazarla la dejaría atorada para siempre.
+  describe('cuando el negocio cambió el tipo después del cobro', () => {
+    beforeEach(() => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({
+        id: 'tender-uber',
+        baseMethod: 'OTHER',
+        active: false, // apagado después
+        revision: 7, // y con comisión nueva
+        name: 'Uber Eats',
+      })
+    })
+
+    it('EN VIVO rechaza: nadie cobra con la comisión de ayer', async () => {
+      await expect(recordFastPayment('venue-1', cobroUber as any, 'user-1')).rejects.toThrow()
+      expect(payments).toHaveLength(0)
+    })
+
+    it('DESDE LA COLA la acepta con la revisión que el cajero tenía enfrente', async () => {
+      await recordFastPayment('venue-1', { ...cobroUber, isOfflineReplay: true } as any, 'user-1')
+
+      expect(payments).toHaveLength(1)
+      expect(payments[0].tenderRevision).toBe(3)
+      expect(Number(payments[0].tenderCommissionAmount)).toBe(15)
+    })
+  })
+
+  // REGRESIÓN: sin tender, el camino clásico queda byte por byte igual.
+  it('un cobro en efectivo normal sigue sin tocar ningún campo de tender', async () => {
+    await recordFastPayment('venue-1', { amount: 5000, tip: 0, method: 'CASH', staffId: 'staff-1' } as any, 'user-1')
+
+    expect(payments[0].method).toBe('CASH')
+    expect(payments[0].tenderTypeId).toBeUndefined()
+    expect(payments[0].fundsFlow).toBeUndefined()
+  })
+})
+
+/**
+ * 🔴 DINERO — `VenueTransaction.status` de una venta rápida.
+ *
+ * `PENDING` significa "Avoqado todavía le debe este dinero al negocio". Estaba FIJO en
+ * PENDING para TODA venta rápida, así que el efectivo del cajón —y un cobro de Uber
+ * Eats, que Avoqado jamás va a depositar— entraban a la cola de liquidación como saldo
+ * por depositar. El lado de lectura ya filtraba bien (el número del dueño era correcto),
+ * pero la FILA mentía: cualquier consumidor nuevo la leería mal.
+ */
+describe('recordFastPayment — qué queda "por depositar" en VenueTransaction', () => {
+  let transacciones: any[] = []
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    arbitrationRow = null
+    payments = []
+    transacciones = []
+    installFakes()
+    prismaMock.order.create.mockResolvedValue({ id: 'fast-order-1', venueId: 'venue-1', total: 50, items: [] })
+    prismaMock.venueTransaction.create.mockImplementation(async ({ data }: any) => {
+      transacciones.push(data)
+      return { id: `vt-${transacciones.length}`, ...data }
+    })
+
+    prismaMock.venueTenderType = prismaMock.venueTenderType ?? { findFirst: jest.fn() }
+    prismaMock.venueTenderTypeRevision = prismaMock.venueTenderTypeRevision ?? { findFirst: jest.fn() }
+    prismaMock.venueTenderType.findFirst.mockResolvedValue({
+      id: 'tender-uber',
+      baseMethod: 'OTHER',
+      active: true,
+      revision: 3,
+      name: 'Uber Eats',
+    })
+    prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue({
+      id: 'rev-uber-1',
+      tenderTypeId: 'tender-uber',
+      venueId: 'venue-1',
+      revision: 3,
+      name: 'Uber Eats',
+      countsAsPhysicalCash: false,
+      captureTip: false,
+      satFormaPago: '99',
+      commissionPercent: new Prisma.Decimal(30),
+    })
+  })
+
+  it('🔴 Uber Eats NO queda por depositar: Avoqado nunca va a mover ese dinero', async () => {
+    await recordFastPayment(
+      'venue-1',
+      { amount: 5000, tip: 0, staffId: 'staff-1', tenderTypeId: 'tender-uber', tenderRevision: 3 } as any,
+      'user-1',
+    )
+
+    expect(transacciones[0].status).toBe('SETTLED')
+  })
+
+  it('🔴 el efectivo tampoco: se queda en el cajón del negocio, no lo deposita Avoqado', async () => {
+    await recordFastPayment('venue-1', { amount: 5000, tip: 0, method: 'CASH', staffId: 'staff-1' } as any, 'user-1')
+
+    expect(transacciones[0].status).toBe('SETTLED')
+  })
+
+  // REGRESIÓN: la tarjeta SÍ la deposita Avoqado — su comportamiento histórico no cambia.
+  it('la tarjeta sigue quedando PENDING (eso sí lo deposita Avoqado)', async () => {
+    await recordFastPayment(
+      'venue-1',
+      { amount: 5000, tip: 0, method: 'CREDIT_CARD', staffId: 'staff-1', merchantAccountId: 'merch-1' } as any,
+      'user-1',
+    )
+
+    expect(transacciones[0].status).toBe('PENDING')
   })
 })

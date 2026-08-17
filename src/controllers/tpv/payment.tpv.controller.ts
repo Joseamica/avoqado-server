@@ -60,6 +60,14 @@ export async function recordPayment(req: Request, res: Response, next: NextFunct
     // Extract payment data from request body (already validated by schema)
     const paymentData = req.body
 
+    // 🔴 La TERMINAL es un aparato de tarjeta: sus medios son efectivo y tarjeta, no el
+    // catálogo de tipos propios del negocio ("Uber Eats", vales). Ese catálogo vive en
+    // el POS (`/mobile/...`). El servicio de cobro es compartido, así que el candado va
+    // en la frontera del namespace, que es donde se sabe quién está llamando.
+    if (paymentData.tenderTypeId != null) {
+      throw new BadRequestError('La terminal no maneja tipos de pago personalizados. Registra este cobro desde el punto de venta.')
+    }
+
     // Auto-inject deviceSerialNumber from JWT if not provided by client
     if (!paymentData.deviceSerialNumber && req.authContext?.terminalSerialNumber) {
       paymentData.deviceSerialNumber = req.authContext.terminalSerialNumber
@@ -128,6 +136,14 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
 
     // Extract payment data from request body (already validated by schema)
     const paymentData = req.body
+
+    // 🔴 La TERMINAL es un aparato de tarjeta: sus medios son efectivo y tarjeta, no el
+    // catálogo de tipos propios del negocio ("Uber Eats", vales). Ese catálogo vive en
+    // el POS (`/mobile/...`). El servicio de cobro es compartido, así que el candado va
+    // en la frontera del namespace, que es donde se sabe quién está llamando.
+    if (paymentData.tenderTypeId != null) {
+      throw new BadRequestError('La terminal no maneja tipos de pago personalizados. Registra este cobro desde el punto de venta.')
+    }
 
     // Auto-inject deviceSerialNumber from JWT if not provided by client
     if (!paymentData.deviceSerialNumber && req.authContext?.terminalSerialNumber) {
