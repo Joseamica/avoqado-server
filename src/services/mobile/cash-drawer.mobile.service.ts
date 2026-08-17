@@ -7,9 +7,47 @@
 
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { Decimal } from '@prisma/client/runtime/library'
+
+/**
+ * Largo máximo de la llave de idempotencia que un cliente puede mandar.
+ *
+ * 🔴 NO es un número al azar: es el techo de lo que la propia plataforma genera, con holgura.
+ * Las llaves reales de hoy son un UUID del POS (36) o una derivada del `paymentId`
+ * (`srv-cash-sale:` + cuid = 39, el más largo del repo — ver `shared/cashDrawerPosting.ts`).
+ * 64 deja sitio para un prefijo nuevo o un id más largo sin que ninguna llave legítima quepa
+ * justa, y a la vez impide que un cliente meta kilobytes en una columna INDEXADA: sin tope,
+ * una llave gigante o revienta el índice btree de Postgres con un error críptico (500 por lo
+ * que debería ser un 400) o infla el índice del que depende la protección contra el doble
+ * cobro. El límite se aplica en TODAS las puertas que aceptan la llave del cliente
+ * (`pay-in`, `pay-out`, `sync`), no sólo en las nuevas.
+ */
+const LOCAL_ID_MAX_LENGTH = 64
+
+/**
+ * Normaliza la llave que manda el cliente: ausente → `null` (app vieja, sigue igual);
+ * presente pero inservible → 400 explícito, nunca un 500 desde el índice.
+ *
+ * NO se recorta el valor: la llave la elige el cliente y tiene que poder reenviar EXACTAMENTE
+ * la misma cadena para que el dedupe empareje. Sólo se rechaza la que no sirve como llave.
+ */
+function normalizeLocalId(raw: unknown, campo = 'localId'): string | null {
+  if (raw === undefined || raw === null) return null
+
+  if (typeof raw !== 'string') {
+    throw new BadRequestError(`${campo} debe ser texto`)
+  }
+  if (raw.trim().length === 0) {
+    throw new BadRequestError(`${campo} no puede venir vacío`)
+  }
+  if (raw.length > LOCAL_ID_MAX_LENGTH) {
+    throw new BadRequestError(`${campo} no puede exceder ${LOCAL_ID_MAX_LENGTH} caracteres`)
+  }
+
+  return raw
+}
 
 // ============================================================================
 // GET CURRENT SESSION
@@ -116,43 +154,127 @@ interface PayInOutParams {
   staffName: string
   amount: number // dollars (e.g. 20.00 = $20.00)
   note?: string
+  /**
+   * 🔴 LLAVE DE IDEMPOTENCIA DEL POS. OPCIONAL y ADITIVA (contrato /mobile: una app ya
+   * distribuida que no la mande se comporta EXACTAMENTE como hoy).
+   *
+   * Es el id con el que la app guarda el movimiento en su base local — Android
+   * `CashDrawerEventEntity.id`, un UUID estable; iOS el suyo — la MISMA llave que ya viaja
+   * por `/cash-drawer/sync`. El push de un ingreso/retiro es fire-and-forget: si la respuesta
+   * se pierde, el POS reintenta el MISMO movimiento y sin llave el servidor crea una SEGUNDA
+   * fila que el arqueo da por buena (efectivo inventado, +$100 medido en Android).
+   */
+  localId?: string | null
 }
 
 /**
- * Add a pay-in event (cash added to drawer).
+ * Lo que devuelven `payIn` / `payOut`.
+ *
+ * `created` es la señal con la que el controlador elige el código HTTP: **201 cuando la fila
+ * se creó, 200 cuando la llave ya existía** y se devuelve la que ya estaba. El CUERPO es
+ * idéntico en los dos casos, así que un cliente que ignore el código sigue funcionando.
  */
-export async function payIn(params: PayInOutParams) {
+export interface DrawerEventResult {
+  event: ReturnType<typeof formatEvent>
+  /** `false` = reintento: no se creó nada, se devolvió el movimiento que ya existía. */
+  created: boolean
+}
+
+/**
+ * Registra un movimiento manual del cajero (ingreso o retiro), idempotente por `localId`.
+ *
+ * 🔴 EL PUNTO ENTERO ES EL REINTENTO. El caso real no es un cliente hostil: es la respuesta
+ * que se pierde (WiFi del local, 502 del proxy, la app que se reinicia a media petición) y el
+ * POS que reenvía el MISMO retiro. Sin llave eso era un SEGUNDO retiro; con ella el índice
+ * `@@unique([venueId, localId])` lo bloquea y se devuelve el movimiento original.
+ *
+ * `createMany` + `skipDuplicates` en vez de `create`: con `create`, el choque lanza P2002 y el
+ * cajero vería un error 500 por una operación que SÍ había funcionado — y volvería a teclearla.
+ * Es el mismo patrón que ya usa `services/shared/cashDrawerPosting.ts` para lo que escribe el
+ * servidor, para que haya UNA sola forma de escribir en esta tabla.
+ *
+ * GANA LA PRIMERA ESCRITURA: un reenvío con la misma llave y otro monto NO reescribe la fila.
+ * Si pudiera, la idempotencia se convertiría en una puerta para mover dinero sin dejar rastro.
+ */
+async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayInOutParams): Promise<DrawerEventResult> {
   const { venueId, staffId, staffName, amount, note } = params
 
   if (amount <= 0) {
     throw new BadRequestError('El monto debe ser mayor a 0')
   }
 
+  // Se valida ANTES de tocar la base: una llave basura no puede llegar al índice único.
+  const localId = normalizeLocalId(params.localId)
+
   const session = await getOpenSession(venueId)
   const amountDecimal = dollarsToDecimal(amount)
 
-  const event = await prisma.cashDrawerEvent.create({
-    data: {
-      sessionId: session.id,
-      venueId,
-      type: 'PAY_IN',
-      amount: amountDecimal,
-      staffId,
-      staffName,
-      note: note || null,
-    },
-  })
-
-  logAction({
-    staffId,
+  const row = {
+    sessionId: session.id,
     venueId,
-    action: 'CASH_DRAWER_PAY_IN',
-    entity: 'CashDrawerEvent',
-    entityId: event.id,
-    data: { sessionId: session.id, amount: Number(amountDecimal), note, source: 'MOBILE' },
-  })
+    type,
+    amount: amountDecimal,
+    staffId,
+    staffName,
+    note: note || null,
+    localId,
+  }
 
-  return formatEvent(event)
+  const action = type === 'PAY_IN' ? 'CASH_DRAWER_PAY_IN' : 'CASH_DRAWER_PAY_OUT'
+  const auditar = (entityId: string) =>
+    logAction({
+      staffId,
+      venueId,
+      action,
+      entity: 'CashDrawerEvent',
+      entityId,
+      data: { sessionId: session.id, amount: Number(amountDecimal), note, source: 'MOBILE' },
+    })
+
+  // Sin llave: EXACTAMENTE el `create` de siempre. Las apps ya distribuidas no cambian de
+  // camino ni de comportamiento — simplemente no ganan la protección (Postgres permite
+  // varios NULL en un índice único, así que aquí no hay nada que deduplicar).
+  if (!localId) {
+    const event = await prisma.cashDrawerEvent.create({ data: row })
+    auditar(event.id)
+    return { event: formatEvent(event), created: true }
+  }
+
+  const result = await prisma.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+  const stored = await prisma.cashDrawerEvent.findFirst({ where: { venueId, localId } })
+
+  if (!stored) {
+    // No debería ocurrir: o lo acabamos de insertar, o ya estaba. Si la relectura falla no
+    // podemos devolverle al POS la fila que tiene que adoptar, y mentir con una fila
+    // inventada sería peor: se responde error y el reintento vuelve a deduplicar.
+    logger.error('❌ [CASH-DRAWER] Movimiento guardado pero imposible de releer por su llave', { venueId, localId, type })
+    throw new InternalServerError('No se pudo confirmar el movimiento de caja')
+  }
+
+  const created = result.count > 0
+
+  if (created) {
+    auditar(stored.id)
+  } else {
+    // Ni auditoría nueva ni fila nueva: el movimiento es el mismo de antes.
+    logger.info('💵 [CASH-DRAWER] Movimiento manual ya registrado (reintento) — se devuelve el original, no se duplica', {
+      venueId,
+      sessionId: session.id,
+      type,
+      localId,
+      eventId: stored.id,
+    })
+  }
+
+  return { event: formatEvent(stored), created }
+}
+
+/**
+ * Add a pay-in event (cash added to drawer). Idempotente por `localId` — ver
+ * `recordManualDrawerEvent`.
+ */
+export async function payIn(params: PayInOutParams): Promise<DrawerEventResult> {
+  return recordManualDrawerEvent('PAY_IN', params)
 }
 
 // ============================================================================
@@ -160,40 +282,11 @@ export async function payIn(params: PayInOutParams) {
 // ============================================================================
 
 /**
- * Add a pay-out event (cash removed from drawer).
+ * Add a pay-out event (cash removed from drawer). Idempotente por `localId` — ver
+ * `recordManualDrawerEvent`.
  */
-export async function payOut(params: PayInOutParams) {
-  const { venueId, staffId, staffName, amount, note } = params
-
-  if (amount <= 0) {
-    throw new BadRequestError('El monto debe ser mayor a 0')
-  }
-
-  const session = await getOpenSession(venueId)
-  const amountDecimal = dollarsToDecimal(amount)
-
-  const event = await prisma.cashDrawerEvent.create({
-    data: {
-      sessionId: session.id,
-      venueId,
-      type: 'PAY_OUT',
-      amount: amountDecimal,
-      staffId,
-      staffName,
-      note: note || null,
-    },
-  })
-
-  logAction({
-    staffId,
-    venueId,
-    action: 'CASH_DRAWER_PAY_OUT',
-    entity: 'CashDrawerEvent',
-    entityId: event.id,
-    data: { sessionId: session.id, amount: Number(amountDecimal), note, source: 'MOBILE' },
-  })
-
-  return formatEvent(event)
+export async function payOut(params: PayInOutParams): Promise<DrawerEventResult> {
+  return recordManualDrawerEvent('PAY_OUT', params)
 }
 
 // ============================================================================
@@ -391,9 +484,10 @@ interface SyncEvent {
   /**
    * Llave de idempotencia del POS: el id con el que la app guarda el evento en su base
    * local (Android `CashDrawerEventEntity.id`, un UUID estable). Opcional para no romper
-   * apps viejas — sin ella el reintento no se puede deduplicar.
+   * apps viejas — sin ella el reintento no se puede deduplicar. Misma llave y mismas
+   * reglas de validación que en `pay-in` / `pay-out` (ver `normalizeLocalId`).
    */
-  localId?: string
+  localId?: string | null
 }
 
 /**
@@ -427,7 +521,13 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
   //
   // PAY_IN y PAY_OUT siguen siendo del cliente: no nacen de un cobro.
   const droppedCashSales = events.filter(event => event.type === 'CASH_SALE').length
-  const acceptedEvents = events.filter(event => event.type !== 'CASH_SALE')
+  // 🔴 La llave se valida aquí también: `/sync` es la OTRA puerta por la que un cliente
+  // escribe en la columna indexada. Validar sólo `pay-in`/`pay-out` dejaría el hueco
+  // abierto por donde entra el lote. Se valida lo que de verdad vamos a insertar (los
+  // `CASH_SALE` se descartan más abajo, así que su llave nunca toca el índice).
+  const acceptedEvents = events
+    .filter(event => event.type !== 'CASH_SALE')
+    .map(event => ({ ...event, localId: normalizeLocalId(event.localId, 'events[].localId') }))
 
   if (droppedCashSales > 0) {
     logger.info('💵 [CASH-DRAWER] CASH_SALE del cliente ignorado — el servidor ya lo registra al cobrar', {

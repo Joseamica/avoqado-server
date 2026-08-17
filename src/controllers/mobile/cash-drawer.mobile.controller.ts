@@ -54,6 +54,29 @@ export const openSession = async (req: Request, res: Response, next: NextFunctio
 }
 
 /**
+ * 🔴 EL CÓDIGO DE UN MOVIMIENTO IDEMPOTENTE: 201 si se creó, 200 si YA ESTABA.
+ *
+ * Cuando el POS manda `localId` y la respuesta anterior se perdió, el reintento no crea
+ * nada: se le devuelve el movimiento original. Decir 201 ("Created") ahí sería mentir sobre
+ * lo único que el cajero necesita saber —si su retiro se registró una vez o dos—, y es la
+ * señal que un operador ve en el log cuando investiga un descuadre.
+ *
+ * Por qué es SEGURO y no rompe a nadie:
+ *   · Una app ya distribuida NO manda `localId`, así que jamás toma la rama del reintento:
+ *     sigue recibiendo el mismo 201 de siempre, bit por bit.
+ *   · Los dos clientes tratan cualquier 2xx como éxito (Android `code in 200..299`; iOS su
+ *     `APIClient` genérico), así que una app nueva con llave tampoco se rompe.
+ *   · El CUERPO es idéntico en los dos casos (el evento, con su `localId`), así que un
+ *     cliente que ignore el código se comporta correctamente igual.
+ *
+ * Referencia: Stripe reproduce el código original de una petición idempotente porque
+ * almacena la respuesta entera; nosotros no guardamos respuestas, así que el estado es la
+ * forma barata y honesta de distinguir "lo creé" de "ya estaba". Square responde 200 a todo.
+ * La regla es la MISMA en `pay-in` y `pay-out`.
+ */
+const idempotentStatus = (created: boolean) => (created ? 201 : 200)
+
+/**
  * Add pay-in event
  * @route POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-in
  */
@@ -61,21 +84,22 @@ export const payIn = async (req: Request, res: Response, next: NextFunction) => 
   try {
     const { venueId } = req.params
     const staffId = req.authContext?.userId || ''
-    const { amount, note, staffName } = req.body
+    const { amount, note, staffName, localId } = req.body
 
     if (!amount || amount <= 0) {
       return res.status(400).json({ success: false, message: 'amount es requerido y debe ser mayor a 0' })
     }
 
-    const event = await cashDrawerService.payIn({
+    const { event, created } = await cashDrawerService.payIn({
       venueId,
       staffId,
       staffName: staffName || 'Staff',
       amount: Number(amount),
       note,
+      localId,
     })
 
-    return res.status(201).json({ success: true, data: event })
+    return res.status(idempotentStatus(created)).json({ success: true, data: event })
   } catch (error) {
     next(error)
   }
@@ -89,21 +113,22 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { venueId } = req.params
     const staffId = req.authContext?.userId || ''
-    const { amount, note, staffName } = req.body
+    const { amount, note, staffName, localId } = req.body
 
     if (!amount || amount <= 0) {
       return res.status(400).json({ success: false, message: 'amount es requerido y debe ser mayor a 0' })
     }
 
-    const event = await cashDrawerService.payOut({
+    const { event, created } = await cashDrawerService.payOut({
       venueId,
       staffId,
       staffName: staffName || 'Staff',
       amount: Number(amount),
       note,
+      localId,
     })
 
-    return res.status(201).json({ success: true, data: event })
+    return res.status(idempotentStatus(created)).json({ success: true, data: event })
   } catch (error) {
     next(error)
   }

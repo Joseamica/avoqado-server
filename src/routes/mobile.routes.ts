@@ -2028,7 +2028,12 @@ router.post(
 /**
  * POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-in
  * Add pay-in event to open session.
- * Body: { amount: number (cents), note?: string, staffName: string }
+ * Body: { amount: number (cents), note?: string, staffName: string, localId?: string }
+ *
+ * `localId` (opcional, ≤64 chars, no vacío) = el id local del POS. Es la llave de
+ * idempotencia: reenviar el MISMO `localId` devuelve el movimiento original con **200**
+ * en vez de crear otro (**201** sólo cuando de verdad se creó). Sin él, un reintento tras
+ * una respuesta perdida duplica el ingreso y el arqueo inventa efectivo.
  */
 router.post(
   '/venues/:venueId/cash-drawer/pay-in',
@@ -2040,7 +2045,10 @@ router.post(
 /**
  * POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-out
  * Add pay-out event to open session.
- * Body: { amount: number (cents), note?: string, staffName: string }
+ * Body: { amount: number (cents), note?: string, staffName: string, localId?: string }
+ *
+ * `localId` igual que en pay-in: MISMA llave → **200** con el retiro original, sin restar
+ * el dinero dos veces. Aquí el defecto va al otro lado (faltante inventado).
  */
 router.post(
   '/venues/:venueId/cash-drawer/pay-out',
