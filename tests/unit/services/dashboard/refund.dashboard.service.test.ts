@@ -389,4 +389,128 @@ describe('refund.dashboard.service', () => {
       expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
     })
   })
+
+  /**
+   * 🔴 DINERO — el reembolso HEREDA la identidad del tipo de pago original.
+   *
+   * El reembolso ya heredaba `method`, pero NADA de la semántica del tipo del catálogo.
+   * Dos consecuencias medibles:
+   *
+   *  1. **Un vale que SÍ entra al cajón** (`countsAsPhysicalCash: true`, method OTHER):
+   *     el cobro sumaba efectivo al cajón, y su reembolso —sin el snapshot— caía al
+   *     fallback legacy `method === 'CASH'` = false. El arqueo seguiría exigiendo un
+   *     efectivo que YA salió: un faltante inventado, en la dirección que acusa al cajero.
+   *  2. El desglose del corte agrupa por `tenderLabel`: la venta aparecía bajo "Uber Eats"
+   *     y su devolución en el genérico, así que el neto POR TIPO mentía.
+   */
+  describe('reembolso de un cobro con tipo de pago del catálogo', () => {
+    const pagoUber = (over: Record<string, unknown> = {}) => ({
+      id: 'payment-original',
+      venueId: 'venue-1',
+      status: TransactionStatus.COMPLETED,
+      type: PaymentType.REGULAR,
+      method: 'OTHER',
+      source: 'APP',
+      amount: 100,
+      tipAmount: 0,
+      orderId: 'order-1',
+      shiftId: null,
+      merchantAccountId: null,
+      processorData: {},
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderTypeId: 'tender-uber',
+      tenderRevision: 3,
+      tenderLabel: 'Uber Eats',
+      tenderCountsAsCash: false,
+      tenderCaptureTip: false,
+      tenderSatFormaPago: '99',
+      ...over,
+    })
+
+    const reembolsar = (over: Record<string, unknown> = {}) =>
+      issueRefund({
+        venueId: 'venue-1',
+        paymentId: 'payment-original',
+        amount: 5000, // $50.00
+        reason: 'RETURNED_GOODS',
+        staffId: 'staff-9',
+        ...over,
+      })
+
+    beforeEach(() => {
+      // 🔴 `jest.clearAllMocks()` NO vacía la cola de `mockResolvedValueOnce`: un test
+      // anterior que lanza antes de consumir su segundo Once se lo hereda al siguiente,
+      // que entonces recibe `[]` y falla con "Payment not found" sin culpa propia.
+      prismaMock.$queryRaw.mockReset()
+      prismaMock.payment.create.mockResolvedValue({ id: 'refund-tender-1' })
+    })
+
+    it('estampa el tipo original en el reembolso (si no, el desglose del corte miente)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoUber()]).mockResolvedValueOnce([])
+
+      await reembolsar()
+
+      expect(prismaMock.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            tenderTypeId: 'tender-uber',
+            tenderRevision: 3,
+            tenderLabel: 'Uber Eats',
+            fundsFlow: 'EXTERNAL_RECORDED',
+          }),
+        }),
+      )
+    })
+
+    it('🔴 un vale que SÍ entraba al cajón devuelve como efectivo del cajón', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([
+          pagoUber({
+            tenderTypeId: 'tender-vale',
+            tenderLabel: 'Vale de despensa',
+            tenderCountsAsCash: true,
+            fundsFlow: 'CASH_DRAWER',
+          }),
+        ])
+        .mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await reembolsar()
+
+      expect(prismaMock.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ tenderCountsAsCash: true, fundsFlow: 'CASH_DRAWER' }),
+        }),
+      )
+      // Y el cajón SÍ se mueve: ese dinero estaba físicamente adentro.
+      expect((prismaMock as any).cashDrawerEvent.createMany).toHaveBeenCalled()
+    })
+
+    // La comisión NO se hereda a propósito: que Uber devuelva su 30% cuando el cliente
+    // cancela es un acuerdo comercial que no conocemos. Inventarlo daría un ingreso o un
+    // costo falso. Se deja vacío hasta que el founder lo decida.
+    it('NO inventa una comisión negativa en el reembolso', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoUber()]).mockResolvedValueOnce([])
+
+      await reembolsar()
+
+      const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(data.tenderCommissionAmount).toBeUndefined()
+      expect(data.tenderCommissionPercent).toBeUndefined()
+    })
+
+    // REGRESIÓN: un cobro clásico (sin tipo del catálogo) no gana campos de tender.
+    it('un reembolso de efectivo normal sigue sin campos de tender', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([pagoUber({ method: 'CASH', fundsFlow: null, tenderTypeId: null, tenderLabel: null, tenderRevision: null })])
+        .mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await reembolsar()
+
+      const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(data.tenderTypeId).toBeUndefined()
+      expect(data.tenderLabel).toBeUndefined()
+    })
+  })
 })

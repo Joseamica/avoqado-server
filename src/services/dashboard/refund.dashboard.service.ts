@@ -9,7 +9,7 @@
  * and "manual" refunds entered by staff from the web dashboard.
  */
 
-import { PaymentMethod, PaymentSource, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
+import { PaymentFundsFlow, PaymentMethod, PaymentSource, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -94,6 +94,13 @@ interface LockedPaymentRow {
   fundsFlow: string | null
   tenderTypeId: string | null
   tenderCountsAsCash: boolean | null
+  // Identidad del tipo del catálogo. El reembolso la HEREDA: el desglose del corte
+  // agrupa por `tenderLabel`, así que sin esto la venta salía bajo "Uber Eats" y su
+  // devolución en el genérico — el neto POR TIPO mentía.
+  tenderRevision: number | null
+  tenderLabel: string | null
+  tenderCaptureTip: boolean | null
+  tenderSatFormaPago: string | null
 }
 
 interface RefundPaymentRow {
@@ -265,7 +272,11 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         "processorData",
         "fundsFlow",
         "tenderTypeId",
-        "tenderCountsAsCash"
+        "tenderCountsAsCash",
+        "tenderRevision",
+        "tenderLabel",
+        "tenderCaptureTip",
+        "tenderSatFormaPago"
       FROM "Payment"
       WHERE id = ${input.paymentId}
       FOR UPDATE
@@ -431,6 +442,27 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         feePercentage: 0,
 
         method: original.method as PaymentMethod,
+        // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
+        // `method`. Sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
+        // legacy (`method === 'CASH'` = false) y el arqueo seguía exigiendo un efectivo que
+        // YA salió — un faltante inventado, en la dirección que acusa al cajero.
+        //
+        // La COMISIÓN no se hereda a propósito: que Uber devuelva su 30% cuando el cliente
+        // cancela es un acuerdo comercial que no conocemos, e inventarlo daría un costo o un
+        // ingreso falso. Queda vacía hasta que haya una decisión.
+        ...(original.tenderTypeId
+          ? {
+              tenderTypeId: original.tenderTypeId,
+              ...(original.tenderRevision != null ? { tenderRevision: original.tenderRevision } : {}),
+              ...(original.tenderLabel != null ? { tenderLabel: original.tenderLabel } : {}),
+              ...(original.tenderCountsAsCash != null ? { tenderCountsAsCash: original.tenderCountsAsCash } : {}),
+              ...(original.tenderCaptureTip != null ? { tenderCaptureTip: original.tenderCaptureTip } : {}),
+              ...(original.tenderSatFormaPago != null ? { tenderSatFormaPago: original.tenderSatFormaPago } : {}),
+            }
+          : {}),
+        // `fundsFlow` va aparte del bloque de arriba: un pago SIN tender también lo tiene
+        // (lo estampa su punto de entrada), y es la autoridad de "¿esto estaba en el cajón?".
+        ...(original.fundsFlow ? { fundsFlow: original.fundsFlow as PaymentFundsFlow } : {}),
         ...(original.source || undefined ? { source: original.source as PaymentSource } : {}),
         status: TransactionStatus.COMPLETED,
         type: PaymentType.REFUND,

@@ -272,6 +272,25 @@ export async function recordRefund(
 
         // Payment info
         method: originalPayment.method,
+        // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
+        // `method`. Un cobro del POS con un tipo del catálogo se puede devolver desde la
+        // terminal: sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
+        // legacy (`method === 'CASH'` = false) y el arqueo seguiría exigiendo un efectivo
+        // que YA salió. Espejo exacto de `refund.dashboard.service.ts`.
+        //
+        // La COMISIÓN no se hereda a propósito: que la plataforma devuelva su porcentaje
+        // cuando el cliente cancela es un acuerdo comercial que no conocemos.
+        ...(originalPayment.tenderTypeId
+          ? {
+              tenderTypeId: originalPayment.tenderTypeId,
+              ...(originalPayment.tenderRevision != null ? { tenderRevision: originalPayment.tenderRevision } : {}),
+              ...(originalPayment.tenderLabel != null ? { tenderLabel: originalPayment.tenderLabel } : {}),
+              ...(originalPayment.tenderCountsAsCash != null ? { tenderCountsAsCash: originalPayment.tenderCountsAsCash } : {}),
+              ...(originalPayment.tenderCaptureTip != null ? { tenderCaptureTip: originalPayment.tenderCaptureTip } : {}),
+              ...(originalPayment.tenderSatFormaPago != null ? { tenderSatFormaPago: originalPayment.tenderSatFormaPago } : {}),
+            }
+          : {}),
+        ...(originalPayment.fundsFlow ? { fundsFlow: originalPayment.fundsFlow } : {}),
         source: originalPayment.source,
         status: TransactionStatus.COMPLETED,
         type: PaymentType.REFUND,
