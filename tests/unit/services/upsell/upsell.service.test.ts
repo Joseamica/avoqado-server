@@ -601,6 +601,189 @@ describe('listActiveRulesForPos — el POS recibe la selección RESUELTA', () =>
 // las otras 4 razones (desactivado, sin existencias, por peso, pide opciones).
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 🔴 EL descuento ligado. El defecto que estos tests impiden (medido 2026-08-17):
+// este `select` NO traía `linkedDiscount`, así que el descuento que el job
+// nocturno le ata a la regla —nacido de una promoción REAL del local— nunca
+// llegaba al POS. La tarjeta pintaba precio de lista y la promoción del negocio
+// no se aplicaba jamás por la vía del upsell.
+//
+// Y el filtro de abajo importa igual de fuerte por la razón contraria: mandar un
+// descuento que el endpoint de órdenes va a rechazar tumba la VENTA ENTERA con
+// 400. Lo que no se puede aplicar sin riesgo se sirve como null, y la tarjeta
+// queda a precio de lista — que es lo de hoy y no rompe nada.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('listActiveRulesForPos — el descuento ligado', () => {
+  function reglaCon(linkedDiscount: any, suggestedProductId = 'prod_agua') {
+    ;(prisma.upsellRule.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'r1',
+        triggerType: 'ALWAYS',
+        triggerProductIds: [],
+        triggerCategoryIds: [],
+        suggestedProductId,
+        suggestedModifiers: null,
+        headline: null,
+        priority: 0,
+        lift: null,
+        daysOfWeek: [],
+        timeFrom: null,
+        timeUntil: null,
+        linkedDiscount,
+      },
+    ])
+    ;(prisma.product.findMany as jest.Mock).mockResolvedValue([
+      { id: suggestedProductId, soldByWeight: false, upsellEnabled: true, modifierGroups: [] },
+    ])
+  }
+
+  const descuentoSano = {
+    id: 'd1',
+    type: 'PERCENTAGE',
+    value: 20,
+    active: true,
+    scope: 'ITEM',
+    targetItemIds: ['prod_agua'],
+    minPurchaseAmount: null,
+    maxDiscountAmount: null,
+    buyQuantity: null,
+    validFrom: null,
+    validUntil: null,
+  }
+
+  it('🔴 un descuento vigente SÍ llega al POS, con su badge ya formateado', async () => {
+    reglaCon(descuentoSano)
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toEqual({ id: 'd1', type: 'PERCENTAGE', value: 20, badge: '-20%' })
+  })
+
+  it('un monto fijo trae el badge en pesos', async () => {
+    reglaCon({ ...descuentoSano, type: 'FIXED_AMOUNT', value: 15 })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toMatchObject({ type: 'FIXED_AMOUNT', value: 15, badge: '-$15' })
+  })
+
+  it('una regla sin descuento devuelve null, no undefined', async () => {
+    reglaCon(null)
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  // ── Lo que NO se sirve, y por qué ────────────────────────────────────────
+
+  it('🔴 un descuento de alcance ORDER no se sirve: tumbaría la venta con 400', async () => {
+    // `validateDiscountScopeForItem` revienta con alcance de orden aplicado a un
+    // artículo. Servirlo convertiría cada venta con esa tarjeta en un error.
+    reglaCon({ ...descuentoSano, scope: 'ORDER', targetItemIds: [] })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('🔴 un descuento que no cubre al producto sugerido no se sirve', async () => {
+    reglaCon({ ...descuentoSano, targetItemIds: ['otro_producto'] })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('targetItemIds vacío es comodín y SÍ se sirve', async () => {
+    reglaCon({ ...descuentoSano, targetItemIds: [] })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toMatchObject({ id: 'd1' })
+  })
+
+  it('🔴 un descuento con compra mínima no se sirve: reventaría al cobrar la línea', async () => {
+    // `calculateDiscountPesos` lanza si la línea no llega al mínimo — y una
+    // sugerencia suelta casi nunca llega.
+    reglaCon({ ...descuentoSano, minPurchaseAmount: 200 })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('🔴 un descuento con tope no se sirve: el POS no puede reproducir el tope', async () => {
+    // La tarjeta prometería más descuento del que el server va a aplicar.
+    reglaCon({ ...descuentoSano, maxDiscountAmount: 50 })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('un descuento desactivado no se sirve', async () => {
+    reglaCon({ ...descuentoSano, active: false })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('un 2x1 no se sirve (el POS no lo sabe pintar ni cobrar)', async () => {
+    reglaCon({ ...descuentoSano, buyQuantity: 2 })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('un COMP no se sirve', async () => {
+    reglaCon({ ...descuentoSano, type: 'COMP', value: 100 })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('🔴 un descuento vencido no se sirve aunque la regla siga ACTIVE', async () => {
+    // El job nocturno retira la regla, pero puede pasar hasta un día entre que
+    // el descuento vence y el job corre.
+    reglaCon({ ...descuentoSano, validUntil: new Date('2020-01-01T00:00:00Z') })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('un descuento que todavía no empieza no se sirve', async () => {
+    reglaCon({ ...descuentoSano, validFrom: new Date('2999-01-01T00:00:00Z') })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  // ── Regresión: lo que ya funcionaba sigue igual ──────────────────────────
+
+  it('el resto del DTO no cambia por traer el descuento', async () => {
+    reglaCon(descuentoSano)
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0]).toMatchObject({
+      id: 'r1',
+      suggestedProductId: 'prod_agua',
+      suggestedModifiers: [],
+      priority: 0,
+      lift: null,
+    })
+    // El objeto de Prisma no se filtra crudo al POS: sólo el DTO formateado.
+    expect((dtos[0] as any).linkedDiscount).not.toHaveProperty('targetItemIds')
+  })
+})
+
 describe('listRules — el select de `suggestedProduct` trae lo que necesita el badge del dashboard', () => {
   it('🟠 incluye active, soldByWeight y modifierGroups — no sólo upsellEnabled', async () => {
     ;(prisma.upsellRule.findMany as jest.Mock).mockResolvedValue([])

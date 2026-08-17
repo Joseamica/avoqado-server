@@ -95,15 +95,35 @@ export interface PosUpsellRuleDTO {
   /** "HH:mm" hora LOCAL del venue. Si timeUntil < timeFrom, la ventana cruza medianoche. */
   timeFrom: string | null
   timeUntil: string | null
+  /**
+   * Descuento ligado a la regla, YA formateado. Null cuando no hay, o cuando el
+   * descuento no es seguro de aplicar en el POS (ver `linkedDiscountParaPos`).
+   *
+   * 🔴 El `badge` viaja formateado DESDE AQUÍ a propósito: dos apps formateando
+   * el mismo descuento es la vía rápida a que Android diga "-20%" y iOS "20% off".
+   */
+  linkedDiscount: PosLinkedDiscountDTO | null
+}
+
+export interface PosLinkedDiscountDTO {
+  id: string
+  /** PERCENTAGE | FIXED_AMOUNT. COMP y 2x1 nunca salen de aquí. */
+  type: 'PERCENTAGE' | 'FIXED_AMOUNT'
+  /** Porcentaje (0-100) o monto en PESOS. */
+  value: number
+  /** "-20%" · "-$15". */
+  badge: string
 }
 
 /**
  * Select compartido para validar/resolver las opciones obligatorias de un
- * producto sugerido. Un solo `select` para los tres call sites que lo
- * necesitan: `assertSameVenue` (createRule), `loadProductForValidation`
- * (updateRule) y `listActiveRulesForPos`.
+ * producto sugerido. Un solo `select` para los call sites que lo necesitan:
+ * `assertSameVenue` (createRule), `loadProductForValidation` (updateRule),
+ * `listActiveRulesForPos` y `listRules`. El tool `upsell_status` del MCP
+ * (`src/mcp/tools/upsell.ts`) lo reusa también, para reflejar el mismo
+ * `suggestedModifiers` resuelto que ve el POS.
  */
-const PRODUCT_VALIDATION_SELECT = {
+export const PRODUCT_VALIDATION_SELECT = {
   id: true,
   upsellEnabled: true,
   soldByWeight: true,
@@ -130,8 +150,17 @@ const PRODUCT_VALIDATION_SELECT = {
  * 🟡 El fail-open queda — pero degradar en TOTAL silencio es indebuggeable en un
  * local: sin esta línea, "la tarjeta del agua dejó de aparecer" no tiene rastro
  * en ningún lado.
+ *
+ * Exportada porque el MCP (`upsell_status`) la reusa para mostrar el mismo
+ * `suggestedModifiers` resuelto que recibe el POS, en vez de reimplementar la
+ * misma degradación fail-open dos veces.
  */
-function resolveForDto(product: ProductForValidation | undefined, selection: unknown, ruleId: string, venueId: string): ResolvedModifier[] {
+export function resolveForDto(
+  product: ProductForValidation | undefined,
+  selection: unknown,
+  ruleId: string,
+  venueId: string,
+): ResolvedModifier[] {
   if (!product) return []
   try {
     return validateAndResolveModifiers(product, selection as SuggestedModifierSelection[] | null)
@@ -174,6 +203,25 @@ export async function listActiveRulesForPos(venueId: string): Promise<PosUpsellR
       daysOfWeek: true,
       timeFrom: true,
       timeUntil: true,
+      // 🔴 Sin esto el descuento ligado NUNCA llegaba al POS: el job nocturno
+      // creaba la regla a partir de una promoción del local, y este `select` la
+      // tiraba. La tarjeta pintaba precio de lista y la promoción del venue no
+      // se aplicaba jamás por la vía del upsell (medido 2026-08-17).
+      linkedDiscount: {
+        select: {
+          id: true,
+          type: true,
+          value: true,
+          active: true,
+          scope: true,
+          targetItemIds: true,
+          minPurchaseAmount: true,
+          maxDiscountAmount: true,
+          buyQuantity: true,
+          validFrom: true,
+          validUntil: true,
+        },
+      },
     },
   })
 
@@ -185,12 +233,77 @@ export async function listActiveRulesForPos(venueId: string): Promise<PosUpsellR
   })
   const porId = new Map(productos.map(p => [p.id, p as ProductForValidation]))
 
-  return rules.map(rule => ({
+  const ahora = new Date()
+  return rules.map(({ linkedDiscount, ...rule }) => ({
     ...rule,
     // Decimal → number. Es un ratio de ordenamiento, no dinero.
     lift: rule.lift === null ? null : Number(rule.lift),
     suggestedModifiers: resolveForDto(porId.get(rule.suggestedProductId), rule.suggestedModifiers, rule.id, venueId),
+    linkedDiscount: linkedDiscountParaPos(linkedDiscount, rule.suggestedProductId, ahora),
   }))
+}
+
+/**
+ * El descuento ligado, SÓLO si el POS lo puede aplicar sin riesgo. Null si no.
+ *
+ * 🔴 Aquí conviene pasarse de conservador, porque las dos formas de equivocarse
+ * cuestan dinero y una además tumba la venta:
+ *
+ *  - **Si mandamos un descuento que el endpoint de órdenes va a rechazar, la
+ *    VENTA ENTERA falla con 400.** `validateDiscountScopeForItem` revienta con
+ *    alcance ORDER o cuando el producto no está en `targetItemIds`, y
+ *    `calculateDiscountPesos` revienta si la línea no llega a
+ *    `minPurchaseAmount`. En un mostrador con fila, eso es peor que no ofrecer
+ *    la promoción.
+ *  - **Si mandamos uno cuya aritmética el POS no puede reproducir EXACTO, la
+ *    tarjeta promete un precio y la orden registra otro.** Por eso quedan fuera
+ *    `maxDiscountAmount` (un tope que el cliente no replica) y COMP/2x1.
+ *
+ * Lo que no pasa el filtro simplemente no lleva descuento: la tarjeta muestra
+ * precio de lista, que es exactamente el comportamiento de hoy y no rompe nada.
+ */
+function linkedDiscountParaPos(
+  discount: {
+    id: string
+    type: string
+    value: Prisma.Decimal
+    active: boolean
+    scope: string
+    targetItemIds: string[]
+    minPurchaseAmount: Prisma.Decimal | null
+    maxDiscountAmount: Prisma.Decimal | null
+    buyQuantity: number | null
+    validFrom: Date | null
+    validUntil: Date | null
+  } | null,
+  suggestedProductId: string,
+  ahora: Date,
+): PosLinkedDiscountDTO | null {
+  if (!discount) return null
+  if (!discount.active) return null
+  if (discount.type !== 'PERCENTAGE' && discount.type !== 'FIXED_AMOUNT') return null
+  if (discount.buyQuantity !== null) return null
+  if (discount.minPurchaseAmount !== null) return null
+  if (discount.maxDiscountAmount !== null) return null
+  if (discount.scope !== 'ITEM') return null
+  // `targetItemIds` vacío es comodín (aplica a todo), igual que lo lee
+  // `validateDiscountScopeForItem`.
+  if (discount.targetItemIds.length > 0 && !discount.targetItemIds.includes(suggestedProductId)) return null
+  if (discount.validFrom && discount.validFrom > ahora) return null
+  if (discount.validUntil && discount.validUntil < ahora) return null
+
+  const value = Number(discount.value)
+  return {
+    id: discount.id,
+    type: discount.type,
+    value,
+    badge: discount.type === 'PERCENTAGE' ? `-${formatearValor(value)}%` : `-$${formatearValor(value)}`,
+  }
+}
+
+/** 20 → "20", 12.5 → "12.5". Sin decimales de adorno en el badge. */
+function formatearValor(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

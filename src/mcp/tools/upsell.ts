@@ -6,9 +6,9 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
 import { getPerformance } from '@/services/upsell/upsellImpression.service'
-import { getUpsellSurfaces } from '@/services/upsell/upsell.service'
+import { getUpsellSurfaces, resolveForDto, PRODUCT_VALIDATION_SELECT } from '@/services/upsell/upsell.service'
 import { parseDbDateRange } from '@/utils/datetime'
-import { UpsellRuleStatus } from '@prisma/client'
+import { Prisma, UpsellRuleStatus } from '@prisma/client'
 
 /**
  * Upsell "¿Algo más?" — lectura desde el MCP.
@@ -25,7 +25,7 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'upsell_status',
-    'Sugerencias al cobrar ("¿algo más?") de un venue: cuánto dinero atribuido generaron, el aumento real de ticket medido contra el grupo de control, dónde están prendidas (mostrador / mesa ordenando / mesa cobrando), las reglas activas y las propuestas que esperan decisión del dueño. Responde "¿cómo van mis sugerencias al cobrar?", "¿sirve el upsell?", "¿tengo propuestas pendientes?". Requiere plan PRO. Pasa venueId.',
+    'Sugerencias al cobrar ("¿algo más?") de un venue: cuánto dinero atribuido generaron, el aumento real de ticket medido contra el grupo de control, dónde están prendidas (mostrador / mesa ordenando / mesa cobrando), las reglas activas y las propuestas que esperan decisión del dueño. Si el producto sugerido pide una opción obligatoria (tamaño, sabor…), `suggestedModifiers` la trae ya resuelta con nombre y precio — vacío si no pide nada, o si la selección quedó inválida por un cambio de catálogo. Responde "¿cómo van mis sugerencias al cobrar?", "¿sirve el upsell?", "¿tengo propuestas pendientes?". Requiere plan PRO. Pasa venueId.',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu alcance)'),
       from: z.string().optional().describe('Inicio del rango, YYYY-MM-DD (hora local del venue). Default: hace 30 días'),
@@ -53,13 +53,36 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
         prisma.upsellRule.findMany({
           where: { venueId, status: { in: [UpsellRuleStatus.ACTIVE, UpsellRuleStatus.PROPOSED] } },
           select: {
+            id: true,
             status: true,
             origin: true,
             headline: true,
             rationale: true,
             supportCount: true,
             lift: true,
-            suggestedProduct: { select: { name: true, upsellEnabled: true } },
+            suggestedProductId: true,
+            // Selección cruda (ids); se resuelve más abajo con `resolveForDto`,
+            // igual que el POS — mismo nombre y precio, nunca ids pelados.
+            suggestedModifiers: true,
+            suggestedProduct: { select: { ...PRODUCT_VALIDATION_SELECT, name: true } },
+            // Para poder contestar "¿por qué mi promoción no sale en la tarjeta?".
+            // Sin esto, una regla de origen PROMOTION se ve idéntica tenga o no un
+            // descuento servible, y el operador no tiene dónde mirar.
+            linkedDiscount: {
+              select: {
+                name: true,
+                type: true,
+                value: true,
+                active: true,
+                scope: true,
+                targetItemIds: true,
+                minPurchaseAmount: true,
+                maxDiscountAmount: true,
+                buyQuantity: true,
+                validFrom: true,
+                validUntil: true,
+              },
+            },
           },
           orderBy: [{ status: 'asc' }, { priority: 'desc' }],
           take: 50,
@@ -72,11 +95,18 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
         headline: r.headline,
         // El dueño vetó el producto: la regla existe pero NO se sirve al POS.
         vetadoPorElDueno: r.suggestedProduct ? !r.suggestedProduct.upsellEnabled : null,
+        // Opciones obligatorias YA resueltas (nombre y precio) — mismo shape que
+        // recibe el POS (`PosUpsellRuleDTO.suggestedModifiers`). [] = el producto
+        // no pide nada; también [] si la selección quedó inválida por un cambio
+        // de catálogo o por el veto/soldByWeight del producto (fail-open, igual
+        // que del lado del POS).
+        suggestedModifiers: resolveForDto(r.suggestedProduct, r.suggestedModifiers, r.id, venueId),
         // `lift` es un ratio de ordenamiento, no dinero: 2.5 = se compran juntos
         // 2.5× más seguido que el promedio.
         lift: r.lift === null ? null : Number(r.lift),
         ticketsDeEvidencia: r.supportCount,
         porQue: r.rationale,
+        descuentoLigado: descuentoLigado(r),
       })
 
       return text({
@@ -105,4 +135,64 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
       })
     },
   )
+}
+
+/**
+ * El descuento ligado a una regla, y —si el POS no lo va a recibir— POR QUÉ.
+ *
+ * 🔴 Existe por un defecto real (2026-08-17): el descuento nunca llegaba al POS y
+ * la tarjeta mostraba precio de lista, así que la promoción del local no se
+ * aplicaba y no había NADA que mirar para darse cuenta. El POS sólo sirve
+ * descuentos que puede cobrar exacto y que el endpoint de órdenes no va a
+ * rechazar (ver `linkedDiscountParaPos` en `services/upsell/upsell.service.ts`);
+ * este campo dice si pasó ese filtro y, si no, cuál fue el motivo.
+ */
+function descuentoLigado(r: {
+  suggestedProductId: string
+  linkedDiscount: {
+    name: string
+    type: string
+    value: Prisma.Decimal
+    active: boolean
+    scope: string
+    targetItemIds: string[]
+    minPurchaseAmount: Prisma.Decimal | null
+    maxDiscountAmount: Prisma.Decimal | null
+    buyQuantity: number | null
+    validFrom: Date | null
+    validUntil: Date | null
+  } | null
+}) {
+  const d = r.linkedDiscount
+  if (!d) return null
+
+  const ahora = new Date()
+  const motivo = !d.active
+    ? 'El descuento está desactivado'
+    : d.type !== 'PERCENTAGE' && d.type !== 'FIXED_AMOUNT'
+      ? `El POS no sabe cobrar descuentos de tipo ${d.type}`
+      : d.buyQuantity !== null
+        ? 'Es un 2x1: el POS no lo pinta como tarjeta'
+        : d.minPurchaseAmount !== null
+          ? 'Tiene compra mínima, y una sugerencia suelta casi nunca la alcanza'
+          : d.maxDiscountAmount !== null
+            ? 'Tiene tope de descuento, y el POS no puede reproducir el tope al centavo'
+            : d.scope !== 'ITEM'
+              ? `Su alcance es ${d.scope}, y sólo los de artículo se pueden aplicar a una línea`
+              : d.targetItemIds.length > 0 && !d.targetItemIds.includes(r.suggestedProductId)
+                ? 'No cubre al producto que sugiere esta regla'
+                : d.validFrom && d.validFrom > ahora
+                  ? 'Todavía no empieza'
+                  : d.validUntil && d.validUntil < ahora
+                    ? 'Ya venció'
+                    : null
+
+  return {
+    nombre: d.name,
+    tipo: d.type,
+    // PESOS o porcentaje, unidades mayores — la plataforma no usa centavos.
+    valor: Number(d.value),
+    llegaAlPos: motivo === null,
+    porQueNoLlega: motivo,
+  }
 }
