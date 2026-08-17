@@ -24,6 +24,7 @@ import {
   setProductUpsellEnabled,
   UpsellValidationError,
 } from '../../services/upsell/upsell.service'
+import { UpsellModifierError } from '../../services/upsell/upsellModifiers'
 import { getPerformance } from '../../services/upsell/upsellImpression.service'
 import { generateAiProposals, UpsellAiError } from '../../services/upsell/upsellAi.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
@@ -34,6 +35,11 @@ import prisma from '../../utils/prismaClient'
 function handle(error: unknown, res: Response, fallback: string) {
   if (error instanceof UpsellValidationError) {
     return res.status(400).json({ success: false, message: error.message, code: error.code })
+  }
+  // Hermana de UpsellValidationError: opciones obligatorias sin resolver al
+  // crear/editar una regla (spec 2026-08-16, B3).
+  if (error instanceof UpsellModifierError) {
+    return res.status(400).json({ success: false, code: error.code, message: error.message })
   }
   logger.error(fallback, { error })
   return res.status(500).json({ success: false, message: fallback })

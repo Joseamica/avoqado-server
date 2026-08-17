@@ -20,6 +20,12 @@
 import { Prisma, UpsellOrigin, UpsellRuleStatus, UpsellTriggerType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import {
+  validateAndResolveModifiers,
+  type ProductForValidation,
+  type ResolvedModifier,
+  type SuggestedModifierSelection,
+} from './upsellModifiers'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // dedupeKey — identidad estable de una regla
@@ -73,6 +79,12 @@ export interface PosUpsellRuleDTO {
   triggerProductIds: string[]
   triggerCategoryIds: string[]
   suggestedProductId: string
+  /**
+   * Opciones obligatorias ya resueltas, con nombre y precio, para que el POS
+   * pinte la tarjeta y arme la línea sin recalcular. Vacío = el producto no pide
+   * nada. NUNCA null: el POS no debe tener que checar nulos.
+   */
+  suggestedModifiers: ResolvedModifier[]
   headline: string | null
   priority: number
   /** Sólo BASKET_DATA. El resolver local ordena por priority y luego por esto. */
@@ -82,6 +94,45 @@ export interface PosUpsellRuleDTO {
   /** "HH:mm" hora LOCAL del venue. Si timeUntil < timeFrom, la ventana cruza medianoche. */
   timeFrom: string | null
   timeUntil: string | null
+}
+
+/**
+ * Select compartido para validar/resolver las opciones obligatorias de un
+ * producto sugerido. Un solo `select` para los tres call sites que lo
+ * necesitan: `assertSameVenue` (createRule), `loadProductForValidation`
+ * (updateRule) y `listActiveRulesForPos`.
+ */
+const PRODUCT_VALIDATION_SELECT = {
+  id: true,
+  upsellEnabled: true,
+  soldByWeight: true,
+  modifierGroups: {
+    select: {
+      group: {
+        select: {
+          id: true,
+          name: true,
+          required: true,
+          modifiers: { select: { id: true, name: true, price: true, active: true } },
+        },
+      },
+    },
+  },
+} as const
+
+/**
+ * 🔴 NUNCA lanza. Una regla que quedó inválida porque el catálogo cambió después
+ * (le pusieron un obligatorio nuevo, desactivaron la opción elegida) no puede
+ * tumbar la respuesta de TODAS las demás y dejar al local sin upsell. Devuelve []
+ * y el POS la descarta sola, que es exactamente el comportamiento de hoy.
+ */
+function resolveForDto(product: ProductForValidation | undefined, selection: unknown): ResolvedModifier[] {
+  if (!product) return []
+  try {
+    return validateAndResolveModifiers(product, selection as SuggestedModifierSelection[] | null)
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -106,6 +157,7 @@ export async function listActiveRulesForPos(venueId: string): Promise<PosUpsellR
       triggerProductIds: true,
       triggerCategoryIds: true,
       suggestedProductId: true,
+      suggestedModifiers: true,
       headline: true,
       priority: true,
       lift: true,
@@ -115,10 +167,19 @@ export async function listActiveRulesForPos(venueId: string): Promise<PosUpsellR
     },
   })
 
-  return rules.map(r => ({
-    ...r,
+  // Un solo lote por TODOS los productos sugeridos de la lista — nunca uno por
+  // regla, o cada arranque de POS dispararía un N+1 contra el catálogo.
+  const productos = await prisma.product.findMany({
+    where: { id: { in: [...new Set(rules.map(r => r.suggestedProductId))] }, venueId },
+    select: PRODUCT_VALIDATION_SELECT,
+  })
+  const porId = new Map(productos.map(p => [p.id, p as ProductForValidation]))
+
+  return rules.map(rule => ({
+    ...rule,
     // Decimal → number. Es un ratio de ordenamiento, no dinero.
-    lift: r.lift === null ? null : Number(r.lift),
+    lift: rule.lift === null ? null : Number(rule.lift),
+    suggestedModifiers: resolveForDto(porId.get(rule.suggestedProductId), rule.suggestedModifiers),
   }))
 }
 
@@ -132,6 +193,7 @@ export interface CreateRuleInput {
   triggerProductIds?: string[]
   triggerCategoryIds?: string[]
   suggestedProductId: string
+  suggestedModifiers?: SuggestedModifierSelection[] | null
   headline?: string | null
   priority?: number
   daysOfWeek?: number[]
@@ -154,11 +216,13 @@ export class UpsellValidationError extends Error {
  * Sin esto, un venue podría disparar sugerencias con ids de otro (fuga entre
  * inquilinos, además de reglas que nunca dispararían).
  */
-async function assertSameVenue(venueId: string, input: CreateRuleInput): Promise<void> {
+async function assertSameVenue(venueId: string, input: CreateRuleInput): Promise<ProductForValidation> {
   const productIds = [...(input.triggerProductIds ?? []), input.suggestedProductId]
   const found = await prisma.product.findMany({
     where: { id: { in: productIds }, venueId },
-    select: { id: true, upsellEnabled: true },
+    // 🔴 soldByWeight y los grupos hacen falta para validar las opciones
+    // obligatorias. Sin esto el server sería tan ciego como lo era el dashboard.
+    select: PRODUCT_VALIDATION_SELECT,
   })
   const foundIds = new Set(found.map(p => p.id))
   const missing = productIds.filter(id => !foundIds.has(id))
@@ -185,11 +249,17 @@ async function assertSameVenue(venueId: string, input: CreateRuleInput): Promise
       throw new UpsellValidationError(`Estas categorías no existen en este venue: ${missingCats.join(', ')}`, 'CATEGORY_NOT_IN_VENUE')
     }
   }
+
+  return suggested as ProductForValidation
 }
 
 /** Regla escrita a mano por el dueño. Nace ACTIVE: él ya decidió. */
 export async function createRule(input: CreateRuleInput, performedBy: string) {
-  await assertSameVenue(input.venueId, input)
+  const suggestedProduct = await assertSameVenue(input.venueId, input)
+
+  // 🔴 Antes de cualquier escritura: una regla que el POS va a descartar no se
+  // guarda. Lanza UpsellModifierError con el nombre del grupo que falta.
+  validateAndResolveModifiers(suggestedProduct, input.suggestedModifiers)
 
   const dedupeKey = computeDedupeKey({
     origin: UpsellOrigin.OWNER,
@@ -214,6 +284,9 @@ export async function createRule(input: CreateRuleInput, performedBy: string) {
       triggerProductIds: input.triggerProductIds ?? [],
       triggerCategoryIds: input.triggerCategoryIds ?? [],
       suggestedProductId: input.suggestedProductId,
+      // Se guarda la SELECCIÓN (ids), no lo resuelto: los nombres y precios se
+      // resuelven al leer, así un cambio de precio en el catálogo se refleja solo.
+      suggestedModifiers: (input.suggestedModifiers ?? []) as unknown as Prisma.InputJsonValue,
       headline: input.headline ?? null,
       origin: UpsellOrigin.OWNER,
       status: UpsellRuleStatus.ACTIVE,
@@ -304,6 +377,8 @@ export async function deleteRule(venueId: string, ruleId: string, performedBy: s
 }
 
 export interface UpdateRuleInput {
+  suggestedProductId?: string
+  suggestedModifiers?: SuggestedModifierSelection[] | null
   headline?: string | null
   priority?: number
   daysOfWeek?: number[]
@@ -311,11 +386,34 @@ export interface UpdateRuleInput {
   timeUntil?: string | null
 }
 
+/**
+ * Comparte `PRODUCT_VALIDATION_SELECT` con `assertSameVenue` (createRule) y
+ * `listActiveRulesForPos` — un solo `select` para los tres call sites.
+ */
+async function loadProductForValidation(venueId: string, productId: string): Promise<ProductForValidation> {
+  const product = await prisma.product.findFirst({ where: { id: productId, venueId }, select: PRODUCT_VALIDATION_SELECT })
+  if (!product) throw new UpsellValidationError(`El producto ${productId} no existe en este venue`, 'PRODUCT_NOT_IN_VENUE')
+  return product as ProductForValidation
+}
+
 export async function updateRule(venueId: string, ruleId: string, input: UpdateRuleInput, performedBy: string) {
   const rule = await prisma.upsellRule.findFirst({ where: { id: ruleId, venueId } })
   if (!rule) throw new UpsellValidationError('No encontré esa regla en este venue.', 'RULE_NOT_FOUND')
 
-  const data: Prisma.UpsellRuleUpdateInput = {}
+  // 🔴 Si cambia el producto O la selección, se revalida. Cambiar el producto de
+  // una regla sin revalidar reintroduce el bug por la puerta de atrás: la regla
+  // nació válida y se vuelve inválida en silencio.
+  if (input.suggestedProductId !== undefined || input.suggestedModifiers !== undefined) {
+    const productId = input.suggestedProductId ?? rule.suggestedProductId
+    const product = await loadProductForValidation(venueId, productId)
+    const selection =
+      input.suggestedModifiers !== undefined ? input.suggestedModifiers : (rule.suggestedModifiers as SuggestedModifierSelection[] | null)
+    validateAndResolveModifiers(product, selection)
+  }
+
+  const data: Prisma.UpsellRuleUncheckedUpdateInput = {}
+  if (input.suggestedProductId !== undefined) data.suggestedProductId = input.suggestedProductId
+  if (input.suggestedModifiers !== undefined) data.suggestedModifiers = (input.suggestedModifiers ?? []) as unknown as Prisma.InputJsonValue
   if (input.headline !== undefined) data.headline = input.headline
   if (input.priority !== undefined) data.priority = input.priority
   if (input.daysOfWeek !== undefined) data.daysOfWeek = input.daysOfWeek
