@@ -11554,6 +11554,28 @@ router.get(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tender-types/commissions:
+ *   get:
+ *     tags: [Dashboard - Tender Types]
+ *     summary: Comisiones pagadas por tipo de pago
+ *     description: >
+ *       Suma la comisión CONGELADA en cada cobro (nunca recalcula con el porcentaje de hoy).
+ *       Rango opcional from/to en formato YYYY-MM-DD, interpretado en la zona del negocio.
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Reporte de comisiones por tipo }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/tender-types/commissions',
+  authenticateTokenMiddleware,
+  checkPermission('tender-types:read'),
+  validateRequest(z.object({ params: tenderTypeVenueParamsSchema })),
+  tenderTypeController.getTenderCommissions,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/tender-types:
  *   post:
  *     tags: [TenderTypes]

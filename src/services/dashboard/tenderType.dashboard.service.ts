@@ -27,6 +27,7 @@ import { OrderSource, PaymentFundsFlow, PaymentMethod, Prisma, TenderSection } f
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from './activity-log.service'
+import { parseDbDateRange } from '../../utils/datetime'
 
 /** SAT c_FormaPago codes accepted for a tender type. '99 Por definir' is excluded on purpose. */
 const VALID_SAT_FORMA_PAGO = new Set([
@@ -464,4 +465,97 @@ export async function resolveTenderForCharge(
 export function computeTenderCommission(percent: Prisma.Decimal | null, amount: Prisma.Decimal): Prisma.Decimal | null {
   if (percent == null) return null
   return amount.mul(percent).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+}
+
+// ============================================================================
+// REPORTE DE COMISIONES POR TIPO DE PAGO
+// ============================================================================
+
+export interface TenderCommissionRow {
+  tenderTypeId: string
+  tenderLabel: string
+  /** Cobros con este tipo en el rango. */
+  count: number
+  /** Venta bruta (sin propina) cobrada con este tipo. */
+  gross: number
+  /** Comisión que el negocio pagó — la CONGELADA en cada cobro, sumada. */
+  commission: number
+  /** Lo que le queda al negocio: bruto − comisión. */
+  net: number
+}
+
+export interface TenderCommissionsReport {
+  from: Date
+  to: Date
+  rows: TenderCommissionRow[]
+  totalGross: number
+  totalCommission: number
+  totalNet: number
+}
+
+/**
+ * "¿Cuánto me cobró Uber Eats este mes?" — la pregunta que el dueño no podía contestar
+ * desde ningún lado.
+ *
+ * 🔴 SUMA la comisión CONGELADA en cada cobro (`tenderCommissionAmount`), nunca la recalcula
+ * con el porcentaje de HOY. Si el negocio sube su comisión de 30% a 35% el martes, el costo
+ * del mes pasado NO puede reescribirse — por eso el monto se congela al cobrar y aquí sólo
+ * se suma.
+ *
+ * Cuenta TODO cobro completado que no sea reembolso — incluida la **venta rápida** (`FAST`),
+ * que es donde el mostrador más usa estos tipos. Los reembolsos quedan fuera porque hoy NO
+ * heredan comisión a propósito (no sabemos si la plataforma la devuelve al cancelar), así que
+ * restarlos inventaría un ahorro que quizá no ocurrió.
+ */
+export async function getTenderCommissionsReport(
+  venueId: string,
+  filters: { from?: string; to?: string },
+): Promise<TenderCommissionsReport> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  // El rango es del día LOCAL del negocio: con el host en UTC (prod), parsear "2026-08-01" a
+  // secas daría jul-31 18:00 en México y el reporte arrancaría un día antes.
+  const { from, to } = parseDbDateRange(filters.from, filters.to, venue?.timezone, 30)
+
+  const grouped = await prisma.payment.groupBy({
+    by: ['tenderTypeId', 'tenderLabel'],
+    where: {
+      venueId,
+      tenderTypeId: { not: null },
+      status: 'COMPLETED',
+      // 🔴 `{ not: 'REFUND' }`, NO `'REGULAR'`: la venta rápida del mostrador se guarda como
+      // `FAST`, y es justo donde más se usan los tipos propios. Filtrar por REGULAR mostraba
+      // CERO en el caso más común (encontrado validando contra datos reales, no con mocks).
+      type: { not: 'REFUND' },
+      createdAt: { gte: from, lte: to },
+    },
+    _sum: { tenderCommissionAmount: true, amount: true, tipAmount: true },
+    _count: { _all: true },
+  })
+
+  const rows: TenderCommissionRow[] = grouped.map(g => {
+    const commission = Number(g._sum.tenderCommissionAmount ?? 0)
+    const gross = Number(g._sum.amount ?? 0)
+    return {
+      tenderTypeId: g.tenderTypeId as string,
+      tenderLabel: g.tenderLabel ?? 'Sin nombre',
+      count: g._count._all,
+      gross,
+      commission,
+      net: Number((gross - commission).toFixed(2)),
+    }
+  })
+
+  // Lo que más cuesta va primero: es la lectura que el dueño busca al abrir el reporte.
+  rows.sort((a, b) => b.commission - a.commission)
+
+  const sum = (pick: (r: TenderCommissionRow) => number) => Number(rows.reduce((acc, r) => acc + pick(r), 0).toFixed(2))
+
+  return {
+    from,
+    to,
+    rows,
+    totalGross: sum(r => r.gross),
+    totalCommission: sum(r => r.commission),
+    totalNet: sum(r => r.net),
+  }
 }

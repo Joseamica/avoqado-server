@@ -26,6 +26,23 @@ export async function listTenderTypes(req: Request, res: Response, next: NextFun
 }
 
 /**
+ * GET /api/v1/dashboard/venues/:venueId/tender-types/commissions
+ *
+ * "¿Cuánto me cobró Uber Eats este mes?" — suma la comisión CONGELADA en cada cobro.
+ * Rango opcional `?from=YYYY-MM-DD&to=YYYY-MM-DD`, interpretado en la zona del NEGOCIO.
+ */
+export async function getTenderCommissions(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const { from, to } = req.query as { from?: string; to?: string }
+    const report = await tenderTypeService.getTenderCommissionsReport(venueId, { from, to })
+    res.json(report)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * POST /api/v1/dashboard/venues/:venueId/tender-types
  */
 export async function createTenderType(req: Request, res: Response, next: NextFunction) {

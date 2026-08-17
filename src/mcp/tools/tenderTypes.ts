@@ -1,14 +1,14 @@
 /**
  * TENDER TYPES — tipos de pago personalizados (VenueTenderType, catálogo core/FREE).
  *
- * Read-only in slice A1 (list_tender_types). Creating/editing is done from the
- * dashboard; when writes are exposed here they will be two-step confirm-gated
- * (MCP invariant #4). Money reporting per tender (commission report) is slice B.
+ * Read-only: `list_tender_types` (catálogo) y `tender_commissions` (cuánto costó cada tipo).
+ * Crear/editar se hace desde el dashboard; cuando se expongan escrituras aquí irán
+ * confirm-gated en dos pasos (invariante #4 del MCP).
  * Scoped to the operator's venues + requirePermission('tender-types:read').
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { listTenderTypes } from '@/services/dashboard/tenderType.dashboard.service'
+import { listTenderTypes, getTenderCommissionsReport } from '@/services/dashboard/tenderType.dashboard.service'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import type { McpScope } from '../scope'
@@ -43,7 +43,36 @@ export function registerTenderTypeTools(server: McpServer, scope: McpScope): voi
           active: t.active,
           revision: t.revision,
         })),
-        nota: 'Los tipos personalizados registran el cobro con method=OTHER; el nombre es la capa de reporte (paridad Square). Los POS aún no los muestran (slice B pendiente).',
+        nota: 'Los tipos personalizados registran el cobro con method=OTHER; el nombre es la capa de reporte (paridad Square). El POS ya los muestra al cobrar.',
+      })
+    },
+  )
+
+  server.tool(
+    'tender_commissions',
+    'Report how much commission the business PAID per tender type over a date range — answers "how much did Uber Eats charge me this month?". Returns, per tender: number of charges, gross sales (tip excluded), commission paid, and net kept. Amounts are in PESOS (major units). The commission is the amount FROZEN on each charge at the time it was taken, never recalculated with today\'s percentage — so changing a tender\'s commission does not rewrite last month\'s cost. Counts only real charges (COMPLETED, REGULAR); refunds are excluded because they do not carry a commission today. Dates are VENUE-LOCAL (YYYY-MM-DD); omit them for the last 30 days. Read-only — requires tender-types:read.',
+    {
+      venueId: z.string().describe('Venue to inspect (must be in your scope)'),
+      from: z.string().optional().describe('Start date YYYY-MM-DD, venue-local. Omit for the last 30 days.'),
+      to: z.string().optional().describe('End date YYYY-MM-DD, venue-local (inclusive).'),
+    },
+    async ({ venueId, from, to }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('tender-types:read', venueId)
+      const report = await getTenderCommissionsReport(venueId, { from, to })
+      return text({
+        ok: true,
+        desde: report.from.toISOString(),
+        hasta: report.to.toISOString(),
+        tipos: report.rows.map(r => ({
+          tipo: r.tenderLabel,
+          cobros: r.count,
+          ventaBruta: r.gross,
+          comisionPagada: r.commission,
+          neto: r.net,
+        })),
+        totales: { ventaBruta: report.totalGross, comisionPagada: report.totalCommission, neto: report.totalNet },
+        nota: 'Montos en PESOS. La comisión es la CONGELADA en cada cobro, no un recálculo con el porcentaje actual. No incluye reembolsos.',
       })
     },
   )
