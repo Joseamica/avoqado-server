@@ -46,7 +46,12 @@ describe('getTenderCommissionsReport', () => {
   it('un tipo sin comisión aparece con 0, no se esconde (el dueño quiere ver TODOS sus tipos)', async () => {
     prismaMock.payment.groupBy.mockResolvedValue([
       fila(),
-      fila({ tenderTypeId: 'tender-vale', tenderLabel: 'Vale', _sum: { tenderCommissionAmount: null, amount: 80, tipAmount: 0 }, _count: { _all: 2 } }),
+      fila({
+        tenderTypeId: 'tender-vale',
+        tenderLabel: 'Vale',
+        _sum: { tenderCommissionAmount: null, amount: 80, tipAmount: 0 },
+        _count: { _all: 2 },
+      }),
     ])
 
     const r = await getTenderCommissionsReport('venue-1', {})
@@ -57,8 +62,18 @@ describe('getTenderCommissionsReport', () => {
 
   it('ordena por comisión pagada, de mayor a menor: lo que más cuesta va primero', async () => {
     prismaMock.payment.groupBy.mockResolvedValue([
-      fila({ tenderTypeId: 't-a', tenderLabel: 'Chico', _sum: { tenderCommissionAmount: 5, amount: 50, tipAmount: 0 }, _count: { _all: 1 } }),
-      fila({ tenderTypeId: 't-b', tenderLabel: 'Caro', _sum: { tenderCommissionAmount: 200, amount: 600, tipAmount: 0 }, _count: { _all: 9 } }),
+      fila({
+        tenderTypeId: 't-a',
+        tenderLabel: 'Chico',
+        _sum: { tenderCommissionAmount: 5, amount: 50, tipAmount: 0 },
+        _count: { _all: 1 },
+      }),
+      fila({
+        tenderTypeId: 't-b',
+        tenderLabel: 'Caro',
+        _sum: { tenderCommissionAmount: 200, amount: 600, tipAmount: 0 },
+        _count: { _all: 9 },
+      }),
     ])
 
     const r = await getTenderCommissionsReport('venue-1', {})
