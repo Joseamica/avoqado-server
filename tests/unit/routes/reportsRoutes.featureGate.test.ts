@@ -116,6 +116,28 @@ afterAll(done => {
   server.close(done)
 })
 
+describe('?venueId= en un reporte venue-scoped — /full-testing 2026-08-18', () => {
+  // El venue de un reporte se indica en la ruta (/venues/:venueId/…) o en el header x-venue-id.
+  // Un `?venueId=` de OTRO venue se ignoraba en silencio y el 200 traía datos del venue del
+  // token: quien lo mandó cree que ve el venue X y ve el suyo. Ahora es 400 con la instrucción.
+  it('otro venue en ?venueId= → 400 con mensaje que dice dónde va el venue', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+    const res = await request(server)
+      .get('/api/v1/dashboard/reports/sales-by-item')
+      .query({ startDate: now(), endDate: now(), venueId: 'otro_venue' })
+    expect(res.status).toBe(400)
+    expect(res.body.message).toMatch(/x-venue-id/)
+  })
+
+  it('el mismo venue en ?venueId= no estorba → 200', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+    const res = await request(server)
+      .get('/api/v1/dashboard/reports/sales-by-item')
+      .query({ startDate: now(), endDate: now(), venueId: VENUE_ID })
+    expect(res.status).toBe(200)
+  })
+})
+
 describe('GET /reports/sales-by-item — fully Pro-gated (ADVANCED_REPORTS)', () => {
   it('Free venue → 403 ADVANCED_REPORTS', async () => {
     const res = await request(server).get('/api/v1/dashboard/reports/sales-by-item').query({ startDate: now(), endDate: now() })

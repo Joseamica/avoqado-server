@@ -26,6 +26,27 @@ import prisma from '@/utils/prismaClient'
 
 const router = express.Router()
 
+/**
+ * `?venueId=` NO selecciona el venue de un reporte — se indica en la ruta (`/venues/:venueId/…`)
+ * o en el header `x-venue-id`, y de ahí lo toma `resolveRequestVenueId` (params → header →
+ * token). Antes un `?venueId=` de OTRO venue se ignoraba en silencio: el 200 traía datos del
+ * venue del token y quien lo mandó (un integrador, el MCP) creía estar viendo el venue X.
+ * Hallazgo de /full-testing 2026-08-18. Un `?venueId=` igual al resuelto no estorba.
+ */
+export function rejectForeignVenueInQuery(req: Request, res: Response, next: NextFunction) {
+  const fromQuery = req.query?.venueId
+  if (typeof fromQuery !== 'string' || fromQuery.length === 0) return next()
+  const resolved = resolveRequestVenueId(req, (req as any).authContext ?? {})
+  if (resolved && fromQuery === resolved) return next()
+  return res.status(400).json({
+    error: 'Bad Request',
+    message:
+      'Este reporte no acepta ?venueId=: indica el venue en la ruta (/venues/:venueId/…) o en el header x-venue-id. ' +
+      'Sin eso se usa el venue de tu sesión.',
+  })
+}
+router.use(rejectForeignVenueInQuery)
+
 /** Stable error code when a Free venue requests a sales-summary range beyond "today". */
 export const PLAN_LIMIT_RANGE_CODE = 'PLAN_LIMIT_RANGE'
 
