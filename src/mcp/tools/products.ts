@@ -1,7 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { OrderStatus } from '@prisma/client'
+import { OrderStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { lineRevenueSql, lineUnitsSql } from '@/services/dashboard/lineRevenue'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -47,15 +48,30 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
         })
       }
 
-      const agg = await prisma.orderItem.aggregate({
-        where: {
-          productId: matches[0].id,
-          // scope + date + "real sale" all enforced through the parent order
-          order: { ...base, createdAt: { gte: start, lte: end }, status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] } },
-        },
-        _sum: { quantity: true, total: true },
-        _count: { _all: true },
-      })
+      // Revenue MUST come from the shared `lineRevenueSql` — the same
+      // definition the dashboard reports use. This used to be
+      // `_sum: { total: true }`, and `OrderItem.total` disagrees with it:
+      // `total` carries tax INCLUDED on some rows and stacked ON TOP on others,
+      // so the MCP answered a bigger number than the dashboard for the very
+      // same product (La Ribera "Chilaquiles": 7,109.64 vs 5,940.00). Two
+      // sources of truth for one question is exactly what the MCP must not be.
+      //
+      // Prisma's `aggregate` cannot express the formula (modifiers live in
+      // their own table), hence raw SQL. `venueId` is already proven in scope
+      // by `guard.venueFilter` above.
+      const [agg] = await prisma.$queryRaw<Array<{ units: Prisma.Decimal | null; revenue: Prisma.Decimal | null; lines: bigint }>>`
+        SELECT
+          COALESCE(SUM(${Prisma.raw(lineUnitsSql())}), 0) as units,
+          COALESCE(SUM(${Prisma.raw(lineRevenueSql())}), 0) as revenue,
+          COUNT(oi.id)::bigint as lines
+        FROM "OrderItem" oi
+        INNER JOIN "Order" o ON o.id = oi."orderId"
+        WHERE oi."productId" = ${matches[0].id}
+          AND o."venueId" = ${venueId}
+          AND o."createdAt" >= ${start}
+          AND o."createdAt" <= ${end}
+          AND o.status NOT IN (${OrderStatus.CANCELLED}::"OrderStatus", ${OrderStatus.DELETED}::"OrderStatus")
+      `
 
       return text({
         found: true,
@@ -63,9 +79,10 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
         venueId,
         window: { start: start.toISOString(), end: end.toISOString() },
         timezone: tz,
-        unitsSold: agg._sum.quantity ?? 0,
-        revenue: round2(num(agg._sum.total)),
-        timesOrdered: agg._count._all, // line-item appearances across orders
+        // Kilos for goods sold by weight, plain quantity for everything else.
+        unitsSold: round2(num(agg?.units ?? null)),
+        revenue: round2(num(agg?.revenue ?? null)),
+        timesOrdered: Number(agg?.lines ?? 0), // line-item appearances across orders
       })
     },
   )
