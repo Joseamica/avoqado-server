@@ -59,10 +59,10 @@
  */
 
 import { startOfDay, setHours, subDays } from 'date-fns'
-import { format as formatTz, fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { fromZonedTime, toZonedTime } from 'date-fns-tz'
 
 import logger from '../../config/logger'
-import { DEFAULT_TIMEZONE, isValidTimezone } from '../../utils/datetime'
+import { DEFAULT_TIMEZONE, formatInVenueTimezone, isValidTimezone } from '../../utils/datetime'
 import defaultPrisma from '../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 
@@ -251,7 +251,9 @@ export async function autoCloseStaleDrawerSessions(options: AutoCloseOptions = {
 
       const hoursOpen = Math.floor((now.getTime() - session.openedAt.getTime()) / 3_600_000)
       const hoursIdle = Math.floor(idleMs / 3_600_000)
-      const boundaryLocal = formatTz(boundary, 'yyyy-MM-dd HH:mm', { timeZone: timezone })
+      // Hora de pared del VENUE, no del host: en prod/CI Node corre en UTC y el
+      // `format(..., { timeZone })` de date-fns-tz no convierte (sólo alimenta `z`).
+      const boundaryLocal = formatInVenueTimezone(boundary, timezone, 'yyyy-MM-dd HH:mm')
       const note =
         `${AUTO_CLOSE_NOTE_PREFIX}: nadie la cerró. ` +
         `El día de negocio terminó el ${boundaryLocal} (${timezone}); ` +

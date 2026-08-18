@@ -43,7 +43,7 @@
  */
 
 import { startOfDay, endOfDay, subDays, startOfWeek, endOfWeek, startOfMonth, endOfMonth, parseISO, isValid, formatISO } from 'date-fns'
-import { fromZonedTime, toZonedTime, format as formatTz } from 'date-fns-tz'
+import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 
 import { BadRequestError } from '../errors/AppError'
 
@@ -449,7 +449,10 @@ export function formatInVenueTimezone(
   timezone: string = DEFAULT_TIMEZONE,
   formatString: string = 'yyyy-MM-dd HH:mm:ss',
 ): string {
-  return formatTz(date, formatString, { timeZone: timezone })
+  // 🔴 NOT `format(date, fmt, { timeZone })`: in date-fns-tz that option only feeds
+  // the `z` tokens and the wall clock comes from the HOST tz (UTC in prod/CI) —
+  // a 20:00 Mexico payment rendered as the next day. `formatInTimeZone` converts.
+  return formatInTimeZone(date, timezone, formatString)
 }
 
 /**
