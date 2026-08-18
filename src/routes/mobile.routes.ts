@@ -1637,37 +1637,90 @@ router.delete(
 
 // ============================================================================
 // DISCOUNTS
+//
+// 🔴 Estas rutas llevaban SÓLO `requireVenueMembership`: cualquier miembro del
+// venue —mesero, cocinero o VIEWER— podía crear, editar y borrar los descuentos
+// del negocio desde el POS, mientras la gemela de /dashboard sí exigía
+// `discounts:create/update/delete`. El POS era la puerta de atrás al mismo
+// catálogo. Mismos nombres que /dashboard: un permiso se espeja EXACTO o el
+// mismo usuario puede en un cliente y no en el otro.
+// El mostrador NO pierde nada: leer descuentos para aplicarlos sigue siendo
+// `discounts:read` + `discounts:apply`, que CASHIER y WAITER ya traen.
 // ============================================================================
 
-router.get('/venues/:venueId/discounts', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.listDiscounts)
-router.post('/venues/:venueId/discounts', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.createDiscount)
+router.get(
+  '/venues/:venueId/discounts',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('discounts:read'),
+  discountMobileController.listDiscounts,
+)
+router.post(
+  '/venues/:venueId/discounts',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('discounts:create'),
+  discountMobileController.createDiscount,
+)
 router.put(
   '/venues/:venueId/discounts/:discountId',
   authenticateTokenMiddleware,
   requireVenueMembership,
+  checkPermission('discounts:update'),
   discountMobileController.updateDiscount,
 )
 router.delete(
   '/venues/:venueId/discounts/:discountId',
   authenticateTokenMiddleware,
   requireVenueMembership,
+  checkPermission('discounts:delete'),
   discountMobileController.deleteDiscount,
 )
 
 // ============================================================================
 // COUPONS
+//
+// 🔴 Mismo hueco que descuentos: sin `checkPermission`, cualquier miembro creaba
+// y borraba cupones del negocio. `validate` es el gesto del COBRO (comprobar un
+// código con el cliente enfrente) → `coupons:redeem`, que CASHIER y WAITER ya
+// tienen; no `coupons:create`, que administra el catálogo.
 // ============================================================================
 
-router.get('/venues/:venueId/coupons', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.listCoupons)
-router.post('/venues/:venueId/coupons', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.createCoupon)
-router.put('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.updateCoupon)
+router.get(
+  '/venues/:venueId/coupons',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('coupons:read'),
+  couponMobileController.listCoupons,
+)
+router.post(
+  '/venues/:venueId/coupons',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('coupons:create'),
+  couponMobileController.createCoupon,
+)
+router.put(
+  '/venues/:venueId/coupons/:couponId',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('coupons:update'),
+  couponMobileController.updateCoupon,
+)
 router.delete(
   '/venues/:venueId/coupons/:couponId',
   authenticateTokenMiddleware,
   requireVenueMembership,
+  checkPermission('coupons:delete'),
   couponMobileController.deleteCoupon,
 )
-router.post('/venues/:venueId/coupons/validate', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.validateCoupon)
+router.post(
+  '/venues/:venueId/coupons/validate',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('coupons:redeem'),
+  couponMobileController.validateCoupon,
+)
 
 // ============================================================================
 // UPSELL "¿Algo más?"
@@ -2602,6 +2655,18 @@ router.delete(
 // ============================================================================
 // KDS (Kitchen Display System)
 // Authenticated endpoints - requires valid JWT
+//
+// 🔴 Las 4 rutas llevaban SÓLO `requireVenueMembership`: cualquier miembro del
+// venue, VIEWER incluido, podía crear comandas, cambiarles el estado y
+// BUMPEARLAS — o sea borrar de la pantalla el trabajo de la cocina.
+//
+// El permiso se elige fail-open PARA LA COCINA, que es la regla de este dominio:
+// se toma el más conservador que NO deje fuera a KITCHEN. `orders:update` es el
+// que KITCHEN ya trae por default (avanzar comandas es su trabajo) y que también
+// tiene el POS que crea la comanda tras el cobro (CASHIER/WAITER/MANAGER+).
+// NO se inventa un namespace `kds:*`: habría nacido sin roles y habría apagado
+// la cocina el día del deploy. Leer el tablero se queda en `orders:read`, que
+// tienen los 9 roles — mirar la pantalla nunca debe requerir escritura.
 // ============================================================================
 
 /**
@@ -2609,14 +2674,26 @@ router.delete(
  * List active KDS orders for a venue.
  * Query: ?status=NEW,PREPARING,READY (default: active orders)
  */
-router.get('/venues/:venueId/kds/orders', authenticateTokenMiddleware, requireVenueMembership, kdsMobileController.listKdsOrders)
+router.get(
+  '/venues/:venueId/kds/orders',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.listKdsOrders,
+)
 
 /**
  * POST /api/v1/mobile/venues/:venueId/kds/orders
  * Create a new KDS order (after payment succeeds).
  * Body: { orderNumber, orderType?, orderId?, items: [{ productName, quantity, modifiers?, notes? }] }
  */
-router.post('/venues/:venueId/kds/orders', authenticateTokenMiddleware, requireVenueMembership, kdsMobileController.createKdsOrder)
+router.post(
+  '/venues/:venueId/kds/orders',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.createKdsOrder,
+)
 
 /**
  * PUT /api/v1/mobile/venues/:venueId/kds/orders/:id/status
@@ -2627,6 +2704,7 @@ router.put(
   '/venues/:venueId/kds/orders/:id/status',
   authenticateTokenMiddleware,
   requireVenueMembership,
+  checkPermission('orders:update'),
   kdsMobileController.updateKdsOrderStatus,
 )
 
@@ -2634,7 +2712,13 @@ router.put(
  * POST /api/v1/mobile/venues/:venueId/kds/orders/:id/bump
  * Mark KDS order as COMPLETED instantly.
  */
-router.post('/venues/:venueId/kds/orders/:id/bump', authenticateTokenMiddleware, requireVenueMembership, kdsMobileController.bumpKdsOrder)
+router.post(
+  '/venues/:venueId/kds/orders/:id/bump',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.bumpKdsOrder,
+)
 
 // ============================================================================
 // PRINT STATIONS (PRINT_STATIONS) — routing config + gateway outbox replica
