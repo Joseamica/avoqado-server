@@ -97,7 +97,19 @@ async function correrGuardDePropiedad(method: string, path: string, role: StaffR
   if (path.includes(':orderId')) params.orderId = 'order-1'
   if (path.includes(':tableId')) params.tableId = 'mesa-5'
   if (path.includes(':itemId')) params.itemId = 'item-1'
-  if (path.includes(':orderServiceChargeId')) params.orderServiceChargeId = 'cargo-1'
+  if (path.includes(':orderServiceChargeId'))
+    params.orderServiceChargeId = 'cargo-1'
+
+    // Desde 2026-08-18 `resolveUserRoleForVenue` ya NO confía en el rol que viene dentro
+    // del token: lo lee de `StaffVenue`, para poder aplicar el PermissionSet del empleado
+    // y para que dar de baja a alguien surta efecto de inmediato. El mock refleja al MISMO
+    // empleado que declara el authContext, así que el test sigue midiendo lo de siempre.
+  ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({
+    role,
+    active: true,
+    permissionSetId: null,
+    permissionSet: null,
+  })
 
   const req = {
     params,

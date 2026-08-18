@@ -32,7 +32,20 @@ import request from 'supertest'
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   authenticateTokenMiddleware: (req: any, _res: any, next: any) => {
     const ctx = req.headers['x-test-auth-context']
-    if (ctx) req.authContext = JSON.parse(ctx as string)
+    if (ctx) {
+      req.authContext = JSON.parse(ctx as string)
+      // Desde 2026-08-18 `resolveUserRoleForVenue` YA NO confía en el rol del token: lo
+      // lee de `StaffVenue`, para poder aplicar el PermissionSet del empleado y para que
+      // dar de baja a alguien surta efecto de inmediato. Espejamos aquí al MISMO empleado
+      // que declara el header, así el test sigue midiendo lo que medía antes.
+      const prismaMock = jest.requireMock('@/utils/prismaClient').default
+      prismaMock.staffVenue.findUnique.mockResolvedValue({
+        role: req.authContext.role,
+        active: true,
+        permissionSetId: null,
+        permissionSet: null,
+      })
+    }
     next()
   },
 }))
@@ -48,7 +61,7 @@ jest.mock('@/middlewares/validation', () => ({
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    staffVenue: { findFirst: jest.fn() },
+    staffVenue: { findFirst: jest.fn(), findUnique: jest.fn() },
     venueRolePermission: { findUnique: jest.fn() },
   },
 }))

@@ -38,8 +38,24 @@ jest.mock('@/config/logger', () => ({
 const VENUE = 'venue-1'
 const USER = 'staff-cajero'
 
-/** El rol llega por el token (mismo venue), así que no hace falta más DB que el probe de SUPERADMIN. */
-const puedeSaltarse = (role: StaffRole, overrides: readonly string[]) => staffCanManageAllTables(USER, VENUE, VENUE, role, overrides)
+/**
+ * El rol se lee de `StaffVenue`, NO del token.
+ *
+ * Este comentario decía antes: "el rol llega por el token (mismo venue), así que no hace
+ * falta más DB que el probe de SUPERADMIN" — y eso describía exactamente el hueco de
+ * seguridad que se cerró el 2026-08-18: `resolveUserRoleForVenue` devolvía el rol del JWT
+ * sin mirar la base, así que ni aplicaba el `PermissionSet` del empleado ni se enteraba de
+ * que lo habían dado de baja. Ahora consulta, y el mock refleja al mismo empleado.
+ */
+const puedeSaltarse = (role: StaffRole, overrides: readonly string[]) => {
+  ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({
+    role,
+    active: true,
+    permissionSetId: null,
+    permissionSet: null,
+  })
+  return staffCanManageAllTables(USER, VENUE, VENUE, role, overrides)
+}
 
 describe('El override que se le pasa es el que se evalúa', () => {
   beforeEach(() => {
@@ -67,7 +83,15 @@ describe('El override que se le pasa es el que se evalúa', () => {
   })
 
   it('sin pasar override, el default sigue siendo tables:manage-all (compatibilidad)', async () => {
+    // Se declara el rol en la base para CADA caso: `jest.clearAllMocks()` limpia las
+    // llamadas pero NO las implementaciones, así que sin esto el segundo caso heredaría
+    // el `mockResolvedValue` del primero y el test mediría el rol equivocado.
+    const conRol = (role: StaffRole) =>
+      (prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
+
+    conRol(StaffRole.CASHIER)
     await expect(staffCanManageAllTables(USER, VENUE, VENUE, StaffRole.CASHIER)).resolves.toBe(false)
+    conRol(StaffRole.MANAGER)
     await expect(staffCanManageAllTables(USER, VENUE, VENUE, StaffRole.MANAGER)).resolves.toBe(true)
   })
 

@@ -10,7 +10,7 @@ import { consumePermissionOverride, isManagerPinOverrideEnabled } from '@/servic
 
 type RoleResolutionSource = 'token' | 'staffVenue' | 'orgOwner' | 'none'
 
-interface ResolvedUserRole {
+export interface ResolvedUserRole {
   role: StaffRole | null
   source: RoleResolutionSource
   permissionSet?: PermissionSet | null
@@ -90,15 +90,54 @@ export async function resolveUserRoleForVenue(params: {
   targetVenueId: string
   tokenVenueId?: string
   tokenRole?: string
+  /**
+   * El objeto `req` de la petición en curso, SOLO para memoizar. Opcional: sin él la
+   * función se comporta igual, nada más que consulta cada vez. Pásalo siempre que lo
+   * tengas a mano — ver el porqué del costo abajo.
+   */
+  req?: Request
 }): Promise<ResolvedUserRole> {
-  const { userId, targetVenueId, tokenVenueId, tokenRole } = params
+  const { userId, targetVenueId, tokenVenueId, tokenRole, req } = params
 
-  if (tokenVenueId && tokenVenueId === targetVenueId && tokenRole) {
-    return {
-      role: tokenRole as StaffRole,
-      source: 'token',
-    }
+  // 🔴 AQUÍ HABÍA UN ATAJO Y ERA UN HUECO DE SEGURIDAD (P1, auditoría 2026-08-18).
+  //
+  // Decía: si `tokenVenueId === targetVenueId && tokenRole`, devuelve el rol del JWT y
+  // no consultes nada. Como eso es el caso NORMAL de la TPV y del POS, en la práctica la
+  // base casi nunca se leía, y se perdían las dos cosas que sólo viven en ella:
+  //
+  //   · `permissionSet` — la lista propia del empleado (`StaffVenue.permissionSetId`),
+  //     que es el ÚNICO camino del producto que permite RECORTAR permisos. Salía
+  //     `undefined` siempre, así que el recorte no se aplicaba EN LÍNEA. Pero el replay
+  //     offline sí lo carga (`services/access/access.service.ts`), o sea que la misma
+  //     acción pasaba con internet y se rechazaba sin internet, y el intent acababa en
+  //     cuarentena. Mismo patrón que a2c0c739, una capa más abajo.
+  //
+  //   · `active` — nunca se miraba. Un empleado dado de baja seguía trabajando hasta
+  //     que caducara su token.
+  //
+  // El JWT sigue sirviendo para AUTENTICAR (quién eres); ya no para AUTORIZAR (qué
+  // puedes), porque eso cambia sin que el token se entere. No lo vuelvas a poner.
+  //
+  // COSTO, y por qué no se disparó: esta función la llaman `validateVenueAccess`,
+  // `checkPermission` y `checkTableOwnership` en la MISMA cadena, así que quitar el
+  // atajo a secas serían 3 consultas por request. Se memoiza en el propio `req` (una
+  // por request y por venue), que además deja la petición con MENOS consultas que antes
+  // en las rutas que ya caían al camino largo. La memoria muere con el request: no hay
+  // caché entre peticiones, para que dar de baja a alguien surta efecto de inmediato.
+  const memoKey = `${userId}:${targetVenueId}`
+  if (req) {
+    const cacheado = req.__avqRoleCache?.get(memoKey)
+    if (cacheado) return cacheado
   }
+  const recordar = (r: ResolvedUserRole): ResolvedUserRole => {
+    if (req) {
+      req.__avqRoleCache ??= new Map()
+      req.__avqRoleCache.set(memoKey, r)
+    }
+    return r
+  }
+  void tokenVenueId
+  void tokenRole
 
   const staffVenue = await prisma.staffVenue.findUnique({
     where: {
@@ -116,11 +155,11 @@ export async function resolveUserRoleForVenue(params: {
   })
 
   if (staffVenue?.active) {
-    return {
+    return recordar({
       role: staffVenue.role,
       source: 'staffVenue',
       permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null,
-    }
+    })
   }
 
   const targetVenue = await prisma.venue.findUnique({
@@ -129,10 +168,10 @@ export async function resolveUserRoleForVenue(params: {
   })
 
   if (!targetVenue) {
-    return {
+    return recordar({
       role: null,
       source: 'none',
-    }
+    })
   }
 
   const orgMembership = await prisma.staffOrganization.findUnique({
@@ -149,16 +188,16 @@ export async function resolveUserRoleForVenue(params: {
   })
 
   if (orgMembership?.isActive && orgMembership.role === OrgRole.OWNER) {
-    return {
+    return recordar({
       role: StaffRole.OWNER,
       source: 'orgOwner',
-    }
+    })
   }
 
-  return {
+  return recordar({
     role: null,
     source: 'none',
-  }
+  })
 }
 
 /**
@@ -249,6 +288,7 @@ export const checkPermission = (requiredPermission: string) => {
         targetVenueId: venueId,
         tokenVenueId: authContext.venueId,
         tokenRole: authContext.role,
+        req,
       })
 
       if (!userRole) {
@@ -476,6 +516,7 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
         targetVenueId: venueId,
         tokenVenueId: authContext.venueId,
         tokenRole: authContext.role,
+        req,
       })
 
       if (!userRole) {
@@ -568,6 +609,7 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
         targetVenueId: venueId,
         tokenVenueId: authContext.venueId,
         tokenRole: authContext.role,
+        req,
       })
 
       if (!userRole) {

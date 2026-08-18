@@ -72,6 +72,7 @@ export async function requireVenueMembership(req: Request, res: Response, next: 
       targetVenueId,
       tokenVenueId: authContext.venueId,
       tokenRole: authContext.role,
+      req,
     })
 
     if (!role) {

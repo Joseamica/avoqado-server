@@ -45,6 +45,13 @@ export async function staffCanManageAllTables(
   tokenVenueId?: string,
   tokenRole?: string,
   overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
+  /**
+   * La petición en curso, SOLO para que `resolveUserRoleForVenue` memoice y no
+   * consulte la base una vez por middleware. Opcional a propósito: el reducer offline
+   * (`sync.mobile.service.ts`) llama a esta función SIN request, y ahí no debe haber
+   * memoria compartida — cada intent se evalúa por su cuenta.
+   */
+  req?: Request,
 ): Promise<boolean> {
   // SUPERADMIN bypass (mismo criterio que checkPermission)
   const superAdminVenue = await prisma.staffVenue.findFirst({
@@ -58,6 +65,7 @@ export async function staffCanManageAllTables(
     targetVenueId: venueId,
     tokenVenueId,
     tokenRole,
+    req,
   })
   if (!userRole) return false
 
@@ -149,7 +157,9 @@ export const checkTableOwnership = (
       const foreign = owners.find(o => o.servedById && o.servedById !== authContext.userId)
       if (!foreign) return next()
 
-      if (await staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role, overridePermissions)) {
+      if (
+        await staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role, overridePermissions, req)
+      ) {
         logger.debug(`checkTableOwnership: override [${overridePermissions.join(', ')}] para ${authContext.userId} en venue ${venueId}`)
         return next()
       }

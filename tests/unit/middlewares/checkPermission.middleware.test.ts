@@ -88,6 +88,17 @@ describe('checkPermission Middleware', () => {
 
     // Default: not a superadmin
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
+    // Default: el empleado existe en el venue, ACTIVO y con el rol del authContext.
+    // Desde 2026-08-18 `resolveUserRoleForVenue` YA NO devuelve el rol del token: lo lee
+    // de `StaffVenue`, para poder aplicar el PermissionSet del empleado y para que dar de
+    // baja a alguien surta efecto de inmediato (antes seguía trabajando hasta que su
+    // token caducara). Los casos que necesitan otra cosa lo sobrescriben abajo.
+    ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({
+      role: StaffRole.MANAGER,
+      active: true,
+      permissionSetId: null,
+      permissionSet: null,
+    })
     // Default: if venue resolution fallback is needed
     ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org_123' })
     ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
