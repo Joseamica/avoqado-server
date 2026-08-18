@@ -29,7 +29,12 @@ import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
-import { isTableOwnershipEnforced, staffCanManageAllTables } from '../../middlewares/checkTableOwnership.middleware'
+import {
+  DEFAULT_OWNERSHIP_OVERRIDES,
+  PAYMENT_OWNERSHIP_OVERRIDES,
+  isTableOwnershipEnforced,
+  staffCanManageAllTables,
+} from '../../middlewares/checkTableOwnership.middleware'
 import * as tableService from '../tpv/table.tpv.service'
 import * as orderTpvService from '../tpv/order.tpv.service'
 import * as orderMobileService from './order.mobile.service'
@@ -557,8 +562,20 @@ async function applyIntent(ctx: {
   }
 }
 
-/** Regla de propiedad de mesa — misma semántica que checkTableOwnership. */
-async function assertOwnership(venueId: string, staffId: string, orderId: string): Promise<void> {
+/**
+ * Regla de propiedad de mesa — misma semántica que checkTableOwnership.
+ *
+ * `overridePermissions` espeja el de la ruta online: PAY_CASH monta el de COBRO
+ * (`tables:pay-any`), todo lo demás el default. Desalinearlos significaría que el cajero
+ * puede liquidar una mesa ajena con red y no puede sin ella — o al revés, que el replay
+ * se salta un candado que el online sí aplica.
+ */
+async function assertOwnership(
+  venueId: string,
+  staffId: string,
+  orderId: string,
+  overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
+): Promise<void> {
   if (!(await isTableOwnershipEnforced(venueId))) return
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
@@ -566,7 +583,7 @@ async function assertOwnership(venueId: string, staffId: string, orderId: string
   })
   if (!order || !order.tableId) return // mostrador — la regla no aplica
   if (!order.servedById || order.servedById === staffId) return
-  if (await staffCanManageAllTables(staffId, venueId)) return
+  if (await staffCanManageAllTables(staffId, venueId, undefined, undefined, overridePermissions)) return
   const ownerName = order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}`.trim() : 'otro mesero'
   const err: any = new Error(`Solo ${ownerName} puede modificar esta mesa`)
   err.errorCode = 'TABLE_OWNED_BY_OTHER'
@@ -953,7 +970,8 @@ async function applyPayCash(
       message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0',
     }
   }
-  await assertOwnership(venueId, staffId, orderId)
+  // Mismo override que la ruta online del cobro: la caja liquida cualquier cheque.
+  await assertOwnership(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
 
   const payment = await orderMobileService.payCashOrder(venueId, orderId, {
     amount: amountCents,

@@ -56,7 +56,7 @@ import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-li
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
-import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
+import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateVenueAccess, requireVenueMembership } from '../middlewares/validateVenueAccess.middleware'
 import { pinLoginRateLimiter, pinOverrideRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
@@ -789,11 +789,17 @@ router.get('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, chec
  *       404:
  *         description: Order not found
  */
+// 🔴 Única ruta eximida del candado de propiedad de mesa con `tables:pay-any`: con la
+// propiedad encendida, el CAJERO no podía liquidar ninguna mesa abierta por un mesero
+// —su trabajo literal— y el único escape era `tables:manage-all`, que le regalaría
+// editar, descontar, cortesiar, cancelar, mover y fusionar CUALQUIER mesa. Toast y
+// Square resuelven igual: hay dueño de mesa para EDITAR el cheque, y la caja lo liquida.
+// Las demás rutas de esta orden conservan el override default.
 router.post(
   '/venues/:venueId/orders/:orderId/pay',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
-  checkTableOwnership('order'),
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
   orderMobileController.payCash,
 )
 

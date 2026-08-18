@@ -54,6 +54,10 @@ jest.mock('@/middlewares/checkFeatureAccess.middleware', () => ({ hasFeatureAcce
 jest.mock('@/middlewares/checkTableOwnership.middleware', () => ({
   isTableOwnershipEnforced: jest.fn(),
   staffCanManageAllTables: jest.fn(),
+  // Las dos listas de override son datos, no comportamiento: se exponen tal cual para
+  // poder afirmar CUÁL monta cada intent (el cobro usa la acotada).
+  DEFAULT_OWNERSHIP_OVERRIDES: ['tables:manage-all'],
+  PAYMENT_OWNERSHIP_OVERRIDES: ['tables:manage-all', 'tables:pay-any'],
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/config/logger', () => ({
@@ -488,6 +492,41 @@ describe('sync.mobile.service processIntents', () => {
     })
     const acks = await processIntents(baseParams([{ id: 'i14', type: 'CLEAR_TABLE', payload: { tableId: 't1' } }]))
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+  })
+
+  // 🔴 Caso #4 de la auditoría de permisos de piso: con la propiedad de mesa encendida
+  // el CAJERO no podía liquidar una mesa abierta por un mesero. El override acotado
+  // `tables:pay-any` exime SÓLO al cobro — y el reducer offline tiene que montar el
+  // mismo, o el cajero cobraría con red y no sin ella.
+  it('PAY_CASH evalúa la propiedad con el override de COBRO (tables:pay-any), no con el default', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-otro',
+      servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+    })
+
+    await processIntents(baseParams([{ id: 'i-pay-ajena', type: 'PAY_CASH', payload: { orderId: 'order-99', amountCents: 1000 } }]))
+
+    expect(tableOwnership.staffCanManageAllTables).toHaveBeenCalledWith(STAFF, VENUE, undefined, undefined, [
+      'tables:manage-all',
+      'tables:pay-any',
+    ])
+  })
+
+  it('🔴 los intents que EDITAN la mesa ajena siguen con el override default', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-otro',
+      servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+    })
+
+    await processIntents(baseParams([{ id: 'i-comp-ajena', type: 'COMP_ORDER', payload: { orderId: 'order-98', reason: 'x' } }]))
+
+    expect(tableOwnership.staffCanManageAllTables).toHaveBeenCalledWith(STAFF, VENUE, undefined, undefined, ['tables:manage-all'])
   })
 
   it('UPDATE_DETAILS y CANCEL_ORDER delegan en el mismo servicio que online', async () => {

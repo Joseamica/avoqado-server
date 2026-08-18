@@ -356,7 +356,15 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // Override de propiedad de mesa: con VenueSettings.enforceTableOwnership
   // encendido, este permiso deja modificar/cerrar mesas de OTROS meseros
   // (checkTableOwnership middleware). MANAGER+ lo tiene por default.
-  'tables:manage-all': ['tables:manage-all', 'tables:read', 'tables:update'],
+  'tables:manage-all': ['tables:manage-all', 'tables:read', 'tables:update', 'tables:pay-any'],
+  // Override ACOTADO del candado de propiedad: sólo exime a la ruta de COBRO. Con la
+  // propiedad de mesa encendida, el CAJERO no podía liquidar ninguna mesa abierta por un
+  // mesero —que es literalmente su trabajo— y el único escape era `tables:manage-all`,
+  // que le habría regalado editar, descontar, cortesiar, cancelar, mover y fusionar
+  // CUALQUIER mesa. Toast y Square hacen lo mismo: hay dueño de mesa para editar el
+  // cheque, y la caja lo liquida igual. NO implica `tables:update`: cobrar no es tocar
+  // el piso.
+  'tables:pay-any': ['tables:pay-any', 'tables:read'],
 
   // ===========================
   // RESERVATIONS
@@ -781,6 +789,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'estimates:create',
     'shifts:read',
     'tables:read',
+    // Propiedad de mesa (PRO, opt-in): la CAJA liquida cualquier cheque aunque la mesa
+    // sea de otro mesero — es su trabajo. Override acotado: NO permite editarla,
+    // descontarla, cortesiarla, cancelarla, moverla ni fusionarla.
+    'tables:pay-any',
     'reviews:read',
     'customers:read', // Phase 1: Customer System
     // Alta de cliente en el cobro (founder, 2026-08-16). Sin esto la venta queda anónima:
@@ -1673,7 +1685,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   ],
   reviews: ['reviews:read', 'reviews:respond'],
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
-  tables: ['tables:read', 'tables:update', 'tables:manage-all'],
+  tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],

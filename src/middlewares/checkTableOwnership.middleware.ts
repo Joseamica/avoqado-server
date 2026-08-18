@@ -25,12 +25,26 @@ import { resolveUserRoleForVenue } from './checkPermission.middleware'
  * genérico. Corre DESPUÉS de authenticate/checkFeatureAccess/checkPermission.
  */
 
-/** ¿El staff puede saltarse la regla de propiedad en este venue? */
+/**
+ * Override por DEFAULT: administrar mesas ajenas de punta a punta (MANAGER+).
+ * `tables:pay-any` es el override ACOTADO que sólo monta la ruta de COBRO.
+ */
+export const DEFAULT_OWNERSHIP_OVERRIDES = ['tables:manage-all'] as const
+/** Cobro: la caja liquida cualquier cheque sin poder editarlo (Toast/Square hacen igual). */
+export const PAYMENT_OWNERSHIP_OVERRIDES = ['tables:manage-all', 'tables:pay-any'] as const
+
+/**
+ * ¿El staff puede saltarse la regla de propiedad en este venue?
+ *
+ * @param overridePermissions cualquiera de estos permisos exime. Por default sólo
+ *        `tables:manage-all`; la ruta de cobro añade `tables:pay-any`.
+ */
 export async function staffCanManageAllTables(
   userId: string,
   venueId: string,
   tokenVenueId?: string,
   tokenRole?: string,
+  overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
 ): Promise<boolean> {
   // SUPERADMIN bypass (mismo criterio que checkPermission)
   const superAdminVenue = await prisma.staffVenue.findFirst({
@@ -48,7 +62,7 @@ export async function staffCanManageAllTables(
   if (!userRole) return false
 
   if (permissionSet) {
-    return evaluatePermissionList(permissionSet.permissions, 'tables:manage-all')
+    return overridePermissions.some(perm => evaluatePermissionList(permissionSet.permissions, perm))
   }
 
   const venueRolePermission = await prisma.venueRolePermission.findUnique({
@@ -56,7 +70,7 @@ export async function staffCanManageAllTables(
     select: { permissions: true },
   })
   const customPermissions = venueRolePermission ? (venueRolePermission.permissions as string[]) : null
-  return hasPermission(userRole, customPermissions, 'tables:manage-all')
+  return overridePermissions.some(perm => hasPermission(userRole, customPermissions, perm))
 }
 
 /** ¿El venue tiene encendida la regla de propiedad de mesa? */
@@ -73,9 +87,15 @@ type OwnershipSource = 'order' | 'table'
 /**
  * @param source 'order' = la ruta trae `:orderId`; 'table' = trae `:tableId`
  *               (open/clear) y la regla evalúa la(s) orden(es) abierta(s) de esa mesa.
+ * @param overridePermissions permisos que eximen del candado. La ruta de COBRO monta
+ *        `PAYMENT_OWNERSHIP_OVERRIDES` para que la caja pueda liquidar un cheque ajeno
+ *        sin ganar el derecho a editarlo; todas las demás se quedan con el default.
  */
-export const checkTableOwnership = (source: OwnershipSource = 'order') => {
-  return async (req: Request, res: Response, next: NextFunction) => {
+export const checkTableOwnership = (
+  source: OwnershipSource = 'order',
+  overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
+) => {
+  const middleware = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const authContext = (req as any).authContext
       if (!authContext?.userId) {
@@ -129,8 +149,8 @@ export const checkTableOwnership = (source: OwnershipSource = 'order') => {
       const foreign = owners.find(o => o.servedById && o.servedById !== authContext.userId)
       if (!foreign) return next()
 
-      if (await staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role)) {
-        logger.debug(`checkTableOwnership: override tables:manage-all para ${authContext.userId} en venue ${venueId}`)
+      if (await staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role, overridePermissions)) {
+        logger.debug(`checkTableOwnership: override [${overridePermissions.join(', ')}] para ${authContext.userId} en venue ${venueId}`)
         return next()
       }
 
@@ -150,4 +170,9 @@ export const checkTableOwnership = (source: OwnershipSource = 'order') => {
       return res.status(500).json({ error: 'Internal Server Error', message: 'Failed to verify table ownership' })
     }
   }
+
+  // Expuesto para tests de auditoría de rutas: permite afirmar QUÉ override monta cada
+  // endpoint sin ejecutar el middleware (mismo patrón que `requiredPermission`).
+  ;(middleware as any).ownershipOverridePermissions = [...overridePermissions]
+  return middleware
 }
