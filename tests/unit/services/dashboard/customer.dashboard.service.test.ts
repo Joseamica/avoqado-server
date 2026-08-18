@@ -659,6 +659,18 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   applySalePosting: jest.fn().mockResolvedValue({ postingId: 'p-1', applied: true, issues: [] }),
 }))
 
+const onOrderPaidMock = jest.fn().mockResolvedValue(undefined)
+jest.mock('@/services/referrals/referralQualification.service', () => ({
+  __esModule: true,
+  onOrderPaid: (...a: unknown[]) => onOrderPaidMock(...a),
+}))
+
+const logActionMock = jest.fn()
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  __esModule: true,
+  logAction: (...a: unknown[]) => logActionMock(...a),
+}))
+
 describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
   const CLIENTE = 'cust-1'
   const ORDEN = { id: 'order-1', orderNumber: 'ORD-1', remainingBalance: new Decimal(100), total: new Decimal(100) }
@@ -701,5 +713,111 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
       expect.anything(),
       expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1' }),
     )
+  })
+
+  // ── El hook de referidos sigue al CAS, no a la lista de candidatas ──────────
+  // `pendingOrders` son las órdenes que ESTABAN pendientes cuando se leyó el
+  // cliente. La que pierde el CAS NO la liquidó ESTA llamada, así que dispararle
+  // `onOrderPaid` es afirmar un cobro que este camino no hizo — y calificar un
+  // referido de más es irreversible (quema el `ReferralTierUnlock` de por vida).
+  it('🔴 la orden que PIERDE el CAS no dispara el hook de referidos', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    await settleCustomerBalance('venue-1', CLIENTE)
+
+    expect(onOrderPaidMock).not.toHaveBeenCalled()
+  })
+
+  it('✅ la orden que SÍ liquidó esta llamada sí lo dispara, con su propio orderId', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+
+    await settleCustomerBalance('venue-1', CLIENTE)
+
+    expect(onOrderPaidMock).toHaveBeenCalledTimes(1)
+    expect(onOrderPaidMock).toHaveBeenCalledWith({ orderId: 'order-1', venueId: 'venue-1' })
+  })
+
+  // ── Lo REPORTADO también sale del CAS, no de la foto inicial ────────────────
+  //
+  // Escenario real: cliente con 3 órdenes de fiado de $300. Entre la lectura del
+  // cliente y el CAS, el TPV cobra una. Se crean 2 Payment ($600) — correcto —
+  // pero el conteo, el monto, el mensaje y el ActivityLog salían de
+  // `pendingOrders` (la foto inicial): le decían al cajero "3 órdenes / $900" y
+  // dejaban una bitácora que cuenta el dinero DOS veces. La bitácora es de lo
+  // que dependemos para investigar incidentes: no puede mentir.
+  describe('lo reportado sale del CAS, no de pendingOrders', () => {
+    const TRES_DE_300 = [
+      { order: { id: 'order-A', orderNumber: 'ORD-A', remainingBalance: new Decimal(300), total: new Decimal(300) } },
+      { order: { id: 'order-B', orderNumber: 'ORD-B', remainingBalance: new Decimal(300), total: new Decimal(300) } },
+      { order: { id: 'order-C', orderNumber: 'ORD-C', remainingBalance: new Decimal(300), total: new Decimal(300) } },
+    ]
+
+    // A gana · B la perdió (el TPV se le adelantó) · C gana.
+    const conBPerdida = () => {
+      prismaMock.customer.findFirst.mockResolvedValue({ id: CLIENTE, orderAssociations: TRES_DE_300 } as any)
+      prismaMock.order.updateMany
+        .mockResolvedValueOnce({ count: 1 } as any)
+        .mockResolvedValueOnce({ count: 0 } as any)
+        .mockResolvedValueOnce({ count: 1 } as any)
+    }
+
+    it('🔴 devuelve 2 y $600 — no 3 y $900 — cuando una orden pierde el CAS', async () => {
+      conBPerdida()
+
+      const result = await settleCustomerBalance('venue-1', CLIENTE)
+
+      expect(result.settledOrderCount).toBe(2)
+      expect(result.settledAmount).toBe(600)
+      // El monto reportado es la suma EXACTA de los Payment que se crearon.
+      expect(prismaMock.payment.create).toHaveBeenCalledTimes(2)
+    })
+
+    it('🔴 el mensaje al cajero no le confirma una liquidación que no hizo', async () => {
+      conBPerdida()
+
+      const result = await settleCustomerBalance('venue-1', CLIENTE)
+
+      expect(result.message).toContain('2 order(s)')
+      expect(result.message).toContain('600')
+      expect(result.message).not.toContain('3 order(s)')
+      expect(result.message).not.toContain('900')
+    })
+
+    it('🔴 el ActivityLog CUSTOMER_BALANCE_SETTLED no cuenta el dinero dos veces', async () => {
+      conBPerdida()
+
+      await settleCustomerBalance('venue-1', CLIENTE)
+
+      expect(logActionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CUSTOMER_BALANCE_SETTLED',
+          entityId: CLIENTE,
+          data: { settledOrderCount: 2, settledAmount: 600 },
+        }),
+      )
+    })
+
+    it('✅ sin contención las tres se liquidan y se reportan las tres', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({ id: CLIENTE, orderAssociations: TRES_DE_300 } as any)
+      prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+
+      const result = await settleCustomerBalance('venue-1', CLIENTE)
+
+      expect(result.settledOrderCount).toBe(3)
+      expect(result.settledAmount).toBe(900)
+      expect(onOrderPaidMock).toHaveBeenCalledTimes(3)
+    })
+
+    it('✅ si las TRES pierden el CAS no se reporta nada liquidado', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({ id: CLIENTE, orderAssociations: TRES_DE_300 } as any)
+      prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+
+      const result = await settleCustomerBalance('venue-1', CLIENTE)
+
+      expect(result.settledOrderCount).toBe(0)
+      expect(result.settledAmount).toBe(0)
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect(onOrderPaidMock).not.toHaveBeenCalled()
+    })
   })
 })

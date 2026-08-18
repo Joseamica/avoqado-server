@@ -715,9 +715,6 @@ export async function settleCustomerBalance(
     }
   }
 
-  // Calculate total amount being settled
-  const totalSettledAmount = pendingOrders.reduce((sum, oc) => sum + Number(oc.order.remainingBalance), 0)
-
   // Update all pending orders to mark them as paid and create payment records
   //
   // 🔴 CAS por orden (fase 5, audit Codex): el update era CIEGO, así que esta
@@ -728,6 +725,18 @@ export async function settleCustomerBalance(
   // 🔴 Y también deduce: marcaba PAID sin tocar inventario. El vale nace dentro
   // del mismo CAS, así que el perdedor tampoco puede descontar.
   const postingIds: string[] = []
+  // 🔴 LA lista de lo que ESTA llamada liquidó de verdad — no las que estaban
+  // pendientes al leer al cliente. TODO lo que se reporta hacia afuera sale de
+  // aquí: el hook de referidos, el conteo, el monto, el mensaje y el
+  // ActivityLog. Una sola fuente, para que no se puedan desincronizar.
+  //
+  // `pendingOrders` es una FOTO tomada en `:702`; entre esa lectura y el CAS de
+  // abajo el TPV puede cobrar una de esas órdenes. Antes el reporte salía de la
+  // foto: con 3 cuentas de $300 y una cobrada por otro camino, se creaban 2
+  // Payment ($600) pero se le respondía al cajero "3 order(s) totaling 900" y se
+  // escribía un ActivityLog con 900 — la bitácora contando el dinero DOS veces,
+  // justo el registro del que dependemos para investigar un incidente.
+  const settled: Array<{ orderId: string; amount: number }> = []
   await prisma.$transaction(async tx => {
     for (const oc of pendingOrders) {
       const remainingBalance = Number(oc.order.remainingBalance)
@@ -742,6 +751,10 @@ export async function settleCustomerBalance(
         },
       })
       if (transition.count === 0) continue
+      // Se registra el MISMO `remainingBalance` que va al Payment de abajo: el
+      // monto reportado es la suma exacta de los pagos creados, no un recálculo
+      // que pueda divergir de ellos.
+      settled.push({ orderId: oc.order.id, amount: remainingBalance })
 
       // Create a payment record to track the settlement
       await tx.payment.create({
@@ -790,24 +803,48 @@ export async function settleCustomerBalance(
 
   // REFERRAL HOOK: each settled order may have had a pending referral — trigger qualification
   // (idempotent: no-ops if no PENDING Referral matches each orderId)
+  //
+  // 🔴 Sobre `settled`, NO sobre `pendingOrders`: la que perdió el CAS no la
+  // liquidó ESTA llamada (se le adelantó `settleOrder` o un cobro del TPV).
+  // Dispararle el hook es afirmar un cobro que este camino no hizo — y
+  // `onOrderPaid` reclama el referido y quema un `ReferralTierUnlock`, que se
+  // gana UNA vez en la vida y no se re-emite.
+  //
+  // Corre DESPUÉS del commit de la transacción de arriba, y eso es obligatorio:
+  // `onOrderPaid` abre su propia transacción y relee la orden, así que llamarlo
+  // dentro de la nuestra le escondería el `PAID` sin commitear y mataría la
+  // calificación en silencio. Ver su precondición.
+  //
+  // El try/catch por orden se conserva: un fallo del hook nunca puede tumbar una
+  // liquidación ya commiteada.
   try {
     const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
-    for (const oc of pendingOrders) {
+    for (const { orderId } of settled) {
       try {
-        await onOrderPaid({ orderId: oc.order.id, venueId })
+        await onOrderPaid({ orderId, venueId })
       } catch (err) {
-        console.error('[referral hook] onOrderPaid failed for order', oc.order.id, err)
+        console.error('[referral hook] onOrderPaid failed for order', orderId, err)
       }
     }
   } catch (err) {
     console.error('[referral hook] Failed to import referralQualification.service', err)
   }
 
+  // 🔴 Conteo, monto, mensaje y bitácora: los CUATRO salen de `settled`, nunca
+  // de `pendingOrders`. Arreglar sólo el referido y dejar los pesos colgados de
+  // la foto inicial era la asimetría que nadie iba a poder explicar después.
+  const settledOrderCount = settled.length
+  const settledAmount = settled.reduce((sum, s) => sum + s.amount, 0)
+
   logger.info(`Customer balance settled: ${customerId}`, {
     venueId,
     customerId,
-    settledOrderCount: pendingOrders.length,
-    settledAmount: totalSettledAmount,
+    settledOrderCount,
+    settledAmount,
+    // Cuántas candidatas había al leer al cliente. Si no cuadra con
+    // `settledOrderCount`, otro camino cobró en medio — es dato de diagnóstico,
+    // no un error.
+    candidateOrderCount: pendingOrders.length,
     notes,
   })
 
@@ -816,13 +853,13 @@ export async function settleCustomerBalance(
     action: 'CUSTOMER_BALANCE_SETTLED',
     entity: 'Customer',
     entityId: customerId,
-    data: { settledOrderCount: pendingOrders.length, settledAmount: totalSettledAmount },
+    data: { settledOrderCount, settledAmount },
   })
 
   return {
-    settledOrderCount: pendingOrders.length,
-    settledAmount: totalSettledAmount,
-    message: `Successfully settled ${pendingOrders.length} order(s) totaling ${totalSettledAmount}`,
+    settledOrderCount,
+    settledAmount,
+    message: `Successfully settled ${settledOrderCount} order(s) totaling ${settledAmount}`,
   }
 }
 
