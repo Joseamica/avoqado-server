@@ -2260,7 +2260,16 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           where: { id: orderId, venueId, version: fresh.version, paymentStatus: { in: ['PENDING', 'PARTIAL'] } },
           data: {
             paymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
-            status: isFullyPaid ? 'COMPLETED' : 'PENDING',
+            // 🔴 Un abono PARCIAL no toca `Order.status`. Antes escribía
+            // `PENDING`, o sea que una comanda ya `CONFIRMED`/`PREPARING`
+            // RETROCEDÍA de etapa porque el cliente pagó la mitad — cobrar no es
+            // un evento de cocina. `status` es el interruptor "¿la cuenta sigue
+            // abierta?" (las listas de cuentas abiertas y el plano de mesas
+            // filtran por él); el dinero se lee de `paymentStatus`. Un cobro sólo
+            // puede AVANZARLO a COMPLETED cuando la cuenta queda saldada.
+            // (`payment.tpv.service`, `manualPayment.service` y el webhook de
+            // cripto ya se comportaban así.)
+            ...(isFullyPaid ? { status: 'COMPLETED' as const } : {}),
             paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
             remainingBalance: Math.max(0, remainingAfterPayment),
             tipAmount: totalTip,

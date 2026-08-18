@@ -699,12 +699,16 @@ describe('order.mobile.service', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           paymentStatus: 'PARTIAL',
-          status: 'PENDING',
           paidAmount: new Decimal(50),
           remainingBalance: 50,
         }),
       }),
     )
+    // 🔴 El abono parcial ya NO escribe `status`. Antes ponía `PENDING`, o sea
+    // que devolvía de etapa una comanda ya CONFIRMED/PREPARING por un evento de
+    // caja. Detalle y la regla completa:
+    // `tests/unit/services/mobile/orderStatus.partialPayment.test.ts`.
+    expect(prismaMock.order.updateMany.mock.calls.at(-1)![0].data).not.toHaveProperty('status')
 
     // Second half: one COMPLETED $50 payment on file → cumulative $100 → PAID.
     prismaMock.order.findUnique.mockResolvedValue({ ...orderRow, paymentStatus: 'PARTIAL' })

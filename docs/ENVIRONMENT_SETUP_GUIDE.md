@@ -69,6 +69,28 @@ openssl rand -base64 64
 node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ```
 
+## 🪙 Webhook de cripto (B4Bit) — banderas de autenticación
+
+El webhook `POST /api/v1/webhooks/b4bit` **exige firma HMAC válida** (`src/controllers/tpv/b4bit-webhook.tpv.controller.ts`). Ninguna de
+estas variables es obligatoria: los defaults son los seguros. Se documentan porque **B4Bit NO reintenta** — cada webhook rechazado es una
+confirmación de cobro perdida para siempre.
+
+| Variable                        | Default si NO está      | Qué hace                                                                                                                                                                                                                            |
+| ------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `B4BIT_STRICT_WEBHOOK_AUTH`     | **ON** (estricto)       | Válvula de despliegue. Sólo el literal `false` la apaga. Apagada: el webhook se procesa **como antes** pero cada caso que habría rechazado escribe `🚨 [B4Bit webhook] HABRÍA RECHAZADO` con el motivo y el status que habría dado. |
+| `B4BIT_ALLOW_UNSIGNED_WEBHOOKS` | **OFF**                 | Sólo con el valor `true` **y fuera de producción**: acepta el webhook de un venue sin secreto. En `NODE_ENV=production` se ignora por completo.                                                                                     |
+| `B4BIT_WEBHOOK_SECRET`          | (sin fallback si falta) | **Legado**: un único secreto global, previo al secreto por venue (`VenueCryptoConfig.b4bitSecretKey`). ⚠️ Si está definido, **tapa** la alerta `🚨 SIN SECRET`: un venue sin llave propia falla con 401 en vez de 503.              |
+
+**Antes de desplegar el modo estricto** conviene verificar tres cosas en producción:
+
+1. `SELECT ... FROM "VenueCryptoConfig"` — ningún venue `ACTIVE` sin `b4bitSecretKey`, y que la llave case `^[0-9a-fA-F]{64}$` (hex de 64;
+   `Buffer.from(x,'hex')` trunca en silencio y dejaría a ese venue sin cobros).
+2. Si existe volumen cripto real (`Payment.method = 'CRYPTOCURRENCY'`).
+3. Si `B4BIT_WEBHOOK_SECRET` está definido en el entorno (ver la advertencia de arriba).
+
+Plan B si B4Bit no manda los headers como documenta: desplegar con `B4BIT_STRICT_WEBHOOK_AUTH=false` y leer los `🚨 HABRÍA RECHAZADO` antes
+de prender el estricto.
+
 ## 🌐 Frontend URLs
 
 ### Staging: `https://develop.avoqado-web-dashboard.pages.dev`

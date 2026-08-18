@@ -83,6 +83,19 @@ export async function enableCryptoForVenue(venueId: string) {
 }
 
 /**
+ * El `secretKey` de B4Bit es una llave de 32 bytes en hexadecimal (64 caracteres).
+ *
+ * 🔴 Validarlo NO es cosmético: la verificación del webhook hace
+ * `Buffer.from(secret, 'hex')`, y eso **trunca en silencio** al primer carácter
+ * no-hex. Un secreto mal pegado (con espacios, a medias, o con otro formato) no
+ * falla al guardarse: falla después, en CADA webhook de ese venue — y B4Bit no
+ * reintenta, así que cada confirmación rechazada es un cobro que desaparece de
+ * los libros. Se rechaza al pegarlo, que es el único momento en que hay alguien
+ * mirando.
+ */
+const B4BIT_SECRET_KEY_PATTERN = /^[0-9a-fA-F]{64}$/
+
+/**
  * Complete crypto setup by saving Device ID + Secret Key, then validating
  */
 export async function completeCryptoSetup(venueId: string, deviceId: string, secretKey: string) {
@@ -91,6 +104,14 @@ export async function completeCryptoSetup(venueId: string, deviceId: string, sec
   if (existing.status === CryptoConfigStatus.INACTIVE) {
     throw new BadRequestError('Crypto está desactivado. Reactívalo primero.')
   }
+
+  if (!B4BIT_SECRET_KEY_PATTERN.test((secretKey ?? '').trim())) {
+    throw new BadRequestError(
+      'La Secret Key de B4Bit debe ser hexadecimal de 64 caracteres (32 bytes). ' +
+        'Cópiala completa desde el panel de B4Bit, sin espacios ni saltos de línea.',
+    )
+  }
+  secretKey = secretKey.trim()
 
   // Validate credentials by making a test API call with the device ID.
   // Per B4Bit docs (https://docs.b4bit.com/pay/api/autenticacion/), X-Device-Id

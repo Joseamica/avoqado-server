@@ -287,7 +287,7 @@ router.post('/angelpay/:merchantAccountId', handleAngelPayWebhook)
  *                   type: boolean
  *                 action:
  *                   type: string
- *                   enum: [CONFIRMED, AWAITING_CONFIRMATION, FAILED, EXPIRED, NOT_FOUND, ERROR]
+ *                   enum: [CONFIRMED, AWAITING_CONFIRMATION, FAILED, EXPIRED, NOT_FOUND, ERROR, IGNORED]
  *                 message:
  *                   type: string
  *                 paymentId:

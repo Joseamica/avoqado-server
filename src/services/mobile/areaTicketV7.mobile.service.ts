@@ -3245,7 +3245,11 @@ export async function finalizeAreaTicketPaymentInTransaction(
       where: { id: input.orderId },
       data: {
         paymentStatus,
-        status: finalFullyPaid ? 'COMPLETED' : 'PENDING',
+        // 🔴 Un cobro PARCIAL no toca `Order.status`: escribía `PENDING` y
+        // devolvía a la etapa inicial una orden ya `CONFIRMED`/`PREPARING`.
+        // `status` dice "¿la cuenta sigue abierta?" — el dinero lo dice
+        // `paymentStatus`. Sólo AVANZA a COMPLETED al quedar saldada.
+        ...(finalFullyPaid ? { status: 'COMPLETED' as const } : {}),
         paidAmount: totalPaid,
         remainingBalance,
         tipAmount: totalTip,

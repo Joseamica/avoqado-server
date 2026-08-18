@@ -97,6 +97,14 @@ export interface B4BitWebhookPayload {
 
   // Metadata
   timestamp?: string // ISO timestamp of the webhook
+  /**
+   * Momento en que B4Bit editó la orden por última vez.
+   *
+   * 🔑 B4Bit NO garantiza el orden de entrega de los webhooks: su documentación
+   * pide deduplicar por `identifier + edited_at` y **descartar el más viejo**.
+   * Opcional a propósito — los payloads que no lo traen se procesan como siempre.
+   */
+  edited_at?: string
 }
 
 /**
@@ -171,7 +179,8 @@ export interface InitiateCryptoPaymentResult {
 
 export interface ProcessWebhookResult {
   success: boolean
-  action: 'CONFIRMED' | 'AWAITING_CONFIRMATION' | 'FAILED' | 'EXPIRED' | 'NOT_FOUND' | 'ERROR'
+  /** `IGNORED`: el webhook llegó fuera de orden (`edited_at` viejo) y no se aplicó. */
+  action: 'CONFIRMED' | 'AWAITING_CONFIRMATION' | 'FAILED' | 'EXPIRED' | 'NOT_FOUND' | 'ERROR' | 'IGNORED'
   message: string
   paymentId?: string
   details?: {

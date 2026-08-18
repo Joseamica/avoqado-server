@@ -457,25 +457,27 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
  * Verify B4Bit webhook signature
  *
  * B4Bit signs webhooks with HMAC-SHA256:
- * signature = hex(hmac_sha256(secret, nonce + body))
+ * signature = hex(hmac_sha256(secret_bytes, nonce + body))
  *
- * @param nonce X-NONCE header (unix timestamp)
- * @param body Raw request body as string
+ * 🔴 Esta función SÓLO contesta "¿la firma cuadra?". Qué hacer cuando no hay
+ * secreto es una decisión del controlador (rechazar con 503), no de aquí: antes
+ * devolvía `true` sin secreto y eso convertía a cualquier venue sin
+ * `b4bitSecretKey` en una puerta abierta.
+ *
+ * @param nonce X-NONCE header (unix timestamp en segundos)
+ * @param body Cuerpo CRUDO tal como llegó — B4Bit lo genera con `requests` de
+ *   Python (espacio tras `,` y `:`), así que re-serializarlo cambia el HMAC.
  * @param signature X-SIGNATURE header
- * @returns true if signature is valid
+ * @returns true sólo si la firma es válida
  */
 export function verifyWebhookSignature(nonce: string, body: string, signature: string, webhookSecret?: string | null): boolean {
   const secret = webhookSecret || process.env.B4BIT_WEBHOOK_SECRET
 
-  // TODO(#43 seguridad): sin secret esto devuelve `true`, o sea que acepta CUALQUIER
-  // webhook sin verificar nada. Junto con el `if (signature && nonce)` del controlador
-  // (`b4bit-webhook.tpv.controller.ts`), que se salta la verificación entera cuando
-  // faltan los dos headers, un tercero podría marcar cobros como confirmados.
-  // Es una tarea APARTE (#43) y NO se toca aquí: este cambio es sólo el saldo parcial.
   if (!secret) {
-    logger.warn('⚠️ B4BIT_WEBHOOK_SECRET not configured - skipping signature verification')
-    return true // Allow in development, should require in production
+    logger.warn('⚠️ B4Bit: sin secreto para verificar la firma del webhook — se rechaza')
+    return false
   }
+  if (!signature || !nonce) return false
 
   // B4Bit documentation: X-SIGNATURE = hexadecimal(hmac_sha256(merchant_secret_key, nonce + body))
   // The merchant_secret_key must be converted from hex string to bytes
@@ -483,7 +485,13 @@ export function verifyWebhookSignature(nonce: string, body: string, signature: s
   const message = nonce + body
   const expectedSignature = crypto.createHmac('sha256', secretBytes).update(message).digest('hex')
 
-  if (signature === expectedSignature) {
+  // 🔴 Comparación en TIEMPO CONSTANTE (mismo patrón que el webhook de AngelPay).
+  // La guarda de longitud no es cosmética: `timingSafeEqual` LANZA si los buffers
+  // miden distinto, y una firma corta tumbaría el handler con un 500.
+  const matches =
+    expectedSignature.length === signature.length && crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(signature))
+
+  if (matches) {
     logger.info('✅ B4Bit webhook signature verified')
     return true
   }
@@ -495,6 +503,24 @@ export function verifyWebhookSignature(nonce: string, body: string, signature: s
   })
 
   return false
+}
+
+/**
+ * `edited_at` en milisegundos, o `null` si no es una fecha usable.
+ *
+ * 🔑 La validación es lo que impide que una basura se guarde como marca de agua:
+ * a partir de ahí toda comparación da `NaN` (siempre `false`) y la protección
+ * contra webhooks fuera de orden queda apagada para ese pago, en silencio.
+ */
+function parseEditedAtMs(value: unknown): number | null {
+  if (typeof value !== 'string') return null
+  const ms = Date.parse(value)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/** El `edited_at` del payload sólo si es una fecha válida (si no, `undefined`). */
+function validEditedAt(payload: B4BitWebhookPayload): string | undefined {
+  return parseEditedAtMs(payload.edited_at) !== null ? payload.edited_at : undefined
 }
 
 /**
@@ -552,6 +578,49 @@ export async function processWebhook(payload: B4BitWebhookPayload): Promise<Proc
   }
 
   const venueId = payment.venueId
+  const processorData = typeof payment.processorData === 'object' && payment.processorData !== null ? (payment.processorData as any) : {}
+
+  // ── ORDEN DE ENTREGA ────────────────────────────────────────────────────────
+  // B4Bit no garantiza el orden y pide descartar el webhook viejo comparando
+  // `edited_at`. Sin esto, un `AC` rezagado puede pisar el estado que dejó el
+  // `CO` que llegó antes.
+  //
+  // 🔑 Un `edited_at` que no sea una fecha de verdad se trata como AUSENTE, y
+  // sobre todo NO se guarda: una vez que la marca de agua es basura, toda
+  // comparación futura da `NaN` (siempre `false`) y la protección de orden queda
+  // apagada para ese pago, **en silencio**.
+  const incomingEditedAtMs = parseEditedAtMs(payload.edited_at)
+  const lastEditedAtMs = parseEditedAtMs(processorData.lastEditedAt)
+
+  if (payload.edited_at !== undefined && incomingEditedAtMs === null) {
+    logger.warn('⚠️ [B4Bit] `edited_at` inválido en el payload — se ignora y NO se guarda como marca de agua', {
+      paymentId: payment.id,
+      venueId,
+      status,
+      editedAt: payload.edited_at,
+    })
+  }
+
+  if (incomingEditedAtMs !== null && lastEditedAtMs !== null && incomingEditedAtMs < lastEditedAtMs) {
+    logger.warn('⚠️ [B4Bit] webhook FUERA DE ORDEN ignorado — su `edited_at` es anterior al último aplicado', {
+      paymentId: payment.id,
+      venueId,
+      status,
+      editedAt: payload.edited_at,
+      lastEditedAt: processorData.lastEditedAt,
+    })
+    return {
+      success: true,
+      action: 'IGNORED',
+      message: 'Webhook fuera de orden: edited_at anterior al último aplicado',
+      paymentId: payment.id,
+      details: { status },
+    }
+  }
+
+  /** Se guarda junto con cada estado aplicado para poder descartar los viejos. */
+  const applicableEditedAt = validEditedAt(payload)
+  const editedAtPatch = applicableEditedAt ? { lastEditedAt: applicableEditedAt } : {}
 
   // Process based on status
   switch (status) {
@@ -564,7 +633,8 @@ export async function processWebhook(payload: B4BitWebhookPayload): Promise<Proc
         where: { id: payment.id },
         data: {
           processorData: {
-            ...(typeof payment.processorData === 'object' ? payment.processorData : {}),
+            ...processorData,
+            ...editedAtPatch,
             lastStatus: 'AC',
             cryptoAmount: crypto_amount,
             cryptoCurrency: currency,
@@ -605,12 +675,59 @@ export async function processWebhook(payload: B4BitWebhookPayload): Promise<Proc
     case 'EX': // Expired
       const failReason = status === 'OC' ? 'Monto insuficiente' : 'Orden expirada'
 
+      // 🔴 MONEY — un fallo TARDÍO no degrada un cobro que ya se confirmó.
+      //
+      // `OC`/`EX` escribían `status: 'FAILED'` sin mirar el estado actual, así que
+      // un webhook rezagado (B4Bit no garantiza el orden) marcaba FAILED un cobro
+      // REAL y ya cobrado. El cierre de turno y el de caja seleccionan
+      // `status: 'COMPLETED'`: el dinero desaparecía del corte mientras la orden
+      // seguía PAID. Se registra el intento en `processorData` y se avisa, pero el
+      // estado del cobro es terminal.
+      if (payment.status === 'COMPLETED') {
+        await prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            processorData: {
+              ...processorData,
+              ...editedAtPatch,
+              lastStatus: status,
+              lateFailureIgnored: true,
+              lateFailureReason: failReason,
+              lateFailureAt: new Date().toISOString(),
+            },
+          },
+        })
+
+        logger.warn('⚠️ [B4Bit] estado tardío ignorado — el cobro ya estaba COMPLETED y no se degrada', {
+          paymentId: payment.id,
+          venueId,
+          orderId: payment.orderId,
+          status,
+          failReason,
+        })
+
+        // Sin `crypto:payment_failed`: decirle a la terminal que falló un cobro
+        // que el cliente YA pagó la llevaría a cobrarlo otra vez.
+        return {
+          success: true,
+          action: 'CONFIRMED',
+          message: `Estado tardío ${status} ignorado: el cobro ya estaba confirmado`,
+          paymentId: payment.id,
+          details: {
+            status,
+            cryptoAmount: crypto_amount,
+            cryptoCurrency: currency,
+          },
+        }
+      }
+
       await prisma.payment.update({
         where: { id: payment.id },
         data: {
           status: 'FAILED',
           processorData: {
-            ...(typeof payment.processorData === 'object' ? payment.processorData : {}),
+            ...processorData,
+            ...editedAtPatch,
             lastStatus: status,
             failReason,
             failedAt: new Date().toISOString(),
@@ -669,6 +786,11 @@ interface CryptoSettlementResult {
   becamePaid: boolean
   paidAmount: string
   remainingBalance: string
+  /**
+   * Motivo por el que el saldo de la orden NO se recalculó. El `Payment` SÍ queda
+   * COMPLETED en ambos casos: el dinero llegó de verdad y no se puede perder.
+   */
+  balanceSkipped?: 'ORDER_HAS_REFUND' | 'ORDER_NOT_CHARGEABLE'
 }
 
 /**
@@ -723,9 +845,18 @@ async function settleOrderForConfirmedCryptoPayment(
     amount: Prisma.Decimal | number
     externalId: string | null
     processorData: Prisma.JsonValue
+    /**
+     * El estado del `Payment` **ANTES** de este webhook. `COMPLETED` significa
+     * que este `CO` es una REENTREGA/replay (ya lo habíamos aplicado); cualquier
+     * otro es la transición real a cobrado. Sin este dato no se pueden
+     * distinguir, y el guard de reembolsos se aplicaría también a un cobro nuevo.
+     */
+    status: string
   },
   processorPatch: Prisma.InputJsonObject,
 ): Promise<CryptoSettlementResult | null> {
+  /** ¿Este `CO` ya lo habíamos aplicado antes? */
+  const isRedelivery = payment.status === 'COMPLETED'
   const MAX_SETTLEMENT_ATTEMPTS = 3
 
   for (let attempt = 1; attempt <= MAX_SETTLEMENT_ATTEMPTS; attempt++) {
@@ -753,6 +884,8 @@ async function settleOrderForConfirmedCryptoPayment(
             subtotal: true,
             discountAmount: true,
             serviceChargeAmount: true,
+            paidAmount: true,
+            remainingBalance: true,
             completedAt: true,
             version: true,
           },
@@ -765,19 +898,100 @@ async function settleOrderForConfirmedCryptoPayment(
           return null
         }
 
+        /** El estado de la orden tal como quedó, para reportar sin recalcular nada. */
+        const untouched = (reason: CryptoSettlementResult['balanceSkipped']): CryptoSettlementResult => ({
+          isFullyPaid: fresh.paymentStatus === 'PAID',
+          becamePaid: false,
+          paidAmount: Number(fresh.paidAmount ?? 0).toFixed(2),
+          remainingBalance: Number(fresh.remainingBalance ?? 0).toFixed(2),
+          balanceSkipped: reason,
+        })
+
+        // 🔴 UNA ORDEN CANCELADA NO SE RESUCITA.
+        //
+        // La INICIACIÓN valida esto, pero entre iniciar y confirmar pasan minutos
+        // en los que alguien puede cancelar la cuenta. Sin el guard, el `CO` la
+        // dejaba `status: COMPLETED` + `paymentStatus: PAID`: una venta cancelada
+        // reaparecía cobrada. El `Payment` sí queda COMPLETED —el dinero llegó— y
+        // se grita en el log para que alguien lo concilie a mano.
+        if (fresh.status === 'CANCELLED' || fresh.status === 'DELETED') {
+          logger.error('🚨 [B4Bit] cobro confirmado sobre orden cancelada', {
+            paymentId: payment.id,
+            venueId: payment.venueId,
+            orderId: payment.orderId,
+            amount: payment.amount.toString(),
+            orderStatus: fresh.status,
+            b4bitReference: payment.externalId,
+            action: 'el Payment quedó COMPLETED; decidir a mano si se reembolsa o se reabre la cuenta',
+          })
+          return untouched('ORDER_NOT_CHARGEABLE')
+        }
+
         // Los pagos COMPLETED DURABLES — la única fuente de verdad de lo cobrado.
         // `order.paidAmount` es un derivado y arrastra el valor equivocado si
         // alguna vez se escribió mal; recalcular desde aquí lo repara solo.
         const completedPayments = await tx.payment.findMany({
           where: { orderId: payment.orderId, status: 'COMPLETED' },
-          select: { amount: true, tipAmount: true },
+          select: { amount: true, tipAmount: true, type: true },
         })
+
+        // 🔴 UNA CUENTA REEMBOLSADA NO REABRE SALDO — pero SÓLO si este `CO` es
+        // una REENTREGA.
+        //
+        // El recálculo suma TODOS los pagos COMPLETED, y un reembolso vive como un
+        // `Payment` NEGATIVO con `type: REFUND` colgado de la misma orden. Un `CO`
+        // reentregado (B4Bit tolera duplicados) volvía a recalcular una cuenta YA
+        // saldada: $200 + (−$200) = $0 pagados ⇒ la venta devuelta reaparecía
+        // debiendo $200, en el estado contradictorio `status COMPLETED` +
+        // `paymentStatus PARTIAL`.
+        //
+        // 🔑 `isRedelivery` NO es un detalle: sin él el guard también atrapaba un
+        // cobro NUEVO sobre una cuenta abierta que arrastra un reembolso previo
+        // (abonó $100 en efectivo, se le reembolsó, ahora paga $200 en cripto).
+        // Ahí la aritmética con el refund es la CORRECTA —+100 −100 +200 = 200 ⇒
+        // SALDADA— y saltarse la liquidación dejaba la cuenta pidiendo $100 que el
+        // cliente ya pagó: el mesero se los cobra dos veces. Sólo la reentrega
+        // recalcularía de más; la transición real se liquida siempre.
+        //
+        // El guard está ACOTADO A CRIPTO a propósito: los otros canales comparten
+        // la misma consulta sin filtro de `type`, pero ahí hace falta que una
+        // persona cobre otra vez para dispararlo; en cripto lo dispara un webhook,
+        // sin intervención humana. Excluir los REFUND del saldo en los 4 canales es
+        // una decisión de consistencia aparte.
+        const orderHasRefund = completedPayments.some(p => p.type === 'REFUND')
+
+        if (isRedelivery && orderHasRefund) {
+          logger.warn('⚠️ [B4Bit] CO reentregado sobre una cuenta con reembolso — saldo no recalculado', {
+            paymentId: payment.id,
+            venueId: payment.venueId,
+            orderId: payment.orderId,
+          })
+          return untouched('ORDER_HAS_REFUND')
+        }
+
+        if (orderHasRefund) {
+          // Se liquida normal (es lo correcto), pero queda dicho: una cuenta con
+          // reembolsos que recibe un cobro nuevo merece una mirada humana.
+          logger.warn('⚠️ [B4Bit] cobro cripto NUEVO sobre una cuenta con reembolsos previos — el saldo SÍ se recalcula incluyéndolos', {
+            paymentId: payment.id,
+            venueId: payment.venueId,
+            orderId: payment.orderId,
+          })
+        }
 
         const balance = computeOrderBalance(fresh, completedPayments)
         const wasAlreadyPaid = fresh.paymentStatus === 'PAID'
 
         const transition = await tx.order.updateMany({
-          where: { id: payment.orderId, venueId: payment.venueId, version: fresh.version },
+          // El filtro de `status` cierra la carrera: si cancelan la orden entre la
+          // relectura y este write, la CAS no encuentra fila (count 0) y el
+          // reintento la relee ya CANCELLED, donde el guard de arriba la ataja.
+          where: {
+            id: payment.orderId,
+            venueId: payment.venueId,
+            version: fresh.version,
+            status: { notIn: ['CANCELLED', 'DELETED'] },
+          },
           data: {
             // Sólo el derivado del cobro. `total`/`tipAmount` NO se tocan — ver el
             // bloque de `Order.total` en el docstring (cuota de envío de agregador).
@@ -936,14 +1150,18 @@ async function handlePaymentConfirmed(
     txHash: tx_hash,
     confirmations,
     confirmedAt: new Date().toISOString(),
+    // Sólo si es una fecha válida — ver `parseEditedAtMs`.
+    ...(validEditedAt(payload) ? { lastEditedAt: validEditedAt(payload) } : {}),
   })
 
   if (payment.orderId && settlement) {
-    logger.info(settlement.isFullyPaid ? '📦 Order marked as PAID' : '📦 Order partially paid — balance still open', {
-      orderId: payment.orderId,
-      paidAmount: settlement.paidAmount,
-      remainingBalance: settlement.remainingBalance,
-    })
+    if (!settlement.balanceSkipped) {
+      logger.info(settlement.isFullyPaid ? '📦 Order marked as PAID' : '📦 Order partially paid — balance still open', {
+        orderId: payment.orderId,
+        paidAmount: settlement.paidAmount,
+        remainingBalance: settlement.remainingBalance,
+      })
+    }
 
     // REFERRAL HOOK: trigger referral qualification if this crypto-paid order has a pending referral.
     // 🔑 Sólo en la TRANSICIÓN REAL a pagado: un abono parcial no es una venta
