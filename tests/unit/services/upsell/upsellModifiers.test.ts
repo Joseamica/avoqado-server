@@ -1,4 +1,4 @@
-import { validateAndResolveModifiers, UpsellModifierError } from '@/services/upsell/upsellModifiers'
+import { validateAndResolveModifiers, canAutoPropose, UpsellModifierError } from '@/services/upsell/upsellModifiers'
 
 const grupo = (id: string, required: boolean, mods: Array<{ id: string; name: string; price: number; active?: boolean }>) => ({
   group: { id, name: `Grupo ${id}`, required, modifiers: mods.map(m => ({ active: true, ...m })) },
@@ -115,5 +115,41 @@ describe('validateAndResolveModifiers', () => {
   it('el precio de Prisma (Decimal) se normaliza a número', () => {
     const p = producto([grupo('g', true, [{ id: 'm', name: 'X', price: { toString: () => '12.50' } as any }])])
     expect(validateAndResolveModifiers(p, [{ groupId: 'g', modifierId: 'm' }])[0].price).toBe(12.5)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// canAutoPropose — Ronda final de correcciones (2026-08-17)
+//
+// Los tres generadores automáticos (job nocturno, IA, espejo de promociones)
+// NUNCA eligen un modificador por el dueño — no es un juicio que les toque.
+// `canAutoPropose` es el candado que evita que propongan (o, en el caso de
+// PROMOTION, activen directo) un producto que `validateAndResolveModifiers`
+// rechazaría con una selección vacía.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('canAutoPropose', () => {
+  it('un producto sin obligatorios y que no se vende por peso SÍ se puede proponer solo', () => {
+    expect(canAutoPropose(producto([]))).toBe(true)
+  })
+
+  it('sólo grupos OPCIONALES: sigue proponible sin elegir nada', () => {
+    const p = producto([grupo('g_op', false, [{ id: 'm1', name: 'Extra', price: 10 }])])
+    expect(canAutoPropose(p)).toBe(true)
+  })
+
+  it('🔴 un producto que se vende por peso NO se puede proponer solo', () => {
+    const p = producto([], { soldByWeight: true })
+    expect(canAutoPropose(p)).toBe(false)
+  })
+
+  it('🔴 un producto vetado por el dueño NO se puede proponer solo', () => {
+    const p = producto([], { upsellEnabled: false })
+    expect(canAutoPropose(p)).toBe(false)
+  })
+
+  it('🔴 un producto con un grupo obligatorio NO se puede proponer solo — nadie eligió "Chico o Grande"', () => {
+    const p = producto([grupo('g_tam', true, [{ id: 'm_ch', name: 'Chico', price: 0 }])])
+    expect(canAutoPropose(p)).toBe(false)
   })
 })

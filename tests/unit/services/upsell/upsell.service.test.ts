@@ -19,6 +19,7 @@ import {
   parseUpsellSurfaces,
   createRule,
   updateRule,
+  approveRule,
   listRules,
   listActiveRulesForPos,
 } from '../../../../src/services/upsell/upsell.service'
@@ -468,6 +469,118 @@ describe('updateRule — revalida si cambia el producto o la selección (spec B3
         }),
       }),
     )
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Ronda final de correcciones (2026-08-17): `approveRule` pasaba una propuesta
+// de PROPOSED a ACTIVE sin validar nada. El spec promete "nunca se guarda una
+// regla que el POS va a ignorar" — antes eso sólo era cierto para las reglas
+// que el dueño escribe a mano (createRule/updateRule, arriba). Estos tests
+// prueban que aprobar reusa el MISMO validador, no una copia.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('approveRule — misma validación que crear', () => {
+  it('🔴 rechaza aprobar una propuesta cuyo producto pide una opción obligatoria sin resolver', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({
+      id: 'r1',
+      status: 'PROPOSED',
+      suggestedProductId: 'prod_agua',
+      // El job nunca elige el tamaño por el dueño.
+      suggestedModifiers: [],
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue({
+      id: 'prod_agua',
+      soldByWeight: false,
+      upsellEnabled: true,
+      modifierGroups: [
+        { group: { id: 'g_tam', name: 'Tamaño', required: true, modifiers: [{ id: 'm_gr', name: 'Grande', price: 15, active: true }] } },
+      ],
+    })
+
+    await expect(approveRule('v1', 'r1', 'staff_1')).rejects.toThrow(/Tamaño/)
+    // 🔴 Lo importante: NO se activó. El bug original era justo que sí se activaba.
+    expect(prisma.upsellRule.update).not.toHaveBeenCalled()
+  })
+
+  it('🔴 rechaza aprobar un producto que se vende por peso', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({
+      id: 'r1',
+      status: 'PROPOSED',
+      suggestedProductId: 'prod_jamon',
+      suggestedModifiers: null,
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue({
+      id: 'prod_jamon',
+      soldByWeight: true,
+      upsellEnabled: true,
+      modifierGroups: [],
+    })
+
+    await expect(approveRule('v1', 'r1', 'staff_1')).rejects.toThrow(/se vende por peso/)
+    expect(prisma.upsellRule.update).not.toHaveBeenCalled()
+  })
+
+  it('🔴 rechaza aprobar un producto que el dueño vetó DESPUÉS de que se propuso la regla', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({
+      id: 'r1',
+      status: 'PROPOSED',
+      suggestedProductId: 'prod_coca',
+      suggestedModifiers: null,
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue({
+      id: 'prod_coca',
+      soldByWeight: false,
+      upsellEnabled: false, // vetado entre que se propuso y que el dueño decide aprobar
+      modifierGroups: [],
+    })
+
+    await expect(approveRule('v1', 'r1', 'staff_1')).rejects.toThrow(/vetado/)
+    expect(prisma.upsellRule.update).not.toHaveBeenCalled()
+  })
+
+  it('aprueba y activa cuando el producto sigue siendo válido', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({
+      id: 'r1',
+      status: 'PROPOSED',
+      origin: 'BASKET_DATA',
+      suggestedProductId: 'prod_coca',
+      suggestedModifiers: null,
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue({
+      id: 'prod_coca',
+      soldByWeight: false,
+      upsellEnabled: true,
+      modifierGroups: [],
+    })
+    ;(prisma.upsellRule.update as jest.Mock).mockResolvedValue({ id: 'r1', status: 'ACTIVE' })
+
+    const result = await approveRule('v1', 'r1', 'staff_1')
+
+    expect(prisma.product.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'prod_coca', venueId: 'v1' } }))
+    expect(prisma.upsellRule.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'r1' },
+        data: expect.objectContaining({ status: UpsellRuleStatus.ACTIVE, approvedById: 'staff_1' }),
+      }),
+    )
+    expect(result.status).toBe('ACTIVE')
+  })
+
+  it('una regla YA activa regresa de inmediato — no revalida ni toca el catálogo', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue({ id: 'r1', status: UpsellRuleStatus.ACTIVE })
+
+    await approveRule('v1', 'r1', 'staff_1')
+
+    expect(prisma.product.findFirst).not.toHaveBeenCalled()
+    expect(prisma.upsellRule.update).not.toHaveBeenCalled()
+  })
+
+  it('regla inexistente sigue lanzando RULE_NOT_FOUND (no rompe lo de hoy)', async () => {
+    ;(prisma.upsellRule.findFirst as jest.Mock).mockResolvedValue(null)
+
+    await expect(approveRule('v1', 'r1', 'staff_1')).rejects.toThrow(/No encontré esa regla/)
+    expect(prisma.product.findFirst).not.toHaveBeenCalled()
   })
 })
 

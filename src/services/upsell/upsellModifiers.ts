@@ -96,3 +96,27 @@ export function validateAndResolveModifiers(
 
   return resolved
 }
+
+/**
+ * ¿Un generador AUTOMÁTICO (job nocturno, IA, espejo de promociones) puede
+ * proponer este producto SIN que un humano elija nada?
+ *
+ * Ronda final de correcciones (2026-08-17): ninguno de los tres generadores
+ * escribe `suggestedModifiers` — nunca han sabido elegir "¿Chico o Grande?" por
+ * el dueño, eso es un juicio que no les toca. Antes de esta función proponían
+ * de todos modos, y `approveRule`/`validateAndResolveModifiers` los rechazaba
+ * hasta que el dueño intentaba aprobarlos: la propuesta nacía muerta y sólo se
+ * notaba al dar clic en "Activar". `canAutoPropose` corre el MISMO validador
+ * con una selección vacía — exactamente lo que un generador automático puede
+ * ofrecer — y dice si eso alcanza. Si el producto no tiene obligatorios (el
+ * caso común) y no se vende por peso, `validateAndResolveModifiers` no lanza
+ * y esta función responde `true`.
+ */
+export function canAutoPropose(product: ProductForValidation): boolean {
+  try {
+    validateAndResolveModifiers(product, undefined)
+    return true
+  } catch {
+    return false
+  }
+}

@@ -32,7 +32,8 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { venuesWithFeatureAccess } from '../services/access/basePlan.service'
-import { computeDedupeKey } from '../services/upsell/upsell.service'
+import { computeDedupeKey, PRODUCT_VALIDATION_SELECT } from '../services/upsell/upsell.service'
+import { canAutoPropose, type ProductForValidation } from '../services/upsell/upsellModifiers'
 import { scheduleJob } from '../observability/jobContext'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -211,8 +212,27 @@ async function proposeBasketRules(venueId: string, since: Date): Promise<number>
   const pairs = await findBasketPairs(venueId, since)
   if (pairs.length === 0) return 0
 
+  // 🔴 Ronda final de correcciones (2026-08-17). El SQL de `findBasketPairs` ya
+  // filtra el veto del dueño y el catálogo (`upsellEnabled`, `active`,
+  // `deletedAt`); lo que le falta —venderse por peso, o pedir una opción
+  // obligatoria que este job no sabe elegir por el dueño— se checa aquí, con
+  // el MISMO validador que usa `approveRule` (`canAutoPropose`,
+  // `upsellModifiers.ts`), en vez de reimplementar la regla. Sin esto el
+  // dueño ve la propuesta en su bandeja, da "Activar", y el server la
+  // rechaza — parece un bug del sistema, no una regla mal armada. Y este job
+  // es justo el de MAYOR volumen: propone lo que se compra junto, que suele
+  // incluir lo que se vende por peso o pide talla/sabor.
+  const productos = await prisma.product.findMany({
+    where: { id: { in: [...new Set(pairs.map(p => p.suggestedProductId))] }, venueId },
+    select: PRODUCT_VALIDATION_SELECT,
+  })
+  const porId = new Map(productos.map(p => [p.id, p as ProductForValidation]))
+
   let written = 0
   for (const pair of pairs) {
+    const producto = porId.get(pair.suggestedProductId)
+    if (!producto || !canAutoPropose(producto)) continue
+
     const dedupeKey = computeDedupeKey({
       origin: UpsellOrigin.BASKET_DATA,
       triggerType: UpsellTriggerType.PRODUCT,
@@ -297,12 +317,21 @@ async function syncPromotionRules(venueId: string, now: Date): Promise<{ activat
 
     // El veto del dueño también aquí: un descuento sobre un producto no marcado
     // como sugerible NO produce tarjeta.
+    //
+    // 🔴 Ronda final de correcciones (2026-08-17): el select ahora trae lo que
+    // `canAutoPropose` necesita. Esta capa es la más delicada de las tres: nace
+    // ACTIVE directo, SIN pasar por `approveRule` (el dueño "ya decidió" al
+    // crear el descuento) — así que sin este filtro un producto por peso o con
+    // un obligatorio sin resolver se guardaría ACTIVE y el POS lo ignoraría
+    // para siempre, en silencio, sin que ningún "Activar" fallido lo delatara.
     const sugeribles = await prisma.product.findMany({
       where: { id: { in: d.targetItemIds }, venueId, upsellEnabled: true, active: true, deletedAt: null },
-      select: { id: true },
+      select: PRODUCT_VALIDATION_SELECT,
     })
 
     for (const p of sugeribles) {
+      if (!canAutoPropose(p as ProductForValidation)) continue
+
       const dedupeKey = computeDedupeKey({
         origin: UpsellOrigin.PROMOTION,
         triggerType: UpsellTriggerType.ALWAYS,

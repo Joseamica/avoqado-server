@@ -305,6 +305,67 @@ describe('upsell_status', () => {
     expect(out.activas[0].desactivadoEnCatalogo).toBe(true)
   })
 
+  it('🔴 un producto que se vende por peso reporta seVendePorPeso — antes se leía perfectamente sano aquí y el POS la descartaba siempre', async () => {
+    mockRuleFindMany.mockResolvedValueOnce([
+      {
+        id: 'r_peso',
+        status: 'ACTIVE',
+        origin: 'OWNER',
+        headline: null,
+        rationale: null,
+        supportCount: null,
+        lift: null,
+        suggestedProductId: 'prod_jamon',
+        suggestedModifiers: null,
+        suggestedProduct: {
+          id: 'prod_jamon',
+          name: 'Jamón Serrano',
+          upsellEnabled: true,
+          soldByWeight: true, // se vende por peso
+          active: true,
+          modifierGroups: [],
+        },
+        linkedDiscount: null,
+      },
+    ])
+
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect(out.activas).toHaveLength(1)
+    expect(out.activas[0].seVendePorPeso).toBe(true)
+    // Los demás motivos no aplican — no se debe reportar como vetado ni desactivado.
+    expect(out.activas[0].vetadoPorElDueno).toBe(false)
+    expect(out.activas[0].desactivadoEnCatalogo).toBe(false)
+  })
+
+  it('un producto normal reporta seVendePorPeso en false', async () => {
+    mockRuleFindMany.mockResolvedValueOnce([
+      {
+        id: 'r_normal',
+        status: 'ACTIVE',
+        origin: 'OWNER',
+        headline: null,
+        rationale: null,
+        supportCount: null,
+        lift: null,
+        suggestedProductId: 'prod_coca',
+        suggestedModifiers: null,
+        suggestedProduct: {
+          id: 'prod_coca',
+          name: 'Coca-Cola',
+          upsellEnabled: true,
+          soldByWeight: false,
+          active: true,
+          modifierGroups: [],
+        },
+        linkedDiscount: null,
+      },
+    ])
+
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.activas[0].seVendePorPeso).toBe(false)
+  })
+
   it('un descuento elegible SÍ llega al POS', async () => {
     mockRuleFindMany.mockResolvedValueOnce([
       {

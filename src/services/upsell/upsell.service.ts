@@ -492,11 +492,31 @@ export async function createRule(input: CreateRuleInput, performedBy: string) {
 /**
  * Aprueba una propuesta (`PROPOSED` → `ACTIVE`). Es lo que hace el dueño cuando
  * el job nocturno o la IA le proponen algo con su evidencia.
+ *
+ * 🔴 Ronda final de correcciones (2026-08-17): antes esto flipaba el status SIN
+ * validar nada. El spec promete "nunca se guarda una regla que el POS va a
+ * ignorar" — pero eso sólo era cierto para las reglas que el dueño escribe A
+ * MANO (`createRule`/`updateRule`, que sí validan). Una propuesta del job
+ * nocturno o de la IA podía activarse aunque el producto se vendiera por peso,
+ * estuviera vetado, o pidiera una opción obligatoria sin resolver — el camino
+ * de MAYOR volumen (son los que proponen solos, cada noche) quedaba sin la
+ * misma protección que el camino manual. Reusa el MISMO validador que
+ * `createRule`/`updateRule` (`loadProductForValidation` +
+ * `validateAndResolveModifiers`) en vez de escribir una segunda copia de la
+ * regla — y también cubre el caso en que el catálogo cambió DESPUÉS de que se
+ * propuso la regla (el dueño vetó el producto, o le agregó un obligatorio,
+ * entre que se propuso y que decide aprobar).
  */
 export async function approveRule(venueId: string, ruleId: string, performedBy: string) {
   const rule = await prisma.upsellRule.findFirst({ where: { id: ruleId, venueId } })
   if (!rule) throw new UpsellValidationError('No encontré esa regla en este venue.', 'RULE_NOT_FOUND')
   if (rule.status === UpsellRuleStatus.ACTIVE) return rule
+
+  const product = await loadProductForValidation(venueId, rule.suggestedProductId)
+  // Lanza UpsellModifierError (o UpsellValidationError si el producto ya no
+  // existe) — el controller (`upsell.dashboard.controller.ts`) ya sabe
+  // traducir ambas a 400 con el código y el mensaje en español.
+  validateAndResolveModifiers(product, rule.suggestedModifiers as SuggestedModifierSelection[] | null)
 
   const updated = await prisma.upsellRule.update({
     where: { id: ruleId },

@@ -37,7 +37,7 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'upsell_status',
-    'Sugerencias al cobrar ("¿algo más?") de un venue: cuánto dinero atribuido generaron, el aumento real de ticket medido contra el grupo de control, dónde están prendidas (mostrador / mesa ordenando / mesa cobrando), las reglas activas y las propuestas que esperan decisión del dueño. Si el producto sugerido pide una opción obligatoria (tamaño, sabor…), `suggestedModifiers` la trae ya resuelta con nombre y precio — vacío si no pide nada, o si la selección quedó inválida por un cambio de catálogo. Cada regla trae por qué NO llegaría al POS: `vetadoPorElDueno` (lo vetó en la ficha del producto), `desactivadoEnCatalogo` (el producto está apagado), `pideOpcionesSinResolver` (pide una opción obligatoria que esta regla no resolvió) y, si tiene promoción ligada, `descuentoLigado.porQueNoLlega`. NO sabe si hay existencias — eso lo calcula el POS en el dispositivo, así que "sin existencias" nunca va a aparecer aquí aunque sea la causa real. Responde "¿cómo van mis sugerencias al cobrar?", "¿sirve el upsell?", "¿tengo propuestas pendientes?", "¿por qué no sale la sugerencia del agua?". Requiere plan PRO. Pasa venueId.',
+    'Sugerencias al cobrar ("¿algo más?") de un venue: cuánto dinero atribuido generaron, el aumento real de ticket medido contra el grupo de control, dónde están prendidas (mostrador / mesa ordenando / mesa cobrando), las reglas activas y las propuestas que esperan decisión del dueño. Si el producto sugerido pide una opción obligatoria (tamaño, sabor…), `suggestedModifiers` la trae ya resuelta con nombre y precio — vacío si no pide nada, o si la selección quedó inválida por un cambio de catálogo. Cada regla trae por qué NO llegaría al POS: `vetadoPorElDueno` (lo vetó en la ficha del producto), `desactivadoEnCatalogo` (el producto está apagado), `seVendePorPeso` (se vende por peso — el POS nunca lo puede sugerir de un toque), `pideOpcionesSinResolver` (pide una opción obligatoria que esta regla no resolvió) y, si tiene promoción ligada, `descuentoLigado.porQueNoLlega`. NO sabe si hay existencias — eso lo calcula el POS en el dispositivo, así que "sin existencias" nunca va a aparecer aquí aunque sea la causa real. Responde "¿cómo van mis sugerencias al cobrar?", "¿sirve el upsell?", "¿tengo propuestas pendientes?", "¿por qué no sale la sugerencia del agua?". Requiere plan PRO. Pasa venueId.',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu alcance)'),
       from: z.string().optional().describe('Inicio del rango, YYYY-MM-DD (hora local del venue). Default: hace 30 días'),
@@ -121,6 +121,13 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
         // dispara aunque siga `ACTIVE` y sin veto — mismo motivo `DESACTIVADO` que
         // ya reporta el dashboard (`avoqado-web-dashboard/src/lib/upsell/suggestability.ts`).
         desactivadoEnCatalogo: r.suggestedProduct ? r.suggestedProduct.active === false : null,
+        // 🔴 Ronda final de correcciones (2026-08-17): faltaba este motivo. El
+        // dato YA venía en el select (`PRODUCT_VALIDATION_SELECT` trae
+        // `soldByWeight`) pero nunca se reportaba — una regla para un producto
+        // por peso se leía perfectamente sana aquí y el POS la descartaba
+        // siempre (`UpsellResolver.kt` / `validateAndResolveModifiers`), sin
+        // que el MCP pudiera explicar por qué.
+        seVendePorPeso: r.suggestedProduct ? r.suggestedProduct.soldByWeight === true : null,
         // Opciones obligatorias YA resueltas (nombre y precio) — mismo shape que
         // recibe el POS (`PosUpsellRuleDTO.suggestedModifiers`). [] = el producto
         // no pide nada; también [] si la selección quedó inválida por un cambio

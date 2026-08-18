@@ -33,11 +33,22 @@ function pair(over: Partial<any> = {}) {
   }
 }
 
+/** Producto sano de sobra: sin obligatorios, no se vende por peso. `canAutoPropose` lo deja pasar. */
+function productoProponible(id: string, over: Partial<any> = {}) {
+  return { id, upsellEnabled: true, soldByWeight: false, modifierGroups: [], ...over }
+}
+
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.upsellRule.findUnique.mockResolvedValue(null)
   prismaMock.upsellRule.upsert.mockResolvedValue({} as any)
   prismaMock.upsellRule.updateMany.mockResolvedValue({ count: 0 } as any)
+  // 🔴 Ronda final de correcciones (2026-08-17): `proposeBasketRules` ahora
+  // hace un segundo `product.findMany` para `canAutoPropose` (soldByWeight +
+  // obligatorios). Default sano para 'galleta', el `suggestedProductId` que
+  // usa el helper `pair()` de abajo — los tests que necesitan un producto NO
+  // proponible sobreescriben esto explícitamente.
+  prismaMock.product.findMany.mockResolvedValue([productoProponible('galleta')] as any)
 })
 
 describe('Capa 2 — la consulta agregada', () => {
@@ -153,6 +164,63 @@ describe('Capa 2 — qué se escribe', () => {
   })
 })
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Ronda final de correcciones (2026-08-17): el SQL de arriba ya filtra el veto
+// y el catálogo, pero no sabe de obligatorios ni de venta por peso — eso lo
+// checa `canAutoPropose` en JS, con el producto YA cargado. Sin esto el dueño
+// veía la propuesta en su bandeja, daba "Activar", y el server la rechazaba.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Capa 2 — no propone lo que approveRule va a rechazar de todos modos', () => {
+  it('🔴 NO propone un producto que se vende por peso', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([pair()])
+    prismaMock.product.findMany.mockResolvedValue([productoProponible('galleta', { soldByWeight: true })] as any)
+
+    const escritas = await proposeBasketRules(venueId, since)
+
+    expect(escritas).toBe(0)
+    expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+  })
+
+  it('🔴 NO propone un producto que pide una opción obligatoria (nadie elige "Chico o Grande" por el dueño)', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([pair()])
+    prismaMock.product.findMany.mockResolvedValue([
+      productoProponible('galleta', {
+        modifierGroups: [{ group: { id: 'g_tam', name: 'Tamaño', required: true, modifiers: [{ id: 'm', name: 'Chico', price: 0 }] } }],
+      }),
+    ] as any)
+
+    const escritas = await proposeBasketRules(venueId, since)
+
+    expect(escritas).toBe(0)
+    expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+  })
+
+  it('sí propone un producto con SÓLO grupos opcionales', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([pair()])
+    prismaMock.product.findMany.mockResolvedValue([
+      productoProponible('galleta', {
+        modifierGroups: [{ group: { id: 'g_op', name: 'Extras', required: false, modifiers: [] } }],
+      }),
+    ] as any)
+
+    const escritas = await proposeBasketRules(venueId, since)
+
+    expect(escritas).toBe(1)
+    expect(prismaMock.upsellRule.upsert).toHaveBeenCalled()
+  })
+
+  it('un producto huérfano (no vino en el findMany) tampoco se propone', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([pair()])
+    prismaMock.product.findMany.mockResolvedValue([] as any)
+
+    const escritas = await proposeBasketRules(venueId, since)
+
+    expect(escritas).toBe(0)
+    expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+  })
+})
+
 describe('Capa 4 — el espejo de los descuentos', () => {
   const now = new Date('2026-08-04T12:00:00Z')
 
@@ -160,7 +228,7 @@ describe('Capa 4 — el espejo de los descuentos', () => {
     prismaMock.discount.findMany.mockResolvedValue([
       { id: 'd1', targetItemIds: ['galleta'], daysOfWeek: [1, 2], timeFrom: '10:00', timeUntil: '18:00' },
     ] as any)
-    prismaMock.product.findMany.mockResolvedValue([{ id: 'galleta' }] as any)
+    prismaMock.product.findMany.mockResolvedValue([productoProponible('galleta')] as any)
 
     const r = await syncPromotionRules(venueId, now)
 
@@ -225,5 +293,43 @@ describe('Capa 4 — el espejo de los descuentos', () => {
     const where = (prismaMock.discount.findMany.mock.calls[0][0] as any).where
     expect(where.OR).toEqual([{ validFrom: null }, { validFrom: { lte: now } }])
     expect(where.AND).toEqual([{ OR: [{ validUntil: null }, { validUntil: { gte: now } }] }])
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Ronda final de correcciones (2026-08-17): esta capa es la MÁS delicada de
+  // las tres — nace ACTIVE directo, sin pasar por `approveRule`. Sin este
+  // filtro, un producto por peso o con un obligatorio sin resolver se
+  // guardaría ACTIVE y el POS lo ignoraría para siempre, en silencio.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it('🔴 NO activa una regla para un producto que se vende por peso', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([
+      { id: 'd1', targetItemIds: ['jamon'], daysOfWeek: [], timeFrom: null, timeUntil: null },
+    ] as any)
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'jamon', upsellEnabled: true, soldByWeight: true, modifierGroups: [] }] as any)
+
+    const r = await syncPromotionRules(venueId, now)
+
+    expect(r.activated).toBe(0)
+    expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+  })
+
+  it('🔴 NO activa una regla para un producto que pide una opción obligatoria sin resolver', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([
+      { id: 'd1', targetItemIds: ['agua'], daysOfWeek: [], timeFrom: null, timeUntil: null },
+    ] as any)
+    prismaMock.product.findMany.mockResolvedValue([
+      {
+        id: 'agua',
+        upsellEnabled: true,
+        soldByWeight: false,
+        modifierGroups: [{ group: { id: 'g_tam', name: 'Tamaño', required: true, modifiers: [{ id: 'm', name: 'Chico', price: 0 }] } }],
+      },
+    ] as any)
+
+    const r = await syncPromotionRules(venueId, now)
+
+    expect(r.activated).toBe(0)
+    expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
   })
 })

@@ -35,8 +35,25 @@ function fakeClient(proposals: unknown, opts: { failFirst?: boolean; failAlways?
   } as any
 }
 
+// 🔴 Ronda final de correcciones (2026-08-17): `generateAiProposals` ahora pide
+// `soldByWeight`/`modifierGroups` (vía `PRODUCT_VALIDATION_SELECT`) para poder
+// filtrar con `canAutoPropose`. El default aquí es un producto SANO (sin
+// obligatorios, no se vende por peso) para no romper los tests existentes, que
+// nunca quisieron probar esa dimensión — `productoConObligatorio`/
+// `productoPorPeso` abajo cubren los casos nuevos explícitamente.
 function producto(id: string, name: string, upsellEnabled = true, price = 40) {
-  return { id, name, price, upsellEnabled, category: { name: 'Bebidas' } }
+  return { id, name, price, upsellEnabled, category: { name: 'Bebidas' }, soldByWeight: false, modifierGroups: [] as any[] }
+}
+
+function productoPorPeso(id: string, name: string) {
+  return { ...producto(id, name), soldByWeight: true }
+}
+
+function productoConObligatorio(id: string, name: string) {
+  return {
+    ...producto(id, name),
+    modifierGroups: [{ group: { id: 'g_tam', name: 'Tamaño', required: true, modifiers: [{ id: 'm', name: 'Chico', price: 0 }] } }],
+  }
 }
 
 beforeEach(() => {
@@ -124,6 +141,33 @@ describe('Upsell IA — lo que devuelve el modelo NO se cree a ciegas', () => {
 
     expect(r.proposed).toBe(0)
     expect(r.discarded).toBe(1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Ronda final de correcciones (2026-08-17): la IA nunca elige "¿Chico o
+  // Grande?" por el dueño — así que proponer un producto que necesita esa
+  // elección es proponer algo que `approveRule` va a rechazar de todos modos.
+  // Mismo candado (`canAutoPropose`) que usa el job nocturno.
+  // ───────────────────────────────────────────────────────────────────────
+
+  it('🔴 un producto que se vende por peso se descarta, aunque el modelo lo haya sugerido', async () => {
+    prismaMock.product.findMany.mockResolvedValue([producto('p1', 'Café'), productoPorPeso('p2', 'Jamón')] as any)
+
+    const r = await generateAiProposals(venueId, fakeClient([{ triggerProductIds: ['p1'], suggestedProductId: 'p2', headline: 'x' }]))
+
+    expect(r.proposed).toBe(0)
+    expect(r.discarded).toBe(1)
+    expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un producto con una opción obligatoria se descarta: la IA no puede resolverla por el dueño', async () => {
+    prismaMock.product.findMany.mockResolvedValue([producto('p1', 'Café'), productoConObligatorio('p2', 'Agua Mineral 1L')] as any)
+
+    const r = await generateAiProposals(venueId, fakeClient([{ triggerProductIds: ['p1'], suggestedProductId: 'p2', headline: 'x' }]))
+
+    expect(r.proposed).toBe(0)
+    expect(r.discarded).toBe(1)
+    expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
   })
 
   it('un disparador inválido no tira la propuesta: cae a ALWAYS', async () => {

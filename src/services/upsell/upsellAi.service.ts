@@ -26,7 +26,8 @@ import OpenAI from 'openai'
 import { UpsellAiRunStatus, UpsellOrigin, UpsellRuleStatus, UpsellTriggerType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { computeDedupeKey } from './upsell.service'
+import { computeDedupeKey, PRODUCT_VALIDATION_SELECT } from './upsell.service'
+import { canAutoPropose, type ProductForValidation } from './upsellModifiers'
 
 const MODEL = 'gpt-4o-mini'
 const TIMEOUT_MS = 60_000
@@ -225,7 +226,13 @@ export async function generateAiProposals(venueId: string, client?: OpenAI): Pro
   try {
     const catalog = await prisma.product.findMany({
       where: { venueId, active: true, deletedAt: null },
-      select: { id: true, name: true, price: true, upsellEnabled: true, category: { select: { name: true } } },
+      // 🔴 `PRODUCT_VALIDATION_SELECT` (soldByWeight + modifierGroups) se suma
+      // aquí — ronda final de correcciones (2026-08-17) — para poder filtrar más
+      // abajo lo que un generador automático NO puede proponer sin que un
+      // humano elija nada. Mismo candado que usa `approveRule` al aprobar
+      // (`canAutoPropose`): proponer algo que el server va a rechazar es peor
+      // que no proponerlo.
+      select: { ...PRODUCT_VALIDATION_SELECT, name: true, price: true, category: { select: { name: true } } },
       // 🔴 Los SUGERIBLES primero, y sólo después el resto.
       //
       // Con `orderBy: name` y un tope de 150, una carta de 800 productos viajaba
@@ -244,6 +251,9 @@ export async function generateAiProposals(venueId: string, client?: OpenAI): Pro
       category: p.category?.name ?? null,
       upsellEnabled: p.upsellEnabled,
     }))
+    // Shape completo (soldByWeight + modifierGroups), para `canAutoPropose` más
+    // abajo — `items` de arriba sólo lleva lo que necesita el prompt.
+    const productForValidationById = new Map(catalog.map(p => [p.id, p as ProductForValidation]))
 
     // Sin productos marcados como sugeribles no hay nada que proponer: cualquier
     // regla nacería muerta. Se dice claro en vez de quemar tokens.
@@ -285,6 +295,16 @@ export async function generateAiProposals(venueId: string, client?: OpenAI): Pro
       // regla que apunta a la nada; el veto del dueño se revalida aquí también,
       // porque el modelo puede ignorar la instrucción del prompt.
       if (!p?.suggestedProductId || !suggestibleIds.has(p.suggestedProductId)) {
+        discarded++
+        continue
+      }
+      // 🔴 Ronda final de correcciones (2026-08-17): mismo candado que el job
+      // nocturno (`canAutoPropose`) — no proponer lo que `approveRule` va a
+      // rechazar de todos modos (se vende por peso, o pide una opción
+      // obligatoria que la IA no puede elegir por el dueño). La IA nunca elige
+      // "¿Chico o Grande?"; eso es un juicio que no le toca.
+      const productoSugerido = productForValidationById.get(p.suggestedProductId)
+      if (!productoSugerido || !canAutoPropose(productoSugerido)) {
         discarded++
         continue
       }
