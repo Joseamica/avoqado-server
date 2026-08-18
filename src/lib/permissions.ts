@@ -55,6 +55,9 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'orders:create': [
     'orders:read', // Inherit read capabilities
     'orders:create',
+    // Puente: quien toma comandas conserva COTIZAR, que migró al permiso propio
+    // `estimates:create` (auditoría de piso, caso #16). No va al revés.
+    'estimates:create',
     'products:read', // Need to select products
     'menu:read', // Need to browse menu
     'inventory:read', // Need to check stock availability
@@ -489,6 +492,17 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'creditPacks:redeem': ['creditPacks:redeem', 'creditPacks:read', 'customers:read'],
 
   // ===========================
+  // ESTIMATES / PRESUPUESTOS
+  // ===========================
+  // Cotizar NO es tomar comanda: un presupuesto no mueve dinero ni abre cuenta. Con
+  // `orders:create` la recepcionista (HOST) llenaba la cotización con el cliente
+  // enfrente y truena al guardar, y el atajo de darle `orders:create` le abriría de
+  // golpe líneas, cortesías, cargos y separar. Arrastra lo que la pantalla necesita:
+  // navegar el menú, elegir al cliente y leer la lista. CONVERTIR el presupuesto en
+  // orden se queda en `orders:create`: ahí sí nace una comanda.
+  'estimates:create': ['estimates:create', 'orders:read', 'menu:read', 'customers:read'],
+
+  // ===========================
   // ROLE CONFIG (Custom Role Display Names)
   // ===========================
   'role-config:read': ['role-config:read'],
@@ -660,6 +674,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reservations:create',
     'reservations:update',
     'reservations:cancel',
+    // Cotizar desde recepción (auditoría de piso, caso #16). Un presupuesto no mueve
+    // dinero ni abre comanda; convertirlo en orden SIGUE exigiendo `orders:create`.
+    'estimates:create',
     'customers:read', // Phase 1: Customer System
     // Alta de cliente desde recepción / reservas (founder, 2026-08-16). Sin esto la
     // recepcionista llena nombre y teléfono con el cliente enfrente y truena al guardar.
@@ -759,6 +776,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:create',
     'payments:refund',
     'area-tickets:checkout',
+    // Cotizar: el mostrador ya podia (heredaba orders:create via area-tickets:checkout),
+    // pero esa herencia es de UN nivel y no alcanzaba al permiso nuevo. Explicito.
+    'estimates:create',
     'shifts:read',
     'tables:read',
     'reviews:read',
@@ -966,6 +986,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'accounting:manage', // Capa B fiscal — catálogo de cuentas (editar/seed) — PREMIUM (bundle CFDI)
     'menu:*',
     'orders:*',
+    // El wildcard 'orders:*' NO expande dependencias, asi que el permiso de cotizar va
+    // explicito (mismo motivo que el resto de los permisos nuevos de esta lista).
+    'estimates:create',
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'payments:*',
     'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
@@ -1096,6 +1119,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'cash-out:*', // Cash Out (PlayTelecom same-day promoter commission) — full control
     'menu:*',
     'orders:*',
+    // El wildcard 'orders:*' NO expande dependencias, asi que el permiso de cotizar va
+    // explicito (mismo motivo que el resto de los permisos nuevos de esta lista).
+    'estimates:create',
     'payments:*',
     'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
     'area-tickets:*', // Operate and configure multi-area retail tickets
@@ -1602,6 +1628,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void', 'orders:merge'],
+  // Presupuestos / cotizaciones del POS. Leerlos se queda en `orders:read`.
+  estimates: ['estimates:create'],
   'area-tickets': [
     'area-tickets:issue',
     'area-tickets:checkout',

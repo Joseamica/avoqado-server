@@ -2542,10 +2542,15 @@ router.get(
  * Create a new estimate.
  * Body: { items: [{ productId?, productName, quantity, unitPrice }], staffName, customerName?, customerEmail?, customerPhone?, notes?, validUntil? }
  */
+// 🔴 `estimates:create`, no `orders:create`: cotizar no es tomar comanda. Con el
+// permiso de comanda la recepcionista (HOST) llenaba el presupuesto con el cliente
+// enfrente y truena al guardar; darle `orders:create` le abriría de golpe líneas,
+// cortesías, cargos y separar. `orders:create` implica `estimates:create` (puente), así
+// que nadie que ya cotizaba pierde nada.
 router.post(
   '/venues/:venueId/estimates',
   authenticateTokenMiddleware,
-  checkPermission('orders:create'),
+  checkPermission('estimates:create'),
   estimateMobileController.createEstimate,
 )
 
@@ -2565,10 +2570,12 @@ router.get(
  * Update estimate status (send, accept, reject, cancel).
  * Body: { status: string }
  */
+// Enviar, aceptar, rechazar y cancelar son el ciclo de vida del MISMO presupuesto:
+// mismo permiso que crearlo.
 router.put(
   '/venues/:venueId/estimates/:estimateId/status',
   authenticateTokenMiddleware,
-  checkPermission('orders:create'),
+  checkPermission('estimates:create'),
   estimateMobileController.updateStatus,
 )
 
@@ -2576,6 +2583,8 @@ router.put(
  * POST /api/v1/mobile/venues/:venueId/estimates/:estimateId/convert
  * Convert an accepted estimate to an order.
  */
+// 🔴 CONVERTIR se queda en `orders:create` a propósito: aquí sí nace una comanda con
+// líneas. Es la frontera entre cotizar y vender.
 router.post(
   '/venues/:venueId/estimates/:estimateId/convert',
   authenticateTokenMiddleware,
