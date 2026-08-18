@@ -205,9 +205,16 @@ Traduce el pedido de Uber al contrato interno. Reglas verificadas:
 - `[api]` Precios en **centavos enteros**; el ÷100 vive solo aquí.
 - `[api]` Títulos bajo `title.translations.en` **aunque el texto esté en español**. Buscar `es_mx`
   no encuentra nada.
-- `[api]` `tax_info.vat_rate_percentage` llegó como **15** en un restaurante mexicano. No se
-  sustituye por `Product.taxRate × 100` a ciegas: `Product.taxRate` es fracción (`0.16`) `[código]`,
-  y publicar un IVA inventado es un problema fiscal. Se confirma con fixture antes de publicar menú.
+- ✅ `[api]` **El IVA de Uber NO es fuente de verdad fiscal — explicado el 2026-08-17.** El fixture
+  real trae `tax_info.vat_rate_percentage` en **15 para 47 items y 16 para 6, en el MISMO menú**. No
+  es una convención de Uber: es un error de captura del comercio, propagado al duplicar productos
+  (misma huella humana que el item "Borrar 1" que dejaron publicado). Consecuencias:
+  - **Al leer** un pedido, el impuesto **no se copia** de Uber. La plataforma guarda
+    `OrderItem.taxAmount = 0` en todas sus líneas `[código]`; queda escrito para que nadie lo
+    "arregle" tomando el dato del proveedor.
+  - **Al publicar** el menú se manda `Product.taxRate` de Avoqado (fracción `0.16` → `16`), nunca lo
+    que hubiera en Uber. Efecto colateral deseable: publicar desde Avoqado **le corrige al comercio**
+    el error fiscal que tenía en su menú.
 - `[doc]` El precio de un modificador **no** viene multiplicado por la cantidad del padre.
 - Dinero en `Decimal` o string decimal, **nunca `number`** — regla del repo.
 - El mapper entrega el split explícito de quién cobra qué; el core no deduce nada. Si un monto no se
