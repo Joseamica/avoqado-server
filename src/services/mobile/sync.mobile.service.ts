@@ -148,8 +148,11 @@ export function requiredPermissionForIntent(type: string): string | null {
       return 'orders:create'
     case 'PAY_CASH':
       return 'payments:create'
+    // Espejo de la ruta online: deshacer una venta SIN cobrar es del mostrador; el
+    // servicio rechaza cualquier orden con pagos, así que el permiso acotado no alcanza
+    // a anular un cheque ya cobrado ni por la vía offline.
     case 'CANCEL_ORDER':
-      return 'orders:cancel'
+      return 'orders:cancel-unpaid'
     // Cortesía y descuento tienen permiso PROPIO online (/orders/:id/comp →
     // orders:comp, /orders/:id/discount* → discounts:apply). Con un genérico
     // 'orders:update', un WAITER/CASHIER reproduciría offline lo que online

@@ -1002,4 +1002,29 @@ describe('cancelOrder — guard against live terminal charges', () => {
     expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
     expect(prismaMock.order.update).not.toHaveBeenCalled()
   })
+
+  // 🔴 Auditoría de permisos de piso, caso #9: esta ruta pasó al permiso ACOTADO
+  // `orders:cancel-unpaid`, que le da al mostrador deshacer la venta que el POS acaba de
+  // crear. Para que "sin cobrar" sea verdad y no un nombre bonito, la cancelación tiene
+  // que ser INCAPAZ de tocar una orden con dinero encima. PAID ya se rechazaba; PARTIAL
+  // no, y una cuenta a medio pagar que se cancelaba se llevaba el registro del dinero ya
+  // cobrado. Aplica a todos, MANAGER+ incluido: con pagos hechos se reembolsa primero.
+  it('rechaza cancelar una orden PARTIAL: ese dinero ya se cobró y hay que reembolsarlo primero', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', paymentStatus: 'PARTIAL', status: 'CONFIRMED' })
+
+    await expect(cancelOrder('venue-1', 'order-1')).rejects.toMatchObject({ statusCode: 400 })
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+  })
+
+  it('una orden PENDING (sin un solo peso encima) sí se cancela — es el caso del cliente que se arrepiente', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', paymentStatus: 'PENDING', status: 'CONFIRMED' })
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+
+    await cancelOrder('venue-1', 'order-1', 'cliente se arrepintió', 'staff-1')
+
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'CANCELLED' }) }),
+    )
+  })
 })

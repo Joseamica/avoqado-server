@@ -840,10 +840,17 @@ router.post(
  *       404:
  *         description: Order not found
  */
+// 🔴 `orders:cancel-unpaid`, no `orders:cancel`: el POS crea la orden ANTES de cobrar,
+// así que si el cliente se arrepiente o falla la terminal el mostrador tiene que poder
+// deshacerla — con `orders:cancel` (MANAGER+) quedaba una orden abierta y cobrable
+// ensuciando el corte, y el cajero atrapado en la pantalla de error. Dar `orders:cancel`
+// al mostrador habría permitido anular cheques AJENOS ya en servicio; el permiso acotado
+// no, porque el servicio rechaza cualquier orden con pagos (PAID o PARTIAL).
+// `orders:cancel` lo implica, así que MANAGER+ no pierde nada.
 router.delete(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
-  checkPermission('orders:cancel'),
+  checkPermission('orders:cancel-unpaid'),
   checkTableOwnership('order'),
   orderMobileController.cancelOrder,
 )

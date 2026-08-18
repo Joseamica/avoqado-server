@@ -3907,9 +3907,9 @@ router.post(
  * `TablesRepository.cancelOrder` en avoqado-tpv. Body: { reason?: string }
  *
  * Cadena de permiso — mismo permiso que `requiredPermissionForIntent('CANCEL_ORDER')`
- * en `sync.mobile.service.ts` (`orders:cancel`, NO `orders:update` como
- * split/merge/service-charges: cancelar es más destructivo que actualizar, y
- * el reducer offline ya lo trata distinto) + `checkTableOwnership('order')`,
+ * en `sync.mobile.service.ts` (`orders:cancel-unpaid` desde 2026-08-17, NO
+ * `orders:update` como split/merge/service-charges: cancelar es más destructivo que
+ * actualizar, y el reducer offline ya lo trata distinto) + `checkTableOwnership('order')`,
  * espejo EXACTO de la ruta `/mobile` equivalente (`DELETE
  * /mobile/venues/:venueId/orders/:orderId`) y de la propia `assertOwnership`
  * que corre el reducer antes de aplicar CUALQUIER `CANCEL_ORDER` reproducido.
@@ -3919,7 +3919,7 @@ router.post(
   authenticateTokenMiddleware,
   validateVenueAccess,
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:cancel'),
+  checkPermission('orders:cancel-unpaid'),
   checkTableOwnership('order'),
   orderTableController.cancelOrder,
 )

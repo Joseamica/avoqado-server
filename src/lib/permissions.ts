@@ -72,11 +72,21 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'orders:read',
     'orders:cancel',
     'payments:read', // Need to see if refund is needed
+    // Puente: quien cancela cheques ajenos conserva deshacer una venta sin cobrar, que
+    // migró al permiso acotado `orders:cancel-unpaid`. No va al revés.
+    'orders:cancel-unpaid',
   ],
   // "Fusionar cuentas": permiso propio desde el día uno (divergencia deliberada
   // de Square, que no lo separa). Junta el dinero de dos cheques en uno solo y
   // cierra el origen — si sale mal, no hay "deshacer" que devuelva las líneas
   // a su cheque original. Por eso NO viaja con orders:update.
+  // Deshacer la venta que el POS acaba de crear — SIN un solo peso encima. El POS abre la
+  // orden ANTES de cobrar, así que si el cliente se arrepiente o falla la terminal, el
+  // mostrador tiene que poder borrarla; con `orders:cancel` (MANAGER+) quedaba una orden
+  // abierta y cobrable ensuciando el corte. Acotado de verdad: la ruta rechaza cualquier
+  // orden con pagos (PAID o PARTIAL), así que este permiso NO alcanza a anular un cheque
+  // en el que ya entró dinero. Sólo arrastra lectura.
+  'orders:cancel-unpaid': ['orders:cancel-unpaid', 'orders:read'],
   'orders:merge': ['orders:read', 'orders:update', 'orders:merge', 'tables:read'],
 
   // ===========================
@@ -721,6 +731,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:read',
     'orders:create',
     'orders:update',
+    // Deshacer la venta recién arrancada, sin poder anular un cheque ya cobrado
+    // (auditoría de piso, caso #9).
+    'orders:cancel-unpaid',
     'payments:read',
     'payments:create',
     'area-tickets:issue',
@@ -789,6 +802,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'estimates:create',
     'shifts:read',
     'tables:read',
+    // Deshacer la venta que el POS acaba de crear si el cliente se arrepiente o falla la
+    // terminal (auditoría de piso, caso #9). NO es `orders:cancel`: la ruta rechaza
+    // cualquier orden con pagos, así que no alcanza a anular un cheque ya cobrado.
+    'orders:cancel-unpaid',
     // Propiedad de mesa (PRO, opt-in): la CAJA liquida cualquier cheque aunque la mesa
     // sea de otro mesero — es su trabajo. Override acotado: NO permite editarla,
     // descontarla, cortesiarla, cancelarla, moverla ni fusionarla.
@@ -1639,7 +1656,16 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   accounting: ['accounting:read', 'accounting:reconcile', 'accounting:manage'],
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
-  orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void', 'orders:merge'],
+  orders: [
+    'orders:read',
+    'orders:create',
+    'orders:update',
+    'orders:cancel',
+    'orders:cancel-unpaid',
+    'orders:comp',
+    'orders:void',
+    'orders:merge',
+  ],
   // Presupuestos / cotizaciones del POS. Leerlos se queda en `orders:read`.
   estimates: ['estimates:create'],
   'area-tickets': [

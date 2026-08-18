@@ -2883,8 +2883,18 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
     throw new NotFoundError('Order not found')
   }
 
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot cancel a paid order')
+  // 🔴 Ninguna orden CON DINERO ENCIMA se cancela por aquí — ni PAID ni PARTIAL. Antes
+  // sólo se rechazaba PAID, así que una cuenta a medio pagar se podía cancelar y se
+  // llevaba el registro del dinero ya cobrado. Es además lo que hace honesto al permiso
+  // acotado `orders:cancel-unpaid` que gatea esta ruta: "sin cobrar" tiene que ser una
+  // propiedad del código, no una promesa del nombre. Con pagos hechos el camino es
+  // reembolsar y después cancelar, igual que en Square.
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError(
+      order.paymentStatus === 'PAID'
+        ? 'Cannot cancel a paid order'
+        : 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.',
+    )
   }
 
   // A live/unknown terminal charge means money can still move: cancelling the order
