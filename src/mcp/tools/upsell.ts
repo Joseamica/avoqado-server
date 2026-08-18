@@ -6,7 +6,19 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
 import { getPerformance } from '@/services/upsell/upsellImpression.service'
-import { getUpsellSurfaces, resolveForDto, PRODUCT_VALIDATION_SELECT } from '@/services/upsell/upsell.service'
+import {
+  getUpsellSurfaces,
+  resolveForDto,
+  PRODUCT_VALIDATION_SELECT,
+  evaluateLinkedDiscountForPos,
+  type LinkedDiscountRejectReason,
+} from '@/services/upsell/upsell.service'
+import {
+  validateAndResolveModifiers,
+  UpsellModifierError,
+  type ProductForValidation,
+  type SuggestedModifierSelection,
+} from '@/services/upsell/upsellModifiers'
 import { parseDbDateRange } from '@/utils/datetime'
 import { Prisma, UpsellRuleStatus } from '@prisma/client'
 
@@ -25,7 +37,7 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'upsell_status',
-    'Sugerencias al cobrar ("¿algo más?") de un venue: cuánto dinero atribuido generaron, el aumento real de ticket medido contra el grupo de control, dónde están prendidas (mostrador / mesa ordenando / mesa cobrando), las reglas activas y las propuestas que esperan decisión del dueño. Si el producto sugerido pide una opción obligatoria (tamaño, sabor…), `suggestedModifiers` la trae ya resuelta con nombre y precio — vacío si no pide nada, o si la selección quedó inválida por un cambio de catálogo. Responde "¿cómo van mis sugerencias al cobrar?", "¿sirve el upsell?", "¿tengo propuestas pendientes?". Requiere plan PRO. Pasa venueId.',
+    'Sugerencias al cobrar ("¿algo más?") de un venue: cuánto dinero atribuido generaron, el aumento real de ticket medido contra el grupo de control, dónde están prendidas (mostrador / mesa ordenando / mesa cobrando), las reglas activas y las propuestas que esperan decisión del dueño. Si el producto sugerido pide una opción obligatoria (tamaño, sabor…), `suggestedModifiers` la trae ya resuelta con nombre y precio — vacío si no pide nada, o si la selección quedó inválida por un cambio de catálogo. Cada regla trae por qué NO llegaría al POS: `vetadoPorElDueno` (lo vetó en la ficha del producto), `desactivadoEnCatalogo` (el producto está apagado), `pideOpcionesSinResolver` (pide una opción obligatoria que esta regla no resolvió) y, si tiene promoción ligada, `descuentoLigado.porQueNoLlega`. NO sabe si hay existencias — eso lo calcula el POS en el dispositivo, así que "sin existencias" nunca va a aparecer aquí aunque sea la causa real. Responde "¿cómo van mis sugerencias al cobrar?", "¿sirve el upsell?", "¿tengo propuestas pendientes?", "¿por qué no sale la sugerencia del agua?". Requiere plan PRO. Pasa venueId.',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu alcance)'),
       from: z.string().optional().describe('Inicio del rango, YYYY-MM-DD (hora local del venue). Default: hace 30 días'),
@@ -64,7 +76,10 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
             // Selección cruda (ids); se resuelve más abajo con `resolveForDto`,
             // igual que el POS — mismo nombre y precio, nunca ids pelados.
             suggestedModifiers: true,
-            suggestedProduct: { select: { ...PRODUCT_VALIDATION_SELECT, name: true } },
+            // `active` NO está en `PRODUCT_VALIDATION_SELECT` (no lo necesita para
+            // validar modificadores) — se agrega encima para poder reportar
+            // `desactivadoEnCatalogo`, igual que ya hace `listRules` en el servicio.
+            suggestedProduct: { select: { ...PRODUCT_VALIDATION_SELECT, name: true, active: true } },
             // Para poder contestar "¿por qué mi promoción no sale en la tarjeta?".
             // Sin esto, una regla de origen PROMOTION se ve idéntica tenga o no un
             // descuento servible, y el operador no tiene dónde mirar.
@@ -78,6 +93,12 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
                 targetItemIds: true,
                 minPurchaseAmount: true,
                 maxDiscountAmount: true,
+                // 🔴 Sin esto, `evaluateLinkedDiscountForPos` no compila: declara
+                // `maxTotalUses` como requerido. Antes de reusar esa función este
+                // `select` se había desincronizado en silencio del de
+                // `listActiveRulesForPos` — con la función compartida, TypeScript
+                // exige traer los mismos campos que el POS.
+                maxTotalUses: true,
                 buyQuantity: true,
                 validFrom: true,
                 validUntil: true,
@@ -95,12 +116,22 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
         headline: r.headline,
         // El dueño vetó el producto: la regla existe pero NO se sirve al POS.
         vetadoPorElDueno: r.suggestedProduct ? !r.suggestedProduct.upsellEnabled : null,
+        // Apagado en el catálogo (`Product.active=false`): `listActiveRulesForPos`
+        // también lo filtra al servir al POS, así que una regla así NUNCA se
+        // dispara aunque siga `ACTIVE` y sin veto — mismo motivo `DESACTIVADO` que
+        // ya reporta el dashboard (`avoqado-web-dashboard/src/lib/upsell/suggestability.ts`).
+        desactivadoEnCatalogo: r.suggestedProduct ? r.suggestedProduct.active === false : null,
         // Opciones obligatorias YA resueltas (nombre y precio) — mismo shape que
         // recibe el POS (`PosUpsellRuleDTO.suggestedModifiers`). [] = el producto
         // no pide nada; también [] si la selección quedó inválida por un cambio
         // de catálogo o por el veto/soldByWeight del producto (fail-open, igual
         // que del lado del POS).
         suggestedModifiers: resolveForDto(r.suggestedProduct, r.suggestedModifiers, r.id, venueId),
+        // La regla pide una opción obligatoria (tamaño, sabor…) y su selección NO
+        // la resuelve. `suggestedModifiers` de arriba ya colapsó a [] por el
+        // fail-open de `resolveForDto` — sin este campo "no pide nada" y "pide y
+        // quedó sin resolver" se leen exactamente igual.
+        pideOpcionesSinResolver: r.suggestedProduct ? faltanOpcionesPorResolver(r.suggestedProduct, r.suggestedModifiers) : null,
         // `lift` es un ratio de ordenamiento, no dinero: 2.5 = se compran juntos
         // 2.5× más seguido que el promedio.
         lift: r.lift === null ? null : Number(r.lift),
@@ -138,14 +169,54 @@ export function registerUpsellTools(server: McpServer, scope: McpScope) {
 }
 
 /**
+ * ¿Esta regla no llega al POS porque pide una opción obligatoria (tamaño,
+ * sabor…) y su selección no la resuelve?
+ *
+ * `resolveForDto` (arriba) usa el MISMO validador pero atrapa cualquier error y
+ * colapsa a `[]` a propósito — fail-open: una regla con catálogo cambiado no
+ * puede tumbar el resto de las sugerencias (ver su docstring en
+ * `services/upsell/upsell.service.ts`). Eso es correcto para lo que resuelve
+ * (`suggestedModifiers`), pero deja a este campo ciego: "no pide nada" y "pide y
+ * quedó sin resolver" se ven idénticos. Por eso aquí SÍ se llama al validador
+ * puro directo (`validateAndResolveModifiers`, sin pasar por `resolveForDto`) y
+ * se lee su `.code` — sin tocar el fail-open del POS.
+ *
+ * `PRODUCT_NOT_SUGGESTABLE` (veto del dueño / se vende por peso) NO cuenta para
+ * este campo: el veto ya tiene el suyo (`vetadoPorElDueno`) y gana primero —
+ * `validateAndResolveModifiers` lo lanza ANTES de mirar los modificadores, así
+ * que un producto vetado nunca reporta `pideOpcionesSinResolver: true` aunque
+ * también le falte una opción.
+ */
+function faltanOpcionesPorResolver(product: ProductForValidation, selection: unknown): boolean {
+  try {
+    validateAndResolveModifiers(product, selection as SuggestedModifierSelection[] | null)
+    return false
+  } catch (error) {
+    return (
+      error instanceof UpsellModifierError &&
+      (error.code === 'MISSING_REQUIRED_MODIFIER' || error.code === 'MODIFIER_NOT_IN_GROUP' || error.code === 'MODIFIER_INACTIVE')
+    )
+  }
+}
+
+/**
  * El descuento ligado a una regla, y —si el POS no lo va a recibir— POR QUÉ.
  *
  * 🔴 Existe por un defecto real (2026-08-17): el descuento nunca llegaba al POS y
  * la tarjeta mostraba precio de lista, así que la promoción del local no se
  * aplicaba y no había NADA que mirar para darse cuenta. El POS sólo sirve
  * descuentos que puede cobrar exacto y que el endpoint de órdenes no va a
- * rechazar (ver `linkedDiscountParaPos` en `services/upsell/upsell.service.ts`);
- * este campo dice si pasó ese filtro y, si no, cuál fue el motivo.
+ * rechazar (ver `evaluateLinkedDiscountForPos` en
+ * `services/upsell/upsell.service.ts`); este campo dice si pasó ese filtro y, si
+ * no, cuál fue el motivo.
+ *
+ * 🔴 Ronda 2 (2026-08-17): esta función reimplementaba esa cadena de condiciones
+ * A MANO y se desincronizó de verdad — un commit posterior (`8501d866`) le
+ * agregó a `linkedDiscountParaPos` el chequeo de `maxTotalUses` y a esta copia
+ * no, así que el MCP decía `llegaAlPos: true` para un descuento que el POS ya
+ * excluía. Ahora llama a `evaluateLinkedDiscountForPos` — la MISMA función que
+ * usa `listActiveRulesForPos` para servir al POS — en vez de mantener su propia
+ * copia. Sólo la TRADUCCIÓN a frase (`explicarMotivoDescuento`) vive aquí.
  */
 function descuentoLigado(r: {
   suggestedProductId: string
@@ -158,6 +229,7 @@ function descuentoLigado(r: {
     targetItemIds: string[]
     minPurchaseAmount: Prisma.Decimal | null
     maxDiscountAmount: Prisma.Decimal | null
+    maxTotalUses: number | null
     buyQuantity: number | null
     validFrom: Date | null
     validUntil: Date | null
@@ -166,26 +238,7 @@ function descuentoLigado(r: {
   const d = r.linkedDiscount
   if (!d) return null
 
-  const ahora = new Date()
-  const motivo = !d.active
-    ? 'El descuento está desactivado'
-    : d.type !== 'PERCENTAGE' && d.type !== 'FIXED_AMOUNT'
-      ? `El POS no sabe cobrar descuentos de tipo ${d.type}`
-      : d.buyQuantity !== null
-        ? 'Es un 2x1: el POS no lo pinta como tarjeta'
-        : d.minPurchaseAmount !== null
-          ? 'Tiene compra mínima, y una sugerencia suelta casi nunca la alcanza'
-          : d.maxDiscountAmount !== null
-            ? 'Tiene tope de descuento, y el POS no puede reproducir el tope al centavo'
-            : d.scope !== 'ITEM'
-              ? `Su alcance es ${d.scope}, y sólo los de artículo se pueden aplicar a una línea`
-              : d.targetItemIds.length > 0 && !d.targetItemIds.includes(r.suggestedProductId)
-                ? 'No cubre al producto que sugiere esta regla'
-                : d.validFrom && d.validFrom > ahora
-                  ? 'Todavía no empieza'
-                  : d.validUntil && d.validUntil < ahora
-                    ? 'Ya venció'
-                    : null
+  const motivo = evaluateLinkedDiscountForPos(d, r.suggestedProductId, new Date())
 
   return {
     nombre: d.name,
@@ -193,6 +246,32 @@ function descuentoLigado(r: {
     // PESOS o porcentaje, unidades mayores — la plataforma no usa centavos.
     valor: Number(d.value),
     llegaAlPos: motivo === null,
-    porQueNoLlega: motivo,
+    porQueNoLlega: motivo === null ? null : explicarMotivoDescuento(motivo, d),
+  }
+}
+
+/** Traduce el código de `evaluateLinkedDiscountForPos` a la frase que lee el dueño. */
+function explicarMotivoDescuento(motivo: LinkedDiscountRejectReason, d: { type: string; scope: string }): string {
+  switch (motivo) {
+    case 'DISABLED':
+      return 'El descuento está desactivado'
+    case 'UNSUPPORTED_TYPE':
+      return `El POS no sabe cobrar descuentos de tipo ${d.type}`
+    case 'BUY_X_GET_Y_FREE':
+      return 'Es un 2x1: el POS no lo pinta como tarjeta'
+    case 'HAS_MIN_PURCHASE':
+      return 'Tiene compra mínima, y una sugerencia suelta casi nunca la alcanza'
+    case 'HAS_MAX_DISCOUNT_CAP':
+      return 'Tiene tope de descuento, y el POS no puede reproducir el tope al centavo'
+    case 'USAGE_CAP_SET':
+      return 'Tiene tope de usos: entre que se sirve la tarjeta y se cobra se puede agotar'
+    case 'SCOPE_NOT_ITEM':
+      return `Su alcance es ${d.scope}, y sólo los de artículo se pueden aplicar a una línea`
+    case 'PRODUCT_NOT_TARGETED':
+      return 'No cubre al producto que sugiere esta regla'
+    case 'NOT_YET_STARTED':
+      return 'Todavía no empieza'
+    case 'EXPIRED':
+      return 'Ya venció'
   }
 }

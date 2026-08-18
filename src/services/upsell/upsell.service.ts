@@ -245,7 +245,40 @@ export async function listActiveRulesForPos(venueId: string): Promise<PosUpsellR
 }
 
 /**
- * El descuento ligado, SÓLO si el POS lo puede aplicar sin riesgo. Null si no.
+ * Los campos de un descuento que hacen falta para decidir si el POS lo puede
+ * cobrar sin riesgo. Deliberadamente NO incluye `id`/`name`/`value`: esos sólo
+ * hacen falta para CONSTRUIR el DTO (`linkedDiscountParaPos`, abajo), no para
+ * decidir la elegibilidad.
+ */
+export interface LinkedDiscountEligibilityInput {
+  type: string
+  active: boolean
+  scope: string
+  targetItemIds: string[]
+  minPurchaseAmount: Prisma.Decimal | null
+  maxDiscountAmount: Prisma.Decimal | null
+  maxTotalUses: number | null
+  buyQuantity: number | null
+  validFrom: Date | null
+  validUntil: Date | null
+}
+
+/** `null` = el POS lo puede cobrar sin riesgo. Cualquier otro valor es el motivo por el que no. */
+export type LinkedDiscountRejectReason =
+  | 'DISABLED'
+  | 'UNSUPPORTED_TYPE'
+  | 'BUY_X_GET_Y_FREE'
+  | 'HAS_MIN_PURCHASE'
+  | 'HAS_MAX_DISCOUNT_CAP'
+  | 'USAGE_CAP_SET'
+  | 'SCOPE_NOT_ITEM'
+  | 'PRODUCT_NOT_TARGETED'
+  | 'NOT_YET_STARTED'
+  | 'EXPIRED'
+
+/**
+ * La ÚNICA cadena de condiciones que decide si un descuento ligado a una regla
+ * de upsell es seguro de cobrar en el POS.
  *
  * 🔴 Aquí conviene pasarse de conservador, porque las dos formas de equivocarse
  * cuestan dinero y una además tumba la venta:
@@ -260,33 +293,23 @@ export async function listActiveRulesForPos(venueId: string): Promise<PosUpsellR
  *    tarjeta promete un precio y la orden registra otro.** Por eso quedan fuera
  *    `maxDiscountAmount` (un tope que el cliente no replica) y COMP/2x1.
  *
- * Lo que no pasa el filtro simplemente no lleva descuento: la tarjeta muestra
- * precio de lista, que es exactamente el comportamiento de hoy y no rompe nada.
+ * Exportada para que `linkedDiscountParaPos` (abajo, arma el DTO del POS) y el
+ * MCP `upsell_status` (`src/mcp/tools/upsell.ts`, explica el motivo al dueño)
+ * reusen la MISMA cadena en vez de tener cada quien su copia — que es justo
+ * como se desincronizaron antes: un commit le agregó `maxTotalUses` aquí y no a
+ * la copia del MCP (medido 2026-08-17). Cualquier condición nueva se agrega
+ * AQUÍ una sola vez y automáticamente aplica a los dos consumidores.
  */
-function linkedDiscountParaPos(
-  discount: {
-    id: string
-    type: string
-    value: Prisma.Decimal
-    active: boolean
-    scope: string
-    targetItemIds: string[]
-    minPurchaseAmount: Prisma.Decimal | null
-    maxDiscountAmount: Prisma.Decimal | null
-    maxTotalUses: number | null
-    buyQuantity: number | null
-    validFrom: Date | null
-    validUntil: Date | null
-  } | null,
+export function evaluateLinkedDiscountForPos(
+  discount: LinkedDiscountEligibilityInput,
   suggestedProductId: string,
   ahora: Date,
-): PosLinkedDiscountDTO | null {
-  if (!discount) return null
-  if (!discount.active) return null
-  if (discount.type !== 'PERCENTAGE' && discount.type !== 'FIXED_AMOUNT') return null
-  if (discount.buyQuantity !== null) return null
-  if (discount.minPurchaseAmount !== null) return null
-  if (discount.maxDiscountAmount !== null) return null
+): LinkedDiscountRejectReason | null {
+  if (!discount.active) return 'DISABLED'
+  if (discount.type !== 'PERCENTAGE' && discount.type !== 'FIXED_AMOUNT') return 'UNSUPPORTED_TYPE'
+  if (discount.buyQuantity !== null) return 'BUY_X_GET_Y_FREE'
+  if (discount.minPurchaseAmount !== null) return 'HAS_MIN_PURCHASE'
+  if (discount.maxDiscountAmount !== null) return 'HAS_MAX_DISCOUNT_CAP'
   // 🔴 Tope de usos: `validateDiscountActive` (que corre en CADA creación de
   // orden) LANZA cuando `currentUses >= maxTotalUses`, así que un descuento
   // agotado convierte la venta en un 400. Y el POS no lo puede prever: cachea
@@ -297,18 +320,36 @@ function linkedDiscountParaPos(
   // se sirve la regla y se cobra, el contador puede llegar al límite (lo suben
   // las demás cajas, la TPV y el dashboard). La promoción sigue existiendo y se
   // puede aplicar a mano; lo único que pierde es sugerirse sola.
-  if (discount.maxTotalUses !== null) return null
-  if (discount.scope !== 'ITEM') return null
+  if (discount.maxTotalUses !== null) return 'USAGE_CAP_SET'
+  if (discount.scope !== 'ITEM') return 'SCOPE_NOT_ITEM'
   // `targetItemIds` vacío es comodín (aplica a todo), igual que lo lee
   // `validateDiscountScopeForItem`.
-  if (discount.targetItemIds.length > 0 && !discount.targetItemIds.includes(suggestedProductId)) return null
-  if (discount.validFrom && discount.validFrom > ahora) return null
-  if (discount.validUntil && discount.validUntil < ahora) return null
+  if (discount.targetItemIds.length > 0 && !discount.targetItemIds.includes(suggestedProductId)) return 'PRODUCT_NOT_TARGETED'
+  if (discount.validFrom && discount.validFrom > ahora) return 'NOT_YET_STARTED'
+  if (discount.validUntil && discount.validUntil < ahora) return 'EXPIRED'
+  return null
+}
+
+/**
+ * El descuento ligado, SÓLO si el POS lo puede aplicar sin riesgo. Null si no —
+ * la tarjeta muestra precio de lista, que es exactamente el comportamiento de
+ * hoy y no rompe nada. La cadena de condiciones vive en
+ * `evaluateLinkedDiscountForPos`; esta función sólo arma el DTO cuando pasa.
+ */
+function linkedDiscountParaPos(
+  discount: (LinkedDiscountEligibilityInput & { id: string; value: Prisma.Decimal }) | null,
+  suggestedProductId: string,
+  ahora: Date,
+): PosLinkedDiscountDTO | null {
+  if (!discount) return null
+  if (evaluateLinkedDiscountForPos(discount, suggestedProductId, ahora) !== null) return null
 
   const value = Number(discount.value)
   return {
     id: discount.id,
-    type: discount.type,
+    // TS no ve, a través de la llamada de arriba, que `type` ya quedó acotado a
+    // los dos soportados — lo garantiza `evaluateLinkedDiscountForPos`.
+    type: discount.type as PosLinkedDiscountDTO['type'],
     value,
     badge: discount.type === 'PERCENTAGE' ? `-${formatearValor(value)}%` : `-$${formatearValor(value)}`,
   }
