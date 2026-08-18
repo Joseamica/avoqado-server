@@ -44,13 +44,7 @@ export async function getUberAppToken(deps: UberTokenDeps): Promise<string> {
   const request = (async () => {
     const r = await deps.fetchToken()
     // Nunca cachear basura del proveedor: token vacío o expires_in inválido ⇒ error visible
-    if (
-      !r ||
-      typeof r.access_token !== 'string' ||
-      r.access_token.length === 0 ||
-      !Number.isFinite(r.expires_in) ||
-      r.expires_in <= 0
-    ) {
+    if (!r || typeof r.access_token !== 'string' || r.access_token.length === 0 || !Number.isFinite(r.expires_in) || r.expires_in <= 0) {
       throw new Error('Respuesta de token de Uber inválida (access_token/expires_in)')
     }
     if (gen === generation) cached = { token: r.access_token, expiresAtMs: now() + r.expires_in * 1000 }

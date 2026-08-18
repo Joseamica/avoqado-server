@@ -11,7 +11,9 @@ describe('auto-provisión del tender de delivery (durable)', () => {
   let orgId: string
 
   beforeAll(async () => {
-    const org = await prisma.organization.create({ data: { name: `Org tender ${Date.now()}`, email: `t${Date.now()}@t.mx`, phone: '5555555555' } })
+    const org = await prisma.organization.create({
+      data: { name: `Org tender ${Date.now()}`, email: `t${Date.now()}@t.mx`, phone: '5555555555' },
+    })
     orgId = org.id
     const venue = await prisma.venue.create({
       data: { organizationId: orgId, name: `Venue tender ${Date.now()}`, slug: `vt-${Date.now()}` },
@@ -36,11 +38,11 @@ describe('auto-provisión del tender de delivery (durable)', () => {
   it('crea el tender del proveedor con defaults conservadores', async () => {
     const t = await ensureDeliveryTenderType(venueId, DeliveryProvider.UBER_EATS)
     expect(t.name).toBe('Uber Eats')
-    expect(t.baseMethod).toBe(PaymentMethod.OTHER)     // el schema lo exige para filas custom
-    expect(t.countsAsPhysicalCash).toBe(false)          // no entra al cajón
-    expect(t.captureTip).toBe(false)                    // la propina la liquida la plataforma
-    expect(t.commissionPercent).toBeNull()              // decisión comercial del venue: NO se inventa
-    expect(t.satFormaPago).toBeNull()                   // decisión fiscal del venue: NO se inventa
+    expect(t.baseMethod).toBe(PaymentMethod.OTHER) // el schema lo exige para filas custom
+    expect(t.countsAsPhysicalCash).toBe(false) // no entra al cajón
+    expect(t.captureTip).toBe(false) // la propina la liquida la plataforma
+    expect(t.commissionPercent).toBeNull() // decisión comercial del venue: NO se inventa
+    expect(t.satFormaPago).toBeNull() // decisión fiscal del venue: NO se inventa
     expect(t.isSystem).toBe(false)
   })
 
@@ -55,16 +57,21 @@ describe('auto-provisión del tender de delivery (durable)', () => {
   it('respeta el que el DUEÑO ya creó a mano: lo reusa y NO lo pisa', async () => {
     const propio = await prisma.venueTenderType.create({
       data: {
-        venueId, name: 'Rappi', normalizedName: normalizeTenderName('Rappi'),
-        baseMethod: PaymentMethod.OTHER, isSystem: false,
-        countsAsPhysicalCash: false, captureTip: true,      // el dueño la quiere así
-        commissionPercent: '28.5', satFormaPago: '03',      // y ya la configuró
+        venueId,
+        name: 'Rappi',
+        normalizedName: normalizeTenderName('Rappi'),
+        baseMethod: PaymentMethod.OTHER,
+        isSystem: false,
+        countsAsPhysicalCash: false,
+        captureTip: true, // el dueño la quiere así
+        commissionPercent: '28.5',
+        satFormaPago: '03', // y ya la configuró
         revision: 1,
       },
     })
     const t = await ensureDeliveryTenderType(venueId, DeliveryProvider.RAPPI)
     expect(t.id).toBe(propio.id)
-    expect(t.captureTip).toBe(true)                    // NO se pisó
+    expect(t.captureTip).toBe(true) // NO se pisó
     expect(t.commissionPercent?.toString()).toBe('28.5')
     expect(t.satFormaPago).toBe('03')
   })

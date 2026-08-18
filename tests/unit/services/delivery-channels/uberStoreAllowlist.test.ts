@@ -1,4 +1,8 @@
-import { parseWritableStoreIds, assertStoreWritable, UberStoreWriteBlockedError } from '@/services/delivery-channels/providers/uber-eats/uber.storeAllowlist'
+import {
+  parseWritableStoreIds,
+  assertStoreWritable,
+  UberStoreWriteBlockedError,
+} from '@/services/delivery-channels/providers/uber-eats/uber.storeAllowlist'
 
 // Candado §5.0/paso 1 de la spec: el sandbox de Uber escribe en tiendas REALES
 // (verificado 2026-08-17, Doña Simona). Default-deny: sin lista, cero escrituras.

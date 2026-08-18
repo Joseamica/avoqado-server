@@ -10,6 +10,7 @@ import {
   validatePermissionFormat,
   expandWildcards,
   hasPermission,
+  getEffectiveRolePermissions,
 } from '../../lib/permissions'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
@@ -84,7 +85,18 @@ export async function getAllRolePermissions(venueId: string) {
   const roles = Object.values(StaffRole)
   return roles.map(role => {
     const custom = customPermissions.find(cp => cp.role === role)
-    const rawPermissions = custom ? custom.permissions : DEFAULT_PERMISSIONS[role]
+
+    // 🔴 Se devuelven los permisos EFECTIVOS, no la lista cruda guardada.
+    //
+    // Antes esto mandaba `custom.permissions` tal cual cuando el venue tenía fila propia. Y
+    // como ese campo es ADITIVO —se suma a los de fábrica, no los reemplaza—, la pantalla
+    // mentía: un venue que guardó `['menu:read']` veía UNA casilla marcada mientras su rol
+    // tenía en realidad los ~50 de fábrica más ésa. El admin creía haber recortado el rol y
+    // no había recortado nada.
+    //
+    // `getEffectiveRolePermissions` es la MISMA función con la que el backend autoriza, así
+    // que lo que se pinta es exactamente lo que el rol puede hacer — exclusiones incluidas.
+    const rawPermissions = getEffectiveRolePermissions(role, custom?.permissions ?? null, custom?.deniedPermissions ?? null)
 
     // Expand wildcards to individual permissions for frontend display
     const expandedPermissions = expandWildcards(rawPermissions)
@@ -92,6 +104,9 @@ export async function getAllRolePermissions(venueId: string) {
     return {
       role,
       permissions: expandedPermissions,
+      // Lo que este venue QUITÓ explícitamente. La pantalla lo necesita para distinguir
+      // "nunca lo tuvo" de "se lo quitaron", y para no re-mandarlo como si fuera nuevo.
+      deniedPermissions: (custom?.deniedPermissions as string[] | undefined) ?? [],
       isCustom: !!custom,
       modifiedBy: custom?.modifier || null,
       modifiedAt: custom?.updatedAt || null,

@@ -5,8 +5,8 @@ documentación pública; v5 = revisión contra el código y contra el dashboard 
 adversarial de Codex, 10 bloqueantes cerrados) **Repo:** `avoqado-server` · **Después:** DiDi Food, luego Rappi (specs propios, mismo motor)
 
 > **v6 — 10 bloqueantes cerrados.** La v5 se probó **contra la API real de Uber** y luego se auditó con Codex (`gpt-5.6-sol`, esfuerzo
-> `max`, solo lectura), que devolvió 26 hallazgos: **10 bloqueantes, 12 graves, 4 menores**, y veredicto "no implementable como está".
-> Cinco se verificaron a mano contra el código antes de aceptarlos; los cinco eran correctos. Los bloqueantes y dónde se cierran:
+> `max`, solo lectura), que devolvió 26 hallazgos: **10 bloqueantes, 12 graves, 4 menores**, y veredicto "no implementable como está". Cinco
+> se verificaron a mano contra el código antes de aceptarlos; los cinco eran correctos. Los bloqueantes y dónde se cierran:
 >
 > 1. 🔴 **El sandbox de Uber escribe en PRODUCCIÓN** — verificado: un `PUT /menus` con token de sandbox modificó el menú en vivo de un
 >    restaurante real y apareció en su Uber Eats Manager (se restauró desde backup). El UUID público del comercio decodifica al mismo
@@ -18,7 +18,8 @@ adversarial de Codex, 10 bloqueantes cerrados) **Repo:** `avoqado-server` · **D
 > 5. 🔴 **`PrintJob` fluye al revés de como la v5 lo diseñó**: el gateway sube su outbox al server, no al revés. No existe camino
 >    server→gateway → **§5.12**, `CloudPrintIntent`.
 > 6. 🔴 **El unique de `PrintJob` hace imposible una comanda por estación** — y la v5 escribió una prueba que no podía pasar → **§5.12**.
-> 7. **`model Refund` no existe**; el patrón real es un `Payment` negativo. Y la reposición de inventario es aproximada y best-effort → **§5.7**.
+> 7. **`model Refund` no existe**; el patrón real es un `Payment` negativo. Y la reposición de inventario es aproximada y best-effort →
+>    **§5.7**.
 > 8. **La pausa infiere éxito del código HTTP**: la prueba real devolvió 200 sin efecto → **§5.8**, `PAUSE_PENDING`.
 > 9. **El binding OAuth no tenía dónde guardar el token** antes de crear el link, ni ruta multi-tienda → **§7.2**, `UberOAuthSession`.
 > 10. **El mapper de menú ignoraba el fixture real**: `title.translations.en` incluso en español, IVA 15 (no 16), `Product.taxRate` es
@@ -161,30 +162,28 @@ Cada punto cierra uno o más defectos de §4. Todo es agnóstico de proveedor.
 
 ### 5.0 🔴 Lista blanca de tiendas escribibles (cierra #22 — BLOQUEANTE, va PRIMERO)
 
-**El incidente que la origina (2026-08-17, verificado).** Con credenciales de sandbox
-(`sandbox-login.uber.com` + `test-api.uber.com`), `GET /v1/eats/stores` devolvió un comercio **de
-producción** que la cuenta administra. Un `PUT /v2/eats/stores/{store_id}/menus` con ese token
-**modificó el menú en vivo** y el item apareció en su Uber Eats Manager; se restauró desde backup. El
-UUID público del restaurante en `ubereats.com` decodifica **al mismo `store_id`**. La guía de Uber
-afirma *"All sandbox activity is isolated from production merchants"* y **eso no se cumple cuando la
-cuenta no tiene test store asignada**.
+**El incidente que la origina (2026-08-17, verificado).** Con credenciales de sandbox (`sandbox-login.uber.com` + `test-api.uber.com`),
+`GET /v1/eats/stores` devolvió un comercio **de producción** que la cuenta administra. Un `PUT /v2/eats/stores/{store_id}/menus` con ese
+token **modificó el menú en vivo** y el item apareció en su Uber Eats Manager; se restauró desde backup. El UUID público del restaurante en
+`ubereats.com` decodifica **al mismo `store_id`**. La guía de Uber afirma _"All sandbox activity is isolated from production merchants"_ y
+**eso no se cumple cuando la cuenta no tiene test store asignada**.
 
-Conclusión de diseño: **el dominio del entorno NO es una garantía de aislamiento.** No se puede
-depender de "estamos en sandbox" para que una escritura sea inofensiva.
+Conclusión de diseño: **el dominio del entorno NO es una garantía de aislamiento.** No se puede depender de "estamos en sandbox" para que
+una escritura sea inofensiva.
 
 **Contrato, default-deny:**
 
-| Qué | Cómo |
-| --- | --- |
-| Config | `UBER_WRITABLE_STORE_IDS_SANDBOX` y `UBER_WRITABLE_STORE_IDS_PRODUCTION`, separadas. Vacío ⇒ **cero escrituras permitidas**, que es el estado correcto al arrancar |
+| Qué             | Cómo                                                                                                                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Config          | `UBER_WRITABLE_STORE_IDS_SANDBOX` y `UBER_WRITABLE_STORE_IDS_PRODUCTION`, separadas. Vacío ⇒ **cero escrituras permitidas**, que es el estado correcto al arrancar                    |
 | Dónde se aplica | En el **cliente HTTP de más bajo nivel** (`uber.client.ts`), antes de CUALQUIER `POST/PUT/PATCH/DELETE` asociado a una tienda. No en el servicio: un caller nuevo se saltaría el gate |
-| Cuántas veces | **Dos**: al encolar en el outbox y otra vez en el worker antes de emitir. La config pudo cambiar entre una y otra, y el evento pudo encolarse hace horas |
-| Al violarse | El evento queda `BLOCKED_SAFETY` (estado terminal), alerta a ops, y **no se emite ninguna petición HTTP**. Nunca un fallo silencioso ni un reintento |
-| Alcance | Menú (`PUT /menus`), pausa (`/status`), `pos_data` (POST/PATCH/DELETE), y **también** accept / deny / cancel / `restaurantdelivery/status` |
+| Cuántas veces   | **Dos**: al encolar en el outbox y otra vez en el worker antes de emitir. La config pudo cambiar entre una y otra, y el evento pudo encolarse hace horas                              |
+| Al violarse     | El evento queda `BLOCKED_SAFETY` (estado terminal), alerta a ops, y **no se emite ninguna petición HTTP**. Nunca un fallo silencioso ni un reintento                                  |
+| Alcance         | Menú (`PUT /menus`), pausa (`/status`), `pos_data` (POST/PATCH/DELETE), y **también** accept / deny / cancel / `restaurantdelivery/status`                                            |
 
-🔑 **Los endpoints de pedido también entran**, aunque su URL lleve `order_id` y no `store_id`: el
-adapter resuelve el `storeId` desde el link originador y lo pasa al cliente para que el gate pueda
-evaluarlo. Un accept contra un pedido de una tienda real es tan destructivo como publicar un menú.
+🔑 **Los endpoints de pedido también entran**, aunque su URL lleve `order_id` y no `store_id`: el adapter resuelve el `storeId` desde el
+link originador y lo pasa al cliente para que el gate pueda evaluarlo. Un accept contra un pedido de una tienda real es tan destructivo como
+publicar un menú.
 
 Las lecturas (`GET`) quedan fuera del gate: son inofensivas y son justo lo que permite investigar.
 
@@ -251,17 +250,17 @@ subtotal **después** de la promo del comercio (no el monto de la promo). El map
     `tipAmount = externallyPaidTip`, `netAmount = amount`, `fundsFlow = EXTERNAL_RECORDED`, COMPLETED + `PaymentAllocation`.
   - PAID: `paidAmount = Order.total`, `remainingBalance = 0`, `paymentStatus = PAID`.
   - PARTIAL: `paidAmount = externallyPaidSale + externallyPaidTip`, **`remainingBalance = cashDueSale + cashDueTip`**,
-    `paymentStatus = PARTIAL`; el efectivo restante se cobra en el POS con el flujo normal (es una cuenta con saldo).
-    🔴 **La v5 y anteriores decían `cashDueSale − cashDueTip` (RESTA).** Con esa fórmula el saldo pendiente queda corto por
-    exactamente `2 × cashDueTip`: se le cobra de menos al cliente toda propina en efectivo, y la invariante de coherencia deja
-    de cerrar. Corregido en v6 (auditoría Codex, 2026-08-17).
+    `paymentStatus = PARTIAL`; el efectivo restante se cobra en el POS con el flujo normal (es una cuenta con saldo). 🔴 **La v5 y
+    anteriores decían `cashDueSale − cashDueTip` (RESTA).** Con esa fórmula el saldo pendiente queda corto por exactamente `2 × cashDueTip`:
+    se le cobra de menos al cliente toda propina en efectivo, y la invariante de coherencia deja de cerrar. Corregido en v6 (auditoría
+    Codex, 2026-08-17).
   - UNPAID: sin `Payment`; `paymentStatus = PENDING`, `paidAmount = 0`, `remainingBalance = Order.total`.
-  - 🔴 **`cashPassThroughToPlatform` NO tiene hoy campo, asiento de caja ni pasivo** (§11 no lo crea). Mientras no exista esa
-    contabilidad, un pedido que lo traiga con valor > 0 se **rechaza** (400 + evento visible + alerta): no se "estima
-    conservadoramente". Registrar como venta del comercio un efectivo que es de Uber descuadra el arqueo de caja. Esto alinea
-    §5.1 con §10.0 (que ya ordena rechazar splits inciertos) y corrige §10.5, que decía lo contrario.
-  - **Invariante general** (vale para los tres estados): `Order.total === Σ Payment.amount + Σ Payment.tipAmount + remainingBalance`.
-    La igualdad `Order.total === paidAmount` **solo** aplica a PAID — afirmarla para PARTIAL/UNPAID es un test que falla con razón.
+  - 🔴 **`cashPassThroughToPlatform` NO tiene hoy campo, asiento de caja ni pasivo** (§11 no lo crea). Mientras no exista esa contabilidad,
+    un pedido que lo traiga con valor > 0 se **rechaza** (400 + evento visible + alerta): no se "estima conservadoramente". Registrar como
+    venta del comercio un efectivo que es de Uber descuadra el arqueo de caja. Esto alinea §5.1 con §10.0 (que ya ordena rechazar splits
+    inciertos) y corrige §10.5, que decía lo contrario.
+  - **Invariante general** (vale para los tres estados): `Order.total === Σ Payment.amount + Σ Payment.tipAmount + remainingBalance`. La
+    igualdad `Order.total === paidAmount` **solo** aplica a PAID — afirmarla para PARTIAL/UNPAID es un test que falla con razón.
 - Regla conservadora: si el proveedor reporta efectivo por cobrar en un tipo de pedido donde su doc no lo contempla (Uber: `cash_amount_due`
   fuera de `DELIVERY_BY_RESTAURANT`), se toma **como efectivo por cobrar** (nunca como pagado) y se alerta — jamás se inventa un cobro. El
   mapper es responsable de derivar los campos y de que la invariante cuadre; si no cuadra, lanza (400) y el evento queda visible para
@@ -306,23 +305,21 @@ Nuevo modelo `DeliveryOutboundEvent` (migración):
 | `attemptCount`, `nextAttemptAt`, `lastError`, `sentAt`  | backoff y descarte de veneno (mismo patrón que `DeliveryOrderEvent`)                                                                                                                                                                                                                                                                                                          |
 | `deadlineAt?`                                           | ACCEPTED lleva el SLA de aceptación del proveedor (§10.5); si llega sin SENT → alerta + la orden se marca para revisión, porque el marketplace probablemente ya la canceló                                                                                                                                                                                                    |
 
-🔴 **El protocolo de claim de la v5 no garantizaba ni exclusión ni orden** (auditoría Codex). Cuatro
-huecos, y el repo **ya tiene el patrón correcto** en `catalogPublicationOutbox.service.ts:391` (predecesor
-con `NOT EXISTS`) y `:430` (fencing) — se copia de ahí en vez de reinventarlo:
+🔴 **El protocolo de claim de la v5 no garantizaba ni exclusión ni orden** (auditoría Codex). Cuatro huecos, y el repo **ya tiene el patrón
+correcto** en `catalogPublicationOutbox.service.ts:391` (predecesor con `NOT EXISTS`) y `:430` (fencing) — se copia de ahí en vez de
+reinventarlo:
 
-| Hueco | Qué pasaba | Cómo se cierra |
-| --- | --- | --- |
-| `sequence` sin asignación atómica ni unique | Dos eventos podían recibir el mismo número | Fila `DeliveryOutboundStream` con contador atómico (o advisory lock transaccional por stream) + `@@unique([streamKey, sequence])` |
-| `SKIP LOCKED` a secas | El worker B **salta** el `seq=1` bloqueado y toma el `seq=2` del mismo stream: **READY sale antes que ACCEPTED** | Reclamar **solo la cabeza**: `NOT EXISTS` de predecesores no terminales en ese `streamKey` |
-| `claimToken` declarado pero no exigido | Un worker con lease vencido sobrescribe al nuevo dueño y marca SENT una ejecución ajena | Todo acknowledgement va con `WHERE id = ? AND state = 'SENDING' AND claimToken = ?` y **verifica `count === 1`** |
-| Timeout HTTP sin relación con el lease | El lease expira mientras la petición sigue viva ⇒ dos workers emiten el mismo efecto | **Timeout HTTP estrictamente menor que el lease**, o renovación del lease durante la petición |
+| Hueco                                       | Qué pasaba                                                                                                       | Cómo se cierra                                                                                                                    |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `sequence` sin asignación atómica ni unique | Dos eventos podían recibir el mismo número                                                                       | Fila `DeliveryOutboundStream` con contador atómico (o advisory lock transaccional por stream) + `@@unique([streamKey, sequence])` |
+| `SKIP LOCKED` a secas                       | El worker B **salta** el `seq=1` bloqueado y toma el `seq=2` del mismo stream: **READY sale antes que ACCEPTED** | Reclamar **solo la cabeza**: `NOT EXISTS` de predecesores no terminales en ese `streamKey`                                        |
+| `claimToken` declarado pero no exigido      | Un worker con lease vencido sobrescribe al nuevo dueño y marca SENT una ejecución ajena                          | Todo acknowledgement va con `WHERE id = ? AND state = 'SENDING' AND claimToken = ?` y **verifica `count === 1`**                  |
+| Timeout HTTP sin relación con el lease      | El lease expira mientras la petición sigue viva ⇒ dos workers emiten el mismo efecto                             | **Timeout HTTP estrictamente menor que el lease**, o renovación del lease durante la petición                                     |
 
-**El sistema es *at-least-once*, y se declara así.** Si un worker muere después de que Uber aplicó el
-request pero antes de persistir SENT, el siguiente lo repite. Para `accept` / `cancel` eso importa:
-se usa la idempotency key del proveedor si existe, o se **consulta el estado remoto** antes de dar un
-duplicado por bueno. `// REVALIDAR EN SANDBOX`: no está confirmado si Uber deduplica accept/cancel
-repetidos — hace falta repetir el mismo request contra una tienda **expresamente autorizada** (§5.0) y
-leer el estado después.
+**El sistema es _at-least-once_, y se declara así.** Si un worker muere después de que Uber aplicó el request pero antes de persistir SENT,
+el siguiente lo repite. Para `accept` / `cancel` eso importa: se usa la idempotency key del proveedor si existe, o se **consulta el estado
+remoto** antes de dar un duplicado por bueno. `// REVALIDAR EN SANDBOX`: no está confirmado si Uber deduplica accept/cancel repetidos — hace
+falta repetir el mismo request contra una tienda **expresamente autorizada** (§5.0) y leer el estado después.
 
 - El job `delivery-outbound-dispatch.job.ts` procesa **un evento a la vez por stream**; un fallo bloquea los siguientes del mismo stream
   hasta reintento o DEAD (que desbloquea y alerta). Streams distintos —otros pedidos, el menú, la pausa— avanzan en paralelo, con un límite
@@ -349,24 +346,22 @@ esquema de lease que el outbox (`claimToken` + `lockedUntil`, columnas nuevas en
 `STATUS` se persiste y se refleja en el panel; no se "reprocesa". Un `CANCEL` **parcial** que aún no tenga handler va a DEAD con alerta y
 revisión manual — jamás a PROCESSED en silencio.
 
-🔴 **Serialización por PEDIDO, no por evento (cierra un bloqueante de la auditoría Codex).** El lease
-de §5.4 es por fila, y `NEW_ORDER` y `CANCEL` del mismo pedido son **filas distintas**: nada impide
-que dos workers los procesen a la vez. La ventana es real y cara — se acepta, se descuenta stock y se
-imprime un pedido que ya venía cancelado. Y la carrera inversa deja el `CANCEL` en `PENDING_ORDER`
-para siempre aunque la orden ya se haya confirmado.
+🔴 **Serialización por PEDIDO, no por evento (cierra un bloqueante de la auditoría Codex).** El lease de §5.4 es por fila, y `NEW_ORDER` y
+`CANCEL` del mismo pedido son **filas distintas**: nada impide que dos workers los procesen a la vez. La ventana es real y cara — se acepta,
+se descuenta stock y se imprime un pedido que ya venía cancelado. Y la carrera inversa deja el `CANCEL` en `PENDING_ORDER` para siempre
+aunque la orden ya se haya confirmado.
 
-Regla: **todo evento se procesa bajo un lock serializado por `(provider, channelLinkId,
-externalOrderId)`** — fila de stream o `pg_advisory_xact_lock`. Bajo ese lock:
+Regla: **todo evento se procesa bajo un lock serializado por `(provider, channelLinkId, externalOrderId)`** — fila de stream o
+`pg_advisory_xact_lock`. Bajo ese lock:
 
 1. Se **releen todos** los eventos de ese pedido, no solo el que despertó al worker.
-2. **Antes** de crear el ACCEPTED, el `Payment`, el posting de inventario o el `CloudPrintIntent`, se
-   busca un `CANCEL` pendiente. Si existe, se aplica el estado terminal y **no se encola ni la
-   aceptación ni la impresión**.
-3. Se fija **un solo orden de adquisición** (`stream → event`, nunca al revés) para que no haya
-   deadlock entre dos workers que tomen los mismos dos recursos en distinto orden.
+2. **Antes** de crear el ACCEPTED, el `Payment`, el posting de inventario o el `CloudPrintIntent`, se busca un `CANCEL` pendiente. Si
+   existe, se aplica el estado terminal y **no se encola ni la aceptación ni la impresión**.
+3. Se fija **un solo orden de adquisición** (`stream → event`, nunca al revés) para que no haya deadlock entre dos workers que tomen los
+   mismos dos recursos en distinto orden.
 
-Prueba obligatoria: ambas carreras con **dos conexiones PostgreSQL reales**, no con mocks — un mock
-no reproduce el entrelazado que causa el bug.
+Prueba obligatoria: ambas carreras con **dos conexiones PostgreSQL reales**, no con mocks — un mock no reproduce el entrelazado que causa el
+bug.
 
 ### 5.6 Activación técnica (cierra #9)
 
@@ -383,17 +378,17 @@ y así se documenta en el schema.
 `Payment` ni inventario. Se crea un servicio de compensación propio, `cancelDeliveryOrder(orderId, { reason, source })`, transaccional:
 
 1. `Order.status = CANCELLED`, `paymentStatus = REFUNDED` si había `Payment`.
-2. 🔴 **NO existe `model Refund` en el schema** — la v5 lo daba por hecho y §11 anunciaba una migración que no aplica (auditoría Codex).
-   El patrón real de la plataforma (`refund.dashboard.service.ts:429`) es otro: **el `Payment` original se queda COMPLETED** y se crea
-   un **`Payment` negativo** COMPLETED con `type = REFUND`; al original solo se le agrega metadata (`:485`). Marcar el original como
-   REFUNDED **y además** crear el negativo produce **doble reversión**: el reporte pasa de venta neta cero a venta negativa.
-   Entonces: `Payment` negativo COMPLETED, `type = REFUND`, `fundsFlow = EXTERNAL_RECORDED`, monto = `amount + tipAmount`,
-   `idempotencyKey = dlvr:` + hash del evento. El original **no se toca** salvo su metadata.
-3. 🔴 **La reposición de inventario no puede reusar `restockItem` como si fuera reversión exacta.** Su propia documentación admite que
-   es **aproximada** (`inventoryRestock.service.ts:19`), corre **fuera de la transacción** (`refund.dashboard.service.ts:603`), es
-   best-effort y **omite serializados**. Reintentar repone dos veces; con recetas recupera insumos equivocados; los seriales no vuelven.
-   Se crea una **reversión durable por las líneas originales de `InventoryPosting`**, con unique por `(posting, evento)` y worker
-   reintentable — revertir lo que se descontó, no recalcular lo que se cree que se descontó.
+2. 🔴 **NO existe `model Refund` en el schema** — la v5 lo daba por hecho y §11 anunciaba una migración que no aplica (auditoría Codex). El
+   patrón real de la plataforma (`refund.dashboard.service.ts:429`) es otro: **el `Payment` original se queda COMPLETED** y se crea un
+   **`Payment` negativo** COMPLETED con `type = REFUND`; al original solo se le agrega metadata (`:485`). Marcar el original como REFUNDED
+   **y además** crear el negativo produce **doble reversión**: el reporte pasa de venta neta cero a venta negativa. Entonces: `Payment`
+   negativo COMPLETED, `type = REFUND`, `fundsFlow = EXTERNAL_RECORDED`, monto = `amount + tipAmount`, `idempotencyKey = dlvr:` + hash del
+   evento. El original **no se toca** salvo su metadata.
+3. 🔴 **La reposición de inventario no puede reusar `restockItem` como si fuera reversión exacta.** Su propia documentación admite que es
+   **aproximada** (`inventoryRestock.service.ts:19`), corre **fuera de la transacción** (`refund.dashboard.service.ts:603`), es best-effort
+   y **omite serializados**. Reintentar repone dos veces; con recetas recupera insumos equivocados; los seriales no vuelven. Se crea una
+   **reversión durable por las líneas originales de `InventoryPosting`**, con unique por `(posting, evento)` y worker reintentable —
+   revertir lo que se descontó, no recalcular lo que se cree que se descontó.
 4. Encola `ORDER_STATUS CANCELLED` en el outbox **solo si la cancelación nació en el POS**; si nació en el marketplace no se le reenvía.
 5. `ActivityLog ORDER_CANCELLED_BY_CHANNEL` / `_BY_POS`.
 
@@ -401,20 +396,17 @@ Idempotente por orden. Solo cancelación total; parcial → §10.6 y DEAD mientr
 
 ### 5.8 Pausa honesta (cierra #12)
 
-🔴 **Un código HTTP 2xx NO es confirmación de que la tienda quedó pausada (verificado, 2026-08-17).**
-Se llamó `POST /v1/eats/store/{id}/status` con `PAUSED`: devolvió **200** (no el 204 que §10.9
-afirmaba) y el estado **no cambió** ni en el sandbox ni en el Manager. Un diseño que infiere "pausado"
-del código de respuesta le muestra PAUSED al dueño mientras Uber le sigue mandando pedidos — que es
-exactamente el defecto #12 que esta sección venía a cerrar, reintroducido por otra puerta.
+🔴 **Un código HTTP 2xx NO es confirmación de que la tienda quedó pausada (verificado, 2026-08-17).** Se llamó
+`POST /v1/eats/store/{id}/status` con `PAUSED`: devolvió **200** (no el 204 que §10.9 afirmaba) y el estado **no cambió** ni en el sandbox
+ni en el Manager. Un diseño que infiere "pausado" del código de respuesta le muestra PAUSED al dueño mientras Uber le sigue mandando pedidos
+— que es exactamente el defecto #12 que esta sección venía a cerrar, reintroducido por otra puerta.
 
-- **Un solo camino: todo por el outbox.** La v5 tenía pausa manual con llamada directa y pausa por
-  plan por outbox; §6.3 decía que toda salida va por outbox. Se unifica en outbox — dos caminos para
-  el mismo efecto es dos veces la superficie de bug.
-- **Estado intermedio `PAUSE_PENDING`**, que solo pasa a PAUSED al **confirmar por lectura remota** o
-  al recibir `store.status.changed`. Nunca por el 2xx.
-- Si el entorno no ofrece una verificación observable (hoy el sandbox no la ofrece), **la pausa se
-  declara no soportada ahí y la UI no reporta éxito**. Preferible un "no puedo confirmarlo" honesto
-  que un PAUSED falso.
+- **Un solo camino: todo por el outbox.** La v5 tenía pausa manual con llamada directa y pausa por plan por outbox; §6.3 decía que toda
+  salida va por outbox. Se unifica en outbox — dos caminos para el mismo efecto es dos veces la superficie de bug.
+- **Estado intermedio `PAUSE_PENDING`**, que solo pasa a PAUSED al **confirmar por lectura remota** o al recibir `store.status.changed`.
+  Nunca por el 2xx.
+- Si el entorno no ofrece una verificación observable (hoy el sandbox no la ofrece), **la pausa se declara no soportada ahí y la UI no
+  reporta éxito**. Preferible un "no puedo confirmarlo" honesto que un PAUSED falso.
 - Prueba: pausar y reanudar **observando el estado**, no el status HTTP.
 - **Pausa por pérdida de PREMIUM** (sistema, §5.11): no puede llamar en línea (no hay usuario esperando), así que va por el outbox
   `STORE_PAUSE`. El link **no** cambia a PAUSED hasta que el evento esté SENT; mientras tanto se persiste `suspendedReason = 'PLAN'` +
@@ -424,24 +416,23 @@ exactamente el defecto #12 que esta sección venía a cerrar, reintroducido por 
 
 ### 5.9 Menú real y flujo de publicación (cierra #8, #11)
 
-🔴 **Lo que el menú REAL de Uber desmintió (fixture capturado el 2026-08-17, 109 items de un
-restaurante mexicano). La v5 estaba mal en tres puntos:**
+🔴 **Lo que el menú REAL de Uber desmintió (fixture capturado el 2026-08-17, 109 items de un restaurante mexicano). La v5 estaba mal en tres
+puntos:**
 
-| La v5 asumía | El fixture real dice | Consecuencia si no se corrige |
-| --- | --- | --- |
-| Títulos sin estructura fijada | **`title.translations.en`** — Uber usa la llave `en` **aunque el texto esté en español** | El mapper busca `es_mx`, no encuentra nada, y el `PUT` sobrescribe las traducciones reales con vacío |
-| §9 fijaba `vat_rate_percentage: 16` | El fixture trae **15** | Un test que codifica 16 falla contra la realidad, o peor: se publica un IVA equivocado |
-| `Product.taxRate` vale "0 / 8 / 16" | En Prisma es **fracción decimal** (`0.16`, `schema.prisma:1597`) | Multiplicar por 100 a ciegas da 1600% o 0.16% según cómo se lea |
+| La v5 asumía                        | El fixture real dice                                                                     | Consecuencia si no se corrige                                                                        |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Títulos sin estructura fijada       | **`title.translations.en`** — Uber usa la llave `en` **aunque el texto esté en español** | El mapper busca `es_mx`, no encuentra nada, y el `PUT` sobrescribe las traducciones reales con vacío |
+| §9 fijaba `vat_rate_percentage: 16` | El fixture trae **15**                                                                   | Un test que codifica 16 falla contra la realidad, o peor: se publica un IVA equivocado               |
+| `Product.taxRate` vale "0 / 8 / 16" | En Prisma es **fracción decimal** (`0.16`, `schema.prisma:1597`)                         | Multiplicar por 100 a ciegas da 1600% o 0.16% según cómo se lea                                      |
 
-Además `menuSnapshot.service.ts:19,71` **convierte `Decimal` a `number`**, que es exactamente el
-descuido que la regla de dinero del repo prohíbe: el snapshot monetario va en **strings decimales**, y
-el `Decimal.mul(100).toDecimalPlaces(0)` vive **solo en el adapter**, nunca antes.
+Además `menuSnapshot.service.ts:19,71` **convierte `Decimal` a `number`**, que es exactamente el descuido que la regla de dinero del repo
+prohíbe: el snapshot monetario va en **strings decimales**, y el `Decimal.mul(100).toDecimalPlaces(0)` vive **solo en el adapter**, nunca
+antes.
 
-🔴 **El IVA no se publica hasta entenderlo.** No se sabe por qué Uber materializa 15 para ese producto
-—puede ser configuración de esa tienda, un redondeo suyo, o una convención que desconocemos—. **No se
-sustituye por `Product.taxRate * 100` a ciegas.** Se confirma con un `GET → PUT → GET` controlado
-sobre una tienda **autorizada por §5.0** y con backup previo, más la respuesta de soporte. Publicar un
-IVA inventado en el menú de un comercio es un problema fiscal, no un bug de formato.
+🔴 **El IVA no se publica hasta entenderlo.** No se sabe por qué Uber materializa 15 para ese producto —puede ser configuración de esa
+tienda, un redondeo suyo, o una convención que desconocemos—. **No se sustituye por `Product.taxRate * 100` a ciegas.** Se confirma con un
+`GET → PUT → GET` controlado sobre una tienda **autorizada por §5.0** y con backup previo, más la respuesta de soporte. Publicar un IVA
+inventado en el menú de un comercio es un problema fiscal, no un bug de formato.
 
 `buildMenuSnapshot(venueId)`:
 
@@ -525,38 +516,33 @@ entera**. No es un riesgo teórico — es el estado de hoy, y lo confirmó de fo
 - `PrintGateway` (`venueId @unique`) ya designa **un** dispositivo broker por sucursal. Esto es lo que evita el bug obvio: si todas las
   tablets escucharan el socket, cada una imprimiría su copia.
 
-🔴 **Lo que la v5 diseñó mal, y por qué (auditoría Codex, 2026-08-17).** La v5 decía "el server encola
-`PrintJob` y el gateway los consume por su camino normal". Es falso por **dos** razones independientes,
-ambas verificadas en el código:
+🔴 **Lo que la v5 diseñó mal, y por qué (auditoría Codex, 2026-08-17).** La v5 decía "el server encola `PrintJob` y el gateway los consume
+por su camino normal". Es falso por **dos** razones independientes, ambas verificadas en el código:
 
-| Error de la v5 | Realidad |
-| --- | --- |
-| `PrintJob` sería una cola server→gateway | Va **al revés**: el gateway crea el `id` y **sube su outbox local** al server como réplica de auditoría (`print.mobile.service.ts:36`, comentario literal: *"Solo el gateway DESIGNADO del venue puede replicar su outbox"*; Android lo declara igual en `PrintJobModels.kt`). **No hay endpoint de descarga, ni socket de nuevo job, ni consumidor móvil.** El server puede insertar filas y ningún dispositivo se entera |
-| Un `PrintJob` por estación con el mismo `eventId` | Imposible: `@@unique([venueId, eventId, reason, seq])` (`schema.prisma:14099`). Cocina y barra colisionan con `reason=ORIGINAL, seq=1`; EXPO también. `seq` está reservado para original/reimpresión, **no** para numerar destinos |
+| Error de la v5                                    | Realidad                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PrintJob` sería una cola server→gateway          | Va **al revés**: el gateway crea el `id` y **sube su outbox local** al server como réplica de auditoría (`print.mobile.service.ts:36`, comentario literal: _"Solo el gateway DESIGNADO del venue puede replicar su outbox"_; Android lo declara igual en `PrintJobModels.kt`). **No hay endpoint de descarga, ni socket de nuevo job, ni consumidor móvil.** El server puede insertar filas y ningún dispositivo se entera |
+| Un `PrintJob` por estación con el mismo `eventId` | Imposible: `@@unique([venueId, eventId, reason, seq])` (`schema.prisma:14099`). Cocina y barra colisionan con `reason=ORIGINAL, seq=1`; EXPO también. `seq` está reservado para original/reimpresión, **no** para numerar destinos                                                                                                                                                                                         |
 
-La prueba que la v5 escribió —*"un pedido con dos estaciones genera dos `PrintJob` distintos"*— **no
-podía pasar** con el schema actual. Un test imposible es peor que ninguno: da falsa cobertura.
+La prueba que la v5 escribió —_"un pedido con dos estaciones genera dos `PrintJob` distintos"_— **no podía pasar** con el schema actual. Un
+test imposible es peor que ninguno: da falsa cobertura.
 
 **El diseño corregido (v6):**
 
-- **`CloudPrintIntent`** (modelo nuevo, migración): la intención de impresión que nace en el server.
-  Se inserta **dentro de la misma transacción** que crean la `Order` y el ACCEPTED del outbox — no
-  después del commit, porque un crash entre commit y encolado pierde la impresión para siempre, que
-  es justo el fallo que esta sección existe para evitar.
-- Un intent **por destino**, con `destinationKey` = `STATION:<id>` · `UNROUTED` · `EXPO`, y
-  `causalEventId` separado del destino. Unique: `(venueId, causalEventId, destinationKey, reason, seq)`.
-  Así dos estaciones y el EXPO conviven sin colisionar, y `seq` conserva su significado real.
-- El **gateway designado los reclama**: endpoint de descarga con claim/lease + un socket-nudge como
-  optimización de latencia (nunca como único camino — un nudge perdido no puede perder la comanda).
-  Al reclamarlos, el gateway los persiste en su outbox local y **`PrintJob` sigue siendo lo que ya
-  es**: la réplica del resultado físico que el dispositivo sube de vuelta.
-- 🔴 **Activar AUTO exige un gateway con heartbeat reciente.** Sin ningún dispositivo registrado, no
-  hay fail-open posible: el fail-open de `offline-first-y-hub-lan.md` §4 aplica cuando un POS **ya
-  está intentando imprimir**; no puede invocarse cuando no hay nadie escuchando. Un venue sin gateway
-  no debe poder quedar en aceptación automática, o Avoqado se compromete con Uber a preparar pedidos
-  que nadie verá.
-- `PrintJob` no gana `channelLinkId`, así que el conteo "fallidos por link" del MCP se resuelve por
-  `CloudPrintIntent`, que sí conoce el pedido y el canal.
+- **`CloudPrintIntent`** (modelo nuevo, migración): la intención de impresión que nace en el server. Se inserta **dentro de la misma
+  transacción** que crean la `Order` y el ACCEPTED del outbox — no después del commit, porque un crash entre commit y encolado pierde la
+  impresión para siempre, que es justo el fallo que esta sección existe para evitar.
+- Un intent **por destino**, con `destinationKey` = `STATION:<id>` · `UNROUTED` · `EXPO`, y `causalEventId` separado del destino. Unique:
+  `(venueId, causalEventId, destinationKey, reason, seq)`. Así dos estaciones y el EXPO conviven sin colisionar, y `seq` conserva su
+  significado real.
+- El **gateway designado los reclama**: endpoint de descarga con claim/lease + un socket-nudge como optimización de latencia (nunca como
+  único camino — un nudge perdido no puede perder la comanda). Al reclamarlos, el gateway los persiste en su outbox local y **`PrintJob`
+  sigue siendo lo que ya es**: la réplica del resultado físico que el dispositivo sube de vuelta.
+- 🔴 **Activar AUTO exige un gateway con heartbeat reciente.** Sin ningún dispositivo registrado, no hay fail-open posible: el fail-open de
+  `offline-first-y-hub-lan.md` §4 aplica cuando un POS **ya está intentando imprimir**; no puede invocarse cuando no hay nadie escuchando.
+  Un venue sin gateway no debe poder quedar en aceptación automática, o Avoqado se compromete con Uber a preparar pedidos que nadie verá.
+- `PrintJob` no gana `channelLinkId`, así que el conteo "fallidos por link" del MCP se resuelve por `CloudPrintIntent`, que sí conoce el
+  pedido y el canal.
 
 Nada de esto es específico de Uber: cualquier pedido de cualquier canal lo hereda.
 
@@ -564,12 +550,11 @@ Nada de esto es específico de Uber: cualquier pedido de cualquier canal lo here
 apps). Se implementa aquí: un ticket con el pedido **completo** para quien lo arma y se lo entrega al repartidor — necesario justo porque
 las comandas salen partidas por estación.
 
-🔴 **El enum del server NO es la implementación.** Que `PrintJobType.EXPO` exista en Prisma no imprime
-nada: hace falta un **renderer** que convierta el intent en ESC/POS, y ese vive en los clientes. Por
-la regla cross-repo del workspace (android e iOS se cambian JUNTOS), el EXPO exige renderer **y**
-pruebas en **avoqado-android y avoqado-ios en el mismo trabajo**. Sin eso, prender el switch produce
-un intent que nadie sabe dibujar y el ticket nunca sale — un fallo silencioso peor que no tener la
-función. Esto convierte al EXPO en trabajo de tres repos, no solo del server, y así debe planearse.
+🔴 **El enum del server NO es la implementación.** Que `PrintJobType.EXPO` exista en Prisma no imprime nada: hace falta un **renderer** que
+convierta el intent en ESC/POS, y ese vive en los clientes. Por la regla cross-repo del workspace (android e iOS se cambian JUNTOS), el EXPO
+exige renderer **y** pruebas en **avoqado-android y avoqado-ios en el mismo trabajo**. Sin eso, prender el switch produce un intent que
+nadie sabe dibujar y el ticket nunca sale — un fallo silencioso peor que no tener la función. Esto convierte al EXPO en trabajo de tres
+repos, no solo del server, y así debe planearse.
 
 | Eje                   | Valor                                                                                                                | Por qué                                                                                                                                                                                                                                                                                                                             |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -599,74 +584,66 @@ los pedidos de Uber/Rappi/DiDi al mismo flujo, "sin captura manual ni tablets ex
 **por dispositivo** (Device Setup → Ticket Display Options). 🔑 **En ninguno el dueño elige un aparato**: configura áreas y qué sale en cada
 una. Se adopta ese patrón — la pregunta "¿por POS o por venue?" no debe llegarle al usuario.
 
-**Pruebas:** un pedido de delivery con líneas de dos estaciones genera **dos `CloudPrintIntent` con
-`destinationKey` distinto** (la v5 decía "dos `PrintJob` distintos" y era una prueba **imposible**: el
-unique del schema lo prohíbe) · los intents se crean **dentro de la misma transacción** que la orden —
-un rollback no deja intents huérfanos y un crash post-commit no pierde la impresión · un venue **sin
-gateway con heartbeat reciente** no puede quedar en AUTO · la misma ingesta reintentada no duplica
-jobs (unique por `eventId`) · venue sin estaciones → igual se encola un job "SIN ESTACIÓN" (jamás cero) · switch OFF → no hay job `EXPO` y
-las comandas salen igual · job `FAILED` sobre delivery → alerta · el `EXPO` lleva el pedido completo, no el parcial de una estación.
+**Pruebas:** un pedido de delivery con líneas de dos estaciones genera **dos `CloudPrintIntent` con `destinationKey` distinto** (la v5 decía
+"dos `PrintJob` distintos" y era una prueba **imposible**: el unique del schema lo prohíbe) · los intents se crean **dentro de la misma
+transacción** que la orden — un rollback no deja intents huérfanos y un crash post-commit no pierde la impresión · un venue **sin gateway
+con heartbeat reciente** no puede quedar en AUTO · la misma ingesta reintentada no duplica jobs (unique por `eventId`) · venue sin
+estaciones → igual se encola un job "SIN ESTACIÓN" (jamás cero) · switch OFF → no hay job `EXPO` y las comandas salen igual · job `FAILED`
+sobre delivery → alerta · el `EXPO` lleva el pedido completo, no el parcial de una estación.
 
 ### 5.13 🔴 Un pedido de delivery desencadena TODO (decisión del founder, 2026-08-17)
 
-**El requisito, en sus palabras:** *"si llega algo por Uber Eats y no tienen el método de pago Uber
-Eats, que se cree solo — y reportes, impresión del recibo, inventarios, TODO se desencadene."*
+**El requisito, en sus palabras:** _"si llega algo por Uber Eats y no tienen el método de pago Uber Eats, que se cree solo — y reportes,
+impresión del recibo, inventarios, TODO se desencadene."_
 
-Traducido a regla de diseño: **un pedido de delivery es una venta del venue como cualquier otra.** No
-un caso especial que llega a medias. Si algo de la plataforma reacciona ante una venta de mostrador,
-tiene que reaccionar igual ante una de Uber.
+Traducido a regla de diseño: **un pedido de delivery es una venta del venue como cualquier otra.** No un caso especial que llega a medias.
+Si algo de la plataforma reacciona ante una venta de mostrador, tiene que reaccionar igual ante una de Uber.
 
 **Estado real hoy (verificado, no asumido):**
 
-| Consecuencia de una venta | ¿Se dispara con delivery? | Evidencia |
-| --- | --- | --- |
-| Descuento de inventario | ✅ **sí** | `deliveryOrderIngestion.service.ts:260,276` — `createSalePostingInTx` + `applySalePosting`; commit `ca6ef88c` "los pedidos de agregador descuentan inventario (paridad Toast/Square)" |
-| Se crea `Payment` | ✅ sí, si el proveedor confirmó pago | `:218` — gateado por `orderIsAlreadyPaid` |
-| Resumen por canal | ✅ parcial | `deliverySummary.service.ts`, agrupa por `Order.source` — solo HOY y solo bruto |
-| **Tipo de pago del catálogo** | ❌ **NO** | `grep tenderTypeId` en la ingesta: **0**. El `Payment` se crea con `method: PaymentMethod.OTHER` y `externalSource: 'UBER_EATS'`, **sin `tenderTypeId`** (`:222-224`) |
-| Comanda a estaciones | ❌ no | §5.12 (defecto #21) |
-| Recibo del pedido | ❌ no | `PrintJobType.RECEIPT` existe; nadie lo dispara para delivery |
+| Consecuencia de una venta     | ¿Se dispara con delivery?            | Evidencia                                                                                                                                                                             |
+| ----------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Descuento de inventario       | ✅ **sí**                            | `deliveryOrderIngestion.service.ts:260,276` — `createSalePostingInTx` + `applySalePosting`; commit `ca6ef88c` "los pedidos de agregador descuentan inventario (paridad Toast/Square)" |
+| Se crea `Payment`             | ✅ sí, si el proveedor confirmó pago | `:218` — gateado por `orderIsAlreadyPaid`                                                                                                                                             |
+| Resumen por canal             | ✅ parcial                           | `deliverySummary.service.ts`, agrupa por `Order.source` — solo HOY y solo bruto                                                                                                       |
+| **Tipo de pago del catálogo** | ❌ **NO**                            | `grep tenderTypeId` en la ingesta: **0**. El `Payment` se crea con `method: PaymentMethod.OTHER` y `externalSource: 'UBER_EATS'`, **sin `tenderTypeId`** (`:222-224`)                 |
+| Comanda a estaciones          | ❌ no                                | §5.12 (defecto #21)                                                                                                                                                                   |
+| Recibo del pedido             | ❌ no                                | `PrintJobType.RECEIPT` existe; nadie lo dispara para delivery                                                                                                                         |
 
-**Qué se pierde exactamente por no estampar el tender type.** `VenueTenderType` no es una etiqueta
-bonita: es donde viven cuatro semánticas de dinero (`schema.prisma:3756-3773`), y un `Payment` sin
-él las pierde todas:
+**Qué se pierde exactamente por no estampar el tender type.** `VenueTenderType` no es una etiqueta bonita: es donde viven cuatro semánticas
+de dinero (`schema.prisma:3756-3773`), y un `Payment` sin él las pierde todas:
 
-| Campo del tender | Qué decide | Sin él |
-| --- | --- | --- |
-| `commissionPercent` | la comisión del canal (Uber ≈ 30%) | el margen real del pedido no se registra en ningún lado |
-| `satFormaPago` | la forma de pago del catálogo SAT | al timbrar el CFDI no hay forma de pago que declarar |
-| `countsAsPhysicalCash` | si entra al arqueo de caja | el cierre de turno no sabe clasificarlo |
-| `captureTip` | si admite propina | — |
+| Campo del tender       | Qué decide                         | Sin él                                                  |
+| ---------------------- | ---------------------------------- | ------------------------------------------------------- |
+| `commissionPercent`    | la comisión del canal (Uber ≈ 30%) | el margen real del pedido no se registra en ningún lado |
+| `satFormaPago`         | la forma de pago del catálogo SAT  | al timbrar el CFDI no hay forma de pago que declarar    |
+| `countsAsPhysicalCash` | si entra al arqueo de caja         | el cierre de turno no sabe clasificarlo                 |
+| `captureTip`           | si admite propina                  | —                                                       |
 
-Y en los reportes el pedido aparece como **"OTHER"** genérico en vez de "Uber Eats", que es
-precisamente lo que el catálogo de tipos de pago existe para evitar.
+Y en los reportes el pedido aparece como **"OTHER"** genérico en vez de "Uber Eats", que es precisamente lo que el catálogo de tipos de pago
+existe para evitar.
 
 **El diseño: auto-provisión al activar el canal.**
 
-- Al pasar un `DeliveryChannelLink` a ACTIVE (§5.6), el sistema **crea o resuelve** el
-  `VenueTenderType` del canal con `normalizedName` derivado del proveedor (`uber eats`, `rappi`,
-  `didi food`). Idempotente: si el venue ya lo creó a mano, se **reusa el suyo** — jamás se duplica
-  ni se pisa lo que el dueño configuró.
-- Defaults al crearlo: `baseMethod = OTHER` (obligado por el schema para filas custom),
-  `countsAsPhysicalCash = false` (el dinero no entra al cajón), `captureTip = false` (la propina la
-  liquida la plataforma), `commissionPercent` y `satFormaPago` **vacíos** — son decisiones fiscales y
-  comerciales del venue, y **inventarlas es peor que dejarlas en blanco**. El panel las pide con un
-  aviso visible.
-- La ingesta estampa `tenderTypeId` + `tenderRevision` en el `Payment`, igual que el cobro rápido de
-  TPV, para que el snapshot de comisión y forma SAT quede congelado en el momento del cobro.
-- 🔴 **Esto se hace SIN preguntarle al founder cada vez.** Por la regla del repo (`feature-gating.md`):
-  *"un feature cuyo único switch es un `UPDATE` en Postgres está incompleto — deja al founder de
-  switch humano para cada cliente que lo pida"*. Que el dueño tenga que crear el tipo de pago a mano
-  antes de recibir su primer pedido es exactamente ese defecto.
+- Al pasar un `DeliveryChannelLink` a ACTIVE (§5.6), el sistema **crea o resuelve** el `VenueTenderType` del canal con `normalizedName`
+  derivado del proveedor (`uber eats`, `rappi`, `didi food`). Idempotente: si el venue ya lo creó a mano, se **reusa el suyo** — jamás se
+  duplica ni se pisa lo que el dueño configuró.
+- Defaults al crearlo: `baseMethod = OTHER` (obligado por el schema para filas custom), `countsAsPhysicalCash = false` (el dinero no entra
+  al cajón), `captureTip = false` (la propina la liquida la plataforma), `commissionPercent` y `satFormaPago` **vacíos** — son decisiones
+  fiscales y comerciales del venue, y **inventarlas es peor que dejarlas en blanco**. El panel las pide con un aviso visible.
+- La ingesta estampa `tenderTypeId` + `tenderRevision` en el `Payment`, igual que el cobro rápido de TPV, para que el snapshot de comisión y
+  forma SAT quede congelado en el momento del cobro.
+- 🔴 **Esto se hace SIN preguntarle al founder cada vez.** Por la regla del repo (`feature-gating.md`): _"un feature cuyo único switch es un
+  `UPDATE` en Postgres está incompleto — deja al founder de switch humano para cada cliente que lo pida"_. Que el dueño tenga que crear el
+  tipo de pago a mano antes de recibir su primer pedido es exactamente ese defecto.
 
-**Lo que falta y no se inventa aquí:** el recibo del pedido (`PrintJobType.RECEIPT`) sigue sin
-disparador — se resuelve con el mismo `CloudPrintIntent` de §5.12, con `destinationKey` propio. Y el
-resumen por canal debe pasar de "hoy y bruto" a cruzarse con la comisión del tender.
+**Lo que falta y no se inventa aquí:** el recibo del pedido (`PrintJobType.RECEIPT`) sigue sin disparador — se resuelve con el mismo
+`CloudPrintIntent` de §5.12, con `destinationKey` propio. Y el resumen por canal debe pasar de "hoy y bruto" a cruzarse con la comisión del
+tender.
 
-**Pruebas:** activar un canal en un venue sin tipos de pago crea el del proveedor · activarlo en un
-venue que ya lo tenía **reusa el existente y no lo modifica** · un pedido ingerido estampa
-`tenderTypeId` y `tenderRevision` · el reporte por método de pago muestra "Uber Eats", no "OTHER" ·
-desactivar el canal **no borra** el tipo de pago (hay ventas históricas apuntando a él).
+**Pruebas:** activar un canal en un venue sin tipos de pago crea el del proveedor · activarlo en un venue que ya lo tenía **reusa el
+existente y no lo modifica** · un pedido ingerido estampa `tenderTypeId` y `tenderRevision` · el reporte por método de pago muestra "Uber
+Eats", no "OTHER" · desactivar el canal **no borra** el tipo de pago (hay ventas históricas apuntando a él).
 
 ## 6. Fase B — adaptador de Uber Eats
 
@@ -787,33 +764,28 @@ Base URLs por entorno: `UBER_API_URL` = `https://test-api.uber.com` (TEST APP) /
 
 🔴 **El flujo de la v5 no era implementable (auditoría Codex). Tres defectos y una contradicción:**
 
-1. **No hay dónde guardar el estado intermedio.** El paso 2 guarda el token del comerciante en
-   `link.credentials`, pero el link **se crea hasta el paso 5** — después de elegir tienda y escribir
-   `pos_data`. Y `DeliveryChannelLink` exige `externalLocationId` desde su creación
-   (`schema.prisma:5417`), que es justo el dato que todavía no se conoce. El callback no tiene dónde
-   dejar el token.
-2. **No existe ruta para el caso multi-tienda.** El paso 3 dice "si hay varias, el dashboard pide
-   elegir", pero no hay endpoint que liste ni que confirme la elección.
-3. **El `state` no está especificado como single-use ni ligado al usuario que inició.** Sin eso, un
-   `state` reutilizado o robado puede atar la tienda de un comerciante al venue equivocado.
+1. **No hay dónde guardar el estado intermedio.** El paso 2 guarda el token del comerciante en `link.credentials`, pero el link **se crea
+   hasta el paso 5** — después de elegir tienda y escribir `pos_data`. Y `DeliveryChannelLink` exige `externalLocationId` desde su creación
+   (`schema.prisma:5417`), que es justo el dato que todavía no se conoce. El callback no tiene dónde dejar el token.
+2. **No existe ruta para el caso multi-tienda.** El paso 3 dice "si hay varias, el dashboard pide elegir", pero no hay endpoint que liste ni
+   que confirme la elección.
+3. **El `state` no está especificado como single-use ni ligado al usuario que inició.** Sin eso, un `state` reutilizado o robado puede atar
+   la tienda de un comerciante al venue equivocado.
 
-Y la contradicción: **§5.6 exige activación ops-only, §7.2 autoactivaba con
-`autoActivateOnProvision`, y §14 vuelve a decir que ops activa.** Tres afirmaciones para la misma
-decisión.
+Y la contradicción: **§5.6 exige activación ops-only, §7.2 autoactivaba con `autoActivateOnProvision`, y §14 vuelve a decir que ops
+activa.** Tres afirmaciones para la misma decisión.
 
 **Corrección (v6):**
 
-- **`UberOAuthSession`** (modelo nuevo, migración), corta y **one-shot**, con el mismo patrón que la
-  `GoogleOAuthSession` que el repo ya tiene (`schema.prisma:12460`): token cifrado, `venueId`,
-  `userId` del iniciador, `expiresAt`, `consumedAt`, y las tiendas autorizadas que devolvió Uber.
-- El callback **no crea el link**: valida el `state`, guarda la sesión y devuelve un `attemptId`.
-  Endpoints **autenticados** listan las tiendas de esa sesión y confirman cuál se vincula —
-  resolve-don't-guess, nunca elegir por el usuario cuando hay varias.
-- Al confirmar se **revalida membresía, permiso y feature** del usuario sobre ese venue: entre el
-  inicio del OAuth y la confirmación pudo cambiar cualquiera de los tres.
-- **Una sola política de activación, y es la de §5.6:** el link nace `PENDING` y **ops activa**.
-  `autoActivateOnProvision` se elimina. Para un piloto, empezar a ingerir pedidos antes de que
-  alguien revise es exactamente el riesgo que no se quiere.
+- **`UberOAuthSession`** (modelo nuevo, migración), corta y **one-shot**, con el mismo patrón que la `GoogleOAuthSession` que el repo ya
+  tiene (`schema.prisma:12460`): token cifrado, `venueId`, `userId` del iniciador, `expiresAt`, `consumedAt`, y las tiendas autorizadas que
+  devolvió Uber.
+- El callback **no crea el link**: valida el `state`, guarda la sesión y devuelve un `attemptId`. Endpoints **autenticados** listan las
+  tiendas de esa sesión y confirman cuál se vincula — resolve-don't-guess, nunca elegir por el usuario cuando hay varias.
+- Al confirmar se **revalida membresía, permiso y feature** del usuario sobre ese venue: entre el inicio del OAuth y la confirmación pudo
+  cambiar cualquiera de los tres.
+- **Una sola política de activación, y es la de §5.6:** el link nace `PENDING` y **ops activa**. `autoActivateOnProvision` se elimina. Para
+  un piloto, empezar a ingerir pedidos antes de que alguien revise es exactamente el riesgo que no se quiere.
 
 Flujo integrator-initiated (el que corresponde a "ops conecta / el dueño autoriza"):
 
@@ -916,7 +888,7 @@ en `pos_data`. No se mezclan las dos. Corolario del split de dinero (§5.1): si 
 con certeza, el mapper **rechaza** (400 + evento visible), nunca estima.
 
 | #   | Tema                    | Contrato leído                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Fuente                                                                                                                                                                                                                                                                                      |
-| --- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| --- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | Firma                   | `X-Uber-Signature`, HMAC-SHA256 hex minúsculas del body crudo, llave = **Signing Key** registrada en el dashboard al crear el webhook (`Basic HMAC`), **no** el client secret — verificado en el dashboard el 2026-08-17; el formulario la exige y ofrece además una _Secondary Signing Key_ para rotar. Payload: `event_id` (**único, documentado para dedup**), `event_type`, `event_time` (firmado → ventana de replay), `meta { resource_id, user_id (store), status }`, `resource_href`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | [webhooks](https://developer.uber.com/docs/eats/guides/webhooks), [orders.notification](https://developer.uber.com/docs/eats/references/api/webhooks.orders-notification)                                                                                                                   |
 | 2   | Eventos                 | `orders.notification` (nuevo pedido; trae solo ids) · `orders.scheduled.notification` (programado; **también es pedido nuevo**) · `orders.cancel` · `orders.failure` (v1.0.0) · `orders.release` (repartidor cerca) · `order.fulfillment_issues.resolved` (**re-leer la orden**) · `store.provisioned` / `store.deprovisioned` · `store.status.changed`. **Uber no garantiza orden entre eventos.** Respuesta esperada **200 body vacío**. Reintentos: **máx 7**; cadencia inconsistente entre guía y referencia → no se asume                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | [webhooks](https://developer.uber.com/docs/eats/guides/webhooks), [order-integration](https://developer.uber.com/docs/eats/guides/order-integration)                                                                                                                                        |
 | 3   | Pedido                  | `GET /v2/eats/order/{order_id}` (scope `eats.store.orders.read`) → `id`, `display_id` (5 chars, para el ticket), `external_reference_id`, `current_state` ∈ CREATED/ACCEPTED/DENIED/FINISHED/CANCELED, `type` ∈ PICK_UP/DINE_IN/DELIVERY_BY_UBER/DELIVERY_BY_RESTAURANT, `store`, `eater { first_name, last_name(inicial), phone (anonimizado), phone_code, delivery { location, type, notes } }`, `cart.items[] { id, instance_id, title, external_data, quantity, price { unit_price, total_price, base_unit_price… }, selected_modifier_groups[].selected_items[] { price, quantity }, special_instructions }`, `payment.charges`, `placed_at`, `estimated_ready_for_pickup_at`, `deliveries[]`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | [get-order](https://developer.uber.com/docs/eats/references/api/v2/get-eats-order-orderid)                                                                                                                                                                                                  |
@@ -928,8 +900,8 @@ con certeza, el mapper **rechaza** (400 + evento visible), nunca estima.
 | 9   | Pausar tienda           | `POST /v1/eats/store/{store_id}/status` `{ status: 'ONLINE' \| 'PAUSED', paused_until?, reason }` → 204; scope `eats.store.status.write`. Path **singular** `store`. Auto-reanudar por `paused_until` `// REVALIDAR`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | [store-status](https://developer.uber.com/docs/eats/references/api/v1/post-eats-stores-storeid-status)                                                                                                                                                                                      |
 | 10  | Binding                 | OAuth `authorization_code`, scope `eats.pos_provisioning`, `https://auth.uber.com/oauth/v2/authorize?…`, token en `POST https://auth.uber.com/oauth/v2/token`, 30 días. `GET /v1/eats/stores` (token de usuario) · `POST /v1/eats/stores/{store_id}/pos_data` (activar; `integrator_store_id`, `integrator_brand_id`, `merchant_store_id`, `is_order_manager`, `require_manual_acceptance`, `webhooks_config.webhooks_version`; `pos_integration_enabled` ignorado/deprecado, `partner_store_id` deprecado; query vs body `// REVALIDAR`) · `PATCH …/pos_data { integration_enabled: false }` · `DELETE …/pos_data`. Webhooks `store.provisioned` / `store.deprovisioned`. También existe activación por soporte de Uber y pre-integración en onboarding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | [integration-activation-flows](https://developer.uber.com/docs/eats/guides/integration-activation-flows), [authentication](https://developer.uber.com/docs/eats/guides/authentication), [pos_data](https://developer.uber.com/docs/eats/references/api/v1/post-eats-stores-storeid-posdata) |
 | 11  | Token de app            | `client_credentials`, TTL 30 días, **100 tokens/hora y el 101º invalida el más viejo** → persistir el token (§7.1). Scopes: `eats.store`, `eats.store.status.write`, `eats.order`, `eats.store.orders.read`, `eats.report`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | [authentication](https://developer.uber.com/docs/eats/guides/authentication)                                                                                                                                                                                                                |
-| 12  | Sandbox                 | Dominios **separados**: `https://sandbox-login.uber.com` (auth) y `https://test-api.uber.com` (API); mezclar falla. **Las tiendas de prueba las da Integration Tech Support** (no self-serve) — solicitud enviada 2026-08-17, **Uber Case# 59404262 / Request #739474**, prioridad P3 (SLA: acuse 4 h, resolución 48 h). 🔴 **Sin test store, `GET /v1/eats/stores` devuelve las tiendas REALES de la cuenta y las escrituras caen en producción — ver §5.0.** Junto con la tienda, Uber entrega **test store credentials** para entrar a Uber Eats Orders como si fueras el comercio y ponerla en estado abierto (necesario para el pedido de prueba). Pedidos de prueba: entrar a Uber Eats con la **cuenta de prueba**, usar la **dirección de la tienda de prueba** y pedir como cliente |
-| 15  | **Paso a producción**   | 🔴 No es solo trámite: (1) **integration verification = sesión CONJUNTA de pruebas end-to-end con Uber**, agendada por tech support — no una revisión de papeles; (2) app de PRODUCCIÓN aparte, creada con una cuenta de Uber de producción (no de test); (3) **los scopes de producción se piden con OTRO tech support request** citando el `client_id` de esa app; (4) configurar el webhook de producción. El encabezado de la doc advierte: *"Access to These APIs May Require Written Approval From Uber"*, y la guía asume que trabajas con un **partner manager** de Uber Eats. **Consecuencia para el plan:** la fase E no se puede agendar hasta que el motor esté completo y probado — Uber va a verlo funcionando en vivo | [going-live](https://developer.uber.com/docs/eats/guides/going-live)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | [sandbox](https://developer.uber.com/docs/eats/guides/sandbox), [webhooks](https://developer.uber.com/docs/eats/guides/webhooks)                                                                                                                                                            |
+| 12  | Sandbox                 | Dominios **separados**: `https://sandbox-login.uber.com` (auth) y `https://test-api.uber.com` (API); mezclar falla. **Las tiendas de prueba las da Integration Tech Support** (no self-serve) — solicitud enviada 2026-08-17, **Uber Case# 59404262 / Request #739474**, prioridad P3 (SLA: acuse 4 h, resolución 48 h). 🔴 **Sin test store, `GET /v1/eats/stores` devuelve las tiendas REALES de la cuenta y las escrituras caen en producción — ver §5.0.** Junto con la tienda, Uber entrega **test store credentials** para entrar a Uber Eats Orders como si fueras el comercio y ponerla en estado abierto (necesario para el pedido de prueba). Pedidos de prueba: entrar a Uber Eats con la **cuenta de prueba**, usar la **dirección de la tienda de prueba** y pedir como cliente                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 15  | **Paso a producción**   | 🔴 No es solo trámite: (1) **integration verification = sesión CONJUNTA de pruebas end-to-end con Uber**, agendada por tech support — no una revisión de papeles; (2) app de PRODUCCIÓN aparte, creada con una cuenta de Uber de producción (no de test); (3) **los scopes de producción se piden con OTRO tech support request** citando el `client_id` de esa app; (4) configurar el webhook de producción. El encabezado de la doc advierte: _"Access to These APIs May Require Written Approval From Uber"_, y la guía asume que trabajas con un **partner manager** de Uber Eats. **Consecuencia para el plan:** la fase E no se puede agendar hasta que el motor esté completo y probado — Uber va a verlo funcionando en vivo                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | [going-live](https://developer.uber.com/docs/eats/guides/going-live)                                                                                                                                                                                                                        | [sandbox](https://developer.uber.com/docs/eats/guides/sandbox), [webhooks](https://developer.uber.com/docs/eats/guides/webhooks) |
 | 13  | Autenticación de la app | El founder eligió **Client Secret**; Uber recomienda llave asimétrica. Se arranca con client secret por ser más simple; migrar a asimétrica es un cambio acotado en `uber.client.ts`. ⚠️ Esta elección **no** afecta la firma de webhooks: esa usa la Signing Key dedicada (§7.3), no el client secret — la v4 justificaba la elección con esa razón y era falsa                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | dashboard de Uber (capturas 2026-08-17)                                                                                                                                                                                                                                                     |
 | 14  | Webhook dado de alta    | `Primary Webhook` · URL `https://api.avoqado.io/api/v1/webhooks/delivery/uber` · `Authentication Type: Basic HMAC` · Signing Key generada por nosotros (`openssl rand -hex 32`, en `.env` como `UBER_WEBHOOK_SIGNING_KEY`) · Secondary Signing Key vacía (reservada para rotación). La ruta **aún no existe** en el server: se construye en B1                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | dashboard de Uber (2026-08-17)                                                                                                                                                                                                                                                              |
 
@@ -949,28 +921,26 @@ cancelación, menú, pausa, binding y sandbox.
 
 Los enums `DeliveryProvider.UBER_EATS` / `DIDI_FOOD` y `OrderSource.UBER_EATS` / `DIDI_FOOD` **ya existen**. Lo demás sí:
 
-| Migración                                                                                                                                                                        | Para                            |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `DeliveryOutboundEvent` (nuevo modelo: `kind`, `payload`, `sequence`, `state` con SENDING, `claimToken`, `lockedUntil`, `deadlineAt`…)                                           | §5.4 outbox                     |
-| `DeliveryOrderEvent.externalOrderId`, `dedupKey @unique`, `claimToken`, `lockedUntil`, `receivedWhileSuspended`, estados `UNRESOLVED_STORE` / `PENDING_ORDER` / `REJECTED_STALE` | §5.11 dedup · §6.2 · §5.5 lease |
-| `DeliveryProviderCredential` (nuevo modelo: token de app persistido por entorno/cliente/scopes)                                                                                  | §7.1                            |
-| `DeliveryChannelLink.credentials Bytes?`, `previousWebhookSecret`, `previousSecretValidUntil`, `lastMenuSyncError`, `sandbox`, `suspendedReason`, `suspendRequestedAt`           | §5.10, §5.9, §6.2, §5.8         |
-| 🔴 **`Refund` NO existe como modelo.** El patrón real es un `Payment` negativo `type = REFUND` (§5.7) — la v5 anunciaba aquí una migración inexistente. Lo que sí hace falta: **reversión durable de `InventoryPosting`** con unique por `(posting, evento)` | §5.7 |
-| 🔴 **`CloudPrintIntent`** (nuevo modelo): `venueId`, `orderId`, `channelLinkId`, `causalEventId`, **`destinationKey`** (`STATION:<id>` · `UNROUTED` · `EXPO`), `reason`, `seq`, `payload`, estado + claim/lease para el gateway, `@@unique([venueId, causalEventId, destinationKey, reason, seq])` | §5.12 impresión |
-| 🔴 **`UberOAuthSession`** (nuevo modelo, patrón `GoogleOAuthSession`): token cifrado, `venueId`, `userId`, `expiresAt`, `consumedAt`, tiendas autorizadas. One-shot | §7.2 binding |
-| 🔴 **`DeliveryOutboundStream`** (nuevo modelo): contador atómico de `sequence` por `streamKey`. Y `DeliveryOutboundEvent` gana `@@unique([streamKey, sequence])` | §5.4 orden y exclusión |
-| 🔴 Estado **`BLOCKED_SAFETY`** en `DeliveryOutboundEvent` (terminal: escritura vetada por la lista blanca) | §5.0 |
-| 🔴 Estado **`PAUSE_PENDING`** en `DeliveryChannelStatus` (pausa pedida, aún no confirmada por lectura remota) | §5.8 |
+| Migración                                                                                                                                                                                                                                                                                          | Para                            |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `DeliveryOutboundEvent` (nuevo modelo: `kind`, `payload`, `sequence`, `state` con SENDING, `claimToken`, `lockedUntil`, `deadlineAt`…)                                                                                                                                                             | §5.4 outbox                     |
+| `DeliveryOrderEvent.externalOrderId`, `dedupKey @unique`, `claimToken`, `lockedUntil`, `receivedWhileSuspended`, estados `UNRESOLVED_STORE` / `PENDING_ORDER` / `REJECTED_STALE`                                                                                                                   | §5.11 dedup · §6.2 · §5.5 lease |
+| `DeliveryProviderCredential` (nuevo modelo: token de app persistido por entorno/cliente/scopes)                                                                                                                                                                                                    | §7.1                            |
+| `DeliveryChannelLink.credentials Bytes?`, `previousWebhookSecret`, `previousSecretValidUntil`, `lastMenuSyncError`, `sandbox`, `suspendedReason`, `suspendRequestedAt`                                                                                                                             | §5.10, §5.9, §6.2, §5.8         |
+| 🔴 **`Refund` NO existe como modelo.** El patrón real es un `Payment` negativo `type = REFUND` (§5.7) — la v5 anunciaba aquí una migración inexistente. Lo que sí hace falta: **reversión durable de `InventoryPosting`** con unique por `(posting, evento)`                                       | §5.7                            |
+| 🔴 **`CloudPrintIntent`** (nuevo modelo): `venueId`, `orderId`, `channelLinkId`, `causalEventId`, **`destinationKey`** (`STATION:<id>` · `UNROUTED` · `EXPO`), `reason`, `seq`, `payload`, estado + claim/lease para el gateway, `@@unique([venueId, causalEventId, destinationKey, reason, seq])` | §5.12 impresión                 |
+| 🔴 **`UberOAuthSession`** (nuevo modelo, patrón `GoogleOAuthSession`): token cifrado, `venueId`, `userId`, `expiresAt`, `consumedAt`, tiendas autorizadas. One-shot                                                                                                                                | §7.2 binding                    |
+| 🔴 **`DeliveryOutboundStream`** (nuevo modelo): contador atómico de `sequence` por `streamKey`. Y `DeliveryOutboundEvent` gana `@@unique([streamKey, sequence])`                                                                                                                                   | §5.4 orden y exclusión          |
+| 🔴 Estado **`BLOCKED_SAFETY`** en `DeliveryOutboundEvent` (terminal: escritura vetada por la lista blanca)                                                                                                                                                                                         | §5.0                            |
+| 🔴 Estado **`PAUSE_PENDING`** en `DeliveryChannelStatus` (pausa pedida, aún no confirmada por lectura remota)                                                                                                                                                                                      | §5.8                            |
 
-🔴 **Las seis filas marcadas se agregaron en v6 y faltaban** — el diseño las usaba y la tabla no las
-creaba (lo detectó la auditoría Codex: *"migraciones/estados que no existen"*). Es el mismo defecto
-que la auditoría anterior ya había señalado, repetido al escribir las correcciones. **Al cerrar cada
-sección nueva, verificar que todo modelo, enum y campo que menciona esté en esta tabla.**
+🔴 **Las seis filas marcadas se agregaron en v6 y faltaban** — el diseño las usaba y la tabla no las creaba (lo detectó la auditoría Codex:
+_"migraciones/estados que no existen"_). Es el mismo defecto que la auditoría anterior ya había señalado, repetido al escribir las
+correcciones. **Al cerrar cada sección nueva, verificar que todo modelo, enum y campo que menciona esté en esta tabla.**
 
-Cada una aditiva. Por regla del repo (`critical-warnings.md`), **toda edición de `prisma/schema.prisma`
-termina con `npm run schema:map` y `docs/SCHEMA_MAP.md` va en el MISMO commit**; los tres modelos
-nuevos (`CloudPrintIntent`, `UberOAuthSession`, `DeliveryOutboundStream`) necesitan además su entrada
-en `MODEL_TO_DOMAIN` de `scripts/generate-schema-map.ts` o el script falla.
+Cada una aditiva. Por regla del repo (`critical-warnings.md`), **toda edición de `prisma/schema.prisma` termina con `npm run schema:map` y
+`docs/SCHEMA_MAP.md` va en el MISMO commit**; los tres modelos nuevos (`CloudPrintIntent`, `UberOAuthSession`, `DeliveryOutboundStream`)
+necesitan además su entrada en `MODEL_TO_DOMAIN` de `scripts/generate-schema-map.ts` o el script falla.
 
 ## 12. Plan por fases
 
@@ -1016,10 +986,9 @@ con conciliación manual; una base de clientes no.
 - **Conciliación financiera del marketplace** es fase posterior, declarada, y **prerequisito de disponibilidad general** (el piloto vive con
   conciliación manual).
 - **Auto-sync de menú fuera de v1**: manual + al activar. La bandera `autoSyncMenu` se oculta hasta que exista el mecanismo.
-- **Un pedido de delivery desencadena TODO** (founder, 2026-08-17, §5.13): es una venta del venue como
-  cualquier otra. El tipo de pago del canal **se auto-provisiona al activar el link** — el dueño no
-  tiene que crearlo a mano antes de su primer pedido. Inventario ya está conectado; faltan comanda,
-  recibo y el estampado de `tenderTypeId`.
+- **Un pedido de delivery desencadena TODO** (founder, 2026-08-17, §5.13): es una venta del venue como cualquier otra. El tipo de pago del
+  canal **se auto-provisiona al activar el link** — el dueño no tiene que crearlo a mano antes de su primer pedido. Inventario ya está
+  conectado; faltan comanda, recibo y el estampado de `tenderTypeId`.
 - **La impresión del pedido de delivery entra a v1** (founder, 2026-08-17, tras verificarse que hoy no se imprime nada — §5.12). Comandas
   por estación **sin switch** (es core); ticket de expedición **con switch por sucursal**, cuyo default lo deriva el sistema del número de
   estaciones activas. El dueño **nunca elige un dispositivo**: configura áreas, como Fudo/Parrot.

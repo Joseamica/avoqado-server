@@ -20,8 +20,14 @@ describe('resolución item de Uber → Product (durable)', () => {
 
     const cat = await prisma.menuCategory.create({ data: { venueId, name: 'Cat', slug: `cat-${Date.now()}` } })
     const p1 = await prisma.product.create({
-      data: { venueId, categoryId: cat.id, name: 'Cochinita', sku: `SKU-COCH-${Date.now()}`,
-              externalId: `${UBER_EXTERNAL_ID_PREFIX}Cochinita_de_Doña_Si`, price: '304.00' },
+      data: {
+        venueId,
+        categoryId: cat.id,
+        name: 'Cochinita',
+        sku: `SKU-COCH-${Date.now()}`,
+        externalId: `${UBER_EXTERNAL_ID_PREFIX}Cochinita_de_Doña_Si`,
+        price: '304.00',
+      },
     })
     porExternalId = p1.id
     const p2 = await prisma.product.create({
@@ -46,7 +52,9 @@ describe('resolución item de Uber → Product (durable)', () => {
       await prisma.shift.deleteMany({ where: { venueId: { in: [venueId, otroVenueId] } } })
       await prisma.venue.deleteMany({ where: { id: { in: [venueId, otroVenueId] } } })
       await prisma.organization.deleteMany({ where: { id: orgId } })
-    } catch { /* fixtures */ }
+    } catch {
+      /* fixtures */
+    }
   })
 
   it('1º por externalId (UBER_EATS:{item_id}) — el camino cuando Avoqado publicó el menú', async () => {

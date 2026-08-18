@@ -8,10 +8,14 @@ import { persistUberWebhookEvent } from '@/services/delivery-channels/providers/
 describe('uber webhook ingress (durable)', () => {
   const KEY = 'llave-de-prueba-integration'
   const mkBody = (eventId: string, storeId = 'store-uber-1', orderId = 'order-1') =>
-    Buffer.from(JSON.stringify({
-      event_id: eventId, event_type: 'orders.notification', event_time: 1_700_000_000,
-      meta: { resource_id: orderId, user_id: storeId, status: 'pos' },
-    }))
+    Buffer.from(
+      JSON.stringify({
+        event_id: eventId,
+        event_type: 'orders.notification',
+        event_time: 1_700_000_000,
+        meta: { resource_id: orderId, user_id: storeId, status: 'pos' },
+      }),
+    )
   const sign = (b: Buffer) => crypto.createHmac('sha256', KEY).update(b).digest('hex')
   const ids: string[] = []
 
