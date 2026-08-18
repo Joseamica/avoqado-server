@@ -158,7 +158,7 @@ describe('sync.mobile.service processIntents', () => {
 
     const acks = await processIntents(params)
 
-    expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'CANCEL_ORDER' }), 'orders:cancel')
+    expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'CANCEL_ORDER' }), 'orders:cancel-unpaid')
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
     expect(orderMobileService.cancelOrder).not.toHaveBeenCalled()
     expect(prisma.posSyncIntent.create).toHaveBeenCalledWith(
@@ -777,7 +777,10 @@ describe('sync.mobile.service processIntents', () => {
       ['ADD_ITEMS', 'orders:create'],
       ['CLEAR_TABLE', 'tables:update'],
       ['PAY_CASH', 'payments:create'],
-      ['CANCEL_ORDER', 'orders:cancel'],
+      // 🔴 2026-08-17 — auditoría de piso, caso #9: deshacer una venta SIN cobrar es del
+      // mostrador. El servicio rechaza órdenes con pagos (PAID o PARTIAL), así que el
+      // permiso acotado no anula un cheque ya cobrado ni por la vía offline.
+      ['CANCEL_ORDER', 'orders:cancel-unpaid'],
       ['COMP_ORDER', 'orders:comp'],
       ['APPLY_DISCOUNT', 'discounts:apply'],
       ['APPLY_SERVICE_CHARGE', 'orders:update'],

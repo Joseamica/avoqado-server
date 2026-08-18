@@ -201,20 +201,22 @@ describe('DELETE /venues/:venueId/orders/:orderId/service-charges/:orderServiceC
  *
  * Bloque APARTE de `cases` por la MISMA razón que el DELETE service-charges de
  * arriba: 6 capas (suma checkTableOwnership) Y un permiso DISTINTO
- * (`orders:cancel`, no `orders:update` — mismo nombre exacto que
- * `requiredPermissionForIntent('CANCEL_ORDER')` en `sync.mobile.service.ts`,
- * así que reproducir offline y pegarle online exigen el mismo permiso).
+ * (`orders:cancel-unpaid` desde 2026-08-17 — auditoría de permisos de piso, caso #9;
+ * mismo nombre exacto que `requiredPermissionForIntent('CANCEL_ORDER')` en
+ * `sync.mobile.service.ts`, así que reproducir offline y pegarle online exigen el mismo
+ * permiso. El servicio rechaza cualquier orden con pagos, PAID o PARTIAL, así que el
+ * permiso acotado no alcanza a anular un cheque ya cobrado).
  */
 describe('POST /venues/:venueId/orders/:orderId/cancel', () => {
   const PATH = '/venues/:venueId/orders/:orderId/cancel'
   const { checkTableOwnership } = require('@/middlewares/checkTableOwnership.middleware')
 
-  it('existe, con auth + validateVenueAccess + permiso orders:cancel (NO orders:update)', () => {
+  it('existe, con auth + validateVenueAccess + permiso orders:cancel-unpaid (NO orders:update)', () => {
     const route = inspectRoute(tpvRouter, 'post', PATH)
     expect(route).toBeDefined()
     expect(route!.hasAuthenticateToken).toBe(true)
     expect(route!.hasValidateVenueAccess).toBe(true)
-    expect(route!.permission).toBe('orders:cancel')
+    expect(route!.permission).toBe('orders:cancel-unpaid')
   })
 
   it('lleva EXACTAMENTE 6 capas — la sexta es checkTableOwnership, igual que /mobile', () => {
