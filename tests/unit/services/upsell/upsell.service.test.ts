@@ -705,6 +705,84 @@ describe('listActiveRulesForPos — el POS recibe la selección RESUELTA', () =>
     // pero deja línea con qué regla y qué venue.
     expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ ruleId: 'r_stale', venueId: 'v1' }))
   })
+
+  // 🟡 Medido en hardware (2026-08-18): 6 fetches del POS → 9 avisos del MISMO
+  // warn, porque cada refresco de cada tablet dispara `listActiveRulesForPos` y
+  // antes se avisaba SIEMPRE que una regla ACTIVE seguía rota. El fail-open no
+  // se toca (sigue sirviendo `[]`): lo que se recorta es el VOLUMEN del log.
+  it('un segundo fetch de la misma regla rota no repite el warn (memoizado por ruleId, no por request)', async () => {
+    const reglaRota = {
+      id: 'r_stale_repeat',
+      triggerType: 'ALWAYS',
+      triggerProductIds: [],
+      triggerCategoryIds: [],
+      suggestedProductId: 'prod_leche_repeat',
+      suggestedModifiers: [],
+      headline: null,
+      priority: 0,
+      lift: null,
+      daysOfWeek: [],
+      timeFrom: null,
+      timeUntil: null,
+    }
+    const productoConObligatorioSinResolver = {
+      id: 'prod_leche_repeat',
+      soldByWeight: false,
+      upsellEnabled: true,
+      modifierGroups: [
+        { group: { id: 'g_tipo', name: 'Tipo', required: true, modifiers: [{ id: 'm_ent', name: 'Entera', price: 0, active: true }] } },
+      ],
+    }
+    ;(prisma.upsellRule.findMany as jest.Mock).mockResolvedValue([reglaRota])
+    ;(prisma.product.findMany as jest.Mock).mockResolvedValue([productoConObligatorioSinResolver])
+
+    // Tres "refrescos del POS" seguidos contra la MISMA regla rota.
+    await listActiveRulesForPos('v1')
+    await listActiveRulesForPos('v1')
+    await listActiveRulesForPos('v1')
+
+    const avisosDeEstaRegla = (logger.warn as jest.Mock).mock.calls.filter(call => call[1]?.ruleId === 'r_stale_repeat')
+    expect(avisosDeEstaRegla).toHaveLength(1)
+  })
+
+  it('si la regla se arregla y luego se vuelve a romper, el warn se repite (edge-triggered, no "una vez en la vida del proceso")', async () => {
+    const ruleId = 'r_recovers_then_breaks'
+    const reglaBase = {
+      id: ruleId,
+      triggerType: 'ALWAYS',
+      triggerProductIds: [],
+      triggerCategoryIds: [],
+      suggestedProductId: 'prod_variable',
+      suggestedModifiers: [],
+      headline: null,
+      priority: 0,
+      lift: null,
+      daysOfWeek: [],
+      timeFrom: null,
+      timeUntil: null,
+    }
+    const productoRoto = {
+      id: 'prod_variable',
+      soldByWeight: false,
+      upsellEnabled: true,
+      modifierGroups: [
+        { group: { id: 'g_tipo', name: 'Tipo', required: true, modifiers: [{ id: 'm_ent', name: 'Entera', price: 0, active: true }] } },
+      ],
+    }
+    // Mismo producto, ya sin grupos obligatorios sin resolver: se "arregló".
+    const productoSano = { ...productoRoto, modifierGroups: [] }
+
+    ;(prisma.upsellRule.findMany as jest.Mock).mockResolvedValue([reglaBase])
+    ;(prisma.product.findMany as jest.Mock).mockResolvedValueOnce([productoRoto])
+    await listActiveRulesForPos('v1') // 1) rota → avisa
+    ;(prisma.product.findMany as jest.Mock).mockResolvedValueOnce([productoSano])
+    await listActiveRulesForPos('v1') // 2) se arregló → sin aviso
+    ;(prisma.product.findMany as jest.Mock).mockResolvedValueOnce([productoRoto])
+    await listActiveRulesForPos('v1') // 3) se rompe de nuevo → ES una entrada NUEVA al estado, avisa otra vez
+
+    const avisosDeEstaRegla = (logger.warn as jest.Mock).mock.calls.filter(call => call[1]?.ruleId === ruleId)
+    expect(avisosDeEstaRegla).toHaveLength(2)
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

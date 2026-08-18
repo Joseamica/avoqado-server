@@ -155,6 +155,20 @@ export const PRODUCT_VALIDATION_SELECT = {
  * `suggestedModifiers` resuelto que recibe el POS, en vez de reimplementar la
  * misma degradación fail-open dos veces.
  */
+/**
+ * Reglas cuyo aviso de degradación YA se emitió — evita repetir el mismo `warn`
+ * en cada fetch del POS. Cada refresco de cada tablet en el local dispara
+ * `listActiveRulesForPos`; sin esto, una sola regla rota llena el log (medido:
+ * 6 fetches → 9 avisos, en un venue con sólo 2 reglas degradadas).
+ *
+ * Vive en memoria de proceso, igual que `venueNames.ts` (`src/observability/`):
+ * se resetea con cada deploy, y eso está bien. Se limpia sola cuando la regla
+ * vuelve a resolver (abajo), así que "avisado" significa "primera vez que ENTRA
+ * al estado degradado", no "una sola vez en la vida del proceso" — si se
+ * arregla y se vuelve a romper después, avisa de nuevo.
+ */
+const degradedRuleWarned = new Set<string>()
+
 export function resolveForDto(
   product: ProductForValidation | undefined,
   selection: unknown,
@@ -163,13 +177,18 @@ export function resolveForDto(
 ): ResolvedModifier[] {
   if (!product) return []
   try {
-    return validateAndResolveModifiers(product, selection as SuggestedModifierSelection[] | null)
+    const resolved = validateAndResolveModifiers(product, selection as SuggestedModifierSelection[] | null)
+    degradedRuleWarned.delete(ruleId)
+    return resolved
   } catch (error) {
-    logger.warn('Regla de upsell con selección inválida — se sirve sin modificadores obligatorios', {
-      ruleId,
-      venueId,
-      error: error instanceof Error ? error.message : String(error),
-    })
+    if (!degradedRuleWarned.has(ruleId)) {
+      degradedRuleWarned.add(ruleId)
+      logger.warn('Regla de upsell con selección inválida — se sirve sin modificadores obligatorios', {
+        ruleId,
+        venueId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
     return []
   }
 }
