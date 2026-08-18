@@ -22,11 +22,25 @@
  * El alta de catálogo desde el back-office (`POST /dashboard/venues/:venueId/products`)
  * se queda en `menu:create`: administrar el menú y dar de alta al vuelo son dos gestos
  * distintos.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 🔴 SEGUNDA PASADA (la verificación encontró que el fix quedó A MEDIAS)
+ *
+ * Scan & Go tiene DOS puertas, no una. La gemela de TPV
+ * —`POST /tpv/venues/:venueId/products/quick-add`, cuyo propio OpenAPI dice
+ * _"Create product on-the-fly from barcode scan"_— se quedó en `menu:create`.
+ * O sea: el MISMO gesto (escaneo un código que no existe, lo doy de alta sin salir
+ * de la pantalla) pedía dos permisos distintos según por qué app entrara.
+ *
+ * 🔑 Por qué no se detectó: este archivo sólo importaba `mobileRouter`. Un test que
+ * no importa el router de la otra puerta no puede ver que la otra puerta está abierta.
+ * Por eso ahora importa `tpvRouter` y las aserciones corren sobre las DOS.
  */
 
 import { StaffRole } from '@prisma/client'
 import mobileRouter from '@/routes/mobile.routes'
 import dashboardRouter from '@/routes/dashboard.routes'
+import tpvRouter from '@/routes/tpv.routes'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { hasPermission, resolvePermissions } from '@/lib/permissions'
 
@@ -52,6 +66,32 @@ function hasAuth(router: any, method: string, path: string): boolean {
 }
 
 const POS_CREATE = '/venues/:venueId/products'
+const TPV_QUICK_ADD = '/venues/:venueId/products/quick-add'
+
+describe('POST /tpv/venues/:venueId/products/quick-add — la MISMA alta, por la otra puerta', () => {
+  it('sigue autenticada', () => {
+    expect(hasAuth(tpvRouter, 'post', TPV_QUICK_ADD)).toBe(true)
+  })
+
+  it('🔴 exige tpv-products:write, igual que su gemela de /mobile', () => {
+    expect(permissionOf(tpvRouter, 'post', TPV_QUICK_ADD)).toBe('tpv-products:write')
+  })
+
+  it('🔑 las DOS puertas del mismo gesto piden el MISMO permiso', () => {
+    // La regresión que este test existe para atrapar: arreglar una y dejar la otra.
+    expect(permissionOf(tpvRouter, 'post', TPV_QUICK_ADD)).toBe(permissionOf(mobileRouter, 'post', POS_CREATE))
+  })
+
+  it.each([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER])('%s no pierde el quick-add de TPV', role => {
+    expect(hasPermission(role, null, permissionOf(tpvRouter, 'post', TPV_QUICK_ADD)!)).toBe(true)
+  })
+
+  it('🔴 CASHIER y WAITER tampoco crean artículos por la puerta de TPV', () => {
+    for (const role of [StaffRole.CASHIER, StaffRole.WAITER]) {
+      expect(hasPermission(role, null, permissionOf(tpvRouter, 'post', TPV_QUICK_ADD)!)).toBe(false)
+    }
+  })
+})
 
 describe('POST /mobile/venues/:venueId/products — el alta al vuelo del escáner', () => {
   it('sigue autenticada', () => {

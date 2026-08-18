@@ -5746,7 +5746,7 @@ router.get(
  *       401:
  *         description: Unauthorized
  *       403:
- *         description: Forbidden (lacks menu:create permission)
+ *         description: Forbidden (lacks tpv-products:write permission)
  */
 export async function createTpvQuickAddProductHandler(req: Request, res: Response, next: NextFunction) {
   try {
@@ -5836,10 +5836,17 @@ export async function createTpvQuickAddProductHandler(req: Request, res: Respons
   }
 }
 
+// 🔴 `tpv-products:write` — el MISMO permiso que su gemela de `/mobile`
+// (`POST /mobile/venues/:venueId/products`). Scan & Go tiene DOS puertas y el fix
+// original sólo cerró una: este endpoint —cuyo propio OpenAPI de aquí arriba dice
+// "Create product on-the-fly from barcode scan"— seguía pidiendo `menu:create`, así que
+// el MISMO gesto exigía permiso distinto según por qué app entrara el cajero. Un rol
+// personalizado con el toggle de Scan & Go encendido recibía 403 por la puerta de TPV.
+// `menu:create` lo implica (puente), así que nadie que administre el menú pierde el alta.
 router.post(
   '/venues/:venueId/products/quick-add',
   authenticateTokenMiddleware,
-  checkPermission('menu:create'),
+  checkPermission('tpv-products:write'),
   createTpvQuickAddProductHandler,
 )
 
