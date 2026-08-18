@@ -38,6 +38,22 @@ export interface SignupResult {
   }
 }
 
+export interface LandingSignupInput {
+  email: string
+  firstName?: string
+  lastName?: string
+  organizationName?: string
+  phone?: string
+}
+
+export interface LandingSignupResult {
+  staff: { id: string; email: string }
+  organizationId: string | null
+  /** Token EN CLARO para el magic link. En la DB solo vive su hash SHA-256. */
+  magicLinkToken: string
+  alreadyExisted: boolean
+}
+
 export interface VerifyEmailResult {
   emailVerified: boolean
   accessToken: string
@@ -339,4 +355,109 @@ export async function checkEmailVerificationStatus(email: string): Promise<{ ema
     emailExists: true,
     emailVerified: staff.emailVerified,
   }
+}
+
+/**
+ * Alta desde una landing publica (avoqado.io/restaurants y hermanas).
+ *
+ * Difiere de `signupUser` en UNA cosa: aqui NO se pide contrasena, porque el
+ * formulario vive en una landing de trafico pagado y cada campo extra cuesta
+ * conversion (decision de la junta del 17-ago-2026).
+ *
+ * El usuario la define despues, con el magic link del correo de bienvenida.
+ * Ese link es el flujo de reset de contrasena que YA existe — mismo token
+ * hasheado, misma caducidad, mismo un-solo-uso, misma pantalla del dashboard.
+ * No se invento un mecanismo nuevo ni se toco `signupUser`: quien entra por
+ * dashboard.avoqado.io/signup sigue exactamente el mismo camino de siempre.
+ *
+ * Por que la cuenta nace con `emailVerified: true` y `password: null`:
+ *   - `password: null` la deja inaccesible por login normal — la unica puerta
+ *     es el magic link, que solo llega al correo que el usuario escribio.
+ *   - El login exige `emailVerified` (auth.service.ts:294); dejarla en false
+ *     dejaria al usuario fuera aun despues de fijar su contrasena.
+ *   - La cuenta nace vacia (sin venue ni datos), asi que no hay nada que
+ *     proteger todavia mas alla del acceso mismo.
+ */
+export async function signupFromLanding(input: LandingSignupInput): Promise<LandingSignupResult> {
+  const { email, firstName = '', lastName = '', organizationName = '', phone } = input
+  const normalizedEmail = email.toLowerCase().trim()
+
+  // 1. Si ya existe, NO es un error para el visitante: se le manda el magic link
+  //    igual para que entre a su cuenta. Decirle "ya estas registrado" en una
+  //    landing de ads es perder el lead por un tecnicismo.
+  const existing = await prisma.staff.findUnique({ where: { email: normalizedEmail } })
+
+  const { resetToken, hashedToken, expiryTime } = buildMagicLinkToken()
+
+  if (existing) {
+    await prisma.staff.update({
+      where: { id: existing.id },
+      data: { resetToken: hashedToken, resetTokenExpiry: expiryTime, resetTokenUsedAt: null },
+    })
+    return {
+      staff: { id: existing.id, email: existing.email },
+      organizationId: await getPrimaryOrganizationId(existing.id),
+      magicLinkToken: resetToken,
+      alreadyExisted: true,
+    }
+  }
+
+  // 2. Crear organizacion + staff OWNER + progreso, igual que el signup normal
+  const result = await prisma.$transaction(async tx => {
+    const organization = await tx.organization.create({
+      data: {
+        name: organizationName || 'Nuevo Negocio',
+        email: normalizedEmail,
+        phone: phone || '',
+      },
+    })
+
+    const staff = await tx.staff.create({
+      data: {
+        email: normalizedEmail,
+        password: null, // sin contrasena: se fija al canjear el magic link
+        firstName,
+        lastName,
+        phone: phone || null,
+        active: true,
+        emailVerified: true, // ver nota del encabezado
+        resetToken: hashedToken,
+        resetTokenExpiry: expiryTime,
+        resetTokenUsedAt: null,
+      },
+    })
+
+    await tx.staffOrganization.create({
+      data: {
+        staffId: staff.id,
+        organizationId: organization.id,
+        role: OrgRole.OWNER,
+        isPrimary: true,
+        isActive: true,
+      },
+    })
+
+    // wizardVersion 2 = el wizard vigente (/setup). Sin esto cae al legacy.
+    await tx.onboardingProgress.create({
+      data: { organizationId: organization.id, currentStep: 0, completedSteps: [], wizardVersion: 2 },
+    })
+
+    return { organization, staff }
+  })
+
+  return {
+    staff: { id: result.staff.id, email: result.staff.email },
+    organizationId: result.organization.id,
+    magicLinkToken: resetToken,
+    alreadyExisted: false,
+  }
+}
+
+/** Mismo esquema que el reset de contrasena: 32 bytes, hash SHA-256, 1 hora. */
+function buildMagicLinkToken() {
+  const resetToken = crypto.randomBytes(32).toString('hex')
+  const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex')
+  const expiryTime = new Date()
+  expiryTime.setHours(expiryTime.getHours() + 24) // 24h: el correo de una landing se abre mas tarde que un reset pedido a proposito
+  return { resetToken, hashedToken, expiryTime }
 }

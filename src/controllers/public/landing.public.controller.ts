@@ -2,6 +2,9 @@ import { Request, Response, NextFunction } from 'express'
 import emailService from '../../services/email.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
+import { signupFromLanding } from '../../services/onboarding/signup.service'
+import crypto from 'crypto'
+import prisma from '../../utils/prismaClient'
 
 const CONTACT_NOTIFY_EMAIL = process.env.CONTACT_NOTIFY_EMAIL || 'hola@avoqado.io'
 // Onboarding recibe el mismo aviso que ventas: quien da de alta al cliente
@@ -57,6 +60,37 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
 
     const logoUrl = 'https://avoqado.io/isotipo.svg'
     const nombre = `${String(firstName)} ${String(lastName)}`.trim()
+
+    // Crear la cuenta de verdad, no solo mandar un correo. El prospecto queda
+    // registrado en la DB igual que si hubiera entrado por dashboard/signup;
+    // la diferencia es que aqui no se le pidio contrasena — la define con el
+    // magic link de abajo. Si esto falla NO se aborta el contacto: el lead
+    // sigue valiendo aunque el alta no haya podido crearse.
+    let magicLink: string | null = null
+    try {
+      const alta = await signupFromLanding({
+        email: String(email),
+        firstName: String(firstName),
+        lastName: String(lastName),
+        organizationName: String(companyName),
+        phone: String(phone),
+      })
+      // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
+      const apiUrl = process.env.PUBLIC_API_URL || 'https://api.avoqado.io'
+      magicLink = `${apiUrl}/api/v1/public/onboarding/continuar/${alta.magicLinkToken}`
+      logger.info('[CONTACT_SUBMIT] Cuenta creada desde landing', {
+        staffId: alta.staff.id,
+        organizationId: alta.organizationId,
+        alreadyExisted: alta.alreadyExisted,
+        source,
+      })
+    } catch (err) {
+      logger.error('[CONTACT_SUBMIT] No se pudo crear la cuenta; se continua solo con el lead', {
+        email,
+        companyName,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
     const utmTexto =
       utm && typeof utm === 'object' && Object.keys(utm as object).length > 0
         ? Object.entries(utm as Record<string, string>)
@@ -155,9 +189,17 @@ Campana: ${utmTexto || '—'}
       <p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>
     </div>
 
-    <div style="padding:32px 0;text-align:center;">
-      <a href="https://avoqado.io/restaurants" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">Ver como funciona</a>
+    <div style="padding:32px 0 8px;text-align:center;">
+      <a href="${magicLink || 'https://avoqado.io/restaurants'}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">${magicLink ? 'Continua tu onboarding' : 'Ver como funciona'}</a>
     </div>
+
+    ${
+      magicLink
+        ? `<div style="padding-bottom:24px;text-align:center;">
+      <p style="font-size:13px;color:#666;margin:0;">Al entrar eliges tu contrasena. El enlace sirve por 24 horas y una sola vez.</p>
+    </div>`
+        : ''
+    }
 
     <div style="padding-bottom:24px;">
       <p style="font-size:14px;color:#666;margin:0;">Si prefieres adelantarte, respondenos este correo o escribenos por WhatsApp y con gusto te atendemos.</p>
@@ -189,7 +231,7 @@ Con Avoqado vas a poder:
 
 El plan inicial es gratis para siempre y no pedimos tarjeta.
 
-Ver como funciona: https://avoqado.io/restaurants
+${magicLink ? `Continua tu onboarding aqui (eliges tu contrasena, sirve 24 horas y una sola vez):\n${magicLink}` : 'Ver como funciona: https://avoqado.io/restaurants'}
 
 Servicios Tecnologicos Avo S.A. de C.V. — Ciudad de Mexico, Mexico
 Politica de Privacidad: https://avoqado.io/privacy
@@ -405,4 +447,68 @@ export async function submitLabsBrief(req: Request, res: Response, next: NextFun
   } catch (err) {
     return next(err)
   }
+}
+
+// ------------------------------------------------------------
+// GET /api/v1/public/onboarding/continuar/:token
+// ------------------------------------------------------------
+/**
+ * Salto medido del magic link del correo de bienvenida.
+ *
+ * El correo NO apunta directo al dashboard: pasa por aqui para poder registrar
+ * que la persona SI hizo clic. Sin esto el embudo tiene un hueco ciego entre
+ * "se mando el correo" y "fijo su contrasena", y no habria forma de distinguir
+ * "nunca abrio el correo" de "entro pero se atoro eligiendo contrasena".
+ *
+ * No valida ni consume el token — de eso se encarga la pantalla de reset. Aqui
+ * solo se cuenta el clic y se redirige. Un token invalido igual redirige, para
+ * que sea la pantalla (que ya sabe hacerlo) quien explique el error.
+ */
+export async function continuarOnboarding(req: Request, res: Response, _next: NextFunction) {
+  const token = String(req.params.token || '')
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
+  const destino = `${frontendUrl}/auth/reset-password/${encodeURIComponent(token)}`
+
+  try {
+    // El token viaja en claro en el correo; en la DB vive su hash SHA-256.
+    const hashed = crypto.createHash('sha256').update(token).digest('hex')
+    const staff = await prisma.staff.findFirst({
+      where: { resetToken: hashed },
+      select: { id: true, email: true, resetTokenExpiry: true, resetTokenUsedAt: true },
+    })
+
+    if (staff) {
+      const vencido = staff.resetTokenExpiry ? staff.resetTokenExpiry < new Date() : true
+      await prisma.activityLog.create({
+        data: {
+          staffId: staff.id,
+          action: 'ONBOARDING_MAGIC_LINK_CLICKED',
+          entity: 'Staff',
+          entityId: staff.id,
+          data: {
+            source: 'landing_welcome_email',
+            // Con estos dos se distingue "clic util" de "clic tardio o repetido",
+            // que es justo donde se traba la gente.
+            expired: vencido,
+            alreadyUsed: Boolean(staff.resetTokenUsedAt),
+            userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
+          },
+        },
+      })
+      logger.info('[ONBOARDING] Clic en el magic link', {
+        staffId: staff.id,
+        expired: vencido,
+        alreadyUsed: Boolean(staff.resetTokenUsedAt),
+      })
+    } else {
+      logger.warn('[ONBOARDING] Clic en magic link con token desconocido')
+    }
+  } catch (err) {
+    // Medir jamas debe impedir que el usuario entre.
+    logger.error('[ONBOARDING] No se pudo registrar el clic del magic link', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  return res.redirect(302, destino)
 }

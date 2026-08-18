@@ -16,7 +16,7 @@ import * as customerPortalController from '../controllers/public/customerPortal.
 import * as otpAuthController from '../controllers/public/otpAuth.public.controller'
 import * as paymentLinkPublicController from '../controllers/public/paymentLink.public.controller'
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
-import { submitContact, submitLabsBrief } from '../controllers/public/landing.public.controller'
+import { submitContact, submitLabsBrief, continuarOnboarding } from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
 import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
@@ -355,7 +355,31 @@ router.get(
 // ---- Landing Page Routes (unauthenticated) — called from avoqado.io frontend ----
 // nodemailer doesn't work on Cloudflare Pages Functions, so the landing proxies
 // email submissions to this server which uses Resend (HTTP).
-router.post('/contact', writeLimit, submitContact)
+// El correo se valida con Zod y no a mano: el controller solo comprobaba que el campo
+// existiera, asi que un "noesemail" respondia 200 y la confirmacion al prospecto se perdia
+// en silencio (nadie se enteraba de que el lead nunca recibio nada).
+const contactSchema = z.object({
+  body: z.object({
+    firstName: z.string().trim().min(1, 'El nombre es requerido'),
+    lastName: z.string().trim().min(1, 'El apellido es requerido'),
+    phone: z.string().trim().min(1, 'El telefono es requerido'),
+    email: z.string().trim().email('Formato de correo invalido'),
+    companyName: z.string().trim().min(1, 'El nombre del negocio es requerido'),
+    // Calificacion opcional que manda la landing de sector
+    employees: z.string().optional(),
+    revenue: z.string().optional(),
+    businessType: z.string().optional(),
+    modules: z.string().optional(),
+    source: z.string().optional(),
+    utm: z.record(z.string(), z.string()).optional(),
+  }),
+})
+router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)
+
+// Salto medido del magic link del correo de bienvenida: cuenta el clic y redirige
+// a la pantalla de contrasena del dashboard. readLimit (no writeLimit) porque un
+// usuario puede legitimamente abrir el enlace varias veces desde su correo.
+router.get('/onboarding/continuar/:token', readLimit, continuarOnboarding)
 router.post('/labs/submit', writeLimit, submitLabsBrief)
 
 // ---- Venue Chat (customer ↔ venue messaging via WABA relay) ----
