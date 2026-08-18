@@ -4,6 +4,9 @@ import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 
 const CONTACT_NOTIFY_EMAIL = process.env.CONTACT_NOTIFY_EMAIL || 'hola@avoqado.io'
+// Onboarding recibe el mismo aviso que ventas: quien da de alta al cliente
+// necesita el lead sin esperar un reenvio manual (founder, 2026-08-17).
+const ONBOARDING_NOTIFY_EMAIL = process.env.ONBOARDING_NOTIFY_EMAIL || 'onboarding@avoqado.io'
 const LABS_NOTIFY_EMAIL = process.env.LABS_NOTIFY_EMAIL || 'hola@avoqado.io'
 
 const projectLabel: Record<string, string> = {
@@ -31,52 +34,198 @@ function escapeHtml(s: string): string {
 // ------------------------------------------------------------
 // POST /api/v1/public/contact — landing demo request form
 // ------------------------------------------------------------
+/** Fila clave/valor del aviso interno, con el formato de tabla de EMAIL_STANDARDS. */
+function fila(label: string, value: unknown): string {
+  const v = value === undefined || value === null || String(value).trim() === '' ? '—' : String(value)
+  return `
+        <tr>
+          <td style="width:160px;padding:10px 14px;border-bottom:1px solid #e5e7eb;color:#666;font-size:13px;">${escapeHtml(label)}</td>
+          <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;color:#000;font-size:14px;">${escapeHtml(v)}</td>
+        </tr>`
+}
+
 export async function submitContact(req: Request, res: Response, next: NextFunction) {
   try {
     const { firstName, lastName, phone, email, companyName, employees, revenue } = req.body || {}
+    // Campos opcionales que manda la landing de sector (restaurantes): tipo de
+    // negocio, módulos marcados en el formulario, origen y UTMs de la campaña.
+    const { businessType, modules, source, utm } = req.body || {}
 
     if (!firstName || !lastName || !phone || !email || !companyName) {
       throw new BadRequestError('Todos los campos son requeridos')
     }
 
-    const internalHtml = `
-      <h2>Nueva solicitud de ventas</h2>
-      <p><strong>Nombre:</strong> ${escapeHtml(String(firstName))} ${escapeHtml(String(lastName))}</p>
-      <p><strong>Email:</strong> ${escapeHtml(String(email))}</p>
-      <p><strong>Teléfono:</strong> ${escapeHtml(String(phone))}</p>
-      <p><strong>Empresa:</strong> ${escapeHtml(String(companyName))}</p>
-      <p><strong>Tamaño:</strong> ${escapeHtml(String(employees ?? '-'))}</p>
-      <p><strong>Ingresos:</strong> ${escapeHtml(String(revenue ?? '-'))}</p>
-      <hr>
-      <p><em>Enviado desde avoqado.io/contact</em></p>
-    `
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const nombre = `${String(firstName)} ${String(lastName)}`.trim()
+    const utmTexto =
+      utm && typeof utm === 'object' && Object.keys(utm as object).length > 0
+        ? Object.entries(utm as Record<string, string>)
+            .map(([k, v]) => `${k}=${v}`)
+            .join(' · ')
+        : ''
 
-    const confirmHtml = `
-      <h2>¡Gracias por tu interés en Avoqado!</h2>
-      <p>Hola ${escapeHtml(String(firstName))},</p>
-      <p>Hemos recibido tu solicitud de información para <strong>${escapeHtml(String(companyName))}</strong>.</p>
-      <p>Nuestro equipo de ventas se pondrá en contacto contigo en las próximas 24 horas.</p>
-      <br>
-      <p>Saludos,<br>El equipo de Avoqado</p>
-    `
+    // ---------- Aviso interno (ventas + onboarding) ----------
+    const internalHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Nuevo prospecto</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
+  <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+    <div style="padding-bottom:32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display:inline-block;vertical-align:middle;">
+      <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom:24px;">
+      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">Nuevo prospecto</h1>
+      <p style="margin:0;font-size:16px;color:#666;">${escapeHtml(String(companyName))}</p>
+    </div>
 
-    const [internalSent, confirmSent] = await Promise.all([
-      emailService.sendEmail({
-        to: CONTACT_NOTIFY_EMAIL,
-        subject: `Nueva solicitud de demo - ${String(companyName)}`,
-        html: internalHtml,
-      }),
+    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Contacto</h2>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:24px;">
+      ${fila('Nombre', nombre)}${fila('Negocio', companyName)}${fila('WhatsApp', phone)}${fila('Correo', email)}
+    </table>
+
+    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Calificacion</h2>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:24px;">
+      ${fila('Tipo de negocio', businessType)}${fila('Sucursales', employees)}${fila('Ventas al mes', revenue)}${fila('Le interesa', modules)}
+    </table>
+
+    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Origen</h2>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+      ${fila('Pagina', source)}${fila('Campana', utmTexto)}
+    </table>
+
+    <div style="padding:32px 0;text-align:center;">
+      <a href="https://wa.me/${encodeURIComponent(String(phone).replace(/[^0-9]/g, ''))}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">Escribirle por WhatsApp</a>
+    </div>
+
+    <hr style="border:none;border-top:1px solid #e0e0e0;margin:40px 0 24px 0;">
+    <div>
+      <div style="margin-bottom:16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display:inline-block;vertical-align:middle;">
+        <span style="font-size:16px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+      </div>
+      <p style="margin:0 0 16px 0;font-size:14px;color:#000;">Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico</p>
+      <p style="margin:16px 0 0 0;font-size:14px;"><a href="https://avoqado.io/privacy" style="color:#000;text-decoration:none;font-weight:600;">Politica de Privacidad</a></p>
+    </div>
+  </div>
+</body></html>`
+
+    const internalText = `Nuevo prospecto — ${String(companyName)}
+
+CONTACTO
+Nombre: ${nombre}
+Negocio: ${String(companyName)}
+WhatsApp: ${String(phone)}
+Correo: ${String(email)}
+
+CALIFICACION
+Tipo de negocio: ${businessType || '—'}
+Sucursales: ${employees || '—'}
+Ventas al mes: ${revenue || '—'}
+Le interesa: ${modules || '—'}
+
+ORIGEN
+Pagina: ${source || '—'}
+Campana: ${utmTexto || '—'}
+`
+
+    // ---------- Confirmacion al prospecto ----------
+    const confirmHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Bienvenido a Avoqado</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
+  <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+    <div style="padding-bottom:32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display:inline-block;vertical-align:middle;">
+      <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+    </div>
+
+    <div style="padding-bottom:24px;">
+      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">Hola ${escapeHtml(String(firstName))}, ya quedo tu registro</h1>
+    </div>
+
+    <div style="padding-bottom:8px;">
+      <p style="font-size:16px;margin:0 0 16px 0;color:#000;">Recibimos los datos de <strong>${escapeHtml(String(companyName))}</strong>. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menu y dejarte cobrando.</p>
+      <p style="font-size:16px;margin:0 0 24px 0;color:#000;">Mientras tanto, esto es lo que vas a poder hacer:</p>
+      <ul style="font-size:15px;margin:0 0 24px 0;padding-left:24px;color:#000;">
+        <li style="margin-bottom:8px;">Cobrar con tarjeta, efectivo o transferencia desde tu tablet, tu compu o el celular de tus meseros</li>
+        <li style="margin-bottom:8px;">Llevar mesas, cuentas abiertas y division de cuenta sin papelitos</li>
+        <li style="margin-bottom:8px;">Mandar las ordenes a cocina y a barra por separado, cada una a su impresora</li>
+        <li style="margin-bottom:8px;">Cuadrar tu corte de caja al centavo al cerrar el turno</li>
+        <li style="margin-bottom:8px;">Facturar CFDI 4.0: tu cliente escanea el QR del ticket y se factura solo</li>
+      </ul>
+      <p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>
+    </div>
+
+    <div style="padding:32px 0;text-align:center;">
+      <a href="https://avoqado.io/restaurants" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">Ver como funciona</a>
+    </div>
+
+    <div style="padding-bottom:24px;">
+      <p style="font-size:14px;color:#666;margin:0;">Si prefieres adelantarte, respondenos este correo o escribenos por WhatsApp y con gusto te atendemos.</p>
+    </div>
+
+    <hr style="border:none;border-top:1px solid #e0e0e0;margin:40px 0 24px 0;">
+    <div>
+      <div style="margin-bottom:16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display:inline-block;vertical-align:middle;">
+        <span style="font-size:16px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+      </div>
+      <p style="margin:0 0 16px 0;font-size:14px;color:#000;">Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico</p>
+      <p style="margin:0;font-size:12px;color:#666;">Recibes este correo porque dejaste tus datos en avoqado.io. Si no fuiste tu, puedes ignorarlo.</p>
+      <p style="margin:16px 0 0 0;font-size:14px;"><a href="https://avoqado.io/privacy" style="color:#000;text-decoration:none;font-weight:600;">Politica de Privacidad</a></p>
+    </div>
+  </div>
+</body></html>`
+
+    const confirmText = `Hola ${String(firstName)}, ya quedo tu registro.
+
+Recibimos los datos de ${String(companyName)}. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menu y dejarte cobrando.
+
+Con Avoqado vas a poder:
+- Cobrar con tarjeta, efectivo o transferencia desde tu tablet, tu compu o el celular de tus meseros
+- Llevar mesas, cuentas abiertas y division de cuenta sin papelitos
+- Mandar las ordenes a cocina y a barra por separado, cada una a su impresora
+- Cuadrar tu corte de caja al centavo al cerrar el turno
+- Facturar CFDI 4.0: tu cliente escanea el QR del ticket y se factura solo
+
+El plan inicial es gratis para siempre y no pedimos tarjeta.
+
+Ver como funciona: https://avoqado.io/restaurants
+
+Servicios Tecnologicos Avo S.A. de C.V. — Ciudad de Mexico, Mexico
+Politica de Privacidad: https://avoqado.io/privacy
+`
+
+    // El aviso interno va a ventas Y a onboarding, para que quien da de alta al
+    // cliente reciba el lead sin depender de un reenvio manual.
+    const internos = [...new Set([CONTACT_NOTIFY_EMAIL, ONBOARDING_NOTIFY_EMAIL].filter(Boolean))]
+
+    const [internosOk, confirmSent] = await Promise.all([
+      Promise.all(
+        internos.map(to =>
+          emailService.sendEmail({
+            to,
+            subject: `Nuevo prospecto - ${String(companyName)}`,
+            html: internalHtml,
+            text: internalText,
+          }),
+        ),
+      ),
       emailService.sendEmail({
         to: String(email),
-        subject: 'Solicitud de contacto recibida - Avoqado',
+        subject: 'Ya quedo tu registro en Avoqado',
         html: confirmHtml,
+        text: confirmText,
       }),
     ])
 
-    if (!internalSent) {
-      logger.error('[CONTACT_SUBMIT] Internal notification failed', { email, companyName })
+    // Basta con que UNO de los internos llegue para no perder el lead.
+    if (!internosOk.some(Boolean)) {
+      logger.error('[CONTACT_SUBMIT] Internal notification failed', { email, companyName, internos })
       return res.status(502).json({ success: false, message: 'No se pudo notificar al equipo. Intenta de nuevo.' })
     }
+    internos.forEach((to, i) => {
+      if (!internosOk[i]) logger.warn('[CONTACT_SUBMIT] Internal notification failed for one recipient', { to, companyName })
+    })
     if (!confirmSent) {
       logger.warn('[CONTACT_SUBMIT] Confirmation email failed (lead saved)', { email })
     }
