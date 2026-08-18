@@ -27,6 +27,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { lineRevenueSql } from '@/services/dashboard/lineRevenue'
 
 const FILE = path.join(__dirname, '../../../../src/services/dashboard/report.service.ts')
 const source = fs.readFileSync(FILE, 'utf8')
@@ -42,7 +43,7 @@ const codeOnly = source
  * snake_case on purpose, because they type the returned row in TypeScript; what can never
  * go back to snake_case are the COLUMNS being queried.
  */
-const sqlOnly = codeOnly
+const templateSql = codeOnly
   .split('$queryRaw')
   .slice(1)
   .map(block => {
@@ -50,6 +51,16 @@ const sqlOnly = codeOnly
     return start === -1 ? '' : block.slice(start + 1, block.indexOf('`', start + 1))
   })
   .join('\n')
+
+/**
+ * The item-revenue expression is no longer typed inline: it comes from the
+ * shared `lineRevenueSql()` (one definition for the eight reports that were all
+ * charging discounted lines at LIST price). It is injected with `Prisma.raw`, so
+ * a purely textual read of this file no longer sees `oi."unitPrice"` — append
+ * what the helper actually emits, or the camelCase guard below silently stops
+ * checking the very columns it exists to protect.
+ */
+const sqlOnly = [templateSql, lineRevenueSql()].join('\n')
 
 describe('raw SQL in the inventory reports', () => {
   it.each([
@@ -65,10 +76,29 @@ describe('raw SQL in the inventory reports', () => {
     expect(sqlOnly).not.toMatch(pattern)
   })
 
+  it('the item-revenue expression really comes from the shared helper', () => {
+    // Guards the composition above: appending `lineRevenueSql()` to `sqlOnly`
+    // is only honest while these queries actually inject it.
+    expect(codeOnly).toContain('Prisma.raw(lineRevenueSql())')
+    expect(codeOnly).toContain("from './lineRevenue'")
+  })
+
   it('camelCase columns are double-quoted', () => {
     // Without quotes, PostgreSQL lowercases them and the exact same error comes back.
-    for (const column of ['"venueId"', '"createdAt"', '"productId"', '"orderId"', '"unitPrice"', '"costPerUnit"', '"rawMaterialId"']) {
-      expect(sqlOnly).toContain(column)
+    // Checked against THIS FILE's own SQL. `"unitPrice"` is deliberately absent
+    // from the list: it moved into the shared helper, so asserting it here
+    // against `sqlOnly` (which appends the helper) would pass no matter what
+    // this file contains — a guard that can never fail is not a guard.
+    for (const column of ['"venueId"', '"createdAt"', '"productId"', '"orderId"', '"costPerUnit"', '"rawMaterialId"']) {
+      expect(templateSql).toContain(column)
+    }
+  })
+
+  it('the helper quotes the columns it contributes', () => {
+    // The other half of the pair above: `unitPrice` / `quantity` /
+    // `discountAmount` now reach these queries through `lineRevenueSql()`.
+    for (const column of ['"unitPrice"', '"quantity"', '"discountAmount"']) {
+      expect(lineRevenueSql()).toContain(column)
     }
   })
 

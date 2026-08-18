@@ -3,6 +3,7 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
 import { SharedQueryService } from './shared-query.service'
+import { isItemLevelDiscount, lineRevenue } from './lineRevenue'
 import { parseDateRange, DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { DateTime } from 'luxon'
 // ⚠️ TECH DEBT — delete when MindForm migrates to native QR module.
@@ -258,8 +259,11 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
     },
     include: {
       items: {
+        // `modifiers` is REQUIRED by lineRevenue — without it the modifier
+        // revenue ($33,811 across the DB) silently disappears from this report.
         include: {
           product: true,
+          modifiers: true,
         },
       },
     },
@@ -273,7 +277,7 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
         const productKey = item.product.id
         const existing = productStatsMap.get(productKey)
 
-        const itemRevenue = item.quantity * Number(item.unitPrice)
+        const itemRevenue = lineRevenue(item) // net of the line's own discount
         const estimatedCost = Number(item.unitPrice) * 0.3 // Mock 30% cost ratio
 
         if (existing) {
@@ -1101,34 +1105,80 @@ async function getSalesHeatmapData(venueId: string, fromDate: Date, toDate: Date
   return { heatmap }
 }
 
+/**
+ * Discount analysis — counts BOTH places a giveaway can be booked.
+ *
+ * This used to filter `Order.discountAmount > 0` only. Combos and promotions
+ * write their giveaway on the LINE (`OrderItem.discountAmount`) and leave
+ * `Order.discountAmount` at 0, so a day with two discounted combos reported
+ * `{ ordersWithDiscount: 0, totalDiscount: 0 }`.
+ *
+ * The two sources are kept SEPARATE in the response (`orderLevelDiscount` /
+ * `itemLevelDiscount`) rather than silently merged: an accountant needs to see
+ * whether a peso came off the whole ticket or off one product, and the split is
+ * additive — the pre-existing fields keep their meaning ("all discount"), the
+ * breakdown is new.
+ *
+ * A line only counts as item-level when its own total is already net of the
+ * discount (`isItemLevelDiscount`). "Cobrar" cortesías leave the line GROSS and
+ * book the giveaway on `Order.discountAmount` instead — counting both sides
+ * would double them. Same trap `salesGiveaways.ts` documents for Sales Summary.
+ */
 async function getDiscountAnalysisData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
+  const statusFilter = { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] }
+
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      status: statusFilter,
       ...dateFilter,
-      discountAmount: { gt: 0 },
+      OR: [{ discountAmount: { gt: 0 } }, { items: { some: { discountAmount: { gt: 0 } } } }],
     },
-    select: { total: true, discountAmount: true, subtotal: true },
+    select: {
+      total: true,
+      discountAmount: true,
+      subtotal: true,
+      // `weightQuantity` matters: isItemLevelDiscount compares `total` against
+      // price × UNITS, and a weighted line's units are its kilos, not `quantity`.
+      items: { select: { quantity: true, unitPrice: true, discountAmount: true, total: true, weightQuantity: true } },
+    },
   })
 
   const totalOrders = await prisma.order.count({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      ...dateFilter,
-    },
+    where: { venueId, status: statusFilter, ...dateFilter },
   })
 
-  const totalDiscount = orders.reduce((sum, o) => sum + Number(o.discountAmount || 0), 0)
-  const totalRevenue = orders.reduce((sum, o) => sum + Number(o.total), 0)
+  let orderLevelDiscount = 0
+  let itemLevelDiscount = 0
+  let totalRevenue = 0
+  let ordersWithDiscount = 0
+
+  for (const order of orders) {
+    const orderDiscount = Number(order.discountAmount || 0)
+    const itemDiscount = order.items.reduce((sum, item) => (isItemLevelDiscount(item) ? sum + Number(item.discountAmount || 0) : sum), 0)
+
+    // The `OR` above matches on the RAW line discount; a line whose giveaway is
+    // already inside Order.discountAmount contributes nothing, so an order can
+    // reach here with no countable discount at all.
+    if (orderDiscount <= 0 && itemDiscount <= 0) continue
+
+    ordersWithDiscount += 1
+    orderLevelDiscount += orderDiscount
+    itemLevelDiscount += itemDiscount
+    totalRevenue += Number(order.total)
+  }
+
+  const totalDiscount = orderLevelDiscount + itemLevelDiscount
 
   return {
-    ordersWithDiscount: orders.length,
+    ordersWithDiscount,
     totalOrders,
-    discountRate: totalOrders > 0 ? (orders.length / totalOrders) * 100 : 0,
+    discountRate: totalOrders > 0 ? (ordersWithDiscount / totalOrders) * 100 : 0,
     totalDiscount,
-    averageDiscount: orders.length > 0 ? totalDiscount / orders.length : 0,
+    // Breakdown of `totalDiscount` — whole-ticket vs per-product giveaways.
+    orderLevelDiscount,
+    itemLevelDiscount,
+    averageDiscount: ordersWithDiscount > 0 ? totalDiscount / ordersWithDiscount : 0,
     revenueWithDiscount: totalRevenue,
   }
 }

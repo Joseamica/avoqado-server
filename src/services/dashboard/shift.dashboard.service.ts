@@ -2,6 +2,7 @@ import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
+import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation } from '../shared/cashReconciliation.service'
 
 interface ShiftFilters {
@@ -255,6 +256,12 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
               id: true,
               quantity: true,
               unitPrice: true,
+              discountAmount: true,
+              // Both are REQUIRED by lineRevenue: without `modifiers` the
+              // modifier revenue vanishes, without `weightQuantity` a weighing
+              // is charged as a whole kilo.
+              weightQuantity: true,
+              modifiers: { select: { price: true, quantity: true } },
               product: {
                 select: {
                   id: true,
@@ -384,17 +391,19 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
     for (const item of order.items) {
       const productName = item.product?.name || 'Unknown Product'
       const quantity = item.quantity || 1
-      const price = Number(item.unitPrice || 0)
+      // Revenue is net of the line's own discount — charging it at list price
+      // overstated every shift that sold a combo or a discounted item.
+      const revenue = lineRevenue(item)
 
       if (productMap.has(productName)) {
         const existing = productMap.get(productName)!
         existing.quantity += quantity
-        existing.revenue += price * quantity
+        existing.revenue += revenue
       } else {
         productMap.set(productName, {
           name: productName,
           quantity,
-          revenue: price * quantity,
+          revenue,
         })
       }
     }

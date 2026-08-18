@@ -41,6 +41,7 @@ import prisma from '@/utils/prismaClient'
 import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { PaymentMethod, Prisma, ReservationStatus } from '@prisma/client'
+import { lineRevenueSql } from './lineRevenue'
 import * as availableBalanceService from './availableBalance.dashboard.service'
 import * as commissionCalculationService from './commission/commission-calculation.service'
 import * as commissionPayoutService from './commission/commission-payout.service'
@@ -1014,7 +1015,7 @@ export class SharedQueryService {
         p."name" as "productName",
         c."name" as "categoryName",
         SUM(oi."quantity")::bigint as "quantitySold",
-        SUM(oi."quantity" * oi."unitPrice") as "revenue",
+        SUM(${Prisma.raw(lineRevenueSql())}) as "revenue",
         COUNT(DISTINCT o."id")::bigint as "orderCount"
       FROM "OrderItem" oi
       INNER JOIN "Product" p ON oi."productId" = p."id"
@@ -1108,7 +1109,7 @@ export class SharedQueryService {
       SELECT
         COALESCE(oi."productName", p."name", 'Producto sin nombre') as "productName",
         SUM(oi."quantity")::bigint as "quantitySold",
-        SUM(oi."quantity" * oi."unitPrice") as "revenue",
+        SUM(${Prisma.raw(lineRevenueSql())}) as "revenue",
         COUNT(DISTINCT o."id")::bigint as "orderCount"
       FROM "OrderItem" oi
       INNER JOIN "Order" o ON oi."orderId" = o."id"
@@ -1203,7 +1204,7 @@ export class SharedQueryService {
       SELECT
         COALESCE(oi."productName", p."name", 'Producto sin nombre') as "productName",
         SUM(oi."quantity")::bigint as "quantitySold",
-        SUM(oi."quantity" * oi."unitPrice") as "revenue",
+        SUM(${Prisma.raw(lineRevenueSql())}) as "revenue",
         COUNT(DISTINCT o."id")::bigint as "orderCount"
       FROM "OrderItem" oi
       INNER JOIN "Order" o ON oi."orderId" = o."id"
@@ -1856,7 +1857,7 @@ export class SharedQueryService {
       SELECT
         p."id" as "productId",
         p."name" as "productName",
-        SUM(oi."quantity" * oi."unitPrice") as "revenue",
+        SUM(${Prisma.raw(lineRevenueSql())}) as "revenue",
         COALESCE(SUM(oi."quantity" * r."totalCost"), 0) as "cost",
         SUM(oi."quantity")::bigint as "quantitySold"
       FROM "OrderItem" oi
@@ -1867,7 +1868,7 @@ export class SharedQueryService {
         AND o."createdAt" >= ${from}::timestamp
         AND o."createdAt" <= ${to}::timestamp
       GROUP BY p."id", p."name"
-      ORDER BY (SUM(oi."quantity" * oi."unitPrice") - COALESCE(SUM(oi."quantity" * r."totalCost"), 0)) DESC
+      ORDER BY (SUM(${Prisma.raw(lineRevenueSql())}) - COALESCE(SUM(oi."quantity" * r."totalCost"), 0)) DESC
       LIMIT ${limit}
     `
 

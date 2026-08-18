@@ -7,7 +7,8 @@
  * Metrics per item:
  * - itemsSold: Count of OrderItem records (transactions)
  * - unitsSold: Sum of OrderItem.quantity
- * - grossSales: Sum of (unitPrice * quantity)
+ * - grossSales: list value sold before discounts (price x units sold, plus
+ *   paid modifiers) via the shared lineGrossSql()
  * - discounts: Sum of discountAmount
  * - netSales: grossSales - discounts
  * - refunds: From refunded orders (tracked separately)
@@ -17,6 +18,7 @@ import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
+import { lineGrossSql, lineRevenueSql } from './lineRevenue'
 
 // ============================================================
 // Types
@@ -50,7 +52,7 @@ export interface ItemSalesMetrics {
   unit: string // 'c/u' (cada uno) or 'ea' (each)
   itemsSold: number // COUNT of OrderItems
   unitsSold: number // SUM of quantity
-  grossSales: number // SUM of (unitPrice * quantity)
+  grossSales: number // list value before discounts (see lineGrossSql)
   discounts: number // SUM of discountAmount
   netSales: number // grossSales - discounts
 }
@@ -58,8 +60,24 @@ export interface ItemSalesMetrics {
 export interface TimePeriodItemMetrics {
   period: string
   periodLabel?: string
+  /**
+   * List price: SUM(unitPrice * quantity). Deliberately GROSS — the chart that
+   * plots it labels the bar "Ventas brutas", and the table's headline is gross
+   * too (Square parity: gross sales and the giveaway shown as separate lines,
+   * see `salesGiveaways.ts`).
+   */
   grossSales: number
   itemsSold: number
+  /**
+   * SUM(OrderItem.discountAmount) and grossSales - discounts, per period.
+   *
+   * The chart used to carry ONLY the gross figure, so there was no way to
+   * reconcile a bar against the table's `netSales` column — a period with a
+   * combo showed 806 in the bar with nothing explaining the missing 25.
+   * Additive: existing consumers keep reading `grossSales` unchanged.
+   */
+  discounts: number
+  netSales: number
 }
 
 export interface SalesByItemResponse {
@@ -151,7 +169,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
       ${selectFields}
       COUNT(oi.id)::integer as items_sold,
       SUM(oi.quantity)::integer as units_sold,
-      COALESCE(SUM(oi."unitPrice" * oi.quantity), 0) as gross_sales,
+      COALESCE(SUM(${lineGrossSql()}), 0) as gross_sales,
       COALESCE(SUM(oi."discountAmount"), 0) as discounts
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
@@ -336,7 +354,9 @@ async function calculateTimePeriodItemMetrics(
   const periodMetricsQuery = `
     SELECT
       ${groupByExpression} as period,
-      COALESCE(SUM(oi."unitPrice" * oi.quantity), 0) as gross_sales,
+      COALESCE(SUM(${lineGrossSql()}), 0) as gross_sales,
+      COALESCE(SUM(oi."discountAmount"), 0) as discounts,
+      COALESCE(SUM(${lineRevenueSql()}), 0) as net_sales,
       COUNT(oi.id)::integer as items_sold
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
@@ -354,6 +374,8 @@ async function calculateTimePeriodItemMetrics(
     Array<{
       period: Date | number
       gross_sales: number | bigint | { toNumber?: () => number }
+      discounts: number | bigint | { toNumber?: () => number }
+      net_sales: number | bigint | { toNumber?: () => number }
       items_sold: number
     }>
   >(periodMetricsQuery, venueId, startDate, endDate)
@@ -380,6 +402,8 @@ async function calculateTimePeriodItemMetrics(
         period: formatPeriod(periodValue, reportType, timezone),
         periodLabel: formatPeriodLabel(periodValue, reportType, timezone),
         grossSales: toNumber(metrics?.gross_sales),
+        discounts: toNumber(metrics?.discounts),
+        netSales: toNumber(metrics?.net_sales),
         itemsSold: Number(metrics?.items_sold || 0),
       }
     })
@@ -397,6 +421,8 @@ async function calculateTimePeriodItemMetrics(
     period: formatPeriod(p.period, reportType, timezone),
     periodLabel: formatPeriodLabel(p.period, reportType, timezone),
     grossSales: toNumber(p.gross_sales),
+    discounts: toNumber(p.discounts),
+    netSales: toNumber(p.net_sales),
     itemsSold: Number(p.items_sold),
   }))
 

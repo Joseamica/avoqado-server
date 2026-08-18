@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
+import { lineRevenueSql, lineUnitsSql } from './lineRevenue'
 
 /**
  * 🔴 These queries were WRITTEN IN snake_case (`o.venue_id`, `rmm.raw_material_id`,
@@ -52,9 +53,16 @@ export async function getPMIXReport(
       oi."productId" as product_id,
       p.name as product_name,
       SUM(oi.quantity)::bigint as quantity_sold,
-      SUM(oi."unitPrice" * oi.quantity) as total_revenue,
+      SUM(${Prisma.raw(lineRevenueSql())}) as total_revenue,
       r."totalCost" as recipe_cost,
-      AVG(oi."unitPrice") as avg_price
+      -- Average price ACTUALLY charged per unit. AVG of unitPrice returned the
+      -- LIST price, so a discounted item looked more profitable than it was and
+      -- the food-cost percentage came out understated. Divided by UNITS (kilos
+      -- for goods sold by weight), so a weighed item reads as price-per-kilo.
+      -- COALESCE keeps this 0 instead of NULL when a line records zero units:
+      -- the caller wraps it in a Prisma Decimal, and that constructor THROWS
+      -- on null.
+      COALESCE(SUM(${Prisma.raw(lineRevenueSql())}) / NULLIF(SUM(${Prisma.raw(lineUnitsSql())}), 0), 0) as avg_price
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
     INNER JOIN "Product" p ON p.id = oi."productId"
@@ -79,7 +87,7 @@ export async function getPMIXReport(
   >`
     SELECT
       SUM(oi.quantity)::bigint as total_quantity,
-      SUM(oi."unitPrice" * oi.quantity) as total_revenue,
+      SUM(${Prisma.raw(lineRevenueSql())}) as total_revenue,
       SUM(COALESCE(r."totalCost", 0) * oi.quantity) as total_cost
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
@@ -114,7 +122,9 @@ export async function getPMIXReport(
       profit: profit.toNumber(),
       profitMargin: revenue.greaterThan(0) ? profit.div(revenue).mul(100).toNumber() : 0,
       foodCostPercentage: revenue.greaterThan(0) ? cost.div(revenue).mul(100).toNumber() : 0,
-      avgPrice: new Decimal(p.avg_price).toNumber(),
+      // `new Decimal(null)` THROWS. The SQL already COALESCEs, but this is the
+      // value a 500 would ride out on, so it does not depend on that alone.
+      avgPrice: new Decimal(p.avg_price ?? 0).toNumber(),
     }
   })
 
@@ -382,7 +392,7 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
   >`
     SELECT
       COALESCE(SUM(COALESCE(r."totalCost", 0) * oi.quantity), 0) as expected_cost,
-      COALESCE(SUM(oi."unitPrice" * oi.quantity), 0) as actual_revenue
+      COALESCE(SUM(${Prisma.raw(lineRevenueSql())}), 0) as actual_revenue
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
     LEFT JOIN "Recipe" r ON r."productId" = oi."productId"
