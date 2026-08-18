@@ -10,11 +10,21 @@
  * comanda: agregar líneas, cortesías, cargos por servicio, separar. Por eso nace un
  * permiso propio y acotado, `estimates:create`, exactamente como propuso el informe.
  *
- * CONVERTIR a orden se queda en `orders:create` a propósito: ahí sí nace una comanda con
- * líneas. Es la frontera entre cotizar y vender.
- *
  * Leer presupuestos se queda en `orders:read`, que satisfacen los 9 roles: no se inventa
  * un `estimates:read` que habría que espejar en tres clientes para no cambiar a nadie.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ⚠️ REVERTIDO (2026-08-17): este archivo decía que CONVERTIR se quedaba en
+ * `orders:create` "a propósito, porque ahí sí nace una comanda". La verificación mostró
+ * que eso dejaba al HOST a MEDIA FUNCIÓN —crea el presupuesto, lo acepta, y no puede
+ * cerrarlo— que es justo el patrón que esta auditoría existe para matar. Convertir pasó
+ * a `estimates:create`.
+ *
+ * Las aserciones de convertir viven ahora en `mobile.estimates.convert.permissions.test.ts`,
+ * con la justificación completa (la autoridad ya se gastó al escribir los precios; Square
+ * auto-convierte al aceptar el cliente; `orders:create` es además el gate de agregar
+ * renglones a cualquier cuenta abierta). Aquí sólo se corrige lo que había quedado
+ * codificando la decisión vieja.
  */
 
 import { StaffRole } from '@prisma/client'
@@ -62,8 +72,8 @@ describe('Cotizar tiene permiso propio, no el de tomar comandas', () => {
     expect(permissionOf(mobileRouter, method, path)).toBe('orders:read')
   })
 
-  it('🔴 CONVERTIR a orden se queda en orders:create: ahí sí nace una comanda', () => {
-    expect(permissionOf(mobileRouter, 'post', '/venues/:venueId/estimates/:estimateId/convert')).toBe('orders:create')
+  it('CONVERTIR cierra el ciclo con el MISMO permiso de cotizar (ver convert.permissions.test.ts)', () => {
+    expect(permissionOf(mobileRouter, 'post', '/venues/:venueId/estimates/:estimateId/convert')).toBe('estimates:create')
   })
 })
 
@@ -78,13 +88,12 @@ describe('HOST cotiza; sigue sin poder tomar comandas', () => {
     expect(DEFAULT_PERMISSIONS[StaffRole.HOST]).toContain('estimates:create')
   })
 
-  it('🔴 HOST NO gana tomar comandas ni convertir el presupuesto en venta', () => {
+  it('🔴 HOST NO gana tomar comandas — que es lo que de verdad se le estaba negando', () => {
+    // Convertir SÍ lo gana (cierra su propia cotización). Lo que sigue cerrado es el
+    // resto del POS: crear comandas, editarlas, comp-earlas.
     expect(hasPermission(StaffRole.HOST, null, 'orders:create')).toBe(false)
     expect(hasPermission(StaffRole.HOST, null, 'orders:update')).toBe(false)
     expect(hasPermission(StaffRole.HOST, null, 'orders:comp')).toBe(false)
-    expect(hasPermission(StaffRole.HOST, null, permissionOf(mobileRouter, 'post', '/venues/:venueId/estimates/:estimateId/convert')!)).toBe(
-      false,
-    )
   })
 
   it('HOST sí puede LEER los presupuestos que cotizó', () => {

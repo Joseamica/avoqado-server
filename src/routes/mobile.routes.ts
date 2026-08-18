@@ -2596,12 +2596,26 @@ router.put(
  * POST /api/v1/mobile/venues/:venueId/estimates/:estimateId/convert
  * Convert an accepted estimate to an order.
  */
-// 🔴 CONVERTIR se queda en `orders:create` a propósito: aquí sí nace una comanda con
-// líneas. Es la frontera entre cotizar y vender.
+// 🔴 CONVERTIR pide `estimates:create`, NO `orders:create`. (Antes decía lo contrario
+// "a propósito"; la verificación mostró que dejaba al HOST a media función y el
+// razonamiento no se sostiene.)
+//
+// 1. La autoridad YA se gastó antes: el HOST escribe los renglones y los PRECIOS al
+//    crear el presupuesto, y lo ACEPTA (mismo permiso). `convertToOrder` no deja
+//    escribir nada nuevo — COPIA verbatim lo ya aceptado. El candado estaba en el paso
+//    equivocado.
+// 2. Square: el permiso de presupuestos es el de facturas, y con Invoices Plus el
+//    presupuesto se AUTO-CONVIERTE al aceptarlo el cliente, sin humano en medio. Si
+//    convertir fuera frontera de autoridad, no se podría automatizar.
+// 3. `orders:create` abre de más: es también el gate de `POST /orders/:orderId/items`
+//    (agregar renglones a CUALQUIER cuenta abierta) y arrastra `inventory:read`.
+//
+// Nadie pierde: `orders:create` implica `estimates:create`. La orden que nace es inerte
+// (PENDING/PENDING) y el HOST no puede cobrarla, editarla, descontarla ni anularla.
 router.post(
   '/venues/:venueId/estimates/:estimateId/convert',
   authenticateTokenMiddleware,
-  checkPermission('orders:create'),
+  checkPermission('estimates:create'),
   estimateMobileController.convertToOrder,
 )
 

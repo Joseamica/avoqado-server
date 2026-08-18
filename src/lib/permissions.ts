@@ -516,8 +516,15 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // `orders:create` la recepcionista (HOST) llenaba la cotización con el cliente
   // enfrente y truena al guardar, y el atajo de darle `orders:create` le abriría de
   // golpe líneas, cortesías, cargos y separar. Arrastra lo que la pantalla necesita:
-  // navegar el menú, elegir al cliente y leer la lista. CONVERTIR el presupuesto en
-  // orden se queda en `orders:create`: ahí sí nace una comanda.
+  // navegar el menú, elegir al cliente y leer la lista.
+  //
+  // 🔴 Cubre el CICLO COMPLETO, CONVERTIR incluido (corregido 2026-08-17; este comentario
+  // decía lo contrario). `convertToOrder` no deja escribir nada nuevo: copia verbatim los
+  // renglones y precios que ESTE mismo permiso ya autorizó a escribir y a aceptar, así que
+  // gatearlo aparte ponía el candado en el paso equivocado y dejaba a recepción a media
+  // función. La orden que nace es inerte (PENDING/PENDING): cobrarla, editarla,
+  // descontarla o anularla siguen exigiendo permisos que el HOST no tiene. Justificación
+  // completa y Square: `tests/unit/routes/mobile.estimates.convert.permissions.test.ts`.
   'estimates:create': ['estimates:create', 'orders:read', 'menu:read', 'customers:read'],
 
   // ===========================
@@ -692,8 +699,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reservations:create',
     'reservations:update',
     'reservations:cancel',
-    // Cotizar desde recepción (auditoría de piso, caso #16). Un presupuesto no mueve
-    // dinero ni abre comanda; convertirlo en orden SIGUE exigiendo `orders:create`.
+    // Cotizar desde recepción (auditoría de piso, caso #16). Cubre el CICLO COMPLETO:
+    // crear, enviar/aceptar/rechazar y CONVERTIR a orden — convertir sólo copia los
+    // renglones que este mismo permiso ya autorizó a escribir, así que gatearlo aparte
+    // ponía el candado en el paso equivocado y dejaba a recepción a media función.
+    // La orden que nace es inerte: cobrarla, editarla, descontarla o anularla siguen
+    // exigiendo permisos que el HOST no tiene.
     'estimates:create',
     'customers:read', // Phase 1: Customer System
     // Alta de cliente desde recepción / reservas (founder, 2026-08-16). Sin esto la
