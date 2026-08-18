@@ -153,10 +153,31 @@ export function requiredPermissionForIntent(type: string): string | null {
     // a anular un cheque ya cobrado ni por la vía offline.
     case 'CANCEL_ORDER':
       return 'orders:cancel-unpaid'
-    // Cortesía y descuento tienen permiso PROPIO online (/orders/:id/comp →
-    // orders:comp, /orders/:id/discount* → discounts:apply). Con un genérico
-    // 'orders:update', un WAITER/CASHIER reproduciría offline lo que online
-    // tiene prohibido — el replay no es puerta trasera.
+    // Cortesía y descuento tienen permiso PROPIO (/orders/:id/comp → orders:comp,
+    // /orders/:id/discount* → discounts:apply). Con un genérico 'orders:update', un
+    // WAITER/CASHIER reproduciría offline lo que tiene prohibido — el replay no es
+    // puerta trasera.
+    //
+    // 🔴 DECLARADO, NO ARREGLADO (auditoría de permisos de piso, 2026-08-17): ese
+    // "online" es cierto para TPV y FALSO para `/mobile`. Medido hoy:
+    //
+    //   POST /tpv/venues/:id/orders/:orderId/comp              → orders:comp   (MANAGER+)
+    //   POST /mobile/venues/:id/orders/:orderId/comp           → orders:update (WAITER+)
+    //   POST /mobile/.../orders/:orderId/items/:itemId/comp    → orders:update (WAITER+)
+    //   intent COMP_ORDER  (offline)                           → orders:comp   (MANAGER+)
+    //   intent ADD_ITEMS con isCortesia (offline)              → orders:comp   (MANAGER+)
+    //
+    // O sea: la MISMA cortesía es de gerente por TPV y por la cola offline, pero de
+    // mesero por la ruta online de `/mobile`. `orders:update` lo traen WAITER y CASHIER
+    // por default; `orders:comp` no lo trae ningún rol debajo de MANAGER. La puerta
+    // floja es `/mobile`, y es PREEXISTENTE — no la abrió esta auditoría.
+    //
+    // No se aprieta aquí a propósito: subir `/mobile` a `orders:comp` le quita a los
+    // meseros de TODOS los venues una capacidad que hoy ya usan (regalar un postre por
+    // un plato tardado es operación normal, no fraude), y eso es una decisión de
+    // producto con dinero enfrente — del founder, no de un fix de permisos. Lo que sí
+    // se corrige es el comentario, que afirmaba un espejo inexistente y habría hecho
+    // que el siguiente lector diera por cerrada una puerta abierta.
     case 'COMP_ORDER':
       return 'orders:comp'
     case 'APPLY_DISCOUNT':
