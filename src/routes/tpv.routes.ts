@@ -4149,6 +4149,11 @@ router.patch(
   '/venues/:venueId/orders/:orderId/items',
   authenticateTokenMiddleware,
   validateVenueAccess,
+  // `orders:create` — nombre EXACTO de su gemela sana, `POST /items` de /mobile. Antes esta
+  // ruta no pedía NINGÚN permiso: con `enforceTableOwnership` apagado (el default)
+  // `checkTableOwnership` hace `return next()` de inmediato, el controller no tiene guard, y
+  // cualquier miembro del venue —VIEWER incluido— metía productos a cualquier cuenta abierta.
+  checkPermission('orders:create'),
   validateRequest(addOrderItemsSchema),
   checkTableOwnership('order'),
   orderController.addItemsToOrder,
@@ -4202,6 +4207,13 @@ router.delete(
   authenticateTokenMiddleware,
   checkPermission('orders:update'),
   validateRequest(removeOrderItemSchema),
+  // Faltaba, y por eso esta ruta IGNORABA lo que el admin configuró. El guard no decide
+  // "el mesero no puede tocar mesas ajenas": decide que se OBEDEZCA el switch del venue
+  // (`VenueSettings.enforceTableOwnership`). Apagado —el default— no cambia nada; encendido,
+  // se respeta. Sin él, poner un renglón respetaba al dueño de la mesa y quitarlo no.
+  // `checkPermission` ya ató el venue (`resolveUserRoleForVenue` → 403 "No access to this
+  // venue"), así que `validateVenueAccess` sería redundante aquí.
+  checkTableOwnership('order'),
   orderController.removeOrderItem,
 )
 

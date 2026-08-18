@@ -56,6 +56,7 @@ const POST_CARGO = '/venues/:venueId/orders/:orderId/service-charges'
 const DELETE_CARGO = '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId'
 const POST_CANCEL = '/venues/:venueId/orders/:orderId/cancel'
 const PATCH_ITEMS = '/venues/:venueId/orders/:orderId/items'
+const DELETE_ITEM = '/venues/:venueId/orders/:orderId/items/:itemId'
 
 /**
  * ¿Esta ruta monta `checkTableOwnership`? Devuelve la lista de override con la que se
@@ -160,6 +161,11 @@ describe('Ablación: el cajero sigue SIN poder editar el resto de la mesa ajena'
   const CERRADAS: Array<[string, string, string]> = [
     ['post', POST_CANCEL, 'cancelar la cuenta'],
     ['patch', PATCH_ITEMS, 'agregar/editar líneas'],
+    // Entró el 2026-08-18: el DELETE de una línea NO montaba el guard, así que
+    // ignoraba el switch del venue — poner una línea respetaba al dueño de la mesa
+    // y quitarla no. Cae en las CERRADAS y no en las abiertas porque su gemela (el
+    // PATCH) está cerrada: la simetría es el invariante, y aquí se cierra hacia arriba.
+    ['delete', DELETE_ITEM, 'quitar una línea'],
   ]
 
   it.each(CERRADAS)('🔴 %s %s (%s) → 403 TABLE_OWNED_BY_OTHER', async (method, path) => {
@@ -183,11 +189,17 @@ describe('Ablación: el cajero sigue SIN poder editar el resto de la mesa ajena'
   })
 
   /**
-   * CONTEO REAL: cuántas rutas de /tpv montan el guard de propiedad. Antes del arreglo
-   * eran 3 (cancel, PATCH items, DELETE service-charges); después son 2. Si alguien
-   * "arregla" otra asimetría quitando candados en bloque, este número lo delata.
+   * CONTEO REAL: cuántas rutas de /tpv montan el guard de propiedad.
+   *
+   * Historia, porque el número solo no dice nada: eran 3 (cancel, PATCH items, DELETE
+   * service-charges) → bajaron a 2 al quitar el candado del DELETE de cargos, que no
+   * protegía nada porque su POST estaba abierto (commit 210dbab6) → volvieron a 3 el
+   * 2026-08-18 al montarlo en el DELETE de una LÍNEA, cuyo PATCH sí está cerrado.
+   *
+   * Cada movimiento de este número va con su razón. Si alguien "arregla" una asimetría
+   * quitando candados en bloque, el conteo lo delata.
    */
-  it('exactamente 2 rutas de /tpv montan checkTableOwnership', () => {
+  it('exactamente 3 rutas de /tpv montan checkTableOwnership', () => {
     const conGuard: string[] = []
     for (const layer of (tpvRouter as any).stack ?? []) {
       if (!layer.route) continue
@@ -196,6 +208,10 @@ describe('Ablación: el cajero sigue SIN poder editar el resto de la mesa ajena'
         if (ownershipLayerOf(tpvRouter, method, layer.route.path)) conGuard.push(`${method.toUpperCase()} ${layer.route.path}`)
       }
     }
-    expect(conGuard.sort()).toEqual(['PATCH /venues/:venueId/orders/:orderId/items', 'POST /venues/:venueId/orders/:orderId/cancel'])
+    expect(conGuard.sort()).toEqual([
+      'DELETE /venues/:venueId/orders/:orderId/items/:itemId',
+      'PATCH /venues/:venueId/orders/:orderId/items',
+      'POST /venues/:venueId/orders/:orderId/cancel',
+    ])
   })
 })

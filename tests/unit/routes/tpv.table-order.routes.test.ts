@@ -244,3 +244,80 @@ describe('POST /venues/:venueId/orders/:orderId/cancel', () => {
     expect(typeof checkTableOwnership).toBe('function')
   })
 })
+
+/**
+ * Los RENGLONES de la cuenta bajo /tpv: poner (PATCH) y quitar (DELETE) — 2026-08-18.
+ *
+ * Mismo defecto de raíz que el DELETE de cargos por servicio (commit 210dbab6): en
+ * `/mobile` la cadena está completa y a `/tpv` se copió sólo la mitad. Aquí la mitad
+ * que faltaba era distinta EN CADA UNA, así que se veía "simétrico" de lejos:
+ *
+ *   PATCH  auth + validateVenueAccess + validateRequest + checkTableOwnership   → SIN checkPermission
+ *   DELETE auth + checkPermission('orders:update') + validateRequest            → SIN checkTableOwnership
+ *
+ * 1. El PATCH no pedía NINGÚN permiso. Y `checkTableOwnership` hace `return next()`
+ *    inmediato si `VenueSettings.enforceTableOwnership` es falso — que es el default
+ *    (`isTableOwnershipEnforced` devuelve `settings?.enforceTableOwnership === true`).
+ *    O sea: en un venue de fábrica, CUALQUIER miembro del venue —VIEWER incluido, que el
+ *    propio catálogo describe como "contadores, consultores externos, observadores"—
+ *    metía productos a cualquier cuenta abierta. El controller tampoco tiene guard.
+ *    Se cierra con el permiso EXACTO de su gemela sana, `POST /items` de `/mobile`:
+ *    `orders:create`.
+ *
+ * 2. El DELETE no montaba `checkTableOwnership`, así que **ignoraba lo que el admin
+ *    configuró**. Ese es el punto: el guard NO decide "el mesero no puede tocar mesas
+ *    ajenas" — decide "que se obedezca el switch del venue". Con el switch apagado
+ *    (default) no cambia nada; con el switch encendido, se respeta. Decisión del founder
+ *    (2026-08-18): *"es depende la configuración, en algunos POS decidirá el admin si
+ *    puede el mesero interferir en otras mesas o no"*.
+ *
+ * 🔴 LO QUE QUEDA ABIERTO Y NO SE ARREGLA AQUÍ: el DELETE pide `orders:update` y el PATCH
+ * `orders:create`. KITCHEN tiene el primero y no el segundo, así que puede QUITAR un
+ * renglón sin poder ponerlo. Viene del gate del DELETE, es anterior a este cambio, y
+ * unificarlo es decisión de producto — no se toca de contrabando.
+ */
+describe('renglones de la cuenta bajo /tpv — poner y quitar bajo la misma regla', () => {
+  const PATCH_PATH = '/venues/:venueId/orders/:orderId/items'
+  const DELETE_PATH = '/venues/:venueId/orders/:orderId/items/:itemId'
+
+  // Por firma, no por conteo de capas: `checkTableOwnership` expone
+  // `ownershipOverridePermissions` justo para que los tests de rutas puedan afirmar
+  // que está montado sin ejecutarlo (mismo patrón que `requiredPermission`).
+  const capaDeDueño = (route: RouteInspection) => route.handlers.find(h => Array.isArray((h as any)?.ownershipOverridePermissions))
+
+  it('PATCH (poner renglones) exige orders:create — el MISMO nombre que POST /items de /mobile', () => {
+    const route = inspectRoute(tpvRouter, 'patch', PATCH_PATH)
+    expect(route).toBeDefined()
+    expect(route!.hasAuthenticateToken).toBe(true)
+    expect(route!.hasValidateVenueAccess).toBe(true)
+    expect(route!.permission).toBe('orders:create')
+  })
+
+  it('DELETE (quitar un renglón) monta checkTableOwnership, para OBEDECER el switch del venue', () => {
+    const route = inspectRoute(tpvRouter, 'delete', DELETE_PATH)
+    expect(route).toBeDefined()
+    expect(capaDeDueño(route!)).toBeDefined()
+  })
+
+  it('🔴 SIMETRÍA: si poner respeta al dueño de la mesa, quitar también — y al revés', () => {
+    const patch = inspectRoute(tpvRouter, 'patch', PATCH_PATH)!
+    const del = inspectRoute(tpvRouter, 'delete', DELETE_PATH)!
+    expect(!!capaDeDueño(del)).toBe(!!capaDeDueño(patch))
+  })
+
+  it('🔴 el permiso NO cambia según haya WiFi: la ruta en línea pide lo mismo que el intent ADD_ITEMS', () => {
+    // Éste es el guard que de verdad importa. Antes del arreglo la ruta en línea no pedía
+    // NADA mientras el intent offline sí exigía `orders:create`, o sea que el POS era MÁS
+    // laxo con internet que sin él: la misma acción pasaba o se rechazaba según el WiFi, y
+    // al reconectar el intent caía en cuarentena. Atarlas impide que vuelvan a separarse.
+    const { requiredPermissionForIntent } = require('@/services/mobile/sync.mobile.service')
+    const online = inspectRoute(tpvRouter, 'patch', PATCH_PATH)!.permission
+    expect(requiredPermissionForIntent('ADD_ITEMS')).toBe('orders:create')
+    expect(online).toBe(requiredPermissionForIntent('ADD_ITEMS'))
+  })
+
+  it('ninguna de las dos queda sin permiso: un rol de sólo lectura no toca la cuenta', () => {
+    expect(inspectRoute(tpvRouter, 'patch', PATCH_PATH)!.permission).toBeDefined()
+    expect(inspectRoute(tpvRouter, 'delete', DELETE_PATH)!.permission).toBeDefined()
+  })
+})
