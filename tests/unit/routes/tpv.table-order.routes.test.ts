@@ -167,14 +167,29 @@ describe('anti-duplicación: superficie de descuentos/comp de Cobrar bajo /tpv',
 /**
  * DELETE service-charges (paridad Android, 2026-08-06).
  *
- * Bloque APARTE de `cases`: esta ruta lleva 6 capas (suma checkTableOwnership),
- * y meterla en la tabla rompería el pin de "EXACTAMENTE 5 capas" de las otras.
- * Deshacer es online-only a propósito — no existe intent REMOVE_SERVICE_CHARGE,
- * así que esta ruta es el ÚNICO camino y su cadena es la única defensa.
+ * 🔴 ACTUALIZADO 2026-08-18 — auditoría de permisos de piso. Este bloque pineaba 6 capas
+ * "la sexta es checkTableOwnership, igual que /mobile", y ESE PIN CODIFICABA UN BUG:
+ * en /mobile el par poner/quitar está completo (POST y DELETE llevan el guard); aquí se
+ * había copiado sólo la mitad de abajo, porque el POST de /tpv nunca tuvo candado de
+ * propiedad. Resultado medido: el cajero PONÍA el cargo en una mesa ajena y recibía 403
+ * al QUITARLO — un estado del que el usuario no puede salir.
+ *
+ * El guard se quitó del DELETE (no se puso en el POST: que el piso aplique cargos y
+ * descuentos sobre mesa ajena está decidido y respaldado por Square/Toast/Fudo — ver el
+ * comentario largo en la ruta). Ahora son 5 capas, las mismas que el POST hermano, así
+ * que la fila cabe en `cases`… pero se queda aquí como bloque propio a propósito: es el
+ * único sitio donde queda escrito por qué el número bajó, y sin eso el próximo que lea
+ * "5 capas" no sabrá que antes hubo 6.
+ *
+ * La simetría en sí (poner y quitar comparten cadena, en las DOS direcciones) y la
+ * ablación viven en `tpv.loQuePonesLoQuitas.routes.test.ts`.
+ *
+ * Deshacer sigue siendo online-only a propósito — no existe intent REMOVE_SERVICE_CHARGE,
+ * así que esta ruta es el ÚNICO camino para revertir.
  */
 describe('DELETE /venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId', () => {
   const PATH = '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId'
-  const { checkTableOwnership } = require('@/middlewares/checkTableOwnership.middleware')
+  const POST_PATH = '/venues/:venueId/orders/:orderId/service-charges'
 
   it('existe, con auth + validateVenueAccess + permiso orders:update', () => {
     const route = inspectRoute(tpvRouter, 'delete', PATH)
@@ -184,14 +199,17 @@ describe('DELETE /venues/:venueId/orders/:orderId/service-charges/:orderServiceC
     expect(route!.permission).toBe('orders:update')
   })
 
-  it('lleva EXACTAMENTE 6 capas — la sexta es checkTableOwnership, igual que /mobile', () => {
+  it('lleva EXACTAMENTE 5 capas (auth, validateVenueAccess, checkFeatureAccess, checkPermission, handler)', () => {
     const route = inspectRoute(tpvRouter, 'delete', PATH)
-    // checkTableOwnership('order') es una factory: la capa montada no es la funcion
-    // exportada sino su retorno. Se fija por conteo + descarte: 6 capas, y la quinta
-    // no es ninguna de las nombradas (auth/venueAccess/feature/permission/handler).
-    expect(route!.handlers).toHaveLength(6)
+    expect(route!.handlers).toHaveLength(5)
     expect(route!.finalHandler).toBe(orderTableController.removeServiceCharge)
-    expect(typeof checkTableOwnership).toBe('function')
+  })
+
+  it('🔴 la MISMA cadena que el POST que aplica el cargo — lo que se pone se puede quitar', () => {
+    const poner = inspectRoute(tpvRouter, 'post', POST_PATH)!
+    const quitar = inspectRoute(tpvRouter, 'delete', PATH)!
+    expect(quitar.handlers).toHaveLength(poner.handlers.length)
+    expect(quitar.permission).toBe(poner.permission)
   })
 })
 

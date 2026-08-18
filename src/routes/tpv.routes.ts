@@ -3928,6 +3928,13 @@ router.post(
  * POST /tpv/venues/{venueId}/orders/{orderId}/service-charges
  * Aplica un cobro por servicio del catálogo (propina automática por comensales,
  * descorche, etc.) a la cuenta abierta. Body: { serviceChargeId: string }
+ *
+ * SIN `checkTableOwnership`, igual que la familia de descuentos de Cobrar: aplicar un
+ * cargo sobre una mesa ajena está permitido a propósito (ningún referente —Square, Toast,
+ * Fudo— ata el descuento/cargo a de quién es la mesa). 🔴 Si algún día se decide cerrar
+ * esta ruta, hay que cerrar TAMBIÉN el DELETE de abajo en el mismo cambio: la asimetría
+ * entre las dos es justo el bug que se arregló el 2026-08-18 y que
+ * `tpv.loQuePonesLoQuitas.routes.test.ts` vigila en las dos direcciones.
  */
 router.post(
   '/venues/:venueId/orders/:orderId/service-charges',
@@ -3941,10 +3948,48 @@ router.post(
 /**
  * DELETE /tpv/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId
  *
- * Espejo de la ruta /mobile equivalente (mobile.routes.ts, DELETE service-charges):
- * misma cadena INCLUIDO checkTableOwnership('order') — deshacer un cargo en la
- * mesa de otro mesero es exactamente el cruce que ese guard existe para impedir.
- * Ver el KDoc del controller: deshacer es online-only a propósito.
+ * 🔴 SIN `checkTableOwnership` — A PROPÓSITO, y es el arreglo de una asimetría medida
+ * (auditoría de permisos de piso, 2026-08-18). Antes la cadena SÍ lo llevaba, copiada
+ * de la ruta /mobile equivalente. El problema: en /mobile el par está COMPLETO (POST y
+ * DELETE llevan el guard), y aquí sólo se copió la mitad de abajo. El POST de arriba
+ * nunca tuvo candado de propiedad, así que el resultado medido era:
+ *
+ *     POST   …/service-charges       orders:update  SIN checkTableOwnership → PONE
+ *     DELETE …/service-charges/:id   orders:update  CON checkTableOwnership → 403 al QUITAR
+ *
+ * El cajero aplicaba el cargo en una mesa ajena y después no podía deshacerlo: un
+ * estado del que el usuario no puede salir. La UI le ofrece el botón de deshacer —
+ * `orders:update` sí lo tiene — y lo frena un guard que el POST no aplicó.
+ *
+ * POR QUÉ SE QUITA AQUÍ Y NO SE PONE EN EL POST. Que el piso pueda aplicar cargos y
+ * descuentos sobre una mesa ajena está DECIDIDO y respaldado por el mercado: ninguno de
+ * los tres referentes ata el descuento/cargo a de quién es la mesa — Square lo gobierna
+ * con "Apply Restricted Discounts and Comps", Toast con `3.1 Discounts` + código de
+ * gerente, y Fudo con `Crear descuentos`. La propiedad de mesa, donde existe (Toast
+ * `1.8`), controla qué VES, no qué puedes hacer. Con el POST abierto por decisión, el
+ * candado del DELETE no protegía nada: sólo dejaba basura que nadie podía limpiar.
+ * Cerrar el POST sería la decisión contraria — de producto, no de código, y NO se tomó
+ * aquí.
+ *
+ * La regla que queda: poner y quitar comparten cadena. `tpv.loQuePonesLoQuitas.routes.test.ts`
+ * fija la simetría como invariante en las dos direcciones, y la ablación de ese archivo
+ * comprueba que cancelar y editar líneas SIGUEN cerradas para el cajero.
+ *
+ * 🔭 CAMINO FUTURO (declarado, NO construido) — partir el permiso en aplicar/cancelar.
+ * Hoy `discounts:apply` gobierna aplicar Y quitar un descuento, y `orders:update` hace
+ * lo propio con los cargos: quien puede poner puede quitar, siempre. Fudo tiene el
+ * modelo bueno y separa DESHACER como verbo propio — sus permisos de descuento son tres
+ * distintos: «Listar descuentos», «Crear descuentos» y «Cancelar descuentos»
+ * (https://soporte.fu.do/es/articles/11730992-funcion-de-permisos-de-usuario, verificado
+ * 2026-08-18). Eso permitiría "el mesero aplica pero sólo el gerente cancela" sin
+ * reintroducir la asimetría que este comentario arregla, porque la diferencia viviría en
+ * el PERMISO —visible y asignable desde el editor de roles— y no en un guard invisible
+ * que sólo aparece en una de las dos rutas. Partirlo implica migrar los
+ * `VenueRolePermission` ya guardados (ver "Renaming a permission" en
+ * `.claude/rules/permissions-policy.md`), así que es su propio cambio.
+ *
+ * Ver el KDoc del controller: deshacer es online-only a propósito (no existe intent
+ * REMOVE_SERVICE_CHARGE), así que esta ruta es el ÚNICO camino para revertir.
  */
 router.delete(
   '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId',
@@ -3952,7 +3997,6 @@ router.delete(
   validateVenueAccess,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
-  checkTableOwnership('order'),
   orderTableController.removeServiceCharge,
 )
 
