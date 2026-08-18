@@ -647,6 +647,7 @@ describe('listActiveRulesForPos — el descuento ligado', () => {
     targetItemIds: ['prod_agua'],
     minPurchaseAmount: null,
     maxDiscountAmount: null,
+    maxTotalUses: null,
     buyQuantity: null,
     validFrom: null,
     validUntil: null,
@@ -717,6 +718,19 @@ describe('listActiveRulesForPos — el descuento ligado', () => {
   it('🔴 un descuento con tope no se sirve: el POS no puede reproducir el tope', async () => {
     // La tarjeta prometería más descuento del que el server va a aplicar.
     reglaCon({ ...descuentoSano, maxDiscountAmount: 50 })
+
+    const dtos = await listActiveRulesForPos('v1')
+
+    expect(dtos[0].linkedDiscount).toBeNull()
+  })
+
+  it('🔴 un descuento con TOPE DE USOS no se sirve: al agotarse tumbaría la venta', async () => {
+    // `validateDiscountActive` corre en CADA creación de orden y LANZA cuando
+    // `currentUses >= maxTotalUses`, así que un descuento agotado convierte la
+    // venta en un 400 — y el POS no lo puede prever, porque cachea las reglas.
+    // Se excluye cualquiera con tope, no sólo los agotados: entre servir la regla
+    // y cobrar, otras cajas pueden llegar al límite.
+    reglaCon({ ...descuentoSano, maxTotalUses: 100 })
 
     const dtos = await listActiveRulesForPos('v1')
 

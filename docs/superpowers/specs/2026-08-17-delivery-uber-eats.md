@@ -120,11 +120,11 @@ entra **marcado para revisión** — nunca silencioso.
 | **Combos** | Uber los manda como `bundled_items`. Sin mapeo estable combo→`Product.sku` el pedido entra **marcado para revisión**, no adivinado | `[doc]` mapeo abierto |
 | **Referidos / lealtad** | **No aplican**: el cliente viene anonimizado (teléfono proxy, apellido inicial). No hay identidad que acreditar | `[doc]` |
 | **Meseros** | `servedById` queda **nulo** — no hay mesero. Ningún reporte de desempeño por mesero debe incluirlos como "sin asignar" que ensucie promedios | `[código]` hoy ya es null |
-| **Propinas** | La propina de delivery NO entra al pool de propinas de staff por defecto (no hay mesero a quién). Visible en reportes como propina del canal | 🔴 decisión de reparto pendiente con el founder |
+| **Propinas** | **Configurable por venue** (founder, 2026-08-17): switch en `VenueSettings` — ¿la propina de delivery entra al pool de propinas del staff? **Default OFF** (toca dinero ⇒ conservador). Switch canónico en el dashboard; el reporte de propinas etiqueta el origen (canal vs piso) para que el corte cuadre con cualquiera de las dos elecciones | decidido |
 | **Comisiones de staff** | No se generan — no hay vendedor | decisión, coherente con meseros |
 | **Comisión de Uber (~30%)** | NO viene en el pedido (`total` excluye marketplace fees `[doc]`). El tender la estima si el venue la captura; la real llega por la API de reporting (fase F). **Los reportes dicen "estimada" hasta entonces — jamás la presentan como exacta** | `[doc]` |
 | **Turnos / corte** | `shiftId` queda nulo. 🔴 El corte del día DEBE mostrar delivery como sección propia (bruto por plataforma, como pidió el levantamiento de Testarudo) — si el corte por turnos lo omite y el reporte del día lo incluye, al dueño "no le cuadra": ese cruce lleva test | `[código]` hoy null; regla nueva |
-| **Facturación / CFDI** | Al confirmar el pedido terminado (paso 13). 🔴 Un pedido de Uber NO entra a la factura global sin decisión fiscal explícita — riesgo de doble facturación, mismo criterio `includeInGlobal=false` ya tomado | decisión fiscal pendiente |
+| **Facturación / CFDI** | Al confirmar el pedido terminado (paso 13). **Configurable por venue** (founder, 2026-08-17): switch en `VenueSettings` — ¿los pedidos de delivery entran a la factura global? **Default OFF** (riesgo de doble facturación; mismo criterio conservador que `includeInGlobal=false`). Switch canónico en el dashboard, junto al de propinas | decidido |
 
 **El invariante que protege al dueño, y lleva tests de cruce:** el mismo peso contado por dos
 reportes distintos da el mismo total. Ventas del día = ventas con turno + ventas de delivery sin
@@ -394,7 +394,7 @@ Aditivas. Por regla del repo, toda edición de `schema.prisma` termina con `npm 
 | --- | --- |
 | Tier | `DELIVERY_CHANNELS`, PREMIUM, ya existe `[código]`. Uber es un proveedor dentro del mismo feature |
 | Permisos | `:connect` SUPERADMIN (crear/activar) · `:manage` OWNER/ADMIN (modo de aceptación) · `:read` MANAGER |
-| Ajuste del venue | **Modo de aceptación** (`AUTO`/`MANUAL`), configurable desde el dashboard. Default AUTO |
+| Ajuste del venue | **Modo de aceptación** (`AUTO`/`MANUAL`), default AUTO · **Propina de delivery al pool de staff**, default OFF · **Delivery entra a factura global**, default OFF — los tres por venue, desde el dashboard |
 | Auditoría | `ActivityLog` en crear, activar, cambiar modo y cancelación entrante |
 | MCP | `delivery_channels` expone estado del link, modo de aceptación y pendientes del outbox |
 

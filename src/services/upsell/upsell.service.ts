@@ -217,6 +217,7 @@ export async function listActiveRulesForPos(venueId: string): Promise<PosUpsellR
           targetItemIds: true,
           minPurchaseAmount: true,
           maxDiscountAmount: true,
+          maxTotalUses: true,
           buyQuantity: true,
           validFrom: true,
           validUntil: true,
@@ -272,6 +273,7 @@ function linkedDiscountParaPos(
     targetItemIds: string[]
     minPurchaseAmount: Prisma.Decimal | null
     maxDiscountAmount: Prisma.Decimal | null
+    maxTotalUses: number | null
     buyQuantity: number | null
     validFrom: Date | null
     validUntil: Date | null
@@ -285,6 +287,17 @@ function linkedDiscountParaPos(
   if (discount.buyQuantity !== null) return null
   if (discount.minPurchaseAmount !== null) return null
   if (discount.maxDiscountAmount !== null) return null
+  // 🔴 Tope de usos: `validateDiscountActive` (que corre en CADA creación de
+  // orden) LANZA cuando `currentUses >= maxTotalUses`, así que un descuento
+  // agotado convierte la venta en un 400. Y el POS no lo puede prever: cachea
+  // las reglas, así que seguiría ofreciendo la tarjeta hasta el siguiente
+  // refresco — cada aceptación tumbando una venta con el cliente enfrente.
+  //
+  // Se excluye CUALQUIER descuento con tope, no sólo los ya agotados: entre que
+  // se sirve la regla y se cobra, el contador puede llegar al límite (lo suben
+  // las demás cajas, la TPV y el dashboard). La promoción sigue existiendo y se
+  // puede aplicar a mano; lo único que pierde es sugerirse sola.
+  if (discount.maxTotalUses !== null) return null
   if (discount.scope !== 'ITEM') return null
   // `targetItemIds` vacío es comodín (aplica a todo), igual que lo lee
   // `validateDiscountScopeForItem`.

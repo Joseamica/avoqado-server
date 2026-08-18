@@ -661,21 +661,47 @@ export async function calculateCategoryFilteredAmount(
 
   let total = 0
   for (const item of orderItems) {
-    const itemSubtotal = decimalToNumber(item.unitPrice) * item.quantity
-    let itemAmount = itemSubtotal
-
-    if (config.includeTax) {
-      itemAmount += decimalToNumber(item.taxAmount)
-    }
-
-    if (config.includeDiscount) {
-      itemAmount += decimalToNumber(item.discountAmount)
-    }
-
-    total += itemAmount
+    total += itemCommissionBase(item, config)
   }
 
   return total
+}
+
+/**
+ * Base comisionable de UNA línea — misma semántica que `calculateBaseAmount`:
+ *
+ *   default              → NETO: bruto − `discountAmount` (lo que el negocio cobró)
+ *   includeDiscount=true → se suma DE VUELTA el descuento (valor pre-descuento)
+ *
+ * 🔴 Antes las dos funciones de items partían del BRUTO (`unitPrice × quantity`)
+ * y `includeDiscount=true` le sumaba el descuento ENCIMA: con el default se
+ * comisionaba dinero que el negocio nunca recibió, y con la opción prendida el
+ * descuento se contaba dos veces. Era invisible mientras el POS mandaba
+ * `discountAmount = 0` siempre (el payload tiraba el `discountId`, arreglado
+ * 2026-08-17); con el dato real, la asimetría contra el camino general —que
+ * parte de `payment.amount`, ya neto— se volvía dinero en cada corte.
+ *
+ * El clamp a 0 es por línea: el descuento se calcula sobre producto +
+ * modificadores, pero esta base usa `unitPrice × quantity` (sin modificadores),
+ * así que una cortesía de línea con modificadores caros puede traer un
+ * descuento mayor que su propio bruto. Esa línea aporta 0 — nunca le resta a
+ * las demás.
+ */
+function itemCommissionBase(
+  item: { quantity: number; unitPrice: Decimal; taxAmount: Decimal | null; discountAmount: Decimal | null },
+  config: { includeTax: boolean; includeDiscount: boolean },
+): number {
+  const gross = decimalToNumber(item.unitPrice) * item.quantity
+  const discount = decimalToNumber(item.discountAmount)
+
+  let itemAmount = Math.max(0, gross - discount)
+  if (config.includeDiscount) {
+    itemAmount += Math.min(discount, gross)
+  }
+  if (config.includeTax) {
+    itemAmount += decimalToNumber(item.taxAmount)
+  }
+  return itemAmount
 }
 
 /**
@@ -700,10 +726,8 @@ export async function calculateLeftoverAmount(
 
   let total = 0
   for (const item of orderItems) {
-    let itemAmount = decimalToNumber(item.unitPrice) * item.quantity
-    if (config.includeTax) itemAmount += decimalToNumber(item.taxAmount)
-    if (config.includeDiscount) itemAmount += decimalToNumber(item.discountAmount)
-    total += itemAmount
+    // Misma aritmética que la base por categoría — ver `itemCommissionBase`.
+    total += itemCommissionBase(item, config)
   }
   return total
 }

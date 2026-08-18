@@ -302,8 +302,11 @@ describe('calculateCategoryFilteredAmount', () => {
       includeDiscount: false,
     })
 
-    // 2*100 + 1*200 = 400
-    expect(result).toBe(400)
+    // 2×100 + (200 − 10 de descuento) = 390. Antes esperaba 400: el default
+    // comisionaba el BRUTO, dinero que el negocio nunca recibió. Corregido
+    // 2026-08-17 para espejar `calculateBaseAmount` (default = neto) — era
+    // invisible mientras el POS mandaba `discountAmount = 0` siempre.
+    expect(result).toBe(390)
 
     // Verify Prisma was called with category filter
     expect(prismaMock.orderItem.findMany).toHaveBeenCalledWith({
@@ -345,7 +348,10 @@ describe('calculateCategoryFilteredAmount', () => {
       includeDiscount: true,
     })
 
-    expect(result).toBe(1100) // 1000 + 100
+    // `includeDiscount=true` significa "comisiona sobre el valor PRE-descuento"
+    // (1000), igual que en `calculateBaseAmount`. Antes esperaba 1100 —bruto MÁS
+    // el descuento— o sea el descuento contado dos veces. Corregido 2026-08-17.
+    expect(result).toBe(1000)
   })
 
   it('should return 0 when no items match categories', async () => {

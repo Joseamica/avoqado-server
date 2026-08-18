@@ -61,6 +61,15 @@ Mide el riesgo, **decláralo en el reporte** y sigue. **Pregunta al founder solo
 irreversible** — ahí el default es **OFF** salvo que él diga lo contrario (precedente: `includeInGlobal` → `false` por riesgo de
 doble-facturación). Todo lo demás lo decides sin preguntar.
 
+🔴 **Y cuando SÍ le preguntes, la pregunta se plantea como «¿configurable por venue o fijo para
+todos?»** — instrucción directa del founder (2026-08-17; caso que la originó: la propina de delivery,
+que quiso configurable). No preguntarle solo "¿ON u OFF?": presentarle las DOS formas — (a) switch por
+venue en `VenueSettings`, dashboard canónico, o (b) comportamiento fijo — cada una con su consecuencia
+en una línea. Aplica en general a decisiones de comportamiento donde dos dueños de venue podrían
+razonablemente querer cosas opuestas (su frase: *"tal vez algunos admins lo quieren de una manera y
+otros otra"*). El test de los dos clientes reales (regla 1) sigue siendo el análisis que se le
+presenta; lo que cambia es que la elección final entre configurable y fijo es SUYA, no del LLM.
+
 ### 4. Apagado se VE y se EXPLICA
 
 🔴 **Nunca desaparecer en silencio.** Ese es exactamente el bug de `Venue.status='ONBOARDING'`, que borra el venue y sus TPVs del dashboard
