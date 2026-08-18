@@ -13,13 +13,14 @@
  * Minimum chargeable amount: $20.00 MXN (B4Bit business rule).
  */
 
-import { PaymentMethod } from '@prisma/client'
+import { PaymentMethod, Prisma } from '@prisma/client'
 import crypto from 'crypto'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { computeOrderBalance } from '../shared/orderBalance'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import type {
@@ -292,6 +293,27 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
     // For crypto payments without an existing order, create a "fast order" (placeholder)
     let orderIdToUse = orderId
 
+    // 🔴 TENANT + ESTADO. El `orderId` llegaba del cliente y se usaba TAL CUAL:
+    // el schema sólo exige que sea un CUID, así que se podía enganchar un cobro
+    // cripto a la cuenta de OTRO negocio, o a una cuenta ya cerrada. El filtro por
+    // `venueId` es lo que hace que una orden ajena simplemente no exista aquí.
+    if (orderIdToUse) {
+      const targetOrder = await tx.order.findUnique({
+        where: { id: orderIdToUse, venueId },
+        select: { id: true, status: true, paymentStatus: true },
+      })
+
+      if (!targetOrder) {
+        throw new BadRequestError('La cuenta no existe o no pertenece a esta sucursal')
+      }
+      if (targetOrder.paymentStatus === 'PAID') {
+        throw new BadRequestError('La cuenta ya está pagada')
+      }
+      if (targetOrder.status === 'CANCELLED' || targetOrder.status === 'DELETED') {
+        throw new BadRequestError('La cuenta está cancelada y no admite cobros')
+      }
+    }
+
     if (!orderIdToUse) {
       // Generate order number
       const orderNumberGenerated = orderNumber || `CRYPTO-${Date.now()}`
@@ -445,6 +467,11 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
 export function verifyWebhookSignature(nonce: string, body: string, signature: string, webhookSecret?: string | null): boolean {
   const secret = webhookSecret || process.env.B4BIT_WEBHOOK_SECRET
 
+  // TODO(#43 seguridad): sin secret esto devuelve `true`, o sea que acepta CUALQUIER
+  // webhook sin verificar nada. Junto con el `if (signature && nonce)` del controlador
+  // (`b4bit-webhook.tpv.controller.ts`), que se salta la verificación entera cuando
+  // faltan los dos headers, un tercero podría marcar cobros como confirmados.
+  // Es una tarea APARTE (#43) y NO se toca aquí: este cambio es sólo el saldo parcial.
   if (!secret) {
     logger.warn('⚠️ B4BIT_WEBHOOK_SECRET not configured - skipping signature verification')
     return true // Allow in development, should require in production
@@ -635,6 +662,216 @@ export async function processWebhook(payload: B4BitWebhookPayload): Promise<Proc
   }
 }
 
+/** Resultado de liquidar la orden tras confirmarse un cobro cripto. */
+interface CryptoSettlementResult {
+  isFullyPaid: boolean
+  /** `true` SÓLO si esta ejecución fue la que llevó la cuenta de abierta a pagada. */
+  becamePaid: boolean
+  paidAmount: string
+  remainingBalance: string
+}
+
+/**
+ * Completa el `Payment` de cripto y recalcula el saldo de su orden — todo en UNA
+ * transacción.
+ *
+ * ── Lo que hace y por qué ───────────────────────────────────────────────────
+ * 1. Marca el pago COMPLETED. Repetirlo es inocuo: es justamente lo que hace que
+ *    un `CO` reentregado por B4Bit no cree un segundo cobro.
+ * 2. RELEE la orden dentro de la transacción (la lectura de arriba pudo quedar
+ *    vieja mientras se generaba el recibo) y sus `Payment` COMPLETED durables.
+ * 3. Recalcula con `computeOrderBalance` — la aritmética canónica compartida.
+ * 4. Escribe la transición con **CAS sobre `version`**: si otro dispositivo cobró
+ *    entre la relectura y el write, `updateMany` no encuentra la fila y devuelve
+ *    count 0. Se reintenta releyendo el estado ya commiteado por el ganador, en
+ *    vez de pisarlo. Mismo patrón que `payCashOrder` y `addItemsToOrder`.
+ *
+ * ⚠️ DIFERENCIA deliberada con `payCashOrder`: su CAS filtra además por
+ * `paymentStatus IN (PENDING, PARTIAL)`; la de aquí sólo por `version`. Es
+ * necesario: un `CO` reentregado sobre una cuenta que YA quedó PAID daría count 0
+ * con ese filtro, y giraría los tres reintentos hasta lanzar por un webhook que en
+ * realidad no tenía nada que hacer. Sin el filtro, la reentrega recalcula el mismo
+ * resultado y sale limpia.
+ *
+ * 🔴 Los efectos de "venta terminada" (`status: COMPLETED`, `completedAt`) sólo
+ * se escriben en la transición real a pagado. Mientras falte dinero la cuenta
+ * queda `PARTIAL` con su `remainingBalance` real y sigue cobrable.
+ *
+ * 🔴 NO se degrada `status` en un abono parcial: una orden que ya iba
+ * `CONFIRMED`/`PREPARING` no debe retroceder a `PENDING` porque entró un abono.
+ * Cobrar no es un evento de preparación. (`payment.tpv.service` y
+ * `manualPayment.service` hacen lo mismo; `payCashOrder` es el outlier.)
+ *
+ * 🔴 NO se escribe `Order.total` ni `Order.tipAmount`. La fórmula canónica sirve
+ * para DECIDIR si la cuenta quedó saldada, no para sobrescribir el total — y omite
+ * `deliveryFeeAmount` y `taxAmount`. Un pedido de agregador (Deliverect/Uber)
+ * guarda `subtotal 200`, `deliveryFeeAmount 40`, `total 240` porque el total viene
+ * del proveedor (`deliveryOrderIngestion.service.ts`, `deliverect.mapper.ts`);
+ * recalcularlo lo dejaría en 200 habiendo cobrado 240 — los $40 de envío
+ * desaparecerían de todo reporte que lea `Order.total`, y quedaría
+ * `paidAmount > total`. Cripto es justo el canal que puede engancharse a una orden
+ * que NO creó. Sumar `deliveryFeeAmount` a la fórmula tocaría `payCashOrder`, que
+ * no es parte de este cambio.
+ *
+ * @returns `null` si el pago no está ligado a ninguna orden (cobro suelto).
+ */
+async function settleOrderForConfirmedCryptoPayment(
+  payment: {
+    id: string
+    venueId: string
+    orderId: string | null
+    amount: Prisma.Decimal | number
+    externalId: string | null
+    processorData: Prisma.JsonValue
+  },
+  processorPatch: Prisma.InputJsonObject,
+): Promise<CryptoSettlementResult | null> {
+  const MAX_SETTLEMENT_ATTEMPTS = 3
+
+  for (let attempt = 1; attempt <= MAX_SETTLEMENT_ATTEMPTS; attempt++) {
+    try {
+      return await prisma.$transaction(async tx => {
+        await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            status: 'COMPLETED',
+            processorData: {
+              ...(typeof payment.processorData === 'object' && payment.processorData !== null ? payment.processorData : {}),
+              ...processorPatch,
+            } as Prisma.InputJsonObject,
+          },
+        })
+
+        if (!payment.orderId) return null
+
+        const fresh = await tx.order.findUnique({
+          where: { id: payment.orderId, venueId: payment.venueId },
+          select: {
+            id: true,
+            status: true,
+            paymentStatus: true,
+            subtotal: true,
+            discountAmount: true,
+            serviceChargeAmount: true,
+            completedAt: true,
+            version: true,
+          },
+        })
+        if (!fresh) {
+          logger.warn('⚠️ B4Bit: order linked to the payment no longer exists for this venue', {
+            orderId: payment.orderId,
+            venueId: payment.venueId,
+          })
+          return null
+        }
+
+        // Los pagos COMPLETED DURABLES — la única fuente de verdad de lo cobrado.
+        // `order.paidAmount` es un derivado y arrastra el valor equivocado si
+        // alguna vez se escribió mal; recalcular desde aquí lo repara solo.
+        const completedPayments = await tx.payment.findMany({
+          where: { orderId: payment.orderId, status: 'COMPLETED' },
+          select: { amount: true, tipAmount: true },
+        })
+
+        const balance = computeOrderBalance(fresh, completedPayments)
+        const wasAlreadyPaid = fresh.paymentStatus === 'PAID'
+
+        const transition = await tx.order.updateMany({
+          where: { id: payment.orderId, venueId: payment.venueId, version: fresh.version },
+          data: {
+            // Sólo el derivado del cobro. `total`/`tipAmount` NO se tocan — ver el
+            // bloque de `Order.total` en el docstring (cuota de envío de agregador).
+            paymentStatus: balance.isFullyPaid ? 'PAID' : 'PARTIAL',
+            paidAmount: balance.paidAmount,
+            remainingBalance: balance.remainingBalance,
+            version: { increment: 1 },
+            // `completedAt` se conserva si ya existía: la venta se cerró una vez,
+            // no una por cada reentrega del webhook.
+            ...(balance.isFullyPaid ? { status: 'COMPLETED' as const, completedAt: fresh.completedAt ?? new Date() } : {}),
+          },
+        })
+
+        if (transition.count === 0) {
+          const conflict: Error & { code?: string } = new Error('B4BIT_ORDER_CAS_LOST')
+          conflict.code = 'B4BIT_ORDER_CAS_LOST'
+          throw conflict
+        }
+
+        return {
+          isFullyPaid: balance.isFullyPaid,
+          becamePaid: balance.isFullyPaid && !wasAlreadyPaid,
+          paidAmount: balance.paidAmount.toFixed(2),
+          remainingBalance: balance.remainingBalance.toFixed(2),
+        }
+      })
+    } catch (error: any) {
+      // Sólo el conflicto de CAS se reintenta. Cualquier otro error sube tal cual.
+      if (error?.code !== 'B4BIT_ORDER_CAS_LOST') throw error
+
+      logger.warn('♻️ B4Bit: order changed while settling the crypto payment — retrying', {
+        orderId: payment.orderId,
+        attempt,
+      })
+    }
+  }
+
+  // ── Agotados los 3 intentos ────────────────────────────────────────────────
+  // 🔴 El `payment.update` vive DENTRO de la transacción, así que cada intento
+  // perdido lo revirtió: en este punto el `Payment` sigue PENDING aunque el dinero
+  // YA esté en la blockchain. Y el controlador contesta 200 siempre ("prevent
+  // retries"), o sea que B4Bit tampoco va a reintentar. Sin lo de abajo, el cobro
+  // desaparecería de los libros sin que nadie se entere.
+  //
+  // Por eso se completa el pago FUERA de la transacción: son dos durabilidades
+  // distintas. "Este cobro ocurrió" no se puede perder nunca; el derivado de la
+  // orden (`paidAmount`/`remainingBalance`) es RECALCULABLE — y de hecho se repara
+  // solo, porque `computeOrderBalance` lee los `Payment` COMPLETED durables: el
+  // siguiente abono sobre esa cuenta ya cuenta éste.
+  //
+  // El estado resultante (pago COMPLETED, orden con saldo de más) yerra hacia el
+  // lado seguro: el negocio ve que le deben de más y lo detecta al cobrar, en vez
+  // de perder el dinero en silencio.
+  try {
+    await prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: 'COMPLETED',
+        processorData: {
+          ...(typeof payment.processorData === 'object' && payment.processorData !== null ? payment.processorData : {}),
+          ...processorPatch,
+          orderSettlementFailed: true,
+          orderSettlementFailedAt: new Date().toISOString(),
+        } as Prisma.InputJsonObject,
+      },
+    })
+  } catch (persistError: any) {
+    logger.error('🚨 [B4Bit settlement] NO SE PUDO REGISTRAR EL COBRO CRIPTO — dinero cobrado sin Payment COMPLETED', {
+      paymentId: payment.id,
+      venueId: payment.venueId,
+      orderId: payment.orderId,
+      amount: payment.amount.toString(),
+      b4bitReference: payment.externalId,
+      error: persistError?.message,
+    })
+    throw persistError
+  }
+
+  // 🚨 greppable a propósito. Las alertas de este repo son por UMBRAL, así que un
+  // evento único de dinero no dispara nada por sí solo: el mensaje tiene que ser
+  // buscable a mano y traer todo lo necesario para reconstruir el caso sin la DB.
+  logger.error('🚨 [B4Bit settlement] EXHAUSTED — pago COMPLETADO pero el saldo de la cuenta NO se pudo actualizar', {
+    paymentId: payment.id,
+    venueId: payment.venueId,
+    orderId: payment.orderId,
+    amount: payment.amount.toString(),
+    b4bitReference: payment.externalId,
+    attempts: MAX_SETTLEMENT_ATTEMPTS,
+    action: 'revisar paidAmount/remainingBalance de la orden a mano; el Payment ya cuenta como cobrado',
+  })
+
+  throw new InternalServerError('No se pudo actualizar el saldo de la cuenta tras confirmar el pago cripto')
+}
+
 /**
  * Handle confirmed crypto payment
  *
@@ -677,43 +914,47 @@ async function handlePaymentConfirmed(
     logger.error('⚠️ Failed to generate receipt', { error: receiptError.message })
   }
 
-  // Update payment to COMPLETED
-  await prisma.payment.update({
-    where: { id: payment.id },
-    data: {
-      status: 'COMPLETED',
-      processorData: {
-        ...(typeof payment.processorData === 'object' ? payment.processorData : {}),
-        lastStatus: 'CO',
-        cryptoAmount: crypto_amount,
-        cryptoCurrency: currency,
-        txHash: tx_hash,
-        confirmations,
-        confirmedAt: new Date().toISOString(),
-      },
-    },
+  // 🔴 MONEY — un abono PARCIAL no puede cerrar la cuenta.
+  //
+  // Esto escribía, sin mirar nada más: `status: COMPLETED`, `paymentStatus: PAID`,
+  // `paidAmount: payment.amount` (PISA lo pagado antes, no acumula) y
+  // `remainingBalance: 0` incondicional. Una cuenta de $200 abonada con $50 en
+  // cripto se cerraba PAGADA y los $150 por cobrar DESAPARECÍAN: ni el mesero, ni
+  // el corte, ni el reporte se enteraban de que faltaba dinero.
+  //
+  // Ahora, en UNA sola transacción: se completa el pago actual, se RELEEN los
+  // `Payment` COMPLETED **durables** de la orden y se recalcula con la aritmética
+  // canónica (`computeOrderBalance`, la misma de `payCashOrder`).
+  //
+  // 🔑 Se recalcula desde los pagos durables, NUNCA con `paidAmount += amount`:
+  // un `CO` reentregado por B4Bit relee el mismo conjunto y llega al mismo
+  // resultado, en vez de duplicar el abono.
+  const settlement = await settleOrderForConfirmedCryptoPayment(payment, {
+    lastStatus: 'CO',
+    cryptoAmount: crypto_amount,
+    cryptoCurrency: currency,
+    txHash: tx_hash,
+    confirmations,
+    confirmedAt: new Date().toISOString(),
   })
 
-  // Update order status if linked
-  if (payment.orderId) {
-    await prisma.order.update({
-      where: { id: payment.orderId },
-      data: {
-        status: 'COMPLETED',
-        paymentStatus: 'PAID',
-        completedAt: new Date(),
-        paidAmount: payment.amount,
-        remainingBalance: 0,
-      },
+  if (payment.orderId && settlement) {
+    logger.info(settlement.isFullyPaid ? '📦 Order marked as PAID' : '📦 Order partially paid — balance still open', {
+      orderId: payment.orderId,
+      paidAmount: settlement.paidAmount,
+      remainingBalance: settlement.remainingBalance,
     })
-    logger.info('📦 Order marked as PAID', { orderId: payment.orderId })
 
-    // REFERRAL HOOK: trigger referral qualification if this crypto-paid order has a pending referral
-    try {
-      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
-      await onOrderPaid({ orderId: payment.orderId, venueId })
-    } catch (err) {
-      console.error('[referral hook] onOrderPaid failed for order', payment.orderId, err)
+    // REFERRAL HOOK: trigger referral qualification if this crypto-paid order has a pending referral.
+    // 🔑 Sólo en la TRANSICIÓN REAL a pagado: un abono parcial no es una venta
+    // terminada, y un webhook repetido sobre una cuenta ya pagada tampoco.
+    if (settlement.becamePaid) {
+      try {
+        const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+        await onOrderPaid({ orderId: payment.orderId, venueId })
+      } catch (err) {
+        console.error('[referral hook] onOrderPaid failed for order', payment.orderId, err)
+      }
     }
   }
 

@@ -49,6 +49,10 @@ export async function handleB4BitWebhook(req: Request, res: Response): Promise<v
 
     // Verify signature dynamically per venue
     // Look up the payment to find the venue, then get the venue's secret key
+    //
+    // TODO(#43 seguridad): este `if` hace que un webhook SIN los dos headers se
+    // procese sin verificar nada — omitir la firma basta para saltársela. Tarea
+    // APARTE (#43); no se toca aquí (este cambio es sólo el saldo parcial).
     if (signature && nonce) {
       let venueSecretKey: string | null | undefined
       const paymentRef = payload.reference
