@@ -168,6 +168,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
         lastName: String(lastName),
         organizationName: String(companyName),
         phone: String(phone),
+        source: source ? String(source) : undefined,
       })
       yaEsCliente = alta.yaEsCliente
       altaEstado = alta.yaEsCliente ? 'existente' : 'creada'
