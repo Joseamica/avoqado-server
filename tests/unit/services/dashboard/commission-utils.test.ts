@@ -291,11 +291,39 @@ describe('calculateBaseAmount', () => {
 // ============================================
 
 describe('calculateCategoryFilteredAmount', () => {
+  // La consulta lee la orden COMPLETA y la selección por categoría se hace en
+  // memoria (antes filtraba en SQL, lo que borraba los renglones de importe
+  // libre sin `productId`), así que cada línea mockeada trae su `product`.
+  beforeEach(() => {
+    prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(0) })
+  })
+
   it('should sum only items in allowed categories', async () => {
     prismaMock.orderItem.findMany.mockResolvedValue([
-      { quantity: 2, unitPrice: new Decimal(100), taxAmount: new Decimal(32), discountAmount: new Decimal(0) },
-      { quantity: 1, unitPrice: new Decimal(200), taxAmount: new Decimal(32), discountAmount: new Decimal(10) },
+      {
+        quantity: 2,
+        unitPrice: new Decimal(100),
+        taxAmount: new Decimal(32),
+        discountAmount: new Decimal(0),
+        product: { categoryId: 'cat-crioterapia' },
+      },
+      {
+        quantity: 1,
+        unitPrice: new Decimal(200),
+        taxAmount: new Decimal(32),
+        discountAmount: new Decimal(10),
+        product: { categoryId: 'cat-iyashi' },
+      },
+      // Fuera del esquema: no debe sumar.
+      {
+        quantity: 1,
+        unitPrice: new Decimal(999),
+        taxAmount: new Decimal(0),
+        discountAmount: new Decimal(0),
+        product: { categoryId: 'cat-otra' },
+      },
     ])
+    prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(10) })
 
     const result = await calculateCategoryFilteredAmount('order-1', ['cat-crioterapia', 'cat-iyashi'], {
       includeTax: false,
@@ -308,26 +336,28 @@ describe('calculateCategoryFilteredAmount', () => {
     // invisible mientras el POS mandaba `discountAmount = 0` siempre.
     expect(result).toBe(390)
 
-    // Verify Prisma was called with category filter
+    // La consulta trae la orden entera + la categoría de cada línea.
     expect(prismaMock.orderItem.findMany).toHaveBeenCalledWith({
-      where: {
-        orderId: 'order-1',
-        product: {
-          categoryId: { in: ['cat-crioterapia', 'cat-iyashi'] },
-        },
-      },
+      where: { orderId: 'order-1' },
       select: {
         quantity: true,
         unitPrice: true,
         taxAmount: true,
         discountAmount: true,
+        product: { select: { categoryId: true } },
       },
     })
   })
 
   it('should include tax when configured', async () => {
     prismaMock.orderItem.findMany.mockResolvedValue([
-      { quantity: 1, unitPrice: new Decimal(1000), taxAmount: new Decimal(160), discountAmount: new Decimal(0) },
+      {
+        quantity: 1,
+        unitPrice: new Decimal(1000),
+        taxAmount: new Decimal(160),
+        discountAmount: new Decimal(0),
+        product: { categoryId: 'cat-1' },
+      },
     ])
 
     const result = await calculateCategoryFilteredAmount('order-1', ['cat-1'], {
@@ -340,8 +370,15 @@ describe('calculateCategoryFilteredAmount', () => {
 
   it('should include discount when configured', async () => {
     prismaMock.orderItem.findMany.mockResolvedValue([
-      { quantity: 1, unitPrice: new Decimal(1000), taxAmount: new Decimal(0), discountAmount: new Decimal(100) },
+      {
+        quantity: 1,
+        unitPrice: new Decimal(1000),
+        taxAmount: new Decimal(0),
+        discountAmount: new Decimal(100),
+        product: { categoryId: 'cat-1' },
+      },
     ])
+    prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(100) })
 
     const result = await calculateCategoryFilteredAmount('order-1', ['cat-1'], {
       includeTax: false,
@@ -367,8 +404,20 @@ describe('calculateCategoryFilteredAmount', () => {
 
   it('should handle multiple items with quantities', async () => {
     prismaMock.orderItem.findMany.mockResolvedValue([
-      { quantity: 3, unitPrice: new Decimal(50), taxAmount: new Decimal(24), discountAmount: new Decimal(0) },
-      { quantity: 1, unitPrice: new Decimal(300), taxAmount: new Decimal(48), discountAmount: new Decimal(0) },
+      {
+        quantity: 3,
+        unitPrice: new Decimal(50),
+        taxAmount: new Decimal(24),
+        discountAmount: new Decimal(0),
+        product: { categoryId: 'cat-1' },
+      },
+      {
+        quantity: 1,
+        unitPrice: new Decimal(300),
+        taxAmount: new Decimal(48),
+        discountAmount: new Decimal(0),
+        product: { categoryId: 'cat-1' },
+      },
     ])
 
     const result = await calculateCategoryFilteredAmount('order-1', ['cat-1'], {
@@ -419,14 +468,29 @@ describe('getPeriodDateRange', () => {
 
 describe('calculateLeftoverAmount', () => {
   it('sums only items whose category is NOT in the claimed set (incl. uncategorized)', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(0) })
     prismaMock.orderItem.findMany.mockResolvedValue([
-      { quantity: 2, unitPrice: new Decimal(100), taxAmount: new Decimal(0), discountAmount: new Decimal(0) },
-      { quantity: 1, unitPrice: new Decimal(50), taxAmount: new Decimal(0), discountAmount: new Decimal(0) },
+      {
+        quantity: 2,
+        unitPrice: new Decimal(100),
+        taxAmount: new Decimal(0),
+        discountAmount: new Decimal(0),
+        product: { categoryId: 'cat-otra' },
+      },
+      // Sin producto = "Otro importe". Antes se caía del `notIn` de SQL y no
+      // generaba comisión para nadie; ahora entra en el sobrante.
+      { quantity: 1, unitPrice: new Decimal(50), taxAmount: new Decimal(0), discountAmount: new Decimal(0), product: null },
+      // Reclamada por otro esquema: fuera del sobrante.
+      {
+        quantity: 1,
+        unitPrice: new Decimal(400),
+        taxAmount: new Decimal(0),
+        discountAmount: new Decimal(0),
+        product: { categoryId: 'cat-claimed' },
+      },
     ])
     const total = await calculateLeftoverAmount('order-1', ['cat-claimed'], { includeTax: false, includeDiscount: false })
     expect(total).toBe(250)
-    const where = prismaMock.orderItem.findMany.mock.calls[0][0].where
-    expect(JSON.stringify(where)).toContain('notIn')
   })
 })
 

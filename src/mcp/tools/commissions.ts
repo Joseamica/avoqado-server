@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 import { hasPermission } from '@/services/access/access.service'
 import { venuesWithCommissionsAccess } from '@/services/access/basePlan.service'
 import { getCalendarMonth, venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
+import { resolveCommissionBase } from '@/services/dashboard/commission/commission-base'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -34,6 +35,7 @@ interface SchemeRow {
   recipient: string
   calcType: string
   defaultRate: { toString(): string }
+  includeDiscount: boolean
   filterByCategories: boolean
   categoryIds: string[]
   useGoalAsTier: boolean
@@ -46,6 +48,11 @@ interface SchemeRow {
  * boundary is surfaced as the string 'EMPLOYEE_GOAL' (it resolves to each
  * staff member's own sales goal at calculation time); a FIXED boundary is the
  * numeric amount (null max = open-ended).
+ *
+ * `commissionBase` responde la pregunta que el operador SÍ hace —"¿un descuento
+ * le baja la comisión al vendedor?"— ya traducida: la bandera de la DB se llama
+ * `includeDiscount` y significa lo contrario de lo que suena, así que el MCP
+ * nunca la expone cruda. Traducción única en `commission-base.ts`.
  */
 export function formatScheme(config: SchemeRow, categoryName: Map<string, string>) {
   const boundary = (value: { toString(): string } | null, type: string): number | 'EMPLOYEE_GOAL' | null => {
@@ -60,6 +67,8 @@ export function formatScheme(config: SchemeRow, categoryName: Map<string, string
     paidTo: config.recipient,
     calcType: config.calcType,
     defaultRate: Number(config.defaultRate),
+    // LO_COBRADO = neto de descuentos y promociones; PRECIO_DE_LISTA = catálogo.
+    commissionBase: resolveCommissionBase(config),
     appliesTo: config.filterByCategories ? config.categoryIds.map(id => categoryName.get(id) ?? id) : 'ALL_CATEGORIES',
     useGoalAsTier: config.useGoalAsTier,
     goalBonusRate: config.goalBonusRate == null ? null : Number(config.goalBonusRate),
@@ -225,7 +234,7 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_commission_schemes',
-    'List active staff commission schemes for your venues — the CONFIG only (rates, tiers, categories), NOT what anyone earned. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount), which product categories it applies to (multiple schemes can run per venue, each on its own categories), and its tiers. A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. ⚠️ Do NOT use these rates to hand-compute a person\'s commission by multiplying their sales — that is wrong (only some categories carry a scheme, commission is attributed to the SERVER not the order creator, and tiers are monthly-cumulative). To answer "¿cuánto de comisión ganó X?" use the staff_commission tool, which reads the real engine. Requires commissions:read.',
+    'List active staff commission schemes for your venues — the CONFIG only (rates, tiers, categories), NOT what anyone earned. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount), which product categories it applies to (multiple schemes can run per venue, each on its own categories), and its tiers. `commissionBase` says what the commission is calculated ON: "LO_COBRADO" (default — net of order AND line discounts/promotions, i.e. what the customer actually paid; tips never count) or "PRECIO_DE_LISTA" (the catalog price, ignoring discounts). A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. ⚠️ Do NOT use these rates to hand-compute a person\'s commission by multiplying their sales — that is wrong (only some categories carry a scheme, commission is attributed to the SERVER not the order creator, and tiers are monthly-cumulative). To answer "¿cuánto de comisión ganó X?" use the staff_commission tool, which reads the real engine. Requires commissions:read.',
     { venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues') },
     async ({ venueId }) => {
       const venueIds = await readableVenues(venueId)

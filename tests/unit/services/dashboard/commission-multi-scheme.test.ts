@@ -82,15 +82,21 @@ const GENERAL = {
 
 const ACTIVE_STAFF = { staffId: STAFF_ID, role: 'WAITER', staff: { id: STAFF_ID, active: true } }
 
-// orderItem.findMany is called once per category-scoped config (and once for leftover).
-// Branch on the where clause to return the right items per category set.
+// La base lee la orden COMPLETA de una vez y selecciona en memoria (antes filtraba
+// en SQL por `product.categoryId`, lo que borraba los renglones de importe libre).
+// El helper conserva su API por conjunto de categorías: cada clave se convierte en
+// la categoría de esas líneas; 'leftover' = una categoría que nadie reclama.
 function mockOrderItemsByCategory(map: Record<string, Array<{ unitPrice: number }>>) {
-  prismaMock.orderItem.findMany.mockImplementation(async (args: any) => {
-    const inList: string[] | undefined = args?.where?.product?.categoryId?.in
-    const key = inList ? inList.join(',') : 'leftover'
-    const items = map[key] ?? []
-    return items.map(i => ({ quantity: 1, unitPrice: new Decimal(i.unitPrice), taxAmount: new Decimal(0), discountAmount: new Decimal(0) }))
-  })
+  const orderLines = Object.entries(map).flatMap(([key, items]) =>
+    items.map(i => ({
+      quantity: 1,
+      unitPrice: new Decimal(i.unitPrice),
+      taxAmount: new Decimal(0),
+      discountAmount: new Decimal(0),
+      product: { categoryId: key === 'leftover' ? 'cat-no-reclamada' : key.split(',')[0] },
+    })),
+  )
+  prismaMock.orderItem.findMany.mockResolvedValue(orderLines)
 }
 
 beforeEach(() => {
@@ -99,6 +105,8 @@ beforeEach(() => {
   prismaMock.staffVenue.findFirst.mockResolvedValue(ACTIVE_STAFF)
   prismaMock.commissionOverride.findFirst.mockResolvedValue(null)
   prismaMock.commissionCalculation.create.mockImplementation(async (args: any) => ({ id: 'calc', ...args.data }))
+  // Sin descuento de orden en estos escenarios (el prorrateo tiene su propia suite).
+  prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(0) })
 })
 
 describe('multi-scheme commission engine', () => {

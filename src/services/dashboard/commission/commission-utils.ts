@@ -17,6 +17,13 @@ import { CommissionRecipient, StaffRole, CommissionCalcType, TierType, TierPerio
 import { startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { DEFAULT_TIMEZONE } from '../../../utils/datetime'
+import {
+  commissionableAmount,
+  orderLevelDiscountOf,
+  resolveCommissionBase,
+  selectCommissionableLines,
+  OrderLineForCommission,
+} from './commission-base'
 
 // ============================================
 // Type Definitions
@@ -355,7 +362,22 @@ export function applyCommissionBounds(amount: number, config: { minAmount: Decim
 // ============================================
 
 /**
- * Calculate the base amount for commission calculation
+ * Base comisionable de un COBRO, cuando el esquema no filtra por categoría.
+ *
+ * Misma base única que el camino de líneas (`commission-base.ts`): el cobro se
+ * normaliza a UNA línea sintética cuyo precio de lista es `payment.amount +
+ * descuento` y cuyo descuento es el de la orden. Así:
+ *
+ *   LO_COBRADO      → `payment.amount` (lo que el cliente pagó de verdad)
+ *   PRECIO_DE_LISTA → `payment.amount + descuento`
+ *
+ * que es exactamente lo que este camino ya hacía — la unificación no le mueve la
+ * base a ningún venue, sólo deja de depender de si su configuración filtra o no
+ * por categoría.
+ *
+ * 🔴 La PROPINA no es parte de la base de la venta: se suma DESPUÉS y sólo si el
+ * esquema trae `includeTips`, igual que en el camino por categorías
+ * (`commission-calculation.service.ts`). Por eso no entra en la función pura.
  *
  * @param payment - Payment data
  * @param config - Commission config with inclusion settings
@@ -374,26 +396,19 @@ export function calculateBaseAmount(
     includeTax: boolean
   },
 ): { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number } {
-  // Start with payment amount (subtotal)
-  let baseAmount = decimalToNumber(payment.amount)
+  const paidAmount = decimalToNumber(payment.amount)
   const tipAmount = decimalToNumber(payment.tipAmount)
   const taxAmount = decimalToNumber(payment.taxAmount)
   const discountAmount = decimalToNumber(payment.discountAmount)
 
+  let baseAmount = commissionableAmount([{ gross: paidAmount + discountAmount, lineDiscount: discountAmount, tax: taxAmount }], {
+    base: resolveCommissionBase(config),
+    includeTax: config.includeTax,
+  })
+
   // Tips are NOT included by default (tips are already direct bonus for employees)
   if (config.includeTips) {
     baseAmount += tipAmount
-  }
-
-  // Tax inclusion
-  if (config.includeTax) {
-    baseAmount += taxAmount
-  }
-
-  // Discount: if includeDiscount is false, we calculate on post-discount amount (default)
-  // If includeDiscount is true, we add back the discount to calculate on pre-discount amount
-  if (config.includeDiscount) {
-    baseAmount += discountAmount
   }
 
   return {
@@ -627,14 +642,63 @@ export async function findActiveCommissionConfigs(
 }
 
 /**
- * Calculate the commission base amount filtering only order items in allowed categories.
+ * Lee la orden COMPLETA una sola vez y la normaliza a las líneas que consume la
+ * base única, con el descuento de ORDEN ya separado del de renglón.
  *
- * When a config has filterByCategories=true, only items whose menuItem.categoryId
- * is in config.categoryIds contribute to the base amount.
+ * 🔴 Se leen TODAS las líneas, no sólo las del esquema, por dos razones:
+ *
+ * 1. **El prorrateo necesita el denominador completo.** El descuento de orden se
+ *    reparte entre todas las líneas; si sólo miráramos las de una categoría, ese
+ *    esquema absorbería el descuento entero.
+ * 2. **Filtrar en SQL por `product.categoryId` perdía los importes libres.** Un
+ *    renglón de "Otro importe" no tiene `productId`, así que la relación no
+ *    existe y no caía ni en el `in` (base por categoría) ni en el `notIn`
+ *    (sobrante): esa venta no generaba comisión para NADIE en cuanto existía una
+ *    configuración por categoría. La selección ahora se hace en memoria, donde
+ *    "sin categoría" es un caso explícito y no un accidente del filtro.
+ */
+async function loadOrderCommissionLines(orderId: string): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number }> {
+  const [orderItems, order] = await Promise.all([
+    prisma.orderItem.findMany({
+      where: { orderId },
+      select: {
+        quantity: true,
+        unitPrice: true,
+        taxAmount: true,
+        discountAmount: true,
+        product: { select: { categoryId: true } },
+      },
+    }),
+    prisma.order.findUnique({ where: { id: orderId }, select: { discountAmount: true } }),
+  ])
+
+  const lines: OrderLineForCommission[] = orderItems.map(item => ({
+    gross: decimalToNumber(item.unitPrice) * item.quantity,
+    lineDiscount: decimalToNumber(item.discountAmount),
+    tax: decimalToNumber(item.taxAmount),
+    categoryId: item.product?.categoryId ?? null,
+  }))
+
+  return {
+    lines,
+    orderLevelDiscount: orderLevelDiscountOf(
+      decimalToNumber(order?.discountAmount),
+      lines.map(line => line.lineDiscount),
+    ),
+  }
+}
+
+/**
+ * Base comisionable de las líneas de UNAS categorías (config con
+ * `filterByCategories=true`).
+ *
+ * Sólo entran las líneas cuyo producto pertenece a `categoryIds` — un importe
+ * libre nunca se cuela aquí: no tiene categoría, así que su lugar es el
+ * sobrante. La aritmética vive en `commission-base.ts`.
  *
  * @param orderId - Order ID to get items from
  * @param categoryIds - Allowed category IDs
- * @param config - Tax/tip/discount inclusion settings
+ * @param config - Tax/discount inclusion settings
  * @returns Filtered base amount, or 0 if no matching items
  */
 export async function calculateCategoryFilteredAmount(
@@ -642,94 +706,38 @@ export async function calculateCategoryFilteredAmount(
   categoryIds: string[],
   config: { includeTax: boolean; includeDiscount: boolean },
 ): Promise<number> {
-  const orderItems = await prisma.orderItem.findMany({
-    where: {
-      orderId,
-      product: {
-        categoryId: { in: categoryIds },
-      },
-    },
-    select: {
-      quantity: true,
-      unitPrice: true,
-      taxAmount: true,
-      discountAmount: true,
-    },
+  const { lines, orderLevelDiscount } = await loadOrderCommissionLines(orderId)
+
+  const selected = selectCommissionableLines({
+    orderLines: lines,
+    orderLevelDiscount,
+    include: line => line.categoryId !== null && categoryIds.includes(line.categoryId),
   })
 
-  if (orderItems.length === 0) return 0
-
-  let total = 0
-  for (const item of orderItems) {
-    total += itemCommissionBase(item, config)
-  }
-
-  return total
+  return commissionableAmount(selected, { base: resolveCommissionBase(config), includeTax: config.includeTax })
 }
 
 /**
- * Base comisionable de UNA línea — misma semántica que `calculateBaseAmount`:
+ * Base comisionable del SOBRANTE: lo que ninguna config por categoría reclama.
  *
- *   default              → NETO: bruto − `discountAmount` (lo que el negocio cobró)
- *   includeDiscount=true → se suma DE VUELTA el descuento (valor pre-descuento)
- *
- * 🔴 Antes las dos funciones de items partían del BRUTO (`unitPrice × quantity`)
- * y `includeDiscount=true` le sumaba el descuento ENCIMA: con el default se
- * comisionaba dinero que el negocio nunca recibió, y con la opción prendida el
- * descuento se contaba dos veces. Era invisible mientras el POS mandaba
- * `discountAmount = 0` siempre (el payload tiraba el `discountId`, arreglado
- * 2026-08-17); con el dato real, la asimetría contra el camino general —que
- * parte de `payment.amount`, ya neto— se volvía dinero en cada corte.
- *
- * El clamp a 0 es por línea: el descuento se calcula sobre producto +
- * modificadores, pero esta base usa `unitPrice × quantity` (sin modificadores),
- * así que una cortesía de línea con modificadores caros puede traer un
- * descuento mayor que su propio bruto. Esa línea aporta 0 — nunca le resta a
- * las demás.
- */
-function itemCommissionBase(
-  item: { quantity: number; unitPrice: Decimal; taxAmount: Decimal | null; discountAmount: Decimal | null },
-  config: { includeTax: boolean; includeDiscount: boolean },
-): number {
-  const gross = decimalToNumber(item.unitPrice) * item.quantity
-  const discount = decimalToNumber(item.discountAmount)
-
-  let itemAmount = Math.max(0, gross - discount)
-  if (config.includeDiscount) {
-    itemAmount += Math.min(discount, gross)
-  }
-  if (config.includeTax) {
-    itemAmount += decimalToNumber(item.taxAmount)
-  }
-  return itemAmount
-}
-
-/**
- * Sum order items whose product category is NOT in `claimedCategoryIds`
- * (plus uncategorized items). Used by a catch-all commission config so it
- * only bills the part of the order no category-scoped config already claims.
+ * Incluye las líneas de categorías no reclamadas **y las de importe libre**
+ * ("Otro importe", sin producto) — juntas con la base por categoría cubren la
+ * orden entera, sin huecos y sin solapes.
  */
 export async function calculateLeftoverAmount(
   orderId: string,
   claimedCategoryIds: string[],
   config: { includeTax: boolean; includeDiscount: boolean },
 ): Promise<number> {
-  const orderItems = await prisma.orderItem.findMany({
-    where: {
-      orderId,
-      product: { categoryId: { notIn: claimedCategoryIds } },
-    },
-    select: { quantity: true, unitPrice: true, taxAmount: true, discountAmount: true },
+  const { lines, orderLevelDiscount } = await loadOrderCommissionLines(orderId)
+
+  const selected = selectCommissionableLines({
+    orderLines: lines,
+    orderLevelDiscount,
+    include: line => line.categoryId === null || !claimedCategoryIds.includes(line.categoryId),
   })
 
-  if (orderItems.length === 0) return 0
-
-  let total = 0
-  for (const item of orderItems) {
-    // Misma aritmética que la base por categoría — ver `itemCommissionBase`.
-    total += itemCommissionBase(item, config)
-  }
-  return total
+  return commissionableAmount(selected, { base: resolveCommissionBase(config), includeTax: config.includeTax })
 }
 
 /**

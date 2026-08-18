@@ -92,4 +92,35 @@ describe('formatScheme', () => {
     expect(scheme.defaultRate).toBe(0.03)
     expect(scheme.tiers).toEqual([])
   })
+
+  /**
+   * 🔴 La base sobre la que se comisiona es la pregunta que un operador SÍ hace
+   * ("¿el descuento le baja la comisión al vendedor?") y el campo de la DB que
+   * la contesta se llama al revés de lo que hace (`includeDiscount`). El MCP
+   * expone la respuesta ya traducida, nunca la bandera cruda.
+   */
+  it('expone la BASE de la comisión, no la bandera cruda `includeDiscount`', () => {
+    const scheme = (includeDiscount: boolean) =>
+      formatScheme(
+        {
+          id: 'c3',
+          venueId: 'v1',
+          name: 'Base',
+          priority: 0,
+          recipient: 'SERVER',
+          calcType: 'PERCENTAGE',
+          defaultRate: '0.03',
+          includeDiscount,
+          filterByCategories: false,
+          categoryIds: [],
+          useGoalAsTier: false,
+          goalBonusRate: null,
+          tiers: [],
+        } as never,
+        categoryName,
+      )
+
+    expect(scheme(false).commissionBase).toBe('LO_COBRADO')
+    expect(scheme(true).commissionBase).toBe('PRECIO_DE_LISTA')
+  })
 })
