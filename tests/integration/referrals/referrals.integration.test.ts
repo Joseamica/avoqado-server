@@ -172,7 +172,15 @@ describe('Referral Program — end-to-end integration', () => {
     })
 
     // Simulate the payment-settled webhook hand-off.
-    await prisma.order.update({ where: { id: order.id }, data: { status: 'COMPLETED' } })
+    await prisma.order.update({
+      where: { id: order.id },
+      // Simula el cobro que CIERRA la cuenta, no sólo el cierre operativo:
+      // `onOrderPaid` relee la orden y aborta si no quedó PAGADA (guardia de
+      // estado). Marcar sólo `status: 'COMPLETED'` dejaba la orden en
+      // paidAmount 0 / remainingBalance 580 — un estado que ningún camino de
+      // cobro real produce, y con el que el referido NO debe calificar.
+      data: { status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: 580, remainingBalance: 0 },
+    })
     await onOrderPaid({ orderId: order.id, venueId })
 
     const qualified = await prisma.referral.findUnique({ where: { id: referral.id } })
@@ -259,7 +267,15 @@ describe('Referral Program — end-to-end integration', () => {
       },
     })
     await prisma.referral.update({ where: { id: referral.id }, data: { qualifyingOrderId: referredOrder.id } })
-    await prisma.order.update({ where: { id: referredOrder.id }, data: { status: 'COMPLETED' } })
+    await prisma.order.update({
+      where: { id: referredOrder.id },
+      // Simula el cobro que CIERRA la cuenta, no sólo el cierre operativo:
+      // `onOrderPaid` relee la orden y aborta si no quedó PAGADA (guardia de
+      // estado). Marcar sólo `status: 'COMPLETED'` dejaba la orden en
+      // paidAmount 0 / remainingBalance 500 — un estado que ningún camino de
+      // cobro real produce, y con el que el referido NO debe calificar.
+      data: { status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: 500, remainingBalance: 0 },
+    })
     await onOrderPaid({ orderId: referredOrder.id, venueId })
 
     const qualified = await prisma.referral.findUnique({ where: { id: referral.id } })
@@ -380,7 +396,15 @@ describe('Referral Program — end-to-end integration', () => {
       where: { id: ref.id },
       data: { qualifyingOrderId: order.id },
     })
-    await prisma.order.update({ where: { id: order.id }, data: { status: 'COMPLETED' } })
+    await prisma.order.update({
+      where: { id: order.id },
+      // Simula el cobro que CIERRA la cuenta, no sólo el cierre operativo:
+      // `onOrderPaid` relee la orden y aborta si no quedó PAGADA (guardia de
+      // estado). Marcar sólo `status: 'COMPLETED'` dejaba la orden en
+      // paidAmount 0 / remainingBalance 580 — un estado que ningún camino de
+      // cobro real produce, y con el que el referido NO debe calificar.
+      data: { status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: 580, remainingBalance: 0 },
+    })
     await onOrderPaid({ orderId: order.id, venueId })
 
     // Pre-refund sanity check: referrer is at TIER_1.
@@ -589,7 +613,15 @@ describe('Referral Program — end-to-end integration', () => {
       where: { id: ref.id },
       data: { qualifyingOrderId: order.id },
     })
-    await prisma.order.update({ where: { id: order.id }, data: { status: 'COMPLETED' } })
+    await prisma.order.update({
+      where: { id: order.id },
+      // Simula el cobro que CIERRA la cuenta, no sólo el cierre operativo:
+      // `onOrderPaid` relee la orden y aborta si no quedó PAGADA (guardia de
+      // estado). Marcar sólo `status: 'COMPLETED'` dejaba la orden en
+      // paidAmount 0 / remainingBalance 580 — un estado que ningún camino de
+      // cobro real produce, y con el que el referido NO debe calificar.
+      data: { status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: 580, remainingBalance: 0 },
+    })
     await onOrderPaid({ orderId: order.id, venueId })
 
     await expect(

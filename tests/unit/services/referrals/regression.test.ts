@@ -99,6 +99,10 @@ describe('referral rewards — golden regression (legacy 3-tier PERCENT_COUPON b
 
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(NOW)
+    // `onOrderPaid` relee la orden y sólo procede si quedó PAID (guardia de
+    // estado, 2026-08-17). Toda esta regresión describe el cobro que CIERRA la
+    // cuenta y cruza el nivel, así que la orden se lee pagada.
+    prismaMock.order.findUnique.mockResolvedValue({ paymentStatus: 'PAID' })
   })
 
   afterEach(() => {

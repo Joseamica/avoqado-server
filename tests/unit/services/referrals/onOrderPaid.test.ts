@@ -38,6 +38,86 @@ describe('onOrderPaid', () => {
     codePrefix: 'MINDFORM',
   }
 
+  beforeEach(() => {
+    // El hook ahora RELEE la orden y sólo procede si quedó PAID (ver la sección
+    // "guardia de estado" abajo). Todos los casos de este archivo describen un
+    // cobro que SÍ cerró la cuenta, así que el default es PAID; los tests que
+    // prueban la guardia lo sobreescriben.
+    prismaMock.order.findUnique.mockResolvedValue({ paymentStatus: 'PAID' })
+  })
+
+  // ---- GUARDIA DE ESTADO: el hook se llama "onOrderPaid", no "onPayment" ----
+  //
+  // Reclamar el referido (PENDING → QUALIFIED) mina cupones/descuentos y quema
+  // un `ReferralTierUnlock`, que por diseño se gana UNA sola vez en la vida del
+  // cliente y NO se vuelve a emitir. Un abono parcial que califique es, por lo
+  // tanto, irreversible. La guardia vive AQUÍ (y no sólo en cada llamador) para
+  // que el próximo camino de cobro que alguien conecte no reabra el defecto.
+
+  it('🔴 un abono PARCIAL no califica el referido: la orden en PARTIAL ni siquiera se reclama', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ paymentStatus: 'PARTIAL' })
+
+    await onOrderPaid({ orderId: 'o_partial', venueId: 'v1' })
+
+    expect(prismaMock.referral.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.customer.update).not.toHaveBeenCalled()
+    expect(prismaMock.discount.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 tampoco califica con la orden en PENDING, ni con una orden que ya fue REFUNDED', async () => {
+    prismaMock.order.findUnique.mockResolvedValueOnce({ paymentStatus: 'PENDING' })
+    await onOrderPaid({ orderId: 'o_pending', venueId: 'v1' })
+
+    prismaMock.order.findUnique.mockResolvedValueOnce({ paymentStatus: 'REFUNDED' })
+    await onOrderPaid({ orderId: 'o_refunded', venueId: 'v1' })
+
+    expect(prismaMock.referral.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una orden que no existe (o es de otro venue) no reclama nada', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(null)
+
+    await onOrderPaid({ orderId: 'o_ajena', venueId: 'v1' })
+
+    expect(prismaMock.referral.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('la relectura filtra por venueId (aislamiento de tenant), no sólo por orderId', async () => {
+    prismaMock.referral.updateMany.mockResolvedValue({ count: 0 })
+
+    await onOrderPaid({ orderId: 'o_tenant', venueId: 'v1' })
+
+    expect(prismaMock.order.findUnique).toHaveBeenCalledWith({
+      where: { id: 'o_tenant', venueId: 'v1' },
+      select: { paymentStatus: true },
+    })
+  })
+
+  it('✅ el cobro que SÍ cierra la cuenta (PAID) califica el referido normalmente', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ paymentStatus: 'PAID' })
+    prismaMock.referral.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.referral.findFirst.mockResolvedValue(claimedReferral)
+    prismaMock.customer.update.mockResolvedValue({
+      id: 'cust_ref',
+      firstName: 'Jose',
+      lastName: 'P',
+      referralCount: 3,
+      referralTier: null,
+    })
+    prismaMock.referralProgramConfig.findUnique.mockResolvedValue(baseConfig)
+
+    await onOrderPaid({ orderId: 'o_paid', venueId: 'v1' })
+
+    expect(prismaMock.referral.updateMany).toHaveBeenCalledWith({
+      where: { qualifyingOrderId: 'o_paid', status: 'PENDING' },
+      data: { status: 'QUALIFIED', qualifiedAt: expect.any(Date) },
+    })
+    expect(prismaMock.customer.update).toHaveBeenCalledWith({
+      where: { id: 'cust_ref' },
+      data: { referralCount: { increment: 1 } },
+    })
+  })
+
   // ---- NEW FEATURE TESTS (Task 5) ----
 
   it('claims the referral by qualifyingOrderId; second run is a no-op', async () => {

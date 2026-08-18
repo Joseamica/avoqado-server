@@ -1,4 +1,5 @@
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import {
   Prisma,
   ReferralTier,
@@ -280,6 +281,10 @@ export async function emitTierRewards(tx: Prisma.TransactionClient, input: EmitT
 }
 
 export interface OnOrderPaidInput {
+  /**
+   * La orden que YA quedó `paymentStatus: 'PAID'` **y COMMITEADA** en la base.
+   * No basta con haberla escrito: ver la precondición de `onOrderPaid`.
+   */
   orderId: string
   venueId: string
 }
@@ -298,11 +303,40 @@ interface OnOrderPaidTxResult {
 }
 
 /**
+ * 🔴🔴 PRECONDICIÓN — LLÁMALO **DESPUÉS** DE COMMITEAR EL `PAID`, NUNCA DENTRO
+ * DE TU PROPIA `prisma.$transaction`.
+ *
+ * Esta función **abre su propia transacción** y arranca releyendo la orden
+ * (paso 0). Esa relectura corre en OTRA conexión: bajo `READ COMMITTED` no ve
+ * una escritura que tu transacción todavía no commiteó. Si la llamas anidada:
+ *
+ *   1. la relectura ve la orden como estaba ANTES (`PENDING`/`PARTIAL`),
+ *   2. la guardia aborta y devuelve sin hacer nada,
+ *   3. el referido **NUNCA se califica** — y no hay reintento, porque el hook
+ *      es fire-and-forget dentro de un `try/catch` del llamador.
+ *
+ * Y el diagnóstico apunta al culpable EQUIVOCADO: el `warn` diría
+ * `paymentStatus: 'PENDING'`, que se lee como "el llamador llamó de más sobre
+ * una cuenta impaga" — exactamente lo contrario de lo que pasó. Por eso el
+ * mensaje del `warn` nombra esta posibilidad explícitamente.
+ *
+ * Los 10 llamadores de hoy cumplen (barrido 2026-08-17: en los 10 el `PAID` se
+ * commitea antes). **No se acepta un `tx` opcional para "arreglarlo"**: eso
+ * metería la emisión de recompensas y el correo dentro de la transacción del
+ * dinero, donde un fallo de recompensas podría tumbar un cobro. Lo que se
+ * mantiene es la precondición.
+ *
+ * ---
+ *
  * Event handler called from the payment-settled webhook. Implements the
  * spec §5 seven-step flow, ALL inside one `prisma.$transaction` so the
  * claim, the increment, the unlock guard and the reward emission either
  * all land together or none do:
  *
+ *   0. GUARDIA DE ESTADO: relee la orden (por `id` + `venueId`) y aborta si
+ *      no quedó `PAID`. El hook califica y mina recompensas irreversibles,
+ *      así que no puede fiarse de que el llamador sólo lo invoque tras un
+ *      cobro que cerró la cuenta. Ver el comentario en el cuerpo.
  *   1. CAS claim BY ORDER: `Referral.updateMany({ qualifyingOrderId,
  *      status: 'PENDING' } → status: 'QUALIFIED')`. `count === 0` means
  *      another execution (or a duplicate webhook) already claimed this
@@ -352,6 +386,58 @@ interface OnOrderPaidTxResult {
  */
 export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
   const txResult = await prisma.$transaction(async tx => {
+    // Step 0 — GUARDIA DE ESTADO: la orden tiene que haber quedado PAGADA.
+    //
+    // 🔴 El hook se llama `onOrderPaid`, no `onPayment`. Los pasos de abajo
+    // reclaman el referido (PENDING → QUALIFIED), incrementan el contador del
+    // referidor, minan cupones/descuentos y queman un `ReferralTierUnlock` —
+    // que por diseño se gana UNA vez en la vida del cliente y NUNCA se vuelve a
+    // emitir (ver "Design decision" arriba). O sea: calificar de más NO se
+    // deshace. Un abono de $1 sobre una cuenta de $500 le quemaba el nivel al
+    // referidor para siempre.
+    //
+    // Hasta ahora eso dependía de que CADA llamador acertara. El barrido de los
+    // 8 sitios (2026-08-17) los encontró correctos, pero por CONSTRUCCIÓN —
+    // un `if (isFullyPaid)` 300 líneas más arriba, una orden rápida que nace
+    // PAID, un CAS que ganó— no por una comprobación local. Cualquiera de esas
+    // invariantes se rompe en un refactor sin que nada avise. La guardia vive
+    // aquí para que el próximo camino de cobro no pueda reabrir el defecto:
+    // es defensa en profundidad, no sustituto de arreglar al llamador.
+    //
+    // Va DENTRO de la transacción y ANTES del claim, así la lectura y el claim
+    // ven el mismo estado. `venueId` no es decorativo: aislamiento de tenant es
+    // regla dura, y de paso un id de otro venue cae aquí en vez de calificar.
+    const order = await tx.order.findUnique({
+      where: { id: input.orderId, venueId: input.venueId },
+      select: { paymentStatus: true },
+    })
+    if (order?.paymentStatus !== 'PAID') {
+      // WARN, no silencio: el error es del LLAMADOR y tiene que verse. El
+      // contexto de ejecución le estampa venueName/correlationId/entrypoint, así
+      // que la línea alcanza para saber qué camino de cobro disparó esto.
+      //
+      // 🔴 El mensaje nombra las DOS causas posibles a propósito. Quien lea esto
+      // a las 2am ve `paymentStatus: 'PENDING'` y concluye lo obvio —"llamaron
+      // de más sobre una cuenta impaga"— cuando puede ser lo contrario: que el
+      // llamador SÍ cobró pero invocó el hook DENTRO de su propia transacción,
+      // y esta relectura (otra conexión, READ COMMITTED) no ve su `PAID` sin
+      // commitear. Mismo síntoma, culpable opuesto. Ver la precondición arriba.
+      logger.warn(
+        '[referral] onOrderPaid ignorado: la orden no se leyó PAGADA. O el llamador lo invocó sin que la cuenta cerrara, ' +
+          'O lo invocó DENTRO de su propia transacción y el PAID aún no estaba commiteado (ver la precondición de onOrderPaid).',
+        {
+          orderId: input.orderId,
+          venueId: input.venueId,
+          paymentStatus: order?.paymentStatus ?? 'ORDEN_NO_ENCONTRADA',
+          // Si el llamador cobró de verdad, esto es una llamada anidada y el
+          // referido se perdió SIN reintento: hay que arreglar al llamador, no
+          // la orden.
+          hint: 'si el cobro sí ocurrió, revisa si onOrderPaid se llamó dentro de una $transaction del llamador',
+        },
+      )
+      return null
+    }
+
     // Step 1: CAS claim by order. `count === 0` → someone else already
     // claimed this order (concurrent execution or duplicate webhook), or
     // there is no PENDING referral for it. Either way, no-op.
