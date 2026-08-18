@@ -41,6 +41,7 @@ import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
 import { authorizeRole } from './middlewares/authorizeRole.middleware'
+import { requestLoggerMiddleware } from './middlewares/requestLogger'
 import { isJsonBodyParseError } from './utils/httpErrors'
 
 // Types (could be moved to a central types file)
@@ -137,7 +138,13 @@ app.use(
 
 // ⚠️ Public booking/receipt routes — mounted BEFORE global CORS so wildcard origin works for widget embedding
 // These are unauthenticated endpoints (no credentials needed), safe to allow any origin
-app.use('/api/v1/public', express.json(), cookieParser(), publicRoutes)
+//
+// 🔴 requestLoggerMiddleware va aquí EXPLÍCITO: montarse antes del CORS global deja estas
+// rutas fuera de `configureCoreMiddlewares`, que es donde vive el logger. El efecto era que
+// NINGÚN request público se registraba — cero rastro de los leads del formulario de la landing,
+// de las reservas del widget ni de los recibos. Un envío fallido no dejaba línea en el log y el
+// único síntoma era un correo que no llegaba. No mover la ruta: rompería el embebido del widget.
+app.use('/api/v1/public', requestLoggerMiddleware, express.json(), cookieParser(), publicRoutes)
 
 // Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
 // /revoke, and discovery metadata — all at the app root (required by the SDK).
