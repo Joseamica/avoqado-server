@@ -43,7 +43,18 @@ import prisma from '@/utils/prismaClient'
  *
  * Approach inspired by GitHub, Linear, and Notion's permission systems.
  */
-const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
+/**
+ * Dependencias implícitas: tener X implica tener Y, porque sin Y la acción X no funciona.
+ *
+ * 🔴 EXPORTADO para que el dashboard GENERE su copia en vez de mantenerla a mano. La copia
+ * escrita a mano había derivado a 68 entradas contra 180 del servidor —112 de menos—, y
+ * entre las que faltaban estaban `tpv-payments:pay-later`, `discounts:apply` y
+ * `coupons:redeem`, o sea justo las que el editor de roles necesita para poder decirle al
+ * admin "este permiso viene incluido en aquél". Sin ellas la pantalla dejaba desmarcar algo
+ * que el backend repone en silencio: mentía. Ver `scripts/regenerar-catalogo-permisos.mjs`
+ * en avoqado-web-dashboard y su modo `--check`.
+ */
+export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   // ORDERS - Viewing and Managing
   // ===========================
