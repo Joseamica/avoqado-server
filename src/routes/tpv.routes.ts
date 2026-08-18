@@ -3647,11 +3647,15 @@ router.get(
 // moduleService.isModuleEnabled (see .claude/rules/feature-gating.md — crossing the two
 // resolvers fails silently for grandfathered venues). Placed AFTER validateVenueAccess so a
 // cross-tenant probe 403s on tenant ownership before this reveals anything about the venue's plan.
+// 🔴 Llevaba CERO checkPermission: cualquier miembro del venue podía abrir mesa desde
+// la TPV. Es la misma acción que `/tables/:tableId/open` (crea o devuelve la orden
+// DINE_IN de la mesa), así que lleva el mismo permiso de SALA.
 router.post(
   '/venues/:venueId/tables/assign',
   authenticateTokenMiddleware,
   validateVenueAccess,
   checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('tables:update'),
   validateRequest(assignTableSchema),
   tableController.assignTable,
 )
@@ -3729,11 +3733,14 @@ router.delete(
 // TABLE_SERVICE (PRO+) — same gate as assign above; clearing releases a table after its
 // order is paid, the other half of the dine-in service loop. Mirrors /mobile's
 // tables/:tableId/clear (mobile.routes.ts:1616).
+// 🔴 Igual que assign: sin checkPermission, liberar una mesa desde la TPV estaba
+// abierto a cualquier miembro del venue. Mismo permiso de sala que /mobile.
 router.post(
   '/venues/:venueId/tables/:tableId/clear',
   authenticateTokenMiddleware,
   validateVenueAccess,
   checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('tables:update'),
   validateRequest(clearTableSchema),
   tableController.clearTable,
 )
@@ -3975,12 +3982,14 @@ router.get(
  * Abre una mesa: reusa la cuenta activa si existe, o crea una orden DINE_IN vacía
  * y marca la mesa OCCUPIED. Body: { covers?: number }
  */
+// `tables:update`, espejo EXACTO de la ruta /mobile equivalente: abrir una mesa es un
+// acto de SALA. Ver el comentario largo en mobile.routes.ts.
 router.post(
   '/venues/:venueId/tables/:tableId/open',
   authenticateTokenMiddleware,
   validateVenueAccess,
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:create'),
+  checkPermission('tables:update'),
   tableController.openTable,
 )
 

@@ -1856,11 +1856,16 @@ router.get('/venues/:venueId/tables', authenticateTokenMiddleware, checkPermissi
  * Open a table: reuses its active order or creates an empty DINE_IN order and
  * marks the table OCCUPIED. Body: { covers?: number }
  */
+// 🔴 `tables:update`, no `orders:create`: abrir una mesa es un acto de SALA — cambia
+// el estado del piso. La orden DINE_IN vacía que se crea nace sin líneas y sin dinero,
+// es un detalle de implementación. Con `orders:create` el HOST —que decide dónde se
+// sienta la gente— no podía abrir una mesa, y `tables:update`, que sí tiene, no abría
+// NINGUNA ruta: era un permiso muerto. Mismo nombre que ya usa el MCP `set_table_status`.
 router.post(
   '/venues/:venueId/tables/:tableId/open',
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:create'),
+  checkPermission('tables:update'),
   // Propiedad de mesa: abrir una mesa OCUPADA por otro mesero reutilizaría su
   // orden activa → 403 TABLE_OWNED_BY_OTHER (el cliente muestra read-only).
   checkTableOwnership('table'),
@@ -1871,11 +1876,13 @@ router.post(
  * POST /api/v1/mobile/venues/{venueId}/tables/{tableId}/clear
  * Release a table after its order is PAID (rejects unpaid orders).
  */
+// Liberar la mesa es la otra mitad del mismo acto de sala (y sólo procede con la
+// cuenta PAGADA), así que comparte permiso con abrir.
 router.post(
   '/venues/:venueId/tables/:tableId/clear',
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:create'),
+  checkPermission('tables:update'),
   checkTableOwnership('table'),
   tableMobileController.clearTable,
 )
@@ -1885,11 +1892,14 @@ router.post(
  * Move an OPEN check to another table (Square's "Mover").
  * Body: { targetTableId: string }
  */
+// Mover la cuenta a otra mesa es reubicar gente en el salón, no editar la comanda:
+// Toast lo separa igual ("Change Table" es su propio permiso). Con `orders:update` lo
+// podía hacer KITCHEN y no lo podía hacer el HOST — justo al revés.
 router.post(
   '/venues/:venueId/orders/:orderId/move',
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:update'),
+  checkPermission('tables:update'),
   checkTableOwnership('order'),
   tableMobileController.moveOrder,
 )

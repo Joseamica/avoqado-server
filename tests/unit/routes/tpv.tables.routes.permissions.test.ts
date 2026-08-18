@@ -45,16 +45,23 @@ function inspectRoute(router: any, method: string, path: string): RouteInspectio
 }
 
 describe('tpv.routes — mesas y floor-elements (spec §4.4)', () => {
-  // [method, path, expectedPermission] — undefined = ruta operativa (assign/clear/GET),
-  // NO debe llevar checkPermission nuevo, solo validateVenueAccess.
+  // [method, path, expectedPermission] — undefined = sólo validateVenueAccess.
+  //
+  // 🔴 2026-08-17 (auditoría de permisos de piso, "Forma B"): `assign` y `clear` SÍ
+  // llevan candado desde hoy. Eran las dos únicas rutas OPERATIVAS de mesa sin ningún
+  // `checkPermission`, así que cualquier miembro del venue abría y liberaba mesas desde
+  // la TPV. Llevan `tables:update` —el permiso de SALA— igual que sus gemelas de
+  // /mobile; el detalle y la matemática de roles están en
+  // `mesas.permisos-de-mesa.routes.test.ts`. `GET /tables` se queda sin candado aquí a
+  // propósito (ya lo tiene `/mobile` con `tables:read`).
   const cases: Array<[string, string, string | undefined]> = [
     ['get', '/venues/:venueId/tables', undefined],
-    ['post', '/venues/:venueId/tables/assign', undefined],
+    ['post', '/venues/:venueId/tables/assign', 'tables:update'],
     ['post', '/venues/:venueId/tables', 'tpv-tables:write'],
     ['put', '/venues/:venueId/tables/:tableId/position', 'tpv-tables:write'],
     ['put', '/venues/:venueId/tables/:tableId', 'tpv-tables:write'],
     ['delete', '/venues/:venueId/tables/:tableId', 'tpv-tables:delete'],
-    ['post', '/venues/:venueId/tables/:tableId/clear', undefined],
+    ['post', '/venues/:venueId/tables/:tableId/clear', 'tables:update'],
     ['get', '/venues/:venueId/floor-elements', undefined],
     ['post', '/venues/:venueId/floor-elements', 'tpv-floor-elements:write'],
     ['put', '/venues/:venueId/floor-elements/:elementId', 'tpv-floor-elements:write'],

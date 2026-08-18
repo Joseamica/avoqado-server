@@ -108,12 +108,15 @@ describe('table-order routes mounted under /tpv (Plan B Task 4)', () => {
   describe('POST /venues/:venueId/tables/:tableId/open', () => {
     const PATH = '/venues/:venueId/tables/:tableId/open'
 
-    it('auth + validateVenueAccess presentes, permiso orders:create, 5 capas', () => {
+    // 2026-08-17 — auditoría de permisos de piso, "Forma B": abrir mesa es un acto de
+    // SALA y migró de `orders:create` a `tables:update` en /mobile y aquí a la vez.
+    // Detalle y matemática de roles en `mesas.permisos-de-mesa.routes.test.ts`.
+    it('auth + validateVenueAccess presentes, permiso tables:update, 5 capas', () => {
       const route = inspectRoute(tpvRouter, 'post', PATH)
       expect(route).toBeDefined()
       expect(route!.hasAuthenticateToken).toBe(true)
       expect(route!.hasValidateVenueAccess).toBe(true)
-      expect(route!.permission).toBe('orders:create')
+      expect(route!.permission).toBe('tables:update')
       expect(route!.handlers).toHaveLength(5)
     })
 

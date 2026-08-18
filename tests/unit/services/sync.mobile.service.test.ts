@@ -731,16 +731,19 @@ describe('sync.mobile.service processIntents', () => {
     // orders:update dejaría a WAITER/CASHIER comp-ear offline lo que online
     // tienen prohibido (replay ≠ puerta trasera).
     it.each([
-      ['OPEN_TABLE', 'orders:create'],
+      // 🔴 2026-08-17 — auditoría de permisos de piso, "Forma B": abrir, liberar y mover
+      // mesa son actos de SALA y sus rutas online migraron a `tables:update`. Meter
+      // líneas (ADD_ITEMS) SÍ es comanda y se queda en `orders:create`.
+      ['OPEN_TABLE', 'tables:update'],
       ['ADD_ITEMS', 'orders:create'],
-      ['CLEAR_TABLE', 'orders:create'],
+      ['CLEAR_TABLE', 'tables:update'],
       ['PAY_CASH', 'payments:create'],
       ['CANCEL_ORDER', 'orders:cancel'],
       ['COMP_ORDER', 'orders:comp'],
       ['APPLY_DISCOUNT', 'discounts:apply'],
       ['APPLY_SERVICE_CHARGE', 'orders:update'],
       ['UPDATE_DETAILS', 'orders:update'],
-      ['MOVE_ORDER', 'orders:update'],
+      ['MOVE_ORDER', 'tables:update'],
       ['ASSIGN_ORDER', 'orders:update'],
       ['SPLIT_ORDER', 'orders:update'],
       ['SPLIT_BY_SEAT', 'orders:update'],

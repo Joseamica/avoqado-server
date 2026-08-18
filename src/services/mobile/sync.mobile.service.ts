@@ -132,9 +132,14 @@ const KNOWN_TYPES: SyncIntentType[] = [
  */
 export function requiredPermissionForIntent(type: string): string | null {
   switch (type) {
+    // Abrir y liberar mesa son actos de SALA, no de comanda: sus rutas online migraron
+    // a `tables:update` (auditoría de permisos de piso, "Forma B"). Meter líneas a una
+    // cuenta SÍ es comanda y se queda en `orders:create`. Desalinear estos dos mapas
+    // convierte apagar el WiFi en la puerta de atrás.
     case 'OPEN_TABLE':
-    case 'ADD_ITEMS':
     case 'CLEAR_TABLE':
+      return 'tables:update'
+    case 'ADD_ITEMS':
       return 'orders:create'
     case 'PAY_CASH':
       return 'payments:create'
@@ -148,9 +153,13 @@ export function requiredPermissionForIntent(type: string): string | null {
       return 'orders:comp'
     case 'APPLY_DISCOUNT':
       return 'discounts:apply'
+    // Mover la cuenta a otra mesa es reubicar gente en el salón: mismo permiso de sala
+    // que su ruta online. ASIGNAR MESERO se queda en `orders:update` a propósito (el
+    // selector de mesero está gateado con ese permiso; ver mesas.permisos-de-mesa.routes.test.ts).
+    case 'MOVE_ORDER':
+      return 'tables:update'
     case 'APPLY_SERVICE_CHARGE':
     case 'UPDATE_DETAILS':
-    case 'MOVE_ORDER':
     case 'ASSIGN_ORDER':
     case 'SPLIT_ORDER':
     case 'SPLIT_BY_SEAT':
