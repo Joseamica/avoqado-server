@@ -7645,25 +7645,6 @@ router.get('/venues/:venueId/shifts', authenticateTokenMiddleware, checkPermissi
 
 /**
  * @openapi
- * /api/v2/dashboard/{venueId}/shifts/{shiftId}:
- *   get:
- *     tags: [Shifts]
- *     summary: Get a shift by ID
- *     security: [{ bearerAuth: [] }]
- *     parameters:
- *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
- *       - { name: shiftId, in: path, required: true, schema: { type: string, format: cuid } }
- *     responses:
- *       200:
- *         description: The requested shift
- *       401: { $ref: '#/components/responses/UnauthorizedError' }
- *       403: { $ref: '#/components/responses/ForbiddenError' }
- *       404: { $ref: '#/components/responses/NotFoundError' }
- */
-router.get('/venues/:venueId/shifts/:shiftId', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShift)
-
-/**
- * @openapi
  * /api/v2/dashboard/{venueId}/shifts/summary:
  *   get:
  *     tags: [Shifts]
@@ -7689,7 +7670,29 @@ router.get('/venues/:venueId/shifts/:shiftId', authenticateTokenMiddleware, chec
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
+// 🔴 MUST stay registered BEFORE '/venues/:venueId/shifts/:shiftId'. Express matches in registration
+// order, so a parametric segment declared first swallows the literal 'summary' and this route becomes
+// unreachable (it answered 404 "Shift not found" until 2026-08-17).
 router.get('/venues/:venueId/shifts/summary', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShiftsSummary)
+
+/**
+ * @openapi
+ * /api/v2/dashboard/{venueId}/shifts/{shiftId}:
+ *   get:
+ *     tags: [Shifts]
+ *     summary: Get a shift by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: shiftId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: The requested shift
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get('/venues/:venueId/shifts/:shiftId', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShift)
 
 /**
  * @openapi

@@ -495,31 +495,55 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
   })
 
   describe('6. Security Tests', () => {
-    it('should prevent enumeration attacks with consistent timing', async () => {
-      // Test with existing user
-      mockPrismaClient.staff.findUnique.mockResolvedValue({
-        email: testEmail,
-      })
+    /**
+     * Antes esto medía el RELOJ: `|t(existe) − t(no existe)| < 200 ms`, comparando dos requests
+     * HTTP reales. Era el test más frágil del repo — con la máquina cargada, un hipo del
+     * planificador en cualquiera de los dos infla la diferencia y el test se pone rojo sin que
+     * nada esté roto. Y peor: pasaba por casualidad, no por una propiedad del código. No hay
+     * relleno de tiempo constante (ni un bcrypt señuelo) en este endpoint: los dos caminos
+     * simplemente son rápidos con prisma mockeado, así que la medición nunca probó nada.
+     *
+     * Se reescribe a lo que SÍ es determinista y sí protege: mismo status para ambos casos y
+     * exactamente UNA lectura por email —sin sondeos extra que delaten la existencia de la cuenta
+     * por la forma del tráfico a la DB.
+     *
+     * 🔴 HALLAZGO que este test NO puede arreglar (decisión de producto, no de test): el MENSAJE
+     * sí distingue los casos hoy — `signup.service.ts:176` responde "Invalid email or verification
+     * code" para un email inexistente, `:237` "Invalid verification code" y `:227` "No verification
+     * code found…" para uno que sí existe. O sea, el endpoint es enumerable leyendo el texto, que
+     * es justo lo que el test del reloj creía estar cubriendo. Se documenta y NO se asterta el
+     * texto actual, para que unificarlo no rompa este test.
+     */
+    it('no delata si la cuenta existe: mismo status y una sola lectura por email', async () => {
+      // Caso A: el email SÍ existe.
+      mockPrismaClient.staff.findUnique.mockResolvedValue({ email: testEmail })
 
-      const startExisting = Date.now()
-      await request(app).post('/api/v1/onboarding/verify-email').send({
+      const resExisting = await request(app).post('/api/v1/onboarding/verify-email').send({
         email: testEmail,
         verificationCode: '000000',
       })
-      const timeExisting = Date.now() - startExisting
+      const lookupsExisting = mockPrismaClient.staff.findUnique.mock.calls.length
 
-      // Test with non-existing user
+      // Caso B: el email NO existe.
+      jest.clearAllMocks()
       mockPrismaClient.staff.findUnique.mockResolvedValue(null)
 
-      const startNonExisting = Date.now()
-      await request(app).post('/api/v1/onboarding/verify-email').send({
+      const resNonExisting = await request(app).post('/api/v1/onboarding/verify-email').send({
         email: 'nonexistent@example.com',
         verificationCode: '000000',
       })
-      const timeNonExisting = Date.now() - startNonExisting
+      const lookupsNonExisting = mockPrismaClient.staff.findUnique.mock.calls.length
 
-      // Timing should be similar (within 200ms) to prevent enumeration
-      expect(Math.abs(timeExisting - timeNonExisting)).toBeLessThan(200)
+      // Mismo status: un 404 contra un 400 sería enumeración de manual.
+      expect(resExisting.status).toBe(resNonExisting.status)
+      expect(resExisting.status).toBe(400)
+
+      // Mismo trabajo contra la DB: una lectura por email en ambos caminos, sin ramificar.
+      expect(lookupsExisting).toBe(1)
+      expect(lookupsNonExisting).toBe(1)
+
+      // Y ninguno de los dos escribe nada por un intento fallido.
+      expect(mockPrismaClient.staff.update).not.toHaveBeenCalled()
     })
 
     it('should use cryptographically secure random codes', () => {

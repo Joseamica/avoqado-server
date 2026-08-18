@@ -3,6 +3,8 @@ import { OrgRole, StaffRole, PermissionSet } from '@prisma/client'
 import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { enrichContext, getContext } from '@/observability/executionContext'
+import { getVenueName } from '@/observability/venueNames'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { consumePermissionOverride, isManagerPinOverrideEnabled } from '@/services/mobile/permission-override.mobile.service'
 
@@ -38,11 +40,49 @@ interface ResolvedUserRole {
  * the role in that venue.
  */
 export function resolveRequestVenueId(req: Request, authContext: { venueId?: string }): string | undefined {
+  const venueId = pickRequestVenueId(req, authContext)
+  stampEffectiveVenueOnContext(venueId)
+  return venueId
+}
+
+/** La resolución pura (params → header → token), sin efectos. */
+function pickRequestVenueId(req: Request, authContext: { venueId?: string }): string | undefined {
   const fromParams = req.params?.venueId
   if (fromParams) return fromParams
   const fromHeader = req.headers?.['x-venue-id']
   if (typeof fromHeader === 'string' && fromHeader.length > 0) return fromHeader
   return authContext.venueId
+}
+
+/**
+ * Corrige el tenant del log cuando la operación NO es sobre el venue del token.
+ *
+ * `authenticateTokenMiddleware` estampa `venueId`/`venueName` desde el JWT, que es lo correcto
+ * para el 95% de los requests pero MIENTE en los dos casos que más importan al investigar:
+ *
+ * - **Superadmin cross-venue**: el token trae su venue "de casa" y el controlador opera sobre
+ *   `req.params.venueId`. Aprobar el KYC del venue B se logueaba como venue A.
+ * - **Dashboard con `x-venue-id`**: las rutas org-scoped mandan el venue activo por header
+ *   precisamente porque el JWT trae el venue viejo del último `switchVenue`. El log usaba el viejo.
+ *
+ * Va aquí, y no en cada controlador, porque este resolver YA es la respuesta canónica a "¿de qué
+ * venue es esta operación?" y corre después de que Express resolvió la ruta. Es la misma filosofía
+ * del `AsyncLocalStorage`: ningún sitio de llamada tiene que acordarse de pasar el tenant.
+ *
+ * Sin costo en el camino normal: si el venue efectivo es el que ya trae el contexto, no hace nada
+ * (ni siquiera resuelve el nombre). `getVenueName` es síncrono y tolerante a fallos por diseño.
+ *
+ * 🔴 NO cubre: rutas sin `checkPermission`/`checkFeatureAccess`, rutas org-only (`:orgId` sin
+ * venue), **jobs** (`runInJobContext` no pone venue: un tick que recorre 39 venues debe llamar
+ * `enrichContext` él mismo por venue) ni **webhooks** (Stripe/Blumon/MercadoPago no pasan por
+ * autenticación). Tampoco corrige `role`, que sigue siendo el del token aunque el rol efectivo en
+ * el venue destino se resuelva aparte (`resolveUserRoleForVenue`).
+ */
+function stampEffectiveVenueOnContext(venueId: string | undefined): void {
+  if (!venueId) return
+  const current = getContext()
+  if (!current || current.venueId === venueId) return
+  enrichContext({ venueId, venueName: getVenueName(venueId) })
 }
 
 export async function resolveUserRoleForVenue(params: {

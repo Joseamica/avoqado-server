@@ -1,7 +1,6 @@
 // src/routes/index.ts
 import express from 'express'
 import dashboardRoutes from './dashboard.routes'
-import analyticsRoutes from './analytics.routes'
 import organizationRoutes from './organization.routes'
 import tpvRoutes from './tpv.routes'
 import posSyncRoutes from './pos-sync.routes'
@@ -23,7 +22,12 @@ import { tpvVersionGate } from '../middlewares/tpv-version-gate.middleware'
 const router = express.Router({ mergeParams: true })
 
 router.use('/dashboard', dashboardRoutes) // All dashboard routes under /api/v1/dashboard
-router.use('/analytics', analyticsRoutes) // Executive analytics endpoints
+// (removed 2026-08-17) '/analytics' servía UN endpoint, `/overview`, que era un MOCK: cero consultas a
+// la DB y `Math.random()` sobre constantes (ARR 1,245,000 · MRR 103,750 · NPS 41 · churn 2.8%). Eran
+// métricas de SaaS —de Avoqado como empresa—, no de un venue, y cualquier MANAGER/OWNER/VIEWER las veía
+// como suyas en `/venues/:slug/analytics`. La analítica REAL vive en `/dashboard` (generalStats,
+// sales-summary, sales-by-item) y `src/services/command-center/`. El precedente interno es
+// `generalStats.dashboard.service.ts:244,958`: donde no hay medición se devuelve 0, no se inventa.
 router.use('/organizations', organizationRoutes) // Organization-level routes for OWNER dashboard
 router.use('/tpv', tpvVersionGate, tpvRoutes) // All TPV routes under /api/v1/tpv (with version gate)
 router.use('/pos-sync', posSyncRoutes) // All posSync routes under /api/posSync
