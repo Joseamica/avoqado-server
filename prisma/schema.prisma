@@ -28,6 +28,18 @@ model Organization {
   billingEmail   String?
   billingAddress Json?
 
+  // GRANDFATHER FLAG AT THE ORGANIZATION LEVEL — inherited by every venue, present and FUTURE.
+  // Same semantics as Venue.seatCapExempt (exempt from BOTH the Free seat cap AND every feature
+  // paywall); a venue is grandfathered when ITS OWN flag or THIS one is true. It exists because
+  // the per-venue flag cannot cover a store that does not exist yet: the rollout migration
+  // backfilled the venues alive at the time, so a legacy/white-label client's later stores were
+  // each born on the Free tier and blocked the third staff invite (PlayTelecom, 6 stores). Set
+  // it on the ORG and new stores are exempt the moment they are created. Mirrors how Module
+  // gating already inherits via OrganizationModule.
+  // Resolved ONLY through basePlan.service.ts (GRANDFATHER_SELECT / resolveGrandfathered) —
+  // never read this column on its own, or a caller will answer the question differently.
+  seatCapExempt Boolean @default(false)
+
   venues      Venue[]
   invitations Invitation[]
   invoices    Invoice[]
