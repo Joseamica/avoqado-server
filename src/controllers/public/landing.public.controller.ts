@@ -114,6 +114,28 @@ const MODULOS: Record<string, { label: string; beneficio: string }> = {
   },
 }
 
+/**
+ * Numero listo para un enlace `wa.me`.
+ *
+ * 🔴 wa.me exige el numero en formato internacional: "a local number without
+ * its international country code will usually be invalid for Click to Chat"
+ * (docs de WhatsApp). El formulario de la landing pide el telefono con
+ * placeholder `55 1234 5678` — 10 digitos, SIN lada de pais — asi que pegar el
+ * valor tal cual producia un enlace muerto, y justo en el boton con el que
+ * ventas atiende al lead.
+ *
+ * Se asume Mexico (52) solo cuando vienen exactamente 10 digitos, que es lo que
+ * pide el formulario. Un numero que ya trae lada se respeta: nunca se le
+ * anteponen dos ladas a un extranjero.
+ */
+function telefonoParaWhatsApp(raw: unknown): string {
+  const d = String(raw ?? '').replace(/\D/g, '')
+  if (!d) return ''
+  if (d.length === 10) return `52${d}` // celular mexicano tal como lo pide la landing
+  if (d.startsWith('00')) return d.slice(2) // 00 + internacional
+  return d // ya trae lada (52…, 521…, o de otro pais)
+}
+
 /** Traduce el `modules` crudo del formulario a lo que se puede leer en un correo. */
 function modulosElegidos(modules: unknown): Array<{ label: string; beneficio: string }> {
   if (typeof modules !== 'string' || !modules.trim()) return []
@@ -279,7 +301,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     </table>
 
     <div style="padding:32px 0;text-align:center;">
-      <a href="https://wa.me/${encodeURIComponent(String(phone).replace(/[^0-9]/g, ''))}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">Escribirle por WhatsApp</a>
+      <a href="https://wa.me/${telefonoParaWhatsApp(phone)}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">Escribirle por WhatsApp</a>
     </div>
 
     <hr style="border:none;border-top:1px solid #e0e0e0;margin:40px 0 24px 0;">
@@ -336,7 +358,7 @@ Campaña: ${utmTexto || '—'}
       ${
       yaEsCliente
         ? `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Vimos que dejaste tus datos en nuestra página, pero <strong>${escapeHtml(String(companyName))}</strong> ya tiene cuenta con nosotros — no hace falta crear otra. Entra con tu correo de siempre; si no recuerdas la contraseña, usa "Olvidé mi contraseña" en la pantalla de acceso.</p>
-      <p style="font-size:16px;margin:0 0 16px 0;color:#000;">Si necesitabas algo más, respóndenos este correo o escríbenos por WhatsApp y te atendemos.</p>`
+      <p style="font-size:16px;margin:0 0 16px 0;color:#000;">Si necesitabas algo más, respóndenos este correo o <a href="https://avoqado.io/wa?utm_source=email&utm_medium=correo&utm_campaign=alta_landing" style="color:#000;font-weight:600;">escríbenos por WhatsApp</a> y te atendemos.</p>`
         : `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Recibimos los datos de <strong>${escapeHtml(String(companyName))}</strong>. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menú y dejarte cobrando.</p>`
     }
       ${
@@ -386,7 +408,7 @@ Campaña: ${utmTexto || '—'}
       yaEsCliente
         ? ''
         : `<div style="padding-bottom:24px;">
-      <p style="font-size:14px;color:#666;margin:0;">Si prefieres adelantarte, respóndenos este correo o escríbenos por WhatsApp y con gusto te atendemos.</p>
+      <p style="font-size:14px;color:#666;margin:0;">Si prefieres adelantarte, respóndenos este correo o <a href="https://avoqado.io/wa?utm_source=email&utm_medium=correo&utm_campaign=alta_landing" style="color:#000;font-weight:600;">escríbenos por WhatsApp</a> y con gusto te atendemos.</p>
     </div>`
     }
 
@@ -411,7 +433,7 @@ Campaña: ${utmTexto || '—'}
 
 Vimos que dejaste tus datos en nuestra página, pero ${String(companyName)} ya tiene cuenta con nosotros — no hace falta crear otra. Entra con tu correo de siempre; si no recuerdas la contraseña, usa "Olvidé mi contraseña" en la pantalla de acceso.
 
-Si necesitabas algo más, respóndenos este correo o escríbenos por WhatsApp y te atendemos.
+Si necesitabas algo más, respóndenos este correo o escríbenos por WhatsApp: https://avoqado.io/wa
 
 ${ctaTexto}: ${ctaUrl}
 
