@@ -26,6 +26,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { FREE_TIER_SEAT_CAP, getVenueSeatCap, getActiveSeatCount, getPendingInvitationCount } from '@/services/access/seatCap.service'
+import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import { cancelPlan, type PlanState } from './planState.service'
 import { retrievePlanSubscription } from '../stripe.service'
 
@@ -336,8 +337,10 @@ export async function getVenueSeatStatus(venueId: string): Promise<{
   allowed: boolean
   exempt: boolean
 }> {
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { seatCapExempt: true } })
-  const exempt = venue?.seatCapExempt ?? false
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { ...GRANDFATHER_SELECT } })
+  // Exempt by the venue's own flag OR its organization's — same resolver the cap itself uses,
+  // so this status can never disagree with the gate it is reporting on.
+  const exempt = resolveGrandfathered(venue)
   const [cap, active, pending] = await Promise.all([
     getVenueSeatCap(venueId),
     getActiveSeatCount(venueId),

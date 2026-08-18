@@ -2,6 +2,9 @@ import { InvitationStatus, StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { ForbiddenError } from '@/errors/AppError'
 import { getVenueBaseTier, PAID_PLAN_TIER_CODES } from './basePlan.service'
+// Imported from the dependency-free module, NOT from basePlan.service: several suites mock
+// basePlan wholesale, and going through it would leave the resolver undefined inside the gate.
+import { GRANDFATHER_SELECT, resolveGrandfathered } from './grandfather'
 
 /**
  * Free-plan seat cap.
@@ -14,10 +17,12 @@ import { getVenueBaseTier, PAID_PLAN_TIER_CODES } from './basePlan.service'
  * Paid tiers (PLAN_PRO / PLAN_PREMIUM) are unlimited. The OWNER counts as one of the seats.
  * Platform support (StaffRole.SUPERADMIN) never counts and is never blocked.
  *
- * Grandfathering: a venue with `seatCapExempt = true` is exempt forever (every venue
- * that existed at rollout is backfilled to true by the venue_seat_cap_exempt migration,
- * so the legacy venues already over the cap don't break). New venues default to false
- * and are enforced once they end up on the Free tier.
+ * Grandfathering: a venue is exempt forever when its OWN `seatCapExempt = true` OR its
+ * `Organization.seatCapExempt = true` (see `./grandfather`). Every venue that existed at
+ * rollout is backfilled to true by the venue_seat_cap_exempt migration, so the legacy venues
+ * already over the cap don't break. New venues default to false — which is why the ORG-level
+ * flag matters: a grandfathered client's later stores would otherwise each be born capped,
+ * and the cap surfaces only when someone tries to invite the third employee.
  *
  * This module only computes the cap and enforces it at invite / staff-creation time.
  * Reconciling an existing over-cap venue on DOWNGRADE is a separate, later task — not here.
@@ -41,14 +46,14 @@ export const SEAT_CAP_REACHED_CODE = 'SEAT_CAP_REACHED'
 export async function getVenueSeatCap(venueId: string): Promise<number | null> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { seatCapExempt: true },
+    select: { ...GRANDFATHER_SELECT },
   })
 
   // Unknown venue: don't manufacture a cap. Fail open.
   if (!venue) return null
 
-  // Grandfathered: exempt forever.
-  if (venue.seatCapExempt) return null
+  // Grandfathered — by the venue's own flag OR its organization's: exempt forever.
+  if (resolveGrandfathered(venue)) return null
 
   // Otherwise the entitled base tier decides. A paid tier → unlimited; no paid tier → Free.
   const tier = await getVenueBaseTier(venueId)
@@ -188,11 +193,12 @@ export async function assertCanAddSeatsBulk(
   const now = new Date()
   const activeWindow = { active: true, suspendedAt: null, OR: [{ endDate: null }, { endDate: { gte: now } }] }
 
-  // 1. Exempt (grandfathered) venues → unlimited (cap null). Unknown venues → fail open (no cap),
+  // 1. Exempt (grandfathered by their own flag OR their org's) → unlimited (cap null).
+  //    Unknown venues → fail open (no cap),
   //    same as getVenueSeatCap. Candidates that could still be capped: known AND not exempt.
-  const venues = await prisma.venue.findMany({ where: { id: { in: ids } }, select: { id: true, seatCapExempt: true } })
+  const venues = await prisma.venue.findMany({ where: { id: { in: ids } }, select: { id: true, ...GRANDFATHER_SELECT } })
   const known = new Map(venues.map(v => [v.id, v]))
-  let capped = ids.filter(id => known.has(id) && known.get(id)!.seatCapExempt !== true)
+  let capped = ids.filter(id => known.has(id) && !resolveGrandfathered(known.get(id)))
   if (capped.length === 0) return // all exempt/unknown → nothing to enforce (the PlayTelecom short-circuit)
 
   // 2. Paid base plan (PLAN_PRO / PLAN_PREMIUM in the active window) → unlimited. Drop from candidates.

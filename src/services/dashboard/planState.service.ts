@@ -12,6 +12,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { derivePlanState, PAID_PLAN_TIER_CODES, IVA_RATE, type PlanStateValue } from '@/services/access/basePlan.service'
 import { getVenueBaseTier } from '@/services/access/basePlan.service'
+import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import {
   retrievePlanSubscription,
   setSubscriptionCancelAtPeriodEnd,
@@ -101,9 +102,10 @@ export interface PlanState {
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null
   stripeSubscriptionId: string | null
   /**
-   * Whether the venue is GRANDFATHERED (Venue.seatCapExempt === true): it operates as it did
-   * before the tier monetization and is exempt from BOTH the Free seat cap AND every feature
-   * paywall. The dashboard reads this to suppress all FeatureGate upsells for the venue.
+   * Whether the venue is GRANDFATHERED (its own `Venue.seatCapExempt`, OR its
+   * `Organization.seatCapExempt` — the whole client is grandfathered, new stores included):
+   * it operates as it did before the tier monetization and is exempt from BOTH the Free seat
+   * cap AND every feature paywall. The dashboard reads this to suppress all FeatureGate upsells.
    */
   grandfathered: boolean
   /**
@@ -158,12 +160,14 @@ async function findPlanProFeature(venueId: string) {
 export async function getPlanState(venueId: string): Promise<PlanState> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { id: true, stripeCustomerId: true, seatCapExempt: true },
+    select: { id: true, stripeCustomerId: true, ...GRANDFATHER_SELECT },
   })
   if (!venue) throw new NotFoundError(`Venue ${venueId} no encontrado`)
 
   // Grandfather flag — exempt from BOTH the seat cap AND feature paywalls (see schema.prisma).
-  const grandfathered = venue.seatCapExempt === true
+  // Resolved from the venue's own flag OR its organization's, so a venue under a grandfathered
+  // client reports `grandfathered: true` and the dashboard suppresses its upsells.
+  const grandfathered = resolveGrandfathered(venue)
 
   const vf = await findPlanProFeature(venueId)
 

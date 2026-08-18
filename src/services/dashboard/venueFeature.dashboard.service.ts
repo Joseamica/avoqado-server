@@ -9,6 +9,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { getVenueBaseTier, PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, FREE_TIER_CODES } from '@/services/access/basePlan.service'
+import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import { cancelSubscription, createTrialSubscriptions } from '../stripe.service'
 import { logAction } from './activity-log.service'
 
@@ -274,9 +275,10 @@ export async function getVenueFeatureStatus(venueId: string) {
       name: true,
       stripeCustomerId: true,
       stripePaymentMethodId: true,
-      // Grandfather flag (see schema.prisma): true = venue is exempt from feature paywalls
-      // and every available feature must surface as granted (no upsell cards).
-      seatCapExempt: true,
+      // Grandfather flags (see schema.prisma): the venue's own, plus its organization's —
+      // either one means the venue is exempt from feature paywalls and every available feature
+      // must surface as granted (no upsell cards). Resolved via resolveGrandfathered.
+      ...GRANDFATHER_SELECT,
       features: {
         where: { active: true },
         include: {
@@ -310,10 +312,10 @@ export async function getVenueFeatureStatus(venueId: string) {
   // keep their richer state untouched; we only promote the ones that would otherwise be in
   // `availableFeatures`. The plan-tier codes themselves are never blanket-granted.
   const baseTier = await getVenueBaseTier(venueId)
-  // Grandfathered venues (Venue.seatCapExempt === true) are exempt from feature paywalls —
+  // Grandfathered venues (own flag OR the organization's) are exempt from feature paywalls —
   // EVERY available non-tier feature must surface as granted (mirror of venueHasFeatureAccess +
   // the checkFeatureAccess middleware short-circuit), so the dashboard shows no upsell cards.
-  const isGrandfathered = venue.seatCapExempt === true
+  const isGrandfathered = resolveGrandfathered(venue)
   const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
   const isPremiumOnlyCode = (code: string): boolean => (PREMIUM_ONLY_CODES as readonly string[]).includes(code)
   // Tier-aware grant predicate — same rule as the checkFeatureAccess middleware:

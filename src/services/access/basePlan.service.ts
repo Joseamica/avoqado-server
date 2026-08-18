@@ -1,5 +1,12 @@
 import prisma from '@/utils/prismaClient'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
+import { GRANDFATHER_SELECT, resolveGrandfathered } from './grandfather'
+
+// Re-exported so the grandfather resolver is discoverable from the access service everyone
+// already imports. Callers OUTSIDE this module should prefer importing from './grandfather'
+// directly: it is dependency-free, so a suite that mocks this service can't strip it away.
+export { GRANDFATHER_SELECT, resolveGrandfathered } from './grandfather'
+export type { GrandfatherSource } from './grandfather'
 
 /**
  * Paid base-plan tier codes (Feature.code), highest tier last in conceptual order.
@@ -129,13 +136,14 @@ export async function venueHasActiveBasePlan(venueId: string): Promise<boolean> 
 
 /**
  * Whether the venue is GRANDFATHERED — i.e. exempt from the tier monetization and operating
- * as it did before tiers. Reads {@link Venue.seatCapExempt} (the grandfather flag; the column
- * keeps its legacy name to avoid migration churn). A grandfathered venue is exempt from BOTH
- * the Free seat cap AND every feature paywall. Returns false when the venue doesn't exist.
+ * as it did before tiers. True when the venue's OWN {@link Venue.seatCapExempt} is set, or when
+ * its {@link Organization.seatCapExempt} is (see {@link resolveGrandfathered}). A grandfathered
+ * venue is exempt from BOTH the Free seat cap AND every feature paywall. Returns false when the
+ * venue doesn't exist.
  */
 export async function venueIsGrandfathered(venueId: string): Promise<boolean> {
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { seatCapExempt: true } })
-  return venue?.seatCapExempt === true
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { ...GRANDFATHER_SELECT } })
+  return resolveGrandfathered(venue)
 }
 
 /**
@@ -147,16 +155,17 @@ export const DEMO_VENUE_STATUSES = ['LIVE_DEMO', 'TRIAL'] as const
 
 /**
  * Whether the venue is EXEMPT from plan-tier gating entirely. True when the venue is either:
- *   - GRANDFATHERED ({@link Venue.seatCapExempt} === true — see {@link venueIsGrandfathered}), or
+ *   - GRANDFATHERED (own {@link Venue.seatCapExempt} OR its {@link Organization.seatCapExempt}
+ *     — see {@link venueIsGrandfathered} / {@link resolveGrandfathered}), or
  *   - a DEMO venue ({@link Venue.status} in {@link DEMO_VENUE_STATUSES}: LIVE_DEMO / TRIAL),
  *     which must showcase every feature.
- * Single venue lookup (seatCapExempt + status). Returns false when the venue doesn't exist.
+ * Single venue lookup (grandfather flags + status). Returns false when the venue doesn't exist.
  * This is the short-circuit used by the feature-access middleware and {@link venueHasFeatureAccess}.
  */
 export async function venueIsExemptFromPlanGating(venueId: string): Promise<boolean> {
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { seatCapExempt: true, status: true } })
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { ...GRANDFATHER_SELECT, status: true } })
   if (!venue) return false
-  if (venue.seatCapExempt === true) return true
+  if (resolveGrandfathered(venue)) return true
   return (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status as string)
 }
 
@@ -191,9 +200,9 @@ export interface VenuePlanInfo {
 export async function getVenuePlanInfo(venueId: string): Promise<VenuePlanInfo> {
   const [tier, venue] = await Promise.all([
     getVenueBaseTier(venueId),
-    prisma.venue.findUnique({ where: { id: venueId }, select: { seatCapExempt: true, status: true } }),
+    prisma.venue.findUnique({ where: { id: venueId }, select: { ...GRANDFATHER_SELECT, status: true } }),
   ])
-  const grandfathered = venue?.seatCapExempt === true
+  const grandfathered = resolveGrandfathered(venue)
   const exempt = grandfathered || (venue != null && (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status as string))
   return { tier: tier ?? 'FREE', grandfathered, exempt }
 }
@@ -260,11 +269,11 @@ export async function venuesWithFeatureAccess(venueIds: string[], featureCode: s
   //    "requiere plan PRO" via the MCP). Checked FIRST so legacy/demo venues never hit a paywall.
   const venuesForExemption = await prisma.venue.findMany({
     where: { id: { in: venueIds } },
-    select: { id: true, seatCapExempt: true, status: true },
+    select: { id: true, ...GRANDFATHER_SELECT, status: true },
   })
   const entitled = new Set(
     venuesForExemption
-      .filter(v => v.seatCapExempt === true || (DEMO_VENUE_STATUSES as readonly string[]).includes(v.status as string))
+      .filter(v => resolveGrandfathered(v) || (DEMO_VENUE_STATUSES as readonly string[]).includes(v.status as string))
       .map(v => v.id),
   )
 

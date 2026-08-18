@@ -82,12 +82,13 @@ export function checkFeatureAccess(featureCode: string) {
         return next()
       }
 
-      // EXEMPT short-circuit: a grandfathered venue (Venue.seatCapExempt === true) operates
+      // EXEMPT short-circuit: a grandfathered venue (its own Venue.seatCapExempt, OR its
+      // Organization.seatCapExempt — a whole grandfathered client, new stores included) operates
       // as it did before tier monetization, and a DEMO venue (Venue.status LIVE_DEMO / TRIAL)
       // must showcase every feature — full feature access for ANY code, no paywall, for both.
       // Checked here, BEFORE the tier check, the same place superadmin is let through (above),
       // so legacy venues (e.g. a hotel using reservations with no RESERVATIONS grant) and
-      // demos never 403 on a feature-gated endpoint. Single venue lookup (seatCapExempt+status).
+      // demos never 403 on a feature-gated endpoint. Single venue lookup (both flags + status).
       if (await venueIsExemptFromPlanGating(venueId)) {
         ;(req as any).venueFeature = { featureCode, grantedBy: 'GRANDFATHERED_OR_DEMO' }
         return next()
