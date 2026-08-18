@@ -34,6 +34,96 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
+/**
+ * Catalogo de los modulos que se pueden marcar en el formulario de la landing.
+ *
+ * La landing manda los VALUES crudos (`mesas, cocina, qr`) porque es lo que trae
+ * el checkbox. Traducirlos aqui y no alla es a proposito: el correo es del
+ * server, y asi una landing nueva (retail, servicios) que reuse los mismos
+ * values hereda las frases sin copiarlas. Un value que no este en el mapa NO se
+ * pierde — cae al propio value, que es feo pero legible.
+ *
+ * `beneficio` es lo que el prospecto lee: no repetir la etiqueta, decirle que
+ * gana. Toda frase de aqui tiene que ser cierta hoy — este correo es lo primero
+ * que recibe de Avoqado, y una promesa de mas se paga en la primera llamada.
+ */
+const MODULOS: Record<string, { label: string; beneficio: string }> = {
+  mesas: {
+    label: 'Mesas y meseros',
+    beneficio: 'Cada mesero abre, mueve y cobra su mesa desde su propio celular, sin hacer fila en la caja.',
+  },
+  cocina: {
+    label: 'Pantalla de cocina',
+    beneficio: 'La comanda entra al momento y cada estación ve solo lo suyo: cocina lo de cocina, barra lo de barra.',
+  },
+  qr: {
+    label: 'Pago con QR en la mesa',
+    beneficio: 'Tu cliente escanea, divide la cuenta entre sus amigos y paga sin esperar a que le lleven la terminal.',
+  },
+  propinas: {
+    label: 'Propinas',
+    beneficio: 'La propina se registra por mesero y sale sola en el corte, sin repartirla a mano al cierre.',
+  },
+  kiosko: {
+    label: 'Kiosko de autoservicio',
+    beneficio: 'El cliente ordena y paga solo en la pantalla; tu gente atiende en vez de capturar.',
+  },
+  terminal: {
+    label: 'Terminal de cobro',
+    beneficio: 'Terminal propia de Avoqado para cobrar con tarjeta en la mesa, sin mandar al cliente a la caja.',
+  },
+  reservas: {
+    label: 'Reservas',
+    beneficio: 'Tus clientes reservan desde Google o desde tu propia página, y la mesa se bloquea sola.',
+  },
+  pedidos: {
+    label: 'Pedidos en línea propios',
+    beneficio: 'Tu propia página de pedidos: sin comisión de app y con el cliente quedándose tuyo.',
+  },
+  delivery: {
+    label: 'Apps de delivery',
+    beneficio: 'Rappi, Uber Eats y DiDi Food entran al mismo lugar vía Deliverect; dejas de capturar la orden dos veces.',
+  },
+  lealtad: {
+    label: 'Lealtad y promociones',
+    beneficio: 'Puntos, cupones y promociones que se aplican solos al momento de cobrar.',
+  },
+  resenas: {
+    label: 'Reseñas de Google',
+    beneficio: 'Le pides la reseña justo cuando acaba de pagar, que es cuando de verdad la deja.',
+  },
+  cfdi: {
+    label: 'Facturación CFDI',
+    beneficio: 'CFDI 4.0 timbrado: tu cliente escanea el QR del ticket y se factura solo, sin ocuparte a ti.',
+  },
+  inventario: {
+    label: 'Inventario y recetas',
+    beneficio: 'Cada venta descuenta los ingredientes por receta y te avisa antes de que se te acabe algo.',
+  },
+  corte: {
+    label: 'Corte de caja y turnos',
+    beneficio: 'Cierras el turno cuadrado al centavo y ves la diferencia de caja en el momento, no al día siguiente.',
+  },
+  comisiones: {
+    label: 'Comisiones a meseros',
+    beneficio: 'La comisión de cada quien se calcula sola sobre lo que realmente vendió.',
+  },
+  sucursales: {
+    label: 'Varias sucursales',
+    beneficio: 'Todas tus sucursales en un solo tablero, cada una con su menú y sus precios.',
+  },
+}
+
+/** Traduce el `modules` crudo del formulario a lo que se puede leer en un correo. */
+function modulosElegidos(modules: unknown): Array<{ label: string; beneficio: string }> {
+  if (typeof modules !== 'string' || !modules.trim()) return []
+  return modules
+    .split(',')
+    .map(v => v.trim())
+    .filter(Boolean)
+    .map(v => MODULOS[v] || { label: v, beneficio: '' })
+}
+
 // ------------------------------------------------------------
 // POST /api/v1/public/contact — landing demo request form
 // ------------------------------------------------------------
@@ -67,6 +157,10 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // magic link de abajo. Si esto falla NO se aborta el contacto: el lead
     // sigue valiendo aunque el alta no haya podido crearse.
     let magicLink: string | null = null
+    let yaEsCliente = false
+    // Que paso con el alta, para poder decirselo al equipo sin que lo adivine
+    // del contenido del correo del cliente.
+    let altaEstado: 'creada' | 'existente' | 'fallo' = 'fallo'
     try {
       const alta = await signupFromLanding({
         email: String(email),
@@ -75,13 +169,18 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
         organizationName: String(companyName),
         phone: String(phone),
       })
-      // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
-      const apiUrl = process.env.PUBLIC_API_URL || 'https://api.avoqado.io'
-      magicLink = `${apiUrl}/api/v1/public/onboarding/continuar/${alta.magicLinkToken}`
-      logger.info('[CONTACT_SUBMIT] Cuenta creada desde landing', {
+      yaEsCliente = alta.yaEsCliente
+      altaEstado = alta.yaEsCliente ? 'existente' : 'creada'
+      if (alta.magicLinkToken) {
+        // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
+        const apiUrl = process.env.PUBLIC_API_URL || 'https://api.avoqado.io'
+        magicLink = `${apiUrl}/api/v1/public/onboarding/continuar/${alta.magicLinkToken}`
+      }
+      logger.info('[CONTACT_SUBMIT] Alta desde landing', {
         staffId: alta.staff.id,
         organizationId: alta.organizationId,
         alreadyExisted: alta.alreadyExisted,
+        yaEsCliente: alta.yaEsCliente,
         source,
       })
     } catch (err) {
@@ -98,6 +197,37 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
             .join(' · ')
         : ''
 
+    // El CTA cambia segun quien recibe: alguien nuevo va al onboarding, un
+    // cliente que ya tiene cuenta va a iniciar sesion (mandarlo a la landing
+    // seria mandarlo a vender algo que ya compro).
+    const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
+    const ctaUrl = magicLink || (yaEsCliente ? `${dashboardUrl}/login` : 'https://avoqado.io/restaurants')
+    const ctaTexto = magicLink ? 'Continúa tu onboarding' : yaEsCliente ? 'Entrar a mi cuenta' : 'Ver cómo funciona'
+
+    // Estado de la cuenta para el equipo. 🔴 Aqui NUNCA va el magic link: ese
+    // enlace fija la contrasena de la cuenta del cliente, y este correo se
+    // reenvia entre el equipo como cualquier otro. Lo que ventas y onboarding
+    // necesitan es SABER que se le mando y en que quedo, no poder usarlo.
+    const CUENTA: Record<typeof altaEstado, { titulo: string; nota: string }> = {
+      creada: {
+        titulo: 'Cuenta creada',
+        nota: 'Ya está dada de alta y le llegó su enlace para elegir contraseña. Vence en 24 horas y sirve una sola vez.',
+      },
+      existente: {
+        titulo: 'Ya era cliente',
+        nota: 'Esta cuenta ya tiene contraseña y opera. No se le tocó nada: ni token ni datos. Ojo, un cliente que vuelve a llenar el formulario casi siempre trae un problema — vale la pena llamarle.',
+      },
+      fallo: {
+        titulo: 'No se pudo crear la cuenta',
+        nota: 'El lead SÍ está completo, pero el alta falló. Hay que darlo de alta a mano en el dashboard. Revisar el log del server por [CONTACT_SUBMIT].',
+      },
+    }
+    const cuenta = CUENTA[altaEstado]
+
+    // Lo que marco en el formulario. Es el dato mas util de todo el lead: dice
+    // por donde abrir la llamada y que configurar primero en el alta.
+    const elegidos = modulosElegidos(modules)
+
     // ---------- Aviso interno (ventas + onboarding) ----------
     const internalHtml = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Nuevo prospecto</title></head>
@@ -108,7 +238,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
       <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
     </div>
     <div style="padding-bottom:24px;">
-      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">Nuevo prospecto</h1>
+      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">${yaEsCliente ? 'Cliente existente pidió información' : 'Nuevo prospecto'}</h1>
       <p style="margin:0;font-size:16px;color:#666;">${escapeHtml(String(companyName))}</p>
     </div>
 
@@ -117,14 +247,34 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
       ${fila('Nombre', nombre)}${fila('Negocio', companyName)}${fila('WhatsApp', phone)}${fila('Correo', email)}
     </table>
 
-    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Calificacion</h2>
+    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Calificación</h2>
     <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:24px;">
-      ${fila('Tipo de negocio', businessType)}${fila('Sucursales', employees)}${fila('Ventas al mes', revenue)}${fila('Le interesa', modules)}
+      ${fila('Tipo de negocio', businessType)}${fila('Sucursales', employees)}${fila('Ventas al mes', revenue)}
     </table>
+
+    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Qué pidió (${elegidos.length})</h2>
+    ${
+      elegidos.length
+        ? `<div style="margin-bottom:24px;">
+      ${elegidos
+        .map(
+          m =>
+            `<span style="display:inline-block;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:999px;padding:6px 14px;margin:0 6px 8px 0;font-size:13px;color:#000;">${escapeHtml(m.label)}</span>`,
+        )
+        .join('')}
+    </div>`
+        : `<p style="margin:0 0 24px 0;font-size:14px;color:#666;">No marcó ninguno. Vale la pena preguntarle por dónde le urge empezar.</p>`
+    }
+
+    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Cuenta</h2>
+    <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:24px;">
+      <div style="font-size:15px;font-weight:600;color:#000;">${escapeHtml(cuenta.titulo)}</div>
+      <div style="font-size:14px;color:#666;margin-top:4px;">${escapeHtml(cuenta.nota)}</div>
+    </div>
 
     <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Origen</h2>
     <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
-      ${fila('Pagina', source)}${fila('Campana', utmTexto)}
+      ${fila('Página', source)}${fila('Campaña', utmTexto)}
     </table>
 
     <div style="padding:32px 0;text-align:center;">
@@ -137,13 +287,13 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
         <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display:inline-block;vertical-align:middle;">
         <span style="font-size:16px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
       </div>
-      <p style="margin:0 0 16px 0;font-size:14px;color:#000;">Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico</p>
-      <p style="margin:16px 0 0 0;font-size:14px;"><a href="https://avoqado.io/privacy" style="color:#000;text-decoration:none;font-weight:600;">Politica de Privacidad</a></p>
+      <p style="margin:0 0 16px 0;font-size:14px;color:#000;">Servicios Tecnológicos Avo S.A. de C.V.<br>Ciudad de México, México</p>
+      <p style="margin:16px 0 0 0;font-size:14px;"><a href="https://avoqado.io/privacy" style="color:#000;text-decoration:none;font-weight:600;">Política de Privacidad</a></p>
     </div>
   </div>
 </body></html>`
 
-    const internalText = `Nuevo prospecto — ${String(companyName)}
+    const internalText = `${yaEsCliente ? 'Cliente existente pidió información' : 'Nuevo prospecto'} — ${String(companyName)}
 
 CONTACTO
 Nombre: ${nombre}
@@ -151,15 +301,20 @@ Negocio: ${String(companyName)}
 WhatsApp: ${String(phone)}
 Correo: ${String(email)}
 
-CALIFICACION
+CALIFICACIÓN
 Tipo de negocio: ${businessType || '—'}
 Sucursales: ${employees || '—'}
 Ventas al mes: ${revenue || '—'}
-Le interesa: ${modules || '—'}
+
+QUÉ PIDIÓ (${elegidos.length})
+${elegidos.length ? elegidos.map(m => `- ${m.label}`).join('\n') : '- No marcó ninguno. Preguntarle por dónde le urge empezar.'}
+
+CUENTA
+${cuenta.titulo}. ${cuenta.nota}
 
 ORIGEN
-Pagina: ${source || '—'}
-Campana: ${utmTexto || '—'}
+Página: ${source || '—'}
+Campaña: ${utmTexto || '—'}
 `
 
     // ---------- Confirmacion al prospecto ----------
@@ -173,37 +328,66 @@ Campana: ${utmTexto || '—'}
     </div>
 
     <div style="padding-bottom:24px;">
-      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">Hola ${escapeHtml(String(firstName))}, ya quedo tu registro</h1>
+      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">${yaEsCliente ? `Hola ${escapeHtml(String(firstName))}, ya tienes cuenta con nosotros` : `Hola ${escapeHtml(String(firstName))}, ya quedó tu registro`}</h1>
     </div>
 
     <div style="padding-bottom:8px;">
-      <p style="font-size:16px;margin:0 0 16px 0;color:#000;">Recibimos los datos de <strong>${escapeHtml(String(companyName))}</strong>. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menu y dejarte cobrando.</p>
-      <p style="font-size:16px;margin:0 0 24px 0;color:#000;">Mientras tanto, esto es lo que vas a poder hacer:</p>
+      ${
+      yaEsCliente
+        ? `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Vimos que dejaste tus datos en nuestra página, pero <strong>${escapeHtml(String(companyName))}</strong> ya tiene cuenta con nosotros — no hace falta crear otra. Entra con tu correo de siempre; si no recuerdas la contraseña, usa "Olvidé mi contraseña" en la pantalla de acceso.</p>
+      <p style="font-size:16px;margin:0 0 16px 0;color:#000;">Si necesitabas algo más, respóndenos este correo o escríbenos por WhatsApp y te atendemos.</p>`
+        : `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Recibimos los datos de <strong>${escapeHtml(String(companyName))}</strong>. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menú y dejarte cobrando.</p>`
+    }
+      ${
+        yaEsCliente
+          ? ''
+          : elegidos.length
+            ? `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Nos dijiste que te interesa esto, y ya viene incluido en tu cuenta:</p>
+      <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin:0 0 24px 0;">
+        ${elegidos
+          .map(
+            m => `<tr>
+          <td style="padding:14px;border-bottom:1px solid #e5e7eb;">
+            <div style="font-size:15px;font-weight:600;color:#000;">${escapeHtml(m.label)}</div>
+            ${m.beneficio ? `<div style="font-size:14px;color:#666;margin-top:4px;">${escapeHtml(m.beneficio)}</div>` : ''}
+          </td>
+        </tr>`,
+          )
+          .join('')}
+      </table>`
+            : `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Esto es lo que vas a poder hacer desde el primer día:</p>
       <ul style="font-size:15px;margin:0 0 24px 0;padding-left:24px;color:#000;">
         <li style="margin-bottom:8px;">Cobrar con tarjeta, efectivo o transferencia desde tu tablet, tu compu o el celular de tus meseros</li>
-        <li style="margin-bottom:8px;">Llevar mesas, cuentas abiertas y division de cuenta sin papelitos</li>
-        <li style="margin-bottom:8px;">Mandar las ordenes a cocina y a barra por separado, cada una a su impresora</li>
+        <li style="margin-bottom:8px;">Llevar mesas, cuentas abiertas y división de cuenta sin papelitos</li>
+        <li style="margin-bottom:8px;">Mandar las órdenes a cocina y a barra por separado, cada una a su impresora</li>
         <li style="margin-bottom:8px;">Cuadrar tu corte de caja al centavo al cerrar el turno</li>
         <li style="margin-bottom:8px;">Facturar CFDI 4.0: tu cliente escanea el QR del ticket y se factura solo</li>
-      </ul>
-      <p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>
-    </div>
-
-    <div style="padding:32px 0 8px;text-align:center;">
-      <a href="${magicLink || 'https://avoqado.io/restaurants'}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">${magicLink ? 'Continua tu onboarding' : 'Ver como funciona'}</a>
+      </ul>`
+      }
+      ${yaEsCliente ? '' : `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>`}
     </div>
 
     ${
       magicLink
-        ? `<div style="padding-bottom:24px;text-align:center;">
-      <p style="font-size:13px;color:#666;margin:0;">Al entrar eliges tu contrasena. El enlace sirve por 24 horas y una sola vez.</p>
+        ? `<div style="border:1px solid #e5e7eb;border-radius:8px;padding:24px;margin:8px 0 24px 0;text-align:center;">
+      <p style="margin:0 0 4px 0;font-size:16px;font-weight:600;color:#000;">Tu cuenta ya está creada</p>
+      <p style="margin:0 0 20px 0;font-size:14px;color:#666;">Solo falta que elijas tu contraseña para entrar.</p>
+      <a href="${ctaUrl}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">${ctaTexto}</a>
+      <p style="margin:20px 0 0 0;font-size:13px;color:#666;">Este enlace sirve por 24 horas y una sola vez. Si vence, escríbenos y te mandamos otro.</p>
     </div>`
-        : ''
+        : `<div style="padding:32px 0 8px;text-align:center;">
+      <a href="${ctaUrl}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">${ctaTexto}</a>
+    </div>`
     }
 
-    <div style="padding-bottom:24px;">
-      <p style="font-size:14px;color:#666;margin:0;">Si prefieres adelantarte, respondenos este correo o escribenos por WhatsApp y con gusto te atendemos.</p>
-    </div>
+    ${
+      // A un cliente existente ya se lo dijimos arriba; repetirlo aqui suena a plantilla.
+      yaEsCliente
+        ? ''
+        : `<div style="padding-bottom:24px;">
+      <p style="font-size:14px;color:#666;margin:0;">Si prefieres adelantarte, respóndenos este correo o escríbenos por WhatsApp y con gusto te atendemos.</p>
+    </div>`
+    }
 
     <hr style="border:none;border-top:1px solid #e0e0e0;margin:40px 0 24px 0;">
     <div>
@@ -211,30 +395,50 @@ Campana: ${utmTexto || '—'}
         <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display:inline-block;vertical-align:middle;">
         <span style="font-size:16px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
       </div>
-      <p style="margin:0 0 16px 0;font-size:14px;color:#000;">Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico</p>
-      <p style="margin:0;font-size:12px;color:#666;">Recibes este correo porque dejaste tus datos en avoqado.io. Si no fuiste tu, puedes ignorarlo.</p>
-      <p style="margin:16px 0 0 0;font-size:14px;"><a href="https://avoqado.io/privacy" style="color:#000;text-decoration:none;font-weight:600;">Politica de Privacidad</a></p>
+      <p style="margin:0 0 16px 0;font-size:14px;color:#000;">Servicios Tecnológicos Avo S.A. de C.V.<br>Ciudad de México, México</p>
+      <p style="margin:0;font-size:12px;color:#666;">Recibes este correo porque dejaste tus datos en avoqado.io. Si no fuiste tú, puedes ignorarlo.</p>
+      <p style="margin:16px 0 0 0;font-size:14px;"><a href="https://avoqado.io/privacy" style="color:#000;text-decoration:none;font-weight:600;">Política de Privacidad</a></p>
     </div>
   </div>
 </body></html>`
 
-    const confirmText = `Hola ${String(firstName)}, ya quedo tu registro.
+    // El texto plano tiene que decir LO MISMO que el HTML: es lo que ve quien
+    // bloquea imagenes, y contradecirlo ahi es la forma mas facil de mandarle a
+    // un cliente de anos un correo de bienvenida.
+    const confirmText = yaEsCliente
+      ? `Hola ${String(firstName)}, ya tienes cuenta con nosotros.
 
-Recibimos los datos de ${String(companyName)}. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menu y dejarte cobrando.
+Vimos que dejaste tus datos en nuestra página, pero ${String(companyName)} ya tiene cuenta con nosotros — no hace falta crear otra. Entra con tu correo de siempre; si no recuerdas la contraseña, usa "Olvidé mi contraseña" en la pantalla de acceso.
 
-Con Avoqado vas a poder:
+Si necesitabas algo más, respóndenos este correo o escríbenos por WhatsApp y te atendemos.
+
+${ctaTexto}: ${ctaUrl}
+
+Servicios Tecnológicos Avo S.A. de C.V. — Ciudad de México, México
+Política de Privacidad: https://avoqado.io/privacy
+`
+      : `Hola ${String(firstName)}, ya quedó tu registro.
+
+Recibimos los datos de ${String(companyName)}. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menú y dejarte cobrando.
+
+${
+  elegidos.length
+    ? `Nos dijiste que te interesa esto, y ya viene incluido en tu cuenta:
+${elegidos.map(m => `- ${m.label}${m.beneficio ? `: ${m.beneficio}` : ''}`).join('\n')}`
+    : `Esto es lo que vas a poder hacer desde el primer día:
 - Cobrar con tarjeta, efectivo o transferencia desde tu tablet, tu compu o el celular de tus meseros
-- Llevar mesas, cuentas abiertas y division de cuenta sin papelitos
-- Mandar las ordenes a cocina y a barra por separado, cada una a su impresora
+- Llevar mesas, cuentas abiertas y división de cuenta sin papelitos
+- Mandar las órdenes a cocina y a barra por separado, cada una a su impresora
 - Cuadrar tu corte de caja al centavo al cerrar el turno
-- Facturar CFDI 4.0: tu cliente escanea el QR del ticket y se factura solo
+- Facturar CFDI 4.0: tu cliente escanea el QR del ticket y se factura solo`
+}
 
 El plan inicial es gratis para siempre y no pedimos tarjeta.
 
-${magicLink ? `Continua tu onboarding aqui (eliges tu contrasena, sirve 24 horas y una sola vez):\n${magicLink}` : 'Ver como funciona: https://avoqado.io/restaurants'}
+${magicLink ? `Tu cuenta ya está creada; solo falta que elijas tu contraseña.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
 
-Servicios Tecnologicos Avo S.A. de C.V. — Ciudad de Mexico, Mexico
-Politica de Privacidad: https://avoqado.io/privacy
+Servicios Tecnológicos Avo S.A. de C.V. — Ciudad de México, México
+Política de Privacidad: https://avoqado.io/privacy
 `
 
     // El aviso interno va a ventas Y a onboarding, para que quien da de alta al
@@ -246,7 +450,7 @@ Politica de Privacidad: https://avoqado.io/privacy
         internos.map(to =>
           emailService.sendEmail({
             to,
-            subject: `Nuevo prospecto - ${String(companyName)}`,
+            subject: `${yaEsCliente ? 'Cliente existente' : 'Nuevo prospecto'} - ${String(companyName)}`,
             html: internalHtml,
             text: internalText,
           }),
@@ -254,7 +458,7 @@ Politica de Privacidad: https://avoqado.io/privacy
       ),
       emailService.sendEmail({
         to: String(email),
-        subject: 'Ya quedo tu registro en Avoqado',
+        subject: yaEsCliente ? 'Ya tienes cuenta en Avoqado' : 'Ya quedó tu registro en Avoqado',
         html: confirmHtml,
         text: confirmText,
       }),
