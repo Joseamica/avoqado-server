@@ -86,6 +86,8 @@ import {
   listCfdisController,
   getCfdiStatusController,
   cancelCfdiController,
+  emitRefundCreditNoteController,
+  getRefundCreditNoteController,
   getFiscalConfigController,
   upsertEmisorController,
   upsertMerchantFiscalConfigController,
@@ -3452,6 +3454,25 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'), // destructive → OWNER/ADMIN only
   cancelCfdiController,
+)
+
+// ---- Facturación CFDI 4.0 — Nota de crédito (CFDI de EGRESO) por un reembolso ----
+// La venta original NO se modifica y el CFDI de ingreso NO se cancela: el egreso va
+// RELACIONADO (TipoRelacion 01, uso G02). Emisión MANUAL con botón — nunca automática.
+// Mismo permiso que emitir un CFDI (`cfdi:issue`) + el mismo gate de plan (`CFDI`, PREMIUM).
+router.get(
+  '/venues/:venueId/refunds/:refundId/credit-note',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  getRefundCreditNoteController,
+)
+router.post(
+  '/venues/:venueId/refunds/:refundId/credit-note',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:issue'),
+  emitRefundCreditNoteController,
 )
 
 // ---- Facturación CFDI 4.0 — Fiscal config: emisor metadata + per-merchant toggles ----

@@ -1,6 +1,13 @@
 // src/services/fiscal/cfdiPayloadBuilder.ts
 import { PaymentMethod, VenueType } from '@prisma/client'
-import { CreateInvoiceParams, CfdiItemInput, CfdiItemTax, GlobalInvoiceParams } from './providers/fiscal-provider.interface'
+import {
+  CreateInvoiceParams,
+  CfdiItemInput,
+  CfdiItemTax,
+  CreditNoteParams,
+  GlobalInvoiceParams,
+  ReceptorInput,
+} from './providers/fiscal-provider.interface'
 import { mapFormaPago, sectorSatDefaults } from './satCatalog'
 import { splitIvaIncluded } from './ivaMath'
 import type { ClosedPeriod } from './globalPeriod'
@@ -70,6 +77,80 @@ export function buildCreateInvoiceParams(input: AvoqadoSaleInput): CreateInvoice
     metodoPago: input.metodoPago,
     serie: input.serie,
     idempotencyKey: input.idempotencyKey,
+  }
+}
+
+// ─── CFDI de EGRESO (nota de crédito) ─────────────────────────────────────────
+
+/** SAT c_UsoCFDI para una nota de crédito: "Devoluciones, descuentos o bonificaciones". */
+export const CREDIT_NOTE_USO_CFDI = 'G02'
+/** SAT c_TipoRelacion: "Nota de crédito de los documentos relacionados". */
+export const CREDIT_NOTE_RELATIONSHIP = '01' as const
+/** ClaveProdServ genérica ("no existe en el catálogo") + ClaveUnidad "Actividad". */
+const CREDIT_NOTE_PRODUCT_KEY = '01010101'
+const CREDIT_NOTE_UNIT_KEY = 'ACT'
+
+/** Un renglón de la nota de crédito: importe IVA-INCLUIDO (centavos) a una tasa real. */
+export interface CreditNoteLine {
+  grossCents: number
+  rate: number
+}
+
+export interface BuildCreditNoteInput {
+  receptor: ReceptorInput & { email?: string }
+  /** UUID (folio fiscal) del CFDI de ingreso que se acredita. */
+  originalUuid: string
+  /** Etiqueta legible de la factura original (serie+folio) — va en la descripción del concepto. */
+  originalLabel: string
+  formaPago: string
+  metodoPago: 'PUE' | 'PPD'
+  serie?: string
+  idempotencyKey: string
+  lines: CreditNoteLine[]
+}
+
+/**
+ * Pure: renglones + factura original → `CreditNoteParams` para el PAC.
+ *
+ * Decisión de conceptos (documentada a propósito): **una partida por TASA de IVA**, no un
+ * prorrateo renglón-por-renglón del ticket. Motivos:
+ *   - el caso normal (todo al 16%) sale como UNA sola partida "Devolución sobre factura X",
+ *     que es exactamente lo que pide el founder y lo que emite un portal fiscal a mano;
+ *   - una devolución PARCIAL no corresponde a renglones concretos (el cliente devolvió "$50",
+ *     no "media hamburguesa"), así que inventar renglones sería inventar información;
+ *   - pero una cuenta con productos gravados y exentos NO puede colapsarse a una tasa sola sin
+ *     declarar un IVA equivocado — de ahí la partida por tasa. Es el mismo criterio que ya usa
+ *     `groupOrderIntoGlobalLines` para la factura global.
+ *
+ * Los importes van IVA-INCLUIDO (`taxIncluded: true`) para que el Total del egreso sea
+ * EXACTAMENTE el dinero devuelto al cliente, igual que en el CFDI de ingreso.
+ */
+export function buildCreditNoteParams(input: BuildCreditNoteInput): CreditNoteParams {
+  if (input.lines.length === 0) throw new Error('buildCreditNoteParams requiere al menos un renglón')
+  const items: CfdiItemInput[] = input.lines.map(line => {
+    const exempt = !Number.isFinite(line.rate) || line.rate <= 0
+    return {
+      satProductKey: CREDIT_NOTE_PRODUCT_KEY,
+      satUnitKey: CREDIT_NOTE_UNIT_KEY,
+      description: `Devolución sobre factura ${input.originalLabel}`,
+      quantity: 1,
+      unitPriceCents: line.grossCents,
+      discountCents: 0,
+      objetoImp: exempt ? '01' : '02',
+      taxes: exempt ? [] : [{ type: 'IVA', factor: 'Tasa', rate: line.rate, withholding: false }],
+      taxIncluded: true,
+    }
+  })
+  return {
+    receptor: { ...input.receptor, usoCfdi: CREDIT_NOTE_USO_CFDI },
+    items,
+    formaPago: input.formaPago,
+    metodoPago: input.metodoPago,
+    serie: input.serie,
+    idempotencyKey: input.idempotencyKey,
+    externalId: input.idempotencyKey,
+    relationship: CREDIT_NOTE_RELATIONSHIP,
+    relatedUuids: [input.originalUuid],
   }
 }
 

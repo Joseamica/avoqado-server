@@ -170,7 +170,7 @@ export interface IssueCfdiResult {
 
 // A reservation older than this is treated as stale (crashed/deployed mid-stamp) and may be reclaimed,
 // so a stuck STAMPING row never permanently locks an order's invoicing.
-const STAMPING_TTL_MS = 3 * 60_000
+export const STAMPING_TTL_MS = 3 * 60_000
 
 export async function issueCfdiForOrder(
   params: { orderId: string; receptor: IssueReceptor; sandbox: boolean; flow?: 'STAFF_B' | 'AUTOFACTURA_A'; expectedVenueId?: string },

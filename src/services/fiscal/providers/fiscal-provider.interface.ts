@@ -100,6 +100,32 @@ export interface CreateInvoiceParams {
   externalId?: string
 }
 
+/**
+ * Params para timbrar un CFDI 4.0 tipo "E" (EGRESO = nota de crédito).
+ *
+ * Ampara una DEVOLUCIÓN/descuento sobre un CFDI de ingreso ya timbrado. La venta original
+ * NO se toca y el CFDI de ingreso NO se cancela (decisión del founder 2026-08-18; es también
+ * lo que hacen Toast/Square/Clip y lo que pide el SAT): se emite un comprobante NUEVO
+ * relacionado al original.
+ *
+ * `relationship` es c_TipoRelacion — '01' = "Nota de crédito de los documentos relacionados".
+ * `receptor.usoCfdi` debe ser 'G02' ("Devoluciones, descuentos o bonificaciones").
+ */
+export interface CreditNoteParams {
+  receptor: ReceptorInput & { usoCfdi: string; email?: string }
+  items: CfdiItemInput[]
+  formaPago: string // c_FormaPago — cómo se devolvió el dinero
+  metodoPago: 'PUE' | 'PPD'
+  serie?: string
+  idempotencyKey: string
+  /** Stamped as `external_id` on the PAC document — enables deterministic orphan lookup. */
+  externalId?: string
+  /** c_TipoRelacion. Hoy siempre '01' (nota de crédito). */
+  relationship: '01'
+  /** UUID(s) (folios fiscales) del/los CFDI de ingreso que se acreditan. */
+  relatedUuids: string[]
+}
+
 /** SAT c_Periodicidad: 01=Diario, 02=Semanal, 03=Quincenal, 04=Mensual, 05=Bimestral */
 export type SatPeriodicidadCode = '01' | '02' | '03' | '04' | '05'
 
@@ -266,6 +292,8 @@ export interface FiscalProvider {
   createPayrollReceipt?(params: PayrollReceiptParams): Promise<StampedInvoice>
   /** Timbra un CFDI 4.0 tipo "P" (Recibo Electrónico de Pago / complemento de pago). Opcional por proveedor. */
   createPaymentComplement?(params: PaymentComplementParams): Promise<StampedInvoice>
+  /** Timbra un CFDI 4.0 tipo "E" (EGRESO / nota de crédito) relacionado a un CFDI de ingreso. Opcional por proveedor. */
+  createCreditNote?(params: CreditNoteParams): Promise<StampedInvoice>
   /** Envía el CFDI (PDF+XML) por correo al receptor. Si `email` es null, usa el del cliente registrado. Opcional. */
   sendInvoiceByEmail?(providerInvoiceId: string, email?: string): Promise<void>
 }

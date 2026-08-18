@@ -15,6 +15,7 @@ import { env } from '@/config/env'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { issueCfdiForOrder, cancelCfdi, getCfdiStatus, listCfdisForVenue } from '@/services/fiscal/cfdi.service'
+import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
 import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
 import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
@@ -257,6 +258,112 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
     }
 
     res.status(500).json({ error: 'Error interno al cancelar el CFDI' })
+  }
+}
+
+// ─── Nota de crédito (CFDI de EGRESO) por un reembolso ────────────────────────
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/refunds/:refundId/credit-note
+ *
+ * Emite MANUALMENTE un CFDI de EGRESO (nota de crédito) que ampara un reembolso ya hecho.
+ * La venta original NO se toca y el CFDI de ingreso NO se cancela — el egreso va RELACIONADO
+ * (TipoRelacion 01, uso G02). Nunca automático: timbrar es irreversible.
+ *
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:issue').
+ * El ActivityLog lo escribe el SERVICIO (así el MCP y cualquier otro llamador auditan igual).
+ */
+export async function emitRefundCreditNoteController(req: Request, res: Response): Promise<void> {
+  const { refundId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  // Sandbox stamps in dev/staging (free, no SAT effect); live key in production.
+  const sandbox = env.NODE_ENV !== 'production'
+
+  try {
+    const result = await emitRefundCreditNote({
+      venueId,
+      refundPaymentId: refundId,
+      sandbox,
+      requestedByStaffId: authContext.userId ?? null,
+    })
+
+    if (result.status === 'VALIDATION_FAILED') {
+      res.status(422).json({ error: 'No se pudo emitir la nota de crédito', reasons: result.reasons, cfdiId: result.cfdi?.id })
+      return
+    }
+    if (result.status === 'STAMP_FAILED') {
+      res.status(502).json({ error: 'El PAC rechazó el timbrado', message: result.cfdi?.lastError, cfdiId: result.cfdi?.id })
+      return
+    }
+
+    res.status(201).json({
+      creditNote: {
+        id: result.cfdi.id,
+        uuid: result.cfdi.uuid,
+        serie: result.cfdi.serie,
+        folio: result.cfdi.folio,
+        status: result.cfdi.status,
+        totalCents: result.cfdi.totalCents,
+        xmlUrl: result.cfdi.xmlUrl,
+        pdfUrl: result.cfdi.pdfUrl,
+      },
+    })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] credit note failed for refund ${refundId}: ${message}`)
+
+    if (/no encontrado/i.test(message)) {
+      res.status(404).json({ error: message })
+      return
+    }
+    if (/en proceso/i.test(message)) {
+      res.status(409).json({ error: message })
+      return
+    }
+    // Reglas de negocio fiscales: sin factura original, cancelada, sólo propina, importe excedido,
+    // pago que no es reembolso, PAC sin soporte → 409 con el texto EXACTO para que la UI lo pinte.
+    if (/no es un reembolso|no está completado|no tiene una factura|cancelada|propina|excede|no soporta/i.test(message)) {
+      res.status(409).json({ error: message })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al emitir la nota de crédito' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/refunds/:refundId/credit-note
+ *
+ * Devuelve `{ creditNote, eligibility, preview }`: la nota de crédito ya emitida (o `null`),
+ * si se puede emitir y —cuando NO— el porqué en español, listo para pintarse.
+ * Apagado se VE y se EXPLICA: nunca un booleano pelón.
+ * READ — sin ActivityLog (regla critical-warnings: no se auditan lecturas).
+ */
+export async function getRefundCreditNoteController(req: Request, res: Response): Promise<void> {
+  const { refundId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  try {
+    const status = await getRefundCreditNoteStatus(venueId, refundId)
+    if (!status) {
+      res.status(404).json({ error: 'Reembolso no encontrado' })
+      return
+    }
+    res.status(200).json(status)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] getRefundCreditNote failed for refund ${refundId}: ${message}`)
+    res.status(500).json({ error: 'Error interno al consultar la nota de crédito' })
   }
 }
 

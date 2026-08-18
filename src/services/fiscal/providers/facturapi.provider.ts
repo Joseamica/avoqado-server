@@ -6,6 +6,7 @@ import {
   CreateInvoiceParams,
   CreateOrgParams,
   CreateOrgResult,
+  CreditNoteParams,
   FiscalProvider,
   GlobalInvoiceParams,
   InvoiceSearchResult,
@@ -324,6 +325,64 @@ export class FacturapiProvider implements FiscalProvider {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       logger.error(`[facturapi] createPaymentComplement failed: ${message}`)
+      throw err
+    }
+  }
+
+  /**
+   * Timbra un CFDI 4.0 tipo "E" (EGRESO / nota de crédito) relacionado a un CFDI de ingreso.
+   *
+   * Contrato verificado en la documentación de Facturapi (docs.facturapi.io → Guías → Facturas →
+   * Egreso / Relacionados, consultada 2026-08-18):
+   *   - `type: "E"`                                   (InvoiceType.EGRESO en enums.d.ts)
+   *   - `related_documents: [{ relationship, documents: [uuid, ...] }]`
+   *     🔴 `documents` es un ARREGLO de UUIDs, no un string suelto.
+   *   - `relationship: "01"`                          (InvoiceRelation.NOTA_DE_CREDITO)
+   *   - `use: "G02"`                                  (InvoiceUse.DEVOLUCIONES_DESCUENTOS_BONIFICACIONES)
+   *
+   * El mapeo de conceptos es idéntico al de `createInvoice` (mismo `tax_included` para que el
+   * total del egreso sea exactamente lo que se le devolvió al cliente).
+   */
+  async createCreditNote(params: CreditNoteParams): Promise<StampedInvoice> {
+    const payload: any = {
+      type: 'E',
+      customer: {
+        legal_name: FacturapiProvider.normalizeReceptorName(params.receptor.razonSocial),
+        tax_id: params.receptor.rfc,
+        tax_system: params.receptor.regimenFiscal,
+        address: { zip: params.receptor.codigoPostal },
+        email: params.receptor.email,
+      },
+      use: params.receptor.usoCfdi,
+      payment_form: params.formaPago,
+      payment_method: params.metodoPago,
+      ...(params.serie ? { series: params.serie } : {}),
+      ...(params.externalId ? { external_id: params.externalId } : {}),
+      related_documents: [{ relationship: params.relationship, documents: params.relatedUuids }],
+      items: params.items.map(it => ({
+        quantity: it.quantity,
+        discount: toPesos(it.discountCents),
+        product: {
+          description: it.description,
+          product_key: it.satProductKey,
+          unit_key: it.satUnitKey,
+          price: toPesos(it.unitPriceCents),
+          tax_included: it.taxIncluded === true,
+          taxes: it.taxes.map(t => ({
+            type: t.type,
+            rate: t.rate,
+            factor: t.factor,
+            withholding: t.withholding,
+          })),
+        },
+      })),
+    }
+    try {
+      const inv = await this.client.invoices.create(payload)
+      return this.toStamped(inv)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[facturapi] createCreditNote failed: ${message}`)
       throw err
     }
   }
