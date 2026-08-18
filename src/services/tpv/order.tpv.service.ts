@@ -2861,6 +2861,14 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     })
   }
 
+  // Anular TODOS los renglones cierra la orden como CANCELLED: los referidos
+  // PENDING atados a ella se anulan y se revierte cualquier premio (defensa en
+  // profundidad). Nunca lanza.
+  if (isVoidingAllItems) {
+    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+    await onOrderCancelled({ orderId, venueId })
+  }
+
   const voidTableName = updatedOrder.table ? `Mesa ${updatedOrder.table.number}` : null
 
   return {

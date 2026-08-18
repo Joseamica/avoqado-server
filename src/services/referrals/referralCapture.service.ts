@@ -10,9 +10,24 @@ import { Referral } from '@prisma/client'
  */
 export type ValidationReason = 'PROGRAM_INACTIVE' | 'CODE_NOT_FOUND' | 'SELF_REFERRAL' | 'EXISTING_CUSTOMER'
 
+/**
+ * Spanish copy for each machine reason. The enum stays the discriminator the
+ * clients switch on (never remove it — dashboard/TPV/Android/iOS map it to
+ * their own CTA); this is the sentence a cashier actually reads, so the
+ * clients no longer each have to invent their own wording and drift apart.
+ */
+export const VALIDATION_REASON_MESSAGE_ES: Record<ValidationReason, string> = {
+  PROGRAM_INACTIVE: 'El programa de referidos no está activo en esta sucursal.',
+  CODE_NOT_FOUND: 'No encontramos ese código de referido en esta sucursal.',
+  SELF_REFERRAL: 'Un cliente no puede referirse a sí mismo.',
+  EXISTING_CUSTOMER: 'Este cliente ya tiene una compra pagada aquí, así que no cuenta como referido nuevo.',
+}
+
 export interface ValidationResult {
   valid: boolean
   reason?: ValidationReason
+  /** Spanish sentence for `reason` — what the cashier reads. */
+  message?: string
   referrer?: { id: string; firstName: string | null; lastName: string | null }
   /** Convenience copy of `ReferralProgramConfig.newCustomerDiscountPercent`
    *  so callers don't have to re-query the config row. */
@@ -23,6 +38,15 @@ export interface ValidateInput {
   venueId: string
   referralCode: string
   newCustomerId: string
+  /**
+   * The order this very checkout is creating, when the caller already knows
+   * it. Excluded from the "prior paid sale" count — see rule 4 below.
+   */
+  intendedOrderId?: string
+}
+
+function reject(reason: ValidationReason): ValidationResult {
+  return { valid: false, reason, message: VALIDATION_REASON_MESSAGE_ES[reason] }
 }
 
 /**
@@ -35,8 +59,31 @@ export interface ValidateInput {
  *   2. Code must resolve to a Customer in the same venue.
  *   3. The presenter (newCustomerId) cannot be the same Customer as the
  *      code's owner.
- *   4. The presenter must have zero prior Orders in this venue (the "new
- *      customer" definition for the program).
+ *   4. The presenter must have no PRIOR PAID sale in this venue.
+ *
+ * 🔴 Rule 4 used to be "zero prior Orders in this venue, in any state", and
+ * that was a defect in two directions at once (founder decision 2026-08-18,
+ * after comparing Mindbody / Booksy / Square):
+ *
+ *   a) It disqualified people who never bought anything. A booking, an
+ *      abandoned cart or a cancelled check leaves an `Order` row, so a
+ *      customer who "exists" but never paid was refused forever. The market
+ *      defines new by MONEY: Booksy charges only for "visits that actually
+ *      took place", Square requires "one payment greater than $1", Mindbody
+ *      claims the offer only when the brand-new client makes a purchase.
+ *      Capture is attribution, not the reward — the reward still waits for
+ *      the first completed payment (`onOrderPaid`).
+ *
+ *   b) It made the POS flow impossible. Android and iOS capture on payment
+ *      SUCCESS, so by the time they call, the sale of THIS checkout already
+ *      exists and is PAID for this customer — counting it rejected every
+ *      single mobile capture with EXISTING_CUSTOMER. Passing
+ *      `intendedOrderId` excludes exactly that one order, and nothing else.
+ *
+ * Both money signals are checked (`paymentStatus: PAID` OR a COMPLETED
+ * REGULAR payment) because prod carries historically inconsistent rows —
+ * orders left PENDING with completed payments attached. `cancelOrder` in
+ * `order.dashboard.service.ts` already guards with the same pair.
  */
 export async function validateReferralCode(input: ValidateInput): Promise<ValidationResult> {
   const config = await prisma.referralProgramConfig.findUnique({
@@ -44,7 +91,7 @@ export async function validateReferralCode(input: ValidateInput): Promise<Valida
     select: { active: true, newCustomerDiscountPercent: true },
   })
   if (!config || !config.active) {
-    return { valid: false, reason: 'PROGRAM_INACTIVE' }
+    return reject('PROGRAM_INACTIVE')
   }
 
   const referrer = await prisma.customer.findFirst({
@@ -52,18 +99,23 @@ export async function validateReferralCode(input: ValidateInput): Promise<Valida
     select: { id: true, firstName: true, lastName: true },
   })
   if (!referrer) {
-    return { valid: false, reason: 'CODE_NOT_FOUND' }
+    return reject('CODE_NOT_FOUND')
   }
 
   if (referrer.id === input.newCustomerId) {
-    return { valid: false, reason: 'SELF_REFERRAL' }
+    return reject('SELF_REFERRAL')
   }
 
-  const priorOrderCount = await prisma.order.count({
-    where: { customerId: input.newCustomerId, venueId: input.venueId },
+  const priorPaidOrderCount = await prisma.order.count({
+    where: {
+      customerId: input.newCustomerId,
+      venueId: input.venueId,
+      ...(input.intendedOrderId ? { id: { not: input.intendedOrderId } } : {}),
+      OR: [{ paymentStatus: 'PAID' }, { payments: { some: { status: 'COMPLETED', type: 'REGULAR' } } }],
+    },
   })
-  if (priorOrderCount > 0) {
-    return { valid: false, reason: 'EXISTING_CUSTOMER' }
+  if (priorPaidOrderCount > 0) {
+    return reject('EXISTING_CUSTOMER')
   }
 
   return {
@@ -120,6 +172,24 @@ export async function resolveStaffVenueId(venueId: string, candidate: string | n
 }
 
 /**
+ * Keep `intendedOrderId` only when it really is an order of this venue.
+ *
+ * WHY: the POS can hand us an id the server has never seen — a provisional
+ * id from an offline/table session, or a stale one. `Referral
+ * .qualifyingOrderId` is an FK, so persisting it would throw and turn the
+ * capture into a 500: the cashier sees a red error right after a successful
+ * charge, and the attribution is lost anyway. Capture must never block the
+ * sale, so we do exactly what `resolveStaffVenueId` does — drop the link,
+ * keep the row. Tenant-scoped on purpose: another venue's order is as
+ * unusable here as a made-up one.
+ */
+async function resolveIntendedOrderId(venueId: string, candidate: string | null | undefined): Promise<string | null> {
+  if (!candidate) return null
+  const order = await prisma.order.findFirst({ where: { id: candidate, venueId }, select: { id: true } })
+  return order?.id ?? null
+}
+
+/**
  * Create a PENDING Referral row after re-running validation. We don't
  * trust the caller to have called `validateReferralCode` first — this
  * function is the only consumer-safe entrypoint that persists state.
@@ -128,10 +198,16 @@ export async function resolveStaffVenueId(venueId: string, candidate: string | n
  * error message so HTTP handlers can map it to the appropriate 4xx code.
  */
 export async function captureReferral(input: CaptureInput): Promise<Referral> {
+  const qualifyingOrderId = await resolveIntendedOrderId(input.venueId, input.intendedOrderId)
+
   const validation = await validateReferralCode({
     venueId: input.venueId,
     referralCode: input.referralCode,
     newCustomerId: input.newCustomerId,
+    // Must travel: re-running validation without it counts the very sale we
+    // are about to attach the referral to as a "prior paid order", so every
+    // capture-on-payment-success would reject itself with EXISTING_CUSTOMER.
+    intendedOrderId: qualifyingOrderId ?? undefined,
   })
   if (!validation.valid) {
     throw new Error(validation.reason)
@@ -144,7 +220,7 @@ export async function captureReferral(input: CaptureInput): Promise<Referral> {
       referredCustomerId: input.newCustomerId,
       status: 'PENDING',
       capturedByStaffVenueId,
-      qualifyingOrderId: input.intendedOrderId,
+      qualifyingOrderId,
     },
   })
 }

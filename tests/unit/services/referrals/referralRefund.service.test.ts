@@ -32,14 +32,23 @@
  *     `couponCode` relation on CouponRedemption.
  */
 
-import { onOrderRefunded, isRewardRedeemed, revokeTierReward } from '@/services/referrals/referralRefund.service'
+import {
+  onOrderRefunded,
+  isRewardRedeemed,
+  revokeTierReward,
+  revertReferralRewardForOrder,
+  onOrderCancelled,
+} from '@/services/referrals/referralRefund.service'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     $transaction: jest.fn(),
-    referral: { findFirst: jest.fn(), update: jest.fn() },
+    order: { findUnique: jest.fn() },
+    payment: { findMany: jest.fn() },
+    referral: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     customer: { update: jest.fn() },
     referralProgramConfig: { findUnique: jest.fn() },
     referralRewardGrant: { findMany: jest.fn(), update: jest.fn() },
@@ -54,6 +63,19 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const mockedPrisma = prisma as any
+const mockedLogger = logger as any
+
+/** Order that a refund has fully reversed — the default for the legacy suite. */
+function fullyRefundedOrder() {
+  mockedPrisma.order.findUnique.mockResolvedValue({
+    id: 'o1',
+    status: 'COMPLETED',
+    paymentStatus: 'PAID',
+    total: 100,
+    tipAmount: 0,
+  })
+  mockedPrisma.payment.findMany.mockResolvedValue([{ amount: 100 }])
+}
 
 describe('isRewardRedeemed', () => {
   beforeEach(() => jest.clearAllMocks())
@@ -112,6 +134,7 @@ describe('onOrderRefunded', () => {
     jest.clearAllMocks()
     mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockedPrisma))
     mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([])
+    fullyRefundedOrder()
   })
 
   it('does nothing when no QUALIFIED Referral exists for this order', async () => {
@@ -425,5 +448,141 @@ describe('onOrderRefunded', () => {
         }),
       )
     })
+  })
+})
+
+/**
+ * Founder decision 2026-08-18 (market comparison in question 3 of
+ * `inv-decisiones-B-report.md`): the reward is released on the first
+ * completed payment and REVERSED if that qualifying sale is cancelled or
+ * fully refunded. A PARTIAL refund does NOT reverse it — Booksy only stops
+ * charging for a visit that did not happen, it does not claw back a visit
+ * that happened and was partly discounted.
+ */
+describe('revertReferralRewardForOrder', () => {
+  const baseReferral = { id: 'ref_1', status: 'QUALIFIED', referrerCustomerId: 'cust_ref' }
+  const baseConfig = { tier1ReferralsRequired: 7, tier2ReferralsRequired: 12, tier3ReferralsRequired: 20 }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockedPrisma))
+    mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([])
+    mockedPrisma.referral.findFirst.mockResolvedValue(baseReferral)
+    mockedPrisma.customer.update.mockResolvedValue({ id: 'cust_ref', referralCount: 6, referralTier: 'TIER_1' })
+    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue(baseConfig)
+  })
+
+  it('does NOT revert on a PARTIAL refund', async () => {
+    mockedPrisma.order.findUnique.mockResolvedValue({ id: 'o1', status: 'COMPLETED', paymentStatus: 'PARTIAL', total: 100, tipAmount: 0 })
+    mockedPrisma.payment.findMany.mockResolvedValue([{ amount: 40 }])
+
+    await revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_REFUNDED' })
+
+    expect(mockedPrisma.referral.update).not.toHaveBeenCalled()
+    expect(mockedPrisma.customer.update).not.toHaveBeenCalled()
+  })
+
+  it('reverts once the cumulative refunds cover the merchandise total', async () => {
+    mockedPrisma.order.findUnique.mockResolvedValue({ id: 'o1', status: 'COMPLETED', paymentStatus: 'PAID', total: 100, tipAmount: 0 })
+    mockedPrisma.payment.findMany.mockResolvedValue([{ amount: 60 }, { amount: 40 }])
+
+    await revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_REFUNDED' })
+
+    expect(mockedPrisma.referral.update).toHaveBeenCalledWith({
+      where: { id: 'ref_1' },
+      data: expect.objectContaining({ status: 'VOID', voidReason: 'ORDER_REFUNDED' }),
+    })
+  })
+
+  it('compares against MERCHANDISE, not the tip-inclusive total', async () => {
+    // Same trap `crossedFullRefundThreshold` documents for restock: refunds
+    // only ever sum the sale part, so an order with a tip would never cross
+    // a total-with-tip threshold and the reward would survive forever.
+    mockedPrisma.order.findUnique.mockResolvedValue({ id: 'o1', status: 'COMPLETED', paymentStatus: 'PAID', total: 115, tipAmount: 15 })
+    mockedPrisma.payment.findMany.mockResolvedValue([{ amount: 100 }])
+
+    await revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_REFUNDED' })
+
+    expect(mockedPrisma.referral.update).toHaveBeenCalled()
+  })
+
+  it('reverts a CANCELLED order even with no refund payments, tagging the caller reason', async () => {
+    mockedPrisma.order.findUnique.mockResolvedValue({ id: 'o1', status: 'CANCELLED', paymentStatus: 'PENDING', total: 100, tipAmount: 0 })
+    mockedPrisma.payment.findMany.mockResolvedValue([])
+
+    await revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_CANCELLED' })
+
+    expect(mockedPrisma.referral.update).toHaveBeenCalledWith({
+      where: { id: 'ref_1' },
+      data: expect.objectContaining({ status: 'VOID', voidReason: 'ORDER_CANCELLED' }),
+    })
+  })
+
+  it('is idempotent — a second call finds no QUALIFIED referral and no-ops', async () => {
+    mockedPrisma.order.findUnique.mockResolvedValue({ id: 'o1', status: 'CANCELLED', paymentStatus: 'PENDING', total: 100, tipAmount: 0 })
+    mockedPrisma.payment.findMany.mockResolvedValue([])
+    // Two reads per pass: the cheap pre-check, then the one inside the tx.
+    // After the first pass the referral is VOID, so every later read misses.
+    mockedPrisma.referral.findFirst
+      .mockResolvedValueOnce(baseReferral) // pass 1 — pre-check
+      .mockResolvedValueOnce(baseReferral) // pass 1 — inside the transaction
+      .mockResolvedValue(null) // pass 2 onwards — already voided
+
+    await revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_CANCELLED' })
+    await revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_CANCELLED' })
+
+    expect(mockedPrisma.referral.update).toHaveBeenCalledTimes(1)
+  })
+
+  it('NEVER throws when the reversal fails — a refund/cancel must not die because of the referral hook', async () => {
+    mockedPrisma.order.findUnique.mockRejectedValue(new Error('db down'))
+
+    await expect(revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_REFUNDED' })).resolves.toBeUndefined()
+    // Greppable trail: swallowing without a log is how a reward silently
+    // survives a refund and nobody ever finds out.
+    expect(mockedLogger.error).toHaveBeenCalledWith(expect.stringContaining('[referral]'), expect.objectContaining({ orderId: 'o1' }))
+  })
+
+  it('does not touch the order when it no longer exists in this venue (tenant-scoped read)', async () => {
+    mockedPrisma.order.findUnique.mockResolvedValue(null)
+
+    await revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_REFUNDED' })
+
+    expect(mockedPrisma.order.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'o1', venueId: 'v1' } }))
+    expect(mockedPrisma.referral.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('onOrderCancelled', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockedPrisma.referral.updateMany.mockResolvedValue({ count: 1 })
+    mockedPrisma.referral.findFirst.mockResolvedValue(null)
+  })
+
+  it('anula (VOID) los referidos PENDING atados a la orden cancelada, con la razón ORDER_CANCELLED', async () => {
+    await onOrderCancelled({ orderId: 'o-cancelada', venueId: 'v1' })
+
+    expect(mockedPrisma.referral.updateMany).toHaveBeenCalledTimes(1)
+    const call = mockedPrisma.referral.updateMany.mock.calls[0][0]
+    expect(call.where).toEqual({ qualifyingOrderId: 'o-cancelada', venueId: 'v1', status: 'PENDING' })
+    expect(call.data.status).toBe('VOID')
+    expect(call.data.voidReason).toBe('ORDER_CANCELLED')
+    expect(call.data.voidedAt).toBeInstanceOf(Date)
+  })
+
+  it('además intenta la reversa del premio (defensa en profundidad): consulta el QUALIFIED de esa orden', async () => {
+    await onOrderCancelled({ orderId: 'o-cancelada', venueId: 'v1' })
+
+    expect(mockedPrisma.referral.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { qualifyingOrderId: 'o-cancelada', venueId: 'v1', status: 'QUALIFIED' } }),
+    )
+  })
+
+  it('nunca lanza aunque la DB falle: la cancelación no se cae por el referido', async () => {
+    mockedPrisma.referral.updateMany.mockRejectedValue(new Error('db caída'))
+
+    await expect(onOrderCancelled({ orderId: 'o-cancelada', venueId: 'v1' })).resolves.toBeUndefined()
+    expect(mockedLogger.error).toHaveBeenCalled()
   })
 })

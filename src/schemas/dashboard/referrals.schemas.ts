@@ -84,6 +84,12 @@ export const ValidateReferralCodeSchema = z.object({
   body: z.object({
     referralCode: z.string().min(3).max(64),
     newCustomerId: z.string().min(1),
+    // Same field CaptureReferralSchema accepts, and it must be accepted here
+    // too: Zod strips unknown keys, so a client that sends it to /validate but
+    // not to /capture would get "no válido" from one endpoint and a successful
+    // capture from the other for the SAME sale. The rule is "no PRIOR paid
+    // sale", and the order of this very checkout is not prior.
+    intendedOrderId: z.string().optional(),
   }),
 })
 

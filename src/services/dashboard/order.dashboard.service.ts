@@ -7,6 +7,10 @@ import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
+// La ÚNICA definición de "qué cuenta como pagado y cuánto se devolvió" — la
+// misma que usan los cuatro canales de cobro, para que la pantalla no pueda
+// contradecir al saldo persistido.
+import { summarizeRefunds } from '../shared/orderBalance'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -129,6 +133,13 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
         _count: {
           select: { items: true }, // Cheap count for "N productos" cell in /orders list
         },
+        // ADITIVO — sólo para el carril del reembolso. Acotado a los COMPLETED y
+        // a tres columnas: en una lista paginada, traer el pago entero sería
+        // pagar por dato que nadie pinta. El array se descarta al serializar.
+        payments: {
+          where: { status: 'COMPLETED' },
+          select: { amount: true, tipAmount: true, type: true },
+        },
       },
       orderBy: { updatedAt: 'desc' },
       skip,
@@ -140,7 +151,13 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
   ])
 
   return {
-    data: orders,
+    // 🔴 ADITIVO: la fila sale igual que siempre MÁS `refundState`/`refundedAmount`.
+    // Los pagos se quitan a propósito — se leyeron para calcular el resumen, no
+    // para engordar la lista con un array que esta pantalla no usa.
+    data: orders.map(({ payments, ...rest }: any) => {
+      const refunds = summarizeRefunds(payments ?? [])
+      return { ...rest, refundState: refunds.refundState, refundedAmount: Number(refunds.refundedAmount) }
+    }),
     meta: {
       total,
       page,
@@ -342,6 +359,22 @@ export async function getOrderById(venueId: string, orderId: string) {
           },
         },
       },
+      // Promociones vendidas en esta orden. El NOMBRE sale del snapshot (lo que
+      // se cobró), nunca de la promoción viva, que pudo renombrarse después.
+      promotions: {
+        select: {
+          id: true,
+          instanceId: true,
+          snapshotJson: true,
+          grossCents: true,
+          discountCents: true,
+          netCents: true,
+          needsReview: true,
+          reviewReason: true,
+          items: { select: { id: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+      },
       orderCustomers: {
         include: {
           customer: {
@@ -361,10 +394,70 @@ export async function getOrderById(venueId: string, orderId: string) {
     throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
   }
   const flattened = flattenOrderModifiers(order)
+  // ADITIVO — el carril del reembolso (founder, 2026-08-18). `mapOrderPaymentsWithRefunds`
+  // ya detalla QUÉ pago se devolvió y por qué; esto contesta lo otro: ¿esta VENTA
+  // está devuelta, y por cuánto? Sale del MISMO resumen que usan los cuatro
+  // canales de cobro, así que la pantalla no puede contradecir al saldo.
+  // 🔴 Sólo los COMPLETED: aquí llegan pagos de todos los estados, y un
+  // reembolso PENDING/FAILED todavía no sacó dinero de la caja.
+  const refunds = summarizeRefunds((flattened.payments ?? []).filter((p: any) => p.status === 'COMPLETED'))
   return {
     ...flattened,
     payments: mapOrderPaymentsWithRefunds(flattened.payments ?? []),
+    promotions: mapOrderPromotions(order.promotions ?? []),
+    refundState: refunds.refundState,
+    /** Lo devuelto, en PESOS y POSITIVO. 0 cuando no hay reembolsos. */
+    refundedAmount: Number(refunds.refundedAmount),
   }
+}
+
+/**
+ * Las promociones de una orden, listas para pintarse en el detalle.
+ *
+ * Ningún sistema del mercado deja el nombre del combo fuera del detalle de la
+ * venta: Fudo imprime "el nombre del combo y, debajo, cada producto asociado";
+ * Square marca en la comanda que el refresco "is part of the Burger Combo";
+ * Maitre'D dice que el nombre "will be shown on reports, order screen, guest
+ * checks and receipts". Hasta ahora el dato existía (`OrderPromotion`) y NADIE lo
+ * leía: el detalle sólo mostraba un descuento anónimo.
+ *
+ * 🔴 Dinero en PESOS. `OrderPromotion` guarda centavos internamente (como el
+ * ledger contable), y la regla de la plataforma es convertir ÷100 antes de
+ * cualquier salida de display. `itemIds` ata la promoción a sus líneas para que
+ * la UI pueda anidarlas bajo el nombre del combo.
+ */
+function mapOrderPromotions(
+  promotions: Array<{
+    id: string
+    instanceId: string
+    snapshotJson: unknown
+    grossCents: number
+    discountCents: number
+    netCents: number
+    needsReview: boolean
+    reviewReason: string | null
+    items: Array<{ id: string }>
+  }>,
+) {
+  return promotions.map(p => {
+    const snapshot = (p.snapshotJson ?? {}) as { name?: string; type?: string; pricingMode?: string }
+    return {
+      id: p.id,
+      instanceId: p.instanceId,
+      /** El nombre TAL COMO SE COBRÓ. */
+      name: snapshot.name ?? 'Promoción',
+      /** BUNDLE | COMBO. */
+      type: snapshot.type ?? null,
+      /** FIXED_TOTAL | PER_UNIT (2x1). */
+      pricingMode: snapshot.pricingMode ?? null,
+      gross: p.grossCents / 100,
+      discount: p.discountCents / 100,
+      net: p.netCents / 100,
+      needsReview: p.needsReview,
+      reviewReason: p.reviewReason,
+      itemIds: p.items.map(i => i.id),
+    }
+  })
 }
 
 /**
@@ -372,8 +465,24 @@ export async function getOrderById(venueId: string, orderId: string) {
  * SUPERADMIN puede actualizar más campos que usuarios normales.
  */
 export async function updateOrder(venueId: string, orderId: string, data: Partial<Order>) {
-  // Extract allowed fields for SUPERADMIN editing
+  // Extract allowed fields for SUPERADMIN editing.
+  //
+  // 🔴 DINERO — `total`, `tipAmount` y `subtotal` NO se editan a mano (rebanada 0 de
+  // "la propina fuera del total", founder 2026-08-18): se DERIVAN de los renglones y
+  // de los pagos (Toast: `totalAmount` no se toca; Square igual; el SAT ampara la
+  // devolución con un CFDI de egreso, no editando la venta). Antes este PUT los
+  // escribía tal cual con la semántica vieja y sin tocar los pagos → números que
+  // ningún reporte podía cuadrar. Se ignoran con aviso; el resto sigue igual.
   const { status, customerId, customerName, tableId, servedById, tipAmount, total, subtotal, createdAt, orderNumber, type } = data as any
+  if (tipAmount !== undefined || total !== undefined || subtotal !== undefined) {
+    logger.warn('[ORDER.DASHBOARD] updateOrder ignoró campos de dinero editados a mano (total/tipAmount/subtotal se derivan de renglones y pagos)', {
+      venueId,
+      orderId,
+      total,
+      tipAmount,
+      subtotal,
+    })
+  }
 
   // Get the current order to check previous status
   const currentOrder = await prisma.order.findFirst({
@@ -438,9 +547,6 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
       ...(customerName !== undefined && { customerName }),
       ...(tableId !== undefined && { tableId: tableId || null }),
       ...(servedById !== undefined && { servedById: servedById || null }),
-      ...(tipAmount !== undefined && { tipAmount: Number(tipAmount) }),
-      ...(total !== undefined && { total: Number(total) }),
-      ...(subtotal !== undefined && { subtotal: Number(subtotal) }),
       ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
       ...(orderNumber !== undefined && { orderNumber }),
       ...(type !== undefined && { type }),
@@ -528,7 +634,14 @@ export async function deleteOrder(venueId: string, orderId: string) {
     data: { status: cancelledOrder.status },
   })
 
-  return cancelledOrder
+  // Referidos: anula los PENDING de esta orden y revierte premios (defensa en
+    // profundidad). Nunca lanza.
+    {
+      const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+      await onOrderCancelled({ orderId: cancelledOrder.id, venueId: cancelledOrder.venueId })
+    }
+
+    return cancelledOrder
 }
 
 /**

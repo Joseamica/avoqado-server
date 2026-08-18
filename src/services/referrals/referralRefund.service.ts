@@ -1,8 +1,17 @@
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { Prisma, ReferralRewardGrant, ReferralTier } from '@prisma/client'
 import { computeTier, tierToLevel } from './referralQualification.service'
 
 type TxClient = Prisma.TransactionClient
+
+/**
+ * Why the qualifying sale stopped counting. Persisted verbatim on
+ * `Referral.voidReason` and echoed in the `REFERRAL_TIER_REVERSED`
+ * ActivityLog, so finance can tell "the customer got their money back" apart
+ * from "the check was voided".
+ */
+export type ReferralRevertReason = 'ORDER_REFUNDED' | 'ORDER_CANCELLED'
 
 /**
  * Has the referrer already redeemed their tier reward on a real order?
@@ -71,6 +80,109 @@ export async function revokeTierReward(discountId: string, reason: string): Prom
 export interface OnOrderRefundedInput {
   orderId: string
   venueId: string
+}
+
+export interface RevertReferralRewardInput extends OnOrderRefundedInput {
+  reason: ReferralRevertReason
+}
+
+/**
+ * Is this order reversed IN FULL? Only then does the reward go back.
+ *
+ * 🔴 Founder decision 2026-08-18: a PARTIAL refund does NOT revert the
+ * reward. Booksy stops charging for a visit that did not happen; it does not
+ * claw back a visit that happened and got partly discounted. Until now this
+ * file was called unconditionally from BOTH refund paths
+ * (`refund.tpv.service.ts`, `refund.dashboard.service.ts`), so refunding $20
+ * of a $500 sale voided the referral and could revoke a coupon the referrer
+ * had already earned. The guard lives HERE, not at the call sites, so every
+ * present and future caller inherits it.
+ *
+ * Three ways to be fully reversed, in cheapest-first order:
+ *   - the order is CANCELLED / DELETED (a voided check),
+ *   - `paymentStatus` already reads REFUNDED,
+ *   - completed REFUND payments cover the merchandise.
+ *
+ * ⚠️ MERCHANDISE, not `Order.total`: the total carries the tip, while
+ * refunds only ever sum the sale part (`Payment.amount`; the tip travels in
+ * `tipAmount`). Comparing against the tip-inclusive total means an order
+ * with a tip NEVER crosses — the same trap that kept
+ * `crossedFullRefundThreshold` from restocking inventory (audit 2026-08-12).
+ *
+ * This is a STATE predicate, not the edge-crossing one restock uses: it must
+ * answer the same way on a retry, because the caller may run twice.
+ */
+async function isOrderFullyReversed(orderId: string, venueId: string): Promise<boolean> {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { status: true, paymentStatus: true, total: true, tipAmount: true },
+  })
+  if (!order) return false
+
+  if (order.status === 'CANCELLED' || order.status === 'DELETED') return true
+  if (order.paymentStatus === 'REFUNDED') return true
+
+  const merchandiseTotal = Math.max(0, Number(order.total) - Number(order.tipAmount ?? 0))
+  if (merchandiseTotal <= 0.01) return false
+
+  const refunds = await prisma.payment.findMany({
+    where: { orderId, venueId, type: 'REFUND', status: 'COMPLETED' },
+    select: { amount: true },
+  })
+  const totalRefundedSale = refunds.reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0)
+  return totalRefundedSale >= merchandiseTotal - 0.01
+}
+
+/**
+ * THE entrypoint for "this sale stopped counting — take the reward back".
+ *
+ * Contract, and every clause of it is load-bearing:
+ *   - **Never throws.** A refund or a cancellation that already moved money
+ *     must not fail because a referral bookkeeping write failed. Callers
+ *     don't need their own try/catch (the two existing ones keep theirs;
+ *     that's harmless).
+ *   - **Never silent.** Swallowing without a trail is exactly how a revoked
+ *     reward survives and nobody finds out, so every skip and every failure
+ *     writes a greppable `[referral]` line. The execution context stamps
+ *     `venueName` / `correlationId` / `entrypoint` on it for free.
+ *   - **Idempotent.** Reverting twice is a no-op: the second pass finds no
+ *     QUALIFIED referral for the order.
+ *   - **Only on a FULL reversal** — see `isOrderFullyReversed`.
+ *
+ * Call it from the refund paths and from order cancellation. It is a no-op
+ * for an order that never qualified a referral, so wiring it in costs one
+ * indexed read.
+ */
+export async function revertReferralRewardForOrder(input: RevertReferralRewardInput): Promise<void> {
+  try {
+    // Cheapest question first, and it is the common case by far: most orders
+    // never qualified a referral. Asking it here keeps the hook silent and
+    // costs one indexed read — logging a "referral" line on every ordinary
+    // refund would be exactly the noise the log rules warn about.
+    const qualified = await prisma.referral.findFirst({
+      where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'QUALIFIED' },
+      select: { id: true },
+    })
+    if (!qualified) return
+
+    if (!(await isOrderFullyReversed(input.orderId, input.venueId))) {
+      logger.info('[referral] reversión omitida: la venta calificadora no está revertida en su totalidad (reembolso parcial)', {
+        orderId: input.orderId,
+        venueId: input.venueId,
+        referralId: qualified.id,
+        reason: input.reason,
+      })
+      return
+    }
+    await revertQualifiedReferral(input)
+  } catch (err) {
+    logger.error('[referral] no se pudo revertir el premio de la venta calificadora', {
+      orderId: input.orderId,
+      venueId: input.venueId,
+      reason: input.reason,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
 }
 
 /**
@@ -209,7 +321,7 @@ async function revokeFreeProductGrant(tx: TxClient, grant: ReferralRewardGrant, 
  *   7. Always emit a `REFERRAL_TIER_REVERSED` ActivityLog with old + new
  *      tier + the list of revoked grant ids so finance can reconcile.
  */
-export async function onOrderRefunded(input: OnOrderRefundedInput): Promise<void> {
+async function revertQualifiedReferral(input: RevertReferralRewardInput): Promise<void> {
   await prisma.$transaction(async tx => {
     const referral = await tx.referral.findFirst({
       where: { qualifyingOrderId: input.orderId, status: 'QUALIFIED' },
@@ -218,7 +330,7 @@ export async function onOrderRefunded(input: OnOrderRefundedInput): Promise<void
 
     await tx.referral.update({
       where: { id: referral.id },
-      data: { status: 'VOID', voidedAt: new Date(), voidReason: 'ORDER_REFUNDED' },
+      data: { status: 'VOID', voidedAt: new Date(), voidReason: input.reason },
     })
 
     const referrer = await tx.customer.update({
@@ -277,9 +389,62 @@ export async function onOrderRefunded(input: OnOrderRefundedInput): Promise<void
           newTier,
           triggeringReferralId: referral.id,
           refundedOrderId: input.orderId,
+          revertReason: input.reason,
           revokedGrantIds,
         },
       },
     })
   })
+}
+
+/**
+ * Back-compat alias for the refund paths that already import this name
+ * (`refund.tpv.service.ts`, `refund.dashboard.service.ts`). Delegates to
+ * `revertReferralRewardForOrder`, so those two call sites pick up the
+ * partial-refund guard and the never-throw contract without being edited.
+ * New callers should use `revertReferralRewardForOrder` and state their
+ * reason.
+ */
+export async function onOrderRefunded(input: OnOrderRefundedInput): Promise<void> {
+  await revertReferralRewardForOrder({ ...input, reason: 'ORDER_REFUNDED' })
+}
+
+/**
+ * Hook de CANCELACIÓN de orden (mobile, TPV, dashboard). Dos cosas, ninguna
+ * lanza jamás — la cancelación no puede caerse por el referido:
+ *
+ *   1. Los referidos **PENDING** atados a esta orden pasan a `VOID` con razón
+ *      `ORDER_CANCELLED`. Sin esto la fila quedaba colgada para siempre: nunca
+ *      calificó (la orden nunca se pagó) y nadie la cerraba, y además seguía
+ *      ocupando el índice único parcial `Referral_qualifyingOrderId_active_key`.
+ *   2. Defensa en profundidad: `revertReferralRewardForOrder`. Hoy los tres
+ *      caminos de cancelación rechazan una orden con dinero encima, y un
+ *      referido sólo califica con la orden PAID, así que esta rama es un no-op
+ *      por construcción — igual que la guardia de estado de `onOrderPaid`. Se
+ *      conecta para que el próximo camino de cancelación no reabra el hueco.
+ *
+ * Decisión del founder 2026-08-18 (mercado: Booksy revierte con no-show,
+ * Mindbody sólo premia la compra que ocurrió).
+ */
+export async function onOrderCancelled(input: OnOrderRefundedInput): Promise<void> {
+  try {
+    const voided = await prisma.referral.updateMany({
+      where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' },
+      data: { status: 'VOID', voidedAt: new Date(), voidReason: 'ORDER_CANCELLED' },
+    })
+    if (voided.count > 0) {
+      logger.info('[referral] referidos pendientes anulados por cancelación de la orden', {
+        orderId: input.orderId,
+        venueId: input.venueId,
+        count: voided.count,
+      })
+    }
+  } catch (err) {
+    logger.error('[referral] no se pudieron anular los referidos pendientes de la orden cancelada', {
+      orderId: input.orderId,
+      venueId: input.venueId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+  await revertReferralRewardForOrder({ ...input, reason: 'ORDER_CANCELLED' })
 }

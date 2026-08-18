@@ -352,6 +352,35 @@ describe('order.dashboard.service — updateOrder no toca inventario', () => {
   })
 })
 
+// ── updateOrder NO escribe dinero a mano (rebanada 0 de "propina fuera del total") ──
+// Decisión del founder 2026-08-18: `Order.total`, `tipAmount` y `subtotal` se DERIVAN de
+// los renglones y los pagos (Toast/Square/SAT). El diálogo de superadmin dejaba
+// teclear "Total" y "Propina" y el PUT las escribía tal cual sobre la orden — con la
+// semántica vieja (propina dentro del total) y sin tocar los pagos: números que
+// después ningún reporte podía cuadrar. Ahora esos campos se IGNORAN (con warn).
+describe('order.dashboard.service — updateOrder ignora total/tipAmount/subtotal', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+  })
+
+  const orden = () => ({ id: 'order-1', venueId: 'venue-1', status: 'PENDING', paymentStatus: 'PENDING', items: [] })
+
+  it('un PUT con total, tipAmount y subtotal NO los escribe en la orden', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(orden() as any)
+    prismaMock.order.update.mockResolvedValue({ ...orden(), customerName: 'Ana' } as any)
+
+    await updateOrder('venue-1', 'order-1', { customerName: 'Ana', total: 999, tipAmount: 50, subtotal: 900 } as any)
+
+    expect(prismaMock.order.update).toHaveBeenCalledTimes(1)
+    const data = prismaMock.order.update.mock.calls[0][0].data
+    expect(data).not.toHaveProperty('total')
+    expect(data).not.toHaveProperty('tipAmount')
+    expect(data).not.toHaveProperty('subtotal')
+    expect(data.customerName).toBe('Ana')
+  })
+})
+
 // ── settleOrder: el fiado liquidado también deduce (fase 5) ──
 // El pay-later crea órdenes con items REALES; la mercancía salió cuando se
 // sirvió. Bajo la regla vigente ("se descuenta al quedar pagada"), liquidar es

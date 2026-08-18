@@ -104,12 +104,30 @@ export async function captureCode(req: Request, res: Response, next: NextFunctio
     const referral = await capture.captureReferral({ venueId: req.params.venueId, ...req.body })
     res.status(201).json(referral)
   } catch (e: any) {
+    // La MISMA venta capturada dos veces (split por producto: cada renglón cobrado
+    // es un intento) choca con el índice único parcial
+    // `Referral_qualifyingOrderId_active_key`. No es un error del server: es
+    // "esta venta ya tiene su referido". 409, no 500 — el POS sólo lo loguea.
+    if (e?.code === 'P2002') {
+      return res.status(409).json({
+        valid: false,
+        reason: 'ORDER_ALREADY_CAPTURED',
+        message: 'Esta venta ya tiene un referido capturado.',
+      })
+    }
     if (
       e &&
       typeof e.message === 'string' &&
       ['PROGRAM_INACTIVE', 'CODE_NOT_FOUND', 'SELF_REFERRAL', 'EXISTING_CUSTOMER'].includes(e.message)
     ) {
-      return res.status(400).json({ valid: false, reason: e.message })
+      // `reason` stays the machine discriminator every client switches on;
+      // `message` is added (never replacing it) so the six clients stop
+      // inventing their own Spanish copy and drifting apart.
+      return res.status(400).json({
+        valid: false,
+        reason: e.message,
+        message: capture.VALIDATION_REASON_MESSAGE_ES[e.message as capture.ValidationReason],
+      })
     }
     next(e)
   }
