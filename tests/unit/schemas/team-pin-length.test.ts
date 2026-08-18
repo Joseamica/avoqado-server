@@ -36,7 +36,10 @@ describe('longitud del PIN — la misma en TODOS los caminos', () => {
 
     // Vaciar el PIN es BORRARLO, no un PIN inválido: las pantallas de edición
     // mandan '' o null para quitárselo a alguien.
-    it.each([['', 'cadena vacía'], [null, 'null']])('deja borrar el PIN con %s (%s)', valor => {
+    it.each<[string | null, string]>([
+      ['', 'cadena vacía'],
+      [null, 'null'],
+    ])('deja borrar el PIN con %s (%s)', valor => {
       expect(editar(valor).success).toBe(true)
     })
   })

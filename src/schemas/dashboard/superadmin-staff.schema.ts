@@ -65,10 +65,7 @@ export const createStaffSchema = z.object({
     // El PIN se guarda en claro a propósito (decisión founder 2026-08-15), así
     // que su única defensa es poder ser LARGO — caparlo a 6 aquí dejaba fuera
     // del alta por superadmin justo a los PINs que sostienen esa premisa.
-    pin: z
-      .string()
-      .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
-      .optional(),
+    pin: z.string().regex(PIN_REGEX, PIN_ERROR_MESSAGE).optional(),
   }),
 })
 
@@ -114,10 +111,7 @@ export const assignVenueSchema = z.object({
       errorMap: () => ({ message: 'Rol de sucursal inválido' }),
     }),
     // 4-10 dígitos: mismo rango que tpv.schema.ts e invitation.schema.ts.
-    pin: z
-      .string()
-      .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
-      .optional(),
+    pin: z.string().regex(PIN_REGEX, PIN_ERROR_MESSAGE).optional(),
   }),
 })
 
@@ -133,11 +127,7 @@ export const updateVenueAssignmentSchema = z.object({
       })
       .optional(),
     // 4-10 dígitos: mismo rango que tpv.schema.ts e invitation.schema.ts.
-    pin: z
-      .string()
-      .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
-      .optional()
-      .nullable(),
+    pin: z.string().regex(PIN_REGEX, PIN_ERROR_MESSAGE).optional().nullable(),
     active: z.boolean().optional(),
   }),
 })

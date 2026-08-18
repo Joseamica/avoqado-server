@@ -55,10 +55,7 @@ export const InviteTeamMemberSchema = z.object({
       role: z.nativeEnum(StaffRole).refine(role => role !== StaffRole.SUPERADMIN, 'Cannot invite SUPERADMIN role'),
       message: z.string().max(500, 'Message too long').optional(),
       type: z.enum(['email', 'tpv-only']).optional().default('email'),
-      pin: z
-        .string()
-        .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
-        .optional(),
+      pin: z.string().regex(PIN_REGEX, PIN_ERROR_MESSAGE).optional(),
       // When true and role is OWNER, creates StaffVenue for all organization venues
       inviteToAllVenues: z.boolean().optional(),
       // When true, PIN is required when accepting the invitation

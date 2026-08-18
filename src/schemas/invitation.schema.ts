@@ -21,11 +21,7 @@ export const AcceptInvitationSchema = z.object({
     // Existing users send their current password for verification (bcrypt compare),
     // so we must not enforce format rules here — their legacy password may not comply.
     password: z.string().min(1, 'La contraseña es requerida').optional(),
-    pin: z
-      .string()
-      .regex(PIN_REGEX, PIN_ERROR_MESSAGE)
-      .optional()
-      .nullable(),
+    pin: z.string().regex(PIN_REGEX, PIN_ERROR_MESSAGE).optional().nullable(),
   }),
 })
 

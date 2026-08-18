@@ -315,9 +315,7 @@ describe('manualPayment.service', () => {
 
       // Fuera de la tx: si el cajón falla, el pago YA cobrado no se revierte.
       expect(posteadoDentroDeLaTx).toBe(false)
-      expect(postCashSaleToDrawerMock).toHaveBeenCalledWith(
-        expect.objectContaining({ venueId: VENUE_ID, method: 'CASH' }),
-      )
+      expect(postCashSaleToDrawerMock).toHaveBeenCalledWith(expect.objectContaining({ venueId: VENUE_ID, method: 'CASH' }))
     })
 
     it('el helper decide si entró al cajón — el servicio no filtra por método', async () => {
@@ -337,7 +335,6 @@ describe('manualPayment.service', () => {
       // (un vale con countsAsPhysicalCash entra al cajón y no es method CASH).
       expect(postCashSaleToDrawerMock).toHaveBeenCalled()
     })
-
 
     it('un pago PARCIAL no deduce — la deducción es al saldar, como en el TPV', async () => {
       armarTx(ordenConProductos({ payments: [] })) // 30 de 100 → sigue PARTIAL

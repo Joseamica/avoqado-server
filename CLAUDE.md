@@ -132,13 +132,11 @@ After editing code: `npm run format && npm run lint:fix`
 
 ## 🔴 "¿Está en el cajón?" y "¿lo deposita Avoqado?" — SIEMPRE por `tenderSemantics`
 
-`src/services/shared/tenderSemantics.ts` es la ÚNICA respuesta a esas dos preguntas
-(`paymentCountsAsDrawerCash` / `paymentIsAvoqadoSettled`, con `TENDER_SEMANTICS_SELECT` para el
-`select`). **Nunca escribas un `method === 'CASH'` / `method !== 'CASH'` local**: así nacieron las
-tres definiciones distintas de "efectivo esperado" que no coincidían entre closeout, turno TPV y
-CashDrawerEvent. La autoridad es `Payment.fundsFlow` (server-owned, estampado por el punto de
-entrada que cobró) → snapshot del tender → fallback legacy. **La ausencia de `externalSource` NO es
-autoridad financiera** (auditoría 2026-08-15): un pago manual `BANK_TRANSFER` sin merchant no es
+`src/services/shared/tenderSemantics.ts` es la ÚNICA respuesta a esas dos preguntas (`paymentCountsAsDrawerCash` /
+`paymentIsAvoqadoSettled`, con `TENDER_SEMANTICS_SELECT` para el `select`). **Nunca escribas un `method === 'CASH'` / `method !== 'CASH'`
+local**: así nacieron las tres definiciones distintas de "efectivo esperado" que no coincidían entre closeout, turno TPV y CashDrawerEvent.
+La autoridad es `Payment.fundsFlow` (server-owned, estampado por el punto de entrada que cobró) → snapshot del tender → fallback legacy.
+**La ausencia de `externalSource` NO es autoridad financiera** (auditoría 2026-08-15): un pago manual `BANK_TRANSFER` sin merchant no es
 dinero que Avoqado vaya a depositar.
 
 ## Key Business Flow: Order → Payment → Inventory

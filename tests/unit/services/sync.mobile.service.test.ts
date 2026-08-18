@@ -333,7 +333,6 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1' } })
   })
 
-
   it('🔴 PAY_CASH reenvía el tipo de pago del catálogo (antes lo TIRABA y aterrizaba como efectivo)', async () => {
     ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-2', orderNumber: 'A-2' })
 
@@ -364,7 +363,11 @@ describe('sync.mobile.service processIntents', () => {
   it('PAY_CASH rechaza method y tenderTypeId juntos (ambigüedad de dinero)', async () => {
     const acks = await processIntents(
       baseParams([
-        { id: 'i12', type: 'PAY_CASH', payload: { orderId: 'order-8', amountCents: 100, method: 'CASH', tenderTypeId: 'tt-x', tenderRevision: 1 } },
+        {
+          id: 'i12',
+          type: 'PAY_CASH',
+          payload: { orderId: 'order-8', amountCents: 100, method: 'CASH', tenderTypeId: 'tt-x', tenderRevision: 1 },
+        },
       ]),
     )
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
