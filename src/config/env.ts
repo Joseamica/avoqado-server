@@ -102,6 +102,17 @@ const envSchema = z.object({
   EXTERNAL_BANK_EMAIL: z.string().optional(),
   EXTERNAL_BANK_PASSWORD: z.string().optional(),
 
+  // ── Uber Eats Marketplace (integración directa) ────────────────────────────
+  // Llave con la que Uber firma los webhooks entrantes (header X-Uber-Signature).
+  // 🔴 NO es el client secret de la app: es la "Signing Key" dedicada que se
+  // registra en el dashboard al dar de alta el webhook con Basic HMAC.
+  // Opcional a propósito: un venue sin Uber no debe impedir que arranque la API
+  // (mismo criterio que EXTERNAL_BANK_*). El verificador falla claro si falta.
+  UBER_WEBHOOK_SIGNING_KEY: z.string().optional(),
+  // Rotación: Uber ofrece Secondary Signing Key nativa. Si está presente, el
+  // webhook acepta CUALQUIERA de las dos durante la ventana de rotación.
+  UBER_WEBHOOK_SIGNING_KEY_SECONDARY: z.string().optional(),
+
   // Llave dedicada (hex 32 bytes) para cifrar el refreshToken de conexiones bancarias (AES-256-GCM).
   FINANCIAL_CONNECTION_KEY: z.string().length(64, 'FINANCIAL_CONNECTION_KEY debe ser hex de 32 bytes (64 chars)').optional(),
 

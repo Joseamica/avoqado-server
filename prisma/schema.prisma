@@ -1908,7 +1908,7 @@ model InventoryPosting {
 
   orderId String? // denormalizado para consulta directa cuando la fuente es una orden
 
-  status InventoryPostingStatus @default(PENDING)
+  status     InventoryPostingStatus @default(PENDING)
   // Por qué NO se aplicó cuando status=SKIPPED (visible, nunca silencioso):
   // NO_ITEMS | NO_TRACKED_ITEMS | CUSTOM_ITEM | EXTERNAL_INVENTORY_AUTHORITY
   //   · NO_ITEMS          — la venta no trae renglones (cobro de puro monto)
@@ -2904,8 +2904,8 @@ model Shift {
   otherDeclared    Decimal? @db.Decimal(10, 2)
 
   // Summary
-  totalSales  Decimal @default(0) @db.Decimal(12, 2)
-  totalTips   Decimal @default(0) @db.Decimal(10, 2)
+  totalSales    Decimal @default(0) @db.Decimal(12, 2)
+  totalTips     Decimal @default(0) @db.Decimal(10, 2)
   /// Propina cobrada EN EFECTIVO durante el turno. Se persiste aparte porque el arqueo
   /// necesita `totalCashPayments + totalCashTips` (lo que hay físicamente en el cajón),
   /// mientras que `totalCashPayments` debe seguir siendo la cifra de VENTAS en efectivo
@@ -2913,7 +2913,7 @@ model Shift {
   /// dos pantallas lo recalculen con filtros distintos — así nació el descuadre.
   /// La propina de TARJETA NO entra: ese dinero llega por el depósito del banco.
   totalCashTips Decimal @default(0) @db.Decimal(10, 2)
-  totalOrders Int     @default(0)
+  totalOrders   Int     @default(0)
 
   // Automatic calculation fields (FASE 1 - Shift Management)
   totalCashPayments    Decimal @default(0) @db.Decimal(12, 2)
@@ -3655,17 +3655,17 @@ model Payment {
   // later catalog edits never reinterpret recorded payments. The composite FK
   // [venueId, tenderTypeId] makes cross-venue references impossible.
   tenderTypeId            String?
-  tenderType              VenueTenderType? @relation(fields: [venueId, tenderTypeId], references: [venueId, id], onDelete: Restrict)
+  tenderType              VenueTenderType?  @relation(fields: [venueId, tenderTypeId], references: [venueId, id], onDelete: Restrict)
   tenderRevision          Int?
   /// Who moves this money (server-stamped at the entry point). Null = legacy row;
   /// readers fall back to the historical inference so old numbers never shift.
   fundsFlow               PaymentFundsFlow?
-  tenderLabel             String?          @db.VarChar(80)
+  tenderLabel             String?           @db.VarChar(80)
   tenderCountsAsCash      Boolean?
   tenderCaptureTip        Boolean?
-  tenderSatFormaPago      String?          @db.VarChar(2)
-  tenderCommissionPercent Decimal?         @db.Decimal(5, 2)
-  tenderCommissionAmount  Decimal?         @db.Decimal(10, 2)
+  tenderSatFormaPago      String?           @db.VarChar(2)
+  tenderCommissionPercent Decimal?          @db.Decimal(5, 2)
+  tenderCommissionAmount  Decimal?          @db.Decimal(10, 2)
 
   // Receipt
   receipts DigitalReceipt[]
@@ -5496,6 +5496,24 @@ model DeliveryOrderEvent {
   /// los jóvenes; nextAttemptAt implementa el backoff exponencial entre reintentos.
   attemptCount  Int       @default(0)
   nextAttemptAt DateTime?
+
+  /// ── Camino DIRECTO (Uber Eats). Aditivo y nullable: Deliverect no cambia. ──
+  /// Id del PEDIDO en el proveedor. `externalEventId` identifica el EVENTO; este
+  /// campo agrupa todos los eventos de un mismo pedido (necesario para serializar
+  /// NEW_ORDER vs CANCEL, spec paso 9).
+  externalOrderId String?
+
+  /// Dedup GLOBAL para proveedores directos: `UBER_EATS:{event_id}`. Uber reintenta
+  /// hasta 7 veces ante 5xx/timeout y documenta `event_id` como único para deduplicar.
+  /// El @@unique compuesto de abajo NO sirve para Uber: su webhook es UNA URL por app
+  /// y el link se resuelve DESPUÉS de verificar la firma, así que `channelLinkId`
+  /// puede ser null — y en Postgres los NULL no colisionan en un unique compuesto.
+  dedupKey String? @unique
+
+  /// Lease del worker que reclama el evento (spec paso 4): quién lo tomó y hasta
+  /// cuándo. Si el worker muere, el lease expira y otro lo retoma.
+  claimToken  String?
+  lockedUntil DateTime?
 
   /// Dedup con `channelLinkId`: `externalEventId` (channelOrderId) nace en el
   /// marketplace, NO es globalmente único → dos canales/venues pueden colisionar.

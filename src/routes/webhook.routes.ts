@@ -16,6 +16,7 @@ import { handleB4BitWebhook, b4bitWebhookHealthCheck } from '../controllers/tpv/
 import { handleResendWebhook, resendWebhookHealthCheck } from '../controllers/webhooks/resend.webhook.controller'
 import { blumonIPWhitelist } from '../middlewares/blumon-ip-whitelist.middleware'
 import { handleDeliverectOrderWebhook, deliverectWebhookHealthCheck } from '../controllers/delivery-channels/deliverect.webhook.controller'
+import { handleUberWebhook, uberWebhookHealthCheck } from '../controllers/delivery-channels/uber.webhook.controller'
 
 const router = Router()
 
@@ -451,5 +452,13 @@ router.post('/delivery/deliverect/:channelLinkId/orders', handleDeliverectOrderW
  *         description: OK
  */
 router.get('/delivery/deliverect/health', deliverectWebhookHealthCheck)
+
+/**
+ * Uber Eats — UNA sola URL por aplicación (no por tienda): el `store_id` viaja
+ * dentro del payload firmado. Firma: header `X-Uber-Signature` (HMAC-SHA256 hex
+ * del body crudo). Responde 200 con body VACÍO, como exige Uber.
+ */
+router.post('/delivery/uber', handleUberWebhook)
+router.get('/delivery/uber/health', uberWebhookHealthCheck)
 
 export default router
