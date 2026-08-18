@@ -109,6 +109,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'menu:create': [
     'menu:read', // Need to see existing menu structure
     'menu:create',
+    // Puente: quien administra el menú conserva el alta AL VUELO desde el POS
+    // (Scan & Go), que migró al permiso acotado `tpv-products:write`. Sin esto, un rol
+    // personalizado con la lista EXPANDIDA de `menu:create` perdería el diálogo
+    // "Crear nuevo" del escáner. No va al revés a propósito: dar de alta un artículo
+    // desde la caja no debe regalar administrar el catálogo.
+    'tpv-products:write',
   ],
   'menu:update': ['menu:read', 'menu:update'],
   'menu:delete': ['menu:read', 'menu:delete'],

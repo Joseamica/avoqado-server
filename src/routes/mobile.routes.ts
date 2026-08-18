@@ -1562,7 +1562,18 @@ router.get('/venues/:venueId/products', authenticateTokenMiddleware, checkPermis
  * POST /api/v1/mobile/venues/:venueId/products
  * Create a new product.
  */
-router.post('/venues/:venueId/products', authenticateTokenMiddleware, checkPermission('menu:create'), productMobileController.createProduct)
+// 🔴 `tpv-products:write`, el permiso que el catálogo declara literal como "crear
+// productos al vuelo (Scan & Go)" y que hasta hoy NO RESOLVÍA A NADA: se le daba a
+// MANAGER+ y esta ruta —la del diálogo "Crear nuevo" del escáner— pedía `menu:create`.
+// Un rol personalizado con el toggle de Scan & Go encendido recibía 403 con la captura
+// ya hecha. `menu:create` lo implica (puente), así que nadie que administre el menú
+// pierde el alta. El alta de catálogo del back-office se queda en `menu:create`.
+router.post(
+  '/venues/:venueId/products',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-products:write'),
+  productMobileController.createProduct,
+)
 
 /**
  * PUT /api/v1/mobile/venues/:venueId/products/:productId
