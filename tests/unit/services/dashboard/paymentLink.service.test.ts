@@ -45,6 +45,33 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   applySalePosting: (...a: unknown[]) => mockApplySalePosting(...a),
 }))
 
+// Lealtad y métricas del cliente: se mockean los DOS servicios compartidos que
+// ya usan TPV y el pago manual. Lo que esta suite prueba es el CABLEADO del
+// canal (que se disparen, con qué base y contra qué orden), no la aritmética de
+// puntos — ésa vive en loyalty.dashboard.service.test.ts y duplicarla aquí
+// permitiría que las dos versiones se separen sin que nadie se entere.
+const mockEarnPoints = jest.fn()
+jest.mock('@/services/dashboard/loyalty.dashboard.service', () => ({
+  __esModule: true,
+  earnPoints: (...a: unknown[]) => mockEarnPoints(...a),
+}))
+
+const mockUpdateCustomerMetrics = jest.fn()
+jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
+  __esModule: true,
+  updateCustomerMetrics: (...a: unknown[]) => mockUpdateCustomerMetrics(...a),
+}))
+
+// La comisión NO es objeto de esta suite, pero sí lo es la REGRESIÓN de que
+// siga disparándose después de colgarle lealtad al mismo enganche.
+const mockCreateCommissionForPayment = jest.fn()
+const mockCreateSplitCommissionForPayment = jest.fn()
+jest.mock('@/services/dashboard/commission/commission-calculation.service', () => ({
+  __esModule: true,
+  createCommissionForPayment: (...a: unknown[]) => mockCreateCommissionForPayment(...a),
+  createSplitCommissionForPayment: (...a: unknown[]) => mockCreateSplitCommissionForPayment(...a),
+}))
+
 import {
   createPaymentLink,
   getPaymentLinks,
@@ -180,6 +207,10 @@ describe('PaymentLink Service', () => {
   beforeEach(() => {
     mockCreateSalePostingInTx.mockResolvedValue({ id: 'posting-pl-1', status: 'PENDING' })
     mockApplySalePosting.mockResolvedValue({ postingId: 'posting-pl-1', applied: true, issues: [] })
+    mockEarnPoints.mockResolvedValue({ pointsEarned: 0, newBalance: 0 })
+    mockUpdateCustomerMetrics.mockResolvedValue(undefined)
+    mockCreateCommissionForPayment.mockResolvedValue(undefined)
+    mockCreateSplitCommissionForPayment.mockResolvedValue(undefined)
   })
 
   // ─── CREATE ──────────────────────────────────────
@@ -971,6 +1002,288 @@ describe('PaymentLink Service', () => {
       mockApplySalePosting.mockRejectedValueOnce(new Error('pool agotado'))
 
       await expect(finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })).resolves.not.toThrow()
+    })
+  })
+
+  // ─── LEALTAD Y MÉTRICAS DEL CLIENTE (W1) ─────────
+  //
+  // El hueco no era el importe libre: era el CANAL. El TPV y el pago manual ya
+  // acreditaban puntos y movían visitas/gasto sobre el total de la orden; una
+  // liga de pago disparaba comisión y NUNCA tocaba al cliente. Un cliente
+  // registrado que pagaba por link se quedaba sin sus puntos y sin su visita.
+  describe('ligas de pago — lealtad y métricas del cliente', () => {
+    const CUSTOMER_ID = 'cus-registrado-1'
+
+    const armarCobro = (orderId = 'order-123') => {
+      prismaMock.checkoutSession.update.mockResolvedValueOnce({})
+      prismaMock.paymentLink.update.mockResolvedValueOnce({})
+      prismaMock.order.create.mockResolvedValueOnce({ id: orderId, orderNumber: 'PL-123', items: [] })
+      prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-123' })
+    }
+
+    const armarMp = (orderId = 'order-mp-1') => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({ paymentId: null })
+      prismaMock.order.create.mockResolvedValueOnce({ id: orderId, items: [] })
+      prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-mp-1' })
+      prismaMock.checkoutSession.update.mockResolvedValueOnce({})
+      prismaMock.paymentLink.update.mockResolvedValueOnce({})
+    }
+
+    const mpSession = (overrides: Record<string, any> = {}) => ({
+      id: 'session-db-123',
+      sessionId: 'mp_sess_1',
+      amount: new Decimal(500),
+      applicationFeeCents: 0,
+      customerEmail: 'john@example.com',
+      customerPhone: null,
+      paymentId: null,
+      metadata: {},
+      ecommerceMerchant: { id: 'merchant-123', venueId: VENUE_ID },
+      paymentLink: { id: 'pl-123', venueId: VENUE_ID, createdById: STAFF_ID, purpose: 'PAYMENT' },
+      ...overrides,
+    })
+
+    beforeEach(() => {
+      prismaMock.checkoutSession.updateMany.mockResolvedValue({ count: 1 } as any)
+      // `jest.clearAllMocks()` (setup global) borra las LLAMADAS pero NO las colas
+      // de `mockResolvedValueOnce`. Un test que corta antes de resolver al cliente
+      // deja su valor encolado y el siguiente lo consume: sin este reset, el test
+      // del "pagador anónimo" veía al cliente del test anterior.
+      prismaMock.customer.findFirst.mockReset()
+    })
+
+    it('Blumon: un cliente registrado del venue recibe sus puntos UNA vez, sobre el total cobrado', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(mockEarnPoints).toHaveBeenCalledTimes(1)
+      // (venueId, customerId, base, orderId) — la MISMA firma que usa el TPV.
+      // Sin 5º argumento a propósito: `LoyaltyTransaction.createdById` apunta a
+      // StaffVenue.id y en una liga de pago no hay cajero; mandar el Staff.id del
+      // creador de la liga reventaría la FK en silencio.
+      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 100, 'order-123')
+    })
+
+    it('Blumon: la visita y el gasto del cliente se mueven con la MISMA base que los puntos', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledTimes(1)
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100)
+    })
+
+    it('🔴 la propina NO entra en la base: es del empleado, no venta del negocio', async () => {
+      // $500 cobrados = $450 de venta + $50 de propina. Los puntos van sobre 450.
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
+        createMockCheckoutSession({
+          amount: new Decimal(500),
+          metadata: { cardToken: 'tok_test_123', maskedPan: '4242', cardBrand: 'VISA', cvv: '123', tipAmount: 50 },
+        }),
+      )
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 450, 'order-123')
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 450)
+    })
+
+    it('la venta queda atada al cliente (Order.customerId), no sólo los puntos', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(prismaMock.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: CUSTOMER_ID }) }),
+      )
+    })
+
+    it('Stripe: el cobro por liga también acredita puntos y mueve métricas', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
+        createMockCheckoutSession({
+          ecommerceMerchant: { id: 'merchant-123', providerCredentials: {}, provider: { code: 'STRIPE_CONNECT' } },
+        }),
+      )
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarCobro('order-stripe-1')
+
+      await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })
+
+      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 100, 'order-stripe-1')
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100)
+      expect(prismaMock.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: CUSTOMER_ID }) }),
+      )
+    })
+
+    it('MercadoPago: el cobro por liga también acredita puntos y mueve métricas', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarMp('order-mp-9')
+
+      await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
+
+      expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 500, 'order-mp-9')
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 500)
+      expect(prismaMock.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: CUSTOMER_ID }) }),
+      )
+    })
+
+    // ── Idempotencia: un webhook reentregado NO regala puntos dos veces ──
+    //
+    // Las visitas del cliente (`totalVisits++`) NO tienen llave de deduplicación
+    // propia, así que dependen enteramente de que el finalizador sea de un solo
+    // disparo. Estos tests fijan que el enganche viva DESPUÉS de ese candado.
+
+    it('🔴 Stripe: una reentrega del webhook (sesión ya COMPLETED) no vuelve a acreditar', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
+        createMockCheckoutSession({
+          status: 'COMPLETED',
+          ecommerceMerchant: { id: 'merchant-123', providerCredentials: {}, provider: { code: 'STRIPE_CONNECT' } },
+        }),
+      )
+      prismaMock.customer.findFirst.mockResolvedValue({ id: CUSTOMER_ID })
+
+      await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })
+
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect(mockEarnPoints).not.toHaveBeenCalled()
+      expect(mockUpdateCustomerMetrics).not.toHaveBeenCalled()
+    })
+
+    it('🔴 MercadoPago: si una llamada concurrente ya selló el pago, no se acredita nada', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession())
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      // Recheck DENTRO de la transacción: el otro finalizador ya creó la orden.
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({ paymentId: 'payment-ya-existente' })
+
+      await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
+
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect(mockEarnPoints).not.toHaveBeenCalled()
+      expect(mockUpdateCustomerMetrics).not.toHaveBeenCalled()
+    })
+
+    it('Blumon: una sesión ya COMPLETED se rechaza y no acredita', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession({ status: 'COMPLETED' }))
+      prismaMock.customer.findFirst.mockResolvedValue({ id: CUSTOMER_ID })
+
+      await expect(completeCharge('abc12345', 'cs_pl_test123')).rejects.toThrow(BadRequestError)
+      expect(mockEarnPoints).not.toHaveBeenCalled()
+      expect(mockUpdateCustomerMetrics).not.toHaveBeenCalled()
+    })
+
+    // ── Sin cliente, nada cambia ──
+
+    it('un pagador anónimo (correo que no es de ningún cliente) NO toca lealtad ni métricas', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      prismaMock.customer.findFirst.mockResolvedValue(null) // no empata por correo ni por teléfono
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(mockEarnPoints).not.toHaveBeenCalled()
+      expect(mockUpdateCustomerMetrics).not.toHaveBeenCalled()
+      // Y jamás se crea un cliente nuevo: un pago anónimo no da de alta a nadie.
+      expect(prismaMock.customer.create).not.toHaveBeenCalled()
+      expect(prismaMock.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.not.objectContaining({ customerId: expect.anything() }) }),
+      )
+    })
+
+    it('un cobro sin correo ni teléfono ni siquiera consulta la tabla de clientes', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession({ customerEmail: null, customerPhone: null }))
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+      expect(mockEarnPoints).not.toHaveBeenCalled()
+    })
+
+    // ── Nunca puede tumbar un cobro ya aprobado ──
+
+    it('🔴 si acreditar los puntos truena, el cobro NO se cae', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarCobro()
+      mockUpdateCustomerMetrics.mockRejectedValueOnce(new Error('pool agotado'))
+      mockEarnPoints.mockRejectedValueOnce(new Error('lealtad caída'))
+
+      const result = await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(result.status).toBe('COMPLETED')
+    })
+
+    it('el programa apagado lo decide earnPoints, aquí no se replica el candado', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarCobro()
+      // Venue con LoyaltyConfig.active=false → earnPoints devuelve 0 puntos.
+      mockEarnPoints.mockResolvedValueOnce({ pointsEarned: 0, newBalance: 0 })
+
+      const result = await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(result.status).toBe('COMPLETED')
+      // Las métricas SÍ se mueven aunque no haya puntos: la visita ocurrió.
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100)
+    })
+
+    // ── REGRESIÓN: lo que ya funcionaba sigue funcionando ──
+
+    it('REGRESIÓN: la comisión se sigue disparando igual con lealtad colgada del mismo enganche', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
+        createMockCheckoutSession({
+          paymentLink: {
+            id: 'pl-123',
+            shortCode: 'abc12345',
+            venueId: VENUE_ID,
+            purpose: 'PAYMENT',
+            createdById: STAFF_ID,
+            attributions: [{ staffId: STAFF_ID }],
+          },
+        }),
+      )
+      prismaMock.customer.findFirst.mockResolvedValueOnce({ id: CUSTOMER_ID })
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(mockCreateCommissionForPayment).toHaveBeenCalledWith('payment-123')
+      expect(mockCreateSplitCommissionForPayment).not.toHaveBeenCalled()
+    })
+
+    it('REGRESIÓN: sin cliente, la comisión y el vale de inventario siguen intactos', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
+        createMockCheckoutSession({
+          paymentLink: {
+            id: 'pl-123',
+            shortCode: 'abc12345',
+            venueId: VENUE_ID,
+            purpose: 'PAYMENT',
+            createdById: STAFF_ID,
+            attributions: [{ staffId: STAFF_ID }, { staffId: 'staff-2' }],
+          },
+        }),
+      )
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      armarCobro()
+
+      await completeCharge('abc12345', 'cs_pl_test123')
+
+      expect(mockCreateSplitCommissionForPayment).toHaveBeenCalledWith('payment-123', [STAFF_ID, 'staff-2'])
+      expect(mockCreateSalePostingInTx).toHaveBeenCalled()
+      expect(mockApplySalePosting).toHaveBeenCalledWith('posting-pl-1', expect.anything())
     })
   })
 

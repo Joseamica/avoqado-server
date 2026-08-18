@@ -55,6 +55,27 @@ export interface ItemSalesMetrics {
   grossSales: number // list value before discounts (see lineGrossSql)
   discounts: number // SUM of discountAmount
   netSales: number // grossSales - discounts
+  /**
+   * Qué parte de este renglón se vendió DENTRO de una promoción, con el nombre
+   * del combo tal como se cobró (snapshot). Aditivo: sólo viene cuando
+   * `groupBy = 'none'` y el producto salió en al menos una promoción.
+   *
+   * Este reporte sigue el modelo SQUARE — desglosa los COMPONENTES, no el combo
+   * ("The Item Sales report shows the individual items from combos sold") — y el
+   * reporte de promociones sigue el modelo FUDO/TOAST, el combo como renglón.
+   * La decisión del founder (2026-08-18) fue dar las dos vistas SIN switch; esta
+   * marca es lo que evita que las dos se lean como contabilidad doble: aquí se
+   * ve, en el renglón del refresco, que 12 de sus 30 unidades salieron dentro de
+   * «Combo Café + 2 Medialunas».
+   */
+  promotions?: Array<{ name: string; unitsSold: number; netSales: number }>
+  /**
+   * Atajo para pintar "dentro de «Combo X»" sin recorrer el arreglo: el nombre
+   * cuando TODA la parte promocionada del renglón vino de UNA sola promoción.
+   * `null` si vino de varias (ahí la UI dice "en N promociones" y el detalle
+   * está en `promotions`) o si el producto nunca se vendió en promoción.
+   */
+  promotionName?: string | null
 }
 
 export interface TimePeriodItemMetrics {
@@ -204,6 +225,14 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     }>
   >(itemSalesQuery, venueId, parsedStartDate, parsedEndDate)
 
+  // ============================================================
+  // Promotion attribution (Square parity: components, marked)
+  // ============================================================
+  // Sólo tiene sentido en el desglose por PRODUCTO: en un agrupado por canal o
+  // método de pago, "dentro de «Combo X»" no le pertenece a ningún renglón.
+  const promotionAttribution =
+    groupBy === 'none' ? await getPromotionAttribution(venueId, parsedStartDate, parsedEndDate, hourFilterClause) : new Map()
+
   // Transform results based on groupBy
   const items: ItemSalesMetrics[] = itemSalesResults.map(row => {
     const grossSales = Number(row.gross_sales)
@@ -224,6 +253,9 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
       displayName = row.product_name // Already set to t.name or 'Sin terminal asignado'
     }
 
+    const fromPromotions: Array<{ name: string; unitsSold: number; netSales: number }> | undefined =
+      groupBy === 'none' ? promotionAttribution.get(attributionKey(row.productId, displayName)) : undefined
+
     return {
       productId: groupBy === 'none' ? row.productId : null,
       productName: displayName,
@@ -235,6 +267,12 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
       grossSales,
       discounts,
       netSales: grossSales - discounts,
+      ...(fromPromotions && fromPromotions.length > 0
+        ? {
+            promotions: fromPromotions,
+            promotionName: fromPromotions.length === 1 ? fromPromotions[0].name : null,
+          }
+        : {}),
     }
   })
 
@@ -281,6 +319,87 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     byPeriod,
     totals,
   }
+}
+
+// ============================================================
+// Helper: Promotion attribution ("dentro de «Combo X»")
+// ============================================================
+
+/**
+ * Llave de merge con el renglón del reporte. El query principal agrupa por
+ * `oi."productId"` + el nombre denormalizado, y `productId` puede ser NULL
+ * (líneas de POS externo que nunca tuvieron `Product`), así que la llave usa
+ * AMBOS y nunca sólo el id.
+ */
+function attributionKey(productId: string | null, productName: string): string {
+  return `${productId ?? ''}|${productName}`
+}
+
+/**
+ * Cuánto de cada producto se vendió DENTRO de una promoción, por nombre de
+ * promoción tal como se cobró.
+ *
+ * 🔑 El nombre sale de `OrderPromotion.snapshotJson`, no de `Promotion.name`:
+ * renombrar un combo no puede reescribir lo que el cliente vio en un período ya
+ * cerrado (Square documenta esa misma trampa en sus reportes de descuentos).
+ *
+ * NO cambia ningún total: las líneas ya estaban contadas en el query principal
+ * — esto sólo dice de dónde vinieron.
+ */
+async function getPromotionAttribution(
+  venueId: string,
+  startDate: Date,
+  endDate: Date,
+  hourFilterClause: string,
+): Promise<Map<string, Array<{ name: string; unitsSold: number; netSales: number }>>> {
+  const query = `
+    SELECT
+      oi."productId" as "productId",
+      COALESCE(oi."productName", p.name, 'Sin descripción') as product_name,
+      COALESCE(NULLIF(op."snapshotJson"->>'name', ''), pr.name, 'Promoción') as promotion_name,
+      SUM(oi.quantity)::integer as units_sold,
+      COALESCE(SUM(${lineRevenueSql()}), 0) as net_sales
+    FROM "OrderItem" oi
+    INNER JOIN "Order" o ON o.id = oi."orderId"
+    INNER JOIN "OrderPromotion" op ON op.id = oi."orderPromotionId"
+    LEFT JOIN "Promotion" pr ON pr.id = op."promotionId"
+    LEFT JOIN "Product" p ON p.id = oi."productId"
+    WHERE o."venueId" = $1
+      AND o."createdAt" >= $2
+      AND o."createdAt" <= $3
+      AND o.status NOT IN ('CANCELLED')
+      AND o."paymentStatus" NOT IN ('REFUNDED')
+      ${hourFilterClause}
+    GROUP BY oi."productId", COALESCE(oi."productName", p.name, 'Sin descripción'),
+             COALESCE(NULLIF(op."snapshotJson"->>'name', ''), pr.name, 'Promoción')
+    ORDER BY net_sales DESC
+  `
+
+  const rows = await prisma.$queryRawUnsafe<
+    Array<{
+      productId: string | null
+      product_name: string
+      promotion_name: string
+      units_sold: number
+      net_sales: number | bigint | { toNumber?: () => number }
+    }>
+  >(query, venueId, startDate, endDate)
+
+  const byProduct = new Map<string, Array<{ name: string; unitsSold: number; netSales: number }>>()
+  for (const row of rows) {
+    const key = attributionKey(row.productId, row.product_name)
+    const list = byProduct.get(key) ?? []
+    const raw = row.net_sales
+    const netSales =
+      raw === null || raw === undefined
+        ? 0
+        : typeof raw === 'object' && typeof (raw as { toNumber?: () => number }).toNumber === 'function'
+          ? (raw as { toNumber: () => number }).toNumber()
+          : Number(raw)
+    list.push({ name: row.promotion_name, unitsSold: Number(row.units_sold ?? 0), netSales })
+    byProduct.set(key, list)
+  }
+  return byProduct
 }
 
 // ============================================================

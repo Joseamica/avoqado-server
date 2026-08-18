@@ -24,6 +24,8 @@ import { es as esLocale } from 'date-fns/locale'
 import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
 import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
+import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
+import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -1308,6 +1310,131 @@ function mapBlumonCardBrandToEnum(
   return 'OTHER'
 }
 
+// ==========================================
+// LEALTAD Y MÉTRICAS DEL CLIENTE (canal: ligas de pago)
+// ==========================================
+//
+// El TPV (`payment.tpv.service.ts`) y el pago manual (`manualPayment.service.ts`)
+// ya acreditaban puntos y movían visitas/gasto al cerrar una venta con cliente.
+// Las ligas de pago disparaban comisión y NUNCA tocaban al cliente: quien pagaba
+// por link se quedaba sin sus puntos y sin su visita. Estos dos helpers cierran
+// ese hueco REUSANDO los mismos dos servicios — aquí no se calcula ni un punto.
+
+/**
+ * Resuelve el cliente REGISTRADO del venue detrás de un checkout, a partir del
+ * correo/teléfono que capturó la página de cobro.
+ *
+ * Reglas deliberadas:
+ * - **Sólo empata, nunca crea.** Un pago anónimo por link no debe dar de alta un
+ *   cliente: inflaría el CRM y las listas de marketing con gente que nunca se
+ *   registró. Sin coincidencia → `null` y no cambia nada (ni puntos ni métricas).
+ * - **El correo manda sobre el teléfono** (es el dato que capturan los tres
+ *   canales) y el orden es fijo, para que el mismo pago resuelva siempre igual.
+ * - **Nunca lanza.** Es un enganche accesorio de un cobro ya aprobado.
+ */
+async function resolvePaymentLinkCustomerId(venueId: string, email?: string | null, phone?: string | null): Promise<string | null> {
+  const normalizedEmail = email?.trim().toLowerCase() || null
+  const normalizedPhone = phone?.trim() || null
+  if (!normalizedEmail && !normalizedPhone) return null
+
+  try {
+    if (normalizedEmail) {
+      const byEmail = await prisma.customer.findFirst({
+        where: { venueId, active: true, email: { equals: normalizedEmail, mode: 'insensitive' as const } },
+        select: { id: true },
+      })
+      if (byEmail) return byEmail.id
+    }
+    if (normalizedPhone) {
+      const byPhone = await prisma.customer.findFirst({
+        where: { venueId, active: true, phone: normalizedPhone },
+        select: { id: true },
+      })
+      if (byPhone) return byPhone.id
+    }
+    return null
+  } catch (err) {
+    logger.warn('No se pudo resolver el cliente de una liga de pago (el cobro no se ve afectado)', {
+      venueId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
+  }
+}
+
+/**
+ * Acredita puntos y mueve las métricas del cliente por un cobro de liga de pago.
+ *
+ * BASE (decisión del founder, 2026-08-18): lo que el cliente pagó por la venta,
+ * **con IVA** (en México el precio en pantalla ya lo trae) y **sin propina** —
+ * la propina es del empleado, no venta del negocio. En estos tres caminos eso es
+ * exactamente `Order.total − Order.tipAmount`, que es el mismo número que queda
+ * en `Payment.amount`.
+ *
+ * IDEMPOTENCIA (dos capas, ninguna nueva):
+ *  1. Los tres finalizadores ya son de un solo disparo — una reentrega del
+ *     webhook regresa ANTES de crear una segunda orden (sesión COMPLETED en
+ *     Stripe, claim CAS en Blumon, `paymentId` ya sellado en MercadoPago). Es la
+ *     misma garantía de la que ya dependen la comisión y el vale de inventario.
+ *  2. `earnPoints` deduplica por `(customerId, orderId, EARN)` con índice único
+ *     parcial en la DB, así que dos llamadas por la MISMA orden no dan doble punto.
+ *
+ * NUNCA lanza: un cobro aprobado no se cae porque falle un enganche de lealtad
+ * (mismo patrón que comisión, referidos y el vale de inventario en este archivo).
+ *
+ * `earnPoints` NO recibe staff: `LoyaltyTransaction.createdById` referencia
+ * `StaffVenue.id`, y en una liga de pago el cliente cobra solo desde la web — no
+ * hay cajero. Pasar el `Staff.id` del creador de la liga reventaría la FK en
+ * silencio (trampa ya documentada en `manualPayment.service.ts`).
+ */
+async function creditPaymentLinkCustomer(args: {
+  venueId: string
+  customerId: string
+  orderId: string
+  amount: Prisma.Decimal
+  channel: 'stripe' | 'blumon' | 'mercadopago'
+}): Promise<void> {
+  const base = Number(args.amount.toString())
+
+  try {
+    await updateCustomerMetrics(args.customerId, base)
+    logger.info('📊 Métricas del cliente actualizadas (liga de pago)', {
+      orderId: args.orderId,
+      customerId: args.customerId,
+      channel: args.channel,
+      amount: base,
+    })
+  } catch (metricsError: any) {
+    logger.error('⚠️ Falló actualizar métricas del cliente en liga de pago (el cobro sigue en pie)', {
+      orderId: args.orderId,
+      customerId: args.customerId,
+      venueId: args.venueId,
+      channel: args.channel,
+      error: metricsError?.message ?? String(metricsError),
+    })
+  }
+
+  try {
+    const loyaltyResult = await earnPoints(args.venueId, args.customerId, base, args.orderId)
+    logger.info('🎁 Puntos de lealtad acreditados (liga de pago)', {
+      orderId: args.orderId,
+      customerId: args.customerId,
+      channel: args.channel,
+      amount: base,
+      pointsEarned: loyaltyResult?.pointsEarned,
+      newBalance: loyaltyResult?.newBalance,
+    })
+  } catch (loyaltyError: any) {
+    logger.error('⚠️ Falló acreditar puntos en liga de pago (el cobro sigue en pie)', {
+      orderId: args.orderId,
+      customerId: args.customerId,
+      venueId: args.venueId,
+      channel: args.channel,
+      error: loyaltyError?.message ?? String(loyaltyError),
+    })
+  }
+}
+
 export async function finalizePaymentLinkCheckout(args: {
   stripeSessionId: string
   paymentIntentId?: string | null
@@ -1411,6 +1538,11 @@ export async function finalizePaymentLinkCheckout(args: {
   let paymentIdForCommission: string | null = null
   let orderIdForReferral: string | null = null
   let postingId: string | null = null
+  // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
+  // transacción para poder sellar `Order.customerId`.
+  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(venueId, session.customerEmail, session.customerPhone)
+  // Base de lealtad = lo cobrado por la venta, con IVA y SIN propina.
+  const loyaltyBase = subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal
 
   await prisma.$transaction(async tx => {
     // 1. Mark session COMPLETED + record Stripe paymentIntent for reconciliation
@@ -1451,6 +1583,7 @@ export async function finalizePaymentLinkCheckout(args: {
         type: isPaymentOrDonation ? 'MANUAL_ENTRY' : 'TAKEOUT',
         source: 'PAYMENT_LINK',
         createdById: session.paymentLink!.createdById,
+        ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
         customerName: session.customerName,
         customerEmail: session.customerEmail,
         subtotal: subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
@@ -1583,6 +1716,18 @@ export async function finalizePaymentLinkCheckout(args: {
     } catch (err) {
       console.error('[referral hook] onOrderPaid failed for order', orderIdForReferral, err)
     }
+  }
+
+  // LEALTAD + MÉTRICAS DEL CLIENTE. Fuera de la transacción y a prueba de fallos,
+  // igual que comisión / referidos / vale de inventario: el cobro ya está hecho.
+  if (loyaltyCustomerId && orderIdForReferral) {
+    await creditPaymentLinkCustomer({
+      venueId,
+      customerId: loyaltyCustomerId,
+      orderId: orderIdForReferral,
+      amount: loyaltyBase,
+      channel: 'stripe',
+    })
   }
 
   // Fire-and-forget commission calculation. Mirrors how the TPV flow does it
@@ -2232,6 +2377,11 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   let paymentIdForCommission: string | null = null
   let orderIdForReferral: string | null = null
   let postingId: string | null = null
+  // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
+  // transacción para poder sellar `Order.customerId`: sin eso la venta queda
+  // huérfana en el historial del cliente aunque los puntos sí se acrediten.
+  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(venueId, session.customerEmail, session.customerPhone)
+  let loyaltyBase: Prisma.Decimal | null = null
 
   await prisma.$transaction(async tx => {
     // Update checkout session
@@ -2280,6 +2430,8 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
         : session.amount.sub(orderTipAmount)
       const taxAmount = new Prisma.Decimal(0) // Tax included in price for payment links
       const total = subtotal.add(orderTipAmount)
+      // Base de lealtad = total con IVA SIN propina (= subtotal aquí).
+      loyaltyBase = subtotal
 
       const orderNumber = `PL-${Date.now()}`
 
@@ -2290,6 +2442,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
           source: 'PAYMENT_LINK',
           createdById: session.paymentLink!.createdById,
+          ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
           customerName: session.customerName,
           customerEmail: session.customerEmail,
           subtotal,
@@ -2399,6 +2552,18 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
     } catch (err) {
       console.error('[referral hook] onOrderPaid failed for order', orderIdForReferral, err)
     }
+  }
+
+  // LEALTAD + MÉTRICAS DEL CLIENTE. Fuera de la transacción y a prueba de fallos,
+  // igual que comisión / referidos / vale de inventario: el cobro ya está hecho.
+  if (loyaltyCustomerId && orderIdForReferral && loyaltyBase) {
+    await creditPaymentLinkCustomer({
+      venueId,
+      customerId: loyaltyCustomerId,
+      orderId: orderIdForReferral,
+      amount: loyaltyBase,
+      channel: 'blumon',
+    })
   }
 
   // Fire-and-forget commission calculation (matches the Stripe webhook flow).
@@ -3127,6 +3292,11 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
 
   let orderIdForReferral: string | null = null
   let postingId: string | null = null
+  // Cliente registrado detrás del cobro (si lo hay). Aquí cubre TAMBIÉN el
+  // checkout directo sin liga: es la misma función y el mismo `Order` COMPLETED,
+  // y la regla es "acumula en cualquier venta con cliente" — excluirlo habría
+  // pedido una excepción que nadie pidió.
+  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(venueId, session.customerEmail, session.customerPhone)
   try {
     await prisma.$transaction(async tx => {
       // Re-check inside the tx so two concurrent finalizers (optimistic + IPN)
@@ -3141,6 +3311,7 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           type: isItemLink ? 'TAKEOUT' : 'MANUAL_ENTRY',
           source: isLink ? 'PAYMENT_LINK' : 'WEB',
           createdById: session.paymentLink?.createdById ?? undefined,
+          ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
           customerEmail: session.customerEmail,
           subtotal,
           discountAmount: 0,
@@ -3253,6 +3424,19 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
       } catch (err) {
         console.error('[referral hook] onOrderPaid failed for order', orderIdForReferral, err)
       }
+    }
+
+    // LEALTAD + MÉTRICAS DEL CLIENTE. `orderIdForReferral` sólo queda sellado
+    // cuando ESTA invocación creó la orden — una reentrega del IPN sale por el
+    // `paymentId` ya sellado y no llega aquí con orden nueva.
+    if (loyaltyCustomerId && orderIdForReferral) {
+      await creditPaymentLinkCustomer({
+        venueId,
+        customerId: loyaltyCustomerId,
+        orderId: orderIdForReferral,
+        amount: subtotal,
+        channel: 'mercadopago',
+      })
     }
 
     logger.info('MercadoPago checkout finalized (Order + Payment recorded)', {

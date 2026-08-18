@@ -8,6 +8,8 @@ import { planGateMessage } from '../planGate'
 import { auditMcpWrite } from '../audit'
 import { listPromotionsForPos } from '@/services/promotions/promotionCatalog.service'
 import { validatePromotionForPublish } from '@/services/promotions/validatePromotion'
+import { getPromotionSales, type PromotionReportType } from '@/services/dashboard/promotion-sales.dashboard.service'
+import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 
 /**
  * Promociones del POS (combos, bundles, 2x1) — tier PRO, código PROMOTIONS.
@@ -73,10 +75,87 @@ export function registerPromotionTools(server: McpServer, scope: McpScope) {
       const gate = await planGateMessage(venueId, 'PROMOTIONS', 'Las promociones')
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
       const { active, upcoming } = await listPromotionsForPos(venueId)
+
+      // Cuántas veces se ha vendido HOY cada promoción vigente — la pregunta que
+      // sigue SIEMPRE a "¿qué promo tengo corriendo?" es "¿y está jalando?".
+      // El día es el del NEGOCIO, no el del servidor.
+      const soldTodayByPromotion = new Map<string, number>()
+      if (active.length > 0) {
+        const grouped = await prisma.orderPromotion.groupBy({
+          by: ['promotionId'],
+          where: {
+            promotionId: { in: active.map(p => p.id) },
+            order: { venueId, status: { not: 'CANCELLED' } },
+            createdAt: { gte: venueStartOfDay(tz), lte: venueEndOfDay(tz) },
+          },
+          _count: { _all: true },
+        })
+        for (const g of grouped) soldTodayByPromotion.set(g.promotionId, g._count._all)
+      }
+
       return text({
-        activeNow: active.map(p => ({ id: p.id, name: p.name, price: p.priceCents / 100 })),
+        timezone: tz,
+        activeNow: active.map(p => ({
+          id: p.id,
+          name: p.name,
+          price: p.priceCents / 100,
+          soldToday: soldTodayByPromotion.get(p.id) ?? 0,
+        })),
         startingSoon: upcoming.map(p => ({ id: p.id, name: p.name, startsAt: p.startsAt })),
+      })
+    },
+  )
+
+  server.tool(
+    'promotion_sales',
+    'Cómo le fue a cada PROMOCIÓN (combo, bundle, 2x1) en un período: cuántas veces se vendió, cuánto valía a precio de lista (bruto), cuánto se regaló (descuento) y cuánto entró (neto), por NOMBRE de la promoción tal como se cobró. Contesta "¿me sirve el combo? ¿cuánto estoy regalando en promociones?". Complemento de product_sales / top_products, que cuentan los COMPONENTES sueltos: aquí el combo es el renglón. Montos en pesos, fechas en la hora del negocio. Requiere plan PRO.',
+    {
+      venueId: z.string().describe('Venue (debe estar en tu alcance)'),
+      fromDate: z.string().optional().describe('Fecha inicial YYYY-MM-DD (default: hace 30 días)'),
+      toDate: z.string().optional().describe('Fecha final YYYY-MM-DD (default: hoy)'),
+      groupBy: z
+        .enum(['summary', 'days', 'weeks', 'months'])
+        .optional()
+        .describe('summary = sólo el total por promoción; days/weeks/months añade la serie por período'),
+    },
+    async ({ venueId, fromDate, toDate, groupBy }) => {
+      guard.venueFilter(venueId) // lanza ScopeError si el venue no es tuyo
+      guard.requirePermission('reports:read', venueId) // mismo permiso que los demás reportes
+      const gate = await planGateMessage(venueId, 'PROMOTIONS', 'Las promociones') // tier PRO
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
+
+      // 🔴 Fechas VENUE-LOCAL. El servicio recibe strings y las resuelve con
+      // parseDbDateRange (independiente del reloj del host); el default de 30 días
+      // se ancla al MEDIODÍA para que el día calendario no se corra bajo ninguna tz.
+      const defaultFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+      const start = fromDate ?? venueStartOfDay(tz, new Date(`${defaultFrom.toISOString().slice(0, 10)}T12:00:00`)).toISOString()
+      const end = toDate ?? venueEndOfDay(tz).toISOString()
+
+      const report = await getPromotionSales(venueId, {
+        startDate: start,
+        endDate: end,
+        reportType: (groupBy ?? 'summary') as PromotionReportType,
+        timezone: tz,
+      })
+
+      return text({
+        venueId,
+        timezone: report.timezone,
+        window: { start: report.dateRange.startDate.toISOString(), end: report.dateRange.endDate.toISOString() },
+        // Montos en PESOS (el servicio ya los entrega así).
+        totals: report.totals,
+        promotions: report.promotions,
+        byPeriod: report.byPeriod,
+        note:
+          report.totals.needsReview > 0
+            ? `${report.totals.needsReview} venta(s) de promoción quedaron marcadas para revisión (la promo estaba archivada o fuera de vigencia al sincronizar).`
+            : undefined,
       })
     },
   )

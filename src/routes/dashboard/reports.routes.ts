@@ -17,6 +17,7 @@ import { formatInTimeZone } from 'date-fns-tz'
 import { payLaterAgingReport } from '@/controllers/dashboard/reports.dashboard.controller'
 import { salesSummaryReport, salesSummaryExport } from '@/controllers/dashboard/sales-summary.dashboard.controller'
 import { salesByItemReport } from '@/controllers/dashboard/sales-by-item.dashboard.controller'
+import { promotionSalesReport } from '@/controllers/dashboard/promotion-sales.dashboard.controller'
 import { refundsReport } from '@/controllers/dashboard/refunds.dashboard.controller'
 import { checkPermission, resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
@@ -126,6 +127,28 @@ router.get('/venues/:venueId/sales-summary/export', checkPermission('reports:rea
  * @feature ADVANCED_REPORTS (Pro) — also serves the Sales-by-Category report (groupBy=category)
  */
 router.get('/sales-by-item', checkFeatureAccess('ADVANCED_REPORTS'), checkPermission('reports:read'), salesByItemReport)
+
+/**
+ * GET /api/v1/dashboard/reports/promotions
+ *
+ * Reporte de promociones — el COMBO COMO RENGLÓN, con su nombre tal como se cobró:
+ * veces vendida, bruto, descuento otorgado, neto, y desglose por período.
+ * Complemento deliberado del mix de productos (`sales-by-item`), que muestra los
+ * COMPONENTES marcados "dentro de «Combo X»" — las dos vistas, sin switch.
+ *
+ * Query params:
+ * - startDate: ISO date string (required)
+ * - endDate: ISO date string (required)
+ * - reportType: 'summary' | 'hours' | 'days' | 'weeks' | 'months' (optional)
+ *
+ * @permission reports:read
+ * @feature PROMOTIONS (Pro) — el mismo código que gatea el motor de promociones. NO
+ *          `ADVANCED_REPORTS`: un venue sin promociones no tiene qué ver aquí, y así el
+ *          mensaje de upsell habla de promociones y no de reportes. Ambos son PRO, así
+ *          que ningún tier gana ni pierde acceso por esta elección.
+ */
+router.get('/promotions', checkFeatureAccess('PROMOTIONS'), checkPermission('reports:read'), promotionSalesReport)
+router.get('/venues/:venueId/promotions', checkFeatureAccess('PROMOTIONS'), checkPermission('reports:read'), promotionSalesReport)
 
 /**
  * GET /api/v1/dashboard/reports/refunds
