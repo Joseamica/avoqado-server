@@ -44,6 +44,9 @@ export interface LandingSignupInput {
   lastName?: string
   organizationName?: string
   phone?: string
+  /** De que landing vino (`landing_restaurantes`, `landing_retail`…). Queda en
+   *  el ActivityLog del alta para poder partir el embudo por campana. */
+  source?: string
 }
 
 export interface LandingSignupResult {
@@ -384,7 +387,7 @@ export async function checkEmailVerificationStatus(email: string): Promise<{ ema
  *     proteger todavia mas alla del acceso mismo.
  */
 export async function signupFromLanding(input: LandingSignupInput): Promise<LandingSignupResult> {
-  const { email, firstName = '', lastName = '', organizationName = '', phone } = input
+  const { email, firstName = '', lastName = '', organizationName = '', phone, source } = input
   const normalizedEmail = email.toLowerCase().trim()
 
   // 1. Cuenta existente: hay DOS casos y tratarlos igual hace dano.
@@ -463,6 +466,25 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
     // wizardVersion 2 = el wizard vigente (/setup). Sin esto cae al legacy.
     await tx.onboardingProgress.create({
       data: { organizationId: organization.id, currentStep: 0, completedSteps: [], wizardVersion: 2 },
+    })
+
+    // 🔴 Marca PERMANENTE de que esta cuenta nacio en una landing.
+    //
+    // No se puede usar `password IS NULL` para eso, que fue el primer intento:
+    // esa condicion se deja de cumplir justo cuando la persona fija su
+    // contrasena — o sea, en la conversion que queremos medir. El embudo
+    // terminaba contando solo a los que NO convirtieron.
+    //
+    // `source` ademas separa el embudo por landing (restaurantes vs retail vs
+    // servicios), que es lo que hace comparable una campana contra otra.
+    await tx.activityLog.create({
+      data: {
+        staffId: staff.id,
+        action: 'LANDING_SIGNUP_CREATED',
+        entity: 'Staff',
+        entityId: staff.id,
+        data: { source: source || 'landing', organizationId: organization.id },
+      },
     })
 
     return { organization, staff }
