@@ -315,6 +315,72 @@ idempotencia en las llamadas salientes, ni si nos va a limitar. Con un requisito
 inyección exitosa encima, eso hay que preguntárselo en el caso de soporte ya abierto.
 
 
+## 4.ter 🔴 Aterrizaje en el modelo de datos — cómo un pedido de Uber se vuelve una Order
+
+**La pregunta del founder (2026-08-17):** *"¿no tendríamos que planear qué pasa cuando llega la
+integración con mi arquitectura de base de datos?"* — sí, y es el hueco más grande que quedaba:
+Uber manda **sus** productos con **sus** ids, y nada garantiza que existan en el catálogo del venue.
+
+### El problema central: resolver el producto
+
+`Product` tiene tres llaves únicas por venue `[código]`: `sku`, `gtin` y `externalId`
+(`schema.prisma:202-205`). El item de Uber trae `id` y `external_data` [doc]. **El vínculo depende
+de quién creó el menú en Uber:**
+
+| Cómo nació el menú en Uber | Se puede resolver | Qué hacer |
+| --- | --- | --- |
+| Publicado por Avoqado (`PUT /menus`) | ✅ sí — el `id`/`external_data` los pusimos nosotros desde `Product.sku` | Camino feliz |
+| Cargado a mano por el dueño (Doña Simona hoy) | ❌ no — sus ids son de Uber, no de Avoqado | Requiere mapeo |
+
+🔴 **Consecuencia dura:** para un venue cuyo menú NO publicó Avoqado, **publicar el menú deja de ser
+opcional** y se vuelve prerequisito del inventario — sin vínculo no se sabe qué descontar. Alternativa
+si el dueño no quiere republicar: una tabla de mapeo `(venueId, uberItemId) → productId` que alguien
+llena una vez. Cuál de las dos se elige es decisión de producto, pero **una de las dos tiene que
+existir antes del primer pedido con inventario.**
+
+### Cascada de resolución (determinista, sin adivinar)
+
+1. `Product.externalId` = `UBER_EATS:{item_id}` → si existe, ese es
+2. `Product.sku` = `external_data` del item de Uber → si existe, ese es
+3. Ninguno resuelve ⇒ **el pedido entra igual**, con la línea marcada y la orden `needsReview`
+
+🔴 **Nunca resolver por NOMBRE.** "Chilaquiles" existe tres veces en un menú real; un match por texto
+descuenta el stock del producto equivocado y el dueño no tiene cómo notarlo.
+
+### Qué se llena en cada tabla
+
+**`OrderItem`** — la buena noticia: `productId` es **nullable** `[código]`, y hay campos de snapshot
+(`productName`, `productSku`, `categoryName`) pensados justo para esto. Un pedido con un producto no
+reconocido **no se pierde ni se inventa**: se guarda con nombre y precio de Uber, `productId` nulo, y
+queda visible para revisión.
+
+| Campo | De dónde sale |
+| --- | --- |
+| `productId` | cascada de arriba, o **null** si no resuelve |
+| `productName` / `productSku` | snapshot del item de Uber (sobrevive aunque el producto cambie después) |
+| `quantity`, `unitPrice`, `total` | del pedido, en pesos `Decimal` (÷100 en el mapper) |
+| `taxAmount` | **0** — es lo que hace hoy toda la plataforma (`order.tpv.service.ts`), no se estrena aquí |
+| `originSystem` | `DELIVERY_PLATFORM` |
+| `isCortesia`, `appliedDiscountId`, `orderPromotionId`, `seat`, `course` | **null / false** — no aplican: el precio lo fijó Uber y no hay mesa ni puesto |
+
+**`OrderItemModifier`** — `modifierId` también es nullable `[código]`: mismo trato. `name` y `price`
+del snapshot de Uber. ⚠️ [doc] El precio del modificador **no** viene multiplicado por la cantidad del
+padre — el mapper multiplica.
+
+**`Order`** — `servedById` y `shiftId` nulos (§3.quater), `source = UBER_EATS`,
+`originSystem = DELIVERY_PLATFORM`, `externalId = UBER_EATS:{order_id}`.
+
+### Por qué el inventario NO se rompe con esto
+
+El motor descuenta por `productId` `[código]`. Una línea sin resolver simplemente **no descuenta** —
+y eso es lo correcto: mejor no mover el almacén que moverlo mal. Pero el pedido queda marcado, así
+que el hueco es **visible**, no silencioso. Ese es el contrato: lo que el sistema no entiende se ve.
+
+**Pruebas:** item con `externalId` conocido ⇒ resuelve y descuenta · item desconocido ⇒ `OrderItem`
+con `productId` null, snapshot completo, orden marcada, **cero movimiento de inventario** · dos
+productos con el mismo nombre ⇒ jamás se resuelve por texto · modificador × cantidad del padre.
+
+
 ## 5. Lo que NO entra en la v1
 
 Nada de esto bloquea el primer pedido. Se difiere a propósito, no por olvido:
