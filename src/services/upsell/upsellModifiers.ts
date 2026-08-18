@@ -113,10 +113,24 @@ export function validateAndResolveModifiers(
  * y esta función responde `true`.
  */
 export function canAutoPropose(product: ProductForValidation): boolean {
+  return autoProposeRejectionReason(product) === null
+}
+
+/**
+ * Igual pregunta que `canAutoPropose`, pero devuelve el MOTIVO en vez de tragárselo.
+ *
+ * 🔴 Ronda final de correcciones (2026-08-17), P2: antes de esto, un generador
+ * automático que rechazaba un producto no dejaba rastro de POR QUÉ — sólo un
+ * `continue` mudo. Eso choca con la regla del workspace ("apagado se VE y se
+ * EXPLICA, nunca desaparece en silencio"): el dueño ve que su promoción no generó
+ * tarjeta y no tiene cómo enterarse de que el producto pide talla o se vende por
+ * peso. `null` = sí se puede proponer sin que un humano elija nada.
+ */
+export function autoProposeRejectionReason(product: ProductForValidation): string | null {
   try {
     validateAndResolveModifiers(product, undefined)
-    return true
-  } catch {
-    return false
+    return null
+  } catch (error) {
+    return error instanceof UpsellModifierError ? error.message : 'No se pudo validar el producto'
   }
 }

@@ -33,7 +33,7 @@ import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { venuesWithFeatureAccess } from '../services/access/basePlan.service'
 import { computeDedupeKey, PRODUCT_VALIDATION_SELECT } from '../services/upsell/upsell.service'
-import { canAutoPropose, type ProductForValidation } from '../services/upsell/upsellModifiers'
+import { autoProposeRejectionReason, type ProductForValidation } from '../services/upsell/upsellModifiers'
 import { scheduleJob } from '../observability/jobContext'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -118,6 +118,17 @@ interface BasketPair {
   supportCount: number
   confidence: number
   lift: number
+}
+
+/**
+ * Una propuesta que el SQL/el espejo de descuentos encontró, pero que el job
+ * decide NO escribir. `reason` es el mensaje humano de `autoProposeRejectionReason`
+ * (o el caso "ya no está en el catálogo") — lo que el dueño necesita leer para
+ * entender por qué su promoción no generó tarjeta, no un código interno.
+ */
+export interface DiscardedProposal {
+  suggestedName: string
+  reason: string
 }
 
 /**
@@ -208,20 +219,26 @@ export function buildRationale(pair: BasketPair): string {
   )
 }
 
-async function proposeBasketRules(venueId: string, since: Date): Promise<number> {
+async function proposeBasketRules(venueId: string, since: Date): Promise<{ written: number; discarded: DiscardedProposal[] }> {
   const pairs = await findBasketPairs(venueId, since)
-  if (pairs.length === 0) return 0
+  if (pairs.length === 0) return { written: 0, discarded: [] }
 
   // 🔴 Ronda final de correcciones (2026-08-17). El SQL de `findBasketPairs` ya
   // filtra el veto del dueño y el catálogo (`upsellEnabled`, `active`,
   // `deletedAt`); lo que le falta —venderse por peso, o pedir una opción
   // obligatoria que este job no sabe elegir por el dueño— se checa aquí, con
-  // el MISMO validador que usa `approveRule` (`canAutoPropose`,
+  // el MISMO validador que usa `approveRule` (`autoProposeRejectionReason`,
   // `upsellModifiers.ts`), en vez de reimplementar la regla. Sin esto el
   // dueño ve la propuesta en su bandeja, da "Activar", y el server la
   // rechaza — parece un bug del sistema, no una regla mal armada. Y este job
   // es justo el de MAYOR volumen: propone lo que se compra junto, que suele
   // incluir lo que se vende por peso o pide talla/sabor.
+  //
+  // 🔴 P2 (2026-08-17): lo que aquí se descarta NO se pierde mudo. Antes esa
+  // propuesta rota igual se escribía —el dashboard la pintaba con badge rojo
+  // "Pide elegir opciones"— rota pero VISIBLE. Ahora no se escribe nada, así
+  // que sin este `discarded` el dueño no tiene forma de saber por qué su
+  // producto estrella nunca generó una tarjeta de sugerencia.
   const productos = await prisma.product.findMany({
     where: { id: { in: [...new Set(pairs.map(p => p.suggestedProductId))] }, venueId },
     select: PRODUCT_VALIDATION_SELECT,
@@ -229,9 +246,18 @@ async function proposeBasketRules(venueId: string, since: Date): Promise<number>
   const porId = new Map(productos.map(p => [p.id, p as ProductForValidation]))
 
   let written = 0
+  const discarded: DiscardedProposal[] = []
   for (const pair of pairs) {
     const producto = porId.get(pair.suggestedProductId)
-    if (!producto || !canAutoPropose(producto)) continue
+    if (!producto) {
+      discarded.push({ suggestedName: pair.suggestedName, reason: 'Ya no está en el catálogo de este venue' })
+      continue
+    }
+    const rechazo = autoProposeRejectionReason(producto)
+    if (rechazo) {
+      discarded.push({ suggestedName: pair.suggestedName, reason: rechazo })
+      continue
+    }
 
     const dedupeKey = computeDedupeKey({
       origin: UpsellOrigin.BASKET_DATA,
@@ -272,7 +298,7 @@ async function proposeBasketRules(venueId: string, since: Date): Promise<number>
     })
     written++
   }
-  return written
+  return { written, discarded }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -289,7 +315,10 @@ async function proposeBasketRules(venueId: string, since: Date): Promise<number>
  * paga 1" o "va por cuenta de la casa" no se pueden pintar como un precio sin
  * mentir. Es el mismo filtro que rechaza esos tipos al crear una regla a mano.
  */
-async function syncPromotionRules(venueId: string, now: Date): Promise<{ activated: number; retired: number }> {
+async function syncPromotionRules(
+  venueId: string,
+  now: Date,
+): Promise<{ activated: number; retired: number; discarded: DiscardedProposal[] }> {
   const discounts = await prisma.discount.findMany({
     where: {
       venueId,
@@ -311,6 +340,10 @@ async function syncPromotionRules(venueId: string, now: Date): Promise<{ activat
 
   const vigentes = new Set<string>()
   let activated = 0
+  // 🔴 P2 (2026-08-17): esta capa nace ACTIVE directo — el dueño ya decidió al
+  // crear el descuento. Antes rechazar aquí era mudo; ahora se explica igual
+  // que la capa 2, porque el dueño ve su descuento vigente y ninguna tarjeta.
+  const discarded: DiscardedProposal[] = []
 
   for (const d of discounts) {
     if (d.targetItemIds.length === 0) continue
@@ -319,18 +352,23 @@ async function syncPromotionRules(venueId: string, now: Date): Promise<{ activat
     // como sugerible NO produce tarjeta.
     //
     // 🔴 Ronda final de correcciones (2026-08-17): el select ahora trae lo que
-    // `canAutoPropose` necesita. Esta capa es la más delicada de las tres: nace
-    // ACTIVE directo, SIN pasar por `approveRule` (el dueño "ya decidió" al
-    // crear el descuento) — así que sin este filtro un producto por peso o con
-    // un obligatorio sin resolver se guardaría ACTIVE y el POS lo ignoraría
-    // para siempre, en silencio, sin que ningún "Activar" fallido lo delatara.
+    // `autoProposeRejectionReason` necesita (+ `name` para poder explicar el
+    // rechazo). Esta capa es la más delicada de las tres: nace ACTIVE directo,
+    // SIN pasar por `approveRule` (el dueño "ya decidió" al crear el
+    // descuento) — así que sin este filtro un producto por peso o con un
+    // obligatorio sin resolver se guardaría ACTIVE y el POS lo ignoraría para
+    // siempre, en silencio, sin que ningún "Activar" fallido lo delatara.
     const sugeribles = await prisma.product.findMany({
       where: { id: { in: d.targetItemIds }, venueId, upsellEnabled: true, active: true, deletedAt: null },
-      select: PRODUCT_VALIDATION_SELECT,
+      select: { ...PRODUCT_VALIDATION_SELECT, name: true },
     })
 
     for (const p of sugeribles) {
-      if (!canAutoPropose(p as ProductForValidation)) continue
+      const rechazo = autoProposeRejectionReason(p as ProductForValidation)
+      if (rechazo) {
+        discarded.push({ suggestedName: p.name, reason: rechazo })
+        continue
+      }
 
       const dedupeKey = computeDedupeKey({
         origin: UpsellOrigin.PROMOTION,
@@ -379,7 +417,7 @@ async function syncPromotionRules(venueId: string, now: Date): Promise<{ activat
     data: { status: UpsellRuleStatus.INACTIVE },
   })
 
-  return { activated, retired }
+  return { activated, retired, discarded }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -391,6 +429,13 @@ export interface UpsellJobResult {
   proposed: number
   promotionsActivated: number
   promotionsRetired: number
+  /**
+   * Propuestas que un generador ENCONTRÓ pero no escribió (producto por peso,
+   * o pide una opción obligatoria sin resolver). El detalle con nombre de
+   * venue + motivo va al log por venue en `run()`, no aquí — este número es
+   * sólo el total agregado de la corrida.
+   */
+  discarded: number
   errors: number
 }
 
@@ -425,11 +470,18 @@ export class NightlyUpsellRulesJob {
   async run(): Promise<UpsellJobResult> {
     if (this.isRunning) {
       logger.warn('🛒 [UPSELL] La corrida anterior sigue viva, se omite esta')
-      return { venuesProcessed: 0, proposed: 0, promotionsActivated: 0, promotionsRetired: 0, errors: 0 }
+      return { venuesProcessed: 0, proposed: 0, promotionsActivated: 0, promotionsRetired: 0, discarded: 0, errors: 0 }
     }
     this.isRunning = true
 
-    const result: UpsellJobResult = { venuesProcessed: 0, proposed: 0, promotionsActivated: 0, promotionsRetired: 0, errors: 0 }
+    const result: UpsellJobResult = {
+      venuesProcessed: 0,
+      proposed: 0,
+      promotionsActivated: 0,
+      promotionsRetired: 0,
+      discarded: 0,
+      errors: 0,
+    }
     const now = new Date()
     const since = new Date(now.getTime() - ANALYSIS_DAYS * 24 * 60 * 60 * 1000)
 
@@ -455,11 +507,30 @@ export class NightlyUpsellRulesJob {
         await Promise.all(
           lote.map(async venue => {
             try {
-              const proposed = await proposeBasketRules(venue.id, since)
-              const promo = PROMOTION_LAYER_ENABLED ? await syncPromotionRules(venue.id, now) : { activated: 0, retired: 0 }
-              result.proposed += proposed
+              const basket = await proposeBasketRules(venue.id, since)
+              const promo = PROMOTION_LAYER_ENABLED
+                ? await syncPromotionRules(venue.id, now)
+                : { activated: 0, retired: 0, discarded: [] as DiscardedProposal[] }
+              result.proposed += basket.written
               result.promotionsActivated += promo.activated
               result.promotionsRetired += promo.retired
+
+              // 🔴 P2 (2026-08-17): "apagado se VE y se EXPLICA, nunca desaparece en
+              // silencio" (regla del workspace). Antes de este filtro, un producto por
+              // peso o con un obligatorio sin resolver igual generaba una regla ROTA
+              // pero VISIBLE —el dashboard la pintaba con badge rojo "Pide elegir
+              // opciones"—; ahora no se escribe nada. Sin este log por venue, el dueño
+              // no tiene forma de saber por qué su promoción no generó tarjeta.
+              const omitidas = [...basket.discarded, ...promo.discarded]
+              if (omitidas.length > 0) {
+                result.discarded += omitidas.length
+                logger.info(`🛒 [UPSELL] ${venue.name} (${venue.id}): ${omitidas.length} propuesta(s) omitida(s)`, {
+                  venueId: venue.id,
+                  venueName: venue.name,
+                  omitidas,
+                })
+              }
+
               result.venuesProcessed++
             } catch (error) {
               // Un venue que truena NO tumba la corrida. Si no, un solo local con
@@ -473,7 +544,8 @@ export class NightlyUpsellRulesJob {
 
       logger.info(
         `🛒 [UPSELL] Listo: ${result.venuesProcessed} venues · ${result.proposed} propuestas · ` +
-          `${result.promotionsActivated} promos activas · ${result.promotionsRetired} retiradas · ${result.errors} errores`,
+          `${result.promotionsActivated} promos activas · ${result.promotionsRetired} retiradas · ` +
+          `${result.discarded} omitidas · ${result.errors} errores`,
       )
     } catch (error) {
       logger.error('🛒 [UPSELL] La corrida nocturna falló entera', { error })

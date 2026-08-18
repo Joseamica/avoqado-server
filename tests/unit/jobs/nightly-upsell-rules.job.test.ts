@@ -1,6 +1,30 @@
 import { UpsellOrigin, UpsellRuleStatus, UpsellTriggerType } from '@prisma/client'
 import { prismaMock } from '../../__helpers__/setup'
-import { proposeBasketRules, syncPromotionRules, buildRationale, MIN_SUPPORT, MIN_LIFT } from '../../../src/jobs/nightly-upsell-rules.job'
+import {
+  proposeBasketRules,
+  syncPromotionRules,
+  buildRationale,
+  MIN_SUPPORT,
+  MIN_LIFT,
+  nightlyUpsellRulesJob,
+} from '../../../src/jobs/nightly-upsell-rules.job'
+import * as basePlanService from '../../../src/services/access/basePlan.service'
+import logger from '../../../src/config/logger'
+
+// Make retry transparent for the run()-level tests below: just invoke the wrapped
+// fn (deterministic, no backoff — same pattern as plan-renewal-reminder.test.ts).
+// proposeBasketRules/syncPromotionRules never call retry directly, so this is
+// inert for the rest of the file.
+jest.mock('@/utils/retry', () => ({
+  __esModule: true,
+  retry: (fn: () => unknown) => fn(),
+  shouldRetryDbConnectionError: jest.fn(),
+}))
+
+jest.mock('@/services/access/basePlan.service', () => ({
+  __esModule: true,
+  venuesWithFeatureAccess: jest.fn(),
+}))
 
 /**
  * Upsell — job nocturno (capas 2 y 4).
@@ -122,12 +146,16 @@ describe('Capa 2 — qué se escribe', () => {
     prismaMock.$queryRaw.mockResolvedValue([pair()])
     prismaMock.upsellRule.findUnique.mockResolvedValue({ status: UpsellRuleStatus.DISMISSED } as any)
 
-    const escritas = await proposeBasketRules(venueId, since)
+    const resultado = await proposeBasketRules(venueId, since)
 
     // Volver a proponer cada noche lo ya rechazado convierte la bandeja en ruido
     // y enseña al dueño a ignorarla.
-    expect(escritas).toBe(0)
+    expect(resultado.written).toBe(0)
     expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+    // 🔴 Esto NO es "omitido" en el sentido que le interesa al dueño: es una
+    // decisión que ÉL YA TOMÓ (rechazó la regla). No debe aparecer como discarded
+    // —eso mezclaría "el dueño dijo no" con "el producto no se puede sugerir".
+    expect(resultado.discarded).toEqual([])
   })
 
   it('🔴 una regla YA aprobada no se apaga porque bajó el lift', async () => {
@@ -176,10 +204,14 @@ describe('Capa 2 — no propone lo que approveRule va a rechazar de todos modos'
     prismaMock.$queryRaw.mockResolvedValue([pair()])
     prismaMock.product.findMany.mockResolvedValue([productoProponible('galleta', { soldByWeight: true })] as any)
 
-    const escritas = await proposeBasketRules(venueId, since)
+    const resultado = await proposeBasketRules(venueId, since)
 
-    expect(escritas).toBe(0)
+    expect(resultado.written).toBe(0)
     expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+    // 🔴 P2 (2026-08-17): lo omitido se cuenta y se explica — "apagado se VE y se
+    // EXPLICA, nunca desaparece en silencio". El dueño lee "Galleta" y el motivo
+    // real, no un número pelón.
+    expect(resultado.discarded).toEqual([{ suggestedName: 'Galleta', reason: expect.stringMatching(/peso/) }])
   })
 
   it('🔴 NO propone un producto que pide una opción obligatoria (nadie elige "Chico o Grande" por el dueño)', async () => {
@@ -190,10 +222,11 @@ describe('Capa 2 — no propone lo que approveRule va a rechazar de todos modos'
       }),
     ] as any)
 
-    const escritas = await proposeBasketRules(venueId, since)
+    const resultado = await proposeBasketRules(venueId, since)
 
-    expect(escritas).toBe(0)
+    expect(resultado.written).toBe(0)
     expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+    expect(resultado.discarded).toEqual([{ suggestedName: 'Galleta', reason: expect.stringContaining('Tamaño') }])
   })
 
   it('sí propone un producto con SÓLO grupos opcionales', async () => {
@@ -204,20 +237,22 @@ describe('Capa 2 — no propone lo que approveRule va a rechazar de todos modos'
       }),
     ] as any)
 
-    const escritas = await proposeBasketRules(venueId, since)
+    const resultado = await proposeBasketRules(venueId, since)
 
-    expect(escritas).toBe(1)
+    expect(resultado.written).toBe(1)
     expect(prismaMock.upsellRule.upsert).toHaveBeenCalled()
+    expect(resultado.discarded).toEqual([])
   })
 
-  it('un producto huérfano (no vino en el findMany) tampoco se propone', async () => {
+  it('un producto huérfano (no vino en el findMany) tampoco se propone — y también se explica', async () => {
     prismaMock.$queryRaw.mockResolvedValue([pair()])
     prismaMock.product.findMany.mockResolvedValue([] as any)
 
-    const escritas = await proposeBasketRules(venueId, since)
+    const resultado = await proposeBasketRules(venueId, since)
 
-    expect(escritas).toBe(0)
+    expect(resultado.written).toBe(0)
     expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+    expect(resultado.discarded).toEqual([{ suggestedName: 'Galleta', reason: expect.stringContaining('catálogo') }])
   })
 })
 
@@ -302,25 +337,31 @@ describe('Capa 4 — el espejo de los descuentos', () => {
   // guardaría ACTIVE y el POS lo ignoraría para siempre, en silencio.
   // ─────────────────────────────────────────────────────────────────────────
 
-  it('🔴 NO activa una regla para un producto que se vende por peso', async () => {
+  it('🔴 NO activa una regla para un producto que se vende por peso — y explica por qué', async () => {
     prismaMock.discount.findMany.mockResolvedValue([
       { id: 'd1', targetItemIds: ['jamon'], daysOfWeek: [], timeFrom: null, timeUntil: null },
     ] as any)
-    prismaMock.product.findMany.mockResolvedValue([{ id: 'jamon', upsellEnabled: true, soldByWeight: true, modifierGroups: [] }] as any)
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'jamon', name: 'Jamón Serrano', upsellEnabled: true, soldByWeight: true, modifierGroups: [] },
+    ] as any)
 
     const r = await syncPromotionRules(venueId, now)
 
     expect(r.activated).toBe(0)
     expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+    // 🔴 P2 (2026-08-17): esta capa nace ACTIVE directo, sin pasar por
+    // approveRule — es la más delicada de las tres. Antes el rechazo era mudo.
+    expect(r.discarded).toEqual([{ suggestedName: 'Jamón Serrano', reason: expect.stringMatching(/peso/) }])
   })
 
-  it('🔴 NO activa una regla para un producto que pide una opción obligatoria sin resolver', async () => {
+  it('🔴 NO activa una regla para un producto que pide una opción obligatoria sin resolver — y explica por qué', async () => {
     prismaMock.discount.findMany.mockResolvedValue([
       { id: 'd1', targetItemIds: ['agua'], daysOfWeek: [], timeFrom: null, timeUntil: null },
     ] as any)
     prismaMock.product.findMany.mockResolvedValue([
       {
         id: 'agua',
+        name: 'Agua Mineral',
         upsellEnabled: true,
         soldByWeight: false,
         modifierGroups: [{ group: { id: 'g_tam', name: 'Tamaño', required: true, modifiers: [{ id: 'm', name: 'Chico', price: 0 }] } }],
@@ -331,5 +372,83 @@ describe('Capa 4 — el espejo de los descuentos', () => {
 
     expect(r.activated).toBe(0)
     expect(prismaMock.upsellRule.upsert).not.toHaveBeenCalled()
+    expect(r.discarded).toEqual([{ suggestedName: 'Agua Mineral', reason: expect.stringContaining('Tamaño') }])
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2 (2026-08-17): "apagado se VE y se EXPLICA, nunca desaparece en silencio"
+// (regla del workspace). Antes de la ronda de correcciones de arriba, un
+// producto rechazado por canAutoPropose igual generaba una regla ROTA pero
+// VISIBLE — el dashboard la pintaba con badge rojo "Pide elegir opciones".
+// Ahora no se escribe nada, así que run() tiene que dejar rastro POR VENUE,
+// con nombre y motivo — no sólo un contador ciego.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 🔴 `winston`'s `LeveledLogMethod` es una función SOBRECARGADA cuya ÚLTIMA
+// firma es `(infoObject: object): Logger` — un solo argumento. `Parameters<>`
+// (y por tanto el tipo de `jest.spyOn(logger, 'info').mock.calls`) resuelve a
+// ESA firma, una tupla de longitud 1, aunque en tiempo de ejecución el job
+// SIEMPRE llama `logger.info(mensaje, meta)` con dos. Sin este cast, indexar
+// `call[1]` no compila (`TS2493`) pese a ser válido en la práctica.
+type LoggerInfoCall = [string, Record<string, unknown>?]
+
+describe('run() — el rastro de lo omitido es por venue, con nombre y motivo', () => {
+  const venue = { id: 'venue-1', name: 'Testarudo Cafe' }
+
+  beforeEach(() => {
+    prismaMock.venue.findMany.mockResolvedValue([venue] as any)
+    ;(basePlanService.venuesWithFeatureAccess as jest.Mock).mockResolvedValue(new Set([venue.id]))
+  })
+
+  it('🔴 cuando algo se omite, el log trae el NOMBRE del venue y el MOTIVO — no un número pelón', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([pair()])
+    prismaMock.product.findMany.mockResolvedValue([productoProponible('galleta', { soldByWeight: true })] as any)
+    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => logger as any)
+
+    const result = await nightlyUpsellRulesJob.run()
+
+    // Al resultado del job también llega el conteo — hoy sólo reportaba
+    // activated/retired; esto es lo que "agrega las omitidas al resultado" pide.
+    expect(result.discarded).toBe(1)
+
+    // 🔴 Identificado por la METADATA estructurada (trae `omitidas`), no por un
+    // substring del mensaje: el resumen final de la corrida también dice
+    // "...omitidas" en texto plano y un match por substring lo confundiría con
+    // el log por-venue que este test busca.
+    const calls = infoSpy.mock.calls as unknown as LoggerInfoCall[]
+    const perVenueCall = calls.find(call => call[1] && typeof call[1] === 'object' && 'omitidas' in call[1])
+    expect(perVenueCall).toBeDefined()
+    // El nombre, no el id pelón, es lo que el dueño reconoce al leer el log.
+    expect(perVenueCall![0]).toContain(venue.name)
+
+    const meta = perVenueCall![1] as unknown as {
+      venueId: string
+      venueName: string
+      omitidas: Array<{ suggestedName: string; reason: string }>
+    }
+    expect(meta.venueName).toBe(venue.name)
+    expect(meta.venueId).toBe(venue.id)
+    expect(meta.omitidas).toEqual([{ suggestedName: 'Galleta', reason: expect.stringMatching(/peso/) }])
+
+    infoSpy.mockRestore()
+  })
+
+  it('sin omisiones no hay log por venue ni ruido — la corrida normal se queda callada', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([pair()])
+    prismaMock.product.findMany.mockResolvedValue([productoProponible('galleta')] as any)
+    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => logger as any)
+
+    const result = await nightlyUpsellRulesJob.run()
+
+    expect(result.discarded).toBe(0)
+    // El resumen final SIEMPRE loguea (con "0 omitidas"); lo que NO debe existir
+    // es el log estructurado por-venue, que sólo se emite cuando hay algo que
+    // explicar — si no, sería ruido en la corrida normal, todas las noches.
+    const calls = infoSpy.mock.calls as unknown as LoggerInfoCall[]
+    const perVenueCall = calls.find(call => call[1] && typeof call[1] === 'object' && 'omitidas' in call[1])
+    expect(perVenueCall).toBeUndefined()
+
+    infoSpy.mockRestore()
   })
 })
