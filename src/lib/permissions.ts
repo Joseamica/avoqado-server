@@ -148,10 +148,17 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'teams:read', // Need to see team members in shift
     'payments:read', // Need to see shift revenue
   ],
+  // 🔴 Dos ejes distintos, como en paquetes y clientes (auditoría de piso, casos #1 y #2):
+  //   ADMINISTRAR turnos ajenos desde el back-office → shifts:create / :update / :delete / :close
+  //   OPERAR MI turno en la terminal                 → tpv-shifts:create / tpv-shifts:close
+  // Los dos puentes de abajo evitan un rename a ciegas: quien YA administraba turnos
+  // —incluidos los roles personalizados que guardaron la lista EXPANDIDA sin wildcard—
+  // conserva abrir y cerrar en la TPV cuando las rutas pasan a los permisos acotados.
   'shifts:create': [
     'shifts:read',
     'shifts:create',
     'teams:read', // Need to assign team members
+    'tpv-shifts:create', // puente: quien crea turnos también los abre en la terminal
   ],
   'shifts:update': ['shifts:read', 'shifts:update', 'teams:read'],
   'shifts:close': [
@@ -159,6 +166,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'shifts:close',
     'payments:read', // Need to see all payments to close shift
     'orders:read', // Need to see all orders in shift
+    'tpv-shifts:close', // puente: quien cierra turnos ajenos también cierra el propio
   ],
 
   // ===========================
@@ -499,6 +507,24 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'tpv-orders:void': ['tpv-orders:void', 'orders:void', 'orders:read', 'orders:update'],
   'tpv-orders:discount': ['tpv-orders:discount', 'orders:read', 'orders:update', 'discounts:read', 'discounts:apply'],
 
+  // Turno de la terminal — OPERAR el propio, no administrar los ajenos.
+  // El turno de Avoqado es del LOCAL (sólo puede haber uno abierto por venue), así que
+  // "mi turno" y "el turno de la caja" son el mismo registro; quién lo cerró queda en
+  // ActivityLog (SHIFT_CLOSED con el actor). Mismo criterio que Square, donde
+  // "Manage & Start Cash Drawers" es un permiso asignable al personal de piso y el
+  // reporte dice quién terminó la sesión de cajón.
+  //
+  // 🔴 ALIAS BIDIRECCIONAL con `shifts:create`/`shifts:close`, a propósito (patrón de
+  // rename de `.claude/rules/permissions-policy.md`): los APK de TPV en la calle gatean
+  // sus botones con los nombres VIEJOS (`ShiftViewModel.kt` → hasPermission("shifts:create")).
+  // Sin el alias el server diría que sí y la app seguiría escondiendo el botón — la
+  // "Forma C" de la auditoría, donde gana el más estricto y el fix se vuelve invisible.
+  // Es seguro porque `shifts:create` y `shifts:close` YA NO GATEAN NINGUNA RUTA del
+  // backend (lo asegura un test); `shifts:update`/`shifts:delete`, que sí abren el
+  // back-office de turnos, NO entran en el alias y se quedan en MANAGER+.
+  'tpv-shifts:create': ['tpv-shifts:create', 'shifts:create', 'shifts:read'],
+  'tpv-shifts:close': ['tpv-shifts:close', 'shifts:close', 'shifts:read', 'payments:read', 'orders:read'],
+
   // Time Entries
   'tpv-time-entries:read': ['tpv-time-entries:read', 'teams:read'],
   'tpv-time-entries:write': ['tpv-time-entries:write', 'tpv-time-entries:read', 'teams:read'],
@@ -693,6 +719,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'teams:read',
     'tpv:read', // Can view TPV terminals (but not create/edit/command)
     // TPV-specific permissions
+    // Turno de la terminal (founder, 2026-08-16): abrir y cerrar EL TURNO DE LA CAJA es
+    // operar, no administrar. Sin esto la Home del POS deja Cobrar/Órdenes/Mesas apagados
+    // y no existe forma de abrirlo a distancia. `shifts:create/close` (back-office, para
+    // corregir turnos ajenos) SE QUEDAN en MANAGER+.
+    'tpv-shifts:create', // Abrir el turno de la terminal
+    'tpv-shifts:close', // Cerrar el turno y entregar el conteo de efectivo
     'tpv-tables:assign', // Can assign tables to orders
     'tpv-time-entries:write', // Can clock in/out, take breaks
     'tpv-payments:pay-later', // Can create pay-later orders
@@ -743,6 +775,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'commissions:view_own', // Can view own commission earnings
     'teams:read',
     // TPV-specific permissions
+    // Turno de la terminal (founder, 2026-08-16): sin esto el cajero no podía abrir su
+    // turno —y sin turno el POS no cobra— ni hacer su corte al entregar caja. El
+    // back-office de turnos (`shifts:create/close`) SE QUEDA en MANAGER+.
+    'tpv-shifts:create', // Abrir el turno de la terminal
+    'tpv-shifts:close', // Cerrar el turno y entregar el conteo de efectivo
     'tpv-tables:assign', // Can assign tables
     'tpv-time-entries:write', // Can clock in/out
     'tpv-products:read', // Can search products by barcode
@@ -985,6 +1022,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-orders:comp',
     'tpv-orders:void',
     'tpv-orders:discount',
+    // Turno de la terminal — abrir/cerrar el turno de la caja desde el POS.
+    // `shifts:*` NO expande a este namespace, por eso van explícitos (mismo motivo
+    // que el resto de los `tpv-*` de esta lista).
+    'tpv-shifts:create',
+    'tpv-shifts:close',
     'tpv-tables:assign',
     'tpv-tables:write',
     'tpv-tables:delete',
@@ -1096,6 +1138,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-orders:comp',
     'tpv-orders:void',
     'tpv-orders:discount',
+    // Turno de la terminal — abrir/cerrar el turno de la caja desde el POS.
+    // `shifts:*` NO expande a este namespace, por eso van explícitos (mismo motivo
+    // que el resto de los `tpv-*` de esta lista).
+    'tpv-shifts:create',
+    'tpv-shifts:close',
     'tpv-tables:assign',
     'tpv-tables:write',
     'tpv-tables:delete',

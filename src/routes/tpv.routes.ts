@@ -1301,7 +1301,12 @@ router.get(
  *       500:
  *         description: Internal server error
  */
-router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPermission('shifts:create'), shiftController.openShift)
+// 🔴 `tpv-shifts:create`, no `shifts:create`: abrir el turno de ESTA terminal es operar,
+// no administrar turnos ajenos desde el back-office. Con `shifts:create` el CASHIER y el
+// WAITER no podían abrirlo —y con turnos activos el POS deja Cobrar/Órdenes/Mesas
+// apagados—, así que un gerente tenía que venir físicamente. MANAGER+ no pierde nada:
+// `shifts:create` implica `tpv-shifts:create` (puente en PERMISSION_DEPENDENCIES).
+router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPermission('tpv-shifts:create'), shiftController.openShift)
 
 /**
  * @openapi
@@ -1443,10 +1448,16 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *       500:
  *         description: Internal server error
  */
+// 🔴 `tpv-shifts:close`, no `shifts:close`: el corte al entregar caja es del cajero.
+// Con `shifts:close` no podía hacerlo y el turno quedaba abierto — los cobros del
+// siguiente cajero caían sin turno asignado y se perdía el conteo físico, que es
+// justamente el dato para saber de quién es un faltante. Quién cerró queda auditado
+// en ActivityLog (SHIFT_CLOSED con `actorStaffId`). MANAGER+ no pierde nada:
+// `shifts:close` implica `tpv-shifts:close`.
 router.post(
   '/venues/:venueId/shifts/:shiftId/close',
   authenticateTokenMiddleware,
-  checkPermission('shifts:close'),
+  checkPermission('tpv-shifts:close'),
   shiftController.closeShift,
 )
 

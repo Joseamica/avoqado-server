@@ -221,10 +221,13 @@ function extractCatalog(): {
   const dependencyKeys = new Set<string>()
   const dependencies = new Map<string, string[]>()
   if (depsMatch) {
-    // Parse line-by-line: `  'key:name': ['val1', 'val2', ...],` (single-line entries).
-    for (const line of depsMatch[1].split('\n')) {
-      const m = line.match(/^\s*'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'\s*:\s*\[(.*?)\]/)
-      if (!m) continue
+    // Parse `'key:name': ['val1', 'val2', ...],` — the array may span SEVERAL lines
+    // (most entries in permissions.ts are multi-line, one dep per line with a comment).
+    // Parsing only single-line entries made ~40 real bridges invisible to the audit and
+    // produced false TPV_CLIENT_ONLY warnings for perms that DO have a bridge
+    // (`shifts:create` → `tpv-shifts:create`, 2026-08-17).
+    const entry = /^[ \t]*'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'\s*:\s*\[([\s\S]*?)\]/gm
+    for (const m of depsMatch[1].matchAll(entry)) {
       const key = m[1]
       const values = Array.from(m[2].matchAll(/'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'/g)).map(v => v[1])
       dependencyKeys.add(key)
