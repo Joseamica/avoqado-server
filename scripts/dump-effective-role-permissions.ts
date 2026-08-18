@@ -27,18 +27,10 @@
  * `estimates:create`, `orders:cancel-unpaid` y `tables:pay-any`, el modal empezó a
  * enseñar el código pelón y ningún test se enteró.
  */
-import { execFileSync } from 'child_process'
+import { createHash } from 'crypto'
 import { readFileSync } from 'fs'
 import { StaffRole } from '@prisma/client'
 import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../src/lib/permissions'
-
-function serverCommit(): string {
-  try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: `${__dirname}/..`, encoding: 'utf8' }).trim()
-  } catch {
-    return 'unknown'
-  }
-}
 
 /** Rutas que consumen los POS (Android, iOS, TPV). El dashboard web va aparte. */
 const ROUTE_FILES = ['mobile.routes.ts', 'tpv.routes.ts', 'pos-sync.routes.ts'] as const
@@ -62,12 +54,19 @@ for (const role of Object.values(StaffRole) as StaffRole[]) {
   roles[role] = { declared, effective, implicit: effective.filter(p => !declaredSet.has(p)) }
 }
 
+// 🔴 La huella es del CONTENIDO, nunca del commit de git. Un hash de HEAD marca
+// "desactualizado" cada vez que alguien toca cualquier otra cosa de este repo, y un
+// detector que grita en falso se aprende a ignorar — que es peor que no tenerlo.
+// Con la huella de contenido, el `--check` del cliente sólo se pone rojo cuando los
+// PERMISOS cambiaron de verdad.
+const payload = { roles, routePermissions }
+const digest = createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+
 console.log(
   JSON.stringify(
     {
-      generatedFrom: { repo: 'avoqado-server', commit: serverCommit(), fn: 'getEffectiveRolePermissions(role, null)' },
-      roles,
-      routePermissions,
+      generatedFrom: { repo: 'avoqado-server', fn: 'getEffectiveRolePermissions(role, null)', digest },
+      ...payload,
     },
     null,
     2,
