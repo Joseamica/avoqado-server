@@ -296,21 +296,32 @@ export async function getHistoricalSummaries(
   }
 
   // 3. Query aggregated data by period
+  //
+  // `total_products` is the ONLY thing that needs the order's lines. It used to
+  // be fetched with `LEFT JOIN "OrderItem"`, which fans the result out to one
+  // row per line and therefore multiplied `SUM(o.total)` by each order's line
+  // count — a real $931 day was reported as $2,809. The correlated subquery
+  // keeps `total_products` identical while leaving `SUM(o.total)` per ORDER,
+  // which is also the basis `calculatePreviousPeriodsBulk` compares against
+  // (it never had the join, so `salesChange` was comparing inflated vs clean).
   const periodsRaw = await prisma.$queryRaw<
     Array<{
       period_start: Date
       total_sales: Decimal
       total_orders: bigint
-      total_products: bigint
+      // SUM over a subquery returns `numeric`, which Prisma hands back as a
+      // Decimal — not the bigint that `SUM(oi.quantity)` used to produce.
+      // `Number(...)` handles both, but the annotation has to say what actually
+      // arrives or the next reader trusts it.
+      total_products: Decimal
     }>
   >`
     SELECT
       ${Prisma.raw(truncateExpr)} as period_start,
       COALESCE(SUM(o.total), 0) as total_sales,
       COALESCE(COUNT(DISTINCT o.id), 0) as total_orders,
-      COALESCE(SUM(oi.quantity), 0) as total_products
+      COALESCE(SUM((SELECT COALESCE(SUM(oi.quantity), 0) FROM "OrderItem" oi WHERE oi."orderId" = o.id)), 0) as total_products
     FROM "Order" o
-    LEFT JOIN "OrderItem" oi ON oi."orderId" = o.id
     WHERE o."venueId" = ${venueId}
       AND o."createdAt" >= ${startDate}
       AND o."createdAt" <= ${endDate}
