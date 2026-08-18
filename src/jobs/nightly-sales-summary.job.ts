@@ -18,7 +18,8 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard/sales-summary.dashboard.service'
 import emailService from '../services/email.service'
-import { NotificationType, StaffRole, VenueStatus } from '@prisma/client'
+import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
+import { isItemLevelDiscountSql, lineRevenueSql } from '../services/dashboard/lineRevenue'
 import { FRONTEND_URL } from '../config/env'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -419,7 +420,10 @@ async function getCategoryBreakdown(
     SELECT
       COALESCE(c.name, 'Sin categorizar') as name,
       COALESCE(SUM(oi.quantity), 0) as items_sold,
-      COALESCE(SUM(oi.quantity * oi."unitPrice"), 0) as net_sales
+      -- This column, its SQL alias and the TS return type all say NET, but it
+      -- used to sum unitPrice * quantity — the LIST price — so a category with
+      -- a combo was overstated in the owner's nightly email.
+      COALESCE(SUM(${Prisma.raw(lineRevenueSql())}), 0) as net_sales
     FROM "OrderItem" oi
     JOIN "Order" o ON oi."orderId" = o.id
     LEFT JOIN "Product" p ON oi."productId" = p.id
@@ -442,9 +446,79 @@ async function getCategoryBreakdown(
 }
 
 /**
+ * Orders whose giveaways exceed their own subtotal — the ones `GREATEST(…, 0)`
+ * clamps in `getOrderSourcesBreakdown`.
+ *
+ * A clamp that corrects in silence is how a damaged row stays damaged forever:
+ * the email looks right, so nobody ever learns the order needs fixing. This is
+ * the cheap second pass that names them.
+ *
+ * Diagnostics only — it must NEVER break the owner's nightly email, so a failure
+ * here is swallowed after being logged. The email is the product; this is not.
+ */
+async function warnOnClampedOrders(venueId: string, startDate: Date, endDate: Date): Promise<void> {
+  const SAMPLE_LIMIT = 20
+
+  try {
+    const damaged = await prisma.$queryRaw<
+      Array<{ id: string; orderNumber: string; subtotal: unknown; discounts: unknown; net_sales: unknown }>
+    >`
+      SELECT
+        o.id,
+        o."orderNumber",
+        o.subtotal,
+        o."discountAmount" + (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
+          WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())}) as discounts,
+        o.subtotal - o."discountAmount"
+          - (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
+             WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())}) as net_sales
+      FROM "Order" o
+      WHERE o."venueId" = ${venueId}
+        AND o."createdAt" >= ${startDate}
+        AND o."createdAt" <= ${endDate}
+        AND o.status NOT IN ('CANCELLED')
+        AND o."paymentStatus" NOT IN ('REFUNDED')
+        AND o.subtotal - o."discountAmount"
+            - (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
+               WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())}) < 0
+      ORDER BY net_sales ASC
+      LIMIT ${SAMPLE_LIMIT + 1}
+    `
+
+    if (damaged.length === 0) return
+
+    // Data damage, not money at risk — the sale was already clamped to 0, so
+    // nothing is being over- or under-paid. Someone just has to go fix the row.
+    const base = { venueId, clampedOrders: damaged.length > SAMPLE_LIMIT ? `${SAMPLE_LIMIT}+` : damaged.length }
+
+    if (damaged.length > SAMPLE_LIMIT) {
+      logger.warn('⚠️ Órdenes con descuento mayor que su subtotal: net sales negativo, se reportó 0 (data dañada)', {
+        ...base,
+        note: `Más de ${SAMPLE_LIMIT} órdenes afectadas; se omite el detalle`,
+      })
+      return
+    }
+
+    for (const order of damaged) {
+      logger.warn('⚠️ Orden con descuento mayor que su subtotal: net sales negativo, se reportó 0 (data dañada)', {
+        ...base,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        subtotal: Number(order.subtotal),
+        discounts: Number(order.discounts),
+        netSalesBeforeClamp: Number(order.net_sales),
+      })
+    }
+  } catch (error) {
+    // Never let an observability query take down the nightly email.
+    logger.warn('⚠️ No se pudo revisar órdenes con net sales negativo', { venueId, error })
+  }
+}
+
+/**
  * Get order sources breakdown (POS, QR, etc.)
  */
-async function getOrderSourcesBreakdown(
+export async function getOrderSourcesBreakdown(
   venueId: string,
   startDate: Date,
   endDate: Date,
@@ -453,7 +527,27 @@ async function getOrderSourcesBreakdown(
     SELECT
       COALESCE(o.source, 'TPV') as source,
       COUNT(*)::int as orders,
-      COALESCE(SUM(o.subtotal), 0) as net_sales
+      -- Same defect as getCategoryBreakdown above, same email, same "netSales"
+      -- label: this summed Order.subtotal, which is GROSS of every giveaway.
+      -- A 100%-cortesía order that charged 0 was reported as a full sale.
+      --
+      -- subtotal already includes the modifiers, so the fix is to take the two
+      -- discounts off it. The item-level term subtracts ONLY the line discounts
+      -- that are not already inside Order.discountAmount (a "Cobrar" cortesía
+      -- books its giveaway in BOTH places) — the same rule the discount report
+      -- uses, hence the shared predicate. Per-ORDER subqueries, never a JOIN:
+      -- joining OrderItem here would fan out and multiply the sale by its line
+      -- count, which is exactly the bug fixed in historical-reports.service.
+      -- GREATEST clamps a single order at zero. 3 orders in live data carry a
+      -- discount larger than their own subtotal (one has subtotal 0 with a 300
+      -- discount) — real data damage, but an order that sold NOTHING must read
+      -- as 0 in the owner's email, never as a negative that quietly cancels out
+      -- a real sale somewhere else in the same bucket.
+      COALESCE(SUM(GREATEST(
+        o.subtotal - o."discountAmount"
+        - (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
+           WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())})
+      , 0)), 0) as net_sales
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
       AND o."createdAt" >= ${startDate}
@@ -463,6 +557,9 @@ async function getOrderSourcesBreakdown(
     GROUP BY o.source
     ORDER BY net_sales DESC
   `
+
+  // The clamp above may have silently zeroed a damaged order. Name them.
+  await warnOnClampedOrders(venueId, startDate, endDate)
 
   return result.map(r => ({
     source: formatOrderSource(r.source),
