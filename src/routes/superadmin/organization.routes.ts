@@ -63,6 +63,20 @@ const updateOrganizationSchema = z.object({
   }),
 })
 
+// Toggle GRANDFATHERED for the whole organization (inherited by every venue, present and future).
+// Spanish messages: the validation middleware surfaces them straight to the user.
+const setOrganizationGrandfatheredSchema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('El ID de la organización no es válido'),
+  }),
+  body: z.object({
+    grandfathered: z.boolean({
+      required_error: 'El campo "grandfathered" es requerido',
+      invalid_type_error: 'El campo "grandfathered" debe ser un booleano (true o false)',
+    }),
+  }),
+})
+
 const enableModuleSchema = z.object({
   params: z.object({
     organizationId: z.string().cuid('Invalid organization ID'),
@@ -175,6 +189,19 @@ router.get('/:organizationId', validateRequest(organizationIdSchema), organizati
  * @access  Superadmin only
  */
 router.patch('/:organizationId', validateRequest(updateOrganizationSchema), organizationController.updateOrganization)
+
+/**
+ * @route   POST /api/v1/dashboard/superadmin/organizations/:organizationId/plan/grandfathered
+ * @desc    Toggle GRANDFATHERED for the whole organization — exempts every venue it has now AND
+ *          every venue it opens later from the Free seat cap and all feature paywalls. The
+ *          org-level twin of POST /venues/:venueId/plan/grandfathered.
+ * @access  Superadmin only
+ */
+router.post(
+  '/:organizationId/plan/grandfathered',
+  validateRequest(setOrganizationGrandfatheredSchema),
+  organizationController.setOrganizationPlanGrandfathered,
+)
 
 /**
  * @route   DELETE /api/v1/dashboard/superadmin/organizations/:organizationId

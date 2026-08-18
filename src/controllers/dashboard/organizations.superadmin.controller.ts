@@ -3,6 +3,7 @@ import { ModuleScope } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { moduleService, ModuleCode } from '../../services/modules/module.service'
+import * as superadminService from '../../services/dashboard/superadmin.service'
 
 /**
  * Organizations Superadmin Controller
@@ -48,6 +49,10 @@ export async function getAllOrganizations(req: Request, res: Response, next: Nex
       email: org.email,
       phone: org.phone,
       type: org.type,
+      // Org-level grandfather flag — the dashboard shows it as a badge and flips it from the
+      // row menu. Omitting it here would leave the UI unable to tell an exempt org from a
+      // capped one, so the toggle would always offer to turn it ON.
+      seatCapExempt: org.seatCapExempt,
       createdAt: org.createdAt,
       updatedAt: org.updatedAt,
       venueCount: org._count.venues,
@@ -196,6 +201,49 @@ export async function updateOrganization(req: Request, res: Response, next: Next
     return res.status(200).json({ organization })
   } catch (error) {
     logger.error('[ORGANIZATIONS] Error updating organization', { error })
+    next(error)
+  }
+}
+
+/**
+ * POST /organizations/:organizationId/plan/grandfathered
+ *
+ * Toggle GRANDFATHERED status for the WHOLE organization — every venue it has now, and every
+ * venue it opens later, becomes exempt from BOTH the Free seat cap AND every feature paywall.
+ * Body `{ grandfathered: boolean }` validated by Zod in routes.
+ *
+ * Use this (instead of flagging venues one by one) for a legacy or white-label client whose
+ * store count keeps growing: the per-venue flag can't reach a store that doesn't exist yet, so
+ * without this each new store is born capped and blocks the third staff invite.
+ */
+export async function setOrganizationPlanGrandfathered(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { organizationId } = req.params
+    const { grandfathered } = req.body // Validated by Zod: boolean
+
+    const result = await superadminService.setOrganizationGrandfathered(organizationId, grandfathered)
+
+    logger.info(`[ORGANIZATIONS] Grandfathered set to ${grandfathered} for organization ${result.organizationName}`, {
+      organizationId,
+      grandfathered,
+      inheritedByVenues: result.inheritedByVenues,
+      userId: (req as any).authContext?.userId,
+    })
+
+    return res.status(200).json({
+      success: true,
+      data: result,
+      message: grandfathered
+        ? `Organización marcada como grandfathered: ${result.inheritedByVenues} sucursal(es) quedan exentas del límite de usuarios y de los candados de plan, y las nuevas lo heredarán automáticamente.`
+        : `Se retiró el grandfathered de la organización: sus ${result.inheritedByVenues} sucursal(es) vuelven a regirse por su propio plan.`,
+    })
+  } catch (error) {
+    logger.error('[ORGANIZATIONS] Error setting organization grandfathered status', {
+      organizationId: req.params.organizationId,
+      grandfathered: req.body?.grandfathered,
+      error,
+      userId: (req as any).authContext?.userId,
+    })
     next(error)
   }
 }

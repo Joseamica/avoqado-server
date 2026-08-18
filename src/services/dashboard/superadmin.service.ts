@@ -3,6 +3,7 @@ import prisma from '@/utils/prismaClient'
 import { VenueStatus } from '@prisma/client'
 import { PRODUCTION_VENUE_STATUSES, OPERATIONAL_VENUE_STATUSES, DEMO_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
+import { NotFoundError } from '@/errors/AppError'
 
 // ===== PRODUCTION VENUE FILTER =====
 // Excludes demo/trial venues (LIVE_DEMO, TRIAL) from analytics to prevent skewed metrics
@@ -853,6 +854,64 @@ export async function setVenueGrandfathered(venueId: string, value: boolean) {
 
   logger.info(`Venue ${venueId} grandfathered set to ${value}`)
   return getPlanState(venueId)
+}
+
+/**
+ * Toggle GRANDFATHERED status for an ENTIRE ORGANIZATION (`Organization.seatCapExempt`) — the
+ * flag every one of its venues inherits, including the stores it has not opened yet.
+ *
+ * This is the org-level twin of {@link setVenueGrandfathered} and exists because the per-venue
+ * flag cannot reach a venue that does not exist. The rollout migration backfilled the venues
+ * alive at the time, so a grandfathered client's later stores were each born on the Free tier
+ * and blocked the third staff invite — discovered one store at a time, always with the new
+ * employee waiting (PlayTelecom, 6 stores). Set it here once and the problem stops recurring.
+ *
+ * Does NOT touch the venues' own `seatCapExempt`: the two levels stay independent, so turning
+ * the org flag back off restores exactly the per-venue state that was there before.
+ *
+ * Audits one ActivityLog row PER AFFECTED VENUE (stamped with that venue's id, per the
+ * org-level-event rule) so each venue's owner audit screen shows why its plan changed — a row
+ * with a null venueId would be invisible on the screen that matters.
+ */
+export async function setOrganizationGrandfathered(organizationId: string, value: boolean) {
+  const organization = await prisma.organization.findUnique({
+    where: { id: organizationId },
+    select: { id: true, name: true, seatCapExempt: true },
+  })
+  if (!organization) throw new NotFoundError(`Organización ${organizationId} no encontrada`)
+
+  const venues = await prisma.venue.findMany({ where: { organizationId }, select: { id: true } })
+
+  const updated = await prisma.organization.update({
+    where: { id: organizationId },
+    data: { seatCapExempt: value },
+    select: { id: true, name: true, seatCapExempt: true },
+  })
+
+  // Fire-and-forget, one row per venue so the change is visible where owners actually look.
+  for (const venue of venues) {
+    logAction({
+      venueId: venue.id,
+      action: 'ORGANIZATION_GRANDFATHERED_SET',
+      entity: 'Organization',
+      entityId: organizationId,
+      data: { grandfathered: value, organizationId, organizationName: updated.name, inheritedByVenues: venues.length },
+    })
+  }
+
+  logger.info(`Organization ${organizationId} grandfathered set to ${value}`, {
+    organizationId,
+    grandfathered: value,
+    inheritedByVenues: venues.length,
+  })
+
+  return {
+    organizationId: updated.id,
+    organizationName: updated.name,
+    grandfathered: updated.seatCapExempt,
+    /** Venues that inherit the flag right now. Future venues inherit it automatically. */
+    inheritedByVenues: venues.length,
+  }
 }
 
 /**
