@@ -118,7 +118,7 @@ export async function captureCode(req: Request, res: Response, next: NextFunctio
     if (
       e &&
       typeof e.message === 'string' &&
-      ['PROGRAM_INACTIVE', 'CODE_NOT_FOUND', 'SELF_REFERRAL', 'EXISTING_CUSTOMER'].includes(e.message)
+      ['PROGRAM_INACTIVE', 'CODE_NOT_FOUND', 'SELF_REFERRAL', 'EXISTING_CUSTOMER', 'CUSTOMER_NOT_FOUND'].includes(e.message)
     ) {
       // `reason` stays the machine discriminator every client switches on;
       // `message` is added (never replacing it) so the six clients stop

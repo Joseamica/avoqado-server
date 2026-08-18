@@ -334,7 +334,15 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       payment: result,
     })
   } catch (error) {
-    logger.error('Error in payCash controller:', error)
+    // Un rechazo de NEGOCIO (4xx: "ya está pagada", saldo, permisos) no es una falla del server:
+    // logueado como `error:` ensuciaba el barrido de errores del log (/full-testing 2026-08-18).
+    // El errorHandler ya lo registra con su nivel por status; aquí sólo se marca el 5xx real.
+    const status = (error as any)?.statusCode
+    if (typeof status === 'number' && status < 500) {
+      logger.warn(`payCash rechazado (${status}): ${(error as Error)?.message}`)
+    } else {
+      logger.error('Error in payCash controller:', error)
+    }
     next(error)
   }
 }

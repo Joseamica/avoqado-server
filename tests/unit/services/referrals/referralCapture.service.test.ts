@@ -176,6 +176,27 @@ describe('referralCapture.service', () => {
   })
 
   describe('captureReferral', () => {
+    it('rechaza con CUSTOMER_NOT_FOUND (no revienta por FK) si el cliente referido no existe en el venue', async () => {
+      // /full-testing 2026-08-18: un newCustomerId inventado llegaba a `referral.create` y
+      // reventaba con 500 + ruta interna del server (Referral_referredCustomerId_fkey), y lo
+      // alcanzaba hasta un VIEWER. Ahora se valida ANTES de crear: razón de negocio, 4xx.
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ active: true, newCustomerDiscountPercent: 10 })
+      mockedPrisma.customer.findFirst
+        .mockResolvedValueOnce({ id: 'cust_ref', firstName: 'Jose', lastName: 'P' }) // el que refiere existe
+        .mockResolvedValueOnce(null) // el referido NO existe en este venue
+      mockedPrisma.order.count.mockResolvedValue(0)
+
+      await expect(
+        captureReferral({
+          venueId: 'venue_1',
+          referralCode: 'TESTMF-JOSE2K7',
+          newCustomerId: 'cust_inventado',
+          capturedByStaffVenueId: 'sv_1',
+        }),
+      ).rejects.toThrow('CUSTOMER_NOT_FOUND')
+      expect(mockedPrisma.referral.create).not.toHaveBeenCalled()
+    })
+
     it('creates Referral with PENDING status', async () => {
       mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ active: true, newCustomerDiscountPercent: 10 })
       mockedPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_ref', firstName: 'Jose', lastName: 'P' })

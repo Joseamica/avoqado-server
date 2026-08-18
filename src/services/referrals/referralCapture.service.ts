@@ -8,7 +8,7 @@ import { Referral } from '@prisma/client'
  * (e.g., `EXISTING_CUSTOMER` triggers the "Forzar referido" manager
  * override flow). Free-form messages would be impossible to switch on.
  */
-export type ValidationReason = 'PROGRAM_INACTIVE' | 'CODE_NOT_FOUND' | 'SELF_REFERRAL' | 'EXISTING_CUSTOMER'
+export type ValidationReason = 'PROGRAM_INACTIVE' | 'CODE_NOT_FOUND' | 'SELF_REFERRAL' | 'EXISTING_CUSTOMER' | 'CUSTOMER_NOT_FOUND'
 
 /**
  * Spanish copy for each machine reason. The enum stays the discriminator the
@@ -21,6 +21,7 @@ export const VALIDATION_REASON_MESSAGE_ES: Record<ValidationReason, string> = {
   CODE_NOT_FOUND: 'No encontramos ese código de referido en esta sucursal.',
   SELF_REFERRAL: 'Un cliente no puede referirse a sí mismo.',
   EXISTING_CUSTOMER: 'Este cliente ya tiene una compra pagada aquí, así que no cuenta como referido nuevo.',
+  CUSTOMER_NOT_FOUND: 'No encontramos al cliente referido en esta sucursal.',
 }
 
 export interface ValidationResult {
@@ -211,6 +212,18 @@ export async function captureReferral(input: CaptureInput): Promise<Referral> {
   })
   if (!validation.valid) {
     throw new Error(validation.reason)
+  }
+  // El referido tiene que EXISTIR y ser de ESTE venue antes de escribir la fila. Sin
+  // esto, un id inventado (o de otro negocio) llegaba al INSERT y reventaba con 500 +
+  // ruta interna del server por la FK `Referral_referredCustomerId_fkey` — y lo
+  // alcanzaba hasta un VIEWER (hallazgo de /full-testing 2026-08-18). Razón de
+  // negocio, misma familia que las demás: el controller la mapea a 4xx.
+  const referred = await prisma.customer.findFirst({
+    where: { id: input.newCustomerId, venueId: input.venueId },
+    select: { id: true },
+  })
+  if (!referred) {
+    throw new Error('CUSTOMER_NOT_FOUND')
   }
   const capturedByStaffVenueId = await resolveStaffVenueId(input.venueId, input.capturedByStaffVenueId)
   return prisma.referral.create({

@@ -822,6 +822,29 @@ describe('order.mobile.service', () => {
 
 // ── Idempotency via externalId (offline-retry safety, mirrors TPV createOrder) ──
 
+describe('createOrderWithItems — enums del body validados ANTES de tocar la DB (/full-testing 2026-08-18)', () => {
+  // Un `source`/`orderType` fuera del enum llegaba a `tx.order.create()` y Prisma reventaba con 500
+  // + ruta absoluta del servicio en el body. Es un dato inválido del cliente: 400 en español.
+  it('source fuera del enum → BadRequestError, sin llamar a order.create', async () => {
+    await expect(
+      createOrderWithItems('venue-1', { staffId: 'staff-1', items: [{ productId: 'prod-1', quantity: 1 }], source: 'WHATEVER' } as any),
+    ).rejects.toThrow(/origen de la orden/i)
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('orderType fuera del enum → BadRequestError, sin llamar a order.create', async () => {
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        items: [{ productId: 'prod-1', quantity: 1 }],
+        source: 'AVOQADO_ANDROID',
+        orderType: 'NOPE',
+      } as any),
+    ).rejects.toThrow(/tipo de orden/i)
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+})
+
 describe('createOrderWithItems idempotency (externalId)', () => {
   beforeEach(() => {
     jest.clearAllMocks()

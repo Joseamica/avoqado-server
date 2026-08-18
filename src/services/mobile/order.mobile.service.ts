@@ -7,7 +7,7 @@
  * - Order Payment: Create order first, then pay via TPV
  */
 
-import { Prisma } from '@prisma/client'
+import { OrderSource, OrderType, Prisma } from '@prisma/client'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
@@ -705,6 +705,15 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   logger.info(
     `📱 [ORDER.MOBILE] Creating order with ${input.items.length} items | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | source=${input.source || 'AVOQADO_IOS'}`,
   )
+  // Enums del body validados ANTES de tocar la DB: un `source`/`orderType` inventado llegaba a
+  // `tx.order.create()` y Prisma reventaba con 500 + ruta absoluta del servicio en el body
+  // (hallazgo de /full-testing 2026-08-18). Es un dato inválido del cliente → 400 en español.
+  if (input.source && !Object.values(OrderSource).includes(input.source as OrderSource)) {
+    throw new BadRequestError(`Origen de la orden inválido: ${String(input.source)}`)
+  }
+  if (input.orderType && !Object.values(OrderType).includes(input.orderType as OrderType)) {
+    throw new BadRequestError(`Tipo de orden inválido: ${String(input.orderType)}`)
+  }
 
   // Idempotency short-circuit BEFORE any validation/creation work: an offline
   // client retrying after a lost response must get the original order back.
