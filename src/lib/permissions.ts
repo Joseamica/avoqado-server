@@ -1387,7 +1387,20 @@ export const CRITICAL_PERMISSIONS = ['settings:manage', 'settings:read', 'teams:
  * @returns the resolved permissions that API responses and authorization checks
  * should expose for this role at the selected venue
  */
-export function getEffectiveRolePermissions(role: StaffRole, customPermissions: string[] | null | undefined): string[] {
+export function getEffectiveRolePermissions(
+  role: StaffRole,
+  customPermissions: string[] | null | undefined,
+  /**
+   * Lo que el venue QUITA (`VenueRolePermission.deniedPermissions`).
+   *
+   * Va aparte de `customPermissions` porque un solo campo no puede decir dos cosas:
+   * `customPermissions` es ADITIVO a propósito —así un venue que personalizó hace meses
+   * sigue recibiendo los permisos que la plataforma agregue después (lo defiende el test
+   * "keeps new OWNER defaults…", de a3625d37)—, y por eso mismo con él solo era imposible
+   * QUITAR. El dashboard prometía reemplazo y el backend hacía suma; quitar no servía.
+   */
+  deniedPermissions?: string[] | null,
+): string[] {
   // SUPERADMIN EXCEPTION: Always use wildcard, never custom permissions
   // This prevents accidental lockout if SUPERADMIN permissions are customized
   if (role === StaffRole.SUPERADMIN) {
@@ -1420,15 +1433,59 @@ export function getEffectiveRolePermissions(role: StaffRole, customPermissions: 
   // RESOLVE IMPLICIT DEPENDENCIES
   // Expand base permissions to include their implicit dependencies
   // Example: 'orders:read' automatically includes 'products:read', 'payments:read'
-  return Array.from(resolvePermissions(basePermissions))
+  const resuelto = resolvePermissions(basePermissions)
+  if (!deniedPermissions?.length) return Array.from(resuelto)
+
+  // RESTA DE EXCLUSIONES — el orden importa y es una decisión, no un detalle.
+  //
+  //   efectivos = resolver( resolver(base) − excluidos )
+  //
+  // Se resuelve ANTES de restar para que la exclusión muerda contra los comodines: un
+  // `orders:*` en los defaults se expande primero, así que excluir `orders:create` sirve.
+  //
+  // Y se vuelve a resolver DESPUÉS a propósito: si un permiso que el rol CONSERVA implica
+  // al excluido, el excluido vuelve — porque sin él el otro no funciona (`orders:create`
+  // vuelve mientras el rol tenga `tpv-payments:pay-later`, y no es un bug: sin poder
+  // crear la orden no se puede cobrar después). Decisión del founder (2026-08-18): lo
+  // incluido no se quita por separado, pero el dashboard lo MUESTRA como "viene incluido
+  // en X" en vez de fingir que se quitó. Para quitarlo de verdad hay que quitar también
+  // el que lo implica.
+  const negados = new Set(deniedPermissions)
+
+  // 🔴 Los COMODINES hay que abrirlos, o la exclusión no muerde. Un ADMIN no tiene
+  // `orders:print` en su lista: tiene `orders:*`. Restar la cadena exacta quitaría algo
+  // que nunca estuvo, el comodín sobreviviría y `hasPermission` lo concedería igual — la
+  // exclusión sería un placebo. (Lo encontré porque el test que creía cubrir esto pasaba
+  // también SIN el arreglo, o sea que no probaba nada.)
+  //
+  // Se abre SÓLO el recurso que alguna exclusión toca. Los demás comodines se quedan
+  // compactos a propósito: un `scale:*` intacto sigue concediendo las acciones que la
+  // plataforma agregue mañana bajo `scale:`, que es la compatibilidad hacia adelante que
+  // defiende el test de a3625d37. El recurso recortado pierde esa propiedad, y no hay
+  // manera de evitarlo: "todo orders MENOS imprimir" no se puede escribir con un comodín.
+  const recursosRecortados = new Set([...negados].map(p => p.split(':')[0]))
+  const abiertos = Array.from(resuelto).flatMap(p => {
+    const [recurso, accion] = p.split(':')
+    const esComodinTocado = accion === '*' && (recurso === '*' || recursosRecortados.has(recurso))
+    return esComodinTocado ? expandWildcards([p]) : [p]
+  })
+
+  const sobreviven = abiertos.filter(p => !negados.has(p))
+  return Array.from(resolvePermissions(sobreviven))
 }
 
 /**
  * Check one permission against the same effective permission list returned to
  * clients during authentication.
  */
-export function hasPermission(role: StaffRole, customPermissions: string[] | null | undefined, requiredPermission: string): boolean {
-  const allPermissions = getEffectiveRolePermissions(role, customPermissions)
+export function hasPermission(
+  role: StaffRole,
+  customPermissions: string[] | null | undefined,
+  requiredPermission: string,
+  /** Ver `getEffectiveRolePermissions`: lo que el venue QUITA, aparte de lo que agrega. */
+  deniedPermissions?: string[] | null,
+): boolean {
+  const allPermissions = getEffectiveRolePermissions(role, customPermissions, deniedPermissions)
 
   // Check for wildcard (all permissions)
   if (allPermissions.includes('*:*')) return true

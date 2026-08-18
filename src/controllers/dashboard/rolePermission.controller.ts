@@ -64,7 +64,7 @@ export async function getRolePermissions(req: Request, res: Response, next: Next
 export async function updateRolePermissions(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, role } = req.params
-    const { permissions } = req.body
+    const { permissions, deniedPermissions } = req.body
     const modifiedById = req.authContext?.userId
     // Use the role RESOLVED for :venueId by checkPermission('settings:manage'),
     // NOT the raw JWT role — the JWT role may belong to a different venue, which
@@ -91,12 +91,21 @@ export async function updateRolePermissions(req: Request, res: Response, next: N
       return
     }
 
+    // `deniedPermissions` es OPCIONAL a propósito: un cliente viejo que no lo manda
+    // sigue funcionando igual que antes (sin exclusiones) en vez de romperse — regla
+    // del workspace: los campos nuevos son opcionales con default.
+    if (deniedPermissions !== undefined && !Array.isArray(deniedPermissions)) {
+      res.status(400).json({ error: 'deniedPermissions must be an array when provided' })
+      return
+    }
+
     const result = await rolePermissionService.updateRolePermissions(
       venueId,
       role as StaffRole,
       permissions,
       modifiedById,
       modifierRole as StaffRole,
+      (deniedPermissions as string[] | undefined) ?? [],
     )
 
     logger.info(`Role permissions updated`, {

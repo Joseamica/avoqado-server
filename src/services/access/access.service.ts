@@ -13,7 +13,7 @@
  */
 import { StaffRole, OrgRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { DEFAULT_PERMISSIONS, resolvePermissions } from '@/lib/permissions'
+import { getEffectiveRolePermissions, resolvePermissions } from '@/lib/permissions'
 import { getEffectivePermissions } from '@/lib/resolveEffectivePermissions'
 import logger from '@/config/logger'
 import { getFeatureMetadataForVenue, FeatureMetadata } from '@/services/access/feature-metadata.service'
@@ -317,6 +317,7 @@ export async function getUserAccess(
       select: {
         role: true,
         permissions: true,
+        deniedPermissions: true,
       },
     }),
 
@@ -375,21 +376,14 @@ export async function getUserAccess(
     // Permission set assigned: use its permissions directly (bypass role-based resolution)
     basePermissions = getEffectivePermissions(staffVenueData, [])
   } else {
-    // No permission set: use existing role-based resolution
+    // 🔴 Aquí vivía una COPIA de la lógica de `getEffectiveRolePermissions` (merge vs
+    // override + resolución de dependencias). Dos implementaciones de la MISMA regla es
+    // exactamente cómo se separan el camino en línea y el offline: éste es el que usa el
+    // replay de intents, así que cualquier divergencia significa "la acción pasa con
+    // internet y se rechaza sin internet" — el bug que veníamos cerrando todo el día.
+    // Ahora llama a la función única, exclusiones incluidas.
     const customPerms = rolePermissions.find(rp => rp.role === role)
-    const customPermissions = customPerms?.permissions || null
-
-    const defaultPerms = DEFAULT_PERMISSIONS[role] || []
-
-    // OVERRIDE MODE for wildcard roles (OWNER, ADMIN)
-    const hasWildcardDefaults = defaultPerms.includes('*:*')
-    const hasCustomPermissions = customPermissions && customPermissions.length > 0
-
-    if (hasWildcardDefaults && hasCustomPermissions) {
-      basePermissions = customPermissions
-    } else {
-      basePermissions = [...defaultPerms, ...(customPermissions || [])]
-    }
+    basePermissions = getEffectiveRolePermissions(role, customPerms?.permissions ?? null, customPerms?.deniedPermissions ?? null)
   }
 
   // Resolve dependencies

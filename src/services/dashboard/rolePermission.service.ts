@@ -110,6 +110,13 @@ export async function updateRolePermissions(
   permissions: string[],
   modifiedById: string,
   modifierRole: StaffRole,
+  /**
+   * Lo que este venue QUITA. Va aparte de `permissions` porque ese campo es ADITIVO a
+   * propósito —así un venue que personalizó hace meses sigue recibiendo los permisos que
+   * la plataforma agregue después—, y con él solo era IMPOSIBLE quitar: el dashboard
+   * prometía reemplazo y el backend hacía suma. Ver `getEffectiveRolePermissions`.
+   */
+  deniedPermissions: string[] = [],
 ) {
   // 1. Verify venue exists
   const venue = await prisma.venue.findUnique({
@@ -286,10 +293,12 @@ export async function updateRolePermissions(
       venueId,
       role,
       permissions,
+      deniedPermissions,
       modifiedBy: modifiedById,
     },
     update: {
       permissions,
+      deniedPermissions,
       modifiedBy: modifiedById,
     },
     include: {

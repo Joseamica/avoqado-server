@@ -56,6 +56,14 @@ jest.mock('@/config/logger', () => ({
   },
 }))
 
+/**
+ * NOTA sobre el 4º argumento `null` en las aserciones de `hasPermission`:
+ * desde 2026-08-18 la firma es `(role, custom, required, denied)`. `denied` sale de
+ * `VenueRolePermission.deniedPermissions` — el campo que hace posible QUITARLE un permiso
+ * a un rol, cosa que antes era imposible: `permissions` es ADITIVO a propósito (para que
+ * un venue que personalizó hace meses siga recibiendo lo nuevo), así que con un solo campo
+ * el dashboard prometía reemplazo y el backend hacía suma. Ver `getEffectiveRolePermissions`.
+ */
 describe('checkPermission Middleware', () => {
   let mockReq: Partial<Request>
   let mockRes: Partial<Response>
@@ -167,7 +175,7 @@ describe('checkPermission Middleware', () => {
 
       await middleware(mockReq as Request, mockRes as Response, mockNext)
 
-      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, null, 'menu:read')
+      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, null, 'menu:read', null)
       expect(mockNext).toHaveBeenCalledWith()
     })
 
@@ -198,7 +206,7 @@ describe('checkPermission Middleware', () => {
 
       await middleware(mockReq as Request, mockRes as Response, mockNext)
 
-      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, customPerms, 'custom:read')
+      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, customPerms, 'custom:read', null)
     })
   })
 
@@ -221,7 +229,7 @@ describe('checkPermission Middleware', () => {
         },
         select: { role: true, active: true, permissionSetId: true, permissionSet: true },
       })
-      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.ADMIN, null, 'menu:read')
+      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.ADMIN, null, 'menu:read', null)
     })
 
     it('should allow org OWNER fallback when no direct StaffVenue exists', async () => {
@@ -238,7 +246,7 @@ describe('checkPermission Middleware', () => {
 
       await middleware(mockReq as Request, mockRes as Response, mockNext)
 
-      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.OWNER, null, 'menu:read')
+      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.OWNER, null, 'menu:read', null)
       expect(mockNext).toHaveBeenCalledWith()
     })
 
@@ -314,7 +322,7 @@ describe('checkPermission Middleware', () => {
         await middleware(mockReq as Request, mockRes as Response, mockNext)
 
         // venue_123 comes from authContext.venueId in beforeEach
-        expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, null, 'menu:read')
+        expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, null, 'menu:read', null)
       })
 
       it('SECURITY: client cannot grant itself a role by sending an arbitrary x-venue-id', async () => {
@@ -343,7 +351,7 @@ describe('checkPermission Middleware', () => {
         await middleware(mockReq as Request, mockRes as Response, mockNext)
 
         // Falls back to JWT venue_123 → uses token role MANAGER directly
-        expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, null, 'menu:read')
+        expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, null, 'menu:read', null)
       })
     })
   })

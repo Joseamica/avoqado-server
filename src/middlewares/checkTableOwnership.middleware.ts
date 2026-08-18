@@ -75,10 +75,11 @@ export async function staffCanManageAllTables(
 
   const venueRolePermission = await prisma.venueRolePermission.findUnique({
     where: { venueId_role: { venueId, role: userRole } },
-    select: { permissions: true },
+    select: { permissions: true, deniedPermissions: true },
   })
   const customPermissions = venueRolePermission ? (venueRolePermission.permissions as string[]) : null
-  return overridePermissions.some(perm => hasPermission(userRole, customPermissions, perm))
+  const deniedPermissions = venueRolePermission ? ((venueRolePermission.deniedPermissions as string[]) ?? null) : null
+  return overridePermissions.some(perm => hasPermission(userRole, customPermissions, perm, deniedPermissions))
 }
 
 /** ¿El venue tiene encendida la regla de propiedad de mesa? */
@@ -157,9 +158,7 @@ export const checkTableOwnership = (
       const foreign = owners.find(o => o.servedById && o.servedById !== authContext.userId)
       if (!foreign) return next()
 
-      if (
-        await staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role, overridePermissions, req)
-      ) {
+      if (await staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role, overridePermissions, req)) {
         logger.debug(`checkTableOwnership: override [${overridePermissions.join(', ')}] para ${authContext.userId} en venue ${venueId}`)
         return next()
       }

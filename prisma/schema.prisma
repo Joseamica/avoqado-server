@@ -1252,7 +1252,21 @@ model VenueRolePermission {
   venueId     String
   venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
   role        StaffRole
+  /// Lo que este venue AGREGA sobre los permisos de fábrica del rol. Es aditivo a
+  /// propósito: así, cuando la plataforma le suma permisos nuevos a un rol, los venues
+  /// que ya habían personalizado también los reciben en vez de quedarse congelados en la
+  /// lista del día que la guardaron (ver el test "keeps new OWNER defaults…", a3625d37).
   permissions String[] // Custom permissions array: ["menu:read", "orders:create", ...]
+  /// Lo que este venue QUITA. Va aparte de `permissions` porque un solo campo no puede
+  /// decir las dos cosas: si la lista guardada fuera "todo lo que el rol tiene", quitar
+  /// funcionaría pero el venue dejaría de recibir los permisos nuevos. Con el campo
+  /// separado funcionan las dos.
+  ///
+  /// Se resta ANTES de expandir dependencias, no después: si un permiso que el rol
+  /// conserva IMPLICA al excluido, el excluido vuelve — y el dashboard lo muestra como
+  /// "viene incluido en X" en vez de mentir. Decisión del founder (2026-08-18): lo
+  /// incluido no se quita por separado, pero se ve.
+  deniedPermissions String[] @default([])
 
   // Audit trail
   modifiedBy String

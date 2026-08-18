@@ -344,15 +344,18 @@ export const checkPermission = (requiredPermission: string) => {
           },
           select: {
             permissions: true,
+            deniedPermissions: true,
           },
         })
 
+        let deniedPermissions: string[] | null = null
         if (venueRolePermission) {
           customPermissions = venueRolePermission.permissions as string[]
+          deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
         }
 
         // Check if user has permission (uses override mode for wildcard roles)
-        authorized = hasPermission(userRole, customPermissions, requiredPermission)
+        authorized = hasPermission(userRole, customPermissions, requiredPermission, deniedPermissions)
       }
 
       if (!authorized) {
@@ -542,14 +545,17 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
           },
           select: {
             permissions: true,
+            deniedPermissions: true,
           },
         })
 
+        let deniedPermissions: string[] | null = null
         if (venueRolePermission) {
           customPermissions = venueRolePermission.permissions as string[]
+          deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
         }
 
-        authorized = requiredPermissions.some(perm => hasPermission(userRole, customPermissions, perm))
+        authorized = requiredPermissions.some(perm => hasPermission(userRole, customPermissions, perm, deniedPermissions))
       }
 
       if (!authorized) {
@@ -635,14 +641,17 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
           },
           select: {
             permissions: true,
+            deniedPermissions: true,
           },
         })
 
+        let deniedPermissions: string[] | null = null
         if (venueRolePermission) {
           customPermissions = venueRolePermission.permissions as string[]
+          deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
         }
 
-        authorized = requiredPermissions.every(perm => hasPermission(userRole, customPermissions, perm))
+        authorized = requiredPermissions.every(perm => hasPermission(userRole, customPermissions, perm, deniedPermissions))
       }
 
       if (!authorized) {

@@ -124,7 +124,7 @@ describe('checkTableOwnership Middleware', () => {
     setOrderOwnedByJuan()
     setCallerRoleWaiter(true)
     await checkTableOwnership('order')(mockReq as Request, mockRes as Response, mockNext)
-    expect(permissionsLib.hasPermission).toHaveBeenCalledWith('WAITER', null, 'tables:manage-all')
+    expect(permissionsLib.hasPermission).toHaveBeenCalledWith('WAITER', null, 'tables:manage-all', null)
     expect(mockNext).toHaveBeenCalled()
   })
 
