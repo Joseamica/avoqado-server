@@ -49,9 +49,14 @@ export interface LandingSignupInput {
 export interface LandingSignupResult {
   staff: { id: string; email: string }
   organizationId: string | null
-  /** Token EN CLARO para el magic link. En la DB solo vive su hash SHA-256. */
-  magicLinkToken: string
+  /** Token EN CLARO para el magic link. En la DB solo vive su hash SHA-256.
+   *  null cuando la cuenta YA es de un cliente con contrasena: a ese no se le
+   *  toca el token ni se le manda un magic link. */
+  magicLinkToken: string | null
   alreadyExisted: boolean
+  /** true = ya es cliente (tiene contrasena). Cambia el correo que se le manda
+   *  y el aviso interno: no es un prospecto nuevo. */
+  yaEsCliente: boolean
 }
 
 export interface VerifyEmailResult {
@@ -382,14 +387,31 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
   const { email, firstName = '', lastName = '', organizationName = '', phone } = input
   const normalizedEmail = email.toLowerCase().trim()
 
-  // 1. Si ya existe, NO es un error para el visitante: se le manda el magic link
-  //    igual para que entre a su cuenta. Decirle "ya estas registrado" en una
-  //    landing de ads es perder el lead por un tecnicismo.
+  // 1. Cuenta existente: hay DOS casos y tratarlos igual hace dano.
   const existing = await prisma.staff.findUnique({ where: { email: normalizedEmail } })
+
+  if (existing && existing.password !== null) {
+    // YA ES CLIENTE (tiene contrasena, su negocio opera). Aqui NO se le toca el
+    // resetToken: sobrescribirlo invalidaria una recuperacion de contrasena
+    // legitima en curso, y dejaria que cualquiera dispare correos a cualquier
+    // cuenta con solo escribir ese correo en la landing. Tampoco se le manda el
+    // correo de bienvenida: lleva meses siendo cliente, decirle "ya quedo tu
+    // registro" es absurdo. El controller usa `yaEsCliente` para mandarle otro
+    // mensaje y para avisar a ventas que NO es un prospecto nuevo.
+    return {
+      staff: { id: existing.id, email: existing.email },
+      organizationId: await getPrimaryOrganizationId(existing.id),
+      magicLinkToken: null,
+      alreadyExisted: true,
+      yaEsCliente: true,
+    }
+  }
 
   const { resetToken, hashedToken, expiryTime } = buildMagicLinkToken()
 
   if (existing) {
+    // Alta previa por landing que nunca se completo (sin contrasena). Aqui SI se
+    // renueva el link: es un recordatorio util, no una intromision.
     await prisma.staff.update({
       where: { id: existing.id },
       data: { resetToken: hashedToken, resetTokenExpiry: expiryTime, resetTokenUsedAt: null },
@@ -399,6 +421,7 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
       organizationId: await getPrimaryOrganizationId(existing.id),
       magicLinkToken: resetToken,
       alreadyExisted: true,
+      yaEsCliente: false,
     }
   }
 
@@ -450,6 +473,7 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
     organizationId: result.organization.id,
     magicLinkToken: resetToken,
     alreadyExisted: false,
+    yaEsCliente: false,
   }
 }
 
