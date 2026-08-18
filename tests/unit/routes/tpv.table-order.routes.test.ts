@@ -299,10 +299,22 @@ describe('renglones de la cuenta bajo /tpv — poner y quitar bajo la misma regl
     expect(capaDeDueño(route!)).toBeDefined()
   })
 
-  it('🔴 SIMETRÍA: si poner respeta al dueño de la mesa, quitar también — y al revés', () => {
+  it('🔴 SIMETRÍA: si poner respeta al dueño de la mesa, quitar también — con la MISMA llave', () => {
     const patch = inspectRoute(tpvRouter, 'patch', PATCH_PATH)!
     const del = inspectRoute(tpvRouter, 'delete', DELETE_PATH)!
-    expect(!!capaDeDueño(del)).toBe(!!capaDeDueño(patch))
+    const gPatch = capaDeDueño(patch)
+    const gDel = capaDeDueño(del)
+
+    // Presencia: los dos, o ninguno.
+    expect(!!gDel).toBe(!!gPatch)
+
+    // 🔴 Y el MISMO override, que es lo que de verdad hace simétrica la pareja.
+    // Comprobar sólo la presencia dejaba pasar el caso venenoso: poner con override
+    // ['tables:manage-all'] y quitar con uno más estrecho = el cajero pone algo que
+    // después no puede quitar, que es EXACTAMENTE el bug de 210dbab6 en los cargos
+    // por servicio. Mismo patrón que ya vigila `tpv.loQuePonesLoQuitas.routes.test.ts`.
+    expect((gDel as any)?.ownershipOverridePermissions).toEqual((gPatch as any)?.ownershipOverridePermissions)
+    expect((gPatch as any)?.ownershipOverridePermissions).toEqual(['tables:manage-all'])
   })
 
   it('🔴 el permiso NO cambia según haya WiFi: la ruta en línea pide lo mismo que el intent ADD_ITEMS', () => {
@@ -316,8 +328,25 @@ describe('renglones de la cuenta bajo /tpv — poner y quitar bajo la misma regl
     expect(online).toBe(requiredPermissionForIntent('ADD_ITEMS'))
   })
 
-  it('ninguna de las dos queda sin permiso: un rol de sólo lectura no toca la cuenta', () => {
-    expect(inspectRoute(tpvRouter, 'patch', PATCH_PATH)!.permission).toBeDefined()
-    expect(inspectRoute(tpvRouter, 'delete', DELETE_PATH)!.permission).toBeDefined()
+  it('ninguna de las dos queda sin permiso: un rol de sólo lectura NO puede tocar la cuenta', () => {
+    // Antes esto sólo pedía `toBeDefined()`, y eso no probaba nada: con `orders:read`
+    // el VIEWER habría pasado y el test seguía verde (lo cazó la auditoría de Codex,
+    // 2026-08-18). Ahora se afirma el nombre EXACTO y, sobre todo, se evalúa el
+    // permiso con la función real del backend para los roles que NO deben poder.
+    const { hasPermission } = require('@/lib/permissions')
+    const poner = inspectRoute(tpvRouter, 'patch', PATCH_PATH)!.permission
+    const quitar = inspectRoute(tpvRouter, 'delete', DELETE_PATH)!.permission
+    expect(poner).toBe('orders:create')
+    expect(quitar).toBe('orders:update')
+
+    for (const rol of ['VIEWER', 'HOST']) {
+      expect(hasPermission(rol, null, poner)).toBe(false)
+      expect(hasPermission(rol, null, quitar)).toBe(false)
+    }
+    // Y los que SÍ trabajan el piso siguen pudiendo poner — si esto se pone rojo,
+    // el arreglo le quitó la captura a un rol real, que sería un P0 en producción.
+    for (const rol of ['WAITER', 'CASHIER', 'MANAGER', 'ADMIN', 'OWNER']) {
+      expect(hasPermission(rol, null, poner)).toBe(true)
+    }
   })
 })

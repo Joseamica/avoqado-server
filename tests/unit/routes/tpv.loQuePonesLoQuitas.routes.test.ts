@@ -87,8 +87,20 @@ async function correrGuardDePropiedad(method: string, path: string, role: StaffR
   const capa = ownershipLayerOf(tpvRouter, method, path)
   if (!capa) return { paso: true }
 
+  // 🔴 Los params se derivan del PATH REAL de la ruta, no se inventan. Antes se
+  // mandaban `orderId` Y `tableId` a la vez, y eso enmascaraba un cambio peligroso:
+  // si alguien cambiaba `checkTableOwnership('order')` por `('table')`, el guard
+  // seguía bloqueando en el test —porque encontraba el `tableId` que le regalamos—
+  // mientras en producción la ruta nunca recibe ese param y habría dejado pasar.
+  // (Lo cazó la auditoría de Codex, 2026-08-18.)
+  const params: Record<string, string> = { venueId: VENUE }
+  if (path.includes(':orderId')) params.orderId = 'order-1'
+  if (path.includes(':tableId')) params.tableId = 'mesa-5'
+  if (path.includes(':itemId')) params.itemId = 'item-1'
+  if (path.includes(':orderServiceChargeId')) params.orderServiceChargeId = 'cargo-1'
+
   const req = {
-    params: { venueId: VENUE, orderId: 'order-1', tableId: 'mesa-5' },
+    params,
     authContext: { userId: CAJERO, venueId: VENUE, role },
   } as unknown as Request
 
