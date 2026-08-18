@@ -36,7 +36,7 @@ import {
 } from '../payments/cardInternationality.service'
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
-import { linkCustomerToExistingOrder, resolveFastOrderCustomer } from './fastPaymentCustomer'
+import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -3037,6 +3037,13 @@ async function verifyDelegatedPaymentLanded(
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
 
+  // 🔴 EL CLIENTE EFECTIVO de esta venta. Por defecto, el que mandó quien registra el
+  // cobro; si no vino y la solicitud de arbitraje trae uno sembrado por el POS, ése.
+  //
+  // Sin `terminalPaymentRequestId` esta variable NUNCA cambia, así que el camino de
+  // EFECTIVO y el de las TPV viejas quedan byte por byte iguales a como estaban.
+  let effectiveCustomerId: unknown = paymentData.customerId
+
   // 🔴 ¿Este dinero pertenece a una venta que YA existe? El cajero pudo mandar el cobro
   // desde el POS, cancelar, y la terminal cobrar igual. Ese cobro es de la venta que lo
   // originó —con sus productos—, no de una venta sintética vacía. La solicitud de
@@ -3045,11 +3052,15 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Fail-open a propósito: si la consulta truena, se sigue por FAST. Un fallo de infra
   // jamás puede impedir registrar dinero que YA se cobró.
   if (paymentData.terminalPaymentRequestId) {
-    let arbitrationRow: { orderId: string | null; venueId: string; status: string } | null = null
+    let arbitrationRow: { orderId: string | null; venueId: string; status: string; customerId: string | null } | null = null
     try {
       arbitrationRow = await prisma.terminalPaymentRequest.findUnique({
         where: { requestId: paymentData.terminalPaymentRequestId },
-        select: { orderId: true, venueId: true, status: true },
+        // 🔑 `customerId` es el cliente que el POS eligió antes de mandar el cobro a la
+        // terminal. La TPV registra el pago con SU payload, que no lo lleva — sin esto,
+        // la venta con tarjeta nace anónima mientras la misma venta en efectivo sí trae
+        // cliente.
+        select: { orderId: true, venueId: true, status: true, customerId: true },
       })
     } catch (err) {
       logger.error('⚠️ [FastPayment] No se pudo leer la solicitud de arbitraje — se sigue como venta rápida', {
@@ -3059,6 +3070,12 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
 
     const target = resolveFastPaymentTarget(arbitrationRow, venueId)
+
+    // 🔑 El del BODY GANA sobre el de la fila: es el dato más fresco (el cajero lo acaba
+    // de elegir), mientras la fila puede llevar minutos escrita. `target.seededCustomerId`
+    // ya pasó por el MISMO candado de inquilino que la orden — una fila de otro venue no
+    // presta ni su orden ni su cliente.
+    effectiveCustomerId = normalizeRequestedCustomerId(paymentData.customerId) ?? target.seededCustomerId
 
     // 🔴 `requestId` es `@unique` GLOBAL y lo genera el cliente: una colisión entre
     // inquilinos devolvería el `orderId` de OTRO negocio. Se degrada a venta rápida —
@@ -3097,7 +3114,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         // venta que YA existe. Sólo RELLENA (nunca reasigna) y nunca lanza, así que no
         // altera la semántica del catch de abajo. Así `customerLink` viaja en TODAS las
         // respuestas exitosas de `/fast` y el cliente móvil no tiene que adivinar.
-        const customerLink = await linkCustomerToExistingOrder(venueId, target.orderId, paymentData.customerId)
+        const customerLink = await linkCustomerToExistingOrder(venueId, target.orderId, effectiveCustomerId)
         return { ...delegated, customerLink }
       } catch (err) {
         // 🔴 La tarjeta YA se cobró. Antes de esta delegación, ese dinero por lo menos
@@ -3227,7 +3244,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // si el primer intento entró anónimo, sin esto la venta se quedaba sin cliente para
       // siempre (la idempotencia devuelve el pago y nadie vuelve a mirar). Rellenar es
       // aditivo y no toca dinero; reasignar está prohibido (ver `fastPaymentCustomer.ts`).
-      const customerLink = await linkCustomerToExistingOrder(venueId, existingByKey.orderId, paymentData.customerId)
+      const customerLink = await linkCustomerToExistingOrder(venueId, existingByKey.orderId, effectiveCustomerId)
       return {
         ...existingByKey,
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
@@ -3265,7 +3282,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // Return existing payment with receipt (safe retry - client gets same response)
       // Mismo relleno de cliente que el check por `idempotencyKey`: un reintento legacy
       // (TPV < v1.10.10, sin llave) también puede traer el cliente que faltaba.
-      const customerLink = await linkCustomerToExistingOrder(venueId, existingPayment.orderId, paymentData.customerId)
+      const customerLink = await linkCustomerToExistingOrder(venueId, existingPayment.orderId, effectiveCustomerId)
       return {
         ...existingPayment,
         digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
@@ -3416,7 +3433,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Un cliente inválido NO tumba el cobro: devuelve `orderData.customerId = null` y un
   // aviso en la respuesta. El dinero ya está en la caja. Detalle en `fastPaymentCustomer.ts`.
   const { link: customerLink, orderData: customerOrderData } = await t.time('resolveFastOrderCustomer', () =>
-    resolveFastOrderCustomer(venueId, paymentData.customerId),
+    resolveFastOrderCustomer(venueId, effectiveCustomerId),
   )
 
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
@@ -3716,7 +3733,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         if (winner) {
           // La carrera la ganó otra petición: su orden ya existe, así que el cliente se
           // rellena (nunca se reasigna) igual que en cualquier reintento idempotente.
-          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, winner.orderId, paymentData.customerId)
+          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, winner.orderId, effectiveCustomerId)
           return {
             ...winner,
             digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),

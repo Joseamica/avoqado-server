@@ -39,6 +39,16 @@ export interface TerminalPaymentRequest {
   senderDeviceName?: string
   processedByStaffId?: string
   requestId?: string // Client-generated for cancel tracking + idempotency
+  /**
+   * El cliente que el cajero eligió en el POS para esta venta.
+   *
+   * 🔴 Se persiste en la fila y NO se manda a la terminal. La TPV registra el cobro con
+   * su propio payload (que no lleva cliente), así que sin esto la venta con TARJETA nace
+   * anónima mientras la misma venta en efectivo sí lleva cliente. Mandarlo por el socket
+   * sería PII viajando al aparato sin ningún consumidor — y obligaría a desplegar la TPV
+   * (3-5 días por la firma PAX) para un arreglo que es sólo del server.
+   */
+  customerId?: string | null
 }
 
 export interface TerminalPaymentResult {
@@ -331,6 +341,9 @@ class TerminalPaymentService {
           orderId: request.orderId ?? null,
           requestedById: request.requestedBy ?? null,
           senderDevice: request.senderDeviceName ?? null,
+          // El cliente de la venta viaja AQUÍ (no por el socket): es de donde
+          // `recordFastPayment` lo recoge cuando la TPV registra el cobro.
+          customerId: request.customerId ?? null,
           expiresAt: new Date(Date.now() + PAYMENT_TIMEOUT_MS),
         },
       })
@@ -418,6 +431,10 @@ class TerminalPaymentService {
         createdAt: new Date(),
       })
 
+      // 🔴 `customerId` NO va aquí, a propósito: la TPV no lo consume y sería PII enviada
+      // al aparato sin ningún uso. El cliente vive en la fila de arbitraje, que el server
+      // relee al registrar el cobro. Guardarraíl en
+      // `tests/unit/services/terminal-payment.service.test.ts`.
       const paymentPayload = {
         requestId,
         terminalId,

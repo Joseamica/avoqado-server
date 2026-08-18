@@ -11,6 +11,29 @@ import { terminalRegistry } from '../../communication/sockets/terminal-registry'
 import logger from '../../config/logger'
 import { BadRequestError, OrderAlreadyPaidError, TerminalBusyError } from '../../errors/AppError'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
+import { normalizeRequestedCustomerId } from '../../services/tpv/fastPaymentCustomer'
+
+/** Cota del id de cliente: la misma que `/fast` (`tpv.schema.ts`). */
+const MAX_CUSTOMER_ID_LENGTH = 64
+
+/**
+ * El cliente que el POS adjunta al cobro: se normaliza y, si no cabe o no es un string,
+ * se DESCARTA — nunca se rechaza el cobro.
+ *
+ * 🔴 Esta ruta dispara el cobro con TARJETA. Devolver 400 por el formato de un id de
+ * cliente le impediría cobrar al comercio por un dato que ni siquiera toca el dinero: el
+ * peor intercambio posible. Es la misma lección que costó un incidente con
+ * `terminalPaymentRequestId` (`min(1)`, no `min(8)`) y la que gobierna `customerId` en
+ * `/fast` (`.catch(undefined)`).
+ *
+ * La cota existe por otra razón: el límite de body es 1 MB, así que sin ella un id
+ * gigante acabaría en la columna y en el meta del logger de CADA cobro.
+ */
+function sanitizeRelayCustomerId(raw: unknown): string | null {
+  const normalized = normalizeRequestedCustomerId(raw)
+  if (!normalized || normalized.length > MAX_CUSTOMER_ID_LENGTH) return null
+  return normalized
+}
 
 /**
  * POST /api/v1/mobile/venues/:venueId/terminal-payment
@@ -21,8 +44,9 @@ import { validateStaffVenue } from '../../utils/staff-venue.util'
 export async function sendTerminalPayment(req: Request, res: Response) {
   try {
     const { venueId } = req.params
-    const { terminalId, amountCents, tipCents, rating, skipReview, orderId, requestId, processedByStaffId } = req.body
+    const { terminalId, amountCents, tipCents, rating, skipReview, orderId, requestId, processedByStaffId, customerId } = req.body
     const userId = (req as any).authContext?.userId
+    const relayCustomerId = sanitizeRelayCustomerId(customerId)
 
     // Validate required fields
     if (!terminalId || !amountCents) {
@@ -61,6 +85,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       orderId,
       userId,
       processedByStaffId: validatedProcessedByStaffId,
+      customerId: relayCustomerId,
     })
 
     const result = await terminalPaymentService.sendPaymentToTerminal({
@@ -75,6 +100,8 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       senderDeviceName: req.headers['x-device-name'] as string | undefined,
       processedByStaffId: validatedProcessedByStaffId,
       requestId, // Client-generated for cancel tracking
+      // Se guarda en la fila; NUNCA se emite a la terminal (ver terminal-payment.service.ts).
+      customerId: relayCustomerId,
     })
 
     const httpStatus = result.status === 'success' ? 200 : result.status === 'timeout' ? 504 : result.status === 'cancelled' ? 409 : 422

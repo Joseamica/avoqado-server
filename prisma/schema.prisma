@@ -4490,6 +4490,12 @@ model TerminalPaymentRequest {
   orderId       String?
   requestedById String?
   senderDevice  String?
+  // El cliente que el cajero eligió en el POS antes de mandar el cobro. Soft ref SIN FK,
+  // igual que orderId/paymentId: esta fila es un registro de INTENCIÓN en el camino del
+  // dinero — no puede bloquear el borrado de un cliente ni tumbar un cobro por
+  // integridad referencial. Es lo que permite que la venta con TARJETA nazca con
+  // cliente sin que la TPV (que registra ese cobro) tenga que conocerlo.
+  customerId    String?
   paymentId     String? // the recorded Payment.id once COMPLETED (soft ref)
   resultJson    Json? // full terminal result, for idempotent replay
   lateResult    Boolean                      @default(false) // result arrived after TIMED_OUT/UNKNOWN

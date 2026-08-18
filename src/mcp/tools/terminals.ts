@@ -195,7 +195,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'terminal_payment_requests',
-    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (status UNKNOWN holds the terminal until reconciled) or to check what happened to one charge. Amounts are in pesos.',
+    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (status UNKNOWN holds the terminal until reconciled) or to check what happened to one charge. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). Amounts are in pesos.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       requestId: z.string().optional().describe('Look up one specific charge request by its requestId'),
@@ -220,6 +220,9 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         tip: r.tipCents / 100,
         orderId: r.orderId,
         paymentId: r.paymentId,
+        // El cliente que el POS adjuntó al cobro (null en una venta anónima). Sin esto,
+        // "¿a qué cliente iba este cobro?" no es contestable desde el MCP.
+        customerId: r.customerId,
         senderDevice: r.senderDevice,
         lateResult: r.lateResult,
         createdAt: r.createdAt.toISOString(),

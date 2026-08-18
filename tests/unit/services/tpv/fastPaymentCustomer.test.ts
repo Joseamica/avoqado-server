@@ -596,3 +596,153 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
     expect((parsed.body as any).amount).toBe(10000)
   })
 })
+
+/**
+ * 🔴 EL COBRO CON TARJETA: el cliente lo siembra el RELAY, no la terminal.
+ *
+ * En EFECTIVO el POS registra el cobro él mismo y manda `customerId` en el body, así que
+ * la venta nace con cliente. Con TARJETA el camino es otro: el POS manda el cobro a la
+ * terminal (`POST /mobile/venues/:venueId/terminal-payment`), la TPV cobra y registra el
+ * dinero con SU propio payload (`POST /tpv/venues/:venueId/fast`) — que lleva
+ * `terminalPaymentRequestId` pero NO lleva cliente. La TPV no conoce ese dato y no debe
+ * conocerlo: sería PII viajando al aparato sin nadie que la consuma.
+ *
+ * Resultado hasta hoy: la MISMA venta, con el MISMO cliente elegido en pantalla, nacía
+ * con cliente si se pagaba en efectivo y anónima si se pagaba con tarjeta.
+ *
+ * El arreglo no toca la TPV. El POS manda el cliente en el relay, se guarda en la fila de
+ * arbitraje, y `recordFastPayment` la usa como fallback — la misma fila que ya lee para
+ * decidir a qué venta pertenece el dinero.
+ */
+describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la terminal', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    installFakes()
+  })
+
+  /** La fila de arbitraje que el POS dejó al mandar el cobro a la terminal. */
+  function filaDeArbitraje(extra: Record<string, unknown> = {}) {
+    prismaMock.terminalPaymentRequest.findUnique.mockResolvedValue({
+      requestId: 'req-1',
+      orderId: null,
+      venueId: VENUE,
+      status: 'COMPLETED',
+      customerId: null,
+      ...extra,
+    })
+  }
+
+  it('la venta con TARJETA nace con el cliente aunque la TPV no lo mande', async () => {
+    filaDeArbitraje({ customerId: 'cust-1' })
+    prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
+
+    // Payload REAL de la TPV: trae `terminalPaymentRequestId` y NO trae `customerId`.
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD', terminalPaymentRequestId: 'req-1' }), 'user-1')
+
+    const data = datosDeLaOrdenFast()
+    expect(data.customerId).toBe('cust-1')
+    expect(data.orderCustomers).toEqual({ create: [{ customerId: 'cust-1', isPrimary: true }] })
+    expect(result.customerLink).toMatchObject({ status: 'LINKED', customerId: 'cust-1' })
+
+    // 🔴 El mock devuelve la fila entera pase lo que pase en el `select`; sin esta
+    // aserción, olvidar `customerId: true` dejaría el test verde y la feature muerta
+    // (Prisma devolvería `undefined` en producción).
+    expect(prismaMock.terminalPaymentRequest.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.objectContaining({ customerId: true }) }),
+    )
+  })
+
+  it('el cliente del BODY gana sobre el de la fila', async () => {
+    // El body es el dato MÁS FRESCO: si algún día la TPV empieza a mandarlo, o si es un
+    // POS registrando el cobro directamente, ese cliente es el que el cajero acaba de
+    // elegir — la fila puede llevar minutos escrita.
+    filaDeArbitraje({ customerId: 'cust-DE-LA-FILA' })
+    prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
+
+    await recordFastPayment(VENUE, cobroRapido({ customerId: 'cust-1', terminalPaymentRequestId: 'req-1' }), 'user-1')
+
+    expect(prismaMock.customer.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'cust-1' } }))
+    expect(datosDeLaOrdenFast().customerId).toBe('cust-1')
+  })
+
+  it('🔴 una fila de OTRO venue NO presta su cliente — la venta se registra anónima', async () => {
+    // `requestId` es `@unique` GLOBAL y lo genera el cliente: dos inquilinos pueden
+    // colisionar. Tomar el cliente de esa fila metería a una persona de otro negocio en
+    // el historial (y el CFDI) de esta venta.
+    filaDeArbitraje({ venueId: 'venue-AJENO', customerId: 'cust-del-vecino' })
+    prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
+
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD', terminalPaymentRequestId: 'req-1' }), 'user-1')
+
+    expect(datosDeLaOrdenFast().customerId).toBeUndefined()
+    expect(prismaMock.customer.findUnique).not.toHaveBeenCalled() // ni se consulta
+    expect(payments).toHaveLength(1) // …pero el dinero SÍ se registra
+    expect(result.customerLink.status).toBe('NOT_REQUESTED')
+  })
+
+  it('una fila SIN cliente deja la venta anónima, exactamente como hoy', async () => {
+    filaDeArbitraje({ customerId: null })
+
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD', terminalPaymentRequestId: 'req-1' }), 'user-1')
+
+    expect(datosDeLaOrdenFast().customerId).toBeUndefined()
+    expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
+    expect(result.customerLink.status).toBe('NOT_REQUESTED')
+  })
+
+  it('REGRESIÓN: sin terminalPaymentRequestId el camino queda idéntico — ni una consulta de más', async () => {
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD' }), 'user-1')
+
+    expect(prismaMock.terminalPaymentRequest.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
+    expect(datosDeLaOrdenFast().customerId).toBeUndefined()
+    expect(result.customerLink.status).toBe('NOT_REQUESTED')
+  })
+
+  it('el camino con orden EXISTENTE también usa el cliente sembrado', async () => {
+    // El cajero mandó el cobro desde una cuenta abierta, canceló, y la terminal cobró
+    // igual: el dinero es de ESA venta. El cliente que eligió también.
+    filaDeArbitraje({ orderId: 'order-real', status: 'CANCELLED', customerId: 'cust-1' })
+    prismaMock.order.findUnique.mockResolvedValue({
+      id: 'order-real',
+      venueId: VENUE,
+      splitType: null,
+      items: [],
+      payments: [],
+      total: 1000, // pago PARCIAL ⇒ sin pre-flight de inventario
+      source: 'TPV',
+      externalId: null,
+    })
+    prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
+    prismaMock.order.findFirst.mockResolvedValue({ id: 'order-real', venueId: VENUE, customerId: null })
+
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD', terminalPaymentRequestId: 'req-1' }), 'user-1')
+
+    expect(prismaMock.order.create).not.toHaveBeenCalled() // delegó, no creó venta sintética
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'order-real' }, data: expect.objectContaining({ customerId: 'cust-1' }) }),
+    )
+    expect(result.customerLink).toMatchObject({ status: 'LINKED', customerId: 'cust-1' })
+  })
+
+  it('un cliente sembrado que ya no existe NO tumba el cobro', async () => {
+    // El id se guardó minutos antes; el cliente pudo borrarse. El dinero ya se cobró.
+    filaDeArbitraje({ customerId: 'cust-borrado' })
+    prismaMock.customer.findUnique.mockResolvedValue(null)
+
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD', terminalPaymentRequestId: 'req-1' }), 'user-1')
+
+    expect(payments).toHaveLength(1)
+    expect(datosDeLaOrdenFast().customerId).toBeNull()
+    expect(result.customerLink.status).toBe('NOT_FOUND')
+  })
+
+  it('si la lectura de la fila truena, el cobro se registra igual (fail-open)', async () => {
+    prismaMock.terminalPaymentRequest.findUnique.mockRejectedValue(new Error('connection refused'))
+
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD', terminalPaymentRequestId: 'req-1' }), 'user-1')
+
+    expect(payments).toHaveLength(1)
+    expect(result.customerLink.status).toBe('NOT_REQUESTED')
+  })
+})

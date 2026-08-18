@@ -538,6 +538,53 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
   })
 })
 
+describe('TerminalPaymentService — el CLIENTE de la venta va a la FILA, nunca a la terminal', () => {
+  // 🔴 El defecto: el cobro con TARJETA nacía anónimo. En efectivo el POS registra el
+  // cobro él mismo y manda el cliente; con tarjeta lo registra la TPV con su propio
+  // payload, que no lleva cliente. La fila de arbitraje es el único punto donde el
+  // server tiene el cliente que eligió el cajero — por eso se persiste aquí.
+
+  it('persiste el customerId que mandó el POS en la fila de arbitraje', async () => {
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-CUST', requestId: 'REQ-CUST', customerId: 'cust-1' }),
+    )
+    await flush()
+
+    expect(tpr().create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ customerId: 'cust-1' }) }))
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-CUST', status: 'success' })
+    await p1
+  })
+
+  it('🔴 el payload del socket NO lleva el customerId', async () => {
+    // La TPV no consume ese id y no tiene nada que hacer con él: mandarlo sería PII
+    // viajando a un aparato en el mostrador sin ningún consumidor. Además obligaría a
+    // desplegar la TPV (3-5 días por la firma PAX) para un arreglo que es sólo del
+    // server.
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-PII', requestId: 'REQ-PII', customerId: 'cust-1' }),
+    )
+    await flush()
+
+    const payload = emit.mock.calls[0][1]
+    expect(payload.requestId).toBe('REQ-PII') // el emit sí ocurrió…
+    expect(payload).not.toHaveProperty('customerId') // …y no lleva al cliente
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-PII', status: 'success' })
+    await p1
+  })
+
+  it('sin cliente escribe null explícito — la venta anónima se comporta igual que hoy', async () => {
+    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-ANON', requestId: 'REQ-ANON' }))
+    await flush()
+
+    expect(tpr().create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ customerId: null }) }))
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-ANON', status: 'success' })
+    await p1
+  })
+})
+
 describe('TerminalPaymentService — el watchdog no cierra con el pago de otro', () => {
   // 🔴 El watchdog reconcilia una solicitud vencida contra un Payment de la MISMA orden.
   // Tenía dos guardas (no anterior a la solicitud, no reclamado por otra) pero NINGUNA
