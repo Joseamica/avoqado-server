@@ -788,9 +788,13 @@ interface CryptoSettlementResult {
   remainingBalance: string
   /**
    * Motivo por el que el saldo de la orden NO se recalculó. El `Payment` SÍ queda
-   * COMPLETED en ambos casos: el dinero llegó de verdad y no se puede perder.
+   * COMPLETED: el dinero llegó de verdad y no se puede perder.
+   *
+   * Ya sólo queda un motivo. `ORDER_HAS_REFUND` desapareció el 2026-08-18: una
+   * cuenta con reembolsos SÍ se recalcula, porque la aritmética canónica excluye
+   * los `Payment` `type: REFUND` y el recálculo devuelve el mismo saldo.
    */
-  balanceSkipped?: 'ORDER_HAS_REFUND' | 'ORDER_NOT_CHARGEABLE'
+  balanceSkipped?: 'ORDER_NOT_CHARGEABLE'
 }
 
 /**
@@ -848,8 +852,8 @@ async function settleOrderForConfirmedCryptoPayment(
     /**
      * El estado del `Payment` **ANTES** de este webhook. `COMPLETED` significa
      * que este `CO` es una REENTREGA/replay (ya lo habíamos aplicado); cualquier
-     * otro es la transición real a cobrado. Sin este dato no se pueden
-     * distinguir, y el guard de reembolsos se aplicaría también a un cobro nuevo.
+     * otro es la transición real a cobrado. Ya no decide nada del saldo (el guard
+     * de reembolsos se fue el 2026-08-18) — sólo etiqueta el aviso del log.
      */
     status: string
   },
@@ -935,51 +939,43 @@ async function settleOrderForConfirmedCryptoPayment(
           select: { amount: true, tipAmount: true, type: true },
         })
 
-        // 🔴 UNA CUENTA REEMBOLSADA NO REABRE SALDO — pero SÓLO si este `CO` es
-        // una REENTREGA.
+        // 🔴 UNA CUENTA REEMBOLSADA NO REABRE SALDO — y ya no hace falta un guard
+        // aquí para conseguirlo.
         //
-        // El recálculo suma TODOS los pagos COMPLETED, y un reembolso vive como un
-        // `Payment` NEGATIVO con `type: REFUND` colgado de la misma orden. Un `CO`
-        // reentregado (B4Bit tolera duplicados) volvía a recalcular una cuenta YA
-        // saldada: $200 + (−$200) = $0 pagados ⇒ la venta devuelta reaparecía
-        // debiendo $200, en el estado contradictorio `status COMPLETED` +
-        // `paymentStatus PARTIAL`.
+        // Hasta el 2026-08-18 este bloque se SALTABA el recálculo cuando el `CO`
+        // era una reentrega sobre una orden con reembolsos, porque la aritmética
+        // sumaba TODOS los COMPLETED —el `Payment` NEGATIVO `type: REFUND`
+        // incluido— y hacía $200 + (−$200) = $0 pagados: la venta devuelta
+        // reaparecía debiendo $200, en el estado contradictorio `status COMPLETED`
+        // + `paymentStatus PARTIAL`.
         //
-        // 🔑 `isRedelivery` NO es un detalle: sin él el guard también atrapaba un
-        // cobro NUEVO sobre una cuenta abierta que arrastra un reembolso previo
-        // (abonó $100 en efectivo, se le reembolsó, ahora paga $200 en cripto).
-        // Ahí la aritmética con el refund es la CORRECTA —+100 −100 +200 = 200 ⇒
-        // SALDADA— y saltarse la liquidación dejaba la cuenta pidiendo $100 que el
-        // cliente ya pagó: el mesero se los cobra dos veces. Sólo la reentrega
-        // recalcularía de más; la transición real se liquida siempre.
-        //
-        // El guard está ACOTADO A CRIPTO a propósito: los otros canales comparten
-        // la misma consulta sin filtro de `type`, pero ahí hace falta que una
-        // persona cobre otra vez para dispararlo; en cripto lo dispara un webhook,
-        // sin intervención humana. Excluir los REFUND del saldo en los 4 canales es
-        // una decisión de consistencia aparte.
-        const orderHasRefund = completedPayments.some(p => p.type === 'REFUND')
-
-        if (isRedelivery && orderHasRefund) {
-          logger.warn('⚠️ [B4Bit] CO reentregado sobre una cuenta con reembolso — saldo no recalculado', {
-            paymentId: payment.id,
-            venueId: payment.venueId,
-            orderId: payment.orderId,
-          })
-          return untouched('ORDER_HAS_REFUND')
-        }
-
-        if (orderHasRefund) {
-          // Se liquida normal (es lo correcto), pero queda dicho: una cuenta con
-          // reembolsos que recibe un cobro nuevo merece una mirada humana.
-          logger.warn('⚠️ [B4Bit] cobro cripto NUEVO sobre una cuenta con reembolsos previos — el saldo SÍ se recalcula incluyéndolos', {
-            paymentId: payment.id,
-            venueId: payment.venueId,
-            orderId: payment.orderId,
-          })
-        }
-
+        // 🔑 El guard era un parche ACOTADO A CRIPTO sobre un defecto que era de
+        // los CUATRO canales. Ahora la causa está cerrada en la aritmética
+        // canónica: `computeOrderBalance` EXCLUYE los REFUND de `paidAmount` y los
+        // lleva en su propio carril (`refundedAmount`/`refundState`), igual que
+        // `refunded_money` de Square o `refundStatus` de Toast. Recalcular una
+        // cuenta reembolsada llega al MISMO resultado que ya tenía, así que evadir
+        // el recálculo dejó de comprar nada — y el guard sí costaba: obligaba a
+        // distinguir reentrega de cobro nuevo (`isRedelivery`), y equivocarse ahí
+        // dejaba una cuenta pidiendo dinero que el cliente YA pagó.
         const balance = computeOrderBalance(fresh, completedPayments)
+
+        // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
+        // cobro que aterriza sobre una cuenta con devoluciones merece una mirada
+        // humana, así que queda un rastro greppable — MISMO token en los cuatro
+        // canales de cobro.
+        if (balance.refundState !== 'NONE') {
+          logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
+            paymentId: payment.id,
+            venueId: payment.venueId,
+            orderId: payment.orderId,
+            channel: 'b4bit',
+            isRedelivery,
+            refundState: balance.refundState,
+            refundedAmount: balance.refundedAmount.toFixed(2),
+          })
+        }
+
         const wasAlreadyPaid = fresh.paymentStatus === 'PAID'
 
         const transition = await tx.order.updateMany({

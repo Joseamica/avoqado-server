@@ -28,6 +28,10 @@ import {
 } from '../shared/discount.service'
 import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+// La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
+// pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
+// mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
+import { computeOrderBalance, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 
 // MARK: - Types
 
@@ -184,6 +188,14 @@ export interface OrderSummaryResponse {
   staffName: string | null
   customerName: string | null
   createdAt: Date
+  /**
+   * ADITIVO — el carril del reembolso (founder, 2026-08-18). Una venta devuelta
+   * queda CERRADA y MARCADA: el saldo ya no se reabre, así que sin esto se ve
+   * idéntica a una cobrada. Espejo de `Payment.refundStatus` de Toast.
+   */
+  refundState: RefundState
+  /** Lo devuelto, en PESOS y POSITIVO. 0 cuando no hay reembolsos. */
+  refundedAmount: number
 }
 
 export interface OrderDetailResponse {
@@ -252,6 +264,44 @@ export interface OrderDetailResponse {
     createdAt: Date
     processedBy: string | null
   }>
+  /**
+   * Promociones vendidas en esta cuenta — ADITIVO (2026-08-18).
+   *
+   * El nombre del combo no es opcional en ningún POS del mercado: Fudo imprime
+   * "el nombre del combo y, debajo, cada producto asociado"; Square marca el
+   * refresco como "part of the Burger Combo"; Maitre'D lo lleva a "reports,
+   * order screen, guest checks and receipts". El detalle de la cuenta sólo
+   * mostraba un descuento anónimo aunque el dato ya estaba guardado.
+   *
+   * El nombre sale del SNAPSHOT (lo que se cobró), nunca de la promoción viva.
+   * `itemIds` deja al POS anidar las líneas bajo el nombre del combo.
+   *
+   * 🔴 Centavos, NO pesos: mismo contrato que `CreatedOrderResponse.promotions`,
+   * que Android e iOS ya parsean. Dos formas para el mismo objeto en el mismo
+   * namespace sería peor que la inconsistencia con el resto de los campos.
+   */
+  promotions: Array<{
+    id: string
+    instanceId: string
+    name: string
+    type: string | null
+    pricingMode: string | null
+    grossCents: number
+    discountCents: number
+    netCents: number
+    needsReview: boolean
+    itemIds: string[]
+  }>
+  /**
+   * ADITIVO — el carril del reembolso (founder, 2026-08-18). Tras un reembolso
+   * la cuenta queda CERRADA (`status COMPLETED`, `paymentStatus PAID`) y el
+   * dinero devuelto vive AQUÍ, nunca restando del saldo. Es lo que permite
+   * pintar "Reembolsada" / "Reembolso parcial $X" y ocultar "cobrar saldo" —
+   * espejo de `Payment.refundStatus` de Toast y de `refunded_money` de Square.
+   */
+  refundState: RefundState
+  /** Lo devuelto, en PESOS y POSITIVO (como el resto de importes de esta respuesta). */
+  refundedAmount: number
 }
 
 // MARK: - Service Functions
@@ -302,6 +352,13 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
         _count: {
           select: { items: true },
         },
+        // ADITIVO — sólo para el carril del reembolso. Se acota a los COMPLETED
+        // y a tres columnas: en una lista paginada, traer el pago entero sería
+        // pagar por dato que nadie pinta. El array NO sale en la respuesta.
+        payments: {
+          where: { status: 'COMPLETED' },
+          select: { amount: true, tipAmount: true, type: true },
+        },
       },
       orderBy: { createdAt: 'desc' },
       skip,
@@ -310,22 +367,29 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
     prisma.order.count({ where }),
   ])
 
-  const data: OrderSummaryResponse[] = orders.map((order: any) => ({
-    id: order.id,
-    orderNumber: order.orderNumber,
-    status: order.status,
-    paymentStatus: order.paymentStatus,
-    type: order.type,
-    source: order.source,
-    subtotal: Number(order.subtotal),
-    taxAmount: Number(order.taxAmount),
-    discountAmount: Number(order.discountAmount),
-    total: Number(order.total),
-    itemCount: order._count.items,
-    staffName: order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}`.trim() : null,
-    customerName: order.customerName,
-    createdAt: order.createdAt,
-  }))
+  const data: OrderSummaryResponse[] = orders.map((order: any) => {
+    // Mismo resumen que usan los cuatro canales de cobro: una sola definición de
+    // "cuánto se devolvió" para que la lista no pueda contradecir al detalle.
+    const refunds = summarizeRefunds(order.payments ?? [])
+    return {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      type: order.type,
+      source: order.source,
+      subtotal: Number(order.subtotal),
+      taxAmount: Number(order.taxAmount),
+      discountAmount: Number(order.discountAmount),
+      total: Number(order.total),
+      itemCount: order._count.items,
+      staffName: order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}`.trim() : null,
+      customerName: order.customerName,
+      createdAt: order.createdAt,
+      refundState: refunds.refundState,
+      refundedAmount: Number(refunds.refundedAmount),
+    }
+  })
 
   logger.info(`✅ [ORDER.MOBILE] Listed ${data.length} orders (total: ${total})`)
 
@@ -1066,6 +1130,10 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           method: true,
           status: true,
           createdAt: true,
+          // ADITIVO: sin `type` un reembolso es indistinguible de un cobro
+          // negativo. NO se serializa en `payments[]` (contrato viejo intacto);
+          // alimenta `refundState`/`refundedAmount`.
+          type: true,
           processedBy: {
             select: { firstName: true, lastName: true },
           },
@@ -1073,6 +1141,21 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       },
       orderDiscounts: {
         select: { id: true, name: true, amount: true },
+      },
+      // Promociones vendidas en la cuenta — el POS agrupa sus líneas bajo el
+      // nombre del combo tal como se cobró (snapshot), no el nombre vivo.
+      promotions: {
+        select: {
+          id: true,
+          instanceId: true,
+          snapshotJson: true,
+          grossCents: true,
+          discountCents: true,
+          netCents: true,
+          needsReview: true,
+          items: { select: { id: true } },
+        },
+        orderBy: { createdAt: 'asc' },
       },
     },
   })
@@ -1083,6 +1166,13 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
 
   // Flatten modifiers for mobile response
   const flattenedOrder = flattenOrderModifiers(order)
+
+  // El carril del reembolso — MISMO resumen que usan los cuatro canales de
+  // cobro, para que el detalle no pueda contradecir al saldo persistido.
+  // 🔴 Sólo los COMPLETED devuelven dinero: un reembolso PENDING/FAILED todavía
+  // no salió de la caja, y contarlo marcaría como devuelta una venta que no lo
+  // está. (Aquí llegan pagos de todos los estados.)
+  const refunds = summarizeRefunds((flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED'))
 
   return {
     id: flattenedOrder.id,
@@ -1162,6 +1252,23 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       createdAt: p.createdAt,
       processedBy: p.processedBy ? `${p.processedBy.firstName} ${p.processedBy.lastName}`.trim() : null,
     })),
+    promotions: (flattenedOrder.promotions || []).map((p: any) => {
+      const snapshot = (p.snapshotJson ?? {}) as { name?: string; type?: string; pricingMode?: string }
+      return {
+        id: p.id,
+        instanceId: p.instanceId,
+        name: snapshot.name ?? 'Promoción',
+        type: snapshot.type ?? null,
+        pricingMode: snapshot.pricingMode ?? null,
+        grossCents: p.grossCents,
+        discountCents: p.discountCents,
+        netCents: p.netCents,
+        needsReview: p.needsReview,
+        itemIds: (p.items ?? []).map((i: any) => i.id),
+      }
+    }),
+    refundState: refunds.refundState,
+    refundedAmount: Number(refunds.refundedAmount),
   }
 }
 
@@ -2219,39 +2326,53 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
         // 3️⃣ Suma acumulada de pagos previos — split-the-bill. Leída aquí dentro
         //    para que refleje al ganador de una carrera anterior.
+        //
+        // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
+        // `type: REFUND` colgado de la MISMA orden, y sin ese campo la aritmética
+        // no lo puede distinguir de un cobro. Se leen TODOS los COMPLETED (sin
+        // filtrar por `type` en la consulta) porque la función pura necesita los
+        // REFUND para reportar `refundState` — filtrarlos aquí los escondería.
         const previousPayments = await tx.payment.findMany({
           where: { orderId, status: 'COMPLETED' },
-          select: { amount: true, tipAmount: true },
+          select: { amount: true, tipAmount: true, type: true },
         })
-        const previousPaid = previousPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount), 0)
-        const previousTips = previousPayments.reduce((sum, p) => sum + Number(p.tipAmount), 0)
 
-        // Convention: order.total = subtotal - discountAmount + serviceCharge + tipAmount
-        // (Mexico: tax is inclusive in subtotal). Recompute defensively in case the
-        // order was created before tip was known.
-        const orderSubtotal = Number(fresh.subtotal)
-        const orderDiscount = Number(fresh.discountAmount || 0)
-        // 🔴 MONEY (auditoría): sin esto, cualquier pago parcial en efectivo BORRA
-        // el cobro por servicio del total y el restante deja de cobrarlo.
-        const orderServiceCharge = Number(fresh.serviceChargeAmount || 0)
-        const totalTip = previousTips + tipDecimal
-        // 🔴 MONEY: la MERCANCÍA se clampa a 0 ANTES de sumarle cargos y propina.
+        // 🔴 La aritmética canónica, ya no una copia local en FLOAT.
         //
-        // Un `discountAmount` mayor que el subtotal es un estado que existe de
-        // verdad en la base (lo dejan cortesías de cuenta completa aplicadas
-        // sobre un descuento previo). Sin el clamp, COBRAR esa cuenta escribía un
-        // `Order.total` NEGATIVO y la marcaba PAGADA: una venta que RESTA del
-        // corte del día. Comprobado el 2026-08-09 cobrando en $0 la orden
-        // ORD-1779465117373 — entró con total −300.00 y salió PAID con −300.00.
+        // Esta función se extrajo justo de aquí y este camino se había quedado
+        // con su copia. Volver a llamarla cierra dos cosas de golpe: la deriva
+        // entre canales, y el defecto que este trabajo ataca — un reembolso NO
+        // reabre saldo, porque `computeOrderBalance` excluye los `type: REFUND`
+        // de lo pagado y los lleva en su propio carril (`refundState`).
         //
-        // El clamp va sobre `subtotal − descuento`, NO sobre el total completo:
-        // la propina y el cargo por servicio son dinero aparte de la mercancía y
-        // un descuento excedente no debe comérselos. Mismo criterio que
-        // `recalculateOrderTotals` y que `recordOrderPayment` del TPV.
-        const newTotal = Math.max(0, orderSubtotal - orderDiscount) + orderServiceCharge + totalTip
-        const totalPaidIncludingTip = previousPaid + amountDecimal + tipDecimal
-        const remainingAfterPayment = newTotal - totalPaidIncludingTip
-        const isFullyPaid = remainingAfterPayment <= 0.01 // float tolerance, same as TPV path
+        // Las reglas que ya aplicaba y siguen intactas (hay tests que las fijan):
+        // mercancía clampada a 0 ANTES de sumar cargos y propina —un
+        // `discountAmount` mayor que el subtotal existe de verdad en la base y
+        // sin el clamp la venta escribía un `Order.total` NEGATIVO que RESTA del
+        // corte del día (ORD-1779465117373, 2026-08-09)—, el cargo por servicio
+        // dentro del total, y la tolerancia de un centavo para darla por saldada.
+        // Lo único que cambia es que la suma va en `Decimal` y no en float.
+        const balance = computeOrderBalance(fresh, [...previousPayments, { amount: amountDecimal, tipAmount: tipDecimal, type: 'REGULAR' }])
+
+        // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
+        // cobro que aterriza sobre una cuenta con devoluciones merece una mirada
+        // humana, así que queda un rastro greppable — MISMO token en los cuatro
+        // canales de cobro.
+        if (balance.refundState !== 'NONE') {
+          logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
+            orderId,
+            venueId,
+            channel: 'payCashOrder',
+            refundState: balance.refundState,
+            refundedAmount: balance.refundedAmount.toFixed(2),
+          })
+        }
+
+        const totalTip = balance.tipAmount.toNumber()
+        const newTotal = balance.total.toNumber()
+        const totalPaidIncludingTip = balance.paidAmount.toNumber()
+        const remainingAfterPayment = balance.remainingBalance.toNumber()
+        const isFullyPaid = balance.isFullyPaid
 
         // 4️⃣ TRANSICIÓN CONDICIONAL (CAS). `updateMany` con la versión leída: si otro
         //    dispositivo cobró entre la relectura y este write, PostgreSQL reevalúa el
@@ -2926,6 +3047,14 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
   })
 
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
+
+  // Referidos: los PENDING atados a esta orden se anulan (si no, cuelgan para
+  // siempre) y, en defensa en profundidad, se revierte cualquier premio.
+  // Nunca lanza: la cancelación no se cae por el referido.
+  {
+    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+    await onOrderCancelled({ orderId, venueId })
+  }
 
   // TABLE_SERVICE — "Anular cuenta" on an open table: a cancelled check must
   // release its table (clearTable would refuse: the order is unpaid, not PAID).

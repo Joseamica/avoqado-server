@@ -20,6 +20,9 @@ import { serializedInventoryService } from '../serialized-inventory/serializedIn
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
+// La ÚNICA definición de "qué cuenta como pagado" — la comparten los cuatro
+// caminos de cobro, para que un reembolso no reabra saldo en ninguno.
+import { summarizeRefunds } from '../shared/orderBalance'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { isRetryableDbError } from '../../utils/serializableRetry'
@@ -419,15 +422,15 @@ async function validatePreFlightInventory(
       modifiers?: any[]
       paymentAllocations?: any[]
     }>
-    payments: Array<{ amount: any; tipAmount: any }>
+    payments: Array<{ amount: any; tipAmount: any; type?: string | null }>
   },
   paymentAmount: number,
 ): Promise<void> {
   // Calculate total payments (including this new one)
-  const previousPayments = order.payments.reduce(
-    (sum, payment) => sum + parseFloat(payment.amount.toString()) + parseFloat(payment.tipAmount.toString()),
-    0,
-  )
+  // 🔴 Sin los REFUND — misma definición que el recálculo del saldo. Un
+  // reembolso restando aquí hacía creer que la cuenta NO se completa con este
+  // cobro, y el pre-flight de inventario se saltaba en silencio.
+  const previousPayments = summarizeRefunds(order.payments).netPaidAmount.toNumber()
   const totalPaid = previousPayments + paymentAmount
   const originalTotal = parseFloat(order.total.toString())
 
@@ -538,7 +541,12 @@ async function updateOrderTotalsForStandalonePayment(
           // ✅ FIX: Exclude the current payment to avoid double-counting
           ...(currentPaymentId && { id: { not: currentPaymentId } }),
         },
-        select: { amount: true, tipAmount: true },
+        // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
+        // `type: REFUND` colgado de la MISMA orden, y sin ese campo restaba de lo
+        // pagado. Se leen TODOS los COMPLETED sin filtrar por `type` en la
+        // consulta —igual que los otros tres canales— porque el resumen
+        // compartido necesita los REFUND para reportar `refundState`.
+        select: { amount: true, tipAmount: true, type: true },
       },
       items: {
         include: {
@@ -571,11 +579,35 @@ async function updateOrderTotalsForStandalonePayment(
   }
   const isAreaTicketOrder = order.items.some(item => item.areaTicketLineId != null)
 
+  // 🔴 UN REEMBOLSO NO REABRE SALDO (founder, 2026-08-18).
+  //
+  // `summarizeRefunds` es la ÚNICA definición de "qué cuenta como pagado" del
+  // backend (`src/services/shared/orderBalance.ts`), la misma que usan efectivo,
+  // vales por área y cripto. Antes esta suma incluía el `Payment` NEGATIVO
+  // `type: REFUND`, así que un cobro nuevo sobre una cuenta ya devuelta
+  // recalculaba el saldo restando lo reembolsado y la venta volvía a pedir
+  // dinero que el cliente ya había recuperado. El reembolso ahora lleva su
+  // propio carril (`refundedAmount`/`refundState`), como `refunded_money` de
+  // Square o `refundStatus` de Toast — y en México lo cierra el SAT: la
+  // devolución se ampara con un CFDI de Egreso y el de ingreso no se toca.
+  const refundSummary = summarizeRefunds(order.payments)
+
+  // No se BLOQUEA nada: cuando esta función corre la tarjeta YA se cobró en el
+  // proveedor, y rechazar aquí dejaría dinero cobrado SIN registro en Avoqado.
+  // Queda un rastro greppable — MISMO token en los cuatro canales de cobro.
+  if (refundSummary.refundState !== 'NONE') {
+    logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
+      orderId,
+      venueId: order.venueId,
+      channel: 'recordOrderPayment',
+      paymentId: currentPaymentId ?? null,
+      refundState: refundSummary.refundState,
+      refundedAmount: refundSummary.refundedAmount.toFixed(2),
+    })
+  }
+
   // Calculate total payments made (including this new one)
-  const previousPayments = order.payments.reduce(
-    (sum, payment) => sum + parseFloat(payment.amount.toString()) + parseFloat(payment.tipAmount.toString()),
-    0,
-  )
+  const previousPayments = refundSummary.netPaidAmount.toNumber()
   const totalPaid = previousPayments + paymentAmount
 
   // ✅ FIX: Use subtotal as base (doesn't include tips), not order.total (which may already include tips from previous payments)
@@ -586,7 +618,9 @@ async function updateOrderTotalsForStandalonePayment(
   const orderDiscount = order.discountAmount ? parseFloat(order.discountAmount.toString()) : 0
 
   // ✅ FIX: Calculate cumulative tip from all completed payments + current tip
-  const previousTips = order.payments.reduce((sum, payment) => sum + parseFloat(payment.tipAmount.toString()), 0)
+  // 🔴 Sin los REFUND: la propina DEVUELTA (negativa) borraba del total la
+  // propina que el mesero sí había cobrado.
+  const previousTips = refundSummary.netTipAmount.toNumber()
   const totalTip = previousTips + tipAmount
 
   // ✅ FIX: Calculate new total including tips (consistent with fast payments)

@@ -10,6 +10,9 @@ import { auditMcpWrite } from '../audit'
 import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dashboard.service'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
+// El carril del reembolso: la MISMA definición que usan los cuatro canales de
+// cobro, para que el MCP no pueda contradecir al saldo persistido.
+import { summarizeRefunds } from '@/services/shared/orderBalance'
 
 // Maps the tool's friendly reasons to the service's RefundReason values.
 const REFUND_REASON_MAP: Record<string, RefundReason> = {
@@ -247,7 +250,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_refunds',
-    'Refunds ISSUED for a venue you can access, over a date range (default last 7 days). Mirrors the dashboard "Reembolsos" report. Each refund: amount given back (sale + tip, as positive magnitudes), payment method, reason (RETURNED_GOODS/ACCIDENTAL_CHARGE/CANCELLED_ORDER/FRAUDULENT_CHARGE/OTHER), free-text note, the original order number, who processed it, and when. Plus totals (count + total refunded) and a breakdown BY REASON. Use this for "¿cuánto devolvimos esta semana?", "¿por qué se hicieron los reembolsos?", "¿quién procesó los reembolsos?". `list_payments` with status=refunded surfaces both modern and legacy refund rows; use this tool when reason/note/original-payment metadata is required. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    'Refunds ISSUED for a venue you can access, over a date range (default last 7 days). Mirrors the dashboard "Reembolsos" report. Each refund: amount given back (sale + tip, as positive magnitudes), payment method, reason (RETURNED_GOODS/ACCIDENTAL_CHARGE/CANCELLED_ORDER/FRAUDULENT_CHARGE/OTHER), free-text note, the original order number, who processed it, and when. Plus totals (count + total refunded) and a breakdown BY REASON. Use this for "¿cuánto devolvimos esta semana?", "¿por qué se hicieron los reembolsos?", "¿quién procesó los reembolsos?". Each row also carries `refundState` (NONE/PARTIAL/FULL) for the WHOLE original sale — the sale itself is never rewritten (it stays COMPLETED/PAID; Toast/Square model + the Mexican CFDI de Egreso), so refundState is how you tell a fully-returned sale from a partial one. `list_payments` with status=refunded surfaces both modern and legacy refund rows; use this tool when reason/note/original-payment metadata is required. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue whose refunds to read (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
@@ -279,7 +282,20 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           createdAt: true,
           processorData: true,
           processedBy: { select: { firstName: true, lastName: true } },
-          order: { select: { orderNumber: true } },
+          order: {
+            select: {
+              orderNumber: true,
+              // Needed by summarizeRefunds below to report the SALE's refund state.
+              // 🔴 Sólo los COMPLETED: un cobro o un reembolso PENDING/FAILED no movió dinero,
+              // y contarlo desplaza el estado (diría PARTIAL una venta ya devuelta por completo).
+              // Mismo filtro y mismos campos que order.mobile.service.ts — si divergen, el MCP
+              // y la app reportan estados distintos para la misma venta.
+              payments: {
+                where: { status: TransactionStatus.COMPLETED },
+                select: { amount: true, tipAmount: true, type: true },
+              },
+            },
+          },
         },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 25,
@@ -301,6 +317,13 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           totalAmount: round2(sale + tip),
           status: r.status,
           processedBy: r.processedBy ? `${r.processedBy.firstName} ${r.processedBy.lastName}`.trim() : null,
+          // 🔴 Estado de la VENTA completa, no de esta línea: una orden puede
+          // llevar varios reembolsos parciales. La venta original NO se modifica
+          // (queda COMPLETED/PAID) — es el modelo de Toast/Square y lo que exige
+          // el CFDI de Egreso en México —, así que sin esto no hay forma de
+          // saber si ya se devolvió todo. `null` si el reembolso no cuelga de
+          // ninguna orden (devolución suelta desde el POS).
+          refundState: r.order ? summarizeRefunds(r.order.payments).refundState : null,
         }
       })
 

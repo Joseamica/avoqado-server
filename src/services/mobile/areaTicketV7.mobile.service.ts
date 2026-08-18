@@ -48,6 +48,9 @@ import prisma from '../../utils/prismaClient'
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+// La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
+// pagado y cuánto falta" para los cuatro caminos de cobro.
+import { computeOrderBalance } from '../shared/orderBalance'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
@@ -3228,18 +3231,40 @@ export async function finalizeAreaTicketPaymentInTransaction(
   }
   let finalFullyPaid = input.fullyPaid
   if (input.reconcileCapturedPayment) {
+    // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
+    // `type: REFUND` colgado de la MISMA orden. Sin ese campo, este recálculo
+    // restaba lo devuelto de lo pagado y una venta ya reembolsada volvía a pedir
+    // dinero sobre un vale entregado. Se leen TODOS los COMPLETED sin filtrar por
+    // `type` en la consulta: la función pura necesita los REFUND para reportar
+    // `refundState`, y filtrarlos aquí los escondería.
     const payments = await tx.payment.findMany({
       where: { orderId: input.orderId, venueId: input.venueId, status: 'COMPLETED' },
-      select: { amount: true, tipAmount: true },
+      select: { amount: true, tipAmount: true, type: true },
     })
-    const totalPaid = payments.reduce((sum, payment) => sum.add(payment.amount).add(payment.tipAmount), new Prisma.Decimal(0))
-    const totalTip = payments.reduce((sum, payment) => sum.add(payment.tipAmount), new Prisma.Decimal(0))
-    const total = new Prisma.Decimal(lockedOrder.subtotal)
-      .sub(lockedOrder.discountAmount ?? 0)
-      .add(lockedOrder.serviceChargeAmount ?? 0)
-      .add(totalTip)
-    const remainingBalance = Prisma.Decimal.max(new Prisma.Decimal(0), total.sub(totalPaid))
-    finalFullyPaid = remainingBalance.lessThanOrEqualTo(new Prisma.Decimal('0.01'))
+    // La aritmética canónica compartida (`src/services/shared/orderBalance.ts`),
+    // ya no una copia local: MISMA fórmula que efectivo, TPV y cripto, y con
+    // ella la regla "un reembolso no reabre saldo" en un solo sitio.
+    const balance = computeOrderBalance(lockedOrder, payments)
+    const totalPaid = balance.paidAmount
+    const totalTip = balance.tipAmount
+    const total = balance.total
+    const remainingBalance = balance.remainingBalance
+    finalFullyPaid = balance.isFullyPaid
+
+    // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
+    // cobro que aterriza sobre una cuenta con devoluciones merece una mirada
+    // humana, así que queda un rastro greppable — MISMO token en los cuatro
+    // canales de cobro.
+    if (balance.refundState !== 'NONE') {
+      logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
+        orderId: input.orderId,
+        venueId: input.venueId,
+        channel: 'areaTicketV7',
+        refundState: balance.refundState,
+        refundedAmount: balance.refundedAmount.toFixed(2),
+      })
+    }
+
     const paymentStatus = finalFullyPaid ? 'PAID' : totalPaid.greaterThan(0) ? 'PARTIAL' : 'PENDING'
     await tx.order.update({
       where: { id: input.orderId },

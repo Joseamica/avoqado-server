@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { OrderStatus, OrderType, PaymentStatus } from '@prisma/client'
+import { OrderStatus, OrderType, PaymentStatus, TransactionStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
@@ -8,6 +8,9 @@ import { createGuard } from '../guard'
 import { getRecentIntents } from '@/services/mobile/sync.mobile.service'
 import { text } from '../respond'
 import { hasPermission } from '@/services/access/access.service'
+// El carril del reembolso: la MISMA definición que usan los cuatro canales de
+// cobro, para que el MCP no pueda contradecir al saldo persistido.
+import { summarizeRefunds } from '@/services/shared/orderBalance'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const ORDER_STATUS_MAP: Record<string, OrderStatus> = {
@@ -50,7 +53,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'recent_orders',
-    'Recent orders across your venues (or one venue): order number, type, status, total, venue, time. Most recent first. Pass venueId to focus one venue.',
+    'Recent orders across your venues (or one venue): order number, type, status, total, venue, time, plus whether the sale was refunded (refundState NONE/PARTIAL/FULL and refundedAmount in pesos). Most recent first. Pass venueId to focus one venue.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       limit: z.number().int().min(1).max(50).default(15).describe('Max orders to return'),
@@ -67,17 +70,30 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
           total: true,
           createdAt: true,
           venue: { select: { name: true } },
+          // Sólo para el carril del reembolso (ver abajo): tres columnas de los
+          // pagos COMPLETED, no el pago entero. El array no sale en la respuesta.
+          payments: { where: { status: TransactionStatus.COMPLETED }, select: { amount: true, tipAmount: true, type: true } },
         },
         orderBy: { createdAt: 'desc' },
         take: limit,
       })
-      return text({ count: orders.length, orders })
+      // 🔴 Una venta devuelta queda CERRADA y MARCADA (founder, 2026-08-18): el
+      // saldo ya no se reabre, así que sin este campo el operador —y el LLM que
+      // lee esto— no puede distinguirla de una cobrada. Mismo resumen que usan
+      // los cuatro canales de cobro. Dinero en PESOS, como todo el MCP.
+      return text({
+        count: orders.length,
+        orders: orders.map(({ payments, ...rest }) => {
+          const refunds = summarizeRefunds(payments)
+          return { ...rest, refundState: refunds.refundState, refundedAmount: Number(refunds.refundedAmount) }
+        }),
+      })
     },
   )
 
   server.tool(
     'find_order',
-    'Find one order by its human ORDER NUMBER (what the operator sees on receipts/screens, e.g. ORD-5454 or FAST-1781718731451), by its internal id, or by a serial number (SIM/ICCID/barcode) of an item sold on it. Returns the order header, line items, and payments — but only if the order belongs to one of your venues. Pass exactly one of orderNumber, orderId, or serialNumber. Prefer orderNumber — it is the identifier operators actually have.',
+    'Find one order by its human ORDER NUMBER (what the operator sees on receipts/screens, e.g. ORD-5454 or FAST-1781718731451), by its internal id, or by a serial number (SIM/ICCID/barcode) of an item sold on it. Returns the order header, line items, payments, and whether the sale was refunded (refundState NONE/PARTIAL/FULL + refundedAmount in pesos) — but only if the order belongs to one of your venues. NOTE: a refunded sale stays status COMPLETED / paymentStatus PAID and its total is NOT rewritten (Toast/Square model, and the Mexican CFDI de Egreso requires it) — read refundState, never the payment status, to answer "¿se devolvió esta venta?". Pass exactly one of orderNumber, orderId, or serialNumber. Prefer orderNumber — it is the identifier operators actually have.',
     {
       orderNumber: z
         .string()
@@ -128,6 +144,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
           venue: { select: { name: true } },
           items: {
             select: {
+              id: true,
               productName: true,
               quantity: true,
               unitPrice: true,
@@ -135,13 +152,59 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
               discountAmount: true,
               appliedDiscountId: true,
               course: true, // TABLE_SERVICE course/tiempo (null = inmediato)
+              // Ata la línea al combo que la creó (null = línea suelta). Sin esto,
+              // un combo se leía como "tres productos con descuento" sin nombre.
+              orderPromotionId: true,
             },
           },
-          payments: { select: { amount: true, method: true, status: true, createdAt: true } },
+          // Promociones vendidas en la orden. Ningún POS del mercado deja el
+          // nombre del combo fuera del detalle de la venta (Fudo lo imprime con
+          // sus componentes debajo; Square marca "part of the Burger Combo").
+          promotions: {
+            select: {
+              id: true,
+              snapshotJson: true,
+              grossCents: true,
+              discountCents: true,
+              netCents: true,
+              needsReview: true,
+              items: { select: { id: true } },
+            },
+          },
+          // `type` distingue un reembolso (Payment NEGATIVO type REFUND) de un
+          // cobro. Se devuelve tal cual: es dato útil para quien lee la orden.
+          payments: { select: { amount: true, tipAmount: true, method: true, status: true, type: true, createdAt: true } },
         },
       })
       if (!order) return text({ found: false, reason: 'Order not found, or it is outside your venues' })
-      return text({ found: true, order })
+      // 🔑 El nombre sale del SNAPSHOT (lo que se cobró), no de la promoción viva:
+      // renombrarla no puede reescribir una venta pasada. Dinero en PESOS (÷100):
+      // OrderPromotion guarda centavos internamente, como el ledger contable.
+      const promotions = (order.promotions ?? []).map(p => {
+        // `snapshotJson` es Prisma.JsonValue (unión con string/number/array): el cast
+        // directo a objeto no compila, hay que pasar por `unknown`.
+        const snapshot = (p.snapshotJson ?? {}) as unknown as { name?: string; type?: string; pricingMode?: string }
+        return {
+          id: p.id,
+          name: snapshot.name ?? 'Promoción',
+          type: snapshot.type ?? null, // BUNDLE | COMBO
+          pricingMode: snapshot.pricingMode ?? null, // FIXED_TOTAL | PER_UNIT (2x1)
+          gross: p.grossCents / 100,
+          discount: p.discountCents / 100,
+          net: p.netCents / 100,
+          needsReview: p.needsReview,
+          itemIds: p.items.map(i => i.id),
+        }
+      })
+      // 🔴 Una venta devuelta queda CERRADA y MARCADA (founder, 2026-08-18): el
+      // saldo no se reabre, así que `paymentStatus` sigue diciendo PAID y sin
+      // esto el reembolso sería invisible salvo leyendo los pagos uno por uno.
+      // Sólo los COMPLETED devuelven dinero. Pesos, como todo el MCP.
+      const refunds = summarizeRefunds((order.payments ?? []).filter(p => p.status === TransactionStatus.COMPLETED))
+      return text({
+        found: true,
+        order: { ...order, promotions, refundState: refunds.refundState, refundedAmount: Number(refunds.refundedAmount) },
+      })
     },
   )
 

@@ -185,9 +185,17 @@ describe('b4bit — un fallo TARDÍO no degrada un cobro ya confirmado', () => {
 })
 
 describe('b4bit — un CO reentregado sobre una cuenta REEMBOLSADA no reabre el saldo', () => {
-  it('🔴 no recalcula el saldo de la orden y lo dice en el log', async () => {
+  it('🔴 recalcula y el saldo queda IGUAL, porque el reembolso ya no cuenta', async () => {
+    // 🔑 Esto ANTES se resolvía con un guard que se SALTABA el recálculo
+    // (`isRedelivery && orderHasRefund`). El guard desapareció el 2026-08-18: la
+    // aritmética canónica excluye los `Payment` `type: REFUND`, así que
+    // recalcular una cuenta reembolsada llega al MISMO resultado que ya tenía.
+    // Se prueba el recálculo, no la evasión: es lo que garantiza que ningún
+    // camino futuro se olvide del guard.
     mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment({ status: 'COMPLETED' }))
-    mockPrisma.order.findUnique.mockResolvedValue(freshOrder({ status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: d('200.00') }))
+    mockPrisma.order.findUnique.mockResolvedValue(
+      freshOrder({ status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: d('200.00'), remainingBalance: d('0.00') }),
+    )
     // El cobro (+200) y su reembolso (−200), ambos COMPLETED sobre la misma orden.
     mockPrisma.payment.findMany.mockResolvedValue([
       { amount: d('200.00'), tipAmount: d('0.00'), type: 'REGULAR' },
@@ -196,15 +204,21 @@ describe('b4bit — un CO reentregado sobre una cuenta REEMBOLSADA no reabre el 
 
     const result = await processWebhook(webhook())
 
-    // 🔑 Sin el guard esto escribía paidAmount 0 / remainingBalance 200 /
-    // paymentStatus PARTIAL: la venta devuelta reaparecía por cobrar.
-    expect(mockPrisma.order.updateMany).not.toHaveBeenCalled()
-    expect(mockPrisma.order.update).not.toHaveBeenCalled()
+    // 🔑 Antes esto escribía paidAmount 0 / remainingBalance 200 / paymentStatus
+    // PARTIAL: la venta devuelta reaparecía por cobrar.
+    expect(mockPrisma.order.updateMany).toHaveBeenCalledTimes(1)
+    const data = mockPrisma.order.updateMany.mock.calls[0][0].data
+    expect(data.paymentStatus).toBe('PAID')
+    expect(Number(data.paidAmount)).toBe(200)
+    expect(Number(data.remainingBalance)).toBe(0)
     expect(result.action).toBe('CONFIRMED')
-    expect(warnLogged('CO reentregado sobre una cuenta con reembolso')).toBe(true)
+    // La cuenta con reembolsos sigue siendo digna de una mirada humana.
+    expect(warnLogged('[Reembolso] cobro sobre una cuenta con reembolsos')).toBe(true)
   })
 
   it('el Payment igual queda COMPLETED (el dinero es real) y no se dispara el referido', async () => {
+    // `becamePaid` es false: la cuenta YA estaba PAID antes de esta reentrega,
+    // así que el hook de referidos no se vuelve a disparar.
     mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment({ status: 'COMPLETED' }))
     mockPrisma.order.findUnique.mockResolvedValue(freshOrder({ status: 'COMPLETED', paymentStatus: 'PAID' }))
     mockPrisma.payment.findMany.mockResolvedValue([
@@ -219,16 +233,15 @@ describe('b4bit — un CO reentregado sobre una cuenta REEMBOLSADA no reabre el 
   })
 
   it('🔴 un CO PRIMERIZO sobre una orden PARTIAL con un refund previo SÍ liquida', async () => {
-    // 🔑 La distinción que el guard TIENE que hacer: esto NO es una reentrega.
-    //
     // Cuenta de $200. El cliente abonó $100 en efectivo y ese cobro se reembolsó
     // (tender equivocado) → la orden quedó PARTIAL con un `Payment` −100 de tipo
-    // REFUND colgado. Ahora paga los $200 en cripto: es un cobro NUEVO
-    // (`Payment` PENDING → COMPLETED en ESTE webhook), y la aritmética con el
-    // refund es la CORRECTA: +100 −100 +200 = 200 ⇒ cuenta SALDADA.
+    // REFUND colgado. Ahora paga los $200 en cripto: la cuenta queda SALDADA.
     //
-    // Si el guard se salta la liquidación aquí, la orden se queda mostrando
-    // "faltan $100" que el cliente YA pagó → el mesero se los vuelve a cobrar.
+    // 🔑 `paidAmount` es BRUTO (100 + 200 = 300), no neto: el reembolso vive en su
+    // propio carril y NO resta de lo cobrado — es el modelo de Square/Toast, y lo
+    // que hace que la cuenta no pueda "volver a deber". Antes esto daba 200
+    // porque el −100 se restaba, y ese mismo mecanismo era el que dejaba una
+    // venta reembolsada reapareciendo por cobrar.
     mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment({ status: 'PENDING' }))
     mockPrisma.order.findUnique.mockResolvedValue(
       freshOrder({ paymentStatus: 'PARTIAL', paidAmount: d('100.00'), remainingBalance: d('100.00') }),
@@ -244,7 +257,7 @@ describe('b4bit — un CO reentregado sobre una cuenta REEMBOLSADA no reabre el 
     expect(mockPrisma.order.updateMany).toHaveBeenCalledTimes(1)
     const data = mockPrisma.order.updateMany.mock.calls[0][0].data
     expect(data.paymentStatus).toBe('PAID')
-    expect(Number(data.paidAmount)).toBe(200)
+    expect(Number(data.paidAmount)).toBe(300)
     expect(Number(data.remainingBalance)).toBe(0)
     expect(data.status).toBe('COMPLETED')
   })
