@@ -185,7 +185,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'move_table_check',
-    'TABLE_SERVICE: move the OPEN check (cuenta) from one table to another in a venue you can access — Square\'s "Mover". The order keeps its items/courses; the source table is released and the target becomes occupied. Fails if the target is occupied/reserved or the order is already paid. This WRITES; requires orders:update. Pass venueId + source table number + target table number.',
+    'TABLE_SERVICE: move the OPEN check (cuenta) from one table to another in a venue you can access — Square\'s "Mover". The order keeps its items/courses; the source table is released and the target becomes occupied. Fails if the target is occupied/reserved or the order is already paid. This WRITES; requires tables:update. Pass venueId + source table number + target table number.',
     {
       venueId: z.string().describe('Venue that owns both tables (must be in your scope)'),
       fromNumber: z.string().min(1).describe('Table number the check is on now, e.g. "8"'),
@@ -193,7 +193,10 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromNumber, toNumber }) => {
       const where = guard.venueFilter(venueId)
-      guard.requirePermission('orders:update', venueId)
+      // Espejo EXACTO de la ruta HTTP: mover la cuenta es un acto de SALA y migró a
+      // `tables:update` (auditoría de permisos de piso, "Forma B"). Con `orders:update`
+      // el MCP sería el atajo que la ruta ya no da.
+      guard.requirePermission('tables:update', venueId)
       const source = await prisma.table.findFirst({
         where: { ...where, number: fromNumber, active: true },
         select: { id: true, number: true, currentOrderId: true },
