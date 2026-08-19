@@ -784,10 +784,12 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     // Ninguna de las consultas de María puede haber preguntado por Juan: el bloqueo de una
     // persona jamás debe bloquear la agenda de otra.
     const mariaCalls = (prismaMock.externalBusyBlock.findFirst as jest.Mock).mock.calls.map(call => call[0])
-    expect(
-      mariaCalls.some(args => args?.where?.staffId === OTHER_STAFF_ID || args?.where?.OR?.some(c => c.staffId === OTHER_STAFF_ID)),
-    ).toBe(true)
-    expect(mariaCalls.some(args => args?.where?.staffId === STAFF_ID || args?.where?.OR?.some(c => c.staffId === STAFF_ID))).toBe(false)
+    const preguntaPor = (staffId: string) =>
+      mariaCalls.some(
+        (args: any) => args?.where?.staffId === staffId || args?.where?.OR?.some((clause: any) => clause.staffId === staffId),
+      )
+    expect(preguntaPor(OTHER_STAFF_ID)).toBe(true)
+    expect(preguntaPor(STAFF_ID)).toBe(false)
   })
 })
 
