@@ -475,13 +475,16 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
   // ningún reporte podía cuadrar. Se ignoran con aviso; el resto sigue igual.
   const { status, customerId, customerName, tableId, servedById, tipAmount, total, subtotal, createdAt, orderNumber, type } = data as any
   if (tipAmount !== undefined || total !== undefined || subtotal !== undefined) {
-    logger.warn('[ORDER.DASHBOARD] updateOrder ignoró campos de dinero editados a mano (total/tipAmount/subtotal se derivan de renglones y pagos)', {
-      venueId,
-      orderId,
-      total,
-      tipAmount,
-      subtotal,
-    })
+    logger.warn(
+      '[ORDER.DASHBOARD] updateOrder ignoró campos de dinero editados a mano (total/tipAmount/subtotal se derivan de renglones y pagos)',
+      {
+        venueId,
+        orderId,
+        total,
+        tipAmount,
+        subtotal,
+      },
+    )
   }
 
   // Get the current order to check previous status
@@ -635,13 +638,13 @@ export async function deleteOrder(venueId: string, orderId: string) {
   })
 
   // Referidos: anula los PENDING de esta orden y revierte premios (defensa en
-    // profundidad). Nunca lanza.
-    {
-      const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
-      await onOrderCancelled({ orderId: cancelledOrder.id, venueId: cancelledOrder.venueId })
-    }
+  // profundidad). Nunca lanza.
+  {
+    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+    await onOrderCancelled({ orderId: cancelledOrder.id, venueId: cancelledOrder.venueId })
+  }
 
-    return cancelledOrder
+  return cancelledOrder
 }
 
 /**

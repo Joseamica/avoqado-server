@@ -45,7 +45,13 @@ describe('sales-by-item — atribución a promociones', () => {
       .mockResolvedValueOnce([itemRow()]) // query principal
       .mockResolvedValueOnce([
         // atribución
-        { productId: 'prod-refresco', product_name: 'Refresco', promotion_name: 'Combo Café + 2 Medialunas', units_sold: 12, net_sales: 240 },
+        {
+          productId: 'prod-refresco',
+          product_name: 'Refresco',
+          promotion_name: 'Combo Café + 2 Medialunas',
+          units_sold: 12,
+          net_sales: 240,
+        },
       ])
 
     const report = await getSalesByItem(VENUE, { ...RANGE })
@@ -87,7 +93,15 @@ describe('sales-by-item — atribución a promociones', () => {
     prismaMock.$queryRawUnsafe
       .mockResolvedValueOnce([
         itemRow(),
-        itemRow({ productId: null, product_name: 'Agua de sabor', product_sku: null, items_sold: 2, units_sold: 2, gross_sales: 40, discounts: 0 }),
+        itemRow({
+          productId: null,
+          product_name: 'Agua de sabor',
+          product_sku: null,
+          items_sold: 2,
+          units_sold: 2,
+          gross_sales: 40,
+          discounts: 0,
+        }),
       ])
       .mockResolvedValueOnce([
         { productId: null, product_name: 'Agua de sabor', promotion_name: 'Comida corrida', units_sold: 2, net_sales: 30 },

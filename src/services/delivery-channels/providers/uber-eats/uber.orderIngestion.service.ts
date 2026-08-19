@@ -12,7 +12,19 @@
  * Idempotente por `Order.externalId` namespaceado (`UBER_EATS:{id}`): el unique
  * es por venue `[código]` y dos proveedores pueden repetir número de pedido.
  */
-import { Prisma, DeliveryProvider, OrderSource, OriginSystem, OrderStatus, PaymentStatus, PaymentMethod, PaymentFundsFlow, PaymentSource, SplitType, TransactionStatus } from '@prisma/client'
+import {
+  Prisma,
+  DeliveryProvider,
+  OrderSource,
+  OriginSystem,
+  OrderStatus,
+  PaymentStatus,
+  PaymentMethod,
+  PaymentFundsFlow,
+  PaymentSource,
+  SplitType,
+  TransactionStatus,
+} from '@prisma/client'
 import prisma from '../../../../utils/prismaClient'
 import logger from '../../../../config/logger'
 import { createSalePostingInTx, applySalePosting } from '../../../inventory/inventoryPosting.service'
@@ -45,7 +57,9 @@ function assertMoneyInvariants(p: NormalizedUberOrder['payment']): void {
   const ventaTotal = q(D(p.saleAmount).plus(D(p.merchantFees)))
   const ventaSplit = q(D(p.externallyPaidSale).plus(D(p.cashDueSale)))
   if (!ventaTotal.equals(ventaSplit)) {
-    throw new Error(`Invariante de dinero no cuadra: saleAmount+merchantFees (${ventaTotal}) ≠ externallyPaidSale+cashDueSale (${ventaSplit})`)
+    throw new Error(
+      `Invariante de dinero no cuadra: saleAmount+merchantFees (${ventaTotal}) ≠ externallyPaidSale+cashDueSale (${ventaSplit})`,
+    )
   }
   const propina = q(D(p.tipAmount))
   const propinaSplit = q(D(p.externallyPaidTip).plus(D(p.cashDueTip)))
@@ -129,7 +143,7 @@ export async function ingestUberOrder(normalized: NormalizedUberOrder, ctx: Uber
         data: {
           orderId: order.id,
           productId: resolution.productId, // null si no resolvió: la línea NO se pierde
-          productName: item.name,          // snapshot: sobrevive aunque el producto cambie
+          productName: item.name, // snapshot: sobrevive aunque el producto cambie
           productSku: item.externalData ?? null,
           quantity: item.quantity,
           unitPrice: D(item.unitPrice),
@@ -192,7 +206,8 @@ export async function ingestUberOrder(normalized: NormalizedUberOrder, ctx: Uber
       await applySalePosting(postingState.id, null)
     } catch (error) {
       logger.error('[🔴 UberIngest] posting de inventario falló (no fatal, el sweeper lo retoma)', {
-        orderId, error: error instanceof Error ? error.message : 'desconocido',
+        orderId,
+        error: error instanceof Error ? error.message : 'desconocido',
       })
     }
   }

@@ -356,11 +356,11 @@ Campaña: ${utmTexto || '—'}
 
     <div style="padding-bottom:8px;">
       ${
-      yaEsCliente
-        ? `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Vimos que dejaste tus datos en nuestra página, pero <strong>${escapeHtml(String(companyName))}</strong> ya tiene cuenta con nosotros — no hace falta crear otra. Entra con tu correo de siempre; si no recuerdas la contraseña, usa "Olvidé mi contraseña" en la pantalla de acceso.</p>
+        yaEsCliente
+          ? `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Vimos que dejaste tus datos en nuestra página, pero <strong>${escapeHtml(String(companyName))}</strong> ya tiene cuenta con nosotros — no hace falta crear otra. Entra con tu correo de siempre; si no recuerdas la contraseña, usa "Olvidé mi contraseña" en la pantalla de acceso.</p>
       <p style="font-size:16px;margin:0 0 16px 0;color:#000;">Si necesitabas algo más, respóndenos este correo o <a href="https://avoqado.io/wa?utm_source=email&utm_medium=correo&utm_campaign=alta_landing" style="color:#000;font-weight:600;">escríbenos por WhatsApp</a> y te atendemos.</p>`
-        : `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Recibimos los datos de <strong>${escapeHtml(String(companyName))}</strong>. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menú y dejarte cobrando.</p>`
-    }
+          : `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Recibimos los datos de <strong>${escapeHtml(String(companyName))}</strong>. Te escribimos por WhatsApp hoy mismo para ayudarte a cargar tu menú y dejarte cobrando.</p>`
+      }
       ${
         yaEsCliente
           ? ''
