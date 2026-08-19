@@ -8,6 +8,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { getRoleDisplayName, DEFAULT_ROLE_DISPLAY_NAMES } from '../dashboard/venueRoleConfig.dashboard.service'
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
+import { sesionInvalidadaPorCambioDeContrasena } from '@/utils/passwordChangeGuard'
 
 const TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30 // 30 days
 
@@ -249,6 +250,16 @@ export async function refreshAccessToken(refreshToken: string) {
 
   // Extract user information from token
   const { sub: userId, venueId, orgId, terminalSerialNumber } = decoded as any
+
+  // SEGURIDAD: un refresh token anterior al ultimo cambio de contrasena no sirve.
+  //
+  // Sin esto el guard del middleware seria inutil: se le mata el access token al
+  // gerente echado, su app pide un refresh, y sale con uno nuevo y un `iat`
+  // fresco que ya pasa el guard. La sesion habria que cerrarla por los DOS
+  // lados o no se cierra por ninguno.
+  if (await sesionInvalidadaPorCambioDeContrasena(userId, (decoded as any).iat)) {
+    throw new UnauthorizedError('Tu contraseña cambió. Vuelve a iniciar sesión.')
+  }
 
   // Verify user still exists and is active
   const staffVenue = await prisma.staffVenue.findFirst({

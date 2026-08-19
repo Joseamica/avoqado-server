@@ -2884,7 +2884,15 @@ class OrganizationDashboardService {
 
     await prisma.staff.update({
       where: { id: userId },
-      data: { password: hashedPassword },
+      data: {
+        password: hashedPassword,
+        // 🔴 Sella el cambio para que las sesiones abiertas de esa persona se
+        // caigan (ver passwordChangeGuard). Este es JUSTO el caso que motivo el
+        // guard: el dueno le resetea la contrasena a un empleado que acaba de
+        // correr. Sin este sello el empleado se queda dentro desde su celular
+        // hasta que venza su refresh token — hasta 90 dias.
+        lastPasswordReset: new Date(),
+      },
     })
 
     // Audit WHO reset WHOM. `performedBy` (the caller's staffId) is required for a
