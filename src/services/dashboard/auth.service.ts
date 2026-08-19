@@ -743,6 +743,7 @@ export async function validateResetToken(token: string) {
       id: true,
       resetTokenExpiry: true,
       resetTokenUsedAt: true,
+      password: true,
     },
   })
 
@@ -763,7 +764,16 @@ export async function validateResetToken(token: string) {
 
   // 6. SECURITY: Don't return email (even masked) - reduces information leakage
   // Email domain was previously exposed via masked format
-  return { valid: true }
+  //
+  // `isNewAccount` dice si esta cuenta NUNCA ha tenido contrasena — el caso del
+  // alta por landing, que llega aqui por el magic link de bienvenida. La
+  // pantalla lo usa para decir "Crea tu contrasena" en vez de "Restablecer
+  // contrasena": a alguien que se registro hace un minuto, pedirle que
+  // "restablezca" algo que nunca tuvo lo hace dudar de si se equivoco de correo.
+  //
+  // No filtra nada: para llegar hasta aqui ya hay que traer un token valido,
+  // vigente y sin usar de ESA cuenta.
+  return { valid: true, isNewAccount: staff.password === null }
 }
 
 /**

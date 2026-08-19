@@ -694,7 +694,11 @@ export async function submitLabsBrief(req: Request, res: Response, next: NextFun
 export async function continuarOnboarding(req: Request, res: Response, _next: NextFunction) {
   const token = String(req.params.token || '')
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
-  const destino = `${frontendUrl}/auth/reset-password/${encodeURIComponent(token)}`
+  // `lang=es` porque quien llega aqui viene de una landing en espanol y de un
+  // correo en espanol. Sin esto el dashboard elige idioma por el navegador, y a
+  // un mexicano con Chrome en ingles —que son muchos— la primera pantalla de
+  // Avoqado le sale en ingles justo despues de leer todo en espanol.
+  const destino = `${frontendUrl}/auth/reset-password/${encodeURIComponent(token)}?lang=es`
 
   try {
     // El token viaja en claro en el correo; en la DB vive su hash SHA-256.

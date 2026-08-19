@@ -166,6 +166,14 @@ beforeEach(() => {
   })
   // Advisory-lock acquisition for pullConnection — default to "acquired".
   ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ acquired: true }])
+  // `assertOrganizationStaffAvailability` (staff-aware booking) corre en el MISMO camino que
+  // estos flujos: primero resuelve en qué venues de la organización trabaja la persona y luego
+  // busca solapes. Sin estos defaults la lista de membresías llega `undefined` y el servicio
+  // revienta con un TypeError antes de ejercitar lo que estas pruebas miden.
+  ;(prismaMock.staffVenue.findMany as jest.Mock).mockResolvedValue([{ venueId: VENUE_ID }, { venueId: VENUE_ID_B }])
+  ;(prismaMock.reservation.findFirst as jest.Mock).mockResolvedValue(null)
+  ;(prismaMock.classSession.findFirst as jest.Mock).mockResolvedValue(null)
+  ;(prismaMock.slotHold.findFirst as jest.Mock).mockResolvedValue(null)
   rabbitPublishMock.mockClear()
   mockCalendarListList.mockReset()
   mockCalendarListGet.mockReset()
@@ -417,7 +425,7 @@ describe('WORKFLOW [Task 28]: connect → backfill → reservation rejected at b
     // `validateLegacyStaffMembership` selecciona `venue.organizationId`: sin esa rama el
     // servicio revienta con un TypeError en vez de ejercitar la regla que la prueba mide.
     ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', venue: { organizationId: ORG_ID } })
-    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValueOnce({
+    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValue({
       id: 'block-1',
       googleConnectionId: CONNECTION_ID,
       venueId: VENUE_ID,
@@ -441,17 +449,26 @@ describe('WORKFLOW [Task 28]: connect → backfill → reservation rejected at b
         { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
       ),
-    ).rejects.toThrow(/calendario externo/i)
+      // Lo que esta prueba protege es que la reserva NO se cree encima de un evento del
+      // calendario externo. Quién la rechaza cambió: desde la reserva con profesionista, el
+      // bloqueo atado a UNA PERSONA lo atrapa antes `assertOrganizationStaffAvailability`
+      // —la misma validación que mira sus otras citas, clases y apartados— y contesta con el
+      // mensaje genérico de "no está disponible", sin decir de dónde viene el conflicto.
+      // El texto que nombra el calendario externo sigue vivo para los bloqueos del NEGOCIO
+      // (sin `staffId`), que esa validación no mira; el otro caso de este archivo lo cubre.
+    ).rejects.toThrow(/no está disponible en ese horario/i)
 
     // Sanity: the external-busy-block lookup actually fired.
     expect(prismaMock.externalBusyBlock.findFirst).toHaveBeenCalled()
+    // La invariante de negocio, explícita: no se escribió ninguna reserva.
+    expect(prismaMock.reservation.create).not.toHaveBeenCalled()
 
     // ------------------------------------------------------------
     // Step 7 — Create a reservation at a FREE time → success.
     // ------------------------------------------------------------
     const freeStart = new Date(now.getTime() + 10 * 86400_000)
     const freeEnd = new Date(freeStart.getTime() + 60 * 60_000)
-    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValueOnce(null)
+    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValue(null)
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([]) // no overlap conflicts
     ;(prismaMock.reservation.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prismaMock.reservation.create as jest.Mock).mockResolvedValue({
@@ -645,7 +662,7 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     ;(prismaMock.product.findFirst as jest.Mock).mockResolvedValue(null)
     ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueA', venue: { organizationId: ORG_ID } })
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset()
-    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValueOnce(personalBlock)
+    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValue(personalBlock)
 
     await expect(
       reservationService.createReservation(
@@ -661,13 +678,14 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
         { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
       ),
-    ).rejects.toThrow(/calendario externo/i)
+    ).rejects.toThrow(/no está disponible en ese horario/i)
 
-    // The `where` clause must OR `(venueId=A)` with `(staffId=Juan)` so the
-    // staff-personal block is found.
+    // Lo que hace que el bloqueo personal de Juan valga en CUALQUIER sucursal es que la
+    // consulta que ahora corta filtra por PERSONA y no por venue. Si alguien le añadiera un
+    // filtro de venue, el bloqueo dejaría de cruzar sucursales y esta prueba lo cazaría.
     const findFirstArgsA = (prismaMock.externalBusyBlock.findFirst as jest.Mock).mock.calls[0][0]
-    expect(findFirstArgsA.where.OR).toContainEqual({ venueId: VENUE_ID })
-    expect(findFirstArgsA.where.OR).toContainEqual({ staffId: STAFF_ID })
+    expect(findFirstArgsA.where.staffId).toBe(STAFF_ID)
+    expect(findFirstArgsA.where.venueId).toBeUndefined()
 
     // ------------------------------------------------------------
     // Step 3 — Attempt reservation for Juan at Venue B at the same busy time → reject.
@@ -676,7 +694,7 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     // ------------------------------------------------------------
     ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueB', venue: { organizationId: ORG_ID } })
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset()
-    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValueOnce(personalBlock)
+    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValue(personalBlock)
 
     await expect(
       reservationService.createReservation(
@@ -692,17 +710,19 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
         { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
       ),
-    ).rejects.toThrow(/calendario externo/i)
+    ).rejects.toThrow(/no está disponible en ese horario/i)
 
+    // Mismo rechazo desde la sucursal B, con la misma consulta por persona: el bloqueo
+    // personal no se queda encerrado en el venue donde se creó.
     const findFirstArgsB = (prismaMock.externalBusyBlock.findFirst as jest.Mock).mock.calls[0][0]
-    expect(findFirstArgsB.where.OR).toContainEqual({ venueId: VENUE_ID_B })
-    expect(findFirstArgsB.where.OR).toContainEqual({ staffId: STAFF_ID })
+    expect(findFirstArgsB.where.staffId).toBe(STAFF_ID)
+    expect(findFirstArgsB.where.venueId).toBeUndefined()
 
     // ------------------------------------------------------------
     // Step 4 — Reservation for Juan at Venue A at a FREE time → success.
     // ------------------------------------------------------------
     ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueA', venue: { organizationId: ORG_ID } })
-    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValueOnce(null)
+    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValue(null)
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
     ;(prismaMock.reservation.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prismaMock.reservation.create as jest.Mock).mockResolvedValue({
@@ -736,7 +756,7 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     // matches Maria's lookup → null → reservation proceeds.
     // ------------------------------------------------------------
     ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-maria-venueA', venue: { organizationId: ORG_ID } })
-    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValueOnce(null)
+    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValue(null)
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
     ;(prismaMock.reservation.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prismaMock.reservation.create as jest.Mock).mockResolvedValue({
@@ -761,10 +781,13 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     )
     expect(mariaBusy.id).toBe('res-busy-maria')
 
-    // The lookup for Maria must have used her staffId — not Juan's.
-    const mariaFindFirstArgs = (prismaMock.externalBusyBlock.findFirst as jest.Mock).mock.calls[0][0]
-    expect(mariaFindFirstArgs.where.OR).toContainEqual({ staffId: OTHER_STAFF_ID })
-    expect(mariaFindFirstArgs.where.OR).not.toContainEqual({ staffId: STAFF_ID })
+    // Ninguna de las consultas de María puede haber preguntado por Juan: el bloqueo de una
+    // persona jamás debe bloquear la agenda de otra.
+    const mariaCalls = (prismaMock.externalBusyBlock.findFirst as jest.Mock).mock.calls.map(call => call[0])
+    expect(
+      mariaCalls.some(args => args?.where?.staffId === OTHER_STAFF_ID || args?.where?.OR?.some(c => c.staffId === OTHER_STAFF_ID)),
+    ).toBe(true)
+    expect(mariaCalls.some(args => args?.where?.staffId === STAFF_ID || args?.where?.OR?.some(c => c.staffId === STAFF_ID))).toBe(false)
   })
 })
 
@@ -779,7 +802,9 @@ describe('REGRESSION — Phase 1 invariants exercised by the workflows', () => {
     // `validateLegacyStaffMembership` selecciona `venue.organizationId`: sin esa rama el
     // servicio revienta con un TypeError en vez de ejercitar la regla que la prueba mide.
     ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', venue: { organizationId: ORG_ID } })
-    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValueOnce(null)
+    // `mockResolvedValue`, no `…Once`: el camino consulta esta tabla dos veces y con `Once` la
+    // segunda devolvería `undefined`, que no es lo que responde una base sin bloqueos.
+    ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValue(null)
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
     ;(prismaMock.reservation.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prismaMock.reservation.create as jest.Mock).mockResolvedValue({
@@ -804,7 +829,13 @@ describe('REGRESSION — Phase 1 invariants exercised by the workflows', () => {
       STAFF_ID,
     )
 
-    const where = (prismaMock.externalBusyBlock.findFirst as jest.Mock).mock.calls[0][0].where
+    // Ahora hay DOS consultas a externalBusyBlock en el mismo camino: la de
+    // `assertOrganizationStaffAvailability` (solo por staffId) y la de `checkExternalBusyBlock`
+    // (venue OR staff). Esta prueba vigila la SEGUNDA, así que se busca por su forma en vez de
+    // asumir que es la primera — si mañana se añade otra consulta, sigue midiendo la correcta.
+    const orCall = (prismaMock.externalBusyBlock.findFirst as jest.Mock).mock.calls.map(call => call[0]).find(args => args?.where?.OR)
+    expect(orCall).toBeDefined()
+    const where = orCall.where
     // venue filter is ALWAYS in the OR
     expect(where.OR).toContainEqual({ venueId: VENUE_ID })
     // half-open overlap semantics
