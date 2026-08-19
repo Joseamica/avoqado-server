@@ -9,6 +9,7 @@
 import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 let app: Express
 const TEST_SECRET = 'test-secret'
@@ -72,8 +73,13 @@ beforeAll(async () => {
   app = mod.default
 })
 
-const makeToken = (role: string) =>
-  jwt.sign({ sub: 'test-user', orgId: 'test-org', venueId: 'test-venue', role }, process.env.ACCESS_TOKEN_SECRET || TEST_SECRET)
+const TOKEN_VENUE_ID = 'test-venue'
+
+const makeToken = (role: string) => {
+  // El rol se AUTORIZA contra StaffVenue, no contra el JWT (7bdbac01).
+  mirrorTokenRoleOnStaffVenue(role, TOKEN_VENUE_ID)
+  return jwt.sign({ sub: 'test-user', orgId: 'test-org', venueId: TOKEN_VENUE_ID, role }, process.env.ACCESS_TOKEN_SECRET || TEST_SECRET)
+}
 
 describe('Superadmin routes - authentication and authorization', () => {
   test('should return 401 when no token is provided', async () => {

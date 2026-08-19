@@ -30,17 +30,27 @@ import { SocketEventType } from '../../communication/sockets/types'
 const VENUE_TIMEZONE_DEFAULT = 'America/Mexico_City'
 
 // SIM-type buckets for the org Ventas tables/charts. Names are tenant data
-// (confirmed against PlayTelecom's ItemCategory records). The 3 exact buckets +
+// (confirmed against PlayTelecom's ItemCategory records). The exact buckets +
 // "e-SIM" (matched by substring, like the rest of the backend's eSIM detection)
-// are always-present rows; everything else — null, legacy "Otro", the "de caja"
-// family, etc. — collapses to "Otros SIMs" so row sums always reconcile with the
-// weekly total. eSIM was split out of "Otros SIMs" on Isaac's request (2026-06-30).
-export type SimBucket = 'SIM de Intercambio' | '$100 de Promotor' | 'SIM de Evento' | 'e-SIM' | 'Otros SIMs'
+// are always-present rows; everything else — null, legacy "Otro", the "$xx de caja"
+// family, "SIM de regalo", etc. — collapses to "Otros SIMs" so row sums always
+// reconcile with the weekly total.
+//
+// Isaac's requests, in order:
+//   2026-06-30 — split "e-SIM" out of "Otros SIMs".
+//   2026-08-18 — split "SIM de Caja Vinculado" out of "Otros SIMs" (it was 4,344 of the
+//                4,853 confirmed sales sitting in that bucket, i.e. the row hid the bulk
+//                of the volume), and DROP the "SIM de Intercambio" row: that category
+//                does not exist in prod (0 categories, 0 sales) so it always rendered empty.
+//
+// 🔴 "SIM de Caja Vinculado" is matched EXACTLY, never by substring: prod also has nine
+// "$xx de caja" categories ("$40 de caja", "$20 de caja"…) that must STAY in "Otros SIMs".
+export type SimBucket = '$100 de Promotor' | 'SIM de Evento' | 'SIM de Caja Vinculado' | 'e-SIM' | 'Otros SIMs'
 export const SIM_OTHERS: SimBucket = 'Otros SIMs'
 /** Exact-name buckets (matched verbatim, case/space-insensitive). */
-const SIM_EXACT_BUCKETS = ['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento'] as const
-/** Display/row order for the SIM-type tables: 3 exact + e-SIM ("Otros SIMs" appended last when > 0). */
-export const SIM_FIXED_BUCKETS: readonly SimBucket[] = [...SIM_EXACT_BUCKETS, 'e-SIM']
+const SIM_EXACT_BUCKETS = ['$100 de Promotor', 'SIM de Evento', 'SIM de Caja Vinculado'] as const
+/** Display/row order for the SIM-type tables ("Otros SIMs" appended last when > 0). */
+export const SIM_FIXED_BUCKETS: readonly SimBucket[] = ['$100 de Promotor', 'SIM de Evento', 'e-SIM', 'SIM de Caja Vinculado']
 
 export function toSimBucket(categoryName: string | null | undefined): SimBucket {
   const n = (categoryName ?? '').trim().toLowerCase()
@@ -604,9 +614,10 @@ export async function getSalesBySaleTypeWeekly(
 
 /**
  * Confirmed sales by Tipo de SIM × ISO week. Category resolved through
- * payment→order→items→serializedItem→category, mapped to 3 fixed buckets +
- * "Otros SIMs". Same COMPLETED base as getSalesByWeek → totals reconcile.
- * The 3 fixed rows are always present (fixed order); "Otros SIMs" only if > 0.
+ * payment→order→items→serializedItem→category, mapped to the fixed buckets
+ * (`SIM_FIXED_BUCKETS`) + "Otros SIMs". Same COMPLETED base as getSalesByWeek →
+ * totals reconcile. The fixed rows are always present (fixed order); "Otros
+ * SIMs" only if > 0.
  */
 export async function getSalesBySimTypeWeekly(
   orgId: string,

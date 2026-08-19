@@ -50,6 +50,7 @@ jest.mock('../../../src/config/swagger', () => ({
 import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 // Import the real Express app after env + mocks are set
 
@@ -63,6 +64,9 @@ const otherVenueId = 'clvenuetpvauth00000000002' // venue the token holder does 
 const orderId = 'clordertpvauth00000000001'
 
 function makeToken(role: string, tokenVenueId: string = venueId) {
+  // El rol se AUTORIZA contra StaffVenue, no contra el JWT (7bdbac01): la membresía se espeja
+  // solo para el venue del token, así el caso cross-venue sigue resolviendo null.
+  mirrorTokenRoleOnStaffVenue(role, tokenVenueId)
   const payload = {
     sub: 'user_test',
     orgId: 'org_test',

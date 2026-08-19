@@ -457,22 +457,37 @@ describe('getSalesByPromoterDaily — current month, per-day + toReview', () => 
 
 describe('toSimBucket', () => {
   it('maps the three fixed categories exactly', () => {
-    expect(toSimBucket('SIM de Intercambio')).toBe('SIM de Intercambio')
     expect(toSimBucket('$100 de Promotor')).toBe('$100 de Promotor')
     expect(toSimBucket('SIM de Evento')).toBe('SIM de Evento')
+    expect(toSimBucket('SIM de Caja Vinculado')).toBe('SIM de Caja Vinculado')
   })
   it('is trim/case-insensitive', () => {
-    expect(toSimBucket('  sim de intercambio ')).toBe('SIM de Intercambio')
+    // Prod escribe la categoría en minúsculas ("$100 de promotor", "SIM de evento");
+    // la etiqueta de la fila es la del bucket, no la del dato.
+    expect(toSimBucket('  $100 de promotor ')).toBe('$100 de Promotor')
+    expect(toSimBucket('SIM de evento')).toBe('SIM de Evento')
+    expect(toSimBucket('sim de caja vinculado')).toBe('SIM de Caja Vinculado')
   })
   it('routes eSIM categories to "e-SIM" via substring match', () => {
     expect(toSimBucket('E-SIM de promotor')).toBe('e-SIM')
     expect(toSimBucket('eSIM')).toBe('e-SIM')
     expect(toSimBucket('E-Sim Telcel')).toBe('e-SIM')
   })
-  it('routes null and unknown categories (incl. "de caja") to "Otros SIMs"', () => {
+  it('routes null and unknown categories to "Otros SIMs"', () => {
     expect(toSimBucket(null)).toBe('Otros SIMs')
     expect(toSimBucket('Cualquier otra')).toBe('Otros SIMs')
+    expect(toSimBucket('SIM de regalo')).toBe('Otros SIMs')
+  })
+  it('keeps the "$xx de caja" family in "Otros SIMs" — only "SIM de Caja Vinculado" is split out', () => {
+    // Isaac pidió visibilidad de UNA categoría "de caja", no de la familia entera
+    // (Asana "Cambios a tablas de Ventas", 2026-08-18). Un match por substring
+    // arrastraría las 9 categorías "$xx de caja" y rompería lo pedido.
     expect(toSimBucket('$40 de caja')).toBe('Otros SIMs')
+    expect(toSimBucket('$20 de caja')).toBe('Otros SIMs')
+    expect(toSimBucket('$95 de caja')).toBe('Otros SIMs')
+  })
+  it('no longer splits out "SIM de Intercambio" (categoría inexistente en prod: 0 ventas)', () => {
+    expect(toSimBucket('SIM de Intercambio')).toBe('Otros SIMs')
   })
 })
 
@@ -541,24 +556,33 @@ describe('getSalesBySimTypeWeekly', () => {
 
   it('groups by SIM bucket per week; fixed rows (incl. e-SIM) always present; Otros only when > 0', async () => {
     mockedQueryRaw.mockResolvedValue([
-      cat('SIM de Intercambio', 2),
-      cat('SIM de Evento', 1),
+      cat('SIM de Caja Vinculado', 2),
+      cat('SIM de evento', 1),
       cat('E-SIM de promotor', 1), // → e-SIM (su propia fila)
       cat('$40 de caja', 1), // → Otros SIMs
     ])
     const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
-    expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento', 'e-SIM', 'Otros SIMs'])
-    expect(rows[0]).toMatchObject({ total: 2, byWeek: { '2026-W11': 2 } })
-    expect(rows[1]).toMatchObject({ name: '$100 de Promotor', total: 0, byWeek: {} }) // fija, en cero, presente igual
-    expect(rows[2]).toMatchObject({ name: 'SIM de Evento', total: 1 })
-    expect(rows[3]).toMatchObject({ name: 'e-SIM', total: 1 })
+    expect(rows.map(r => r.name)).toEqual(['$100 de Promotor', 'SIM de Evento', 'e-SIM', 'SIM de Caja Vinculado', 'Otros SIMs'])
+    expect(rows[0]).toMatchObject({ name: '$100 de Promotor', total: 0, byWeek: {} }) // fija, en cero, presente igual
+    expect(rows[1]).toMatchObject({ name: 'SIM de Evento', total: 1 })
+    expect(rows[2]).toMatchObject({ name: 'e-SIM', total: 1 })
+    expect(rows[3]).toMatchObject({ name: 'SIM de Caja Vinculado', total: 2, byWeek: { '2026-W11': 2 } })
     expect(rows[4]).toMatchObject({ name: 'Otros SIMs', total: 1 })
   })
 
   it('omits "Otros SIMs" when every sale is a fixed category', async () => {
     mockedQueryRaw.mockResolvedValue([cat('$100 de Promotor', 1)])
     const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
-    expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento', 'e-SIM'])
+    expect(rows.map(r => r.name)).toEqual(['$100 de Promotor', 'SIM de Evento', 'e-SIM', 'SIM de Caja Vinculado'])
+  })
+
+  it('una venta de "SIM de Intercambio" ya NO abre fila propia: cae en Otros SIMs', async () => {
+    // La fila se eliminó por pedido de Isaac (Asana, 2026-08-18). La categoría no existe
+    // en prod (0 ventas), pero si alguien la crea, el total sigue cuadrando vía Otros SIMs.
+    mockedQueryRaw.mockResolvedValue([cat('SIM de Intercambio', 3)])
+    const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
+    expect(rows.map(r => r.name)).not.toContain('SIM de Intercambio')
+    expect(rows.find(r => r.name === 'Otros SIMs')).toMatchObject({ total: 3 })
   })
 
   it('treats a sale with no serialized item as Otros SIMs', async () => {
@@ -663,13 +687,14 @@ describe('todas las agregaciones cuentan el MISMO conjunto de ventas', () => {
 describe('getSalesBySimType — regrouped into SIM buckets', () => {
   it('collapses raw categories into the fixed buckets (incl. e-SIM) + Otros SIMs', async () => {
     mockedQueryRaw.mockResolvedValue([
-      { bucket: '2026-03', category_name: 'SIM de Intercambio', count: BigInt(1) },
+      { bucket: '2026-03', category_name: 'SIM de Caja Vinculado', count: BigInt(1) },
       { bucket: '2026-03', category_name: 'E-SIM de promotor', count: BigInt(1) },
+      { bucket: '2026-03', category_name: '$40 de caja', count: BigInt(1) }, // sigue en Otros SIMs
     ])
     const rows = await getSalesBySimType(ORG_ID, {})
     expect(rows).toHaveLength(1)
-    expect(rows[0].byCategory).toEqual({ 'SIM de Intercambio': 1, 'e-SIM': 1 })
-    expect(rows[0].total).toBe(2)
+    expect(rows[0].byCategory).toEqual({ 'SIM de Caja Vinculado': 1, 'e-SIM': 1, 'Otros SIMs': 1 })
+    expect(rows[0].total).toBe(3)
   })
 
   it('ordena los meses del más reciente al más viejo', async () => {

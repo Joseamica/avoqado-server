@@ -59,7 +59,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
           'promoterWeekly',
         ])
         .describe(
-          'Aggregation: summary KPIs; confirmed sales by month / city / store / supervisor / promoter / promoterDaily; WEEKLY tables saleTypeWeekly (Líneas Nuevas vs Portabilidades) and simTypeWeekly (SIM de Intercambio / $100 de Promotor / SIM de Evento / e-SIM / Otros SIMs); or promoterWeekly (per promoter × week, attributed to store + supervisor)',
+          'Aggregation: summary KPIs; confirmed sales by month / city / store / supervisor / promoter / promoterDaily; WEEKLY tables saleTypeWeekly (Líneas Nuevas vs Portabilidades) and simTypeWeekly ($100 de Promotor / SIM de Evento / e-SIM / SIM de Caja Vinculado / Otros SIMs — "Otros SIMs" groups every other category, e.g. the "$xx de caja" family and "SIM de regalo"); or promoterWeekly (per promoter × week, attributed to store + supervisor)',
         ),
       fromDate: z
         .string()

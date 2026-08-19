@@ -34,6 +34,7 @@ import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 const mockMarkExternalHandoff = jest.fn()
 const mockConfirmExternalSettlement = jest.fn()
@@ -68,8 +69,10 @@ beforeAll(async () => {
 })
 
 /** Mismo helper que `venueActivityLog.api.test.ts`: JWT shape de AvoqadoJwtPayload. */
-const makeToken = (role: string) =>
-  jwt.sign(
+const makeToken = (role: string) => {
+  // El rol se AUTORIZA contra StaffVenue, no contra el JWT (7bdbac01).
+  mirrorTokenRoleOnStaffVenue(role, VENUE_ID)
+  return jwt.sign(
     {
       sub: STAFF_ID,
       orgId: ORG_ID,
@@ -78,6 +81,7 @@ const makeToken = (role: string) =>
     },
     process.env.ACCESS_TOKEN_SECRET || TEST_SECRET,
   )
+}
 
 const authHeader = (role: string) => ({ Authorization: `Bearer ${makeToken(role)}` })
 

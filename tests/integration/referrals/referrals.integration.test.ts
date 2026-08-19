@@ -411,6 +411,25 @@ describe('Referral Program — end-to-end integration', () => {
     const preRefundRefer = await prisma.customer.findUnique({ where: { id: referrer.id } })
     expect(preRefundRefer?.referralTier).toBe('TIER_1')
 
+    // El reembolso de verdad, no sólo el aviso. Desde f7e2696e la reversa ocurre SOLO si la
+    // venta se devolvió COMPLETA, y eso `isOrderFullyReversed` lo decide leyendo los `Payment`
+    // de tipo REFUND de la orden — no el hecho de que alguien llame al hook. Los dos caminos
+    // reales (dashboard y TPV) crean ese pago ANTES de avisar; el test tiene que hacer lo mismo
+    // o estaría midiendo un reembolso que nunca ocurrió.
+    await prisma.payment.create({
+      data: {
+        venueId,
+        orderId: order.id,
+        amount: -580, // negativo, como todo reembolso
+        method: 'CASH',
+        status: 'COMPLETED',
+        type: 'REFUND',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: -580,
+      },
+    })
+
     // Refund — should reverse tier + revoke unredeemed reward bundle.
     await onOrderRefunded({ orderId: order.id, venueId })
 

@@ -29,6 +29,7 @@ import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 // Override the global activity-log service mock so the three venue-scoped
 // query functions the controller calls exist and return data.
@@ -59,11 +60,12 @@ beforeAll(async () => {
 
 /**
  * Generate a JWT token matching AvoqadoJwtPayload shape.
- * The token venueId matches the URL param so checkPermission resolves
- * the role without an extra prisma.staffVenue.findUnique call.
+ * Desde 7bdbac01 `checkPermission` SIEMPRE lee el rol de `prisma.staffVenue.findUnique`:
+ * el JWT autentica, la base autoriza. Por eso la membresía se espeja junto con el token.
  */
-const makeToken = (role: string) =>
-  jwt.sign(
+const makeToken = (role: string) => {
+  mirrorTokenRoleOnStaffVenue(role, VENUE_ID)
+  return jwt.sign(
     {
       sub: STAFF_ID,
       orgId: ORG_ID,
@@ -72,6 +74,7 @@ const makeToken = (role: string) =>
     },
     process.env.ACCESS_TOKEN_SECRET || TEST_SECRET,
   )
+}
 
 /**
  * Prevent accidental SUPERADMIN fallthrough: checkPermission probes

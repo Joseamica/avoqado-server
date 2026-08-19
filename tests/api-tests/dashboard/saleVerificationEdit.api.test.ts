@@ -28,6 +28,7 @@ import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 let app: Express
 const TEST_SECRET = 'test-secret'
@@ -63,11 +64,12 @@ beforeAll(async () => {
 /**
  * Generate JWT token matching AvoqadoJwtPayload shape. The token venueId is used
  * by resolveRequestVenueId (route has no :venueId) and the token orgId is checked
- * by checkOrgAccess. With tokenVenueId === targetVenueId the permission middleware
- * resolves the token role without a staffVenue lookup.
+ * by checkOrgAccess. Desde 7bdbac01 el rol se AUTORIZA contra `StaffVenue`, no contra el JWT,
+ * así que la membresía se espeja en la base junto con el token.
  */
-const makeToken = (role: string) =>
-  jwt.sign(
+const makeToken = (role: string) => {
+  mirrorTokenRoleOnStaffVenue(role, VENUE_ID)
+  return jwt.sign(
     {
       sub: STAFF_ID,
       orgId: ORG_ID,
@@ -76,6 +78,7 @@ const makeToken = (role: string) =>
     },
     process.env.ACCESS_TOKEN_SECRET || TEST_SECRET,
   )
+}
 
 /**
  * Prevent accidental SUPERADMIN fallthrough: checkPermission probes

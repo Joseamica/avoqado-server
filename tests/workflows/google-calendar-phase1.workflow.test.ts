@@ -414,7 +414,9 @@ describe('WORKFLOW [Task 28]: connect → backfill → reservation rejected at b
     // ------------------------------------------------------------
     ;(prismaMock.table.findFirst as jest.Mock).mockResolvedValue(null) // no table
     ;(prismaMock.product.findFirst as jest.Mock).mockResolvedValue(null)
-    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1' })
+    // `validateLegacyStaffMembership` selecciona `venue.organizationId`: sin esa rama el
+    // servicio revienta con un TypeError en vez de ejercitar la regla que la prueba mide.
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', venue: { organizationId: ORG_ID } })
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValueOnce({
       id: 'block-1',
       googleConnectionId: CONNECTION_ID,
@@ -641,7 +643,7 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     // ------------------------------------------------------------
     ;(prismaMock.table.findFirst as jest.Mock).mockResolvedValue(null)
     ;(prismaMock.product.findFirst as jest.Mock).mockResolvedValue(null)
-    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueA' })
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueA', venue: { organizationId: ORG_ID } })
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset()
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValueOnce(personalBlock)
 
@@ -672,7 +674,7 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     // Even though venueId differs, Juan's staff-personal block still matches via
     // `OR: [{ venueId: B }, { staffId: Juan }]`.
     // ------------------------------------------------------------
-    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueB' })
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueB', venue: { organizationId: ORG_ID } })
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset()
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockResolvedValueOnce(personalBlock)
 
@@ -699,7 +701,7 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     // ------------------------------------------------------------
     // Step 4 — Reservation for Juan at Venue A at a FREE time → success.
     // ------------------------------------------------------------
-    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueA' })
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-juan-venueA', venue: { organizationId: ORG_ID } })
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValueOnce(null)
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
     ;(prismaMock.reservation.findUnique as jest.Mock).mockResolvedValue(null)
@@ -733,7 +735,7 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
     // Since the seeded block has venueId=null and staffId=Juan, neither clause
     // matches Maria's lookup → null → reservation proceeds.
     // ------------------------------------------------------------
-    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-maria-venueA' })
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-maria-venueA', venue: { organizationId: ORG_ID } })
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValueOnce(null)
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
     ;(prismaMock.reservation.findUnique as jest.Mock).mockResolvedValue(null)
@@ -774,7 +776,9 @@ describe('REGRESSION — Phase 1 invariants exercised by the workflows', () => {
   it('REGRESSION: checkExternalBusyBlock query always includes venueId in the OR clause', async () => {
     ;(prismaMock.table.findFirst as jest.Mock).mockResolvedValue(null)
     ;(prismaMock.product.findFirst as jest.Mock).mockResolvedValue(null)
-    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1' })
+    // `validateLegacyStaffMembership` selecciona `venue.organizationId`: sin esa rama el
+    // servicio revienta con un TypeError en vez de ejercitar la regla que la prueba mide.
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', venue: { organizationId: ORG_ID } })
     ;(prismaMock.externalBusyBlock.findFirst as jest.Mock).mockReset().mockResolvedValueOnce(null)
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
     ;(prismaMock.reservation.findUnique as jest.Mock).mockResolvedValue(null)

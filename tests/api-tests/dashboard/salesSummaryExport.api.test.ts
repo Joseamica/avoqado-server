@@ -43,6 +43,7 @@ import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 import type { SalesSummaryResponse } from '@/services/dashboard/sales-summary.dashboard.service'
 // Real MindForm venue id — the ONE venue allowed to filter QR_LEGACY. Imported (not
 // hard-coded) so the test stays in lockstep with the controller's own guard source.
@@ -148,8 +149,11 @@ beforeAll(async () => {
 })
 
 /** JWT matching AvoqadoJwtPayload — tokenVenueId === :venueId so the token role drives access. */
-const makeToken = (role: string) =>
-  jwt.sign({ sub: STAFF_ID, orgId: ORG_ID, venueId: VENUE_ID, role }, process.env.ACCESS_TOKEN_SECRET || TEST_SECRET)
+const makeToken = (role: string) => {
+  // El rol se AUTORIZA contra StaffVenue, no contra el JWT (7bdbac01).
+  mirrorTokenRoleOnStaffVenue(role, VENUE_ID)
+  return jwt.sign({ sub: STAFF_ID, orgId: ORG_ID, venueId: VENUE_ID, role }, process.env.ACCESS_TOKEN_SECRET || TEST_SECRET)
+}
 
 const authHeader = (role: string) => ({ Authorization: `Bearer ${makeToken(role)}` })
 
@@ -227,11 +231,12 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
   // the detailed branch — so a non-MindForm venue would pass even WITHOUT the new guard and
   // wouldn't exercise the fix. The MindForm venue clears that earlier guard and reaches the
   // detailed branch, where ONLY the new guard stands between QR_LEGACY and the throwing
-  // buildPaymentWhereFilter('QR_LEGACY'). The JWT venueId === MindForm id so the token role
-  // drives access (no staffVenue lookup needed; mirrors makeToken/authHeader for VENUE_ID).
+  // buildPaymentWhereFilter('QR_LEGACY'). El token va al venue de MindForm, así que la
+  // membresía se espeja en `StaffVenue` para ESE venue (7bdbac01: la base autoriza, no el JWT).
   it('detailed mode + paymentMethod=QR_LEGACY (MindForm venue) returns 400 (BadRequest), not 500', async () => {
     mockVenueHasFeatureAccess.mockResolvedValue(true) // ADVANCED_REPORTS clamp + TRANSACTION_EXPORT
 
+    mirrorTokenRoleOnStaffVenue('OWNER', MINDFORM_VENUE_ID)
     const mindformToken = jwt.sign(
       { sub: STAFF_ID, orgId: ORG_ID, venueId: MINDFORM_VENUE_ID, role: 'OWNER' },
       process.env.ACCESS_TOKEN_SECRET || TEST_SECRET,

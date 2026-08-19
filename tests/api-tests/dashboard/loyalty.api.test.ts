@@ -10,6 +10,7 @@ import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 let app: Express
 const TEST_SECRET = 'test-secret'
@@ -96,8 +97,10 @@ beforeEach(() => {
 /**
  * Generate JWT token with specified role and permissions
  */
-const makeToken = (role: string, permissions: string[] = []) =>
-  jwt.sign(
+const makeToken = (role: string, permissions: string[] = []) => {
+  // El rol se AUTORIZA contra StaffVenue, no contra el JWT (7bdbac01).
+  mirrorTokenRoleOnStaffVenue(role, VENUE_ID)
+  return jwt.sign(
     {
       sub: 'test-user',
       orgId: 'test-org',
@@ -107,6 +110,7 @@ const makeToken = (role: string, permissions: string[] = []) =>
     },
     process.env.ACCESS_TOKEN_SECRET || TEST_SECRET,
   )
+}
 
 describe('Loyalty API - Authentication & Authorization', () => {
   describe('GET /api/v1/dashboard/venues/:venueId/loyalty/config', () => {

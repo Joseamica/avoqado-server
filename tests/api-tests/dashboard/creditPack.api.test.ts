@@ -21,6 +21,7 @@ import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 let app: Express
 const TEST_SECRET = 'test-secret'
@@ -72,8 +73,10 @@ beforeAll(async () => {
  * Note: The `permissions` array in the token payload is NOT used by checkPermission middleware.
  * Actual permission resolution uses role defaults + VenueRolePermission from DB.
  */
-const makeToken = (role: string) =>
-  jwt.sign(
+const makeToken = (role: string) => {
+  // El rol se AUTORIZA contra StaffVenue, no contra el JWT (7bdbac01).
+  mirrorTokenRoleOnStaffVenue(role, VENUE_ID)
+  return jwt.sign(
     {
       sub: 'test-user',
       orgId: 'test-org',
@@ -82,6 +85,7 @@ const makeToken = (role: string) =>
     },
     process.env.ACCESS_TOKEN_SECRET || TEST_SECRET,
   )
+}
 
 /**
  * Configure prismaMock to return custom permissions for a given role.

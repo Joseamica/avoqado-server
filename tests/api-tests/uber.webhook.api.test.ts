@@ -1,11 +1,23 @@
 import crypto from 'crypto'
 import request from 'supertest'
-import app from '@/app'
 import { persistUberWebhookEvent } from '@/services/delivery-channels/providers/uber-eats/uber.webhookIngress'
+
+// 🔴 La prueba fija ella misma la llave de firma, ANTES de cargar la app.
+//
+// El controller responde 503 a TODO si no hay `UBER_WEBHOOK_SIGNING_KEY`. Heredarla del `.env`
+// de la máquina hacía que la suite pasara en local y fallara entera en CI (que no tiene `.env`):
+// los 7 casos daban 503 y el servicio mockeado nunca llegaba a ejecutarse. Un test no puede
+// depender de la configuración del equipo donde se corre.
+//
+// Por eso `require` en vez de `import` para la app: los `import` se elevan por encima de esta
+// asignación y volverían a leer la llave demasiado pronto. `dotenv` no pisa lo ya definido.
+process.env.UBER_WEBHOOK_SIGNING_KEY = process.env.UBER_WEBHOOK_SIGNING_KEY || 'test-uber-webhook-signing-key'
 
 jest.mock('@/services/delivery-channels/providers/uber-eats/uber.webhookIngress', () => ({
   persistUberWebhookEvent: jest.fn(),
 }))
+
+const app = require('@/app').default
 const persistMock = persistUberWebhookEvent as jest.MockedFunction<typeof persistUberWebhookEvent>
 
 // Camino HTTP del webhook: montaje raw, códigos y — lo que Uber exige — BODY VACÍO.
