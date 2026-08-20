@@ -113,6 +113,30 @@ const envSchema = z.object({
   // webhook acepta CUALQUIERA de las dos durante la ventana de rotación.
   UBER_WEBHOOK_SIGNING_KEY_SECONDARY: z.string().optional(),
 
+  // Ambiente de Uber. Decide el PAR de hosts (login↔api), que es INSEPARABLE:
+  // SANDBOX ⇒ sandbox-login + test-api · PRODUCTION ⇒ auth + api.
+  // Default SANDBOX a propósito: equivocarse hacia producción toca comercios reales.
+  UBER_ENVIRONMENT: z.enum(['SANDBOX', 'PRODUCTION']).default('SANDBOX'),
+
+  // Credenciales OAuth de la app (client_credentials). Distintas por ambiente: la
+  // app de prueba y la de producción son DOS apps con DOS secrets.
+  UBER_CLIENT_ID_SANDBOX: z.string().optional(),
+  UBER_CLIENT_SECRET_SANDBOX: z.string().optional(),
+  UBER_CLIENT_ID_PRODUCTION: z.string().optional(),
+  UBER_CLIENT_SECRET_PRODUCTION: z.string().optional(),
+
+  // 🔴 Candado de escrituras (default-deny). CSV de store_id que ADMITEN escritura.
+  // Vacío o ausente ⇒ CERO escrituras. Nació del incidente del 2026-08-17, cuando un
+  // token de sandbox modificó el menú EN VIVO de un restaurante real.
+  UBER_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
+  UBER_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
+
+  // Base pública para la URL de retorno del OAuth de Uber (sin barra final). En local
+  // es el túnel de ngrok; en prod, https://api.avoqado.io. Debe coincidir EXACTAMENTE
+  // con lo registrado en el dashboard de Uber, y ser la misma al pedir y al canjear.
+  // Si falta, se deduce del request — frágil detrás de proxy, por eso se prefiere explícita.
+  UBER_OAUTH_REDIRECT_BASE: z.string().optional(),
+
   // Llave dedicada (hex 32 bytes) para cifrar el refreshToken de conexiones bancarias (AES-256-GCM).
   FINANCIAL_CONNECTION_KEY: z.string().length(64, 'FINANCIAL_CONNECTION_KEY debe ser hex de 32 bytes (64 chars)').optional(),
 
