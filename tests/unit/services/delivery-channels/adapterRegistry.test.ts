@@ -13,6 +13,23 @@ describe('adapterRegistry', () => {
     expect(hasAdapter(DeliveryProvider.RAPPI)).toBe(false)
   })
 
+  it('🔴 TODO adaptador registrado trae los tres obligatorios del contrato', () => {
+    // `DirectDeliveryAdapter` ya lo exige en compilación, pero un `as any` al registrar
+    // se lo salta — y el síntoma sería un pedido real que revienta en producción, no un
+    // error de build. Comprobarlo en runtime cuesta nada y cierra esa puerta.
+    //
+    // Son estos tres y no otros porque son, literalmente, lo que significa recibir un
+    // pedido: que el mensaje sea auténtico, saber de quién es, y poder traducirlo.
+    for (const provider of Object.values(DeliveryProvider)) {
+      if (!hasAdapter(provider)) continue
+      const a = adapterFor(provider) as Record<string, unknown>
+      for (const metodo of ['verifyWebhook', 'extractIdentity', 'normalizeOrder']) {
+        expect(typeof a[metodo]).toBe('function')
+      }
+      expect(a.provider).toBe(provider) // ni registrado bajo la llave equivocada
+    }
+  })
+
   it('🔴 GUARDRAIL: el core NO menciona proveedores por nombre — sólo el registro puede', () => {
     const coreDir = path.join(process.cwd(), 'src/services/delivery-channels/core')
     const ofensores: string[] = []

@@ -81,12 +81,6 @@ export interface NormalizedDeliveryOrder {
 // (`typeof adapter.X === 'function'`), nunca preguntando quién es el proveedor.
 // ============================================================================
 
-export interface ProviderContext {
-  link: DeliveryChannelLink
-  /** Rappi resuelve dominio por país; el core NUNCA arma URLs. */
-  countryCode?: string
-}
-
 export interface EventIdentity {
   eventId: string
   eventType: string
@@ -110,12 +104,10 @@ export interface ActionResult {
 }
 
 /**
- * Contrato que TODO proveedor de delivery implementa (Deliverect hoy; DiDi/Rappi/Uber
- * directo mañana). Los primeros cinco métodos son los que `deliverect.adapter.ts` ya
- * implementa y `statusDispatcher.service.ts`/`deliveryChannelLink.service.ts` consumen
- * hoy en producción — se conservan intactos. Las capacidades nuevas de abajo son
- * OPCIONALES a propósito: ningún adapter las implementa todavía (existen para que un
- * proveedor futuro las adopte sin otra ronda de ampliar este contrato).
+ * Contrato LEGADO de Deliverect. Congelado: Deliverect es el fallback, no el camino nuevo.
+ *
+ * No se le agregan métodos. Un proveedor DIRECTO (Uber, y mañana Rappi/DiDi) implementa
+ * `DirectDeliveryAdapter`, abajo.
  */
 export interface DeliveryProviderAdapter {
   readonly provider: DeliveryProvider
@@ -124,16 +116,52 @@ export interface DeliveryProviderAdapter {
   sendStatusUpdate(link: DeliveryChannelLink, externalOrderId: string, status: DeliveryOrderStatus): Promise<void>
   pushMenu(link: DeliveryChannelLink, snapshot: MenuSnapshot): Promise<void>
   setChannelPaused(link: DeliveryChannelLink, paused: boolean): Promise<void>
+}
 
-  /** Sólo si el webhook manda un puntero y hay que ir por el pedido. */
-  fetchOrder?(orderId: string, ctx: ProviderContext): Promise<unknown>
+/**
+ * 🔴 EL CONTRATO de un proveedor DIRECTO. Esto es lo que hay que implementar para que
+ * "agregar Rappi" sea una semana y no tres.
+ *
+ * Los tres primeros son OBLIGATORIOS porque son, literalmente, lo que significa recibir un
+ * pedido: comprobar que el mensaje es auténtico, saber de qué tienda y qué pedido es, y
+ * traducirlo al contrato interno. Sin cualquiera de los tres no hay integración.
+ *
+ * 🔴 Que sean obligatorios es EL punto. La versión anterior de este archivo declaraba estos
+ * mismos métodos como OPCIONALES junto a los cinco de Deliverect, y el resultado es que no
+ * obligaba a nada: un adaptador de Rappi literalmente vacío compilaba, y Uber —que sí los
+ * implementa— NO satisfacía la interface (le faltaban los cinco de Deliverect), así que el
+ * registro tuvo que tipar con `typeof uberAdapter`. Un contrato que nadie puede cumplir no
+ * es un contrato, es documentación que miente.
+ *
+ * Lo demás son CAPACIDADES: se declaran sólo si la API del proveedor las tiene. Uber exige
+ * ir por el pedido (`fetchOrder`) y contestar dentro del plazo (`acceptOrder`); otro
+ * proveedor puede mandar el pedido completo y no esperar respuesta.
+ *
+ * `storeId` es el id de la tienda EN EL PROVEEDOR (`DeliveryChannelLink.externalLocationId`).
+ * Si algún proveedor necesita más contexto que eso, el parámetro crece ENTONCES, con el caso
+ * real enfrente — no antes. (Aquí vivía un `ProviderContext` inventado para un Rappi que
+ * todavía no existe: nadie lo usó nunca.)
+ */
+export interface DirectDeliveryAdapter {
+  readonly provider: DeliveryProvider
 
-  verifyWebhook?(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, secrets: string[]): WebhookVerdict
-  extractIdentity?(payload: unknown): EventIdentity
-  normalizeOrder?(raw: unknown, ctx: ProviderContext): NormalizedDeliveryOrder
-  acceptOrder?(orderId: string, ctx: ProviderContext): Promise<ActionResult>
-  denyOrder?(orderId: string, reason: DenyReason, ctx: ProviderContext): Promise<ActionResult>
-  markReady?(orderId: string, ctx: ProviderContext): Promise<ActionResult>
-  publishMenu?(snapshot: MenuSnapshot, ctx: ProviderContext): Promise<ActionResult>
-  setStoreStatus?(paused: boolean, ctx: ProviderContext): Promise<ActionResult>
+  /** ¿El mensaje es auténtico? Recibe TODOS los secretos vigentes para tolerar la rotación. */
+  verifyWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, secrets: string[]): boolean
+
+  /** ¿De qué tienda y de qué pedido es? Cada proveedor lo pone en otro campo. */
+  extractIdentity(payload: unknown): EventIdentity
+
+  /** Del formato crudo del proveedor al contrato interno. Aquí vive TODA la diferencia. */
+  normalizeOrder(raw: unknown): NormalizedDeliveryOrder
+
+  /** Sólo si el webhook manda un PUNTERO en vez del pedido (es el caso de Uber). */
+  fetchOrder?(orderId: string): Promise<unknown>
+
+  /** Sólo si el proveedor espera que el POS conteste — y normalmente con un plazo. */
+  acceptOrder?(orderId: string, storeId: string): Promise<ActionResult>
+  denyOrder?(orderId: string, storeId: string, reason?: DenyReason): Promise<ActionResult>
+  markReady?(orderId: string, storeId: string): Promise<ActionResult>
+
+  publishMenu?(snapshot: MenuSnapshot, storeId: string): Promise<ActionResult>
+  setStoreStatus?(paused: boolean, storeId: string): Promise<ActionResult>
 }

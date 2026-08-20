@@ -49,6 +49,16 @@ export function runIngestionContract(
 
     it('🔴 la propina NO entra en el total ni en Payment.amount', async () => {
       const p = hacerPedido({
+        items: [
+          {
+            externalId: 'contrato-propina',
+            name: 'Platillo',
+            quantity: 1,
+            unitPrice: '150.00',
+            total: '150.00',
+            modifiers: [],
+          },
+        ],
         payment: {
           currency: 'MXN',
           saleAmount: '150.00',
@@ -93,6 +103,16 @@ export function runIngestionContract(
       const link = obtenerLink()
       const antes = await prisma.order.count({ where: { venueId: link.venueId } })
       const malo = hacerPedido({
+        items: [
+          {
+            externalId: 'contrato-descuadre',
+            name: 'Platillo',
+            quantity: 1,
+            unitPrice: '100.00',
+            total: '100.00',
+            modifiers: [],
+          },
+        ],
         payment: {
           currency: 'MXN',
           saleAmount: '100.00',
@@ -105,7 +125,10 @@ export function runIngestionContract(
         },
       })
 
-      await expect(ingestDeliveryOrder(malo, link)).rejects.toThrow(DeliveryMoneyMismatchError)
+      // El mensaje importa: un test que sólo exige `DeliveryMoneyMismatchError` pasa aunque
+      // reviente por OTRA razón (así estaba: los renglones no cuadraban con la venta y el
+      // reparto ni se llegaba a evaluar). Se exige el motivo, no la familia del error.
+      await expect(ingestDeliveryOrder(malo, link)).rejects.toThrow(/venta no cuadra/i)
       expect(await prisma.order.count({ where: { venueId: link.venueId } })).toBe(antes)
     })
 
@@ -141,6 +164,16 @@ export function runIngestionContract(
 
     it('la cuenta queda cuadrada: lo pagado y lo pendiente coinciden con el reparto', async () => {
       const p = hacerPedido({
+        items: [
+          {
+            externalId: 'contrato-mixto',
+            name: 'Platillo',
+            quantity: 1,
+            unitPrice: '200.00',
+            total: '200.00',
+            modifiers: [],
+          },
+        ],
         payment: {
           currency: 'MXN',
           saleAmount: '200.00',

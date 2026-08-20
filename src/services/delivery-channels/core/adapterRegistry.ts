@@ -8,33 +8,19 @@
  * Importación ESTÁTICA a propósito: cuatro adaptadores en el mismo repo no justifican
  * un cargador de plugins (spec §9, YAGNI).
  *
- * ⚠️ DIVERGENCIA con `core/types.ts` (encontrada al implementar este registro, plan
- * 2026-08-20 Tarea 5, no antes — verificada con `tsc`, no de memoria):
- * el spec (§5.1) documenta `DeliveryProviderAdapter` con sólo 3 métodos obligatorios
- * (`verifyWebhook`, `extractIdentity`, `normalizeOrder`). La interface REAL en
- * `core/types.ts` es una fusión: conserva `verifySignature`, `parseOrderWebhook`,
- * `sendStatusUpdate`, `pushMenu` y `setChannelPaused` como obligatorios — el contrato
- * VIEJO que sólo `deliverect.adapter.ts` implementa — con las capacidades nuevas
- * encima como opcionales. `uberAdapter` (primer adaptador del contrato NUEVO) no
- * implementa los 5 viejos (no los necesita — su único consumidor hoy,
- * `uber.eventProcessor.ts`, lo llama directo, sin pasar por `DeliveryProviderAdapter`),
- * Y ADEMÁS su `verifyWebhook` devuelve `boolean`, no el `WebhookVerdict` que esa misma
- * interface declara para el método opcional. Dos ejes de divergencia, no uno — por eso
- * este registro NO intenta ir parchando campo por campo un tipo derivado de
- * `DeliveryProviderAdapter`: usa el tipo REAL que Uber exporta (`typeof uberAdapter`),
- * honesto con lo que el objeto de verdad implementa. `core/types.ts` / `uber.adapter.ts`
- * quedan fuera de alcance en esta tarea; fusionar los dos contratos ahí es trabajo
- * aparte (mismo trabajo que migrar Deliverect al contrato nuevo).
+ * Tipado contra `DirectDeliveryAdapter` (`core/types.ts`), y eso es lo que hace útil al
+ * registro: agregar Rappi es implementar una interface, no leer el código de Uber.
+ *
+ * Antes no se podía. La interface fusionaba el contrato viejo de Deliverect (5 métodos
+ * obligatorios) con el nuevo (todos opcionales), así que `uberAdapter` NO la satisfacía y
+ * este archivo tuvo que tipar con `typeof uberAdapter` — el tipo del objeto, no un contrato.
+ * Se partió en dos interfaces ciertas y Uber ahora lo cumple, comprobado con `satisfies` en
+ * `uber.adapter.ts`.
  */
 import { DeliveryProvider } from '@prisma/client'
-import { uberAdapter } from '../providers/uber-eats/uber.adapter'
 
-/**
- * El contrato que un adaptador de integración DIRECTA (Uber/Rappi/DiDi) implementa hoy.
- * Cuando se sume un segundo proveedor directo, amplía a una unión (`typeof uberAdapter |
- * typeof rappiAdapter`) o resuelve la divergencia de arriba en `core/types.ts` primero.
- */
-type DirectDeliveryAdapter = typeof uberAdapter
+import { uberAdapter } from '../providers/uber-eats/uber.adapter'
+import type { DirectDeliveryAdapter } from './types'
 
 const ADAPTERS: Partial<Record<DeliveryProvider, DirectDeliveryAdapter>> = {
   [DeliveryProvider.UBER_EATS]: uberAdapter,
@@ -50,7 +36,7 @@ export function adapterFor(provider: DeliveryProvider): DirectDeliveryAdapter {
   if (!a) {
     throw new Error(
       `No hay adaptador para el proveedor "${provider}". Regístralo en core/adapterRegistry.ts ` +
-        `implementando DeliveryProviderAdapter (core/types.ts).`,
+        `implementando DirectDeliveryAdapter (core/types.ts).`,
     )
   }
   return a

@@ -16,7 +16,7 @@ import { uberApi, fetchUberOrder } from './uber.client'
 import { orderIdFromResourceHref } from './uber.http'
 import { verifyUberSignature } from './uber.signature'
 import { mapUberOrder } from './uber.mapper'
-import type { NormalizedDeliveryOrder } from '../../core/types'
+import type { DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
 
 export type UberDenyReason = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
@@ -117,3 +117,13 @@ export const uberAdapter = {
 }
 
 export type UberAdapter = typeof uberAdapter
+
+// 🔴 LA PRUEBA de que Uber cumple el contrato — en tiempo de COMPILACIÓN, no en un comentario.
+// Si alguien le quita `normalizeOrder`, o le cambia la firma a `acceptOrder`, esto truena aquí
+// y no en producción con un pedido real esperando.
+//
+// `satisfies` y NO `const uberAdapter: DirectDeliveryAdapter = …`: anotar el tipo ENSANCHARÍA
+// lo exportado y los llamadores perderían lo propio de Uber (`UberEventIdentity.resourceRef`,
+// que es el puntero del que se saca el id del pedido). `satisfies` comprueba sin ensanchar.
+const _uberCumpleElContrato = uberAdapter satisfies DirectDeliveryAdapter
+void _uberCumpleElContrato
