@@ -105,6 +105,76 @@ describe('parseDeliverectOrder', () => {
   // Order/Payment "PAID" con forma de reembolso, saltándose el flujo de refund
   // (permisos/confirm/audit).
   // ============================================================
+  // ============================================================
+  // Los dos defectos de dinero que la auditoría externa halló el 2026-08-20. Los tests
+  // anteriores no los veían: el fixture trae serviceCharge y deliveryCost en CERO, así que
+  // el doble conteo era invisible, y nadie probaba un pedido no pagado.
+  // ============================================================
+  describe('dinero: cargos y pedido no pagado', () => {
+    function conPayload(mutate: (p: any) => void): Buffer {
+      const p = JSON.parse(fixture.toString())
+      mutate(p)
+      return Buffer.from(JSON.stringify(p))
+    }
+
+    it('🔴 los cargos NO se cuentan dos veces: viajan DENTRO del total', () => {
+      // $165 de total con $25 de cargos ⇒ la venta es $140 + $25 de cargos = $165.
+      // Antes: saleAmount $165 + merchantFees $25 ⇒ $190 registrados. $25 inventados.
+      const body = conPayload(p => {
+        p.payment.amount = 16500
+        p.serviceCharge = 1000
+        p.deliveryCost = 1500
+        p.orderIsAlreadyPaid = true
+      })
+      const o = parseDeliverectOrder(body, link)
+
+      expect(o.payment.saleAmount).toBe('140.00')
+      expect(o.payment.merchantFees).toBe('25.00')
+      expect(Number(o.payment.saleAmount) + Number(o.payment.merchantFees)).toBe(165)
+      expect(o.payment.externallyPaidSale).toBe('165.00') // el total real, no 190
+    })
+
+    it('🔴 pedido NO pagado: el dinero queda POR COBRAR, no liquidado', () => {
+      // Antes se declaraba pagado siempre ⇒ Payment COMPLETED, orden PAID e inventario
+      // descontado de algo que el cliente todavía debía.
+      const body = conPayload(p => {
+        p.payment.amount = 10000
+        p.orderIsAlreadyPaid = false
+      })
+      const o = parseDeliverectOrder(body, link)
+
+      expect(o.payment.externallyPaidSale).toBe('0.00')
+      expect(o.payment.cashDueSale).toBe('100.00')
+    })
+
+    it('🔴 sin el flag, se asume NO pagado — nunca al revés', () => {
+      const body = conPayload(p => {
+        p.payment.amount = 10000
+        delete p.orderIsAlreadyPaid
+      })
+      const o = parseDeliverectOrder(body, link)
+      expect(o.payment.cashDueSale).toBe('100.00') // conservador con el dinero
+    })
+
+    it('pedido pagado: la plataforma liquidó todo', () => {
+      const body = conPayload(p => {
+        p.payment.amount = 10000
+        p.orderIsAlreadyPaid = true
+      })
+      const o = parseDeliverectOrder(body, link)
+      expect(o.payment.externallyPaidSale).toBe('100.00')
+      expect(o.payment.cashDueSale).toBe('0.00')
+    })
+
+    it('🔴 cargos MAYORES que el total ⇒ rechaza en vez de inventar el reparto', () => {
+      const body = conPayload(p => {
+        p.payment.amount = 1000
+        p.deliveryCost = 5000
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/no se puede determinar sin inventar/)
+    })
+  })
+
   describe('bounds validation (Fix 1, audit)', () => {
     function payloadWith(mutate: (p: any) => void): Buffer {
       const p = JSON.parse(fixture.toString())

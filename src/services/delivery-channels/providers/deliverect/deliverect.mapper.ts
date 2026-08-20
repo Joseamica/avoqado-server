@@ -113,19 +113,39 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
   const merchantFeesNum = toPesosNum(p.serviceCharge, dd) + toPesosNum(p.deliveryCost, dd)
   const tipAmountNum = toPesosNum(p.tip, dd)
 
-  // Deliverect entrega pedidos ya pagados/liquidados por la plataforma al comercio — no
-  // modela "pedido no pagado" en este contrato (a diferencia del `orderIsAlreadyPaid`
-  // legacy que sí lo hacía leyendo el raw payload). externallyPaidSale/Tip = el 100% del
-  // reparto; cashDue* siempre 0 → el invariante de dinero se cumple por construcción.
+  // 🔴 `payment.amount` YA INCLUYE los cargos. El propio schema lo documenta
+  // (`prisma/schema.prisma`, `deliveryFeeAmount`): "para pedidos de agregador el proveedor
+  // la cobra al cliente y viaja DENTRO del total". Antes se tomaba `amount` como
+  // `saleAmount` y ADEMÁS se sumaban los cargos como `merchantFees`: una venta de $165 con
+  // $25 de envío quedaba registrada en $190. Hallado por auditoría externa el 2026-08-20;
+  // el test no lo veía porque su fixture trae ambos cargos en cero.
+  const ventaSinCargos = saleAmountNum - merchantFeesNum
+  if (ventaSinCargos < 0) {
+    throw new Error(
+      `Deliverect: los cargos (${merchantFeesNum}) superan el total (${saleAmountNum}) — el reparto no se puede determinar sin inventar`,
+    )
+  }
+
+  // 🔴 `orderIsAlreadyPaid` NO es decorativo: Deliverect manda `payment.amount` tanto para
+  // pedidos PAGADOS como para los que NO lo están, y este flag es lo ÚNICO que los
+  // distingue. Declararlos todos liquidados creaba un Payment COMPLETED, dejaba la orden
+  // PAID y descontaba inventario de un pedido que el cliente todavía debía.
+  // [doc] https://developers.deliverect.com/page/glossary-pos-orders
+  // Conservador: SÓLO `=== true` cuenta como pagado — ausente o cualquier otro valor deja
+  // el dinero por cobrar, nunca al revés.
+  const yaPagado = (p as { orderIsAlreadyPaid?: unknown })?.orderIsAlreadyPaid === true
+  const totalCobrable = ventaSinCargos + merchantFeesNum
+
   const payment: NormalizedDeliveryOrder['payment'] = {
     currency: 'MXN',
-    saleAmount: toStr(saleAmountNum),
+    saleAmount: toStr(ventaSinCargos),
     merchantFees: toStr(merchantFeesNum),
     tipAmount: toStr(tipAmountNum),
-    externallyPaidSale: toStr(saleAmountNum + merchantFeesNum),
-    externallyPaidTip: toStr(tipAmountNum),
-    cashDueSale: '0.00',
-    cashDueTip: '0.00',
+    // Pagado ⇒ la plataforma ya liquidó. No pagado ⇒ queda por cobrar contra entrega.
+    externallyPaidSale: yaPagado ? toStr(totalCobrable) : '0.00',
+    externallyPaidTip: yaPagado ? toStr(tipAmountNum) : '0.00',
+    cashDueSale: yaPagado ? '0.00' : toStr(totalCobrable),
+    cashDueTip: yaPagado ? '0.00' : toStr(tipAmountNum),
   }
 
   return {
