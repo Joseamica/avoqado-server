@@ -1,57 +1,39 @@
-import { DeliveryChannelLink, OrderSource } from '@prisma/client'
+import { DeliveryChannelLink, DeliveryProvider, OrderSource } from '@prisma/client'
 import type { MenuSnapshot } from './menuSnapshot.service'
 
 /** Estados internos que el core propaga hacia el canal (el adapter los traduce). */
 export type DeliveryOrderStatus = 'ACCEPTED' | 'PREPARING' | 'READY' | 'PICKED_UP' | 'CANCELLED' | 'FAILED'
 
-export interface NormalizedDeliveryItem {
-  /** PLU = Product.sku de Avoqado (el menú lo publicamos nosotros) */
-  plu: string
+/**
+ * 🔴 Todo el dinero viaja como STRING DECIMAL, nunca `number`
+ * (`.claude/rules/critical-warnings.md`: Money = Decimal, Never Float).
+ * El ÷100 de los centavos del proveedor ocurre en SU mapper, jamás aquí ni en el core.
+ *
+ * Historia: hasta 2026-08-20 este contrato usaba `number` y documentaba como normal que
+ * los montos NO cuadraran ("pueden no cuadrar aritméticamente contra total"). Eso es lo
+ * que permitió que la propina se contara dos veces. Ahora el reparto es explícito y se
+ * verifica con `assertDeliveryMoneyInvariants`.
+ */
+export interface NormalizedDeliveryModifier {
+  externalId: string
   name: string
   quantity: number
-  /** PESOS por unidad (el adapter ya convirtió de centavos) */
-  unitPrice: number
-  /** Modificadores aplanados como texto (v1) + monto ya incluido en unitPrice=false → se suma */
-  modifiers: Array<{ plu: string; name: string; quantity: number; unitPrice: number }>
-  notes?: string
+  /** PESOS, string decimal. Ya multiplicado por la cantidad del padre si aplica. */
+  price: string
 }
 
-export interface NormalizedDeliveryOrder {
-  /** ID del pedido en el proveedor — va a Order.externalId (unique por venue) */
+export interface NormalizedDeliveryItem {
+  /** id del item en el catálogo del proveedor */
   externalId: string
-  /** Número corto para mostrar en KDS/tickets (channelOrderDisplayId) */
-  displayId: string
-  /** Canal real resuelto (UBER_EATS/RAPPI/DIDI_FOOD) o DELIVERY_PLATFORM */
-  source: OrderSource
-  items: NormalizedDeliveryItem[]
-  /** PESOS. Informativo del payload del proveedor — ver nota en `total` sobre por qué NO cuadra como suma. */
-  subtotal: number
-  taxAmount: number
-  discountAmount: number
-  tipAmount: number
-  serviceChargeAmount: number
-  deliveryFeeAmount: number
-  /**
-   * PESOS. total = payment.amount del canal (lo que el cliente pagó; tax-inclusive en MX).
-   * NO es una suma derivada de subtotal/tax/tip/fees — esos campos son informativos del
-   * payload del proveedor y pueden no cuadrar aritméticamente contra total (ej. real:
-   * 130 + 19.31 + 10 ≠ 140 en el fixture de Deliverect).
-   */
-  total: number
-  customer?: { name?: string; phone?: string; note?: string }
-  /** Payload crudo del proveedor — va a Order.posRawData */
-  raw: unknown
-  placedAt: Date
-}
-
-/** Contrato que TODO proveedor de delivery implementa (Deliverect hoy; DiDi/Rappi/Uber directo mañana). */
-export interface DeliveryProviderAdapter {
-  readonly provider: 'DELIVERECT' | 'UBER_EATS' | 'RAPPI' | 'DIDI_FOOD'
-  verifySignature(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, link: DeliveryChannelLink): boolean
-  parseOrderWebhook(rawBody: Buffer, link: DeliveryChannelLink): NormalizedDeliveryOrder
-  sendStatusUpdate(link: DeliveryChannelLink, externalOrderId: string, status: DeliveryOrderStatus): Promise<void>
-  pushMenu(link: DeliveryChannelLink, snapshot: MenuSnapshot): Promise<void>
-  setChannelPaused(link: DeliveryChannelLink, paused: boolean): Promise<void>
+  /** Lo que Avoqado escribió al publicar el menú (su `Product.sku`), si el proveedor lo devuelve */
+  externalData?: string | null
+  name: string
+  quantity: number
+  /** PESOS, string decimal */
+  unitPrice: string
+  /** total de la línea = unitPrice × quantity + modificadores */
+  total: string
+  modifiers?: NormalizedDeliveryModifier[]
 }
 
 /**
@@ -75,4 +57,83 @@ export interface NormalizedDeliveryPayment {
   /** parte que el comercio cobra en efectivo en persona */
   cashDueSale: string
   cashDueTip: string
+}
+
+export interface NormalizedDeliveryOrder {
+  /** id del pedido en el proveedor. Se namespacea al guardarlo: `{PROVIDER}:{externalId}` */
+  externalId: string
+  /** número corto que ve el repartidor y va en el ticket */
+  displayId: string
+  source: OrderSource
+  items: NormalizedDeliveryItem[]
+  payment: NormalizedDeliveryPayment
+  customer?: { name?: string; phone?: string; note?: string }
+  /** JSON crudo del proveedor, para auditoría — va a `Order.posRawData` */
+  raw: unknown
+  placedAt: Date
+}
+
+// ============================================================================
+// Capacidades del adaptador (plan 2026-08-20, Tarea 2) — forward-looking: nada
+// las consume todavía (ni deliverect.adapter.ts las implementa, ni statusDispatcher
+// las llama). Existen como el contrato que un adaptador multi-provider futuro
+// (Rappi/DiDi/Uber directo) implementará. El core las consultaría por presencia
+// (`typeof adapter.X === 'function'`), nunca preguntando quién es el proveedor.
+// ============================================================================
+
+export interface ProviderContext {
+  link: DeliveryChannelLink
+  /** Rappi resuelve dominio por país; el core NUNCA arma URLs. */
+  countryCode?: string
+}
+
+export interface EventIdentity {
+  eventId: string
+  eventType: string
+  /** id de la tienda en el proveedor — es como se resuelve el venue */
+  storeId: string | null
+  /** id del PEDIDO (agrupa varios eventos del mismo pedido) */
+  orderId: string | null
+  /** Presente si el webhook manda un puntero en vez del pedido (Uber). */
+  resourceRef?: string | null
+}
+
+export type WebhookVerdict = 'VALID' | 'INVALID_SIGNATURE' | 'MALFORMED'
+
+export type DenyReason = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
+
+export interface ActionResult {
+  ok: boolean
+  status: number
+  /** Cuerpo crudo — se guarda para auditoría cuando falla. */
+  raw: string
+}
+
+/**
+ * Contrato que TODO proveedor de delivery implementa (Deliverect hoy; DiDi/Rappi/Uber
+ * directo mañana). Los primeros cinco métodos son los que `deliverect.adapter.ts` ya
+ * implementa y `statusDispatcher.service.ts`/`deliveryChannelLink.service.ts` consumen
+ * hoy en producción — se conservan intactos. Las capacidades nuevas de abajo son
+ * OPCIONALES a propósito: ningún adapter las implementa todavía (existen para que un
+ * proveedor futuro las adopte sin otra ronda de ampliar este contrato).
+ */
+export interface DeliveryProviderAdapter {
+  readonly provider: DeliveryProvider
+  verifySignature(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, link: DeliveryChannelLink): boolean
+  parseOrderWebhook(rawBody: Buffer, link: DeliveryChannelLink): NormalizedDeliveryOrder
+  sendStatusUpdate(link: DeliveryChannelLink, externalOrderId: string, status: DeliveryOrderStatus): Promise<void>
+  pushMenu(link: DeliveryChannelLink, snapshot: MenuSnapshot): Promise<void>
+  setChannelPaused(link: DeliveryChannelLink, paused: boolean): Promise<void>
+
+  /** Sólo si el webhook manda un puntero y hay que ir por el pedido. */
+  fetchOrder?(orderId: string, ctx: ProviderContext): Promise<unknown>
+
+  verifyWebhook?(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, secrets: string[]): WebhookVerdict
+  extractIdentity?(payload: unknown): EventIdentity
+  normalizeOrder?(raw: unknown, ctx: ProviderContext): NormalizedDeliveryOrder
+  acceptOrder?(orderId: string, ctx: ProviderContext): Promise<ActionResult>
+  denyOrder?(orderId: string, reason: DenyReason, ctx: ProviderContext): Promise<ActionResult>
+  markReady?(orderId: string, ctx: ProviderContext): Promise<ActionResult>
+  publishMenu?(snapshot: MenuSnapshot, ctx: ProviderContext): Promise<ActionResult>
+  setStoreStatus?(paused: boolean, ctx: ProviderContext): Promise<ActionResult>
 }

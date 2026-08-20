@@ -13,41 +13,76 @@ const link: any = {
 }
 
 describe('parseDeliverectOrder', () => {
-  // NUEVO
-  it('convierte centavos a pesos según decimalDigits', () => {
+  // NUEVO — contrato unificado (Tarea 2/3): dinero en STRING DECIMAL, dentro de `payment`.
+  it('convierte centavos a pesos según decimalDigits, como string decimal', () => {
     const o = parseDeliverectOrder(fixture, link)
-    expect(o.items[0].unitPrice).toBe(45.0)
-    expect(o.items[0].modifiers[0].unitPrice).toBe(10.0)
-    expect(o.tipAmount).toBe(10.0)
-    expect(o.taxAmount).toBe(19.31)
+    expect(o.items[0].unitPrice).toBe('45.00')
+    // modifier.price ya viene multiplicado por la cantidad del padre (2): $10 × 2 = $20.
+    expect(o.items[0].modifiers?.[0].price).toBe('20.00')
+    expect(o.payment.tipAmount).toBe('10.00')
   })
-  it('total = payment.amount en pesos (lo que el cliente pagó manda)', () => {
+
+  it('payment.saleAmount = payment.amount del canal en pesos (lo que el cliente pagó manda)', () => {
     const o = parseDeliverectOrder(fixture, link)
-    expect(o.total).toBe(140.0)
+    expect(o.payment.saleAmount).toBe('140.00')
   })
-  it('subtotal = suma de items+modifiers en pesos, modifier × cantidad del padre (Fix C4, spec §10.1.4)', () => {
-    const o = parseDeliverectOrder(fixture, link)
-    // 2×45 + (1×10 modifier × 2 cantidad del taco) + 30 = 140 — el modifier de "extra
-    // queso" aplica a CADA taco (Deliverect: cantidad_modificador × cantidad_producto).
-    expect(o.subtotal).toBe(140.0)
+
+  it('modifier × cantidad del padre: item con quantity=3, modifier quantity=2 price=$5 → item.total = 3×100 + 5×2×3 = 330 (Fix C4, spec §10.1.4)', () => {
+    const p = JSON.parse(fixture.toString())
+    p.items = [
+      {
+        plu: 'PROD-X',
+        name: 'Producto X',
+        price: 10000, // $100
+        quantity: 3,
+        subItems: [{ plu: 'MOD-Y', name: 'Modificador Y', price: 500, quantity: 2 }], // $5 c/u, 2 por producto
+      },
+    ]
+    const o = parseDeliverectOrder(Buffer.from(JSON.stringify(p)), link)
+    // El modifier de "extra queso"-equivalente aplica a CADA unidad del producto padre
+    // (Deliverect: cantidad_modificador × cantidad_producto), no una sola vez.
+    expect(o.items[0].modifiers?.[0].price).toBe('15.00') // $5 × 3 (cantidad del padre)
+    expect(o.items[0].total).toBe('330.00') // 3×100 + (15×2)
   })
+
   it('externalId y displayId vienen del canal', () => {
     const o = parseDeliverectOrder(fixture, link)
     expect(o.externalId).toBe('UE-12345-A')
     expect(o.displayId).toBe('A1B2C3')
   })
+
   it('resuelve el canal real desde config.channelSourceMap', () => {
     const o = parseDeliverectOrder(fixture, link)
     expect(o.source).toBe(OrderSource.UBER_EATS)
   })
+
   it('payload crudo se preserva en raw', () => {
     const o = parseDeliverectOrder(fixture, link)
     expect((o.raw as any).channelOrderId).toBe('UE-12345-A')
   })
+
   it('cliente y nota se capturan', () => {
     const o = parseDeliverectOrder(fixture, link)
     expect(o.customer?.name).toBe('Juan Pérez')
     expect(o.customer?.note).toBe('Sin cebolla por favor')
+  })
+
+  // ============================================================
+  // Deliverect entrega pedidos ya liquidados por la plataforma al comercio (contrato
+  // unificado, Tarea 3): externallyPaidSale/Tip = el 100% del reparto; cashDue* siempre
+  // '0.00'. El invariante de dinero (assertDeliveryMoneyInvariants) se cumple por
+  // construcción, ya que externallyPaidSale/Tip se DERIVAN de saleAmount/merchantFees/tip,
+  // no se leen de un campo independiente del proveedor.
+  // ============================================================
+  it('el reparto de dinero: externallyPaid* = 100%, cashDue* = 0 (Deliverect siempre liquida al comercio)', () => {
+    const o = parseDeliverectOrder(fixture, link)
+    expect(o.payment.currency).toBe('MXN')
+    expect(o.payment.externallyPaidSale).toBe(o.payment.saleAmount)
+    // merchantFees en este fixture es 0 (serviceCharge y deliveryCost ambos 0)
+    expect(o.payment.merchantFees).toBe('0.00')
+    expect(o.payment.externallyPaidTip).toBe(o.payment.tipAmount)
+    expect(o.payment.cashDueSale).toBe('0.00')
+    expect(o.payment.cashDueTip).toBe('0.00')
   })
 
   // REGRESIÓN / bordes
@@ -58,7 +93,7 @@ describe('parseDeliverectOrder', () => {
     const p = JSON.parse(fixture.toString())
     delete p.decimalDigits
     const o = parseDeliverectOrder(Buffer.from(JSON.stringify(p)), link)
-    expect(o.items[0].unitPrice).toBe(45.0)
+    expect(o.items[0].unitPrice).toBe('45.00')
   })
   it('body inválido lanza error legible', () => {
     expect(() => parseDeliverectOrder(Buffer.from('not-json'), link)).toThrow(/payload/i)
@@ -68,8 +103,7 @@ describe('parseDeliverectOrder', () => {
   // Fix 1 (audit, SECURITY): bounds validation de dinero/cantidad — un payload
   // malformado (aunque HMAC-autenticado) con total/unitPrice negativo crearía una
   // Order/Payment "PAID" con forma de reembolso, saltándose el flujo de refund
-  // (permisos/confirm/audit). Solo total/unitPrice/quantity — NUNCA
-  // discountAmount/taxAmount/serviceCharge (semántica de signo aparte).
+  // (permisos/confirm/audit).
   // ============================================================
   describe('bounds validation (Fix 1, audit)', () => {
     function payloadWith(mutate: (p: any) => void): Buffer {
@@ -134,68 +168,8 @@ describe('parseDeliverectOrder', () => {
       expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
     })
 
-    it('discountTotal negativo NO se valida (semántica de signo aparte) — payload sigue siendo válido', () => {
-      const body = payloadWith(p => {
-        p.discountTotal = -500
-      })
-      expect(() => parseDeliverectOrder(body, link)).not.toThrow()
-    })
-
     it('payload válido (fixture original) → NO throw', () => {
       expect(() => parseDeliverectOrder(fixture, link)).not.toThrow()
-    })
-  })
-
-  // ============================================================
-  // Fix C4 (audit, MONEY, spec §10.1.3/10.1.4): dos correcciones de dinero en el
-  // mapper — signo del descuento y multiplicación de modifiers por la cantidad del
-  // item padre. (orderIsAlreadyPaid y la persistencia de serviceCharge/deliveryFee
-  // se prueban en deliveryOrderIngestion.test.ts — viven en el ingestion service.)
-  // ============================================================
-  describe('Fix C4 — contrato de dinero (audit)', () => {
-    function payloadWith(mutate: (p: any) => void): Buffer {
-      const p = JSON.parse(fixture.toString())
-      mutate(p)
-      return Buffer.from(JSON.stringify(p))
-    }
-
-    it('discountTotal negativo (como lo manda Deliverect) → discountAmount se guarda en magnitud POSITIVA', () => {
-      const body = payloadWith(p => {
-        p.discountTotal = -500 // -5.00 pesos
-      })
-      const o = parseDeliverectOrder(body, link)
-      expect(o.discountAmount).toBe(5.0)
-    })
-
-    it('discountTotal positivo (defensivo, no debería ocurrir) → Math.abs es no-op, sigue positivo', () => {
-      const body = payloadWith(p => {
-        p.discountTotal = 500
-      })
-      const o = parseDeliverectOrder(body, link)
-      expect(o.discountAmount).toBe(5.0)
-    })
-
-    it('discountTotal ausente/0 → discountAmount 0 (regresión)', () => {
-      const o = parseDeliverectOrder(fixture, link)
-      expect(o.discountAmount).toBe(0)
-    })
-
-    it('modifier × cantidad del padre: item con quantity=3, modifier quantity=2 price=$5 → contribución = 5×2×3 = 30, NO 10', () => {
-      const body = payloadWith(p => {
-        p.items = [
-          {
-            plu: 'PROD-X',
-            name: 'Producto X',
-            price: 10000, // $100
-            quantity: 3,
-            subItems: [{ plu: 'MOD-Y', name: 'Modificador Y', price: 500, quantity: 2 }], // $5 c/u, 2 por producto
-          },
-        ]
-        p.payment.amount = 33000 // total irrelevante para este assert, solo debe pasar bounds (>=0)
-      })
-      const o = parseDeliverectOrder(body, link)
-      // subtotal = 3×100 (producto) + (5×2×3) modifier = 300 + 30 = 330
-      expect(o.subtotal).toBe(330.0)
     })
   })
 })
