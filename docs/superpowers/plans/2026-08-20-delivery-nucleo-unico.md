@@ -578,11 +578,28 @@ git commit -m "refactor(delivery): Uber usa el núcleo; se borra su ingesta dupl
 
 **Files:**
 - Create: `src/services/delivery-channels/core/adapterRegistry.ts`
+- Modify: `src/services/delivery-channels/core/statusDispatcher.service.ts` (**absorber su registro**)
 - Test: `tests/unit/services/delivery-channels/adapterRegistry.test.ts`
 
 **Interfaces:**
 - Consumes: `DeliveryProviderAdapter` (Tarea 2), `uberAdapter` (Tarea 4).
 - Produces: `adapterFor(provider: DeliveryProvider): DeliveryProviderAdapter`, `hasAdapter(provider: DeliveryProvider): boolean`.
+
+🔴 **Ya existe un registro `provider → adapter`** en `statusDispatcher.service.ts:19-21`, con
+Deliverect dentro. **NO lo absorbas** y **NO toques `deliverect.adapter.ts`**: implementa el
+contrato VIEJO (`verifySignature`, `parseOrderWebhook`, `sendStatusUpdate`) y unificarlo
+obligaría a migrar Deliverect, que es trabajo aparte (spec §8, paso 7).
+
+Lo que sí haces: crear `adapterRegistry.ts` para el contrato NUEVO (hoy sólo Uber), y añadir
+en `statusDispatcher.service.ts:19` un comentario que nombre la deuda:
+
+```typescript
+// ⚠️ DEUDA (plan 2026-08-20): este mapa y `core/adapterRegistry.ts` son DOS registros de
+// lo mismo. Conviven porque `deliverectAdapter` implementa el contrato viejo. Se funden
+// cuando Deliverect migre a `DeliveryProviderAdapter` (spec §8, paso 7).
+```
+
+Los tests existentes de `statusDispatcher` deben seguir en verde sin tocarlos.
 
 - [ ] **Step 1: Escribir el test que falla**
 
@@ -607,11 +624,16 @@ describe('adapterRegistry', () => {
     const coreDir = path.join(process.cwd(), 'src/services/delivery-channels/core')
     const ofensores: string[] = []
 
+    // 🔴 Prohíbe DECISIONES por proveedor, no menciones. Un mapa de etiquetas legibles
+    // (`{ [UBER_EATS]: 'Uber Eats' }` en deliveryTenderProvisioning) es presentación
+    // legítima; lo que no puede existir es que el núcleo RAMIFIQUE según quién sea.
+    const DECISION = /(provider\s*[=!]==|case\s+DeliveryProvider\.|if\s*\([^)]*(UBER_EATS|RAPPI|DIDI_FOOD|DELIVERECT))/
+
     for (const f of fs.readdirSync(coreDir).filter(f => f.endsWith('.ts') && f !== 'adapterRegistry.ts')) {
       const contenido = fs.readFileSync(path.join(coreDir, f), 'utf8')
       contenido.split('\n').forEach((linea, i) => {
         const sinComentario = linea.replace(/\/\/.*$/, '').replace(/\/\*.*?\*\//g, '')
-        if (/(UBER_EATS|RAPPI|DIDI_FOOD|DELIVERECT)/.test(sinComentario)) {
+        if (DECISION.test(sinComentario)) {
           ofensores.push(`${f}:${i + 1}: ${linea.trim()}`)
         }
       })
