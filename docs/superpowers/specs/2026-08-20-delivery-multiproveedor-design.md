@@ -148,7 +148,34 @@ y falla si aparece uno — mismo patrón que el guardrail de `multipartContext.t
 Son la razón real de que Uber tenga camino propio. Al unificar **hay que arreglarlos**, y
 como tocan dinero van con **test primero**, sin excepción.
 
-**Propina contada dos veces** — `core/deliveryOrderIngestion.service.ts:220-221`:
+### 6.0 🔴 El más grave: el contrato del core lleva el dinero en `number` (float)
+
+Descubierto al escribir el plan (2026-08-20). `core/types.ts` declara **todos** los montos
+como `number`:
+
+```typescript
+unitPrice: number   // línea 13
+subtotal: number    // línea 28
+tipAmount: number   // línea 31
+total: number       // línea 40
+```
+
+Viola la regla más dura del repo sobre dinero (`critical-warnings.md`: *"Money = Decimal,
+Never Float"*). Y el propio contrato **normaliza que las cuentas no cuadren** — comentario
+textual en `core/types.ts:34-39`: *"NO es una suma derivada… pueden no cuadrar
+aritméticamente contra total"*, con un ejemplo real donde `130 + 19.31 + 10 ≠ 140`.
+
+`uber.types.ts` ya lo hace bien: **string decimal en todos los montos**, con invariantes
+explícitas que la ingesta verifica y que **rechazan** el pedido si no cuadran al centavo.
+
+**Esto reencuadra el trabajo.** No es "generalizar el contrato de Uber": es **reemplazar el
+del core por el de Uber**, que es el correcto y ya está probado con 7 tests de integración
+contra PostgreSQL real. El destino ya existe; lo que falta es mudarse a él.
+
+Prioridad: **este defecto va antes que la propina** — la propina doble es una consecuencia
+de que el contrato tolere sumas que no cuadran.
+
+### 6.1 Propina contada dos veces — `core/deliveryOrderIngestion.service.ts:220-221`:
 
 ```typescript
 amount:    new Prisma.Decimal(normalized.total),      // el total YA incluye la propina
