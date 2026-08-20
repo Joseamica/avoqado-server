@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { getDeliveryDailySummary } from '@/services/delivery-channels/core/deliverySummary.service'
+import { hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -12,7 +13,7 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
 
   server.tool(
     'delivery_channels',
-    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), último sync de menú, y pedidos de delivery de hoy por canal. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy?". Pass venueId.',
+    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, y pedidos de delivery de hoy por canal. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad?". Pass venueId.',
     { venueId: z.string().describe('Venue cuyos canales de delivery leer (debe estar en tu scope)') },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
@@ -36,7 +37,15 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
       const { channels: todayByChannel } = await getDeliveryDailySummary(venueId)
       return text({
         venueId,
-        channels: links.map(l => ({ ...l, lastMenuSyncAt: l.lastMenuSyncAt?.toISOString() ?? null })),
+        channels: links.map(l => ({
+          ...l,
+          lastMenuSyncAt: l.lastMenuSyncAt?.toISOString() ?? null,
+          // Task 8 (plan 2026-08-20-delivery-nucleo-unico, §8.2): el vínculo puede existir
+          // (el dueño ya conectó el canal) sin que el core todavía sepa traducirlo — la ÚNICA
+          // fuente de verdad de "¿ya hay a quién delegarle?" es el registro de adaptadores
+          // (core/adapterRegistry.ts), nunca una lista de proveedores copiada aquí a mano.
+          integrationReady: hasAdapter(l.provider),
+        })),
         todayByChannel,
       })
     },

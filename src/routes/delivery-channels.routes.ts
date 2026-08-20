@@ -71,12 +71,70 @@ function checkChannelUpdatePermission(req: Request, res: Response, next: NextFun
   return checkPermission('delivery-channels:manage')(req, res, next)
 }
 
+/**
+ * Task 7 (plan 2026-08-20-delivery-nucleo-unico, §8.1): delivery directo es PREMIUM
+ * (decisión founder 2026-08-20). El candado en sí es 100% de `checkFeatureAccess`
+ * ('DELIVERY_CHANNELS' ya vive en PREMIUM_ONLY_CODES — basePlan.service.ts — así que
+ * usa el resolver de FEATURE/`venueHasFeatureAccess`, JAMÁS `moduleService.isModuleEnabled`;
+ * cruzarlos "pasa" en silencio para casi todos los venues de prod, que están
+ * grandfathered — ver `.claude/rules/feature-gating.md`). Esta envoltura NO reimplementa
+ * ese candado: sólo reescribe el CUERPO del 403 cuando niega, porque el que produce hoy
+ * `checkFeatureAccess` es inglés genérico ("Please subscribe to enable this feature"),
+ * sin decir QUÉ plan hace falta ni CÓMO activarlo, y sin un `code` máquina-legible — y
+ * seis clientes distintos (dashboard, superadmin, TPV, Android, iOS, desktop) consumen
+ * esta API, así que un 403 pelón obliga a cada uno a inventarse el texto.
+ */
+const ACTIVAR_EN_DASHBOARD = 'Pídele al dueño del negocio que lo active desde el dashboard (Configuración → Plan).'
+
+interface FeatureAccessDeniedBody {
+  featureCode?: string
+  trialExpired?: boolean
+  suspended?: boolean
+}
+
+function withDeliveryPremiumMessage(_req: Request, res: Response, next: NextFunction) {
+  const originalJson = res.json.bind(res)
+  res.json = (body: unknown) => {
+    const b = body as FeatureAccessDeniedBody
+    if (res.statusCode === 403 && b?.featureCode === 'DELIVERY_CHANNELS') {
+      if (b.trialExpired) {
+        return originalJson({
+          error: 'TRIAL_EXPIRED',
+          code: 'TRIAL_EXPIRED',
+          message: `La prueba gratuita del envío a domicilio (Uber Eats, Rappi, DiDi Food) ya terminó. ${ACTIVAR_EN_DASHBOARD}`,
+          featureCode: 'DELIVERY_CHANNELS',
+          requiredPlan: 'PREMIUM',
+        })
+      }
+      if (b.suspended) {
+        return originalJson({
+          error: 'SUBSCRIPTION_SUSPENDED',
+          code: 'SUBSCRIPTION_SUSPENDED',
+          message: `El envío a domicilio está suspendido por un pago fallido del plan PREMIUM. Actualiza el método de pago en el dashboard (Configuración → Plan) para reactivarlo.`,
+          featureCode: 'DELIVERY_CHANNELS',
+          requiredPlan: 'PREMIUM',
+        })
+      }
+      return originalJson({
+        error: 'PLAN_REQUIRED',
+        code: 'PLAN_REQUIRED',
+        message: `El envío a domicilio con Uber Eats, Rappi o DiDi Food requiere el plan PREMIUM. ${ACTIVAR_EN_DASHBOARD}`,
+        featureCode: 'DELIVERY_CHANNELS',
+        requiredPlan: 'PREMIUM',
+      })
+    }
+    return originalJson(body)
+  }
+  next()
+}
+
 // Orden: auth → (validateRequest) → PERMISO/membresía → feature. Ver el bloque §10.4
 // arriba: permiso antes que feature evita la fuga de estado de plan a no-miembros.
 router.get(
   '/venues/:venueId/channels',
   authenticateTokenMiddleware,
   checkPermission('delivery-channels:read'),
+  withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.listChannels,
 )
@@ -86,6 +144,7 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(createChannelSchema),
   checkPermission('delivery-channels:connect'),
+  withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.createChannel,
 )
@@ -95,6 +154,7 @@ router.patch(
   authenticateTokenMiddleware,
   validateRequest(updateChannelSchema),
   checkChannelUpdatePermission,
+  withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.updateChannel,
 )
@@ -104,6 +164,7 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(pauseChannelSchema),
   checkPermission('delivery-channels:manage'),
+  withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.pauseChannel,
 )
@@ -113,6 +174,7 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(createActivationRequestSchema),
   checkPermission('delivery-channels:request'),
+  withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.requestActivation,
 )
@@ -121,6 +183,7 @@ router.get(
   '/venues/:venueId/activation-request',
   authenticateTokenMiddleware,
   checkPermission('delivery-channels:read'),
+  withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.getActivation,
 )
@@ -129,6 +192,7 @@ router.get(
   '/venues/:venueId/delivery/summary',
   authenticateTokenMiddleware,
   checkPermission('delivery-channels:read'),
+  withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.getSummary,
 )

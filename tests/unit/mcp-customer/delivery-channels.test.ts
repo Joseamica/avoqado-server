@@ -13,6 +13,7 @@ const mockOrderGroupBy = jest.fn()
 const mockRequirePermission = jest.fn()
 const mockVenueFindUnique = jest.fn()
 const mockVenueStartOfDay = jest.fn()
+const mockHasAdapter = jest.fn()
 
 jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: (...a: unknown[]) => mockHasFeatureAccess(...(a as [])),
@@ -41,6 +42,13 @@ jest.mock('@/utils/prismaClient', () => ({
     venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...(a as [])) },
   },
 }))
+// Task 8 (plan 2026-08-20-delivery-nucleo-unico, §8.2): "¿esta integración YA tiene
+// adaptador real, o el vínculo existe pero todavía no hay a quién delegarle?" — la
+// única fuente de verdad es el registro (core/adapterRegistry.ts, Tarea 5 del mismo
+// plan), nunca una lista de proveedores copiada aquí a mano.
+jest.mock('@/services/delivery-channels/core/adapterRegistry', () => ({
+  hasAdapter: (...a: unknown[]) => mockHasAdapter(...(a as [])),
+}))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
@@ -53,6 +61,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks()
   mockVenueStartOfDay.mockReturnValue(new Date('2026-07-18T06:00:00.000Z'))
+  mockHasAdapter.mockReturnValue(false)
 })
 
 describe('delivery_channels', () => {
@@ -85,6 +94,9 @@ describe('delivery_channels', () => {
   it('lists channels + today-by-channel totals (Decimal -> pesos Number) when entitled', async () => {
     mockHasFeatureAccess.mockResolvedValueOnce(true)
     mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    // Task 8: UBER_EATS ya tiene adaptador real (Tarea 5 del plan); RAPPI todavía no —
+    // el vínculo puede existir (el dueño ya lo conectó) sin que el core sepa traducirlo aún.
+    mockHasAdapter.mockImplementation((provider: string) => provider === 'UBER_EATS')
     mockLinkFindMany.mockResolvedValueOnce([
       {
         id: 'link1',
@@ -116,7 +128,7 @@ describe('delivery_channels', () => {
 
     expect(out.venueId).toBe('v1')
     expect(out.channels).toHaveLength(2)
-    expect(out.channels[0]).toMatchObject({ id: 'link1', provider: 'UBER_EATS', status: 'ACTIVE' })
+    expect(out.channels[0]).toMatchObject({ id: 'link1', provider: 'UBER_EATS', status: 'ACTIVE', orderAcceptanceMode: 'AUTO' })
     expect(out.channels[0].lastMenuSyncAt).toBe('2026-07-18T10:00:00.000Z')
     expect(out.channels[1].lastMenuSyncAt).toBeNull()
 
@@ -126,6 +138,56 @@ describe('delivery_channels', () => {
     ])
     // money stays in pesos major units, never cents
     expect(typeof out.todayByChannel[0].totalPesos).toBe('number')
+  })
+
+  // ============================================================
+  // Task 8 (plan 2026-08-20-delivery-nucleo-unico, §8.2): la tool refleja si CADA vínculo
+  // ya tiene un adaptador real detrás (core/adapterRegistry.ts, Tarea 5 del mismo plan) —
+  // "una capacidad no alcanzable por el customer MCP está incompleta" (critical-warnings.md).
+  // ============================================================
+  it('Task 8: refleja integrationReady por vínculo vía hasAdapter(provider) — nunca una lista propia de proveedores', async () => {
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockHasAdapter.mockImplementation((provider: string) => provider === 'UBER_EATS')
+    mockLinkFindMany.mockResolvedValueOnce([
+      {
+        id: 'link1',
+        provider: 'UBER_EATS',
+        status: 'ACTIVE',
+        orderAcceptanceMode: 'AUTO',
+        autoSyncMenu: true,
+        lastMenuSyncAt: null,
+        externalLocationId: 'loc-1',
+      },
+      {
+        id: 'link2',
+        provider: 'RAPPI',
+        status: 'PENDING',
+        orderAcceptanceMode: 'AUTO',
+        autoSyncMenu: true,
+        lastMenuSyncAt: null,
+        externalLocationId: 'loc-2',
+      },
+      {
+        id: 'link3',
+        provider: 'DIDI_FOOD',
+        status: 'PENDING',
+        orderAcceptanceMode: 'AUTO',
+        autoSyncMenu: true,
+        lastMenuSyncAt: null,
+        externalLocationId: 'loc-3',
+      },
+    ])
+    mockOrderGroupBy.mockResolvedValueOnce([])
+
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect(out.channels[0]).toMatchObject({ provider: 'UBER_EATS', integrationReady: true })
+    expect(out.channels[1]).toMatchObject({ provider: 'RAPPI', integrationReady: false })
+    expect(out.channels[2]).toMatchObject({ provider: 'DIDI_FOOD', integrationReady: false })
+    expect(mockHasAdapter).toHaveBeenCalledWith('UBER_EATS')
+    expect(mockHasAdapter).toHaveBeenCalledWith('RAPPI')
+    expect(mockHasAdapter).toHaveBeenCalledWith('DIDI_FOOD')
   })
 
   it('handles zero delivery orders today (no groupBy rows) without throwing', async () => {
