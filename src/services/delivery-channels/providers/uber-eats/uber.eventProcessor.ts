@@ -15,7 +15,7 @@
  * el evento queda FAILED para reconciliar con el comercio; al revés, un pedido perfectamente
  * ingerido se cancela solo y el cliente se queda sin comida.
  */
-import { DeliveryOrderEventStatus } from '@prisma/client'
+import { DeliveryOrderEventStatus, OrderAcceptanceMode } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -94,14 +94,35 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     })
 
     // 3. ACEPTAR YA. Antes de ingerir: el plazo es lo único irrecuperable.
-    const aceptacion = await acceptOrder(identidad.orderId, link.externalLocationId)
+    //
+    // 🔴 …salvo que el venue haya pedido aceptar A MANO. `orderAcceptanceMode` es la
+    // decisión del dueño: aceptar solo cuando él pidió revisar cada pedido le quita el
+    // control sobre su propia cocina.
+    const automatico = link.orderAcceptanceMode === OrderAcceptanceMode.AUTO
+    const aceptacion = automatico
+      ? await acceptOrder(identidad.orderId, link.externalLocationId)
+      : { ok: true, status: 0, raw: 'aceptación manual: la decide el staff' }
+
     if (!aceptacion.ok) {
-      logger.error('🚨 [Uber] no se pudo aceptar el pedido — Uber lo cancelará al vencer el plazo', {
+      // 🔴 Si el pedido YA NO ESTÁ ACTIVO, crear la venta sería inventar una venta fantasma:
+      // Uber ya lo canceló y ese dinero no va a llegar nunca. Se corta aquí.
+      // Medido el 2026-08-20: pasado el plazo, Uber responde
+      // `400 "The order is no longer active"` y el pedido queda en DENIED.
+      const pedidoMuerto = /no longer active|not active|cancel/i.test(aceptacion.raw)
+      logger.error('🚨 [Uber] no se pudo aceptar el pedido', {
         eventRowId,
         orderId: identidad.orderId,
         status: aceptacion.status,
         cuerpo: aceptacion.raw.slice(0, 200),
+        pedidoMuerto,
       })
+
+      if (pedidoMuerto) {
+        await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'PEDIDO_YA_NO_ACTIVO')
+        return { outcome: 'FAILED', accepted: false, error: 'PEDIDO_YA_NO_ACTIVO' }
+      }
+      // Un fallo transitorio (red, 5xx) NO mata el pedido: se ingiere igual para no perder
+      // la venta, y el evento queda marcado para reintentar el accept.
     }
 
     // 4. Convertirlo en venta.

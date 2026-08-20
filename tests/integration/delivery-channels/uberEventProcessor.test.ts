@@ -140,6 +140,61 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
     expect(evento.error).toMatch(/id/i)
   })
 
+  it('🔴 pedido que Uber YA CANCELÓ: no se inventa la venta', async () => {
+    // Medido el 2026-08-20: pasado el plazo, Uber responde 400 "The order is no longer
+    // active". Crear la venta ahí sería registrar dinero que nunca va a llegar.
+    const eventRowId = await nuevoEvento(`ev-muerto-${Date.now()}`)
+    const antes = await prisma.order.count({ where: { venueId } })
+
+    const r = await processUberEvent(eventRowId, {
+      ...deps,
+      acceptOrder: async () => ({ ok: false, status: 400, raw: '{"message":"The order is no longer active."}' }),
+    })
+
+    expect(r.outcome).toBe('FAILED')
+    expect(r.error).toBe('PEDIDO_YA_NO_ACTIVO')
+    expect(await prisma.order.count({ where: { venueId } })).toBe(antes) // NO se creó venta
+  })
+
+  it('un fallo TRANSITORIO del accept no mata la venta: se ingiere y queda para reintentar', async () => {
+    const eventRowId = await nuevoEvento(`ev-flaky-${Date.now()}`)
+    const r = await processUberEvent(eventRowId, {
+      ...deps,
+      acceptOrder: async () => ({ ok: false, status: 503, raw: 'upstream timeout' }),
+    })
+    expect(r.outcome).toBe('PROCESSED') // la venta SÍ entra
+    expect(r.accepted).toBe(false)
+  })
+
+  it('🔴 canal en MANUAL: NO se acepta solo — la decisión es del dueño', async () => {
+    const manual = await prisma.deliveryChannelLink.create({
+      data: {
+        venueId,
+        provider: DeliveryProvider.UBER_EATS,
+        externalLocationId: `store-manual-${Date.now()}`,
+        webhookSecret: 'x',
+        orderAcceptanceMode: 'MANUAL',
+      },
+    })
+    const row = await prisma.deliveryOrderEvent.create({
+      data: {
+        provider: DeliveryProvider.UBER_EATS,
+        externalEventId: `ev-manual-${Date.now()}`,
+        eventType: 'orders.notification',
+        payload: aviso('manual') as object,
+        channelLinkId: manual.id,
+        venueId,
+        dedupKey: `UBER_EATS:manual-${Date.now()}`,
+      },
+    })
+    const antes = aceptados.length
+
+    const r = await processUberEvent(row.id, deps)
+
+    expect(r.outcome).toBe('PROCESSED') // la venta entra igual: la cocina debe verla
+    expect(aceptados.length).toBe(antes) // pero NO se aceptó en Uber
+  })
+
   it('un evento que NO es un pedido se marca procesado y no crea venta', async () => {
     const id = `ev-status-${Date.now()}`
     const eventRowId = await nuevoEvento(id, { ...aviso(id), event_type: 'orders.status_changed' })

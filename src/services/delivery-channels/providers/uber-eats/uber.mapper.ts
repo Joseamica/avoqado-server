@@ -58,14 +58,17 @@ function mapModificadores(grupos: unknown, cantidadPadre: number): NormalizedDel
     for (const m of items) {
       const it = m as { id?: string; title?: unknown; quantity?: unknown; price?: { unit_price?: unknown } }
       const cantidad = typeof it.quantity === 'number' ? it.quantity : 1
-      // [doc] El precio del modificador NO viene multiplicado por la cantidad del padre:
-      // 2 hamburguesas con 1 extra queso c/u cuestan 2× el extra, no 1×.
+      // 🔴 `price` es UNITARIO. La cantidad propia viaja en `quantity` y el core la guarda
+      // aparte, así que multiplicarla aquí la contaría DOS veces: un reporte que haga
+      // `price × quantity` (dashboard/lineRevenue.ts) cobraría el doble. Lo único que sí se
+      // aplica es la cantidad del PADRE: [doc] 2 hamburguesas con extra queso c/u cuestan
+      // 2× el extra, y esa multiplicación no la hace nadie más.
       const unitario = montoDe(it.price?.unit_price)
       salida.push({
         externalId: String(it.id ?? ''),
         name: tituloDe(it.title, 'modificador'),
         quantity: cantidad,
-        price: aPesos(unitario * cantidad * cantidadPadre),
+        price: aPesos(unitario * cantidadPadre),
       })
     }
   }
