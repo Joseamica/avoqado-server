@@ -93,6 +93,17 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'upsells:update': 'UPSELL',
   'upsells:delete': 'UPSELL',
 
+  // Delivery (Uber Eats, Rappi, DiDi) — función PREMIUM. Mismo motivo que `upsells:*`
+  // de arriba: sin esta entrada, en modo white-label los permisos de delivery pasan el
+  // filtro de feature access aunque el venue no tenga la función pagada, y el frontend
+  // pinta la pantalla como si la tuviera. `:connect` es SUPERADMIN-only (y SUPERADMIN se
+  // salta el filtro), pero se mapea igual: el día que se le dé a otro rol, el candado
+  // ya está puesto en vez de faltando.
+  'delivery-channels:read': 'DELIVERY_CHANNELS',
+  'delivery-channels:manage': 'DELIVERY_CHANNELS',
+  'delivery-channels:request': 'DELIVERY_CHANNELS',
+  'delivery-channels:connect': 'DELIVERY_CHANNELS',
+
   // Menu Management
   'menu:read': 'AVOQADO_MENU',
   'menu:write': 'AVOQADO_MENU',
