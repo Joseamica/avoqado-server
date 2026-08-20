@@ -17,6 +17,9 @@ import { DeliveryOrderStatus, DeliveryProviderAdapter } from './types'
 import { deliverectAdapter } from '../providers/deliverect/deliverect.adapter'
 
 /** Registry simple provider→adapter. Providers sin entry (UBER_EATS/RAPPI/DIDI_FOOD directos) lanzan. */
+// ⚠️ DEUDA (plan 2026-08-20): este mapa y `core/adapterRegistry.ts` son DOS registros de
+// lo mismo. Conviven porque `deliverectAdapter` implementa el contrato viejo. Se funden
+// cuando Deliverect migre a `DeliveryProviderAdapter` (spec §8, paso 7).
 const ADAPTER_REGISTRY: Partial<Record<DeliveryProvider, DeliveryProviderAdapter>> = {
   [DeliveryProvider.DELIVERECT]: deliverectAdapter,
 }
