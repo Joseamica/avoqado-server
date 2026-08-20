@@ -242,4 +242,38 @@ describe('parseDeliverectOrder', () => {
       expect(() => parseDeliverectOrder(fixture, link)).not.toThrow()
     })
   })
+
+  // ============================================================
+  // HALLAZGO 1 (auditoría externa, 2026-08-20): el mapper hacía la aritmética interna con
+  // `number` (restas, multiplicaciones) antes de producir el string decimal — viola
+  // `.claude/rules/critical-warnings.md` ("Money = Decimal, Never Float") y permite
+  // redondeos silenciosos del estilo `0.1 + 0.2 !== 0.3`.
+  // ============================================================
+  describe('dinero: Decimal, nunca float (Hallazgo 1)', () => {
+    function conPayload(mutate: (p: any) => void): Buffer {
+      const p = JSON.parse(fixture.toString())
+      mutate(p)
+      return Buffer.from(JSON.stringify(p))
+    }
+
+    it('🔴 cargos que cuadran EXACTO contra el total no deben rechazarse por un épsilon de coma flotante', () => {
+      // $10.00 de serviceCharge + $4.12 de deliveryCost = $14.12 = el total exacto (sin venta
+      // de artículos, un pedido de puros cargos). En `number`, 14.12 - (10.00 + 4.12) da
+      // -1.7763568394002505e-15 (NO cero) por representación binaria — el mapper leía eso
+      // como "los cargos superan el total" y RECHAZABA un pedido perfectamente cuadrado.
+      // Verificado con la aritmética exacta de `toPesosNum` antes de escribir este test.
+      const body = conPayload(p => {
+        p.payment.amount = 1412
+        p.serviceCharge = 1000
+        p.deliveryCost = 412
+        p.orderIsAlreadyPaid = true
+      })
+
+      const o = parseDeliverectOrder(body, link)
+
+      expect(o.payment.saleAmount).toBe('0.00')
+      expect(o.payment.merchantFees).toBe('14.12')
+      expect(o.payment.externallyPaidSale).toBe('14.12')
+    })
+  })
 })

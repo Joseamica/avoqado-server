@@ -125,8 +125,10 @@ export async function ingestDeliveryOrder(
   link: DeliveryChannelLink,
 ): Promise<{ order: Order; created: boolean }> {
   // 🔴 Dinero primero: un pedido cuyo reparto no cuadra NUNCA debe tocar la base — se
-  // verifica ANTES de resolver el venue o abrir la transacción.
-  assertDeliveryMoneyInvariants(normalized.payment)
+  // verifica ANTES de resolver el venue o abrir la transacción. Compara también contra los
+  // renglones (Hallazgo 2, auditoría externa 2026-08-20): saleAmount debe cuadrar con la suma
+  // de los items, no sólo el split consigo mismo.
+  assertDeliveryMoneyInvariants(normalized.payment, normalized.items)
 
   const venue = await prisma.venue.findUnique({ where: { id: link.venueId } })
   if (!venue) throw new Error(`Venue ${link.venueId} del channel link no existe`)

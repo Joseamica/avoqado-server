@@ -173,8 +173,10 @@ describe('ingestDeliveryOrder', () => {
   it('unitPrice/total de la línea pasan TAL CUAL del contrato normalizado, sin recomputar (el mapper ya hizo la cuenta)', async () => {
     // total (110) deliberadamente distinto de unitPrice×quantity (90) — si el servicio
     // recomputara localmente en vez de confiar en el mapper, este test lo detectaría.
+    // payment.saleAmount sube a 110 para cuadrar con el total real del item (Hallazgo 2).
     const normalized = makeNormalized({
       items: [{ externalId: 'TACO', name: 'Taco', quantity: 2, unitPrice: '45.00', total: '110.00', modifiers: [] }],
+      payment: makePayment({ saleAmount: '110.00', externallyPaidSale: '110.00' }),
     })
 
     await ingestDeliveryOrder(normalized, link)
@@ -203,6 +205,8 @@ describe('ingestDeliveryOrder', () => {
           ],
         },
       ],
+      // payment.saleAmount cuadra con el total del item (Hallazgo 2).
+      payment: makePayment({ saleAmount: '110.00', externallyPaidSale: '110.00' }),
     })
 
     await ingestDeliveryOrder(normalized, link)
@@ -229,6 +233,8 @@ describe('ingestDeliveryOrder', () => {
         { externalId: 'TACO', name: 'Taco', quantity: 2, unitPrice: '45.00', total: '90.00', modifiers: [] },
         { externalId: 'REFRESCO', name: 'Refresco', quantity: 1, unitPrice: '20.00', total: '20.00', modifiers: [] },
       ],
+      // Dos líneas suman 110 — payment.saleAmount cuadra con eso (Hallazgo 2).
+      payment: makePayment({ saleAmount: '110.00', externallyPaidSale: '110.00' }),
     })
     ;(prisma.product.findUnique as jest.Mock)
       .mockResolvedValueOnce({ id: 'prod1', sku: 'TACO', name: 'Taco' })
@@ -337,6 +343,9 @@ describe('ingestDeliveryOrder', () => {
   // ============================================================
   it('🔴 Payment.amount es la venta SIN propina; la propina va sólo en tipAmount (antes: amount=230, tipAmount=30 — doble conteo)', async () => {
     const normalized = makeNormalized({
+      // items debe cuadrar contra el nuevo saleAmount (Hallazgo 2: assertDeliveryMoneyInvariants
+      // ahora también compara saleAmount contra la suma de las líneas).
+      items: [{ externalId: 'TACO', name: 'Taco', quantity: 2, unitPrice: '100.00', total: '200.00', modifiers: [] }],
       payment: makePayment({
         saleAmount: '200.00',
         merchantFees: '0.00',
@@ -566,6 +575,8 @@ describe('ingestDeliveryOrder', () => {
           modifiers: [{ externalId: 'MOD-QUESO', name: 'Extra queso', quantity: 1, price: '10.00' }],
         },
       ],
+      // 45 + 55 = 100 — payment.saleAmount cuadra con eso (Hallazgo 2).
+      payment: makePayment({ saleAmount: '100.00', externallyPaidSale: '100.00' }),
     })
 
     await ingestDeliveryOrder(normalized, link)
@@ -587,6 +598,8 @@ describe('ingestDeliveryOrder', () => {
         { externalId: '', name: 'Agua mineral', quantity: 1, unitPrice: '20.00', total: '20.00', modifiers: [] },
         { externalId: '', name: 'Coca cola', quantity: 1, unitPrice: '25.00', total: '25.00', modifiers: [] },
       ],
+      // 20 + 25 = 45 — payment.saleAmount cuadra con eso (Hallazgo 2).
+      payment: makePayment({ saleAmount: '45.00', externallyPaidSale: '45.00' }),
     })
 
     await ingestDeliveryOrder(normalized, link)
@@ -612,9 +625,11 @@ describe('ingestDeliveryOrder', () => {
     // Pedido 1: no existe todavía → se crea
     ;(prisma.product.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValueOnce(null)
     ;(prisma.product.create as jest.Mock).mockResolvedValueOnce(placeholderProduct)
+    // payment.saleAmount cuadra con el total del item ($20, Hallazgo 2) en los dos pedidos.
     const order1 = makeNormalized({
       externalId: 'UE-1',
       items: [{ externalId: '', name: 'Agua mineral', quantity: 1, unitPrice: '20.00', total: '20.00', modifiers: [] }],
+      payment: makePayment({ saleAmount: '20.00', externallyPaidSale: '20.00' }),
     })
     await ingestDeliveryOrder(order1, link)
 
@@ -624,6 +639,7 @@ describe('ingestDeliveryOrder', () => {
     const order2 = makeNormalized({
       externalId: 'UE-2',
       items: [{ externalId: '', name: 'Agua mineral', quantity: 1, unitPrice: '20.00', total: '20.00', modifiers: [] }],
+      payment: makePayment({ saleAmount: '20.00', externallyPaidSale: '20.00' }),
     })
     await ingestDeliveryOrder(order2, link)
 

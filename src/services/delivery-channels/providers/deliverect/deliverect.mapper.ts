@@ -1,4 +1,4 @@
-import { DeliveryChannelLink, OrderSource } from '@prisma/client'
+import { DeliveryChannelLink, OrderSource, Prisma } from '@prisma/client'
 import { NormalizedDeliveryOrder, NormalizedDeliveryItem, NormalizedDeliveryModifier, DeliveryOrderStatus } from '../../core/types'
 
 /**
@@ -27,14 +27,28 @@ export function resolveOrderSource(channelId: number | undefined, link: Delivery
   return OrderSource.DELIVERY_PLATFORM
 }
 
-/** centavos (o la unidad que declare decimalDigits) → PESOS, número interno. SOLO aquí se divide. */
-function toPesosNum(minor: number | undefined | null, decimalDigits: number): number {
-  if (minor == null) return 0
-  return Math.round(minor) / Math.pow(10, decimalDigits)
+/**
+ * centavos (o la unidad que declare decimalDigits) → PESOS, `Prisma.Decimal`. SOLO aquí se
+ * divide.
+ *
+ * 🔴 HALLAZGO 1 (auditoría externa, 2026-08-20): antes dividía en `number`
+ * (`Math.round(minor) / Math.pow(10, decimalDigits)`) y toda la aritmética posterior
+ * (restas, multiplicaciones) seguía en `number` — viola
+ * `.claude/rules/critical-warnings.md` ("Money = Decimal, Never Float") y permite redondeos
+ * silenciosos del estilo `0.1 + 0.2 !== 0.3`. Caso real encontrado: con `number`,
+ * `serviceCharge=$10.00 + deliveryCost=$4.12` contra un `total=$14.12` (EXACTAMENTE iguales)
+ * daba `ventaSinCargos = -1.7763568394002505e-15` — no CERO — y el mapper rechazaba un
+ * pedido perfectamente cuadrado creyendo que los cargos superaban el total. Con Decimal da 0
+ * exacto. `Math.round` se conserva (no aritmética de dinero: sólo sanea centavos
+ * fraccionarios de un payload corrupto) pero la conversión y todo lo que sigue es Decimal.
+ */
+function toPesosDecimal(minor: number | undefined | null, decimalDigits: number): Prisma.Decimal {
+  if (minor == null) return new Prisma.Decimal(0)
+  return new Prisma.Decimal(Math.round(minor)).dividedBy(new Prisma.Decimal(10).pow(decimalDigits))
 }
 
-/** PESOS número interno → string decimal 2 lugares, la forma en que viaja el contrato. */
-const toStr = (pesos: number): string => pesos.toFixed(2)
+/** PESOS Decimal → string decimal 2 lugares, la forma en que viaja el contrato. */
+const toStr = (pesos: Prisma.Decimal): string => pesos.toFixed(2)
 
 export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink): NormalizedDeliveryOrder {
   let p: any
@@ -60,8 +74,8 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
     if (!Number.isFinite(quantity) || quantity <= 0) {
       throw new Error('Deliverect: payload con quantity de item inválida')
     }
-    const unitPriceNum = toPesosNum(it.price, dd)
-    if (!Number.isFinite(unitPriceNum) || unitPriceNum < 0) {
+    const unitPriceDecimal = toPesosDecimal(it.price, dd)
+    if (!unitPriceDecimal.isFinite() || unitPriceDecimal.isNegative()) {
       throw new Error('Deliverect: payload con unitPrice de item inválido')
     }
 
@@ -73,26 +87,26 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
     // del padre — la multiplicación por la cantidad PROPIA del modifier ocurre donde se
     // consuma (`price × quantity`), no aquí.
     const modifiers: NormalizedDeliveryModifier[] = (it.subItems ?? []).map((s: any) => {
-      const modUnitNum = toPesosNum(s.price, dd)
-      if (!Number.isFinite(modUnitNum) || modUnitNum < 0) {
+      const modUnitDecimal = toPesosDecimal(s.price, dd)
+      if (!modUnitDecimal.isFinite() || modUnitDecimal.isNegative()) {
         throw new Error('Deliverect: payload con unitPrice de modifier inválido')
       }
       return {
         externalId: String(s.plu ?? ''),
         name: String(s.name ?? 'Modificador'),
         quantity: Number(s.quantity ?? 1),
-        price: toStr(modUnitNum * quantity),
+        price: toStr(modUnitDecimal.times(quantity)),
       }
     })
 
-    const modifiersTotal = modifiers.reduce((sum, m) => sum + Number(m.price) * m.quantity, 0)
-    const lineTotal = unitPriceNum * quantity + modifiersTotal
+    const modifiersTotal = modifiers.reduce((sum, m) => sum.plus(new Prisma.Decimal(m.price).times(m.quantity)), new Prisma.Decimal(0))
+    const lineTotal = unitPriceDecimal.times(quantity).plus(modifiersTotal)
 
     return {
       externalId: String(it.plu ?? ''),
       name: String(it.name ?? 'Producto'),
       quantity,
-      unitPrice: toStr(unitPriceNum),
+      unitPrice: toStr(unitPriceDecimal),
       total: toStr(lineTotal),
       modifiers,
     }
@@ -100,8 +114,8 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
 
   // Fix 1 (audit, SECURITY): mismo motivo que arriba — payment.amount es lo que financia
   // saleAmount; un valor negativo/no-finito crearía un pedido "PAID" con forma de reembolso.
-  const saleAmountNum = toPesosNum(p.payment?.amount, dd)
-  if (!Number.isFinite(saleAmountNum) || saleAmountNum < 0) {
+  const saleAmountDecimal = toPesosDecimal(p.payment?.amount, dd)
+  if (!saleAmountDecimal.isFinite() || saleAmountDecimal.isNegative()) {
     throw new Error('Deliverect: payload con total inválido')
   }
 
@@ -110,8 +124,8 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
   // REVALIDAR EN STAGING: no hay documentación pública que confirme que Deliverect
   // siempre liquida estos dos campos al comercio (vs. quedárselos la plataforma) — es
   // la lectura más razonable del payload de ejemplo, pero no está verificada end-to-end.
-  const merchantFeesNum = toPesosNum(p.serviceCharge, dd) + toPesosNum(p.deliveryCost, dd)
-  const tipAmountNum = toPesosNum(p.tip, dd)
+  const merchantFeesDecimal = toPesosDecimal(p.serviceCharge, dd).plus(toPesosDecimal(p.deliveryCost, dd))
+  const tipAmountDecimal = toPesosDecimal(p.tip, dd)
 
   // 🔴 `payment.amount` YA INCLUYE los cargos. El propio schema lo documenta
   // (`prisma/schema.prisma`, `deliveryFeeAmount`): "para pedidos de agregador el proveedor
@@ -119,10 +133,14 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
   // `saleAmount` y ADEMÁS se sumaban los cargos como `merchantFees`: una venta de $165 con
   // $25 de envío quedaba registrada en $190. Hallado por auditoría externa el 2026-08-20;
   // el test no lo veía porque su fixture trae ambos cargos en cero.
-  const ventaSinCargos = saleAmountNum - merchantFeesNum
-  if (ventaSinCargos < 0) {
+  //
+  // 🔴 HALLAZGO 1: esta resta viviendo en Decimal (no `number`) es justo lo que evita el
+  // épsilon de coma flotante que rechazaba pedidos perfectamente cuadrados — ver el
+  // comentario de `toPesosDecimal` arriba.
+  const ventaSinCargos = saleAmountDecimal.minus(merchantFeesDecimal)
+  if (ventaSinCargos.isNegative()) {
     throw new Error(
-      `Deliverect: los cargos (${merchantFeesNum}) superan el total (${saleAmountNum}) — el reparto no se puede determinar sin inventar`,
+      `Deliverect: los cargos (${merchantFeesDecimal.toFixed(2)}) superan el total (${saleAmountDecimal.toFixed(2)}) — el reparto no se puede determinar sin inventar`,
     )
   }
 
@@ -134,18 +152,18 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
   // Conservador: SÓLO `=== true` cuenta como pagado — ausente o cualquier otro valor deja
   // el dinero por cobrar, nunca al revés.
   const yaPagado = (p as { orderIsAlreadyPaid?: unknown })?.orderIsAlreadyPaid === true
-  const totalCobrable = ventaSinCargos + merchantFeesNum
+  const totalCobrable = ventaSinCargos.plus(merchantFeesDecimal)
 
   const payment: NormalizedDeliveryOrder['payment'] = {
     currency: 'MXN',
     saleAmount: toStr(ventaSinCargos),
-    merchantFees: toStr(merchantFeesNum),
-    tipAmount: toStr(tipAmountNum),
+    merchantFees: toStr(merchantFeesDecimal),
+    tipAmount: toStr(tipAmountDecimal),
     // Pagado ⇒ la plataforma ya liquidó. No pagado ⇒ queda por cobrar contra entrega.
     externallyPaidSale: yaPagado ? toStr(totalCobrable) : '0.00',
-    externallyPaidTip: yaPagado ? toStr(tipAmountNum) : '0.00',
+    externallyPaidTip: yaPagado ? toStr(tipAmountDecimal) : '0.00',
     cashDueSale: yaPagado ? '0.00' : toStr(totalCobrable),
-    cashDueTip: yaPagado ? '0.00' : toStr(tipAmountNum),
+    cashDueTip: yaPagado ? '0.00' : toStr(tipAmountDecimal),
   }
 
   return {
