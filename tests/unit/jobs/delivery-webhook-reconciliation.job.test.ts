@@ -146,6 +146,20 @@ describe('DeliveryWebhookReconciliationJob', () => {
     expect(statusOr.map((c: any) => c.status).sort()).toEqual([DeliveryOrderEventStatus.FAILED, DeliveryOrderEventStatus.RECEIVED].sort())
   })
 
+  it('🔴 el scan SOLO selecciona DELIVERECT — un evento de Uber jamás llega al parser de Deliverect', async () => {
+    // Regresión real (2026-08-20): sin este filtro, eventos UBER_EATS entraban a
+    // `parseDeliverectOrder`, fallaban con "payload sin channelOrderId/items", reintentaban
+    // cada 2 min por 24 h y se descartaban. Un pedido REAL de Uber se perdería en silencio.
+    mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+
+    await new DeliveryWebhookReconciliationJob().runOnce()
+
+    const scanWhere = mockedFindMany.mock.calls[0][0].where
+    const filtroProveedor = scanWhere.AND.find((c: any) => c.provider !== undefined)
+    expect(filtroProveedor).toBeDefined()
+    expect(filtroProveedor.provider).toBe('DELIVERECT')
+  })
+
   it('channelLinkId null (channel link deleted) → marked ORPHANED immediately, regardless of age, WITH the per-event 🚨 ops alert', async () => {
     const event = makeEvent({
       id: 'evt_orphan_immediate',

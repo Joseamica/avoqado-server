@@ -1,7 +1,7 @@
 // jobs/delivery-webhook-reconciliation.job.ts
 
 import { CronJob } from 'cron'
-import { DeliveryOrderEventStatus, Prisma } from '@prisma/client'
+import { DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -137,6 +137,18 @@ export class DeliveryWebhookReconciliationJob {
         prisma.deliveryOrderEvent.findMany({
           where: {
             AND: [
+              // 🔴 SOLO Deliverect. Abajo se llama `parseDeliverectOrder` sobre CUALQUIER
+              // fila seleccionada: sin este filtro, un evento de Uber entra al parser de
+              // Deliverect, revienta con "payload sin channelOrderId/items", reintenta cada
+              // 2 min durante 24 h y se descarta. Un pedido REAL se perdería en silencio.
+              // (Observado el 2026-08-20 con eventos de prueba de UBER_EATS.)
+              //
+              // Uber tiene camino propio a propósito (spec 2026-08-17 §3.bis, Deliverect
+              // congelado). Su reconciliación es el paso 4 de esa spec y NO existe todavía:
+              // hasta entonces sus eventos atorados se quedan quietos, que es preferible a
+              // procesarlos con el parser equivocado. Al construirla, se enruta por
+              // `event.provider` en vez de ampliar este filtro.
+              { provider: DeliveryProvider.DELIVERECT },
               // Never re-pick a row the ORPHANED sweep already gave up on. Written as an
               // explicit null-tolerant OR (rather than a bare `error: { not: 'ORPHANED' }`)
               // so rows with error=null (never failed before) are NOT accidentally excluded —
