@@ -11,6 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { UBER_EXTERNAL_ID_PREFIX } from '@/services/delivery-channels/providers/uber-eats/uber.productResolver'
 import type { NormalizedDeliveryOrder } from '@/services/delivery-channels/core/types'
+import { runIngestionContract } from './ingestionContract'
 
 // El evento se vuelve VENTA — Order + líneas + Payment + inventario, todo en UNA
 // transacción. Contra PostgreSQL real: el unique de externalId y la idempotencia no se
@@ -199,4 +200,13 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
     expect(p!.amount.toString()).toBe('1')
     expect(p!.fundsFlow).toBe(PaymentFundsFlow.EXTERNAL_RECORDED)
   })
+  // ── EL CONTRATO ────────────────────────────────────────────────────────────────────
+  // Uber es hoy el único proveedor directo, así que es quien estrena la suite. Cuando
+  // llegue Rappi o DiDi, su test invoca ESTA MISMA función: si la pasa, está integrado.
+  let n = 0
+  runIngestionContract(
+    'Uber Eats',
+    overrides => ({ ...pedido(`contrato-${++n}-${Date.now()}`), ...overrides }),
+    () => link,
+  )
 })
