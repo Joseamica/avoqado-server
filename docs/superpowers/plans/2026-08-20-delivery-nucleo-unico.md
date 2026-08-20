@@ -1,10 +1,13 @@
 # Núcleo único de delivery + adaptadores por proveedor — Plan de implementación
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Que Uber Eats, Rappi y DiDi Food compartan UNA sola lógica de negocio, con un adaptador delgado por proveedor que solo traduce.
 
-**Architecture:** El contrato de datos del core (`NormalizedDeliveryOrder`) se reemplaza por el de Uber (`NormalizedUberOrder`), que ya lleva el dinero como string decimal con invariantes verificadas. El core ingiere; los adaptadores traducen. Un registro `provider → adapter` es el único lugar donde se menciona un proveedor por nombre.
+**Architecture:** El contrato de datos del core (`NormalizedDeliveryOrder`) se reemplaza por el de Uber (`NormalizedUberOrder`), que ya
+lleva el dinero como string decimal con invariantes verificadas. El core ingiere; los adaptadores traducen. Un registro `provider → adapter`
+es el único lugar donde se menciona un proveedor por nombre.
 
 **Tech Stack:** TypeScript, Express, Prisma/PostgreSQL, Jest (proyectos `unit` e `integration`).
 
@@ -12,7 +15,8 @@
 
 ## Global Constraints
 
-- **Dinero: `Prisma.Decimal` o string decimal. NUNCA `number`.** Regla dura del repo (`.claude/rules/critical-warnings.md`). Un `number` en un campo de dinero es un defecto, no un estilo.
+- **Dinero: `Prisma.Decimal` o string decimal. NUNCA `number`.** Regla dura del repo (`.claude/rules/critical-warnings.md`). Un `number` en
+  un campo de dinero es un defecto, no un estilo.
 - **Pesos 1:1, unidades mayores.** `1.00` = un peso. El `÷100` de centavos ocurre SOLO en el mapper de cada proveedor.
 - **Todo query filtra por `venueId` u `orgId`.** Sin excepción.
 - **Tests primero en todo lo que toque dinero.** Rojo → verde → commit.
@@ -25,34 +29,39 @@
 
 ## File Structure
 
-| Archivo | Responsabilidad |
-|---|---|
-| `src/services/delivery-channels/core/types.ts` | **Modificar.** El contrato de datos y el del adaptador. Dinero a string decimal. |
-| `src/services/delivery-channels/core/money.ts` | **Crear.** Validación de invariantes de dinero, pura y reutilizable. |
-| `src/services/delivery-channels/core/adapterRegistry.ts` | **Crear.** El único `provider → adapter`. |
-| `src/services/delivery-channels/core/deliveryOrderIngestion.service.ts` | **Modificar.** Adopta el contrato nuevo; arregla la propina. |
-| `src/services/delivery-channels/providers/uber-eats/uber.adapter.ts` | **Crear.** Implementa el contrato; delega en lo que ya existe. |
-| `src/services/delivery-channels/providers/uber-eats/uber.orderIngestion.service.ts` | **Borrar** al final de la Tarea 4. |
-| `tests/unit/services/delivery-channels/deliveryMoney.test.ts` | **Crear.** Invariantes de dinero. |
-| `tests/unit/services/delivery-channels/adapterRegistry.test.ts` | **Crear.** Incluye el guardrail anti-`if`. |
-| `tests/integration/delivery-channels/deliveryOrderIngestion.contract.test.ts` | **Crear.** Suite de contrato compartida. |
+| Archivo                                                                             | Responsabilidad                                                                  |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `src/services/delivery-channels/core/types.ts`                                      | **Modificar.** El contrato de datos y el del adaptador. Dinero a string decimal. |
+| `src/services/delivery-channels/core/money.ts`                                      | **Crear.** Validación de invariantes de dinero, pura y reutilizable.             |
+| `src/services/delivery-channels/core/adapterRegistry.ts`                            | **Crear.** El único `provider → adapter`.                                        |
+| `src/services/delivery-channels/core/deliveryOrderIngestion.service.ts`             | **Modificar.** Adopta el contrato nuevo; arregla la propina.                     |
+| `src/services/delivery-channels/providers/uber-eats/uber.adapter.ts`                | **Crear.** Implementa el contrato; delega en lo que ya existe.                   |
+| `src/services/delivery-channels/providers/uber-eats/uber.orderIngestion.service.ts` | **Borrar** al final de la Tarea 4.                                               |
+| `tests/unit/services/delivery-channels/deliveryMoney.test.ts`                       | **Crear.** Invariantes de dinero.                                                |
+| `tests/unit/services/delivery-channels/adapterRegistry.test.ts`                     | **Crear.** Incluye el guardrail anti-`if`.                                       |
+| `tests/integration/delivery-channels/deliveryOrderIngestion.contract.test.ts`       | **Crear.** Suite de contrato compartida.                                         |
 
 ---
 
 ## Task 1: Invariantes de dinero, aisladas y puras
 
 **Files:**
+
 - Create: `src/services/delivery-channels/core/money.ts`
 - Modify: `src/services/delivery-channels/core/types.ts` (**sólo añadir** `NormalizedDeliveryPayment`)
 - Test: `tests/unit/services/delivery-channels/deliveryMoney.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada.
-- Produces: `NormalizedDeliveryPayment` (la interface), `assertDeliveryMoneyInvariants(payment: NormalizedDeliveryPayment): void` (lanza `DeliveryMoneyMismatchError`), `DeliveryMoneyMismatchError`.
+- Produces: `NormalizedDeliveryPayment` (la interface), `assertDeliveryMoneyInvariants(payment: NormalizedDeliveryPayment): void` (lanza
+  `DeliveryMoneyMismatchError`), `DeliveryMoneyMismatchError`.
 
-Esta lógica hoy vive dentro de `uber.orderIngestion.service.ts:55` (`assertMoneyInvariants`). Se extrae para que TODOS los proveedores la compartan y sea testeable sin base de datos.
+Esta lógica hoy vive dentro de `uber.orderIngestion.service.ts:55` (`assertMoneyInvariants`). Se extrae para que TODOS los proveedores la
+compartan y sea testeable sin base de datos.
 
-⚠️ **`NormalizedDeliveryPayment` se añade AQUÍ, no en la Tarea 2**, porque `money.ts` lo necesita para compilar. Es puramente aditivo: no toca ningún tipo existente, así que el árbol sigue verde y esta tarea puede commitear sola.
+⚠️ **`NormalizedDeliveryPayment` se añade AQUÍ, no en la Tarea 2**, porque `money.ts` lo necesita para compilar. Es puramente aditivo: no
+toca ningún tipo existente, así que el árbol sigue verde y esta tarea puede commitear sola.
 
 - [ ] **Step 0: Añadir la interface a `core/types.ts`**
 
@@ -91,9 +100,13 @@ import { assertDeliveryMoneyInvariants, DeliveryMoneyMismatchError } from '@/ser
 
 const base = {
   currency: 'MXN' as const,
-  saleAmount: '100.00', merchantFees: '20.00', tipAmount: '15.00',
-  externallyPaidSale: '120.00', externallyPaidTip: '15.00',
-  cashDueSale: '0.00', cashDueTip: '0.00',
+  saleAmount: '100.00',
+  merchantFees: '20.00',
+  tipAmount: '15.00',
+  externallyPaidSale: '120.00',
+  externallyPaidTip: '15.00',
+  cashDueSale: '0.00',
+  cashDueTip: '0.00',
 }
 
 describe('delivery money invariants', () => {
@@ -102,9 +115,7 @@ describe('delivery money invariants', () => {
   })
 
   it('acepta el reparto mixto: parte en plataforma, parte en efectivo', () => {
-    expect(() =>
-      assertDeliveryMoneyInvariants({ ...base, externallyPaidSale: '70.00', cashDueSale: '50.00' }),
-    ).not.toThrow()
+    expect(() => assertDeliveryMoneyInvariants({ ...base, externallyPaidSale: '70.00', cashDueSale: '50.00' })).not.toThrow()
   })
 
   it('🔴 RECHAZA si la venta no cuadra — jamás estima', () => {
@@ -137,8 +148,8 @@ describe('delivery money invariants', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest --selectProjects unit --testPathPattern "deliveryMoney" --runInBand`
-Expected: FAIL — `Cannot find module '@/services/delivery-channels/core/money'`
+Run: `npx jest --selectProjects unit --testPathPattern "deliveryMoney" --runInBand` Expected: FAIL —
+`Cannot find module '@/services/delivery-channels/core/money'`
 
 - [ ] **Step 3: Implementar el mínimo**
 
@@ -169,9 +180,13 @@ export function assertDeliveryMoneyInvariants(p: NormalizedDeliveryPayment): voi
   }
 
   const campos: Array<[string, string]> = [
-    ['saleAmount', p.saleAmount], ['merchantFees', p.merchantFees], ['tipAmount', p.tipAmount],
-    ['externallyPaidSale', p.externallyPaidSale], ['externallyPaidTip', p.externallyPaidTip],
-    ['cashDueSale', p.cashDueSale], ['cashDueTip', p.cashDueTip],
+    ['saleAmount', p.saleAmount],
+    ['merchantFees', p.merchantFees],
+    ['tipAmount', p.tipAmount],
+    ['externallyPaidSale', p.externallyPaidSale],
+    ['externallyPaidTip', p.externallyPaidTip],
+    ['cashDueSale', p.cashDueSale],
+    ['cashDueTip', p.cashDueTip],
   ]
   for (const [nombre, valor] of campos) {
     let d: Prisma.Decimal
@@ -196,8 +211,7 @@ export function assertDeliveryMoneyInvariants(p: NormalizedDeliveryPayment): voi
   const propinaSplit = q(D(p.externallyPaidTip).plus(D(p.cashDueTip)))
   if (!propina.equals(propinaSplit)) {
     throw new DeliveryMoneyMismatchError(
-      `La propina no cuadra: tipAmount = ${propina.toFixed(2)}, ` +
-        `pero externallyPaidTip + cashDueTip = ${propinaSplit.toFixed(2)}.`,
+      `La propina no cuadra: tipAmount = ${propina.toFixed(2)}, ` + `pero externallyPaidTip + cashDueTip = ${propinaSplit.toFixed(2)}.`,
     )
   }
 }
@@ -205,8 +219,7 @@ export function assertDeliveryMoneyInvariants(p: NormalizedDeliveryPayment): voi
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest --selectProjects unit --testPathPattern "deliveryMoney" --runInBand`
-Expected: PASS (7 tests)
+Run: `npx jest --selectProjects unit --testPathPattern "deliveryMoney" --runInBand` Expected: PASS (7 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -221,14 +234,19 @@ git commit -m "feat(delivery): invariantes de dinero compartidas, con rechazo en
 ## Task 2: El contrato de datos, con el dinero bien
 
 **Files:**
-- Modify: `src/services/delivery-channels/core/types.ts` (reemplaza `NormalizedDeliveryOrder`, `NormalizedDeliveryItem`, `DeliveryProviderAdapter`)
+
+- Modify: `src/services/delivery-channels/core/types.ts` (reemplaza `NormalizedDeliveryOrder`, `NormalizedDeliveryItem`,
+  `DeliveryProviderAdapter`)
 - Test: el typecheck es la prueba; no hay test unitario de un `interface`.
 
 **Interfaces:**
-- Consumes: `DeliveryMoneyMismatchError` de la Tarea 1 (sólo en docs).
-- Produces: `NormalizedDeliveryOrder`, `NormalizedDeliveryItem`, `NormalizedDeliveryModifier`, `NormalizedDeliveryPayment`, `DeliveryProviderAdapter`, `ProviderContext`, `EventIdentity`, `WebhookVerdict`.
 
-Es el contrato de `uber.types.ts` promovido a core, más las capacidades del adaptador. **`uber.types.ts` queda como alias re-exportado** para no romper los 7 tests de integración existentes mientras dura la migración; se borra en la Tarea 4.
+- Consumes: `DeliveryMoneyMismatchError` de la Tarea 1 (sólo en docs).
+- Produces: `NormalizedDeliveryOrder`, `NormalizedDeliveryItem`, `NormalizedDeliveryModifier`, `NormalizedDeliveryPayment`,
+  `DeliveryProviderAdapter`, `ProviderContext`, `EventIdentity`, `WebhookVerdict`.
+
+Es el contrato de `uber.types.ts` promovido a core, más las capacidades del adaptador. **`uber.types.ts` queda como alias re-exportado**
+para no romper los 7 tests de integración existentes mientras dura la migración; se borra en la Tarea 4.
 
 - [ ] **Step 1: Reemplazar los tipos de dinero en `core/types.ts`**
 
@@ -359,8 +377,9 @@ export type {
 
 - [ ] **Step 4: Typecheck — debe fallar en Deliverect, y eso es esperado**
 
-Run: `npx tsc -p tsconfig.build.json --noEmit`
-Expected: FAIL en `providers/deliverect/deliverect.mapper.ts` y en `core/deliveryOrderIngestion.service.ts` — usan los campos viejos (`subtotal`, `total`, `tipAmount` como `number`). Se arreglan en la Tarea 3. **Anota los errores exactos**: son la lista de trabajo de la siguiente tarea.
+Run: `npx tsc -p tsconfig.build.json --noEmit` Expected: FAIL en `providers/deliverect/deliverect.mapper.ts` y en
+`core/deliveryOrderIngestion.service.ts` — usan los campos viejos (`subtotal`, `total`, `tipAmount` como `number`). Se arreglan en la
+Tarea 3. **Anota los errores exactos**: son la lista de trabajo de la siguiente tarea.
 
 - [ ] **Step 5: NO commitear todavía**
 
@@ -371,13 +390,17 @@ El árbol no compila. La Tarea 3 lo cierra. Commit único al final de la Tarea 3
 ## Task 3: El core ingiere con el contrato nuevo (y la propina deja de contarse dos veces)
 
 **Files:**
+
 - Modify: `src/services/delivery-channels/core/deliveryOrderIngestion.service.ts`
 - Modify: `src/services/delivery-channels/providers/deliverect/deliverect.mapper.ts` (adaptar al contrato nuevo)
 - Test: `tests/integration/delivery-channels/deliveryOrderIngestion.test.ts` (existente — extender)
 
 **Interfaces:**
+
 - Consumes: `NormalizedDeliveryOrder`, `NormalizedDeliveryPayment` (Tarea 2); `assertDeliveryMoneyInvariants` (Tarea 1).
-- Produces: `ingestDeliveryOrder(normalized: NormalizedDeliveryOrder, link: DeliveryChannelLink): Promise<{ order: Order; created: boolean }>` — misma firma, contrato nuevo.
+- Produces:
+  `ingestDeliveryOrder(normalized: NormalizedDeliveryOrder, link: DeliveryChannelLink): Promise<{ order: Order; created: boolean }>` — misma
+  firma, contrato nuevo.
 
 **El defecto a matar**, `deliveryOrderIngestion.service.ts:220-221`:
 
@@ -394,16 +417,20 @@ it('🔴 Payment.amount es la venta SIN propina; la propina va sólo en tipAmoun
   const normalized = makeNormalizedOrder({
     payment: {
       currency: 'MXN',
-      saleAmount: '200.00', merchantFees: '0.00', tipAmount: '30.00',
-      externallyPaidSale: '200.00', externallyPaidTip: '30.00',
-      cashDueSale: '0.00', cashDueTip: '0.00',
+      saleAmount: '200.00',
+      merchantFees: '0.00',
+      tipAmount: '30.00',
+      externallyPaidSale: '200.00',
+      externallyPaidTip: '30.00',
+      cashDueSale: '0.00',
+      cashDueTip: '0.00',
     },
   })
 
   const { order } = await ingestDeliveryOrder(normalized, link)
   const payment = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id } })
 
-  expect(payment.amount.toFixed(2)).toBe('200.00')   // la venta, SIN la propina
+  expect(payment.amount.toFixed(2)).toBe('200.00') // la venta, SIN la propina
   expect(payment.tipAmount.toFixed(2)).toBe('30.00') // la propina, aparte
   // Antes: amount venía 230.00 y tipAmount 30.00 ⇒ la propina se contaba dos veces
 })
@@ -413,9 +440,13 @@ it('🔴 rechaza un pedido cuyo reparto de dinero no cuadra, sin escribir nada',
   const malo = makeNormalizedOrder({
     payment: {
       currency: 'MXN',
-      saleAmount: '100.00', merchantFees: '0.00', tipAmount: '0.00',
-      externallyPaidSale: '99.00', externallyPaidTip: '0.00',
-      cashDueSale: '0.00', cashDueTip: '0.00',
+      saleAmount: '100.00',
+      merchantFees: '0.00',
+      tipAmount: '0.00',
+      externallyPaidSale: '99.00',
+      externallyPaidTip: '0.00',
+      cashDueSale: '0.00',
+      cashDueTip: '0.00',
     },
   })
 
@@ -426,32 +457,36 @@ it('🔴 rechaza un pedido cuyo reparto de dinero no cuadra, sin escribir nada',
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `export TEST_DATABASE_URL=$(node -e "require('dotenv/config');process.stdout.write(process.env.TEST_DATABASE_URL||'')") && npx jest --selectProjects integration --testPathPattern "deliveryOrderIngestion" --runInBand`
+Run:
+`export TEST_DATABASE_URL=$(node -e "require('dotenv/config');process.stdout.write(process.env.TEST_DATABASE_URL||'')") && npx jest --selectProjects integration --testPathPattern "deliveryOrderIngestion" --runInBand`
 Expected: FAIL — `payment.amount` da `230.00`, no `200.00`.
 
 - [ ] **Step 3: Adoptar el contrato nuevo en el core**
 
 Cambios concretos en `deliveryOrderIngestion.service.ts`:
 
-1. Al entrar: `assertDeliveryMoneyInvariants(normalized.payment)` **antes de abrir la transacción**. Un pedido que no cuadra no toca la base.
-2. `Order.subtotal` = `payment.saleAmount`; `Order.total` = `saleAmount + merchantFees` (**sin propina**); `Order.taxAmount` = `0` (México: el IVA va incluido en el precio; el impuesto del proveedor no es fuente fiscal — spec §5 de Uber).
+1. Al entrar: `assertDeliveryMoneyInvariants(normalized.payment)` **antes de abrir la transacción**. Un pedido que no cuadra no toca la
+   base.
+2. `Order.subtotal` = `payment.saleAmount`; `Order.total` = `saleAmount + merchantFees` (**sin propina**); `Order.taxAmount` = `0` (México:
+   el IVA va incluido en el precio; el impuesto del proveedor no es fuente fiscal — spec §5 de Uber).
 3. `Payment.amount` = `payment.externallyPaidSale`; `Payment.tipAmount` = `payment.externallyPaidTip`.
 4. Las líneas usan `item.unitPrice`/`item.total` como `Prisma.Decimal(string)`, sin `Number()`.
 5. Copiar de `uber.orderIngestion.service.ts` el manejo de `paidAmount`/`remainingBalance` (ya verificado por sus 7 tests).
 
 - [ ] **Step 4: Adaptar el mapper de Deliverect al contrato nuevo**
 
-`deliverect.mapper.ts` produce hoy los campos viejos. Convertir a string decimal con `.toFixed(2)` y construir el reparto: Deliverect entrega pedidos ya pagados por la plataforma, así que `externallyPaidSale = saleAmount + merchantFees` y `cashDueSale = '0.00'`. **No cambiar su lógica de negocio**: sólo el formato de salida.
+`deliverect.mapper.ts` produce hoy los campos viejos. Convertir a string decimal con `.toFixed(2)` y construir el reparto: Deliverect
+entrega pedidos ya pagados por la plataforma, así que `externallyPaidSale = saleAmount + merchantFees` y `cashDueSale = '0.00'`. **No
+cambiar su lógica de negocio**: sólo el formato de salida.
 
 - [ ] **Step 5: Correr y verificar que pasa**
 
-Run: el mismo del Step 2, más `npx jest --selectProjects unit --testPathPattern "delivery-channels" --runInBand`
-Expected: PASS en ambos. Los 7 tests de `uberOrderIngestion` deben seguir verdes.
+Run: el mismo del Step 2, más `npx jest --selectProjects unit --testPathPattern "delivery-channels" --runInBand` Expected: PASS en ambos.
+Los 7 tests de `uberOrderIngestion` deben seguir verdes.
 
 - [ ] **Step 6: Typecheck limpio**
 
-Run: `npx tsc -p tsconfig.build.json --noEmit`
-Expected: cero errores.
+Run: `npx tsc -p tsconfig.build.json --noEmit` Expected: cero errores.
 
 - [ ] **Step 7: Commit**
 
@@ -466,13 +501,16 @@ git commit -m "fix(delivery): el core deja de contar la propina dos veces y el d
 ## Task 4: Uber usa el núcleo; su ingesta duplicada desaparece
 
 **Files:**
+
 - Create: `src/services/delivery-channels/providers/uber-eats/uber.adapter.ts`
 - Delete: `src/services/delivery-channels/providers/uber-eats/uber.orderIngestion.service.ts`
 - Delete: `src/services/delivery-channels/providers/uber-eats/uber.types.ts` (el alias temporal)
 - Modify: `tests/integration/delivery-channels/uberOrderIngestion.test.ts` → apunta a `ingestDeliveryOrder`
 
 **Interfaces:**
-- Consumes: `DeliveryProviderAdapter`, `ProviderContext` (Tarea 2); `ingestDeliveryOrder` (Tarea 3); `verifyUberSignature`, `orderIdFromResourceHref`, `fetchUberOrder`, `uberApi` (ya existen).
+
+- Consumes: `DeliveryProviderAdapter`, `ProviderContext` (Tarea 2); `ingestDeliveryOrder` (Tarea 3); `verifyUberSignature`,
+  `orderIdFromResourceHref`, `fetchUberOrder`, `uberApi` (ya existen).
 - Produces: `uberAdapter: DeliveryProviderAdapter`.
 
 - [ ] **Step 1: Escribir el adaptador**
@@ -484,7 +522,14 @@ git commit -m "fix(delivery): el core deja de contar la propina dos veces y el d
  * Sólo traduce — no crea órdenes, no cobra, no toca inventario. Eso es del núcleo.
  */
 import { DeliveryProvider } from '@prisma/client'
-import type { ActionResult, DeliveryProviderAdapter, EventIdentity, NormalizedDeliveryOrder, ProviderContext, WebhookVerdict } from '../../core/types'
+import type {
+  ActionResult,
+  DeliveryProviderAdapter,
+  EventIdentity,
+  NormalizedDeliveryOrder,
+  ProviderContext,
+  WebhookVerdict,
+} from '../../core/types'
 import { fetchUberOrder, uberApi } from './uber.client'
 import { orderIdFromResourceHref } from './uber.http'
 import { verifyUberSignature } from './uber.signature'
@@ -499,7 +544,12 @@ export const uberAdapter: DeliveryProviderAdapter = {
   },
 
   extractIdentity(payload): EventIdentity {
-    const p = payload as { event_id?: unknown; event_type?: unknown; resource_href?: unknown; meta?: { user_id?: unknown; resource_id?: unknown } }
+    const p = payload as {
+      event_id?: unknown
+      event_type?: unknown
+      resource_href?: unknown
+      meta?: { user_id?: unknown; resource_id?: unknown }
+    }
     return {
       eventId: typeof p?.event_id === 'string' ? p.event_id : '',
       eventType: typeof p?.event_type === 'string' ? p.event_type : '',
@@ -544,16 +594,19 @@ export const uberAdapter: DeliveryProviderAdapter = {
 }
 ```
 
-**Nota sobre `acceptOrder`:** un `409` cuenta como éxito. Uber responde `409 resource_status_conflict` cuando el pedido ya estaba aceptado, y el outbox es at-least-once: reintentar debe ser inofensivo.
+**Nota sobre `acceptOrder`:** un `409` cuenta como éxito. Uber responde `409 resource_status_conflict` cuando el pedido ya estaba aceptado,
+y el outbox es at-least-once: reintentar debe ser inofensivo.
 
 - [ ] **Step 2: Migrar los tests de ingesta al núcleo**
 
-En `tests/integration/delivery-channels/uberOrderIngestion.test.ts`: cambiar el import de `ingestUberOrder` por `ingestDeliveryOrder` y ajustar la llamada (`(normalized, link)` en vez de `(normalized, ctx)`). **Los 7 casos no cambian** — son el contrato que debe seguir cumpliéndose.
+En `tests/integration/delivery-channels/uberOrderIngestion.test.ts`: cambiar el import de `ingestUberOrder` por `ingestDeliveryOrder` y
+ajustar la llamada (`(normalized, link)` en vez de `(normalized, ctx)`). **Los 7 casos no cambian** — son el contrato que debe seguir
+cumpliéndose.
 
 - [ ] **Step 3: Correr y verificar que pasan**
 
-Run: `npx jest --selectProjects integration --testPathPattern "delivery-channels" --runInBand`
-Expected: PASS — los 7 casos de Uber ahora corriendo contra el núcleo.
+Run: `npx jest --selectProjects integration --testPathPattern "delivery-channels" --runInBand` Expected: PASS — los 7 casos de Uber ahora
+corriendo contra el núcleo.
 
 - [ ] **Step 4: Borrar los duplicados**
 
@@ -577,21 +630,22 @@ git commit -m "refactor(delivery): Uber usa el núcleo; se borra su ingesta dupl
 ## Task 5: El registro de adaptadores y el guardrail anti-`if`
 
 **Files:**
+
 - Create: `src/services/delivery-channels/core/adapterRegistry.ts`
 - Modify: `src/services/delivery-channels/core/statusDispatcher.service.ts` (**absorber su registro**)
 - Test: `tests/unit/services/delivery-channels/adapterRegistry.test.ts`
 
 **Interfaces:**
+
 - Consumes: `DeliveryProviderAdapter` (Tarea 2), `uberAdapter` (Tarea 4).
 - Produces: `adapterFor(provider: DeliveryProvider): DeliveryProviderAdapter`, `hasAdapter(provider: DeliveryProvider): boolean`.
 
-🔴 **Ya existe un registro `provider → adapter`** en `statusDispatcher.service.ts:19-21`, con
-Deliverect dentro. **NO lo absorbas** y **NO toques `deliverect.adapter.ts`**: implementa el
-contrato VIEJO (`verifySignature`, `parseOrderWebhook`, `sendStatusUpdate`) y unificarlo
+🔴 **Ya existe un registro `provider → adapter`** en `statusDispatcher.service.ts:19-21`, con Deliverect dentro. **NO lo absorbas** y **NO
+toques `deliverect.adapter.ts`**: implementa el contrato VIEJO (`verifySignature`, `parseOrderWebhook`, `sendStatusUpdate`) y unificarlo
 obligaría a migrar Deliverect, que es trabajo aparte (spec §8, paso 7).
 
-Lo que sí haces: crear `adapterRegistry.ts` para el contrato NUEVO (hoy sólo Uber), y añadir
-en `statusDispatcher.service.ts:19` un comentario que nombre la deuda:
+Lo que sí haces: crear `adapterRegistry.ts` para el contrato NUEVO (hoy sólo Uber), y añadir en `statusDispatcher.service.ts:19` un
+comentario que nombre la deuda:
 
 ```typescript
 // ⚠️ DEUDA (plan 2026-08-20): este mapa y `core/adapterRegistry.ts` son DOS registros de
@@ -646,8 +700,9 @@ describe('adapterRegistry', () => {
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `npx jest --selectProjects unit --testPathPattern "adapterRegistry" --runInBand`
-Expected: FAIL — el módulo no existe. **El guardrail también puede fallar** listando menciones que quedaron en el core; si es así, esas menciones son trabajo de este mismo paso (mover la decisión al registro).
+Run: `npx jest --selectProjects unit --testPathPattern "adapterRegistry" --runInBand` Expected: FAIL — el módulo no existe. **El guardrail
+también puede fallar** listando menciones que quedaron en el core; si es así, esas menciones son trabajo de este mismo paso (mover la
+decisión al registro).
 
 - [ ] **Step 3: Implementar**
 
@@ -690,8 +745,7 @@ export function adapterFor(provider: DeliveryProvider): DeliveryProviderAdapter 
 
 - [ ] **Step 4: Correr y verificar que pasa**
 
-Run: `npx jest --selectProjects unit --testPathPattern "adapterRegistry" --runInBand`
-Expected: PASS (3 tests)
+Run: `npx jest --selectProjects unit --testPathPattern "adapterRegistry" --runInBand` Expected: PASS (3 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -706,11 +760,14 @@ git commit -m "feat(delivery): registro de adaptadores + guardrail que prohíbe 
 ## Task 6: Suite de contrato compartida
 
 **Files:**
+
 - Create: `tests/integration/delivery-channels/deliveryOrderIngestion.contract.test.ts`
 
 **Interfaces:**
+
 - Consumes: `ingestDeliveryOrder` (Tarea 3), `adapterFor` (Tarea 5).
-- Produces: `runIngestionContract(nombre: string, hacerPedido: (o?: Partial<NormalizedDeliveryOrder>) => NormalizedDeliveryOrder)` — la función que cada proveedor nuevo invoca para demostrar que está bien integrado.
+- Produces: `runIngestionContract(nombre: string, hacerPedido: (o?: Partial<NormalizedDeliveryOrder>) => NormalizedDeliveryOrder)` — la
+  función que cada proveedor nuevo invoca para demostrar que está bien integrado.
 
 Es el entregable que hace que **agregar Rappi cueste una semana y no tres**: su adaptador se considera terminado cuando pasa esta suite.
 
@@ -749,8 +806,14 @@ export function runIngestionContract(
     it('la propina NO entra en Payment.amount', async () => {
       const p = hacerPedido({
         payment: {
-          currency: 'MXN', saleAmount: '150.00', merchantFees: '0.00', tipAmount: '25.00',
-          externallyPaidSale: '150.00', externallyPaidTip: '25.00', cashDueSale: '0.00', cashDueTip: '0.00',
+          currency: 'MXN',
+          saleAmount: '150.00',
+          merchantFees: '0.00',
+          tipAmount: '25.00',
+          externallyPaidSale: '150.00',
+          externallyPaidTip: '25.00',
+          cashDueSale: '0.00',
+          cashDueTip: '0.00',
         },
       })
       const { order } = await ingestDeliveryOrder(p, obtenerLink() as never)
@@ -772,8 +835,14 @@ export function runIngestionContract(
       const antes = await prisma.order.count({ where: { venueId: link.venueId } })
       const malo = hacerPedido({
         payment: {
-          currency: 'MXN', saleAmount: '100.00', merchantFees: '0.00', tipAmount: '0.00',
-          externallyPaidSale: '90.00', externallyPaidTip: '0.00', cashDueSale: '0.00', cashDueTip: '0.00',
+          currency: 'MXN',
+          saleAmount: '100.00',
+          merchantFees: '0.00',
+          tipAmount: '0.00',
+          externallyPaidSale: '90.00',
+          externallyPaidTip: '0.00',
+          cashDueSale: '0.00',
+          cashDueTip: '0.00',
         },
       })
       await expect(ingestDeliveryOrder(malo, link as never)).rejects.toThrow(DeliveryMoneyMismatchError)
@@ -794,12 +863,13 @@ export function runIngestionContract(
 
 - [ ] **Step 2: Conectar Uber a la suite**
 
-En `tests/integration/delivery-channels/uberOrderIngestion.test.ts`, al final: `runIngestionContract('Uber Eats', makeNormalizedOrder, () => link)`.
+En `tests/integration/delivery-channels/uberOrderIngestion.test.ts`, al final:
+`runIngestionContract('Uber Eats', makeNormalizedOrder, () => link)`.
 
 - [ ] **Step 3: Correr y verificar que pasa**
 
-Run: `npx jest --selectProjects integration --testPathPattern "delivery-channels" --runInBand`
-Expected: PASS — los 6 casos del contrato corriendo contra Uber, más los suyos propios.
+Run: `npx jest --selectProjects integration --testPathPattern "delivery-channels" --runInBand` Expected: PASS — los 6 casos del contrato
+corriendo contra Uber, más los suyos propios.
 
 - [ ] **Step 4: Commit**
 
@@ -814,10 +884,12 @@ git commit -m "test(delivery): suite de contrato que todo proveedor debe pasar"
 ## Task 7: Gating PREMIUM
 
 **Files:**
+
 - Modify: `src/routes/delivery-channels.routes.ts`
 - Test: `tests/unit/services/delivery-channels/deliveryGating.test.ts` (crear)
 
 **Interfaces:**
+
 - Consumes: `venueHasFeatureAccess` de `@/services/access/`.
 - Produces: nada nuevo; endurece rutas existentes.
 
@@ -825,8 +897,8 @@ Delivery directo es **PREMIUM** (decisión del founder, 2026-08-20).
 
 - [ ] **Step 1: Verificar cómo se llama el Feature**
 
-Run: `grep -rn "INVENTORY_TRACKING\|'CFDI'" src/services/access/ | head -5`
-Usa el MISMO patrón. Si no existe un código de delivery, créalo siguiendo `.claude/rules/feature-gating.md`.
+Run: `grep -rn "INVENTORY_TRACKING\|'CFDI'" src/services/access/ | head -5` Usa el MISMO patrón. Si no existe un código de delivery, créalo
+siguiendo `.claude/rules/feature-gating.md`.
 
 - [ ] **Step 2: Escribir el test que falla**
 
@@ -835,14 +907,15 @@ it('un venue sin PREMIUM recibe 403 que dice QUÉ falta y CÓMO activarlo', asyn
   jest.mocked(venueHasFeatureAccess).mockResolvedValue(false)
   const res = await request(app).post(`/api/v1/venues/${venueId}/delivery-channels`).send({ provider: 'UBER_EATS' })
   expect(res.status).toBe(403)
-  expect(res.body.message).toMatch(/PREMIUM/i)   // dice qué plan hace falta
-  expect(res.body.code).toBeDefined()            // el cliente puede pintar el upsell sin adivinar
+  expect(res.body.message).toMatch(/PREMIUM/i) // dice qué plan hace falta
+  expect(res.body.code).toBeDefined() // el cliente puede pintar el upsell sin adivinar
 })
 ```
 
 - [ ] **Step 3: Correr, implementar el gate, correr**
 
-Usa `venueHasFeatureAccess` (el resolver de **Feature**, NO el de módulos — cruzarlos falla en silencio porque casi todo prod está grandfathered).
+Usa `venueHasFeatureAccess` (el resolver de **Feature**, NO el de módulos — cruzarlos falla en silencio porque casi todo prod está
+grandfathered).
 
 - [ ] **Step 4: Commit**
 
@@ -857,9 +930,11 @@ git commit -m "feat(delivery): delivery directo es PREMIUM, con 403 que explica 
 ## Task 8: MCP al día
 
 **Files:**
+
 - Modify: `src/mcp/tools/` — la tool `delivery_channels`
 
 **Interfaces:**
+
 - Consumes: `hasAdapter` (Tarea 5).
 - Produces: la tool refleja proveedor, estado de conexión y si hay adaptador.
 
@@ -871,7 +946,8 @@ Run: `grep -rn "delivery_channels" src/mcp/tools/ | head -5`
 
 - [ ] **Step 2: Añadir a la salida, por cada vínculo**
 
-`provider`, `status`, `orderAcceptanceMode`, `integrationReady: hasAdapter(provider)`. Sin montos, así que no aplica la reconciliación de dinero; sí aplican `guard.venueFilter()` y fechas venue-local.
+`provider`, `status`, `orderAcceptanceMode`, `integrationReady: hasAdapter(provider)`. Sin montos, así que no aplica la reconciliación de
+dinero; sí aplican `guard.venueFilter()` y fechas venue-local.
 
 - [ ] **Step 3: Correr los tests del MCP y commitear**
 
@@ -892,4 +968,5 @@ git commit -m "feat(mcp): delivery_channels reporta proveedor y si su integraci�
 - [ ] El guardrail anti-`if` pasa
 - [ ] Actualizar el spec: marcar §8 pasos 1-6 como hechos
 
-**Lo que NO cierra este plan** (trabajos aparte, cada uno con su propio plan): el mapper de Uber (necesita un pedido real), el outbox de aceptar/rechazar, la impresión de comandas, la migración de Deliverect, y los adaptadores de Rappi y DiDi.
+**Lo que NO cierra este plan** (trabajos aparte, cada uno con su propio plan): el mapper de Uber (necesita un pedido real), el outbox de
+aceptar/rechazar, la impresión de comandas, la migración de Deliverect, y los adaptadores de Rappi y DiDi.
