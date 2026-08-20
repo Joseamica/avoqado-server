@@ -53,3 +53,26 @@ export interface DeliveryProviderAdapter {
   pushMenu(link: DeliveryChannelLink, snapshot: MenuSnapshot): Promise<void>
   setChannelPaused(link: DeliveryChannelLink, paused: boolean): Promise<void>
 }
+
+/**
+ * Reparto explícito de quién cobra qué. Lo entrega el ADAPTADOR; el core NO deduce nada.
+ * Invariantes (verificadas por `assertDeliveryMoneyInvariants` en `core/money.ts`):
+ *   saleAmount + merchantFees === externallyPaidSale + cashDueSale
+ *   tipAmount                 === externallyPaidTip  + cashDueTip
+ *
+ * 🔴 Dinero en STRING DECIMAL, nunca `number` (`.claude/rules/critical-warnings.md`).
+ */
+export interface NormalizedDeliveryPayment {
+  currency: 'MXN'
+  /** artículos, IVA incluido (México) */
+  saleAmount: string
+  /** cargos cobrados al cliente que se pagan AL COMERCIO (bolsa, envío propio…) */
+  merchantFees: string
+  tipAmount: string
+  /** parte de (saleAmount + merchantFees) que la plataforma liquida al comercio */
+  externallyPaidSale: string
+  externallyPaidTip: string
+  /** parte que el comercio cobra en efectivo en persona */
+  cashDueSale: string
+  cashDueTip: string
+}
