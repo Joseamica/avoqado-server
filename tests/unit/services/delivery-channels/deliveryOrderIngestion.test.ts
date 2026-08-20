@@ -15,6 +15,12 @@ jest.mock('../../../../src/communication/sockets/managers/socketManager', () => 
   socketManager: { broadcastToVenue: jest.fn() },
 }))
 
+// El tender del canal se auto-provisiona contra la base real; aquí sólo interesa que el
+// Payment quede estampado con él (la provisión tiene su propio test de integración).
+jest.mock('../../../../src/services/delivery-channels/core/deliveryTenderProvisioning.service', () => ({
+  ensureDeliveryTenderType: jest.fn(async () => ({ id: 'tender-canal-1', revision: 1 })),
+}))
+
 jest.mock('../../../../src/services/delivery-channels/core/statusDispatcher.service', () => ({
   dispatchOrderStatus: jest.fn(),
 }))
@@ -113,9 +119,9 @@ describe('ingestDeliveryOrder', () => {
 
     expect(prisma.order.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { venueId_externalId: { venueId: 'venue1', externalId: 'UE-1' } },
+        where: { venueId_externalId: { venueId: 'venue1', externalId: 'DELIVERECT:UE-1' } },
         create: expect.objectContaining({
-          externalId: 'UE-1',
+          externalId: 'DELIVERECT:UE-1',
           orderNumber: 'A1',
           source: OrderSource.UBER_EATS,
           originSystem: OriginSystem.DELIVERY_PLATFORM,
@@ -158,7 +164,7 @@ describe('ingestDeliveryOrder', () => {
           productName: 'Taco',
           productSku: 'TACO',
           quantity: 2,
-          externalId: 'UE-1-TACO-0',
+          externalId: 'DELIVERECT:UE-1-TACO-0',
         }),
       }),
     )
@@ -310,7 +316,7 @@ describe('ingestDeliveryOrder', () => {
           status: TransactionStatus.COMPLETED,
           processor: 'deliverect',
           originSystem: OriginSystem.DELIVERY_PLATFORM,
-          externalId: 'UE-1-platform',
+          externalId: 'DELIVERECT:UE-1-platform',
           posRawData: { any: 'payload' },
         }),
       }),
@@ -567,7 +573,7 @@ describe('ingestDeliveryOrder', () => {
     expect(prisma.orderItem.create).toHaveBeenCalledTimes(2)
     const externalIds = (prisma.orderItem.create as jest.Mock).mock.calls.map((c: any[]) => c[0].data.externalId)
     expect(new Set(externalIds).size).toBe(2) // distintos — jamás el mismo `${externalId}-${sku}` para ambas líneas
-    expect(externalIds).toEqual(['UE-1-TACO-0', 'UE-1-TACO-1'])
+    expect(externalIds).toEqual(['DELIVERECT:UE-1-TACO-0', 'DELIVERECT:UE-1-TACO-1'])
 
     const totals = (prisma.orderItem.create as jest.Mock).mock.calls.map((c: any[]) => Number(c[0].data.total))
     expect(totals).toEqual([45, 55])

@@ -6,6 +6,7 @@ import {
   OrderAcceptanceMode,
   OrderType,
   OriginSystem,
+  PaymentFundsFlow,
   PaymentMethod,
   PaymentSource,
   PaymentStatus,
@@ -19,6 +20,7 @@ import { dispatchOrderStatus } from './statusDispatcher.service'
 import { applySalePosting, createSalePostingInTx } from '../../inventory/inventoryPosting.service'
 import { NormalizedDeliveryOrder } from './types'
 import { assertDeliveryMoneyInvariants } from './money'
+import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
 import {
   assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
@@ -56,7 +58,18 @@ async function resolveProductId(
   sku: string,
   name: string,
   unitPrice: string,
+  /** `{PROVIDER}:{id del item en el catálogo del proveedor}` — la vía preferente. */
+  externalIdProveedor?: string | null,
 ): Promise<string> {
+  // 🔴 PRIMERO por el id del proveedor. Es lo que Avoqado escribió al publicar el menú, así
+  // que identifica el producto aunque el comercio le cambie el SKU o el nombre después.
+  // Buscar sólo por SKU (como hacía antes) creaba un producto placeholder NUEVO en cada
+  // pedido de un producto que sí existía en el catálogo.
+  if (externalIdProveedor) {
+    const porExternalId = await tx.product.findFirst({ where: { venueId, externalId: externalIdProveedor } })
+    if (porExternalId) return porExternalId.id
+  }
+
   const existing = await tx.product.findUnique({ where: { venueId_sku: { venueId, sku } } })
   if (existing) return existing.id
 
@@ -124,15 +137,24 @@ export async function ingestDeliveryOrder(
   const tip = D(p.tipAmount)
   // Semántica canónica de la plataforma (decisión founder 2026-08-18, spec §6 "propina
   // dentro/fuera del total"): Order.total NUNCA incluye propina — Payment.tipAmount es la
-  // verdad. A diferencia de uber.orderIngestion.service.ts (que todavía no migró a esta
-  // semántica), aquí SÍ se implementa así porque es lo que este mismo cambio corrige.
+  // verdad. Antes el total incluía la propina Y `Payment.tipAmount` la repetía: se contaba
+  // dos veces. Ese defecto es la razón por la que Uber llegó a tener su propia ingesta.
   const total = subtotal.plus(merchantFees)
   const pagadoExterno = D(p.externallyPaidSale).plus(D(p.externallyPaidTip))
   const porCobrar = D(p.cashDueSale).plus(D(p.cashDueTip))
   const paymentStatus = porCobrar.isZero() ? PaymentStatus.PAID : pagadoExterno.isZero() ? PaymentStatus.PENDING : PaymentStatus.PARTIAL
 
+  // 🔴 El folio del pedido se namespacea por proveedor. `Order.externalId` es único por
+  // venue, y dos marketplaces pueden repetir número de pedido: sin el prefijo, el pedido
+  // #1234 de Rappi pisaría al #1234 de Uber en el mismo negocio.
+  const externalIdNamespaceado = `${link.provider}:${normalized.externalId}`
+
+  // Fuera de la transacción a propósito: crea sus propias filas y es idempotente, así que
+  // reintentarlo es inofensivo y no alarga el lock de la orden.
+  const tender = await ensureDeliveryTenderType(venue.id, link.provider)
+
   const existing = await prisma.order.findUnique({
-    where: { venueId_externalId: { venueId: venue.id, externalId: normalized.externalId } },
+    where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
   })
   const isNew = !existing
   // Holder para que TS no estreche la asignación dentro del callback async.
@@ -140,10 +162,10 @@ export async function ingestDeliveryOrder(
 
   const order = await prisma.$transaction(async tx => {
     const order = await tx.order.upsert({
-      where: { venueId_externalId: { venueId: venue.id, externalId: normalized.externalId } },
+      where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
       update: { posRawData: normalized.raw as Prisma.InputJsonValue, syncedAt: new Date() },
       create: {
-        externalId: normalized.externalId,
+        externalId: externalIdNamespaceado,
         orderNumber: normalized.displayId,
         source: normalized.source,
         originSystem: OriginSystem.DELIVERY_PLATFORM,
@@ -158,7 +180,7 @@ export async function ingestDeliveryOrder(
         tipAmount: tip,
         total,
         // Partial payment tracking: cuánto liquidó la plataforma vs. cuánto queda por
-        // cobrar en persona (efectivo contra entrega). Calcado de uber.orderIngestion.
+        // cobrar en persona (efectivo contra entrega).
         paidAmount: pagadoExterno,
         remainingBalance: porCobrar,
         posRawData: normalized.raw as Prisma.InputJsonValue,
@@ -184,7 +206,14 @@ export async function ingestDeliveryOrder(
         // derivado del NOMBRE — nunca `Date.now()`, que generaría un producto nuevo por
         // ocurrencia.
         const sku = item.externalId || `delivery-unknown-${toPlaceholderSlug(item.name)}`
-        const productId = await resolveProductId(tx, venue.id, sku, item.name, item.unitPrice)
+        const productId = await resolveProductId(
+          tx,
+          venue.id,
+          sku,
+          item.name,
+          item.unitPrice,
+          item.externalId ? `${link.provider}:${item.externalId}` : null,
+        )
         const createdItem = await tx.orderItem.create({
           data: {
             orderId: order.id,
@@ -197,13 +226,15 @@ export async function ingestDeliveryOrder(
             // modificadores) como string decimal — se usa TAL CUAL, sin recomputar aquí.
             total: D(item.total),
             taxAmount: new Prisma.Decimal(0),
-            externalId: `${normalized.externalId}-${item.externalId || 'noplu'}-${idx}`,
+            // Nace del canal de delivery, no del POS: los reportes por origen lo separan.
+            originSystem: OriginSystem.DELIVERY_PLATFORM,
+            externalId: `${externalIdNamespaceado}-${item.externalId || 'noplu'}-${idx}`,
           },
         })
         createdItems.push(createdItem)
 
         // Modifiers: filas OrderItemModifier reales (contrato unificado, igual que
-        // uber.orderIngestion.service.ts) — ya NO texto concatenado en notes (v1 legacy).
+        // — ya NO texto concatenado en notes (v1 legacy).
         // `modifier.price` ya viene multiplicado por la cantidad del padre (Tarea 2); sólo
         // falta la cantidad PROPIA del modifier para el monto total de esa línea.
         for (const m of item.modifiers ?? []) {
@@ -227,6 +258,15 @@ export async function ingestDeliveryOrder(
               tipAmount: D(p.externallyPaidTip),
               method: PaymentMethod.OTHER,
               source: PaymentSource.DELIVERY_PLATFORM,
+              // 🔴 La plataforma liquida este dinero, NO Avoqado. `fundsFlow` es la ÚNICA
+              // autoridad de esa pregunta (`shared/tenderSemantics.ts`): sin él, este cobro
+              // se contaría como efectivo esperado en el cajón y el arqueo no cuadraría.
+              fundsFlow: PaymentFundsFlow.EXTERNAL_RECORDED,
+              // Tipo de pago del canal (auto-provisionado, idempotente): es el snapshot que
+              // `shared/tenderSemantics.ts` lee para responder "¿está en el cajón?" y
+              // "¿lo deposita Avoqado?". Sin él, el pago cae al fallback legacy.
+              tenderType: { connect: { id: tender.id } },
+              tenderRevision: tender.revision,
               externalSource: normalized.source, // 'UBER_EATS' | 'RAPPI' | ...
               status: TransactionStatus.COMPLETED,
               splitType: SplitType.FULLPAYMENT,
@@ -237,7 +277,7 @@ export async function ingestDeliveryOrder(
               feeAmount: new Prisma.Decimal(0),
               netAmount: D(p.externallyPaidSale),
               originSystem: OriginSystem.DELIVERY_PLATFORM,
-              externalId: `${normalized.externalId}-platform`,
+              externalId: `${externalIdNamespaceado}-platform`,
               posRawData: normalized.raw as Prisma.InputJsonValue,
               venue: { connect: { id: venue.id } },
               order: { connect: { id: order.id } },
