@@ -5547,6 +5547,15 @@ model DeliveryOrderEvent {
   claimToken  String?
   lockedUntil DateTime?
 
+  /// El PEDIDO completo, tal como lo devolvió el proveedor. Existe porque Uber NO
+  /// manda el pedido en el webhook: manda un puntero (`resource_href`) y hay que ir
+  /// a buscarlo con un GET. `payload` guarda el AVISO; esto guarda el CONTENIDO.
+  /// Se conserva crudo a propósito: es la única evidencia de qué mandó el proveedor
+  /// cuando un cuadre no dé, y es de donde salen los fixtures reales del mapper.
+  /// Null mientras no se haya traído (o para proveedores que sí mandan todo).
+  resourcePayload   Json?
+  resourceFetchedAt DateTime?
+
   /// Dedup con `channelLinkId`: `externalEventId` (channelOrderId) nace en el
   /// marketplace, NO es globalmente único → dos canales/venues pueden colisionar.
   /// Acotar por el link evita que el webhook del 2º tenant reciba DUPLICATE.
