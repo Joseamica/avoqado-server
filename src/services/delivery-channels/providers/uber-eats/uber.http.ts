@@ -242,6 +242,28 @@ export async function uberRequest(deps: UberRequestDeps, opts: UberRequestOption
     // genérica, para que el mensaje diga qué env var falta.
     if (!opts.storeId) throw new UberStoreWriteBlockedError('', deps.environment)
     assertStoreWritable(opts.storeId, deps.writableStores, deps.environment)
+
+    // 🔴 El candado autoriza el storeId QUE DECLARA EL CALLER. Sin esto se puede declarar
+    // una tienda permitida y mandar la escritura a OTRA: autorizar A y escribirle a B.
+    // Hallado por auditoría externa el 2026-08-20.
+    //
+    // Sólo aplica a rutas DE TIENDA (`/stores/{id}/…`). Las rutas de PEDIDO
+    // (`/v1/eats/orders/{orderId}/accept_pos_order`) no llevan la tienda en la ruta y eso
+    // es correcto — exigirla ahí rompería aceptar y rechazar pedidos.
+    const enRuta = opts.path.match(/\/stores?\/([^/?#]+)/i)
+    if (enRuta && decodeURIComponent(enRuta[1]).toLowerCase() !== opts.storeId.toLowerCase()) {
+      throw new UberStoreWriteBlockedError(
+        `${opts.storeId} (autorizado) no coincide con "${decodeURIComponent(enRuta[1])}" (destino real en la ruta ${opts.path})`,
+        deps.environment,
+      )
+    }
+  }
+
+  // 🔴 `path` es ruta, no URL: sin esto, un `path` como "//evil.example/x" o ".evil.example/x"
+  // produce un host distinto y le manda el bearer token. Debe empezar con UNA barra y no
+  // llevar autoridad ni esquema.
+  if (!opts.path.startsWith('/') || opts.path.startsWith('//') || /^[a-z]+:/i.test(opts.path)) {
+    throw new Error(`Ruta de Uber inválida: "${opts.path}". Debe empezar con "/" y no llevar host ni esquema.`)
   }
 
   const { api } = uberHostsFor(deps.environment)

@@ -126,6 +126,49 @@ describe('uber.http', () => {
       expect(llamadas).toHaveLength(0) // lo que de verdad importa: NO hubo request
     })
 
+    it('🔴 declarar una tienda autorizada y escribirle a OTRA se bloquea', async () => {
+      // El candado autoriza el storeId que declara el caller. Sin comparar contra la ruta,
+      // se podía declarar la tienda permitida y mandar la escritura a un comercio real.
+      const { impl, llamadas } = fakeFetch({ status: 200 })
+      await expect(
+        uberRequest(
+          { environment: 'SANDBOX', token: 'tok', writableStores: permitidas, fetchImpl: impl },
+          {
+            method: 'PUT',
+            path: '/v2/eats/stores/78cf8848-5cea-48f5-9f44-5bf42d303153/menus', // ← otra tienda
+            storeId: '77abff2e-e700-406d-aaba-5a50b41504dc', // ← la autorizada
+          },
+        ),
+      ).rejects.toBeInstanceOf(UberStoreWriteBlockedError)
+      expect(llamadas).toHaveLength(0)
+    })
+
+    it('una escritura a un PEDIDO pasa aunque la ruta no lleve la tienda (accept/deny)', async () => {
+      // Regresión: exigir el storeId en TODA ruta rompía aceptar y rechazar pedidos, que es
+      // justo lo que Uber cancela a los 11.5 minutos si no se contesta.
+      const { impl, llamadas } = fakeFetch({ status: 200 })
+      const r = await uberRequest(
+        { environment: 'SANDBOX', token: 'tok', writableStores: permitidas, fetchImpl: impl },
+        {
+          method: 'POST',
+          path: '/v1/eats/orders/ord-99/accept_pos_order',
+          storeId: '77abff2e-e700-406d-aaba-5a50b41504dc',
+        },
+      )
+      expect(r.status).toBe(200)
+      expect(llamadas).toHaveLength(1)
+    })
+
+    it('🔴 un `path` con host ajeno se rechaza: el bearer token no sale a otro dominio', async () => {
+      const { impl, llamadas } = fakeFetch({ status: 200 })
+      for (const malo of ['//evil.example/x', 'https://evil.example/x', '.evil.example/x']) {
+        await expect(
+          uberRequest({ environment: 'SANDBOX', token: 'tok', writableStores: new Set(), fetchImpl: impl }, { method: 'GET', path: malo }),
+        ).rejects.toThrow(/Ruta de Uber inválida/)
+      }
+      expect(llamadas).toHaveLength(0)
+    })
+
     it('🔴 una ESCRITURA sin storeId se bloquea: no se puede autorizar lo que no se identifica', async () => {
       const { impl, llamadas } = fakeFetch({ status: 200 })
       await expect(

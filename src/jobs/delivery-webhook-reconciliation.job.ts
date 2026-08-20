@@ -270,6 +270,13 @@ export class DeliveryWebhookReconciliationJob {
   private async markOrphaned(): Promise<number> {
     const cutoff = new Date(Date.now() - this.ORPHAN_TTL_MS)
     const orphanWhere = {
+      // 🔴 SOLO Deliverect, igual que el scan. Sin este filtro el barrido descarta a las 24 h
+      // los eventos de Uber que el scan (correctamente) no procesa — o sea, un pedido REAL de
+      // Uber entraría, nadie lo procesaría, y un día después se marcaría ORPHANED. Venta
+      // perdida en silencio. Hallado por auditoría externa el 2026-08-20; el comentario del
+      // scan decía que esos eventos "se quedan quietos" y era FALSO: se quedaban quietos hasta
+      // que este barrido los tiraba. Uber tendrá su propia reconciliación (spec paso 4).
+      provider: DeliveryProvider.DELIVERECT,
       status: { in: [DeliveryOrderEventStatus.FAILED, DeliveryOrderEventStatus.RECEIVED] },
       receivedAt: { lt: cutoff },
       // Idempotent — never re-log/re-touch a row already marked ORPHANED. Null-tolerant
