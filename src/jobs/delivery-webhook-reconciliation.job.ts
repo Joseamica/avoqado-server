@@ -8,6 +8,7 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { parseDeliverectOrder } from '../services/delivery-channels/providers/deliverect/deliverect.mapper'
 import { ingestDeliveryOrder } from '../services/delivery-channels/core/deliveryOrderIngestion.service'
 import { markEventResult } from '../services/delivery-channels/core/deliveryWebhookEvent.service'
+import { processUberEvent } from '../services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import { scheduleJob } from '../observability/jobContext'
 
 /**
@@ -60,6 +61,23 @@ export class DeliveryWebhookReconciliationJob {
 
   /** Sentinel written to `error` by the ORPHANED sweep — used to exclude already-orphaned rows from every future pass. */
   private static readonly ORPHANED_MARKER = 'ORPHANED'
+
+  /**
+   * Proveedores que este job sabe reconciliar. Cada uno se enruta a SU camino en
+   * `reprocesarSegunProveedor` — pasarle a uno el traductor de otro revienta el payload y
+   * mata un pedido real. Al integrar Rappi/DiDi se amplía aquí Y allá, nunca sólo aquí.
+   */
+  private static readonly RECONCILABLE_PROVIDERS = [DeliveryProvider.DELIVERECT, DeliveryProvider.UBER_EATS]
+
+  /**
+   * Errores TERMINALES: reintentarlos no puede cambiar el resultado, así que la fila se
+   * excluye de toda pasada futura en vez de ocupar un lugar del lote cada 2 minutos.
+   *
+   * `PEDIDO_YA_NO_ACTIVO` — [medido 2026-08-20] pasado el plazo de ~11.5 min, Uber responde
+   * `400 "The order is no longer active"` y deja el pedido en DENIED. Ese dinero no va a
+   * llegar nunca: reintentar no lo resucita, y crear la venta sería inventarla.
+   */
+  private static readonly TERMINAL_ERRORS = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO']
 
   /**
    * Fix B2 (audit §10.2): without an attempt cap, a handful of permanently-broken
@@ -137,23 +155,19 @@ export class DeliveryWebhookReconciliationJob {
         prisma.deliveryOrderEvent.findMany({
           where: {
             AND: [
-              // 🔴 SOLO Deliverect. Abajo se llama `parseDeliverectOrder` sobre CUALQUIER
-              // fila seleccionada: sin este filtro, un evento de Uber entra al parser de
-              // Deliverect, revienta con "payload sin channelOrderId/items", reintenta cada
-              // 2 min durante 24 h y se descarta. Un pedido REAL se perdería en silencio.
-              // (Observado el 2026-08-20 con eventos de prueba de UBER_EATS.)
-              //
-              // Uber tiene camino propio a propósito (spec 2026-08-17 §3.bis, Deliverect
-              // congelado). Su reconciliación es el paso 4 de esa spec y NO existe todavía:
-              // hasta entonces sus eventos atorados se quedan quietos, que es preferible a
-              // procesarlos con el parser equivocado. Al construirla, se enruta por
-              // `event.provider` en vez de ampliar este filtro.
-              { provider: DeliveryProvider.DELIVERECT },
+              // 🔴 Cada proveedor se reprocesa por SU camino (`reprocesarSegunProveedor`).
+              // Antes esto decía sólo DELIVERECT porque abajo se llamaba `parseDeliverectOrder`
+              // sobre CUALQUIER fila: un evento de Uber reventaba con "payload sin
+              // channelOrderId/items" y se perdía un pedido real (observado el 2026-08-20).
+              // La solución no era excluir a Uber —eso lo dejaba SIN NINGÚN reintento, que es
+              // peor: su webhook contesta 200 y procesa en segundo plano, así que este job es
+              // lo único que lo puede rescatar— sino enrutar por proveedor.
+              { provider: { in: DeliveryWebhookReconciliationJob.RECONCILABLE_PROVIDERS } },
               // Never re-pick a row the ORPHANED sweep already gave up on. Written as an
               // explicit null-tolerant OR (rather than a bare `error: { not: 'ORPHANED' }`)
               // so rows with error=null (never failed before) are NOT accidentally excluded —
               // same pattern as blumon-webhook-reconciliation.job.ts's REVERSAL_OPERATION_TYPES guard.
-              { OR: [{ error: null }, { error: { not: DeliveryWebhookReconciliationJob.ORPHANED_MARKER } }] },
+              { OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }] },
               {
                 OR: [
                   { status: DeliveryOrderEventStatus.FAILED, receivedAt: { gte: orphanCutoff } },
@@ -202,10 +216,7 @@ export class DeliveryWebhookReconciliationJob {
           continue
         }
 
-        const normalized = parseDeliverectOrder(Buffer.from(JSON.stringify(event.payload)), channelLink)
-        const { order } = await ingestDeliveryOrder(normalized, channelLink)
-        await markEventResult(event.id, DeliveryOrderEventStatus.PROCESSED, order.id)
-        reprocessed++
+        if (await this.reprocesarSegunProveedor(event, channelLink)) reprocessed++
       } catch (err) {
         // Fix B2: track this job's own retry attempts + schedule exponential
         // backoff so a poison event doesn't occupy every 2-minute pass forever.
@@ -258,6 +269,52 @@ export class DeliveryWebhookReconciliationJob {
     return { reprocessed, orphanedImmediate }
   }
 
+  /**
+   * Enruta el reproceso al camino del proveedor. Devuelve `true` si el evento quedó resuelto.
+   *
+   * Lanza ante un fallo TRANSITORIO — eso es lo que dispara el bookkeeping de backoff del
+   * llamador. Un fallo TERMINAL no lanza: devuelve `false` y la fila queda excluida de toda
+   * pasada futura por `TERMINAL_ERRORS`.
+   *
+   * (Cuando aterrice el registro de adaptadores, este `switch` se resuelve por ahí; hoy es el
+   * único punto del job que conoce proveedores, y está aislado a propósito.)
+   */
+  private async reprocesarSegunProveedor(
+    event: { id: string; provider: DeliveryProvider; payload: unknown; externalEventId: string; venueId: string | null },
+    channelLink: Parameters<typeof ingestDeliveryOrder>[1],
+  ): Promise<boolean> {
+    if (event.provider === DeliveryProvider.UBER_EATS) {
+      // El procesador de Uber hace el camino completo (traer, aceptar, ingerir, marcar) y
+      // NO lanza: reporta el desenlace. Traducirlo es lo que decide reintento vs. rendición.
+      const r = await processUberEvent(event.id)
+
+      if (r.outcome === 'PROCESSED' || r.outcome === 'ALREADY_DONE' || r.outcome === 'NOT_AN_ORDER') return true
+
+      // Sin vínculo no hay a quién ingerirle: el procesador ya lo dejó visible y no hay
+      // nada que reintentar. (En la práctica el guard de `channelLink` del llamador lo
+      // atrapa antes; se contempla aquí para que este método sea correcto por sí solo.)
+      if (r.outcome === 'ORPHANED') return false
+
+      if (r.error && DeliveryWebhookReconciliationJob.TERMINAL_ERRORS.includes(r.error)) {
+        logger.error('🚨 [Delivery recon] pedido de Uber TERMINAL — no se reintenta más', {
+          eventId: event.id,
+          externalEventId: event.externalEventId,
+          venueId: event.venueId,
+          motivo: r.error,
+        })
+        return false
+      }
+
+      // Transitorio (red, 5xx, un fallo de ingesta): que el llamador agende el backoff.
+      throw new Error(r.error ?? 'Uber: fallo desconocido al reprocesar')
+    }
+
+    const normalized = parseDeliverectOrder(Buffer.from(JSON.stringify(event.payload)), channelLink)
+    const { order } = await ingestDeliveryOrder(normalized, channelLink)
+    await markEventResult(event.id, DeliveryOrderEventStatus.PROCESSED, order.id)
+    return true
+  }
+
   /** Fix B2: exponential backoff in ms — `2^attemptCount` minutes, capped at `BACKOFF_CAP_MINUTES`. */
   private backoffMs(attemptCount: number): number {
     return Math.min(2 ** attemptCount, this.BACKOFF_CAP_MINUTES) * 60_000
@@ -270,18 +327,15 @@ export class DeliveryWebhookReconciliationJob {
   private async markOrphaned(): Promise<number> {
     const cutoff = new Date(Date.now() - this.ORPHAN_TTL_MS)
     const orphanWhere = {
-      // 🔴 SOLO Deliverect, igual que el scan. Sin este filtro el barrido descarta a las 24 h
-      // los eventos de Uber que el scan (correctamente) no procesa — o sea, un pedido REAL de
-      // Uber entraría, nadie lo procesaría, y un día después se marcaría ORPHANED. Venta
-      // perdida en silencio. Hallado por auditoría externa el 2026-08-20; el comentario del
-      // scan decía que esos eventos "se quedan quietos" y era FALSO: se quedaban quietos hasta
-      // que este barrido los tiraba. Uber tendrá su propia reconciliación (spec paso 4).
-      provider: DeliveryProvider.DELIVERECT,
+      // Los MISMOS proveedores que el scan, y eso es lo que hace honesto al barrido: caducar
+      // a las 24 h algo que nadie intentó procesar es tirar una venta en silencio (era el caso
+      // de Uber hasta el 2026-08-20). Caduca sólo lo que de verdad se reintentó y no salió.
+      provider: { in: DeliveryWebhookReconciliationJob.RECONCILABLE_PROVIDERS },
       status: { in: [DeliveryOrderEventStatus.FAILED, DeliveryOrderEventStatus.RECEIVED] },
       receivedAt: { lt: cutoff },
       // Idempotent — never re-log/re-touch a row already marked ORPHANED. Null-tolerant
       // OR (not a bare `not: 'ORPHANED'`) so error=null rows (first time aging out) still match.
-      OR: [{ error: null }, { error: { not: DeliveryWebhookReconciliationJob.ORPHANED_MARKER } }],
+      OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }],
     } satisfies Prisma.DeliveryOrderEventWhereInput
 
     // Fetch rows BEFORE flipping them so we can emit a per-event alert with enough detail
