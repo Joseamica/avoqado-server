@@ -1,1 +1,45 @@
-{"id":"dbe79abc-5a6a-4b3d-85fb-cb7b15e77645","display_id":"77645","current_state":"CREATED","store":{"id":"77abff2e-e700-406d-aaba-5a50b41504dc","name":"Avoqado Sandbox 1","integrator_store_id":"cmpe64yq2001f9k92m0lbhmf4","integrator_brand_id":"avoqado"},"eater":{"first_name":"Avoqado","phone":"+52 33 1930 9789","phone_code":"684 18 235","last_name":"S."},"cart":{"items":[{"id":"external_item_1","title":"Best Burger","quantity":1,"price":{"unit_price":{"amount":100,"currency_code":"MXN","formatted_amount":"MX$1.00"},"total_price":{"amount":100,"currency_code":"MXN","formatted_amount":"MX$1.00"},"base_unit_price":{"amount":100,"currency_code":"MXN","formatted_amount":"MX$1.00"},"base_total_price":{"amount":100,"currency_code":"MXN","formatted_amount":"MX$1.00"}},"selected_modifier_groups":null,"instance_id":"bf83130e-1140-4f88-88a3-7e3a713bdd94","eater_id":"b8fb8824-e1cd-59dd-aae4-d93ab8d1f345"}],"version_id":"ce50ae60-728f-5438-b40a-0e3c3e358377","fulfillment_issues":[]},"payment":{"charges":{"total":{"amount":100,"currency_code":"MXN","formatted_amount":"MX$1.00"},"sub_total":{"amount":100,"currency_code":"MXN","formatted_amount":"MX$1.00"}}},"placed_at":"2026-08-20T14:05:55-06:00","estimated_ready_for_pickup_at":"2026-08-20T14:20:55-06:00","type":"DELIVERY_BY_UBER","packaging":{"disposable_items":{"should_include":false}},"eaters":[{"first_name":"Avoqado S","id":"b8fb8824-e1cd-59dd-aae4-d93ab8d1f345"}],"brand":"UBER_EATS","deliveries":[]}
+{
+  "id": "dbe79abc-5a6a-4b3d-85fb-cb7b15e77645",
+  "display_id": "77645",
+  "current_state": "CREATED",
+  "store": {
+    "id": "77abff2e-e700-406d-aaba-5a50b41504dc",
+    "name": "Avoqado Sandbox 1",
+    "integrator_store_id": "cmpe64yq2001f9k92m0lbhmf4",
+    "integrator_brand_id": "avoqado"
+  },
+  "eater": { "first_name": "Avoqado", "phone": "+52 33 1930 9789", "phone_code": "684 18 235", "last_name": "S." },
+  "cart": {
+    "items": [
+      {
+        "id": "external_item_1",
+        "title": "Best Burger",
+        "quantity": 1,
+        "price": {
+          "unit_price": { "amount": 100, "currency_code": "MXN", "formatted_amount": "MX$1.00" },
+          "total_price": { "amount": 100, "currency_code": "MXN", "formatted_amount": "MX$1.00" },
+          "base_unit_price": { "amount": 100, "currency_code": "MXN", "formatted_amount": "MX$1.00" },
+          "base_total_price": { "amount": 100, "currency_code": "MXN", "formatted_amount": "MX$1.00" }
+        },
+        "selected_modifier_groups": null,
+        "instance_id": "bf83130e-1140-4f88-88a3-7e3a713bdd94",
+        "eater_id": "b8fb8824-e1cd-59dd-aae4-d93ab8d1f345"
+      }
+    ],
+    "version_id": "ce50ae60-728f-5438-b40a-0e3c3e358377",
+    "fulfillment_issues": []
+  },
+  "payment": {
+    "charges": {
+      "total": { "amount": 100, "currency_code": "MXN", "formatted_amount": "MX$1.00" },
+      "sub_total": { "amount": 100, "currency_code": "MXN", "formatted_amount": "MX$1.00" }
+    }
+  },
+  "placed_at": "2026-08-20T14:05:55-06:00",
+  "estimated_ready_for_pickup_at": "2026-08-20T14:20:55-06:00",
+  "type": "DELIVERY_BY_UBER",
+  "packaging": { "disposable_items": { "should_include": false } },
+  "eaters": [{ "first_name": "Avoqado S", "id": "b8fb8824-e1cd-59dd-aae4-d93ab8d1f345" }],
+  "brand": "UBER_EATS",
+  "deliveries": []
+}

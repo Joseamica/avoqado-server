@@ -205,4 +205,20 @@ describe('uber.mapper — contra el pedido real', () => {
       expect(p.cashDueTip).toBe('0.00')
     })
   })
+  it('🔴 sin `total` ni `sub_total`: RECHAZA en vez de crear una venta de $0', () => {
+    // El hueco que quedaba: `montoDe` devolvía 0 ante un cargo ausente, así que un pedido
+    // sin bloque de cobros producía una venta de cero pesos, ingerida como legítima y
+    // pagada. Para un PEDIDO esos dos campos no son opcionales — que falten es corrupción,
+    // no gratuidad. (`tip` y `cash_amount_due` sí faltan de verdad: el pedido real no los
+    // trae, y por eso ésos siguen resolviendo a 0.)
+    const sinCobros = { ...fixture, payment: { charges: {} } }
+    expect(() => mapUberOrder(sinCobros)).toThrow(/total/i)
+  })
+
+  it('🔴 con `sub_total` pero sin `total`: tampoco adivina', () => {
+    // Peor que el anterior porque parece sano: la venta entraría al subtotal y los cargos
+    // que el comercio SÍ cobró se perderían en silencio.
+    const sinTotal = { ...fixture, payment: { charges: { sub_total: { amount: 100, currency_code: 'MXN' } } } }
+    expect(() => mapUberOrder(sinTotal)).toThrow(/total/i)
+  })
 })

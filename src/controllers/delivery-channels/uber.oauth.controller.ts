@@ -154,7 +154,9 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
   if (!state || !consumeState(state)) {
     res
       .status(400)
-      .send(page('Estado inválido', '<p class="bad">El <code>state</code> no se pudo verificar, ya se usó, o caducó. Reinicia el flujo.</p>'))
+      .send(
+        page('Estado inválido', '<p class="bad">El <code>state</code> no se pudo verificar, ya se usó, o caducó. Reinicia el flujo.</p>'),
+      )
     return
   }
   if (error) {

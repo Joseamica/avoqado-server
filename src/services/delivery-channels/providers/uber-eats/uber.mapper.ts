@@ -49,6 +49,23 @@ function aPesos(centavos: Prisma.Decimal): string {
  *   - `.amount` presente pero no un número finito (string, objeto, booleano, NaN, null
  *     explícito EN amount): payload corrupto. ⇒ RECHAZA.
  */
+/**
+ * Igual que `montoDe`, pero para los cargos que un PEDIDO no puede no traer.
+ *
+ * 🔴 La diferencia importa y vale dinero: en `montoDe`, ausente = 0, que es correcto para
+ * `tip` y `cash_amount_due` (el pedido real no los trae). Aplicado a `total`/`sub_total`
+ * significaba crear una venta de $0 —ingerida como legítima y pagada— a partir de un
+ * payload corrupto o truncado. Peor todavía el caso a medias: con `sub_total` y sin
+ * `total`, la venta entraba al subtotal y los cargos que el comercio SÍ cobró se perdían
+ * sin que nadie lo notara hasta el corte.
+ */
+function montoRequerido(charge: unknown, contexto: string): Prisma.Decimal {
+  if (charge === undefined || charge === null || (charge as { amount?: unknown })?.amount === undefined) {
+    throw new Error(`El pedido de Uber no trae "${contexto}": sin ese monto no se puede determinar la venta sin inventarla`)
+  }
+  return montoDe(charge, contexto)
+}
+
 function montoDe(charge: unknown, contexto: string): Prisma.Decimal {
   if (charge === undefined || charge === null) return new Prisma.Decimal(0)
   if (typeof charge !== 'object' || Array.isArray(charge)) {
@@ -193,8 +210,8 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
   // `sub_total` son los artículos; lo que exceda en `total` son cargos que el cliente paga
   // AL COMERCIO. La propina sólo aparece en pedidos que reparte el propio restaurante:
   // en DELIVERY_BY_UBER es del repartidor de Uber y NO llega — verificado con el pedido real.
-  const subTotal = montoDe(charges.sub_total, 'payment.charges.sub_total')
-  const total = montoDe(charges.total, 'payment.charges.total')
+  const subTotal = montoRequerido(charges.sub_total, 'payment.charges.sub_total')
+  const total = montoRequerido(charges.total, 'payment.charges.total')
   const propina = montoDe(charges.tip, 'payment.charges.tip')
   const cargosComercio = Prisma.Decimal.max(new Prisma.Decimal(0), total.minus(subTotal).minus(propina))
 
