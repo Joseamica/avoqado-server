@@ -1,0 +1,113 @@
+/**
+ * El menú de Avoqado traducido al formato de Uber.
+ *
+ * Escrito contra el menú REAL de la tienda de sandbox (`GET /v2/eats/stores/{id}/menus`,
+ * 2026-08-20), no contra la documentación.
+ */
+import { mapSnapshotToUberMenu } from '@/services/delivery-channels/providers/uber-eats/uber.menuMapper'
+import type { MenuSnapshot } from '@/services/delivery-channels/core/menuSnapshot.service'
+
+const menu = (overrides: Partial<MenuSnapshot> = {}): MenuSnapshot => ({
+  venueId: 'v1',
+  generatedAt: '2026-08-20T00:00:00.000Z',
+  categories: [
+    {
+      name: 'Tacos',
+      products: [
+        {
+          plu: 'SKU-COCHINITA',
+          name: 'Cochinita',
+          description: 'Con cebolla morada',
+          price: 89.5,
+          imageUrl: 'https://x/y.jpg',
+          modifierGroups: [],
+        },
+      ],
+    },
+  ],
+  ...overrides,
+})
+
+describe('uber.menuMapper', () => {
+  it('🔴 el precio va en CENTAVOS: 89.50 pesos → 8950', () => {
+    // Es la única multiplicación ×100 permitida (frontera Uber). Un error aquí cobra 100
+    // veces de más o de menos y NADA falla: el menú se publica y el cliente ve el precio mal.
+    expect(mapSnapshotToUberMenu(menu()).items[0].price_info.price).toBe(8950)
+  })
+
+  it('🔴 el `id` del item es el SKU: es el contrato con la ingesta', () => {
+    // Uber devuelve este id en cada pedido, y `uber.productResolver` lo busca como
+    // `Product.externalId`. Si cambia entre publicaciones, los pedidos entran igual (nunca
+    // se pierde una venta) pero SIN inventario, SIN costo y SIN reporte por producto.
+    expect(mapSnapshotToUberMenu(menu()).items[0].id).toBe('SKU-COCHINITA')
+  })
+
+  it('los tres niveles quedan enlazados por id: menú → categoría → item', () => {
+    const p = mapSnapshotToUberMenu(menu())
+    expect(p.menus[0].category_ids).toEqual([p.categories[0].id])
+    expect(p.categories[0].entities).toEqual([{ id: 'SKU-COCHINITA' }])
+  })
+
+  it('🔴 un producto en DOS categorías se publica UNA vez', () => {
+    // Uber rechaza el menú COMPLETO si hay un id repetido — se perdería la publicación
+    // entera por un producto que está en "Tacos" y en "Favoritos".
+    const dos = menu({
+      categories: [
+        { name: 'Tacos', products: menu().categories[0].products },
+        { name: 'Favoritos', products: menu().categories[0].products },
+      ],
+    })
+    const p = mapSnapshotToUberMenu(dos)
+
+    expect(p.items).toHaveLength(1)
+    expect(p.categories).toHaveLength(2)
+    expect(p.categories.every(c => c.entities[0].id === 'SKU-COCHINITA')).toBe(true) // referenciado dos veces
+  })
+
+  it('una categoría vacía no se publica: sería una sección en blanco en la app', () => {
+    const conVacia = menu({ categories: [...menu().categories, { name: 'Bebidas', products: [] }] })
+    expect(mapSnapshotToUberMenu(conVacia).categories.map(c => c.title.translations.en)).toEqual(['Tacos'])
+  })
+
+  it('🔴 un modificador se publica también como ITEM, o el menú entero se rechaza', () => {
+    // En el modelo de Uber un modificador ES un item. Publicar el grupo sin publicar sus
+    // opciones deja ids colgando y Uber rechaza todo.
+    const conMods = menu({
+      categories: [
+        {
+          name: 'Tacos',
+          products: [
+            {
+              ...menu().categories[0].products[0],
+              modifierGroups: [
+                {
+                  id: 'g1',
+                  name: 'Extras',
+                  required: false,
+                  allowMultiple: true,
+                  minSelections: 0,
+                  maxSelections: 3,
+                  modifiers: [{ plu: 'MOD-QUESO', name: 'Queso', price: 12 }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    const p = mapSnapshotToUberMenu(conMods)
+
+    expect(p.items.map(i => i.id)).toContain('MOD-QUESO')
+    expect(p.items.find(i => i.id === 'MOD-QUESO')!.price_info.price).toBe(1200)
+    expect(p.modifier_groups[0].modifier_options).toEqual([{ id: 'MOD-QUESO', type: 'ITEM' }])
+  })
+
+  it('🔴 el horario por default es 24/7 y eso SOLO sirve para la tienda de pruebas', () => {
+    // Publicar 24/7 en un negocio real lo muestra siempre abierto: le entran pedidos a las
+    // 3 de la mañana que nadie va a cocinar, y Uber cuenta eso contra su tasa de inyección.
+    expect(mapSnapshotToUberMenu(menu()).menus[0].service_availability).toHaveLength(7)
+
+    const propio = [{ day_of_week: 'monday', time_periods: [{ start_time: '09:00', end_time: '18:00' }] }]
+    expect(mapSnapshotToUberMenu(menu(), { availability: propio }).menus[0].service_availability).toEqual(propio)
+  })
+})

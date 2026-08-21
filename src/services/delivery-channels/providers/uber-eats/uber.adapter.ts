@@ -16,6 +16,8 @@ import { uberApi, fetchUberOrder } from './uber.client'
 import { orderIdFromResourceHref } from './uber.http'
 import { verifyUberSignature } from './uber.signature'
 import { mapUberOrder } from './uber.mapper'
+import { mapSnapshotToUberMenu, type UberMenuOptions } from './uber.menuMapper'
+import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 import type { CanonicalDeliveryEvent, DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
 
 export type UberDenyReason = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
@@ -112,6 +114,54 @@ export const uberAdapter = {
     })
     const ok = r.status < 400 || r.status === 409
     if (!ok) logger.warn('Uber rechazó el accept', { orderId, status: r.status, cuerpo: r.text.slice(0, 200) })
+    return { ok, status: r.status, raw: r.text }
+  },
+
+  /**
+   * Publica el menú completo del venue en la tienda de Uber.
+   *
+   * 🔴 ES LA ESCRITURA MÁS PELIGROSA DE TODA LA INTEGRACIÓN: `PUT /menus` REEMPLAZA el menú
+   * entero de la tienda. El 2026-08-17, con credenciales de SANDBOX, esta llamada modificó
+   * el menú EN VIVO de un restaurante REAL de producción —apareció en su Uber Eats Manager
+   * y hubo que restaurarlo desde respaldo—, porque el aislamiento del sandbox que Uber
+   * documenta NO se cumple cuando la cuenta no tiene tienda de prueba asignada.
+   *
+   * Lo único que lo hace seguro es `assertStoreWritable` en `uber.http.ts`, que corre ANTES
+   * de cualquier escritura y sólo deja pasar las tiendas de `UBER_WRITABLE_STORE_IDS_*`.
+   * **Nunca quites ese candado ni lo muevas más arriba en la pila.**
+   *
+   * Para marcar UN producto agotado NO se usa esto: hay un update puntual
+   * (`POST /v2/eats/stores/{id}/menus/items/{item_id}` con `suspension_info`) que no
+   * republica nada. Republicar el menú entero para agotar un producto es traer una
+   * excavadora a plantar una maceta.
+   */
+  async publishMenu(snapshot: MenuSnapshot, storeId: string, opts?: UberMenuOptions): Promise<UberActionResult> {
+    const payload = mapSnapshotToUberMenu(snapshot, opts)
+    const r = await uberApi({ method: 'PUT', path: `/v2/eats/stores/${encodeURIComponent(storeId)}/menus`, storeId, body: payload })
+    const ok = r.status < 400
+    if (!ok) logger.error('🚨 Uber rechazó el menú', { storeId, status: r.status, cuerpo: r.text.slice(0, 400) })
+    else logger.info('📋 [Uber] menú publicado', { storeId, items: payload.items.length, categorias: payload.categories.length })
+    return { ok, status: r.status, raw: r.text }
+  },
+
+  /**
+   * Marca UN producto como agotado (o lo revive) sin republicar el menú.
+   *
+   * Es la operación del día a día —se acabó la cochinita a las 3pm— y es barata y acotada:
+   * toca un item, no puede romper el menú entero. Es justo lo contrario de `publishMenu`.
+   */
+  async setItemSoldOut(itemId: string, storeId: string, agotado: boolean): Promise<UberActionResult> {
+    const r = await uberApi({
+      method: 'POST',
+      path: `/v2/eats/stores/${encodeURIComponent(storeId)}/menus/items/${encodeURIComponent(itemId)}`,
+      storeId,
+      // `suspension_info` vacío = disponible. Con `suspend_until: 0` Uber lo deja agotado
+      // hasta que alguien lo reactive, que es lo que espera una cocina: no adivinar cuándo
+      // vuelve a haber.
+      body: agotado ? { suspension_info: { suspension: { suspend_until: 0, reason: 'Agotado' } } } : { suspension_info: {} },
+    })
+    const ok = r.status < 400
+    if (!ok) logger.warn('Uber rechazó el cambio de disponibilidad', { storeId, itemId, status: r.status, cuerpo: r.text.slice(0, 200) })
     return { ok, status: r.status, raw: r.text }
   },
 
