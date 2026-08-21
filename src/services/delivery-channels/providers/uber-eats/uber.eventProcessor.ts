@@ -15,13 +15,14 @@
  * el evento queda FAILED para reconciliar con el comercio; al revés, un pedido perfectamente
  * ingerido se cancela solo y el cliente se queda sin comida.
  */
-import { DeliveryOrderEventStatus, DeliveryProvider, OrderAcceptanceMode } from '@prisma/client'
+import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, OrderAcceptanceMode } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
 import { cancelDeliveryOrder } from '../../core/cancelDeliveryOrder.service'
 import { syncChannelMenu } from '../../core/menuSync.service'
+import { releaseScheduledOrder } from '../../core/releaseScheduledOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../core/deliveryWebhookEvent.service'
 import { uberAdapter } from './uber.adapter'
@@ -33,6 +34,9 @@ export type UberProcessOutcome =
   | 'ORPHANED' // llegó de una tienda sin vincular a ningún venue
   | 'CANCELLED' // el proveedor canceló el pedido: dejó de ser venta y salió de cocina
   | 'MENU_SENT' // Uber pidió el menú y se le mandó
+  | 'SCHEDULED' // pedido para más tarde: entró como venta, NO fue a la cocina
+  | 'RELEASED' // ya era hora del programado: fue a la cocina
+  | 'STORE_STATE' // la tienda cambió de estado del lado del proveedor
   | 'FAILED'
 
 export interface UberProcessResult {
@@ -108,9 +112,86 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     return ok ? { outcome: 'MENU_SENT' } : { outcome: 'FAILED', error: r.error }
   }
 
+  // "Ya es hora" de un pedido programado: AHORA sí va a la cocina.
+  if (tipo === 'RELEASE') {
+    if (!identidad.orderId) {
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
+      return { outcome: 'NOT_AN_ORDER' }
+    }
+    const r = await releaseScheduledOrder(`${DeliveryProvider.UBER_EATS}:${identidad.orderId}`)
+    // Si la orden no existe todavía (el release se adelantó a la notificación), queda FAILED
+    // para que la reconciliación lo reintente: enterrarlo dejaría el pedido sin comanda.
+    const ok = r.outcome !== 'ORDER_NOT_FOUND'
+    await markEventResult(
+      eventRowId,
+      ok ? DeliveryOrderEventStatus.PROCESSED : DeliveryOrderEventStatus.FAILED,
+      r.orderId,
+      ok ? undefined : 'ORDEN_NO_EXISTE',
+    )
+    return ok ? { outcome: 'RELEASED', orderId: r.orderId } : { outcome: 'FAILED', error: 'ORDEN_NO_EXISTE' }
+  }
+
+  // La tienda cambió de estado del lado de Uber. `deprovisioned` es el que más duele: nos
+  // quitaron el acceso y seguiríamos creyendo que el canal está vivo, reintentando escrituras
+  // que siempre van a fallar (es exactamente el síntoma del canal muerto de "La Ribera":
+  // 401 al leer, 403 en pos_data, y en Avoqado figuraba ACTIVE).
+  if (tipo === 'STORE_STATE') {
+    if (evento.channelLink) {
+      const quitada = identidad.eventType === 'store.deprovisioned'
+      if (quitada) {
+        await prisma.deliveryChannelLink.update({
+          where: { id: evento.channelLink.id },
+          data: { status: DeliveryChannelStatus.DISABLED },
+        })
+        logger.error('🚨 [Uber] el comercio QUITÓ el acceso a esta tienda — canal deshabilitado', {
+          eventRowId,
+          linkId: evento.channelLink.id,
+          venueId: evento.channelLink.venueId,
+          storeId: identidad.storeId,
+        })
+      } else {
+        logger.info('🏪 [Uber] la tienda cambió de estado del lado del proveedor', {
+          eventRowId,
+          tipo: identidad.eventType,
+          linkId: evento.channelLink.id,
+        })
+      }
+    }
+    await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
+    return { outcome: 'STORE_STATE' }
+  }
+
+  // El cliente cambió algo del pedido y lo confirmó. v1 NO muta la venta —reconciliar
+  // artículos + cobro + inventario a medias es peor que no hacerlo (spec §10)— pero SÍ se
+  // vuelve a traer el pedido y se guarda, y se GRITA: alguien tiene que mirar ese pedido
+  // antes de que la cocina prepare lo que ya no es.
+  if (tipo === 'FULFILLMENT_CHANGED') {
+    if (identidad.orderId) {
+      try {
+        const crudo = await fetchOrder(identidad.orderId)
+        await prisma.deliveryOrderEvent.update({
+          where: { id: eventRowId },
+          data: { resourcePayload: crudo as object, resourceFetchedAt: new Date(), externalOrderId: identidad.orderId },
+        })
+      } catch (err) {
+        logger.error('🚨 [Uber] no se pudo releer el pedido que el cliente cambió', {
+          eventRowId,
+          error: err instanceof Error ? err.message : err,
+        })
+      }
+      logger.error('🚨 [Uber] EL CLIENTE CAMBIÓ EL PEDIDO — revisar antes de prepararlo', {
+        eventRowId,
+        orderId: identidad.orderId,
+        venueId: evento.venueId,
+      })
+    }
+    await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
+    return { outcome: 'NOT_AN_ORDER' }
+  }
+
   // Ruido conocido (cambios de estado, provisioning): se marca visto para que la
   // reconciliación no lo persiga eternamente. Queda persistido y consultable.
-  if (tipo !== 'NEW_ORDER' || !identidad.orderId) {
+  if ((tipo !== 'NEW_ORDER' && tipo !== 'SCHEDULED_ORDER') || !identidad.orderId) {
     await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
     return { outcome: 'NOT_AN_ORDER' }
   }

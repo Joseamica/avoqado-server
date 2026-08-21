@@ -173,6 +173,7 @@ export async function ingestDeliveryOrder(
         source: normalized.source,
         originSystem: OriginSystem.DELIVERY_PLATFORM,
         type: OrderType.DELIVERY,
+        scheduledFor: normalized.scheduledFor ?? null,
         status: 'CONFIRMED', // AUTO-accept: entra confirmada directo a cocina (independiente del dinero)
         kitchenStatus: 'PENDING',
         paymentStatus,
@@ -342,7 +343,19 @@ export async function ingestDeliveryOrder(
   // está guardada y el pedido sigue apareciendo en la lista de órdenes. Perder la venta por
   // no poder pintar un ticket sería peor que el problema que resuelve. Pero el log es
   // `error` y no `warn` a propósito: que no llegue a la cocina es grave, no cosmético.
-  if (isNew) {
+  // 🔴 Un pedido PROGRAMADO no va a la cocina todavía. El cliente lo pidió a las 3pm para
+  // las 8pm: cocinarlo al recibirlo tira la comida y ocupa la pantalla toda la tarde con algo
+  // que no toca. La comanda se crea cuando el proveedor avisa que ya es hora
+  // (`releaseScheduledOrder`, disparado por `orders.release`).
+  if (isNew && normalized.scheduledFor) {
+    logger.info('🕗 [DeliveryIngest] pedido PROGRAMADO — no va a cocina hasta su hora', {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      para: normalized.scheduledFor.toISOString(),
+    })
+  }
+
+  if (isNew && !normalized.scheduledFor) {
     try {
       await prisma.kdsOrder.create({
         data: {

@@ -3178,6 +3178,14 @@ model Order {
   tags String[] @default([])
 
   // POS sync
+  /// Para cuándo pidió el cliente que estuviera, si NO es para ahora mismo.
+  /// null = pedido inmediato (el caso normal).
+  ///
+  /// 🔴 Un pedido programado NO debe llegar a la cocina al recibirse: el cliente lo pidió
+  /// a las 3pm para las 8pm, y cocinarlo al llegar tira la comida. La comanda se crea
+  /// cuando el proveedor avisa que ya es hora (`orders.release` en Uber).
+  scheduledFor DateTime?
+
   externalId   String? // POS order ID
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?

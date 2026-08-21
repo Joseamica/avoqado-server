@@ -302,4 +302,109 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       expect((await prisma.order.findUniqueOrThrow({ where: { id: r1.orderId! } })).status).toBe('CANCELLED')
     })
   })
+  // ── Los 6 eventos que Uber manda y antes IGNORÁBAMOS ─────────────────────────────────
+  //
+  // Uber manda 9 tipos de evento; atendíamos 3. Los demás caían en "ruido conocido, márcalo
+  // visto y olvídalo" — incluidos los que pierden pedidos y los que nos dejan creyendo que
+  // un canal muerto sigue vivo.
+  describe('eventos que se ignoraban', () => {
+    const avisoTipo = (eventId: string, tipo: string, orderId = pedidoReal.id) => ({
+      event_id: eventId,
+      event_type: tipo,
+      resource_href: `https://test-api.uber.com/v2/eats/order/${orderId}`,
+      meta: { user_id: STORE, resource_id: orderId, status: 'pos' },
+    })
+
+    it('🔴 PROGRAMADO: entra como venta pero NO va a la cocina todavía', async () => {
+      // El cliente pidió a las 3pm para las 8pm. Cocinarlo al recibirlo tira la comida y
+      // ocupa la pantalla toda la tarde. Antes este evento se ignoraba y el pedido se
+      // PERDÍA ENTERO — nunca existía en Avoqado.
+      const programado = {
+        ...pedidoReal,
+        id: `prog-${Date.now()}`,
+        scheduled_order: true,
+        estimated_ready_for_pickup_at: '2026-08-21T02:00:00Z',
+      }
+      const id = `ev-prog-${Date.now()}`
+      const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'orders.scheduled.notification', programado.id)), {
+        ...deps,
+        fetchOrder: async () => programado,
+      })
+
+      expect(r.outcome).toBe('PROCESSED')
+      const order = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })
+      expect(order.scheduledFor).not.toBeNull() // la venta SÍ existe, con su hora
+      expect(await prisma.kdsOrder.count({ where: { orderId: order.id } })).toBe(0) // pero NO en cocina
+    })
+
+    it('🔴 RELEASE: ya es hora ⇒ AHORA sí va a la cocina', async () => {
+      const programado = {
+        ...pedidoReal,
+        id: `prog2-${Date.now()}`,
+        scheduled_order: true,
+        estimated_ready_for_pickup_at: '2026-08-21T02:00:00Z',
+      }
+      const idP = `ev-prog2-${Date.now()}`
+      const ing = await processUberEvent(await nuevoEvento(idP, avisoTipo(idP, 'orders.scheduled.notification', programado.id)), {
+        ...deps,
+        fetchOrder: async () => programado,
+      })
+      expect(await prisma.kdsOrder.count({ where: { orderId: ing.orderId! } })).toBe(0)
+
+      const idR = `ev-rel-${Date.now()}`
+      const r = await processUberEvent(await nuevoEvento(idR, avisoTipo(idR, 'orders.release', programado.id)), deps)
+
+      expect(r.outcome).toBe('RELEASED')
+      expect(await prisma.kdsOrder.count({ where: { orderId: ing.orderId! } })).toBe(1)
+    })
+
+    it('RELEASE dos veces no duplica la comanda: la cocina no prepara doble', async () => {
+      const programado = {
+        ...pedidoReal,
+        id: `prog3-${Date.now()}`,
+        scheduled_order: true,
+        estimated_ready_for_pickup_at: '2026-08-21T02:00:00Z',
+      }
+      const idP = `ev-prog3-${Date.now()}`
+      const ing = await processUberEvent(await nuevoEvento(idP, avisoTipo(idP, 'orders.scheduled.notification', programado.id)), {
+        ...deps,
+        fetchOrder: async () => programado,
+      })
+      for (const n of [1, 2]) {
+        const idR = `ev-rel-${n}-${Date.now()}`
+        await processUberEvent(await nuevoEvento(idR, avisoTipo(idR, 'orders.release', programado.id)), deps)
+      }
+      expect(await prisma.kdsOrder.count({ where: { orderId: ing.orderId! } })).toBe(1)
+    })
+
+    it('🔴 el comercio nos QUITA la tienda ⇒ el canal se deshabilita', async () => {
+      // Sin esto seguiríamos creyendo que el canal está vivo y reintentando escrituras que
+      // van a fallar siempre. Es exactamente el síntoma del canal muerto que encontramos:
+      // 401 al leer la tienda, 403 en su configuración, y en Avoqado figuraba ACTIVE.
+      const id = `ev-deprov-${Date.now()}`
+      const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'store.deprovisioned')), deps)
+
+      expect(r.outcome).toBe('STORE_STATE')
+      expect((await prisma.deliveryChannelLink.findUniqueOrThrow({ where: { id: linkId } })).status).toBe('DISABLED')
+      await prisma.deliveryChannelLink.update({ where: { id: linkId }, data: { status: 'ACTIVE' } })
+    })
+
+    it('🔴 el cliente CAMBIA el pedido: se vuelve a traer y se guarda para revisar', async () => {
+      // v1 NO muta la venta —reconciliar artículos + cobro + inventario a medias es peor que
+      // no hacerlo— pero el pedido nuevo queda guardado y se grita, porque alguien tiene que
+      // mirarlo antes de que la cocina prepare lo que ya no es.
+      const cambiado = { ...pedidoReal, display_id: 'CAMBIADO' }
+      const id = `ev-fulfill-${Date.now()}`
+      const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'order.fulfillment_issues.resolved')), {
+        ...deps,
+        fetchOrder: async () => cambiado,
+      })
+
+      expect(r.outcome).toBe('NOT_AN_ORDER') // no crea otra venta
+      const ev = await prisma.deliveryOrderEvent.findUniqueOrThrow({
+        where: { id: (await prisma.deliveryOrderEvent.findFirstOrThrow({ where: { externalEventId: id } })).id },
+      })
+      expect(ev.resourcePayload).toMatchObject({ display_id: 'CAMBIADO' }) // el pedido NUEVO quedó guardado
+    })
+  })
 })

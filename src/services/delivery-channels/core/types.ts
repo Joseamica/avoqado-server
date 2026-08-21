@@ -77,6 +77,13 @@ export interface NormalizedDeliveryOrder {
   /** JSON crudo del proveedor, para auditoría — va a `Order.posRawData` */
   raw: unknown
   placedAt: Date
+  /**
+   * Para cuándo lo pidió el cliente, si NO es inmediato.
+   *
+   * 🔴 Un pedido programado NO va a la cocina al recibirse: se pidió a las 3pm para las 8pm
+   * y cocinarlo al llegar tira la comida. La comanda espera al aviso de "ya es hora".
+   */
+  scheduledFor?: Date | null
 }
 
 // ============================================================================
@@ -160,6 +167,10 @@ export type CanonicalDeliveryEvent =
   | 'NEW_ORDER' // hay un pedido nuevo que ingerir
   | 'CANCEL' // el proveedor canceló el pedido: NO se debe seguir cocinando ni cobrar
   | 'MENU_REFRESH' // el proveedor PIDE el menú: se le manda aunque creamos que ya lo tiene
+  | 'SCHEDULED_ORDER' // pedido para MÁS TARDE: entra como venta pero NO va a la cocina todavía
+  | 'RELEASE' // ya es hora del pedido programado: AHORA sí va a la cocina
+  | 'FULFILLMENT_CHANGED' // el cliente cambió algo del pedido y lo confirmó
+  | 'STORE_STATE' // la tienda cambió de estado del lado del proveedor (conectada, quitada, pausada)
   | 'IGNORED' // ruido conocido (cambios de estado, provisioning) — se marca visto y ya
 
 export interface DirectDeliveryAdapter {

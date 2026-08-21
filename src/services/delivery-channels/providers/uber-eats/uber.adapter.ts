@@ -63,6 +63,18 @@ export const uberAdapter = {
     // quedó incompleto de su lado. Ignorarlo deja la tienda con un menú viejo o vacío y
     // nadie se entera hasta que un cliente no encuentra qué pedir.
     if (eventType === 'store.menu_refresh_request') return 'MENU_REFRESH'
+    // Pedido para MÁS TARDE. Antes caía en 'IGNORED' y se perdía ENTERO: el cliente pedía a
+    // las 3pm para las 8pm y en Avoqado no existía. [doc] es de la generación 1.0.0 de la API.
+    if (eventType === 'orders.scheduled.notification') return 'SCHEDULED_ORDER'
+    // "Ya es hora" de un programado (Fast Order Release: el repartidor llegó a la zona).
+    if (eventType === 'orders.release') return 'RELEASE'
+    // El cliente cambió algo del pedido —quitó, sustituyó— y lo confirmó en su app.
+    if (eventType === 'order.fulfillment_issues.resolved') return 'FULFILLMENT_CHANGED'
+    // La tienda cambió de estado del lado de Uber. `deprovisioned` es el que más duele:
+    // nos quitaron el acceso y seguiríamos creyendo que el canal está vivo.
+    if (eventType === 'store.provisioned' || eventType === 'store.deprovisioned' || eventType === 'store.status.changed') {
+      return 'STORE_STATE'
+    }
     return 'IGNORED'
   },
 

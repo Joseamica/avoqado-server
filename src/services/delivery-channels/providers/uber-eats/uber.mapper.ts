@@ -134,6 +134,8 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     cart?: { items?: unknown[] }
     payment?: { charges?: Record<string, unknown> }
     eater?: { first_name?: string; last_name?: string; phone?: string }
+    scheduled_order?: unknown
+    estimated_ready_for_pickup_at?: string
   }
 
   if (typeof d?.id !== 'string' || !d.id) {
@@ -244,5 +246,10 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     },
     raw,
     placedAt: d.placed_at ? new Date(d.placed_at) : new Date(),
+    // ⚠️ `estimated_ready_for_pickup_at` es una ESTIMACIÓN de Uber, no una hora pactada: en
+    // un pedido inmediato viene ~15 min adelante. Sólo cuenta como "programado" si el propio
+    // pedido dice que lo es — si no, cada pedido normal parecería programado y NINGUNO
+    // llegaría a la cocina.
+    scheduledFor: d.scheduled_order === true && d.estimated_ready_for_pickup_at ? new Date(d.estimated_ready_for_pickup_at) : null,
   }
 }
