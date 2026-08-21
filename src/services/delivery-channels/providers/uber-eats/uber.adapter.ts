@@ -16,7 +16,7 @@ import { uberApi, fetchUberOrder } from './uber.client'
 import { orderIdFromResourceHref } from './uber.http'
 import { verifyUberSignature } from './uber.signature'
 import { mapUberOrder } from './uber.mapper'
-import type { DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
+import type { CanonicalDeliveryEvent, DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
 
 export type UberDenyReason = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
@@ -45,6 +45,19 @@ export const uberAdapter = {
     const firma = headers['x-uber-signature']
     const valor = Array.isArray(firma) ? firma[0] : firma
     return secrets.some(s => verifyUberSignature(rawBody, valor, s))
+  },
+
+  /**
+   * Los nombres de Uber → lo que el núcleo entiende.
+   *
+   * `orders.failure` va junto con `orders.cancel` a CANCEL: [doc] es la generación nueva de
+   * la API para el mismo hecho —el pedido ya no va a ocurrir— y tratarlos distinto dejaría
+   * un camino sin cubrir el día que Uber mueva la integración de versión.
+   */
+  classifyEvent(eventType: string): CanonicalDeliveryEvent {
+    if (eventType === 'orders.notification') return 'NEW_ORDER'
+    if (eventType === 'orders.cancel' || eventType === 'orders.failure') return 'CANCEL'
+    return 'IGNORED'
   },
 
   /** ¿De qué tienda y qué pedido es? Cada proveedor lo pone en otro campo. */

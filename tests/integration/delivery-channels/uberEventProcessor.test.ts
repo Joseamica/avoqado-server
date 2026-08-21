@@ -232,4 +232,74 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
     expect(evento.error).toBe('SIN_VINCULO')
     await prisma.deliveryOrderEvent.delete({ where: { id: row.id } })
   })
+  // ── CANCELACIONES ────────────────────────────────────────────────────────────────────
+  //
+  // Uber manda `orders.cancel`, y hasta el 2026-08-20 caía en el mismo cajón que los
+  // cambios de estado: "no es un pedido, márcalo visto y olvídalo". La venta se quedaba
+  // CONFIRMED/PAID, la cocina seguía cocinando comida que nadie iba a recoger, y ese dinero
+  // nunca llegaba pero sí se contaba en los reportes. Nada fallaba; todo mentía.
+  describe('el proveedor cancela el pedido', () => {
+    const avisoCancel = (eventId: string, orderId = pedidoReal.id) => ({
+      event_id: eventId,
+      event_type: 'orders.cancel',
+      resource_href: `https://test-api.uber.com/v2/eats/order/${orderId}`,
+      meta: { user_id: STORE, resource_id: orderId, status: 'pos' },
+    })
+
+    it('🔴 la venta deja de contar Y la comanda sale de la cocina', async () => {
+      const idOk = `ev-precancel-${Date.now()}`
+      const r1 = await processUberEvent(await nuevoEvento(idOk), deps)
+      expect(r1.outcome).toBe('PROCESSED')
+      expect(await prisma.kdsOrder.count({ where: { orderId: r1.orderId! } })).toBe(1)
+
+      const idC = `ev-cancel-${Date.now()}`
+      const r2 = await processUberEvent(await nuevoEvento(idC, avisoCancel(idC)), deps)
+
+      expect(r2.outcome).toBe('CANCELLED')
+      const order = await prisma.order.findUniqueOrThrow({ where: { id: r1.orderId! } })
+      expect(order.status).toBe('CANCELLED') // `autoPosting` ya la excluye de los libros
+      // Lo único que de verdad detiene el desperdicio: que desaparezca del tablero.
+      expect(await prisma.kdsOrder.count({ where: { orderId: r1.orderId! } })).toBe(0)
+    })
+
+    it('cancelación de un pedido que TODAVÍA no llegó: no inventa una orden', async () => {
+      // Uber no ordena sus webhooks; el cancel puede adelantarse a la notificación.
+      const id = `ev-cancel-huerf-${Date.now()}`
+      const antes = await prisma.order.count({ where: { venueId } })
+
+      const r = await processUberEvent(await nuevoEvento(id, avisoCancel(id, 'pedido-que-no-existe')), deps)
+
+      expect(r.outcome).toBe('CANCELLED')
+      expect(r.orderId).toBeUndefined()
+      expect(await prisma.order.count({ where: { venueId } })).toBe(antes)
+    })
+
+    it('IDEMPOTENTE: cancelar dos veces no vuelve a auditar ni truena', async () => {
+      const idOk = `ev-precancel2-${Date.now()}`
+      const r1 = await processUberEvent(await nuevoEvento(idOk), deps)
+
+      const a = `ev-c2a-${Date.now()}`
+      await processUberEvent(await nuevoEvento(a, avisoCancel(a)), deps)
+      const b = `ev-c2b-${Date.now()}`
+      const r3 = await processUberEvent(await nuevoEvento(b, avisoCancel(b)), deps)
+
+      expect(r3.outcome).toBe('CANCELLED')
+      const order = await prisma.order.findUniqueOrThrow({ where: { id: r1.orderId! } })
+      expect(order.status).toBe('CANCELLED')
+    })
+
+    it('🔴 `orders.failure` cuenta igual que `orders.cancel`', async () => {
+      // Es la generación NUEVA de la API de Uber para el mismo hecho: el pedido no va a
+      // ocurrir. Tratarlos distinto deja un camino sin cubrir el día que Uber nos mueva
+      // de versión — y ese día nadie se acordaría de esto.
+      const idOk = `ev-prefail-${Date.now()}`
+      const r1 = await processUberEvent(await nuevoEvento(idOk), deps)
+
+      const idF = `ev-fail-${Date.now()}`
+      const r2 = await processUberEvent(await nuevoEvento(idF, { ...avisoCancel(idF), event_type: 'orders.failure' }), deps)
+
+      expect(r2.outcome).toBe('CANCELLED')
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: r1.orderId! } })).status).toBe('CANCELLED')
+    })
+  })
 })

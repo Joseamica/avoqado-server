@@ -147,6 +147,19 @@ export interface DeliveryProviderAdapter {
  * real enfrente — no antes. (Aquí vivía un `ProviderContext` inventado para un Rappi que
  * todavía no existe: nadie lo usó nunca.)
  */
+/**
+ * Lo que el NÚCLEO entiende de un evento. Cada proveedor los llama distinto —Uber manda
+ * `orders.notification` y `orders.cancel`, otro mandará otra cosa— y traducir es trabajo del
+ * adaptador. El núcleo jamás compara contra la cadena de un proveedor.
+ *
+ * (Esa comparación ya nos costó un bug: `statusDispatcher` filtraba `eventType: 'order'`,
+ * vocabulario de Deliverect, y por eso fallaba en CADA pedido de Uber.)
+ */
+export type CanonicalDeliveryEvent =
+  | 'NEW_ORDER' // hay un pedido nuevo que ingerir
+  | 'CANCEL' // el proveedor canceló el pedido: NO se debe seguir cocinando ni cobrar
+  | 'IGNORED' // ruido conocido (cambios de estado, provisioning) — se marca visto y ya
+
 export interface DirectDeliveryAdapter {
   readonly provider: DeliveryProvider
 
@@ -155,6 +168,13 @@ export interface DirectDeliveryAdapter {
 
   /** ¿De qué tienda y de qué pedido es? Cada proveedor lo pone en otro campo. */
   extractIdentity(payload: unknown): EventIdentity
+
+  /**
+   * Traduce el nombre del evento del proveedor a uno canónico. 🔴 Devolver 'IGNORED' ante
+   * algo desconocido es DELIBERADO y no es pereza: un evento que no sabemos leer NO puede
+   * disparar una acción adivinada sobre dinero o comida. Queda persistido y visible.
+   */
+  classifyEvent(eventType: string): CanonicalDeliveryEvent
 
   /** Del formato crudo del proveedor al contrato interno. Aquí vive TODA la diferencia. */
   normalizeOrder(raw: unknown): NormalizedDeliveryOrder

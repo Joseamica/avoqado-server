@@ -30,6 +30,32 @@ describe('adapterRegistry', () => {
     }
   })
 
+  it('🔴 GUARDRAIL: el core NO compara contra CADENAS de protocolo de un proveedor', () => {
+    // El guardrail de abajo busca NOMBRES de proveedor ('UBER_EATS', 'RAPPI'…) y por eso
+    // dejó pasar los dos bugs de hoy, que eran del mismo error de diseño pero con cadenas:
+    //   · `statusDispatcher` filtraba `eventType: 'order'` — vocabulario de DELIVERECT — y
+    //     por eso fallaba en CADA pedido de Uber.
+    //   · el procesador comparaba `!== 'orders.notification'` y metía `orders.cancel` en el
+    //     cajón de "ignóralo": la venta cancelada seguía contando y la cocina cocinando.
+    // La traducción es trabajo del ADAPTADOR (`classifyEvent`). El core usa los canónicos.
+    const CADENAS_DE_PROVEEDOR = ["'order'", "'orders.notification'", "'orders.cancel'", "'orders.failure'", "'orders.release'"]
+    const dir = path.join(__dirname, '../../../../src/services/delivery-channels/core')
+    const ofensores: string[] = []
+
+    for (const archivo of fs.readdirSync(dir).filter(f => f.endsWith('.ts'))) {
+      const contenido = fs.readFileSync(path.join(dir, archivo), 'utf8')
+      contenido.split('\n').forEach((linea, i) => {
+        // Los COMENTARIOS sí pueden nombrarlas — de hecho deben: son los que documentan
+        // por qué el bug ocurrió. Se excluyen tanto `//` como las líneas de bloque JSDoc.
+        const codigo = linea.split('//')[0]
+        if (codigo.trim().startsWith('*') || codigo.trim().startsWith('/*')) return
+        if (CADENAS_DE_PROVEEDOR.some(c => codigo.includes(c))) ofensores.push(`${archivo}:${i + 1} → ${linea.trim()}`)
+      })
+    }
+
+    expect(ofensores).toEqual([])
+  })
+
   it('🔴 GUARDRAIL: el core NO menciona proveedores por nombre — sólo el registro puede', () => {
     const coreDir = path.join(process.cwd(), 'src/services/delivery-channels/core')
     const ofensores: string[] = []

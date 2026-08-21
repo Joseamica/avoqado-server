@@ -15,11 +15,12 @@
  * el evento queda FAILED para reconciliar con el comercio; al revés, un pedido perfectamente
  * ingerido se cancela solo y el cliente se queda sin comida.
  */
-import { DeliveryOrderEventStatus, OrderAcceptanceMode } from '@prisma/client'
+import { DeliveryOrderEventStatus, DeliveryProvider, OrderAcceptanceMode } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
+import { cancelDeliveryOrder } from '../../core/cancelDeliveryOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../core/deliveryWebhookEvent.service'
 import { uberAdapter } from './uber.adapter'
@@ -29,6 +30,7 @@ export type UberProcessOutcome =
   | 'ALREADY_DONE' // ya se había procesado: reintento inofensivo
   | 'NOT_AN_ORDER' // evento que no es un pedido (status, etc.)
   | 'ORPHANED' // llegó de una tienda sin vincular a ningún venue
+  | 'CANCELLED' // el proveedor canceló el pedido: dejó de ser venta y salió de cocina
   | 'FAILED'
 
 export interface UberProcessResult {
@@ -61,9 +63,29 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
 
   const identidad = uberAdapter.extractIdentity(evento.payload)
 
-  // Sólo los avisos de PEDIDO llevan a una venta. Los demás (cambios de estado, etc.) se
-  // marcan procesados para que la reconciliación no los persiga eternamente.
-  if (identidad.eventType !== 'orders.notification' || !identidad.orderId) {
+  // 🔴 Se clasifica por evento CANÓNICO, no comparando contra la cadena de Uber. Antes esto
+  // decía `!== 'orders.notification'` y metía TODO lo demás —incluido `orders.cancel`— en el
+  // mismo cajón de "no es un pedido, márcalo visto y olvídalo". Consecuencia real: si el
+  // cliente cancelaba, la venta se quedaba PAID, la cocina seguía cocinando, y ese dinero
+  // nunca llegaba pero sí se contaba.
+  const tipo = uberAdapter.classifyEvent(identidad.eventType)
+
+  if (tipo === 'CANCEL') {
+    if (!identidad.orderId) {
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'CANCEL_SIN_ORDER_ID')
+      return { outcome: 'FAILED', error: 'CANCEL_SIN_ORDER_ID' }
+    }
+    // Deliberadamente ANTES del guard de `channelLink`: una cancelación se atiende aunque el
+    // vínculo se haya borrado — la orden ya existe en la base y dejar de cocinarla no
+    // depende de que el canal siga conectado.
+    const r = await cancelDeliveryOrder(identidad.orderId, DeliveryProvider.UBER_EATS, 'cancelado por Uber')
+    await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, r.orderId)
+    return { outcome: 'CANCELLED', orderId: r.orderId }
+  }
+
+  // Ruido conocido (cambios de estado, provisioning): se marca visto para que la
+  // reconciliación no lo persiga eternamente. Queda persistido y consultable.
+  if (tipo !== 'NEW_ORDER' || !identidad.orderId) {
     await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
     return { outcome: 'NOT_AN_ORDER' }
   }
