@@ -118,6 +118,14 @@ export function aDisponibilidadUber(horario: HorarioSemanal) {
 }
 
 /** Ids estables y legibles: si cambian, los pedidos dejan de resolver (ver nota 🔴 arriba). */
+/** Cuántas opciones EXIGE el grupo. Nunca más de las que realmente tiene. */
+const minPermitido = (g: { required: boolean; minSelections: number; modifiers: unknown[] }) =>
+  g.required ? Math.min(Math.max(1, g.minSelections), g.modifiers.length) : 0
+
+/** Cuántas PERMITE. Sin tope explícito, tantas como opciones haya (o una si no es múltiple). */
+const maxPermitido = (g: { allowMultiple: boolean; maxSelections: number | null; modifiers: unknown[] }) =>
+  Math.min(g.maxSelections ?? (g.allowMultiple ? g.modifiers.length : 1), g.modifiers.length)
+
 const idCategoria = (nombre: string) =>
   `cat-${nombre
     .trim()
@@ -168,6 +176,15 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
       })
 
       for (const g of p.modifierGroups) {
+        // 🔴 Un grupo de modificadores VACÍO rompe el pedido del cliente. Si además es
+        // obligatorio, le pide elegir algo de una lista sin opciones y NO PUEDE completar la
+        // compra — el producto queda invendible sin que nada falle de nuestro lado.
+        // Toast lo documenta como falla de sincronización con Uber, DoorDash, Grubhub,
+        // Deliveroo y Skip: "an empty modifier group is one that exists but has no
+        // selectable modifier options inside it".
+        // Un grupo sin opciones no aporta NADA: se omite en vez de publicarlo roto.
+        if (g.modifiers.length === 0) continue
+
         const gid = `grp-${g.id}`
         if (vistos.has(gid)) continue
         vistos.add(gid)
@@ -177,8 +194,10 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
           title: t(g.name),
           quantity_info: {
             quantity: {
-              max_permitted: g.maxSelections ?? (g.allowMultiple ? 99 : 1),
-              min_permitted: g.required ? Math.max(1, g.minSelections) : 0,
+              // El máximo nunca puede quedar por debajo del mínimo ni de las opciones que
+              // existen: un grupo que exige 2 y permite 1 deja al cliente sin poder avanzar.
+              max_permitted: Math.max(maxPermitido(g), minPermitido(g)),
+              min_permitted: minPermitido(g),
             },
           },
           modifier_options: g.modifiers.map(m => ({ id: m.plu, type: 'ITEM' })),

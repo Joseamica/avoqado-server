@@ -186,4 +186,81 @@ describe('uber.menuMapper', () => {
       expect(mapSnapshotToUberMenu(menu(), { precios: { overrides: { 'SKU-COCHINITA': -50 } } }).items[0].price_info.price).toBe(8950)
     })
   })
+  // ── Fallas que la industria ya documentó ─────────────────────────────────────────────
+  describe('configuraciones de menú que rompen el pedido', () => {
+    const conGrupos = (grupos: unknown[]) =>
+      menu({
+        categories: [{ name: 'Tacos', products: [{ ...menu().categories[0].products[0], modifierGroups: grupos as never }] }],
+      })
+
+    it('🔴 un grupo de modificadores VACÍO no se publica: dejaría el producto invendible', () => {
+      // Toast lo documenta como falla de sincronización con Uber, DoorDash, Grubhub,
+      // Deliveroo y Skip. Si además es OBLIGATORIO, el cliente tiene que elegir algo de una
+      // lista sin opciones y NO PUEDE completar la compra — sin que nada falle de nuestro lado.
+      const p = mapSnapshotToUberMenu(
+        conGrupos([{ id: 'g0', name: 'Vacío', required: true, allowMultiple: false, minSelections: 1, maxSelections: 1, modifiers: [] }]),
+      )
+      expect(p.modifier_groups).toHaveLength(0)
+    })
+
+    it('🔴 el mínimo nunca excede las opciones que EXISTEN', () => {
+      // Un grupo que exige 3 y sólo tiene 1 opción deja al cliente sin poder avanzar.
+      const p = mapSnapshotToUberMenu(
+        conGrupos([
+          {
+            id: 'g1',
+            name: 'Salsas',
+            required: true,
+            allowMultiple: true,
+            minSelections: 3,
+            maxSelections: 5,
+            modifiers: [{ plu: 'S1', name: 'Verde', price: 0 }],
+          },
+        ]),
+      )
+      const q = p.modifier_groups[0].quantity_info as { quantity: { min_permitted: number; max_permitted: number } }
+      expect(q.quantity.min_permitted).toBe(1)
+      expect(q.quantity.max_permitted).toBe(1)
+    })
+
+    it('el máximo nunca queda por debajo del mínimo', () => {
+      const p = mapSnapshotToUberMenu(
+        conGrupos([
+          {
+            id: 'g2',
+            name: 'Extras',
+            required: true,
+            allowMultiple: false,
+            minSelections: 2,
+            maxSelections: 1,
+            modifiers: [
+              { plu: 'E1', name: 'Uno', price: 5 },
+              { plu: 'E2', name: 'Dos', price: 5 },
+            ],
+          },
+        ]),
+      )
+      const q = p.modifier_groups[0].quantity_info as { quantity: { min_permitted: number; max_permitted: number } }
+      expect(q.quantity.max_permitted).toBeGreaterThanOrEqual(q.quantity.min_permitted)
+    })
+
+    it('un grupo OPCIONAL con opciones sí se publica, con mínimo 0', () => {
+      const p = mapSnapshotToUberMenu(
+        conGrupos([
+          {
+            id: 'g3',
+            name: 'Extras',
+            required: false,
+            allowMultiple: true,
+            minSelections: 0,
+            maxSelections: null,
+            modifiers: [{ plu: 'X1', name: 'Queso', price: 12 }],
+          },
+        ]),
+      )
+      const q = p.modifier_groups[0].quantity_info as { quantity: { min_permitted: number; max_permitted: number } }
+      expect(q.quantity.min_permitted).toBe(0)
+      expect(q.quantity.max_permitted).toBe(1)
+    })
+  })
 })
