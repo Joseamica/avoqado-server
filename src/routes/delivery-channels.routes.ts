@@ -186,7 +186,7 @@ router.get(
   '/venues/:venueId/channels/uber/connect-url',
   authenticateTokenMiddleware,
   checkPermission('delivery-channels:manage'),
-  deliveryChannelsController.getUberConnectUrl,
+  ctrl.getUberConnectUrl,
 )
 
 router.post(
