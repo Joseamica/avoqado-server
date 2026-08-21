@@ -89,6 +89,37 @@ export function runIngestionContract(
       expect(pago.tenderTypeId).not.toBeNull() // tender del canal, auto-provisionado
     })
 
+    it('🔴 LLEGA A LA COCINA: el pedido crea su ticket de KDS', async () => {
+      // Sin esto la integración es un árbol cayendo en un bosque vacío: aceptamos el pedido
+      // en el marketplace —el cliente esperando comida, el reloj del proveedor corriendo—
+      // y la cocina no ve NADA. Comprobado contra la base el 2026-08-20: el pedido real de
+      // Uber (#77645) estaba CONFIRMED y tenía CERO filas de KDS.
+      //
+      // El KDS lee de su propia tabla (`KdsOrder`), no de `Order`, y hasta hoy sólo se
+      // llenaba cuando un cliente llamaba el endpoint a mano. Un pedido de marketplace no
+      // tiene a nadie que lo llame.
+      //
+      // [mercado] Square: los pedidos de apps de delivery "are all sent to and fulfilled
+      // directly from the kitchen" — lo configurable es QUÉ pantalla los muestra, no si
+      // llegan. Toast: los de terceros "approve automatically and skip the approval tab", y
+      // el auto-firing hay que tenerlo prendido para recibir pedidos en línea. En los dos,
+      // el default es que llegan.
+      const { order } = await ingestDeliveryOrder(hacerPedido(), obtenerLink())
+
+      const ticket = await prisma.kdsOrder.findFirst({ where: { orderId: order.id }, include: { items: true } })
+      expect(ticket).not.toBeNull()
+      expect(ticket!.orderNumber).toBe(order.orderNumber)
+      expect(ticket!.items.length).toBeGreaterThan(0)
+    })
+
+    it('reingerir NO duplica el ticket de cocina: la comanda se prepara una vez', async () => {
+      const p = hacerPedido()
+      const { order } = await ingestDeliveryOrder(p, obtenerLink())
+      await ingestDeliveryOrder(p, obtenerLink())
+
+      expect(await prisma.kdsOrder.count({ where: { orderId: order.id } })).toBe(1)
+    })
+
     it('IDEMPOTENTE: el mismo pedido dos veces no duplica venta ni cobro', async () => {
       const p = hacerPedido()
       const a = await ingestDeliveryOrder(p, obtenerLink())

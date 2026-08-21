@@ -221,4 +221,21 @@ describe('uber.mapper — contra el pedido real', () => {
     const sinTotal = { ...fixture, payment: { charges: { sub_total: { amount: 100, currency_code: 'MXN' } } } }
     expect(() => mapUberOrder(sinTotal)).toThrow(/total/i)
   })
+  it('🔴 la nota del cliente viaja al contrato: es lo que la cocina lee', () => {
+    // "sin cebolla" no es un adorno: sin ella la comanda sale mal y el cliente devuelve el
+    // plato. Es el único dato del pedido que no se puede reconstruir de ningún otro lado.
+    const conNota = {
+      ...fixture,
+      cart: { ...fixture.cart, items: [{ ...fixture.cart.items[0], special_instructions: '  Sin cebolla, por favor  ' }] },
+    }
+    expect(mapUberOrder(conNota).items[0].notes).toBe('Sin cebolla, por favor') // recortada
+  })
+
+  it('una nota vacía o mal formada no rompe el pedido: queda en null', () => {
+    // Un pedido perdido por una nota con basura sería el peor intercambio posible.
+    for (const basura of ['   ', 42, null, { texto: 'x' }]) {
+      const raro = { ...fixture, cart: { ...fixture.cart, items: [{ ...fixture.cart.items[0], special_instructions: basura }] } }
+      expect(mapUberOrder(raro).items[0].notes).toBeNull()
+    }
+  })
 })

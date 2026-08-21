@@ -185,6 +185,7 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
       quantity?: unknown
       price?: { unit_price?: unknown; total_price?: unknown }
       selected_modifier_groups?: unknown
+      special_instructions?: unknown
     }
     // 🔴 ENTERO, no objeto — verificado en el pedido real.
     const cantidad = typeof it.quantity === 'number' ? it.quantity : 1
@@ -199,6 +200,11 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
       // se prefiere si Uber lo manda por separado en algún tipo de pedido.
       externalData: it.external_data ?? (typeof it.id === 'string' ? it.id : null),
       name: tituloDe(it.title, `item ${i}`),
+      // ⚠️ NO VERIFICADO contra un pedido real: el de sandbox no traía notas. El campo
+      // es el que documenta Uber; si algún día llega una nota y no aparece en la
+      // comanda, es AQUÍ. Se ignora cualquier cosa que no sea texto en vez de romper el
+      // pedido por una nota mal formada.
+      notes: typeof it.special_instructions === 'string' && it.special_instructions.trim() ? it.special_instructions.trim() : null,
       quantity: cantidad,
       unitPrice: aPesos(montoDe(it.price?.unit_price, `item ${i} price.unit_price`)),
       total: aPesos(totalLinea),

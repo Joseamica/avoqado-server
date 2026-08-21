@@ -89,6 +89,10 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
       await prisma.orderItemModifier.deleteMany({ where: { orderItem: { orderId: { in: ids } } } })
       await prisma.orderItem.deleteMany({ where: { orderId: { in: ids } } })
       await prisma.order.deleteMany({ where: { venueId } })
+      // KdsOrder tiene FK a Venue: si no se borra, el deleteMany de venue de abajo
+      // truena y el catch de este bloque se lo traga — venues de prueba acumulándose
+      // en silencio para siempre. (KdsOrderItem cae solo, va en cascade.)
+      await prisma.kdsOrder.deleteMany({ where: { venueId } })
       await prisma.deliveryChannelLink.deleteMany({ where: { venueId } })
       await prisma.venueTenderTypeRevision.deleteMany({ where: { venueId } })
       await prisma.venueTenderType.deleteMany({ where: { venueId } })

@@ -328,6 +328,49 @@ export async function ingestDeliveryOrder(
     }
   }
 
+  // 🔴 QUE LLEGUE A LA COCINA. El KDS lee de su PROPIA tabla (`KdsOrder`), no de `Order`, y
+  // hasta hoy sólo se llenaba cuando un cliente llamaba el endpoint a mano — cosa que un
+  // pedido de marketplace no tiene quién haga. Resultado medido el 2026-08-20: el pedido
+  // real de Uber (#77645) quedó CONFIRMED con CERO filas de KDS. O sea: lo aceptamos en
+  // Uber, el cliente esperando su comida, y la cocina sin enterarse.
+  //
+  // Sólo en la PRIMERA ingesta: una actualización de un pedido ya en marcha no puede
+  // reimprimir la comanda ni duplicarla en la pantalla.
+  //
+  // NO FATAL y fuera de la transacción, igual que el socket: si el KDS falla, la venta ya
+  // está guardada y el pedido sigue apareciendo en la lista de órdenes. Perder la venta por
+  // no poder pintar un ticket sería peor que el problema que resuelve. Pero el log es
+  // `error` y no `warn` a propósito: que no llegue a la cocina es grave, no cosmético.
+  if (isNew) {
+    try {
+      await prisma.kdsOrder.create({
+        data: {
+          venueId: venue.id,
+          orderNumber: order.orderNumber,
+          orderType: 'DELIVERY',
+          orderId: order.id,
+          items: {
+            create: normalized.items.map(it => ({
+              productName: it.name,
+              quantity: it.quantity,
+              modifiers: it.modifiers?.length ? JSON.stringify(it.modifiers.map(m => ({ name: m.name, quantity: m.quantity }))) : null,
+              // Lo que el cliente escribió para este renglón. Es lo que separa servir bien
+              // de servir mal, y el único lugar del sistema donde hoy sobrevive.
+              notes: it.notes ?? null,
+            })),
+          },
+        },
+      })
+    } catch (error) {
+      logger.error('[❌ DeliveryIngest] el pedido NO llegó a la cocina (venta guardada, comanda no)', {
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        venueId: venue.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
   try {
     socketManager.broadcastToVenue(venue.id, isNew ? SocketEventType.ORDER_CREATED : SocketEventType.ORDER_UPDATED, {
       orderId: order.id,

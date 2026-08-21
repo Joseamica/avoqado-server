@@ -33,6 +33,11 @@ export interface NormalizedDeliveryItem {
   unitPrice: string
   /** total de la línea = unitPrice × quantity + modificadores */
   total: string
+  /**
+   * Lo que el cliente pidió por escrito para ESTE renglón ("sin cebolla", "bien cocido").
+   * Va a la comanda de cocina: es la diferencia entre servir bien y servir mal.
+   */
+  notes?: string | null
   modifiers?: NormalizedDeliveryModifier[]
 }
 
