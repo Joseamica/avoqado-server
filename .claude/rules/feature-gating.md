@@ -104,11 +104,10 @@ viceversa.**
 
 ### 🔴 El grandfathering vive en DOS niveles — resuélvelo SOLO con `access/grandfather.ts`
 
-`seatCapExempt` existe en `Venue` **y** en `Organization`. Un venue está exento si **cualquiera de
-los dos** la tiene. La de la organización es la que cubre las tiendas que el cliente **todavía no
-ha abierto**: la migración del rollout sólo alcanzó a los venues vivos en ese momento, así que las
-que nacen después arrancan en el tope del plan Gratis (PlayTelecom, 6 tiendas — el bloqueo aparece
-recién al invitar al tercer empleado).
+`seatCapExempt` existe en `Venue` **y** en `Organization`. Un venue está exento si **cualquiera de los dos** la tiene. La de la organización
+es la que cubre las tiendas que el cliente **todavía no ha abierto**: la migración del rollout sólo alcanzó a los venues vivos en ese
+momento, así que las que nacen después arrancan en el tope del plan Gratis (PlayTelecom, 6 tiendas — el bloqueo aparece recién al invitar al
+tercer empleado).
 
 ```typescript
 // ❌ MAL — sólo ve un nivel; discrepa del resto de la plataforma sin fallar
@@ -121,16 +120,13 @@ select: { ...GRANDFATHER_SELECT }
 if (resolveGrandfathered(venue)) ...
 ```
 
-- **Impórtalo de `access/grandfather.ts`, NO de `basePlan.service`** (que lo re-exporta por
-  comodidad): varias suites mockean `basePlan` completo, y pasar por él deja el resolver
-  `undefined` dentro de un gate que decide si alguien puede trabajar.
-- Los ocho consumidores actuales ya lo usan (basePlan ×4, `getVenueSeatCap`,
-  `assertCanAddSeatsBulk`, `getPlanState`, `seatReconciliation`, `venueFeature`, el middleware).
-  **Si añades un noveno, úsalo también**: un gate que contesta distinto a los demás no truena, sólo
-  deja pasar —o bloquea— a quien no debía.
-- No confundas exención con **estatus demo** (`LIVE_DEMO`/`TRIAL`): también exime del paywall, pero
-  NO es grandfathering. `venueIsExemptFromPlanGating` compone las dos; `venueIsGrandfathered` sólo
-  la primera.
+- **Impórtalo de `access/grandfather.ts`, NO de `basePlan.service`** (que lo re-exporta por comodidad): varias suites mockean `basePlan`
+  completo, y pasar por él deja el resolver `undefined` dentro de un gate que decide si alguien puede trabajar.
+- Los ocho consumidores actuales ya lo usan (basePlan ×4, `getVenueSeatCap`, `assertCanAddSeatsBulk`, `getPlanState`, `seatReconciliation`,
+  `venueFeature`, el middleware). **Si añades un noveno, úsalo también**: un gate que contesta distinto a los demás no truena, sólo deja
+  pasar —o bloquea— a quien no debía.
+- No confundas exención con **estatus demo** (`LIVE_DEMO`/`TRIAL`): también exime del paywall, pero NO es grandfathering.
+  `venueIsExemptFromPlanGating` compone las dos; `venueIsGrandfathered` sólo la primera.
 
 ### MCP (`src/mcp/tools/`): serialized inventory SIEMPRE por el módulo
 

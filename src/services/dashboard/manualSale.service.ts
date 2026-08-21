@@ -4,7 +4,16 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { logAction } from './activity-log.service'
-import { resolveIccid, resolveVenue, resolveStaffByCode, resolveCategory, mapPaymentForm, parseAmount } from './manualSale.resolvers'
+import {
+  resolveIccid,
+  resolveVenue,
+  resolveStaffByCode,
+  resolveCategory,
+  mapPaymentForm,
+  mapSaleStatus,
+  parseAmount,
+} from './manualSale.resolvers'
+import type { ManualSaleOutcome } from './manualSale.resolvers'
 import type { ManualSaleRowInput } from '../../schemas/dashboard/manualSale.schema'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
@@ -15,8 +24,20 @@ import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
  *
  * Unlike a normal TPV sale (which lands as a PENDING SaleVerification awaiting
  * back-office documentation review), a manual upload represents a sale whose
- * documentation was already checked offline, so the SaleVerification is created
- * directly as COMPLETED with the uploading actor stamped as its reviewer.
+ * outcome ya se decidió fuera del sistema, así que la SaleVerification se crea
+ * directamente en su estado FINAL, con el actor que sube el archivo estampado
+ * como revisor:
+ *
+ *   - "Aprobada" (default) → COMPLETED, la documentación se revisó offline.
+ *   - "Rechazada"          → REJECTED, venta perdida: el SIM salió pero la línea
+ *                            no se pudo vincular/portar y el cliente ya se fue.
+ *
+ * En AMBOS casos el SIM se marca SOLD. Ésa es la decisión de producto detrás de
+ * la columna "Estatus de Venta" (Isaac / founder, 2026-08-17): una venta rechazada
+ * SÍ sacó el SIM del inventario físico, así que dejarlo en custodia del supervisor
+ * es exactamente la mentira que la columna vino a arreglar. El resultado es idéntico
+ * al de una venta del TPV que el back-office rechazó — mismo par (SOLD, REJECTED),
+ * ningún estado inventado aparte.
  *
  * All 6 opaque row values are resolved to real org-scoped records first
  * (`manualSale.resolvers.ts`). On ANY resolver error nothing has been written
@@ -37,7 +58,7 @@ import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 const VENUE_TIMEZONE_DEFAULT = 'America/Mexico_City'
 
 export type CreateOneManualSaleResult =
-  | { ok: true; orderId: string; verificationId: string; venueId: string }
+  | { ok: true; orderId: string; verificationId: string; venueId: string; saleStatus: ManualSaleOutcome }
   | { ok: false; error: string }
 
 interface ManualSaleAuditPayload {
@@ -61,7 +82,14 @@ function isError<T extends object>(v: T | { error: string }): v is { error: stri
  * closure variable (which TS can't narrow across the callback boundary).
  */
 type TxResult =
-  | { ok: true; orderId: string; verificationId: string; venueId: string; audit: ManualSaleAuditPayload }
+  | {
+      ok: true
+      orderId: string
+      verificationId: string
+      venueId: string
+      saleStatus: ManualSaleOutcome
+      audit: ManualSaleAuditPayload
+    }
   | { ok: false; error: string }
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
@@ -139,6 +167,14 @@ export async function createOneManualSale(
           const categoryResult = await resolveCategory(orgId, row.simType, tx, item.categoryId ?? undefined)
           if (isError(categoryResult)) return { ok: false as const, error: categoryResult.error }
 
+          // Resultado declarado de la venta ("Estatus de Venta"). Se resuelve ANTES
+          // de escribir: un estatus no reconocido devuelve error con la tx intacta.
+          const saleStatusResult = mapSaleStatus(row.saleStatus)
+          if (isError(saleStatusResult)) return { ok: false as const, error: saleStatusResult.error }
+          const { outcome } = saleStatusResult
+          // El motivo solo tiene sentido en una venta rechazada; en una aprobada se ignora.
+          const rejectionNote = outcome === 'REJECTED' ? row.rejectionNote?.trim() || null : null
+
           const { method, amountApplies } = mapPaymentForm(row.paymentForm)
           const amount = parseAmount(row.amount, amountApplies)
 
@@ -169,6 +205,9 @@ export async function createOneManualSale(
               servedById: sellerStaffId,
               posRawData: {
                 manualSerializedSale: true,
+                // Permite separar en reportes las ventas externas rechazadas de las buenas
+                // sin volver a cruzar contra SaleVerification.
+                manualSaleStatus: outcome,
                 recordedByStaffId: actorStaffId,
                 iccid: item.serialNumber,
                 storeName: row.storeName,
@@ -238,7 +277,7 @@ export async function createOneManualSale(
               staffId: sellerStaffId,
               photos: [],
               scannedProducts: [],
-              status: 'COMPLETED',
+              status: outcome,
               inventoryDeducted: false,
               isPortabilidad: /portabilidad/i.test(row.saleType),
               serialNumbers: [normalizedIccid],
@@ -248,6 +287,11 @@ export async function createOneManualSale(
               createdAt: soldAt,
               reviewedById: actorStaffId,
               reviewedAt: soldAt,
+              // Texto libre del operador. `rejectionReasons` se queda vacío a propósito:
+              // ese catálogo describe fallas de DOCUMENTACIÓN (falta la foto de vinculación,
+              // imágenes ilegibles…), no "no se pudo vincular la línea", y el propio flujo de
+              // revisión tampoco exige motivos cuando el rechazo es final.
+              reviewNotes: rejectionNote,
             },
           })
 
@@ -263,7 +307,7 @@ export async function createOneManualSale(
             amount: amount.toString(),
           }
 
-          return { ok: true, orderId: order.id, verificationId: verification.id, venueId: venue.id, audit }
+          return { ok: true, orderId: order.id, verificationId: verification.id, venueId: venue.id, saleStatus: outcome, audit }
         }),
       row.iccid,
     )
@@ -272,8 +316,11 @@ export async function createOneManualSale(
 
     // Post-tx, fire-and-forget audit dual-write (never blocks/rolls back). Only
     // reached when the tx committed with a successful sale.
+    // Acción distinta para la venta rechazada: es la anomalía que un owner audita
+    // (un SIM que salió sin venta cobrable), y compartir acción con las aprobadas
+    // la escondería entre cientos de filas normales.
     void logAction({
-      action: 'MANUAL_SALE_CREATED',
+      action: result.saleStatus === 'REJECTED' ? 'MANUAL_SALE_REJECTED_CREATED' : 'MANUAL_SALE_CREATED',
       entity: 'Order',
       entityId: result.orderId,
       staffId: actorStaffId,
@@ -283,11 +330,18 @@ export async function createOneManualSale(
         sellerStaffId: result.audit.sellerStaffId,
         storeName: result.audit.storeName,
         amount: result.audit.amount,
+        saleStatus: result.saleStatus,
       },
     })
     void writeCustodyEvent(result.audit, actorStaffId)
 
-    return { ok: true, orderId: result.orderId, verificationId: result.verificationId, venueId: result.venueId }
+    return {
+      ok: true,
+      orderId: result.orderId,
+      verificationId: result.verificationId,
+      venueId: result.venueId,
+      saleStatus: result.saleStatus,
+    }
   } catch (err) {
     logger.error(`[MANUAL SALE] createOneManualSale failed for iccid=${row.iccid}: ${(err as Error).message}`)
     return { ok: false, error: 'No se pudo registrar la venta' }
@@ -360,6 +414,12 @@ export interface RowResult {
   iccid: string
   storeName: string
   motivo?: string
+  /**
+   * Resultado declarado de la fila. Viaja hasta la vista previa para que el operador
+   * VEA cuáles va a subir como rechazadas antes de confirmar — una rechazada creada
+   * por error queda como venta perdida y sólo se deshace a mano.
+   */
+  saleStatus?: ManualSaleOutcome
 }
 
 export interface BulkManualSalesResult {
@@ -407,7 +467,7 @@ export async function bulkManualSales(
     if (apply) {
       const result = await createOneManualSale(orgId, actorStaffId, row)
       if (result.ok) {
-        crear.push({ index, iccid: row.iccid, storeName: row.storeName })
+        crear.push({ index, iccid: row.iccid, storeName: row.storeName, saleStatus: result.saleStatus })
       } else if (result.error === ICCID_ALREADY_SOLD_ERROR) {
         omitir.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: result.error })
       } else {
@@ -418,6 +478,16 @@ export async function bulkManualSales(
 
     // Preview: run the resolvers directly, read-only, against the base
     // `prisma` client (no $transaction — nothing is written in preview).
+    //
+    // El estatus va primero: es puro, no cuesta un query, y un valor no reconocido
+    // ("Pendiente", una falta de ortografía) debe verse como error de la fila sin
+    // que el operador tenga que resolver antes el ICCID.
+    const saleStatusResult = mapSaleStatus(row.saleStatus)
+    if (isError(saleStatusResult)) {
+      error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: saleStatusResult.error })
+      continue
+    }
+
     const iccidResult = await resolveIccid(orgId, row.iccid, prisma)
     if (isError(iccidResult)) {
       if (iccidResult.error === ICCID_ALREADY_SOLD_ERROR) {
@@ -447,7 +517,7 @@ export async function bulkManualSales(
       continue
     }
 
-    crear.push({ index, iccid: row.iccid, storeName: row.storeName })
+    crear.push({ index, iccid: row.iccid, storeName: row.storeName, saleStatus: saleStatusResult.outcome })
   }
 
   if (apply) {

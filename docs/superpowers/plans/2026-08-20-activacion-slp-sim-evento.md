@@ -1,6 +1,7 @@
 # Activación SLP — venue + reasignación automática de SIM de Evento — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Crear el venue `ACTIVACIÓN SLP` y una barredora automática que, cada 15 minutos, mueve las ventas de SIM de Evento (pasadas y
 futuras) de la tienda del promotor hacia ese venue — sin tocar el turno/caja del promotor.
@@ -19,12 +20,12 @@ futuras) de la tienda del promotor hacia ese venue — sin tocar el turno/caja d
 ## Global Constraints
 
 - Nunca tocar `Payment.shiftId`, `Terminal`, `Shift`, `CashDrawerEvent` — el turno y caja física del promotor no se mueven.
-- Toda comparación de `categoryName`/`state` es case/espacio-insensible (`.trim().toLowerCase()` o `mode: 'insensitive'` en Prisma) —
-  nunca match exacto sensible a mayúsculas, nunca fuzzy/`LIKE`/`startsWith`.
-- Nunca reasignar una orden parcialmente por item — sólo si el 100% de sus `OrderItem` son de la categoría de la regla; si no, se salta y
-  se loggea (`mixed_order_skipped`), nunca se mueve.
-- Resolver `Organization` y `Venue` destino **por nombre/slug en cada tick**, nunca ids fijos en código — el job debe no-operar (no
-  tronar) en un ambiente sin datos de PlayTelecom.
+- Toda comparación de `categoryName`/`state` es case/espacio-insensible (`.trim().toLowerCase()` o `mode: 'insensitive'` en Prisma) — nunca
+  match exacto sensible a mayúsculas, nunca fuzzy/`LIKE`/`startsWith`.
+- Nunca reasignar una orden parcialmente por item — sólo si el 100% de sus `OrderItem` son de la categoría de la regla; si no, se salta y se
+  loggea (`mixed_order_skipped`), nunca se mueve.
+- Resolver `Organization` y `Venue` destino **por nombre/slug en cada tick**, nunca ids fijos en código — el job debe no-operar (no tronar)
+  en un ambiente sin datos de PlayTelecom.
 - La lectura de entrada del job (candidatos) va envuelta en `retry(..., shouldRetryDbConnectionError)` — regla obligatoria de
   `.claude/rules/cron-jobs.md`. La transacción de reasignación y `logAction` van FUERA del retry.
 - Un fallo en UNA orden se loggea y el loop continúa — nunca aborta el tick completo.
@@ -74,8 +75,8 @@ describe('isOrderPureCategoryMatch', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"`
-Expected: FAIL — `Cannot find module '@/jobs/playtelecomEventSimReassignment.job'` (el archivo aún no existe).
+Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"` Expected: FAIL —
+`Cannot find module '@/jobs/playtelecomEventSimReassignment.job'` (el archivo aún no existe).
 
 - [ ] **Step 3: Crear el archivo con la implementación mínima**
 
@@ -130,8 +131,7 @@ export function isOrderPureCategoryMatch(categoryNames: Array<string | null>, ca
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"`
-Expected: PASS — los 5 casos.
+Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"` Expected: PASS — los 5 casos.
 
 - [ ] **Step 5: Formatear y commitear**
 
@@ -153,8 +153,8 @@ git commit -m "feat: predicado puro isOrderPureCategoryMatch (Activación SLP, A
 **Interfaces:**
 
 - Consumes: `isOrderPureCategoryMatch` (Tarea 1), `PLAYTELECOM_EVENT_VENUE_REASSIGNMENT_RULES` (Tarea 1).
-- Produces: `reassignEventSimSalesForRule(rule: EventVenueReassignmentRule): Promise<{ reassigned: number; skippedMixed: number }>` —
-  usada por la Tarea 3.
+- Produces: `reassignEventSimSalesForRule(rule: EventVenueReassignmentRule): Promise<{ reassigned: number; skippedMixed: number }>` — usada
+  por la Tarea 3.
 
 - [ ] **Step 1: Escribir los tests que fallan (mock de Prisma)**
 
@@ -180,7 +180,11 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
 
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { isOrderPureCategoryMatch, reassignEventSimSalesForRule, type EventVenueReassignmentRule } from '@/jobs/playtelecomEventSimReassignment.job'
+import {
+  isOrderPureCategoryMatch,
+  reassignEventSimSalesForRule,
+  type EventVenueReassignmentRule,
+} from '@/jobs/playtelecomEventSimReassignment.job'
 
 const RULE: EventVenueReassignmentRule = {
   orgName: 'PlayTelecom',
@@ -280,8 +284,8 @@ describe('reassignEventSimSalesForRule', () => {
 
 - [ ] **Step 2: Correr los tests y verificar que fallan**
 
-Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"`
-Expected: FAIL — `reassignEventSimSalesForRule is not a function` (todavía no existe).
+Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"` Expected: FAIL —
+`reassignEventSimSalesForRule is not a function` (todavía no existe).
 
 - [ ] **Step 3: Implementar `reassignEventSimSalesForRule`**
 
@@ -350,7 +354,12 @@ export async function reassignEventSimSalesForRule(
   for (const orderId of orderIds) {
     try {
       const orderItems = await prisma.orderItem.findMany({ where: { orderId }, select: { categoryName: true } })
-      if (!isOrderPureCategoryMatch(orderItems.map(i => i.categoryName), rule.categoryName)) {
+      if (
+        !isOrderPureCategoryMatch(
+          orderItems.map(i => i.categoryName),
+          rule.categoryName,
+        )
+      ) {
         skippedMixed++
         logger.warn('[PlayTelecom Event SIM Reassignment] Orden mixta, se salta para revisión manual', {
           entrypoint: 'job:playtelecom-event-sim-reassignment',
@@ -394,8 +403,8 @@ export async function reassignEventSimSalesForRule(
 
 - [ ] **Step 4: Correr los tests y verificar que pasan**
 
-Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"`
-Expected: PASS — los 5 casos nuevos + los 5 de la Tarea 1 (10 en total).
+Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"` Expected: PASS — los 5 casos nuevos + los 5 de la
+Tarea 1 (10 en total).
 
 - [ ] **Step 5: Formatear y commitear**
 
@@ -452,8 +461,8 @@ describe('reassignEventSimSales (orquestador)', () => {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"`
-Expected: FAIL — `reassignEventSimSales is not a function`.
+Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"` Expected: FAIL —
+`reassignEventSimSales is not a function`.
 
 - [ ] **Step 3: Implementar el orquestador y el arranque del cron**
 
@@ -496,8 +505,8 @@ export function startPlaytelecomEventSimReassignmentJob(): void {
 
 - [ ] **Step 4: Correr los tests y verificar que pasan**
 
-Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"`
-Expected: PASS — los 11 casos (10 previos + 1 nuevo).
+Run: `npx jest --selectProjects unit --testPathPattern "playtelecomEventSimReassignment"` Expected: PASS — los 11 casos (10 previos + 1
+nuevo).
 
 - [ ] **Step 5: Wirear el arranque en `server.ts`**
 
@@ -510,17 +519,16 @@ import { startPlaytelecomEventSimReassignmentJob } from './jobs/playtelecomEvent
 En `src/server.ts:424`, justo después de la línea `startAreaTicketExternalReconciliationJob()`:
 
 ```typescript
-      // Start area-ticket external-charge reconciliation (opens UNCONFIRMED_CHARGE incidents)
-      startAreaTicketExternalReconciliationJob()
+// Start area-ticket external-charge reconciliation (opens UNCONFIRMED_CHARGE incidents)
+startAreaTicketExternalReconciliationJob()
 
-      // Start PlayTelecom Event-SIM venue reassignment (Asana 1217556190300772)
-      startPlaytelecomEventSimReassignmentJob()
+// Start PlayTelecom Event-SIM venue reassignment (Asana 1217556190300772)
+startPlaytelecomEventSimReassignmentJob()
 ```
 
 - [ ] **Step 6: Verificar que el server sigue compilando**
 
-Run: `npx tsc -p tsconfig.build.json --noEmit`
-Expected: 0 errores.
+Run: `npx tsc -p tsconfig.build.json --noEmit` Expected: 0 errores.
 
 Si la máquina está saturada, usar el script de verificación repartida del workspace en vez de correrlo a pelo:
 
@@ -706,20 +714,17 @@ ACTIVACIÓN SLP?" y esperar un sí explícito antes de tocar `RENDER_DATABASE_UR
 
 - [ ] **Step 1: Suite completa de la carpeta de jobs**
 
-Run: `npx jest --selectProjects unit --testPathPattern "jobs/playtelecomEventSimReassignment"`
-Expected: PASS, 11 casos.
+Run: `npx jest --selectProjects unit --testPathPattern "jobs/playtelecomEventSimReassignment"` Expected: PASS, 11 casos.
 
 - [ ] **Step 2: Typecheck completo**
 
 Run: `npx tsc -p tsconfig.build.json --noEmit` (o `./scripts/avq-verify.sh avoqado-server npx tsc -p tsconfig.build.json --noEmit` si la
-máquina está saturada — regla del workspace).
-Expected: 0 errores.
+máquina está saturada — regla del workspace). Expected: 0 errores.
 
 - [ ] **Step 3: `npm run pre-deploy`**
 
-Run: `npm run pre-deploy`
-Expected: PASS. Si algo truena en un archivo que esta tarea NO tocó, no es de este cambio — anotarlo en el reporte, no debuggearlo aquí
-(regla del workspace: varias sesiones trabajan en paralelo).
+Run: `npm run pre-deploy` Expected: PASS. Si algo truena en un archivo que esta tarea NO tocó, no es de este cambio — anotarlo en el
+reporte, no debuggearlo aquí (regla del workspace: varias sesiones trabajan en paralelo).
 
 - [ ] **Step 4: Commit final si algo quedó suelto**
 

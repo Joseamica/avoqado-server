@@ -213,6 +213,49 @@ export async function resolveCategory(
 }
 
 /**
+ * El resultado de la venta tal como lo declara la columna "Estatus de Venta":
+ * `COMPLETED` = "Venta correcta" · `REJECTED` = venta perdida (terminal), el SIM
+ * salió pero la línea no se pudo vincular/portar y el cliente ya se fue.
+ * Son los MISMOS valores de `SaleVerificationStatus` que produce el flujo de
+ * revisión del TPV — una venta externa rechazada queda idéntica a una del TPV
+ * que el back-office rechazó, no en un estado inventado aparte.
+ */
+export type ManualSaleOutcome = 'COMPLETED' | 'REJECTED'
+
+const APPROVED_LABELS = new Set(['aprobada', 'aprobado', 'aprobadas', 'aprobados', 'correcta', 'venta correcta', 'ok'])
+const REJECTED_LABELS = new Set(['rechazada', 'rechazado', 'rechazadas', 'rechazados'])
+
+/**
+ * Interpreta la columna "Estatus de Venta" del Excel.
+ *
+ * Vacía o ausente → `COMPLETED`: los archivos que el operador ya venía subiendo
+ * no traen la columna y todos eran ventas aprobadas, así que ese es el default
+ * compatible hacia atrás.
+ *
+ * Un valor que NO se reconoce es un ERROR, nunca un default silencioso: asumir
+ * "aprobada" ante un texto raro filtraría como venta buena (facturable a Walmart)
+ * algo que el operador quiso marcar como perdido. Preferimos que la fila caiga en
+ * la columna de errores de la vista previa y él la corrija.
+ */
+export function mapSaleStatus(raw: string | undefined | null): Resolved<{ outcome: ManualSaleOutcome }> {
+  const normalized = normalizeName(raw ?? '')
+
+  if (normalized === '') {
+    return { outcome: 'COMPLETED' }
+  }
+
+  if (APPROVED_LABELS.has(normalized)) {
+    return { outcome: 'COMPLETED' }
+  }
+
+  if (REJECTED_LABELS.has(normalized)) {
+    return { outcome: 'REJECTED' }
+  }
+
+  return { error: 'Estatus de venta no válido (usa "Aprobada" o "Rechazada")' }
+}
+
+/**
  * Maps the raw "Forma de Pago" sheet value to a `PaymentMethod` enum value
  * plus whether the amount column should be honored (`amountApplies`).
  *
