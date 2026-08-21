@@ -659,11 +659,14 @@ describe('ingestDeliveryOrder', () => {
   // ============================================================
   // 11. I2 (IMPORTANT): modo AUTO dispara el accept al canal tras ingesta exitosa
   // ============================================================
-  it('I2: link AUTO + orden nueva (created:true) → dispatchOrderStatus llamado con (order, "ACCEPTED")', async () => {
+  it('I2: link AUTO + orden nueva (created:true) → dispatchOrderStatus con el LINK que ya tenemos', async () => {
     const result = await ingestDeliveryOrder(makeNormalized(), link) // link.orderAcceptanceMode = 'AUTO' (fixture)
 
     expect(result.created).toBe(true)
-    expect(dispatchOrderStatus).toHaveBeenCalledWith(expect.objectContaining({ id: 'order1' }), 'ACCEPTED')
+    // 🔴 El tercer argumento no es adorno: sin él, el despachador vuelve a buscar el canal
+    // en la base y NO lo encuentra, porque el evento se liga a la orden DESPUÉS de esta
+    // ingesta. Era una carrera que producía un warning en cada pedido de Uber.
+    expect(dispatchOrderStatus).toHaveBeenCalledWith(expect.objectContaining({ id: 'order1' }), 'ACCEPTED', link)
   })
 
   it('I2: link MANUAL → dispatchOrderStatus NO se llama (aceptación manual queda para el staff)', async () => {

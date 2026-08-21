@@ -400,7 +400,7 @@ export async function ingestDeliveryOrder(
   // tumbe la ingesta — el pedido ya está persistido, eso jamás se revierte por un fallo aquí.
   if (isNew && link.orderAcceptanceMode === OrderAcceptanceMode.AUTO) {
     try {
-      void dispatchOrderStatus(order, 'ACCEPTED').catch(error => {
+      void dispatchOrderStatus(order, 'ACCEPTED', link).catch(error => {
         logger.error('[❌ DeliveryIngest] AUTO-accept dispatch falló (async, no fatal)', {
           orderId: order.id,
           error: error instanceof Error ? error.message : 'Unknown error',
