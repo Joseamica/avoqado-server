@@ -188,5 +188,16 @@ export interface DirectDeliveryAdapter {
   markReady?(orderId: string, storeId: string): Promise<ActionResult>
 
   publishMenu?(snapshot: MenuSnapshot, storeId: string): Promise<ActionResult>
+
+  /**
+   * El menú YA TRADUCIDO al formato del proveedor, SIN publicarlo.
+   *
+   * Existe para que el sincronizador pueda sacarle huella y decidir si hace falta publicar,
+   * sin gastar una llamada de red. Se hashea lo traducido y no el snapshot interno a
+   * propósito: si mañana se arregla un bug del traductor, la huella cambia y el menú se
+   * republica solo — hashear el snapshot dejaría al proveedor con el menú mal traducido
+   * hasta que alguien editara un producto por casualidad.
+   */
+  buildMenuPayload?(snapshot: MenuSnapshot): unknown
   setStoreStatus?(paused: boolean, storeId: string): Promise<ActionResult>
 }

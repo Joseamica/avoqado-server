@@ -5460,6 +5460,12 @@ model DeliveryChannelLink {
 
   autoSyncMenu   Boolean   @default(true)
   lastMenuSyncAt DateTime?
+  /// Huella (SHA-256) del menú tal como se publicó por última vez al proveedor.
+  /// El sincronizador compara contra esto en vez de engancharse a cada edición de
+  /// producto: así detecta cambios vengan de donde vengan —dashboard, MCP, un script,
+  /// SQL directo— y se auto-corrige si una publicación se perdió. Un enganche por
+  /// evento sólo ve los caminos que alguien se acordó de instrumentar.
+  lastMenuHash   String?
 
   /// Config extra por proveedor (p.ej. mapa channelId→OrderSource de Deliverect)
   config Json?

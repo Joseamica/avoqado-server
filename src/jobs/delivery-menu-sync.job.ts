@@ -1,0 +1,94 @@
+// jobs/delivery-menu-sync.job.ts
+
+import { CronJob } from 'cron'
+
+import logger from '../config/logger'
+import { scheduleJob } from '../observability/jobContext'
+import { syncChannelMenu, syncableLinksWhere } from '../services/delivery-channels/core/menuSync.service'
+import prisma from '../utils/prismaClient'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+
+/**
+ * Mantiene el menú de cada canal de delivery igual al de Avoqado.
+ *
+ * 🔴 POR QUÉ EXISTE (founder, 2026-08-20: "es importante que siempre los menús estén
+ * actualizados, sino sería un problema grave"). Un menú viejo en el proveedor cuesta dinero
+ * de dos formas y ninguna falla visiblemente:
+ *   · El cliente paga el precio VIEJO — el proveedor cobra lo que SU menú dice, y la
+ *     diferencia la come el negocio.
+ *   · El cliente pide algo que ya no existe y hay que rechazar. Uber exige 99.9% de tasa de
+ *     inyección y por debajo del 99% REVOCA el acceso: los rechazos por menú viejo se pagan
+ *     con la integración completa.
+ *
+ * Compara por HUELLA, no por eventos (ver `menuSync.service.ts`): detecta cambios vengan de
+ * donde vengan y se auto-corrige si una publicación se perdió.
+ *
+ * CADENCIA — 5 minutos, y el número está pensado, no elegido al azar: `PUT /menus` REEMPLAZA
+ * el menú entero del proveedor, así que correrlo cada minuto mientras alguien edita su carta
+ * lo republicaría 20 veces seguidas. Cinco minutos agrupa una tanda de ediciones en una sola
+ * publicación y deja el menú viejo, a lo mucho, ese rato.
+ */
+export class DeliveryMenuSyncJob {
+  private job: CronJob | null = null
+
+  /** Cada 5 min al segundo :20 — NUNCA :00, regla anti-estampida (.claude/rules/cron-jobs.md). */
+  private readonly CRON_PATTERN = '20 */5 * * * *'
+
+  /** Tope por pasada: publicar un menú es una llamada pesada; una tanda grande se reparte. */
+  private readonly BATCH_SIZE = 20
+
+  start(): void {
+    if (this.job) return
+    this.job = scheduleJob('deliveryMenuSync', this.CRON_PATTERN, async () => {
+      await this.runOnce()
+    })
+    logger.info('📋 Delivery menu sync job started — cada 5min, tope 20 canales')
+  }
+
+  stop(): void {
+    this.job?.stop()
+    this.job = null
+  }
+
+  async runOnce(): Promise<{ publicados: number; sinCambio: number; fallidos: number }> {
+    let publicados = 0
+    let sinCambio = 0
+    let fallidos = 0
+
+    try {
+      // Regla del repo: la PRIMERA lectura del job va envuelta en retry — es la que muere
+      // en la estampida de conexiones, y corre antes de cualquier efecto.
+      const links = await retry(
+        () =>
+          prisma.deliveryChannelLink.findMany({
+            where: syncableLinksWhere(),
+            // El menos reciente primero: si hay más canales que el tope, todos avanzan por
+            // turnos en vez de que unos pocos acaparen cada pasada.
+            orderBy: { lastMenuSyncAt: { sort: 'asc', nulls: 'first' } },
+            take: this.BATCH_SIZE,
+          }),
+        { shouldRetry: shouldRetryDbConnectionError, context: 'deliveryMenuSync.scan' },
+      )
+
+      for (const link of links) {
+        // Aislamiento por canal: que el menú de un negocio no se quede viejo porque el de
+        // otro reventó.
+        const r = await syncChannelMenu(link)
+        if (r.outcome === 'PUBLISHED') publicados++
+        else if (r.outcome === 'UNCHANGED') sinCambio++
+        else if (r.outcome === 'FAILED') fallidos++
+      }
+
+      if (publicados > 0 || fallidos > 0) {
+        logger.info('📋 [MenuSync] pasada terminada', { publicados, sinCambio, fallidos, revisados: links.length })
+      }
+    } catch (error) {
+      // Nunca tumbar el cron: la siguiente pasada reintenta sola porque la huella no cambió.
+      logger.error('🚨 [MenuSync] la pasada falló completa', { error: error instanceof Error ? error.message : error })
+    }
+
+    return { publicados, sinCambio, fallidos }
+  }
+}
+
+export const deliveryMenuSyncJob = new DeliveryMenuSyncJob()

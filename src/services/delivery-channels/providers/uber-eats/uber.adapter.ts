@@ -117,6 +117,11 @@ export const uberAdapter = {
     return { ok, status: r.status, raw: r.text }
   },
 
+  /** El menú traducido, sin publicarlo — para que el sincronizador le saque huella. */
+  buildMenuPayload(snapshot: MenuSnapshot, opts?: UberMenuOptions): unknown {
+    return mapSnapshotToUberMenu(snapshot, opts)
+  },
+
   /**
    * Publica el menú completo del venue en la tienda de Uber.
    *
