@@ -41,6 +41,7 @@ import * as refundMobileController from '../controllers/mobile/refund.mobile.con
 import * as estimateMobileController from '../controllers/mobile/estimate.mobile.controller'
 import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
+import * as deliveryOrderMobileController from '../controllers/mobile/deliveryOrder.mobile.controller'
 import * as kdsMobileController from '../controllers/mobile/kds.mobile.controller'
 import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
 import * as syncMobileController from '../controllers/mobile/sync.mobile.controller'
@@ -699,6 +700,35 @@ router.get('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermissi
  *         description: Order not found
  */
 router.get('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, checkPermission('orders:read'), orderMobileController.getOrder)
+
+/**
+ * Aceptar o rechazar un pedido de una app de delivery, desde el punto de venta.
+ *
+ * 🔴 Sin esto, el modo MANUAL era una trampa: el dashboard dejaba activarlo, entraban los
+ * pedidos, NADIE podía aceptarlos, y el proveedor los cancelaba a los ~11.5 minutos. Todos,
+ * en silencio y sin que nada fallara.
+ *
+ * Y es la salida cuando el marketplace vende algo que la cocina no puede preparar — cosa
+ * que pasa de verdad en un venue sin inventario, porque ahí nunca se marca nada como
+ * agotado y el proveedor lo sigue ofreciendo.
+ *
+ * Permiso `orders:update`: quien puede modificar una cuenta puede decir si la cocina la
+ * saca. No se inventa un permiso nuevo — uno más que nadie tiene asignado deja el botón
+ * muerto para todos.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/delivery/accept',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  deliveryOrderMobileController.acceptOrder,
+)
+
+router.post(
+  '/venues/:venueId/orders/:orderId/delivery/deny',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  deliveryOrderMobileController.denyOrder,
+)
 
 /**
  * @openapi

@@ -266,7 +266,10 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
       )
 
       const ok = activacion.status < 400
-      ok ? activadas++ : fallidas++
+      // `if` y no un ternario: un ternario cuyo valor se tira es una expresión sin efecto
+      // declarado, y el linter lo marca con razón — el incremento es el efecto, no el valor.
+      if (ok) activadas++
+      else fallidas++
       filas.push(
         `<li>${encabezado}activación: <span class="${ok ? 'ok' : 'bad'}">HTTP ${activacion.status}</span>` +
           (ok ? '' : ` — ${esc(activacion.text.slice(0, 200))}`) +

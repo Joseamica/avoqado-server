@@ -208,6 +208,13 @@ export interface DirectDeliveryAdapter {
   /** Sólo si el proveedor espera que el POS conteste — y normalmente con un plazo. */
   acceptOrder?(orderId: string, storeId: string): Promise<ActionResult>
   denyOrder?(orderId: string, storeId: string, reason?: DenyReason): Promise<ActionResult>
+
+  /**
+   * Cancela un pedido YA ACEPTADO. NO es lo mismo que `denyOrder`:
+   *  · denegar  = rechazarlo ANTES de decir que sí. Limpio; el cliente se entera al instante.
+   *  · cancelar = deshacerlo DESPUÉS. Cuesta más caro: el cliente ya está esperando su comida.
+   */
+  cancelOrder?(orderId: string, storeId: string, reason?: DenyReason): Promise<ActionResult>
   markReady?(orderId: string, storeId: string): Promise<ActionResult>
 
   publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown; precios?: unknown }): Promise<ActionResult>
