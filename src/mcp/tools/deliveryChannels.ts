@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { getDeliveryDailySummary } from '@/services/delivery-channels/core/deliverySummary.service'
 import { calcularTasaInyeccion } from '@/services/delivery-channels/core/injectionRate.service'
+import { menuSyncStatusOf } from '@/services/delivery-channels/core/menuSync.service'
 import { hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -69,11 +70,9 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           // ausencia con `autoSyncMenu` prendido significa exactamente "nunca se logró
           // publicar" — no "todavía no toca". Por eso se puede responder sin adivinar.
           menuPublicado: l.lastMenuHash !== null,
-          menuSyncStatus: !l.autoSyncMenu
-            ? 'MANUAL' // el dueño lo apagó: mantiene su menú del proveedor a mano
-            : l.lastMenuHash === null
-              ? 'NUNCA_PUBLICADO' // 🚨 lo que el operador tiene que ver
-              : 'AL_DIA',
+          // Una sola derivación compartida con el REST del dashboard: dos copias acabarían
+          // contestando distinto y nadie sabría a cuál creerle.
+          menuSyncStatus: menuSyncStatusOf(l),
           lastMenuHash: undefined, // la huella misma no le sirve a nadie fuera del sincronizador
         })),
         todayByChannel,

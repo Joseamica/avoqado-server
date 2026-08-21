@@ -23,6 +23,8 @@ import logger from '../../../config/logger'
 import { ConflictError, NotFoundError, ValidationError } from '../../../errors/AppError'
 import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
+import { calcularTasaInyeccion } from './injectionRate.service'
+import { menuSyncStatusOf } from './menuSync.service'
 import { getAdapter } from './statusDispatcher.service'
 
 /** Select explícito — NUNCA incluye `webhookSecret`. Usado por list/create/update. */
@@ -36,6 +38,7 @@ const SAFE_SELECT = {
   status: true,
   autoSyncMenu: true,
   lastMenuSyncAt: true,
+  lastMenuHash: true,
   config: true,
   createdAt: true,
   updatedAt: true,
@@ -45,11 +48,33 @@ export type DeliveryChannelLinkSafe = Omit<DeliveryChannelLink, 'webhookSecret'>
 
 /** GET /venues/:venueId/channels — lista los canales del venue. NUNCA expone webhookSecret. */
 export async function listChannelLinks(venueId: string): Promise<DeliveryChannelLinkSafe[]> {
-  return prisma.deliveryChannelLink.findMany({
+  const links = (await prisma.deliveryChannelLink.findMany({
     where: { venueId },
     select: SAFE_SELECT,
     orderBy: { createdAt: 'desc' },
-  }) as unknown as Promise<DeliveryChannelLinkSafe[]>
+  })) as unknown as Array<DeliveryChannelLinkSafe & { autoSyncMenu: boolean; lastMenuHash: string | null; provider: DeliveryProvider }>
+
+  // 🔴 Dos cosas que el dueño necesita VER y que hasta hoy sólo existían en el log o en la
+  // base:
+  //   · `menuSyncStatus` — un menú que nunca se logró publicar deja al proveedor vendiendo
+  //     otra carta, o ninguna, y nadie se entera hasta que un cliente se queja.
+  //   · `injectionRate` — es el número con el que el proveedor decide REVOCAR el acceso
+  //     (Uber: exige 99.9%, revoca bajo 99%). Era invisible: se podía estar cayendo semanas.
+  //
+  // Se calculan aquí, en el listado que la pantalla ya pide, en vez de en un endpoint aparte:
+  // un dato que exige una segunda llamada es un dato que la UI acaba no mostrando.
+  return Promise.all(
+    links.map(async l => {
+      const { lastMenuHash: _oculto, ...resto } = l
+      return {
+        ...resto,
+        menuSyncStatus: menuSyncStatusOf(l),
+        // La huella misma no se expone: fuera del sincronizador no le sirve a nadie y sólo
+        // invita a que alguien la use como si significara algo.
+        injectionRate: await calcularTasaInyeccion({ venueId, provider: l.provider }).catch(() => null),
+      }
+    }),
+  ) as unknown as DeliveryChannelLinkSafe[]
 }
 
 export interface CreateChannelLinkInput {

@@ -123,6 +123,24 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
   }
 }
 
+/**
+ * ¿Está el menú de este canal al día en el proveedor?
+ *
+ * Vive aquí, en UN solo lugar, y lo consumen el MCP y el REST del dashboard. Dos derivaciones
+ * de lo mismo se separan: la del MCP diría "al día" mientras la del dashboard dice "nunca
+ * publicado", y quien las lea no sabrá a cuál creerle.
+ *
+ * Se puede contestar sin adivinar porque `lastMenuHash` se guarda SÓLO cuando la publicación
+ * salió bien: su ausencia con el auto-sync prendido significa exactamente "nunca se logró
+ * publicar", no "todavía no toca".
+ */
+export type MenuSyncStatus = 'MANUAL' | 'NUNCA_PUBLICADO' | 'AL_DIA'
+
+export function menuSyncStatusOf(link: { autoSyncMenu: boolean; lastMenuHash: string | null }): MenuSyncStatus {
+  if (!link.autoSyncMenu) return 'MANUAL' // el dueño lo apagó: mantiene su menú a mano
+  return link.lastMenuHash === null ? 'NUNCA_PUBLICADO' : 'AL_DIA'
+}
+
 /** Los canales que deben mantenerse sincronizados: activos y con el auto-sync prendido. */
 export function syncableLinksWhere() {
   return {
