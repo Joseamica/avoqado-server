@@ -241,7 +241,27 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
           method: 'POST',
           path: `/v1/eats/stores/${encodeURIComponent(storeId)}/pos_data`,
           storeId,
-          body: { integrator_store_id: link?.venueId ?? storeId, integrator_brand_id: 'avoqado' },
+          body: {
+            integrator_store_id: link?.venueId ?? storeId,
+            integrator_brand_id: 'avoqado',
+            // 🔴 `is_order_manager` ES EL INTERRUPTOR. Sin él, la tienda queda con
+            // `integration_enabled: true` y todo PARECE bien —el webhook llega, el pedido
+            // se trae, se ingiere con su comanda de cocina— pero `accept_pos_order`
+            // responde `403 user_not_allowed` y Uber cancela a los ~11.5 min. El cliente se
+            // queda sin comida y el log sólo dice "user not allowed".
+            //
+            // Medido con un pedido REAL el 2026-08-20 (`00012fba-…`, "Avoqado Sandbox 1").
+            // Ningún test lo podía atrapar: todos mockean la red.
+            //
+            // ⚠️ NO es `pos_integration_enabled`: ése está DEPRECADO y Uber lo IGNORA en
+            // silencio — se probó mandándolo, el POST devolvió 200 y el flag siguió en
+            // `false`. Lo dice nuestra propia investigación (ANEXO §Flujo
+            // integrator-initiated, paso 4) y se confirmó contra la API real.
+            is_order_manager: true,
+            // AUTO: que Uber no exija que un humano confirme en su app. Nuestro
+            // `orderAcceptanceMode` por canal es quien decide si aceptamos solos.
+            require_manual_acceptance: false,
+          },
         },
       )
 
