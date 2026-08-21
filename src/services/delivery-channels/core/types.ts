@@ -200,7 +200,7 @@ export interface DirectDeliveryAdapter {
   denyOrder?(orderId: string, storeId: string, reason?: DenyReason): Promise<ActionResult>
   markReady?(orderId: string, storeId: string): Promise<ActionResult>
 
-  publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown }): Promise<ActionResult>
+  publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown; precios?: unknown }): Promise<ActionResult>
 
   /** Agota o revive UN producto sin republicar el menú. La operación del día a día. */
   setItemSoldOut?(itemId: string, storeId: string, agotado: boolean): Promise<ActionResult>
@@ -217,7 +217,7 @@ export interface DirectDeliveryAdapter {
    * republica solo — hashear el snapshot dejaría al proveedor con el menú mal traducido
    * hasta que alguien editara un producto por casualidad.
    */
-  buildMenuPayload?(snapshot: MenuSnapshot, opts?: { availability?: unknown }): unknown
+  buildMenuPayload?(snapshot: MenuSnapshot, opts?: { availability?: unknown; precios?: unknown }): unknown
 
   /**
    * Traduce el horario NEUTRAL del núcleo al formato del proveedor.

@@ -123,4 +123,67 @@ describe('uber.menuMapper', () => {
     expect(p.items[0].id).toBe('SKU-COCHINITA')
     expect(p.items[0].external_data).toBe('SKU-COCHINITA')
   })
+  // ── Precios propios del canal ────────────────────────────────────────────────────────
+  //
+  // 🔴 Uber cobra ~30% de comisión: publicar el precio de mostrador hace que el comercio
+  // PIERDA dinero en cada pedido. Subir el precio en el marketplace es práctica normal del
+  // sector, y la falla que los agregadores (Otter, Chowly) documentan como la más común al
+  // conectar un POS es justamente que la sincronización BORRA ese precio especial.
+  describe('precios por canal', () => {
+    it('sin configurar nada, publica el precio de mostrador (no cambia el comportamiento)', () => {
+      expect(mapSnapshotToUberMenu(menu()).items[0].price_info.price).toBe(8950)
+    })
+
+    it('🔴 markup: +30% sobre 89.50 → 116.35', () => {
+      const p = mapSnapshotToUberMenu(menu(), { precios: { markupPercent: 30 } })
+      expect(p.items[0].price_info.price).toBe(11635) // 89.50 × 1.30 = 116.35
+    })
+
+    it('🔴 un override fijo GANA sobre el markup', () => {
+      // El comercio puso un precio pensado para ese producto en ese canal; un porcentaje
+      // genérico no puede pisarlo.
+      const p = mapSnapshotToUberMenu(menu(), { precios: { markupPercent: 30, overrides: { 'SKU-COCHINITA': 99 } } })
+      expect(p.items[0].price_info.price).toBe(9900)
+    })
+
+    it('🔴 los MODIFICADORES también llevan markup', () => {
+      // Si no, un extra de $12 con 30% en el platillo se sigue publicando a $12 y la
+      // comisión se come ese margen.
+      const conMods = menu({
+        categories: [
+          {
+            name: 'Tacos',
+            products: [
+              {
+                ...menu().categories[0].products[0],
+                modifierGroups: [
+                  {
+                    id: 'g1',
+                    name: 'Extras',
+                    required: false,
+                    allowMultiple: true,
+                    minSelections: 0,
+                    maxSelections: 3,
+                    modifiers: [{ plu: 'MOD-QUESO', name: 'Queso', price: 12 }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+      const p = mapSnapshotToUberMenu(conMods, { precios: { markupPercent: 30 } })
+      expect(p.items.find(i => i.id === 'MOD-QUESO')!.price_info.price).toBe(1560) // 12 × 1.30
+    })
+
+    it('un markup basura se ignora en vez de publicar un precio absurdo', () => {
+      for (const malo of [NaN, Infinity, undefined as unknown as number]) {
+        expect(mapSnapshotToUberMenu(menu(), { precios: { markupPercent: malo } }).items[0].price_info.price).toBe(8950)
+      }
+    })
+
+    it('🔴 un override NEGATIVO se ignora: nadie publica un precio negativo', () => {
+      expect(mapSnapshotToUberMenu(menu(), { precios: { overrides: { 'SKU-COCHINITA': -50 } } }).items[0].price_info.price).toBe(8950)
+    })
+  })
 })

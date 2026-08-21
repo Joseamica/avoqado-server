@@ -26,6 +26,21 @@ const t = (texto: string) => ({ translations: { en: texto } })
 /** PESOS → centavos. La ÚNICA multiplicación ×100 permitida (frontera Uber). */
 const aCentavos = (pesos: number): number => Math.round(pesos * 100)
 
+/**
+ * El precio que se publica para un SKU: override fijo > markup > precio de mostrador.
+ *
+ * Se redondea al centavo en la MISMA operación que convierte a centavos, no antes: redondear
+ * dos veces (a pesos y luego a centavos) desplaza el precio y el comercio cobra distinto de
+ * lo que configuró.
+ */
+function precioPublicado(sku: string, precioMostrador: number, p?: PreciosDeCanal): number {
+  const fijo = p?.overrides?.[sku]
+  if (typeof fijo === 'number' && Number.isFinite(fijo) && fijo >= 0) return aCentavos(fijo)
+  const pct = p?.markupPercent
+  if (typeof pct === 'number' && Number.isFinite(pct) && pct !== 0) return aCentavos(precioMostrador * (1 + pct / 100))
+  return aCentavos(precioMostrador)
+}
+
 const DIAS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const
 
 export interface UberMenuPayload {
@@ -48,6 +63,19 @@ export interface UberMenuPayload {
   }>
 }
 
+export interface PreciosDeCanal {
+  /**
+   * Porcentaje que se SUMA al precio de mostrador para este canal. `30` = +30%.
+   *
+   * 🔴 Existe porque Uber cobra ~30% de comisión: publicar el precio de mostrador hace que
+   * el comercio PIERDA dinero en cada pedido de delivery. Subir el precio en el marketplace
+   * es práctica normal del sector.
+   */
+  markupPercent?: number
+  /** Precio fijo en PESOS para un SKU concreto. Gana sobre el markup. */
+  overrides?: Record<string, number>
+}
+
 export interface UberMenuOptions {
   /**
    * Horario en que la tienda acepta pedidos, ya en formato de Uber.
@@ -59,6 +87,19 @@ export interface UberMenuOptions {
    * inyección que Uber exige para no revocar el acceso.
    */
   availability?: Array<{ day_of_week: string; time_periods: Array<{ start_time: string; end_time: string }> }>
+
+  /**
+   * Precios propios de este canal.
+   *
+   * 🔴 LA LECCIÓN MÁS REPETIDA DE LOS AGREGADORES (Otter, Chowly): una sincronización desde
+   * el POS SOBRESCRIBE los precios especiales que el comercio puso en el marketplace. Sin
+   * esto, nuestro sincronizador —que corre cada 5 minutos— le borraría al comercio su
+   * markup de delivery una y otra vez, y perdería dinero en cada pedido sin entender por qué.
+   *
+   * Default: sin markup y sin overrides ⇒ se publica el precio de mostrador, que es
+   * exactamente lo que hacía antes. Nadie cambia de comportamiento hasta configurarlo.
+   */
+  precios?: PreciosDeCanal
 }
 
 const TODO_EL_DIA = DIAS.map(d => ({ day_of_week: d, time_periods: [{ start_time: '00:00', end_time: '23:59' }] }))
@@ -122,7 +163,7 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
         title: t(p.name),
         ...(p.description ? { description: t(p.description) } : {}),
         ...(p.imageUrl ? { image_url: p.imageUrl } : {}),
-        price_info: { price: aCentavos(p.price) },
+        price_info: { price: precioPublicado(p.plu, p.price, opts.precios) },
         tax_info: {},
       })
 
@@ -148,7 +189,15 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
         for (const m of g.modifiers) {
           if (vistos.has(m.plu)) continue
           vistos.add(m.plu)
-          items.push({ id: m.plu, external_data: m.plu, title: t(m.name), price_info: { price: aCentavos(m.price) }, tax_info: {} })
+          items.push({
+            id: m.plu,
+            external_data: m.plu,
+            title: t(m.name),
+            // Los modificadores también llevan markup: si no, un extra de $20 con 30% de markup
+            // en el platillo sigue publicándose a $20 y la comisión se come ese margen.
+            price_info: { price: precioPublicado(m.plu, m.price, opts.precios) },
+            tax_info: {},
+          })
         }
       }
     }
