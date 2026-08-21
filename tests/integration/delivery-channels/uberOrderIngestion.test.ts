@@ -131,6 +131,25 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
     expect(items[0].modifiers[0].name).toBe('Leche entera')
   })
 
+  it('la comanda de cocina guarda los modificadores en la MISMA forma que el POS', async () => {
+    // 🔴 Este caso existe porque el de arriba pasaba mientras la cocina estaba rota: afirmaba
+    // sobre `OrderItem` —la tabla de la VENTA— y la pantalla de cocina lee `KdsOrderItem`, que
+    // es otra. La ingesta guardaba ahí `[{"name":…,"quantity":…}]` mientras el POS guardaba
+    // `["texto"]` en esa misma columna, y la diferencia llegó hasta el fierro: en una Sunmi D3
+    // con un pedido real de Uber, Android pintó el JSON crudo y iOS perdió el modificador.
+    //
+    // Cuando dos productores escriben al mismo almacén, el contrato no es el esquema: es la
+    // FORMA del valor. Por eso se afirma el string EXACTO que queda guardado.
+    const { order } = await ingestDeliveryOrder(pedido('ord-kds'), link)
+    const kds = await prisma.kdsOrder.findFirst({ where: { orderId: order.id }, include: { items: true } })
+
+    expect(kds).not.toBeNull()
+    expect(kds!.orderType).toBe('DELIVERY')
+    expect(kds!.items).toHaveLength(1)
+    expect(kds!.items[0].modifiers).toBe('["Leche entera"]')
+    expect(JSON.parse(kds!.items[0].modifiers!)).toEqual(['Leche entera'])
+  })
+
   it('crea el Payment con tender del canal y fundsFlow EXTERNAL_RECORDED', async () => {
     const { order } = await ingestDeliveryOrder(pedido('ord-3'), link)
     const p = await prisma.payment.findFirst({ where: { orderId: order.id } })

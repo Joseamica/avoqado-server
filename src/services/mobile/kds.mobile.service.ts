@@ -20,6 +20,59 @@ const KdsStatus = {
 }
 const VALID_STATUSES = ['NEW', 'PREPARING', 'READY', 'COMPLETED']
 
+// MARK: - Modificadores: UNA sola forma para los dos productores
+
+/**
+ * 🔴 `KdsOrderItem.modifiers` la escriben DOS productores y hasta el 2026-08-20 cada uno
+ * guardaba una forma distinta: el POS `["Sin cebolla"]`, la ingesta de marketplace
+ * `[{"name":"Extra queso","quantity":1}]`. El lector sólo hacía `JSON.parse`, así que la
+ * diferencia llegaba entera a la cocina — verificado en una Sunmi D3 con un pedido real de
+ * Uber: Android pintó el JSON crudo y iOS falló el cast a `[String]` y **perdió el
+ * modificador sin dejar rastro**. Un modificador perdido es un platillo mal servido.
+ *
+ * El esquema no protege la FORMA de un valor serializado; sólo una función compartida lo
+ * hace. Por eso los dos productores normalizan con ÉSTA antes de escribir —incluida
+ * `deliveryOrderIngestion.service.ts`, que la importa— y el lector la vuelve a aplicar para
+ * sanar las filas que ya se escribieron mal.
+ */
+export type KdsModifierInput = string | { name?: string | null; quantity?: number | null } | null | undefined
+
+export function toKdsModifierLabels(modifiers: KdsModifierInput[] | null | undefined): string[] {
+  if (!Array.isArray(modifiers)) return []
+
+  return modifiers.reduce<string[]>((etiquetas, modificador) => {
+    if (typeof modificador === 'string') {
+      const texto = modificador.trim()
+      if (texto) etiquetas.push(texto)
+      return etiquetas
+    }
+
+    const nombre = modificador?.name?.trim()
+    // Sin nombre no hay nada que preparar: se descarta en vez de escribir "undefined" en la
+    // comanda, que es ruido que el cocinero tiene que interpretar a media comida.
+    if (!nombre) return etiquetas
+
+    const cantidad = modificador?.quantity ?? 1
+    etiquetas.push(cantidad > 1 ? `${cantidad}x ${nombre}` : nombre)
+    return etiquetas
+  }, [])
+}
+
+/**
+ * Lee la columna cruda. Tolera JSON corrupto A PROPÓSITO: `JSON.parse` suelto tiraba TODO el
+ * endpoint con un throw, o sea que una fila mala dejaba a la cocina sin las otras 30
+ * comandas. Perder un modificador es malo; perder el tablero completo es peor.
+ */
+export function parseKdsModifiers(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  try {
+    return toKdsModifierLabels(JSON.parse(raw))
+  } catch {
+    logger.warn(`KDS: modificadores ilegibles en la comanda, se muestran vacíos: ${raw.slice(0, 120)}`)
+    return []
+  }
+}
+
 // MARK: - Types
 
 export interface CreateKdsOrderItemInput {
@@ -110,7 +163,7 @@ export async function createKdsOrder(venueId: string, input: CreateKdsOrderInput
         create: input.items.map(item => ({
           productName: item.productName,
           quantity: item.quantity,
-          modifiers: item.modifiers ? JSON.stringify(item.modifiers) : null,
+          modifiers: item.modifiers?.length ? JSON.stringify(toKdsModifierLabels(item.modifiers)) : null,
           notes: item.notes || null,
         })),
       },
@@ -204,7 +257,7 @@ function formatKdsOrder(order: any): KdsOrderResponse {
       id: item.id,
       productName: item.productName,
       quantity: item.quantity,
-      modifiers: item.modifiers ? JSON.parse(item.modifiers) : [],
+      modifiers: parseKdsModifiers(item.modifiers),
       notes: item.notes,
     })),
     startedAt: order.startedAt?.toISOString() || null,

@@ -21,6 +21,7 @@ import { applySalePosting, createSalePostingInTx } from '../../inventory/invento
 import { NormalizedDeliveryOrder } from './types'
 import { assertDeliveryMoneyInvariants } from './money'
 import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
+import { toKdsModifierLabels } from '../../mobile/kds.mobile.service'
 import {
   assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
@@ -353,7 +354,11 @@ export async function ingestDeliveryOrder(
             create: normalized.items.map(it => ({
               productName: it.name,
               quantity: it.quantity,
-              modifiers: it.modifiers?.length ? JSON.stringify(it.modifiers.map(m => ({ name: m.name, quantity: m.quantity }))) : null,
+              // 🔴 Por el normalizador COMPARTIDO, nunca serializando la forma del proveedor.
+              // Guardar aquí `[{name, quantity}]` mientras el POS guardaba `["texto"]` en la
+              // MISMA columna llegó hasta la cocina: Android pintó el JSON crudo y iOS perdió
+              // el modificador en silencio (visto en una Sunmi D3 con un pedido real de Uber).
+              modifiers: it.modifiers?.length ? JSON.stringify(toKdsModifierLabels(it.modifiers)) : null,
               // Lo que el cliente escribió para este renglón. Es lo que separa servir bien
               // de servir mal, y el único lugar del sistema donde hoy sobrevive.
               notes: it.notes ?? null,
