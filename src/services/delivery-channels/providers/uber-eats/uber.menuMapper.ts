@@ -32,6 +32,7 @@ export interface UberMenuPayload {
   categories: Array<{ id: string; title: ReturnType<typeof t>; entities: Array<{ id: string }> }>
   items: Array<{
     id: string
+    external_data: string
     title: ReturnType<typeof t>
     description?: ReturnType<typeof t>
     image_url?: string
@@ -93,6 +94,17 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
 
       items.push({
         id: p.plu,
+        // Se manda por si Uber lo devuelve en el pedido, pero NO se puede contar con él:
+        // ⚠️ MEDIDO el 2026-08-20 — lo publicamos y `GET /menus` lo devuelve `undefined`.
+        // Uber no lo eco en el menú, y si aparece o no en un PEDIDO sigue sin verificarse.
+        //
+        // 🔴 Consecuencia real, y por eso está escrito aquí: lo que HOY hace que un pedido
+        // reconozca el producto es el fallback `external_data ?? id` de `uber.mapper.ts`,
+        // porque publicamos `id = sku`. Ese fallback NO es defensivo: es LOAD-BEARING. El
+        // día que alguien lo "limpie" por parecer redundante, TODOS los pedidos de Uber
+        // dejan de reconocer productos —entran igual, sin inventario ni costo— y nadie va a
+        // relacionar una cosa con la otra.
+        external_data: p.plu,
         title: t(p.name),
         ...(p.description ? { description: t(p.description) } : {}),
         ...(p.imageUrl ? { image_url: p.imageUrl } : {}),
@@ -122,7 +134,7 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
         for (const m of g.modifiers) {
           if (vistos.has(m.plu)) continue
           vistos.add(m.plu)
-          items.push({ id: m.plu, title: t(m.name), price_info: { price: aCentavos(m.price) }, tax_info: {} })
+          items.push({ id: m.plu, external_data: m.plu, title: t(m.name), price_info: { price: aCentavos(m.price) }, tax_info: {} })
         }
       }
     }

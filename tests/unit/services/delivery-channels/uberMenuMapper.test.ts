@@ -110,4 +110,17 @@ describe('uber.menuMapper', () => {
     const propio = [{ day_of_week: 'monday', time_periods: [{ start_time: '09:00', end_time: '18:00' }] }]
     expect(mapSnapshotToUberMenu(menu(), { availability: propio }).menus[0].service_availability).toEqual(propio)
   })
+  it('🔴 `id` y `external_data` son AMBOS el SKU — el resolver depende de eso', () => {
+    // ⚠️ MEDIDO: publicamos `external_data` y `GET /menus` lo devuelve `undefined` — Uber no
+    // lo eco. Si aparece en un PEDIDO sigue sin verificarse. Así que lo que HOY hace que un
+    // pedido reconozca el producto es el fallback `external_data ?? id` de `uber.mapper.ts`,
+    // combinado con publicar `id = sku`.
+    //
+    // Por eso este test exige que los DOS sean el SKU: es la única forma de que el resolver
+    // enganche por cualquiera de sus dos caminos. Publicar un `id` que no sea el SKU rompe
+    // el reconocimiento de TODOS los pedidos sin que nada falle.
+    const p = mapSnapshotToUberMenu(menu())
+    expect(p.items[0].id).toBe('SKU-COCHINITA')
+    expect(p.items[0].external_data).toBe('SKU-COCHINITA')
+  })
 })
