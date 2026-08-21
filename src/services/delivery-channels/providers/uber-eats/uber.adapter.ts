@@ -63,6 +63,10 @@ export const uberAdapter = {
     // quedó incompleto de su lado. Ignorarlo deja la tienda con un menú viejo o vacío y
     // nadie se entera hasta que un cliente no encuentra qué pedir.
     if (eventType === 'store.menu_refresh_request') return 'MENU_REFRESH'
+    // [verificado con un evento REAL, 2026-08-21] El reporte financiero llega por aquí, y
+    // es la ÚNICA vía por la que nos enteramos de un reembolso: la API de pedidos no los
+    // reporta ('Refunds/chargebacks appear only in Reporting', guía de Uber).
+    if (eventType === 'eats.report.success') return 'REPORT_READY'
     // Pedido para MÁS TARDE. Antes caía en 'IGNORED' y se perdía ENTERO: el cliente pedía a
     // las 3pm para las 8pm y en Avoqado no existía. [doc] es de la generación 1.0.0 de la API.
     if (eventType === 'orders.scheduled.notification') return 'SCHEDULED_ORDER'

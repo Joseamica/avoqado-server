@@ -171,6 +171,7 @@ export type CanonicalDeliveryEvent =
   | 'RELEASE' // ya es hora del pedido programado: AHORA sí va a la cocina
   | 'FULFILLMENT_CHANGED' // el cliente cambió algo del pedido y lo confirmó
   | 'STORE_STATE' // la tienda cambió de estado del lado del proveedor (conectada, quitada, pausada)
+  | 'REPORT_READY' // el reporte financiero está listo: es la ÚNICA vía para enterarse de un reembolso
   | 'IGNORED' // ruido conocido (cambios de estado, provisioning) — se marca visto y ya
 
 export interface DirectDeliveryAdapter {

@@ -16,7 +16,7 @@
  * del TPV: es la forma que el resto de la plataforma ya sabe leer (`computeOrderBalance`
  * excluye los REFUND, y los reportes los netean).
  */
-import { Prisma, TransactionStatus } from '@prisma/client'
+import { PaymentFundsFlow, Prisma, TransactionStatus } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -74,6 +74,14 @@ export async function applyDeliveryRefund(params: {
       // Negativo, como el reembolso del TPV: es la forma que los reportes ya netean.
       amount: monto.neg(),
       tipAmount: new Prisma.Decimal(0),
+      // 🔴 Cero, y NO es un placeholder: estos tres son la comisión del PROCESADOR de pagos,
+      // y aquí Avoqado no procesa nada — el dinero lo mueve el marketplace. El propio schema
+      // lo advierte: "Commercial tender commission (Uber's ~30%) lives in tenderCommission*
+      // below — never here". Meter el 30% de Uber en estos campos mezclaría dos costos
+      // distintos y rompería el reporte de comisiones de tarjeta.
+      feePercentage: new Prisma.Decimal(0),
+      feeAmount: new Prisma.Decimal(0),
+      netAmount: monto.neg(),
       type: 'REFUND',
       status: TransactionStatus.COMPLETED,
       method: original?.method ?? 'OTHER',
@@ -81,8 +89,11 @@ export async function applyDeliveryRefund(params: {
       // Hereda la SEMÁNTICA del cobro original: este dinero tampoco sale del cajón, lo
       // descuenta el proveedor de su depósito. Sin heredarlo, el arqueo pediría un efectivo
       // que nunca estuvo ahí.
-      ...(original?.tenderTypeId ? { tenderTypeId: original.tenderTypeId } : {}),
-      ...(original?.fundsFlow ? { fundsFlow: original.fundsFlow } : {}),
+      // Explícitos y no con spreads condicionales: un `...(cond ? {a} : {})` produce una
+      // llave OPCIONAL, y eso rompe la discriminación de tipos de Prisma entre su forma
+      // escalar y la relacional.
+      tenderTypeId: original?.tenderTypeId ?? null,
+      fundsFlow: original?.fundsFlow ?? PaymentFundsFlow.EXTERNAL_RECORDED,
       // 🔴 La COMISIÓN no se hereda, a propósito: que el proveedor devuelva el dinero al
       // cliente NO significa que devuelva su porcentaje al comercio. Copiarla aquí le
       // acreditaría al negocio una comisión que nadie le regresó.

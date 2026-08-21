@@ -85,7 +85,14 @@ function partirLinea(linea: string): string[] {
  */
 export function parseUberReportCsv(csv: string): UberReportRow[] {
   // El BOM del archivo se pega al primer encabezado y rompe el match por nombre.
-  const lineas = csv.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim().length > 0)
+  //
+  // `\uFEFF` escapado y NO el carácter pegado tal cual: es INVISIBLE, así que en el código se
+  // lee como un regex vacío que no borra nada, y el siguiente que pase por aquí lo "limpia"
+  // sin saber que acaba de romper el parseo. Por eso `no-irregular-whitespace` lo prohíbe.
+  const lineas = csv
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .filter(l => l.trim().length > 0)
   if (lineas.length < 3) return [] // dos encabezados y nada más: reporte vacío, no un error
 
   const nombres = partirLinea(lineas[1])

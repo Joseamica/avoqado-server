@@ -16,6 +16,7 @@ import { PaymentFundsFlow, type DeliveryChannelLink } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
+import { applyDeliveryRefund } from '@/services/delivery-channels/core/applyDeliveryRefund.service'
 import { DeliveryMoneyMismatchError } from '@/services/delivery-channels/core/money'
 import type { NormalizedDeliveryOrder } from '@/services/delivery-channels/core/types'
 
@@ -153,6 +154,53 @@ export function runIngestionContract(
 
       expect(pago.tenderCommissionPercent).toBeNull()
       expect(pago.tenderCommissionAmount).toBeNull()
+    })
+
+    it('🔴 un REEMBOLSO del proveedor NETEA la venta, y no la borra', async () => {
+      // La API de pedidos NUNCA reporta reembolsos ("Refunds/chargebacks appear only in
+      // Reporting", guía de Uber): sin esto, el dinero se descuenta del depósito del comercio
+      // y en Avoqado la venta sigue contando completa.
+      //
+      // 🔴 Y NO es una cancelación: la comida SÍ se hizo y se entregó, el cliente se quejó
+      // después. La venta ocurrió —tuvo su costo, su inventario, su comisión— así que se
+      // NETEA con un cobro negativo, no se borra. Borrarla escondería una venta real.
+      const p = hacerPedido()
+      const { order } = await ingestDeliveryOrder(p, obtenerLink())
+      const antes = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id, type: 'REGULAR' } })
+
+      const r = await applyDeliveryRefund({
+        externalOrderId: p.externalId,
+        provider: 'UBER_EATS',
+        montoDevuelto: '40.00',
+        motivo: 'prueba',
+      })
+      expect(r.outcome).toBe('APPLIED')
+
+      const devolucion = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id, type: 'REFUND' } })
+      expect(devolucion.amount.toString()).toBe('-40') // negativo: los reportes lo netean
+      // Hereda la semántica del cobro original: este dinero TAMPOCO sale del cajón, lo
+      // descuenta el proveedor de su depósito. Sin heredarlo, el arqueo pediría un efectivo
+      // que nunca estuvo ahí.
+      expect(devolucion.fundsFlow).toBe(antes.fundsFlow)
+      expect(devolucion.tenderTypeId).toBe(antes.tenderTypeId)
+      // 🔴 La comisión NO se hereda: que el proveedor devuelva el dinero al cliente no
+      // significa que le regrese su 30% al comercio.
+      expect(devolucion.tenderCommissionAmount).toBeNull()
+      // La venta original sigue existiendo: ocurrió de verdad.
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).not.toBe('CANCELLED')
+    })
+
+    it('🔴 IDEMPOTENTE: el mismo reembolso dos veces no resta doble', async () => {
+      // El reporte se pide a diario y los rangos se traslapan: el MISMO reembolso llega
+      // muchas veces. Sin idempotencia, el ingreso del comercio se hundiría solo, un poco
+      // cada día, sin que nada fallara.
+      const p = hacerPedido()
+      const { order } = await ingestDeliveryOrder(p, obtenerLink())
+      const args = { externalOrderId: p.externalId, provider: 'UBER_EATS' as const, montoDevuelto: '25.00', motivo: 'x' }
+
+      expect((await applyDeliveryRefund(args)).outcome).toBe('APPLIED')
+      expect((await applyDeliveryRefund(args)).outcome).toBe('ALREADY_APPLIED')
+      expect(await prisma.payment.count({ where: { orderId: order.id, type: 'REFUND' } })).toBe(1)
     })
 
     it('IDEMPOTENTE: el mismo pedido dos veces no duplica venta ni cobro', async () => {

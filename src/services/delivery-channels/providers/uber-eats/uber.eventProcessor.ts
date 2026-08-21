@@ -26,6 +26,7 @@ import { releaseScheduledOrder } from '../../core/releaseScheduledOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../core/deliveryWebhookEvent.service'
 import { uberAdapter } from './uber.adapter'
+import { processUberReport } from './uber.reportProcessor'
 
 export type UberProcessOutcome =
   | 'PROCESSED' // pedido aceptado en Uber y convertido en venta
@@ -37,6 +38,7 @@ export type UberProcessOutcome =
   | 'SCHEDULED' // pedido para más tarde: entró como venta, NO fue a la cocina
   | 'RELEASED' // ya era hora del programado: fue a la cocina
   | 'STORE_STATE' // la tienda cambió de estado del lado del proveedor
+  | 'REPORT' // llegó el reporte financiero; de ahí salen los reembolsos
   | 'FAILED'
 
 export interface UberProcessResult {
@@ -187,6 +189,13 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     }
     await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
     return { outcome: 'NOT_AN_ORDER' }
+  }
+
+  // El reporte financiero: la ÚNICA vía por la que nos enteramos de un reembolso. No
+  // depende de un canal — el aviso viene de la cuenta, no de una tienda.
+  if (tipo === 'REPORT_READY') {
+    const r = await processUberReport(eventRowId)
+    return r.outcome === 'PROCESSED' ? { outcome: 'REPORT' } : { outcome: 'FAILED', error: r.error }
   }
 
   // Ruido conocido (cambios de estado, provisioning): se marca visto para que la
