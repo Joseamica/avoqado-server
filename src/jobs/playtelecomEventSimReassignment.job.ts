@@ -162,8 +162,10 @@ export async function reassignEventSimSalesForRule(
   return { reassigned, skippedMixed }
 }
 
-export async function reassignEventSimSales(): Promise<void> {
-  for (const rule of PLAYTELECOM_EVENT_VENUE_REASSIGNMENT_RULES) {
+export async function reassignEventSimSales(
+  rules: EventVenueReassignmentRule[] = PLAYTELECOM_EVENT_VENUE_REASSIGNMENT_RULES,
+): Promise<void> {
+  for (const rule of rules) {
     try {
       const { reassigned, skippedMixed } = await reassignEventSimSalesForRule(rule)
       if (reassigned > 0 || skippedMixed > 0) {

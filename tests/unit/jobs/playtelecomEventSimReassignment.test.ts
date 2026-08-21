@@ -149,4 +149,32 @@ describe('reassignEventSimSales (orquestador)', () => {
 
     expect(prisma.organization.findFirst).toHaveBeenCalledTimes(PLAYTELECOM_EVENT_VENUE_REASSIGNMENT_RULES.length)
   })
+
+  it('si UNA regla truena, sigue procesando la SIGUIENTE regla distinta (no aborta el loop)', async () => {
+    const ruleA: EventVenueReassignmentRule = {
+      orgName: 'OrgA',
+      categoryName: 'CatA',
+      originState: 'StateA',
+      targetVenueSlug: 'slug-a',
+    }
+    const ruleB: EventVenueReassignmentRule = {
+      orgName: 'OrgB',
+      categoryName: 'CatB',
+      originState: 'StateB',
+      targetVenueSlug: 'slug-b',
+    }
+    ;(prisma.organization.findFirst as jest.Mock).mockRejectedValueOnce(new Error('boom en ruleA')).mockResolvedValueOnce(null) // ruleB: org no existe, se salta limpio (no cuenta como error)
+
+    await expect(reassignEventSimSales([ruleA, ruleB])).resolves.toBeUndefined()
+
+    expect(prisma.organization.findFirst).toHaveBeenCalledTimes(2)
+    expect(prisma.organization.findFirst).toHaveBeenNthCalledWith(1, {
+      where: { name: { equals: 'OrgA', mode: 'insensitive' } },
+      select: { id: true },
+    })
+    expect(prisma.organization.findFirst).toHaveBeenNthCalledWith(2, {
+      where: { name: { equals: 'OrgB', mode: 'insensitive' } },
+      select: { id: true },
+    })
+  })
 })
