@@ -29,6 +29,7 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           orderAcceptanceMode: true,
           autoSyncMenu: true,
           lastMenuSyncAt: true,
+          lastMenuHash: true,
           externalLocationId: true,
         },
       })
@@ -45,6 +46,21 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           // fuente de verdad de "¿ya hay a quién delegarle?" es el registro de adaptadores
           // (core/adapterRegistry.ts), nunca una lista de proveedores copiada aquí a mano.
           integrationReady: hasAdapter(l.provider),
+          // 🔴 "¿mi menú está actualizado allá?" es la pregunta que un operador SÍ hace, y
+          // hasta ahora no había forma de contestarla sin entrar a la base. Un menú viejo
+          // cobra el precio equivocado o provoca rechazos que Uber cuenta contra la tasa de
+          // inyección que exige para no revocar el acceso.
+          //
+          // `lastMenuHash` se guarda SÓLO cuando la publicación salió bien, así que su
+          // ausencia con `autoSyncMenu` prendido significa exactamente "nunca se logró
+          // publicar" — no "todavía no toca". Por eso se puede responder sin adivinar.
+          menuPublicado: l.lastMenuHash !== null,
+          menuSyncStatus: !l.autoSyncMenu
+            ? 'MANUAL' // el dueño lo apagó: mantiene su menú del proveedor a mano
+            : l.lastMenuHash === null
+              ? 'NUNCA_PUBLICADO' // 🚨 lo que el operador tiene que ver
+              : 'AL_DIA',
+          lastMenuHash: undefined, // la huella misma no le sirve a nadie fuera del sincronizador
         })),
         todayByChannel,
       })

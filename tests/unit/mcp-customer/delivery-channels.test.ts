@@ -235,4 +235,56 @@ describe('delivery_channels', () => {
     await call({ venueId: 'v1' })
     expect(mockVenueFindUnique).not.toHaveBeenCalled()
   })
+  it('🔴 reporta si el menú está publicado en el proveedor', async () => {
+    // "¿mi menú está actualizado allá?" es la pregunta que un operador SÍ hace, y hasta
+    // ahora sólo se podía contestar entrando a la base. Un menú viejo cobra el precio
+    // equivocado o provoca rechazos que Uber cuenta contra la tasa que exige para no
+    // revocar el acceso.
+    //
+    // `lastMenuHash` se guarda SÓLO si la publicación salió bien: su ausencia con el
+    // auto-sync prendido significa "nunca se logró publicar", no "todavía no toca". Por eso
+    // se puede contestar sin adivinar.
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockLinkFindMany.mockResolvedValueOnce([
+      {
+        id: 'l1',
+        provider: 'UBER_EATS',
+        status: 'ACTIVE',
+        orderAcceptanceMode: 'AUTO',
+        autoSyncMenu: true,
+        lastMenuSyncAt: null,
+        lastMenuHash: null,
+        externalLocationId: 's1',
+      },
+      {
+        id: 'l2',
+        provider: 'UBER_EATS',
+        status: 'ACTIVE',
+        orderAcceptanceMode: 'AUTO',
+        autoSyncMenu: true,
+        lastMenuSyncAt: new Date(),
+        lastMenuHash: 'abc',
+        externalLocationId: 's2',
+      },
+      {
+        id: 'l3',
+        provider: 'UBER_EATS',
+        status: 'ACTIVE',
+        orderAcceptanceMode: 'AUTO',
+        autoSyncMenu: false,
+        lastMenuSyncAt: null,
+        lastMenuHash: null,
+        externalLocationId: 's3',
+      },
+    ])
+    mockOrderGroupBy.mockResolvedValueOnce([])
+
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect(out.channels.map((c: { menuSyncStatus: string }) => c.menuSyncStatus)).toEqual(['NUNCA_PUBLICADO', 'AL_DIA', 'MANUAL'])
+    expect(out.channels.map((c: { menuPublicado: boolean }) => c.menuPublicado)).toEqual([false, true, false])
+    // La huella misma no le sirve a nadie fuera del sincronizador.
+    expect(out.channels[1].lastMenuHash).toBeUndefined()
+  })
 })
