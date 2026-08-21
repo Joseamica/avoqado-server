@@ -22,8 +22,14 @@ describe('adapterRegistry', () => {
     // pedido: que el mensaje sea auténtico, saber de quién es, y poder traducirlo.
     for (const provider of Object.values(DeliveryProvider)) {
       if (!hasAdapter(provider)) continue
-      const a = adapterFor(provider) as Record<string, unknown>
-      for (const metodo of ['verifyWebhook', 'extractIdentity', 'normalizeOrder']) {
+      // `as const` y NO un `as Record<string, unknown>`: un cast a Record no compila contra
+      // una `interface` (TS2352, porque una interface se puede ampliar después y TS no puede
+      // garantizar que toda llave sea `unknown`). Y hacerlo con `as unknown as` sí compilaría
+      // pero renunciaría a lo mejor de todo esto: así, los tres nombres se validan CONTRA el
+      // contrato en compilación — si alguien renombra uno, el build lo dice aquí, en vez de
+      // que lo descubra un pedido real reventando.
+      const a = adapterFor(provider)
+      for (const metodo of ['verifyWebhook', 'extractIdentity', 'normalizeOrder'] as const) {
         expect(typeof a[metodo]).toBe('function')
       }
       expect(a.provider).toBe(provider) // ni registrado bajo la llave equivocada

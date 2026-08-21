@@ -18,6 +18,7 @@ import { Request, Response } from 'express'
 
 import { env } from '@/config/env'
 import logger from '@/config/logger'
+import * as deliveryChannelLinkService from '@/services/delivery-channels/core/deliveryChannelLink.service'
 import prisma from '@/utils/prismaClient'
 
 import {
@@ -80,14 +81,29 @@ function signState(payload: string): string {
   return `${payload}.${mac}`
 }
 
-function issueState(): string {
+/**
+ * @param venueId A qué negocio de Avoqado pertenecen las tiendas que el comercio va a
+ *   autorizar. Viaja DENTRO del state firmado y NO como parámetro suelto — si viniera del
+ *   query, cualquiera podría enlazar las tiendas de un comercio al negocio que quisiera.
+ *   El HMAC es lo que hace que sólo nosotros podamos emitirlo.
+ */
+function issueState(venueId?: string): string {
   const ahora = Date.now()
   for (const [k, exp] of statesEmitidos) if (exp < ahora) statesEmitidos.delete(k)
 
-  const nonce = `${crypto.randomBytes(12).toString('hex')}.${ahora}`
+  // El venueId va en el payload firmado. Sin `:` cuando no hay venue, para que los states
+  // viejos (sin venue) sigan siendo válidos y una sesión en curso no se rompa al desplegar.
+  const nonce = `${crypto.randomBytes(12).toString('hex')}.${ahora}${venueId ? `.${venueId}` : ''}`
   const state = signState(nonce)
   statesEmitidos.set(state, ahora + STATE_TTL_MS)
   return state
+}
+
+/** El venue que viajó dentro del state, si venía uno. Sólo se lee DESPUÉS de verificar la firma. */
+function venueDelState(state: string): string | null {
+  const payload = state.slice(0, state.lastIndexOf('.'))
+  const partes = payload.split('.')
+  return partes.length >= 3 ? partes[2] : null
 }
 
 /** Verifica firma, caducidad y que NO se haya usado. Consume el state al validarlo. */
@@ -136,7 +152,9 @@ export async function startUberOAuth(req: Request, res: Response): Promise<void>
       environment: environment(),
       clientId: credentials().clientId,
       redirectUri: redirectUri(req),
-      state: issueState(),
+      // `venueId` sólo se acepta de una petición ya autenticada (ver la ruta del dashboard
+      // que lo emite); aquí llega ya validado y se sella dentro del state.
+      state: issueState(typeof req.query.venueId === 'string' ? req.query.venueId : undefined),
     })
     res.redirect(url)
   } catch (e) {
@@ -151,6 +169,10 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
 
   // 🔴 El `state` se valida ANTES de tocar nada más: sin eso, `error`/`error_description`
   // de un GET arbitrario llegaban a la respuesta sin haber probado que el flujo nació aquí.
+  // El venue viaja DENTRO del state firmado; se lee antes de consumirlo, pero sólo se usa
+  // después de que `consumeState` haya validado la firma — leerlo no lo autentica.
+  const venueDelFlujo = state ? venueDelState(state) : null
+
   if (!state || !consumeState(state)) {
     res
       .status(400)
@@ -218,10 +240,41 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
       const storeId = t.store_id
       if (!storeId) continue
 
-      const link = await prisma.deliveryChannelLink.findUnique({
+      let link = await prisma.deliveryChannelLink.findUnique({
         where: { provider_externalLocationId: { provider: 'UBER_EATS', externalLocationId: storeId } },
         select: { venueId: true, venue: { select: { name: true } } },
       })
+
+      // 🔴 EL VÍNCULO SE CREA AQUÍ, y es lo que convierte esto en algo que un CLIENTE puede
+      // usar. Antes sólo buscaba: había un huevo-y-gallina imposible de resolver solo —
+      // hacía falta el id de tienda de Uber para crear el canal, y ese id sólo aparece
+      // DESPUÉS de que el comercio autoriza. El resultado era que cada alta la teníamos que
+      // rematar a mano contra la base.
+      //
+      // El `venueId` viene del state FIRMADO, no del query: si viniera del query, cualquiera
+      // podría enlazar las tiendas de un comercio al negocio que quisiera.
+      if (!link && venueDelFlujo) {
+        try {
+          await deliveryChannelLinkService.createChannelLink(venueDelFlujo, {
+            provider: 'UBER_EATS',
+            externalLocationId: storeId,
+            externalAccountId: t.name ?? null,
+          })
+          link = await prisma.deliveryChannelLink.findUnique({
+            where: { provider_externalLocationId: { provider: 'UBER_EATS', externalLocationId: storeId } },
+            select: { venueId: true, venue: { select: { name: true } } },
+          })
+          logger.info('🛵 [UberOAuth] canal creado automáticamente al autorizar', { venueId: venueDelFlujo, storeId })
+        } catch (err) {
+          // Una tienda que no se pudo vincular NO detiene a las demás: un comercio con seis
+          // sucursales no se queda sin conectar ninguna porque una falló.
+          logger.error('🚨 [UberOAuth] no se pudo crear el canal', {
+            venueId: venueDelFlujo,
+            storeId,
+            error: err instanceof Error ? err.message : err,
+          })
+        }
+      }
 
       const encabezado = `<strong>${esc(t.name ?? '(sin nombre)')}</strong><br><code>${esc(storeId)}</code><br>`
       const negocio = `<br>negocio en Avoqado: ${link?.venue?.name ? esc(link.venue.name) : '<span class="bad">sin vincular</span>'}`

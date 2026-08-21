@@ -3,6 +3,7 @@
  * Controller delgado: extrae `authContext` (JAMÁS `req.user`) y delega al service.
  */
 import { NextFunction, Request, Response } from 'express'
+import { env } from '../../config/env'
 import * as deliveryChannelLinkService from '../../services/delivery-channels/core/deliveryChannelLink.service'
 import * as activationService from '../../services/delivery-channels/core/deliveryActivation.service'
 import * as deliverySummaryService from '../../services/delivery-channels/core/deliverySummary.service'
@@ -95,4 +96,28 @@ export const getSummary = async (req: Request, res: Response): Promise<void> => 
   const { venueId } = req.params
   const summary = await deliverySummaryService.getDeliveryDailySummary(venueId)
   res.json({ success: true, data: summary })
+}
+
+/**
+ * Devuelve el enlace que el comercio abre para autorizar a Avoqado en su cuenta de Uber Eats.
+ *
+ * El `venueId` se sella dentro del `state` firmado del OAuth, así que cuando Uber nos regrese
+ * al comercio ya sabemos a qué negocio pertenecen las tiendas que autorice — y el canal se
+ * crea solo. Sin esto, cada alta había que rematarla a mano.
+ */
+export const getUberConnectUrl = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const base = env.UBER_OAUTH_REDIRECT_BASE || `${req.protocol}://${req.get('host')}`
+    // Se devuelve el enlace en vez de redirigir: quien llama es el dashboard, y necesita
+    // poder mostrarlo, copiarlo o mandárselo al dueño por correo — no saltar de inmediato.
+    return res.json({
+      ok: true,
+      url: `${base}/api/v1/delivery/uber/oauth/start?venueId=${encodeURIComponent(venueId)}`,
+      instrucciones:
+        'Abre este enlace con la cuenta de Uber Eats Manager del negocio. Al autorizar, sus tiendas quedan conectadas a Avoqado automáticamente.',
+    })
+  } catch (e) {
+    return next(e)
+  }
 }

@@ -169,6 +169,26 @@ router.post(
   ctrl.pauseChannel,
 )
 
+/**
+ * El enlace que un COMERCIO abre para conectar su cuenta de Uber Eats con Avoqado.
+ *
+ * 🔴 Es el paso que convierte esto en algo que un cliente puede hacer solo. Antes el alta se
+ * remataba a mano contra la base: hacía falta el id de tienda de Uber para crear el canal, y
+ * ese id sólo aparece DESPUÉS de que el comercio autoriza — un huevo-y-gallina.
+ *
+ * 🔴 Por qué el venue se sella aquí y no viaja en el query del OAuth: esta ruta está
+ * AUTENTICADA, así que sabemos quién pide y para qué negocio. El id entra al `state` firmado
+ * con HMAC, y el callback —que es público, porque lo llama Uber— sólo confía en lo que venga
+ * ahí dentro. Si aceptara un `venueId` suelto del query, cualquiera podría enlazar las
+ * tiendas de un comercio al negocio que quisiera.
+ */
+router.get(
+  '/venues/:venueId/channels/uber/connect-url',
+  authenticateTokenMiddleware,
+  checkPermission('delivery-channels:manage'),
+  deliveryChannelsController.getUberConnectUrl,
+)
+
 router.post(
   '/venues/:venueId/activation-request',
   authenticateTokenMiddleware,
