@@ -212,14 +212,12 @@ describe('disponibilidad — agotar y revivir productos', () => {
     // 0.5 kg en bodega SÍ se pueden hacer. Dividir mal aquí esconde platillos que sí hay.
     const a = adaptadorDisp()
     ;(adapterFor as jest.Mock).mockReturnValue(a)
-    mockedProducts
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          sku: 'TACOS',
-          recipe: { portionYield: 10, lines: [{ quantity: dec(2), rawMaterial: { currentStock: dec(0.5), name: 'Carne' } }] },
-        },
-      ])
+    mockedProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        sku: 'TACOS',
+        recipe: { portionYield: 10, lines: [{ quantity: dec(2), rawMaterial: { currentStock: dec(0.5), name: 'Carne' } }] },
+      },
+    ])
 
     expect((await syncChannelAvailability(link({ config: {} }))).agotados).toBe(0)
     expect(a.setItemSoldOut).not.toHaveBeenCalled()

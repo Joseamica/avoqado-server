@@ -11,9 +11,18 @@ import * as basePlanService from '@/services/access/basePlan.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { Prisma } from '@prisma/client'
 
-const date = '2026-08-21'
-const startsAt = new Date('2026-08-21T15:00:00.000Z')
-const endsAt = new Date('2026-08-21T16:00:00.000Z')
+// 🔴 Relativo a HOY, NUNCA una fecha fija. La anterior ('2026-08-21T15:00Z') era una bomba de
+// tiempo: pasó verde desde que se escribió hasta que el reloj la alcanzó, y ese día 13 tests
+// empezaron a fallar solos con "No se puede reservar un horario en el pasado" — el CI en rojo
+// sin que nadie tocara una línea. `createHold` valida contra el reloj REAL, así que la fecha
+// tiene que moverse con él.
+//
+// +2 días: futuro seguro y dentro de `maxAdvanceDays: 60`. Las 15:00 UTC se conservan del
+// original porque mantienen el MISMO día civil en UTC y en México (9:00), que es de lo que
+// depende `date`.
+const date = new Date(Date.now() + 48 * 60 * 60_000).toISOString().slice(0, 10)
+const startsAt = new Date(`${date}T15:00:00.000Z`)
+const endsAt = new Date(`${date}T16:00:00.000Z`)
 const ordinarySlot = { startsAt, endsAt, availableTables: [], availableStaff: [] }
 const fullSlot = { ...ordinarySlot, available: false as const, reason: 'FULL' as const }
 
@@ -1224,7 +1233,9 @@ describe('reservation availability controller boundaries', () => {
       data: expect.objectContaining({
         venueId: 'venue-1',
         startsAt,
-        endsAt: new Date('2026-08-21T16:15:00.000Z'),
+        // Derivado de `endsAt`, no una fecha fija: son los 15 min de `noShowGraceMin` que el
+        // servidor añade al resolver la ventana. Escrito fijo volvía a caducar con el reloj.
+        endsAt: new Date(endsAt.getTime() + 15 * 60_000),
         productIds: ['product-1'],
         classSessionId: null,
         staffId: 'staff-1',
