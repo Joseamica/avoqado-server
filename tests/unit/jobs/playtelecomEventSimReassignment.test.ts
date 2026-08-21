@@ -19,6 +19,8 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   isOrderPureCategoryMatch,
   reassignEventSimSalesForRule,
+  reassignEventSimSales,
+  PLAYTELECOM_EVENT_VENUE_REASSIGNMENT_RULES,
   type EventVenueReassignmentRule,
 } from '@/jobs/playtelecomEventSimReassignment.job'
 
@@ -136,5 +138,15 @@ describe('isOrderPureCategoryMatch', () => {
 
   it('es false para una orden vacía (nunca reasigna algo sin items)', () => {
     expect(isOrderPureCategoryMatch([], 'SIM de Evento')).toBe(false)
+  })
+})
+
+describe('reassignEventSimSales (orquestador)', () => {
+  it('corre TODAS las reglas de PLAYTELECOM_EVENT_VENUE_REASSIGNMENT_RULES y no truena si una falla', async () => {
+    ;(prisma.organization.findFirst as jest.Mock).mockRejectedValueOnce(new Error('boom')).mockResolvedValue(null)
+
+    await expect(reassignEventSimSales()).resolves.toBeUndefined()
+
+    expect(prisma.organization.findFirst).toHaveBeenCalledTimes(PLAYTELECOM_EVENT_VENUE_REASSIGNMENT_RULES.length)
   })
 })

@@ -18,6 +18,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from '../services/dashboard/activity-log.service'
+import { scheduleCron } from '../observability/jobContext'
 
 /**
  * Regla de reasignación: qué categoría, en qué estado de origen, se mueve a qué venue
@@ -159,4 +160,35 @@ export async function reassignEventSimSalesForRule(
   }
 
   return { reassigned, skippedMixed }
+}
+
+export async function reassignEventSimSales(): Promise<void> {
+  for (const rule of PLAYTELECOM_EVENT_VENUE_REASSIGNMENT_RULES) {
+    try {
+      const { reassigned, skippedMixed } = await reassignEventSimSalesForRule(rule)
+      if (reassigned > 0 || skippedMixed > 0) {
+        logger.info(
+          `[PlayTelecom Event SIM Reassignment] ${rule.orgName}/${rule.categoryName}: ${reassigned} orden(es) movidas a ${rule.targetVenueSlug}, ${skippedMixed} saltada(s) por mixtas`,
+        )
+      }
+    } catch (err) {
+      logger.error('[PlayTelecom Event SIM Reassignment] Regla falló completa', {
+        rule,
+        error: err instanceof Error ? err.message : err,
+      })
+    }
+  }
+}
+
+/**
+ * Cadencia cada 15 min, con minuto desfasado (NO alineado a :00/:15/:30/:45) para evitar la
+ * estampida de conexiones documentada en `.claude/rules/cron-jobs.md`.
+ */
+export function startPlaytelecomEventSimReassignmentJob(): void {
+  logger.info('[PlayTelecom Event SIM Reassignment] ⏰ Job started. Runs every 15 min (offset :04/:19/:34/:49).')
+  scheduleCron('playtelecom-event-sim-reassignment', '4,19,34,49 * * * *', () => {
+    reassignEventSimSales().catch(err => {
+      logger.error('[PlayTelecom Event SIM Reassignment] Job iteration failed', { err })
+    })
+  })
 }

@@ -21,6 +21,7 @@ import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { startStalePendingAlertJob } from './jobs/stalePendingAlert.job'
 import { startVenueChatInactivityCleanupJob } from './jobs/venueChatInactivityCleanup.job'
 import { startAreaTicketExternalReconciliationJob } from './jobs/areaTicketExternalReconciliation.job'
+import { startPlaytelecomEventSimReassignmentJob } from './jobs/playtelecomEventSimReassignment.job'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { planRenewalReminderJob } from './jobs/plan-renewal-reminder.job'
@@ -422,6 +423,9 @@ const startApplication = async (retries = 3) => {
 
       // Start area-ticket external-charge reconciliation (opens UNCONFIRMED_CHARGE incidents)
       startAreaTicketExternalReconciliationJob()
+
+      // Start PlayTelecom Event-SIM venue reassignment (Asana 1217556190300772)
+      startPlaytelecomEventSimReassignmentJob()
 
       // Start TPV health monitor
       tpvHealthMonitorJob.start()
