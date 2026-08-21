@@ -46,6 +46,10 @@ jest.mock('@/utils/prismaClient', () => ({
 // adaptador real, o el vínculo existe pero todavía no hay a quién delegarle?" — la
 // única fuente de verdad es el registro (core/adapterRegistry.ts, Tarea 5 del mismo
 // plan), nunca una lista de proveedores copiada aquí a mano.
+jest.mock('@/services/delivery-channels/core/injectionRate.service', () => ({
+  calcularTasaInyeccion: jest.fn(async () => ({ recibidos: 0, aceptados: 0, porcentaje: null, estado: 'SIN_DATOS', fallidos: [] })),
+}))
+
 jest.mock('@/services/delivery-channels/core/adapterRegistry', () => ({
   hasAdapter: (...a: unknown[]) => mockHasAdapter(...(a as [])),
 }))

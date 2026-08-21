@@ -4,6 +4,7 @@ import { CronJob } from 'cron'
 
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
+import { calcularTasaInyeccion, UMBRAL_OBJETIVO } from '../services/delivery-channels/core/injectionRate.service'
 import { syncChannelAvailability, syncChannelMenu, syncableLinksWhere } from '../services/delivery-channels/core/menuSync.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -95,6 +96,39 @@ export class DeliveryMenuSyncJob {
 
       if (publicados > 0 || fallidos > 0) {
         logger.info('📋 [MenuSync] pasada terminada', { publicados, sinCambio, fallidos, revisados: links.length })
+      }
+
+      // 🔴 La tasa de inyección: el número con el que Uber decide REVOCAR el acceso (exige
+      // 99.9%, revoca por debajo de 99%). Hasta hoy era invisible — se podía estar cayendo
+      // semanas sin que nadie lo supiera hasta recibir el correo. Se revisa aquí en vez de
+      // en su propio cron porque son los mismos canales y la misma cadencia; lo caro es
+      // publicar el menú, no contar filas.
+      for (const link of links) {
+        try {
+          const t = await calcularTasaInyeccion({ venueId: link.venueId, provider: link.provider })
+          if (t.estado === 'CRITICO' || t.estado === 'ALERTA') {
+            logger[t.estado === 'CRITICO' ? 'error' : 'warn'](
+              t.estado === 'CRITICO'
+                ? '🚨 [Inyección] BAJO EL UMBRAL DE REVOCACIÓN — el proveedor puede quitar el acceso'
+                : `⚠️ [Inyección] por debajo del objetivo de ${UMBRAL_OBJETIVO}%`,
+              {
+                venueId: link.venueId,
+                provider: link.provider,
+                porcentaje: t.porcentaje,
+                aceptados: t.aceptados,
+                recibidos: t.recibidos,
+                // Los motivos van en la MISMA línea: saber que va mal sin saber por qué
+                // obliga a investigar desde cero justo cuando hay prisa.
+                motivos: t.fallidos.slice(0, 5).map(f => f.motivo),
+              },
+            )
+          }
+        } catch (error) {
+          logger.error('🚨 [Inyección] no se pudo calcular la tasa', {
+            linkId: link.id,
+            error: error instanceof Error ? error.message : error,
+          })
+        }
       }
     } catch (error) {
       // Nunca tumbar el cron: la siguiente pasada reintenta sola porque la huella no cambió.

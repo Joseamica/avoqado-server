@@ -189,6 +189,16 @@ export interface DirectDeliveryAdapter {
    */
   classifyEvent(eventType: string): CanonicalDeliveryEvent
 
+  /**
+   * Los nombres de evento —SUYOS— que significan "un cliente hizo un pedido".
+   *
+   * Existe para que el núcleo pueda CONTAR pedidos (la tasa de inyección) sin escribir
+   * `'orders.notification'`, que es vocabulario de Uber. Lo pide el guardrail de
+   * `adapterRegistry.test.ts`, y con razón: el mismo error —el núcleo comparando contra la
+   * cadena de un proveedor— ya causó tres bugs en este módulo.
+   */
+  orderEventTypes(): string[]
+
   /** Del formato crudo del proveedor al contrato interno. Aquí vive TODA la diferencia. */
   normalizeOrder(raw: unknown): NormalizedDeliveryOrder
 

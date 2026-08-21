@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { getDeliveryDailySummary } from '@/services/delivery-channels/core/deliverySummary.service'
+import { calcularTasaInyeccion } from '@/services/delivery-channels/core/injectionRate.service'
 import { hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -36,6 +37,19 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
       // Task 5: fuente compartida con el REST GET .../delivery/summary (DRY) — misma lógica
       // venue-local (venueStartOfDay) que antes vivía inline aquí, ahora en deliverySummary.service.
       const { channels: todayByChannel } = await getDeliveryDailySummary(venueId)
+
+      // 🔴 La tasa de inyección es el número con el que el proveedor decide REVOCAR el
+      // acceso (Uber exige 99.9%, revoca por debajo de 99%). Un operador tiene que poder
+      // preguntarlo — hasta hoy sólo existía en el log, o sea que se veía cuando alguien
+      // ya estaba buscando el problema, nunca antes.
+      const inyeccion = await Promise.all(
+        [...new Set(links.map(l => l.provider))].map(async provider => ({
+          provider,
+          // El venue resuelto por el scope, no el filtro crudo: `where.venueId` puede ser
+          // un `{ in: [...] }` del guard multi-venue, y la tasa se reporta por venue.
+          ...(await calcularTasaInyeccion({ venueId, provider })),
+        })),
+      )
       return text({
         venueId,
         channels: links.map(l => ({
@@ -63,6 +77,10 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           lastMenuHash: undefined, // la huella misma no le sirve a nadie fuera del sincronizador
         })),
         todayByChannel,
+        // `porcentaje: null` con `estado: SIN_DATOS` significa que aún no llegan pedidos —
+        // NO que la tasa sea 0. Reportar 0% sin datos dispararía alarma en cada negocio
+        // que todavía no vende por ahí, y las alarmas falsas enseñan a ignorarlas.
+        inyeccion,
       })
     },
   )

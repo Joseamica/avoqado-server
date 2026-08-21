@@ -78,6 +78,11 @@ export const uberAdapter = {
     return 'IGNORED'
   },
 
+  /** Los eventos de Uber que significan "llegó un pedido" — incluye los programados. */
+  orderEventTypes(): string[] {
+    return ['orders.notification', 'orders.scheduled.notification']
+  },
+
   /** ¿De qué tienda y qué pedido es? Cada proveedor lo pone en otro campo. */
   extractIdentity(payload: unknown): UberEventIdentity {
     const p = payload as {
