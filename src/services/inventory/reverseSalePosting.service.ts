@@ -22,6 +22,31 @@ import { BatchStatus, MovementType, Prisma, RawMaterialMovementType } from '@pri
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
+/**
+ * 🔴 NO CONECTAR ESTO A LOS REEMBOLSOS SIN LEER ESTO PRIMERO.
+ *
+ * Parece el siguiente paso obvio —"ya existe la reversa, que los reembolsos también
+ * devuelvan stock"— y es un error. Una CANCELACIÓN y un REEMBOLSO no son lo mismo:
+ *
+ *   · Cancelación: la comida NUNCA se hizo. Los ingredientes siguen en la bodega y el
+ *     sistema debe reflejarlo. Es lo que hace este servicio.
+ *   · Reembolso: la comida SÍ se hizo y se entregó, y el cliente se quejó. Los ingredientes
+ *     ya no existen. Devolverlos INVENTA inventario que físicamente se consumió — y ese
+ *     faltante aparece semanas después en un conteo, igual que el bug que este servicio vino
+ *     a arreglar, pero en la dirección contraria.
+ *
+ * [mercado, verificado 2026-08-21] Los dos referentes lo tratan como DECISIÓN HUMANA, nunca
+ * automática:
+ *   · Toast pregunta "Return items to inventory" y el staff elige qué artículos se
+ *     reingresan.
+ *   · Square: una devolución POR ARTÍCULO pregunta si se reingresa; un reembolso POR MONTO
+ *     asume que NO y no toca el inventario.
+ *
+ * O sea que el comportamiento actual —los reembolsos no devuelven stock— es el CORRECTO y
+ * coincide con el mercado. Si algún día se quiere ofrecer el reingreso, va con una decisión
+ * explícita por artículo en la UI del reembolso, no automático y no reusando esta función
+ * tal cual (que revierte la venta COMPLETA y sería falso en un reembolso parcial).
+ */
 export type ReverseOutcome = 'REVERSED' | 'ALREADY_REVERSED' | 'NOTHING_TO_REVERSE'
 
 export interface ReverseResult {
