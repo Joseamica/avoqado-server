@@ -9,6 +9,7 @@ import { DeliveryOrderEventStatus, DeliveryProvider } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
+import { listKdsOrders } from '@/services/mobile/kds.mobile.service'
 import pedidoReal from '../../fixtures/delivery/uber/pedido-real-delivery-by-uber.json'
 
 const STORE = `store-${Date.now()}`
@@ -357,6 +358,63 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
     } finally {
       ;(prisma as any).kdsOrder.create = original
     }
+  })
+
+  it('🔴 en MANUAL la venta queda PENDIENTE, no confirmada — y el KDS lo dice', async () => {
+    // CONFIRMED significa "ya le dijimos que sí al proveedor". En MANUAL no se lo dijimos, y
+    // marcarlo confirmado tenía tres consecuencias: el POS no podía saber cuáles falta
+    // aceptar, el tablero decía que todo iba bien mientras el reloj de ~11.5 min corría, y
+    // `denyDeliveryOrder` elegía CANCELAR en vez de RECHAZAR — protocolo equivocado y peor
+    // para el cliente, que ya creía tener su pedido confirmado.
+    const manual = await prisma.deliveryChannelLink.create({
+      data: {
+        venueId,
+        provider: DeliveryProvider.UBER_EATS,
+        externalLocationId: `store-pend-${Date.now()}`,
+        webhookSecret: 'x',
+        orderAcceptanceMode: 'MANUAL',
+      },
+    })
+    const pedido = { ...pedidoReal, id: `pend-${Date.now()}` }
+    const row = await prisma.deliveryOrderEvent.create({
+      data: {
+        provider: DeliveryProvider.UBER_EATS,
+        externalEventId: `ev-pend-${Date.now()}`,
+        eventType: 'orders.notification',
+        payload: aviso('p', pedido.id) as object,
+        channelLinkId: manual.id,
+        venueId,
+        dedupKey: `UBER_EATS:pend-${Date.now()}`,
+      },
+    })
+
+    const r = await processUberEvent(row.id, { ...deps, fetchOrder: async () => pedido })
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })
+    expect(order.status).toBe('PENDING') // NO confirmada: nadie le ha dicho que sí a Uber
+
+    // Y el POS tiene que poder verlo, o el botón que la cocina necesita no puede existir.
+    const enCocina = await listKdsOrders(venueId, 'NEW,PREPARING,READY')
+    const mio = (enCocina as Array<{ orderId: string | null; needsAcceptance?: boolean }>).find(o => o.orderId === order.id)
+    expect(mio?.needsAcceptance).toBe(true)
+  })
+
+  it('en AUTO la venta entra CONFIRMADA y el KDS no pide aceptarla', async () => {
+    // ⚠️ Id PROPIO, no el de la fixture: otros casos de este archivo cancelan ese pedido, y
+    // reingerirlo devuelve la orden ya CANCELADA por idempotencia. Compartir id hace que un
+    // test dependa del orden de ejecución del anterior — ya mordió dos veces aquí.
+    const propio = { ...pedidoReal, id: `auto-conf-${Date.now()}` }
+    const id = `ev-auto-conf-${Date.now()}`
+    const r = await processUberEvent(await nuevoEvento(id, aviso(id, propio.id)), {
+      ...deps,
+      fetchOrder: async () => propio,
+    })
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })
+
+    expect(order.status).toBe('CONFIRMED')
+    const enCocina = await listKdsOrders(venueId, 'NEW,PREPARING,READY')
+    const mio = (enCocina as Array<{ orderId: string | null; needsAcceptance?: boolean }>).find(o => o.orderId === order.id)
+    expect(mio?.needsAcceptance).toBe(false)
   })
 
   // ── Los 6 eventos que Uber manda y antes IGNORÁBAMOS ─────────────────────────────────

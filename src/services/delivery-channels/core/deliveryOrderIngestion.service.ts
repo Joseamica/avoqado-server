@@ -4,6 +4,7 @@ import {
   DeliveryChannelLink,
   Order,
   OrderAcceptanceMode,
+  OrderStatus,
   OrderType,
   OriginSystem,
   PaymentFundsFlow,
@@ -174,7 +175,13 @@ export async function ingestDeliveryOrder(
         originSystem: OriginSystem.DELIVERY_PLATFORM,
         type: OrderType.DELIVERY,
         scheduledFor: normalized.scheduledFor ?? null,
-        status: 'CONFIRMED', // AUTO-accept: entra confirmada directo a cocina (independiente del dinero)
+        // 🔴 CONFIRMED significa "ya le dijimos que sí al proveedor". En modo MANUAL NO se lo
+        // dijimos —nadie lo ha aceptado todavía— y marcarlo confirmado era una mentira con
+        // tres consecuencias: el POS no podía saber cuáles falta aceptar, el tablero decía
+        // que todo iba bien mientras el reloj de 11.5 min corría, y `denyDeliveryOrder`
+        // elegía CANCELAR en vez de RECHAZAR (protocolo equivocado y peor para el cliente,
+        // que ya creía tener su pedido confirmado).
+        status: link.orderAcceptanceMode === OrderAcceptanceMode.MANUAL ? OrderStatus.PENDING : OrderStatus.CONFIRMED,
         kitchenStatus: 'PENDING',
         paymentStatus,
         subtotal,
