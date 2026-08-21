@@ -30,6 +30,7 @@ import prisma from '@/utils/prismaClient'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 
+import { resolveDeliveryHours } from './deliveryHours.service'
 import { buildMenuSnapshot } from './menuSnapshot.service'
 
 export type MenuSyncOutcome = 'PUBLISHED' | 'UNCHANGED' | 'NO_PUBLISHER' | 'FAILED'
@@ -66,14 +67,20 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
 
   try {
     const snapshot = await buildMenuSnapshot(link.venueId)
+
+    // 🔴 El horario va SIEMPRE, y entra en la huella: si el dueño cambia sus horas, el menú
+    // se republica solo. Antes se publicaba 24/7 en silencio y nadie se enteraba de que su
+    // negocio aparecía abierto de madrugada.
+    const { horario, fuente } = await resolveDeliveryHours(link)
+    const availability = typeof adapter.mapHours === 'function' ? adapter.mapHours(horario) : undefined
     // Se traduce ANTES de decidir: es lo que de verdad va a viajar, y es lo que hay que
     // comparar. Cuesta CPU y nada de red.
-    const payload = adapter.buildMenuPayload ? adapter.buildMenuPayload(snapshot) : snapshot
+    const payload = adapter.buildMenuPayload ? adapter.buildMenuPayload(snapshot, { availability }) : snapshot
     const actual = huella(payload)
 
     if (!opts.force && actual === link.lastMenuHash) return { outcome: 'UNCHANGED', linkId: link.id }
 
-    const r = await adapter.publishMenu(snapshot, link.externalLocationId)
+    const r = await adapter.publishMenu(snapshot, link.externalLocationId, { availability })
     if (!r.ok) {
       // 🔴 NO se guarda la huella si falló: guardarla haría que la siguiente pasada creyera
       // que Uber ya lo tiene, y el menú se quedaría viejo PARA SIEMPRE sin volver a intentar.

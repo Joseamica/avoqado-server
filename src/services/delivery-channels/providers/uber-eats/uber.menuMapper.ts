@@ -17,6 +17,7 @@
  * publicaciones, los pedidos dejan de resolver a un producto: entran igual (nunca se pierde
  * una venta) pero sin inventario, sin costo y sin reportes por producto.
  */
+import type { HorarioSemanal } from '../../core/deliveryHours.service'
 import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 
 /** Un texto como lo quiere Uber. Ver nota (2) arriba sobre por qué la llave es `en`. */
@@ -49,18 +50,31 @@ export interface UberMenuPayload {
 
 export interface UberMenuOptions {
   /**
-   * Horario en que la tienda acepta pedidos. El default es 24/7 y está puesto a propósito
-   * para la tienda de PRUEBAS.
+   * Horario en que la tienda acepta pedidos, ya en formato de Uber.
    *
-   * 🔴 Publicar 24/7 en un negocio real lo muestra siempre abierto y le entran pedidos a
-   * las 3 de la mañana que nadie va a cocinar. Quien publique un venue real DEBE pasar su
-   * horario aquí — no se toma solo porque los horarios del venue todavía no son la fuente
-   * confiable (hueco conocido, ver memoria `square-audit-gap-analysis`).
+   * 🔴 Lo resuelve `resolveDeliveryHours` (núcleo) y lo traduce `aDisponibilidadUber`. El
+   * default 24/7 de abajo SÓLO aplica si alguien llama a este traductor sin pasar nada —
+   * cosa que el sincronizador ya no hace. Publicar 24/7 en un negocio real le mete pedidos
+   * a las 3 de la mañana que nadie va a cocinar, y cada rechazo cuenta contra la tasa de
+   * inyección que Uber exige para no revocar el acceso.
    */
   availability?: Array<{ day_of_week: string; time_periods: Array<{ start_time: string; end_time: string }> }>
 }
 
 const TODO_EL_DIA = DIAS.map(d => ({ day_of_week: d, time_periods: [{ start_time: '00:00', end_time: '23:59' }] }))
+
+/**
+ * Horario neutral (el del núcleo) → el formato de Uber.
+ *
+ * Un día apagado simplemente NO aparece: Uber entiende la ausencia como "cerrado". Mandarlo
+ * con una lista vacía de periodos hace que rechace el menú entero.
+ */
+export function aDisponibilidadUber(horario: HorarioSemanal) {
+  return DIAS.filter(d => horario[d]?.enabled && horario[d].ranges.length > 0).map(d => ({
+    day_of_week: d,
+    time_periods: horario[d].ranges.map(r => ({ start_time: r.open, end_time: r.close })),
+  }))
+}
 
 /** Ids estables y legibles: si cambian, los pedidos dejan de resolver (ver nota 🔴 arriba). */
 const idCategoria = (nombre: string) =>

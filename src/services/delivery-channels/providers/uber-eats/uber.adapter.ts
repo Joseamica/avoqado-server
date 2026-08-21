@@ -16,7 +16,7 @@ import { uberApi, fetchUberOrder } from './uber.client'
 import { orderIdFromResourceHref } from './uber.http'
 import { verifyUberSignature } from './uber.signature'
 import { mapUberOrder } from './uber.mapper'
-import { mapSnapshotToUberMenu, type UberMenuOptions } from './uber.menuMapper'
+import { aDisponibilidadUber, mapSnapshotToUberMenu, type UberMenuOptions } from './uber.menuMapper'
 import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 import type { CanonicalDeliveryEvent, DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
 
@@ -160,6 +160,11 @@ export const uberAdapter = {
   /** El menú traducido, sin publicarlo — para que el sincronizador le saque huella. */
   buildMenuPayload(snapshot: MenuSnapshot, opts?: UberMenuOptions): unknown {
     return mapSnapshotToUberMenu(snapshot, opts)
+  },
+
+  /** Traduce el horario neutral del núcleo al formato de disponibilidad de Uber. */
+  mapHours(horario: Parameters<typeof aDisponibilidadUber>[0]) {
+    return aDisponibilidadUber(horario)
   },
 
   /**

@@ -9,6 +9,12 @@ jest.mock('@/services/delivery-channels/core/menuSnapshot.service', () => ({
   buildMenuSnapshot: jest.fn(),
 }))
 
+// El sincronizador resuelve el horario antes de publicar; sin esto la cascada consulta
+// reservas de verdad. Se fija en ESTIMADO, que es el caso por defecto de un venue nuevo.
+jest.mock('@/services/delivery-channels/core/deliveryHours.service', () => ({
+  resolveDeliveryHours: jest.fn(async () => ({ horario: {}, fuente: 'ESTIMADO' })),
+}))
+
 jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn(async () => true),
 }))
