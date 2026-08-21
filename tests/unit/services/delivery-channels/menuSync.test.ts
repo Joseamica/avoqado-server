@@ -9,6 +9,10 @@ jest.mock('@/services/delivery-channels/core/menuSnapshot.service', () => ({
   buildMenuSnapshot: jest.fn(),
 }))
 
+jest.mock('@/services/access/basePlan.service', () => ({
+  venueHasFeatureAccess: jest.fn(async () => true),
+}))
+
 jest.mock('@/services/delivery-channels/core/adapterRegistry', () => ({
   hasAdapter: jest.fn(() => true),
   adapterFor: jest.fn(),
@@ -17,7 +21,8 @@ jest.mock('@/services/delivery-channels/core/adapterRegistry', () => ({
 import prisma from '@/utils/prismaClient'
 import { buildMenuSnapshot } from '@/services/delivery-channels/core/menuSnapshot.service'
 import { adapterFor, hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
-import { syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { syncChannelAvailability, syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
 
 const mockedSnapshot = buildMenuSnapshot as jest.Mock
 const mockedAdapterFor = adapterFor as jest.Mock
@@ -132,5 +137,72 @@ describe('menuSync — el menú del proveedor sigue al de Avoqado', () => {
     const r = await syncChannelMenu(link({ lastMenuHash: hash1 }))
 
     expect(r.outcome).toBe('PUBLISHED') // detectó el cambio del TRADUCTOR
+  })
+})
+
+describe('disponibilidad — agotar y revivir productos', () => {
+  const mockedFeature = venueHasFeatureAccess as jest.Mock
+  const mockedProducts = (prisma as any).product.findMany as jest.Mock
+  const mockedLinkUpdate = (prisma as any).deliveryChannelLink.update as jest.Mock
+
+  function adaptadorDisp(ok = true) {
+    return { setItemSoldOut: jest.fn(async () => ({ ok, status: ok ? 200 : 400, raw: '' })) }
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(hasAdapter as jest.Mock).mockReturnValue(true)
+    mockedFeature.mockResolvedValue(true)
+    mockedLinkUpdate.mockResolvedValue({})
+  })
+
+  it('🔴 agota lo que se acabó y revive lo que volvió — sólo la DIFERENCIA', () => {
+    // Repetir el estado de 96 productos cada 5 minutos serían 96 llamadas por nada.
+    const a = adaptadorDisp()
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }, { sku: 'B' }])
+
+    return syncChannelAvailability(link({ config: { soldOutSkus: ['B', 'C'] } })).then(r => {
+      expect(r).toEqual({ agotados: 1, revividos: 1 })
+      expect(a.setItemSoldOut).toHaveBeenCalledWith('A', 'store1', true) // nuevo
+      expect(a.setItemSoldOut).toHaveBeenCalledWith('C', 'store1', false) // volvió
+      expect(a.setItemSoldOut).not.toHaveBeenCalledWith('B', 'store1', true) // ya estaba
+    })
+  })
+
+  it('🔴 sin INVENTORY_TRACKING no toca NADA: los números serían basura', async () => {
+    // Agotar con base en stock que nadie mantiene ESCONDE productos de la app sin motivo,
+    // que es peor que venderlos de más. [mercado] Square hace lo mismo: sólo marca agotado
+    // el producto que tiene el seguimiento prendido.
+    const a = adaptadorDisp()
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedFeature.mockResolvedValue(false)
+
+    expect(await syncChannelAvailability(link())).toEqual({ agotados: 0, revividos: 0 })
+    expect(mockedProducts).not.toHaveBeenCalled()
+    expect(a.setItemSoldOut).not.toHaveBeenCalled()
+  })
+
+  it('🔴 si el proveedor RECHAZA agotar uno, no se registra como hecho', async () => {
+    // Registrarlo haría que la siguiente pasada creyera que ya está agotado y nunca lo
+    // reintentara: el proveedor seguiría vendiendo algo que no hay, para siempre.
+    ;(adapterFor as jest.Mock).mockReturnValue(adaptadorDisp(false))
+    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }])
+
+    await syncChannelAvailability(link({ config: {} }))
+
+    expect(mockedLinkUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ config: expect.objectContaining({ soldOutSkus: [] }) }) }),
+    )
+  })
+
+  it('sin cambios no gasta ni una llamada', async () => {
+    const a = adaptadorDisp()
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }])
+
+    expect(await syncChannelAvailability(link({ config: { soldOutSkus: ['A'] } }))).toEqual({ agotados: 0, revividos: 0 })
+    expect(a.setItemSoldOut).not.toHaveBeenCalled()
+    expect(mockedLinkUpdate).not.toHaveBeenCalled()
   })
 })

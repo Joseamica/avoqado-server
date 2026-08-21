@@ -21,6 +21,7 @@ import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
 import { cancelDeliveryOrder } from '../../core/cancelDeliveryOrder.service'
+import { syncChannelMenu } from '../../core/menuSync.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../core/deliveryWebhookEvent.service'
 import { uberAdapter } from './uber.adapter'
@@ -31,6 +32,7 @@ export type UberProcessOutcome =
   | 'NOT_AN_ORDER' // evento que no es un pedido (status, etc.)
   | 'ORPHANED' // llegó de una tienda sin vincular a ningún venue
   | 'CANCELLED' // el proveedor canceló el pedido: dejó de ser venta y salió de cocina
+  | 'MENU_SENT' // Uber pidió el menú y se le mandó
   | 'FAILED'
 
 export interface UberProcessResult {
@@ -81,6 +83,29 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     const r = await cancelDeliveryOrder(identidad.orderId, DeliveryProvider.UBER_EATS, 'cancelado por Uber')
     await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, r.orderId)
     return { outcome: 'CANCELLED', orderId: r.orderId }
+  }
+
+  // Uber PIDE el menú. Se le manda con `force`, aunque nuestra huella diga que ya lo tiene:
+  // si lo está pidiendo es porque de su lado se perdió, y discutirle con nuestro registro
+  // sería confiar en él justo en el caso donde está mal. Sin esto, la tienda se queda con un
+  // menú viejo o vacío y nadie se entera hasta que un cliente no encuentra qué pedir.
+  if (tipo === 'MENU_REFRESH') {
+    if (!evento.channelLink) {
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'SIN_VINCULO')
+      return { outcome: 'ORPHANED' }
+    }
+    const r = await syncChannelMenu(evento.channelLink, { force: true })
+    // Un menú que el proveedor pidió y no pudimos mandar NO se marca como procesado: queda
+    // FAILED y la reconciliación lo reintenta. Marcarlo visto lo enterraría.
+    const ok = r.outcome === 'PUBLISHED'
+    await markEventResult(
+      eventRowId,
+      ok ? DeliveryOrderEventStatus.PROCESSED : DeliveryOrderEventStatus.FAILED,
+      undefined,
+      ok ? undefined : r.error,
+    )
+    logger[ok ? 'info' : 'error']('📋 [Uber] el proveedor pidió el menú', { eventRowId, resultado: r.outcome })
+    return ok ? { outcome: 'MENU_SENT' } : { outcome: 'FAILED', error: r.error }
   }
 
   // Ruido conocido (cambios de estado, provisioning): se marca visto para que la

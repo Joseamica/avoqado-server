@@ -59,6 +59,10 @@ export const uberAdapter = {
   classifyEvent(eventType: string): CanonicalDeliveryEvent {
     if (eventType === 'orders.notification') return 'NEW_ORDER'
     if (eventType === 'orders.cancel' || eventType === 'orders.failure') return 'CANCEL'
+    // [doc] Uber manda esto cuando NECESITA el menú — típicamente porque se le perdió o
+    // quedó incompleto de su lado. Ignorarlo deja la tienda con un menú viejo o vacío y
+    // nadie se entera hasta que un cliente no encuentra qué pedir.
+    if (eventType === 'store.menu_refresh_request') return 'MENU_REFRESH'
     return 'IGNORED'
   },
 
@@ -115,6 +119,42 @@ export const uberAdapter = {
     const ok = r.status < 400 || r.status === 409
     if (!ok) logger.warn('Uber rechazó el accept', { orderId, status: r.status, cuerpo: r.text.slice(0, 200) })
     return { ok, status: r.status, raw: r.text }
+  },
+
+  /**
+   * Pausa o reanuda la tienda en el proveedor.
+   *
+   * 🔴 Es lo que evita el peor círculo de esta integración: si la cocina se satura o el
+   * negocio cierra temprano y NO hay forma de pausar, los pedidos siguen entrando y hay que
+   * rechazarlos uno por uno. Uber cuenta cada rechazo contra la tasa de inyección que exige
+   * (99.9%, revocación por debajo de 99%): o sea que no poder pausar termina costando la
+   * integración completa, no sólo unos pedidos.
+   *
+   * Pausar NO cierra el negocio: los clientes lo siguen viendo, sólo no pueden pedir. Es
+   * reversible y es la herramienta correcta para "ahorita no", a diferencia de despublicar
+   * el menú.
+   */
+  async setStoreStatus(paused: boolean, storeId: string, motivo?: string): Promise<UberActionResult> {
+    const r = await uberApi({
+      method: 'POST',
+      // ⚠️ `store` en SINGULAR. La documentación de Uber lo publica en plural y ese da 404 —
+      // verificado el 2026-08-17 contra la API real. No lo "corrijas" a `stores`.
+      path: `/v1/eats/store/${encodeURIComponent(storeId)}/status`,
+      storeId,
+      body: paused ? { status: 'PAUSED', reason: motivo ?? 'Pausado desde el punto de venta', pause_duration: 3600 } : { status: 'ONLINE' },
+    })
+    const ok = r.status < 400
+    if (!ok)
+      logger.error('🚨 Uber rechazó el cambio de estado de la tienda', { storeId, paused, status: r.status, cuerpo: r.text.slice(0, 300) })
+    else logger.info(`🏪 [Uber] tienda ${paused ? 'PAUSADA' : 'REANUDADA'}`, { storeId, motivo })
+    return { ok, status: r.status, raw: r.text }
+  },
+
+  /** ¿Está la tienda recibiendo pedidos ahora mismo, según el proveedor? */
+  async getStoreStatus(storeId: string): Promise<{ ok: boolean; status: number; estado?: string; motivo?: string; raw: string }> {
+    const r = await uberApi({ method: 'GET', path: `/v1/eats/store/${encodeURIComponent(storeId)}/status`, storeId })
+    const j = r.json as { status?: string; offlineReason?: string } | undefined
+    return { ok: r.status < 400, status: r.status, estado: j?.status, motivo: j?.offlineReason, raw: r.text }
   },
 
   /** El menú traducido, sin publicarlo — para que el sincronizador le saque huella. */

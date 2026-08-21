@@ -158,6 +158,7 @@ export interface DeliveryProviderAdapter {
 export type CanonicalDeliveryEvent =
   | 'NEW_ORDER' // hay un pedido nuevo que ingerir
   | 'CANCEL' // el proveedor canceló el pedido: NO se debe seguir cocinando ni cobrar
+  | 'MENU_REFRESH' // el proveedor PIDE el menú: se le manda aunque creamos que ya lo tiene
   | 'IGNORED' // ruido conocido (cambios de estado, provisioning) — se marca visto y ya
 
 export interface DirectDeliveryAdapter {
@@ -188,6 +189,12 @@ export interface DirectDeliveryAdapter {
   markReady?(orderId: string, storeId: string): Promise<ActionResult>
 
   publishMenu?(snapshot: MenuSnapshot, storeId: string): Promise<ActionResult>
+
+  /** Agota o revive UN producto sin republicar el menú. La operación del día a día. */
+  setItemSoldOut?(itemId: string, storeId: string, agotado: boolean): Promise<ActionResult>
+
+  /** Pausa o reanuda la tienda: deja de recibir pedidos sin desaparecer de la app. */
+  setStoreStatus?(paused: boolean, storeId: string, motivo?: string): Promise<ActionResult>
 
   /**
    * El menú YA TRADUCIDO al formato del proveedor, SIN publicarlo.

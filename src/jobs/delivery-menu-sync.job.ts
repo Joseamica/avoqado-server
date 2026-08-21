@@ -4,7 +4,7 @@ import { CronJob } from 'cron'
 
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
-import { syncChannelMenu, syncableLinksWhere } from '../services/delivery-channels/core/menuSync.service'
+import { syncChannelAvailability, syncChannelMenu, syncableLinksWhere } from '../services/delivery-channels/core/menuSync.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
@@ -77,6 +77,20 @@ export class DeliveryMenuSyncJob {
         if (r.outcome === 'PUBLISHED') publicados++
         else if (r.outcome === 'UNCHANGED') sinCambio++
         else if (r.outcome === 'FAILED') fallidos++
+
+        // La disponibilidad va SIEMPRE, aunque el menú no haya cambiado — de hecho es el
+        // caso normal: el menú cambia una vez al mes y los productos se acaban a diario.
+        // Va aparte y con su propio try/catch: que un fallo agotando un producto no impida
+        // que el menú se publique (ni al revés).
+        try {
+          await syncChannelAvailability(link)
+        } catch (error) {
+          logger.error('🚨 [MenuSync] falló la disponibilidad — el proveedor puede estar vendiendo lo que no hay', {
+            linkId: link.id,
+            venueId: link.venueId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
       }
 
       if (publicados > 0 || fallidos > 0) {

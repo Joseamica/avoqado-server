@@ -28,6 +28,8 @@ import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
 import { adapterFor, hasAdapter } from './adapterRegistry'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+
 import { buildMenuSnapshot } from './menuSnapshot.service'
 
 export type MenuSyncOutcome = 'PUBLISHED' | 'UNCHANGED' | 'NO_PUBLISHER' | 'FAILED'
@@ -116,4 +118,81 @@ export function syncableLinksWhere() {
     // del schema es `true`, porque el peligro es el menú viejo, no el sincronizado.
     autoSyncMenu: true,
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// DISPONIBILIDAD (agotar / revivir un producto)
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Marca en el proveedor los productos que se acabaron, y revive los que volvieron.
+ *
+ * 🔴 Es la operación que más veces al día importa, y es lo CONTRARIO de republicar el menú:
+ * toca un item, es barata, y no puede romper nada. Sin ella el proveedor sigue vendiendo lo
+ * que ya no hay — o entregas de menos, o rechazas el pedido, y cada rechazo cuenta contra la
+ * tasa de inyección que Uber exige para no revocar el acceso.
+ *
+ * 🔴 SÓLO productos que de verdad llevan inventario, y sólo si el venue tiene la función
+ * activa. Sin `INVENTORY_TRACKING` los números de stock no se mantienen y son basura:
+ * agotar productos con base en basura los ESCONDE de la app sin motivo, que es peor que
+ * venderlos de más.
+ *
+ * [mercado] Es exactamente lo que hace Square: marca agotado al llegar a cero **sólo si ese
+ * producto tiene el seguimiento de inventario prendido**; si no, lo sigue vendiendo.
+ *
+ * ⚠️ Y NO contradice nuestra paridad de stock negativo (Square-parity, 2026-08-12): dejar
+ * vender por debajo de cero es para el MOSTRADOR, donde hay una persona que ve la bodega y
+ * decide. En un marketplace nadie está ahí: el cliente pide a ciegas y el rechazo lo paga el
+ * negocio. Contextos distintos, decisiones distintas, a propósito.
+ *
+ * ⚠️ LÍMITE CONOCIDO: sólo cubre productos con inventario PROPIO. Un platillo cuya
+ * disponibilidad depende de su receta (se acabó la carne ⇒ no hay hamburguesas) NO se detecta
+ * todavía — hace falta explotar recetas, que es su propia rebanada.
+ */
+export async function syncChannelAvailability(link: DeliveryChannelLink): Promise<{ agotados: number; revividos: number }> {
+  if (!hasAdapter(link.provider)) return { agotados: 0, revividos: 0 }
+  const adapter = adapterFor(link.provider)
+  if (typeof adapter.setItemSoldOut !== 'function') return { agotados: 0, revividos: 0 }
+
+  if (!(await venueHasFeatureAccess(link.venueId, 'INVENTORY_TRACKING'))) return { agotados: 0, revividos: 0 }
+
+  const sinStock = await prisma.product.findMany({
+    where: { venueId: link.venueId, active: true, inventory: { currentStock: { lte: 0 } } },
+    select: { sku: true },
+  })
+  const deben = new Set(sinStock.map(p => p.sku).filter(Boolean) as string[])
+
+  // Lo que ya le dijimos al proveedor. Se guarda la LISTA y no una huella: hace falta el
+  // contenido para mandar sólo la diferencia — repetir el estado de 96 productos cada 5
+  // minutos serían 96 llamadas por nada.
+  const previo = new Set(((link.config as { soldOutSkus?: string[] } | null)?.soldOutSkus ?? []) as string[])
+
+  const agotar = [...deben].filter(sku => !previo.has(sku))
+  const revivir = [...previo].filter(sku => !deben.has(sku))
+  if (agotar.length === 0 && revivir.length === 0) return { agotados: 0, revividos: 0 }
+
+  const logrados = new Set(previo)
+  for (const sku of agotar) {
+    const r = await adapter.setItemSoldOut(sku, link.externalLocationId, true)
+    // Sólo se registra lo que el proveedor ACEPTÓ. Guardar un fallo como hecho haría que la
+    // siguiente pasada creyera que ya está agotado y nunca lo reintentara.
+    if (r.ok) logrados.add(sku)
+  }
+  for (const sku of revivir) {
+    const r = await adapter.setItemSoldOut(sku, link.externalLocationId, false)
+    if (r.ok) logrados.delete(sku)
+  }
+
+  await prisma.deliveryChannelLink.update({
+    where: { id: link.id },
+    data: { config: { ...((link.config as object) ?? {}), soldOutSkus: [...logrados] } },
+  })
+
+  logger.info('🥡 [MenuSync] disponibilidad actualizada en el proveedor', {
+    linkId: link.id,
+    venueId: link.venueId,
+    agotados: agotar.length,
+    revividos: revivir.length,
+  })
+  return { agotados: agotar.length, revividos: revivir.length }
 }
