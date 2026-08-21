@@ -14,6 +14,11 @@
  * Spec completa: docs/superpowers/specs/2026-08-20-activacion-slp-sim-evento-design.md
  */
 
+import logger from '../config/logger'
+import prisma from '../utils/prismaClient'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { logAction } from '../services/dashboard/activity-log.service'
+
 /**
  * Regla de reasignación: qué categoría, en qué estado de origen, se mueve a qué venue
  * destino (dentro de qué organización, resuelta por NOMBRE — nunca un id fijo, para que
@@ -41,4 +46,117 @@ export function isOrderPureCategoryMatch(categoryNames: Array<string | null>, ca
   if (categoryNames.length === 0) return false
   const target = categoryName.trim().toLowerCase()
   return categoryNames.every(name => name != null && name.trim().toLowerCase() === target)
+}
+
+/**
+ * Núcleo de la reasignación para UNA regla. Resuelve organización y venue destino por
+ * NOMBRE/slug (nunca un id fijo) — si cualquiera de los dos no existe en este ambiente
+ * (dev/CI sin datos de PlayTelecom), se salta la regla sin truena. Sólo reasigna una
+ * orden si es 100% pura para la categoría de la regla (`isOrderPureCategoryMatch`); una
+ * orden mixta se salta y se loguea para revisión manual, nunca se mueve parcialmente.
+ *
+ * Payment.shiftId NUNCA se toca aquí — sólo Order.venueId + Payment.venueId +
+ * SaleVerification.venueId + SerializedItem.sellingVenueId, juntos en una transacción.
+ */
+export async function reassignEventSimSalesForRule(
+  rule: EventVenueReassignmentRule,
+): Promise<{ reassigned: number; skippedMixed: number }> {
+  const org = await prisma.organization.findFirst({
+    where: { name: { equals: rule.orgName, mode: 'insensitive' } },
+    select: { id: true },
+  })
+  if (!org) {
+    logger.debug(`[PlayTelecom Event SIM Reassignment] Organización "${rule.orgName}" no existe en este ambiente — se salta la regla`)
+    return { reassigned: 0, skippedMixed: 0 }
+  }
+
+  const targetVenue = await prisma.venue.findFirst({
+    where: { slug: rule.targetVenueSlug, organizationId: org.id },
+    select: { id: true },
+  })
+  if (!targetVenue) {
+    logger.warn(`[PlayTelecom Event SIM Reassignment] Venue destino "${rule.targetVenueSlug}" no existe todavía — se salta la regla`)
+    return { reassigned: 0, skippedMixed: 0 }
+  }
+
+  const candidates = await retry(
+    () =>
+      prisma.serializedItem.findMany({
+        where: {
+          status: 'SOLD',
+          orderItemId: { not: null },
+          category: { name: { equals: rule.categoryName, mode: 'insensitive' } },
+          sellingVenueId: { not: null },
+          NOT: { sellingVenueId: targetVenue.id },
+          sellingVenue: { organizationId: org.id, state: { equals: rule.originState, mode: 'insensitive' } },
+        },
+        select: { orderItemId: true },
+      }),
+    {
+      retries: 2,
+      initialDelay: 1500,
+      shouldRetry: shouldRetryDbConnectionError,
+      context: 'playtelecom-event-sim-reassignment.findCandidates',
+    },
+  )
+
+  const orderItemIds = candidates.map(c => c.orderItemId).filter((id): id is string => id != null)
+  if (orderItemIds.length === 0) return { reassigned: 0, skippedMixed: 0 }
+
+  const orderItemsForCandidates = await prisma.orderItem.findMany({
+    where: { id: { in: orderItemIds } },
+    select: { orderId: true },
+  })
+  const orderIds = Array.from(new Set(orderItemsForCandidates.map(oi => oi.orderId)))
+
+  let reassigned = 0
+  let skippedMixed = 0
+
+  for (const orderId of orderIds) {
+    try {
+      const orderItems = await prisma.orderItem.findMany({ where: { orderId }, select: { categoryName: true } })
+      if (
+        !isOrderPureCategoryMatch(
+          orderItems.map(i => i.categoryName),
+          rule.categoryName,
+        )
+      ) {
+        skippedMixed++
+        logger.warn('[PlayTelecom Event SIM Reassignment] Orden mixta, se salta para revisión manual', {
+          entrypoint: 'job:playtelecom-event-sim-reassignment',
+          orderId,
+          reason: 'mixed_order_skipped',
+        })
+        continue
+      }
+
+      await prisma.$transaction(async tx => {
+        await tx.order.updateMany({ where: { id: orderId, NOT: { venueId: targetVenue.id } }, data: { venueId: targetVenue.id } })
+        await tx.payment.updateMany({ where: { orderId, NOT: { venueId: targetVenue.id } }, data: { venueId: targetVenue.id } })
+        await tx.saleVerification.updateMany({
+          where: { payment: { orderId }, NOT: { venueId: targetVenue.id } },
+          data: { venueId: targetVenue.id },
+        })
+        await tx.serializedItem.updateMany({ where: { orderItem: { orderId } }, data: { sellingVenueId: targetVenue.id } })
+      })
+
+      await logAction({
+        action: 'ORDER_VENUE_REASSIGNED',
+        entity: 'Order',
+        entityId: orderId,
+        venueId: targetVenue.id,
+        staffId: null,
+        data: { toVenueId: targetVenue.id, reason: 'playtelecom_evento_sim', category: rule.categoryName },
+      })
+      reassigned++
+    } catch (err) {
+      logger.error('[PlayTelecom Event SIM Reassignment] No se pudo reasignar una orden', {
+        entrypoint: 'job:playtelecom-event-sim-reassignment',
+        orderId,
+        error: err instanceof Error ? err.message : err,
+      })
+    }
+  }
+
+  return { reassigned, skippedMixed }
 }
