@@ -57,7 +57,7 @@ async function main() {
 
   console.log('PLAN:')
   console.log(
-    `  1. CREAR venue "${NEW_VENUE_NAME}" (slug ${NEW_VENUE_SLUG}, type ${tmpl.type}, tz ${tmpl.timezone}, ${tmpl.currency}/${tmpl.country}, org ${tmpl.organizationId})`,
+    `  1. CREAR venue "${NEW_VENUE_NAME}" (slug ${NEW_VENUE_SLUG}, type ${tmpl.type}, tz ${tmpl.timezone}, ${tmpl.currency}/${tmpl.country}, status ACTIVE, ciudad/estado San Luis Potosí, org ${tmpl.organizationId})`,
   )
   console.log(`  2. CREAR VenuePaymentConfig → primaryAccountId ${tmplPc?.primaryAccountId ?? '(molde sin pc!)'}`)
   console.log(`  3. CLONAR ${tmplMods.length} VenueModule del molde: ${tmplMods.map(m => m.moduleId).join(', ')}`)
@@ -80,6 +80,8 @@ async function main() {
         currency: tmpl.currency,
         country: tmpl.country,
         state: 'San Luis Potosí',
+        city: 'San Luis Potosí',
+        status: 'ACTIVE',
         active: true,
       },
     })
