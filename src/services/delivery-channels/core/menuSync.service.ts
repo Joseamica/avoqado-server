@@ -169,11 +169,45 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
 
   if (!(await venueHasFeatureAccess(link.venueId, 'INVENTORY_TRACKING'))) return { agotados: 0, revividos: 0 }
 
+  // (a) Productos con inventario PROPIO que se acabaron.
   const sinStock = await prisma.product.findMany({
     where: { venueId: link.venueId, active: true, inventory: { currentStock: { lte: 0 } } },
     select: { sku: true },
   })
   const deben = new Set(sinStock.map(p => p.sku).filter(Boolean) as string[])
+
+  // (b) 🔴 Platillos que NO SE PUEDEN HACER porque falta un ingrediente. Es el caso que de
+  // verdad pasa en una cocina: no se acaba "la hamburguesa", se acaba la carne — y entonces
+  // TODOS los platillos que la llevan dejan de existir. Sin esto, Uber los sigue vendiendo y
+  // cada uno termina en un rechazo, que es lo que cuenta contra la tasa de inyección.
+  const conReceta = await prisma.product.findMany({
+    where: { venueId: link.venueId, active: true, recipe: { isNot: null } },
+    select: {
+      sku: true,
+      recipe: {
+        select: {
+          portionYield: true,
+          lines: {
+            // Un ingrediente OPCIONAL que falte no impide hacer el platillo — sólo sale sin
+            // él. Contarlo agotaría platillos que sí se pueden preparar.
+            where: { isOptional: false },
+            select: { quantity: true, rawMaterial: { select: { currentStock: true, name: true } } },
+          },
+        },
+      },
+    },
+  })
+
+  for (const p of conReceta) {
+    if (!p.sku || !p.recipe) continue
+    const porciones = p.recipe.portionYield > 0 ? p.recipe.portionYield : 1
+    const faltaAlgo = p.recipe.lines.some(l => {
+      // Lo que se necesita para UNA porción: la receta rinde `portionYield`.
+      const necesario = l.quantity.div(porciones)
+      return l.rawMaterial.currentStock.lessThan(necesario)
+    })
+    if (faltaAlgo) deben.add(p.sku)
+  }
 
   // Lo que ya le dijimos al proveedor. Se guarda la LISTA y no una huella: hace falta el
   // contenido para mandar sólo la diferencia — repetir el estado de 96 productos cada 5

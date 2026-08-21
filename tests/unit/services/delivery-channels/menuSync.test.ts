@@ -27,6 +27,8 @@ jest.mock('@/services/delivery-channels/core/adapterRegistry', () => ({
 import prisma from '@/utils/prismaClient'
 import { buildMenuSnapshot } from '@/services/delivery-channels/core/menuSnapshot.service'
 import { adapterFor, hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
+import { Prisma } from '@prisma/client'
+
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { syncChannelAvailability, syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
 
@@ -151,6 +153,8 @@ describe('disponibilidad — agotar y revivir productos', () => {
   const mockedProducts = (prisma as any).product.findMany as jest.Mock
   const mockedLinkUpdate = (prisma as any).deliveryChannelLink.update as jest.Mock
 
+  const dec = (n: number) => new Prisma.Decimal(n)
+
   function adaptadorDisp(ok = true) {
     return { setItemSoldOut: jest.fn(async () => ({ ok, status: ok ? 200 : 400, raw: '' })) }
   }
@@ -166,7 +170,7 @@ describe('disponibilidad — agotar y revivir productos', () => {
     // Repetir el estado de 96 productos cada 5 minutos serían 96 llamadas por nada.
     const a = adaptadorDisp()
     ;(adapterFor as jest.Mock).mockReturnValue(a)
-    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }, { sku: 'B' }])
+    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }, { sku: 'B' }]).mockResolvedValueOnce([])
 
     return syncChannelAvailability(link({ config: { soldOutSkus: ['B', 'C'] } })).then(r => {
       expect(r).toEqual({ agotados: 1, revividos: 1 })
@@ -174,6 +178,62 @@ describe('disponibilidad — agotar y revivir productos', () => {
       expect(a.setItemSoldOut).toHaveBeenCalledWith('C', 'store1', false) // volvió
       expect(a.setItemSoldOut).not.toHaveBeenCalledWith('B', 'store1', true) // ya estaba
     })
+  })
+
+  it('🔴 agota los platillos que NO SE PUEDEN HACER por falta de ingrediente', async () => {
+    // Es el caso que de verdad pasa en una cocina: no se acaba "la hamburguesa", se acaba la
+    // CARNE — y entonces todos los platillos que la llevan dejan de existir. Sin esto Uber
+    // los sigue vendiendo y cada uno termina en un rechazo, que cuenta contra la tasa de
+    // inyección que Uber exige para no revocar el acceso.
+    const a = adaptadorDisp()
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts
+      .mockResolvedValueOnce([]) // (a) nada con inventario propio agotado
+      .mockResolvedValueOnce([
+        {
+          sku: 'HAMBURGUESA',
+          recipe: { portionYield: 1, lines: [{ quantity: dec(0.2), rawMaterial: { currentStock: dec(0), name: 'Carne' } }] },
+        },
+        {
+          sku: 'ENSALADA',
+          recipe: { portionYield: 1, lines: [{ quantity: dec(0.1), rawMaterial: { currentStock: dec(5), name: 'Lechuga' } }] },
+        },
+      ])
+
+    const r = await syncChannelAvailability(link({ config: {} }))
+
+    expect(r.agotados).toBe(1)
+    expect(a.setItemSoldOut).toHaveBeenCalledWith('HAMBURGUESA', 'store1', true)
+    expect(a.setItemSoldOut).not.toHaveBeenCalledWith('ENSALADA', 'store1', true)
+  })
+
+  it('🔴 la receta que RINDE VARIAS porciones no se agota de más', async () => {
+    // Una receta de 2 kg de carne que rinde 10 porciones necesita 0.2 kg por porción. Con
+    // 0.5 kg en bodega SÍ se pueden hacer. Dividir mal aquí esconde platillos que sí hay.
+    const a = adaptadorDisp()
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          sku: 'TACOS',
+          recipe: { portionYield: 10, lines: [{ quantity: dec(2), rawMaterial: { currentStock: dec(0.5), name: 'Carne' } }] },
+        },
+      ])
+
+    expect((await syncChannelAvailability(link({ config: {} }))).agotados).toBe(0)
+    expect(a.setItemSoldOut).not.toHaveBeenCalled()
+  })
+
+  it('un ingrediente OPCIONAL que falte no agota el platillo', async () => {
+    // Sale sin él. Contarlo agotaría platillos que sí se pueden preparar.
+    const a = adaptadorDisp()
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    // El servicio filtra `isOptional: false` en la consulta, así que un opcional NI SIQUIERA
+    // llega: el test lo refleja devolviendo la receta ya sin él.
+    mockedProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'PLATO', recipe: { portionYield: 1, lines: [] } }])
+
+    expect((await syncChannelAvailability(link({ config: {} }))).agotados).toBe(0)
   })
 
   it('🔴 sin INVENTORY_TRACKING no toca NADA: los números serían basura', async () => {
@@ -193,7 +253,7 @@ describe('disponibilidad — agotar y revivir productos', () => {
     // Registrarlo haría que la siguiente pasada creyera que ya está agotado y nunca lo
     // reintentara: el proveedor seguiría vendiendo algo que no hay, para siempre.
     ;(adapterFor as jest.Mock).mockReturnValue(adaptadorDisp(false))
-    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }])
+    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }]).mockResolvedValueOnce([])
 
     await syncChannelAvailability(link({ config: {} }))
 
@@ -205,7 +265,7 @@ describe('disponibilidad — agotar y revivir productos', () => {
   it('sin cambios no gasta ni una llamada', async () => {
     const a = adaptadorDisp()
     ;(adapterFor as jest.Mock).mockReturnValue(a)
-    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }])
+    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }]).mockResolvedValueOnce([])
 
     expect(await syncChannelAvailability(link({ config: { soldOutSkus: ['A'] } }))).toEqual({ agotados: 0, revividos: 0 })
     expect(a.setItemSoldOut).not.toHaveBeenCalled()
