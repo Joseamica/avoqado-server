@@ -22,6 +22,7 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { ConflictError, NotFoundError, ValidationError } from '../../../errors/AppError'
 import { logAction } from '../../dashboard/activity-log.service'
+import { adapterFor, hasAdapter } from './adapterRegistry'
 import { getAdapter } from './statusDispatcher.service'
 
 /** Select explícito — NUNCA incluye `webhookSecret`. Usado por list/create/update. */
@@ -216,17 +217,57 @@ export async function pauseChannelLink(
     throw new NotFoundError('Canal de delivery no encontrado')
   }
 
-  try {
-    const adapter = getAdapter(fullLink.provider)
-    await adapter.setChannelPaused(fullLink, paused)
-  } catch (error) {
-    logger.error(
-      `[🛵 DeliveryChannel] Fallo notificando pausa=${paused} al proveedor (link ${linkId}) — no se revierte el cambio de status`,
-      {
+  // 🔴 PAUSAR TIENE QUE LLEGARLE AL PROVEEDOR. Antes esto resolvía el adaptador con el
+  // registro VIEJO (`statusDispatcher`), que sólo conoce Deliverect: para Uber lanzaba, el
+  // catch se lo tragaba, y el status local IGUAL pasaba a PAUSED.
+  //
+  // O sea que el dueño apretaba "Pausar" con la cocina ahogada, el dashboard le decía
+  // PAUSADO, y Uber le seguía mandando pedidos. Un botón que miente es peor que uno que no
+  // existe: con el que no existe, al menos busca otra salida.
+  const motivo = paused ? 'Pausado desde el punto de venta' : undefined
+
+  if (hasAdapter(fullLink.provider)) {
+    // Proveedor DIRECTO (Uber hoy).
+    const adapter = adapterFor(fullLink.provider)
+    if (typeof adapter.setStoreStatus === 'function') {
+      let r: { ok: boolean; status: number; raw: string }
+      try {
+        r = await adapter.setStoreStatus(paused, fullLink.externalLocationId, motivo)
+      } catch (error) {
+        r = { ok: false, status: 0, raw: error instanceof Error ? error.message : String(error) }
+      }
+      if (!r.ok) {
+        // 🔴 Y ESTA es la otra mitad: avisarle a Uber no sirve de nada si igual pintamos
+        // PAUSADO cuando él dijo que no. Se revierte el estado local y se lanza, para que el
+        // dueño se entere y pueda hacer otra cosa —apagar el menú, hablar a soporte— en vez
+        // de creerse protegido mientras le siguen entrando pedidos.
+        await prisma.deliveryChannelLink.updateMany({ where: { id: linkId, venueId }, data: { status: fullLink.status } })
+        logger.error('🚨 [DeliveryChannel] el proveedor NO aceptó la pausa — estado local revertido', {
+          linkId,
+          venueId,
+          provider: fullLink.provider,
+          paused,
+          status: r.status,
+          cuerpo: r.raw.slice(0, 300),
+        })
+        throw new ConflictError(
+          paused
+            ? 'No se pudo pausar el canal en el proveedor: sigue recibiendo pedidos. Reintenta o pausa desde su portal.'
+            : 'No se pudo reactivar el canal en el proveedor. Reintenta o reactívalo desde su portal.',
+        )
+      }
+    }
+  } else {
+    // Camino LEGADO (Deliverect): su adaptador tiene otra forma. Se queda best-effort porque
+    // así estaba y no hay pedido real que lo ejercite hoy.
+    try {
+      const adapter = getAdapter(fullLink.provider)
+      await adapter.setChannelPaused(fullLink, paused)
+    } catch (error) {
+      logger.error(`[🛵 DeliveryChannel] Fallo notificando pausa=${paused} al proveedor (link ${linkId}) — no se revierte el status`, {
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined,
-      },
-    )
+      })
+    }
   }
 
   void logAction({

@@ -8,6 +8,7 @@
 import prisma from '../../../../src/utils/prismaClient'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { getAdapter } from '../../../../src/services/delivery-channels/core/statusDispatcher.service'
+import { adapterFor, hasAdapter } from '../../../../src/services/delivery-channels/core/adapterRegistry'
 import { ConflictError, NotFoundError, ValidationError } from '../../../../src/errors/AppError'
 import { DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode } from '@prisma/client'
 import {
@@ -16,6 +17,11 @@ import {
   updateChannelLink,
   pauseChannelLink,
 } from '../../../../src/services/delivery-channels/core/deliveryChannelLink.service'
+
+jest.mock('../../../../src/services/delivery-channels/core/adapterRegistry', () => ({
+  hasAdapter: jest.fn(() => false),
+  adapterFor: jest.fn(),
+}))
 
 jest.mock('../../../../src/services/delivery-channels/core/statusDispatcher.service', () => ({
   getAdapter: jest.fn(),
@@ -42,6 +48,10 @@ const baseLink = {
 describe('deliveryChannelLink.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // `clearAllMocks` limpia las LLAMADAS pero NO las implementaciones: sin esto, un
+    // `mockReturnValue(true)` de un test se filtra a todos los siguientes y los manda por
+    // el camino equivocado. El default es 'no hay adaptador directo' (camino legado).
+    ;(hasAdapter as jest.Mock).mockReturnValue(false)
   })
 
   // ============================================================
@@ -227,6 +237,64 @@ describe('deliveryChannelLink.service', () => {
   // pauseChannelLink — tenant isolation + adapter best-effort + ActivityLog
   // ============================================================
   describe('pauseChannelLink', () => {
+    // ── Un botón que MIENTE (hallado el 2026-08-21) ───────────────────────────────────
+    it('🔴 PAUSAR de verdad le avisa al proveedor DIRECTO, no sólo a nuestra base', async () => {
+      // El bug: `pauseChannelLink` resolvía el adaptador con el registro VIEJO
+      // (`statusDispatcher`), que sólo tiene Deliverect. Para Uber lanzaba, el try/catch se
+      // lo tragaba, y el status local igual pasaba a PAUSED.
+      //
+      // O sea: el dueño apretaba "Pausar" con la cocina ahogada, el dashboard le decía
+      // PAUSADO, y Uber le seguía mandando pedidos. Un botón que miente es peor que un botón
+      // que no existe — con el que no existe, al menos busca otra salida.
+      const setStoreStatus = jest.fn().mockResolvedValue({ ok: true, status: 200, raw: '' })
+      ;(hasAdapter as jest.Mock).mockReturnValue(true)
+      ;(adapterFor as jest.Mock).mockReturnValue({ setStoreStatus })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({
+        ...baseLink,
+        provider: 'UBER_EATS',
+        externalLocationId: 'store-x',
+      })
+
+      await pauseChannelLink('venue1', 'link1', true, 'staff1')
+
+      expect(setStoreStatus).toHaveBeenCalledWith(true, 'store-x', expect.any(String))
+      expect(getAdapter).not.toHaveBeenCalled() // ya no pasa por el registro viejo
+    })
+
+    it('reanudar también le llega al proveedor', async () => {
+      const setStoreStatus = jest.fn().mockResolvedValue({ ok: true, status: 200, raw: '' })
+      ;(hasAdapter as jest.Mock).mockReturnValue(true)
+      ;(adapterFor as jest.Mock).mockReturnValue({ setStoreStatus })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({
+        ...baseLink,
+        provider: 'UBER_EATS',
+        externalLocationId: 'store-x',
+      })
+
+      await pauseChannelLink('venue1', 'link1', false)
+
+      // Sin motivo al reanudar: el motivo describe POR QUÉ se pausó y no aplica al revés.
+      expect(setStoreStatus).toHaveBeenCalledWith(false, 'store-x', undefined)
+    })
+
+    it('🔴 si el proveedor RECHAZA la pausa, NO decimos que está pausado', async () => {
+      // Es la mitad que faltaba: avisarle a Uber no sirve si igual pintamos PAUSADO cuando
+      // él dijo que no. El dueño tiene que enterarse para poder hacer otra cosa —apagar el
+      // menú, llamar a soporte— en vez de creerse protegido mientras entran pedidos.
+      ;(hasAdapter as jest.Mock).mockReturnValue(true)
+      ;(adapterFor as jest.Mock).mockReturnValue({ setStoreStatus: jest.fn().mockResolvedValue({ ok: false, status: 500, raw: 'boom' }) })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({
+        ...baseLink,
+        provider: 'UBER_EATS',
+        externalLocationId: 'store-x',
+      })
+
+      await expect(pauseChannelLink('venue1', 'link1', true)).rejects.toThrow(/no se pudo pausar/i)
+    })
+
     it('actualiza status usando SIEMPRE where: { id, venueId } (tenant isolation)', async () => {
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
