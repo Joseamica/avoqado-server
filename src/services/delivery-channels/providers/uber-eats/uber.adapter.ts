@@ -169,6 +169,27 @@ export const uberAdapter = {
     return { ok: r.status < 400, status: r.status, estado: j?.status, motivo: j?.offlineReason, raw: r.text }
   },
 
+  /**
+   * Cancela un pedido YA ACEPTADO.
+   *
+   * Distinto de `denyOrder`, que es rechazarlo antes de aceptarlo. Este es para cuando ya
+   * dijimos que sí y algo lo impide después — por ejemplo, que no podamos hacerle llegar a
+   * la cocina una instrucción de ALERGIA.
+   *
+   * ⚠️ `cancelling_party` sólo acepta `MERCHANT` (medido: `RESTAURANT` devuelve 400).
+   */
+  async cancelOrder(orderId: string, storeId: string, reason = 'OUT_OF_ITEMS'): Promise<UberActionResult> {
+    const r = await uberApi({
+      method: 'POST',
+      path: `/v1/eats/orders/${encodeURIComponent(orderId)}/cancel`,
+      storeId,
+      body: { reason, cancelling_party: 'MERCHANT' },
+    })
+    const ok = r.status < 400
+    if (!ok) logger.error('🚨 Uber rechazó la cancelación', { orderId, status: r.status, cuerpo: r.text.slice(0, 200) })
+    return { ok, status: r.status, raw: r.text }
+  },
+
   /** El menú traducido, sin publicarlo — para que el sincronizador le saque huella. */
   buildMenuPayload(snapshot: MenuSnapshot, opts?: UberMenuOptions): unknown {
     return mapSnapshotToUberMenu(snapshot, opts)

@@ -255,7 +255,34 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
 
     // 4. Convertirlo en venta.
     const normalizado = uberAdapter.normalizeOrder(crudo)
-    const { order } = await ingestDeliveryOrder(normalizado, link)
+    const { order, kitchenTicketCreated } = await ingestDeliveryOrder(normalizado, link)
+
+    // 🔴 REQUISITO DE UBER, y además es seguridad de una persona: la integración debe
+    // RECHAZAR el pedido cuando no puede transmitir alergias o instrucciones especiales
+    // ("Order rejection when allergens/special instructions cannot be relayed", Quality &
+    // Performance Standards).
+    //
+    // El caso concreto: el cliente escribió "alérgico al cacahuate", la comanda de cocina
+    // falló al crearse, y la venta se guardó igual. Sin esto la cocina prepara el platillo
+    // SIN enterarse de la alergia — y nadie nota que faltó nada. Cancelar es peor servicio y
+    // muchísimo mejor que eso.
+    const traeInstrucciones = normalizado.items.some(i => typeof i.notes === 'string' && i.notes.trim().length > 0)
+    if (traeInstrucciones && !kitchenTicketCreated && !normalizado.scheduledFor) {
+      logger.error('🚨 [Uber] el pedido trae INSTRUCCIONES y no llegaron a la cocina — se CANCELA', {
+        eventRowId,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+      })
+      const c = await uberAdapter.cancelOrder(identidad.orderId, link.externalLocationId, 'OUT_OF_ITEMS')
+      await cancelDeliveryOrder(identidad.orderId, DeliveryProvider.UBER_EATS, 'no se pudieron transmitir las instrucciones a la cocina')
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, order.id, 'INSTRUCCIONES_NO_TRANSMITIDAS')
+      return {
+        outcome: 'FAILED',
+        orderId: order.id,
+        accepted: aceptacion.ok,
+        error: `INSTRUCCIONES_NO_TRANSMITIDAS (cancelado en Uber: ${c.ok})`,
+      }
+    }
 
     await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, order.id)
     logger.info('🛵 [Uber] pedido procesado', {

@@ -124,7 +124,7 @@ async function resolveProductId(
 export async function ingestDeliveryOrder(
   normalized: NormalizedDeliveryOrder,
   link: DeliveryChannelLink,
-): Promise<{ order: Order; created: boolean }> {
+): Promise<{ order: Order; created: boolean; kitchenTicketCreated: boolean }> {
   // 🔴 Dinero primero: un pedido cuyo reparto no cuadra NUNCA debe tocar la base — se
   // verifica ANTES de resolver el venue o abrir la transacción. Compara también contra los
   // renglones (Hallazgo 2, auditoría externa 2026-08-20): saleAmount debe cuadrar con la suma
@@ -355,6 +355,7 @@ export async function ingestDeliveryOrder(
     })
   }
 
+  let kitchenTicketCreated = false
   if (isNew && !normalized.scheduledFor) {
     try {
       await prisma.kdsOrder.create({
@@ -379,6 +380,7 @@ export async function ingestDeliveryOrder(
           },
         },
       })
+      kitchenTicketCreated = true
     } catch (error) {
       logger.error('[❌ DeliveryIngest] el pedido NO llegó a la cocina (venta guardada, comanda no)', {
         orderId: order.id,
@@ -427,5 +429,5 @@ export async function ingestDeliveryOrder(
     }
   }
 
-  return { order, created: isNew }
+  return { order, created: isNew, kitchenTicketCreated }
 }

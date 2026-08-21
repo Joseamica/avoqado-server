@@ -8,6 +8,7 @@
 import { DeliveryOrderEventStatus, DeliveryProvider } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
+import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import pedidoReal from '../../fixtures/delivery/uber/pedido-real-delivery-by-uber.json'
 
 const STORE = `store-${Date.now()}`
@@ -302,6 +303,62 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       expect((await prisma.order.findUniqueOrThrow({ where: { id: r1.orderId! } })).status).toBe('CANCELLED')
     })
   })
+  // ── Requisito DURO de Uber, y seguridad de una persona ───────────────────────────────
+  it('🔴 si el pedido trae INSTRUCCIONES y no llegan a la cocina, se CANCELA', async () => {
+    // "Order rejection when allergens/special instructions cannot be relayed" es capacidad
+    // REQUERIDA en los estándares de calidad de Uber. El caso concreto: el cliente escribió
+    // "alérgico al cacahuate", la comanda falló, y la venta se guardaba igual — la cocina
+    // preparaba SIN enterarse y nadie notaba que faltó nada. Cancelar es peor servicio y
+    // muchísimo mejor que eso.
+    const conNota = {
+      ...pedidoReal,
+      id: `alergia-${Date.now()}`,
+      cart: { ...pedidoReal.cart, items: [{ ...pedidoReal.cart.items[0], special_instructions: 'ALÉRGICO AL CACAHUATE' }] },
+    }
+    const cancelados: string[] = []
+    // Se simula el fallo de la comanda tirando la tabla de KDS con un venue inexistente NO
+    // sirve; se fuerza con un espía sobre prisma.kdsOrder.create.
+    const original = prisma.kdsOrder.create
+    ;(prisma as any).kdsOrder.create = jest.fn().mockRejectedValue(new Error('KDS caído'))
+    const spyCancel = jest.spyOn(uberAdapter, 'cancelOrder').mockImplementation(async (id: string) => {
+      cancelados.push(id)
+      return { ok: true, status: 200, raw: '' }
+    })
+
+    try {
+      const id = `ev-alergia-${Date.now()}`
+      const r = await processUberEvent(await nuevoEvento(id, aviso(id, conNota.id)), { ...deps, fetchOrder: async () => conNota })
+
+      expect(r.outcome).toBe('FAILED')
+      expect(r.error).toMatch(/INSTRUCCIONES_NO_TRANSMITIDAS/)
+      expect(cancelados).toContain(conNota.id) // se canceló EN UBER, no sólo internamente
+      const order = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })
+      expect(order.status).toBe('CANCELLED')
+    } finally {
+      ;(prisma as any).kdsOrder.create = original
+      spyCancel.mockRestore()
+    }
+  })
+
+  it('un pedido SIN instrucciones no se cancela aunque falle la comanda', async () => {
+    // Sin nota que perder, la venta vale más que la comanda: queda visible en la lista de
+    // órdenes y alguien la puede rescatar. Cancelarla sería tirar una venta buena.
+    // Id propio: otros tests de este archivo cancelan el pedido de la fixture, y reingerir
+    // devuelve esa orden ya CANCELADA (idempotencia). Compartir id entre casos hace que un
+    // test dependa del orden de ejecución del anterior.
+    const sinNota = { ...pedidoReal, id: `sinnota-${Date.now()}` }
+    const original = prisma.kdsOrder.create
+    ;(prisma as any).kdsOrder.create = jest.fn().mockRejectedValue(new Error('KDS caído'))
+    try {
+      const id = `ev-sinnota-${Date.now()}`
+      const r = await processUberEvent(await nuevoEvento(id, aviso(id, sinNota.id)), { ...deps, fetchOrder: async () => sinNota })
+      expect(r.outcome).toBe('PROCESSED')
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })).status).toBe('CONFIRMED')
+    } finally {
+      ;(prisma as any).kdsOrder.create = original
+    }
+  })
+
   // ── Los 6 eventos que Uber manda y antes IGNORÁBAMOS ─────────────────────────────────
   //
   // Uber manda 9 tipos de evento; atendíamos 3. Los demás caían en "ruido conocido, márcalo
