@@ -11,6 +11,7 @@ import { DeliveryProvider, OrderStatus, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { reverseSalePosting } from '@/services/inventory/reverseSalePosting.service'
 
 export interface CancelResult {
   outcome: 'CANCELLED' | 'ORDER_NOT_FOUND' | 'ALREADY_CANCELLED'
@@ -58,15 +59,30 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
     await tx.kdsOrder.deleteMany({ where: { orderId: order.id } })
   })
 
-  // 🔴 EL STOCK NO SE DEVUELVE, y es a propósito declarado, no un olvido: hoy NINGÚN camino
-  // de la plataforma lo devuelve —tampoco los reembolsos— y no existe una reversa de
-  // `InventoryPosting`. Hacerla a medias sobre lotes PEPS sería peor que no hacerla. Se
-  // deja el aviso para que el faltante sea VISIBLE en el corte en vez de silencioso.
-  logger.warn('[🛵 DeliveryCancel] pedido cancelado — el inventario NO se devolvió (limitación conocida de la plataforma)', {
-    orderId: order.id,
-    orderNumber: order.orderNumber,
-    externalId,
-  })
+  // Devolver el stock va DESPUÉS y fuera de la transacción de arriba, y el orden es
+  // deliberado: lo urgente es sacar la comanda de la cocina —eso detiene el desperdicio en
+  // segundos—, y `reverseSalePosting` abre su propia transacción (Prisma no anida
+  // interactivas). Si la reversa falla, la cancelación YA quedó firme: se grita, y como la
+  // reversa es idempotente se puede reintentar sin devolver el stock dos veces.
+  try {
+    const rev = await reverseSalePosting({
+      venueId: order.venueId,
+      orderId: order.id,
+      reason: `cancelación de delivery: ${motivo ?? 'sin motivo'}`,
+    })
+    if (rev.outcome === 'REVERSED') {
+      logger.info('♻️ [DeliveryCancel] stock devuelto', { orderId: order.id, movimientos: rev.movements })
+    }
+  } catch (error) {
+    // 🔴 `error` y no `warn`: un faltante de inventario que nadie ve aparece semanas después
+    // en un conteo físico, ya sin forma de rastrear de dónde salió.
+    logger.error('🚨 [DeliveryCancel] el pedido se canceló pero el STOCK NO SE DEVOLVIÓ — reconciliar a mano', {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      externalId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 
   void logAction({
     action: 'DELIVERY_ORDER_CANCELLED',
