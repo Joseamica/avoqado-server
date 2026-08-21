@@ -21,6 +21,7 @@ import { dispatchOrderStatus } from './statusDispatcher.service'
 import { applySalePosting, createSalePostingInTx } from '../../inventory/inventoryPosting.service'
 import { NormalizedDeliveryOrder } from './types'
 import { assertDeliveryMoneyInvariants } from './money'
+import { computeTenderCommission } from '../../dashboard/tenderType.dashboard.service'
 import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
 import { toKdsModifierLabels } from '../../mobile/kds.mobile.service'
 import {
@@ -157,6 +158,18 @@ export async function ingestDeliveryOrder(
   // reintentarlo es inofensivo y no alarga el lock de la orden.
   const tender = await ensureDeliveryTenderType(venue.id, link.provider)
 
+  // 🔴 Sin comisión configurada, los reportes de este negocio SOBREESTIMAN su ingreso: la
+  // venta entra completa y lo que el marketplace se queda no aparece en ningún lado. No se
+  // inventa un porcentaje —cada comercio negocia el suyo— pero tampoco se calla.
+  if (tender.commissionPercent == null) {
+    logger.warn('⚠️ [DeliveryIngest] el tipo de pago del canal NO tiene comisión configurada — los reportes sobreestiman el ingreso', {
+      venueId: venue.id,
+      provider: link.provider,
+      tenderTypeId: tender.id,
+      accion: 'configúrala en Ajustes → Tipos de pago (el comercio negocia su % con el proveedor)',
+    })
+  }
+
   const existing = await prisma.order.findUnique({
     where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
   })
@@ -277,6 +290,20 @@ export async function ingestDeliveryOrder(
               // `shared/tenderSemantics.ts` lee para responder "¿está en el cajón?" y
               // "¿lo deposita Avoqado?". Sin él, el pago cae al fallback legacy.
               tenderType: { connect: { id: tender.id } },
+              // 🔴 LA COMISIÓN DEL MARKETPLACE, congelada en el cobro igual que hace el TPV.
+              //
+              // Sin esto, los cortes, reportes y contabilidad del negocio mostraban la venta
+              // COMPLETA como ingreso: $100 de Uber se veían como $100 cuando Uber deposita
+              // ~$70. El dueño creía ganar 30% más de lo que gana, en cada pedido, para
+              // siempre — y lo descubría cuando el depósito no cuadraba con sus números.
+              //
+              // El porcentaje sale del tipo de pago del canal, que el dueño edita en la
+              // pantalla de tipos de pago (`VenueTenderType.commissionPercent`, cuyo propio
+              // comentario en el schema dice literalmente "e.g. Uber ~30%"). Se congela aquí
+              // y no se lee después: si mañana renegocia su comisión, los pedidos viejos
+              // deben seguir contando lo que de verdad les costó.
+              tenderCommissionPercent: tender.commissionPercent,
+              tenderCommissionAmount: computeTenderCommission(tender.commissionPercent, D(p.externallyPaidSale)),
               tenderRevision: tender.revision,
               externalSource: normalized.source, // 'UBER_EATS' | 'RAPPI' | ...
               status: TransactionStatus.COMPLETED,

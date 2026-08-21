@@ -120,6 +120,41 @@ export function runIngestionContract(
       expect(await prisma.kdsOrder.count({ where: { orderId: order.id } })).toBe(1)
     })
 
+    it('🔴 LA COMISIÓN del marketplace queda registrada en el cobro', async () => {
+      // Sin esto los cortes, reportes y contabilidad muestran la venta COMPLETA como
+      // ingreso: $100 de Uber se ven como $100 cuando el proveedor deposita ~$70. El dueño
+      // cree ganar 30% más de lo que gana, en CADA pedido, y lo descubre cuando el depósito
+      // no cuadra con sus números.
+      //
+      // El porcentaje vive en el tipo de pago del canal (`VenueTenderType.commissionPercent`,
+      // cuyo comentario en el schema dice literalmente "e.g. Uber ~30%") y el dueño lo edita
+      // en la pantalla de tipos de pago. Aquí se CONGELA en el cobro: si mañana renegocia,
+      // los pedidos viejos deben seguir contando lo que de verdad les costó.
+      const link = obtenerLink()
+      const tender = await prisma.venueTenderType.findFirstOrThrow({ where: { venueId: link.venueId } })
+      await prisma.venueTenderType.update({ where: { id: tender.id }, data: { commissionPercent: '30.00' } })
+
+      const { order } = await ingestDeliveryOrder(hacerPedido(), link)
+      const pago = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id } })
+
+      expect(pago.tenderCommissionPercent?.toString()).toBe('30')
+      // 30% de lo que la plataforma liquidó, redondeado al centavo.
+      const esperado = pago.amount.mul(30).div(100).toDecimalPlaces(2)
+      expect(pago.tenderCommissionAmount?.toString()).toBe(esperado.toString())
+
+      await prisma.venueTenderType.update({ where: { id: tender.id }, data: { commissionPercent: null } })
+    })
+
+    it('sin comisión configurada NO se inventa un porcentaje', async () => {
+      // Cada comercio negocia el suyo. Poner 30% "porque suele ser" haría que los reportes
+      // mintieran en la dirección contraria, y con la misma confianza.
+      const { order } = await ingestDeliveryOrder(hacerPedido(), obtenerLink())
+      const pago = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id } })
+
+      expect(pago.tenderCommissionPercent).toBeNull()
+      expect(pago.tenderCommissionAmount).toBeNull()
+    })
+
     it('IDEMPOTENTE: el mismo pedido dos veces no duplica venta ni cobro', async () => {
       const p = hacerPedido()
       const a = await ingestDeliveryOrder(p, obtenerLink())
