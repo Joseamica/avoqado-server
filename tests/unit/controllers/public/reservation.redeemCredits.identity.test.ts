@@ -51,7 +51,9 @@ describe('redeemCreditsForReservation — identidad', () => {
     const r = await redeemCreditsForReservation(tx, { ...base, customerId: 'c_sesion', customerEmail: 'ajeno@x.com' })
 
     expect(r.redeemed).toBe(true)
-    expect(tx.customer.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 'c_sesion', venueId: 'v1' }) }))
+    expect(tx.customer.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'c_sesion', venueId: 'v1' }) }),
+    )
     // nunca buscó por el email del body
     const contactLookups = tx.customer.findFirst.mock.calls.filter((c: any) => c[0].where.OR)
     expect(contactLookups).toHaveLength(0)
@@ -64,9 +66,9 @@ describe('redeemCreditsForReservation — identidad', () => {
       purchaseCustomerId: 'c_dueno', // la compra es del dueño, no de la sesión
     })
 
-    await expect(
-      redeemCreditsForReservation(tx, { ...base, customerId: 'c_sesion', customerEmail: 'dueno@x.com' }),
-    ).rejects.toThrow(/no valido para este cliente/i)
+    await expect(redeemCreditsForReservation(tx, { ...base, customerId: 'c_sesion', customerEmail: 'dueno@x.com' })).rejects.toThrow(
+      /no valido para este cliente/i,
+    )
     expect(tx.creditItemBalance.update).not.toHaveBeenCalled()
   })
 
@@ -76,6 +78,8 @@ describe('redeemCreditsForReservation — identidad', () => {
     const r = await redeemCreditsForReservation(tx, { ...base, customerEmail: 'inv@x.com' })
 
     expect(r.redeemed).toBe(true)
-    expect(tx.customer.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ OR: expect.any(Array) }) }))
+    expect(tx.customer.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ OR: expect.any(Array) }) }),
+    )
   })
 })

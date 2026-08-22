@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { rejectBodyCustomerId } from '../common/publicIdentity.schema'
 
 // ==========================================
 // DASHBOARD SCHEMAS
@@ -127,12 +128,15 @@ export const publicCheckoutSchema = z.object({
     venueSlug: z.string().min(1),
     packId: z.string().min(1),
   }),
-  body: z.object({
-    email: z.string().email('Email invalido').optional(),
-    phone: z.string().min(1, 'El telefono es requerido'),
-    successUrl: z.string().url('URL de exito invalida'),
-    cancelUrl: z.string().url('URL de cancelacion invalida'),
-  }),
+  // Fase 0.B: la identidad viene de la sesión, nunca del body.
+  body: rejectBodyCustomerId(
+    z.object({
+      email: z.string().email('Email invalido').optional(),
+      phone: z.string().min(1, 'El telefono es requerido'),
+      successUrl: z.string().url('URL de exito invalida'),
+      cancelUrl: z.string().url('URL de cancelacion invalida'),
+    }),
+  ),
 })
 
 export const publicBalanceQuerySchema = z.object({

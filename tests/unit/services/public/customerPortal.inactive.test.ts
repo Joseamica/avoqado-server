@@ -86,9 +86,9 @@ describe('customerPortal — Customer.active en emisores de token', () => {
         return null
       })
 
-      await expect(
-        registerCustomer(VENUE, { email: 'nuevo@b.com', password: 'Secreto123', phone: '+525511111111' }),
-      ).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_INACTIVE' })
+      await expect(registerCustomer(VENUE, { email: 'nuevo@b.com', password: 'Secreto123', phone: '+525511111111' })).rejects.toMatchObject(
+        { statusCode: 401, code: 'CUSTOMER_INACTIVE' },
+      )
 
       expect(prismaMock.customer.update).not.toHaveBeenCalled()
       expect(generateCustomerToken).not.toHaveBeenCalled()

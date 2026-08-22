@@ -2522,7 +2522,10 @@ export async function redeemCreditsForReservation(
     : await tx.customer.findFirst({
         where: {
           venueId: args.venueId,
-          OR: [...(args.customerEmail ? [{ email: args.customerEmail }] : []), ...(args.customerPhone ? [{ phone: args.customerPhone }] : [])],
+          OR: [
+            ...(args.customerEmail ? [{ email: args.customerEmail }] : []),
+            ...(args.customerPhone ? [{ phone: args.customerPhone }] : []),
+          ],
         },
       })
   if (!customer) {

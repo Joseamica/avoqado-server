@@ -256,11 +256,17 @@ export function checkPublicVenueFeature(featureCode: string, customerMessage?: s
       const venueSlug = req.params?.venueSlug
       if (!venueSlug) return next() // no slug param on this route — nothing to gate on
 
-      // Same slug→venue resolution as the public controllers (slug + active), id only.
-      const venue = await prisma.venue.findFirst({
-        where: { slug: venueSlug, active: true },
-        select: { id: true },
-      })
+      // Fase 0.B: si `resolveVenueBySlug` ya corrió en esta cadena, reusar su resultado
+      // (una query por request, y todas las capas ven el MISMO venue). Si no, resolver
+      // aquí como antes — rutas que todavía no montan el resolver siguen funcionando.
+      const alreadyResolved = (req as any).publicVenue as { id: string; slug: string } | undefined
+      const venue =
+        alreadyResolved?.id && alreadyResolved.slug === venueSlug
+          ? { id: alreadyResolved.id }
+          : await prisma.venue.findFirst({
+              where: { slug: venueSlug, active: true },
+              select: { id: true },
+            })
 
       // Unknown slug → let the controller produce its existing 404.
       if (!venue) return next()

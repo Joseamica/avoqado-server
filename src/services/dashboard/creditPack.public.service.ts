@@ -214,7 +214,7 @@ export async function createCheckoutSession(
     const limitCustomerId = sessionCustomerId
       ? sessionCustomerId
       : email || phone
-        ? (await prisma.customer.findFirst({ where: { venueId, ...(email ? { email } : { phone }) }, select: { id: true } }))?.id ?? null
+        ? ((await prisma.customer.findFirst({ where: { venueId, ...(email ? { email } : { phone }) }, select: { id: true } }))?.id ?? null)
         : null
 
     if (limitCustomerId) {
@@ -349,9 +349,7 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
   // Find or create customer. Fase 0.B: si la sesión de checkout nació con sesión de
   // cliente, la compra se liga a ESE customer (metadata.customerId) — nunca al email,
   // que el comprador pudo teclear a mano. Sin customerId (invitado), contacto como antes.
-  const sessionCustomer = metadata.customerId
-    ? await prisma.customer.findFirst({ where: { id: metadata.customerId, venueId } })
-    : null
+  const sessionCustomer = metadata.customerId ? await prisma.customer.findFirst({ where: { id: metadata.customerId, venueId } }) : null
   const customer = sessionCustomer ?? (await findOrCreateCustomer(venueId, email, phone))
 
   // Calculate expiration

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { rejectBodyCustomerId } from '../common/publicIdentity.schema'
 
 // ==========================================
 // RESERVATION SCHEMAS — Zod validation (Spanish messages)
@@ -554,7 +555,8 @@ export const updateReservationSettingsBodySchema = z
 
 // ---- Public Booking ----
 
-export const publicCreateReservationBodySchema = z
+export const publicCreateReservationBodySchema = rejectBodyCustomerId(
+  z
   .object({
     startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }).optional(),
     endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }).optional(),
@@ -638,7 +640,8 @@ export const publicCreateReservationBodySchema = z
       message: 'La duracion no coincide con el rango de fechas',
       path: ['duration'],
     },
-  )
+  ),
+)
 
 // ---- Param Schemas ----
 

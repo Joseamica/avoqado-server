@@ -33,6 +33,12 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
     const parsedResult = await schema.safeParseAsync(dataToParse)
 
     if (!parsedResult.success) {
+      // Fase 0.B: un schema puede marcar un issue con `params.code` para que el 400 salga
+      // con ese código (hoy: CUSTOMER_ID_NOT_ALLOWED). El primero que aparezca gana.
+      const codedIssue = parsedResult.error.errors.find(e => e.code === 'custom' && (e as any).params?.code)
+      if (codedIssue) {
+        return next(new BadRequestError(codedIssue.message, (codedIssue as any).params.code))
+      }
       const errorMessages = parsedResult.error.errors
         .map(err => {
           // Strip internal path prefixes (body., query., params.) — users don't need to see these
