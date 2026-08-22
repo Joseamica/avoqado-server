@@ -30,6 +30,8 @@ export type SimCustodyErrorCode =
   | 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_BODY'
   | 'PROMOTER_NOT_FOUND'
   | 'NOT_IN_PROMOTER_STATE'
+  | 'SUPERVISOR_NOT_FOUND'
+  | 'NOT_IN_SUPERVISOR_STATE'
 
 export interface SimCustodyErrorEntry {
   /** Canonical code used across backend/dashboard/TPV. */
@@ -186,6 +188,24 @@ export const SIM_CUSTODY_ERROR_CODES: Record<SimCustodyErrorCode, SimCustodyErro
     messages: {
       es: 'El SIM no está asignado a un promotor (usa asignación a promotor/supervisor).',
       en: 'The SIM is not assigned to a promoter (use the assign-to-promoter/supervisor flow).',
+    },
+  },
+  SUPERVISOR_NOT_FOUND: {
+    code: 'SUPERVISOR_NOT_FOUND',
+    httpStatus: 404,
+    messages: {
+      es: 'El supervisor destino no existe, no está activo, o no pertenece a esta organización.',
+      en: 'The target supervisor does not exist, is inactive, or does not belong to this organization.',
+    },
+  },
+  NOT_IN_SUPERVISOR_STATE: {
+    code: 'NOT_IN_SUPERVISOR_STATE',
+    httpStatus: 409,
+    messages: {
+      // Actionable on purpose: the two ways a SIM lands outside SUPERVISOR_HELD have
+      // different fixes, and the OWNER shouldn't have to guess which one applies.
+      es: 'El SIM no está en poder de un supervisor. Si ya lo tiene un promotor, recoléctalo primero; si está en almacén, usa "Asignar a Supervisor".',
+      en: 'The SIM is not held by a supervisor. If a promoter already has it, collect it first; if it is in the warehouse, use "Assign to Supervisor".',
     },
   },
 }

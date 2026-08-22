@@ -158,6 +158,130 @@ describe('Organization Config Routes', () => {
   })
 
   // ═══════════════════════════════════════════════════════════════════════════════
+  // STAFF LOOKUPS (orgStaffAccess — any staff member of the org)
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  describe('GET /supervisors (SIM custody Supervisor dropdown)', () => {
+    const adminContext = {
+      userId: USER_ID,
+      orgId: ORG_ID,
+      venueId: VENUE_ID,
+      role: 'ADMIN',
+    }
+
+    const supervisorRow = {
+      id: 'staff-mgr-1',
+      firstName: 'Juan',
+      lastName: 'Nájera',
+      email: 'juan@pt.mx',
+      phone: '4421234567',
+      employeeCode: 'PT-014',
+      venues: [{ venueId: VENUE_ID, role: 'MANAGER', venue: { name: 'BAE Pavón', slug: 'bae-pavon' } }],
+    }
+
+    // THE BUG THIS ENDPOINT FIXES: `sim-custody:assign-to-supervisor` and
+    // `sim-custody:reassign-supervisor` are granted to ADMIN as well as OWNER, but
+    // the dropdown used to read the OWNER-only /team endpoint → 403 → an empty
+    // "Supervisor destino" list with no explanation. Any staff of the org must be
+    // able to read this lookup.
+    it('should allow a non-OWNER org member (ADMIN) — the dropdown must not 403', async () => {
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-admin' })
+      prismaMock.staff.findMany.mockResolvedValue([supervisorRow])
+
+      const res = await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/supervisors`)
+        .set(...authHeader(adminContext))
+
+      expect(res.status).toBe(200)
+      expect(res.body.success).toBe(true)
+      expect(res.body.data).toHaveLength(1)
+      expect(res.body.data[0]).toMatchObject({ id: 'staff-mgr-1', employeeCode: 'PT-014' })
+    })
+
+    // The service validates the target with `staffVenue: { active, role: MANAGER,
+    // venue.organizationId }` (custody.service.ts reassignSupervisor). The lookup
+    // MUST use the same predicate or the dropdown can offer a target the backend
+    // then rejects with SUPERVISOR_NOT_FOUND.
+    it('should return only ACTIVE MANAGERs of the org', async () => {
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-admin' })
+      prismaMock.staff.findMany.mockResolvedValue([])
+
+      await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/supervisors`)
+        .set(...authHeader(adminContext))
+
+      expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            active: true,
+            venues: {
+              some: {
+                venue: { organizationId: ORG_ID },
+                role: { in: ['MANAGER'] },
+                active: true,
+              },
+            },
+          },
+        }),
+      )
+    })
+
+    it('should return 403 for a user who does not belong to the org', async () => {
+      prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+
+      const res = await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/supervisors`)
+        .set(...authHeader(cashierContext))
+
+      expect(res.status).toBe(403)
+      expect(res.body.success).toBe(false)
+      expect(prismaMock.staff.findMany).not.toHaveBeenCalled()
+    })
+
+    it('should allow SUPERADMIN without a membership lookup', async () => {
+      prismaMock.staff.findMany.mockResolvedValue([supervisorRow])
+
+      const res = await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/supervisors`)
+        .set(...authHeader(superadminContext))
+
+      expect(res.status).toBe(200)
+      expect(prismaMock.staffVenue.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('should return an empty array (not an error) when the org has no MANAGERs', async () => {
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-admin' })
+      prismaMock.staff.findMany.mockResolvedValue([])
+
+      const res = await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/supervisors`)
+        .set(...authHeader(adminContext))
+
+      expect(res.status).toBe(200)
+      expect(res.body.data).toEqual([])
+    })
+
+    // REGRESSION: the sibling promoter lookup must keep working unchanged.
+    it('should not affect GET /promoters (WAITER/CASHIER lookup)', async () => {
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-admin' })
+      prismaMock.staff.findMany.mockResolvedValue([])
+
+      const res = await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/promoters`)
+        .set(...authHeader(adminContext))
+
+      expect(res.status).toBe(200)
+      expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            venues: { some: expect.objectContaining({ role: { in: ['WAITER', 'CASHIER'] } }) },
+          }),
+        }),
+      )
+    })
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════════
   // ORG GOALS CRUD
   // ═══════════════════════════════════════════════════════════════════════════════
 

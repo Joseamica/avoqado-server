@@ -84,6 +84,13 @@ export interface ReassignPromoterInput {
   idempotencyRequestId?: string | null
 }
 
+export interface ReassignSupervisorInput {
+  actor: CustodyActor
+  toSupervisorStaffId: string
+  serialNumbers: string[]
+  idempotencyRequestId?: string | null
+}
+
 export interface ChangeCategoryInput {
   actor: CustodyActor
   serialNumbers: string[]
@@ -662,6 +669,103 @@ export class SimCustodyService {
           })
 
           return { event: 'REASSIGNED_PROMOTER_TO_PROMOTER' as SerializedItemCustodyEventType, item: updated }
+        }),
+      )
+    }
+
+    return buildSummary(results)
+  }
+
+  /**
+   * Admin override: moves a SUPERVISOR_HELD SIM from one supervisor to another.
+   *
+   * Mirror of `reassignPromoter` one level up the chain. Before this existed the
+   * only path was collect-from-supervisor (SINGLE serial) + assign-to-supervisor,
+   * which meant N manual operations and a timeline that claimed a collection that
+   * never physically happened.
+   *
+   * SCOPE (founder decision, Asana 1217743599033198 — "Opción A"): ONLY
+   * SUPERVISOR_HELD is eligible. A SIM a promoter already carries keeps its old
+   * supervisor; collect it from the promoter first. Widening this later would
+   * silently re-point SIMs that are physically out on the street, so it is a
+   * deliberate product decision, not an oversight.
+   *
+   * Validates that `toSupervisorStaffId` is an active MANAGER in the actor's org
+   * before the loop — the same role the dashboard's Supervisor dropdown offers
+   * (`useOrgStaffByRole(orgId, 'MANAGER')`), so the UI can never propose a target
+   * the backend rejects. A bad target fails ALL rows upfront.
+   *
+   * Per-SIM in a transaction with the version lock:
+   *   - NOT_FOUND if the serial does not resolve in this org
+   *   - SIM_SOLD if item.status === 'SOLD' || item.custodyState === 'SOLD'
+   *   - NOT_IN_SUPERVISOR_STATE if custodyState !== 'SUPERVISOR_HELD'
+   *   - Idempotent no-op if already on the target supervisor (status: ok, no event)
+   *   - Otherwise: update assignedSupervisorId + assignedSupervisorAt, KEEP
+   *     custodyState, leave every promoter column untouched, bump custodyVersion,
+   *     and write a REASSIGNED_SUPERVISOR_TO_SUPERVISOR event.
+   *
+   * Authorization is gated at the route layer (`sim-custody:reassign-supervisor`,
+   * OWNER / ADMIN; SUPERADMIN inherits via `*:*`).
+   */
+  async reassignSupervisor(input: ReassignSupervisorInput): Promise<BulkResult> {
+    const { actor, toSupervisorStaffId, serialNumbers, idempotencyRequestId } = input
+
+    // Validate the target supervisor is an active MANAGER in the actor's org.
+    // Checked once before the loop — a bad target fails ALL rows upfront.
+    const isSupervisor = await this.db.staffVenue.findFirst({
+      where: {
+        staffId: toSupervisorStaffId,
+        active: true,
+        role: 'MANAGER',
+        venue: { organizationId: actor.organizationId },
+      },
+      select: { id: true },
+    })
+
+    if (!isSupervisor) {
+      const error = new SimCustodyError('SUPERVISOR_NOT_FOUND')
+      const results: BulkResultRow[] = serialNumbers.map(serialNumber => ({
+        serialNumber,
+        status: 'error' as const,
+        code: error.code,
+        message: error.message,
+      }))
+      return buildSummary(results)
+    }
+
+    const results: BulkResultRow[] = []
+    for (const serialNumber of serialNumbers) {
+      results.push(
+        await this.processOneRow(serialNumber, async tx => {
+          const item = await this.findOrgItem(tx, actor.organizationId, serialNumber)
+          if (!item) throw new SimCustodyError('NOT_FOUND')
+          if (item.status === 'SOLD' || item.custodyState === 'SOLD') throw new SimCustodyError('SIM_SOLD')
+          if (item.custodyState !== 'SUPERVISOR_HELD') throw new SimCustodyError('NOT_IN_SUPERVISOR_STATE')
+          // Idempotent: already on the target supervisor — no write, no event.
+          if (item.assignedSupervisorId === toSupervisorStaffId) {
+            return { event: 'REASSIGNED_SUPERVISOR_TO_SUPERVISOR' as SerializedItemCustodyEventType, item }
+          }
+
+          const updated = await this.updateWithVersion(tx, item, {
+            custodyState: item.custodyState, // KEEP current state — this is a handoff, not a chain transition
+            assignedSupervisorId: toSupervisorStaffId,
+            assignedSupervisorAt: new Date(),
+            // Promoter columns are deliberately omitted: updateWithVersion preserves
+            // the row's current value for any key absent from the patch.
+          })
+
+          await this.writeEvent(tx, {
+            item: updated,
+            eventType: 'REASSIGNED_SUPERVISOR_TO_SUPERVISOR',
+            fromState: item.custodyState,
+            toState: item.custodyState,
+            fromStaffId: item.assignedSupervisorId,
+            toStaffId: toSupervisorStaffId,
+            actorStaffId: actor.staffId,
+            idempotencyRequestId,
+          })
+
+          return { event: 'REASSIGNED_SUPERVISOR_TO_SUPERVISOR' as SerializedItemCustodyEventType, item: updated }
         }),
       )
     }

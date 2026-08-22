@@ -8,6 +8,7 @@
  *   POST /collect-from-supervisor  OWNER
  *   GET  /events                   OWNER | MANAGER (timeline)
  *   POST /reassign-promoter        OWNER | ADMIN (bulk reassign between promoters)
+ *   POST /reassign-supervisor      OWNER | ADMIN (bulk reassign between supervisors)
  *   POST /change-category          OWNER | ADMIN (bulk category change)
  *
  * Thin controllers: validate input (Zod ES), assert tenant, delegate to
@@ -53,6 +54,11 @@ const CollectBody = z.object({
 
 export const ReassignPromoterBody = z.object({
   toPromoterStaffId: z.string().min(1, 'El promotor destino es requerido'),
+  serialNumbers: z.array(z.string().min(1)).min(1, 'Debes incluir al menos un SIM').max(500, 'Máximo 500 SIMs por solicitud'),
+})
+
+export const ReassignSupervisorBody = z.object({
+  toSupervisorStaffId: z.string().min(1, 'El supervisor destino es requerido'),
   serialNumbers: z.array(z.string().min(1)).min(1, 'Debes incluir al menos un SIM').max(500, 'Máximo 500 SIMs por solicitud'),
 })
 
@@ -245,6 +251,37 @@ export async function reassignPromoter(req: Request, res: Response, next: NextFu
     const result = await simCustodyService.reassignPromoter({
       actor: { staffId: userId, organizationId: paramOrgId, role },
       toPromoterStaffId: parse.data.toPromoterStaffId,
+      serialNumbers: parse.data.serialNumbers,
+      idempotencyRequestId: req.idempotency?.requestId ?? null,
+    })
+    res.status(200).json(result)
+  } catch (err) {
+    if (respondSimCustodyError(res, err)) return
+    next(err)
+  }
+}
+
+/**
+ * OWNER/ADMIN: Bulk reassign SIMs from one supervisor to another.
+ * Only SUPERVISOR_HELD SIMs are eligible — a SIM a promoter already carries keeps
+ * its old supervisor (collect it from the promoter first).
+ * Requires: sim-custody:reassign-supervisor + SERIALIZED_INVENTORY module.
+ */
+export async function reassignSupervisor(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId, orgId, role } = (req as any).authContext ?? {}
+    const { orgId: paramOrgId } = req.params
+    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+      const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
+      return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
+    }
+
+    const parse = ReassignSupervisorBody.safeParse(req.body)
+    if (!parse.success) return mapZodError(res, parse.error)
+
+    const result = await simCustodyService.reassignSupervisor({
+      actor: { staffId: userId, organizationId: paramOrgId, role },
+      toSupervisorStaffId: parse.data.toSupervisorStaffId,
       serialNumbers: parse.data.serialNumbers,
       idempotencyRequestId: req.idempotency?.requestId ?? null,
     })

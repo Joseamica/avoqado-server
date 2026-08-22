@@ -486,6 +486,7 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'sim-custody:view-all-supervisors': ['sim-custody:view-all-supervisors', 'inventory:read'], // Read-only cross-supervisor visibility (no mutation authority)
   'sim-custody:approve-registration': ['sim-custody:approve-registration', 'sim-custody:assign-to-supervisor', 'inventory:read'], // OWNER aprueba/rechaza solicitudes de alta de SIMs creadas por promotores en la TPV
   'sim-custody:reassign': ['sim-custody:reassign', 'inventory:read'], // Admin moves a held/pending SIM from one promotor to another
+  'sim-custody:reassign-supervisor': ['sim-custody:reassign-supervisor', 'inventory:read'], // Admin moves a SUPERVISOR_HELD SIM from one supervisor to another (a supervisor's whole warehouse — kept separate from the promotor-level reassign so it can be revoked on its own)
   'tpv-sim-custody:accept': ['tpv-sim-custody:accept'], // Promoter accepts SIM reception on TPV
   'tpv-sim-custody:reject': ['tpv-sim-custody:reject'], // Promoter rejects a pending SIM on TPV
 
@@ -1142,6 +1143,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-sim-custody:reject',
     // SIM custody admin operations — reassign SIMs between promotores + change category
     'sim-custody:reassign', // Bulk-move a held SIM from one promotor to another
+    'sim-custody:reassign-supervisor', // Bulk-move a SUPERVISOR_HELD SIM from one supervisor to another
     'serialized-inventory:change-category', // Bulk-change category of non-sold SIMs
     // Google Calendar Sync — full venue control
     'calendar:manage_venue',
@@ -1278,6 +1280,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'sim-custody:view-all-supervisors', // Full cross-supervisor visibility
     'sim-custody:approve-registration', // Aprobar/rechazar solicitudes de alta de SIMs
     'sim-custody:reassign', // Bulk-move a held SIM from one promotor to another
+    'sim-custody:reassign-supervisor', // Bulk-move a SUPERVISOR_HELD SIM from one supervisor to another
     // Allow OWNER to use TPV inbox too (edge case: venue owner also operates as promoter).
     'tpv-sim-custody:accept',
     'tpv-sim-custody:reject',
@@ -1888,6 +1891,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'sim-custody:view-all-supervisors',
     'sim-custody:approve-registration',
     'sim-custody:reassign',
+    'sim-custody:reassign-supervisor',
   ],
   'tpv-sim-custody': ['tpv-sim-custody:accept', 'tpv-sim-custody:reject'],
   // Venue Crypto Config (per-venue B4Bit device management)

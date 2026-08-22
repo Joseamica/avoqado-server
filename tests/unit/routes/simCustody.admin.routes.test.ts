@@ -1,6 +1,7 @@
 /**
- * Route-level tests for the two admin bulk SIM-custody endpoints (Task 6):
+ * Route-level tests for the admin bulk SIM-custody endpoints (Task 6):
  *   POST /organizations/:orgId/sim-custody/reassign-promoter
+ *   POST /organizations/:orgId/sim-custody/reassign-supervisor
  *   POST /organizations/:orgId/sim-custody/change-category
  *
  * Covers:
@@ -58,10 +59,12 @@ jest.mock('express-rate-limit', () => () => (_req: any, _res: any, next: any) =>
 
 // 6. Custody service
 const mockReassignPromoter = jest.fn()
+const mockReassignSupervisor = jest.fn()
 const mockChangeCategory = jest.fn()
 jest.mock('@/services/serialized-inventory/custody.service', () => ({
   simCustodyService: {
     reassignPromoter: (...args: unknown[]) => mockReassignPromoter(...args),
+    reassignSupervisor: (...args: unknown[]) => mockReassignSupervisor(...args),
     changeCategory: (...args: unknown[]) => mockChangeCategory(...args),
   },
 }))
@@ -91,6 +94,7 @@ const VENUE_ID = 'venue-test-456'
 const USER_ID = 'user-test-001'
 const PROMOTER_A = 'staff-promoter-A'
 const PROMOTER_B = 'staff-promoter-B'
+const SUPERVISOR_B = 'staff-supervisor-B'
 const CATEGORY_ID = 'cat-test-789'
 
 const ownerCtx = { userId: USER_ID, orgId: ORG_ID, venueId: VENUE_ID, role: 'OWNER' }
@@ -222,6 +226,166 @@ describe('POST /sim-custody/reassign-promoter', () => {
         .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-promoter`)
         .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': 'sim-custody:reassign' })
         .send({ toPromoterStaffId: PROMOTER_B, serialNumbers: ['SIM-001'] })
+
+      expect(mockIsModuleEnabled).toHaveBeenCalledWith(VENUE_ID, 'SERIALIZED_INVENTORY')
+    })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /sim-custody/reassign-supervisor', () => {
+  let app: express.Express
+
+  const SUP_BULK_RESULT = {
+    summary: { total: 2, succeeded: 2, failed: 0 },
+    results: [
+      { serialNumber: 'SIM-001', status: 'ok', event: 'REASSIGNED_SUPERVISOR_TO_SUPERVISOR' },
+      { serialNumber: 'SIM-002', status: 'ok', event: 'REASSIGNED_SUPERVISOR_TO_SUPERVISOR' },
+    ],
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    app = createApp()
+    mockIsModuleEnabled.mockResolvedValue(true)
+    mockReassignSupervisor.mockResolvedValue(SUP_BULK_RESULT)
+  })
+
+  // (a) Permission gate
+  describe('(a) Permission checks', () => {
+    it('returns 403 when caller lacks sim-custody:reassign-supervisor', async () => {
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set(authHeader(ownerCtx))
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: ['SIM-001'] })
+
+      expect(res.status).toBe(403)
+      expect(mockReassignSupervisor).not.toHaveBeenCalled()
+    })
+
+    it('calls checkPermission with "sim-custody:reassign-supervisor"', async () => {
+      await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': 'sim-custody:reassign-supervisor' })
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: ['SIM-001'] })
+
+      expect(mockCheckPermission).toHaveBeenCalledWith('sim-custody:reassign-supervisor')
+    })
+
+    it('does NOT accept the promotor-level permission (separate authority)', async () => {
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': 'sim-custody:reassign' })
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: ['SIM-001'] })
+
+      expect(res.status).toBe(403)
+      expect(mockReassignSupervisor).not.toHaveBeenCalled()
+    })
+  })
+
+  // (b) Body validation
+  describe('(b) Body validation (Zod)', () => {
+    const allowHeaders = { ...authHeader(ownerCtx), 'x-test-allow-permission': 'sim-custody:reassign-supervisor' }
+
+    it('returns 400 when toSupervisorStaffId is missing', async () => {
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set(allowHeaders)
+        .send({ serialNumbers: ['SIM-001'] })
+
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('VALIDATION_ERROR')
+      expect(mockReassignSupervisor).not.toHaveBeenCalled()
+    })
+
+    it('returns 400 when serialNumbers is empty', async () => {
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set(allowHeaders)
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: [] })
+
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('VALIDATION_ERROR')
+    })
+
+    it('returns 400 when serialNumbers exceeds 500', async () => {
+      const tooMany = Array.from({ length: 501 }, (_, i) => `SIM-${i}`)
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set(allowHeaders)
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: tooMany })
+
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('VALIDATION_ERROR')
+    })
+  })
+
+  // (c) Happy path — the real PlayTelecom case: 100 ICCIDs in one call
+  describe('(c) Valid input → service call + BulkResult', () => {
+    it('calls reassignSupervisor with correct args and returns the BulkResult', async () => {
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': 'sim-custody:reassign-supervisor' })
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: ['SIM-001', 'SIM-002'] })
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual(SUP_BULK_RESULT)
+      expect(mockReassignSupervisor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actor: { staffId: USER_ID, organizationId: ORG_ID, role: 'OWNER' },
+          toSupervisorStaffId: SUPERVISOR_B,
+          serialNumbers: ['SIM-001', 'SIM-002'],
+        }),
+      )
+    })
+
+    it('accepts a 100-serial bulk payload in ONE request', async () => {
+      const hundred = Array.from({ length: 100 }, (_, i) => `895214006369218${String(i).padStart(4, '0')}F`)
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': 'sim-custody:reassign-supervisor' })
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: hundred })
+
+      expect(res.status).toBe(200)
+      expect(mockReassignSupervisor).toHaveBeenCalledWith(expect.objectContaining({ serialNumbers: hundred }))
+    })
+  })
+
+  // (d) Tenant boundary
+  describe('(d) Tenant isolation', () => {
+    it('returns TENANT_MISMATCH when authContext.orgId differs from the URL org', async () => {
+      const otherOrgCtx = { ...ownerCtx, orgId: 'org-someone-else' }
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set({ ...authHeader(otherOrgCtx), 'x-test-allow-permission': '*' })
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: ['SIM-001'] })
+
+      expect(res.body.error).toBe('TENANT_MISMATCH')
+      expect(mockReassignSupervisor).not.toHaveBeenCalled()
+    })
+  })
+
+  // (e) Module gate
+  describe('(e) SERIALIZED_INVENTORY module off → 403 moduleRequired', () => {
+    it('returns 403 with moduleRequired:true when module is disabled', async () => {
+      mockIsModuleEnabled.mockResolvedValue(false)
+
+      const res = await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': '*' })
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: ['SIM-001'] })
+
+      expect(res.status).toBe(403)
+      expect(res.body.moduleRequired).toBe(true)
+      expect(mockReassignSupervisor).not.toHaveBeenCalled()
+    })
+
+    it('checks the module using the venueId from authContext', async () => {
+      await request(app)
+        .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': 'sim-custody:reassign-supervisor' })
+        .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: ['SIM-001'] })
 
       expect(mockIsModuleEnabled).toHaveBeenCalledWith(VENUE_ID, 'SERIALIZED_INVENTORY')
     })

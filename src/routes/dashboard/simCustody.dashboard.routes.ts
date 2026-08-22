@@ -25,6 +25,7 @@ import {
   collectFromSupervisor,
   listEvents,
   reassignPromoter,
+  reassignSupervisor,
   changeCategory,
 } from '../../controllers/dashboard/simCustody.dashboard.controller'
 
@@ -136,6 +137,19 @@ router.post(
   simCustodyIdempotency({ required: true }),
   bulkLimiter,
   reassignPromoter,
+)
+
+// Supervisor↔Supervisor handoff. Same pipeline as reassign-promoter, one level
+// up the chain. Only SUPERVISOR_HELD SIMs move (founder decision "Opción A") —
+// see custody.service.ts reassignSupervisor.
+router.post(
+  '/sim-custody/reassign-supervisor',
+  authenticateTokenMiddleware,
+  requireSerializedInventoryModule,
+  checkPermission('sim-custody:reassign-supervisor'),
+  simCustodyIdempotency({ required: true }),
+  bulkLimiter,
+  reassignSupervisor,
 )
 
 router.post(

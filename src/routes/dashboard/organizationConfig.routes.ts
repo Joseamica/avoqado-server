@@ -413,6 +413,82 @@ router.get('/promoters', orgStaffAccess, async (req: Request, res: Response, nex
 })
 
 /**
+ * GET /dashboard/organizations/:orgId/supervisors
+ * Lookup endpoint used by the SIM custody "Supervisor" dropdowns (assign to
+ * supervisor / reassign between supervisors).
+ *
+ * Returns ONLY staff with role `MANAGER` active in at least one venue of the org —
+ * the exact predicate `custody.service.ts#reassignSupervisor` validates the target
+ * against, so the dropdown can never offer someone the service then rejects with
+ * `SUPERVISOR_NOT_FOUND`.
+ *
+ * Accessible to any authenticated staff member of the org, mirroring `/promoters`.
+ * The actions these dropdowns feed (`sim-custody:assign-to-supervisor`,
+ * `sim-custody:reassign-supervisor`) are granted to **ADMIN as well as OWNER**, so
+ * gating the lookup with the OWNER-only `/team` endpoint left ADMIN with a silently
+ * empty dropdown (403 swallowed by the query) — the bug this endpoint fixes, exactly
+ * as `/promoters` fixed it one level down the chain for the Supervisor/MANAGER.
+ */
+router.get('/supervisors', orgStaffAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+
+    const staff = await prisma.staff.findMany({
+      where: {
+        active: true,
+        venues: {
+          some: {
+            venue: { organizationId: orgId },
+            role: { in: [StaffRole.MANAGER] },
+            active: true,
+          },
+        },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        employeeCode: true,
+        venues: {
+          where: {
+            venue: { organizationId: orgId },
+            role: { in: [StaffRole.MANAGER] },
+            active: true,
+          },
+          select: {
+            venueId: true,
+            role: true,
+            venue: { select: { name: true, slug: true } },
+          },
+        },
+      },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+    })
+
+    const data = staff.map(s => ({
+      id: s.id,
+      firstName: s.firstName,
+      lastName: s.lastName,
+      email: s.email,
+      phone: s.phone,
+      employeeCode: s.employeeCode,
+      venues: s.venues.map(v => ({
+        venueId: v.venueId,
+        venueName: v.venue.name,
+        venueSlug: v.venue.slug,
+        role: v.role,
+      })),
+    }))
+
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
  * GET /dashboard/organizations/:orgId/team
  * List all staff in the org with their venue assignments, roles, and status.
  * Query: scope (optional, default 'org')

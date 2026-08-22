@@ -318,6 +318,214 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'reassign_sim_supervisor',
+    'Move SIMs / ICCIDs from one SUPERVISOR to another in bulk — e.g. a supervisor leaves or changes territory and their warehouse has to pass to the new one. Identify the target supervisor by NAME (resolved among the active supervisors of the org; ambiguous or unknown names return the candidate list instead of guessing). ONLY SIMs the supervisor still holds in their warehouse are moved: a SIM a promoter already carries keeps its old supervisor — collect it from the promoter first. The custody state, the promoter and the sale are never touched, and every move is written to the custody timeline. Only for venues with the SERIALIZED_INVENTORY module (telecom / white-label). By DEFAULT it only PREVIEWS; call again with confirm:true to apply. This WRITES — requires sim-custody:reassign-supervisor.',
+    {
+      venueId: z
+        .string()
+        .describe('A venue in the org that owns the SIMs (must be in your scope) — used for the module gate and to resolve the org'),
+      serialNumbers: z.array(z.string().min(1)).min(1).max(500).describe('ICCIDs / serial numbers to move (max 500)'),
+      toSupervisorName: z
+        .string()
+        .min(1)
+        .describe('Name of the destination supervisor, e.g. "Juan Nájera" (matched case/accent-insensitively among the org supervisors)'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+    },
+    async ({ venueId, serialNumbers, toSupervisorName, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // SERIALIZED_INVENTORY is a MODULE — gate exactly like the platform (isModuleEnabled, incl.
+      // org-level fallback), NOT the Feature/tier resolver.
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      guard.requirePermission('sim-custody:reassign-supervisor', venueId)
+
+      const access = scope.perVenueAccess.get(venueId)
+      const callerRole = access?.role
+      const organizationId = access?.organizationId
+      if (!callerRole || !organizationId) {
+        return text({ ok: false, error: 'No pude resolver la organización de este venue.' })
+      }
+
+      // Resolve the supervisor NAME → staffId among the org's ACTIVE MANAGERs — the
+      // same set the dashboard dropdown offers, so the MCP can never propose a target
+      // the service rejects with SUPERVISOR_NOT_FOUND.
+      const rows = await prisma.staffVenue.findMany({
+        where: { active: true, role: StaffRole.MANAGER, venue: { organizationId } },
+        select: { staff: { select: { id: true, firstName: true, lastName: true } } },
+      })
+      const supervisors = new Map<string, string>()
+      for (const r of rows) {
+        if (r.staff) supervisors.set(r.staff.id, `${r.staff.firstName ?? ''} ${r.staff.lastName ?? ''}`.trim())
+      }
+      const norm = (s: string) =>
+        s
+          .normalize('NFD')
+          .replace(/\p{Diacritic}/gu, '')
+          .trim()
+          .toLowerCase()
+      const wanted = norm(toSupervisorName)
+      const matches = [...supervisors.entries()].filter(([, name]) => {
+        const n = norm(name)
+        return n === wanted || n.includes(wanted) || wanted.includes(n)
+      })
+      // Resolve-don't-guess: 0 or 2+ matches → hand back the candidates and stop.
+      if (matches.length !== 1) {
+        return text({
+          ok: false,
+          error:
+            matches.length === 0
+              ? `No encontré un supervisor llamado "${toSupervisorName}" en esta organización.`
+              : `"${toSupervisorName}" coincide con más de un supervisor — dime cuál exactamente.`,
+          availableSupervisors: [...supervisors.values()].sort(),
+          ...(matches.length > 1 ? { matched: matches.map(([, name]) => name) } : {}),
+        })
+      }
+      const [toSupervisorStaffId, toSupervisorFullName] = matches[0]
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: { serialCount: serialNumbers.length, toSupervisor: toSupervisorFullName },
+          message:
+            `Esto pasará ${serialNumbers.length} SIM(s) a "${toSupervisorFullName}". Solo se mueven los que su supervisor actual ` +
+            'todavía tiene en bodega; los que ya trae un promotor se rechazan con NOT_IN_SUPERVISOR_STATE (hay que recolectarlos ' +
+            'del promotor primero). Ni la venta ni el promotor se tocan. Confirma con el operador; luego vuelve a llamar con confirm:true.',
+        })
+      }
+
+      try {
+        const result = await simCustodyService.reassignSupervisor({
+          actor: { staffId: scope.staffId, organizationId, role: callerRole },
+          toSupervisorStaffId,
+          serialNumbers,
+        })
+        await auditMcpWrite(scope, {
+          action: 'SIM_CUSTODY_REASSIGNED_SUPERVISOR',
+          entity: 'SerializedItem',
+          entityId: venueId, // bulk op — no single entity; anchor the MCP audit on the venue
+          venueId,
+          data: { toSupervisorStaffId, toSupervisorName: toSupervisorFullName, summary: result.summary },
+        })
+        return text({
+          ok: result.summary.failed === 0,
+          toSupervisor: toSupervisorFullName,
+          summary: result.summary,
+          results: result.results,
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'reassign_sim_promoter',
+    "Move SIMs / ICCIDs from one PROMOTER to another in bulk — e.g. a promoter quits mid-shift or goes on leave and the SIMs they are carrying have to pass to whoever covers them. Identify the target promoter by NAME (resolved among the active promoters of the org; ambiguous or unknown names return the candidate list instead of guessing). ONLY SIMs a promoter is currently carrying are moved — already accepted on the TPV (PROMOTER_HELD) or still pending acceptance (PROMOTER_PENDING). A SIM still in the warehouse or in the supervisor's hands is rejected with NOT_IN_PROMOTER_STATE: assign it down the chain instead. The custody state, the supervisor and the sale are never touched, and every move is written to the custody timeline. Only for venues with the SERIALIZED_INVENTORY module (telecom / white-label). By DEFAULT it only PREVIEWS; call again with confirm:true to apply. This WRITES — requires sim-custody:reassign.",
+    {
+      venueId: z
+        .string()
+        .describe('A venue in the org that owns the SIMs (must be in your scope) — used for the module gate and to resolve the org'),
+      serialNumbers: z.array(z.string().min(1)).min(1).max(500).describe('ICCIDs / serial numbers to move (max 500)'),
+      toPromoterName: z
+        .string()
+        .min(1)
+        .describe('Name of the destination promoter, e.g. "María López" (matched case/accent-insensitively among the org promoters)'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+    },
+    async ({ venueId, serialNumbers, toPromoterName, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // SERIALIZED_INVENTORY is a MODULE — gate exactly like the platform (isModuleEnabled, incl.
+      // org-level fallback), NOT the Feature/tier resolver.
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      guard.requirePermission('sim-custody:reassign', venueId)
+
+      const access = scope.perVenueAccess.get(venueId)
+      const callerRole = access?.role
+      const organizationId = access?.organizationId
+      if (!callerRole || !organizationId) {
+        return text({ ok: false, error: 'No pude resolver la organización de este venue.' })
+      }
+
+      // Resolve the promoter NAME → staffId among the org's ACTIVE WAITER/CASHIER staff —
+      // the same set `reassignPromoter` validates against (and the dashboard dropdown
+      // offers), so the MCP can never propose a target the service rejects with
+      // PROMOTER_NOT_FOUND.
+      const rows = await prisma.staffVenue.findMany({
+        where: { active: true, role: { in: [StaffRole.WAITER, StaffRole.CASHIER] }, venue: { organizationId } },
+        select: { staff: { select: { id: true, firstName: true, lastName: true } } },
+      })
+      const promoters = new Map<string, string>()
+      for (const r of rows) {
+        if (r.staff) promoters.set(r.staff.id, `${r.staff.firstName ?? ''} ${r.staff.lastName ?? ''}`.trim())
+      }
+      const norm = (s: string) =>
+        s
+          .normalize('NFD')
+          .replace(/\p{Diacritic}/gu, '')
+          .trim()
+          .toLowerCase()
+      const wanted = norm(toPromoterName)
+      const matches = [...promoters.entries()].filter(([, name]) => {
+        const n = norm(name)
+        return n === wanted || n.includes(wanted) || wanted.includes(n)
+      })
+      // Resolve-don't-guess: 0 or 2+ matches → hand back the candidates and stop.
+      if (matches.length !== 1) {
+        return text({
+          ok: false,
+          error:
+            matches.length === 0
+              ? `No encontré un promotor llamado "${toPromoterName}" en esta organización.`
+              : `"${toPromoterName}" coincide con más de un promotor — dime cuál exactamente.`,
+          availablePromoters: [...promoters.values()].sort(),
+          ...(matches.length > 1 ? { matched: matches.map(([, name]) => name) } : {}),
+        })
+      }
+      const [toPromoterStaffId, toPromoterFullName] = matches[0]
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: { serialCount: serialNumbers.length, toPromoter: toPromoterFullName },
+          message:
+            `Esto pasará ${serialNumbers.length} SIM(s) a "${toPromoterFullName}". Solo se mueven los que un promotor ya trae ` +
+            '(aceptados en la TPV o pendientes de aceptar); los que siguen en bodega o en poder del supervisor se rechazan con ' +
+            'NOT_IN_PROMOTER_STATE (hay que asignarlos por la cadena normal). Ni la venta ni el supervisor se tocan. Confirma con ' +
+            'el operador; luego vuelve a llamar con confirm:true.',
+        })
+      }
+
+      try {
+        const result = await simCustodyService.reassignPromoter({
+          actor: { staffId: scope.staffId, organizationId, role: callerRole },
+          toPromoterStaffId,
+          serialNumbers,
+        })
+        await auditMcpWrite(scope, {
+          action: 'SIM_CUSTODY_REASSIGNED_PROMOTER',
+          entity: 'SerializedItem',
+          entityId: venueId, // bulk op — no single entity; anchor the MCP audit on the venue
+          venueId,
+          data: { toPromoterStaffId, toPromoterName: toPromoterFullName, summary: result.summary },
+        })
+        return text({
+          ok: result.summary.failed === 0,
+          toPromoter: toPromoterFullName,
+          summary: result.summary,
+          results: result.results,
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
     'serialized_stock_by_category',
     'Serialized inventory (SIMs) broken down BY CATEGORY/TYPE across your organization: for each type (e.g. "SIM de Intercambio", "SIM de Evento", "$100 de Promotor", "e-SIM"), how many are AVAILABLE vs SOLD. Counts the ORG-LEVEL pool (PlayTelecom registers SIMs at org level, not per store). Answers "¿cuántas SIM de cada tipo tengo disponibles / vendidas?". Only for venues with the SERIALIZED_INVENTORY module. Pass venueId (any venue in the org — used for the module gate and to resolve the org).',
     { venueId: z.string().describe('A venue in the org (must be in your scope) — for the module gate + org resolution') },
