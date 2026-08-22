@@ -89,6 +89,11 @@ describe('ingestDeliveryOrder', () => {
     // No existing order by default (fresh ingest)
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prisma.product.findUnique as jest.Mock).mockResolvedValue({ id: 'prod1', sku: 'TACO', name: 'Taco' })
+    // La consulta que resuelve la CATEGORÍA de cada renglón, para poder rutear la comanda a
+    // su estación (tacos a cocina, cerveza a barra). El código la envuelve en try/catch —una
+    // falla aquí no puede tumbar la ingesta de un pedido ya pagado— pero el camino feliz sí
+    // tiene que devolver filas, o el ruteo se probaría siempre en su modo degradado.
+    ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'prod1', categoryId: 'cat1' }])
     ;(prisma.order.upsert as jest.Mock).mockResolvedValue(existingOrderRow)
     // Devuelve la fila COMPLETA (como Prisma): el vale de inventario se arma con
     // los renglones recién creados, así que necesita id + productId + cantidad.

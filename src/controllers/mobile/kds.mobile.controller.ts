@@ -131,3 +131,50 @@ export const bumpKdsOrder = async (req: Request, res: Response, next: NextFuncti
     next(error)
   }
 }
+
+// ── Quién imprime una comanda que llegó SOLA ───────────────────────────────────────
+// Un pedido de marketplace aparece a la vez en TODAS las pantallas de cocina; sin árbitro,
+// las tres tablets de un local sacan el mismo papel tres veces.
+
+/** POST /mobile/venues/:venueId/kds/orders/:id/claim-print — "yo la imprimo". */
+export const claimKdsPrint = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, id } = req.params
+    const deviceId = String((req.body ?? {}).deviceId ?? '').trim()
+    if (!deviceId) return res.status(400).json({ ok: false, error: 'Falta identificar el aparato (deviceId).' })
+
+    const r = await kdsMobileService.claimKdsPrint(venueId, id, deviceId)
+    // 200 con `claimed:false` a propósito, NO un 409: perder la carrera es el resultado
+    // NORMAL para todas las tablets menos una. Un error haría que el POS pinte una falla
+    // cada vez que otra fue más rápida.
+    return res.json({ ok: true, ...r })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** POST .../confirm-print — "ya salió el papel". */
+export const confirmKdsPrinted = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, id } = req.params
+    const deviceId = String((req.body ?? {}).deviceId ?? '').trim()
+    if (!deviceId) return res.status(400).json({ ok: false, error: 'Falta identificar el aparato (deviceId).' })
+    const r = await kdsMobileService.confirmKdsPrinted(venueId, id, deviceId)
+    return res.json({ ok: r.ok })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** POST .../release-print — "no pude"; la suelta YA para que otro aparato lo intente. */
+export const releaseKdsPrint = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, id } = req.params
+    const deviceId = String((req.body ?? {}).deviceId ?? '').trim()
+    if (!deviceId) return res.status(400).json({ ok: false, error: 'Falta identificar el aparato (deviceId).' })
+    const r = await kdsMobileService.releaseKdsPrint(venueId, id, deviceId)
+    return res.json({ ok: r.ok })
+  } catch (e) {
+    return next(e)
+  }
+}

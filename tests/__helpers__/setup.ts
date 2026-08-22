@@ -105,6 +105,8 @@ const prismaMock: any = {
   promotionOption: createMockModel(),
   orderPromotion: createMockModel(),
   deliveryChannelLink: createMockModel(),
+  kdsOrder: createMockModel(),
+  kdsOrderItem: createMockModel(),
   deliveryOrderEvent: createMockModel(),
   deliveryActivationRequest: createMockModel(),
   payment: createMockModel(),

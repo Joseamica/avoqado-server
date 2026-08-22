@@ -10576,6 +10576,7 @@ enum SerializedItemCustodyEventType {
   COLLECTED_FROM_SUPERVISOR
   MARKED_SOLD // mirror de la venta para timeline unificada
   REASSIGNED_PROMOTER_TO_PROMOTER // Admin moved a held/pending SIM from one promotor to another
+  REASSIGNED_SUPERVISOR_TO_SUPERVISOR // Admin moved a SUPERVISOR_HELD SIM from one supervisor to another
 }
 
 // Append-only audit log for custody transitions. Source of truth for dispute
@@ -13365,10 +13366,34 @@ model KdsOrder {
   items       KdsOrderItem[]
   startedAt   DateTime?
   completedAt DateTime?
+
+  /// Quién se adjudicó IMPRIMIR esta comanda, y cuándo.
+  ///
+  /// 🔴 POR QUÉ EXISTE: un pedido de marketplace no lo manda nadie desde una tablet — llega
+  /// solo y aparece en TODAS las pantallas de cocina a la vez. Sin un árbitro, las tres
+  /// tablets de un local imprimirían el mismo pedido tres veces. Es el problema #1 de
+  /// soporte de Toast con pedidos en línea ("double printing"), y ellos lo resuelven
+  /// obligando a designar un aparato a mano.
+  ///
+  /// Aquí se resuelve SIN configuración: el primero que reclama gana, con un `updateMany`
+  /// atómico. Se elige así a propósito — una designación que nadie configuró significa que
+  /// NADIE imprime, y la regla de este dominio es que el fail-safe no puede ser no imprimir.
+  ///
+  /// La reclamación CADUCA (ver `PRINT_CLAIM_TTL_MS`): si el aparato que ganó se quedó sin
+  /// papel, sin batería o sin red, otro la retoma. Sin caducidad, un aparato muerto se
+  /// llevaría la comanda a la tumba.
+  printClaimedAt DateTime?
+  printClaimedBy String?
+  /// Sellado cuando el aparato confirma que el papel SALIÓ. Es lo que vuelve la reclamación
+  /// definitiva: hasta entonces, sigue siendo retomable.
+  printedAt      DateTime?
+
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
   @@index([venueId, status])
+  /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
+  @@index([venueId, printedAt])
 }
 
 model KdsOrderItem {
@@ -13379,6 +13404,19 @@ model KdsOrderItem {
   quantity    Int
   modifiers   String? // JSON array of modifier names
   notes       String?
+
+  /// A qué producto y categoría corresponde el renglón.
+  ///
+  /// 🔴 Existe para que la comanda se pueda RUTEAR. El ruteo de impresión decide la
+  /// estación con la cascada producto → categoría → default del negocio, y sin estos dos
+  /// ids un pedido que llegó solo (marketplace) sólo podría salir en un ticket "SIN
+  /// ESTACIÓN": los tacos y la cerveza en el mismo papel, en la misma impresora.
+  ///
+  /// Van SUELTOS (sin `@relation`), igual que `KdsOrder.orderId`: una comanda es una foto
+  /// del momento y tiene que sobrevivir a que después borren el producto del catálogo. Al
+  /// leerlos, la ausencia significa "no supimos rutearlo", jamás un error.
+  productId  String?
+  categoryId String?
 
   @@index([kdsOrderId])
 }

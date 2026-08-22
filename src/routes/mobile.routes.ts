@@ -2830,6 +2830,38 @@ router.post(
 )
 
 /**
+ * Reclamar / confirmar / soltar la impresión de una comanda que llegó sola.
+ *
+ * Permiso `orders:update`, el MISMO que ya pide crear y avanzar una comanda: quien puede
+ * mover el tablero puede imprimirlo. Inventar un permiso nuevo aquí dejaría el papel sin
+ * salir para todos hasta que alguien se acordara de otorgarlo — y en este dominio el
+ * fail-safe no puede ser no imprimir.
+ */
+router.post(
+  '/venues/:venueId/kds/orders/:id/claim-print',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.claimKdsPrint,
+)
+
+router.post(
+  '/venues/:venueId/kds/orders/:id/confirm-print',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.confirmKdsPrinted,
+)
+
+router.post(
+  '/venues/:venueId/kds/orders/:id/release-print',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.releaseKdsPrint,
+)
+
+/**
  * PUT /api/v1/mobile/venues/:venueId/kds/orders/:id/status
  * Update KDS order status.
  * Body: { status: "PREPARING" | "READY" | "COMPLETED" }

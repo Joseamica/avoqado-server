@@ -97,6 +97,8 @@ export interface KdsOrderResponse {
   status: KdsOrderStatus
   /** Falta que la cocina lo acepte en la app de delivery (sólo en canales MANUAL). */
   needsAcceptance?: boolean
+  /** ¿Falta que un aparato reclame e imprima esta comanda? Sólo para pedidos de marketplace. */
+  needsPrint?: boolean
   items: Array<{
     id: string
     productName: string
@@ -154,7 +156,9 @@ export async function listKdsOrders(venueId: string, statusFilter?: string): Pro
 
   return orders.map(o => {
     const venta = o.orderId ? porId.get(o.orderId) : undefined
-    return formatKdsOrder(o, venta?.type === 'DELIVERY' && venta?.status === 'PENDING')
+    // `type === 'DELIVERY'` es lo que separa "llegó solo" de "lo mandó un mesero". Sólo lo
+    // primero necesita que alguien reclame la impresión.
+    return formatKdsOrder({ ...o, esDeMarketplace: venta?.type === 'DELIVERY' }, venta?.type === 'DELIVERY' && venta?.status === 'PENDING')
   })
 }
 
@@ -278,6 +282,11 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
       quantity: item.quantity,
       modifiers: parseKdsModifiers(item.modifiers),
       notes: item.notes,
+      // Los ids que el POS necesita para RUTEAR la comanda a su estación. `null` = no
+      // supimos de qué producto es; el motor lo manda al ticket "SIN ESTACIÓN" en vez de
+      // no imprimirlo.
+      productId: item.productId ?? null,
+      categoryId: item.categoryId ?? null,
     })),
     /**
      * 🔴 ¿Falta que alguien acepte este pedido en la app de delivery?
@@ -290,8 +299,92 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
      * perdía TODOS los pedidos en silencio.
      */
     needsAcceptance,
+    /**
+     * ¿Esta comanda todavía no sale en papel?
+     *
+     * Sólo aplica a pedidos que llegaron SOLOS (marketplace): los que manda un mesero desde
+     * una tablet ya se imprimen en ese mismo gesto. Aquí no hay gesto humano — el pedido
+     * aparece en todas las pantallas a la vez, y alguien tiene que reclamar el trabajo.
+     *
+     * `false` en cuanto alguien lo reclama, no cuando termina: si se esperara al papel, las
+     * demás tablets seguirían viéndolo pendiente los segundos que tarda la impresión y lo
+     * reclamarían también.
+     */
+    needsPrint: Boolean(order.esDeMarketplace) && !order.printedAt && !order.printClaimedAt,
     startedAt: order.startedAt?.toISOString() || null,
     completedAt: order.completedAt?.toISOString() || null,
     createdAt: order.createdAt.toISOString(),
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════
+//  Quién imprime una comanda que llegó SOLA
+// ════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Cuánto vale una reclamación antes de que otro aparato pueda retomarla.
+ *
+ * 90 segundos: lo suficiente para bajar la configuración de impresión y sacar el papel
+ * —incluso con red mala—, y lo bastante corto para que la cocina no se quede esperando si
+ * la tablet que ganó se apagó. Es el único número de este mecanismo, y el error caro sería
+ * hacerlo grande: una comanda enterrada 10 minutos es un pedido que nadie preparó.
+ */
+export const PRINT_CLAIM_TTL_MS = 90_000
+
+/**
+ * "Yo la imprimo." Devuelve si este aparato ganó.
+ *
+ * 🔴 Un `updateMany` atómico, NO leer-y-luego-escribir. La diferencia es el bug entero: con
+ * lectura previa hay una ventana entre consultar y mutar, y dos tablets que preguntan en el
+ * mismo instante ganan LAS DOS. Aquí gana quien la base deje pasar primero, y el perdedor
+ * recibe `count: 0`.
+ *
+ * Se elige un árbitro implícito en vez de designar un aparato en la configuración —que es
+ * como lo resuelve Toast— porque una designación que nadie configuró significa que NADIE
+ * imprime, y en este dominio el fail-safe no puede ser dejar a la cocina sin enterarse
+ * (`offline-first-y-hub-lan.md` §4.1a).
+ */
+export async function claimKdsPrint(venueId: string, kdsOrderId: string, deviceId: string): Promise<{ claimed: boolean }> {
+  const limite = new Date(Date.now() - PRINT_CLAIM_TTL_MS)
+
+  const r = await prisma.kdsOrder.updateMany({
+    where: {
+      id: kdsOrderId,
+      venueId,
+      // Lo ya impreso NUNCA se reclama: el papel no se des-imprime.
+      printedAt: null,
+      // Libre, o reclamada por alguien que ya se tardó demasiado.
+      OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: limite } }],
+    },
+    data: { printClaimedAt: new Date(), printClaimedBy: deviceId },
+  })
+
+  return { claimed: r.count > 0 }
+}
+
+/** "Ya salió el papel." Sella la impresión y la vuelve definitiva. */
+export async function confirmKdsPrinted(venueId: string, kdsOrderId: string, deviceId: string): Promise<{ ok: boolean }> {
+  const r = await prisma.kdsOrder.updateMany({
+    // `printClaimedBy` en el WHERE: sólo confirma quien reclamó. Otro aparato no puede
+    // declarar impreso algo que no imprimió.
+    where: { id: kdsOrderId, venueId, printClaimedBy: deviceId, printedAt: null },
+    data: { printedAt: new Date() },
+  })
+  return { ok: r.count > 0 }
+}
+
+/**
+ * "No pude." Libera la reclamación EN EL ACTO para que otro aparato lo intente.
+ *
+ * Sin esto, una tablet sin papel bloquearía la comanda los 90 segundos completos mientras la
+ * cocina no se entera del pedido. El caso es real y común: la impresora de una estación se
+ * queda sin rollo a media comida.
+ */
+export async function releaseKdsPrint(venueId: string, kdsOrderId: string, deviceId: string): Promise<{ ok: boolean }> {
+  const r = await prisma.kdsOrder.updateMany({
+    // `printedAt: null` para que soltar no pueda borrar una impresión ya confirmada.
+    where: { id: kdsOrderId, venueId, printClaimedBy: deviceId, printedAt: null },
+    data: { printClaimedAt: null, printClaimedBy: null },
+  })
+  return { ok: r.count > 0 }
 }

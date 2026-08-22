@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "SerializedItemCustodyEventType" ADD VALUE 'REASSIGNED_SUPERVISOR_TO_SUPERVISOR';

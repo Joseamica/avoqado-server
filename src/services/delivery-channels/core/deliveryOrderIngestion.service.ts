@@ -176,6 +176,9 @@ export async function ingestDeliveryOrder(
   const isNew = !existing
   // Holder para que TS no estreche la asignación dentro del callback async.
   const postingState: { id: string | null } = { id: null }
+  // Fuera de la transacción a propósito: la comanda se arma DESPUÉS y necesita los productos
+  // que se resolvieron adentro, para poder rutear cada renglón a su estación.
+  const renglonesCreados: Array<{ productId: string | null }> = []
 
   const order = await prisma.$transaction(async tx => {
     const order = await tx.order.upsert({
@@ -256,6 +259,7 @@ export async function ingestDeliveryOrder(
           },
         })
         createdItems.push(createdItem)
+        renglonesCreados.push({ productId: createdItem.productId })
 
         // Modifiers: filas OrderItemModifier reales (contrato unificado, igual que
         // — ya NO texto concatenado en notes (v1 legacy).
@@ -389,6 +393,36 @@ export async function ingestDeliveryOrder(
     })
   }
 
+  // Una sola consulta para las categorías de todos los renglones: el ruteo las necesita y
+  // pedirlas una por una multiplicaría los viajes a la base en el camino de un pedido.
+  //
+  // 🔴 Y va envuelta: esta búsqueda sólo sirve para que la comanda salga en la impresora
+  // correcta. Si falla, lo que se pierde es el ruteo —el renglón cae al ticket "SIN
+  // ESTACIÓN", que igual se imprime—. Dejarla propagar tumbaría la INGESTA COMPLETA del
+  // pedido: el cliente ya pagó en Uber y su venta no existiría en el sistema, por no haber
+  // podido averiguar a qué categoría pertenece un taco.
+  // Las categorías de todos los renglones en UNA consulta: el ruteo de impresión las
+  // necesita, y pedirlas una por una multiplicaría los viajes a la base en el camino de un
+  // pedido que ya está pagado.
+  //
+  // 🔴 Y va envuelta en try/catch a propósito. Esta búsqueda sólo sirve para que la comanda
+  // salga en la impresora correcta; si falla, lo que se pierde es el ruteo —el renglón cae
+  // al ticket "SIN ESTACIÓN", que igual se imprime—. Dejarla propagar tumbaría la INGESTA
+  // COMPLETA: el cliente ya pagó en Uber y su venta no existiría en el sistema, por no haber
+  // podido averiguar a qué categoría pertenece un taco.
+  const idsProducto = renglonesCreados.map(i => i.productId).filter((v): v is string => Boolean(v))
+  const categoriaPorProducto = new Map<string, string | null>()
+  if (idsProducto.length) {
+    try {
+      const filas = await prisma.product.findMany({ where: { id: { in: idsProducto } }, select: { id: true, categoryId: true } })
+      for (const p of filas ?? []) categoriaPorProducto.set(p.id, p.categoryId)
+    } catch (error) {
+      logger.warn('[DeliveryIngest] no se pudieron leer las categorías para rutear la comanda (se imprime sin estación)', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
   let kitchenTicketCreated = false
   if (isNew && !normalized.scheduledFor) {
     try {
@@ -399,9 +433,15 @@ export async function ingestDeliveryOrder(
           orderType: 'DELIVERY',
           orderId: order.id,
           items: {
-            create: normalized.items.map(it => ({
+            create: normalized.items.map((it, idx) => ({
               productName: it.name,
               quantity: it.quantity,
+              // Los ids que hacen RUTEABLE la comanda: sin ellos, los tacos y la cerveza
+              // salen en el mismo papel. `renglonesCreados` ya trae el producto que resolvió la
+              // transacción de arriba — no se vuelve a buscar. Se aparean por índice porque
+              // se crearon recorriendo `normalized.items` en este mismo orden.
+              productId: renglonesCreados[idx]?.productId ?? null,
+              categoryId: categoriaPorProducto.get(renglonesCreados[idx]?.productId ?? '') ?? null,
               // 🔴 Por el normalizador COMPARTIDO, nunca serializando la forma del proveedor.
               // Guardar aquí `[{name, quantity}]` mientras el POS guardaba `["texto"]` en la
               // MISMA columna llegó hasta la cocina: Android pintó el JSON crudo y iOS perdió
