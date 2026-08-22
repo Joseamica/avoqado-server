@@ -6,7 +6,6 @@ import { getReservationSettings, isStaffAware, type OperatingHours } from '../..
 import { mergeReservationBranding } from '../../services/dashboard/reservationBranding.service'
 import { checkExternalBusyBlock } from '../../services/reservation/external-busy-block.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
-import { verifyCustomerToken } from '../../jwt.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
@@ -113,20 +112,42 @@ export function resolveUpfrontPolicy(
 }
 
 /**
- * Opportunistically extract an authenticated customer from a Bearer token on
- * the public booking endpoint. Returns null when no token is present or the
- * token is invalid/expired — the caller decides whether anonymous is allowed
- * (e.g. `settings.publicBooking.requireAccount`).
+ * Fase 0.B — con qué identidad se liga una reserva pública.
+ *
+ * La ÚNICA fuente de identidad es `req.customerAuth`, que pone el middleware
+ * `authenticateCustomerOptional` después de haber rechazado ya tokens inválidos,
+ * expirados, de otro venue o de cuentas inactivas. Aquí ya no se lee el header.
+ *
+ * 🔴 El body NUNCA confiere identidad. Antes, con `requireAccount`, un
+ * `customerId` suelto en el body —sin token— satisfacía el login
+ * (`!authenticatedCustomer && !bodyCustomerId`), y un token de OTRO venue
+ * quedaba truthy y también lo satisfacía. Las dos puertas se cierran aquí.
+ *
+ * Función pura para poder probarla sin Express (patrón del repo:
+ * `computeCancelDecision`).
  */
-function tryReadAuthenticatedCustomer(req: Request): { customerId: string; venueId: string } | null {
-  const authHeader = req.headers.authorization
-  if (!authHeader?.startsWith('Bearer ')) return null
-  try {
-    const payload = verifyCustomerToken(authHeader.slice(7))
-    return { customerId: payload.sub, venueId: payload.venueId }
-  } catch {
-    return null
+export function resolveBookingIdentity(input: {
+  customerAuth: { customerId: string; venueId: string } | null | undefined
+  requireAccount: boolean
+  bodyCustomerId: unknown
+  /** Si true, un customerId en el body que difiera del token es 400 (el body no manda). */
+  rejectBodyCustomerId?: boolean
+}): { ok: true; customerId: string | null } | { ok: false; code: 'CUSTOMER_AUTH_REQUIRED' | 'CUSTOMER_ID_NOT_ALLOWED' } {
+  const auth = input.customerAuth ?? null
+  const bodyId = typeof input.bodyCustomerId === 'string' && input.bodyCustomerId.length > 0 ? input.bodyCustomerId : null
+
+  if (auth) {
+    if (input.rejectBodyCustomerId && bodyId && bodyId !== auth.customerId) {
+      return { ok: false, code: 'CUSTOMER_ID_NOT_ALLOWED' }
+    }
+    return { ok: true, customerId: auth.customerId }
   }
+
+  if (input.requireAccount) {
+    return { ok: false, code: 'CUSTOMER_AUTH_REQUIRED' }
+  }
+  // Invitado. El bodyId se descarta a propósito: sin sesión no liga nada.
+  return { ok: true, customerId: null }
 }
 
 async function resolveVenueBySlug(venueSlug: string) {
@@ -697,25 +718,28 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
     }
 
-    // Always bind a valid Bearer JWT to the booking, independent of
-    // `requireAccount`. When the customer is logged in, their bookings need
-    // to surface in "Mis Reservaciones" and anchor any credit redemption to
-    // the same identity — even at venues that allow anonymous guest bookings.
-    // We trust the JWT (signed server-side) but verify the embedded venueId
-    // matches the URL slug so a token minted for venue A can't be replayed
-    // against venue B. Public unauthenticated body.customerId is NEVER
-    // trusted to set customerId here — that path is only honored under
-    // requireAccount, where the operator has opted in to that contract.
-    const authenticatedCustomer = tryReadAuthenticatedCustomer(req)
-    if (authenticatedCustomer && authenticatedCustomer.venueId === venue.id) {
-      req.body.customerId = authenticatedCustomer.customerId
-    }
-
-    if (settings.publicBooking.requireAccount) {
-      const bodyCustomerId = typeof req.body?.customerId === 'string' ? req.body.customerId : null
-      if (!authenticatedCustomer && !bodyCustomerId) {
-        throw new UnauthorizedError('Este negocio requiere iniciar sesion para reservar.')
+    // Fase 0.B — la identidad viene SÓLO de `req.customerAuth` (middleware
+    // `authenticateCustomerOptional`, que ya rechazó tokens ajenos/inválidos/inactivos).
+    // El body nunca confiere identidad: con sesión se liga al token; sin sesión y
+    // con `requireAccount`, 401; sin sesión y sin `requireAccount`, invitado.
+    const identity = resolveBookingIdentity({
+      customerAuth: (req as any).customerAuth,
+      requireAccount: settings.publicBooking.requireAccount,
+      bodyCustomerId: req.body?.customerId,
+      rejectBodyCustomerId: true,
+    })
+    if (!identity.ok) {
+      if (identity.code === 'CUSTOMER_AUTH_REQUIRED') {
+        throw new UnauthorizedError('Este negocio requiere iniciar sesion para reservar.', 'CUSTOMER_AUTH_REQUIRED')
       }
+      throw new BadRequestError('No se acepta customerId en el cuerpo de la solicitud.', 'CUSTOMER_ID_NOT_ALLOWED')
+    }
+    // Se escribe el resultado (o se borra) para que ningún camino posterior lea un
+    // customerId que no venga de la sesión.
+    if (identity.customerId) {
+      req.body.customerId = identity.customerId
+    } else {
+      delete req.body.customerId
     }
 
     // Validate required fields based on config

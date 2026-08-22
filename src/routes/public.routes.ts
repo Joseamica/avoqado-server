@@ -22,7 +22,8 @@ import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public
 import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
-import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
+import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
+import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
 import { checkPublicVenueFeature } from '../middlewares/checkFeatureAccess.middleware'
 import { venueChatAuth } from '../middlewares/venueChatAuth.middleware'
 import {
@@ -140,9 +141,14 @@ router.get(
   reservationPublicController.getAvailability,
 )
 
+// Fase 0.B: el venue se resuelve ANTES de la identidad (el slug manda sobre el token), y
+// la identidad ANTES del plan (401 de "no eres tú" gana a 403 de "este venue no tiene PRO").
+// Cualquier Authorization presente se valida; sin header sigue siendo invitado.
 router.post(
   '/venues/:venueSlug/reservations',
   writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomerOptional,
   requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateReservationBodySchema })),
   reservationPublicController.createReservation,
@@ -236,11 +242,13 @@ router.post('/venues/:venueSlug/customer/register', authLimit, validateRequest(c
 
 router.post('/venues/:venueSlug/customer/login', authLimit, validateRequest(customerLoginSchema), customerPortalController.login)
 
-router.get('/venues/:venueSlug/customer/portal', readLimit, authenticateCustomer, customerPortalController.getPortal)
+// Fase 0.B: el slug manda. Antes el portal usaba sólo el venue del JWT e ignoraba la URL.
+router.get('/venues/:venueSlug/customer/portal', readLimit, resolveVenueBySlug, authenticateCustomer, customerPortalController.getPortal)
 
 router.patch(
   '/venues/:venueSlug/customer/profile',
   writeLimit,
+  resolveVenueBySlug,
   authenticateCustomer,
   validateRequest(customerUpdateProfileSchema),
   customerPortalController.updateProfile,

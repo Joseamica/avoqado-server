@@ -26,8 +26,8 @@ class AppError extends Error {
 }
 
 export class BadRequestError extends AppError {
-  constructor(message: string = 'Solicitud incorrecta') {
-    super(message, 400)
+  constructor(message: string = 'Solicitud incorrecta', code?: string, details?: unknown) {
+    super(message, 400, true, code, details)
   }
 }
 
@@ -44,8 +44,8 @@ export class ConflictError extends AppError {
 }
 
 export class UnauthorizedError extends AppError {
-  constructor(message: string = 'No autorizado') {
-    super(message, 401)
+  constructor(message: string = 'No autorizado', code?: string) {
+    super(message, 401, true, code)
   }
 }
 
@@ -100,8 +100,8 @@ export class ForbiddenError extends AppError {
 }
 
 export class ValidationError extends AppError {
-  constructor(message: string = 'Error de validación') {
-    super(message, 422)
+  constructor(message: string = 'Error de validación', code?: string, details?: unknown) {
+    super(message, 422, true, code, details)
   }
 }
 
