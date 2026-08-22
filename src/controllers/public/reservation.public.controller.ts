@@ -119,12 +119,15 @@ export function resolveUpfrontPolicy(
  * cancelaba la reserva sin devolver los créditos, y la sesión de Stripe quedaba huérfana.
  * Los créditos YA son el pago: el depósito se apaga para esa reserva. Pura, probada sola.
  */
-export function resolveDepositsWhenPayingWithCredits<D extends Record<string, unknown> | undefined>(input: {
+type DepositsShape = { enabled: boolean; mode: string; [k: string]: unknown }
+
+export function resolveDepositsWhenPayingWithCredits<D extends DepositsShape | undefined>(input: {
   wantsCredits: boolean
   deposits: D
-}): D | (Record<string, unknown> & { enabled: false; mode: 'none' }) {
+}): D {
   if (!input.wantsCredits) return input.deposits
-  return { ...(input.deposits ?? {}), enabled: false as const, mode: 'none' as const }
+  // El spread conserva el resto del shape del venue (ventana, %, monto) y sólo apaga el depósito.
+  return { ...(input.deposits ?? {}), enabled: false, mode: 'none' } as unknown as D
 }
 
 /**

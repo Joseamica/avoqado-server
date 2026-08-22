@@ -1,8 +1,8 @@
-import { Prisma, OrderType, OrderSource } from '@prisma/client'
+import { Prisma, OrderType, OrderSource, OrderStatus } from '@prisma/client'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
 /** Statuses that do NOT count as "the reservation already has an order". Mirrors the partial unique index. */
-export const ALIVE_ORDER_EXCLUDED_STATUSES = ['CANCELLED', 'DELETED'] as const
+export const ALIVE_ORDER_EXCLUDED_STATUSES: OrderStatus[] = ['CANCELLED', 'DELETED']
 
 interface CreateOrderFromReservationInput {
   reservationId: string
