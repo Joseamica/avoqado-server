@@ -17,12 +17,19 @@ jest.mock('@/jwt.service', () => ({
   __esModule: true,
   generateCustomerToken: jest.fn(() => 'signed.jwt.token'),
 }))
+// Fase 1: verifyOtp corre dentro de una transacción y decide el estado de aprobación.
+// Esta suite prueba el OTP en sí, así que la activación se simula.
+jest.mock('@/services/public/customerBookingAccess.service', () => ({
+  __esModule: true,
+  activateCustomerAccount: jest.fn(async () => ({ approvalStatus: 'APPROVED', requestsApproval: false, approvalVersion: 0 })),
+}))
 
 // Imported AFTER the mocks so the service binds to the mocked modules.
 import { requestOtp, verifyOtp } from '@/services/public/otpAuth.public.service'
 import { sendOtpWhatsApp } from '@/services/whatsapp.service'
 import emailService from '@/services/email.service'
 import { generateCustomerToken } from '@/jwt.service'
+import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 
 const VENUE_ID = 'venue-123'
 const PHONE_RAW = '+52 (55) 1234-5678'
@@ -36,6 +43,9 @@ describe('OTP Auth Public Service', () => {
     ;(sendOtpWhatsApp as jest.Mock).mockResolvedValue(true)
     ;(emailService.sendOtpCodeEmail as jest.Mock).mockResolvedValue(true)
     ;(generateCustomerToken as jest.Mock).mockReturnValue('signed.jwt.token')
+    // Fase 1: la identidad se resuelve dentro de una tx; el mock ejecuta el callback igual.
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+    ;(activateCustomerAccount as jest.Mock).mockResolvedValue({ approvalStatus: 'APPROVED', requestsApproval: false, approvalVersion: 0 })
     // Name-backfill lookup (findGuestNameFromPastReservations) runs on every new-customer
     // path. Default to "no past reservation" so tests that don't care about backfill
     // don't have to mock it; tests below override per-case.
@@ -259,6 +269,8 @@ describe('OTP Auth Public Service', () => {
 
       expect(result).toEqual({
         token: 'signed.jwt.token',
+        // Fase 1: la respuesta lleva el estado de aprobación de la activación.
+        approvalStatus: 'APPROVED',
         customer: { id: 'customer-1', firstName: null, lastName: null, email: null, phone: PHONE_NORM },
       })
     })
