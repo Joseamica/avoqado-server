@@ -498,6 +498,8 @@ model Venue {
   classSessions       ClassSession[]
   waitlistEntries     ReservationWaitlistEntry[]
   reservationSettings ReservationSettings?
+  // Fase 1 — avisos de aprobación de clientes pendientes de entregar
+  customerApprovalOutbox CustomerApprovalOutbox[]
 
   // Per-venue defaults applied to NEW payment links + admin notification
   // preferences when a link is paid. See VenuePaymentLinkSettings for fields.
@@ -6372,6 +6374,9 @@ model Customer {
   // Facturación CFDI 4.0
   taxProfiles CustomerTaxProfile[]
 
+  // Fase 1 — avisos de aprobación encolados para este cliente
+  approvalOutbox CustomerApprovalOutbox[]
+
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
   @@unique([venueId, referralCode])
@@ -7981,6 +7986,84 @@ enum CustomerApprovalStatus {
   PENDING
   APPROVED
   REJECTED
+}
+
+/// Los 4 avisos de la aprobación. `REQUESTED_STAFF` va a los roles configurados del venue;
+/// los otros tres, al cliente.
+enum CustomerApprovalEvent {
+  REQUESTED_STAFF
+  PENDING_CUSTOMER
+  APPROVED_CUSTOMER
+  REJECTED_CUSTOMER
+}
+
+enum CustomerApprovalDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  DEAD_LETTER
+}
+
+enum CustomerApprovalChannel {
+  EMAIL
+  WHATSAPP
+}
+
+/// Fase 1 — el EVENTO lógico de aprobación, encolado DENTRO de la transacción que lo produce
+/// (activar cuenta o decidir). Separado de la entrega porque un evento tiene N destinatarios:
+/// entregar a 2 de 3 y reintentar duplicaría los 2 primeros si el dedupe viviera aquí.
+model CustomerApprovalOutbox {
+  id String @id @default(cuid())
+
+  venueId    String
+  venue      Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  event CustomerApprovalEvent
+  /// Ordena y suprime: nunca se entrega una versión vieja si ya salió una más nueva
+  /// (evitaría que llegue "en espera" DESPUÉS de "aprobado").
+  approvalVersion Int
+  /// `${event}:${customerId}:${approvalVersion}` — repetir la misma decisión no encola de nuevo.
+  dedupeKey      String @unique
+  payloadVersion Int    @default(1)
+  payload        Json?
+
+  deliveries CustomerApprovalDelivery[]
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId, customerId, approvalVersion])
+}
+
+/// La ENTREGA: una fila por destinatario y canal. Es la unidad que se reintenta.
+model CustomerApprovalDelivery {
+  id String @id @default(cuid())
+
+  outboxId String
+  outbox   CustomerApprovalOutbox @relation(fields: [outboxId], references: [id], onDelete: Cascade)
+
+  recipient String // email o teléfono, según el canal
+  channel   CustomerApprovalChannel
+  /// Idempotency key que viaja al proveedor (Resend): si el proceso muere entre "aceptado" y
+  /// `sentAt`, el reintento no genera un segundo correo.
+  providerKey String @unique
+
+  status        CustomerApprovalDeliveryStatus @default(PENDING)
+  attempts      Int                            @default(0)
+  nextAttemptAt DateTime                       @default(now())
+  /// Claim con SKIP LOCKED: dos workers nunca entregan la misma fila.
+  leaseUntil DateTime?
+  lastError  String?   @db.Text
+  /// SÓLO tras confirmación del proveedor.
+  sentAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([outboxId, recipient, channel])
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseUntil])
 }
 
 enum LoyaltyTransactionType {

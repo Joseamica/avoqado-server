@@ -509,6 +509,9 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 20. Customers, Consumers & Reviews
   Customer: 'Customers, Consumers & Reviews',
   CustomerGroup: 'Customers, Consumers & Reviews',
+  // Fase 1 — aprobación del cliente por el venue: el evento y su entrega por destinatario
+  CustomerApprovalOutbox: 'Customers, Consumers & Reviews',
+  CustomerApprovalDelivery: 'Customers, Consumers & Reviews',
   Consumer: 'Customers, Consumers & Reviews',
   ConsumerAuthAccount: 'Customers, Consumers & Reviews',
   OtpChallenge: 'Customers, Consumers & Reviews',
