@@ -23,7 +23,11 @@
  * `DeliveryChannelLink` — meterlos ahí implicaría copiar el mismo secreto en cada venue y
  * tener que rotarlo N veces.
  */
-import { RAPPI_EVENTS } from './rappi.adapter'
+import { DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
+
+import prisma from '../../../../utils/prismaClient'
+import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
+import { parseRappiSignatureHeader, verifyRappiSignature } from './rappi.signature'
 
 /** Los eventos que sabemos manejar, y el pedazo de URL con el que los registramos en Rappi. */
 export const RUTA_POR_EVENTO: Readonly<Record<string, string>> = {
@@ -94,4 +98,115 @@ export function secretosDelEvento(mapaJson: string | undefined, evento: string):
  */
 export function esPing(evento: string): boolean {
   return evento === RAPPI_EVENTS.PING
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  Persistencia — el 200 sólo sale con el evento ya guardado
+// ────────────────────────────────────────────────────────────────────────────────────
+
+export type RappiIngressOutcome = 'PERSISTED' | 'DUPLICATE' | 'INVALID_SIGNATURE' | 'MALFORMED'
+
+export interface RappiIngressInput {
+  rawBody: Buffer
+  signatureHeader: string | undefined
+  /** 🔴 El evento viene de la RUTA, jamás del cuerpo: varios payloads de Rappi son idénticos. */
+  evento: string
+  /** Los secretos vigentes de ESE evento (`secretosDelEvento`) — cada evento tiene el suyo. */
+  secrets: string[]
+}
+
+interface CuerpoRappi {
+  event?: unknown
+  event_time?: unknown
+}
+
+/**
+ * La llave de deduplicación, compuesta — Rappi NO manda un id de evento propio.
+ *
+ * Tres familias, porque la identidad natural de cada evento es distinta:
+ *
+ *  · Con PEDIDO (`NEW_ORDER`, cancelaciones…): `evento:tienda:pedido`. Un reenvío del mismo
+ *    aviso deduplica — que es lo que se quiere.
+ *  · `ORDER_OTHER_EVENT`: además el SUBTIPO y su `event_time`. El mismo pedido genera varios
+ *    ("repartidor asignado", "llegó a la tienda"…) y sin esto el segundo se descartaría como
+ *    duplicado del primero.
+ *  · Sin identidad natural (`MENU_APPROVED`, `STORE_CONNECTIVITY`…): el TIMESTAMP de la
+ *    firma. Un menú se aprueba muchas veces a lo largo de meses con el mismo `store_id` —
+ *    sin el timestamp, la segunda aprobación jamás se procesaría.
+ */
+export function llaveDeDeduplicacion(evento: string, payload: unknown, signatureHeader: string | undefined): string {
+  const identidad = rappiAdapter.extractIdentity(payload)
+  const base = `RAPPI:${evento}:${identidad.storeId ?? 'sin-tienda'}:${identidad.orderId ?? 'sin-pedido'}`
+
+  if (evento === RAPPI_EVENTS.ORDER_OTHER_EVENT) {
+    const c = (payload ?? {}) as CuerpoRappi
+    const subtipo = typeof c.event === 'string' ? c.event : 'sin-subtipo'
+    const cuando = typeof c.event_time === 'string' ? c.event_time : 'sin-hora'
+    return `${base}:${subtipo}:${cuando}`
+  }
+
+  const conIdentidadNatural = new Set<string>([
+    RAPPI_EVENTS.NEW_ORDER,
+    RAPPI_EVENTS.NEW_ORDER_SCHEDULED,
+    RAPPI_EVENTS.NEW_ORDER_SCHEDULED_CANCELLED,
+    RAPPI_EVENTS.ORDER_EVENT_CANCEL,
+  ])
+  if (conIdentidadNatural.has(evento)) return base
+
+  const t = parseRappiSignatureHeader(signatureHeader)?.timestamp ?? 'sin-t'
+  return `${base}:t${t}`
+}
+
+/**
+ * Verifica, deduplica y guarda. Espejo del contrato de Uber: ACK persist-first — la firma se
+ * comprueba ANTES de mirar el payload, y la carrera del duplicado la resuelve el `@unique`
+ * de la base (P2002), no un "¿existe?" previo que dejaría ventana.
+ *
+ * El link puede no existir (tienda aún sin vincular): el evento se guarda igual con venue
+ * nulo — un pedido real jamás se tira por eso.
+ */
+export async function persistRappiWebhookEvent(input: RappiIngressInput): Promise<{ outcome: RappiIngressOutcome; eventRowId?: string }> {
+  const secrets = (input.secrets ?? []).filter(Boolean)
+  if (secrets.length === 0) return { outcome: 'INVALID_SIGNATURE' }
+  if (!secrets.some(s => verifyRappiSignature(input.rawBody, input.signatureHeader, s))) return { outcome: 'INVALID_SIGNATURE' }
+
+  let payload: unknown
+  try {
+    payload = JSON.parse(input.rawBody.toString('utf8'))
+  } catch {
+    return { outcome: 'MALFORMED' }
+  }
+
+  const identidad = rappiAdapter.extractIdentity(payload)
+  const dedupKey = llaveDeDeduplicacion(input.evento, payload, input.signatureHeader)
+
+  const link = identidad.storeId
+    ? await prisma.deliveryChannelLink.findUnique({
+        where: { provider_externalLocationId: { provider: DeliveryProvider.RAPPI, externalLocationId: identidad.storeId } },
+        select: { id: true, venueId: true },
+      })
+    : null
+
+  try {
+    const row = await prisma.deliveryOrderEvent.create({
+      data: {
+        provider: DeliveryProvider.RAPPI,
+        externalEventId: dedupKey,
+        // 🔴 El tipo es el de la RUTA — el payload puede no traer ninguno (PING y
+        // MENU_REJECTED son literalmente indistinguibles por contenido).
+        eventType: input.evento,
+        dedupKey,
+        externalOrderId: identidad.orderId,
+        channelLinkId: link?.id ?? null,
+        venueId: link?.venueId ?? null,
+        payload: payload as Prisma.InputJsonValue,
+        status: DeliveryOrderEventStatus.RECEIVED,
+      },
+      select: { id: true },
+    })
+    return { outcome: 'PERSISTED', eventRowId: row.id }
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') return { outcome: 'DUPLICATE' }
+    throw e
+  }
 }

@@ -13,13 +13,22 @@
  * entonces, un canal RAPPI se ve como "no lista" — que es la verdad.
  *
  * Lo que sí está aquí es lo caro y lo verificable: la firma (algoritmo distinto al de Uber),
- * la traducción de los 11 eventos, y el mapeo del pedido con su red de cuadre. Eso vale
- * aunque cambie un endpoint.
+ * la traducción de los 11 eventos, el mapeo del pedido con su red de cuadre, y las llamadas
+ * de salida escritas contra los endpoints publicados — TODAS pasan por el candado de tiendas
+ * de `rappi.http`, así que con la lista vacía ninguna puede tocar un comercio real.
+ *
+ * 🔴 Las capacidades usan `import()` PEREZOSO de `rappi.client` a propósito: ese módulo lee
+ * `@/config/env`, que valida y hace `process.exit` al cargarse — un import normal mataría a
+ * los workers de Jest de todo el que importe este adaptador (regla del repo).
  */
 import type { DeliveryProvider } from '@prisma/client'
 
-import type { CanonicalDeliveryEvent, EventIdentity, NormalizedDeliveryOrder } from '../../core/types'
-import { extraerStoreId, normalizeRappiOrder, type RappiOrderPayload } from './rappi.mapper'
+import type { ActionResult, CanonicalDeliveryEvent, DenyReason, EventIdentity, NormalizedDeliveryOrder } from '../../core/types'
+import type { MenuSnapshot } from '../../core/menuSnapshot.service'
+import type { HorarioSemanal } from '../../core/deliveryHours.service'
+import { aHorarioRappi } from './rappi.hours'
+import { construirMenuRappi, type PreciosDeCanal } from './rappi.menuMapper'
+import { extraerStoreId, normalizeRappiOrder, tiempoDeCoccion, type RappiOrderPayload } from './rappi.mapper'
 import { verifyRappiSignature } from './rappi.signature'
 
 /** Los 11 eventos que Rappi documenta, tal cual los nombra. */
@@ -137,6 +146,98 @@ export const rappiAdapter = {
 
   normalizeOrder(raw: unknown): NormalizedDeliveryOrder {
     return normalizeRappiOrder(raw)
+  },
+
+  /**
+   * Aceptar, declarando los minutos de preparación que RAPPI mismo sugirió en el pedido.
+   *
+   * Este camino lo usa el botón "Aceptar" del POS (modo MANUAL), que sólo trae los ids: el
+   * tiempo se recupera del evento persistido — el pedido completo viajó en el webhook y ahí
+   * quedó guardado. Sin dato se cae al recorte de `tiempoDeCoccion`, nunca a un número fuera
+   * del rango (Rappi lo rechazaría y el pedido seguiría vivo con el reloj corriendo).
+   */
+  async acceptOrder(orderId: string, storeId: string): Promise<ActionResult> {
+    const [{ aceptarPedidoRappi }, { default: prisma }] = await Promise.all([import('./rappi.client'), import('@/utils/prismaClient')])
+
+    const evento = await prisma.deliveryOrderEvent.findFirst({
+      where: { provider: 'RAPPI', externalOrderId: orderId },
+      orderBy: { receivedAt: 'desc' },
+      select: { payload: true },
+    })
+    const detail = (evento?.payload as RappiOrderPayload | null)?.order_detail ?? {}
+    return aceptarPedidoRappi(orderId, storeId, tiempoDeCoccion(detail))
+  },
+
+  /**
+   * Rechazar. 🔴 Si el motivo es "estoy saturado" o "cerrado", Rappi NO lo admite — su
+   * catálogo es sobre el pedido estando mal, no sobre la tienda. En ese caso NO se llama a
+   * la red: se devuelve `ok:false` con la explicación de que lo correcto es PAUSAR, para que
+   * el caller la muestre en vez de un error opaco.
+   */
+  async denyOrder(orderId: string, storeId: string, reason?: DenyReason): Promise<ActionResult> {
+    const { rechazarPedidoRappi } = await import('./rappi.client')
+    const { traduccion, http } = await rechazarPedidoRappi(orderId, storeId, reason)
+    if (!traduccion.rechazable) return { ok: false, status: 0, raw: traduccion.explicacion }
+    return http as ActionResult
+  },
+
+  /** "Listo para el repartidor". ⚠️ Rappi ignora la CUARTA llamada en adelante por pedido. */
+  async markReady(orderId: string, storeId: string): Promise<ActionResult> {
+    const { marcarListoRappi } = await import('./rappi.client')
+    return marcarListoRappi(orderId, storeId)
+  },
+
+  /**
+   * Agotado/disponible por SKU. ⚠️ Es el ÚNICO camino que reactiva un producto apagado:
+   * republicar el menú NO lo hace (documentado en su FAQ).
+   */
+  async setItemSoldOut(itemId: string, storeId: string, agotado: boolean): Promise<ActionResult> {
+    const { disponibilidadItemsRappi } = await import('./rappi.client')
+    return disponibilidadItemsRappi(storeId, agotado ? { turn_off: [itemId] } : { turn_on: [itemId] })
+  },
+
+  /**
+   * Pausar/reanudar la tienda — por el endpoint SÍNCRONO, que contesta por tienda si de
+   * verdad quedó. `SUSPENDED` o `STORE_NOT_PUBLISHED` es `ok:false` AUNQUE el HTTP sea 200:
+   * pintar "activa" cuando Rappi dijo que no es el botón que miente que ya se arregló una
+   * vez en Uber.
+   */
+  async setStoreStatus(paused: boolean, storeId: string): Promise<ActionResult> {
+    const { habilitarTiendaRappi } = await import('./rappi.client')
+    const r = await habilitarTiendaRappi(storeId, !paused)
+
+    const quedo = r.resultadoTienda === 'SUCCESS' || r.resultadoTienda === 'STORE_ALREADY_IN_STATUS'
+    if (r.ok && !quedo) {
+      return { ok: false, status: r.status, raw: `${r.resultadoTienda ?? 'SIN_RESULTADO'}: ${r.mensajeTienda ?? r.raw.slice(0, 200)}` }
+    }
+    return r
+  },
+
+  /**
+   * Publicar el menú. 🔴 Un `ok` aquí significa "en revisión", NO publicado — lo publicado
+   * llega por `MENU_APPROVED`. Los productos que Rappi rechazaría se filtran y REPORTAN
+   * antes de mandar: el rechazo de Rappi viene sin motivo, así que cada regla atrapada aquí
+   * es un rechazo que no habrá que adivinar.
+   */
+  async publishMenu(snapshot: MenuSnapshot, storeId: string, opts?: { precios?: unknown }): Promise<ActionResult> {
+    const [{ publicarMenuRappi }, { default: logger }] = await Promise.all([import('./rappi.client'), import('@/config/logger')])
+
+    const { payload, problemas } = construirMenuRappi(snapshot, storeId, { precios: opts?.precios as PreciosDeCanal | undefined })
+    if (problemas.length) {
+      logger.warn('📋 [Rappi] productos que NO se publican (Rappi los rechazaría, y sin decir por qué)', { storeId, problemas })
+    }
+    if (payload.items.length === 0) {
+      return { ok: false, status: 0, raw: 'El menú quedó vacío tras filtrar lo que Rappi rechazaría — no se mandó nada.' }
+    }
+    return publicarMenuRappi(payload)
+  },
+
+  buildMenuPayload(snapshot: MenuSnapshot, opts?: { precios?: unknown }): unknown {
+    return construirMenuRappi(snapshot, 'PREVIEW', { precios: opts?.precios as PreciosDeCanal | undefined }).payload
+  },
+
+  mapHours(horario: HorarioSemanal): unknown {
+    return aHorarioRappi(horario)
   },
 }
 

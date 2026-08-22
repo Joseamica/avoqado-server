@@ -136,6 +136,24 @@ const envSchema = z.object({
   UBER_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
   UBER_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
 
+  // ── Rappi (segundo canal directo de reparto) ──────────────────────────────────────
+  RAPPI_ENVIRONMENT: z.enum(['SANDBOX', 'PRODUCTION']).default('SANDBOX'),
+  RAPPI_CLIENT_ID_SANDBOX: z.string().optional(),
+  RAPPI_CLIENT_SECRET_SANDBOX: z.string().optional(),
+  RAPPI_CLIENT_ID_PRODUCTION: z.string().optional(),
+  RAPPI_CLIENT_SECRET_PRODUCTION: z.string().optional(),
+  /** País del host de producción (el de México se escribe `services.mxgrability.rappi.com`). */
+  RAPPI_COUNTRY: z.string().default('MX'),
+  /**
+   * JSON `{ "NEW_ORDER": "secreto", "PING": ["viejo","nuevo"], … }` — 🔴 Rappi da UN secreto
+   * POR EVENTO (11), no uno por integración, y se rotan por separado. Once variables sueltas
+   * se desincronizarían a la primera rotación; ilegible ⇒ cero secretos ⇒ nada se acepta.
+   */
+  RAPPI_WEBHOOK_SECRETS: z.string().optional(),
+  /** Tiendas donde SÍ se puede escribir. Vacía = ninguna (el candado del incidente 2026-08-17). */
+  RAPPI_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
+  RAPPI_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
+
   // Base pública para la URL de retorno del OAuth de Uber (sin barra final). En local
   // es el túnel de ngrok; en prod, https://api.avoqado.io. Debe coincidir EXACTAMENTE
   // con lo registrado en el dashboard de Uber, y ser la misma al pedir y al canjear.

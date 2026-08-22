@@ -17,6 +17,7 @@ import { handleResendWebhook, resendWebhookHealthCheck } from '../controllers/we
 import { blumonIPWhitelist } from '../middlewares/blumon-ip-whitelist.middleware'
 import { handleDeliverectOrderWebhook, deliverectWebhookHealthCheck } from '../controllers/delivery-channels/deliverect.webhook.controller'
 import { handleUberWebhook, uberWebhookHealthCheck } from '../controllers/delivery-channels/uber.webhook.controller'
+import { handleRappiWebhook, rappiWebhookHealthCheck } from '../controllers/delivery-channels/rappi.webhook.controller'
 import { handleDidiWebhook, didiWebhookHealthCheck } from '../controllers/delivery-channels/didi.webhook.controller'
 
 const router = Router()
@@ -461,6 +462,17 @@ router.get('/delivery/deliverect/health', deliverectWebhookHealthCheck)
  */
 router.post('/delivery/uber', handleUberWebhook)
 router.get('/delivery/uber/health', uberWebhookHealthCheck)
+
+/**
+ * Rappi — 🔴 UNA URL POR EVENTO (exigencia suya, once en total): el segmento `:evento` ES el
+ * tipo, porque varios cuerpos de Rappi no traen tipo y dos son idénticos entre sí
+ * (MENU_REJECTED y PING son ambos `{store_id}`). Las URLs que se registran en Rappi:
+ * `/api/v1/webhooks/delivery/rappi/new-order`, `/…/ping`, etc. — el mapa completo vive en
+ * `RUTA_POR_EVENTO` (rappi.webhookIngress.ts). Firma: header `Rappi-Signature`
+ * (`t=…,sign=…`, HMAC-SHA256 sobre `timestamp.payload`), con secreto POR evento.
+ */
+router.post('/delivery/rappi/:evento', handleRappiWebhook)
+router.get('/delivery/rappi/health', rappiWebhookHealthCheck)
 
 // DiDi Food. UNA sola URL para todas las tiendas y para los dos ambientes: el evento trae
 // `app_shop_id` (el id que nosotros elegimos al ligar la tienda) y con eso se resuelve el venue.
