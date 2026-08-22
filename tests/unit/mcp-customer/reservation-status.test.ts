@@ -70,7 +70,7 @@ describe('set_reservation_status dispatch', () => {
       expect.objectContaining({
         reservationId: 'r1',
         venueId: 'v1',
-        actor: { type: 'HUMAN', staffId: 's1', organizationId: 'o1' },
+        actor: { type: 'HUMAN', staffId: 's1' },
         source: 'MCP',
         now: expect.any(Date),
       }),

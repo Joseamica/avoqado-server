@@ -477,7 +477,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
             updated = await checkInReservationAndOpenOrder({
               reservationId: reservation.id,
               venueId: reservation.venueId,
-              actor: { type: 'HUMAN', staffId: scope.staffId, organizationId: scope.organizationId ?? scope.activeOrg },
+              actor: { type: 'HUMAN', staffId: scope.staffId },
               source: 'MCP',
               now: new Date(),
             })

@@ -20,13 +20,18 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { ConflictError, NotFoundError, ValidationError } from '@/errors/AppError'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
-import { attachServices, RESERVATION_INCLUDE } from '@/services/dashboard/reservation.dashboard.service'
+import { RESERVATION_INCLUDE } from '@/services/dashboard/reservation.dashboard.service'
+import { resolveServicesMany } from '@/services/reservation/reservation-services.resolver'
 import { createOrderFromReservation } from '@/services/reservation/createOrderFromReservation'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 
-export type CheckInActor =
-  | { type: 'HUMAN'; staffId: string; organizationId: string }
-  | { type: 'SERVICE'; servicePrincipalId: string; organizationId: string }
+/**
+ * Quién hace el check-in. NO lleva organizationId: el ActivityLog se estampa con la
+ * organización DEL VENUE objetivo (auditoría 5) — el tenant guard exige que
+ * `venueId` pertenezca a `organizationId`, y un superadmin/MCP puede operar un venue de
+ * otra organización que la de su JWT / activeOrg; derivarlo del token revertía el check-in.
+ */
+export type CheckInActor = { type: 'HUMAN'; staffId: string } | { type: 'SERVICE'; servicePrincipalId: string }
 
 export type CheckInSource = 'DASHBOARD' | 'POS_ANDROID' | 'POS_IOS' | 'MCP' | 'KIOSK'
 
@@ -78,22 +83,28 @@ function actorLabel(actor: CheckInActor): string {
 }
 
 /** Campos de ActivityLog que satisfacen `ActivityLog_actor_identity_check` para cada actor. */
-function activityActorFields(actor: CheckInActor) {
+function activityActorFields(actor: CheckInActor, organizationId: string) {
   return actor.type === 'HUMAN'
     ? {
         actorType: 'HUMAN' as const,
-        organizationId: actor.organizationId,
+        organizationId,
         staffId: actor.staffId,
         actorStaffId: actor.staffId, // la constraint EXIGE actorStaffId = staffId
         servicePrincipalId: null,
       }
     : {
         actorType: 'SERVICE' as const,
-        organizationId: actor.organizationId,
+        organizationId,
         staffId: null,
         actorStaffId: null,
         servicePrincipalId: actor.servicePrincipalId,
       }
+}
+
+/** La organización DEL VENUE — la única que el tenant guard de ActivityLog acepta. */
+async function venueOrganizationId(client: Prisma.TransactionClient | typeof prisma, venueId: string): Promise<string> {
+  const venue = await client.venue.findUniqueOrThrow({ where: { id: venueId }, select: { organizationId: true } })
+  return venue.organizationId
 }
 
 export interface CheckInCommand {
@@ -166,9 +177,10 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
   }
 
   // ActivityLog DENTRO de la tx: si falla, el check-in se revierte (sin rastro no hay check-in).
+  const organizationId = await venueOrganizationId(tx, cmd.venueId)
   await tx.activityLog.create({
     data: {
-      ...activityActorFields(cmd.actor),
+      ...activityActorFields(cmd.actor, organizationId),
       venueId: cmd.venueId,
       action: 'RESERVATION_CHECKED_IN',
       entity: 'Reservation',
@@ -183,7 +195,9 @@ export async function checkInReservation(tx: Prisma.TransactionClient, cmd: Chec
 
 async function finish(tx: Prisma.TransactionClient, cmd: CheckInCommand, outcome: CheckInResult['outcome']): Promise<CheckInResult> {
   const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: cmd.reservationId }, include: RESERVATION_INCLUDE })
-  const withServices = await attachServices(reservation as any)
+  // Con la MISMA tx (auditoría 5): `attachServices` usaba el cliente global — otra conexión
+  // abierta mientras la transacción sigue viva, fuera del snapshot y capaz de atascar el pool.
+  const [withServices] = await resolveServicesMany([reservation], tx)
   const { services, ...rest } = withServices as any
   return { outcome, reservation: rest, services: services ?? [] }
 }
@@ -235,13 +249,20 @@ export async function checkInReservationAndOpenOrder(cmd: CheckInCommand): Promi
       })
       orderId = alive?.id ?? null
       orderCreated = false
+      if (!alive) {
+        // Chocamos con el índice pero la orden ganadora ya no está viva (se canceló en la
+        // ventana). No lo disfrazamos de "sin orden": es un fallo de creación con rastro.
+        orderError = ORDER_CREATION_FAILED
+        logger.error(`[CHECK_IN] P2002 on reservation ${cmd.reservationId} but no alive order found on re-read`, { source: cmd.source })
+      }
     } else {
       orderError = ORDER_CREATION_FAILED
       logger.error(`[CHECK_IN] Order auto-create failed for reservation ${cmd.reservationId}: ${err?.message}`, { source: cmd.source })
       try {
+        const organizationId = await venueOrganizationId(prisma, cmd.venueId)
         await prisma.activityLog.create({
           data: {
-            ...activityActorFields(cmd.actor),
+            ...activityActorFields(cmd.actor, organizationId),
             venueId: cmd.venueId,
             action: 'ORDER_FROM_RESERVATION_FAILED',
             entity: 'Reservation',

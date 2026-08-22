@@ -49,9 +49,14 @@ async function recordMoneyAnomaly(args: {
   })
 }
 
-/** A claim older than this without a materialized outcome belongs to a dead process. */
-export const STRIPE_CLAIM_LEASE_MS = 2 * 60_000
+/**
+ * A claim older than this without a materialized outcome belongs to a dead process. The work
+ * here is one Stripe retrieve + one DB transaction; 5 minutes is far beyond any legitimate
+ * run (Stripe's own request timeout is 80 s) while still letting a dead claim self-heal.
+ */
+export const STRIPE_CLAIM_LEASE_MS = 5 * 60_000
 export const STRIPE_EVENT_IN_PROGRESS = 'STRIPE_EVENT_IN_PROGRESS' as const
+export const STRIPE_WORK_NOT_MATERIALIZED = 'STRIPE_WORK_NOT_MATERIALIZED' as const
 
 /**
  * Claim-then-work, RETRY-SAFE — with a LEASE.
@@ -70,10 +75,18 @@ export const STRIPE_EVENT_IN_PROGRESS = 'STRIPE_EVENT_IN_PROGRESS' as const
  *       · claim older than the lease → the owner died mid-work (or its release failed):
  *         drop the stale claim and run the work ourselves.
  *   - Only a P2002 on the claim means "duplicate"; one born inside the work is a real failure.
+ *   - POSTCONDITION (auditoría 5): after `work()` returns, `isDone()` must be true. A
+ *     finalizer that returns normally without materializing (payment-link with no local
+ *     session) would otherwise leave claim + nothing + 2xx = a lost event. Instead: release
+ *     and throw STRIPE_WORK_NOT_MATERIALIZED so Stripe retries.
+ *   - FENCING (auditoría 5): every release is conditioned on the `processedAt` of the claim
+ *     THIS process knows (its own `create`, or the stale row it read). `processedAt` is the
+ *     claim's identity (one per insert); a slow owner can never delete a newer claim someone
+ *     else created after declaring it dead, so a third delivery can't slip in.
  *
- * Why no state column: `ProcessedStripeEvent.processedAt` is the lease clock, and every piece
- * of work here is idempotent on a unique key (purchase by checkout session, checkout session
- * COMPLETED), so re-running after a dead claim is safe.
+ * Why no state column: `ProcessedStripeEvent.processedAt` is both the lease clock and the
+ * fencing token, and every piece of work here is idempotent on a unique key (purchase by
+ * checkout session, checkout session COMPLETED), so re-running after a dead claim is safe.
  */
 async function withClaimedEvent(
   event: VerifiedWebhookEvent,
@@ -86,9 +99,12 @@ async function withClaimedEvent(
     prisma.processedStripeEvent.create({
       data: { ...where, eventType: event.type, account: event.account, payload: event.data as Prisma.InputJsonValue },
     })
+  // Fenced release: only the claim with THIS processedAt (ours) is deleted.
+  const release = (processedAt: Date) => prisma.processedStripeEvent.deleteMany({ where: { ...where, processedAt } })
 
+  let mine: { processedAt: Date }
   try {
-    await claim()
+    mine = await claim()
   } catch (error: any) {
     if (error?.code !== 'P2002') throw error
 
@@ -98,35 +114,46 @@ async function withClaimedEvent(
     }
     const existing = await prisma.processedStripeEvent.findUnique({ where: { endpoint_stripeEventId: where } })
     const ageMs = existing ? Date.now() - existing.processedAt.getTime() : Number.POSITIVE_INFINITY
-    if (ageMs < STRIPE_CLAIM_LEASE_MS) {
+    if (existing && ageMs < STRIPE_CLAIM_LEASE_MS) {
       // Someone is (very likely) still working on it. Don't acknowledge; let Stripe retry.
       throw new ServiceUnavailableError(`${label} webhook ${event.id} is being processed by another delivery`, STRIPE_EVENT_IN_PROGRESS)
     }
     logger.warn(`⚠️ [STRIPE CONNECT] Stale ${label} claim without outcome (${Math.round(ageMs / 1000)}s) — dropping it and re-running`, {
       eventId: event.id,
     })
-    await prisma.processedStripeEvent.deleteMany({ where })
-    await claim() // a concurrent re-claimer would P2002 here and propagate — fine, Stripe retries
+    if (existing) await release(existing.processedAt) // fenced: only that stale row, never a newer one
+    mine = await claim() // a concurrent re-claimer would P2002 here and propagate — fine, Stripe retries
   }
 
-  try {
-    await work()
-  } catch (error) {
+  const releaseMineAndFail = async (error: unknown, why: string) => {
     try {
-      await prisma.processedStripeEvent.deleteMany({ where: { endpoint: 'connect', stripeEventId: event.id } })
-      logger.error(`❌ [STRIPE CONNECT] ${label} work failed — claim released so Stripe's retry re-runs it`, {
+      await release(mine.processedAt)
+      logger.error(`❌ [STRIPE CONNECT] ${label} ${why} — claim released so Stripe's retry re-runs it`, {
         eventId: event.id,
         err: (error as Error)?.message,
       })
     } catch (releaseErr) {
-      // The original failure is the one that matters; a stuck claim is logged loudly.
-      logger.error(`❌ [STRIPE CONNECT] ${label} work failed AND the claim could not be released — manual replay needed`, {
+      // The original failure is the one that matters; a stuck claim self-heals via the lease.
+      logger.error(`❌ [STRIPE CONNECT] ${label} ${why} AND the claim could not be released — lease will expire`, {
         eventId: event.id,
         err: (error as Error)?.message,
         releaseErr: (releaseErr as Error)?.message,
       })
     }
     throw error
+  }
+
+  try {
+    await work()
+  } catch (error) {
+    await releaseMineAndFail(error, 'work failed')
+  }
+
+  if (!(await isDone())) {
+    await releaseMineAndFail(
+      new ServiceUnavailableError(`${label} webhook ${event.id} finished without a materialized outcome`, STRIPE_WORK_NOT_MATERIALIZED),
+      'work returned without materializing',
+    )
   }
 }
 

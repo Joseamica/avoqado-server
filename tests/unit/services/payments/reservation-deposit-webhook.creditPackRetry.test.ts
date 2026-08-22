@@ -50,8 +50,12 @@ const p2002 = () => Object.assign(new Error('Unique constraint failed'), { code:
 describe('webhook Connect — credit pack fulfillment retry-safe', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.processedStripeEvent.create.mockResolvedValue({} as any)
+    prismaMock.processedStripeEvent.create.mockResolvedValue({ processedAt: new Date() } as any)
     prismaMock.processedStripeEvent.deleteMany.mockResolvedValue({ count: 1 } as any)
+    // Por default el resultado queda materializado tras el trabajo (postcondición OK);
+    // los casos que prueban "no materializado" lo sobreescriben.
+    prismaMock.creditPackPurchase.findUnique.mockResolvedValue({ id: 'purchase-1' } as any)
+    prismaMock.checkoutSession.findUnique.mockResolvedValue({ status: 'COMPLETED' } as any)
   })
 
   it('happy path: reclama, cumple, NO libera el claim', async () => {
@@ -72,7 +76,7 @@ describe('webhook Connect — credit pack fulfillment retry-safe', () => {
     await expect(processStripeConnectWebhookEvent(creditPackEvent())).rejects.toMatchObject({ code: 'CREDIT_PACK_OWNER_UNRESOLVED' })
 
     expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({
-      where: { endpoint: 'connect', stripeEventId: 'evt_1' },
+      where: { endpoint: 'connect', stripeEventId: 'evt_1', processedAt: expect.any(Date) },
     })
   })
 
@@ -114,15 +118,18 @@ describe('webhook Connect — credit pack fulfillment retry-safe', () => {
   // Auditoría 4: "si el proceso muere entre crear el claim y terminar el trabajo, el catch nunca
   // corre" / "si falla deleteMany el claim queda atascado". Lease: un claim viejo sin resultado
   // es un muerto → se libera y el reintento vuelve a correr el trabajo.
-  it('🔴 duplicado (P2002) con claim VIEJO (>2 min) y resultado NO materializado (proceso murió) → libera el claim muerto y corre el fulfillment', async () => {
-    prismaMock.processedStripeEvent.create.mockRejectedValueOnce(p2002()).mockResolvedValueOnce({} as any)
-    prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+  it('🔴 duplicado (P2002) con claim VIEJO (> lease) y resultado NO materializado (proceso murió) → libera el claim muerto y corre el fulfillment', async () => {
+    prismaMock.processedStripeEvent.create.mockRejectedValueOnce(p2002()).mockResolvedValueOnce({ processedAt: new Date() } as any)
+    // Sin compra al chocar con el claim muerto; con compra tras re-correr (postcondición OK).
+    prismaMock.creditPackPurchase.findUnique.mockResolvedValueOnce(null).mockResolvedValue({ id: 'purchase-1' } as any)
     prismaMock.processedStripeEvent.findUnique.mockResolvedValue({ processedAt: new Date(Date.now() - 10 * 60_000) } as any)
     ;(fulfillPurchase as jest.Mock).mockResolvedValue({ id: 'purchase-1' })
 
     await expect(processStripeConnectWebhookEvent(creditPackEvent())).resolves.toBeUndefined()
 
-    expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({ where: { endpoint: 'connect', stripeEventId: 'evt_1' } })
+    expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({
+      where: { endpoint: 'connect', stripeEventId: 'evt_1', processedAt: expect.any(Date) },
+    })
     expect(prismaMock.processedStripeEvent.create).toHaveBeenCalledTimes(2)
     expect(fulfillPurchase).toHaveBeenCalledTimes(1)
   })
@@ -133,7 +140,52 @@ describe('webhook Connect — credit pack fulfillment retry-safe', () => {
     await expect(processStripeConnectWebhookEvent(creditPackEvent())).rejects.toMatchObject({ code: 'P2002' })
 
     expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({
-      where: { endpoint: 'connect', stripeEventId: 'evt_1' },
+      where: { endpoint: 'connect', stripeEventId: 'evt_1', processedAt: expect.any(Date) },
+    })
+  })
+
+  // Auditoría 5: fencing. Sin identidad del claim, A (lento) podía borrar el claim que B creó
+  // tras considerar muerto el de A, y entonces C entraba mientras B seguía trabajando. Cada
+  // borrado va condicionado al `processedAt` del claim que ESE proceso conoce (su propio
+  // create, o el stale que leyó): nunca se borra un claim ajeno más nuevo.
+  it('🔴 fencing: al liberar tras un fallo, el deleteMany va condicionado al processedAt del claim PROPIO', async () => {
+    const mine = new Date('2026-08-22T18:00:00.000Z')
+    prismaMock.processedStripeEvent.create.mockResolvedValue({ processedAt: mine } as any)
+    ;(fulfillPurchase as jest.Mock).mockRejectedValue(new Error('boom'))
+
+    await expect(processStripeConnectWebhookEvent(creditPackEvent())).rejects.toThrow('boom')
+
+    expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({
+      where: { endpoint: 'connect', stripeEventId: 'evt_1', processedAt: mine },
+    })
+  })
+
+  it('🔴 fencing: al soltar un claim VIEJO, el deleteMany va condicionado al processedAt que se leyó (no pisa uno más nuevo)', async () => {
+    const stale = new Date(Date.now() - 10 * 60_000)
+    prismaMock.processedStripeEvent.create.mockRejectedValueOnce(p2002()).mockResolvedValueOnce({ processedAt: new Date() } as any)
+    prismaMock.creditPackPurchase.findUnique.mockResolvedValueOnce(null).mockResolvedValue({ id: 'purchase-1' } as any)
+    prismaMock.processedStripeEvent.findUnique.mockResolvedValue({ processedAt: stale } as any)
+    ;(fulfillPurchase as jest.Mock).mockResolvedValue({ id: 'purchase-1' })
+
+    await processStripeConnectWebhookEvent(creditPackEvent())
+
+    expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({
+      where: { endpoint: 'connect', stripeEventId: 'evt_1', processedAt: stale },
+    })
+  })
+
+  // Auditoría 5: postcondición. Un finalizador puede devolver "normal" sin materializar nada
+  // (payment-link sin sesión local). Claim + sin resultado + 2xx = evento perdido.
+  it('🔴 postcondición: si el trabajo termina sin lanzar pero isDone() sigue en false → libera el claim y propaga (Stripe reintenta)', async () => {
+    const mine = new Date()
+    prismaMock.processedStripeEvent.create.mockResolvedValue({ processedAt: mine } as any)
+    ;(fulfillPurchase as jest.Mock).mockResolvedValue(undefined) // "terminó" sin compra
+    prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+
+    await expect(processStripeConnectWebhookEvent(creditPackEvent())).rejects.toMatchObject({ code: 'STRIPE_WORK_NOT_MATERIALIZED' })
+
+    expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({
+      where: { endpoint: 'connect', stripeEventId: 'evt_1', processedAt: mine },
     })
   })
 
@@ -150,7 +202,7 @@ describe('webhook Connect — credit pack fulfillment retry-safe', () => {
     await expect(processStripeConnectWebhookEvent(paymentLinkEvent())).rejects.toThrow('pl boom')
 
     expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({
-      where: { endpoint: 'connect', stripeEventId: 'evt_pl' },
+      where: { endpoint: 'connect', stripeEventId: 'evt_pl', processedAt: expect.any(Date) },
     })
   })
 })

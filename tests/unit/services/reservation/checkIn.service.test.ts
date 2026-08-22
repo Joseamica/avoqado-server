@@ -8,7 +8,6 @@ jest.mock('@/services/dashboard/reservationSettings.service', () => ({
 }))
 jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   __esModule: true,
-  attachServices: jest.fn(async (r: any) => ({ ...r, services: [{ id: 'svc-1', name: 'Yoga' }] })),
   RESERVATION_INCLUDE: { customer: true },
 }))
 
@@ -25,8 +24,8 @@ import { getReservationSettings } from '@/services/dashboard/reservationSettings
  * Fase 0.C — check-in PURO (spec §0.C, tests 1-5, 7-8, 11-15, 19).
  * Cambia estado + statusLog + ActivityLog DENTRO de la tx; NO crea orden; idempotente.
  */
-const HUMAN: CheckInActor = { type: 'HUMAN', staffId: 'staff-1', organizationId: 'org-1' }
-const SERVICE: CheckInActor = { type: 'SERVICE', servicePrincipalId: 'kiosk-device-1', organizationId: 'org-1' }
+const HUMAN: CheckInActor = { type: 'HUMAN', staffId: 'staff-1' }
+const SERVICE: CheckInActor = { type: 'SERVICE', servicePrincipalId: 'kiosk-device-1' }
 const NOW = new Date('2026-08-22T18:00:00.000Z')
 
 function mkTx(row: Partial<any>, opts: { casCount?: number; rereadStatus?: string; logThrows?: boolean } = {}) {
@@ -36,6 +35,8 @@ function mkTx(row: Partial<any>, opts: { casCount?: number; rereadStatus?: strin
     confirmationCode: 'RES-1',
     status: 'CONFIRMED',
     startsAt: NOW,
+    productId: 'svc-1',
+    productIds: [],
     statusLog: [{ status: 'CONFIRMED', at: '2026-08-22T10:00:00.000Z', by: null }],
     ...row,
   }
@@ -52,6 +53,10 @@ function mkTx(row: Partial<any>, opts: { casCount?: number; rereadStatus?: strin
       }),
     },
     order: { findFirst: jest.fn(), create: jest.fn() },
+    // Auditoría 5: organizationId se deriva del VENUE objetivo (no del JWT) y los servicios
+    // se resuelven con la MISMA tx (antes attachServices abría otra conexión).
+    venue: { findUniqueOrThrow: jest.fn(async () => ({ organizationId: 'org-del-venue' })) },
+    product: { findMany: jest.fn(async () => [{ id: 'svc-1', name: 'Yoga', price: null, duration: 60 }]) },
   }
   return tx
 }
@@ -119,7 +124,8 @@ describe('checkInReservation (puro, dentro de tx)', () => {
     const r = await checkInReservation(tx, base)
     expect(r.outcome).toBe('CHECKED_IN')
     expect(r.reservation.status).toBe('CHECKED_IN')
-    expect(r.services).toEqual([{ id: 'svc-1', name: 'Yoga' }])
+    expect(r.services).toEqual([{ id: 'svc-1', name: 'Yoga', price: null, duration: 60 }])
+    expect(tx.product.findMany).toHaveBeenCalled() // resueltos con la tx, no con el cliente global
   })
 
   it('test 3: CHECKED_IN → mismo outcome, SIN escribir (idempotente)', async () => {
@@ -149,7 +155,7 @@ describe('checkInReservation (puro, dentro de tx)', () => {
     expect(tx.activityLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         actorType: 'HUMAN',
-        organizationId: 'org-1',
+        organizationId: 'org-del-venue', // del venue, no del actor/JWT (superadmin cross-org)
         staffId: 'staff-1',
         actorStaffId: 'staff-1',
         servicePrincipalId: null,

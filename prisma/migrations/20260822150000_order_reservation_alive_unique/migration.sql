@@ -9,12 +9,24 @@
 -- bloquear su reemplazo). COMPLETED sí cuenta. Es el MISMO predicado que usa el
 -- `findFirst` previo (createOrderFromReservation.ts, ALIVE_ORDER_EXCLUDED_STATUSES).
 --
--- ANTES de aplicar en prod: `npx tsx scripts/audit-duplicate-reservation-orders.ts`
--- debe salir con "Sin duplicados"; si hay reservas con >1 orden viva, la creación del
--- índice falla y hay que resolverlas a mano (nunca cancelar una orden PAGADA por script).
+-- CONCURRENTLY (auditoría 5): un CREATE INDEX normal bloquea las escrituras en "Order"
+-- durante el escaneo — en prod eso frena cobros. Precedente en este repo:
+-- 20260808121000_index_venue_organization_key_concurrently. No va dentro de BEGIN/COMMIT.
 --
--- Prisma no puede expresar índices parciales en schema.prisma (precedente en este repo:
+-- ANTES de aplicar en prod: `npx tsx scripts/audit-duplicate-reservation-orders.ts`
+-- debe salir con "Sin duplicados" (agrupa EXACTAMENTE como este índice: por reservationId,
+-- sin venue). Si hay duplicados, la creación falla y hay que resolverlos a mano (nunca
+-- cancelar una orden PAGADA por script).
+--
+-- RUNBOOK si falla a medias: un CREATE INDEX CONCURRENTLY interrumpido deja un índice
+-- INVÁLIDO (pg_index.indisvalid = false) que bloquea el reintento. Recuperación:
+--   SELECT indexrelid::regclass, indisvalid FROM pg_index
+--    WHERE indexrelid = '"Order_reservationId_alive_key"'::regclass;
+--   DROP INDEX CONCURRENTLY IF EXISTS "Order_reservationId_alive_key";  -- sólo si indisvalid = false
+--   y volver a correr `prisma migrate deploy` (o `migrate resolve --rolled-back` + deploy).
+--
+-- Prisma no puede expresar índices parciales en schema.prisma (precedente:
 -- PrintStation_venueId_default_key, TerminalPaymentRequest_active_slot).
-CREATE UNIQUE INDEX "Order_reservationId_alive_key"
+CREATE UNIQUE INDEX CONCURRENTLY "Order_reservationId_alive_key"
   ON "Order" ("reservationId")
   WHERE "reservationId" IS NOT NULL AND "status" NOT IN ('CANCELLED', 'DELETED');

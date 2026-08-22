@@ -257,13 +257,13 @@ export async function confirmReservation(req: Request, res: Response, next: Next
 export async function checkInReservation(req: Request, res: Response, next: NextFunction) {
   try {
     const venueId = resolveVenueId(req)
-    const { userId, orgId } = (req as any).authContext
+    const { userId } = (req as any).authContext
     const { id } = req.params
 
     const result = await checkInReservationAndOpenOrder({
       reservationId: id,
       venueId,
-      actor: { type: 'HUMAN', staffId: userId, organizationId: orgId },
+      actor: { type: 'HUMAN', staffId: userId },
       source: deriveCheckInSource(req.headers['x-device-platform']),
       now: new Date(),
     })

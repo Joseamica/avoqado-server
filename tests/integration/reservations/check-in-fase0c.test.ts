@@ -61,7 +61,7 @@ describe('Fase 0.C — check-in (integration, real DB)', () => {
       data: { email: `coach-${RUN}@test.com`, firstName: 'Coach', lastName: 'ITEST' },
     })
     staffId = staff.id
-    actor = { type: 'HUMAN', staffId: staff.id, organizationId: org.id }
+    actor = { type: 'HUMAN', staffId: staff.id }
     const category = await prisma.menuCategory.create({ data: { venueId: venue.id, name: 'Clases', slug: `clases-0c-${RUN}` } })
     const product = await prisma.product.create({
       data: { venueId: venue.id, sku: `0C-${RUN}`, name: 'Yoga', categoryId: category.id, price: new Prisma.Decimal(200) },

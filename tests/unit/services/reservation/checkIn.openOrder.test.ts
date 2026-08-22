@@ -8,7 +8,6 @@ jest.mock('@/services/dashboard/reservationSettings.service', () => ({
 }))
 jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   __esModule: true,
-  attachServices: jest.fn(async (r: any) => ({ ...r, services: [{ id: 'svc-1', name: 'Yoga', price: null, duration: 60 }] })),
   RESERVATION_INCLUDE: {},
 }))
 jest.mock('@/services/reservation/createOrderFromReservation', () => ({
@@ -32,13 +31,24 @@ const NOW = new Date('2026-08-22T18:00:00.000Z')
 const cmd = {
   reservationId: 'res-1',
   venueId: 'v1',
-  actor: { type: 'HUMAN' as const, staffId: 'staff-1', organizationId: 'org-1' },
+  actor: { type: 'HUMAN' as const, staffId: 'staff-1' },
   source: 'POS_ANDROID' as const,
   now: NOW,
 }
 
 function armReservation(status = 'CONFIRMED') {
-  const row = { id: 'res-1', venueId: 'v1', confirmationCode: 'RES-1', status, startsAt: NOW, statusLog: [] }
+  const row = {
+    id: 'res-1',
+    venueId: 'v1',
+    confirmationCode: 'RES-1',
+    status,
+    startsAt: NOW,
+    statusLog: [],
+    productId: 'svc-1',
+    productIds: [],
+  }
+  prismaMock.venue.findUniqueOrThrow.mockResolvedValue({ organizationId: 'org-del-venue' } as any)
+  prismaMock.product.findMany.mockResolvedValue([{ id: 'svc-1', name: 'Yoga', price: null, duration: 60 }] as any)
   prismaMock.reservation.findFirst.mockResolvedValue(row as any)
   prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
   prismaMock.reservation.findUniqueOrThrow.mockResolvedValue({ ...row, status: 'CHECKED_IN', checkedInAt: NOW } as any)

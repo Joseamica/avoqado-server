@@ -14,19 +14,21 @@
  */
 import prisma from '../src/utils/prismaClient'
 
-type Row = { reservationId: string; venueId: string; aliveOrders: number; paidOrders: number; orderIds: string[] }
+type Row = { reservationId: string; venueIds: string[]; aliveOrders: number; paidOrders: number; orderIds: string[] }
 
 async function main() {
+  // Agrupa EXACTAMENTE como el índice parcial (sólo por reservationId, sin venue): dos
+  // órdenes vivas de la misma reserva repartidas entre venues también harían fallar el índice.
   const rows = await prisma.$queryRaw<Row[]>`
     SELECT "reservationId",
-           "venueId",
+           ARRAY_AGG(DISTINCT "venueId")                                   AS "venueIds",
            COUNT(*)::int                                                   AS "aliveOrders",
            COUNT(*) FILTER (WHERE "paymentStatus" = 'PAID')::int           AS "paidOrders",
            ARRAY_AGG("id" ORDER BY "createdAt")                            AS "orderIds"
     FROM "Order"
     WHERE "reservationId" IS NOT NULL
       AND "status" NOT IN ('CANCELLED', 'DELETED')
-    GROUP BY "reservationId", "venueId"
+    GROUP BY "reservationId"
     HAVING COUNT(*) > 1
     ORDER BY "paidOrders" DESC, "aliveOrders" DESC
   `
@@ -38,7 +40,8 @@ async function main() {
 
   console.log(`⚠️  ${rows.length} reserva(s) con más de una orden viva — resolver a mano ANTES de crear el índice:\n`)
   for (const r of rows) {
-    const venue = await prisma.venue.findUnique({ where: { id: r.venueId }, select: { name: true, slug: true } })
+    const venues = await prisma.venue.findMany({ where: { id: { in: r.venueIds } }, select: { name: true, slug: true } })
+    const venue = { name: venues.map(v => v.name).join(' / ') || r.venueIds.join(','), slug: venues.map(v => v.slug).join(' / ') }
     const reservation = await prisma.reservation.findUnique({
       where: { id: r.reservationId },
       select: { confirmationCode: true, status: true, startsAt: true },
@@ -50,7 +53,7 @@ async function main() {
           ? '🟡 una pagada: cancelar las NO pagadas'
           : '🟢 ninguna pagada: dejar la más reciente'
     console.log('---')
-    console.log(`Venue: ${venue?.name ?? r.venueId} (${venue?.slug ?? '?'})`)
+    console.log(`Venue(s): ${venue.name} (${venue.slug || '?'})`)
     console.log(
       `Reserva: ${reservation?.confirmationCode ?? r.reservationId} · ${reservation?.status} · ${reservation?.startsAt?.toISOString()}`,
     )
