@@ -886,7 +886,13 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // checkout (will charge) vs CONFIRMED + amount-owed-at-venue (no Stripe yet).
     if (req.body.classSessionId) {
       const stripeMerchantPreflight = await resolveActiveStripeMerchant(venue.id)
-      const reservation = await createClassReservation(venue.id, req.body, settings, !!stripeMerchantPreflight)
+      const reservation = await createClassReservation(
+        venue.id,
+        req.body,
+        settings,
+        !!stripeMerchantPreflight,
+        ((req as any).customerAuth?.customerId as string | undefined) ?? null,
+      )
 
       // When the class requires upfront cash AND the venue has Stripe configured,
       // the reservation landed in PENDING + depositStatus PENDING. Mint a Stripe
@@ -1261,6 +1267,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
             confirmationCode: reservation.confirmationCode,
             balanceIds,
             creditsPerBalance: seats,
+            // Fase 0.B: con sesión, el dueño de los créditos es el customer del token.
+            customerId: ((req as any).customerAuth?.customerId as string | undefined) ?? null,
             customerEmail: req.body.guestEmail,
             customerPhone: req.body.guestPhone,
             expectedProductIds: incomingProductIds.length > 0 ? incomingProductIds : req.body.productId ? [req.body.productId] : undefined,
@@ -1829,6 +1837,20 @@ export async function cancelReservation(req: Request, res: Response, next: NextF
 // CLASS Reservation — Serializable transaction with capacity check
 // ==========================================
 
+/**
+ * Fase 0.B — a qué Customer se liga una reserva de clase. Con sesión, el customer del
+ * token manda (antes se ligaba siempre al match por email/teléfono del body, aunque hubiera
+ * sesión). Sin sesión, se conserva el match por contacto. Pura, para probarla sola.
+ */
+export function resolveClassCustomerBinding(input: {
+  sessionCustomerId: string | null | undefined
+  matchedByContact: { id: string } | null
+}): { customerId: string | null; source: 'SESSION' | 'CONTACT' | 'NONE' } {
+  if (input.sessionCustomerId) return { customerId: input.sessionCustomerId, source: 'SESSION' }
+  if (input.matchedByContact) return { customerId: input.matchedByContact.id, source: 'CONTACT' }
+  return { customerId: null, source: 'NONE' }
+}
+
 async function createClassReservation(
   venueId: string,
   body: {
@@ -1843,6 +1865,8 @@ async function createClassReservation(
   },
   moduleConfig: any,
   hasStripeMerchant: boolean,
+  /** Fase 0.B: customerId de la sesión (req.customerAuth), o null si es invitado. */
+  sessionCustomerId: string | null = null,
 ) {
   const requestedSpotIds = body.spotIds ?? []
   // If spotIds provided, partySize = number of spots selected
@@ -2014,8 +2038,11 @@ async function createClassReservation(
               AND (${emailCond} OR ${phoneCond})
           `
         : []
-    const matchedCustomer =
+    const matchedByContact =
       matchCandidates.find(c => (body.guestEmail && c.email === body.guestEmail) || phonesMatch(c.phone, body.guestPhone)) ?? null
+    // Fase 0.B: con sesión, el customer del token manda sobre el match por contacto.
+    const binding = resolveClassCustomerBinding({ sessionCustomerId, matchedByContact })
+    const matchedCustomer = binding.customerId ? { id: binding.customerId } : null
 
     // Three states for the reservation row:
     // 1. requiresUpfrontCash (policy=required + venue has Stripe): PENDING +
@@ -2070,13 +2097,16 @@ async function createClassReservation(
     let creditRedeemed = false
     let creditsUsed = 0
     if (body.creditItemBalanceId) {
-      // Find customer by email/phone
-      const customer = await tx.customer.findFirst({
-        where: {
-          venueId,
-          OR: [...(body.guestEmail ? [{ email: body.guestEmail }] : []), ...(body.guestPhone ? [{ phone: body.guestPhone }] : [])],
-        },
-      })
+      // Fase 0.B: con sesión, los créditos son SÓLO del customer del token. Sin sesión,
+      // se resuelve por contacto como antes.
+      const customer = sessionCustomerId
+        ? await tx.customer.findFirst({ where: { id: sessionCustomerId, venueId } })
+        : await tx.customer.findFirst({
+            where: {
+              venueId,
+              OR: [...(body.guestEmail ? [{ email: body.guestEmail }] : []), ...(body.guestPhone ? [{ phone: body.guestPhone }] : [])],
+            },
+          })
 
       if (!customer) {
         throw new BadRequestError('No se encontro el cliente para canjear creditos')
@@ -2466,6 +2496,12 @@ export async function redeemCreditsForReservation(
     /** One balance ID per redemption (length 1 = legacy single-product). */
     balanceIds: string[]
     creditsPerBalance: number
+    /**
+     * Fase 0.B: identidad de SESIÓN. Cuando viene, manda: el dueño de los créditos es este
+     * customer y `customerEmail/customerPhone` se ignoran para resolverlo. Sin él (invitado),
+     * se resuelve por contacto como siempre.
+     */
+    customerId?: string | null
     customerEmail?: string
     customerPhone?: string
     /** When provided, every balance.productId MUST match one of these (no
@@ -2478,13 +2514,17 @@ export async function redeemCreditsForReservation(
     return { creditsUsed: 0, redeemed: false }
   }
 
-  // Find customer by email/phone (same logic as class path).
-  const customer = await tx.customer.findFirst({
-    where: {
-      venueId: args.venueId,
-      OR: [...(args.customerEmail ? [{ email: args.customerEmail }] : []), ...(args.customerPhone ? [{ phone: args.customerPhone }] : [])],
-    },
-  })
+  // Fase 0.B: con sesión, el dueño de los créditos es el customer autenticado — nunca
+  // el email/teléfono del body (antes eso permitía gastar créditos ajenos conociendo
+  // un balanceId). Sin sesión, se resuelve por contacto como antes.
+  const customer = args.customerId
+    ? await tx.customer.findFirst({ where: { id: args.customerId, venueId: args.venueId } })
+    : await tx.customer.findFirst({
+        where: {
+          venueId: args.venueId,
+          OR: [...(args.customerEmail ? [{ email: args.customerEmail }] : []), ...(args.customerPhone ? [{ phone: args.customerPhone }] : [])],
+        },
+      })
   if (!customer) {
     throw new BadRequestError('No se encontro el cliente para canjear creditos')
   }
