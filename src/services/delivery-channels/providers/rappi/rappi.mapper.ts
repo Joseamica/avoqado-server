@@ -20,6 +20,15 @@ const D = (v: unknown): Prisma.Decimal => new Prisma.Decimal(typeof v === 'numbe
 /** Tolerancia al cuadrar: un centavo por renglón, por el redondeo del proveedor. */
 const TOLERANCIA_POR_RENGLON = 0.01
 
+interface RappiSubItem {
+  id?: string
+  sku?: string
+  name?: string
+  type?: string
+  price?: number
+  quantity?: number
+}
+
 interface RappiItem {
   id?: string
   name?: string
@@ -28,17 +37,36 @@ interface RappiItem {
   price?: number
   unit_price_with_discount?: number
   unit_price_without_discount?: number
+  /** Lo que el cliente escribió para ESTE renglón ("sin cebolla"). */
+  comments?: string
+  /**
+   * Los modificadores. 🔴 Se llaman `subitems`, no `modifiers` — y venían fuera del ejemplo
+   * de webhook que publica el portal, así que la primera versión de este mapeo los tiraba a
+   * la basura: la cocina no se enteraba del queso extra Y el dinero no cuadraba.
+   */
+  subitems?: RappiSubItem[]
 }
 
 interface RappiOrderDetail {
   order_id?: string
+  created_at?: string
   place_at?: string
   delivery_method?: string
   payment_method?: string
+  /** Minutos de preparación: Rappi manda su sugerencia y el rango permitido. */
+  cooking_time?: number
+  min_cooking_time?: number
+  max_cooking_time?: number
   totals?: {
+    total_products?: number
+    /** El total DESPUÉS de descuentos. Es contra éste que cuadran los renglones. */
+    total_products_with_discount?: number
+    total_discounts?: number
     total_order?: number
+    /** La parte de los descuentos que ABSORBE EL COMERCIO, no Rappi. */
+    total_discount_by_partner?: number
     total_to_pay?: number
-    charges?: Record<string, unknown>
+    charges?: { shipping?: number; service_fee?: number } & Record<string, unknown>
     other_totals?: { tip?: number; total_rappi_pay?: number; total_rappi_credits?: number }
   }
   items?: RappiItem[]
@@ -87,6 +115,21 @@ function mapearItems(items: RappiItem[]): NormalizedDeliveryItem[] {
     // unidad. Usar el precio sin descuento inflaría la venta y descuadraría contra el total.
     const unitario = D(it.unit_price_with_discount ?? it.price ?? 0)
 
+    // 🔴 Los modificadores cuestan dinero y van EN el total del renglón. La glosario de
+    // Rappi confirma que el `sku` es "el identificador que el ALIADO otorga" — el nuestro.
+    const subitems = it.subitems ?? []
+    const modifiers = subitems.map((sub, j) => {
+      const cantSub = Number.isFinite(sub.quantity) && (sub.quantity as number) > 0 ? (sub.quantity as number) : 1
+      return {
+        externalId: String(sub.sku ?? sub.id ?? '').trim() || `rappi-sub-${idx}-${j}`,
+        name: sub.name?.trim() || 'Modificador',
+        quantity: cantSub,
+        price: D(sub.price ?? 0).mul(cantSub).toFixed(2),
+      }
+    })
+
+    const extrasPorUnidad = modifiers.reduce((acc, m) => acc.plus(new Prisma.Decimal(m.price)), new Prisma.Decimal(0))
+
     return {
       // El `sku` es NUESTRO identificador del producto (el que publicamos en el menú); el
       // `id` es el de Rappi. Se prefiere el sku para resolver el producto, igual que en Uber
@@ -96,8 +139,13 @@ function mapearItems(items: RappiItem[]): NormalizedDeliveryItem[] {
       name: it.name?.trim() || 'Producto',
       quantity: cantidad,
       unitPrice: unitario.toFixed(2),
-      total: unitario.mul(cantidad).toFixed(2),
-      notes: null,
+      // El total del renglón incluye los modificadores. Sin ellos el cuadre contra el total
+      // de Rappi falla siempre que alguien pida queso extra — o sea, casi siempre.
+      total: unitario.plus(extrasPorUnidad).mul(cantidad).toFixed(2),
+      // Lo que el cliente escribió. Es lo que separa servir bien de servir mal, y el único
+      // lugar del sistema donde sobrevive.
+      notes: it.comments?.trim() || null,
+      ...(modifiers.length ? { modifiers } : {}),
     }
   })
 }
