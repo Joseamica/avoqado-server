@@ -10,7 +10,7 @@ import { logAction } from '../../../../src/services/dashboard/activity-log.servi
 import { getAdapter } from '../../../../src/services/delivery-channels/core/statusDispatcher.service'
 import { adapterFor, hasAdapter } from '../../../../src/services/delivery-channels/core/adapterRegistry'
 import { ConflictError, NotFoundError, ValidationError } from '../../../../src/errors/AppError'
-import { DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode } from '@prisma/client'
+import { DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode, Prisma } from '@prisma/client'
 import {
   listChannelLinks,
   createChannelLink,
@@ -28,6 +28,17 @@ jest.mock('../../../../src/services/delivery-channels/core/statusDispatcher.serv
 }))
 
 const HEX64 = /^[0-9a-f]{64}$/
+
+/** Horario semanal válido mínimo — todos los días prendidos con un rango sano. */
+const HORARIO_OK = {
+  monday: { enabled: true, ranges: [{ open: '09:00', close: '22:00' }] },
+  tuesday: { enabled: true, ranges: [{ open: '09:00', close: '22:00' }] },
+  wednesday: { enabled: true, ranges: [{ open: '09:00', close: '22:00' }] },
+  thursday: { enabled: true, ranges: [{ open: '09:00', close: '22:00' }] },
+  friday: { enabled: true, ranges: [{ open: '09:00', close: '22:00' }] },
+  saturday: { enabled: true, ranges: [{ open: '09:00', close: '22:00' }] },
+  sunday: { enabled: false, ranges: [] },
+}
 
 const baseLink = {
   id: 'link1',
@@ -214,6 +225,84 @@ describe('deliveryChannelLink.service', () => {
           data: expect.objectContaining({ autoSyncMenu: false }),
         }),
       )
+    })
+
+    // ── `config` es UNA sola columna con VARIAS cosas adentro (2026-08-21) ─────────────
+    // El horario de delivery y el markup de precios viven los dos en `config`. El primer
+    // intento la REEMPLAZABA entera, así que guardar el horario desde la pantalla nueva
+    // borraba el markup — y el markup es lo único que evita perder dinero en cada pedido,
+    // porque Uber se queda ~30%. Nadie se habría enterado: no falla, sólo deja de cobrar
+    // de más. Por eso se MEZCLA, y por eso este test existe.
+    it('guardar SÓLO deliveryHours NO borra el markup ni las demás llaves de config', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        config: { note: 'alta manual', precios: { markupPercent: 30 } },
+      })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+
+      await updateChannelLink('venue1', 'link1', { config: { deliveryHours: HORARIO_OK } }, 'staff1')
+
+      const escrito = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
+      expect(escrito.precios).toEqual({ markupPercent: 30 })
+      expect(escrito.note).toBe('alta manual')
+      expect(escrito.deliveryHours).toEqual(HORARIO_OK)
+    })
+
+    it('config: null SÍ limpia todo (es la forma explícita de borrar, no un accidente)', async () => {
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+
+      await updateChannelLink('venue1', 'link1', { config: null }, 'staff1')
+
+      expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
+      const escrito = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
+      expect(escrito).toBe(Prisma.JsonNull)
+    })
+
+    // ── Un horario inválido guardado en silencio es PEOR que rechazarlo ────────────────
+    // `esHorarioValido` ya rechaza la basura al PUBLICAR, pero cae al horario estimado sin
+    // decir nada. El comercio ve su horario guardado en la pantalla y Uber recibe otro.
+    // Se rechaza en la escritura para que el error salga donde el humano puede corregirlo.
+    it('rechaza un deliveryHours con forma inválida en vez de guardarlo', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
+
+      await expect(
+        updateChannelLink('venue1', 'link1', { config: { deliveryHours: { monday: { enabled: true, ranges: [] } } } }),
+      ).rejects.toThrow(ValidationError)
+
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('rechaza una hora imposible (25:00) — el regex sola la dejaba pasar', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
+      const roto = { ...HORARIO_OK, monday: { enabled: true, ranges: [{ open: '25:00', close: '30:00' }] } }
+
+      await expect(updateChannelLink('venue1', 'link1', { config: { deliveryHours: roto } })).rejects.toThrow(ValidationError)
+
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('rechaza un markup absurdo (-10% o 500%) en vez de publicarlo a Uber', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
+
+      await expect(updateChannelLink('venue1', 'link1', { config: { precios: { markupPercent: -10 } } })).rejects.toThrow(
+        ValidationError,
+      )
+      await expect(updateChannelLink('venue1', 'link1', { config: { precios: { markupPercent: 500 } } })).rejects.toThrow(
+        ValidationError,
+      )
+
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('rechaza un override de precio negativo (regalaría el producto)', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ config: {} })
+
+      await expect(
+        updateChannelLink('venue1', 'link1', { config: { precios: { overrides: { 'sku-1': -5 } } } }),
+      ).rejects.toThrow(ValidationError)
+
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
     })
 
     it('el resultado devuelto NUNCA incluye webhookSecret', async () => {

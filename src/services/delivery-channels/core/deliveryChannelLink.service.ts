@@ -23,6 +23,7 @@ import logger from '../../../config/logger'
 import { ConflictError, NotFoundError, ValidationError } from '../../../errors/AppError'
 import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
+import { esHorarioValido } from './deliveryHours.service'
 import { calcularTasaInyeccion } from './injectionRate.service'
 import { menuSyncStatusOf } from './menuSync.service'
 import { getAdapter } from './statusDispatcher.service'
@@ -152,28 +153,128 @@ export interface UpdateChannelLinkInput {
  * Tenant isolation: la mutación misma filtra por `{ id: linkId, venueId }` — un link
  * de otro venue no matchea ninguna fila (`count === 0`) → NotFoundError, nada se toca.
  */
+/**
+ * Tope del markup de delivery, en por ciento.
+ *
+ * Uber se queda ~30%, así que el markup razonable vive alrededor de ahí. 200% es holgado a
+ * propósito —no somos quién para decidir el precio de nadie— pero corta el dedazo: un `3000`
+ * en vez de `30` publicaría a Uber un producto de $50 en $1,550. El comercio no se enteraría
+ * hasta que dejaran de llegarle pedidos.
+ */
+const MARKUP_MAX = 200
+
+/**
+ * ¿Los precios de canal que nos mandan tienen sentido, o van a costar dinero?
+ *
+ * Un markup NEGATIVO publicaría por DEBAJO del precio de mostrador y, encima de la comisión
+ * de Uber, cada pedido sería pérdida. Un override negativo regalaría el producto. Ninguno de
+ * los dos falla en ningún lado: se publican y se cobran.
+ */
+function validarPrecios(v: unknown): void {
+  if (v === undefined || v === null) return
+  if (typeof v !== 'object' || Array.isArray(v)) throw new ValidationError('`precios` debe ser un objeto')
+  const p = v as { markupPercent?: unknown; overrides?: unknown }
+
+  if (p.markupPercent !== undefined) {
+    const m = p.markupPercent
+    if (typeof m !== 'number' || !Number.isFinite(m) || m < 0 || m > MARKUP_MAX) {
+      throw new ValidationError(`El markup debe ser un número entre 0 y ${MARKUP_MAX} por ciento`)
+    }
+  }
+
+  if (p.overrides !== undefined) {
+    if (typeof p.overrides !== 'object' || p.overrides === null || Array.isArray(p.overrides)) {
+      throw new ValidationError('`precios.overrides` debe ser un objeto { sku: precio }')
+    }
+    for (const [sku, precio] of Object.entries(p.overrides as Record<string, unknown>)) {
+      if (typeof precio !== 'number' || !Number.isFinite(precio) || precio < 0) {
+        throw new ValidationError(`El precio fijo de "${sku}" debe ser un número mayor o igual a 0`)
+      }
+    }
+  }
+}
+
+/**
+ * `config` es UNA columna con VARIAS cosas adentro — se MEZCLA, no se reemplaza.
+ *
+ * 🔴 POR QUÉ (bug hallado el 2026-08-21, antes de que existiera la pantalla): el horario de
+ * delivery (`deliveryHours`) y el markup de precios (`precios`) viven los dos aquí. Escribir
+ * la columna entera significa que guardar el horario BORRA el markup — y el markup es lo
+ * único que evita perder dinero en cada pedido, porque Uber se queda ~30%. No falla, no
+ * avisa: simplemente el comercio deja de cobrar de más y no entiende por qué.
+ *
+ * Es un merge SUPERFICIAL a propósito: mandar `precios` reemplaza el bloque `precios`
+ * completo (quitar un override es mandar el objeto sin él), pero nunca toca `deliveryHours`.
+ * Un merge profundo haría imposible borrar una llave.
+ *
+ * `config: null` sigue limpiando todo — es la forma explícita de borrar, y se distingue de
+ * `undefined` (no lo tocaste).
+ */
+function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue): Prisma.InputJsonValue {
+  const base = actual && typeof actual === 'object' && !Array.isArray(actual) ? (actual as Record<string, unknown>) : {}
+  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) return entrante
+  return { ...base, ...(entrante as Record<string, unknown>) } as Prisma.InputJsonValue
+}
+
+/**
+ * Lo que llega a `config` se valida ANTES de escribirlo.
+ *
+ * 🔴 `esHorarioValido` ya rechaza la basura al PUBLICAR el menú, pero ahí cae al horario
+ * estimado y sigue como si nada. El comercio ve su horario guardado en la pantalla y Uber
+ * recibe otro — el peor de los dos mundos, porque nadie revisa lo que parece correcto. El
+ * error tiene que salir donde el humano todavía puede corregirlo: al guardar.
+ */
+function validarConfig(entrante: Prisma.InputJsonValue): void {
+  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) return
+  const c = entrante as Record<string, unknown>
+
+  if (c.deliveryHours !== undefined && c.deliveryHours !== null && !esHorarioValido(c.deliveryHours)) {
+    throw new ValidationError(
+      'El horario de delivery no es válido: cada día necesita `enabled` y `ranges`, y cada rango horas "HH:MM" reales con cierre después de la apertura.',
+    )
+  }
+
+  validarPrecios(c.precios)
+}
+
 export async function updateChannelLink(
   venueId: string,
   linkId: string,
   data: UpdateChannelLinkInput,
   performedBy?: string,
 ): Promise<DeliveryChannelLinkSafe> {
-  const result = await prisma.deliveryChannelLink.updateMany({
-    where: { id: linkId, venueId },
-    data: {
-      ...(data.externalLocationId !== undefined && { externalLocationId: data.externalLocationId }),
-      ...(data.externalAccountId !== undefined && { externalAccountId: data.externalAccountId }),
-      ...(data.orderAcceptanceMode !== undefined && { orderAcceptanceMode: data.orderAcceptanceMode }),
-      ...(data.autoSyncMenu !== undefined && { autoSyncMenu: data.autoSyncMenu }),
-      ...(data.config !== undefined && { config: data.config === null ? Prisma.JsonNull : data.config }),
-    },
+  if (data.config !== undefined && data.config !== null) validarConfig(data.config)
+
+  // Leer-mezclar-escribir dentro de UNA transacción: sin ella, dos admins guardando a la vez
+  // (o la pantalla de horario y la de precios) se pisan y el último gana con datos viejos.
+  const link = await prisma.$transaction(async tx => {
+    let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
+    if (data.config === null) {
+      config = Prisma.JsonNull
+    } else if (data.config !== undefined) {
+      // Tenant-scoped igual que la mutación: un link de otro venue no da fila y el
+      // `updateMany` de abajo devuelve count 0 → NotFoundError, sin filtrar nada.
+      const actual = await tx.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { config: true } })
+      config = mezclarConfig(actual?.config, data.config)
+    }
+
+    const result = await tx.deliveryChannelLink.updateMany({
+      where: { id: linkId, venueId },
+      data: {
+        ...(data.externalLocationId !== undefined && { externalLocationId: data.externalLocationId }),
+        ...(data.externalAccountId !== undefined && { externalAccountId: data.externalAccountId }),
+        ...(data.orderAcceptanceMode !== undefined && { orderAcceptanceMode: data.orderAcceptanceMode }),
+        ...(data.autoSyncMenu !== undefined && { autoSyncMenu: data.autoSyncMenu }),
+        ...(config !== undefined && { config }),
+      },
+    })
+
+    if (result.count === 0) {
+      throw new NotFoundError('Canal de delivery no encontrado')
+    }
+
+    return tx.deliveryChannelLink.findUnique({ where: { id: linkId }, select: SAFE_SELECT })
   })
-
-  if (result.count === 0) {
-    throw new NotFoundError('Canal de delivery no encontrado')
-  }
-
-  const link = await prisma.deliveryChannelLink.findUnique({ where: { id: linkId }, select: SAFE_SELECT })
 
   void logAction({
     staffId: performedBy,
