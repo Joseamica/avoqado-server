@@ -87,13 +87,44 @@ describe('webhook Connect — credit pack fulfillment retry-safe', () => {
     expect(prismaMock.processedStripeEvent.create).toHaveBeenCalledTimes(2)
   })
 
-  it('entrega duplicada (P2002 en el CLAIM) → se ignora sin correr el fulfillment y sin liberar nada', async () => {
+  it('entrega duplicada (P2002 en el CLAIM) con el resultado YA materializado (la compra existe) → 200, sin correr el fulfillment ni liberar', async () => {
     prismaMock.processedStripeEvent.create.mockRejectedValue(p2002())
+    prismaMock.creditPackPurchase.findUnique.mockResolvedValue({ id: 'purchase-1' } as any)
 
     await expect(processStripeConnectWebhookEvent(creditPackEvent())).resolves.toBeUndefined()
 
     expect(fulfillPurchase).not.toHaveBeenCalled()
     expect(prismaMock.processedStripeEvent.deleteMany).not.toHaveBeenCalled()
+  })
+
+  // Auditoría 4: "B recibe P2002 y contesta 200 antes de saber si A terminará bien; si A falla
+  // después, ya hubo una entrega reconocida sin fulfillment". Un duplicado sólo se reconoce
+  // cuando el resultado está materializado; si no, Stripe debe seguir reintentando.
+  it('🔴 duplicado (P2002) con claim RECIENTE y resultado NO materializado (A sigue trabajando) → no-2xx para que Stripe reintente; no se toca el claim', async () => {
+    prismaMock.processedStripeEvent.create.mockRejectedValue(p2002())
+    prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+    prismaMock.processedStripeEvent.findUnique.mockResolvedValue({ processedAt: new Date(Date.now() - 10_000) } as any)
+
+    await expect(processStripeConnectWebhookEvent(creditPackEvent())).rejects.toMatchObject({ code: 'STRIPE_EVENT_IN_PROGRESS' })
+
+    expect(fulfillPurchase).not.toHaveBeenCalled()
+    expect(prismaMock.processedStripeEvent.deleteMany).not.toHaveBeenCalled()
+  })
+
+  // Auditoría 4: "si el proceso muere entre crear el claim y terminar el trabajo, el catch nunca
+  // corre" / "si falla deleteMany el claim queda atascado". Lease: un claim viejo sin resultado
+  // es un muerto → se libera y el reintento vuelve a correr el trabajo.
+  it('🔴 duplicado (P2002) con claim VIEJO (>2 min) y resultado NO materializado (proceso murió) → libera el claim muerto y corre el fulfillment', async () => {
+    prismaMock.processedStripeEvent.create.mockRejectedValueOnce(p2002()).mockResolvedValueOnce({} as any)
+    prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+    prismaMock.processedStripeEvent.findUnique.mockResolvedValue({ processedAt: new Date(Date.now() - 10 * 60_000) } as any)
+    ;(fulfillPurchase as jest.Mock).mockResolvedValue({ id: 'purchase-1' })
+
+    await expect(processStripeConnectWebhookEvent(creditPackEvent())).resolves.toBeUndefined()
+
+    expect(prismaMock.processedStripeEvent.deleteMany).toHaveBeenCalledWith({ where: { endpoint: 'connect', stripeEventId: 'evt_1' } })
+    expect(prismaMock.processedStripeEvent.create).toHaveBeenCalledTimes(2)
+    expect(fulfillPurchase).toHaveBeenCalledTimes(1)
   })
 
   it('🔴 P2002 nacido DENTRO del fulfillment NO se confunde con "webhook duplicado": libera el claim y propaga', async () => {
