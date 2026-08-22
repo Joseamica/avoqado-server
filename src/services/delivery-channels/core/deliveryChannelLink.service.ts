@@ -318,7 +318,12 @@ export async function pauseChannelLink(
       venueId,
       ...(paused ? {} : { status: DeliveryChannelStatus.PAUSED }),
     },
-    data: { status: newStatus },
+    // 🔴 `snoozedUntil: null` SIEMPRE, en las dos direcciones. Esta es la pausa
+    // INDEFINIDA (la del dashboard): la decidió una persona a propósito y no se
+    // reactiva sola. Si no se limpiara, un snooze del POS que quedó vivo reanudaría
+    // la tienda que el dueño acaba de apagar — el peor error posible de esta feature.
+    // `snoozeChannelLink` vuelve a poner el reloj DESPUÉS, encima de esta escritura.
+    data: { status: newStatus, snoozedUntil: null },
   })
 
   if (result.count === 0) {
@@ -407,4 +412,134 @@ export async function pauseChannelLink(
 
   const { webhookSecret: _webhookSecret, ...safeLink } = fullLink
   return safeLink
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════
+//  "Me saturé" — el freno temporal, desde el POS
+// ════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Cuánto puede frenar el reparto quien está en el piso, en minutos.
+ *
+ * 🔴 Es un catálogo CERRADO y con tope a propósito. El referente: Toast pone este mismo
+ * botón en el POS con duraciones fijas (20 min, 40 min, hasta el día siguiente) en vez de
+ * un apagador libre, y lo protege con un permiso aparte —"Throttle Online Orders"— que sí
+ * se le puede dar al puesto de cocina sin darle la configuración entera.
+ *
+ * Dónde divergimos a propósito: Toast incluye "hasta mañana" e "indefinido" desde el POS.
+ * Aquí el tope son 2 horas, y **apagar la tienda por el resto del día sigue siendo del
+ * dueño, desde el dashboard**. La razón es la falla documentada del patrón: en la
+ * comunidad de Square el reclamo recurrente es "pause stuck" — alguien pausa, se le
+ * olvida, y el negocio amanece apagado. Quien cocina necesita respirar veinte minutos;
+ * cerrar el canal es una decisión de negocio, y esa se toma con la cabeza fría.
+ */
+export const SNOOZE_MINUTOS_VALIDOS = [20, 40, 60, 120] as const
+
+/**
+ * Frena los pedidos de reparto un rato y deja puesto el reloj que los va a reanudar.
+ *
+ * Reutiliza `pauseChannelLink` a propósito en vez de escribir el status a mano: ahí vive
+ * TODO lo que hace que una pausa sea real —avisarle al proveedor, revertir el estado local
+ * si el proveedor la rechaza, y lanzar para que el humano se entere—. Una segunda
+ * implementación acabaría pausando sólo en nuestra base mientras Uber sigue mandando
+ * pedidos, que es exactamente el bug que esa función ya había arreglado una vez.
+ */
+export async function snoozeChannelLink(
+  venueId: string,
+  linkId: string,
+  minutos: number,
+  performedBy?: string,
+): Promise<DeliveryChannelLinkSafe> {
+  if (!(SNOOZE_MINUTOS_VALIDOS as readonly number[]).includes(minutos)) {
+    throw new ValidationError(
+      `La pausa desde el punto de venta sólo puede durar ${SNOOZE_MINUTOS_VALIDOS.join(', ')} minutos. ` +
+        'Para cerrar el canal por más tiempo, hazlo desde el dashboard.',
+    )
+  }
+
+  // Si el proveedor rechaza la pausa, esto LANZA y el reloj nunca se escribe: no queda un
+  // canal "con snooze" que en realidad sigue recibiendo pedidos.
+  const link = await pauseChannelLink(venueId, linkId, true, performedBy)
+
+  const snoozedUntil = new Date(Date.now() + minutos * 60_000)
+  await prisma.deliveryChannelLink.updateMany({ where: { id: linkId, venueId }, data: { snoozedUntil } })
+
+  void logAction({
+    staffId: performedBy,
+    venueId,
+    action: 'DELIVERY_CHANNEL_SNOOZED',
+    entity: 'DeliveryChannelLink',
+    entityId: linkId,
+    data: { minutos, snoozedUntil: snoozedUntil.toISOString() },
+  })
+
+  return { ...link, snoozedUntil } as DeliveryChannelLinkSafe
+}
+
+/**
+ * Reanuda ANTES de que venza el reloj, cuando la cocina se puso al día.
+ *
+ * 🔴 LA ASIMETRÍA ES EL PUNTO: sólo cancela una pausa que TIENE reloj, o sea una que se
+ * pidió desde el POS. La pausa indefinida —la del dashboard, `snoozedUntil: null`— no se
+ * puede deshacer desde aquí. El permiso del punto de venta es angosto a propósito: poder
+ * frenar los pedidos no puede implicar poder reabrir la tienda que el dueño cerró por una
+ * avería, por falta de personal, o por lo que sea. Reabrir sigue siendo suyo.
+ */
+export async function cancelarSnooze(venueId: string, linkId: string, performedBy?: string): Promise<DeliveryChannelLinkSafe> {
+  const actual = await prisma.deliveryChannelLink.findFirst({
+    where: { id: linkId, venueId },
+    select: { snoozedUntil: true },
+  })
+
+  if (!actual) throw new NotFoundError('Canal de delivery no encontrado')
+
+  if (actual.snoozedUntil === null) {
+    throw new ValidationError(
+      'Este canal lo pausaron desde el dashboard, sin fecha de reactivación. Para volver a recibir pedidos, pídeselo a quien administra el negocio.',
+    )
+  }
+
+  return pauseChannelLink(venueId, linkId, false, performedBy)
+}
+
+/**
+ * Reactiva los canales cuyo reloj ya venció. Lo llama un job cada minuto.
+ *
+ * 🔴 Cada canal va AISLADO. Sin eso, un solo venue con el proveedor caído dejaría a todos
+ * los demás negocios apagados en su marketplace — un lote que se rinde en el primer error
+ * convierte una falla de uno en una falla de todos, y nadie se entera porque desde afuera
+ * "la tienda está pausada" se ve igual que "la tienda no reanudó".
+ */
+export async function reanudarSnoozesVencidos(): Promise<{ reanudados: number; fallidos: number }> {
+  const vencidos = await prisma.deliveryChannelLink.findMany({
+    where: { status: DeliveryChannelStatus.PAUSED, snoozedUntil: { lte: new Date() } },
+    select: { id: true, venueId: true, provider: true },
+  })
+
+  let reanudados = 0
+  let fallidos = 0
+
+  for (const canal of vencidos) {
+    try {
+      await pauseChannelLink(canal.venueId, canal.id, false)
+      reanudados++
+      logger.info('⏰ [DeliveryChannel] se acabó la pausa: canal reactivado', {
+        linkId: canal.id,
+        venueId: canal.venueId,
+        provider: canal.provider,
+      })
+    } catch (error) {
+      fallidos++
+      // Se deja el reloj puesto para reintentar en el siguiente tick: borrarlo aquí
+      // dejaría el canal pausado PARA SIEMPRE, que es justo lo que esto evita.
+      logger.error('🚨 [DeliveryChannel] no se pudo reactivar un canal cuya pausa venció', {
+        linkId: canal.id,
+        venueId: canal.venueId,
+        provider: canal.provider,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  return { reanudados, fallidos }
 }

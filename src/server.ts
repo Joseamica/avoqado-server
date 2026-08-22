@@ -33,6 +33,7 @@ import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
 import { blumonPaymentAuditJob } from './jobs/blumon-payment-audit.job'
 import { deliveryMenuSyncJob } from './jobs/delivery-menu-sync.job'
+import { deliverySnoozeResumeJob } from './jobs/delivery-snooze-resume.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
@@ -180,6 +181,7 @@ const gracefulShutdown = async (signal: string) => {
       logger.info('Stopping delivery webhook reconciliation job...')
       deliveryWebhookReconciliationJob.stop()
       deliveryMenuSyncJob.stop()
+      deliverySnoozeResumeJob.stop()
 
       logger.info('Stopping Stripe webhook reconciliation job...')
       stripeWebhookReconciliationJob.stop()
@@ -507,6 +509,7 @@ const startApplication = async (retries = 3) => {
       // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED)
       deliveryWebhookReconciliationJob.start()
       deliveryMenuSyncJob.start()
+      deliverySnoozeResumeJob.start()
 
       // Start Stripe PLATFORM webhook reconciliation job (every 5min at :03 —
       // replays FAILED WebhookEvent rows. The controller answers 200 even on

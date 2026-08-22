@@ -81,6 +81,11 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           // El margen sobre el precio de mostrador. `null` = se está publicando el precio de
           // mostrador tal cual, y como el marketplace se queda ~30%, cada pedido deja menos
           // de lo que el comercio cree. Se contesta sin que nadie tenga que abrir la base.
+          // Hasta cuándo dura la pausa que alguien pidió desde el POS. `null` con status
+          // PAUSED = pausa INDEFINIDA (la del dashboard): no se reactiva sola. Es la
+          // diferencia entre "la cocina está respirando 20 minutos" y "el negocio lleva
+          // apagado desde ayer y nadie se ha dado cuenta" — y desde afuera se ven igual.
+          snoozedUntil: l.snoozedUntil?.toISOString() ?? null,
           margenPorcentaje:
             typeof (l.config as { precios?: { markupPercent?: unknown } } | null)?.precios?.markupPercent === 'number'
               ? ((l.config as { precios: { markupPercent: number } }).precios.markupPercent as number)

@@ -58,6 +58,11 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   // ORDERS - Viewing and Managing
   // ===========================
+  // Quien puede ADMINISTRAR el canal también puede frenarlo un rato: sin este puente,
+  // un dueño parado frente al POS no podría tocar el botón que sí ve su cocinero.
+  'delivery-channels:manage': ['delivery-channels:manage', 'delivery-channels:read', 'delivery-channels:snooze'],
+  'delivery-channels:snooze': ['delivery-channels:snooze'],
+
   'orders:read': [
     'orders:read',
     'products:read', // Need to see what products are in the order
@@ -739,6 +744,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'area-tickets:issue',
     'area-tickets:deliver',
     'scale:use',
+    // "Me saturé": frenar los pedidos de reparto un rato, desde el POS. Es un permiso
+    // DELIBERADAMENTE angosto — NO es `delivery-channels:manage`, que además deja
+    // reconectar el canal y cambiar precios y horario. Quien cocina necesita el freno,
+    // no el tablero. Mismo corte que Toast, que separa "Throttle Online Orders" del
+    // permiso de configuración justo para poder dárselo al puesto de cocina.
+    'delivery-channels:snooze',
     'calendar:connect_self', // Google Calendar Sync — connect own personal calendar
   ],
 
@@ -756,6 +767,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Deshacer la venta recién arrancada, sin poder anular un cheque ya cobrado
     // (auditoría de piso, caso #9).
     'orders:cancel-unpaid',
+    'delivery-channels:snooze', // "me saturé": freno temporal de reparto desde el POS
     'payments:read',
     'payments:create',
     'area-tickets:issue',
@@ -815,6 +827,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'menu:read',
     'orders:read',
     'orders:update',
+    'delivery-channels:snooze', // "me saturé": freno temporal de reparto desde el POS
     'payments:read',
     'payments:create',
     'payments:refund',
@@ -1019,6 +1032,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'cfdi:issue',
     'cfdi:view',
     // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier) — read-only
+    'delivery-channels:snooze', // "me saturé": freno temporal de reparto desde el POS
     'delivery-channels:read',
   ],
 
@@ -1909,7 +1923,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // Datos fiscales del venue como receptor de las facturas de Avoqado — OWNER-only (feature gratis/core)
   'venue-fiscal-profile': ['venue-fiscal-profile:manage'],
   // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier, Task 10/11)
-  'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage', 'delivery-channels:request'],
+  'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage', 'delivery-channels:request', 'delivery-channels:snooze'],
 }
 
 /**

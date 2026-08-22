@@ -5478,6 +5478,19 @@ model DeliveryChannelLink {
   /// Config extra por proveedor (p.ej. mapa channelId→OrderSource de Deliverect)
   config Json?
 
+  /// Hasta cuándo dura la pausa que alguien pidió DESDE EL POS ("me saturé").
+  ///
+  /// 🔴 Existe para que la pausa CADUQUE sola. Un apagador sin reloj en manos de quien
+  /// está cocinando es la falla más reportada del patrón: se pausa a las 8pm en plena
+  /// cena, nadie se acuerda de reactivar, y el negocio pasa la noche entera apagado en
+  /// el marketplace sin que nadie se entere hasta la mañana siguiente. (Es literalmente
+  /// el hilo "POS ordering - pause stuck" de la comunidad de Square; Toast lo resuelve
+  /// con snooze por tiempo — 20 min, 40 min, hasta mañana — y por eso se copia eso.)
+  ///
+  /// `null` con `status: PAUSED` = pausa INDEFINIDA, la del dashboard: esa la decidió un
+  /// dueño a propósito y NO se reactiva sola. Distinguirlas es todo el punto del campo.
+  snoozedUntil DateTime?
+
   events DeliveryOrderEvent[]
 
   createdAt DateTime @default(now())

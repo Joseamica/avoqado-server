@@ -42,6 +42,7 @@ import * as estimateMobileController from '../controllers/mobile/estimate.mobile
 import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
 import * as deliveryOrderMobileController from '../controllers/mobile/deliveryOrder.mobile.controller'
+import * as deliveryChannelMobileController from '../controllers/mobile/deliveryChannel.mobile.controller'
 import * as kdsMobileController from '../controllers/mobile/kds.mobile.controller'
 import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
 import * as syncMobileController from '../controllers/mobile/sync.mobile.controller'
@@ -728,6 +729,43 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('orders:update'),
   deliveryOrderMobileController.denyOrder,
+)
+
+/**
+ * "Me saturé" — frenar los pedidos de reparto un rato, desde el POS.
+ *
+ * Permiso `delivery-channels:snooze`, NUEVO y angosto a propósito: NO es
+ * `delivery-channels:manage`, que además deja reconectar el canal y cambiar precios y
+ * horario. Quien cocina necesita el freno, no el tablero. Es el mismo corte que hace Toast,
+ * que separa "Throttle Online Orders" del permiso de configuración justo para poder
+ * dárselo al puesto de cocina. Lo tienen KITCHEN, WAITER, CASHIER, MANAGER, y —vía
+ * dependencia— ADMIN y OWNER.
+ *
+ * El feature gate PREMIUM no se repite aquí: `listChannelLinks` sólo devuelve canales de
+ * venues que ya lo tienen, y un venue sin canales simplemente no ve el control.
+ */
+router.get(
+  '/venues/:venueId/delivery/channels',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('delivery-channels:snooze'),
+  deliveryChannelMobileController.listChannels,
+)
+
+router.post(
+  '/venues/:venueId/delivery/channels/:linkId/snooze',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('delivery-channels:snooze'),
+  deliveryChannelMobileController.snoozeChannel,
+)
+
+router.delete(
+  '/venues/:venueId/delivery/channels/:linkId/snooze',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('delivery-channels:snooze'),
+  deliveryChannelMobileController.resumeChannel,
 )
 
 /**
