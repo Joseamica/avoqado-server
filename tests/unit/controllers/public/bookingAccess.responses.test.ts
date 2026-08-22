@@ -21,6 +21,7 @@ jest.mock('@/services/public/otpAuth.public.service', () => ({
 jest.mock('@/services/public/bookingAccess.service', () => ({
   __esModule: true,
   computeBookingAccess: jest.fn(async () => ({ status: 'APPROVED', canCreateReservation: false, blockedBy: 'PLAN' })),
+  withBookingAccess: jest.requireActual('@/services/public/bookingAccess.service').withBookingAccess,
 }))
 
 import * as portalController from '@/controllers/public/customerPortal.public.controller'
@@ -78,6 +79,15 @@ describe('bookingAccess en las 4 respuestas autenticadas', () => {
     await portalController.getPortal({ customerAuth: { customerId: 'c1', venueId: 'venue-1' } } as any, res, jest.fn())
     expect(res.body).toEqual(expect.objectContaining({ bookingAccess: EXPECTED }))
     expect(computeBookingAccess).toHaveBeenCalledWith('venue-1')
+  })
+
+  it('🔴 si bookingAccess no se pudo calcular (null) → login responde 200 SIN el campo; el token ya emitido nunca se pierde (auditoría 4)', async () => {
+    ;(computeBookingAccess as jest.Mock).mockResolvedValueOnce(null)
+    const res = mkRes()
+    await portalController.login({ params: { venueSlug: 'v' }, body: { email: 'a@b.com', password: 'x' } } as any, res, jest.fn())
+    expect(res.statusCode).toBe(200)
+    expect(res.body.token).toBe('t')
+    expect('bookingAccess' in res.body).toBe(false)
   })
 
   it('si el servicio de auth falla, NO se consulta bookingAccess (el error manda)', async () => {

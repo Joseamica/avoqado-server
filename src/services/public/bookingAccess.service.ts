@@ -45,24 +45,40 @@ export function resolveBookingAccess(input: {
     : { status: input.approvalStatus, canCreateReservation: true }
 }
 
-/**
- * Compuesta: consulta plan + settings del venue. Si la consulta de plan truena, hace
- * FAIL-OPEN (hasPlan=true) igual que el gate de rutas — el cliente no se queda sin
- * reservar por un tropiezo de nuestra DB; el gate real decide en el POST.
- */
-export async function computeBookingAccess(venueId: string): Promise<BookingAccess> {
-  const [hasPlan, settings] = await Promise.all([
-    venueHasFeatureAccess(venueId, 'RESERVATIONS').catch((err: unknown) => {
-      logger.error('[bookingAccess] plan lookup failed — failing open', { venueId, err: (err as Error)?.message })
-      return true
-    }),
-    getReservationSettings(venueId),
-  ])
+/** Para esparcir en la respuesta: `{ bookingAccess }` si se pudo calcular, `{}` si no (campo omitido). */
+export function withBookingAccess(access: BookingAccess | null): { bookingAccess?: BookingAccess } {
+  return access ? { bookingAccess: access } : {}
+}
 
-  return resolveBookingAccess({
-    hasPlan,
-    // Mismo default que el controller de reservas: sólo `false` explícito apaga.
-    publicBookingEnabled: (settings as { publicBooking?: { enabled?: boolean } })?.publicBooking?.enabled !== false,
-    approvalStatus: 'APPROVED', // Fase 0. Fase 1: desde el Customer.
-  })
+/**
+ * Compuesta: consulta plan + settings del venue. BEST-EFFORT, nunca lanza:
+ *
+ * - Si la consulta de plan truena → FAIL-OPEN (hasPlan=true), igual que el gate de rutas;
+ *   el POST sigue siendo la autoridad.
+ * - Si cualquier otra cosa truena → `null` (el controller omite el campo). Auditoría 4:
+ *   este cálculo corre DESPUÉS de que login/register/OTP ya emitieron token, crearon la
+ *   cuenta o consumieron el código; un 500 aquí convertía una operación exitosa en error
+ *   ("ya existe" al reintentar, pedir otro código). Un dato informativo jamás invalida
+ *   al emisor.
+ */
+export async function computeBookingAccess(venueId: string): Promise<BookingAccess | null> {
+  try {
+    const [hasPlan, settings] = await Promise.all([
+      venueHasFeatureAccess(venueId, 'RESERVATIONS').catch((err: unknown) => {
+        logger.error('[bookingAccess] plan lookup failed — failing open', { venueId, err: (err as Error)?.message })
+        return true
+      }),
+      getReservationSettings(venueId),
+    ])
+
+    return resolveBookingAccess({
+      hasPlan,
+      // Mismo default que el controller de reservas: sólo `false` explícito apaga.
+      publicBookingEnabled: (settings as { publicBooking?: { enabled?: boolean } })?.publicBooking?.enabled !== false,
+      approvalStatus: 'APPROVED', // Fase 0. Fase 1: desde el Customer.
+    })
+  } catch (err) {
+    logger.error('[bookingAccess] could not be computed — omitted from the response', { venueId, err: (err as Error)?.message })
+    return null
+  }
 }

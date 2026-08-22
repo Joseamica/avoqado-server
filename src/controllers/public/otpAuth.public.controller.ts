@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as otpService from '../../services/public/otpAuth.public.service'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { computeBookingAccess } from '../../services/public/bookingAccess.service'
+import { computeBookingAccess, withBookingAccess } from '../../services/public/bookingAccess.service'
 
 async function resolveVenueBySlug(venueSlug: string) {
   const venue = await prisma.venue.findFirst({
@@ -49,7 +49,7 @@ export async function verifyOtp(req: Request, res: Response, next: NextFunction)
 
     // Fase 0.B: es un emisor de token → lleva bookingAccess como login/register/portal.
     const bookingAccess = await computeBookingAccess(venue.id)
-    res.json({ ...result, bookingAccess })
+    res.json({ ...result, ...withBookingAccess(bookingAccess) })
   } catch (error) {
     next(error)
   }

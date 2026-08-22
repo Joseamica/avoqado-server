@@ -3,7 +3,7 @@ import * as customerPortalService from '../../services/public/customerPortal.pub
 import { NotFoundError } from '../../errors/AppError'
 import type { CustomerAuthContext } from '../../middlewares/customerAuth.middleware'
 import prisma from '../../utils/prismaClient'
-import { computeBookingAccess } from '../../services/public/bookingAccess.service'
+import { computeBookingAccess, withBookingAccess } from '../../services/public/bookingAccess.service'
 
 async function resolveVenueBySlug(venueSlug: string) {
   const venue = await prisma.venue.findFirst({
@@ -33,7 +33,7 @@ export async function register(req: Request, res: Response, next: NextFunction) 
 
     // Fase 0.B: el widget pinta "¿puedo reservar?" desde la sesión, no desde un 403 tardío.
     const bookingAccess = await computeBookingAccess(venue.id)
-    res.status(201).json({ ...result, bookingAccess })
+    res.status(201).json({ ...result, ...withBookingAccess(bookingAccess) })
   } catch (error) {
     next(error)
   }
@@ -51,7 +51,7 @@ export async function login(req: Request, res: Response, next: NextFunction) {
     const result = await customerPortalService.loginCustomer(venue.id, email, password)
 
     const bookingAccess = await computeBookingAccess(venue.id)
-    res.json({ ...result, bookingAccess })
+    res.json({ ...result, ...withBookingAccess(bookingAccess) })
   } catch (error) {
     next(error)
   }
@@ -68,7 +68,7 @@ export async function getPortal(req: Request, res: Response, next: NextFunction)
     const result = await customerPortalService.getCustomerPortal(venueId, customerId)
 
     const bookingAccess = await computeBookingAccess(venueId)
-    res.json({ ...result, bookingAccess })
+    res.json({ ...result, ...withBookingAccess(bookingAccess) })
   } catch (error) {
     next(error)
   }

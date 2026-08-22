@@ -93,6 +93,17 @@ describe('computeBookingAccess (compuesta)', () => {
     expect(r.canCreateReservation).toBe(true)
   })
 
+  it('🔴 si los SETTINGS truenan → devuelve null (campo omitido) y se loguea; NUNCA propaga (auditoría 4: no puede tumbar login/register/OTP/portal tras una operación exitosa)', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+    ;(getReservationSettings as jest.Mock).mockRejectedValue(new Error('settings down'))
+
+    await expect(computeBookingAccess('venue-1')).resolves.toBeNull()
+    expect((logger as any).error).toHaveBeenCalledWith(
+      expect.stringContaining('bookingAccess'),
+      expect.objectContaining({ venueId: 'venue-1' }),
+    )
+  })
+
   it('si la consulta de plan truena → fail-open como el gate (hasPlan=true) y se loguea', async () => {
     ;(venueHasFeatureAccess as jest.Mock).mockRejectedValue(new Error('db down'))
     ;(getReservationSettings as jest.Mock).mockResolvedValue({ publicBooking: { enabled: true } })
