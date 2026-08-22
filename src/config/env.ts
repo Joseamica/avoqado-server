@@ -109,6 +109,11 @@ const envSchema = z.object({
   // Opcional a propósito: un venue sin Uber no debe impedir que arranque la API
   // (mismo criterio que EXTERNAL_BANK_*). El verificador falla claro si falta.
   UBER_WEBHOOK_SIGNING_KEY: z.string().optional(),
+
+  /// DiDi Food — `app_secret` de la app. Firma los webhooks: `MD5(cuerpo crudo + secreto)`.
+  /// Hay uno por app, y las apps de prueba y producción tienen secretos distintos.
+  DIDI_APP_SECRET_SANDBOX: z.string().optional(),
+  DIDI_APP_SECRET_PRODUCTION: z.string().optional(),
   // Rotación: Uber ofrece Secondary Signing Key nativa. Si está presente, el
   // webhook acepta CUALQUIERA de las dos durante la ventana de rotación.
   UBER_WEBHOOK_SIGNING_KEY_SECONDARY: z.string().optional(),

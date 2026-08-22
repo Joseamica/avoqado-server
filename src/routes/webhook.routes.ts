@@ -17,6 +17,7 @@ import { handleResendWebhook, resendWebhookHealthCheck } from '../controllers/we
 import { blumonIPWhitelist } from '../middlewares/blumon-ip-whitelist.middleware'
 import { handleDeliverectOrderWebhook, deliverectWebhookHealthCheck } from '../controllers/delivery-channels/deliverect.webhook.controller'
 import { handleUberWebhook, uberWebhookHealthCheck } from '../controllers/delivery-channels/uber.webhook.controller'
+import { handleDidiWebhook, didiWebhookHealthCheck } from '../controllers/delivery-channels/didi.webhook.controller'
 
 const router = Router()
 
@@ -460,5 +461,10 @@ router.get('/delivery/deliverect/health', deliverectWebhookHealthCheck)
  */
 router.post('/delivery/uber', handleUberWebhook)
 router.get('/delivery/uber/health', uberWebhookHealthCheck)
+
+// DiDi Food. UNA sola URL para todas las tiendas y para los dos ambientes: el evento trae
+// `app_shop_id` (el id que nosotros elegimos al ligar la tienda) y con eso se resuelve el venue.
+router.post('/delivery/didi', handleDidiWebhook)
+router.get('/delivery/didi/health', didiWebhookHealthCheck)
 
 export default router
