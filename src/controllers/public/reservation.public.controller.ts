@@ -111,6 +111,23 @@ export function resolveUpfrontPolicy(
 }
 
 /**
+ * Pagar con créditos ⇒ NO hay depósito (auditoría 4, bloqueo 2).
+ *
+ * Antes `willUseCredits` sólo apagaba el prepago sintético de `upfrontPolicy=required`;
+ * `settings.deposits` seguía vivo, así que una cita podía canjear créditos Y abrir una sesión
+ * de Stripe de depósito. Si el cliente canjeaba y abandonaba el checkout, el job de depósitos
+ * cancelaba la reserva sin devolver los créditos, y la sesión de Stripe quedaba huérfana.
+ * Los créditos YA son el pago: el depósito se apaga para esa reserva. Pura, probada sola.
+ */
+export function resolveDepositsWhenPayingWithCredits<D extends Record<string, unknown> | undefined>(input: {
+  wantsCredits: boolean
+  deposits: D
+}): D | (Record<string, unknown> & { enabled: false; mode: 'none' }) {
+  if (!input.wantsCredits) return input.deposits
+  return { ...(input.deposits ?? {}), enabled: false as const, mode: 'none' as const }
+}
+
+/**
  * Fase 0.B — con qué identidad se liga una reserva pública.
  *
  * La ÚNICA fuente de identidad es `req.customerAuth`, que pone el middleware
@@ -1123,6 +1140,14 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
     }
 
+    // Auditoría 4: pagar con créditos ⇒ NO hay depósito (ni prepago sintético ni
+    // settings.deposits). Evita la sesión de Stripe huérfana y el caso "canjeó y abandonó
+    // el checkout → el job de depósitos cancela sin devolver créditos".
+    if (wantsCredits) {
+      effectiveDeposits = resolveDepositsWhenPayingWithCredits({ wantsCredits, deposits: effectiveDeposits })
+      paymentPolicyOverride = { deposits: effectiveDeposits }
+    }
+
     const depositPreview = await previewDepositRequirement(venue.id, req.body, { ...settings, deposits: effectiveDeposits })
     const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
 
@@ -1179,6 +1204,39 @@ export async function createReservation(req: Request, res: Response, next: NextF
         ...(normalAppointmentHold ? { appointmentHoldId: normalAppointmentHold.id } : {}),
       },
     )
+
+    // Auditoría 4: el canje va ANTES de cualquier depósito/sesión de Stripe (que con créditos
+    // ya no existe) — si el canje falla, la compensación cancela una reserva sin efectos
+    // externos colgando.
+    // Credit redemption for non-class appointments. Lives outside the
+    // reservation transaction (reservationService.createReservation owns its
+    // own tx and doesn't expose it). Auditoría 3: if the redemption fails the
+    // reservation must NOT stay alive holding the slot — it is cancelled as
+    // compensation (SYSTEM / CREDIT_REDEEM_FAILED) and the error surfaces.
+    let creditRedeemed = false
+    let creditsUsed = 0
+    const balanceIds: string[] = Array.isArray(req.body.creditItemBalanceIds)
+      ? req.body.creditItemBalanceIds.filter((id: unknown): id is string => typeof id === 'string')
+      : req.body.creditItemBalanceId
+        ? [req.body.creditItemBalanceId]
+        : []
+    if (balanceIds.length > 0) {
+      const seats = (req.body.spotIds?.length || req.body.partySize || 1) as number
+      const result = await redeemCreditsWithCompensation({
+        venueId: venue.id,
+        reservationId: reservation.id,
+        confirmationCode: reservation.confirmationCode,
+        balanceIds,
+        creditsPerBalance: seats,
+        // Fase 0.B: el dueño de los créditos es el customer de la sesión (obligatoria).
+        customerId: ((req as any).customerAuth?.customerId as string | undefined) ?? null,
+        customerEmail: req.body.guestEmail,
+        customerPhone: req.body.guestPhone,
+        expectedProductIds: incomingProductIds.length > 0 ? incomingProductIds : req.body.productId ? [req.body.productId] : undefined,
+      })
+      creditRedeemed = result.redeemed
+      creditsUsed = result.creditsUsed
+    }
 
     // Owes-at-venue fallback (policy=required + no Stripe merchant): the
     // reservation was just created CONFIRMED with no deposit. Stamp the
@@ -1259,36 +1317,6 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // Burn the slot hold now that the reservation exists. Best-effort —
     // failures are logged but do not poison the committed booking response.
     await finalizeReservationSideEffects()
-
-    // Credit redemption for non-class appointments. Lives outside the
-    // reservation transaction (reservationService.createReservation owns its
-    // own tx and doesn't expose it). Auditoría 3: if the redemption fails the
-    // reservation must NOT stay alive holding the slot — it is cancelled as
-    // compensation (SYSTEM / CREDIT_REDEEM_FAILED) and the error surfaces.
-    let creditRedeemed = false
-    let creditsUsed = 0
-    const balanceIds: string[] = Array.isArray(req.body.creditItemBalanceIds)
-      ? req.body.creditItemBalanceIds.filter((id: unknown): id is string => typeof id === 'string')
-      : req.body.creditItemBalanceId
-        ? [req.body.creditItemBalanceId]
-        : []
-    if (balanceIds.length > 0) {
-      const seats = (req.body.spotIds?.length || req.body.partySize || 1) as number
-      const result = await redeemCreditsWithCompensation({
-        venueId: venue.id,
-        reservationId: reservation.id,
-        confirmationCode: reservation.confirmationCode,
-        balanceIds,
-        creditsPerBalance: seats,
-        // Fase 0.B: el dueño de los créditos es el customer de la sesión (obligatoria).
-        customerId: ((req as any).customerAuth?.customerId as string | undefined) ?? null,
-        customerEmail: req.body.guestEmail,
-        customerPhone: req.body.guestPhone,
-        expectedProductIds: incomingProductIds.length > 0 ? incomingProductIds : req.body.productId ? [req.body.productId] : undefined,
-      })
-      creditRedeemed = result.redeemed
-      creditsUsed = result.creditsUsed
-    }
 
     // Booking confirmation email — only fires when the reservation is already
     // CONFIRMED at this point (no-deposit flow OR pay-at-venue). For the
@@ -2481,14 +2509,26 @@ type RedeemArgs = Parameters<typeof redeemCreditsForReservation>[1]
  * propaga al cliente. Si la compensación también falla, se loguea fuerte y gana el error
  * original. `deps` inyectables para probarlo solo.
  */
+export const RESERVATION_CREDIT_COMPENSATION_FAILED = 'RESERVATION_CREDIT_COMPENSATION_FAILED' as const
+
+type CompensationAnomaly = {
+  category: typeof RESERVATION_CREDIT_COMPENSATION_FAILED
+  reservationId: string
+  expectedState: Prisma.InputJsonValue
+  observedState: Prisma.InputJsonValue
+}
+
 export async function redeemCreditsWithCompensation(
   args: RedeemArgs,
   deps: {
     redeem: (a: RedeemArgs) => Promise<{ creditsUsed: number; redeemed: boolean }>
     cancel: (venueId: string, reservationId: string, by: string, reason: string) => Promise<unknown>
+    /** Rastro DURABLE cuando la compensación falla (auditoría 4): un log no es reintento. */
+    recordAnomaly: (a: CompensationAnomaly) => Promise<unknown>
   } = {
     redeem: a => prisma.$transaction(tx => redeemCreditsForReservation(tx, a)),
     cancel: (venueId, reservationId, by, reason) => reservationService.cancelReservation(venueId, reservationId, by, reason),
+    recordAnomaly: a => prisma.moneyAnomaly.create({ data: { ...a, stripeEventId: null } }),
   },
 ): Promise<{ creditsUsed: number; redeemed: boolean }> {
   try {
@@ -2512,6 +2552,26 @@ export async function redeemCreditsWithCompensation(
           cancelErr: (cancelErr as Error)?.message,
         },
       )
+      // Sin esto la reserva viva sólo existiría en un log. MoneyAnomaly es la cola de
+      // reconciliación que ops ya revisa (misma tabla que los depósitos de Stripe).
+      try {
+        await deps.recordAnomaly({
+          category: RESERVATION_CREDIT_COMPENSATION_FAILED,
+          reservationId: args.reservationId,
+          expectedState: { status: 'CANCELLED', reason: CREDIT_REDEEM_FAILED_REASON, balanceIds: args.balanceIds },
+          observedState: {
+            status: 'ALIVE_WITHOUT_CREDITS',
+            confirmationCode: args.confirmationCode,
+            redeemError: (error as Error)?.message ?? String(error),
+            cancelError: (cancelErr as Error)?.message ?? String(cancelErr),
+          },
+        })
+      } catch (anomalyErr) {
+        logger.error('[CREDIT REDEEM FAILED] ni la MoneyAnomaly pudo registrarse — reconciliar a mano', {
+          reservationId: args.reservationId,
+          anomalyErr: (anomalyErr as Error)?.message,
+        })
+      }
     }
     // Surface the original error so the customer can fix the input rather
     // than think they paid with credits when they didn't.

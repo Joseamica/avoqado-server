@@ -48,7 +48,7 @@ describe('redeemCreditsWithCompensation', () => {
     expect((logger as any).error).toHaveBeenCalledWith(expect.stringContaining('[CREDIT REDEEM FAILED]'), expect.anything())
   })
 
-  it('si la compensación también falla → se loguea "reserva viva" y el error ORIGINAL sigue siendo el que se propaga', async () => {
+  it('si la compensación también falla → MoneyAnomaly DURABLE (RESERVATION_CREDIT_COMPENSATION_FAILED) + log "reserva viva"; el error ORIGINAL sigue siendo el que se propaga', async () => {
     const boom = new Error('producto distinto')
     const redeem = jest.fn(async () => {
       throw boom
@@ -56,12 +56,37 @@ describe('redeemCreditsWithCompensation', () => {
     const cancel = jest.fn(async () => {
       throw new Error('cancel boom')
     })
+    const recordAnomaly = jest.fn(async () => ({}))
 
-    await expect(redeemCreditsWithCompensation(args, { redeem, cancel })).rejects.toBe(boom)
+    await expect(redeemCreditsWithCompensation(args, { redeem, cancel, recordAnomaly })).rejects.toBe(boom)
 
+    // Auditoría 4: un log no es reintento; la anomalía es el rastro que ops reconcilia.
+    expect(recordAnomaly).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'RESERVATION_CREDIT_COMPENSATION_FAILED',
+        reservationId: 'res-1',
+        expectedState: expect.objectContaining({ status: 'CANCELLED' }),
+        observedState: expect.objectContaining({ redeemError: 'producto distinto', cancelError: 'cancel boom' }),
+      }),
+    )
     expect((logger as any).error).toHaveBeenCalledWith(
       expect.stringContaining('compensación'),
       expect.objectContaining({ reservationId: 'res-1' }),
     )
+  })
+
+  it('si hasta registrar la anomalía falla, el error ORIGINAL sigue ganando (nunca se pierde la causa raíz)', async () => {
+    const boom = new Error('saldo insuficiente')
+    const redeem = jest.fn(async () => {
+      throw boom
+    })
+    const cancel = jest.fn(async () => {
+      throw new Error('cancel boom')
+    })
+    const recordAnomaly = jest.fn(async () => {
+      throw new Error('anomaly boom')
+    })
+
+    await expect(redeemCreditsWithCompensation(args, { redeem, cancel, recordAnomaly })).rejects.toBe(boom)
   })
 })
