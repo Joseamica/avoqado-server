@@ -1,5 +1,5 @@
 import prisma from '../../utils/prismaClient'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import { generateOtpCode, hashOtpCode, normalizeEmail } from '../../lib/otp'
 import { sendOtpWhatsApp } from '../whatsapp.service'
@@ -63,6 +63,13 @@ export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | '
   await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { consumedAt: new Date() } })
 
   const customer = await resolveIdentity(args.venueId, args.channel === 'whatsapp' ? { phone: destination } : { email: destination })
+  // Fase 0.B: el código fue correcto y el challenge ya quedó consumido (no se puede reusar),
+  // pero una cuenta desactivada por el venue no recibe token. `=== false` a propósito:
+  // `active` es @default(true) en DB; un registro sin el campo (mocks, selects parciales)
+  // no debe volverse "inactivo" por accidente.
+  if (customer.active === false) {
+    throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+  }
   const token = generateCustomerToken(customer.id, args.venueId)
   return {
     token,

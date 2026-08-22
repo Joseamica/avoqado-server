@@ -35,6 +35,12 @@ export async function registerCustomer(
     throw new BadRequestError('Ya existe una cuenta con este correo. Inicia sesión.')
   }
 
+  // Fase 0.B: un contacto desactivado no se "activa" poniéndole password desde el registro
+  // público. Reactivar es decisión del venue, no del cliente.
+  if (existing && existing.active === false) {
+    throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+  }
+
   const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS)
 
   let customer
@@ -118,6 +124,12 @@ export async function loginCustomer(venueId: string, email: string, password: st
   const valid = await bcrypt.compare(password, customer.password)
   if (!valid) {
     throw new UnauthorizedError('Correo o contraseña incorrectos')
+  }
+
+  // Fase 0.B: una cuenta desactivada por el venue no recibe token por ninguna puerta.
+  // Se comprueba DESPUÉS del password para no revelar el estado a quien no lo sabe.
+  if (customer.active === false) {
+    throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
   }
 
   const token = generateCustomerToken(customer.id, venueId)

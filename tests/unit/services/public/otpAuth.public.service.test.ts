@@ -95,6 +95,35 @@ describe('OTP Auth Public Service', () => {
   // ==========================================
   // verifyOtp
   // ==========================================
+  describe('verifyOtp — Fase 0.B: Customer.active', () => {
+    it('código correcto pero Customer inactivo → 401 CUSTOMER_INACTIVE, challenge consumido, sin token', async () => {
+      prismaMock.otpChallenge.findFirst.mockResolvedValue({
+        id: 'otp-1',
+        destination: PHONE_NORM,
+        codeHash: hashOtpCode('123456'),
+        attempts: 0,
+        maxAttempts: 5,
+        consumedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+      })
+      prismaMock.otpChallenge.update.mockResolvedValue({})
+      prismaMock.consumer.findMany.mockResolvedValue([{ id: 'cons-1' }] as any)
+      prismaMock.customer.findUnique.mockResolvedValue({
+        id: 'cust-1',
+        venueId: VENUE_ID,
+        phone: PHONE_NORM,
+        consumerId: 'cons-1', // ya ligado: no entra al update de consumerId
+        active: false,
+      } as any)
+
+      await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })).rejects.toMatchObject({
+        statusCode: 401,
+        code: 'CUSTOMER_INACTIVE',
+      })
+      expect(generateCustomerToken).not.toHaveBeenCalled()
+    })
+  })
+
   describe('verifyOtp', () => {
     it('throws when the challenge is expired', async () => {
       prismaMock.otpChallenge.findFirst.mockResolvedValue({
