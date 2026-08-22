@@ -31,14 +31,15 @@ export async function registerCustomer(
     where: { venueId_email: { venueId, email } },
   })
 
-  if (existing?.password) {
-    throw new BadRequestError('Ya existe una cuenta con este correo. Inicia sesión.')
-  }
-
   // Fase 0.B: un contacto desactivado no se "activa" poniéndole password desde el registro
-  // público. Reactivar es decisión del venue, no del cliente.
+  // público. Reactivar es decisión del venue, no del cliente. Va ANTES del 400 "ya existe":
+  // si ya tenía password, el "inicia sesión" también le daría 401 — mejor decírselo aquí.
   if (existing && existing.active === false) {
     throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+  }
+
+  if (existing?.password) {
+    throw new BadRequestError('Ya existe una cuenta con este correo. Inicia sesión.')
   }
 
   const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS)
@@ -62,13 +63,13 @@ export async function registerCustomer(
       const phoneExists = await prisma.customer.findUnique({
         where: { venueId_phone: { venueId, phone } },
       })
-      if (phoneExists?.password) {
-        throw new BadRequestError('Ya existe una cuenta con este teléfono.')
-      }
       // Fase 0.B: misma regla que el contacto por email — un contacto desactivado no se
-      // "activa" fusionándole email+password desde el registro público.
+      // "activa" fusionándole email+password desde el registro público. Antes del 400.
       if (phoneExists && phoneExists.active === false) {
         throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+      }
+      if (phoneExists?.password) {
+        throw new BadRequestError('Ya existe una cuenta con este teléfono.')
       }
       if (phoneExists) {
         // Phone customer exists without password — merge by setting email + password
