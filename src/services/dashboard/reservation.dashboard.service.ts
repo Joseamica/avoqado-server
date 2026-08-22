@@ -11,7 +11,6 @@ import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
 import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
 import { resolveModifierSelections, type ResolvedModifierRow } from '@/services/reservation/resolveModifierSelections'
-import { createOrderFromReservation } from '@/services/reservation/createOrderFromReservation'
 import {
   buildSyncKey,
   collapseSupersededOps,
@@ -716,7 +715,7 @@ export interface ReservationFilters {
   search?: string // name, phone, confirmation code
 }
 
-const RESERVATION_INCLUDE = {
+export const RESERVATION_INCLUDE = {
   customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
   table: { select: { id: true, number: true, capacity: true } },
   product: { select: { id: true, name: true, price: true } },
@@ -746,7 +745,7 @@ interface ReservationService {
  * service and its 2nd service silently disappeared from the UI. We fetch the
  * products here and attach them as `services`, preserving booking order.
  */
-async function attachServices<T extends ServiceResolvable>(reservation: T) {
+export async function attachServices<T extends ServiceResolvable>(reservation: T) {
   const [withServices] = await attachServicesMany([reservation])
   return withServices
 }
@@ -1032,37 +1031,11 @@ export async function confirmReservation(venueId: string, reservationId: string,
   return transitionReservation(venueId, reservationId, 'CONFIRMED', confirmedById)
 }
 
-export async function checkInReservation(venueId: string, reservationId: string, checkedInBy: string) {
-  const transitioned = await transitionReservation(venueId, reservationId, 'CHECKED_IN', checkedInBy)
-  // Auto-create the TPV order so the cashier sees the booked services +
-  // picked modifiers pre-populated. Idempotent — re-check-in of an already
-  // converted reservation returns the existing order. Wrapped in a single
-  // SERIALIZABLE tx so the check-in + conversion either both happen or
-  // neither does.
-  let orderId: string | null = null
-  try {
-    const result = await withSerializableRetry(async tx =>
-      createOrderFromReservation(tx, {
-        reservationId,
-        venueId,
-        createdByStaffId: checkedInBy === 'CUSTOMER' || checkedInBy === 'SYSTEM' ? null : checkedInBy,
-      }),
-    )
-    orderId = result?.orderId ?? null
-  } catch (err) {
-    // Order auto-creation must NEVER block check-in. The reservation IS
-    // checked in; if conversion fails, the cashier creates the order
-    // manually like before.
-    logger.error(`[CHECK_IN] Order auto-create failed for reservation ${reservationId}: ${(err as Error).message}`)
-  }
-  // Surface the full booked services[] (Square-pattern multi-service bookings
-  // store the lead service in `product` but the ordered list in `productIds`)
-  // so the POS can print one kitchen/service comanda per booked service.
-  // Reuses the same helper getReservationById/getReservationsCalendar use —
-  // purely additive, `orderId` and every other field are preserved.
-  const withServices = await attachServices(transitioned)
-  return Object.assign(withServices, { orderId })
-}
+// Fase 0.C: `checkInReservation` se movió a src/services/reservation/checkIn.service.ts —
+// comando PURO en tx (CAS + statusLog + ActivityLog, idempotente, PENDING|CONFIRMED → CHECKED_IN,
+// sin orden) y wrapper `checkInReservationAndOpenOrder` (COUNTER: abre la orden fuera de la tx,
+// respuesta plana con orderId/orderCreated/orderError). Antes aquí: sólo CONFIRMED, no idempotente,
+// y el fallo de la orden se tragaba sin rastro.
 
 export async function completeReservation(venueId: string, reservationId: string) {
   return transitionReservation(venueId, reservationId, 'COMPLETED', null)

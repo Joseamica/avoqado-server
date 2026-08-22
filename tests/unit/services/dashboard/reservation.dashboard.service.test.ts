@@ -5,7 +5,6 @@ import {
   getReservationByCancelSecret,
   getReservationStats,
   confirmReservation,
-  checkInReservation,
   completeReservation,
   markNoShow,
   cancelReservation,
@@ -1834,72 +1833,9 @@ describe('Reservation Dashboard Service', () => {
       })
     })
 
-    describe('checkInReservation', () => {
-      it('should transition CONFIRMED -> CHECKED_IN', async () => {
-        prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
-        prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
-        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
-
-        const result = await checkInReservation(VENUE_ID, 'res-1', STAFF_ID)
-
-        expect(result.status).toBe('CHECKED_IN')
-        expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
-          expect.objectContaining({
-            data: expect.objectContaining({
-              status: 'CHECKED_IN',
-              checkedInAt: expect.any(Date),
-            }),
-          }),
-        )
-      })
-
-      it('should reject PENDING -> CHECKED_IN (invalid)', async () => {
-        prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'PENDING' }))
-
-        await expect(checkInReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
-      })
-
-      // Additive contract — the check-in response must carry the full booked
-      // services[] (not just the lead `product`) so the POS can print one
-      // comanda per service, without losing anything it already returned.
-      it('includes services[] for ALL booked productIds on check-in (multi-service)', async () => {
-        prismaMock.reservation.findFirst.mockResolvedValue(
-          createMockReservation({ status: 'CONFIRMED', productId: 'p-baby', productIds: ['p-baby', 'p-manipedi'] }),
-        )
-        prismaMock.reservation.update.mockResolvedValue(
-          createMockReservation({ status: 'CHECKED_IN', productId: 'p-baby', productIds: ['p-baby', 'p-manipedi'] }),
-        )
-        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(
-          createMockReservation({ status: 'CHECKED_IN', productId: 'p-baby', productIds: ['p-baby', 'p-manipedi'] }),
-        )
-        prismaMock.product.findMany.mockResolvedValue([
-          { id: 'p-manipedi', name: 'Manicure + Pedicure + Spa', price: new Prisma.Decimal(800), duration: 70 },
-          { id: 'p-baby', name: 'Baby Boomer', price: new Prisma.Decimal(150), duration: 25 },
-        ] as any)
-
-        const result = await checkInReservation(VENUE_ID, 'res-1', STAFF_ID)
-
-        expect(result.services.map((s: any) => s.name)).toEqual(['Baby Boomer', 'Manicure + Pedicure + Spa'])
-        expect(prismaMock.product.findMany).toHaveBeenCalledWith(
-          expect.objectContaining({ where: { id: { in: ['p-baby', 'p-manipedi'] } } }),
-        )
-      })
-
-      // Regression guard — the additive change must not drop orderId or any
-      // pre-existing field the dashboard already consumes from this response.
-      it('still returns orderId and pre-existing fields alongside the new services[]', async () => {
-        prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
-        prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
-        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
-
-        const result = await checkInReservation(VENUE_ID, 'res-1', STAFF_ID)
-
-        expect(result.status).toBe('CHECKED_IN')
-        expect(result.confirmationCode).toBe('RES-ABC123')
-        expect(result).toHaveProperty('orderId')
-        expect(result.services).toEqual([]) // table-only reservation, no productId/productIds
-      })
-    })
+    // Fase 0.C: el check-in vive en src/services/reservation/checkIn.service.ts (comando puro +
+    // wrapper que abre la orden). PENDING → CHECKED_IN ahora es válido (las apps mandan PENDING)
+    // y es idempotente. Sus tests: tests/unit/services/reservation/checkIn.*.test.ts.
 
     describe('completeReservation', () => {
       it('should transition CHECKED_IN -> COMPLETED', async () => {
@@ -2034,7 +1970,6 @@ describe('Reservation Dashboard Service', () => {
         prismaMock.reservation.findFirst.mockResolvedValue(null)
 
         await expect(confirmReservation(VENUE_ID, 'nonexistent', STAFF_ID)).rejects.toThrow(NotFoundError)
-        await expect(checkInReservation(VENUE_ID, 'nonexistent', STAFF_ID)).rejects.toThrow(NotFoundError)
         await expect(completeReservation(VENUE_ID, 'nonexistent')).rejects.toThrow(NotFoundError)
         await expect(markNoShow(VENUE_ID, 'nonexistent', STAFF_ID)).rejects.toThrow(NotFoundError)
         await expect(cancelReservation(VENUE_ID, 'nonexistent', STAFF_ID)).rejects.toThrow(NotFoundError)
@@ -3250,7 +3185,6 @@ describe('Reservation Dashboard Service', () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: terminal }))
 
         await expect(confirmReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
-        await expect(checkInReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
         await expect(completeReservation(VENUE_ID, 'res-1')).rejects.toThrow(BadRequestError)
         await expect(markNoShow(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
         await expect(cancelReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)

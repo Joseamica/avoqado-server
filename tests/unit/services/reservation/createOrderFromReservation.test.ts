@@ -79,4 +79,17 @@ describe('createOrderFromReservation staff prefill', () => {
     expect(prismaMock.reservation.findFirst).not.toHaveBeenCalled()
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
+
+  it('🔴 Fase 0.C (test 10): la idempotencia sólo cuenta órdenes VIVAS — mismo predicado que el índice parcial (status NOT IN CANCELLED, DELETED)', async () => {
+    // Antes el findFirst no filtraba status: una orden CANCELADA bloqueaba el reemplazo para siempre.
+    prismaMock.order.findFirst.mockResolvedValue(null)
+
+    await createOrderFromReservation(prismaMock, { reservationId: 'reservation-1', venueId: 'venue-1' })
+
+    expect(prismaMock.order.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { reservationId: 'reservation-1', venueId: 'venue-1', status: { notIn: ['CANCELLED', 'DELETED'] } },
+      }),
+    )
+  })
 })

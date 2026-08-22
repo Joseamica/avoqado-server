@@ -3215,7 +3215,11 @@ model Order {
 
   // Originating reservation — set by check-in auto-conversion so the cashier
   // sees the booked services + picked modifiers pre-populated. Idempotency
-  // anchor: createOrderFromReservation skips when this order already exists.
+  // anchor: createOrderFromReservation skips when an ALIVE order already exists.
+  // DB-level guarantee (Fase 0.C, migration 20260822150000): partial unique index
+  // `Order_reservationId_alive_key` ON (reservationId) WHERE reservationId IS NOT NULL
+  // AND status NOT IN ('CANCELLED','DELETED') — Prisma can't express it here; the
+  // loser of a concurrent check-in gets P2002 and is handed the winner's order.
   reservationId String?
   reservation   Reservation? @relation("OrderFromReservation", fields: [reservationId], references: [id], onDelete: SetNull)
 

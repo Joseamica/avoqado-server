@@ -9,13 +9,13 @@ import {
   rescheduleAppointmentReservation,
   cancelReservation,
   confirmReservation,
-  checkInReservation,
   completeReservation,
   markNoShow,
   updateReservation,
   type UpdateReservationInput,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
+import { checkInReservationAndOpenOrder } from '@/services/reservation/checkIn.service'
 import { canVenueChargeOnline } from '@/services/payments/ecommerceCapability'
 import { getClassSession } from '@/services/dashboard/classSession.dashboard.service'
 import { getWaitlist, addToWaitlist } from '@/services/dashboard/reservationWaitlist.service'
@@ -472,7 +472,15 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
             updated = await confirmReservation(reservation.venueId, reservation.id, 'SYSTEM')
             break
           case 'checked_in':
-            updated = await checkInReservation(reservation.venueId, reservation.id, 'SYSTEM')
+            // Fase 0.C: el actor es el staff dueño de la conexión MCP (HUMAN), source=MCP
+            // (sin ventana de horario). Abre la orden TPV como COUNTER; respuesta plana.
+            updated = await checkInReservationAndOpenOrder({
+              reservationId: reservation.id,
+              venueId: reservation.venueId,
+              actor: { type: 'HUMAN', staffId: scope.staffId, organizationId: scope.organizationId ?? scope.activeOrg },
+              source: 'MCP',
+              now: new Date(),
+            })
             break
           case 'completed':
             updated = await completeReservation(reservation.venueId, reservation.id)
