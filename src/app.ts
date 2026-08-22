@@ -36,6 +36,7 @@ import { eventLoopGuardMiddleware, startEventLoopMonitor } from './middlewares/e
 import webhookRoutes from './routes/webhook.routes'
 import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calendar.webhook.controller'
 import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webhook.controller'
+import { startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
@@ -145,6 +146,13 @@ app.use(
 // de las reservas del widget ni de los recibos. Un envío fallido no dejaba línea en el log y el
 // único síntoma era un correo que no llegaba. No mover la ruta: rompería el embebido del widget.
 app.use('/api/v1/public', requestLoggerMiddleware, express.json(), cookieParser(), publicRoutes)
+
+// Activación de Uber Eats por OAuth. PÚBLICAS a propósito: Uber redirige aquí el navegador
+// del comerciante, sin sesión de Avoqado — la prueba de origen es el `state` firmado, no un
+// token nuestro. Una tienda sólo queda alcanzable por nuestro token de app DESPUÉS de que su
+// dueño autorice aquí; sin este flujo cada alta dependería de un ticket a soporte de Uber.
+app.get('/api/v1/delivery/uber/oauth/start', requestLoggerMiddleware, startUberOAuth)
+app.get('/api/v1/delivery/uber/oauth/callback', requestLoggerMiddleware, uberOAuthCallback)
 
 // Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
 // /revoke, and discovery metadata — all at the app root (required by the SDK).

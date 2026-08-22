@@ -35,6 +35,9 @@ jest.mock('@/services/dashboard/manualSale.resolvers', () => ({
   resolveCategory: (...a: any[]) => resolveCategoryMock(...a),
   mapPaymentForm: (...a: any[]) => mapPaymentFormMock(...a),
   parseAmount: (...a: any[]) => parseAmountMock(...a),
+  // Puro (no toca DB): se usa la implementación REAL para que estas suites
+  // sigan ejercitando el default "sin columna de estatus = Aprobada".
+  mapSaleStatus: (...a: any[]) => jest.requireActual('@/services/dashboard/manualSale.resolvers').mapSaleStatus(...a),
 }))
 
 // serializedInventoryService.markAsSold — returns { item }.
@@ -127,7 +130,13 @@ describe('manualSale.service — createOneManualSale', () => {
 
     const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
 
-    expect(result).toEqual({ ok: true, orderId: 'order-1', verificationId: 'verification-1', venueId: STORE_VENUE_ID })
+    expect(result).toEqual({
+      ok: true,
+      orderId: 'order-1',
+      verificationId: 'verification-1',
+      venueId: STORE_VENUE_ID,
+      saleStatus: 'COMPLETED',
+    })
 
     // Order created once, MANUAL_ENTRY / DASHBOARD_MANUAL, COMPLETED, pesos amount.
     expect(tx.order.create).toHaveBeenCalledTimes(1)

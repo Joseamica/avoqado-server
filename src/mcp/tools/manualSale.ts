@@ -11,10 +11,18 @@ import type { ManualSaleRowInput } from '@/schemas/dashboard/manualSale.schema'
 /**
  * record_serialized_sale — single-row version of "Subir ventas fuera de TPV"
  * (Task 4's `createOneManualSale`), exposed through the customer MCP so an
- * operator can record ONE external SIM sale (already documentation-approved
- * offline — PlayTelecom / Walmart) by conversation, without the bulk upload
- * flow. Confirm-gated like every money/inventory-affecting MCP write: it
- * both creates a paid Order + Payment AND flips a SerializedItem to SOLD.
+ * operator can record ONE external SIM sale (decided offline — PlayTelecom /
+ * Walmart) by conversation, without the bulk upload flow. Confirm-gated like
+ * every money/inventory-affecting MCP write: it both creates a paid Order +
+ * Payment AND flips a SerializedItem to SOLD.
+ *
+ * `saleStatus` mirrors the sheet's "Estatus de Venta" column: "Aprobada"
+ * (default) records a good sale; "Rechazada" records a LOST one — the SIM left
+ * the shelf but the line could not be linked/ported and the customer is gone.
+ * Both flip the SIM to SOLD; only the SaleVerification differs (COMPLETED vs
+ * REJECTED). The confirmation preview says which one out loud, because an
+ * LLM-driven "regístrala como rechazada" that lands on the wrong branch is only
+ * undone by hand.
  *
  * ORG-level write, not per-venue: the caller does not pre-select a venueId —
  * `createOneManualSale` resolves `storeName` against the org's own venues
@@ -51,9 +59,32 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
       paymentForm: z.string().min(1).describe('How it was paid, e.g. "Efectivo", "Tarjeta", "No aplica"'),
       amount: z.union([z.number(), z.string()]).describe('Sale amount in PESOS (major units), e.g. 250.00 — never cents'),
       simType: z.string().optional().describe("SIM type/category label; falls back to the SIM's existing category if omitted"),
+      saleStatus: z
+        .enum(['Aprobada', 'Rechazada'])
+        .optional()
+        .describe(
+          'Outcome of the sale. "Aprobada" (default) = good sale. "Rechazada" = the SIM left but the line could not be linked/ported and the sale was lost — the SIM still leaves inventory, but the sale is not billable.',
+        ),
+      rejectionNote: z
+        .string()
+        .optional()
+        .describe('Free-text reason, only used when saleStatus is "Rechazada" (e.g. "no se pudo vincular, el cliente ya se lo llevó")'),
       confirm: z.boolean().optional().describe('Must be true to actually record the sale; without it you get a preview'),
     },
-    async ({ iccid, promoterCode, promoterName, storeName, saleDate, saleType, paymentForm, amount, simType, confirm }) => {
+    async ({
+      iccid,
+      promoterCode,
+      promoterName,
+      storeName,
+      saleDate,
+      saleType,
+      paymentForm,
+      amount,
+      simType,
+      saleStatus,
+      rejectionNote,
+      confirm,
+    }) => {
       requireManualSaleAccess() // throws ScopeError if no venue in the active org grants manual-sales:create
 
       if (!promoterCode && !promoterName) {
@@ -62,13 +93,17 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
 
       const seller = promoterName ?? promoterCode
       const amountLabel = typeof amount === 'number' ? amount.toFixed(2) : amount
+      const isRejected = saleStatus === 'Rechazada'
+      const statusLabel = isRejected ? 'RECHAZADA (venta perdida)' : 'Aprobada'
 
       if (!confirm) {
         return text({
           ok: false,
           requiresConfirmation: true,
-          change: { iccid, seller, storeName, saleDate, amount: amountLabel },
-          message: `Voy a registrar la venta del SIM ${iccid} de ${seller} en ${storeName} por $${amountLabel}. Vuelve a llamar con confirm:true para confirmar.`,
+          change: { iccid, seller, storeName, saleDate, amount: amountLabel, saleStatus: statusLabel },
+          message: isRejected
+            ? `Voy a registrar como RECHAZADA la venta del SIM ${iccid} de ${seller} en ${storeName} por $${amountLabel}: el SIM sale del inventario pero la venta NO cuenta como buena${rejectionNote ? ` (motivo: ${rejectionNote})` : ''}. Vuelve a llamar con confirm:true para confirmar.`
+            : `Voy a registrar la venta del SIM ${iccid} de ${seller} en ${storeName} por $${amountLabel}. Vuelve a llamar con confirm:true para confirmar.`,
         })
       }
 
@@ -82,6 +117,8 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
         paymentForm,
         amount,
         simType,
+        saleStatus,
+        rejectionNote,
       }
 
       const result = await createOneManualSale(scope.activeOrg, scope.staffId, row)
@@ -94,7 +131,7 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
         entity: 'Order',
         entityId: result.orderId,
         venueId: result.venueId,
-        data: { iccid, seller, storeName, saleDate, amount: amountLabel },
+        data: { iccid, seller, storeName, saleDate, amount: amountLabel, saleStatus: result.saleStatus },
       })
 
       return text({
@@ -102,7 +139,10 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
         orderId: result.orderId,
         verificationId: result.verificationId,
         venueId: result.venueId,
-        message: `Venta registrada: SIM ${iccid} vendido por ${seller} en ${storeName}.`,
+        saleStatus: result.saleStatus,
+        message: isRejected
+          ? `Venta RECHAZADA registrada: el SIM ${iccid} ya no aparece en custodia, y la venta de ${seller} en ${storeName} queda marcada como perdida.`
+          : `Venta registrada: SIM ${iccid} vendido por ${seller} en ${storeName}.`,
       })
     },
   )

@@ -36,6 +36,19 @@ export const manualSaleRowSchema = z.object({
   amount: z.union([z.number(), z.string()]),
   /** "Tipo de SIM" / "Categoría" — optional; falls back to the item's existing category. */
   simType: z.string().optional(),
+  /**
+   * "Estatus de Venta" — "Aprobada" | "Rechazada". Opcional a propósito: los archivos
+   * que el operador ya venía subiendo no traen la columna, y una columna ausente o
+   * vacía significa "Aprobada". El valor se INTERPRETA en `mapSaleStatus`
+   * (`manualSale.resolvers.ts`), no aquí — Zod valida forma, nunca reglas de negocio.
+   */
+  saleStatus: z.string().optional(),
+  /**
+   * "Motivo de Rechazo" — texto libre del operador ("no se pudo vincular; el cliente
+   * ya se lo llevó"). Solo se guarda cuando la venta viene rechazada; en una venta
+   * aprobada se ignora.
+   */
+  rejectionNote: z.string().optional(),
 })
 
 /** Bulk payload: the parsed sheet rows, plus an optional two-step confirm flag. */

@@ -1,21 +1,38 @@
-import { DeliveryProvider, OrderSource, OriginSystem, PaymentMethod, PaymentFundsFlow, TransactionStatus } from '@prisma/client'
+import {
+  DeliveryChannelLink,
+  DeliveryProvider,
+  OrderSource,
+  OriginSystem,
+  PaymentMethod,
+  PaymentFundsFlow,
+  TransactionStatus,
+} from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { ingestUberOrder } from '@/services/delivery-channels/providers/uber-eats/uber.orderIngestion.service'
+import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { UBER_EXTERNAL_ID_PREFIX } from '@/services/delivery-channels/providers/uber-eats/uber.productResolver'
-import type { NormalizedUberOrder } from '@/services/delivery-channels/providers/uber-eats/uber.types'
+import type { NormalizedDeliveryOrder } from '@/services/delivery-channels/core/types'
+import { runIngestionContract } from './ingestionContract'
 
-// Spec paso 7: el evento se vuelve VENTA — Order + líneas + Payment + inventario,
-// todo en UNA transacción. Contra PostgreSQL real: el unique de externalId y la
-// idempotencia no se prueban con Prisma mockeado.
+// El evento se vuelve VENTA — Order + líneas + Payment + inventario, todo en UNA
+// transacción. Contra PostgreSQL real: el unique de externalId y la idempotencia no se
+// prueban con Prisma mockeado.
+//
+// Estos 7 casos nacieron contra `ingestUberOrder`, la ingesta duplicada que Uber tenía
+// porque el núcleo contaba la propina dos veces. Con el núcleo ya arreglado, corren
+// contra `ingestDeliveryOrder` y siguen siendo el mismo contrato: son la red que prueba
+// que la unificación no perdió nada.
 describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
-  let venueId: string, orgId: string, productId: string, linkId: string
+  let venueId: string, orgId: string, productId: string
+  let link: DeliveryChannelLink
 
-  const pedido = (externalId: string, itemExternalId = 'Cochinita_de_Doña_Si'): NormalizedUberOrder => ({
+  const pedido = (externalId: string, itemExternalId = 'Cochinita_de_Doña_Si'): NormalizedDeliveryOrder => ({
     externalId,
     displayId: 'AB12C',
+    source: OrderSource.UBER_EATS,
     items: [
       {
         externalId: itemExternalId,
+        externalData: itemExternalId,
         name: 'Cochinita',
         quantity: 2,
         unitPrice: '304.00',
@@ -34,6 +51,7 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
       cashDueTip: '0.00',
     },
     raw: { fuente: 'test' },
+    placedAt: new Date('2026-08-20T20:05:55.000Z'),
   })
 
   beforeAll(async () => {
@@ -55,10 +73,9 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
       },
     })
     productId = p.id
-    const link = await prisma.deliveryChannelLink.create({
+    link = await prisma.deliveryChannelLink.create({
       data: { venueId, provider: DeliveryProvider.UBER_EATS, externalLocationId: `store-${Date.now()}`, webhookSecret: 'x' },
     })
-    linkId = link.id
   })
 
   afterAll(async () => {
@@ -72,6 +89,10 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
       await prisma.orderItemModifier.deleteMany({ where: { orderItem: { orderId: { in: ids } } } })
       await prisma.orderItem.deleteMany({ where: { orderId: { in: ids } } })
       await prisma.order.deleteMany({ where: { venueId } })
+      // KdsOrder tiene FK a Venue: si no se borra, el deleteMany de venue de abajo
+      // truena y el catch de este bloque se lo traga — venues de prueba acumulándose
+      // en silencio para siempre. (KdsOrderItem cae solo, va en cascade.)
+      await prisma.kdsOrder.deleteMany({ where: { venueId } })
       await prisma.deliveryChannelLink.deleteMany({ where: { venueId } })
       await prisma.venueTenderTypeRevision.deleteMany({ where: { venueId } })
       await prisma.venueTenderType.deleteMany({ where: { venueId } })
@@ -86,20 +107,21 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
   })
 
   it('crea la Order con el namespace del proveedor y sin mesero ni turno', async () => {
-    const r = await ingestUberOrder(pedido('ord-1'), { linkId, venueId })
-    const o = await prisma.order.findUnique({ where: { id: r.orderId } })
-    expect(o!.externalId).toBe('UBER_EATS:ord-1') // namespaceado: dos proveedores pueden repetir folio
-    expect(o!.source).toBe(OrderSource.UBER_EATS)
-    expect(o!.originSystem).toBe(OriginSystem.DELIVERY_PLATFORM)
-    expect(o!.servedById).toBeNull() // no hay mesero
-    expect(o!.shiftId).toBeNull() // no pertenece a un turno
-    expect(o!.total.toString()).toBe('658') // 608 + 30 + 20
-    expect(o!.subtotal.toString()).toBe('608')
+    const { order } = await ingestDeliveryOrder(pedido('ord-1'), link)
+    expect(order.externalId).toBe('UBER_EATS:ord-1') // namespaceado: dos proveedores pueden repetir folio
+    expect(order.source).toBe(OrderSource.UBER_EATS)
+    expect(order.originSystem).toBe(OriginSystem.DELIVERY_PLATFORM)
+    expect(order.servedById).toBeNull() // no hay mesero
+    expect(order.shiftId).toBeNull() // no pertenece a un turno
+    // 🔴 638, NO 658: el total es venta + cargos, SIN propina. Antes de arreglar el núcleo
+    // la propina entraba también aquí y se contaba dos veces.
+    expect(order.total.toString()).toBe('638')
+    expect(order.subtotal.toString()).toBe('608')
   })
 
   it('resuelve el producto y guarda snapshot + modificadores', async () => {
-    const r = await ingestUberOrder(pedido('ord-2'), { linkId, venueId })
-    const items = await prisma.orderItem.findMany({ where: { orderId: r.orderId }, include: { modifiers: true } })
+    const { order } = await ingestDeliveryOrder(pedido('ord-2'), link)
+    const items = await prisma.orderItem.findMany({ where: { orderId: order.id }, include: { modifiers: true } })
     expect(items).toHaveLength(1)
     expect(items[0].productId).toBe(productId)
     expect(items[0].productName).toBe('Cochinita') // snapshot, sobrevive si el producto cambia
@@ -109,11 +131,30 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
     expect(items[0].modifiers[0].name).toBe('Leche entera')
   })
 
+  it('la comanda de cocina guarda los modificadores en la MISMA forma que el POS', async () => {
+    // 🔴 Este caso existe porque el de arriba pasaba mientras la cocina estaba rota: afirmaba
+    // sobre `OrderItem` —la tabla de la VENTA— y la pantalla de cocina lee `KdsOrderItem`, que
+    // es otra. La ingesta guardaba ahí `[{"name":…,"quantity":…}]` mientras el POS guardaba
+    // `["texto"]` en esa misma columna, y la diferencia llegó hasta el fierro: en una Sunmi D3
+    // con un pedido real de Uber, Android pintó el JSON crudo y iOS perdió el modificador.
+    //
+    // Cuando dos productores escriben al mismo almacén, el contrato no es el esquema: es la
+    // FORMA del valor. Por eso se afirma el string EXACTO que queda guardado.
+    const { order } = await ingestDeliveryOrder(pedido('ord-kds'), link)
+    const kds = await prisma.kdsOrder.findFirst({ where: { orderId: order.id }, include: { items: true } })
+
+    expect(kds).not.toBeNull()
+    expect(kds!.orderType).toBe('DELIVERY')
+    expect(kds!.items).toHaveLength(1)
+    expect(kds!.items[0].modifiers).toBe('["Leche entera"]')
+    expect(JSON.parse(kds!.items[0].modifiers!)).toEqual(['Leche entera'])
+  })
+
   it('crea el Payment con tender del canal y fundsFlow EXTERNAL_RECORDED', async () => {
-    const r = await ingestUberOrder(pedido('ord-3'), { linkId, venueId })
-    const p = await prisma.payment.findFirst({ where: { orderId: r.orderId } })
+    const { order } = await ingestDeliveryOrder(pedido('ord-3'), link)
+    const p = await prisma.payment.findFirst({ where: { orderId: order.id } })
     expect(p).not.toBeNull()
-    expect(p!.amount.toString()).toBe('638') // venta + fees, SIN propina
+    expect(p!.amount.toString()).toBe('638') // venta + cargos, SIN propina
     expect(p!.tipAmount.toString()).toBe('20') // propina aparte: no se cuenta dos veces
     expect(p!.method).toBe(PaymentMethod.OTHER)
     expect(p!.fundsFlow).toBe(PaymentFundsFlow.EXTERNAL_RECORDED) // Avoqado NO deposita este dinero
@@ -122,33 +163,73 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
   })
 
   it('deja la cuenta cuadrada: paidAmount y remainingBalance coherentes', async () => {
-    const r = await ingestUberOrder(pedido('ord-4'), { linkId, venueId })
-    const o = await prisma.order.findUnique({ where: { id: r.orderId } })
-    expect(o!.paidAmount.toString()).toBe('658') // 638 + 20
+    const { order } = await ingestDeliveryOrder(pedido('ord-4'), link)
+    const o = await prisma.order.findUnique({ where: { id: order.id } })
+    expect(o!.paidAmount.toString()).toBe('658') // 638 de venta + 20 de propina = lo que entró
     expect(o!.remainingBalance.toString()).toBe('0')
     expect(o!.paymentStatus).toBe('PAID')
   })
 
   it('IDEMPOTENTE: reingerir el mismo pedido no duplica Order ni Payment', async () => {
-    const a = await ingestUberOrder(pedido('ord-5'), { linkId, venueId })
-    const b = await ingestUberOrder(pedido('ord-5'), { linkId, venueId })
-    expect(b.orderId).toBe(a.orderId)
-    expect(b.alreadyExisted).toBe(true)
-    expect(await prisma.payment.count({ where: { orderId: a.orderId } })).toBe(1)
+    const a = await ingestDeliveryOrder(pedido('ord-5'), link)
+    const b = await ingestDeliveryOrder(pedido('ord-5'), link)
+    expect(b.order.id).toBe(a.order.id)
+    expect(b.created).toBe(false)
+    expect(await prisma.payment.count({ where: { orderId: a.order.id } })).toBe(1)
   })
 
-  it('producto que NO resuelve ⇒ la línea entra igual, marcada, sin productId', async () => {
-    const r = await ingestUberOrder(pedido('ord-6', 'producto-que-no-existe'), { linkId, venueId })
-    const items = await prisma.orderItem.findMany({ where: { orderId: r.orderId } })
-    expect(items[0].productId).toBeNull() // no se adivina
-    expect(items[0].productName).toBe('Cochinita') // pero el pedido NO se pierde
-    expect(r.unresolvedItems).toBe(1) // y queda visible para revisión
+  it('producto que NO resuelve ⇒ entra igual, ligado a un placeholder inactivo para re-mapear', async () => {
+    // 🔴 Diferencia deliberada con la ingesta vieja de Uber, que dejaba `productId: null`.
+    // El núcleo crea un producto placeholder INACTIVO en la categoría "Delivery (sin mapear)":
+    // el pedido nunca se pierde Y la línea queda ligada a algo que el dueño puede re-mapear
+    // desde el dashboard. Con `null` el renglón quedaba huérfano y no salía en ningún
+    // reporte por producto.
+    const { order } = await ingestDeliveryOrder(pedido('ord-6', 'producto-que-no-existe'), link)
+    const items = await prisma.orderItem.findMany({ where: { orderId: order.id } })
+    expect(items[0].productName).toBe('Cochinita') // el pedido NO se pierde
+    expect(items[0].productId).not.toBeNull()
+
+    const placeholder = await prisma.product.findUniqueOrThrow({ where: { id: items[0].productId! } })
+    expect(placeholder.active).toBe(false) // inactivo: no se puede vender por error desde el POS
+    const cat = await prisma.menuCategory.findUniqueOrThrow({ where: { id: placeholder.categoryId! } })
+    expect(cat.slug).toBe('delivery-desconocido') // visible para el staff, en su propio cajón
   })
 
   it('rechaza si el split de dinero no cuadra (jamás inventa un cobro)', async () => {
     const malo = pedido('ord-7')
     malo.payment.externallyPaidSale = '999.00' // ya no cuadra con saleAmount + merchantFees
-    await expect(ingestUberOrder(malo, { linkId, venueId })).rejects.toThrow(/no cuadra|invariante/i)
+    await expect(ingestDeliveryOrder(malo, link)).rejects.toThrow(/no cuadra|invariante/i)
     expect(await prisma.order.count({ where: { venueId, externalId: 'UBER_EATS:ord-7' } })).toBe(0)
   })
+
+  it('🔴 EL PEDIDO REAL de Uber, de punta a punta: JSON crudo → traductor → venta', async () => {
+    // Cierra el círculo con el pedido que de verdad hizo Uber el 2026-08-20.
+    const { mapUberOrder } = await import('@/services/delivery-channels/providers/uber-eats/uber.mapper')
+    const crudo = await import('../../fixtures/delivery/uber/pedido-real-delivery-by-uber.json')
+
+    const { order } = await ingestDeliveryOrder(mapUberOrder(crudo.default ?? crudo), link)
+
+    expect(order.externalId).toBe('UBER_EATS:dbe79abc-5a6a-4b3d-85fb-cb7b15e77645')
+    expect(order.orderNumber).toBe('77645')
+    expect(order.total.toString()).toBe('1') // MX$1.00 del Best Burger
+    expect(order.tipAmount.toString()).toBe('0') // reparte Uber ⇒ la propina no llega al comercio
+
+    const items = await prisma.orderItem.findMany({ where: { orderId: order.id } })
+    expect(items).toHaveLength(1)
+    expect(items[0].productName).toBe('Best Burger')
+    expect(items[0].quantity).toBe(1)
+
+    const p = await prisma.payment.findFirst({ where: { orderId: order.id } })
+    expect(p!.amount.toString()).toBe('1')
+    expect(p!.fundsFlow).toBe(PaymentFundsFlow.EXTERNAL_RECORDED)
+  })
+  // ── EL CONTRATO ────────────────────────────────────────────────────────────────────
+  // Uber es hoy el único proveedor directo, así que es quien estrena la suite. Cuando
+  // llegue Rappi o DiDi, su test invoca ESTA MISMA función: si la pasa, está integrado.
+  let n = 0
+  runIngestionContract(
+    'Uber Eats',
+    overrides => ({ ...pedido(`contrato-${++n}-${Date.now()}`), ...overrides }),
+    () => link,
+  )
 })

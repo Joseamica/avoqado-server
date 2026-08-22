@@ -21,6 +21,7 @@ import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { startStalePendingAlertJob } from './jobs/stalePendingAlert.job'
 import { startVenueChatInactivityCleanupJob } from './jobs/venueChatInactivityCleanup.job'
 import { startAreaTicketExternalReconciliationJob } from './jobs/areaTicketExternalReconciliation.job'
+import { startPlaytelecomEventSimReassignmentJob } from './jobs/playtelecomEventSimReassignment.job'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { planRenewalReminderJob } from './jobs/plan-renewal-reminder.job'
@@ -31,6 +32,7 @@ import { batchExpirationJob } from './jobs/batch-expiration.job'
 import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
 import { blumonPaymentAuditJob } from './jobs/blumon-payment-audit.job'
+import { deliveryMenuSyncJob } from './jobs/delivery-menu-sync.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
@@ -177,6 +179,7 @@ const gracefulShutdown = async (signal: string) => {
 
       logger.info('Stopping delivery webhook reconciliation job...')
       deliveryWebhookReconciliationJob.stop()
+      deliveryMenuSyncJob.stop()
 
       logger.info('Stopping Stripe webhook reconciliation job...')
       stripeWebhookReconciliationJob.stop()
@@ -423,6 +426,9 @@ const startApplication = async (retries = 3) => {
       // Start area-ticket external-charge reconciliation (opens UNCONFIRMED_CHARGE incidents)
       startAreaTicketExternalReconciliationJob()
 
+      // Start PlayTelecom Event-SIM venue reassignment (Asana 1217556190300772)
+      startPlaytelecomEventSimReassignmentJob()
+
       // Start TPV health monitor
       tpvHealthMonitorJob.start()
 
@@ -500,6 +506,7 @@ const startApplication = async (retries = 3) => {
       // Start delivery webhook reconciliation job (every 2min at :45s — retries
       // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED)
       deliveryWebhookReconciliationJob.start()
+      deliveryMenuSyncJob.start()
 
       // Start Stripe PLATFORM webhook reconciliation job (every 5min at :03 —
       // replays FAILED WebhookEvent rows. The controller answers 200 even on

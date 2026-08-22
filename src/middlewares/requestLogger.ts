@@ -4,6 +4,52 @@ import { runWithContext } from '../observability/executionContext'
 import { CORRELATION_HEADER, resolveCorrelationId } from '../observability/correlationId'
 import { normalizeEntrypoint } from '../observability/entrypoint'
 
+/** Parámetros de query cuyo VALOR nunca puede llegar a un log. */
+const PARAMS_SENSIBLES = new Set([
+  'code', // 🔴 el de OAuth: canjea un token mientras no expire
+  'state',
+  'access_token',
+  'refresh_token',
+  'id_token',
+  'token',
+  'client_secret',
+  'secret',
+  'password',
+  'api_key',
+  'apikey',
+  'signature',
+])
+
+/**
+ * Redacta credenciales del query string, dejando el resto de la URL legible.
+ *
+ * `normalizeEntrypoint` ya borra el query string entero, pero eso alimenta el campo
+ * `entrypoint`; el logger ADEMÁS escribe la URL cruda en `Request Start`/`Request End`, que
+ * es donde se filtraban. Ante una query malformada se redacta entera: perder legibilidad es
+ * preferible a filtrar un secreto.
+ */
+export function redactUrlSecrets(url: string): string {
+  const i = url.indexOf('?')
+  if (i === -1) return url
+
+  const ruta = url.slice(0, i)
+  const query = url.slice(i + 1)
+
+  try {
+    const params = new URLSearchParams(query)
+    let tocado = false
+    for (const clave of [...params.keys()]) {
+      if (PARAMS_SENSIBLES.has(clave.toLowerCase())) {
+        params.set(clave, '[redactado]')
+        tocado = true
+      }
+    }
+    return tocado ? `${ruta}?${params.toString()}` : url
+  } catch {
+    return `${ruta}?[query-redactada]`
+  }
+}
+
 /**
  * Middleware para registrar todos los requests en el logger.
  *
@@ -25,7 +71,11 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
   // line people actually search — without a tenant.
   runWithContext({ correlationId, source: 'http', entrypoint: normalizeEntrypoint(req.method, req.url) }, () => {
     const start = process.hrtime()
-    const { method, url, ip } = req
+    const { method, ip } = req
+    // 🔴 NUNCA la URL cruda: el query string carga credenciales. El callback de OAuth recibe
+    // `?code=…&state=…`, y ese código canjea un token si alguien lo lee del log antes de que
+    // expire. Hallado por auditoría externa el 2026-08-20.
+    const url = redactUrlSecrets(req.url)
 
     // Skip logging health checks and heartbeats to reduce log noise (in all environments)
     const isHealthCheck = url === '/health'

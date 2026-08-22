@@ -1,10 +1,11 @@
-import { OrderSource, OrderType, OriginSystem, PaymentMethod, PaymentSource, TransactionStatus } from '@prisma/client'
+import { OrderSource, OrderType, OriginSystem, PaymentMethod, PaymentSource, PaymentStatus, TransactionStatus } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import { socketManager } from '../../../../src/communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../../../src/communication/sockets/types'
 import { ingestDeliveryOrder } from '../../../../src/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { dispatchOrderStatus } from '../../../../src/services/delivery-channels/core/statusDispatcher.service'
-import { NormalizedDeliveryOrder } from '../../../../src/services/delivery-channels/core/types'
+import { DeliveryMoneyMismatchError } from '../../../../src/services/delivery-channels/core/money'
+import { NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '../../../../src/services/delivery-channels/core/types'
 import {
   assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
@@ -12,6 +13,12 @@ import {
 
 jest.mock('../../../../src/communication/sockets/managers/socketManager', () => ({
   socketManager: { broadcastToVenue: jest.fn() },
+}))
+
+// El tender del canal se auto-provisiona contra la base real; aquí sólo interesa que el
+// Payment quede estampado con él (la provisión tiene su propio test de integración).
+jest.mock('../../../../src/services/delivery-channels/core/deliveryTenderProvisioning.service', () => ({
+  ensureDeliveryTenderType: jest.fn(async () => ({ id: 'tender-canal-1', revision: 1 })),
 }))
 
 jest.mock('../../../../src/services/delivery-channels/core/statusDispatcher.service', () => ({
@@ -33,28 +40,36 @@ jest.mock('../../../../src/services/inventory/inventoryPosting.service', () => (
 
 const link: any = { id: 'link1', venueId: 'venue1', provider: 'DELIVERECT', orderAcceptanceMode: 'AUTO' }
 
+// Reparto por default: pagado 100% por la plataforma (nada por cobrar en persona) — el
+// caso normal para un agregador. saleAmount 90 + merchantFees 0 = externallyPaidSale 90;
+// tipAmount 10 = externallyPaidTip 10. cashDue* en 0 ⇒ Order.paymentStatus PAID.
+const basePayment: NormalizedDeliveryPayment = {
+  currency: 'MXN',
+  saleAmount: '90.00',
+  merchantFees: '0.00',
+  tipAmount: '10.00',
+  externallyPaidSale: '90.00',
+  externallyPaidTip: '10.00',
+  cashDueSale: '0.00',
+  cashDueTip: '0.00',
+}
+
 const baseNormalized: NormalizedDeliveryOrder = {
   externalId: 'UE-1',
   displayId: 'A1',
   source: OrderSource.UBER_EATS,
-  items: [{ plu: 'TACO', name: 'Taco', quantity: 2, unitPrice: 45, modifiers: [] }],
-  subtotal: 90,
-  taxAmount: 14.4,
-  discountAmount: 0,
-  tipAmount: 10,
-  serviceChargeAmount: 0,
-  deliveryFeeAmount: 0,
-  total: 114.4,
-  // Fix C4 (audit, spec §10.1.2): orderIsAlreadyPaid vive en el payload crudo del
-  // proveedor (normalized.raw), no en un campo tipado de NormalizedDeliveryOrder —
-  // ver el comentario en ingestDeliveryOrder. `true` = caso normal (agregadores casi
-  // siempre cobran al cliente); los tests de Fix C4 abajo cubren false/ausente.
-  raw: { any: 'payload', orderIsAlreadyPaid: true },
+  items: [{ externalId: 'TACO', name: 'Taco', quantity: 2, unitPrice: '45.00', total: '90.00', modifiers: [] }],
+  payment: basePayment,
+  raw: { any: 'payload' },
   placedAt: new Date('2026-07-18T12:00:00.000Z'),
 }
 
 function makeNormalized(overrides: Partial<NormalizedDeliveryOrder> = {}): NormalizedDeliveryOrder {
   return { ...baseNormalized, ...overrides }
+}
+
+function makePayment(overrides: Partial<NormalizedDeliveryPayment> = {}): NormalizedDeliveryPayment {
+  return { ...basePayment, ...overrides }
 }
 
 const existingOrderRow = {
@@ -85,7 +100,7 @@ describe('ingestDeliveryOrder', () => {
       weightQuantity: null,
     })
     ;(prisma.payment.count as jest.Mock).mockResolvedValue(0)
-    ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'pay1', amount: 114.4 })
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'pay1', amount: 90 })
     ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({ id: 'alloc1' })
     // Placeholder category already exists by default (find-or-create path tested separately)
     ;(prisma.menuCategory.findUnique as jest.Mock).mockResolvedValue({ id: 'cat-placeholder', slug: 'delivery-desconocido' })
@@ -104,26 +119,28 @@ describe('ingestDeliveryOrder', () => {
 
     expect(prisma.order.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { venueId_externalId: { venueId: 'venue1', externalId: 'UE-1' } },
+        where: { venueId_externalId: { venueId: 'venue1', externalId: 'DELIVERECT:UE-1' } },
         create: expect.objectContaining({
-          externalId: 'UE-1',
+          externalId: 'DELIVERECT:UE-1',
           orderNumber: 'A1',
           source: OrderSource.UBER_EATS,
           originSystem: OriginSystem.DELIVERY_PLATFORM,
           type: OrderType.DELIVERY,
           status: 'CONFIRMED',
-          paymentStatus: 'PAID',
+          paymentStatus: PaymentStatus.PAID,
           kitchenStatus: 'PENDING',
-          posRawData: { any: 'payload', orderIsAlreadyPaid: true },
+          posRawData: { any: 'payload' },
           createdAt: baseNormalized.placedAt,
         }),
       }),
     )
 
     const callArg = (prisma.order.upsert as jest.Mock).mock.calls[0][0]
+    // subtotal/total ya NO se derivan de los items — vienen de payment.saleAmount/merchantFees.
     expect(callArg.create.subtotal.toString()).toBe('90')
-    expect(callArg.create.taxAmount.toString()).toBe('14.4')
-    expect(callArg.create.total.toString()).toBe('114.4')
+    expect(callArg.create.taxAmount.toString()).toBe('0') // México: IVA incluido, nunca fuente fiscal el del proveedor
+    expect(callArg.create.total.toString()).toBe('90') // saleAmount + merchantFees, SIN propina
+    expect(callArg.create.tipAmount.toString()).toBe('10')
   })
 
   it('lanza si el venue del channel link no existe', async () => {
@@ -133,7 +150,7 @@ describe('ingestDeliveryOrder', () => {
   })
 
   // ============================================================
-  // 2. OrderItems con productId resuelto por sku
+  // 2. OrderItems con productId resuelto por sku (externalId del canal)
   // ============================================================
   it('crea OrderItems resolviendo productId por sku (Product venueId_sku)', async () => {
     await ingestDeliveryOrder(makeNormalized(), link)
@@ -147,106 +164,77 @@ describe('ingestDeliveryOrder', () => {
           productName: 'Taco',
           productSku: 'TACO',
           quantity: 2,
-          externalId: 'UE-1-TACO-0',
+          externalId: 'DELIVERECT:UE-1-TACO-0',
         }),
       }),
     )
   })
 
-  it('OrderItem.total = unitPrice * quantity para items SIN modifiers (regresión)', async () => {
-    await ingestDeliveryOrder(makeNormalized(), link)
+  it('unitPrice/total de la línea pasan TAL CUAL del contrato normalizado, sin recomputar (el mapper ya hizo la cuenta)', async () => {
+    // total (110) deliberadamente distinto de unitPrice×quantity (90) — si el servicio
+    // recomputara localmente en vez de confiar en el mapper, este test lo detectaría.
+    // payment.saleAmount sube a 110 para cuadrar con el total real del item (Hallazgo 2).
+    const normalized = makeNormalized({
+      items: [{ externalId: 'TACO', name: 'Taco', quantity: 2, unitPrice: '45.00', total: '110.00', modifiers: [] }],
+      payment: makePayment({ saleAmount: '110.00', externallyPaidSale: '110.00' }),
+    })
+
+    await ingestDeliveryOrder(normalized, link)
 
     const callArg = (prisma.orderItem.create as jest.Mock).mock.calls[0][0]
     expect(callArg.data.unitPrice.toString()).toBe('45')
-    expect(callArg.data.total.toString()).toBe('90')
+    expect(callArg.data.total.toString()).toBe('110')
     expect(callArg.data.taxAmount.toString()).toBe('0')
   })
 
-  it('OrderItem.total incluye el modifier × cantidad del padre y sum(líneas) == Order.subtotal (Fix C4, spec §10.1.4)', async () => {
+  // ============================================================
+  // 3b. Modifiers → filas OrderItemModifier reales (contrato unificado; ya NO texto en notes)
+  // ============================================================
+  it('crea una fila OrderItemModifier por cada modifier del item, con name/quantity/price', async () => {
     const normalized = makeNormalized({
       items: [
         {
-          plu: 'TACO',
+          externalId: 'TACO',
           name: 'Taco',
           quantity: 2,
-          unitPrice: 45,
-          modifiers: [{ plu: 'MOD-QUESO', name: 'Extra queso', quantity: 1, unitPrice: 10 }],
-        },
-        { plu: 'REFRESCO', name: 'Refresco', quantity: 1, unitPrice: 30, modifiers: [] },
-      ],
-      // 2×45 + (1×10 modifier × 2 cantidad del taco) + 30 = 140 — el modifier aplica a
-      // CADA taco (Deliverect: cantidad_modificador × cantidad_producto), no una sola vez.
-      subtotal: 140,
-    })
-    ;(prisma.product.findUnique as jest.Mock)
-      .mockResolvedValueOnce({ id: 'prod1', sku: 'TACO', name: 'Taco' })
-      .mockResolvedValueOnce({ id: 'prod2', sku: 'REFRESCO', name: 'Refresco' })
-
-    await ingestDeliveryOrder(normalized, link)
-
-    const totals = (prisma.orderItem.create as jest.Mock).mock.calls.map((c: any[]) => Number(c[0].data.total))
-    expect(totals).toEqual([110, 30]) // línea Taco: 2×45 + (10×1×2) = 110, NO 100
-    expect(totals.reduce((a: number, b: number) => a + b, 0)).toBe(normalized.subtotal)
-  })
-
-  // ============================================================
-  // 3b. Modifiers visibles en cocina vía notes (v1 — sin OrderItemModifier rows)
-  // ============================================================
-  it('los modifiers aparecen en notes con formato "+ Nx Nombre" unidos con " | "', async () => {
-    const normalized = makeNormalized({
-      items: [
-        {
-          plu: 'TACO',
-          name: 'Taco',
-          quantity: 2,
-          unitPrice: 45,
+          unitPrice: '45.00',
+          total: '110.00',
           modifiers: [
-            { plu: 'MOD-QUESO', name: 'Extra queso', quantity: 1, unitPrice: 10 },
-            { plu: 'MOD-SALSA', name: 'Salsa verde', quantity: 2, unitPrice: 0 },
+            { externalId: 'MOD-QUESO', name: 'Extra queso', quantity: 1, price: '20.00' },
+            { externalId: 'MOD-SALSA', name: 'Salsa verde', quantity: 2, price: '0.00' },
           ],
         },
       ],
+      // payment.saleAmount cuadra con el total del item (Hallazgo 2).
+      payment: makePayment({ saleAmount: '110.00', externallyPaidSale: '110.00' }),
     })
 
     await ingestDeliveryOrder(normalized, link)
 
-    const callArg = (prisma.orderItem.create as jest.Mock).mock.calls[0][0]
-    expect(callArg.data.notes).toBe('+ 1x Extra queso | + 2x Salsa verde')
-  })
-
-  it('item con notes propio + modifiers: el notes propio va primero', async () => {
-    const normalized = makeNormalized({
-      items: [
-        {
-          plu: 'TACO',
-          name: 'Taco',
-          quantity: 2,
-          unitPrice: 45,
-          modifiers: [{ plu: 'MOD-QUESO', name: 'Extra queso', quantity: 1, unitPrice: 10 }],
-          notes: 'Sin cebolla',
-        },
-      ],
+    expect(prisma.orderItemModifier.create).toHaveBeenCalledTimes(2)
+    expect(prisma.orderItemModifier.create).toHaveBeenNthCalledWith(1, {
+      data: { orderItemId: 'item1', modifierId: null, name: 'Extra queso', quantity: 1, price: expect.anything() },
     })
-
-    await ingestDeliveryOrder(normalized, link)
-
-    const callArg = (prisma.orderItem.create as jest.Mock).mock.calls[0][0]
-    expect(callArg.data.notes).toBe('Sin cebolla | + 1x Extra queso')
+    const firstCallPrice = (prisma.orderItemModifier.create as jest.Mock).mock.calls[0][0].data.price
+    expect(firstCallPrice.toString()).toBe('20')
+    const secondCallPrice = (prisma.orderItemModifier.create as jest.Mock).mock.calls[1][0].data.price
+    expect(secondCallPrice.toString()).toBe('0')
   })
 
-  it('item sin modifiers ni notes → notes queda undefined (regresión)', async () => {
-    await ingestDeliveryOrder(makeNormalized(), link)
+  it('item sin modifiers → no crea ninguna fila OrderItemModifier (regresión)', async () => {
+    await ingestDeliveryOrder(makeNormalized(), link) // baseNormalized: modifiers: []
 
-    const callArg = (prisma.orderItem.create as jest.Mock).mock.calls[0][0]
-    expect(callArg.data.notes).toBeUndefined()
+    expect(prisma.orderItemModifier.create).not.toHaveBeenCalled()
   })
 
   it('crea un OrderItem por cada item normalizado', async () => {
     const normalized = makeNormalized({
       items: [
-        { plu: 'TACO', name: 'Taco', quantity: 2, unitPrice: 45, modifiers: [] },
-        { plu: 'REFRESCO', name: 'Refresco', quantity: 1, unitPrice: 20, modifiers: [] },
+        { externalId: 'TACO', name: 'Taco', quantity: 2, unitPrice: '45.00', total: '90.00', modifiers: [] },
+        { externalId: 'REFRESCO', name: 'Refresco', quantity: 1, unitPrice: '20.00', total: '20.00', modifiers: [] },
       ],
+      // Dos líneas suman 110 — payment.saleAmount cuadra con eso (Hallazgo 2).
+      payment: makePayment({ saleAmount: '110.00', externallyPaidSale: '110.00' }),
     })
     ;(prisma.product.findUnique as jest.Mock)
       .mockResolvedValueOnce({ id: 'prod1', sku: 'TACO', name: 'Taco' })
@@ -258,9 +246,9 @@ describe('ingestDeliveryOrder', () => {
   })
 
   // ============================================================
-  // 3. Placeholder si el PLU no existe (find-or-create categoría delivery-desconocido)
+  // 3. Placeholder si el sku no existe (find-or-create categoría delivery-desconocido)
   // ============================================================
-  it('crea producto placeholder + categoría delivery-desconocido si el PLU no existe', async () => {
+  it('crea producto placeholder + categoría delivery-desconocido si el sku no existe', async () => {
     ;(prisma.product.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prisma.menuCategory.findUnique as jest.Mock).mockResolvedValue(null)
 
@@ -334,20 +322,67 @@ describe('ingestDeliveryOrder', () => {
           status: TransactionStatus.COMPLETED,
           processor: 'deliverect',
           originSystem: OriginSystem.DELIVERY_PLATFORM,
-          externalId: 'UE-1-platform',
-          posRawData: { any: 'payload', orderIsAlreadyPaid: true },
+          externalId: 'DELIVERECT:UE-1-platform',
+          posRawData: { any: 'payload' },
         }),
       }),
     )
 
     const callArg = (prisma.payment.create as jest.Mock).mock.calls[0][0]
-    expect(callArg.data.amount.toString()).toBe('114.4')
+    expect(callArg.data.amount.toString()).toBe('90')
     expect(callArg.data.tipAmount.toString()).toBe('10')
     expect(callArg.data.feePercentage.toString()).toBe('0')
     expect(callArg.data.feeAmount.toString()).toBe('0')
-    expect(callArg.data.netAmount.toString()).toBe('114.4')
+    expect(callArg.data.netAmount.toString()).toBe('90')
     expect(callArg.data.order).toEqual({ connect: { id: 'order1' } })
     expect(callArg.data.venue).toEqual({ connect: { id: 'venue1' } })
+  })
+
+  // ============================================================
+  // 4b. 🔴 EL BUG QUE ESTE CAMBIO MATA — la propina ya NO se cuenta dos veces
+  // ============================================================
+  it('🔴 Payment.amount es la venta SIN propina; la propina va sólo en tipAmount (antes: amount=230, tipAmount=30 — doble conteo)', async () => {
+    const normalized = makeNormalized({
+      // items debe cuadrar contra el nuevo saleAmount (Hallazgo 2: assertDeliveryMoneyInvariants
+      // ahora también compara saleAmount contra la suma de las líneas).
+      items: [{ externalId: 'TACO', name: 'Taco', quantity: 2, unitPrice: '100.00', total: '200.00', modifiers: [] }],
+      payment: makePayment({
+        saleAmount: '200.00',
+        merchantFees: '0.00',
+        tipAmount: '30.00',
+        externallyPaidSale: '200.00',
+        externallyPaidTip: '30.00',
+        cashDueSale: '0.00',
+        cashDueTip: '0.00',
+      }),
+    })
+
+    await ingestDeliveryOrder(normalized, link)
+
+    const callArg = (prisma.payment.create as jest.Mock).mock.calls[0][0]
+    expect(callArg.data.amount.toString()).toBe('200') // la venta, SIN la propina
+    expect(callArg.data.tipAmount.toString()).toBe('30') // la propina, aparte
+    expect(callArg.data.netAmount.toString()).toBe('200') // netAmount consistente con amount
+  })
+
+  it('🔴 rechaza un pedido cuyo reparto de dinero no cuadra, sin tocar la base (ni venue.findUnique)', async () => {
+    const malo = makeNormalized({
+      payment: makePayment({
+        saleAmount: '100.00',
+        merchantFees: '0.00',
+        tipAmount: '0.00',
+        externallyPaidSale: '99.00', // 100 ≠ 99 + 0 — no cuadra
+        externallyPaidTip: '0.00',
+        cashDueSale: '0.00',
+        cashDueTip: '0.00',
+      }),
+    })
+
+    await expect(ingestDeliveryOrder(malo, link)).rejects.toThrow(DeliveryMoneyMismatchError)
+
+    expect(prisma.venue.findUnique).not.toHaveBeenCalled()
+    expect(prisma.$transaction).not.toHaveBeenCalled()
+    expect(prisma.order.upsert).not.toHaveBeenCalled()
   })
 
   // ============================================================
@@ -359,7 +394,7 @@ describe('ingestDeliveryOrder', () => {
     expect(prisma.paymentAllocation.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          amount: 114.4,
+          amount: 90,
           payment: { connect: { id: 'pay1' } },
           order: { connect: { id: 'order1' } },
         }),
@@ -378,7 +413,7 @@ describe('ingestDeliveryOrder', () => {
     expect(result.created).toBe(false)
     expect(prisma.order.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        update: expect.objectContaining({ posRawData: { any: 'payload', orderIsAlreadyPaid: true } }),
+        update: expect.objectContaining({ posRawData: { any: 'payload' } }),
       }),
     )
     expect(prisma.orderItem.create).not.toHaveBeenCalled()
@@ -400,18 +435,8 @@ describe('ingestDeliveryOrder', () => {
   // ============================================================
   // 6b. Inventario: el pedido pagado DESCUENTA del almacén (fase 5.8)
   // ============================================================
-  //
-  // Un pedido de agregador entra ya PAGADO y con renglones resueltos a
-  // productos REALES del catálogo (resolveProductId), pero no descontaba nada:
-  // la comida salía de la cocina y el almacén no se movía. Decisión del founder
-  // (2026-08-16), con paridad Toast/Square —donde un pedido de tercero es una
-  // orden más y deplete el stock igual—: Avoqado descuenta.
-  //
-  // Límite conocido: el mapper v1 guarda los modificadores como TEXTO en notes,
-  // sin filas OrderItemModifier, así que se descuenta el producto base y no los
-  // insumos del modificador. Eso es del mapper, no de este camino.
   describe('inventario — el pedido pagado descuenta del almacén', () => {
-    it('un pedido YA PAGADO deja vale CON sus renglones (no SKIPPED)', async () => {
+    it('un pedido YA PAGADO (nada por cobrar en persona) deja vale CON sus renglones (no SKIPPED)', async () => {
       await ingestDeliveryOrder(makeNormalized(), link)
 
       expect(createSalePostingInTxMock).toHaveBeenCalledWith(
@@ -441,8 +466,17 @@ describe('ingestDeliveryOrder', () => {
       expect(applySalePostingMock).toHaveBeenCalledWith('posting-del-1', null)
     })
 
-    it('un pedido NO pagado todavía no deja vale — nada que descontar aún', async () => {
-      await ingestDeliveryOrder(makeNormalized({ raw: { any: 'payload', orderIsAlreadyPaid: false } }), link)
+    it('un pedido con saldo por cobrar en persona (NO pagado en su totalidad) todavía no deja vale', async () => {
+      const normalized = makeNormalized({
+        payment: makePayment({
+          externallyPaidSale: '0.00',
+          externallyPaidTip: '0.00',
+          cashDueSale: '90.00',
+          cashDueTip: '10.00',
+        }),
+      })
+
+      await ingestDeliveryOrder(normalized, link)
 
       expect(createSalePostingInTxMock).not.toHaveBeenCalled()
     })
@@ -526,43 +560,46 @@ describe('ingestDeliveryOrder', () => {
   })
 
   // ============================================================
-  // 10. C1 (CRITICAL): PLU duplicado en el mismo pedido NO debe perder el pedido
+  // 10. C1 (CRITICAL): sku duplicado en el mismo pedido NO debe perder el pedido
   // ============================================================
-  it('C1: mismo PLU en 2 líneas → 2 OrderItems con externalIds DISTINTOS (nunca choca @@unique([orderId, externalId]))', async () => {
+  it('C1: mismo sku en 2 líneas → 2 OrderItems con externalIds DISTINTOS (nunca choca @@unique([orderId, externalId]))', async () => {
     const normalized = makeNormalized({
       items: [
-        { plu: 'TACO', name: 'Taco', quantity: 1, unitPrice: 45, modifiers: [] },
+        { externalId: 'TACO', name: 'Taco', quantity: 1, unitPrice: '45.00', total: '45.00', modifiers: [] },
         {
-          plu: 'TACO',
+          externalId: 'TACO',
           name: 'Taco (extra queso)',
           quantity: 1,
-          unitPrice: 45,
-          modifiers: [{ plu: 'MOD-QUESO', name: 'Extra queso', quantity: 1, unitPrice: 10 }],
+          unitPrice: '45.00',
+          total: '55.00',
+          modifiers: [{ externalId: 'MOD-QUESO', name: 'Extra queso', quantity: 1, price: '10.00' }],
         },
       ],
-      subtotal: 100, // 45 + (45+10)
+      // 45 + 55 = 100 — payment.saleAmount cuadra con eso (Hallazgo 2).
+      payment: makePayment({ saleAmount: '100.00', externallyPaidSale: '100.00' }),
     })
 
     await ingestDeliveryOrder(normalized, link)
 
     expect(prisma.orderItem.create).toHaveBeenCalledTimes(2)
     const externalIds = (prisma.orderItem.create as jest.Mock).mock.calls.map((c: any[]) => c[0].data.externalId)
-    expect(new Set(externalIds).size).toBe(2) // distintos — jamás el mismo `${externalId}-${plu}` para ambas líneas
-    expect(externalIds).toEqual(['UE-1-TACO-0', 'UE-1-TACO-1'])
+    expect(new Set(externalIds).size).toBe(2) // distintos — jamás el mismo `${externalId}-${sku}` para ambas líneas
+    expect(externalIds).toEqual(['DELIVERECT:UE-1-TACO-0', 'DELIVERECT:UE-1-TACO-1'])
 
     const totals = (prisma.orderItem.create as jest.Mock).mock.calls.map((c: any[]) => Number(c[0].data.total))
-    expect(totals.reduce((a: number, b: number) => a + b, 0)).toBe(normalized.subtotal)
+    expect(totals).toEqual([45, 55])
   })
 
-  it('C1: 2 items SIN PLU con nombres distintos → 2 placeholders con skus determinísticos DISTINTOS (nunca Date.now())', async () => {
-    ;(prisma.product.findUnique as jest.Mock).mockResolvedValue(null) // ningún PLU/sku existe en catálogo
+  it('C1: 2 items SIN externalId con nombres distintos → 2 placeholders con skus determinísticos DISTINTOS (nunca Date.now())', async () => {
+    ;(prisma.product.findUnique as jest.Mock).mockResolvedValue(null) // ningún sku existe en catálogo
     ;(prisma.product.create as jest.Mock).mockResolvedValueOnce({ id: 'prod-agua' }).mockResolvedValueOnce({ id: 'prod-coca' })
     const normalized = makeNormalized({
       items: [
-        { plu: '', name: 'Agua mineral', quantity: 1, unitPrice: 20, modifiers: [] },
-        { plu: '', name: 'Coca cola', quantity: 1, unitPrice: 25, modifiers: [] },
+        { externalId: '', name: 'Agua mineral', quantity: 1, unitPrice: '20.00', total: '20.00', modifiers: [] },
+        { externalId: '', name: 'Coca cola', quantity: 1, unitPrice: '25.00', total: '25.00', modifiers: [] },
       ],
-      subtotal: 45,
+      // 20 + 25 = 45 — payment.saleAmount cuadra con eso (Hallazgo 2).
+      payment: makePayment({ saleAmount: '45.00', externallyPaidSale: '45.00' }),
     })
 
     await ingestDeliveryOrder(normalized, link)
@@ -583,23 +620,26 @@ describe('ingestDeliveryOrder', () => {
     expect(productSkus).toEqual(['delivery-unknown-agua-mineral', 'delivery-unknown-coca-cola'])
   })
 
-  it('C1: item SIN PLU repetido en 2 pedidos distintos → el placeholder se REUSA (findUnique hit, create llamado 1 vez)', async () => {
+  it('C1: item SIN externalId repetido en 2 pedidos distintos → el placeholder se REUSA (findUnique hit, create llamado 1 vez)', async () => {
     const placeholderProduct = { id: 'prod-agua-reused' }
     // Pedido 1: no existe todavía → se crea
     ;(prisma.product.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValueOnce(null)
     ;(prisma.product.create as jest.Mock).mockResolvedValueOnce(placeholderProduct)
+    // payment.saleAmount cuadra con el total del item ($20, Hallazgo 2) en los dos pedidos.
     const order1 = makeNormalized({
       externalId: 'UE-1',
-      items: [{ plu: '', name: 'Agua mineral', quantity: 1, unitPrice: 20, modifiers: [] }],
+      items: [{ externalId: '', name: 'Agua mineral', quantity: 1, unitPrice: '20.00', total: '20.00', modifiers: [] }],
+      payment: makePayment({ saleAmount: '20.00', externallyPaidSale: '20.00' }),
     })
     await ingestDeliveryOrder(order1, link)
 
-    // Pedido 2: mismo nombre sin PLU → el sku determinístico coincide → findUnique lo encuentra, NO crea de nuevo
+    // Pedido 2: mismo nombre sin externalId → el sku determinístico coincide → findUnique lo encuentra, NO crea de nuevo
     ;(prisma.product.findUnique as jest.Mock).mockResolvedValueOnce(placeholderProduct)
     ;(prisma.order.upsert as jest.Mock).mockResolvedValueOnce({ ...existingOrderRow, id: 'order2', externalId: 'UE-2' })
     const order2 = makeNormalized({
       externalId: 'UE-2',
-      items: [{ plu: '', name: 'Agua mineral', quantity: 1, unitPrice: 20, modifiers: [] }],
+      items: [{ externalId: '', name: 'Agua mineral', quantity: 1, unitPrice: '20.00', total: '20.00', modifiers: [] }],
+      payment: makePayment({ saleAmount: '20.00', externallyPaidSale: '20.00' }),
     })
     await ingestDeliveryOrder(order2, link)
 
@@ -619,11 +659,14 @@ describe('ingestDeliveryOrder', () => {
   // ============================================================
   // 11. I2 (IMPORTANT): modo AUTO dispara el accept al canal tras ingesta exitosa
   // ============================================================
-  it('I2: link AUTO + orden nueva (created:true) → dispatchOrderStatus llamado con (order, "ACCEPTED")', async () => {
+  it('I2: link AUTO + orden nueva (created:true) → dispatchOrderStatus con el LINK que ya tenemos', async () => {
     const result = await ingestDeliveryOrder(makeNormalized(), link) // link.orderAcceptanceMode = 'AUTO' (fixture)
 
     expect(result.created).toBe(true)
-    expect(dispatchOrderStatus).toHaveBeenCalledWith(expect.objectContaining({ id: 'order1' }), 'ACCEPTED')
+    // 🔴 El tercer argumento no es adorno: sin él, el despachador vuelve a buscar el canal
+    // en la base y NO lo encuentra, porque el evento se liga a la orden DESPUÉS de esta
+    // ingesta. Era una carrera que producía un warning en cada pedido de Uber.
+    expect(dispatchOrderStatus).toHaveBeenCalledWith(expect.objectContaining({ id: 'order1' }), 'ACCEPTED', link)
   })
 
   it('I2: link MANUAL → dispatchOrderStatus NO se llama (aceptación manual queda para el staff)', async () => {
@@ -652,77 +695,64 @@ describe('ingestDeliveryOrder', () => {
   })
 
   // ============================================================
-  // 12. Fix C4 (audit, MONEY, spec §10.1.5): serviceChargeAmount/deliveryFeeAmount se
-  // normalizaban en el mapper pero nunca se escribían en el Order — quedaban en 0
-  // aunque el `total` SÍ los incluía (pedido internamente inconsistente).
+  // 12. Reparto de dinero — Payment/paymentStatus (contrato unificado, Tarea 2/3)
+  //
+  // Sustituye al viejo `orderIsAlreadyPaid` (leído de un campo crudo de Deliverect,
+  // `normalized.raw`): con el reparto explícito, "¿hay pago de plataforma?" se
+  // contesta con externallyPaidSale + externallyPaidTip > 0, sin cast a `any`.
   // ============================================================
-  it('Fix C4: persiste serviceChargeAmount y deliveryFeeAmount en el Order (antes se normalizaban pero nunca se escribían)', async () => {
-    const normalized = makeNormalized({ serviceChargeAmount: 12.5, deliveryFeeAmount: 25 })
-
-    await ingestDeliveryOrder(normalized, link)
-
-    const callArg = (prisma.order.upsert as jest.Mock).mock.calls[0][0]
-    expect(callArg.create.serviceChargeAmount.toString()).toBe('12.5')
-    expect(callArg.create.deliveryFeeAmount.toString()).toBe('25')
-  })
-
-  it('Fix C4: serviceChargeAmount/deliveryFeeAmount en 0 (default) se persisten como 0 explícito (regresión)', async () => {
-    await ingestDeliveryOrder(makeNormalized(), link) // baseNormalized: ambos en 0
-
-    const callArg = (prisma.order.upsert as jest.Mock).mock.calls[0][0]
-    expect(callArg.create.serviceChargeAmount.toString()).toBe('0')
-    expect(callArg.create.deliveryFeeAmount.toString()).toBe('0')
-  })
-
-  // ============================================================
-  // 13. Fix C4 (audit, MONEY, spec §10.1.2): orderIsAlreadyPaid — Deliverect manda
-  // payment.amount para pedidos PAGADOS Y NO pagados. Antes: SIEMPRE se creaba un
-  // Payment COMPLETED → un pedido no-pagado se volvía ingreso liquidado ficticio.
-  // Fix conservador: SOLO orderIsAlreadyPaid === true crea el Payment.
-  // ============================================================
-  describe('Fix C4 — orderIsAlreadyPaid (spec §10.1.2)', () => {
-    it('orderIsAlreadyPaid: true (default de baseNormalized) → crea Payment COMPLETED, Order.paymentStatus PAID', async () => {
+  describe('reparto de dinero — reemplaza al viejo orderIsAlreadyPaid', () => {
+    it('pago externo > 0 (default) → crea Payment COMPLETED, Order.paymentStatus PAID', async () => {
       await ingestDeliveryOrder(makeNormalized(), link)
 
       expect(prisma.payment.create).toHaveBeenCalledTimes(1)
       expect(prisma.paymentAllocation.create).toHaveBeenCalledTimes(1)
       const callArg = (prisma.order.upsert as jest.Mock).mock.calls[0][0]
-      expect(callArg.create.paymentStatus).toBe('PAID')
+      expect(callArg.create.paymentStatus).toBe(PaymentStatus.PAID)
     })
 
-    it('orderIsAlreadyPaid: false → NO crea Payment ni PaymentAllocation, Order.paymentStatus PENDING (nunca ingreso fantasma)', async () => {
-      const normalized = makeNormalized({ raw: { any: 'payload', orderIsAlreadyPaid: false } })
+    it('sin pago externo (todo por cobrar en persona) → NO crea Payment ni PaymentAllocation, Order.paymentStatus PENDING (nunca ingreso fantasma)', async () => {
+      const normalized = makeNormalized({
+        payment: makePayment({ externallyPaidSale: '0.00', externallyPaidTip: '0.00', cashDueSale: '90.00', cashDueTip: '10.00' }),
+      })
 
       await ingestDeliveryOrder(normalized, link)
 
       expect(prisma.payment.create).not.toHaveBeenCalled()
       expect(prisma.paymentAllocation.create).not.toHaveBeenCalled()
       const callArg = (prisma.order.upsert as jest.Mock).mock.calls[0][0]
-      expect(callArg.create.paymentStatus).toBe('PENDING')
+      expect(callArg.create.paymentStatus).toBe(PaymentStatus.PENDING)
       // La orden SÍ se confirma para cocina — el flujo de preparación es independiente del de dinero.
       expect(callArg.create.status).toBe('CONFIRMED')
     })
 
-    it('orderIsAlreadyPaid ausente del payload → tratado como NO pagado (conservador, nunca asume pagado por default)', async () => {
-      const normalized = makeNormalized({ raw: { any: 'payload' } }) // sin el campo
+    it('pago parcial (algo externo + algo por cobrar) → Order.paymentStatus PARTIAL, SÍ crea Payment por lo ya liquidado', async () => {
+      const normalized = makeNormalized({
+        payment: makePayment({
+          saleAmount: '90.00',
+          externallyPaidSale: '50.00',
+          externallyPaidTip: '10.00',
+          cashDueSale: '40.00',
+          cashDueTip: '0.00',
+        }),
+      })
 
       await ingestDeliveryOrder(normalized, link)
 
-      expect(prisma.payment.create).not.toHaveBeenCalled()
       const callArg = (prisma.order.upsert as jest.Mock).mock.calls[0][0]
-      expect(callArg.create.paymentStatus).toBe('PENDING')
+      expect(callArg.create.paymentStatus).toBe(PaymentStatus.PARTIAL)
+      expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+      const paymentArg = (prisma.payment.create as jest.Mock).mock.calls[0][0]
+      expect(paymentArg.data.amount.toString()).toBe('50')
+      expect(paymentArg.data.tipAmount.toString()).toBe('10')
+      // Parcial: SIGUE sin descontar inventario — sólo cuando queda en 0 lo por cobrar.
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
     })
 
-    it('orderIsAlreadyPaid: "true" (string, no boolean) → tratado como NO pagado (=== true estricto, nunca truthy laxo)', async () => {
-      const normalized = makeNormalized({ raw: { any: 'payload', orderIsAlreadyPaid: 'true' } })
-
-      await ingestDeliveryOrder(normalized, link)
-
-      expect(prisma.payment.create).not.toHaveBeenCalled()
-    })
-
-    it('items SIEMPRE se procesan aunque orderIsAlreadyPaid sea false (el pedido no-pagado igual entra a cocina)', async () => {
-      const normalized = makeNormalized({ raw: { any: 'payload', orderIsAlreadyPaid: false } })
+    it('items SIEMPRE se procesan aunque no haya pago externo todavía (el pedido no-pagado igual entra a cocina)', async () => {
+      const normalized = makeNormalized({
+        payment: makePayment({ externallyPaidSale: '0.00', externallyPaidTip: '0.00', cashDueSale: '90.00', cashDueTip: '10.00' }),
+      })
 
       await ingestDeliveryOrder(normalized, link)
 

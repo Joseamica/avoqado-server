@@ -16,6 +16,7 @@ import { Request, Response } from 'express'
 import logger from '../../config/logger'
 import { env } from '../../config/env'
 import { persistUberWebhookEvent } from '../../services/delivery-channels/providers/uber-eats/uber.webhookIngress'
+import { processUberEvent } from '../../services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 
 export async function handleUberWebhook(req: Request, res: Response): Promise<void> {
   // El body DEBE llegar como Buffer: la firma se calcula sobre los bytes crudos.
@@ -53,6 +54,22 @@ export async function handleUberWebhook(req: Request, res: Response): Promise<vo
 
     logger.info(`[✅ UberWebhook] evento ${result.outcome}`, { eventRowId: result.eventRowId })
     res.status(200).end()
+
+    // 🔴 DESPUÉS del 200, nunca antes. Uber espera un ACK inmediato: traer el pedido y
+    // aceptarlo toma segundos y haría que el webhook expirara del lado de Uber, que
+    // reintentaría — y con eso empezaría a consumir los ~11.5 minutos de plazo.
+    //
+    // Sin `await` a propósito: el evento YA está persistido, así que si el proceso muere
+    // aquí no se pierde nada — la reconciliación lo retoma. Lo que NO puede pasar es que
+    // este trabajo retrase la respuesta.
+    if (result.outcome === 'PERSISTED' && result.eventRowId) {
+      void processUberEvent(result.eventRowId).catch(error => {
+        logger.error('[🔴 UberWebhook] el procesamiento posterior al ACK falló', {
+          eventRowId: result.eventRowId,
+          error: error instanceof Error ? error.message : 'desconocido',
+        })
+      })
+    }
   } catch (error) {
     // No se pudo persistir ⇒ 503 para que Uber reintente (contrato persist-first)
     logger.error('[🔴 UberWebhook] fallo al persistir el evento', {

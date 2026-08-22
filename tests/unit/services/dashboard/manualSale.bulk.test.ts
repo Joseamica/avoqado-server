@@ -35,6 +35,9 @@ jest.mock('@/services/dashboard/manualSale.resolvers', () => ({
   resolveCategory: (...a: any[]) => resolveCategoryMock(...a),
   mapPaymentForm: (...a: any[]) => mapPaymentFormMock(...a),
   parseAmount: (...a: any[]) => parseAmountMock(...a),
+  // Puro (no toca DB): se usa la implementación REAL para que estas suites
+  // sigan ejercitando el default "sin columna de estatus = Aprobada".
+  mapSaleStatus: (...a: any[]) => jest.requireActual('@/services/dashboard/manualSale.resolvers').mapSaleStatus(...a),
 }))
 
 // serializedInventoryService.markAsSold — hit via the REAL createOneManualSale
@@ -131,7 +134,7 @@ describe('manualSale.service — bulkManualSales', () => {
 
       const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false)
 
-      expect(result.crear).toEqual([{ index: 0, iccid: '8952140064323812041F', storeName: 'BAE MUÑOZ SLP (898)' }])
+      expect(result.crear).toEqual([{ index: 0, iccid: '8952140064323812041F', storeName: 'BAE MUÑOZ SLP (898)', saleStatus: 'COMPLETED' }])
       expect(result.omitir).toEqual([])
       expect(result.error).toEqual([])
       expect(result.created).toBeUndefined()
@@ -200,8 +203,8 @@ describe('manualSale.service — bulkManualSales', () => {
 
       expect(result.created).toBe(2)
       expect(result.crear).toEqual([
-        { index: 0, iccid: 'ICCID-GOOD-1', storeName: 'BAE MUÑOZ SLP (898)' },
-        { index: 2, iccid: 'ICCID-GOOD-2', storeName: 'BAE MUÑOZ SLP (898)' },
+        { index: 0, iccid: 'ICCID-GOOD-1', storeName: 'BAE MUÑOZ SLP (898)', saleStatus: 'COMPLETED' },
+        { index: 2, iccid: 'ICCID-GOOD-2', storeName: 'BAE MUÑOZ SLP (898)', saleStatus: 'COMPLETED' },
       ])
       expect(result.omitir).toEqual([{ index: 1, iccid: 'ICCID-SOLD-1', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'ICCID ya vendido' }])
       expect(result.error).toEqual([])
@@ -252,7 +255,7 @@ describe('manualSale.service — bulkManualSales', () => {
       const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, rows, false)
 
       // First occurrence (index 0) goes through the normal resolver classification.
-      expect(result.crear).toEqual([{ index: 0, iccid: '  abc123  ', storeName: 'BAE MUÑOZ SLP (898)' }])
+      expect(result.crear).toEqual([{ index: 0, iccid: '  abc123  ', storeName: 'BAE MUÑOZ SLP (898)', saleStatus: 'COMPLETED' }])
       // Second occurrence (index 1) is omitted for being a duplicate — never resolved.
       expect(result.omitir).toEqual([{ index: 1, iccid: 'ABC123', storeName: 'Other Store', motivo: 'ICCID duplicado en el archivo' }])
       // Resolvers ran exactly once — for the kept (first) row only.

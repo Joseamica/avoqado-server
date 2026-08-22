@@ -3178,6 +3178,14 @@ model Order {
   tags String[] @default([])
 
   // POS sync
+  /// Para cuándo pidió el cliente que estuviera, si NO es para ahora mismo.
+  /// null = pedido inmediato (el caso normal).
+  ///
+  /// 🔴 Un pedido programado NO debe llegar a la cocina al recibirse: el cliente lo pidió
+  /// a las 3pm para las 8pm, y cocinarlo al llegar tira la comida. La comanda se crea
+  /// cuando el proveedor avisa que ya es hora (`orders.release` en Uber).
+  scheduledFor DateTime?
+
   externalId   String? // POS order ID
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
@@ -5460,6 +5468,12 @@ model DeliveryChannelLink {
 
   autoSyncMenu   Boolean   @default(true)
   lastMenuSyncAt DateTime?
+  /// Huella (SHA-256) del menú tal como se publicó por última vez al proveedor.
+  /// El sincronizador compara contra esto en vez de engancharse a cada edición de
+  /// producto: así detecta cambios vengan de donde vengan —dashboard, MCP, un script,
+  /// SQL directo— y se auto-corrige si una publicación se perdió. Un enganche por
+  /// evento sólo ve los caminos que alguien se acordó de instrumentar.
+  lastMenuHash   String?
 
   /// Config extra por proveedor (p.ej. mapa channelId→OrderSource de Deliverect)
   config Json?
@@ -5546,6 +5560,15 @@ model DeliveryOrderEvent {
   /// cuándo. Si el worker muere, el lease expira y otro lo retoma.
   claimToken  String?
   lockedUntil DateTime?
+
+  /// El PEDIDO completo, tal como lo devolvió el proveedor. Existe porque Uber NO
+  /// manda el pedido en el webhook: manda un puntero (`resource_href`) y hay que ir
+  /// a buscarlo con un GET. `payload` guarda el AVISO; esto guarda el CONTENIDO.
+  /// Se conserva crudo a propósito: es la única evidencia de qué mandó el proveedor
+  /// cuando un cuadre no dé, y es de donde salen los fixtures reales del mapper.
+  /// Null mientras no se haya traído (o para proveedores que sí mandan todo).
+  resourcePayload   Json?
+  resourceFetchedAt DateTime?
 
   /// Dedup con `channelLinkId`: `externalEventId` (channelOrderId) nace en el
   /// marketplace, NO es globalmente único → dos canales/venues pueden colisionar.

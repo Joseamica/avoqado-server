@@ -997,3 +997,64 @@ con conciliación manual; una base de clientes no.
 - **`Product.sku` como PLU con candado**: mientras un venue tenga un link ACTIVE, cambiar el `sku` de un producto publicado exige
   confirmación explícita en el dashboard y re-publica el menú; el plan añade esa validación en `product.dashboard.service.ts`. Una tabla de
   ids externos versionados se evalúa cuando haya más de un proveedor vivo.
+
+---
+
+## API de Reportes de Uber — contrato descubierto empíricamente (2026-08-21)
+
+🔴 **Por qué importa, y no es opcional:** la guía de reporting de Uber dice que
+**"Refunds/chargebacks appear only in Reporting—not Orders API"**. O sea: si Uber le
+reembolsa a un cliente por un error del pedido, **por la API de pedidos NUNCA nos enteramos**.
+La venta queda en Avoqado como cobrada, el dinero se descuenta del depósito, y los libros del
+comercio quedan mal. Es exactamente la fuga que la industria documenta como ~3% de
+discrepancia entre el estado de cuenta y el depósito bancario.
+
+**La documentación pública NO trae el contrato** (`/references/api/reporting_suite` sólo
+muestra el menú de navegación). Se descubrió sondeando la API real de sandbox, leyendo lo que
+los propios errores revelan:
+
+| Intento | Respuesta | Lo que enseñó |
+| --- | --- | --- |
+| `GET /v1/eats/reports` | 404 | no es plural en el path |
+| `POST /v1/eats/report` con body `{}` | 400 `"missing the required field; ensure storeUUID, endDate, startDate, reportType"` | **los 4 campos requeridos** |
+| `{ report_type: 'PAYMENT_DETAILS' }` | 400 `"unknown enum value"` | el campo va en **snake_case** y ese enum no existe |
+| `{ store_uuid: [...] , ... }` | 400 "missing required field" | `store_uuid` NO es el nombre |
+| `{ store_uuids: [...], start_date, end_date, report_type }` | **200 `{ workflow_id }`** | ✅ el contrato |
+
+**Contrato verificado:**
+
+```
+POST /v1/eats/report
+{
+  "store_uuids": ["<store_id>"],          // ARRAY y en PLURAL — el singular da 400
+  "start_date":  "YYYY-MM-DD",
+  "end_date":    "YYYY-MM-DD",
+  "report_type": "PAYMENT_DETAILS_REPORT" // aceptado; 'PAYMENT_DETAILS' NO existe
+}
+→ 200 { "workflow_id": "<uuid>_<uuid>" }
+```
+
+⚠️ **Lo que queda SIN verificar, y por eso no se construyó:** no existe ningún `GET` para
+recoger el resultado — se probaron `/v1/eats/report/{wf}`, `/v1/eats/reports/{wf}`,
+`?workflow_id=`, `/report/status/{wf}` y `/report/download/{wf}`: **todos 404**. La guía dice
+que el resultado es **CSV asíncrono** ("may take up to 72 hours to settle", "poll daily,
+ideally overnight"), así que lo más probable es que llegue por **webhook** con una URL de
+descarga. El nombre del evento y la forma del payload NO se conocen.
+
+**Cómo completarlo cuando toque, sin adivinar:** nuestro webhook YA persiste cualquier evento
+con su `event_type` y su payload íntegro (`DeliveryOrderEvent`), y lo desconocido se clasifica
+`IGNORED` sin romper nada. Basta con pedir un reporte y mirar qué llega:
+
+```sql
+SELECT "eventType", payload FROM "DeliveryOrderEvent"
+WHERE provider = 'UBER_EATS' AND "eventType" NOT LIKE 'orders.%'
+ORDER BY "receivedAt" DESC LIMIT 5;
+```
+
+Es el mismo método con el que se escribió el traductor de pedidos contra un pedido REAL en vez
+de contra la documentación —que traía tres cosas mal—: **primero se ve lo que la API manda de
+verdad, después se escribe el código.**
+
+**Datos de la guía que sí están documentados y aplican al diseño:** hasta 50 tiendas por
+llamada · resultado en CSV · los datos tardan hasta 72 h en asentarse · las disputas aparecen
+hasta 30 días después · *"Net Payout in your system should match Payment Details Report total"*.

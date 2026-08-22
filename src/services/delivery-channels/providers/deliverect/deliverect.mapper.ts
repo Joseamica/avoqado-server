@@ -1,5 +1,5 @@
-import { DeliveryChannelLink, OrderSource } from '@prisma/client'
-import { NormalizedDeliveryOrder, NormalizedDeliveryItem, DeliveryOrderStatus } from '../../core/types'
+import { DeliveryChannelLink, OrderSource, Prisma } from '@prisma/client'
+import { NormalizedDeliveryOrder, NormalizedDeliveryItem, NormalizedDeliveryModifier, DeliveryOrderStatus } from '../../core/types'
 
 /**
  * Mapa status interno → código numérico de Deliverect.
@@ -27,11 +27,28 @@ export function resolveOrderSource(channelId: number | undefined, link: Delivery
   return OrderSource.DELIVERY_PLATFORM
 }
 
-/** centavos (o la unidad que declare decimalDigits) → PESOS. SOLO aquí se divide. */
-function toPesos(minor: number | undefined | null, decimalDigits: number): number {
-  if (minor == null) return 0
-  return Math.round(minor) / Math.pow(10, decimalDigits)
+/**
+ * centavos (o la unidad que declare decimalDigits) → PESOS, `Prisma.Decimal`. SOLO aquí se
+ * divide.
+ *
+ * 🔴 HALLAZGO 1 (auditoría externa, 2026-08-20): antes dividía en `number`
+ * (`Math.round(minor) / Math.pow(10, decimalDigits)`) y toda la aritmética posterior
+ * (restas, multiplicaciones) seguía en `number` — viola
+ * `.claude/rules/critical-warnings.md` ("Money = Decimal, Never Float") y permite redondeos
+ * silenciosos del estilo `0.1 + 0.2 !== 0.3`. Caso real encontrado: con `number`,
+ * `serviceCharge=$10.00 + deliveryCost=$4.12` contra un `total=$14.12` (EXACTAMENTE iguales)
+ * daba `ventaSinCargos = -1.7763568394002505e-15` — no CERO — y el mapper rechazaba un
+ * pedido perfectamente cuadrado creyendo que los cargos superaban el total. Con Decimal da 0
+ * exacto. `Math.round` se conserva (no aritmética de dinero: sólo sanea centavos
+ * fraccionarios de un payload corrupto) pero la conversión y todo lo que sigue es Decimal.
+ */
+function toPesosDecimal(minor: number | undefined | null, decimalDigits: number): Prisma.Decimal {
+  if (minor == null) return new Prisma.Decimal(0)
+  return new Prisma.Decimal(Math.round(minor)).dividedBy(new Prisma.Decimal(10).pow(decimalDigits))
 }
+
+/** PESOS Decimal → string decimal 2 lugares, la forma en que viaja el contrato. */
+const toStr = (pesos: Prisma.Decimal): string => pesos.toFixed(2)
 
 export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink): NormalizedDeliveryOrder {
   let p: any
@@ -45,52 +62,108 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
   }
   const dd = typeof p.decimalDigits === 'number' ? p.decimalDigits : 2
 
-  const items: NormalizedDeliveryItem[] = p.items.map((it: any) => ({
-    plu: String(it.plu ?? ''),
-    name: String(it.name ?? 'Producto'),
-    quantity: Number(it.quantity ?? 1),
-    unitPrice: toPesos(it.price, dd),
-    modifiers: (it.subItems ?? []).map((s: any) => ({
-      plu: String(s.plu ?? ''),
-      name: String(s.name ?? 'Modificador'),
-      quantity: Number(s.quantity ?? 1),
-      unitPrice: toPesos(s.price, dd),
-    })),
-    notes: it.remark ? String(it.remark) : undefined,
-  }))
-
-  // Fix (audit, SECURITY): bounds-validate money/quantity BEFORE they can flow into an
-  // Order/Payment. `total`/`unitPrice`/`quantity` are coerced with Number()/toPesos with no
-  // bounds — a negative `total` from a malformed (even HMAC-authenticated) payload would create
-  // a "PAID" Order/Payment shaped like a refund, skipping the whole refund flow (permisos/
-  // confirm/audit). Deliberately NOT validating discountAmount/taxAmount/serviceCharge here —
-  // those can carry legit sign semantics, revalidate in staging.
-  for (const it of items) {
-    if (!Number.isFinite(it.unitPrice) || it.unitPrice < 0) {
-      throw new Error('Deliverect: payload con unitPrice de item inválido')
-    }
-    if (!Number.isFinite(it.quantity) || it.quantity <= 0) {
+  // Fix (audit, SECURITY): bounds-validate money/quantity BEFORE they can flow into un
+  // Order/Payment. Un total/unitPrice negativo de un payload malformado (aunque
+  // HMAC-autenticado) crearía una Order/Payment "PAID" con forma de reembolso, saltándose
+  // el flujo de refund (permisos/confirm/audit). Deliberadamente NO se valida aquí
+  // taxTotal/serviceCharge/deliveryCost — esos ya no se exponen en el contrato normalizado
+  // (ver nota de Order.discountAmount/serviceChargeAmount/deliveryFeeAmount más abajo) y
+  // `assertDeliveryMoneyInvariants` (core/money.ts) es quien valida merchantFees/tipAmount.
+  const items: NormalizedDeliveryItem[] = p.items.map((it: any) => {
+    const quantity = Number(it.quantity ?? 1)
+    if (!Number.isFinite(quantity) || quantity <= 0) {
       throw new Error('Deliverect: payload con quantity de item inválida')
     }
-    for (const modifier of it.modifiers) {
-      if (!Number.isFinite(modifier.unitPrice) || modifier.unitPrice < 0) {
+    const unitPriceDecimal = toPesosDecimal(it.price, dd)
+    if (!unitPriceDecimal.isFinite() || unitPriceDecimal.isNegative()) {
+      throw new Error('Deliverect: payload con unitPrice de item inválido')
+    }
+
+    // Fix C4 (audit, MONEY, spec §10.1.4): Deliverect define el monto de un modifier
+    // como cantidad_modificador × cantidad_PRODUCTO (el padre) — 2 productos con un
+    // modifier de $15 registran $30, no $15. Doc:
+    // https://developers.deliverect.com/docs/how-to-interpret-modifiers-and-the-quantity-ordered
+    // El contrato nuevo (Tarea 2) pide `modifier.price` YA multiplicado por la cantidad
+    // del padre — la multiplicación por la cantidad PROPIA del modifier ocurre donde se
+    // consuma (`price × quantity`), no aquí.
+    const modifiers: NormalizedDeliveryModifier[] = (it.subItems ?? []).map((s: any) => {
+      const modUnitDecimal = toPesosDecimal(s.price, dd)
+      if (!modUnitDecimal.isFinite() || modUnitDecimal.isNegative()) {
         throw new Error('Deliverect: payload con unitPrice de modifier inválido')
       }
+      return {
+        externalId: String(s.plu ?? ''),
+        name: String(s.name ?? 'Modificador'),
+        quantity: Number(s.quantity ?? 1),
+        price: toStr(modUnitDecimal.times(quantity)),
+      }
+    })
+
+    const modifiersTotal = modifiers.reduce((sum, m) => sum.plus(new Prisma.Decimal(m.price).times(m.quantity)), new Prisma.Decimal(0))
+    const lineTotal = unitPriceDecimal.times(quantity).plus(modifiersTotal)
+
+    return {
+      externalId: String(it.plu ?? ''),
+      name: String(it.name ?? 'Producto'),
+      quantity,
+      unitPrice: toStr(unitPriceDecimal),
+      total: toStr(lineTotal),
+      modifiers,
     }
+  })
+
+  // Fix 1 (audit, SECURITY): mismo motivo que arriba — payment.amount es lo que financia
+  // saleAmount; un valor negativo/no-finito crearía un pedido "PAID" con forma de reembolso.
+  const saleAmountDecimal = toPesosDecimal(p.payment?.amount, dd)
+  if (!saleAmountDecimal.isFinite() || saleAmountDecimal.isNegative()) {
+    throw new Error('Deliverect: payload con total inválido')
   }
 
-  // Fix C4 (audit, MONEY, spec §10.1.4): Deliverect define el monto de un modifier
-  // como cantidad_modificador × cantidad_PRODUCTO (el padre) — 2 productos con un
-  // modifier de $15 registran $30, no $15. Doc:
-  // https://developers.deliverect.com/docs/how-to-interpret-modifiers-and-the-quantity-ordered
-  const subtotal = items.reduce(
-    (sum, it) => sum + it.unitPrice * it.quantity + it.modifiers.reduce((m, s) => m + s.unitPrice * s.quantity * it.quantity, 0),
-    0,
-  )
+  // merchantFees: cargos que el proveedor cobra al cliente PERO liquida al comercio
+  // (bolsa/envío propio) — para Deliverect eso es serviceCharge + deliveryCost.
+  // REVALIDAR EN STAGING: no hay documentación pública que confirme que Deliverect
+  // siempre liquida estos dos campos al comercio (vs. quedárselos la plataforma) — es
+  // la lectura más razonable del payload de ejemplo, pero no está verificada end-to-end.
+  const merchantFeesDecimal = toPesosDecimal(p.serviceCharge, dd).plus(toPesosDecimal(p.deliveryCost, dd))
+  const tipAmountDecimal = toPesosDecimal(p.tip, dd)
 
-  const total = toPesos(p.payment?.amount, dd)
-  if (!Number.isFinite(total) || total < 0) {
-    throw new Error('Deliverect: payload con total inválido')
+  // 🔴 `payment.amount` YA INCLUYE los cargos. El propio schema lo documenta
+  // (`prisma/schema.prisma`, `deliveryFeeAmount`): "para pedidos de agregador el proveedor
+  // la cobra al cliente y viaja DENTRO del total". Antes se tomaba `amount` como
+  // `saleAmount` y ADEMÁS se sumaban los cargos como `merchantFees`: una venta de $165 con
+  // $25 de envío quedaba registrada en $190. Hallado por auditoría externa el 2026-08-20;
+  // el test no lo veía porque su fixture trae ambos cargos en cero.
+  //
+  // 🔴 HALLAZGO 1: esta resta viviendo en Decimal (no `number`) es justo lo que evita el
+  // épsilon de coma flotante que rechazaba pedidos perfectamente cuadrados — ver el
+  // comentario de `toPesosDecimal` arriba.
+  const ventaSinCargos = saleAmountDecimal.minus(merchantFeesDecimal)
+  if (ventaSinCargos.isNegative()) {
+    throw new Error(
+      `Deliverect: los cargos (${merchantFeesDecimal.toFixed(2)}) superan el total (${saleAmountDecimal.toFixed(2)}) — el reparto no se puede determinar sin inventar`,
+    )
+  }
+
+  // 🔴 `orderIsAlreadyPaid` NO es decorativo: Deliverect manda `payment.amount` tanto para
+  // pedidos PAGADOS como para los que NO lo están, y este flag es lo ÚNICO que los
+  // distingue. Declararlos todos liquidados creaba un Payment COMPLETED, dejaba la orden
+  // PAID y descontaba inventario de un pedido que el cliente todavía debía.
+  // [doc] https://developers.deliverect.com/page/glossary-pos-orders
+  // Conservador: SÓLO `=== true` cuenta como pagado — ausente o cualquier otro valor deja
+  // el dinero por cobrar, nunca al revés.
+  const yaPagado = (p as { orderIsAlreadyPaid?: unknown })?.orderIsAlreadyPaid === true
+  const totalCobrable = ventaSinCargos.plus(merchantFeesDecimal)
+
+  const payment: NormalizedDeliveryOrder['payment'] = {
+    currency: 'MXN',
+    saleAmount: toStr(ventaSinCargos),
+    merchantFees: toStr(merchantFeesDecimal),
+    tipAmount: toStr(tipAmountDecimal),
+    // Pagado ⇒ la plataforma ya liquidó. No pagado ⇒ queda por cobrar contra entrega.
+    externallyPaidSale: yaPagado ? toStr(totalCobrable) : '0.00',
+    externallyPaidTip: yaPagado ? toStr(tipAmountDecimal) : '0.00',
+    cashDueSale: yaPagado ? '0.00' : toStr(totalCobrable),
+    cashDueTip: yaPagado ? '0.00' : toStr(tipAmountDecimal),
   }
 
   return {
@@ -98,17 +171,7 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
     displayId: String(p.channelOrderDisplayId ?? p.channelOrderId),
     source: resolveOrderSource(p.channel, link),
     items,
-    subtotal: Math.round(subtotal * 100) / 100,
-    taxAmount: toPesos(p.taxTotal, dd),
-    // Fix C4 (audit, MONEY, spec §10.1.3): Deliverect manda discountTotal en NEGATIVO;
-    // el resto del sistema espera la MAGNITUD positiva en discountAmount (y la resta
-    // donde corresponda) — sin Math.abs, un descuento de -10 SUMABA 10 al neto. Doc:
-    // https://developers.deliverect.com/docs/how-are-discounts-sent
-    discountAmount: Math.abs(toPesos(p.discountTotal, dd)),
-    tipAmount: toPesos(p.tip, dd),
-    serviceChargeAmount: toPesos(p.serviceCharge, dd),
-    deliveryFeeAmount: toPesos(p.deliveryCost, dd),
-    total,
+    payment,
     customer: p.customer || p.note ? { name: p.customer?.name, phone: p.customer?.phoneNumber, note: p.note } : undefined,
     raw: p,
     placedAt: p.createdAt ? new Date(p.createdAt) : new Date(),

@@ -85,11 +85,16 @@ describe('dispatchOrderStatus', () => {
   // ============================================================
   // 2. Fix B3: rutea por el link ORIGINADOR del pedido, no por "cualquier link ACTIVE"
   // ============================================================
-  it('Fix B3: busca el DeliveryOrderEvent originador (eventType "order", orderId de la orden) y despacha por SU channelLinkId', async () => {
+  it('Fix B3: sin link a la mano, busca el evento originador y despacha por SU channelLinkId', async () => {
+    // 🔴 SIN filtro de `eventType`. Este test antes exigía `eventType: 'order'` y con eso
+    // CODIFICABA UN BUG: 'order' es el vocabulario de Deliverect, y los eventos de Uber
+    // (`orders.notification`) nunca coincidían — el despacho de todo proveedor directo
+    // caía en el warning "sin evento originador", en cada pedido. El evento originador es
+    // el PRIMERO ligado a esta orden, se llame como se llame en el protocolo de cada uno.
     await dispatchOrderStatus(makeOrder(), 'ACCEPTED')
 
     expect(prisma.deliveryOrderEvent.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { orderId: 'order1', eventType: 'order' } }),
+      expect.objectContaining({ where: { orderId: 'order1', channelLinkId: { not: null } } }),
     )
     expect(prisma.deliveryChannelLink.findUnique).toHaveBeenCalledWith({ where: { id: 'link1' } })
   })
@@ -193,5 +198,47 @@ describe('getAdapter (registry)', () => {
 
   it('lanza para un provider sin adapter implementado todavía', () => {
     expect(() => getAdapter(DeliveryProvider.UBER_EATS)).toThrow()
+  })
+  // ── Falsa alarma + bug de ruteo, hallados con pedidos REALES de Uber (2026-08-20) ────
+  describe('proveedor que gestiona el estado por su cuenta (Uber)', () => {
+    const uberLink: any = { id: 'link_u', venueId: 'venue1', provider: DeliveryProvider.UBER_EATS, status: DeliveryChannelStatus.ACTIVE }
+
+    it('🔴 NO consulta la base cuando el llamador YA sabe el canal', async () => {
+      // El warning "sin DeliveryOrderEvent originador" salía en CADA pedido de Uber. Dos
+      // causas encadenadas:
+      //   1. el lookup filtraba `eventType: 'order'` — vocabulario de DELIVERECT. Los de
+      //      Uber son `orders.notification`, así que NUNCA coincidía.
+      //   2. aunque coincidiera, el evento se liga a la orden DESPUÉS de ingerir, así que
+      //      en ese instante todavía no hay `orderId`. Es una carrera, no un dato faltante.
+      // Un warning que sale siempre y nunca importa entrena a la gente a ignorar el log.
+      // El llamador (la ingesta) SIEMPRE tiene el link en la mano: pasárselo elimina las
+      // dos causas de golpe.
+      const order = makeOrder({ id: 'ord_u', externalId: 'UBER_EATS:abc' })
+
+      await dispatchOrderStatus(order as any, 'ACCEPTED', uberLink)
+
+      expect((prisma as any).deliveryOrderEvent.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('un proveedor sin sendStatusUpdate no es un error: él mismo acepta el pedido', async () => {
+      // Uber acepta con `accept_pos_order` en su propio procesador. Pedirle además un
+      // "status update" es pedirle algo que su API no tiene — no es una falla, es que no
+      // aplica. Antes esto reventaba en `getAdapter` y el error se tragaba en silencio.
+      const order = makeOrder({ id: 'ord_u2', externalId: 'UBER_EATS:def' })
+
+      await expect(dispatchOrderStatus(order as any, 'ACCEPTED', uberLink)).resolves.toBeUndefined()
+      expect(deliverectClient.postOrderStatus).not.toHaveBeenCalled() // ni se cruza de proveedor
+    })
+
+    it('🔴 el link que se pasa MANDA: sigue sin adivinar otro canal del venue', async () => {
+      // La protección original (rutear por el link originador y jamás por "el primer
+      // ACTIVE del venue") se conserva: con >1 canal activo, mandar el status al proveedor
+      // equivocado con un id ajeno es peor que no mandarlo.
+      const order = makeOrder({ id: 'ord_d', externalId: 'DELIV-9' })
+
+      await dispatchOrderStatus(order as any, 'ACCEPTED', activeLink)
+
+      expect(deliverectClient.postOrderStatus).toHaveBeenCalled()
+    })
   })
 })

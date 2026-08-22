@@ -150,3 +150,50 @@ describe('record_serialized_sale — org-level permission gate', () => {
     expect(mockCreateOneManualSale).not.toHaveBeenCalled()
   })
 })
+
+describe('record_serialized_sale — venta rechazada', () => {
+  it('el preview dice en voz alta que es RECHAZADA, con el motivo, y no escribe nada', async () => {
+    const out = parse(await call({ ...baseInput, saleStatus: 'Rechazada', rejectionNote: 'no se pudo vincular' }))
+
+    // El LLM interpreta pedidos difusos: si el preview no gritara "RECHAZADA",
+    // el operador confirmaría una venta perdida creyendo que registra una buena.
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.message).toMatch(/RECHAZADA/)
+    expect(out.message).toContain('no se pudo vincular')
+    expect(out.change.saleStatus).toMatch(/RECHAZADA/)
+    expect(mockCreateOneManualSale).not.toHaveBeenCalled()
+  })
+
+  it('con confirm:true pasa el estatus y el motivo al servicio, y lo audita', async () => {
+    mockCreateOneManualSale.mockResolvedValueOnce({
+      ok: true,
+      orderId: 'ord-2',
+      verificationId: 'ver-2',
+      venueId: 'v1',
+      saleStatus: 'REJECTED',
+    })
+
+    const out = parse(await call({ ...baseInput, saleStatus: 'Rechazada', rejectionNote: 'el cliente ya se lo llevó', confirm: true }))
+
+    const [, , row] = mockCreateOneManualSale.mock.calls[0]
+    expect(row).toMatchObject({ saleStatus: 'Rechazada', rejectionNote: 'el cliente ya se lo llevó' })
+    expect(out.saleStatus).toBe('REJECTED')
+    expect(mockAudit.mock.calls[0][1].data).toMatchObject({ saleStatus: 'REJECTED' })
+  })
+
+  // REGRESIÓN: sin la columna, el tool sigue registrando una venta normal.
+  it('sin saleStatus el preview y el mensaje siguen siendo los de una venta normal', async () => {
+    const preview = parse(await call(baseInput))
+    expect(preview.message).not.toMatch(/RECHAZADA/)
+
+    mockCreateOneManualSale.mockResolvedValueOnce({
+      ok: true,
+      orderId: 'ord-3',
+      verificationId: 'ver-3',
+      venueId: 'v1',
+      saleStatus: 'COMPLETED',
+    })
+    const out = parse(await call({ ...baseInput, confirm: true }))
+    expect(out.message).toMatch(/Venta registrada/)
+  })
+})

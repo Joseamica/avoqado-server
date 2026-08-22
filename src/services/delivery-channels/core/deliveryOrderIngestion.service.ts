@@ -4,10 +4,13 @@ import {
   DeliveryChannelLink,
   Order,
   OrderAcceptanceMode,
+  OrderStatus,
   OrderType,
   OriginSystem,
+  PaymentFundsFlow,
   PaymentMethod,
   PaymentSource,
+  PaymentStatus,
   Prisma,
   SplitType,
   TransactionStatus,
@@ -17,6 +20,10 @@ import { SocketEventType } from '../../../communication/sockets/types'
 import { dispatchOrderStatus } from './statusDispatcher.service'
 import { applySalePosting, createSalePostingInTx } from '../../inventory/inventoryPosting.service'
 import { NormalizedDeliveryOrder } from './types'
+import { assertDeliveryMoneyInvariants } from './money'
+import { computeTenderCommission } from '../../dashboard/tenderType.dashboard.service'
+import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
+import { toKdsModifierLabels } from '../../mobile/kds.mobile.service'
 import {
   assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
@@ -24,10 +31,12 @@ import {
 
 const PLACEHOLDER_CATEGORY_SLUG = 'delivery-desconocido'
 
+const D = (v: string) => new Prisma.Decimal(v)
+
 /**
- * Slug determinístico para el sku placeholder de un item sin PLU: lowercase,
+ * Slug determinístico para el sku placeholder de un item sin externalId: lowercase,
  * no-alfanumérico → '-', recortado a 40 chars. Determinístico (nunca `Date.now()`) para que
- * el MISMO item sin PLU en pedidos distintos reutilice el mismo producto placeholder
+ * el MISMO item sin externalId en pedidos distintos reutilice el mismo producto placeholder
  * (`findUnique` por venueId_sku lo encuentra) en vez de crear uno nuevo cada vez.
  */
 function toPlaceholderSlug(name: string): string {
@@ -40,18 +49,30 @@ function toPlaceholderSlug(name: string): string {
 
 /**
  * Resuelve el Product.id de Avoqado para un item de delivery por su sku (= Product.sku,
- * PLU del canal o el fallback determinístico si el canal no mandó PLU — ver toPlaceholderSlug).
- * Si el sku no existe en el catálogo (menú desincronizado con el canal), crea un producto
- * placeholder inactivo bajo la categoría `delivery-desconocido` (find-or-create) para no
- * bloquear la ingesta — el staff lo re-mapea después desde el dashboard.
+ * externalId del canal o el fallback determinístico si el canal no mandó externalId — ver
+ * toPlaceholderSlug). Si el sku no existe en el catálogo (menú desincronizado con el canal),
+ * crea un producto placeholder inactivo bajo la categoría `delivery-desconocido`
+ * (find-or-create) para no bloquear la ingesta — el staff lo re-mapea después desde el
+ * dashboard.
  */
 async function resolveProductId(
   tx: Prisma.TransactionClient,
   venueId: string,
   sku: string,
   name: string,
-  unitPrice: number,
+  unitPrice: string,
+  /** `{PROVIDER}:{id del item en el catálogo del proveedor}` — la vía preferente. */
+  externalIdProveedor?: string | null,
 ): Promise<string> {
+  // 🔴 PRIMERO por el id del proveedor. Es lo que Avoqado escribió al publicar el menú, así
+  // que identifica el producto aunque el comercio le cambie el SKU o el nombre después.
+  // Buscar sólo por SKU (como hacía antes) creaba un producto placeholder NUEVO en cada
+  // pedido de un producto que sí existía en el catálogo.
+  if (externalIdProveedor) {
+    const porExternalId = await tx.product.findFirst({ where: { venueId, externalId: externalIdProveedor } })
+    if (porExternalId) return porExternalId.id
+  }
+
   const existing = await tx.product.findUnique({ where: { venueId_sku: { venueId, sku } } })
   if (existing) return existing.id
 
@@ -81,7 +102,7 @@ async function resolveProductId(
       createdById: null,
       sku,
       name,
-      price: new Prisma.Decimal(unitPrice),
+      price: D(unitPrice),
       categoryId: category.id,
       active: false,
     },
@@ -95,39 +116,62 @@ async function resolveProductId(
 }
 
 /**
- * Convierte una NormalizedDeliveryOrder (Task 2) en una Order real de Avoqado con su Payment
- * externo ya liquidado (Avoqado no procesó el dinero — fee 0 explícito) y emite el socket de
- * tiempo real. Patrón calcado de processPosOrderEvent (src/services/pos-sync/posSyncOrder.service.ts):
- * upsert por venueId_externalId para idempotencia, payments guardados detrás de un count===0,
- * y el socket se emite DESPUÉS de que la transacción confirma (su fallo nunca tumba la ingesta).
+ * Convierte una NormalizedDeliveryOrder (contrato unificado, Tarea 2) en una Order real de
+ * Avoqado con su Payment externo ya liquidado (Avoqado no procesó el dinero — fee 0
+ * explícito) y emite el socket de tiempo real. Patrón calcado de processPosOrderEvent
+ * (src/services/pos-sync/posSyncOrder.service.ts): upsert por venueId_externalId para
+ * idempotencia, payments guardados detrás de un count===0, y el socket se emite DESPUÉS de
+ * que la transacción confirma (su fallo nunca tumba la ingesta).
  */
 export async function ingestDeliveryOrder(
   normalized: NormalizedDeliveryOrder,
   link: DeliveryChannelLink,
-): Promise<{ order: Order; created: boolean }> {
+): Promise<{ order: Order; created: boolean; kitchenTicketCreated: boolean }> {
+  // 🔴 Dinero primero: un pedido cuyo reparto no cuadra NUNCA debe tocar la base — se
+  // verifica ANTES de resolver el venue o abrir la transacción. Compara también contra los
+  // renglones (Hallazgo 2, auditoría externa 2026-08-20): saleAmount debe cuadrar con la suma
+  // de los items, no sólo el split consigo mismo.
+  assertDeliveryMoneyInvariants(normalized.payment, normalized.items)
+
   const venue = await prisma.venue.findUnique({ where: { id: link.venueId } })
   if (!venue) throw new Error(`Venue ${link.venueId} del channel link no existe`)
 
-  // Fix C4 (audit, MONEY, spec §10.1.2): Deliverect manda `payment.amount` (mapeado a
-  // normalized.total) para pedidos PAGADOS Y NO pagados — `orderIsAlreadyPaid` es lo
-  // único que distingue. Antes: SIEMPRE se creaba un Payment COMPLETED → un pedido
-  // no-pagado se volvía ingreso liquidado ficticio. Doc:
-  // https://developers.deliverect.com/page/glossary-pos-orders
-  //
-  // Se lee directo de `normalized.raw` (el payload completo del proveedor) en vez de un
-  // campo tipado nuevo en NormalizedDeliveryOrder/core/types.ts — ese archivo está fuera
-  // del scope de este fix (dueño único: deliverect.hmac/client/mapper.ts,
-  // deliveryOrderIngestion.service.ts, deliverect.webhook.controller.ts).
-  //
-  // Conservador: SOLO `=== true` cuenta como pagado — ausente/false/cualquier otro valor
-  // NUNCA crea un Payment (nunca ingreso fantasma por default).
-  // REVALIDAR EN STAGING: representación exacta del pedido no-pagado (status/amountDue) —
-  // hoy solo se deja paymentStatus PENDING sin Payment/PaymentAllocation; paidAmount y
-  // remainingBalance quedan en su default de schema (0/0).
-  const orderIsAlreadyPaid = (normalized.raw as any)?.orderIsAlreadyPaid === true
+  const p = normalized.payment
+  const subtotal = D(p.saleAmount)
+  const merchantFees = D(p.merchantFees)
+  const tip = D(p.tipAmount)
+  // Semántica canónica de la plataforma (decisión founder 2026-08-18, spec §6 "propina
+  // dentro/fuera del total"): Order.total NUNCA incluye propina — Payment.tipAmount es la
+  // verdad. Antes el total incluía la propina Y `Payment.tipAmount` la repetía: se contaba
+  // dos veces. Ese defecto es la razón por la que Uber llegó a tener su propia ingesta.
+  const total = subtotal.plus(merchantFees)
+  const pagadoExterno = D(p.externallyPaidSale).plus(D(p.externallyPaidTip))
+  const porCobrar = D(p.cashDueSale).plus(D(p.cashDueTip))
+  const paymentStatus = porCobrar.isZero() ? PaymentStatus.PAID : pagadoExterno.isZero() ? PaymentStatus.PENDING : PaymentStatus.PARTIAL
+
+  // 🔴 El folio del pedido se namespacea por proveedor. `Order.externalId` es único por
+  // venue, y dos marketplaces pueden repetir número de pedido: sin el prefijo, el pedido
+  // #1234 de Rappi pisaría al #1234 de Uber en el mismo negocio.
+  const externalIdNamespaceado = `${link.provider}:${normalized.externalId}`
+
+  // Fuera de la transacción a propósito: crea sus propias filas y es idempotente, así que
+  // reintentarlo es inofensivo y no alarga el lock de la orden.
+  const tender = await ensureDeliveryTenderType(venue.id, link.provider)
+
+  // 🔴 Sin comisión configurada, los reportes de este negocio SOBREESTIMAN su ingreso: la
+  // venta entra completa y lo que el marketplace se queda no aparece en ningún lado. No se
+  // inventa un porcentaje —cada comercio negocia el suyo— pero tampoco se calla.
+  if (tender.commissionPercent == null) {
+    logger.warn('⚠️ [DeliveryIngest] el tipo de pago del canal NO tiene comisión configurada — los reportes sobreestiman el ingreso', {
+      venueId: venue.id,
+      provider: link.provider,
+      tenderTypeId: tender.id,
+      accion: 'configúrala en Ajustes → Tipos de pago (el comercio negocia su % con el proveedor)',
+    })
+  }
 
   const existing = await prisma.order.findUnique({
-    where: { venueId_externalId: { venueId: venue.id, externalId: normalized.externalId } },
+    where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
   })
   const isNew = !existing
   // Holder para que TS no estreche la asignación dentro del callback async.
@@ -135,27 +179,34 @@ export async function ingestDeliveryOrder(
 
   const order = await prisma.$transaction(async tx => {
     const order = await tx.order.upsert({
-      where: { venueId_externalId: { venueId: venue.id, externalId: normalized.externalId } },
+      where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
       update: { posRawData: normalized.raw as Prisma.InputJsonValue, syncedAt: new Date() },
       create: {
-        externalId: normalized.externalId,
+        externalId: externalIdNamespaceado,
         orderNumber: normalized.displayId,
         source: normalized.source,
         originSystem: OriginSystem.DELIVERY_PLATFORM,
         type: OrderType.DELIVERY,
-        status: 'CONFIRMED', // AUTO-accept: entra confirmada directo a cocina (independiente del dinero)
+        scheduledFor: normalized.scheduledFor ?? null,
+        // 🔴 CONFIRMED significa "ya le dijimos que sí al proveedor". En modo MANUAL NO se lo
+        // dijimos —nadie lo ha aceptado todavía— y marcarlo confirmado era una mentira con
+        // tres consecuencias: el POS no podía saber cuáles falta aceptar, el tablero decía
+        // que todo iba bien mientras el reloj de 11.5 min corría, y `denyDeliveryOrder`
+        // elegía CANCELAR en vez de RECHAZAR (protocolo equivocado y peor para el cliente,
+        // que ya creía tener su pedido confirmado).
+        status: link.orderAcceptanceMode === OrderAcceptanceMode.MANUAL ? OrderStatus.PENDING : OrderStatus.CONFIRMED,
         kitchenStatus: 'PENDING',
-        paymentStatus: orderIsAlreadyPaid ? 'PAID' : 'PENDING',
-        subtotal: new Prisma.Decimal(normalized.subtotal),
-        taxAmount: new Prisma.Decimal(normalized.taxAmount),
-        discountAmount: new Prisma.Decimal(normalized.discountAmount),
-        tipAmount: new Prisma.Decimal(normalized.tipAmount),
-        // Fix C4 (audit, spec §10.1.5): se normalizaban en el mapper pero nunca se
-        // persistían — el `total` los incluye pero los campos quedaban en 0 (pedido
-        // internamente inconsistente + reporte/fiscal mal).
-        serviceChargeAmount: new Prisma.Decimal(normalized.serviceChargeAmount),
-        deliveryFeeAmount: new Prisma.Decimal(normalized.deliveryFeeAmount),
-        total: new Prisma.Decimal(normalized.total),
+        paymentStatus,
+        subtotal,
+        // México: el IVA ya va incluido en el precio — el impuesto que reporta el
+        // proveedor no es fuente fiscal (spec §5 de Uber, aplicado igual aquí).
+        taxAmount: new Prisma.Decimal(0),
+        tipAmount: tip,
+        total,
+        // Partial payment tracking: cuánto liquidó la plataforma vs. cuánto queda por
+        // cobrar en persona (efectivo contra entrega).
+        paidAmount: pagadoExterno,
+        remainingBalance: porCobrar,
         posRawData: normalized.raw as Prisma.InputJsonValue,
         createdAt: normalized.placedAt,
         syncedAt: new Date(),
@@ -169,28 +220,24 @@ export async function ingestDeliveryOrder(
       const createdItems: unknown[] = []
       // Índice explícito (no forEach con await): distintos pedidos con payloads idénticos
       // reintentados producen el MISMO índice por línea → externalId sigue siendo idempotente.
-      // Necesario porque un pedido puede repetir el mismo PLU en 2 líneas (p.ej. "Taco" solo +
-      // "Taco" con extra queso) — usar solo `${externalId}-${plu}` chocaría con
-      // @@unique([orderId, externalId]) de OrderItem (P2002) y tumbaría la tx completa,
-      // perdiendo el pedido pagado permanentemente (ver C1 en el review de este scaffold).
+      // Necesario porque un pedido puede repetir el mismo externalId en 2 líneas (p.ej.
+      // "Taco" solo + "Taco" con extra queso) — usar solo `${externalId}-${item.externalId}`
+      // chocaría con @@unique([orderId, externalId]) de OrderItem (P2002) y tumbaría la tx
+      // completa, perdiendo el pedido pagado permanentemente (ver C1 en el review original).
       for (let idx = 0; idx < normalized.items.length; idx++) {
         const item = normalized.items[idx]
-        // sku determinístico: el PLU del canal, o (si vino vacío) un placeholder derivado
-        // del NOMBRE — nunca `Date.now()`, que generaría un producto nuevo por ocurrencia.
-        const sku = item.plu || `delivery-unknown-${toPlaceholderSlug(item.name)}`
-        const productId = await resolveProductId(tx, venue.id, sku, item.name, item.unitPrice)
-        // Modifiers: monto en total + nombres en notes (v1). Resolución a OrderItemModifier rows con PLUs MOD-* = fase staging.
-        // El total de línea DEBE incluir sus modifiers para que sum(OrderItem.total) == Order.subtotal (conciliación al centavo).
-        // Fix C4 (audit, MONEY, spec §10.1.4): el modifier se multiplica por la cantidad
-        // del item PADRE — Deliverect define cantidad_modificador × cantidad_producto (2
-        // tacos con 1 "extra queso" c/u = 2× el monto del modifier, no 1×). Doc:
-        // https://developers.deliverect.com/docs/how-to-interpret-modifiers-and-the-quantity-ordered
-        const lineTotal = item.modifiers.reduce(
-          (acc, m) => acc.add(new Prisma.Decimal(m.unitPrice).mul(m.quantity).mul(item.quantity)),
-          new Prisma.Decimal(item.unitPrice).mul(item.quantity),
+        // sku determinístico: el externalId del canal, o (si vino vacío) un placeholder
+        // derivado del NOMBRE — nunca `Date.now()`, que generaría un producto nuevo por
+        // ocurrencia.
+        const sku = item.externalId || `delivery-unknown-${toPlaceholderSlug(item.name)}`
+        const productId = await resolveProductId(
+          tx,
+          venue.id,
+          sku,
+          item.name,
+          item.unitPrice,
+          item.externalId ? `${link.provider}:${item.externalId}` : null,
         )
-        const modifierNotes = item.modifiers.map(m => `+ ${m.quantity}x ${m.name}`)
-        const notes = [item.notes, ...modifierNotes].filter(Boolean).join(' | ') || undefined
         const createdItem = await tx.orderItem.create({
           data: {
             orderId: order.id,
@@ -198,29 +245,66 @@ export async function ingestDeliveryOrder(
             productName: item.name,
             productSku: sku,
             quantity: item.quantity,
-            unitPrice: new Prisma.Decimal(item.unitPrice),
-            total: lineTotal,
+            unitPrice: D(item.unitPrice),
+            // El mapper del proveedor ya entrega el total de línea (unitPrice×quantity +
+            // modificadores) como string decimal — se usa TAL CUAL, sin recomputar aquí.
+            total: D(item.total),
             taxAmount: new Prisma.Decimal(0),
-            externalId: `${normalized.externalId}-${item.plu || 'noplu'}-${idx}`,
-            notes,
+            // Nace del canal de delivery, no del POS: los reportes por origen lo separan.
+            originSystem: OriginSystem.DELIVERY_PLATFORM,
+            externalId: `${externalIdNamespaceado}-${item.externalId || 'noplu'}-${idx}`,
           },
         })
         createdItems.push(createdItem)
+
+        // Modifiers: filas OrderItemModifier reales (contrato unificado, igual que
+        // — ya NO texto concatenado en notes (v1 legacy).
+        // `modifier.price` ya viene multiplicado por la cantidad del padre (Tarea 2); sólo
+        // falta la cantidad PROPIA del modifier para el monto total de esa línea.
+        for (const m of item.modifiers ?? []) {
+          await tx.orderItemModifier.create({
+            data: { orderItemId: createdItem.id, modifierId: null, name: m.name, quantity: m.quantity, price: D(m.price) },
+          })
+        }
       }
 
-      // Fix C4 (audit, spec §10.1.2): SOLO crear el Payment externo si el proveedor
-      // confirmó que el pedido YA está pagado — ver `orderIsAlreadyPaid` arriba. Un
-      // pedido no-pagado queda con items + Order PENDING pero SIN Payment/PaymentAllocation
-      // (nunca ingreso liquidado ficticio).
-      if (orderIsAlreadyPaid) {
+      // 🔴 El bug que este cambio mata: antes `Payment.amount` era `normalized.total`
+      // (que YA incluía la propina) y `Payment.tipAmount` la volvía a sumar aparte. Ahora
+      // el reparto es explícito: `amount` = la venta liquidada por la plataforma, SIN
+      // propina; `tipAmount` = la propina liquidada, aparte. `netAmount` se ajusta igual
+      // (Avoqado no cobra fee sobre este dinero, así que netAmount == amount).
+      if (pagadoExterno.greaterThan(0)) {
         const existingPayments = await tx.payment.count({ where: { orderId: order.id } })
         if (existingPayments === 0) {
           const payment = await tx.payment.create({
             data: {
-              amount: new Prisma.Decimal(normalized.total),
-              tipAmount: new Prisma.Decimal(normalized.tipAmount),
+              amount: D(p.externallyPaidSale),
+              tipAmount: D(p.externallyPaidTip),
               method: PaymentMethod.OTHER,
               source: PaymentSource.DELIVERY_PLATFORM,
+              // 🔴 La plataforma liquida este dinero, NO Avoqado. `fundsFlow` es la ÚNICA
+              // autoridad de esa pregunta (`shared/tenderSemantics.ts`): sin él, este cobro
+              // se contaría como efectivo esperado en el cajón y el arqueo no cuadraría.
+              fundsFlow: PaymentFundsFlow.EXTERNAL_RECORDED,
+              // Tipo de pago del canal (auto-provisionado, idempotente): es el snapshot que
+              // `shared/tenderSemantics.ts` lee para responder "¿está en el cajón?" y
+              // "¿lo deposita Avoqado?". Sin él, el pago cae al fallback legacy.
+              tenderType: { connect: { id: tender.id } },
+              // 🔴 LA COMISIÓN DEL MARKETPLACE, congelada en el cobro igual que hace el TPV.
+              //
+              // Sin esto, los cortes, reportes y contabilidad del negocio mostraban la venta
+              // COMPLETA como ingreso: $100 de Uber se veían como $100 cuando Uber deposita
+              // ~$70. El dueño creía ganar 30% más de lo que gana, en cada pedido, para
+              // siempre — y lo descubría cuando el depósito no cuadraba con sus números.
+              //
+              // El porcentaje sale del tipo de pago del canal, que el dueño edita en la
+              // pantalla de tipos de pago (`VenueTenderType.commissionPercent`, cuyo propio
+              // comentario en el schema dice literalmente "e.g. Uber ~30%"). Se congela aquí
+              // y no se lee después: si mañana renegocia su comisión, los pedidos viejos
+              // deben seguir contando lo que de verdad les costó.
+              tenderCommissionPercent: tender.commissionPercent,
+              tenderCommissionAmount: computeTenderCommission(tender.commissionPercent, D(p.externallyPaidSale)),
+              tenderRevision: tender.revision,
               externalSource: normalized.source, // 'UBER_EATS' | 'RAPPI' | ...
               status: TransactionStatus.COMPLETED,
               splitType: SplitType.FULLPAYMENT,
@@ -229,9 +313,9 @@ export async function ingestDeliveryOrder(
               // plataforma es entre restaurante y plataforma (fuera de Avoqado).
               feePercentage: new Prisma.Decimal(0),
               feeAmount: new Prisma.Decimal(0),
-              netAmount: new Prisma.Decimal(normalized.total),
+              netAmount: D(p.externallyPaidSale),
               originSystem: OriginSystem.DELIVERY_PLATFORM,
-              externalId: `${normalized.externalId}-platform`,
+              externalId: `${externalIdNamespaceado}-platform`,
               posRawData: normalized.raw as Prisma.InputJsonValue,
               venue: { connect: { id: venue.id } },
               order: { connect: { id: order.id } },
@@ -241,22 +325,19 @@ export async function ingestDeliveryOrder(
             data: { amount: payment.amount, payment: { connect: { id: payment.id } }, order: { connect: { id: order.id } } },
           })
         }
+      }
 
-        // Inventario: el pedido entra PAGADO con renglones resueltos a productos
-        // REALES del catálogo, así que descuenta como cualquier otra venta —
-        // decisión del founder (2026-08-16) con paridad Toast/Square, donde un
-        // pedido de tercero es una orden más y deplete el stock igual. Antes no
-        // descontaba nada: la comida salía de la cocina y el almacén no se movía.
-        //
-        // El vale nace en ESTA transacción (si la ingesta se cae, no queda un
-        // descuento huérfano) y se aplica tras el commit. Sólo cuando el canal
-        // confirmó el pago: un pedido no-pagado no descuenta, igual que en el
-        // resto de la plataforma ("stock deduction ONLY when fully paid").
-        //
-        // ⚠️ Límite conocido: el mapper v1 guarda los modificadores como TEXTO
-        // en `notes`, sin filas OrderItemModifier — se descuenta el producto
-        // base, no los insumos del modificador. Se cierra cuando el mapper
-        // resuelva los PLUs MOD-*.
+      // Inventario: el pedido entra PAGADO EN SU TOTALIDAD (nada por cobrar en persona)
+      // con renglones resueltos a productos REALES del catálogo, así que descuenta como
+      // cualquier otra venta — decisión del founder (2026-08-16) con paridad Toast/Square,
+      // donde un pedido de tercero es una orden más y deplete el stock igual. Regla de la
+      // plataforma: "stock deduction ONLY when fully paid" — por eso se gatea en
+      // porCobrar.isZero(), no en "hubo algún pago externo" (eso permitiría descontar un
+      // pedido parcialmente pagado).
+      //
+      // El vale nace en ESTA transacción (si la ingesta se cae, no queda un descuento
+      // huérfano) y se aplica tras el commit.
+      if (porCobrar.isZero()) {
         const posting = await createSalePostingInTx(tx, {
           venueId: venue.id,
           orderId: order.id,
@@ -283,6 +364,67 @@ export async function ingestDeliveryOrder(
     }
   }
 
+  // 🔴 QUE LLEGUE A LA COCINA. El KDS lee de su PROPIA tabla (`KdsOrder`), no de `Order`, y
+  // hasta hoy sólo se llenaba cuando un cliente llamaba el endpoint a mano — cosa que un
+  // pedido de marketplace no tiene quién haga. Resultado medido el 2026-08-20: el pedido
+  // real de Uber (#77645) quedó CONFIRMED con CERO filas de KDS. O sea: lo aceptamos en
+  // Uber, el cliente esperando su comida, y la cocina sin enterarse.
+  //
+  // Sólo en la PRIMERA ingesta: una actualización de un pedido ya en marcha no puede
+  // reimprimir la comanda ni duplicarla en la pantalla.
+  //
+  // NO FATAL y fuera de la transacción, igual que el socket: si el KDS falla, la venta ya
+  // está guardada y el pedido sigue apareciendo en la lista de órdenes. Perder la venta por
+  // no poder pintar un ticket sería peor que el problema que resuelve. Pero el log es
+  // `error` y no `warn` a propósito: que no llegue a la cocina es grave, no cosmético.
+  // 🔴 Un pedido PROGRAMADO no va a la cocina todavía. El cliente lo pidió a las 3pm para
+  // las 8pm: cocinarlo al recibirlo tira la comida y ocupa la pantalla toda la tarde con algo
+  // que no toca. La comanda se crea cuando el proveedor avisa que ya es hora
+  // (`releaseScheduledOrder`, disparado por `orders.release`).
+  if (isNew && normalized.scheduledFor) {
+    logger.info('🕗 [DeliveryIngest] pedido PROGRAMADO — no va a cocina hasta su hora', {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      para: normalized.scheduledFor.toISOString(),
+    })
+  }
+
+  let kitchenTicketCreated = false
+  if (isNew && !normalized.scheduledFor) {
+    try {
+      await prisma.kdsOrder.create({
+        data: {
+          venueId: venue.id,
+          orderNumber: order.orderNumber,
+          orderType: 'DELIVERY',
+          orderId: order.id,
+          items: {
+            create: normalized.items.map(it => ({
+              productName: it.name,
+              quantity: it.quantity,
+              // 🔴 Por el normalizador COMPARTIDO, nunca serializando la forma del proveedor.
+              // Guardar aquí `[{name, quantity}]` mientras el POS guardaba `["texto"]` en la
+              // MISMA columna llegó hasta la cocina: Android pintó el JSON crudo y iOS perdió
+              // el modificador en silencio (visto en una Sunmi D3 con un pedido real de Uber).
+              modifiers: it.modifiers?.length ? JSON.stringify(toKdsModifierLabels(it.modifiers)) : null,
+              // Lo que el cliente escribió para este renglón. Es lo que separa servir bien
+              // de servir mal, y el único lugar del sistema donde hoy sobrevive.
+              notes: it.notes ?? null,
+            })),
+          },
+        },
+      })
+      kitchenTicketCreated = true
+    } catch (error) {
+      logger.error('[❌ DeliveryIngest] el pedido NO llegó a la cocina (venta guardada, comanda no)', {
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        venueId: venue.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
   try {
     socketManager.broadcastToVenue(venue.id, isNew ? SocketEventType.ORDER_CREATED : SocketEventType.ORDER_UPDATED, {
       orderId: order.id,
@@ -304,11 +446,10 @@ export async function ingestDeliveryOrder(
   // pedido ya aceptado jamás debe re-disparar el accept. Doble defensa: dispatchOrderStatus
   // YA traga sus propios errores (statusDispatcher.service.ts), pero este try/catch +
   // .catch() asegura que NADA de esta llamada (ni siquiera un throw síncrono al invocarla)
-  // tumbe la ingesta — el pedido ya está persistido (Fix C4: pagado SOLO si
-  // orderIsAlreadyPaid), eso jamás se revierte por un fallo aquí.
+  // tumbe la ingesta — el pedido ya está persistido, eso jamás se revierte por un fallo aquí.
   if (isNew && link.orderAcceptanceMode === OrderAcceptanceMode.AUTO) {
     try {
-      void dispatchOrderStatus(order, 'ACCEPTED').catch(error => {
+      void dispatchOrderStatus(order, 'ACCEPTED', link).catch(error => {
         logger.error('[❌ DeliveryIngest] AUTO-accept dispatch falló (async, no fatal)', {
           orderId: order.id,
           error: error instanceof Error ? error.message : 'Unknown error',
@@ -322,5 +463,5 @@ export async function ingestDeliveryOrder(
     }
   }
 
-  return { order, created: isNew }
+  return { order, created: isNew, kitchenTicketCreated }
 }
