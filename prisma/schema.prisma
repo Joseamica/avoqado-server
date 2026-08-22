@@ -1056,6 +1056,10 @@ model Staff {
   emailTemplatesCreated     EmailTemplate[]     @relation("EmailTemplateCreator")
   marketingCampaignsCreated MarketingCampaign[] @relation("MarketingCampaignCreator")
 
+  /// Fase 1 — clientes que ESTE staff aprobó o rechazó. onDelete: Restrict del lado del
+  /// Customer: dar de baja a un staff nunca borra la historia de quién decidió.
+  customerApprovalsDecided Customer[] @relation("CustomerApprovalDecider")
+
   // Payment Links
   paymentLinksCreated     PaymentLink[]            @relation("PaymentLinkCreatedBy")
   /// Payment links where THIS staff is one of the commission recipients
@@ -6326,6 +6330,23 @@ model Customer {
 
   active Boolean @default(true)
 
+  // ---- Fase 1: aprobación del cliente por el venue -------------------------------------
+  // Sólo aplica cuando ReservationSettings.requireCustomerApproval está prendido; con el
+  // switch apagado el gate ni siquiera lee estos campos. Default APPROVED: nadie que ya
+  // exista pasa a PENDING jamás (ni en la migración ni al mover el switch).
+  approvalStatus CustomerApprovalStatus @default(APPROVED)
+  /// Separa el CONTACTO de CRM (creado por staff, import o checkout) de la CUENTA que
+  /// alguien activó con password/OTP/Consumer. Sólo una cuenta activada pide aprobación.
+  accountActivatedAt       DateTime?
+  approvalRequestedAt      DateTime?
+  approvalDecidedAt        DateTime?
+  approvalDecidedByStaffId String?
+  approvalDecisionReason   String? @db.Text
+  /// Token de fencing: sube en cada decisión. La reserva lo compara dentro de su
+  /// transacción serializable, así la carrera aprobar-vs-reservar es determinista.
+  approvalVersion  Int    @default(0)
+  approvalDecidedBy Staff? @relation("CustomerApprovalDecider", fields: [approvalDecidedByStaffId], references: [id], onDelete: Restrict)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -6358,6 +6379,8 @@ model Customer {
   @@index([consumerId])
   @@index([customerGroupId])
   @@index([referredByCustomerId])
+  /// Fase 1: la bandeja "En espera de aprobación" del dashboard, ordenada por antigüedad.
+  @@index([venueId, approvalStatus, approvalRequestedAt])
 }
 
 model Consumer {
@@ -7949,6 +7972,15 @@ enum AuthProvider {
   FACEBOOK
   APPLE
   PHONE
+}
+
+/// Fase 1 — si el venue aprueba a quién le deja reservar. APPROVED es el default de todos
+/// (el switch apagado es el caso normal); PENDING sólo nace al ACTIVAR una cuenta con el
+/// switch prendido; REJECTED nunca cancela reservas ni revoca créditos ya existentes.
+enum CustomerApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 enum LoyaltyTransactionType {
@@ -12356,6 +12388,11 @@ model ReservationSettings {
   requirePhone         Boolean @default(true)
   requireEmail         Boolean @default(false)
   requireAccount       Boolean @default(false) // when true, customer must log in or register before booking
+  /// Fase 1: el venue aprueba manualmente a cada cliente nuevo antes de dejarlo reservar.
+  /// Exige requireAccount (CHECK en la migración): sin cuenta no hay a quién aprobar.
+  requireCustomerApproval Boolean @default(false)
+  /// Roles del venue que reciben el aviso "hay alguien esperando aprobación".
+  customerApprovalNotificationRoles StaffRole[] @default([OWNER, ADMIN])
 
   // Cancellation
   allowCustomerCancel         Boolean @default(true)
