@@ -124,7 +124,9 @@ function mapearItems(items: RappiItem[]): NormalizedDeliveryItem[] {
         externalId: String(sub.sku ?? sub.id ?? '').trim() || `rappi-sub-${idx}-${j}`,
         name: sub.name?.trim() || 'Modificador',
         quantity: cantSub,
-        price: D(sub.price ?? 0).mul(cantSub).toFixed(2),
+        price: D(sub.price ?? 0)
+          .mul(cantSub)
+          .toFixed(2),
       }
     })
 
@@ -191,23 +193,59 @@ function mapearPago(detail: RappiOrderDetail, ventaRenglones: Prisma.Decimal): N
  * puede descubrirse leyendo un reporte tres semanas después.
  */
 function verificarCuadre(renglones: Prisma.Decimal, detail: RappiOrderDetail, orderId: string): void {
-  const totalCrudo = detail.totals?.total_to_pay ?? detail.totals?.total_order
+  const t = detail.totals
+
+  // 🔴 `total_products_with_discount` PRIMERO. Su propio FAQ lo dice: "el total del pedido con
+  // descuentos aplicados" está en ese campo — y es contra ése que suman los renglones, porque
+  // los renglones ya vienen con el precio con descuento. Cuadrar contra `total_order` metería
+  // el envío y la cuota de servicio, y contra `total_products` (sin descuento) inflaría todo.
+  //
+  // Ojo: ese campo NO aparece en el ejemplo JSON del portal, sólo en el FAQ. La referencia y
+  // el FAQ no coinciden, así que se intenta en cascada y se acepta el primero que exista.
+  const totalCrudo = t?.total_products_with_discount ?? t?.total_products ?? t?.total_to_pay ?? t?.total_order
   // Sin total no hay nada contra qué cuadrar. No se inventa: se deja pasar el de los
   // renglones, que es el único dato firme, y el pedido igual entra a cocina.
   if (totalCrudo === undefined || totalCrudo === null) return
 
-  const total = D(totalCrudo)
-  const propina = D(detail.totals?.other_totals?.tip ?? 0)
-  const esperado = total.minus(propina)
+  // Si el total que encontramos incluye la propina (los que son del PEDIDO, no de los
+  // productos), se resta antes de comparar.
+  const incluyePropina = t?.total_products_with_discount === undefined && t?.total_products === undefined
+  const esperado = incluyePropina ? D(totalCrudo).minus(D(t?.other_totals?.tip ?? 0)) : D(totalCrudo)
   const tolerancia = new Prisma.Decimal(TOLERANCIA_POR_RENGLON).mul(Math.max(1, detail.items?.length ?? 1))
 
   if (renglones.minus(esperado).abs().gt(tolerancia)) {
     throw new Error(
       `[Rappi] la venta no cuadra en el pedido ${orderId}: los renglones suman ${renglones.toFixed(2)} pero el total ` +
-        `menos propina da ${esperado.toFixed(2)}. Revisa las UNIDADES (¿pesos o centavos?) y qué campo de \`totals\` ` +
-        `es la venta antes de dar por buena esta integración.`,
+        `de referencia da ${esperado.toFixed(2)}. Revisa las UNIDADES (la documentación NO dice si los montos son ` +
+        `pesos o centavos) y qué campo de \`totals\` es la venta antes de dar por buena esta integración.`,
     )
   }
+}
+
+/** ISO 8601 de Rappi → Date. Una fecha ilegible NUNCA tumba el pedido. */
+function fechaPedido(iso?: string): Date {
+  if (!iso) return new Date()
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? new Date() : d
+}
+
+/**
+ * Cuántos minutos declarar al aceptar, respetando el rango que Rappi permite.
+ *
+ * 🔴 Resulta que Rappi MANDA su propia sugerencia (`cooking_time`) y el rango válido
+ * (`min`/`max`) dentro del pedido. O sea que el "dato que Avoqado no tiene" casi no existe:
+ * el default correcto es devolverle el suyo. Sólo si algún día queremos declarar un tiempo
+ * propio hay que recortarlo al rango, o la llamada se rechaza.
+ */
+export function tiempoDeCoccion(
+  detail: { cooking_time?: number; min_cooking_time?: number; max_cooking_time?: number },
+  propuesto?: number,
+): number {
+  const sugerido = Number.isFinite(detail.cooking_time) ? (detail.cooking_time as number) : 15
+  const min = Number.isFinite(detail.min_cooking_time) ? (detail.min_cooking_time as number) : 1
+  const max = Number.isFinite(detail.max_cooking_time) ? (detail.max_cooking_time as number) : 60
+  const elegido = Number.isFinite(propuesto) ? (propuesto as number) : sugerido
+  return Math.min(Math.max(elegido, min), max)
 }
 
 export function normalizeRappiOrder(raw: unknown): NormalizedDeliveryOrder {
@@ -244,9 +282,9 @@ export function normalizeRappiOrder(raw: unknown): NormalizedDeliveryOrder {
       phone: payload.customer?.phone_number?.trim() || undefined,
     },
     raw,
-    // Sin fecha en el contrato del webhook: se usa la de recepción. Es honesto —el momento en
-    // que nos enteramos— y no inventa una precisión que no tenemos.
-    placedAt: new Date(),
+    // `created_at` viene en la respuesta de `getOrders` (ISO 8601). Si faltara se usa el
+    // momento de recepción: es honesto —cuándo nos enteramos— y no inventa precisión.
+    placedAt: fechaPedido(detail.created_at),
     scheduledFor: null,
   }
 }

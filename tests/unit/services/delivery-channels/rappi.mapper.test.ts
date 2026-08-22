@@ -10,6 +10,7 @@ import {
   esPedidoProgramado,
   extraerStoreId,
   normalizeRappiOrder,
+  tiempoDeCoccion,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.mapper'
 
 /** Copia fiel del ejemplo del portal; los montos se pasan por parámetro. */
@@ -140,5 +141,97 @@ describe('extraerStoreId', () => {
 
   it('devuelve null si no hay tienda — sin ella no se puede resolver el venue', () => {
     expect(extraerStoreId({})).toBeNull()
+  })
+})
+
+// ── Lo que la REFERENCIA de API reveló y el ejemplo del webhook escondía ──────────────
+// El ejemplo de `NEW_ORDER_SCHEDULED` que publica el portal NO trae modificadores ni notas.
+// La referencia de `getOrders` sí — y la primera versión de este mapeo los tiraba a la basura.
+describe('lo que trae el pedido REAL y no el ejemplo del webhook', () => {
+  const conSubitems = {
+    order_detail: {
+      order_id: '392625',
+      created_at: '2026-04-10T11:12:57.000Z',
+      cooking_time: 10,
+      min_cooking_time: 5,
+      max_cooking_time: 20,
+      payment_method: 'cc',
+      totals: { total_products_with_discount: 130, other_totals: { tip: 0 } },
+      items: [
+        {
+          sku: '1234',
+          id: '2089918083',
+          name: 'Ensalada',
+          comments: 'Sin vinagre',
+          price: 100,
+          quantity: 1,
+          subitems: [{ sku: '11', id: '10005260', name: 'Queso burrata', price: 30, quantity: 1 }],
+        },
+      ],
+    },
+    store: { internal_id: '30000011', external_id: '123445' },
+  }
+
+  it('🔴 los MODIFICADORES no se pierden — se llaman `subitems`, no `modifiers`', () => {
+    const o = normalizeRappiOrder(conSubitems)
+    expect(o.items[0].modifiers).toEqual([{ externalId: '11', name: 'Queso burrata', quantity: 1, price: '30.00' }])
+  })
+
+  it('🔴 el modificador va DENTRO del total del renglón, o el cuadre falla con cada extra', () => {
+    const o = normalizeRappiOrder(conSubitems)
+    expect(o.items[0].unitPrice).toBe('100.00')
+    expect(o.items[0].total).toBe('130.00')
+    expect(o.payment.saleAmount).toBe('130.00')
+  })
+
+  it('🔴 la nota del cliente sobrevive — es lo que separa servir bien de servir mal', () => {
+    expect(normalizeRappiOrder(conSubitems).items[0].notes).toBe('Sin vinagre')
+  })
+
+  it('usa la fecha REAL del pedido (`created_at`), no la de recepción', () => {
+    expect(normalizeRappiOrder(conSubitems).placedAt.toISOString()).toBe('2026-04-10T11:12:57.000Z')
+  })
+
+  it('una fecha ilegible NUNCA tumba el pedido: cae a la de recepción', () => {
+    const roto = JSON.parse(JSON.stringify(conSubitems))
+    roto.order_detail.created_at = 'ayer por la tarde'
+    expect(() => normalizeRappiOrder(roto)).not.toThrow()
+  })
+
+  it('el modificador multiplica por SU cantidad', () => {
+    const dos = JSON.parse(JSON.stringify(conSubitems))
+    dos.order_detail.items[0].subitems[0].quantity = 2
+    dos.order_detail.totals.total_products_with_discount = 160
+    expect(normalizeRappiOrder(dos).items[0].total).toBe('160.00')
+  })
+
+  it('cuadra contra `total_products_with_discount`, NO contra el total del pedido', () => {
+    // `total_order` incluye envío y cuota de servicio: cuadrar contra él fallaría siempre.
+    const conEnvio = JSON.parse(JSON.stringify(conSubitems))
+    conEnvio.order_detail.totals.total_order = 999
+    conEnvio.order_detail.totals.charges = { shipping: 50, service_fee: 100 }
+    expect(() => normalizeRappiOrder(conEnvio)).not.toThrow()
+  })
+})
+
+// ── El "dato que Avoqado no tiene" resultó que Rappi lo manda ─────────────────────────
+describe('tiempoDeCoccion', () => {
+  const rango = { cooking_time: 10, min_cooking_time: 5, max_cooking_time: 20 }
+
+  it('🔴 por default devuelve el que RAPPI sugiere — no hay que inventar nada', () => {
+    expect(tiempoDeCoccion(rango)).toBe(10)
+  })
+
+  it('recorta al rango permitido: fuera de él, Rappi rechaza la llamada', () => {
+    expect(tiempoDeCoccion(rango, 99)).toBe(20)
+    expect(tiempoDeCoccion(rango, 1)).toBe(5)
+  })
+
+  it('respeta un tiempo propio si cae dentro del rango', () => {
+    expect(tiempoDeCoccion(rango, 15)).toBe(15)
+  })
+
+  it('sin datos de Rappi usa un default sensato en vez de reventar', () => {
+    expect(tiempoDeCoccion({})).toBe(15)
   })
 })
