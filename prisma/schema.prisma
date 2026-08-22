@@ -6402,6 +6402,10 @@ model ConsumerAuthAccount {
 
 model OtpChallenge {
   id          String    @id @default(cuid())
+  // Fase 0.B: el reto está atado al venue. Un OTP pedido en A no verifica en B, y pedir uno
+  // en B no invalida el de A. Nullable sólo por la migración: los retos creados antes
+  // quedan con NULL y `verify` los RECHAZA (TTL 10 min ⇒ mueren solos; sin rama legacy).
+  venueId     String?
   channel     String // 'whatsapp' | 'email'
   destination String // E.164 phone OR lowercased email
   codeHash    String // sha256(code + OTP_PEPPER); never store plaintext
@@ -6413,6 +6417,7 @@ model OtpChallenge {
   createdAt   DateTime  @default(now())
 
   @@index([destination, expiresAt])
+  @@index([venueId, destination, channel])
 }
 
 model CustomerGroup {

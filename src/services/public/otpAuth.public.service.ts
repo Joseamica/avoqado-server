@@ -23,16 +23,29 @@ export async function requestOtp(args: {
   const destination = args.channel === 'email' ? normalizeEmail(args.destination) : normalizePhone(args.destination)
   const now = Date.now()
 
-  const last30s = await prisma.otpChallenge.count({ where: { destination, createdAt: { gt: new Date(now - 30_000) } } })
+  // Fase 0.B: todo se acota al venue. Un mismo teléfono puede tener retos vivos en dos
+  // estudios distintos sin que uno invalide o rate-limite al otro.
+  const venueId = args.venueId
+  const last30s = await prisma.otpChallenge.count({ where: { venueId, destination, createdAt: { gt: new Date(now - 30_000) } } })
   if (last30s > 0) throw new BadRequestError('Espera un momento antes de pedir otro código.')
-  const lastHour = await prisma.otpChallenge.count({ where: { destination, createdAt: { gt: new Date(now - 3_600_000) } } })
+  const lastHour = await prisma.otpChallenge.count({ where: { venueId, destination, createdAt: { gt: new Date(now - 3_600_000) } } })
   if (lastHour >= 5) throw new BadRequestError('Demasiados códigos solicitados. Intenta más tarde.')
 
-  await prisma.otpChallenge.updateMany({ where: { destination, consumedAt: null }, data: { consumedAt: new Date() } })
+  await prisma.otpChallenge.updateMany({
+    where: { venueId, destination, channel: args.channel, consumedAt: null },
+    data: { consumedAt: new Date() },
+  })
 
   const code = generateOtpCode()
   await prisma.otpChallenge.create({
-    data: { channel: args.channel, destination, codeHash: hashOtpCode(code), expiresAt: new Date(now + TTL_MS), ip: args.ip ?? null },
+    data: {
+      venueId,
+      channel: args.channel,
+      destination,
+      codeHash: hashOtpCode(code),
+      expiresAt: new Date(now + TTL_MS),
+      ip: args.ip ?? null,
+    },
   })
 
   try {
@@ -50,7 +63,12 @@ export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | '
 }> {
   const destination = args.channel === 'email' ? normalizeEmail(args.destination) : normalizePhone(args.destination)
 
-  const challenge = await prisma.otpChallenge.findFirst({ where: { destination, consumedAt: null }, orderBy: { createdAt: 'desc' } })
+  // Fase 0.B: sólo retos de ESTE venue y canal. Un reto legacy con venueId NULL no entra
+  // aquí nunca (no puede probar de qué venue vino) — muere por TTL.
+  const challenge = await prisma.otpChallenge.findFirst({
+    where: { venueId: args.venueId, destination, channel: args.channel, consumedAt: null },
+    orderBy: { createdAt: 'desc' },
+  })
   if (!challenge || challenge.expiresAt.getTime() <= Date.now()) throw new BadRequestError('El código expiró. Pide uno nuevo.')
   if (challenge.attempts >= challenge.maxAttempts) {
     await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { consumedAt: new Date() } })

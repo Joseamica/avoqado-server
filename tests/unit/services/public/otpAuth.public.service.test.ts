@@ -95,6 +95,37 @@ describe('OTP Auth Public Service', () => {
   // ==========================================
   // verifyOtp
   // ==========================================
+  describe('Fase 0.B: el reto OTP está atado al venue', () => {
+    it('requestOtp en venue B NO invalida ni cuenta los retos del mismo teléfono en venue A', async () => {
+      prismaMock.otpChallenge.count.mockResolvedValue(0)
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 0 })
+      prismaMock.otpChallenge.create.mockResolvedValue({ id: 'otp-B' })
+
+      await requestOtp({ venueId: 'venue-B', channel: 'whatsapp', destination: PHONE_RAW, ip: '1.1.1.1' })
+
+      // rate-limit y la invalidación filtran por venue: el reto de A sobrevive
+      for (const call of prismaMock.otpChallenge.count.mock.calls) {
+        expect(call[0].where).toMatchObject({ venueId: 'venue-B', destination: PHONE_NORM })
+      }
+      expect(prismaMock.otpChallenge.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ venueId: 'venue-B', destination: PHONE_NORM, channel: 'whatsapp' }) }),
+      )
+      expect(prismaMock.otpChallenge.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ venueId: 'venue-B' }) }),
+      )
+    })
+
+    it('verifyOtp en venue B busca sólo retos de venue B (el de A no verifica en B)', async () => {
+      prismaMock.otpChallenge.findFirst.mockResolvedValue(null)
+
+      await expect(verifyOtp({ venueId: 'venue-B', channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })).rejects.toThrow(/expir/i)
+
+      expect(prismaMock.otpChallenge.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ venueId: 'venue-B', destination: PHONE_NORM, channel: 'whatsapp' }) }),
+      )
+    })
+  })
+
   describe('verifyOtp — Fase 0.B: Customer.active', () => {
     it('código correcto pero Customer inactivo → 401 CUSTOMER_INACTIVE, challenge consumido, sin token', async () => {
       prismaMock.otpChallenge.findFirst.mockResolvedValue({

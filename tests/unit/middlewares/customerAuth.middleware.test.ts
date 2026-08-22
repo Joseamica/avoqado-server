@@ -18,10 +18,7 @@
 
 import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
-import {
-  authenticateCustomer,
-  authenticateCustomerOptional,
-} from '@/middlewares/customerAuth.middleware'
+import { authenticateCustomer, authenticateCustomerOptional } from '@/middlewares/customerAuth.middleware'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
