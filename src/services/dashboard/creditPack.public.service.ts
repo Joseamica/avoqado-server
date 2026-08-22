@@ -14,7 +14,7 @@ import { nanoid } from 'nanoid'
 import { Prisma, CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
 import emailService from '@/services/email.service'
@@ -288,6 +288,53 @@ export async function createCheckoutSession(
 /**
  * Fulfill a credit pack purchase after successful payment (called from webhook)
  */
+export const CREDIT_PACK_OWNER_UNRESOLVED = 'CREDIT_PACK_OWNER_UNRESOLVED' as const
+
+/**
+ * Fase 0.B — dueño de una compra cuyo checkout nació con sesión de cliente. Fail-closed:
+ * si `customerId` no resuelve dentro del venue, registra `MoneyAnomaly` (categoría
+ * CREDIT_PACK_OWNER_UNRESOLVED, clave = id de la sesión de Checkout, así un reintento de
+ * Stripe no duplica la anomalía) y lanza un `ConflictError` con ese código. Nunca cae al
+ * contacto. Exportada para probarla sola.
+ */
+export async function resolveSessionCustomerForFulfillment(args: {
+  customerId: string
+  venueId: string
+  checkoutSessionId: string
+  packId: string
+}): Promise<{ id: string }> {
+  const customer = await prisma.customer.findFirst({ where: { id: args.customerId, venueId: args.venueId } })
+  if (customer) return customer
+
+  const expectedState = { customerId: args.customerId, venueId: args.venueId, packId: args.packId }
+  try {
+    await prisma.moneyAnomaly.create({
+      data: {
+        category: CREDIT_PACK_OWNER_UNRESOLVED,
+        // Clave de idempotencia: la sesión de Checkout identifica el dinero cobrado.
+        stripeEventId: args.checkoutSessionId,
+        expectedState,
+        observedState: { customerFoundInVenue: false, checkoutSessionId: args.checkoutSessionId },
+      },
+    })
+  } catch (err: any) {
+    // P2002 = ya registrada por una entrega anterior del webhook. Cualquier otra cosa
+    // tampoco debe tapar el error real: lo que importa es NO crear la compra.
+    if (err?.code !== 'P2002') {
+      logger.error('❌ [CREDIT PACK] No se pudo registrar MoneyAnomaly', { ...expectedState, err: err?.message })
+    }
+  }
+  logger.error('🚨 [CREDIT PACK] Money anomaly: compra pagada cuyo customer de sesión no resuelve en el venue', {
+    ...expectedState,
+    checkoutSessionId: args.checkoutSessionId,
+  })
+  throw new ConflictError(
+    'La compra está pagada pero su cliente ya no existe en este negocio. Requiere reconciliación manual.',
+    CREDIT_PACK_OWNER_UNRESOLVED,
+    expectedState,
+  )
+}
+
 export async function fulfillPurchase(checkoutSessionId: string, connectAccountId?: string) {
   // Retrieve session from Stripe. New purchases are created on the venue's
   // CONNECTED account (Stripe Connect), so the retrieve must be scoped with
@@ -322,22 +369,32 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
     return existing
   }
 
-  // Find credit pack with items
-  const pack = await prisma.creditPack.findUnique({
-    where: { id: packId },
+  // Find credit pack with items — scoped to the venue in the metadata (Fase 0.B).
+  const pack = await prisma.creditPack.findFirst({
+    where: { id: packId, venueId },
     include: { items: true },
   })
 
   if (!pack) {
-    logger.error('❌ [CREDIT PACK] Pack not found during fulfillment', { packId })
+    logger.error('❌ [CREDIT PACK] Pack not found during fulfillment', { packId, venueId })
     throw new Error(`CreditPack ${packId} not found`)
   }
 
-  // Find or create customer. Fase 0.B: si la sesión de checkout nació con sesión de
-  // cliente, la compra se liga a ESE customer (metadata.customerId) — nunca al email,
-  // que el comprador pudo teclear a mano. Sin customerId (invitado), contacto como antes.
-  const sessionCustomer = metadata.customerId ? await prisma.customer.findFirst({ where: { id: metadata.customerId, venueId } }) : null
-  const customer = sessionCustomer ?? (await findOrCreateCustomer(venueId, email, phone))
+  // Fase 0.B: a quién pertenece la compra.
+  //
+  // Con `metadata.customerId` (el checkout nació con sesión de cliente) el fulfillment es
+  // FAIL-CLOSED: la compra es de ESE customer o de nadie. Si no resuelve en el venue
+  // (borrado, o id de otro venue), NO se reasigna a quien coincida por email/teléfono —
+  // eso era "Stripe vuelve silenciosamente al contacto" (auditoría 2): dinero pagado
+  // atribuido a otra identidad. Se registra MoneyAnomaly (reconciliación manual: la
+  // sesión de Stripe y el customerId quedan ahí) y se lanza. Un customer INACTIVO sí
+  // resuelve (no se filtra `active`): el dinero es suyo; no podrá usar los créditos hasta
+  // que el venue lo reactive (el canje exige sesión, y los emisores de token lo niegan).
+  //
+  // Sin customerId (checkout invitado) se resuelve/crea por contacto, como siempre.
+  const customer = metadata.customerId
+    ? await resolveSessionCustomerForFulfillment({ customerId: metadata.customerId, venueId, checkoutSessionId, packId })
+    : await findOrCreateCustomer(venueId, email, phone)
 
   // Calculate expiration
   const expiresAt = pack.validityDays ? new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000) : null

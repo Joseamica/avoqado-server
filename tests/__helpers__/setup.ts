@@ -281,6 +281,8 @@ const prismaMock: any = {
   creditPackPurchase: createMockModel(),
   creditItemBalance: createMockModel(),
   creditTransaction: createMockModel(),
+  // Money reconciliation (Fase 0.B: fulfillment fail-closed registra anomalías)
+  moneyAnomaly: createMockModel(),
   // Payment Link models
   paymentLink: createMockModel(),
   checkoutSession: createMockModel(),
