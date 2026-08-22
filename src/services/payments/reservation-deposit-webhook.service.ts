@@ -48,6 +48,58 @@ async function recordMoneyAnomaly(args: {
   })
 }
 
+/**
+ * Claim-then-work, RETRY-SAFE.
+ *
+ * The claim (`ProcessedStripeEvent`, unique on [endpoint, stripeEventId]) goes FIRST so two
+ * concurrent deliveries of the same event can't both run the work. But a claim is not a
+ * receipt: if the work throws, the claim is RELEASED so Stripe's retry runs the work again.
+ * Before (auditoría 3, P1) the claim stayed and the retry hit P2002 → "duplicate, ignored":
+ * money charged, purchase never granted, no retry possible — a one-attempt webhook.
+ *
+ * Only a P2002 on the CLAIM itself means "duplicate delivery". A P2002 born inside the work
+ * (e.g. a unique violation in the purchase insert) is a real failure and propagates.
+ */
+async function withClaimedEvent(event: VerifiedWebhookEvent, label: string, work: () => Promise<unknown>): Promise<void> {
+  try {
+    await prisma.processedStripeEvent.create({
+      data: {
+        stripeEventId: event.id,
+        endpoint: 'connect',
+        eventType: event.type,
+        account: event.account,
+        payload: event.data as Prisma.InputJsonValue,
+      },
+    })
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      logger.info(`ℹ️ [STRIPE CONNECT] Duplicate ${label} webhook ignored`, { eventId: event.id })
+      return
+    }
+    throw error
+  }
+
+  try {
+    await work()
+  } catch (error) {
+    try {
+      await prisma.processedStripeEvent.deleteMany({ where: { endpoint: 'connect', stripeEventId: event.id } })
+      logger.error(`❌ [STRIPE CONNECT] ${label} work failed — claim released so Stripe's retry re-runs it`, {
+        eventId: event.id,
+        err: (error as Error)?.message,
+      })
+    } catch (releaseErr) {
+      // The original failure is the one that matters; a stuck claim is logged loudly.
+      logger.error(`❌ [STRIPE CONNECT] ${label} work failed AND the claim could not be released — manual replay needed`, {
+        eventId: event.id,
+        err: (error as Error)?.message,
+        releaseErr: (releaseErr as Error)?.message,
+      })
+    }
+    throw error
+  }
+}
+
 async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
   const session = event.data as CheckoutSessionLike
   if (!session.id) {
@@ -70,60 +122,23 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
   // Checkout Session. 'payment_link' came from our public payment-link flow,
   // anything else (or missing) falls through to reservation-deposit handling.
   if (session.metadata?.type === 'payment_link') {
-    try {
-      // Idempotency: record the event first so duplicate deliveries no-op
-      // via the unique constraint on `stripeEventId`.
-      await prisma.processedStripeEvent.create({
-        data: {
-          stripeEventId: event.id,
-          endpoint: 'connect',
-          eventType: event.type,
-          account: event.account,
-          payload: event.data as Prisma.InputJsonValue,
-        },
-      })
-      await finalizePaymentLinkCheckout({
+    await withClaimedEvent(event, 'payment-link', () =>
+      finalizePaymentLinkCheckout({
         stripeSessionId: session.id,
         paymentIntentId,
         amountPaidCents: session.amount_total ?? null,
-      })
-    } catch (error: any) {
-      if (error?.code === 'P2002') {
-        logger.info('ℹ️ [STRIPE CONNECT] Duplicate payment-link webhook ignored', { eventId: event.id })
-        return
-      }
-      throw error
-    }
+      }),
+    )
     return
   }
 
   // Credit-pack purchases now settle on the venue's connected account (money
   // routing fix), so their checkout.session.completed lands HERE, not on the
-  // platform webhook. Dispatch to the same fulfillment used before.
+  // platform webhook. Dispatch to the same fulfillment used before. Pass
+  // event.account so fulfillPurchase retrieves the session with the correct
+  // connected-account (stripeAccount) scope.
   if (session.metadata?.type === 'credit_pack_purchase') {
-    try {
-      // Claim the event first so duplicate deliveries no-op via the unique
-      // stripeEventId constraint (fulfillPurchase is also idempotent on
-      // stripeCheckoutSessionId — this just avoids a redundant Stripe retrieve).
-      await prisma.processedStripeEvent.create({
-        data: {
-          stripeEventId: event.id,
-          endpoint: 'connect',
-          eventType: event.type,
-          account: event.account,
-          payload: event.data as Prisma.InputJsonValue,
-        },
-      })
-      // Pass event.account so fulfillPurchase retrieves the session with the
-      // correct connected-account (stripeAccount) scope.
-      await fulfillCreditPackPurchase(session.id, event.account)
-    } catch (error: any) {
-      if (error?.code === 'P2002') {
-        logger.info('ℹ️ [STRIPE CONNECT] Duplicate credit-pack webhook ignored', { eventId: event.id })
-        return
-      }
-      throw error
-    }
+    await withClaimedEvent(event, 'credit-pack', () => fulfillCreditPackPurchase(session.id, event.account))
     return
   }
 

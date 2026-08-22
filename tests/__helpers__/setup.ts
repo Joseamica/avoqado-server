@@ -283,6 +283,8 @@ const prismaMock: any = {
   creditTransaction: createMockModel(),
   // Money reconciliation (Fase 0.B: fulfillment fail-closed registra anomalías)
   moneyAnomaly: createMockModel(),
+  // Stripe webhook idempotency claims (Connect + platform)
+  processedStripeEvent: createMockModel(),
   // Payment Link models
   paymentLink: createMockModel(),
   checkoutSession: createMockModel(),
