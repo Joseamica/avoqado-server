@@ -24,7 +24,15 @@ describe('validateRequest — customerId en el body público', () => {
     const schema = z.object({ params: z.object({ venueSlug: z.string() }), body: publicCreateReservationBodySchema })
     const { next } = await run(
       schema,
-      { guestName: 'Ana', guestPhone: '+525511111111', customerId: 'c_inventado', productId: 'p1', startsAt: new Date(Date.now() + 3600000).toISOString(), endsAt: new Date(Date.now() + 7200000).toISOString(), duration: 60 },
+      {
+        guestName: 'Ana',
+        guestPhone: '+525511111111',
+        customerId: 'c_inventado',
+        productId: 'p1',
+        startsAt: new Date(Date.now() + 3600000).toISOString(),
+        endsAt: new Date(Date.now() + 7200000).toISOString(),
+        duration: 60,
+      },
       { venueSlug: 'x' },
     )
     const err = (next as jest.Mock).mock.calls[0][0]
@@ -47,7 +55,14 @@ describe('validateRequest — customerId en el body público', () => {
     const schema = z.object({ params: z.object({ venueSlug: z.string() }), body: publicCreateReservationBodySchema })
     const { req, next } = await run(
       schema,
-      { guestName: 'Ana', guestPhone: '+525511111111', productId: 'p1', startsAt: new Date(Date.now() + 3600000).toISOString(), endsAt: new Date(Date.now() + 7200000).toISOString(), duration: 60 },
+      {
+        guestName: 'Ana',
+        guestPhone: '+525511111111',
+        productId: 'p1',
+        startsAt: new Date(Date.now() + 3600000).toISOString(),
+        endsAt: new Date(Date.now() + 7200000).toISOString(),
+        duration: 60,
+      },
       { venueSlug: 'x' },
     )
     expect((next as jest.Mock).mock.calls[0]).toEqual([])
@@ -58,7 +73,15 @@ describe('validateRequest — customerId en el body público', () => {
     const schema = z.object({ params: z.object({ venueSlug: z.string() }), body: publicCreateReservationBodySchema })
     const { next } = await run(
       schema,
-      { guestName: 'Ana', guestPhone: '+525511111111', productId: 'p1', startsAt: new Date(Date.now() + 3600000).toISOString(), endsAt: new Date(Date.now() + 7200000).toISOString(), duration: 60, utm_source: 'ig' },
+      {
+        guestName: 'Ana',
+        guestPhone: '+525511111111',
+        productId: 'p1',
+        startsAt: new Date(Date.now() + 3600000).toISOString(),
+        endsAt: new Date(Date.now() + 7200000).toISOString(),
+        duration: 60,
+        utm_source: 'ig',
+      },
       { venueSlug: 'x' },
     )
     expect((next as jest.Mock).mock.calls[0]).toEqual([])

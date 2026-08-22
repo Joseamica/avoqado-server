@@ -15,18 +15,15 @@ import { z } from 'zod'
 export const CUSTOMER_ID_NOT_ALLOWED = 'CUSTOMER_ID_NOT_ALLOWED' as const
 
 export function rejectBodyCustomerId<T extends z.ZodTypeAny>(schema: T) {
-  return z.preprocess(
-    (raw, ctx) => {
-      if (raw && typeof raw === 'object' && 'customerId' in (raw as Record<string, unknown>)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['customerId'],
-          message: 'No se acepta customerId en el cuerpo de la solicitud.',
-          params: { code: CUSTOMER_ID_NOT_ALLOWED },
-        })
-      }
-      return raw
-    },
-    schema,
-  )
+  return z.preprocess((raw, ctx) => {
+    if (raw && typeof raw === 'object' && 'customerId' in (raw as Record<string, unknown>)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['customerId'],
+        message: 'No se acepta customerId en el cuerpo de la solicitud.',
+        params: { code: CUSTOMER_ID_NOT_ALLOWED },
+      })
+    }
+    return raw
+  }, schema)
 }
