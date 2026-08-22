@@ -137,6 +137,15 @@ const CATALOG_GAP_ALLOWLIST = new Set<string>([
   // the floor — if a client needs IT staff who can configure
   // integrations without full venue management, decompose into
   // `venues:integrations` etc. and add those to the catalog.
+  'financialConnections:manage', // Connect/read/disconnect the venue's BANK ACCOUNTS
+  // (self-connect, balance lookup). OWNER-only on purpose: it is
+  // the ONLY grant in DEFAULT_PERMISSIONS (`financialConnections:*`
+  // on OWNER) and the routes say so out loud
+  // (dashboard.routes.ts "financialConnections:manage, OWNER-only").
+  // Putting it in the catalog would let an OWNER delegate bank-account
+  // linking to a custom role — a deliberate product decision, not a
+  // catalog omission. If that delegation is ever wanted, drop this
+  // line and add it to INDIVIDUAL_PERMISSIONS_BY_RESOURCE instead.
 ])
 
 const ARG_STRICT = process.argv.includes('--strict')
@@ -373,16 +382,35 @@ function main(): void {
 
   // H1 venue defaults are a cross-repo authority, not merely UI gate names.
   // Compare the exact role matrix when the optional dashboard sibling exists.
-  const dashboardDefaultsPath = path.join(WORKSPACE_ROOT, 'avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts')
-  if (fs.existsSync(dashboardDefaultsPath)) {
+  //
+  // The GENERATED artifact holds the data: `defaultPermissions.ts` stopped being a
+  // hand-written map and became a re-export of it. Reading the shim parses zero roles,
+  // which the comparator can't tell apart from "the dashboard dropped every grant" —
+  // that's how this check spent time reporting 7 precise, confident, WRONG drifts while
+  // the generated file had the matrix exactly right. Keep the legacy path as a fallback
+  // for checkouts predating the generator.
+  const dashboardDefaultsPath = [
+    'avoqado-web-dashboard/src/lib/permissions/generated/defaultPermissions.generated.ts',
+    'avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts',
+  ]
+    .map(relative => path.join(WORKSPACE_ROOT, relative))
+    .find(candidate => fs.existsSync(candidate))
+
+  if (dashboardDefaultsPath) {
     const dashboardDefaultsSource = fs.readFileSync(dashboardDefaultsPath, 'utf8')
     const drift = compareCatalogVenueDefaults(DEFAULT_PERMISSIONS as unknown as Record<string, readonly string[]>, dashboardDefaultsSource)
     for (const item of drift) {
       issues.push({
         severity: 'ERROR',
         code: item.code,
-        perm: `${item.permission}@${item.role}`,
-        message: `Expected direct default=${item.expected}, found ${item.actual}. Server and dashboard must mirror the frozen H1 role matrix.`,
+        perm:
+          item.code === 'DASHBOARD_DEFAULTS_UNPARSEABLE'
+            ? path.relative(WORKSPACE_ROOT, dashboardDefaultsPath)
+            : `${item.permission}@${item.role}`,
+        message:
+          item.code === 'DASHBOARD_DEFAULTS_UNPARSEABLE'
+            ? 'Found no role blocks in the dashboard defaults file — this audit cannot tell "unreadable" from "everything drifted", so it refuses to guess. The file moved or changed shape: point this check at whichever file now holds the literal role → permissions map.'
+            : `Expected direct default=${item.expected}, found ${item.actual}. Server and dashboard must mirror the frozen H1 role matrix.`,
       })
     }
   }
