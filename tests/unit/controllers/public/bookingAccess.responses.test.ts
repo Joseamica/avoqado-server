@@ -54,7 +54,8 @@ describe('bookingAccess en las 4 respuestas autenticadas', () => {
     const res = mkRes()
     await portalController.login({ params: { venueSlug: 'v' }, body: { email: 'a@b.com', password: 'x' } } as any, res, jest.fn())
     expect(res.body).toEqual(expect.objectContaining({ token: 't', bookingAccess: EXPECTED }))
-    expect(computeBookingAccess).toHaveBeenCalledWith('venue-1')
+    // Fase 1: se pasa el customerId para leer su estado de aprobación real.
+    expect(computeBookingAccess).toHaveBeenCalledWith('venue-1', 'c1')
   })
 
   it('POST register → 201 { token, customer, bookingAccess }', async () => {
@@ -78,7 +79,8 @@ describe('bookingAccess en las 4 respuestas autenticadas', () => {
     const res = mkRes()
     await portalController.getPortal({ customerAuth: { customerId: 'c1', venueId: 'venue-1' } } as any, res, jest.fn())
     expect(res.body).toEqual(expect.objectContaining({ bookingAccess: EXPECTED }))
-    expect(computeBookingAccess).toHaveBeenCalledWith('venue-1')
+    // Fase 1: se pasa el customerId para leer su estado de aprobación real.
+    expect(computeBookingAccess).toHaveBeenCalledWith('venue-1', 'c1')
   })
 
   it('🔴 si bookingAccess no se pudo calcular (null) → login responde 200 SIN el campo; el token ya emitido nunca se pierde (auditoría 4)', async () => {

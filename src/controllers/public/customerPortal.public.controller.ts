@@ -32,7 +32,7 @@ export async function register(req: Request, res: Response, next: NextFunction) 
     })
 
     // Fase 0.B: el widget pinta "¿puedo reservar?" desde la sesión, no desde un 403 tardío.
-    const bookingAccess = await computeBookingAccess(venue.id)
+    const bookingAccess = await computeBookingAccess(venue.id, result.customer?.id)
     res.status(201).json({ ...result, ...withBookingAccess(bookingAccess) })
   } catch (error) {
     next(error)
@@ -50,7 +50,7 @@ export async function login(req: Request, res: Response, next: NextFunction) {
 
     const result = await customerPortalService.loginCustomer(venue.id, email, password)
 
-    const bookingAccess = await computeBookingAccess(venue.id)
+    const bookingAccess = await computeBookingAccess(venue.id, result.customer?.id)
     res.json({ ...result, ...withBookingAccess(bookingAccess) })
   } catch (error) {
     next(error)
@@ -67,7 +67,7 @@ export async function getPortal(req: Request, res: Response, next: NextFunction)
 
     const result = await customerPortalService.getCustomerPortal(venueId, customerId)
 
-    const bookingAccess = await computeBookingAccess(venueId)
+    const bookingAccess = await computeBookingAccess(venueId, customerId)
     res.json({ ...result, ...withBookingAccess(bookingAccess) })
   } catch (error) {
     next(error)

@@ -14,6 +14,7 @@
  * No va en `getVenueInfo` (anónimo): es una respuesta sobre UN cliente autenticado.
  */
 import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
 
@@ -61,21 +62,29 @@ export function withBookingAccess(access: BookingAccess | null): { bookingAccess
  *   ("ya existe" al reintentar, pedir otro código). Un dato informativo jamás invalida
  *   al emisor.
  */
-export async function computeBookingAccess(venueId: string): Promise<BookingAccess | null> {
+export async function computeBookingAccess(venueId: string, customerId?: string | null): Promise<BookingAccess | null> {
   try {
-    const [hasPlan, settings] = await Promise.all([
+    const [hasPlan, settings, customer] = await Promise.all([
       venueHasFeatureAccess(venueId, 'RESERVATIONS').catch((err: unknown) => {
         logger.error('[bookingAccess] plan lookup failed — failing open', { venueId, err: (err as Error)?.message })
         return true
       }),
       getReservationSettings(venueId),
+      // Fase 1: el estado real del cliente. Sin customerId (respuesta anónima) o con el switch
+      // apagado, sigue siendo APPROVED — el eje de aprobación simplemente no aplica.
+      customerId
+        ? prisma.customer.findFirst({ where: { id: customerId, venueId }, select: { approvalStatus: true } })
+        : Promise.resolve(null),
     ])
+
+    const requiresApproval =
+      (settings as { publicBooking?: { requireCustomerApproval?: boolean } })?.publicBooking?.requireCustomerApproval === true
 
     return resolveBookingAccess({
       hasPlan,
       // Mismo default que el controller de reservas: sólo `false` explícito apaga.
       publicBookingEnabled: (settings as { publicBooking?: { enabled?: boolean } })?.publicBooking?.enabled !== false,
-      approvalStatus: 'APPROVED', // Fase 0. Fase 1: desde el Customer.
+      approvalStatus: requiresApproval ? ((customer?.approvalStatus as BookingApprovalStatus) ?? 'APPROVED') : 'APPROVED',
     })
   } catch (err) {
     logger.error('[bookingAccess] could not be computed — omitted from the response', { venueId, err: (err as Error)?.message })

@@ -9,6 +9,12 @@ jest.mock('bcryptjs', () => ({
   __esModule: true,
   default: { hash: jest.fn(async () => 'hashed'), compare: jest.fn(async () => true) },
 }))
+// Fase 1: el registro corre dentro de una transacción y decide el estado de aprobación.
+// Aquí sólo interesa el gate de `Customer.active`, así que la activación se simula.
+jest.mock('@/services/public/customerBookingAccess.service', () => ({
+  __esModule: true,
+  activateCustomerAccount: jest.fn(async () => ({ approvalStatus: 'APPROVED', requestsApproval: false, approvalVersion: 0 })),
+}))
 
 import { loginCustomer, registerCustomer } from '@/services/public/customerPortal.public.service'
 import { generateCustomerToken } from '@/jwt.service'
@@ -23,6 +29,8 @@ describe('customerPortal — Customer.active en emisores de token', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     ;(generateCustomerToken as jest.Mock).mockReturnValue('signed.jwt.token')
+    // El registro es transaccional desde Fase 1: la tx ejecuta su callback con el mismo mock.
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
   })
 
   describe('loginCustomer', () => {

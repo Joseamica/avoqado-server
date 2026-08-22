@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client'
+import { Prisma, StaffRole } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
@@ -99,6 +99,9 @@ export interface ReservationConfig {
     requirePhone: boolean
     requireEmail: boolean
     requireAccount: boolean
+    /// Fase 1 — el venue aprueba a mano a cada cliente nuevo antes de dejarlo reservar.
+    requireCustomerApproval: boolean
+    customerApprovalNotificationRoles: StaffRole[]
     showStaffPicker: boolean
   }
   /**
@@ -250,6 +253,8 @@ export async function getReservationSettings(
       requirePhone: settings.requirePhone,
       requireEmail: settings.requireEmail,
       requireAccount: settings.requireAccount ?? false,
+      requireCustomerApproval: settings.requireCustomerApproval ?? false,
+      customerApprovalNotificationRoles: settings.customerApprovalNotificationRoles ?? [],
       showStaffPicker: settings.showStaffPicker ?? false,
     },
     googleCalendar: {
@@ -576,6 +581,8 @@ function getDefaultConfig(): ReservationConfig {
       requirePhone: true,
       requireEmail: false,
       requireAccount: false,
+      requireCustomerApproval: false,
+      customerApprovalNotificationRoles: [StaffRole.OWNER, StaffRole.ADMIN],
       showStaffPicker: false,
     },
     googleCalendar: {

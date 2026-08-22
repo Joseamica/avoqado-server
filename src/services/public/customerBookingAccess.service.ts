@@ -70,6 +70,50 @@ async function venueRequiresApproval(tx: Prisma.TransactionClient, venueId: stri
   return settings?.requireCustomerApproval === true
 }
 
+type LockedCustomer = {
+  approvalStatus: string
+  approvalVersion: number
+  active: boolean
+  approvalDecidedAt: Date | null
+  accountActivatedAt: Date | null
+}
+
+/**
+ * 🔴 ORDEN DE LOCKS (auditoría de diseño 16 §2) — romperlo produce deadlocks intermitentes:
+ *
+ *   1. `Customer`  ← aquí, SIEMPRE primero
+ *   2. `ClassSession` / advisory lock de la cita
+ *   3. `CreditItemBalance` (orden determinista si son varios)
+ *
+ * Y el MODO importa tanto como el orden:
+ * - **Gate de lectura → `FOR SHARE`.** `FOR UPDATE` bloquearía también los `KEY SHARE` que los
+ *   INSERT de `Reservation`/`CreditTransaction` toman sobre el FK a Customer: la reserva pública
+ *   iba Customer→ClassSession mientras la del staff iba ClassSession→FK Customer. Ciclo.
+ * - **Escritura (activar/decidir) → `FOR NO KEY UPDATE`.** Compite con el gate y con la otra
+ *   escritura, pero deja pasar los FK.
+ */
+async function lockCustomer(
+  tx: Prisma.TransactionClient,
+  customerId: string,
+  venueId: string,
+  mode: 'SHARE' | 'NO KEY UPDATE',
+): Promise<LockedCustomer | null> {
+  // El modo NO puede parametrizarse con $queryRaw (sería inyección); dos consultas literales.
+  const rows =
+    mode === 'SHARE'
+      ? await tx.$queryRaw<LockedCustomer[]>`
+          SELECT "approvalStatus", "approvalVersion", "active", "approvalDecidedAt", "accountActivatedAt"
+          FROM "Customer" WHERE "id" = ${customerId} AND "venueId" = ${venueId}
+          FOR SHARE
+        `
+      : await tx.$queryRaw<LockedCustomer[]>`
+          SELECT "approvalStatus", "approvalVersion", "active", "approvalDecidedAt", "accountActivatedAt"
+          FROM "Customer" WHERE "id" = ${customerId} AND "venueId" = ${venueId}
+          FOR NO KEY UPDATE
+        `
+  return rows[0] ?? null
+}
+
 function dedupeKey(event: ApprovalEvent, customerId: string, approvalVersion: number): string {
   return `${event}:${customerId}:${approvalVersion}`
 }
@@ -83,13 +127,10 @@ export async function activateCustomerAccount(
   tx: Prisma.TransactionClient,
   input: { customerId: string; venueId: string; origin: ActivationOrigin },
 ): Promise<{ approvalStatus: CustomerApprovalStatus; requestsApproval: boolean; approvalVersion: number }> {
-  const [requireCustomerApproval, customer] = await Promise.all([
-    venueRequiresApproval(tx, input.venueId),
-    tx.customer.findUnique({
-      where: { id: input.customerId },
-      select: { accountActivatedAt: true, approvalDecidedAt: true, approvalStatus: true, approvalVersion: true },
-    }),
-  ])
+  const requireCustomerApproval = await venueRequiresApproval(tx, input.venueId)
+  // Con lock de escritura: sin él, una preaprobación concurrente se perdía (esta lectura no la
+  // veía y escribía PENDING encima). Auditoría 16 §1.1.
+  const customer = await lockCustomer(tx, input.customerId, input.venueId, 'NO KEY UPDATE')
   if (!customer) throw new NotFoundError('Cliente no encontrado')
 
   const resolved = resolveApprovalOnActivation({ ...customer, requireCustomerApproval, origin: input.origin })
@@ -136,16 +177,16 @@ export async function assertCustomerCanCreateReservation(
   tx: Prisma.TransactionClient,
   input: { customerId: string | null | undefined; venueId: string },
 ): Promise<void> {
-  if (!input.customerId) return // invitado: no hay a quién aprobar
-  if (!(await venueRequiresApproval(tx, input.venueId))) return
+  if (!(await venueRequiresApproval(tx, input.venueId))) return // switch apagado: ni se lee
 
-  const rows = await tx.$queryRaw<{ approvalStatus: string; approvalVersion: number; active: boolean }[]>`
-    SELECT "approvalStatus", "approvalVersion", "active"
-    FROM "Customer"
-    WHERE "id" = ${input.customerId} AND "venueId" = ${input.venueId}
-    FOR UPDATE
-  `
-  const row = rows[0]
+  // 🔴 Con el switch prendido, un invitado NO pasa (auditoría 16 §1.2): el CHECK de la migración
+  // ya obliga `requireAccount`, así que llegar sin sesión es un hueco de la superficie (holds y
+  // checkout de paquetes eran exactamente esa puerta), no un caso legítimo.
+  if (!input.customerId) {
+    throw new UnauthorizedError('Este negocio requiere iniciar sesión para reservar.', 'CUSTOMER_AUTH_REQUIRED')
+  }
+
+  const row = await lockCustomer(tx, input.customerId, input.venueId, 'SHARE')
   if (!row) throw new NotFoundError('Cliente no encontrado en este negocio')
   if (row.active === false) throw new UnauthorizedError('Esta cuenta está desactivada', CUSTOMER_INACTIVE)
 
@@ -180,17 +221,13 @@ export async function decideCustomerApproval(
     actorStaffId: string
   },
 ): Promise<{ approvalStatus: CustomerApprovalStatus; approvalVersion: number; changed: boolean }> {
-  const rows = await tx.$queryRaw<{ approvalStatus: string; approvalVersion: number; active: boolean }[]>`
-    SELECT "approvalStatus", "approvalVersion", "active"
-    FROM "Customer"
-    WHERE "id" = ${input.customerId} AND "venueId" = ${input.venueId}
-    FOR UPDATE
-  `
-  const row = rows[0]
+  const row = await lockCustomer(tx, input.customerId, input.venueId, 'NO KEY UPDATE')
   if (!row) throw new NotFoundError('Cliente no encontrado en este negocio')
 
-  // Idempotente: ya está en el estado pedido ⇒ ni versión, ni audit, ni correo.
-  if (row.approvalStatus === input.decision) {
+  // 🔴 Idempotente SÓLO si la decisión ya fue tomada de verdad (auditoría 16 §1.3). Un contacto
+  // de CRM está APPROVED por DEFAULT sin que nadie decidiera: "aprobarlo" no es un no-op, es la
+  // PREAPROBACIÓN — justo lo que lo protege de caer en PENDING al activar su cuenta.
+  if (row.approvalStatus === input.decision && row.approvalDecidedAt) {
     return { approvalStatus: input.decision as CustomerApprovalStatus, approvalVersion: row.approvalVersion, changed: false }
   }
 

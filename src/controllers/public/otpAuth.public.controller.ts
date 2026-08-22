@@ -48,7 +48,7 @@ export async function verifyOtp(req: Request, res: Response, next: NextFunction)
     const result = await otpService.verifyOtp({ venueId: venue.id, channel, destination, code })
 
     // Fase 0.B: es un emisor de token → lleva bookingAccess como login/register/portal.
-    const bookingAccess = await computeBookingAccess(venue.id)
+    const bookingAccess = await computeBookingAccess(venue.id, result.customer?.id)
     res.json({ ...result, ...withBookingAccess(bookingAccess) })
   } catch (error) {
     next(error)
