@@ -14,6 +14,7 @@ const mockRequirePermission = jest.fn()
 const mockVenueFindUnique = jest.fn()
 const mockVenueStartOfDay = jest.fn()
 const mockHasAdapter = jest.fn()
+const mockReservationFindUnique = jest.fn()
 
 jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: (...a: unknown[]) => mockHasFeatureAccess(...(a as [])),
@@ -40,6 +41,12 @@ jest.mock('@/utils/prismaClient', () => ({
     deliveryChannelLink: { findMany: (...a: unknown[]) => mockLinkFindMany(...(a as [])) },
     order: { groupBy: (...a: unknown[]) => mockOrderGroupBy(...(a as [])) },
     venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...(a as [])) },
+    // `resolveDeliveryHours` cae al horario del módulo de RESERVAS cuando el canal no
+    // tiene el suyo. Su `.catch(() => null)` cuelga del promise FLUIDO de Prisma, así que
+    // el mock tiene que devolver algo thenable — un `jest.fn()` pelón devuelve undefined
+    // y revienta con "cannot read .catch of undefined", que no se parece en nada a la
+    // causa real.
+    reservationSettings: { findUnique: (...a: unknown[]) => mockReservationFindUnique(...(a as [])) },
   },
 }))
 // Task 8 (plan 2026-08-20-delivery-nucleo-unico, §8.2): "¿esta integración YA tiene
@@ -66,7 +73,31 @@ beforeEach(() => {
   jest.clearAllMocks()
   mockVenueStartOfDay.mockReturnValue(new Date('2026-07-18T06:00:00.000Z'))
   mockHasAdapter.mockReturnValue(false)
+  // Default: el venue NO usa el módulo de reservas ⇒ el horario cae al ESTIMADO, que es
+  // el caso más común y el que el tool tiene que saber declarar como suposición.
+  mockReservationFindUnique.mockResolvedValue(null)
 })
+
+const HORARIO_CANAL = {
+  monday: { enabled: true, ranges: [{ open: '11:00', close: '23:00' }] },
+  tuesday: { enabled: true, ranges: [{ open: '11:00', close: '23:00' }] },
+  wednesday: { enabled: true, ranges: [{ open: '11:00', close: '23:00' }] },
+  thursday: { enabled: true, ranges: [{ open: '11:00', close: '23:00' }] },
+  friday: { enabled: true, ranges: [{ open: '11:00', close: '23:00' }] },
+  saturday: { enabled: true, ranges: [{ open: '11:00', close: '23:00' }] },
+  sunday: { enabled: false, ranges: [] },
+}
+
+const LINK_BASE = {
+  venueId: 'v1',
+  provider: 'UBER_EATS',
+  status: 'ACTIVE',
+  orderAcceptanceMode: 'AUTO',
+  autoSyncMenu: true,
+  lastMenuSyncAt: null,
+  lastMenuHash: 'abc',
+  externalLocationId: 's1',
+}
 
 describe('delivery_channels', () => {
   it('rejects a venue outside the caller scope — no DB read (cross-tenant guard)', async () => {
@@ -290,5 +321,87 @@ describe('delivery_channels', () => {
     expect(out.channels.map((c: { menuPublicado: boolean }) => c.menuPublicado)).toEqual([false, true, false])
     // La huella misma no le sirve a nadie fuera del sincronizador.
     expect(out.channels[1].lastMenuHash).toBeUndefined()
+  })
+
+  // ── El horario y el margen: los dos ajustes que mueven dinero ─────────────────────
+  // Vivían SÓLO en la columna JSON del canal, así que la única forma de contestar "¿a
+  // qué horas acepto pedidos?" o "¿qué margen tengo?" era abrir Postgres.
+  it('🔴 expone el horario Y DE DÓNDE SALIÓ — un estimado dicho como certeza no lo revisa nadie', async () => {
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockLinkFindMany.mockResolvedValueOnce([
+      {
+        id: 'l1',
+        venueId: 'v1',
+        provider: 'UBER_EATS',
+        status: 'ACTIVE',
+        orderAcceptanceMode: 'AUTO',
+        autoSyncMenu: true,
+        lastMenuSyncAt: null,
+        lastMenuHash: 'abc',
+        externalLocationId: 's1',
+        config: { deliveryHours: HORARIO_CANAL },
+      },
+      {
+        id: 'l2',
+        venueId: 'v1',
+        provider: 'UBER_EATS',
+        status: 'ACTIVE',
+        orderAcceptanceMode: 'AUTO',
+        autoSyncMenu: true,
+        lastMenuSyncAt: null,
+        lastMenuHash: 'def',
+        externalLocationId: 's2',
+        config: null,
+      },
+    ])
+    mockOrderGroupBy.mockResolvedValueOnce([])
+
+    const out = parse(await call({ venueId: 'v1' }))
+    const [configurado, sinConfigurar] = out.channels
+
+    expect(configurado.horarioFuente).toBe('CANAL')
+    expect(configurado.horario.monday.ranges[0]).toEqual({ open: '11:00', close: '23:00' })
+
+    // Lo que de verdad importa: el segundo canal TAMBIÉN devuelve un horario, pero
+    // declarado como suposición. Sin `horarioFuente` se leerían idénticos.
+    expect(sinConfigurar.horarioFuente).toBe('ESTIMADO')
+    expect(sinConfigurar.horario).not.toBeNull()
+  })
+
+  it('🔴 expone el margen, y `null` cuando no hay — publicar el precio de mostrador pierde dinero', async () => {
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockLinkFindMany.mockResolvedValueOnce([
+      { ...LINK_BASE, id: 'l1', config: { precios: { markupPercent: 30 } } },
+      { ...LINK_BASE, id: 'l2', config: { precios: {} } },
+      { ...LINK_BASE, id: 'l3', config: null },
+      // Basura en la columna: no debe reportarse como margen ni tumbar el tool.
+      { ...LINK_BASE, id: 'l4', config: { precios: { markupPercent: 'treinta' } } },
+    ])
+    mockOrderGroupBy.mockResolvedValueOnce([])
+
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.channels.map((c: { margenPorcentaje: number | null }) => c.margenPorcentaje)).toEqual([30, null, null, null])
+  })
+
+  it('🔴 NUNCA devuelve webhookSecret ni el blob crudo de config', async () => {
+    // Este tool dejó de usar `select` para poder resolver el horario (que necesita el
+    // registro entero), así que la consulta AHORA trae el secreto. Se anula en el mapeo —
+    // y esto es lo que prueba que se sigue anulando.
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockLinkFindMany.mockResolvedValueOnce([
+      { ...LINK_BASE, id: 'l1', webhookSecret: 'no-debe-salir-jamas', config: { precios: { markupPercent: 30 } } },
+    ])
+    mockOrderGroupBy.mockResolvedValueOnce([])
+
+    const crudo = (await call({ venueId: 'v1' })).content[0].text
+    expect(crudo).not.toContain('no-debe-salir-jamas')
+
+    const canal = parse({ content: [{ text: crudo }] }).channels[0]
+    expect(canal.webhookSecret).toBeUndefined()
+    expect(canal.config).toBeUndefined()
+    expect(canal.margenPorcentaje).toBe(30) // el dato SÍ sale, desglosado
   })
 })
