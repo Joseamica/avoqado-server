@@ -14,7 +14,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { ValidationError } from '@/errors/AppError'
 import {
   cancelarSnooze,
-  listChannelLinks,
+  listChannelsResumen,
   snoozeChannelLink,
   SNOOZE_MINUTOS_VALIDOS,
 } from '@/services/delivery-channels/core/deliveryChannelLink.service'
@@ -28,7 +28,9 @@ import {
 export const listChannels = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const links = await listChannelLinks(venueId)
+    // La versión LEAN, no `listChannelLinks`: cada aparato de cocina consulta esto cada 10
+    // segundos, y la completa calcula tasa de inyección y estado del menú por llamada.
+    const links = await listChannelsResumen(venueId)
 
     return res.json({
       ok: true,
@@ -40,7 +42,7 @@ export const listChannels = async (req: Request, res: Response, next: NextFuncti
         // `null` con status PAUSED = la pausa indefinida del dashboard. El POS la muestra
         // como pausado pero SIN cuenta regresiva, porque no se va a reactivar sola y
         // pintar un reloj que no corre sería mentir.
-        snoozedUntil: (l as { snoozedUntil?: Date | null }).snoozedUntil?.toISOString() ?? null,
+        snoozedUntil: l.snoozedUntil?.toISOString() ?? null,
       })),
       duracionesValidas: SNOOZE_MINUTOS_VALIDOS,
     })
