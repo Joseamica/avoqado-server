@@ -5,29 +5,26 @@ import { resolveClassCustomerBinding } from '@/controllers/public/reservation.pu
  *
  * Antes (reservation.public.controller.ts:2019-2049) se ligaba SIEMPRE al candidato que
  * coincidía por email/teléfono del body, aunque hubiera sesión. Una alumna con sesión que
- * tecleara el email de otra terminaba ligada a la otra. Con sesión, el customer del token
- * manda; sin sesión, se conserva el match por contacto.
+ * tecleara el email de otra terminaba ligada a la otra.
+ *
+ * Auditoría 2 (P1 #1): tampoco el INVITADO liga por contacto — email/teléfono vienen del
+ * body y "el body nunca confiere identidad". La reserva invitada queda con `customerId=null`
+ * y el portal la recupera igual por `guestEmail`/`guestPhone` del Customer verificado
+ * (customerPortal.public.service.ts, contactFilter). Igual que la cita invitada.
  */
 describe('resolveClassCustomerBinding', () => {
-  const byContact = { id: 'c_contacto', email: 'x@y.com', phone: null }
-
-  it('con sesión → el customer del token, aunque el contacto del body coincida con otro', () => {
-    const r = resolveClassCustomerBinding({ sessionCustomerId: 'c_token', matchedByContact: byContact })
+  it('con sesión → el customer del token', () => {
+    const r = resolveClassCustomerBinding({ sessionCustomerId: 'c_token' })
     expect(r).toEqual({ customerId: 'c_token', source: 'SESSION' })
   })
 
-  it('con sesión y sin match por contacto → el customer del token', () => {
-    const r = resolveClassCustomerBinding({ sessionCustomerId: 'c_token', matchedByContact: null })
-    expect(r).toEqual({ customerId: 'c_token', source: 'SESSION' })
+  it('🔴 sin sesión → customerId null, aunque el contacto del body coincida con un Customer (el body no confiere identidad)', () => {
+    const r = resolveClassCustomerBinding({ sessionCustomerId: null })
+    expect(r).toEqual({ customerId: null, source: 'NONE' })
   })
 
-  it('sin sesión → el match por contacto (comportamiento de invitado, sin cambio)', () => {
-    const r = resolveClassCustomerBinding({ sessionCustomerId: null, matchedByContact: byContact })
-    expect(r).toEqual({ customerId: 'c_contacto', source: 'CONTACT' })
-  })
-
-  it('sin sesión y sin match → reserva sin customer', () => {
-    const r = resolveClassCustomerBinding({ sessionCustomerId: null, matchedByContact: null })
+  it('sessionCustomerId undefined (ruta sin auth opcional) → igual que sin sesión', () => {
+    const r = resolveClassCustomerBinding({ sessionCustomerId: undefined })
     expect(r).toEqual({ customerId: null, source: 'NONE' })
   })
 })

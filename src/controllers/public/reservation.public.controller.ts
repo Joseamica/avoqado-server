@@ -22,7 +22,6 @@ import { es as esLocale } from 'date-fns/locale'
 import emailService from '../../services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
-import { phonesMatch, phoneLast10 } from '../../utils/phone'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { normalizeBookedProductIds, reservationBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 import {
@@ -1838,16 +1837,21 @@ export async function cancelReservation(req: Request, res: Response, next: NextF
 // ==========================================
 
 /**
- * Fase 0.B — a qué Customer se liga una reserva de clase. Con sesión, el customer del
- * token manda (antes se ligaba siempre al match por email/teléfono del body, aunque hubiera
- * sesión). Sin sesión, se conserva el match por contacto. Pura, para probarla sola.
+ * Fase 0.B — a qué Customer se liga una reserva de clase: SÓLO al de la sesión.
+ *
+ * Antes se ligaba siempre al Customer que coincidía por email/teléfono del body, aunque
+ * hubiera sesión (una alumna con sesión que tecleara el email de otra quedaba ligada a la
+ * otra). Y el invitado tampoco liga por contacto (auditoría 2, P1 #1): email/teléfono
+ * vienen del body y el body nunca confiere identidad. La reserva invitada queda con
+ * `customerId=null`, igual que la cita invitada; el portal la recupera por
+ * `guestEmail`/`guestPhone` del Customer verificado (customerPortal contactFilter).
+ * Pura, para probarla sola.
  */
-export function resolveClassCustomerBinding(input: {
-  sessionCustomerId: string | null | undefined
-  matchedByContact: { id: string } | null
-}): { customerId: string | null; source: 'SESSION' | 'CONTACT' | 'NONE' } {
+export function resolveClassCustomerBinding(input: { sessionCustomerId: string | null | undefined }): {
+  customerId: string | null
+  source: 'SESSION' | 'NONE'
+} {
   if (input.sessionCustomerId) return { customerId: input.sessionCustomerId, source: 'SESSION' }
-  if (input.matchedByContact) return { customerId: input.matchedByContact.id, source: 'CONTACT' }
   return { customerId: null, source: 'NONE' }
 }
 
@@ -2012,36 +2016,11 @@ async function createClassReservation(
     })
     const finalCode = existing ? reservationService.generateConfirmationCode() : confirmationCode
 
-    // Auto-link to a registered Customer when the guest data matches one. This
-    // makes the booking show up in the customer portal "Mis Reservaciones" and
-    // anchors loyalty/credits to the same identity.
-    // Auto-link matching: exact email OR canonical phone. Phone is matched
-    // format-independently — coarse-prefilter existing customers by the trailing
-    // 10 digits, then canonical-verify with phonesMatch — because guest-typed and
-    // stored phone strings aren't consistently normalized across write paths.
-    const phoneLast10Digits = body.guestPhone ? phoneLast10(body.guestPhone) : null
-    // Fetch candidate customers: exact email OR normalized-phone last-10 match.
-    // The phone side strips non-digits from the STORED "phone" column in SQL so
-    // formatting differences don't hide a real returning customer (a Prisma
-    // `endsWith` compares raw text and misses "55 1234 5678"). phonesMatch below
-    // is the canonical verify. Column names are compile-time literals here.
-    const emailCond = body.guestEmail ? Prisma.sql`"email" = ${body.guestEmail}` : Prisma.sql`FALSE`
-    const phoneCond = phoneLast10Digits
-      ? Prisma.sql`right(regexp_replace("phone", '[^0-9]', '', 'g'), 10) = ${phoneLast10Digits}`
-      : Prisma.sql`FALSE`
-    const matchCandidates =
-      body.guestEmail || phoneLast10Digits
-        ? await tx.$queryRaw<{ id: string; email: string | null; phone: string | null }[]>`
-            SELECT "id", "email", "phone"
-            FROM "Customer"
-            WHERE "venueId" = ${venueId}
-              AND (${emailCond} OR ${phoneCond})
-          `
-        : []
-    const matchedByContact =
-      matchCandidates.find(c => (body.guestEmail && c.email === body.guestEmail) || phonesMatch(c.phone, body.guestPhone)) ?? null
-    // Fase 0.B: con sesión, el customer del token manda sobre el match por contacto.
-    const binding = resolveClassCustomerBinding({ sessionCustomerId, matchedByContact })
+    // Fase 0.B: la reserva se liga SÓLO al Customer de la sesión. Antes aquí había un
+    // auto-link por email/teléfono del body (query raw sobre "Customer" con phonesMatch);
+    // se retiró porque el body no confiere identidad — ver resolveClassCustomerBinding.
+    // El portal sigue mostrando la reserva invitada por guestEmail/guestPhone.
+    const binding = resolveClassCustomerBinding({ sessionCustomerId })
     const matchedCustomer = binding.customerId ? { id: binding.customerId } : null
 
     // Three states for the reservation row:
