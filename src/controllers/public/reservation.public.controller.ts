@@ -131,6 +131,13 @@ export function resolveBookingIdentity(input: {
   bodyCustomerId: unknown
   /** Si true, un customerId en el body que difiera del token es 400 (el body no manda). */
   rejectBodyCustomerId?: boolean
+  /**
+   * Si true, la reserva quiere pagar con créditos (`creditItemBalanceId[s]`). Los créditos
+   * son de CUENTA: sin sesión es 401 aunque el venue admita invitados. Se decide aquí,
+   * antes de insertar nada, porque en cita el canje corre en OTRA transacción y un 401
+   * tardío dejaría una reserva huérfana.
+   */
+  wantsCredits?: boolean
 }): { ok: true; customerId: string | null } | { ok: false; code: 'CUSTOMER_AUTH_REQUIRED' | 'CUSTOMER_ID_NOT_ALLOWED' } {
   const auth = input.customerAuth ?? null
   const bodyId = typeof input.bodyCustomerId === 'string' && input.bodyCustomerId.length > 0 ? input.bodyCustomerId : null
@@ -142,7 +149,7 @@ export function resolveBookingIdentity(input: {
     return { ok: true, customerId: auth.customerId }
   }
 
-  if (input.requireAccount) {
+  if (input.requireAccount || input.wantsCredits) {
     return { ok: false, code: 'CUSTOMER_AUTH_REQUIRED' }
   }
   // Invitado. El bodyId se descarta a propósito: sin sesión no liga nada.
@@ -721,15 +728,24 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // `authenticateCustomerOptional`, que ya rechazó tokens ajenos/inválidos/inactivos).
     // El body nunca confiere identidad: con sesión se liga al token; sin sesión y
     // con `requireAccount`, 401; sin sesión y sin `requireAccount`, invitado.
+    const wantsCredits =
+      (typeof req.body?.creditItemBalanceId === 'string' && req.body.creditItemBalanceId.length > 0) ||
+      (Array.isArray(req.body?.creditItemBalanceIds) && req.body.creditItemBalanceIds.length > 0)
     const identity = resolveBookingIdentity({
       customerAuth: (req as any).customerAuth,
       requireAccount: settings.publicBooking.requireAccount,
       bodyCustomerId: req.body?.customerId,
       rejectBodyCustomerId: true,
+      wantsCredits,
     })
     if (!identity.ok) {
       if (identity.code === 'CUSTOMER_AUTH_REQUIRED') {
-        throw new UnauthorizedError('Este negocio requiere iniciar sesion para reservar.', 'CUSTOMER_AUTH_REQUIRED')
+        throw new UnauthorizedError(
+          wantsCredits && !settings.publicBooking.requireAccount
+            ? 'Inicia sesión para pagar con tus créditos.'
+            : 'Este negocio requiere iniciar sesion para reservar.',
+          'CUSTOMER_AUTH_REQUIRED',
+        )
       }
       throw new BadRequestError('No se acepta customerId en el cuerpo de la solicitud.', 'CUSTOMER_ID_NOT_ALLOWED')
     }
@@ -1855,6 +1871,31 @@ export function resolveClassCustomerBinding(input: { sessionCustomerId: string |
   return { customerId: null, source: 'NONE' }
 }
 
+/**
+ * Fase 0.B — quién puede gastar créditos al reservar: SÓLO el customer de la sesión.
+ *
+ * Antes, sin sesión, el dueño se resolvía por `guestEmail/guestPhone` del body; como el
+ * balance también era público por contacto, conocer el email de alguien bastaba para
+ * obtener un balanceId y gastar sus créditos (auditoría 2, P1). Compartido por los dos
+ * caminos que canjean (clase inline y `redeemCreditsForReservation` de cita).
+ *
+ * - sin sesión → 401 CUSTOMER_AUTH_REQUIRED (antes de tocar la DB)
+ * - sesión cuyo customer ya no existe en el venue → 400
+ */
+export async function requireSessionCustomerForCredits(
+  tx: Prisma.TransactionClient,
+  input: { sessionCustomerId: string | null | undefined; venueId: string },
+): Promise<{ id: string }> {
+  if (!input.sessionCustomerId) {
+    throw new UnauthorizedError('Inicia sesión para pagar con tus créditos', 'CUSTOMER_AUTH_REQUIRED')
+  }
+  const customer = await tx.customer.findFirst({ where: { id: input.sessionCustomerId, venueId: input.venueId }, select: { id: true } })
+  if (!customer) {
+    throw new BadRequestError('No se encontro el cliente para canjear creditos')
+  }
+  return customer
+}
+
 async function createClassReservation(
   venueId: string,
   body: {
@@ -2076,20 +2117,8 @@ async function createClassReservation(
     let creditRedeemed = false
     let creditsUsed = 0
     if (body.creditItemBalanceId) {
-      // Fase 0.B: con sesión, los créditos son SÓLO del customer del token. Sin sesión,
-      // se resuelve por contacto como antes.
-      const customer = sessionCustomerId
-        ? await tx.customer.findFirst({ where: { id: sessionCustomerId, venueId } })
-        : await tx.customer.findFirst({
-            where: {
-              venueId,
-              OR: [...(body.guestEmail ? [{ email: body.guestEmail }] : []), ...(body.guestPhone ? [{ phone: body.guestPhone }] : [])],
-            },
-          })
-
-      if (!customer) {
-        throw new BadRequestError('No se encontro el cliente para canjear creditos')
-      }
+      // Fase 0.B: los créditos son SÓLO del customer de la sesión; sin sesión → 401.
+      const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId, venueId })
 
       // Lock and verify balance
       const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
@@ -2476,11 +2505,11 @@ export async function redeemCreditsForReservation(
     balanceIds: string[]
     creditsPerBalance: number
     /**
-     * Fase 0.B: identidad de SESIÓN. Cuando viene, manda: el dueño de los créditos es este
-     * customer y `customerEmail/customerPhone` se ignoran para resolverlo. Sin él (invitado),
-     * se resuelve por contacto como siempre.
+     * Fase 0.B: identidad de SESIÓN — obligatoria para canjear. El dueño de los créditos es
+     * este customer; sin sesión es 401 CUSTOMER_AUTH_REQUIRED (ver requireSessionCustomerForCredits).
      */
     customerId?: string | null
+    /** Sólo informativos (mensajes/emails); NO identifican al dueño de los créditos. */
     customerEmail?: string
     customerPhone?: string
     /** When provided, every balance.productId MUST match one of these (no
@@ -2493,23 +2522,7 @@ export async function redeemCreditsForReservation(
     return { creditsUsed: 0, redeemed: false }
   }
 
-  // Fase 0.B: con sesión, el dueño de los créditos es el customer autenticado — nunca
-  // el email/teléfono del body (antes eso permitía gastar créditos ajenos conociendo
-  // un balanceId). Sin sesión, se resuelve por contacto como antes.
-  const customer = args.customerId
-    ? await tx.customer.findFirst({ where: { id: args.customerId, venueId: args.venueId } })
-    : await tx.customer.findFirst({
-        where: {
-          venueId: args.venueId,
-          OR: [
-            ...(args.customerEmail ? [{ email: args.customerEmail }] : []),
-            ...(args.customerPhone ? [{ phone: args.customerPhone }] : []),
-          ],
-        },
-      })
-  if (!customer) {
-    throw new BadRequestError('No se encontro el cliente para canjear creditos')
-  }
+  const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId: args.customerId, venueId: args.venueId })
 
   let totalCreditsUsed = 0
   for (const balanceId of args.balanceIds) {

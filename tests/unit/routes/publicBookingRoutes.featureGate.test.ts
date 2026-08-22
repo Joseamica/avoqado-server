@@ -388,7 +388,10 @@ describe('wiring — the gates are actually present in the route files (source r
     expect(publicRoutesSrc).toMatch(
       /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule',\s*cancelLimit,[^\n]*\n\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*validateRequest/,
     )
-    expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/credit-packs\/balance',\s*readLimit,\s*validateRequest/)
+    // Fase 0.B: el balance exige sesión (dato de cuenta) pero sigue SIN gate de plan.
+    expect(publicRoutesSrc).toMatch(
+      /'\/venues\/:venueSlug\/credit-packs\/balance',\s*readLimit,\s*resolveVenueBySlug,\s*authenticateCustomer,\s*validateRequest/,
+    )
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/info',\s*readLimit,\s*validateRequest/)
   })
 

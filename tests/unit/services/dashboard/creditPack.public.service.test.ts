@@ -264,7 +264,10 @@ describe('CreditPack Public Service', () => {
   // lookupCustomerCredits
   // ==========================================
 
-  describe('lookupCustomerCredits', () => {
+  // Fase 0.B (auditoría 2, P1 "canje invitado"): el balance es dato de CUENTA. Se consulta
+  // por el customerId de la sesión, nunca por email/teléfono de la query — con contacto,
+  // cualquiera que supiera tu email veía tus compras y obtenía un balanceId para gastarlas.
+  describe('lookupCustomerCredits (por sesión)', () => {
     it('should return customer with active purchases and balances', async () => {
       const customer = createMockCustomer()
       const purchase = createMockPurchase({
@@ -280,7 +283,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([purchase])
 
-      const result = await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      const result = await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
       expect(result.customer).toEqual({
         id: CUSTOMER_ID,
@@ -296,47 +299,32 @@ describe('CreditPack Public Service', () => {
       })
     })
 
-    it('should return null customer when not found', async () => {
+    it('should return null customer when the session customer no longer exists in the venue', async () => {
       prismaMock.customer.findFirst.mockResolvedValue(null)
 
-      const result = await lookupCustomerCredits(VENUE_ID, 'notfound@example.com')
+      const result = await lookupCustomerCredits(VENUE_ID, 'cust-borrado')
 
       expect(result.customer).toBeNull()
       expect(result.purchases).toEqual([])
     })
 
-    it('should throw BadRequestError when neither email nor phone provided', async () => {
-      await expect(lookupCustomerCredits(VENUE_ID)).rejects.toThrow(BadRequestError)
-      await expect(lookupCustomerCredits(VENUE_ID)).rejects.toThrow('Se requiere email o telefono para consultar creditos')
+    it('🔴 sin customerId (sin sesión) → 401 CUSTOMER_AUTH_REQUIRED, sin consultar nada', async () => {
+      await expect(lookupCustomerCredits(VENUE_ID, '')).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_AUTH_REQUIRED' })
+      await expect(lookupCustomerCredits(VENUE_ID, null as any)).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_AUTH_REQUIRED' })
+      expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackPurchase.findMany).not.toHaveBeenCalled()
     })
 
-    it('should find customer by email', async () => {
+    it('🔴 busca al customer SÓLO por id + venueId — nunca por email ni teléfono', async () => {
       const customer = createMockCustomer()
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(1)
       expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
-        where: {
-          venueId: VENUE_ID,
-          email: 'maria@example.com',
-        },
-      })
-    })
-
-    it('should find customer by phone', async () => {
-      const customer = createMockCustomer()
-      prismaMock.customer.findFirst.mockResolvedValue(customer)
-      prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
-
-      await lookupCustomerCredits(VENUE_ID, undefined, '+525551234567')
-
-      expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
-        where: {
-          venueId: VENUE_ID,
-          phone: '+525551234567',
-        },
+        where: { id: CUSTOMER_ID, venueId: VENUE_ID },
       })
     })
 
@@ -345,7 +333,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
       expect(prismaMock.creditPackPurchase.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -372,7 +360,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
       // The query uses OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }]
       // which excludes purchases whose expiresAt is in the past
@@ -385,7 +373,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
       expect(prismaMock.creditPackPurchase.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1269,7 +1257,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits('venue-ABC', 'test@example.com')
+      await lookupCustomerCredits('venue-ABC', 'cust-abc')
 
       expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
         where: expect.objectContaining({ venueId: 'venue-ABC' }),

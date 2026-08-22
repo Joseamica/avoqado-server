@@ -222,9 +222,13 @@ router.get(
   creditPackPublicController.getAvailablePacks,
 )
 
+// Fase 0.B: el balance es dato de CUENTA → sesión obligatoria (el slug manda sobre el
+// token). Sin plan gate: es lectura manage-existing (regla de oro de arriba).
 router.get(
   '/venues/:venueSlug/credit-packs/balance',
   readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
   validateRequest(publicBalanceQuerySchema),
   creditPackPublicController.getCustomerBalance,
 )

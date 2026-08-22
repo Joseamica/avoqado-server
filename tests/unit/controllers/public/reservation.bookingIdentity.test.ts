@@ -25,6 +25,24 @@ describe('resolveBookingIdentity', () => {
     expect(r).toEqual({ ok: true, customerId: null })
   })
 
+  it('🔴 sin sesión y requireAccount=false pero quiere pagar con créditos → CUSTOMER_AUTH_REQUIRED (antes de crear nada)', () => {
+    // Auditoría 2: los créditos son de cuenta. Se decide AQUÍ, antes de insertar la
+    // reserva, porque en cita el canje corre en OTRA transacción y un 401 tardío
+    // dejaría una reserva huérfana.
+    const r = resolveBookingIdentity({ customerAuth: null, requireAccount: false, bodyCustomerId: undefined, wantsCredits: true })
+    expect(r).toEqual({ ok: false, code: 'CUSTOMER_AUTH_REQUIRED' })
+  })
+
+  it('con sesión y quiere pagar con créditos → ok con el customerId del token', () => {
+    const r = resolveBookingIdentity({
+      customerAuth: { customerId: 'c_token', venueId: 'v1' },
+      requireAccount: false,
+      bodyCustomerId: undefined,
+      wantsCredits: true,
+    })
+    expect(r).toEqual({ ok: true, customerId: 'c_token' })
+  })
+
   it('sin sesión y requireAccount=true → rechaza CUSTOMER_AUTH_REQUIRED', () => {
     const r = resolveBookingIdentity({ customerAuth: null, requireAccount: true, bodyCustomerId: undefined })
     expect(r).toEqual({ ok: false, code: 'CUSTOMER_AUTH_REQUIRED' })

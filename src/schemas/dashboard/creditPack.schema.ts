@@ -143,9 +143,10 @@ export const publicBalanceQuerySchema = z.object({
   params: z.object({
     venueSlug: z.string().min(1),
   }),
+  // Fase 0.B: ya no acepta email/phone — el balance es del customer de la sesión. Zod
+  // descarta claves desconocidas, así que un widget viejo que las mande no recibe 400
+  // por eso (recibe el 401 de sesión de la ruta).
   query: z.object({
-    email: z.string().email().optional(),
-    phone: z.string().optional(),
     seats: z.string().regex(/^\d+$/).optional(),
     productId: z.string().optional(),
     // Comma-separated product IDs for the multi-service /appointments wizard.

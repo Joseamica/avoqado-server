@@ -14,7 +14,7 @@ import { nanoid } from 'nanoid'
 import { Prisma, CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
 import emailService from '@/services/email.service'
@@ -68,7 +68,11 @@ export async function getAvailablePacks(venueId: string, productId?: string) {
 }
 
 /**
- * Lookup customer credits by email or phone.
+ * Lookup the credits of the AUTHENTICATED customer (Fase 0.B).
+ *
+ * Antes se buscaba por email/teléfono de la query: cualquiera que supiera tu email veía
+ * tus compras y obtenía un `balanceId` para canjearlo como invitado (auditoría 2, P1).
+ * El balance es dato de cuenta: sólo por `customerId` de la sesión, dentro del venue.
  *
  * Optional `opts.seats`: annotates each itemBalance with `sufficient: remainingQuantity >= seats`
  *   so the widget can disable balances that can't cover the booking.
@@ -79,35 +83,18 @@ export async function getAvailablePacks(venueId: string, productId?: string) {
  */
 export async function lookupCustomerCredits(
   venueId: string,
-  email?: string,
-  phone?: string,
+  customerId: string,
   opts?: { seats?: number; productId?: string; productIds?: string[] },
 ) {
-  if (!email && !phone) {
-    throw new BadRequestError('Se requiere email o telefono para consultar creditos')
+  if (!customerId) {
+    throw new UnauthorizedError('Inicia sesión para consultar tus créditos', 'CUSTOMER_AUTH_REQUIRED')
   }
 
   const seats = opts?.seats
   const productIds = opts?.productIds && opts.productIds.length > 0 ? opts.productIds : undefined
   const productId = productIds ? undefined : opts?.productId
 
-  // Find customer (strict by both when both are present, then fallback by either)
-  let customer = null
-  if (email && phone) {
-    customer = await prisma.customer.findFirst({
-      where: { venueId, email, phone },
-    })
-  }
-  if (!customer && email) {
-    customer = await prisma.customer.findFirst({
-      where: { venueId, email },
-    })
-  }
-  if (!customer && phone) {
-    customer = await prisma.customer.findFirst({
-      where: { venueId, phone },
-    })
-  }
+  const customer = await prisma.customer.findFirst({ where: { id: customerId, venueId } })
 
   if (!customer) {
     return { customer: null, purchases: [], requestedSeats: seats ?? null }

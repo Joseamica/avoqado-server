@@ -72,14 +72,24 @@ describe('redeemCreditsForReservation — identidad', () => {
     expect(tx.creditItemBalance.update).not.toHaveBeenCalled()
   })
 
-  it('sin sesión (invitado): sigue resolviendo por email/teléfono como hoy', async () => {
+  it('🔴 sin sesión (invitado) con balanceId → 401 CUSTOMER_AUTH_REQUIRED; nunca resuelve por email/teléfono (auditoría 2)', async () => {
+    // Antes: el invitado "probaba" que el balance era suyo con el email del body. Con el
+    // balance público por contacto, cualquiera que supiera tu email gastaba tus créditos.
     const tx = mkTx({ customerByContact: { id: 'c_inv', venueId: 'v1' }, purchaseCustomerId: 'c_inv' })
 
-    const r = await redeemCreditsForReservation(tx, { ...base, customerEmail: 'inv@x.com' })
+    await expect(redeemCreditsForReservation(tx, { ...base, customerEmail: 'inv@x.com' })).rejects.toMatchObject({
+      statusCode: 401,
+      code: 'CUSTOMER_AUTH_REQUIRED',
+    })
+    expect(tx.customer.findFirst).not.toHaveBeenCalled()
+    expect(tx.creditItemBalance.update).not.toHaveBeenCalled()
+    expect(tx.creditTransaction.create).not.toHaveBeenCalled()
+  })
 
-    expect(r.redeemed).toBe(true)
-    expect(tx.customer.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ OR: expect.any(Array) }) }),
-    )
+  it('con sesión pero el customer ya no existe en el venue → 400, sin tocar saldos', async () => {
+    const tx = mkTx({ customerById: null, purchaseCustomerId: 'c_x' })
+
+    await expect(redeemCreditsForReservation(tx, { ...base, customerId: 'c_borrado' })).rejects.toMatchObject({ statusCode: 400 })
+    expect(tx.creditItemBalance.update).not.toHaveBeenCalled()
   })
 })
