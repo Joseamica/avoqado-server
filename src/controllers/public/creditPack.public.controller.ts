@@ -91,8 +91,13 @@ export async function createCheckout(req: Request, res: Response, next: NextFunc
     const { venueSlug, packId } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
     const { email, phone, successUrl, cancelUrl } = req.body
+    // Fase 0.B: con sesión (authenticateCustomerOptional ya validó el token contra el slug),
+    // la compra se liga al customer del token; el email del body no manda.
+    const sessionCustomerId = ((req as any).customerAuth?.customerId as string | undefined) ?? null
 
-    const result = await creditPackPublicService.createCheckoutSession(venue.id, packId, email, phone, successUrl, cancelUrl)
+    const result = await creditPackPublicService.createCheckoutSession(venue.id, packId, email, phone, successUrl, cancelUrl, {
+      customerId: sessionCustomerId,
+    })
 
     res.json(result)
   } catch (error) {

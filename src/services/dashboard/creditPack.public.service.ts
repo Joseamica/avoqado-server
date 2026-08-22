@@ -179,7 +179,14 @@ export async function createCheckoutSession(
   phone: string | undefined,
   successUrl: string,
   cancelUrl: string,
+  /**
+   * Fase 0.B: identidad de sesión. Cuando viene `customerId`, el límite por cliente se
+   * cuenta por ese id (no por el email del body, que es manipulable) y viaja en la
+   * metadata de Stripe para que el fulfillment ligue la compra a ESA cuenta.
+   */
+  identity?: { customerId?: string | null },
 ) {
+  const sessionCustomerId = identity?.customerId ?? null
   const pack = await prisma.creditPack.findFirst({
     where: { id: packId, venueId, active: true },
   })
@@ -201,19 +208,19 @@ export async function createCheckoutSession(
     throw new BadRequestError('La cuenta Stripe Connect del negocio no está configurada.')
   }
 
-  // Check maxPerCustomer if applicable
-  if (pack.maxPerCustomer && (email || phone)) {
-    const customer = await prisma.customer.findFirst({
-      where: {
-        venueId,
-        ...(email ? { email } : { phone }),
-      },
-    })
+  // Check maxPerCustomer if applicable. Fase 0.B: con sesión, se cuenta por el customer del
+  // token; sin sesión, por email/teléfono como antes.
+  if (pack.maxPerCustomer) {
+    const limitCustomerId = sessionCustomerId
+      ? sessionCustomerId
+      : email || phone
+        ? (await prisma.customer.findFirst({ where: { venueId, ...(email ? { email } : { phone }) }, select: { id: true } }))?.id ?? null
+        : null
 
-    if (customer) {
+    if (limitCustomerId) {
       const purchaseCount = await prisma.creditPackPurchase.count({
         where: {
-          customerId: customer.id,
+          customerId: limitCustomerId,
           creditPackId: packId,
           status: { notIn: [CreditPurchaseStatus.REFUNDED] },
         },
@@ -265,6 +272,7 @@ export async function createCheckoutSession(
         venueId,
         packId: pack.id,
         ecommerceMerchantId: merchant.id,
+        ...(sessionCustomerId ? { customerId: sessionCustomerId } : {}),
         ...(phone ? { customerPhone: phone } : {}),
         ...(email ? { customerEmail: email } : {}),
       },
@@ -338,8 +346,13 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
     throw new Error(`CreditPack ${packId} not found`)
   }
 
-  // Find or create customer
-  const customer = await findOrCreateCustomer(venueId, email, phone)
+  // Find or create customer. Fase 0.B: si la sesión de checkout nació con sesión de
+  // cliente, la compra se liga a ESE customer (metadata.customerId) — nunca al email,
+  // que el comprador pudo teclear a mano. Sin customerId (invitado), contacto como antes.
+  const sessionCustomer = metadata.customerId
+    ? await prisma.customer.findFirst({ where: { id: metadata.customerId, venueId } })
+    : null
+  const customer = sessionCustomer ?? (await findOrCreateCustomer(venueId, email, phone))
 
   // Calculate expiration
   const expiresAt = pack.validityDays ? new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000) : null

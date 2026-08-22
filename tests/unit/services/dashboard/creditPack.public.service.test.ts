@@ -399,6 +399,56 @@ describe('CreditPack Public Service', () => {
   // createCheckoutSession
   // ==========================================
 
+  // Fase 0.B — checkout con sesión: el customerId del token manda sobre el email del body.
+  describe('createCheckoutSession — identidad de sesión (Fase 0.B)', () => {
+    const successUrl = 'https://example.com/success'
+    const cancelUrl = 'https://example.com/cancel'
+    const merchant = () => ({
+      id: 'ecm-stripe-1',
+      chargesEnabled: true,
+      platformFeeBps: 100,
+      providerCredentials: { connectAccountId: 'acct_test_123' },
+      provider: { code: 'STRIPE_CONNECT', active: true },
+    })
+
+    it('con customerId: la metadata de Stripe lleva customerId', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      mockStripeCheckoutCreate.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.com/cs_1' })
+
+      await createCheckoutSession(VENUE_ID, PACK_ID, 'ajeno@x.com', undefined, successUrl, cancelUrl, { customerId: 'c_sesion' })
+
+      const [params] = mockStripeCheckoutCreate.mock.calls[0]
+      expect(params.metadata).toEqual(expect.objectContaining({ customerId: 'c_sesion' }))
+    })
+
+    it('con customerId: maxPerCustomer cuenta por ese id, NO busca por el email del body', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ maxPerCustomer: 1 }))
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      prismaMock.creditPackPurchase.count.mockResolvedValue(1) // ya compró una
+
+      await expect(
+        createCheckoutSession(VENUE_ID, PACK_ID, 'otro@x.com', undefined, successUrl, cancelUrl, { customerId: 'c_sesion' }),
+      ).rejects.toThrow(/limite/i)
+
+      expect(prismaMock.creditPackPurchase.count).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ customerId: 'c_sesion' }) }),
+      )
+      expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('sin customerId (invitado): maxPerCustomer sigue resolviendo por email como hoy', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ maxPerCustomer: 1 }))
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'c_por_email' })
+      prismaMock.creditPackPurchase.count.mockResolvedValue(1)
+
+      await expect(createCheckoutSession(VENUE_ID, PACK_ID, 'maria@x.com', undefined, successUrl, cancelUrl)).rejects.toThrow(/limite/i)
+
+      expect(prismaMock.customer.findFirst).toHaveBeenCalled()
+    })
+  })
+
   describe('createCheckoutSession', () => {
     const successUrl = 'https://example.com/success'
     const cancelUrl = 'https://example.com/cancel'

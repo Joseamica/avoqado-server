@@ -228,9 +228,13 @@ router.get(
 // Checkout is a PRE-PAYMENT to book (create-flow surface) → gated. The pack
 // LIST + BALANCE reads above stay UNGATED: existing credit holders must always
 // be able to see what they already paid for, regardless of the venue's plan.
+// Fase 0.B: con sesión, la compra se liga al customer del token (el email del body no manda).
+// Sin header sigue siendo checkout de invitado.
 router.post(
   '/venues/:venueSlug/credit-packs/:packId/checkout',
   writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomerOptional,
   requireReservationsPlan,
   validateRequest(publicCheckoutSchema),
   creditPackPublicController.createCheckout,
