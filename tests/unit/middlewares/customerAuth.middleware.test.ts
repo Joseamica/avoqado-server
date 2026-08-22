@@ -219,6 +219,18 @@ describe('authenticateCustomerOptional', () => {
     expect((req as any).customerAuth).toBeNull()
   })
 
+  it('header PRESENTE pero vacío ("") → 401 CUSTOMER_TOKEN_INVALID, NO degrada a invitado', async () => {
+    // Un cliente que manda `Authorization: ` vacío está mal configurado; no es un invitado.
+    const req = mkReq({ headers: { authorization: '' } } as any)
+    const res = mkRes()
+    const next = jest.fn() as NextFunction
+
+    await authenticateCustomerOptional(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'CUSTOMER_TOKEN_INVALID' }))
+  })
+
   it('header PRESENTE pero inválido → 401, NO degrada a invitado', async () => {
     const req = mkReq({ headers: { authorization: 'Bearer basura' } } as any)
     const res = mkRes()

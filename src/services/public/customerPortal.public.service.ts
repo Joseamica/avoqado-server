@@ -65,6 +65,11 @@ export async function registerCustomer(
       if (phoneExists?.password) {
         throw new BadRequestError('Ya existe una cuenta con este teléfono.')
       }
+      // Fase 0.B: misma regla que el contacto por email — un contacto desactivado no se
+      // "activa" fusionándole email+password desde el registro público.
+      if (phoneExists && phoneExists.active === false) {
+        throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+      }
       if (phoneExists) {
         // Phone customer exists without password — merge by setting email + password
         customer = await prisma.customer.update({

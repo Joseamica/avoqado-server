@@ -65,6 +65,19 @@ jest.mock('@/middlewares/customerAuth.middleware', () => ({
     req.customerAuth = { customerId: 'cust_1', venueId: 'venue_pub_1' }
     next()
   },
+  // Fase 0.B: la variante opcional va en create/checkout. Passthrough como invitado.
+  authenticateCustomerOptional: (req: any, _res: any, next: any) => {
+    req.customerAuth = null
+    next()
+  },
+}))
+// Fase 0.B: resolveVenueBySlug va antes de la identidad. Passthrough que inyecta el venue
+// del slug para que el gate de plan pueda correr igual que antes.
+jest.mock('@/middlewares/resolveVenueBySlug.middleware', () => ({
+  resolveVenueBySlug: (req: any, _res: any, next: any) => {
+    req.publicVenue = { id: 'venue_pub_1', slug: req.params?.venueSlug ?? 'venue-pub' }
+    next()
+  },
 }))
 jest.mock('@/middlewares/consumerAuth.middleware', () => ({
   authenticateConsumer: (req: any, _res: any, next: any) => {
@@ -344,7 +357,11 @@ describe('wiring — the gates are actually present in the route files (source r
 
   it.each([
     [/'\/venues\/:venueSlug\/availability',\s*readLimit,\s*requireReservationsPlan,/, 'availability GET'],
-    [/'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*requireReservationsPlan,/, 'create POST'],
+    // Fase 0.B: venue → identidad opcional → plan. El orden importa (401 de identidad gana a 403 de plan).
+    [
+      /'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      'create POST',
+    ],
     [/'\/venues\/:venueSlug\/reservations\/hold',\s*writeLimit,\s*requireReservationsPlan,/, 'hold POST'],
     [
       /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule\/availability',\s*readLimit,\s*requireReservationsPlan,/,
@@ -354,7 +371,10 @@ describe('wiring — the gates are actually present in the route files (source r
       /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule\/hold',\s*writeLimit,\s*requireReservationsPlan,/,
       'reschedule hold POST',
     ],
-    [/'\/venues\/:venueSlug\/credit-packs\/:packId\/checkout',\s*writeLimit,\s*requireReservationsPlan,/, 'pack checkout POST'],
+    [
+      /'\/venues\/:venueSlug\/credit-packs\/:packId\/checkout',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      'pack checkout POST',
+    ],
   ])('public.routes.ts gates the create surface: %s (%s)', fragment => {
     expect(publicRoutesSrc).toMatch(fragment)
   })

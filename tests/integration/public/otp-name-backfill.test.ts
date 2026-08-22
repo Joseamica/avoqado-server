@@ -59,8 +59,10 @@ describe('OTP name backfill — formatted guestPhone (integration, real DB)', ()
       },
     })
     // Plant an unconsumed OTP challenge the verify path will accept.
+    // Fase 0.B: el reto está atado al venue; sin venueId, verify lo rechaza a propósito.
     await prisma.otpChallenge.create({
       data: {
+        venueId,
         channel: 'whatsapp',
         destination: PHONE_E164,
         codeHash: hashOtpCode('123456'),

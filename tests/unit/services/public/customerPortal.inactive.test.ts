@@ -78,6 +78,22 @@ describe('customerPortal — Customer.active en emisores de token', () => {
       expect(generateCustomerToken).not.toHaveBeenCalled()
     })
 
+    it('🔴 contacto existente por TELÉFONO, inactivo, sin password → 401 CUSTOMER_INACTIVE (rama phoneExists)', async () => {
+      // No hay cuenta por email; sí hay un contacto por teléfono, desactivado.
+      prismaMock.customer.findUnique.mockImplementation(async ({ where }: any) => {
+        if (where.venueId_email) return null
+        if (where.venueId_phone) return { id: 'c_tel', venueId: VENUE, phone: '+525511111111', password: null, active: false }
+        return null
+      })
+
+      await expect(
+        registerCustomer(VENUE, { email: 'nuevo@b.com', password: 'Secreto123', phone: '+525511111111' }),
+      ).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_INACTIVE' })
+
+      expect(prismaMock.customer.update).not.toHaveBeenCalled()
+      expect(generateCustomerToken).not.toHaveBeenCalled()
+    })
+
     it('regresión: contacto existente ACTIVO sin password → se le pone password y recibe token', async () => {
       prismaMock.customer.findUnique.mockResolvedValue({
         id: 'c1',

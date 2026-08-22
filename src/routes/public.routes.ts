@@ -202,9 +202,13 @@ router.post(
   validateRequest(z.object({ params: publicReservationParamsSchema, body: rescheduleHoldBodySchema })),
   reservationPublicController.createRescheduleHold,
 )
+// Fase 0.B: la autorización sigue siendo `cancelSecret`; la identidad opcional va SÓLO para
+// rechazar un Authorization presente pero inválido/ajeno (nunca degradar a invitado en silencio).
 router.post(
   '/venues/:venueSlug/reservations/:cancelSecret/reschedule',
   cancelLimit, // same rate envelope — destructive-ish public mutation
+  resolveVenueBySlug,
+  authenticateCustomerOptional,
   validateRequest(z.object({ params: publicReservationParamsSchema, body: publicRescheduleBodySchema })),
   reservationPublicController.rescheduleReservation,
 )

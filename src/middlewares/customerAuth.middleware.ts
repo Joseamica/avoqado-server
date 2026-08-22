@@ -61,7 +61,9 @@ async function resolveCustomerAuth(
   req: Request,
 ): Promise<{ ok: true; auth: CustomerAuthContext | null } | { ok: false; failure: AuthFailure }> {
   const authHeader = req.headers.authorization
-  if (authHeader === undefined || authHeader === '') {
+  // Sólo la AUSENCIA del header es invitado. Un header presente pero vacío (`Authorization: `)
+  // es un cliente mal configurado, no un invitado: se rechaza como cualquier token inválido.
+  if (authHeader === undefined) {
     return { ok: true, auth: null }
   }
 

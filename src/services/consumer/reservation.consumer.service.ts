@@ -1,6 +1,6 @@
 import { CreditPurchaseStatus, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
@@ -164,7 +164,19 @@ async function createReservationDepositCheckout(
   }
 }
 
-async function ensureVenueCustomer(venueId: string, consumerId: string) {
+/**
+ * Fase 0.B: un Customer que el venue desactivó no se vincula ni se usa desde la app de
+ * consumidor, en ninguna de las tres ramas. No se crea un duplicado (chocaría con los
+ * índices únicos por venue) ni se degrada a invitado: reactivar es decisión del venue.
+ * `=== false` a propósito: `active` es @default(true); un registro sin el campo no es inactivo.
+ */
+function assertCustomerActive(customer: { active?: boolean | null } | null | undefined) {
+  if (customer && customer.active === false) {
+    throw new UnauthorizedError('Esta cuenta está desactivada en este negocio', 'CUSTOMER_INACTIVE')
+  }
+}
+
+export async function ensureVenueCustomer(venueId: string, consumerId: string) {
   const consumer = await prisma.consumer.findUnique({
     where: { id: consumerId },
     select: { id: true, email: true, phone: true, firstName: true, lastName: true, active: true },
@@ -174,6 +186,7 @@ async function ensureVenueCustomer(venueId: string, consumerId: string) {
   const existingByConsumer = await prisma.customer.findFirst({
     where: { venueId, consumerId },
   })
+  assertCustomerActive(existingByConsumer)
   if (existingByConsumer) return { consumer, customer: existingByConsumer }
 
   const existingByEmail = consumer.email
@@ -181,6 +194,7 @@ async function ensureVenueCustomer(venueId: string, consumerId: string) {
         where: { venueId_email: { venueId, email: consumer.email } },
       })
     : null
+  assertCustomerActive(existingByEmail)
 
   if (existingByEmail) {
     const customer = await prisma.customer.update({
@@ -200,6 +214,7 @@ async function ensureVenueCustomer(venueId: string, consumerId: string) {
         where: { venueId_phone: { venueId, phone: consumer.phone } },
       })
     : null
+  assertCustomerActive(existingByPhone)
 
   if (existingByPhone) {
     const customer = await prisma.customer.update({
