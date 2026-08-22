@@ -13519,6 +13519,20 @@ model PrintStation {
   printer      Printer? @relation(fields: [printerId], references: [id], onDelete: SetNull)
   copies       Int      @default(1) // v1: fixed 1 (copies>1 = post-v1)
   isDefault    Boolean  @default(false) // fallback for unrouted items; ONE per venue (partial unique index in migration)
+
+  /// ¿Aquí se EMPACA? La estación que recibe el ticket consolidado del pedido completo.
+  ///
+  /// 🔴 No es una comanda más: las comandas dicen qué COCINAR y cada estación ve sólo su
+  /// parte. Éste lleva el pedido ENTERO en una hoja, y es para quien mete todo en la bolsa y
+  /// se la da al repartidor — su lista de verificación. En una mesa el mesero lleva los
+  /// platos y ve al cliente; en reparto, si falta una salsa el cliente se entera en su casa,
+  /// y eso acaba en reembolso y calificación baja.
+  ///
+  /// UNA por venue (índice único parcial, igual que `isDefault`). Si NADIE la marca no sale
+  /// ticket extra: el default es no cambiarle nada a quien no lo quiera. Y se marca aparte
+  /// de `isDefault` a propósito — mandar el consolidado a la estación por default haría que
+  /// la cocina reciba DOS papeles del mismo pedido, que es el doble-impreso clásico.
+  isPacking    Boolean  @default(false)
   active       Boolean  @default(true)
   displayOrder Int      @default(0)
 

@@ -105,6 +105,8 @@ export const createStationSchema = z.object({
         .max(5, 'Máximo 5 copias')
         .optional(),
       isDefault: z.boolean().optional(),
+      /** ¿Aquí se empaca? Recibe el ticket consolidado del pedido de reparto. UNA por venue. */
+      isPacking: z.boolean().optional(),
       displayOrder: z.number().int().min(0).optional(),
     })
     .strict(),
@@ -124,6 +126,8 @@ export const updateStationSchema = z.object({
         .max(5, 'Máximo 5 copias')
         .optional(),
       isDefault: z.boolean().optional(),
+      /** ¿Aquí se empaca? Recibe el ticket consolidado del pedido de reparto. UNA por venue. */
+      isPacking: z.boolean().optional(),
       displayOrder: z.number().int().min(0).optional(),
       active: z.boolean().optional(),
     })

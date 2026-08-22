@@ -37,10 +37,14 @@ export interface PrintConfigPayload {
     printerId: string | null
     copies: number
     isDefault: boolean
+    /** ¿Aquí se empaca? Recibe el ticket consolidado del pedido completo. */
+    isPacking: boolean
     active: boolean
     displayOrder: number
   }>
   defaultStationId: string | null
+  /** La estación que empaca, o `null` si el negocio no marcó ninguna. */
+  packingStationId: string | null
   /** Only categories that have an explicit station set. */
   categoryRouting: Array<{ categoryId: string; printStationId: string }>
   /** Only products that have an explicit override set. */
@@ -66,6 +70,9 @@ export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayl
   ])
 
   const defaultStation = stations.find(s => s.isDefault && s.active) ?? null
+  // `null` cuando nadie la marcó: entonces NO sale ticket de empaque. El default es no
+  // cambiarle nada a quien no lo pidió.
+  const packingStation = stations.find(s => s.isPacking && s.active) ?? null
 
   const payload: Omit<PrintConfigPayload, 'version'> = {
     gateway: gateway ? { terminalId: gateway.terminalId, address: gateway.address, active: gateway.active } : null,
@@ -88,10 +95,12 @@ export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayl
       printerId: s.printerId,
       copies: s.copies,
       isDefault: s.isDefault,
+      isPacking: s.isPacking,
       active: s.active,
       displayOrder: s.displayOrder,
     })),
     defaultStationId: defaultStation?.id ?? null,
+    packingStationId: packingStation?.id ?? null,
     categoryRouting: categories.map(c => ({ categoryId: c.id, printStationId: c.printStationId as string })),
     productOverrides: products.map(p => ({ productId: p.id, printStationId: p.printStationId as string })),
   }

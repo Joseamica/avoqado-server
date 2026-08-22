@@ -174,6 +174,11 @@ export async function createStation(venueId: string, input: CreateStationInput, 
   await assertPrinterInVenue(venueId, input.printerId ?? null)
 
   const station = await prisma.$transaction(async tx => {
+    // Igual que `isDefault`: UNA por venue. Se apaga la anterior en la misma transacción,
+    // porque el índice único parcial de la base rechazaría la segunda.
+    if (input.isPacking) {
+      await tx.printStation.updateMany({ where: { venueId, isPacking: true }, data: { isPacking: false } })
+    }
     if (input.isDefault) {
       // I9: solo un default por venue → limpiar el anterior antes de crear.
       await tx.printStation.updateMany({ where: { venueId, isDefault: true }, data: { isDefault: false } })
@@ -185,6 +190,7 @@ export async function createStation(venueId: string, input: CreateStationInput, 
         printerId: input.printerId ?? null,
         copies: input.copies ?? 1,
         isDefault: input.isDefault ?? false,
+        isPacking: input.isPacking ?? false,
         displayOrder: input.displayOrder ?? 0,
       },
     })
@@ -195,7 +201,12 @@ export async function createStation(venueId: string, input: CreateStationInput, 
     action: 'PRINT_STATION_CREATED',
     entity: 'PrintStation',
     entityId: station.id,
-    data: { name: station.name, printerId: station.printerId, isDefault: station.isDefault } as Prisma.InputJsonValue,
+    data: {
+      name: station.name,
+      printerId: station.printerId,
+      isDefault: station.isDefault,
+      isPacking: station.isPacking,
+    } as Prisma.InputJsonValue,
   })
   return station
 }
@@ -206,6 +217,9 @@ export async function updateStation(venueId: string, stationId: string, input: U
   await assertPrinterInVenue(venueId, input.printerId ?? null)
 
   const station = await prisma.$transaction(async tx => {
+    if (input.isPacking === true) {
+      await tx.printStation.updateMany({ where: { venueId, isPacking: true, NOT: { id: stationId } }, data: { isPacking: false } })
+    }
     if (input.isDefault === true) {
       await tx.printStation.updateMany({ where: { venueId, isDefault: true, NOT: { id: stationId } }, data: { isDefault: false } })
     }
@@ -216,6 +230,7 @@ export async function updateStation(venueId: string, stationId: string, input: U
         printerId: input.printerId === undefined ? undefined : input.printerId,
         copies: input.copies ?? undefined,
         isDefault: input.isDefault ?? undefined,
+        isPacking: input.isPacking ?? undefined,
         displayOrder: input.displayOrder ?? undefined,
         active: input.active ?? undefined,
       },
@@ -229,7 +244,7 @@ export async function updateStation(venueId: string, stationId: string, input: U
     entityId: station.id,
     data: {
       changes: input,
-      previous: { name: previous.name, isDefault: previous.isDefault, active: previous.active },
+      previous: { name: previous.name, isDefault: previous.isDefault, isPacking: previous.isPacking, active: previous.active },
     } as Prisma.InputJsonValue,
   })
   return station
