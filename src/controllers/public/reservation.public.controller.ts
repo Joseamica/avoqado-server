@@ -1262,9 +1262,9 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
     // Credit redemption for non-class appointments. Lives outside the
     // reservation transaction (reservationService.createReservation owns its
-    // own tx and doesn't expose it), so on the rare failure case the
-    // reservation stands but credits are NOT consumed — the customer's
-    // unaffected, ops can reconcile from the [CREDIT REDEEM FAILED] log.
+    // own tx and doesn't expose it). Auditoría 3: if the redemption fails the
+    // reservation must NOT stay alive holding the slot — it is cancelled as
+    // compensation (SYSTEM / CREDIT_REDEEM_FAILED) and the error surfaces.
     let creditRedeemed = false
     let creditsUsed = 0
     const balanceIds: string[] = Array.isArray(req.body.creditItemBalanceIds)
@@ -1273,32 +1273,21 @@ export async function createReservation(req: Request, res: Response, next: NextF
         ? [req.body.creditItemBalanceId]
         : []
     if (balanceIds.length > 0) {
-      try {
-        const seats = (req.body.spotIds?.length || req.body.partySize || 1) as number
-        const result = await prisma.$transaction(async tx =>
-          redeemCreditsForReservation(tx, {
-            venueId: venue.id,
-            reservationId: reservation.id,
-            confirmationCode: reservation.confirmationCode,
-            balanceIds,
-            creditsPerBalance: seats,
-            // Fase 0.B: con sesión, el dueño de los créditos es el customer del token.
-            customerId: ((req as any).customerAuth?.customerId as string | undefined) ?? null,
-            customerEmail: req.body.guestEmail,
-            customerPhone: req.body.guestPhone,
-            expectedProductIds: incomingProductIds.length > 0 ? incomingProductIds : req.body.productId ? [req.body.productId] : undefined,
-          }),
-        )
-        creditRedeemed = result.redeemed
-        creditsUsed = result.creditsUsed
-      } catch (error) {
-        logger.error(
-          `[CREDIT REDEEM FAILED] reservation=${reservation.confirmationCode} balances=${balanceIds.join(',')} err=${(error as Error).message}`,
-        )
-        // Surface the error to the customer so they can fix the input rather
-        // than think they paid with credits when they didn't.
-        throw error
-      }
+      const seats = (req.body.spotIds?.length || req.body.partySize || 1) as number
+      const result = await redeemCreditsWithCompensation({
+        venueId: venue.id,
+        reservationId: reservation.id,
+        confirmationCode: reservation.confirmationCode,
+        balanceIds,
+        creditsPerBalance: seats,
+        // Fase 0.B: el dueño de los créditos es el customer de la sesión (obligatoria).
+        customerId: ((req as any).customerAuth?.customerId as string | undefined) ?? null,
+        customerEmail: req.body.guestEmail,
+        customerPhone: req.body.guestPhone,
+        expectedProductIds: incomingProductIds.length > 0 ? incomingProductIds : req.body.productId ? [req.body.productId] : undefined,
+      })
+      creditRedeemed = result.redeemed
+      creditsUsed = result.creditsUsed
     }
 
     // Booking confirmation email — only fires when the reservation is already
@@ -2476,6 +2465,59 @@ export async function validateHoldForReservation(args: {
 // ==========================================
 // CREDIT REDEMPTION (shared helper)
 // ==========================================
+
+export const CREDIT_REDEEM_FAILED_REASON = 'CREDIT_REDEEM_FAILED' as const
+
+type RedeemArgs = Parameters<typeof redeemCreditsForReservation>[1]
+
+/**
+ * Canje de créditos para una CITA ya creada, con COMPENSACIÓN (auditoría 3, P1).
+ *
+ * La cita se confirma en su propia transacción (`reservationService.createReservation`) y el
+ * canje corre en otra. Si el canje falla —saldo insuficiente, producto distinto, compra
+ * expirada, DB— la reserva NO puede quedar viva ocupando el lugar sin créditos cobrados: se
+ * cancela como SYSTEM con razón CREDIT_REDEEM_FAILED (cancelReservation ya maneja outbox de
+ * calendario; reembolso y depósito son no-op porque nada se cobró) y el error ORIGINAL se
+ * propaga al cliente. Si la compensación también falla, se loguea fuerte y gana el error
+ * original. `deps` inyectables para probarlo solo.
+ */
+export async function redeemCreditsWithCompensation(
+  args: RedeemArgs,
+  deps: {
+    redeem: (a: RedeemArgs) => Promise<{ creditsUsed: number; redeemed: boolean }>
+    cancel: (venueId: string, reservationId: string, by: string, reason: string) => Promise<unknown>
+  } = {
+    redeem: a => prisma.$transaction(tx => redeemCreditsForReservation(tx, a)),
+    cancel: (venueId, reservationId, by, reason) => reservationService.cancelReservation(venueId, reservationId, by, reason),
+  },
+): Promise<{ creditsUsed: number; redeemed: boolean }> {
+  try {
+    return await deps.redeem(args)
+  } catch (error) {
+    logger.error(
+      `[CREDIT REDEEM FAILED] reservation=${args.confirmationCode} balances=${args.balanceIds.join(',')} — cancelling as compensation`,
+      {
+        reservationId: args.reservationId,
+        err: (error as Error)?.message,
+      },
+    )
+    try {
+      await deps.cancel(args.venueId, args.reservationId, 'SYSTEM', CREDIT_REDEEM_FAILED_REASON)
+    } catch (cancelErr) {
+      logger.error(
+        `[CREDIT REDEEM FAILED] la compensación (cancelar) también falló — la reserva ${args.confirmationCode} queda VIVA sin créditos`,
+        {
+          reservationId: args.reservationId,
+          err: (error as Error)?.message,
+          cancelErr: (cancelErr as Error)?.message,
+        },
+      )
+    }
+    // Surface the original error so the customer can fix the input rather
+    // than think they paid with credits when they didn't.
+    throw error
+  }
+}
 
 /**
  * Redeems credits from one or more CreditItemBalance rows against a reservation.
