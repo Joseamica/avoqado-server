@@ -8002,6 +8002,10 @@ enum CustomerApprovalDeliveryStatus {
   SENT
   FAILED
   DEAD_LETTER
+  /// No se envió porque ya salió una versión MÁS NUEVA del mismo cliente: evita que llegue
+  /// "tu cuenta está en revisión" después de "ya puedes reservar". Es un desenlace normal,
+  /// no una falla — por eso NO es DEAD_LETTER, que es lo que alguien debe ir a revisar.
+  SUPERSEDED
 }
 
 enum CustomerApprovalChannel {

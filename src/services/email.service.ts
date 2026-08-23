@@ -18,6 +18,12 @@ interface EmailOptions {
   text?: string
   attachments?: EmailAttachment[]
   headers?: Record<string, string>
+  /**
+   * Clave de idempotencia del proveedor (Resend). Dos llamadas con la misma clave producen
+   * UN correo. La usa el outbox de aprobación: es lo que hace seguro reintentar cuando el
+   * proceso murió sin saber si el envío había salido.
+   */
+  idempotencyKey?: string
 }
 
 interface InvitationEmailData {
@@ -328,7 +334,10 @@ class EmailService {
         }),
       }
 
-      const result = await resend.emails.send(emailPayload)
+      // 🔴 `idempotencyKey` es de Resend, no un header: si el proceso muere entre "Resend
+      // aceptó" y el registro del envío, el reintento NO genera un segundo correo. Sin
+      // esto, el outbox de aprobación mandaría duplicados en cada crash a media entrega.
+      const result = await resend.emails.send(emailPayload, options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined)
 
       if (result.error) {
         logger.error('📧 Failed to send email:', result.error)
@@ -4481,6 +4490,99 @@ Equipo de Avoqado`
       subject: `${code} es tu código de acceso`,
       html: `<p>Tu código de acceso es <strong style="font-size:20px">${code}</strong>.</p><p>Vence en 10 minutos. Si no lo pediste, ignora este correo.</p>`,
       text: `Tu código de acceso es ${code}. Vence en 10 minutos.`,
+    })
+  }
+
+  /**
+   * Fase 1 — los cuatro avisos de la aprobación de un cliente.
+   *
+   * Uno solo para los cuatro eventos, a propósito: el worker del outbox llama a UNA función
+   * y no tiene que saber qué plantilla le toca a cada evento. Estética según
+   * `.claude/rules/email-templates.md` (isotipo ×2, fondo blanco, CTA negro, sin emoji).
+   */
+  async sendCustomerApprovalEmail(
+    event: 'REQUESTED_STAFF' | 'PENDING_CUSTOMER' | 'APPROVED_CUSTOMER' | 'REJECTED_CUSTOMER',
+    email: string,
+    data: {
+      venueName: string
+      customerName?: string | null
+      bookingUrl: string
+      dashboardUrl: string
+      reason?: string | null
+      idempotencyKey?: string
+    },
+  ): Promise<boolean> {
+    // 🔴 Todo lo que escribe una persona se escapa: el motivo del rechazo lo teclea el
+    // negocio y el nombre viene del registro del cliente. Sin esto, cualquiera podría
+    // inyectar HTML en el correo que le llega a la dueña.
+    const name = escapeHtmlForReferralEmail(data.customerName || 'Un cliente')
+    const venue = escapeHtmlForReferralEmail(data.venueName)
+    const reason = data.reason ? escapeHtmlForReferralEmail(data.reason) : null
+
+    const P = 'font-size: 16px; margin: 0 0 16px 0; color: #000;'
+    let subject: string
+    let bodyHtml: string
+    let text: string
+    let ctaLabel: string
+    let ctaUrl: string
+
+    switch (event) {
+      case 'REQUESTED_STAFF':
+        subject = `${data.venueName}: una persona espera tu aprobación`
+        ctaLabel = 'Revisar solicitud'
+        ctaUrl = data.dashboardUrl
+        bodyHtml = `
+      <p style="${P}">Hola,</p>
+      <p style="${P}"><strong>${name}</strong> creó su cuenta en ${venue} y está esperando tu aprobación para poder reservar en línea.</p>
+      <p style="${P}">Hasta que la revises, no puede apartar lugar.</p>`
+        text = `Hola,\n\n${data.customerName || 'Un cliente'} creó su cuenta en ${data.venueName} y espera tu aprobación para reservar en línea. Hasta que la revises, no puede apartar lugar.\n\nRevisar solicitud: ${data.dashboardUrl}\n\nEquipo de Avoqado`
+        break
+
+      case 'PENDING_CUSTOMER':
+        subject = `Tu cuenta en ${data.venueName} está en revisión`
+        ctaLabel = `Ver ${data.venueName}`
+        ctaUrl = data.bookingUrl
+        bodyHtml = `
+      <p style="${P}">Hola${data.customerName ? ` ${name}` : ''},</p>
+      <p style="${P}">Recibimos tu registro en ${venue}. El negocio revisa cada cuenta nueva antes de habilitar las reservas en línea.</p>
+      <p style="${P}">Te avisamos por este medio en cuanto la revisen. No necesitas hacer nada más.</p>`
+        text = `Hola,\n\nRecibimos tu registro en ${data.venueName}. El negocio revisa cada cuenta nueva antes de habilitar las reservas en línea. Te avisamos en cuanto la revisen.\n\nVer ${data.venueName}: ${data.bookingUrl}\n\nEquipo de Avoqado`
+        break
+
+      case 'APPROVED_CUSTOMER':
+        subject = `Ya puedes reservar en ${data.venueName}`
+        ctaLabel = 'Reservar ahora'
+        ctaUrl = data.bookingUrl
+        bodyHtml = `
+      <p style="${P}">Hola${data.customerName ? ` ${name}` : ''},</p>
+      <p style="${P}">${venue} aprobó tu cuenta. Ya puedes reservar en línea cuando quieras.</p>`
+        text = `Hola,\n\n${data.venueName} aprobó tu cuenta. Ya puedes reservar en línea cuando quieras.\n\nReservar ahora: ${data.bookingUrl}\n\nEquipo de Avoqado`
+        break
+
+      case 'REJECTED_CUSTOMER':
+      default:
+        subject = `Sobre tu cuenta en ${data.venueName}`
+        // 🔴 Al rechazado NO se le manda a la página de reservas: mandarlo a una puerta que
+        // le van a cerrar es peor que no mandarlo a ningún lado. El CTA lleva a Avoqado.
+        ctaLabel = 'Conocer Avoqado'
+        ctaUrl = 'https://avoqado.io'
+        bodyHtml = `
+      <p style="${P}">Hola${data.customerName ? ` ${name}` : ''},</p>
+      <p style="${P}">${venue} no habilitó tu cuenta para reservar en línea.</p>
+      ${reason ? `<p style="${P}"><strong>Motivo:</strong> ${reason}</p>` : ''}
+      <p style="${P}">Si crees que es un error, comunícate directamente con el negocio.</p>`
+        text = `Hola,\n\n${data.venueName} no habilitó tu cuenta para reservar en línea.${data.reason ? `\n\nMotivo: ${data.reason}` : ''}\n\nSi crees que es un error, comunícate directamente con el negocio.\n\nEquipo de Avoqado`
+        break
+    }
+
+    const html = this.buildPlanEmailHtml({ locale: 'es', title: subject, venueName: data.venueName, bodyHtml, ctaLabel, ctaUrl })
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+      ...(data.idempotencyKey ? { idempotencyKey: data.idempotencyKey } : {}),
     })
   }
 

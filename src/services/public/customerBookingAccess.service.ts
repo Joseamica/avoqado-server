@@ -22,6 +22,7 @@
  */
 import { Prisma, CustomerApprovalStatus } from '@prisma/client'
 import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
+import { dedupeKey } from '@/services/reservation/customerApprovalOutbox.service'
 
 export const CUSTOMER_APPROVAL_PENDING = 'CUSTOMER_APPROVAL_PENDING' as const
 export const CUSTOMER_APPROVAL_REJECTED = 'CUSTOMER_APPROVAL_REJECTED' as const
@@ -114,9 +115,9 @@ async function lockCustomer(
   return rows[0] ?? null
 }
 
-function dedupeKey(event: ApprovalEvent, customerId: string, approvalVersion: number): string {
-  return `${event}:${customerId}:${approvalVersion}`
-}
+// La clave de dedupe la define el outbox, que es quien la consume. Definirla dos veces es
+// exactamente cómo se desincronizan: un cambio de formato de un lado y el otro deja de
+// deduplicar, en silencio y sólo en producción.
 
 /**
  * Sella la activación de una cuenta y decide si pide aprobación. Corre DENTRO de la misma

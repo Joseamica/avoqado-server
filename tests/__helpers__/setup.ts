@@ -285,6 +285,9 @@ const prismaMock: any = {
   moneyAnomaly: createMockModel(),
   // Stripe webhook idempotency claims (Connect + platform)
   processedStripeEvent: createMockModel(),
+  // Fase 1: outbox de avisos de aprobación de clientes (evento + entrega por destinatario)
+  customerApprovalOutbox: createMockModel(),
+  customerApprovalDelivery: createMockModel(),
   // Payment Link models
   paymentLink: createMockModel(),
   checkoutSession: createMockModel(),
