@@ -10,8 +10,9 @@
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
-import { PaymentStatus } from '@prisma/client'
+import { CustomerApprovalStatus, PaymentStatus } from '@prisma/client'
 import { logAction } from './activity-log.service'
+import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 
 // ==========================================
@@ -902,4 +903,80 @@ export async function updateCustomerMetrics(customerId: string, orderTotal: numb
     totalVisits: newTotalVisits,
     totalSpent: newTotalSpent,
   })
+}
+
+// ==========================================
+// FASE 1 — APROBACIÓN DE CLIENTES (el negocio decide quién reserva en línea)
+// ==========================================
+
+/**
+ * La decisión del staff, desde el dashboard.
+ *
+ * La lógica dura (lock de fila, write-CAS sobre `approvalVersion`, ActivityLog y outbox de
+ * correo) vive en `customerBookingAccess.service`; aquí sólo se abre la transacción y se
+ * resuelve la organización.
+ *
+ * 🔴 `organizationId` sale del VENUE, no del token de quien aprueba. Un SUPERADMIN —o alguien
+ * con varias organizaciones— traería en su token la organización equivocada, y el rastro de
+ * auditoría quedaría archivado bajo un negocio que no es.
+ */
+export async function decideCustomerApprovalFromDashboard(
+  venueId: string,
+  customerId: string,
+  input: { decision: 'APPROVED' | 'REJECTED'; reason?: string; expectedVersion: number; actorStaffId: string },
+): Promise<{ approvalStatus: CustomerApprovalStatus; approvalVersion: number; changed: boolean }> {
+  return prisma.$transaction(async tx => {
+    const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+    if (!venue) throw new NotFoundError('Negocio no encontrado')
+
+    return decideCustomerApproval(tx, {
+      customerId,
+      venueId,
+      organizationId: venue.organizationId,
+      decision: input.decision,
+      reason: input.reason,
+      expectedVersion: input.expectedVersion,
+      actorStaffId: input.actorStaffId,
+    })
+  })
+}
+
+/**
+ * La bandeja "En espera de aprobación".
+ *
+ * Orden ASCENDENTE por `approvalRequestedAt`: quien lleva más tiempo esperando se atiende
+ * primero. Al revés, en un día ocupado la que pidió en la mañana queda sepultada bajo las de
+ * la tarde y nunca la aprueban.
+ */
+export async function listCustomersAwaitingApproval(
+  venueId: string,
+  opts: { page?: number; pageSize?: number } = {},
+): Promise<{ data: unknown[]; meta: { page: number; pageSize: number; total: number } }> {
+  const page = Math.max(1, opts.page ?? 1)
+  const pageSize = Math.min(100, Math.max(1, opts.pageSize ?? 20))
+
+  const where = { venueId, approvalStatus: CustomerApprovalStatus.PENDING }
+  const [data, total] = await Promise.all([
+    prisma.customer.findMany({
+      where,
+      orderBy: { approvalRequestedAt: 'asc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        approvalStatus: true,
+        approvalVersion: true,
+        approvalRequestedAt: true,
+        accountActivatedAt: true,
+        createdAt: true,
+      },
+    }),
+    prisma.customer.count({ where }),
+  ])
+
+  return { data, meta: { page, pageSize, total } }
 }

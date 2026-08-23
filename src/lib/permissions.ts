@@ -422,6 +422,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'discounts:create': ['discounts:read', 'discounts:create', 'products:read', 'customers:read'],
   // Managing the tender-type catalog implies being able to read it.
   'tender-types:manage': ['tender-types:read', 'tender-types:manage'],
+  // Fase 1: aprobar a un cliente implica poder verlo — la pantalla de "en espera" lista
+  // Customers, así que sin `customers:read` el permiso sería un botón sin bandeja.
+  'customers:approve': ['customers:approve', 'customers:read'],
   'discounts:update': ['discounts:read', 'discounts:update'],
   'discounts:delete': ['discounts:read', 'discounts:delete'],
   // Upsell "¿Algo más?" — sugerencias en la pantalla del cliente y la franja del cajero.
@@ -969,7 +972,16 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'teams:update',
     'teams:delete',
     'teams:invite',
-    'customers:*', // Phase 1: Customer System
+    // 🔴 Fase 1: MANAGER tenía `customers:*`. Se abrió a sus cinco permisos explícitos —
+    // que son EXACTAMENTE los que la plataforma usa hoy, así que no pierde nada— para que
+    // el comodín no le conceda en silencio `customers:approve`. Decidir a quién se le deja
+    // reservar en línea es decisión de dueño (founder, 2026-08-22), no del turno.
+    // Si mañana nace otro `customers:algo`, hay que decidir a mano si MANAGER lo lleva.
+    'customers:read', // Phase 1: Customer System
+    'customers:create',
+    'customers:update',
+    'customers:delete',
+    'customers:settle-balance',
     'customer-groups:*', // Phase 1: Customer System
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
@@ -1811,7 +1823,16 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],
-  customers: ['customers:read', 'customers:create', 'customers:update', 'customers:delete', 'customers:settle-balance'],
+  customers: [
+    'customers:read',
+    'customers:create',
+    'customers:update',
+    'customers:delete',
+    'customers:settle-balance',
+    // Fase 1: aprobar/rechazar a un cliente para que pueda reservar en línea. Default
+    // OWNER/ADMIN; se expone aquí para que un venue pueda concedérselo a MANAGER a mano.
+    'customers:approve',
+  ],
   'customer-groups': ['customer-groups:read', 'customer-groups:create', 'customer-groups:update', 'customer-groups:delete'],
   loyalty: ['loyalty:read', 'loyalty:create', 'loyalty:update', 'loyalty:delete', 'loyalty:redeem', 'loyalty:adjust', 'loyalty:expire'],
   discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete', 'discounts:apply'],

@@ -132,6 +132,47 @@ export async function getCustomerStats(req: Request, res: Response, next: NextFu
  * POST /api/dashboard/:venueId/customers/:customerId/settle-balance
  * Settle pending balance for a customer (mark pay-later orders as paid)
  */
+/**
+ * Fase 1 — la bandeja "En espera de aprobación".
+ */
+export async function getCustomersAwaitingApproval(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { page, pageSize } = req.query as unknown as { page: number; pageSize: number }
+
+    const result = await customerService.listCustomersAwaitingApproval(venueId, { page, pageSize })
+
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Fase 1 — aprobar o rechazar a un cliente para que pueda reservar en línea.
+ *
+ * El actor sale de `authContext.userId` (NUNCA del body): quién aprobó es dato de auditoría
+ * y no puede venir del cliente HTTP.
+ */
+export async function decideCustomerApproval(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, customerId } = req.params
+    const { decision, reason, expectedVersion } = req.body
+    const { userId } = (req as any).authContext
+
+    const result = await customerService.decideCustomerApprovalFromDashboard(venueId, customerId, {
+      decision,
+      reason,
+      expectedVersion,
+      actorStaffId: userId,
+    })
+
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function settleCustomerBalance(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, customerId } = req.params

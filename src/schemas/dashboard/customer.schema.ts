@@ -17,6 +17,35 @@ export const VenueIdParamsSchema = z.object({
   }),
 })
 
+/**
+ * Fase 1 — decisión de aprobación de un cliente.
+ *
+ * `expectedVersion` NO es opcional a propósito: es el write-CAS. Quien decide manda la
+ * versión que tenía en pantalla; si alguien más ya decidió, el server responde 409 en vez
+ * de pisar la decisión ajena en silencio.
+ */
+export const CustomerApprovalDecisionSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('ID de negocio inválido'),
+    customerId: z.string().cuid('ID de cliente inválido'),
+  }),
+  body: z.object({
+    decision: z.enum(['APPROVED', 'REJECTED'], { errorMap: () => ({ message: 'La decisión debe ser APPROVED o REJECTED' }) }),
+    reason: z.string().trim().max(500, 'El motivo no puede exceder 500 caracteres').optional(),
+    expectedVersion: z.coerce.number().int().min(0, 'La versión esperada es requerida'),
+  }),
+})
+
+export const CustomersAwaitingApprovalQuerySchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('ID de negocio inválido'),
+  }),
+  query: z.object({
+    page: z.coerce.number().int().min(1).default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  }),
+})
+
 // ==========================================
 // QUERY SCHEMAS
 // ==========================================
