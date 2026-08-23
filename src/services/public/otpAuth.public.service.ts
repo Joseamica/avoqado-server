@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client'
+import { CustomerApprovalStatus, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
@@ -61,6 +61,8 @@ export async function requestOtp(args: {
 
 export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | 'email'; destination: string; code: string }): Promise<{
   token: string
+  /** Fase 1: estado de aprobación resultante de activar la cuenta; el controller lo compone en `bookingAccess`. */
+  approvalStatus: CustomerApprovalStatus
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }
 }> {
   const destination = args.channel === 'email' ? normalizeEmail(args.destination) : normalizePhone(args.destination)

@@ -1,4 +1,4 @@
-import { CreditPurchaseStatus, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
+import { CreditPurchaseStatus, Prisma, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
@@ -8,6 +8,7 @@ import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import { resolveChargeableStripeMerchant as resolveActiveStripeMerchant } from '@/services/payments/ecommerceCapability'
 import logger from '@/config/logger'
+import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
@@ -176,28 +177,28 @@ function assertCustomerActive(customer: { active?: boolean | null } | null | und
   }
 }
 
-export async function ensureVenueCustomer(venueId: string, consumerId: string) {
-  const consumer = await prisma.consumer.findUnique({
+export async function ensureVenueCustomer(tx: Prisma.TransactionClient, venueId: string, consumerId: string) {
+  const consumer = await tx.consumer.findUnique({
     where: { id: consumerId },
     select: { id: true, email: true, phone: true, firstName: true, lastName: true, active: true },
   })
   if (!consumer || !consumer.active) throw new BadRequestError('Cuenta de consumidor no disponible')
 
-  const existingByConsumer = await prisma.customer.findFirst({
+  const existingByConsumer = await tx.customer.findFirst({
     where: { venueId, consumerId },
   })
   assertCustomerActive(existingByConsumer)
   if (existingByConsumer) return { consumer, customer: existingByConsumer }
 
   const existingByEmail = consumer.email
-    ? await prisma.customer.findUnique({
+    ? await tx.customer.findUnique({
         where: { venueId_email: { venueId, email: consumer.email } },
       })
     : null
   assertCustomerActive(existingByEmail)
 
   if (existingByEmail) {
-    const customer = await prisma.customer.update({
+    const customer = await tx.customer.update({
       where: { id: existingByEmail.id },
       data: {
         consumerId,
@@ -210,14 +211,14 @@ export async function ensureVenueCustomer(venueId: string, consumerId: string) {
   }
 
   const existingByPhone = consumer.phone
-    ? await prisma.customer.findUnique({
+    ? await tx.customer.findUnique({
         where: { venueId_phone: { venueId, phone: consumer.phone } },
       })
     : null
   assertCustomerActive(existingByPhone)
 
   if (existingByPhone) {
-    const customer = await prisma.customer.update({
+    const customer = await tx.customer.update({
       where: { id: existingByPhone.id },
       data: {
         consumerId,
@@ -229,7 +230,7 @@ export async function ensureVenueCustomer(venueId: string, consumerId: string) {
     return { consumer, customer }
   }
 
-  const customer = await prisma.customer.create({
+  const customer = await tx.customer.create({
     data: {
       venueId,
       consumerId,
@@ -242,6 +243,22 @@ export async function ensureVenueCustomer(venueId: string, consumerId: string) {
   })
 
   return { consumer, customer }
+}
+
+/**
+ * Fase 1 — envoltorio transaccional del vínculo Consumer→Customer.
+ *
+ * Abre una transacción CORTA: sólo Consumer + Customer + activación. Deliberadamente NO
+ * envuelve `createReservationForConsumer` entero — ése abre después sus propias transacciones
+ * serializables y puede llamar a Stripe, y sostener una tx durante una llamada de red es lo
+ * que agota el pool de conexiones.
+ */
+export async function ensureVenueCustomerActivated(venueId: string, consumerId: string) {
+  return prisma.$transaction(async tx => {
+    const { consumer, customer } = await ensureVenueCustomer(tx, venueId, consumerId)
+    const activation = await activateCustomerAccount(tx, { customerId: customer.id, venueId, origin: 'CONSUMER' })
+    return { consumer, customer, approvalStatus: activation.approvalStatus }
+  })
 }
 
 export async function createReservationForConsumer(consumerId: string, venueSlug: string, input: ConsumerReservationInput) {
@@ -265,7 +282,7 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
   }
 
-  const { consumer, customer } = await ensureVenueCustomer(venue.id, consumerId)
+  const { consumer, customer } = await ensureVenueCustomerActivated(venue.id, consumerId)
   const guestName = input.guestName ?? displayName(consumer)
   const guestEmail = input.guestEmail ?? consumer.email ?? undefined
   const guestPhone = input.guestPhone ?? consumer.phone ?? undefined

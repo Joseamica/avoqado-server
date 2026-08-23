@@ -20,7 +20,10 @@ describe('ensureVenueCustomer — Customer.active', () => {
   it('rama consumerId: Customer ya vinculado pero inactivo → 401 CUSTOMER_INACTIVE', async () => {
     prismaMock.customer.findFirst.mockResolvedValue({ id: 'c1', venueId: VENUE, consumerId: 'cons-1', active: false } as any)
 
-    await expect(ensureVenueCustomer(VENUE, 'cons-1')).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_INACTIVE' })
+    await expect(ensureVenueCustomer(prismaMock as any, VENUE, 'cons-1')).rejects.toMatchObject({
+      statusCode: 401,
+      code: 'CUSTOMER_INACTIVE',
+    })
     expect(prismaMock.customer.update).not.toHaveBeenCalled()
     expect(prismaMock.customer.create).not.toHaveBeenCalled()
   })
@@ -32,7 +35,10 @@ describe('ensureVenueCustomer — Customer.active', () => {
       return null
     })
 
-    await expect(ensureVenueCustomer(VENUE, 'cons-1')).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_INACTIVE' })
+    await expect(ensureVenueCustomer(prismaMock as any, VENUE, 'cons-1')).rejects.toMatchObject({
+      statusCode: 401,
+      code: 'CUSTOMER_INACTIVE',
+    })
     expect(prismaMock.customer.update).not.toHaveBeenCalled()
   })
 
@@ -43,14 +49,17 @@ describe('ensureVenueCustomer — Customer.active', () => {
       return null
     })
 
-    await expect(ensureVenueCustomer(VENUE, 'cons-1')).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_INACTIVE' })
+    await expect(ensureVenueCustomer(prismaMock as any, VENUE, 'cons-1')).rejects.toMatchObject({
+      statusCode: 401,
+      code: 'CUSTOMER_INACTIVE',
+    })
     expect(prismaMock.customer.update).not.toHaveBeenCalled()
   })
 
   it('regresión: Customer vinculado y activo → se devuelve sin tocar nada', async () => {
     prismaMock.customer.findFirst.mockResolvedValue({ id: 'c1', venueId: VENUE, consumerId: 'cons-1', active: true } as any)
 
-    const r = await ensureVenueCustomer(VENUE, 'cons-1')
+    const r = await ensureVenueCustomer(prismaMock as any, VENUE, 'cons-1')
     expect(r.customer.id).toBe('c1')
     expect(prismaMock.customer.update).not.toHaveBeenCalled()
   })
