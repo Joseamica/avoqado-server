@@ -109,6 +109,11 @@ const envSchema = z.object({
   // Opcional a propósito: un venue sin Uber no debe impedir que arranque la API
   // (mismo criterio que EXTERNAL_BANK_*). El verificador falla claro si falta.
   UBER_WEBHOOK_SIGNING_KEY: z.string().optional(),
+
+  /// DiDi Food — `app_secret` de la app. Firma los webhooks: `MD5(cuerpo crudo + secreto)`.
+  /// Hay uno por app, y las apps de prueba y producción tienen secretos distintos.
+  DIDI_APP_SECRET_SANDBOX: z.string().optional(),
+  DIDI_APP_SECRET_PRODUCTION: z.string().optional(),
   // Rotación: Uber ofrece Secondary Signing Key nativa. Si está presente, el
   // webhook acepta CUALQUIERA de las dos durante la ventana de rotación.
   UBER_WEBHOOK_SIGNING_KEY_SECONDARY: z.string().optional(),
@@ -130,6 +135,24 @@ const envSchema = z.object({
   // token de sandbox modificó el menú EN VIVO de un restaurante real.
   UBER_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
   UBER_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
+
+  // ── Rappi (segundo canal directo de reparto) ──────────────────────────────────────
+  RAPPI_ENVIRONMENT: z.enum(['SANDBOX', 'PRODUCTION']).default('SANDBOX'),
+  RAPPI_CLIENT_ID_SANDBOX: z.string().optional(),
+  RAPPI_CLIENT_SECRET_SANDBOX: z.string().optional(),
+  RAPPI_CLIENT_ID_PRODUCTION: z.string().optional(),
+  RAPPI_CLIENT_SECRET_PRODUCTION: z.string().optional(),
+  /** País del host de producción (el de México se escribe `services.mxgrability.rappi.com`). */
+  RAPPI_COUNTRY: z.string().default('MX'),
+  /**
+   * JSON `{ "NEW_ORDER": "secreto", "PING": ["viejo","nuevo"], … }` — 🔴 Rappi da UN secreto
+   * POR EVENTO (11), no uno por integración, y se rotan por separado. Once variables sueltas
+   * se desincronizarían a la primera rotación; ilegible ⇒ cero secretos ⇒ nada se acepta.
+   */
+  RAPPI_WEBHOOK_SECRETS: z.string().optional(),
+  /** Tiendas donde SÍ se puede escribir. Vacía = ninguna (el candado del incidente 2026-08-17). */
+  RAPPI_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
+  RAPPI_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
 
   // Base pública para la URL de retorno del OAuth de Uber (sin barra final). En local
   // es el túnel de ngrok; en prod, https://api.avoqado.io. Debe coincidir EXACTAMENTE

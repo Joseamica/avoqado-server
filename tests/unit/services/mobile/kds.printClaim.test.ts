@@ -6,7 +6,13 @@
  * tres veces — el problema #1 de soporte de Toast con pedidos en línea.
  */
 import prisma from '../../../../src/utils/prismaClient'
-import { claimKdsPrint, confirmKdsPrinted, releaseKdsPrint, PRINT_CLAIM_TTL_MS } from '../../../../src/services/mobile/kds.mobile.service'
+import {
+  claimKdsPrint,
+  comandaPendienteDeImprimir,
+  confirmKdsPrinted,
+  releaseKdsPrint,
+  PRINT_CLAIM_TTL_MS,
+} from '../../../../src/services/mobile/kds.mobile.service'
 
 describe('reclamación de impresión del KDS', () => {
   beforeEach(() => jest.clearAllMocks())
@@ -97,5 +103,34 @@ describe('reclamación de impresión del KDS', () => {
     await releaseKdsPrint('venue1', 'kds1', 'tablet-A')
 
     expect((prisma.kdsOrder.updateMany as jest.Mock).mock.calls[0][0].where.printedAt).toBeNull()
+  })
+})
+
+describe('comandaPendienteDeImprimir — lo que el POS ve como "falta imprimir"', () => {
+  it('ya impresa → no', () => {
+    expect(comandaPendienteDeImprimir({ printedAt: new Date(), printClaimedAt: null })).toBe(false)
+  })
+
+  it('sin reclamar → sí', () => {
+    expect(comandaPendienteDeImprimir({ printedAt: null, printClaimedAt: null })).toBe(true)
+  })
+
+  it('reclamación FRESCA → no (otra tablet no debe pelearla mientras el ganador imprime)', () => {
+    expect(comandaPendienteDeImprimir({ printedAt: null, printClaimedAt: new Date() })).toBe(false)
+  })
+
+  // ── El hueco que hacía inalcanzable la caducidad ─────────────────────────────────
+  // El server permite RETOMAR una reclamación vencida (test de arriba), pero los clientes
+  // sólo reclaman lo que ven pendiente. Si esta función apagara `needsPrint` para siempre
+  // en cuanto alguien reclama, la tablet que reclamó y MURIÓ enterraría la comanda: nadie
+  // volvería a llamar claim-print jamás, y el TTL del server sería letra muerta.
+  it('🔴 reclamación VENCIDA → sí — si no, un aparato muerto entierra la comanda para siempre', () => {
+    const vencida = new Date(Date.now() - PRINT_CLAIM_TTL_MS - 1_000)
+    expect(comandaPendienteDeImprimir({ printedAt: null, printClaimedAt: vencida })).toBe(true)
+  })
+
+  it('vencida pero YA impresa → no (el papel no se des-imprime)', () => {
+    const vencida = new Date(Date.now() - PRINT_CLAIM_TTL_MS - 1_000)
+    expect(comandaPendienteDeImprimir({ printedAt: new Date(), printClaimedAt: vencida })).toBe(false)
   })
 })

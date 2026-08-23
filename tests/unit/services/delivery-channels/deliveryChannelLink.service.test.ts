@@ -13,6 +13,7 @@ import { ConflictError, NotFoundError, ValidationError } from '../../../../src/e
 import { DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode, Prisma } from '@prisma/client'
 import {
   listChannelLinks,
+  listChannelsResumen,
   createChannelLink,
   updateChannelLink,
   pauseChannelLink,
@@ -695,6 +696,43 @@ describe('deliveryChannelLink.service', () => {
 
       await expect(cancelarSnooze('venue-otro', 'link1')).rejects.toThrow(NotFoundError)
       expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  // ============================================================
+  // listChannelsResumen — el semáforo que el POS consulta cada 10s
+  // ============================================================
+  describe('listChannelsResumen', () => {
+    it('🔴 incluye snoozedUntil — sin él la cuenta regresiva NUNCA llega al POS y una pausa con reloj se pinta como pausa del administrador, sin botón de reanudar', async () => {
+      ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([])
+
+      await listChannelsResumen('venue1')
+
+      const arg = (prisma.deliveryChannelLink.findMany as jest.Mock).mock.calls[0][0]
+      expect(arg.where).toEqual({ venueId: 'venue1' })
+      expect(arg.select.snoozedUntil).toBe(true)
+      expect(arg.select.webhookSecret).toBeUndefined()
+    })
+
+    it('es LEAN a propósito: ni config, ni secretos — cada aparato de cocina lo consulta cada 10 segundos', async () => {
+      ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([])
+
+      await listChannelsResumen('venue1')
+
+      const select = (prisma.deliveryChannelLink.findMany as jest.Mock).mock.calls[0][0].select
+      expect(Object.keys(select).sort()).toEqual(['id', 'provider', 'snoozedUntil', 'status'])
+    })
+  })
+
+  describe('SAFE_SELECT expone snoozedUntil', () => {
+    it('🔴 el re-read de update lo incluye — el tipo Safe lo promete y quien lo lea no debe recibir undefined', async () => {
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+
+      await updateChannelLink('venue1', 'link1', { autoSyncMenu: false })
+
+      const callArg = (prisma.deliveryChannelLink.findUnique as jest.Mock).mock.calls[0][0]
+      expect(callArg.select.snoozedUntil).toBe(true)
     })
   })
 })

@@ -310,7 +310,7 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
      * demás tablets seguirían viéndolo pendiente los segundos que tarda la impresión y lo
      * reclamarían también.
      */
-    needsPrint: Boolean(order.esDeMarketplace) && !order.printedAt && !order.printClaimedAt,
+    needsPrint: Boolean(order.esDeMarketplace) && comandaPendienteDeImprimir(order),
     startedAt: order.startedAt?.toISOString() || null,
     completedAt: order.completedAt?.toISOString() || null,
     createdAt: order.createdAt.toISOString(),
@@ -330,6 +330,25 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
  * hacerlo grande: una comanda enterrada 10 minutos es un pedido que nadie preparó.
  */
 export const PRINT_CLAIM_TTL_MS = 90_000
+
+/**
+ * ¿Esta comanda sigue necesitando que ALGUIEN la imprima?
+ *
+ * 🔴 Una reclamación VENCIDA cuenta como libre, y esa es la mitad que faltaba: el server ya
+ * permitía RETOMAR una reclamación vieja, pero los clientes sólo reclaman lo que ven
+ * pendiente. Si esto se apagara para siempre en cuanto alguien reclama, la tablet que
+ * reclamó y murió —batería, papel, red— enterraría la comanda: ningún aparato volvería a
+ * llamar claim-print y el TTL sería letra muerta.
+ *
+ * El empate se rompe hacia IMPRIMIR DE MÁS, nunca hacia no imprimir (regla del dominio):
+ * si una tablet imprimió pero no logró confirmar, a los 90s otra puede sacar un duplicado.
+ * Un papel repetido molesta; un pedido del que la cocina no se enteró cuesta el pedido.
+ */
+export function comandaPendienteDeImprimir(o: { printedAt?: Date | null; printClaimedAt?: Date | null }): boolean {
+  if (o.printedAt) return false
+  if (!o.printClaimedAt) return true
+  return o.printClaimedAt.getTime() < Date.now() - PRINT_CLAIM_TTL_MS
+}
 
 /**
  * "Yo la imprimo." Devuelve si este aparato ganó.
