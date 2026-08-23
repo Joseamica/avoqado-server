@@ -5,7 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
-import { createCustomer } from '@/services/dashboard/customer.dashboard.service'
+import { createCustomer, decideCustomerApprovalFromDashboard } from '@/services/dashboard/customer.dashboard.service'
 
 /** Pure: merge tag changes onto a customer's current tags — add, remove, dedupe (case-insensitive, keeps first-seen casing & order). */
 export function applyTagChanges(current: string[], add: string[] = [], remove: string[] = []): string[] {
@@ -325,6 +325,110 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
             phone: customer.phone,
           },
         })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  // ==========================================================================
+  // Fase 1 — aprobación de clientes (el negocio decide quién reserva en línea)
+  // ==========================================================================
+
+  server.tool(
+    'customers_awaiting_approval',
+    "List the customers waiting for the venue to approve their online-booking account (Fase 1). Oldest first — whoever has been waiting longest is served first. Returns each customer's approvalVersion, which decide_customer_approval needs.",
+    {
+      venueId: z.string().describe('Venue whose waiting list you want (must be in your scope)'),
+      limit: z.number().int().min(1).max(100).optional().describe('Max customers to return (default 20)'),
+    },
+    async ({ venueId, limit }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('customers:approve', venueId)
+
+      const take = limit ?? 20
+      const [customers, total] = await Promise.all([
+        prisma.customer.findMany({
+          where: { ...where, approvalStatus: 'PENDING' },
+          // `id` de desempate: `approvalRequestedAt` no es único, y sin él la paginación
+          // puede perder filas.
+          orderBy: [{ approvalRequestedAt: 'asc' }, { id: 'asc' }],
+          take,
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            approvalVersion: true,
+            approvalRequestedAt: true,
+          },
+        }),
+        prisma.customer.count({ where: { ...where, approvalStatus: 'PENDING' } }),
+      ])
+
+      return text({ ok: true, total, customers })
+    },
+  )
+
+  server.tool(
+    'decide_customer_approval',
+    'Approve or reject a customer so they can (or cannot) book online at this venue (Fase 1). This WRITES and is hard to undo for the person on the other side, so it is CONFIRM-GATED: the first call returns a preview and you must call again with confirm:true. Requires customers:approve (OWNER/ADMIN by default).',
+    {
+      venueId: z.string().describe('Venue that owns the customer (must be in your scope)'),
+      customerId: z.string().min(1).describe('Customer id, from customers_awaiting_approval'),
+      decision: z.enum(['APPROVED', 'REJECTED']).describe('APPROVED lets them book; REJECTED does not'),
+      reason: z.string().max(500).optional().describe('Why — shown to the customer in the rejection email'),
+      confirm: z.boolean().optional().describe('Must be true to actually decide; without it you get a preview'),
+    },
+    async ({ venueId, customerId, decision, reason, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('customers:approve', venueId)
+
+      // El cliente se resuelve DENTRO del venue: un id de otro negocio simplemente no existe
+      // aquí, y decidir a ciegas sobre un id que el LLM inventó es justo lo que no puede pasar.
+      const [customer] = await prisma.customer.findMany({
+        where: { ...where, id: customerId },
+        take: 1,
+        select: { id: true, firstName: true, lastName: true, email: true, approvalStatus: true, approvalVersion: true },
+      })
+      if (!customer) {
+        return text({ ok: false, error: `No encontré al cliente ${customerId} en ese negocio.` })
+      }
+
+      const nombre = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || customer.email || customer.id
+      const etiqueta = decision === 'APPROVED' ? 'APROBAR' : 'RECHAZAR'
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { customer: nombre, from: customer.approvalStatus, to: decision, reason: reason ?? null },
+          message:
+            `Vas a ${etiqueta} a ${nombre}: ${customer.approvalStatus} → ${decision}` +
+            (reason ? `\nMotivo (lo verá el cliente): ${reason}` : '') +
+            (decision === 'REJECTED' ? '\n\nRechazar le impide reservar en línea y le llega un correo.' : '') +
+            '\n\nConfirma con el operador que esto es lo que pidió; luego vuelve a llamar con confirm:true.',
+        })
+      }
+
+      try {
+        // 🔴 `expectedVersion` sale de la fila que se acaba de leer, NUNCA de un parámetro
+        // del LLM: es el write-CAS que evita pisar la decisión de otra persona.
+        const result = await decideCustomerApprovalFromDashboard(venueId, customerId, {
+          decision,
+          reason,
+          expectedVersion: customer.approvalVersion,
+          actorStaffId: scope.staffId,
+        })
+        await auditMcpWrite(scope, {
+          action: decision === 'APPROVED' ? 'CUSTOMER_APPROVAL_APPROVED' : 'CUSTOMER_APPROVAL_REJECTED',
+          entity: 'Customer',
+          entityId: customerId,
+          venueId,
+          data: { from: customer.approvalStatus, to: decision, reason: reason ?? null },
+        })
+        return text({ ok: true, customer: nombre, ...result })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
