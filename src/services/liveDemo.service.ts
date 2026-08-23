@@ -543,7 +543,10 @@ export async function simulateReservation(sessionId: string): Promise<SimReserva
       specialRequests: 'Corte de cabello — reserva creada desde el demo interactivo de avoqado.io',
       internalNotes: `${SIM_RESERVATION_NOTE_PREFIX}-${uuidv4()}`,
     },
-    { writeOrigin: 'PUBLIC' },
+    // Fase 1: el demo se etiqueta PUBLIC aunque no haya ningún cliente detrás. Sin esta
+    // excepción, un venue de demo con `requireCustomerApproval` prendido rompería la demo
+    // con un "inicia sesión para reservar" que nadie puede satisfacer.
+    { writeOrigin: 'PUBLIC', skipCustomerApprovalGate: true },
   )
 
   await updateLiveDemoActivity(sessionId)

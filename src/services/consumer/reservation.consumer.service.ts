@@ -8,7 +8,7 @@ import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import { resolveChargeableStripeMerchant as resolveActiveStripeMerchant } from '@/services/payments/ecommerceCapability'
 import logger from '@/config/logger'
-import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
+import { activateCustomerAccount, assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
@@ -585,6 +585,11 @@ async function createClassReservationForConsumer(
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
   return withSerializableRetry(async tx => {
+    // Fase 1: el gate va primero, dentro de la MISMA tx que aparta el lugar. Las clases no
+    // pasan por `createReservation` (tienen su propia transacción con lock de la sesión),
+    // así que necesitan su propia llamada — el gate del servicio de citas no las cubre.
+    await assertCustomerCanCreateReservation(tx, { customerId: body.customerId, venueId })
+
     const sessions = await tx.$queryRaw<
       { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
     >`

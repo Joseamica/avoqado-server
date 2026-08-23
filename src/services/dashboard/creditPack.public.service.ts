@@ -17,6 +17,7 @@ import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
+import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import emailService from '@/services/email.service'
 import { resolveChargeableStripeMerchant } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
@@ -174,6 +175,13 @@ export async function createCheckoutSession(
   identity?: { customerId?: string | null },
 ) {
   const sessionCustomerId = identity?.customerId ?? null
+
+  // 🔴 Fase 1 — el gate va ANTES de Stripe, no después. Si el negocio no aprobó a esta
+  // persona, no se le cobra un paquete que no va a poder usar. Al revés (cobrar y rechazar
+  // luego) el dinero YA es suyo: por eso rechazar NO revoca créditos ya acreditados, y por
+  // eso el único punto donde se puede evitar el problema es aquí.
+  await prisma.$transaction(async tx => assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId }))
+
   const pack = await prisma.creditPack.findFirst({
     where: { id: packId, venueId, active: true },
   })

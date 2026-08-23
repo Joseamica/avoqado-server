@@ -23,6 +23,7 @@ import emailService from '../../services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { normalizeBookedProductIds, reservationBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 import {
   fastFailLiveHold,
@@ -1941,6 +1942,11 @@ async function createClassReservation(
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
   return withSerializableRetry(async tx => {
+    // Fase 1: el gate va primero, dentro de la MISMA tx que aparta el lugar. Las clases
+    // tienen su propia transacción (lock de la sesión) y no pasan por `createReservation`,
+    // así que el gate del servicio de citas no las cubre.
+    await assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId })
+
     // Lock the ClassSession row and verify it exists + belongs to venue
     const sessions = await tx.$queryRaw<
       { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
@@ -2369,6 +2375,20 @@ export async function createHold(req: Request, res: Response, next: NextFunction
         throw new NotFoundError('La sesion de clase no existe en este venue')
       }
     }
+
+    // 🔴 Fase 1 — un hold aparta 10 minutos de capacidad REAL. Si esta persona no puede
+    // reservar, tampoco puede bloquearle el lugar a quien sí. La ruta antes ni autenticaba:
+    // se le montó `authenticateCustomerOptional` para que exista identidad que gatear.
+    //
+    // Va AQUÍ, después de validar el cuerpo y antes de mintear: un body malformado sigue
+    // muriendo en 400 sin tocar la base (contrato que ya tenía esta ruta y que hay tests
+    // que lo vigilan), y ningún lugar queda apartado antes del gate.
+    await prisma.$transaction(async tx =>
+      assertCustomerCanCreateReservation(tx, {
+        customerId: ((req as any).customerAuth?.customerId as string | undefined) ?? null,
+        venueId: venue.id,
+      }),
+    )
 
     // Lazy GC — cheap, runs once per hold creation.
     void pruneExpiredHolds()

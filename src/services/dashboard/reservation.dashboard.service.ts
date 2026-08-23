@@ -44,6 +44,7 @@ import {
 } from '@/services/reservation/appointmentSlotHold.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { resolveServicesMany, type ServiceResolvable } from '@/services/reservation/reservation-services.resolver'
+import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 
 export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
@@ -263,6 +264,15 @@ export interface ReservationWriteContext {
   paymentPolicyOverride?: {
     deposits: ReservationConfig['deposits']
   }
+  /**
+   * Fase 1: salta el gate de aprobación de clientes. ÚNICO uso legítimo hoy: el Live Demo
+   * (`liveDemo.service.ts`), que etiqueta su reserva simulada como `PUBLIC` aunque no haya
+   * ningún cliente detrás — sin esta excepción, un venue de demo con el switch prendido
+   * rompería la demo con un 401 "inicia sesión". Es explícito y greppable a propósito:
+   * la alternativa (mirar el slug del venue) es justo lo que prohíbe la regla de no
+   * hardcodear clientes.
+   */
+  skipCustomerApprovalGate?: boolean
 }
 
 /**
@@ -300,6 +310,15 @@ export async function createReservation(
   const depositIdempotencyKey = `reservation:${crypto.randomUUID()}:deposit:v1`
 
   const reservation = await withSerializableRetry(async tx => {
+    // 🔴 Fase 1 — el gate va PRIMERO, dentro de la MISMA transacción serializable que va a
+    // apartar el lugar. Fuera de ella no sirve: "leo APPROVED → la dueña rechaza → inserto"
+    // commitea igual, porque Postgres puede serializarlo como "la reserva ocurrió antes del
+    // rechazo". Sólo se gatean los orígenes de cliente; el staff (DASHBOARD/MCP) decide por
+    // su cuenta y el Live Demo se exceptúa explícitamente.
+    if ((context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER') && !context.skipCustomerApprovalGate) {
+      await assertCustomerCanCreateReservation(tx, { customerId: data.customerId, venueId })
+    }
+
     const persistedSettings = await getReservationSettings(venueId, tx)
     const settings: ReservationConfig =
       context.writeOrigin === 'PUBLIC' && context.paymentPolicyOverride

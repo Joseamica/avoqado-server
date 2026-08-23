@@ -2,6 +2,8 @@ import prisma from '@/utils/prismaClient'
 import { VenueStatus } from '@prisma/client'
 import { BadRequestError, ForbiddenError } from '@/errors/AppError'
 import { createCheckoutSession, fulfillPurchase } from '@/services/dashboard/creditPack.public.service'
+import { ensureVenueCustomerActivated } from '@/services/consumer/reservation.consumer.service'
+import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 
 function buildCreditPackPaymentReturnUrl(path: 'success' | 'cancelled', venueSlug: string) {
   const baseUrl = (process.env.CONSUMER_APP_RETURN_URL || 'avoqado://payment-result').replace(/\/$/, '')
@@ -42,6 +44,12 @@ export async function createCreditCheckoutForConsumer(consumerId: string, venueS
     throw new BadRequestError('Agrega correo o telefono a tu perfil para comprar creditos')
   }
 
+  // Fase 1: la compra desde la app tenía identidad de Consumer pero NUNCA resolvía el
+  // Customer del venue — así que el límite por cliente se contaba por email y el gate de
+  // aprobación no tenía a quién mirar. Se liga (y se activa la cuenta) aquí, con el mismo
+  // protocolo que la reserva, y el customerId viaja al checkout.
+  const { customer } = await ensureVenueCustomerActivated(venue.id, consumerId)
+
   return createCheckoutSession(
     venue.id,
     packId,
@@ -49,6 +57,7 @@ export async function createCreditCheckoutForConsumer(consumerId: string, venueS
     consumer.phone ?? undefined,
     buildCreditPackPaymentReturnUrl('success', venue.slug),
     buildCreditPackPaymentReturnUrl('cancelled', venue.slug),
+    { customerId: customer.id },
   )
 }
 
@@ -88,13 +97,20 @@ export async function finalizeCreditCheckout(consumerId: string, sessionId: stri
   // If this purchase customer is not linked yet, bind it to the authenticated
   // consumer and enrich missing contact fields for future lookups.
   if (!linkedConsumer) {
-    await prisma.customer.update({
-      where: { id: hydrated.customer.id },
-      data: {
-        consumerId,
-        ...(consumer.email && !hydrated.customer.email ? { email: consumer.email } : {}),
-        ...(consumer.phone && !hydrated.customer.phone ? { phone: consumer.phone } : {}),
-      },
+    // 🔴 Fase 1: este vínculo se hacía FUERA del protocolo de activación, así que creaba
+    // cuentas de app que nunca pedían aprobación (auditoría §4bis). Ahora liga y activa en
+    // la MISMA transacción, con el mismo origen que la reserva. Idempotente: si la cuenta
+    // ya estaba activa, `activateCustomerAccount` no recalcula nada.
+    await prisma.$transaction(async tx => {
+      await tx.customer.update({
+        where: { id: hydrated.customer.id },
+        data: {
+          consumerId,
+          ...(consumer.email && !hydrated.customer.email ? { email: consumer.email } : {}),
+          ...(consumer.phone && !hydrated.customer.phone ? { phone: consumer.phone } : {}),
+        },
+      })
+      await activateCustomerAccount(tx, { customerId: hydrated.customer.id, venueId: hydrated.venueId, origin: 'CONSUMER' })
     })
   }
 
