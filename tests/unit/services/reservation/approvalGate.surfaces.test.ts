@@ -19,6 +19,14 @@ jest.mock('@/utils/serializableRetry', () => ({
   __esModule: true,
   withSerializableRetry: jest.fn(),
 }))
+jest.mock('@/services/reservation/appointmentSlotHold.service', () => ({
+  __esModule: true,
+  mintNormalAppointmentHold: jest.fn(async () => ({ id: 'hold-1', expiresAt: new Date(Date.now() + 600_000) })),
+  pruneExpiredHolds: jest.fn(async () => undefined),
+  fastFailLiveHold: jest.fn(async () => null),
+  resolveCanonicalAppointmentDuration: jest.fn(async () => 60),
+  assertLegacyAppointmentDurationFloor: jest.fn(async () => undefined),
+}))
 
 import { assertCustomerCanCreateReservation, activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
@@ -28,6 +36,7 @@ import { createReservationForConsumer } from '@/services/consumer/reservation.co
 import * as creditPackService from '@/services/dashboard/creditPack.public.service'
 import * as creditConsumerService from '@/services/consumer/credit.consumer.service'
 import * as reservationPublicController from '@/controllers/public/reservation.public.controller'
+import { mintNormalAppointmentHold } from '@/services/reservation/appointmentSlotHold.service'
 
 const VENUE = 'venue-1'
 const GATE = assertCustomerCanCreateReservation as jest.Mock
@@ -205,6 +214,7 @@ describe('Gate de aprobación — HOLD de slot (aparta capacidad 10 min)', () =>
     GATE.mockResolvedValue(undefined)
     prismaMock.venue.findFirst.mockResolvedValue({ id: VENUE, slug: 'estudio', name: 'Estudio', timezone: 'America/Mexico_City' } as any)
     prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', type: 'SERVICE' }] as any)
+    ;(mintNormalAppointmentHold as jest.Mock).mockResolvedValue({ id: 'hold-1', expiresAt: new Date(Date.now() + 600_000) })
     jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
       publicBooking: { enabled: true, requirePhone: false, requireEmail: false },
       deposits: { enabled: false, mode: 'none' },
@@ -212,8 +222,10 @@ describe('Gate de aprobación — HOLD de slot (aparta capacidad 10 min)', () =>
     } as any)
   })
 
-  it('🔴 un cliente en espera de aprobación NO puede apartar el slot', async () => {
-    armGateRejects()
+  it('🔴 el gate viaja DENTRO de la transacción que mintea, no en una corta aparte', async () => {
+    // Auditoría Codex #3: con el gate en su propia transacción cabía un rechazo entre "puede"
+    // y "aparta", y el rechazado se quedaba con el lugar diez minutos. El contrato ahora es
+    // que el customerId llegue al minteo, que lo gatea como primer paso de SU transacción.
     const next = jest.fn()
     const req = {
       params: { venueSlug: 'estudio' },
@@ -227,7 +239,26 @@ describe('Gate de aprobación — HOLD de slot (aparta capacidad 10 min)', () =>
 
     await reservationPublicController.createHold(req, makeRes(), next)
 
-    expect(GATE).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-hold', venueId: VENUE })
+    expect(mintNormalAppointmentHold).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-hold' }))
+  })
+
+  it('🔴 el rechazo del gate (que ahora vive en el minteo) llega al cliente como 403, no como 500', async () => {
+    ;(mintNormalAppointmentHold as jest.Mock).mockRejectedValue(
+      new ForbiddenError('Tu cuenta está en espera de aprobación del negocio.', 'CUSTOMER_APPROVAL_PENDING'),
+    )
+    const next = jest.fn()
+    const req = {
+      params: { venueSlug: 'estudio' },
+      body: {
+        startsAt: new Date(Date.now() + 3_600_000).toISOString(),
+        endsAt: new Date(Date.now() + 7_200_000).toISOString(),
+        productId: 'prod-1',
+      },
+      customerAuth: { customerId: 'cust-hold', venueId: VENUE },
+    } as any
+
+    await reservationPublicController.createHold(req, makeRes(), next)
+
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 'CUSTOMER_APPROVAL_PENDING' }))
   })
 })

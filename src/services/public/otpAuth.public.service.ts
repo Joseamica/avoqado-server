@@ -87,7 +87,17 @@ export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | '
   // la aprobación viven en UNA transacción. Antes eran escrituras sueltas: si algo tronaba a
   // medias, el código quedaba quemado y el Consumer huérfano, y el cliente tenía que pedir otro.
   const { customer, approvalStatus } = await prisma.$transaction(async tx => {
-    await tx.otpChallenge.update({ where: { id: challenge.id }, data: { consumedAt: new Date() } })
+    // 🔴 CAS, no `update` ciego. El reto se leyó FUERA de la transacción: dos verificaciones
+    // simultáneas con el código correcto leían el mismo reto sin consumir y ambas emitían
+    // token — el "un solo uso" no era tal. Condicionar en `consumedAt: null` deja pasar
+    // exactamente a una; la que pierde recibe el mismo 400 que un código ya usado.
+    const consumed = await tx.otpChallenge.updateMany({
+      where: { id: challenge.id, consumedAt: null },
+      data: { consumedAt: new Date() },
+    })
+    if (consumed.count !== 1) {
+      throw new BadRequestError('Ese código ya se usó. Pide uno nuevo.')
+    }
 
     const customer = await resolveIdentity(tx, args.venueId, args.channel === 'whatsapp' ? { phone: destination } : { email: destination })
     // Fase 0.B: el código fue correcto, pero una cuenta desactivada por el venue no recibe

@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -100,6 +101,8 @@ const RESERVATION_FIELD_LABELS: Record<string, string> = {
   requireEmail: 'Requerir email',
   requireAccount: 'Requerir cuenta',
   showStaffPicker: 'Mostrar selector de profesionista',
+  requireCustomerApproval: 'Aprobar manualmente a cada cliente nuevo',
+  customerApprovalNotificationRoles: 'Roles que reciben el aviso de aprobación',
   remindersEnabled: 'Enviar recordatorios',
   reminderChannels: 'Canales de recordatorio',
   reminderMinBefore: 'Minutos antes de recordar',
@@ -710,6 +713,15 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       requireEmail: z.boolean().optional().describe('Require email for online booking'),
       requireAccount: z.boolean().optional().describe('Require an account for online booking'),
       showStaffPicker: z.boolean().optional().describe('Let self-service guests choose an eligible professional'),
+      requireCustomerApproval: z
+        .boolean()
+        .optional()
+        .describe('Require the venue to manually approve each new customer before they can book online (needs requireAccount)'),
+      customerApprovalNotificationRoles: z
+        .array(z.nativeEnum(StaffRole))
+        .min(1)
+        .optional()
+        .describe('Venue roles that get the "someone is waiting for approval" email'),
       // Reminders
       remindersEnabled: z.boolean().optional().describe('Send booking reminders'),
       reminderChannels: z

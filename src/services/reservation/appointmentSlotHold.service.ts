@@ -27,6 +27,7 @@ import { resolveModifierSelections, type ModifierSelectionInput } from '@/servic
 import { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import prisma from '@/utils/prismaClient'
+import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 
 export const SLOT_HOLD_TTL_MS = 10 * 60 * 1000
 
@@ -40,6 +41,12 @@ export interface MintNormalAppointmentHoldInput {
   staffId?: string
   modifierSelections?: ModifierSelectionInput[]
   windowSemantics?: 'base'
+  /**
+   * Fase 1 — identidad de la sesión pública, para el gate de aprobación. `undefined` es
+   * "esta llamada no viene de una superficie pública" (staff/MCP) y NO se gatea; `null` es
+   * "público sin sesión" y sí pasa por el gate, que decide si el venue admite invitados.
+   */
+  customerId?: string | null
 }
 
 export interface MintedNormalAppointmentHold {
@@ -206,6 +213,14 @@ export async function mintNormalAppointmentHold(input: MintNormalAppointmentHold
   const { productIds } = normalizeBookedProductIds({ productIds: input.productIds })
 
   return withSerializableRetry(async tx => {
+    // 🔴 Fase 1 — el gate va DENTRO de esta transacción, antes de tocar capacidad. Antes
+    // corría en el controlador, en una transacción corta aparte: entre esa lectura y este
+    // minteo cabía un rechazo, y el cliente rechazado se quedaba con el lugar apartado diez
+    // minutos. `undefined` = no viene de una superficie pública (staff), no se gatea.
+    if (input.customerId !== undefined) {
+      await assertCustomerCanCreateReservation(tx, { customerId: input.customerId, venueId: input.venueId })
+    }
+
     const settings = await getReservationSettings(input.venueId, tx)
     let heldEndsAt: Date
 

@@ -174,6 +174,10 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   // Reservations
   'reservations:read': 'AVOQADO_RESERVATIONS',
   'reservations:write': 'AVOQADO_RESERVATIONS',
+  // Fase 1: aprobar clientes es parte de reservaciones, no del CRM. En modo white-label se
+  // filtra junto con el resto de reservaciones — si no, el permiso sobreviviría a un venue
+  // que no tiene la función y aparecería un botón que no lleva a ningún lado.
+  'customers:approve': 'AVOQADO_RESERVATIONS',
 
   // Referral Program
   'referral:read': 'REFERRAL_PROGRAM',

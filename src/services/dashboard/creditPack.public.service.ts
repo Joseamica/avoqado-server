@@ -310,7 +310,7 @@ export async function resolveSessionCustomerForFulfillment(args: {
   venueId: string
   checkoutSessionId: string
   packId: string
-}): Promise<{ id: string }> {
+}): Promise<{ id: string; approvalStatus?: string }> {
   const customer = await prisma.customer.findFirst({ where: { id: args.customerId, venueId: args.venueId } })
   if (customer) return customer
 
@@ -403,6 +403,31 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
   const customer = metadata.customerId
     ? await resolveSessionCustomerForFulfillment({ customerId: metadata.customerId, venueId, checkoutSessionId, packId })
     : await findOrCreateCustomer(venueId, email, phone)
+
+  // 🔴 Fase 1 — el pago entró DESPUÉS de que el negocio rechazara a esta persona.
+  //
+  // Puede pasar: el gate corre antes de crear la sesión de Stripe, pero la URL sobrevive
+  // (~24 h). Si rechazan en medio, el cliente todavía puede pagar.
+  //
+  // Se ACREDITA igual, a propósito: el dinero ya salió de su tarjeta y quedarse con él sin
+  // darle nada es peor que cualquier alternativa. Lo que NO puede pasar es que ocurra en
+  // silencio — hasta aquí, nadie se enteraba. El rastro es lo que le permite al negocio
+  // decidir si lo reembolsa o si lo reconsidera.
+  if ((customer as { approvalStatus?: string }).approvalStatus === 'REJECTED') {
+    logger.warn('[CREDIT PACK] Pago recibido de un cliente RECHAZADO — se acredita y se deja rastro', {
+      venueId,
+      customerId: customer.id,
+      checkoutSessionId,
+      packId,
+    })
+    void logAction({
+      action: 'CREDIT_PACK_PAID_BY_REJECTED_CUSTOMER',
+      entity: 'Customer',
+      entityId: customer.id,
+      venueId,
+      data: { checkoutSessionId, packId, amountTotal: (session.amount_total || 0) / 100 },
+    })
+  }
 
   // Calculate expiration
   const expiresAt = pack.validityDays ? new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000) : null

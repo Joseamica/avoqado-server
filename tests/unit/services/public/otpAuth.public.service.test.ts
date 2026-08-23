@@ -148,6 +148,9 @@ describe('OTP Auth Public Service', () => {
         expiresAt: new Date(Date.now() + 60_000),
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
+      // Fase 1: el consumo del reto es un CAS (`updateMany` con `consumedAt: null`),
+      // no un update ciego — así dos verificaciones simultáneas no emiten dos tokens.
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 1 })
       prismaMock.consumer.findMany.mockResolvedValue([{ id: 'cons-1' }] as any)
       prismaMock.customer.findUnique.mockResolvedValue({
         id: 'cust-1',
@@ -191,6 +194,9 @@ describe('OTP Auth Public Service', () => {
         expiresAt: new Date(Date.now() + 60_000),
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
+      // Fase 1: el consumo del reto es un CAS (`updateMany` con `consumedAt: null`),
+      // no un update ciego — así dos verificaciones simultáneas no emiten dos tokens.
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 1 })
 
       await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '000000' })).rejects.toThrow(
         /incorrecto/i,
@@ -212,6 +218,9 @@ describe('OTP Auth Public Service', () => {
         expiresAt: new Date(Date.now() + 60_000),
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
+      // Fase 1: el consumo del reto es un CAS (`updateMany` con `consumedAt: null`),
+      // no un update ciego — así dos verificaciones simultáneas no emiten dos tokens.
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 1 })
 
       await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })).rejects.toThrow(
         /intentos/i,
@@ -234,6 +243,9 @@ describe('OTP Auth Public Service', () => {
         expiresAt: new Date(Date.now() + 60_000),
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
+      // Fase 1: el consumo del reto es un CAS (`updateMany` con `consumedAt: null`),
+      // no un update ciego — así dos verificaciones simultáneas no emiten dos tokens.
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 1 })
 
       // Identity resolution: no existing Consumer → create one, then no existing Customer → create one
       prismaMock.consumer.findMany.mockResolvedValue([]) // phone path uses findMany
@@ -251,9 +263,11 @@ describe('OTP Auth Public Service', () => {
 
       const result = await verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '654321' })
 
-      // Challenge consumed
-      expect(prismaMock.otpChallenge.update).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: 'otp-1' }, data: { consumedAt: expect.any(Date) } }),
+      // Challenge consumed — con CAS sobre `consumedAt: null` (Fase 1): un `update` por id
+      // consumía el reto aunque otra petición simultánea ya lo hubiera consumido, y ambas
+      // emitían token.
+      expect(prismaMock.otpChallenge.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'otp-1', consumedAt: null }, data: { consumedAt: expect.any(Date) } }),
       )
 
       // New Consumer + Customer created on the phone path
@@ -289,6 +303,9 @@ describe('OTP Auth Public Service', () => {
         expiresAt: new Date(Date.now() + 60_000),
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
+      // Fase 1: el consumo del reto es un CAS (`updateMany` con `consumedAt: null`),
+      // no un update ciego — así dos verificaciones simultáneas no emiten dos tokens.
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 1 })
 
       prismaMock.consumer.findFirst.mockResolvedValue({ id: 'consumer-9', email: EMAIL_NORM, createdAt: new Date() })
       prismaMock.customer.findUnique.mockResolvedValue({
@@ -333,6 +350,9 @@ describe('OTP Auth Public Service', () => {
         codeHash: hashOtpCode('123456'),
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
+      // Fase 1: el consumo del reto es un CAS (`updateMany` con `consumedAt: null`),
+      // no un update ciego — así dos verificaciones simultáneas no emiten dos tokens.
+      prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 1 })
       // No existing Consumer or Customer → create paths
       prismaMock.consumer.findMany.mockResolvedValue([])
       prismaMock.consumer.create.mockResolvedValue({ id: 'cons1' })

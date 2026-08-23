@@ -152,6 +152,8 @@ type ReservationSettingsUpdateInput = Partial<{
   requireEmail: boolean
   requireAccount: boolean
   showStaffPicker: boolean
+  requireCustomerApproval: boolean
+  customerApprovalNotificationRoles: StaffRole[]
   allowCustomerCancel: boolean
   minHoursBeforeCancel: number | null
   minHoursBeforeStart: number | null
@@ -321,6 +323,23 @@ export async function updateReservationSettings(venueId: string, data: Reservati
       )
     }
 
+    // 🔴 Fase 1 — aprobar clientes exige que se pida cuenta: sin cuenta no hay a quién
+    // aprobar. El CHECK de la migración lo garantiza en la base, pero ahí el fallo sale como
+    // un 500 ilegible; aquí sale como una instrucción de qué prender primero. Se evalúa
+    // contra la fila ACTUAL, no sólo contra el payload: prender la aprobación en un venue que
+    // ya pide cuenta es válido aunque el payload no mencione `requireAccount`.
+    const nextRequireApproval =
+      typeof normalized.requireCustomerApproval === 'boolean'
+        ? normalized.requireCustomerApproval
+        : (current?.requireCustomerApproval ?? false)
+    const nextRequireAccount =
+      typeof normalized.requireAccount === 'boolean' ? normalized.requireAccount : (current?.requireAccount ?? false)
+    if (nextRequireApproval && !nextRequireAccount) {
+      throw new BadRequestError(
+        'Para aprobar clientes primero activa "Requerir cuenta" en Reservaciones > Configuración: sin cuenta no hay a quién aprobar.',
+      )
+    }
+
     const wasStaffAware = current?.capacityMode === 'per_staff' || current?.showStaffPicker === true
     const nextCapacityMode = typeof normalized.capacityMode === 'string' ? normalized.capacityMode : (current?.capacityMode ?? 'pacing')
     const nextShowStaffPicker =
@@ -401,7 +420,10 @@ export async function updateReservationSettings(venueId: string, data: Reservati
   return settings
 }
 
-function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput): Prisma.ReservationSettingsUpdateInput {
+// Exportada sólo para poder probarla: es el mapeo del contrato de la API a columnas, y un
+// campo que se cae aquí desaparece EN SILENCIO — el PUT responde 200 y no cambia nada. Así
+// se perdió el switch de aprobación de clientes hasta que lo cazó una auditoría.
+export function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput): Prisma.ReservationSettingsUpdateInput {
   const normalized: Prisma.ReservationSettingsUpdateInput = {}
 
   // Flat payload support (legacy)
@@ -428,6 +450,11 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.requireEmail !== undefined) normalized.requireEmail = data.requireEmail
   if (data.requireAccount !== undefined) normalized.requireAccount = data.requireAccount
   if (data.showStaffPicker !== undefined) normalized.showStaffPicker = data.showStaffPicker
+  // Fase 1 — el payload PLANO es el que usa el MCP. Sin estas dos líneas, `configure_reservations`
+  // respondería "listo" sin cambiar nada.
+  if (data.requireCustomerApproval !== undefined) normalized.requireCustomerApproval = data.requireCustomerApproval
+  if (data.customerApprovalNotificationRoles !== undefined)
+    normalized.customerApprovalNotificationRoles = data.customerApprovalNotificationRoles
   if (data.allowCustomerCancel !== undefined) normalized.allowCustomerCancel = data.allowCustomerCancel
   if (data.minHoursBeforeCancel !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeCancel
   if (data.minHoursBeforeStart !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeStart
@@ -472,6 +499,12 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.publicBooking.requireEmail !== undefined) normalized.requireEmail = data.publicBooking.requireEmail
     if (data.publicBooking.requireAccount !== undefined) normalized.requireAccount = data.publicBooking.requireAccount
     if (data.publicBooking.showStaffPicker !== undefined) normalized.showStaffPicker = data.publicBooking.showStaffPicker
+    // Fase 1. El schema ya garantiza que prender esto viene con `requireAccount: true`; aquí
+    // sólo se copia. El CHECK de la migración es la última red, no la primera.
+    if (data.publicBooking.requireCustomerApproval !== undefined)
+      normalized.requireCustomerApproval = data.publicBooking.requireCustomerApproval
+    if (data.publicBooking.customerApprovalNotificationRoles !== undefined)
+      normalized.customerApprovalNotificationRoles = data.publicBooking.customerApprovalNotificationRoles
   }
 
   if (data.cancellation) {

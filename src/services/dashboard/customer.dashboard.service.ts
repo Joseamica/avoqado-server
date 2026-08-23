@@ -959,7 +959,11 @@ export async function listCustomersAwaitingApproval(
   const [data, total] = await Promise.all([
     prisma.customer.findMany({
       where,
-      orderBy: { approvalRequestedAt: 'asc' },
+      // 🔴 `id` como desempate al final, o la paginación pierde filas: `approvalRequestedAt`
+      // NO es único —dos personas que se registran en el mismo instante lo comparten— y
+      // Postgres es libre de ordenarlas distinto en cada página. Lo cazó el guardia
+      // `pagination-stability.guard`.
+      orderBy: [{ approvalRequestedAt: 'asc' }, { id: 'asc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
       select: {

@@ -26,15 +26,15 @@ describe('rutas de aprobación de clientes', () => {
     expect(awaiting).toBeLessThan(byId)
   })
 
-  it('🔴 la bandeja exige `customers:approve`, no `customers:read`', () => {
+  it('🔴 la bandeja exige el plan de reservaciones Y `customers:approve`, no `customers:read`', () => {
     expect(SOURCE).toMatch(
-      /'\/venues\/:venueId\/customers\/awaiting-approval',\s*authenticateTokenMiddleware,\s*checkPermission\('customers:approve'\),/,
+      /'\/venues\/:venueId\/customers\/awaiting-approval',\s*authenticateTokenMiddleware,(\s|\/\/.*|\n)*checkFeatureAccess\('RESERVATIONS'\),\s*checkPermission\('customers:approve'\),/,
     )
   })
 
-  it('🔴 la decisión es PATCH, exige `customers:approve` y valida el cuerpo', () => {
+  it('🔴 la decisión es PATCH, exige plan + `customers:approve` y valida el cuerpo', () => {
     expect(SOURCE).toMatch(
-      /router\.patch\(\s*'\/venues\/:venueId\/customers\/:customerId\/approval',\s*authenticateTokenMiddleware,\s*checkPermission\('customers:approve'\),\s*validateRequest\(CustomerApprovalDecisionSchema\),/,
+      /router\.patch\(\s*'\/venues\/:venueId\/customers\/:customerId\/approval',\s*authenticateTokenMiddleware,(\s|\/\/.*|\n)*checkFeatureAccess\('RESERVATIONS'\),\s*checkPermission\('customers:approve'\),\s*validateRequest\(CustomerApprovalDecisionSchema\),/,
     )
   })
 })

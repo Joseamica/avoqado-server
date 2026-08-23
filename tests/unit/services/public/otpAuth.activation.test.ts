@@ -44,6 +44,7 @@ function armHappyPath() {
     consumedAt: null,
   } as any)
   prismaMock.otpChallenge.update.mockResolvedValue({} as any)
+  ;(prismaMock.otpChallenge.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
   prismaMock.consumer.findMany.mockResolvedValue([{ id: 'cons1', phone: PHONE }] as any)
   prismaMock.customer.findUnique.mockResolvedValue(null)
   prismaMock.customer.findFirst.mockResolvedValue(null)
@@ -127,6 +128,27 @@ describe('verifyOtp — transaccional (Fase 1)', () => {
     await expect(verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: PHONE, code: CODE })).rejects.toMatchObject({
       statusCode: 400,
     })
+    expect(activateCustomerAccount).not.toHaveBeenCalled()
+  })
+
+  // ---- Un solo uso de verdad (hallazgo #7 de la auditoría de Codex) ---------------------
+  it('🔴 el reto se consume con CAS sobre `consumedAt: null`, no con un update ciego', async () => {
+    await verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: PHONE, code: CODE })
+
+    // Un `update` por id consume el reto aunque otra petición simultánea ya lo haya
+    // consumido: las dos emitirían token. El CAS deja pasar a UNA sola.
+    expect(prismaMock.otpChallenge.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'ch1', consumedAt: null }) }),
+    )
+  })
+
+  it('🔴 si otra petición ya lo consumió (count 0) → 400 y NO se emite token', async () => {
+    ;(prismaMock.otpChallenge.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+    await expect(verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: PHONE, code: CODE })).rejects.toMatchObject({
+      statusCode: 400,
+    })
+    expect(generateCustomerToken).not.toHaveBeenCalled()
     expect(activateCustomerAccount).not.toHaveBeenCalled()
   })
 

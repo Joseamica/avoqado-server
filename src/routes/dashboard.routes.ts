@@ -9094,6 +9094,11 @@ router.get(
 router.get(
   '/venues/:venueId/customers/awaiting-approval',
   authenticateTokenMiddleware,
+  // La aprobación de clientes es parte de reservaciones (PRO): si el venue perdió el plan,
+  // la bandeja y el botón se apagan con él. Sin esto, un venue degradado seguiría decidiendo
+  // sobre una función que ya no tiene — y peor, dejando gente RECHAZADA que quedaría
+  // bloqueada el día que vuelva a contratar.
+  checkFeatureAccess('RESERVATIONS'),
   checkPermission('customers:approve'),
   validateRequest(CustomersAwaitingApprovalQuerySchema),
   customerController.getCustomersAwaitingApproval,
@@ -9346,6 +9351,11 @@ router.post(
 router.patch(
   '/venues/:venueId/customers/:customerId/approval',
   authenticateTokenMiddleware,
+  // La aprobación de clientes es parte de reservaciones (PRO): si el venue perdió el plan,
+  // la bandeja y el botón se apagan con él. Sin esto, un venue degradado seguiría decidiendo
+  // sobre una función que ya no tiene — y peor, dejando gente RECHAZADA que quedaría
+  // bloqueada el día que vuelva a contratar.
+  checkFeatureAccess('RESERVATIONS'),
   checkPermission('customers:approve'),
   validateRequest(CustomerApprovalDecisionSchema),
   customerController.decideCustomerApproval,

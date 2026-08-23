@@ -64,21 +64,25 @@ export function withBookingAccess(access: BookingAccess | null): { bookingAccess
  */
 export async function computeBookingAccess(venueId: string, customerId?: string | null): Promise<BookingAccess | null> {
   try {
-    const [hasPlan, settings, customer] = await Promise.all([
+    const [hasPlan, settings] = await Promise.all([
       venueHasFeatureAccess(venueId, 'RESERVATIONS').catch((err: unknown) => {
         logger.error('[bookingAccess] plan lookup failed — failing open', { venueId, err: (err as Error)?.message })
         return true
       }),
       getReservationSettings(venueId),
-      // Fase 1: el estado real del cliente. Sin customerId (respuesta anónima) o con el switch
-      // apagado, sigue siendo APPROVED — el eje de aprobación simplemente no aplica.
-      customerId
-        ? prisma.customer.findFirst({ where: { id: customerId, venueId }, select: { approvalStatus: true } })
-        : Promise.resolve(null),
     ])
 
     const requiresApproval =
       (settings as { publicBooking?: { requireCustomerApproval?: boolean } })?.publicBooking?.requireCustomerApproval === true
+
+    // 🔴 El estado del cliente se lee SÓLO si el switch está prendido. Con el switch apagado
+    // —el caso de todos los negocios menos uno— este camino no puede añadir ni una consulta:
+    // corre en cada login, registro y verificación de OTP. Antes iba dentro del `Promise.all`
+    // y se consultaba siempre para descartar el resultado (auditoría de Codex, invariante 2).
+    const customer =
+      requiresApproval && customerId
+        ? await prisma.customer.findFirst({ where: { id: customerId, venueId }, select: { approvalStatus: true } })
+        : null
 
     return resolveBookingAccess({
       hasPlan,

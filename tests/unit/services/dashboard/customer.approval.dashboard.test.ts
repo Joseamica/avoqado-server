@@ -79,9 +79,12 @@ describe('listCustomersAwaitingApproval', () => {
     expect(where).toMatchObject({ venueId: VENUE, approvalStatus: 'PENDING' })
   })
 
-  it('🔴 ordena por más antiguo primero: quien lleva más esperando se atiende antes', async () => {
+  it('🔴 ordena por más antiguo primero, con `id` de desempate: sin él la paginación pierde filas', async () => {
+    // `approvalRequestedAt` no es único (dos registros del mismo instante lo comparten) y
+    // Postgres puede ordenarlos distinto en cada página. El guardia `pagination-stability`
+    // del repo lo caza; este test lo fija aquí, donde se lee el porqué.
     await listCustomersAwaitingApproval(VENUE, { page: 1, pageSize: 20 })
 
-    expect(prismaMock.customer.findMany.mock.calls[0][0].orderBy).toEqual({ approvalRequestedAt: 'asc' })
+    expect(prismaMock.customer.findMany.mock.calls[0][0].orderBy).toEqual([{ approvalRequestedAt: 'asc' }, { id: 'asc' }])
   })
 })

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { StaffRole } from '@prisma/client'
 import { rejectBodyCustomerId } from '../common/publicIdentity.schema'
 
 // ==========================================
@@ -540,6 +541,20 @@ export const updateReservationSettingsBodySchema = z
         requireEmail: z.boolean().optional(),
         requireAccount: z.boolean().optional(),
         showStaffPicker: z.boolean().optional(),
+        // Fase 1 — el negocio aprueba a mano a cada cliente nuevo antes de dejarlo reservar.
+        requireCustomerApproval: z.boolean().optional(),
+        // Lista NO vacía a propósito: prender el switch sin avisarle a nadie deja las
+        // solicitudes esperando en una bandeja que nadie sabe que existe.
+        customerApprovalNotificationRoles: z
+          .array(z.nativeEnum(StaffRole))
+          .min(1, 'Elige al menos un rol que reciba el aviso de aprobación')
+          .max(9)
+          .optional(),
+      })
+      .refine(pb => !(pb.requireCustomerApproval === true) || pb.requireAccount === true, {
+        message:
+          'Para aprobar clientes primero activa "Requerir cuenta" en Reservaciones > Configuración: sin cuenta no hay a quién aprobar',
+        path: ['requireCustomerApproval'],
       })
       .optional(),
     payments: z

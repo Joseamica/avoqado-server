@@ -2376,19 +2376,14 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       }
     }
 
-    // 🔴 Fase 1 — un hold aparta 10 minutos de capacidad REAL. Si esta persona no puede
-    // reservar, tampoco puede bloquearle el lugar a quien sí. La ruta antes ni autenticaba:
+    // 🔴 Fase 1 — un hold aparta 10 minutos de capacidad REAL: si esta persona no puede
+    // reservar, tampoco puede bloquearle el lugar a quien sí. La ruta antes ni autenticaba;
     // se le montó `authenticateCustomerOptional` para que exista identidad que gatear.
     //
-    // Va AQUÍ, después de validar el cuerpo y antes de mintear: un body malformado sigue
-    // muriendo en 400 sin tocar la base (contrato que ya tenía esta ruta y que hay tests
-    // que lo vigilan), y ningún lugar queda apartado antes del gate.
-    await prisma.$transaction(async tx =>
-      assertCustomerCanCreateReservation(tx, {
-        customerId: ((req as any).customerAuth?.customerId as string | undefined) ?? null,
-        venueId: venue.id,
-      }),
-    )
+    // El gate NO se ejecuta aquí: viaja a la transacción que mintea (abajo). Hacerlo aquí,
+    // en una transacción corta aparte, dejaba una ventana entre "puede" y "aparta" en la que
+    // cabía un rechazo — y el rechazado se quedaba con el lugar. (Auditoría Codex #3.)
+    const holdCustomerId = ((req as any).customerAuth?.customerId as string | undefined) ?? null
 
     // Lazy GC — cheap, runs once per hold creation.
     void pruneExpiredHolds()
@@ -2414,6 +2409,7 @@ export async function createHold(req: Request, res: Response, next: NextFunction
         staffId: body.staffId,
         modifierSelections: body.modifierSelections,
         windowSemantics: body.windowSemantics,
+        customerId: holdCustomerId,
       })
     } else {
       // Class holds — wrap in a transaction so the
@@ -2421,6 +2417,10 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       // commits with.
       const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
       hold = await prisma.$transaction(async tx => {
+        // Fase 1: el gate, primero y dentro de ESTA transacción — igual que en la rama de
+        // cita. Orden de locks: Customer → sesión de clase, el mismo en todos los caminos.
+        await assertCustomerCanCreateReservation(tx, { customerId: holdCustomerId, venueId: venue.id })
+
         const externalBlock = await checkExternalBusyBlock(tx, {
           venueId: venue.id,
           staffId: null,
