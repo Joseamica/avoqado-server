@@ -221,7 +221,13 @@ export function buildEventBodyForReservation(args: EventBodyForReservationArgs):
     description,
     location: buildVenueLocation(reservation.venue),
     start: { dateTime: reservation.startsAt.toISOString() },
-    end: { dateTime: reservation.endsAt.toISOString() },
+    // El evento cubre el BLOQUE DE AGENDA (servicio + tiempo de limpieza), no
+    // sólo el servicio. Es deliberado y es media solución del incidente de
+    // Amaena: si el evento ya refleja el tiempo realmente ocupado, el salón deja
+    // de tener motivo para estirarlo a mano — que es justo la edición que la
+    // disponibilidad no ve. El desglose va en la descripción, para que nadie
+    // confunda este fin con la hora en que su cliente se va.
+    end: { dateTime: (reservation.blockedEndsAt ?? reservation.endsAt).toISOString() },
     transparency: 'opaque',
     // colorId '10' = Basil (green) in Google's palette. Matches Avoqado brand
     // and visually separates Avoqado-pushed events from unrelated calendar
@@ -315,6 +321,14 @@ function buildReservationDescription(args: ReservationDescriptionArgs): string {
   const duration = formatDuration(reservation.duration)
   if (duration) {
     lines.push(`Duración: ${duration}`)
+  }
+
+  // El evento se extiende hasta el fin de BLOQUE, así que hay que decir en voz
+  // alta cuánto de ese bloque NO es del cliente. Sin esta línea el salón lee un
+  // evento más largo que el servicio y no sabe por qué.
+  const bufferMin = Math.round(((reservation.blockedEndsAt ?? reservation.endsAt).getTime() - reservation.endsAt.getTime()) / 60_000)
+  if (bufferMin > 0) {
+    lines.push(`Incluye ${bufferMin} min de limpieza al final (el cliente termina antes).`)
   }
 
   lines.push('')

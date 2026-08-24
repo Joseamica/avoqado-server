@@ -2017,6 +2017,9 @@ async function createClassReservation(
         productId: session.productId,
         startsAt: session.startsAt,
         endsAt: session.endsAt,
+        // Una CLASE no lleva buffer post-servicio (es de citas): el bloque de
+        // agenda coincide con la sesión.
+        blockedEndsAt: session.endsAt,
         duration: session.duration,
         status: effectiveStatus,
         channel: 'WEB',

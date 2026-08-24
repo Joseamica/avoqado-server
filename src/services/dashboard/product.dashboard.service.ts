@@ -32,6 +32,7 @@ export interface CreateProductDto {
   kitchenName?: string // Short name for kitchen display (max 50)
   abbreviation?: string // Ultra-short text for POS (max 24)
   duration?: number // Minutes (for SERVICE, APPOINTMENTS_SERVICE)
+  bufferAfterMin?: number // Tiempo de limpieza DESPUÉS del servicio: aparta agenda, no mueve la hora del cliente
   soldByWeight?: boolean // Venta por peso: price = precio POR KG; forces unit KILOGRAM
 
   // Event fields
@@ -89,6 +90,7 @@ export interface UpdateProductDto {
   kitchenName?: string | null
   abbreviation?: string | null
   duration?: number | null
+  bufferAfterMin?: number | null
   soldByWeight?: boolean // Venta por peso: al activarlo, price = precio POR KG y unit se fuerza a KILOGRAM
   unit?: string | null // Unidad de medida (forzada a KILOGRAM cuando soldByWeight pasa a true)
 
@@ -169,6 +171,13 @@ function validateProductByType(data: CreateProductDto | UpdateProductDto, _isUpd
   if (data.duration !== undefined && data.duration !== null) {
     if (data.duration < 1 || data.duration > 1440) {
       throw new AppError('Duration must be between 1 and 1440 minutes', 400)
+    }
+  }
+
+  // Buffer post-servicio (0-240 minutos). Cuatro horas ya es un turno completo.
+  if (data.bufferAfterMin !== undefined && data.bufferAfterMin !== null) {
+    if (data.bufferAfterMin < 0 || data.bufferAfterMin > 240) {
+      throw new AppError('El tiempo de limpieza debe estar entre 0 y 240 minutos', 400)
     }
   }
 
@@ -616,6 +625,7 @@ export async function createProduct(venueId: string, productData: CreateProductD
             kitchenName: productFields.kitchenName,
             abbreviation: productFields.abbreviation,
             duration: productFields.duration,
+            bufferAfterMin: productFields.bufferAfterMin,
 
             // Venta por peso: price is the price PER KG; unit pinned to KILOGRAM.
             soldByWeight: productFields.soldByWeight ?? false,

@@ -228,6 +228,8 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           inventoryMethod: true,
           soldByWeight: true,
           unit: true,
+          duration: true,
+          bufferAfterMin: true,
           category: { select: { name: true } },
           modifierGroups: {
             select: {
@@ -296,6 +298,11 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           // POS captures the weight (kg) at sale time.
           soldByWeight: p.soldByWeight,
           ...(p.soldByWeight ? { unit: p.unit } : {}),
+          // Agenda: `durationMinutes` es lo que dura el servicio para el CLIENTE;
+          // `bufferAfterMin` es el tiempo de limpieza que se aparta después y que
+          // el cliente nunca ve en su comprobante.
+          durationMinutes: p.duration,
+          bufferAfterMin: p.bufferAfterMin,
           availability, // live stock + limiting/insufficient raw materials (RECIPE), null if not tracked
           modifierGroups: p.modifierGroups.map(mg => ({
             name: mg.group.name,
