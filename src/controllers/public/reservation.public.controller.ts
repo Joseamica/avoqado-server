@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express'
+import { toPublicBookingPayload } from '@/services/public/publicBookingPayload'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
@@ -442,7 +443,10 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
       branding: mergeReservationBranding(reservationBranding, venueInfoRest.primaryColor),
       products,
       timezone: venue.timezone || 'America/Mexico_City',
-      publicBooking: settings.publicBooking,
+      // Lista blanca: esta respuesta es ANÓNIMA. Copiar el objeto entero publicaba en
+      // internet cada campo nuevo de la config — así se filtró
+      // `customerApprovalNotificationRoles`. Ver `publicBookingPayload.ts`.
+      publicBooking: toPublicBookingPayload(settings.publicBooking as Record<string, unknown>),
       // Venue-chat availability. `canMessage` is the single gate the booking
       // surfaces use to decide whether to render a "message us" affordance, so
       // a dead-end (no relay + no phone) never shows the customer a button that
