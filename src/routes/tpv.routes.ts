@@ -2158,7 +2158,30 @@ router.get('/terminals/:serialNumber/activation-status', activationController.ch
  *                   type: string
  *                   example: "Terminal not found with serial number: 2841548417"
  */
-router.get('/terminals/:serialNumber/config', validateRequest(serialNumberParamSchema), terminalController.getTerminalConfig)
+// ──────────────────────────────────────────────────────────────────────────────
+// 🔴 Este endpoint es PÚBLICO (sin auth) y devuelve la configuración del comercio.
+// El límite NO lo arregla —a quien ya tiene un serial le basta UNA petición— pero
+// encarece raspar muchos seriales y deja el intento visible en el log.
+// 60/min por IP es holgadísimo para uso legítimo: una terminal lo llama al arrancar,
+// así que ni un local con decenas de terminales reiniciando a la vez lo alcanza.
+// El arreglo de fondo (autenticar el endpoint y sacar credenciales del payload) exige
+// desplegar la app de PAX antes — 3-5 días por la firma — y va aparte.
+// ──────────────────────────────────────────────────────────────────────────────
+const terminalConfigLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => req.ip,
+  message: { error: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
+})
+
+router.get(
+  '/terminals/:serialNumber/config',
+  terminalConfigLimiter,
+  validateRequest(serialNumberParamSchema),
+  terminalController.getTerminalConfig,
+)
 
 // ==========================================
 // APP UPDATE ENDPOINTS (Dual Update System)
