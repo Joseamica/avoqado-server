@@ -158,6 +158,21 @@ describe('deliverClaimed — entrega, supresión y fallo', () => {
     expect(r.failed).toBe(1)
   })
 
+  it('🔴 correo PERMANENTEMENTE inentregable → terminal al PRIMER intento, sin reintentos', async () => {
+    // Lo cazó /full-testing leyendo el log del backend: `sendEmail` ya sabe distinguir un
+    // destinatario imposible (dominio de ejemplo, cuenta semilla, correo mal formado) y lo
+    // SALTA. Mi worker lo trataba como "el proveedor rechazó" y lo reintentaba 6 veces con
+    // backoff: trabajo inútil, y el DEAD_LETTER se llenaba de ruido que tapa las fallas reales.
+    const r = await deliverClaimed([claimed({ recipient: 'nadie@example.com' })] as any, { now: NOW })
+
+    expect(SEND).not.toHaveBeenCalled() // ni se intenta: se sabe de antemano
+    const data = prismaMock.customerApprovalDelivery.updateMany.mock.calls[0][0].data
+    expect(data.status).toBe('DEAD_LETTER')
+    expect(data.nextAttemptAt).toBeUndefined() // no se reagenda
+    expect(data.lastError).toContain('UNDELIVERABLE')
+    expect(r.failed).toBe(1)
+  })
+
   it('🔴 agotados los intentos → DEAD_LETTER visible, no un reintento eterno', async () => {
     SEND.mockResolvedValue(false)
 

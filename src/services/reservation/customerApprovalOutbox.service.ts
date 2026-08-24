@@ -18,6 +18,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import emailService from '@/services/email.service'
+import { classifyUndeliverable } from '@/utils/undeliverableEmail'
 
 export type ApprovalOutboxEvent = 'REQUESTED_STAFF' | 'PENDING_CUSTOMER' | 'APPROVED_CUSTOMER' | 'REJECTED_CUSTOMER'
 export type DeliveryChannel = 'EMAIL' | 'WHATSAPP'
@@ -297,6 +298,21 @@ export async function deliverClaimed(
     const casWhere = { id: d.id, attempts: d.attempts, leaseUntil: d.leaseUntil }
 
     try {
+      // 🔴 Un destinatario PERMANENTEMENTE inentregable no se reintenta: reintentarlo seis
+      // veces con backoff es trabajo inútil, y llena el DEAD_LETTER de ruido que tapa las
+      // fallas de verdad. `sendEmail` ya lo detecta y lo salta devolviendo `false`, pero
+      // desde aquí eso era indistinguible de "el proveedor está caído". Se corta antes.
+      // (Lo encontró /full-testing leyendo el log: "Skipped undeliverable recipient".)
+      const undeliverable = d.channel === 'EMAIL' ? classifyUndeliverable(d.recipient) : null
+      if (undeliverable) {
+        failed += 1
+        await prisma.customerApprovalDelivery.updateMany({
+          where: casWhere,
+          data: { status: 'DEAD_LETTER', leaseUntil: null, lastError: `UNDELIVERABLE:${undeliverable}` },
+        })
+        continue
+      }
+
       const newerSent = await prisma.customerApprovalDelivery.count({
         where: {
           status: 'SENT',

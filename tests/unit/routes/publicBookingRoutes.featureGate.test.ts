@@ -362,7 +362,10 @@ describe('wiring — the gates are actually present in the route files (source r
     ],
     // Fase 1: el hold aparta capacidad ⇒ pasa por el gate de aprobación, y para eso necesita
     // identidad. Mismo orden que crear reserva: identidad ANTES del plan.
-    [/'\/venues\/:venueSlug\/reservations\/hold',\s*writeLimit,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/, 'hold POST'],
+    [
+      /'\/venues\/:venueSlug\/reservations\/hold',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      'hold POST',
+    ],
     [
       /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule\/availability',\s*readLimit,\s*requireReservationsPlan,/,
       'reschedule availability GET',

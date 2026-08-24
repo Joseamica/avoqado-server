@@ -158,11 +158,17 @@ router.post(
 // to the paid create flow; releasing is deliberately ungated so a downgraded
 // venue cannot strand capacity until TTL.
 // Fase 1: el hold aparta capacidad, así que pasa por el gate de aprobación — y para eso
-// necesita identidad. `authenticateCustomerOptional` va ANTES del plan, igual que en crear
-// reserva: el 401 de "no eres tú" gana al 403 de "este venue no tiene PRO".
+// necesita identidad. Mismo orden EXACTO que crear reserva, y los tres pasos importan:
+// 🔴 `resolveVenueBySlug` va PRIMERO. Sin él, `authenticateCustomer*` no tiene contra qué
+// venue validar el token y responde 500 `CUSTOMER_AUTH_INTERNAL` — la ruta se cae para
+// TODOS, con o sin sesión. Lo cazó /full-testing con un cliente real; los tests unitarios
+// no lo ven porque montan el controlador sin la cadena de middlewares.
+// Después la identidad, y al final el plan: el 401 de "no eres tú" gana al 403 de "este
+// venue no tiene PRO".
 router.post(
   '/venues/:venueSlug/reservations/hold',
   writeLimit,
+  resolveVenueBySlug,
   authenticateCustomerOptional,
   requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateHoldBodySchema })),
