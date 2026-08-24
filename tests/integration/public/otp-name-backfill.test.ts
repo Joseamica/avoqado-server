@@ -52,6 +52,8 @@ describe('OTP name backfill — formatted guestPhone (integration, real DB)', ()
         confirmationCode: RESERVATION_CODE,
         startsAt: new Date(Date.now() - 86400000),
         endsAt: new Date(Date.now() - 86400000 + 3600000),
+        // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+        blockedEndsAt: new Date(Date.now() - 86400000 + 3600000),
         duration: 60,
         guestName: 'Ana TESTNAME',
         guestPhone: '55 9999 0001',

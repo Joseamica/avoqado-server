@@ -191,6 +191,11 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
         organizationName: String(companyName),
         phone: String(phone),
         source: source ? String(source) : undefined,
+        // Los UTMs viajan al alta, no solo al correo interno: pegados en un
+        // correo, "de que campana vino este lead" solo se contesta abriendo
+        // correos a mano. En el ActivityLog del alta si se puede consultar.
+        // Ya vienen filtrados por allowlist y recortados en `contactSchema`.
+        utm: utm as Record<string, string> | undefined,
       })
       yaEsCliente = alta.yaEsCliente
       altaEstado = alta.yaEsCliente ? 'existente' : 'creada'

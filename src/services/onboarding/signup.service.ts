@@ -47,6 +47,12 @@ export interface LandingSignupInput {
   /** De que landing vino (`landing_restaurantes`, `landing_retail`…). Queda en
    *  el ActivityLog del alta para poder partir el embudo por campana. */
   source?: string
+  /** Parametros de campana que traia la URL de aterrizaje (`utm_source`,
+   *  `utm_campaign`, `fbclid`, `gclid`…). Antes solo se pegaban en el correo
+   *  interno, asi que "de que campana vino este lead" no se podia CONSULTAR:
+   *  habia que abrir correos a mano. Guardarlos junto a `source` los vuelve
+   *  parte del alta y hace comparable una campana contra otra. */
+  utm?: Record<string, string>
 }
 
 export interface LandingSignupResult {
@@ -387,7 +393,7 @@ export async function checkEmailVerificationStatus(email: string): Promise<{ ema
  *     proteger todavia mas alla del acceso mismo.
  */
 export async function signupFromLanding(input: LandingSignupInput): Promise<LandingSignupResult> {
-  const { email, firstName = '', lastName = '', organizationName = '', phone, source } = input
+  const { email, firstName = '', lastName = '', organizationName = '', phone, source, utm } = input
   const normalizedEmail = email.toLowerCase().trim()
 
   // 1. Cuenta existente: hay DOS casos y tratarlos igual hace dano.
@@ -477,13 +483,16 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
     //
     // `source` ademas separa el embudo por landing (restaurantes vs retail vs
     // servicios), que es lo que hace comparable una campana contra otra.
+    // `utm` solo se escribe cuando la URL de aterrizaje traia algo: un `{}` en
+    // cada alta organica no dice nada y ensucia la consulta del embudo.
+    const utmLimpio = utm && Object.keys(utm).length > 0 ? utm : undefined
     await tx.activityLog.create({
       data: {
         staffId: staff.id,
         action: 'LANDING_SIGNUP_CREATED',
         entity: 'Staff',
         entityId: staff.id,
-        data: { source: source || 'landing', organizationId: organization.id },
+        data: { source: source || 'landing', organizationId: organization.id, ...(utmLimpio ? { utm: utmLimpio } : {}) },
       },
     })
 

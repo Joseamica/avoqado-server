@@ -271,6 +271,10 @@ export async function assertOrganizationStaffAvailability(
   })
   const venueIds = [...new Set(memberships.map(membership => membership.venueId))]
   const overlap = { startsAt: { lt: args.endsAt }, endsAt: { gt: args.startsAt } }
+  // Una RESERVA ocupa hasta su `blockedEndsAt` (servicio + tiempo de limpieza).
+  // Las demás tablas (clases, holds, bloques externos) no tienen buffer, así que
+  // conservan `overlap`. Con buffer 0 ambos son equivalentes.
+  const reservationOverlap = { startsAt: { lt: args.endsAt }, blockedEndsAt: { gt: args.startsAt } }
 
   const [reservation, classSession, hold, personalBlock] = await Promise.all([
     tx.reservation.findFirst({
@@ -278,7 +282,7 @@ export async function assertOrganizationStaffAvailability(
         assignedStaffId: args.staffId,
         venueId: { in: venueIds },
         status: { in: ACTIVE_RESERVATION_STATUSES },
-        ...overlap,
+        ...reservationOverlap,
         ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
       },
       select: { id: true },
@@ -511,18 +515,24 @@ export async function findLegacyStaffAvailabilityForDayWindows(
   })
   const venueIds = [...new Set(memberships.map(membership => membership.venueId))]
   const overlap = { startsAt: { lt: envelope.endsAt }, endsAt: { gt: envelope.startsAt } }
+  // Ver nota en `assertOrganizationStaffAvailability`: sólo Reservation tiene buffer.
+  const reservationOverlap = { startsAt: { lt: envelope.endsAt }, blockedEndsAt: { gt: envelope.startsAt } }
 
   const [reservations, classes, holds, externalBlocks] = await Promise.all([
-    db.reservation.findMany({
-      where: {
-        venueId: { in: venueIds },
-        assignedStaffId: args.staffId,
-        status: { in: ACTIVE_RESERVATION_STATUSES },
-        ...overlap,
-        ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
-      },
-      select: { startsAt: true, endsAt: true },
-    }),
+    db.reservation
+      .findMany({
+        where: {
+          venueId: { in: venueIds },
+          assignedStaffId: args.staffId,
+          status: { in: ACTIVE_RESERVATION_STATUSES },
+          ...reservationOverlap,
+          ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
+        },
+        select: { startsAt: true, endsAt: true, blockedEndsAt: true },
+      })
+      // El intervalo ocupado termina en el fin de BLOQUE, no en el del servicio.
+      // `?? endsAt` es la red: sin el dato, la cita sigue ocupando su horario.
+      .then(rows => rows.map(row => ({ startsAt: row.startsAt, endsAt: row.blockedEndsAt ?? row.endsAt }))),
     db.classSession.findMany({
       where: {
         venueId: { in: venueIds },
@@ -664,16 +674,24 @@ export async function findEligibleStaffForDayWindows(
     venuesByStaff.set(membership.staffId, venueIds)
   }
   const envelopeOverlap = { startsAt: { lt: envelope.endsAt }, endsAt: { gt: envelope.startsAt } }
+  // Ver nota en `assertOrganizationStaffAvailability`: sólo Reservation tiene buffer.
+  const reservationEnvelopeOverlap = { startsAt: { lt: envelope.endsAt }, blockedEndsAt: { gt: envelope.startsAt } }
   const [reservations, classes, holds, dailyCounts] = await Promise.all([
-    db.reservation.findMany({
-      where: {
-        OR: candidateConflictOr(candidates, venuesByStaff, 'assignedStaffId'),
-        status: { in: ACTIVE_RESERVATION_STATUSES },
-        ...envelopeOverlap,
-        ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
-      },
-      select: { assignedStaffId: true, startsAt: true, endsAt: true },
-    }),
+    db.reservation
+      .findMany({
+        where: {
+          OR: candidateConflictOr(candidates, venuesByStaff, 'assignedStaffId'),
+          status: { in: ACTIVE_RESERVATION_STATUSES },
+          ...reservationEnvelopeOverlap,
+          ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
+        },
+        select: { assignedStaffId: true, startsAt: true, endsAt: true, blockedEndsAt: true },
+      })
+      // El intervalo ocupado termina en el fin de BLOQUE, no en el del servicio.
+      // `?? endsAt` es la red: sin el dato, la cita sigue ocupando su horario.
+      .then(rows =>
+        rows.map(row => ({ assignedStaffId: row.assignedStaffId, startsAt: row.startsAt, endsAt: row.blockedEndsAt ?? row.endsAt })),
+      ),
     db.classSession.findMany({
       where: {
         OR: candidateConflictOr(candidates, venuesByStaff, 'assignedStaffId'),
@@ -842,13 +860,15 @@ export async function resolveStaffAssignment(tx: Prisma.TransactionClient, args:
     venuesByStaff.set(membership.staffId, venueIds)
   }
   const overlap = { startsAt: { lt: args.endsAt }, endsAt: { gt: args.startsAt } }
+  // Ver nota en `assertOrganizationStaffAvailability`: sólo Reservation tiene buffer.
+  const reservationOverlap = { startsAt: { lt: args.endsAt }, blockedEndsAt: { gt: args.startsAt } }
 
   const [reservations, classes, holds, personalBlocks, dailyCounts] = await Promise.all([
     tx.reservation.findMany({
       where: {
         OR: candidateConflictOr(candidates, venuesByStaff, 'assignedStaffId'),
         status: { in: ACTIVE_RESERVATION_STATUSES },
-        ...overlap,
+        ...reservationOverlap,
         ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
       },
       select: { assignedStaffId: true },

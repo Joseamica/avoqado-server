@@ -293,6 +293,8 @@ function startMinimalCommitmentWriter(args: { kind: CommitmentKind; venueId: str
             channel: 'DASHBOARD',
             startsAt: args.window.startsAt,
             endsAt: args.window.endsAt,
+            // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+            blockedEndsAt: args.window.endsAt,
             duration: Math.round((args.window.endsAt.getTime() - args.window.startsAt.getTime()) / 60_000),
             assignedStaffId: staffId,
             partySize: 1,
@@ -591,6 +593,8 @@ describe('production reservation update staff authority on PostgreSQL', () => {
         channel: 'DASHBOARD',
         startsAt: window.startsAt,
         endsAt: window.endsAt,
+        // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+        blockedEndsAt: window.endsAt,
         duration: Math.round((window.endsAt.getTime() - window.startsAt.getTime()) / 60_000),
         assignedStaffId,
         partySize: 1,
@@ -839,6 +843,8 @@ describe('staff commitment serialization on PostgreSQL', () => {
         channel: 'DASHBOARD',
         startsAt: second.startsAt,
         endsAt: second.endsAt,
+        // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+        blockedEndsAt: second.endsAt,
         duration: 60,
         assignedStaffId: staffId,
         partySize: 1,
@@ -969,6 +975,8 @@ describe('ClassSession updates on PostgreSQL', () => {
         channel: 'DASHBOARD',
         startsAt: window.startsAt,
         endsAt: window.endsAt,
+        // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+        blockedEndsAt: window.endsAt,
         duration: 60,
         assignedStaffId: staffId,
         partySize: 1,
@@ -994,6 +1002,8 @@ describe('hardDeleteTeamMember serialization on PostgreSQL', () => {
           channel: 'DASHBOARD',
           startsAt: window.startsAt,
           endsAt: window.endsAt,
+          // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+          blockedEndsAt: window.endsAt,
           duration: 60,
           assignedStaffId: staffId,
           partySize: 1,
@@ -1041,6 +1051,8 @@ describe('hardDeleteTeamMember serialization on PostgreSQL', () => {
         channel: 'DASHBOARD',
         startsAt: window.startsAt,
         endsAt: window.endsAt,
+        // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+        blockedEndsAt: window.endsAt,
         duration: 60,
         assignedStaffId: staffId,
         partySize: 1,

@@ -1,5 +1,6 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
+import { isDeliverableRecipient } from '../utils/undeliverableEmail'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -313,6 +314,14 @@ class EmailService {
   async sendEmail(options: EmailOptions): Promise<boolean> {
     if (!resend || !this.isAvailable) {
       logger.warn('📧 Email service not available. Skipping email send.')
+      return false
+    }
+
+    // Provably-undeliverable recipients (demo/seed staff, TPV service accounts,
+    // reserved TLDs) never reach Resend: every attempt is another bounce against
+    // the reputation shared with real transactional mail.
+    // See src/utils/undeliverableEmail.ts.
+    if (!isDeliverableRecipient(options.to, 'emailService.sendEmail', { subject: options.subject })) {
       return false
     }
 
@@ -4651,6 +4660,11 @@ export async function sendReferralWelcomeEmail(input: SendReferralWelcomeEmailIn
     logger.warn('[referral-email] Resend not configured — skipping welcome email')
     return false
   }
+  // These two functions bypass EmailService.sendEmail, so they carry their own
+  // copy of the undeliverable guard.
+  if (!isDeliverableRecipient(input.to, 'sendReferralEmail')) {
+    return false
+  }
   try {
     const result = await resend.emails.send({
       from: FROM_EMAIL,
@@ -4732,6 +4746,9 @@ export interface SendReferralTierUpEmailInput {
 export async function sendReferralTierUpEmail(input: SendReferralTierUpEmailInput): Promise<boolean> {
   if (!resend) {
     logger.warn('[referral-email] Resend not configured — skipping tier-up email')
+    return false
+  }
+  if (!isDeliverableRecipient(input.to, 'sendReferralEmail')) {
     return false
   }
   try {

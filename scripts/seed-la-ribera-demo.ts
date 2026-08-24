@@ -1717,6 +1717,8 @@ async function seed(force: boolean) {
         status: ReservationStatus.CONFIRMED,
         startsAt,
         endsAt: addMinutes(startsAt, 90),
+        // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+        blockedEndsAt: addMinutes(startsAt, 90),
         duration: 90,
         partySize: r.party,
         guestName: r.name,

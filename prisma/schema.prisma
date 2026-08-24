@@ -1714,6 +1714,14 @@ model Product {
   // General-purpose duration (any product type, e.g., haircut = 45 min)
   durationMinutes Int? // Duration in minutes (optional, for scheduling/display)
 
+  // Tiempo de limpieza/preparación DESPUÉS del servicio (Square: "Block extra
+  // time after appointment"; Booksy: "Padding Time"). Aparta agenda pero NO
+  // mueve la hora de fin que ve el cliente — mezclarlas es el hack de Mindbody,
+  // que obliga a borrar la hora de fin de los correos. Null/0 = sin buffer, que
+  // es el comportamiento previo a esta columna.
+  // Plan: docs/plans/2026-08-22-buffer-y-ediciones-gcal.md
+  bufferAfterMin Int?
+
   // Inventory tracking configuration
   trackInventory  Boolean          @default(false)
   inventoryMethod InventoryMethod? // ✅ WORLD-CLASS: How to track (QUANTITY | RECIPE)
@@ -8277,6 +8285,11 @@ enum NotificationType {
   LOW_INVENTORY
   SYSTEM_MAINTENANCE
   FEATURE_UPDATED
+  /// El venue movió/estiró en Google Calendar un evento que Avoqado empujó. Ese
+  /// ajuste NO reprograma la cita; sólo aparta la agenda. Se avisa para que el
+  /// negocio entienda por qué apareció tiempo ocupado que él no bloqueó desde
+  /// Avoqado. Ver `services/google-calendar/own-event-edit.service.ts`.
+  CALENDAR_EVENT_EDITED
 
   // Admin notifications
   VENUE_APPROVAL_NEEDED
@@ -12071,6 +12084,21 @@ model Reservation {
   endsAt   DateTime
   duration Int // Minutes (denormalized for queries)
 
+  // Fin del BLOQUE DE AGENDA = endsAt + buffer del servicio (Product.bufferAfterMin).
+  //
+  // Tres marcas distintas que NUNCA se mezclan:
+  //   startsAt        inicio
+  //   endsAt          fin del servicio  → lo que ve el CLIENTE (correo, comprobante)
+  //   blockedEndsAt   fin del bloque    → lo que aparta el NEGOCIO (disponibilidad,
+  //                                       colisiones, evento de Google)
+  //
+  // 🔴 Materializada a propósito, NO calculada: varios sitios consultan solapamiento
+  // (reservationAvailability, appointmentStaffAssignment, reservation.dashboard) y
+  // uno que olvide sumar el buffer reintroduce la doble reserva en silencio.
+  // NOT NULL con backfill = endsAt: una fila sin este dato dejaría de bloquear su
+  // propio horario, que es peor que el bug que esto arregla.
+  blockedEndsAt DateTime
+
   // Guest info (linked Customer or anonymous)
   customerId String?
   customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
@@ -12180,6 +12208,10 @@ model Reservation {
   @@unique([venueId, confirmationCode])
   @@index([venueId, status, startsAt])
   @@index([venueId, startsAt, endsAt])
+  // Espejos de los dos índices de solapamiento, sobre el fin de BLOQUE. Sin
+  // ellos la disponibilidad pierde el índice al consultar blockedEndsAt.
+  @@index([venueId, startsAt, blockedEndsAt])
+  @@index([assignedStaffId, startsAt, blockedEndsAt])
   @@index([venueId, tableId, startsAt])
   @@index([venueId, productId, startsAt])
   @@index([venueId, classSessionId])

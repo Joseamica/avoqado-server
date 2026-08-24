@@ -21,7 +21,9 @@ import {
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import {
+  applyBufferToEndsAt,
   assertLegacyAppointmentDurationFloor,
+  resolveBufferAfterMin,
   normalizeBookedProductIds,
   reservationBookedProductIds,
   resolveAppointmentWindow,
@@ -351,6 +353,9 @@ export async function createReservation(
     let modifierDelta: Prisma.Decimal
     let finalEndsAt: Date
     let finalDuration: number
+    // Fin del BLOQUE DE AGENDA (`endsAt` + buffer del servicio). `finalEndsAt`
+    // sigue siendo la hora del cliente; esta es la que aparta calendario.
+    let blockedEndsAt: Date
 
     if (context.windowSemantics === 'base') {
       const resolvedWindow = await resolveAppointmentWindow(tx, {
@@ -365,6 +370,7 @@ export async function createReservation(
       modifierDelta = resolvedWindow.modifierPriceDelta
       finalEndsAt = resolvedWindow.finalEndsAt
       finalDuration = resolvedWindow.finalDurationMin
+      blockedEndsAt = resolvedWindow.blockedEndsAt
     } else {
       if (isAppointment && isStaffAware(settings)) {
         const rawIntervalDurationMin = (data.endsAt.getTime() - data.startsAt.getTime()) / 60_000
@@ -400,6 +406,7 @@ export async function createReservation(
         modifiers.totalDurationDelta === 0 ? data.endsAt : new Date(data.endsAt.getTime() + modifiers.totalDurationDelta * 60_000)
       const minimumEndsAt = new Date(data.startsAt.getTime() + finalDuration * 60_000)
       finalEndsAt = minimumEndsAt > rawEndsAtWithModifiers ? minimumEndsAt : rawEndsAtWithModifiers
+      blockedEndsAt = applyBufferToEndsAt(finalEndsAt, await resolveBufferAfterMin(tx, { venueId, productIds: bookedProductIds }))
     }
 
     let effectiveAssignedStaffId = data.assignedStaffId ?? null
@@ -557,7 +564,7 @@ export async function createReservation(
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         AND "startsAt" < ${finalEndsAt}
-        AND "endsAt" > ${data.startsAt}
+        AND "blockedEndsAt" > ${data.startsAt}
         AND "tableId" = ${data.tableId}
         FOR UPDATE NOWAIT
       `
@@ -573,7 +580,7 @@ export async function createReservation(
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         AND "startsAt" < ${finalEndsAt}
-        AND "endsAt" > ${data.startsAt}
+        AND "blockedEndsAt" > ${data.startsAt}
         AND "assignedStaffId" = ${effectiveAssignedStaffId}
         FOR UPDATE NOWAIT
       `
@@ -593,7 +600,7 @@ export async function createReservation(
           WHERE "venueId" = ${venueId}
             AND "productId" = ${leadProductId}
             AND "startsAt" < ${finalEndsAt}
-            AND "endsAt" > ${data.startsAt}
+            AND "blockedEndsAt" > ${data.startsAt}
             AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           FOR UPDATE
         `
@@ -624,6 +631,7 @@ export async function createReservation(
         channel: data.channel ?? 'DASHBOARD',
         startsAt: data.startsAt,
         endsAt: finalEndsAt,
+        blockedEndsAt,
         duration: finalDuration,
         customerId: data.customerId,
         guestName: data.guestName,
@@ -1598,7 +1606,7 @@ export async function updateReservation(
           AND id <> ${reservationId}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           AND "startsAt" < ${newEndsAt}
-          AND "endsAt" > ${newStartsAt}
+          AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
       if (tableConflicts.length > 0) {
@@ -1615,7 +1623,7 @@ export async function updateReservation(
           AND id <> ${reservationId}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           AND "startsAt" < ${newEndsAt}
-          AND "endsAt" > ${newStartsAt}
+          AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
       if (staffConflicts.length > 0) {
@@ -1634,7 +1642,7 @@ export async function updateReservation(
           AND "productId" = ${newProductId}
           AND id <> ${reservationId}
           AND "startsAt" < ${newEndsAt}
-          AND "endsAt" > ${newStartsAt}
+          AND "blockedEndsAt" > ${newStartsAt}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         FOR UPDATE
       `
@@ -1651,11 +1659,21 @@ export async function updateReservation(
       })
     }
 
+    // El bloque de agenda se recalcula SIEMPRE que la ventana o los servicios
+    // cambien: si `endsAt` se mueve y `blockedEndsAt` se queda con el valor
+    // viejo, la cita bloquea el horario anterior y libera el nuevo — un hueco
+    // silencioso que TypeScript no puede detectar en un update parcial.
+    const windowMoved = data.startsAt !== undefined || data.endsAt !== undefined || useLockedDuration || data.productId !== undefined
+    const newBlockedEndsAt = windowMoved
+      ? applyBufferToEndsAt(newEndsAt, await resolveBufferAfterMin(tx, { venueId, productIds: newProductIds }))
+      : undefined
+
     const updated = await tx.reservation.update({
       where: { id: reservationId },
       data: {
         ...(data.startsAt !== undefined && { startsAt: newStartsAt }),
         ...((data.endsAt !== undefined || useLockedDuration) && { endsAt: newEndsAt }),
+        ...(newBlockedEndsAt !== undefined && { blockedEndsAt: newBlockedEndsAt }),
         duration: finalDuration,
         ...(data.guestName !== undefined && { guestName: data.guestName }),
         ...(data.guestPhone !== undefined && { guestPhone: data.guestPhone }),
@@ -1940,7 +1958,7 @@ async function rescheduleAppointmentWithHold(args: {
           AND id <> ${reservation.id}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           AND "startsAt" < ${lockedHold.endsAt}
-          AND "endsAt" > ${newStartsAt}
+          AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
       if (tableConflicts.length > 0) {
@@ -1948,11 +1966,18 @@ async function rescheduleAppointmentWithHold(args: {
       }
     }
 
+    // La ventana se movió ⇒ el bloque de agenda se recalcula con ella.
+    const rescheduledBlockedEndsAt = applyBufferToEndsAt(
+      lockedHold.endsAt,
+      await resolveBufferAfterMin(tx, { venueId, productIds: reservationBookedProductIds(reservation) }),
+    )
+
     const updated = await tx.reservation.update({
       where: { id: reservation.id },
       data: {
         startsAt: newStartsAt,
         endsAt: lockedHold.endsAt,
+        blockedEndsAt: rescheduledBlockedEndsAt,
         duration: reservation.duration,
       },
       include: RESERVATION_INCLUDE,

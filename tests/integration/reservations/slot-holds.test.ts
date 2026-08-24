@@ -64,6 +64,8 @@ async function createAppointmentReservation(
       channel: 'DASHBOARD',
       startsAt: window.startsAt,
       endsAt: window.endsAt,
+      // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+      blockedEndsAt: window.endsAt,
       duration,
       productId: args.productId ?? productA,
       productIds: args.productIds ?? [],

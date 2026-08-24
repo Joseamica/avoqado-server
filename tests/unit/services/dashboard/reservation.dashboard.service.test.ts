@@ -177,6 +177,11 @@ describe('Reservation Dashboard Service', () => {
     // Task 4: resolveModifierSelections calls productModifierGroup.findMany in all reservation creations.
     // Default to empty array to maintain backward compatibility with existing tests that don't mock this.
     prismaMock.productModifierGroup.findMany.mockResolvedValue([])
+    // Buffer post-servicio: resolveBufferAfterMin hace su propio product.findMany
+    // en los caminos legacy de creación y reprogramación. Default a lista vacía
+    // = sin buffer, que es el comportamiento previo a esa columna. Los tests que
+    // necesitan filas concretas lo sobrescriben abajo.
+    prismaMock.product.findMany.mockResolvedValue([])
     jest.spyOn(appointmentStaffAssignmentService, 'lockAppointmentVenue').mockResolvedValue()
     jest.spyOn(appointmentStaffAssignmentService, 'resolveStaffAssignment').mockResolvedValue(STAFF_ID)
     jest.spyOn(appointmentStaffAssignmentService, 'assertOrganizationStaffAvailability').mockResolvedValue()
@@ -760,11 +765,13 @@ describe('Reservation Dashboard Service', () => {
           baseEndsAt: appointmentInput.endsAt,
           finalEndsAt: appointmentInput.endsAt,
           canonicalBaseDurationMin: 60,
+          bufferAfterMin: 0,
           modifierDurationDelta: 0,
           finalDurationMin: 60,
           productIds: ['prod-1', 'prod-2'],
           modifierRows: [],
           modifierPriceDelta: new Prisma.Decimal(0),
+          blockedEndsAt: appointmentInput.endsAt,
         })
         const liveRow = {
           id: 'hold-matrix',
@@ -880,6 +887,7 @@ describe('Reservation Dashboard Service', () => {
         baseEndsAt: appointmentInput.endsAt,
         finalEndsAt: appointmentInput.endsAt,
         canonicalBaseDurationMin: 60,
+        bufferAfterMin: 0,
         modifierDurationDelta: 0,
         finalDurationMin: 60,
         productIds: ['prod-1'],
@@ -893,6 +901,7 @@ describe('Reservation Dashboard Service', () => {
           },
         ],
         modifierPriceDelta: new Prisma.Decimal(10),
+        blockedEndsAt: appointmentInput.endsAt,
       })
       prismaMock.reservationModifier.createMany.mockResolvedValue({ count: 1 } as any)
       const targets = jest.spyOn(calendarOutboxService, 'resolveReservationPushTargets').mockResolvedValue([{ id: 'connection-1' }] as any)
@@ -3314,6 +3323,9 @@ describe('rescheduleAppointmentReservation', () => {
     })
     prismaMock.reservation.findUnique.mockResolvedValue(makeAppt() as any)
     prismaMock.reservation.update.mockResolvedValue(makeAppt({ startsAt: newStart, endsAt: newEnd }) as any)
+    // Buffer post-servicio: la reprogramación recalcula el fin de bloque y para
+    // eso consulta el catálogo. Lista vacía = sin buffer (comportamiento previo).
+    prismaMock.product.findMany.mockResolvedValue([])
     prismaMock.slotHold.deleteMany.mockResolvedValue({ count: 1 } as any)
     jest.spyOn(calendarOutboxService, 'resolveReservationPushTargets').mockResolvedValue([{ id: 'connection-1' }] as any)
     jest.spyOn(calendarOutboxService, 'enqueuePush').mockResolvedValue(['outbox-1'])
@@ -3628,7 +3640,7 @@ describe('rescheduleAppointmentReservation', () => {
 
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
     expect((prismaMock.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')).toMatch(
-      /FROM "Reservation"[\s\S]*"venueId" = \?[\s\S]*"tableId" = \?[\s\S]*id <> \?[\s\S]*"startsAt" < \?[\s\S]*"endsAt" > \?[\s\S]*FOR UPDATE NOWAIT/i,
+      /FROM "Reservation"[\s\S]*"venueId" = \?[\s\S]*"tableId" = \?[\s\S]*id <> \?[\s\S]*"startsAt" < \?[\s\S]*"blockedEndsAt" > \?[\s\S]*FOR UPDATE NOWAIT/i,
     )
     expect(prismaMock.$queryRaw.mock.calls[0].slice(1)).toEqual([VENUE, 'table-1', 'res-appt-1', newEnd, newStart])
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()

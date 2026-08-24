@@ -13,6 +13,7 @@ import { Resend } from 'resend'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+import { classifyUndeliverable, isDeliverableRecipient } from '@/utils/undeliverableEmail'
 import { CampaignStatus, DeliveryStatus, StaffRole } from '@prisma/client'
 
 // Initialize Resend
@@ -646,6 +647,19 @@ export async function processPendingDeliveries() {
 
     for (const delivery of pendingDeliveries) {
       try {
+        // Campaign audiences are built from Staff/Venue rows, so they inherit
+        // the same demo/seed placeholders the cron jobs did. FAILED, not BOUNCED:
+        // no bounce happened — we refused to send. Keeping them apart is what
+        // lets a report distinguish "bad address in our data" from "their server
+        // rejected it". Either way the row leaves PENDING so it is not retried.
+        if (!isDeliverableRecipient(delivery.recipientEmail, 'marketing.processPendingDeliveries', { campaignId: campaign.id })) {
+          await prisma.campaignDelivery.update({
+            where: { id: delivery.id },
+            data: { status: DeliveryStatus.FAILED },
+          })
+          continue
+        }
+
         // Send email
         const result = await resend.emails.send({
           from: FROM_EMAIL,
@@ -766,8 +780,20 @@ export interface ResendWebhookPayload {
       link: string
       timestamp: string
     }
+    // For bounced events. `type` is 'Permanent' | 'Transient' | 'Undetermined';
+    // `subType` is Resend's classification ('General', 'NoEmail', 'Suppressed',
+    // 'MailboxFull'…). Only Permanent bounces hurt sender reputation.
+    bounce?: {
+      type?: string
+      subType?: string
+      message?: string
+      diagnosticCode?: string[]
+    }
   }
 }
+
+/** Events that must never be discarded silently — they cost sender reputation. */
+const REPUTATION_EVENTS: ResendEventType[] = ['email.bounced', 'email.complained']
 
 export async function handleResendWebhook(payload: ResendWebhookPayload) {
   const { type, data } = payload
@@ -780,6 +806,32 @@ export async function handleResendWebhook(payload: ResendWebhookPayload) {
   })
 
   if (!delivery) {
+    // Most webhooks land here: everything the cron jobs and transactional routes
+    // send has no CampaignDelivery row. Opens/clicks on those are noise, but a
+    // bounce or a spam complaint is a reputation event — dropping it in silence
+    // is how ~16 daily hard bounces went unnoticed until 2026-08-23. Log them
+    // with the recipient AND our own classification, so the line answers "was
+    // this a real customer, or seed data we should never have emailed?".
+    if (REPUTATION_EVENTS.includes(type)) {
+      const recipient = data.to?.[0] ?? null
+      // Deliberately not "hard bounce": Resend reports most of ours as Transient,
+      // which is exactly why they never get auto-suppressed and keep recurring.
+      // The real type is in `bounceType` below.
+      const label = type === 'email.complained' ? 'Spam complaint' : 'Bounce'
+
+      logger.warn(`📧 [Resend] ${label} on a non-campaign email`, {
+        recipient,
+        recipientClass: recipient ? classifyUndeliverable(recipient) : null,
+        resendId,
+        subject: data.subject ?? null,
+        bounceType: data.bounce?.type ?? null,
+        bounceSubType: data.bounce?.subType ?? null,
+        bounceMessage: data.bounce?.message ?? null,
+      })
+
+      return { handled: true, reason: 'Transactional reputation event logged' }
+    }
+
     // Not a marketing campaign email - ignore
     return { handled: false, reason: 'Not a marketing campaign delivery' }
   }

@@ -82,11 +82,13 @@ function baseResolvedWindow() {
     baseEndsAt: rawEndsAt,
     finalEndsAt,
     canonicalBaseDurationMin: 60,
+    bufferAfterMin: 0,
     modifierDurationDelta: 15,
     finalDurationMin: 75,
     productIds: [productId],
     modifierRows: [],
     modifierPriceDelta: new Prisma.Decimal(0),
+    blockedEndsAt: finalEndsAt,
   }
 }
 
@@ -100,6 +102,7 @@ describe('mintNormalAppointmentHold', () => {
     jest.spyOn(windowService, 'resolveCanonicalAppointmentDuration').mockResolvedValue({
       productIds: [productId],
       canonicalBaseDurationMin: 60,
+      bufferAfterMin: 0,
     })
     jest.spyOn(windowService, 'assertLegacyAppointmentDurationFloor').mockResolvedValue()
     jest.spyOn(modifierService, 'resolveModifierSelections').mockResolvedValue({
@@ -305,6 +308,7 @@ describe('mintRescheduleAppointmentHold', () => {
       jest.spyOn(windowService, 'resolveCanonicalAppointmentDuration').mockImplementation(async () => ({
         productIds: [productId, 'product-2'],
         canonicalBaseDurationMin: currentDuration,
+        bufferAfterMin: 0,
       }))
 
       await mintRescheduleAppointmentHold({

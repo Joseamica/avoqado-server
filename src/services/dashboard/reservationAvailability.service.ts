@@ -234,7 +234,11 @@ export async function getAvailableSlots(
       venueId,
       status: { in: ACTIVE_STATUSES },
       startsAt: { lt: dayEnd },
-      endsAt: { gt: dayStart },
+      // El BLOQUE de agenda, no el fin del servicio: una cita que terminó antes
+      // del inicio del día pero cuyo tiempo de limpieza entra en él sigue
+      // ocupando. Con buffer 0 `blockedEndsAt` === `endsAt`, así que este filtro
+      // es idéntico al anterior para todo venue que no configure buffer.
+      blockedEndsAt: { gt: dayStart },
       // Reschedule self-exclusion: the reservation being moved must not occupy
       // its own target slots (see SlotOptions.excludeReservationId).
       ...(options.excludeReservationId ? { id: { not: options.excludeReservationId } } : {}),
@@ -243,6 +247,7 @@ export async function getAvailableSlots(
       id: true,
       startsAt: true,
       endsAt: true,
+      blockedEndsAt: true,
       tableId: true,
       assignedStaffId: true,
       productId: true,
@@ -378,7 +383,12 @@ export async function getAvailableSlots(
     if (legacyStaffAvailabilityByWindow && !legacyStaffAvailabilityByWindow[slotIndex]) continue
 
     // Find reservations overlapping this slot
-    const overlapping = existingReservations.filter(r => r.startsAt < slotEnd && r.endsAt > slotStart)
+    // Solapamiento contra el BLOQUE de agenda de la cita existente (servicio +
+    // su tiempo de limpieza), no contra la hora en que el cliente se va.
+    // El `?? endsAt` es la red: una fila sin el dato sigue bloqueando al menos
+    // su horario de servicio. Desaparecer del cálculo sería peor que no tener
+    // buffer — dejaría vendible un horario realmente ocupado.
+    const overlapping = existingReservations.filter(r => r.startsAt < slotEnd && (r.blockedEndsAt ?? r.endsAt) > slotStart)
     const overlappingHolds = activeHolds.filter(
       hold => isLiveSlotHold(hold, checkedAt) && hold.startsAt < slotEnd && hold.endsAt > slotStart,
     )

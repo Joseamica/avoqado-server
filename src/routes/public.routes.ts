@@ -382,6 +382,37 @@ router.get(
 // El correo se valida con Zod y no a mano: el controller solo comprobaba que el campo
 // existiera, asi que un "noesemail" respondia 200 y la confirmacion al prospecto se perdia
 // en silencio (nadie se enteraba de que el lead nunca recibio nada).
+// Llaves de campana que la landing propaga (mismo listado que `restaurants.astro`).
+// Se filtra con allowlist y con tope de largo en vez de aceptar el `record` abierto:
+// esto viene de internet SIN autenticar y desde ahora se guarda en la columna JSON
+// del ActivityLog del alta, asi que un `utm` sin limite deja escribir basura
+// arbitraria en el registro de un lead. Lo que no este aqui se descarta en silencio.
+const UTM_KEYS = [
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_content',
+  'utm_term',
+  'gclid',
+  'gbraid',
+  'wbraid',
+  'fbclid',
+  'msclkid',
+] as const
+
+const utmSchema = z
+  .record(z.string(), z.string())
+  .optional()
+  .transform(u => {
+    if (!u) return undefined
+    const limpio: Record<string, string> = {}
+    for (const k of UTM_KEYS) {
+      const v = u[k]
+      if (typeof v === 'string' && v.trim()) limpio[k] = v.trim().slice(0, 200)
+    }
+    return Object.keys(limpio).length > 0 ? limpio : undefined
+  })
+
 const contactSchema = z.object({
   body: z.object({
     firstName: z.string().trim().min(1, 'El nombre es requerido'),
@@ -395,7 +426,7 @@ const contactSchema = z.object({
     businessType: z.string().optional(),
     modules: z.string().optional(),
     source: z.string().optional(),
-    utm: z.record(z.string(), z.string()).optional(),
+    utm: utmSchema,
   }),
 })
 router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)

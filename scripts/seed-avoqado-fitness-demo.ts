@@ -467,6 +467,8 @@ async function seed(force: boolean) {
           cancelSecret: rand(24),
           startsAt,
           endsAt,
+          // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+          blockedEndsAt: endsAt,
           duration: 60,
           partySize: 1,
           channel: ReservationChannel.DASHBOARD,

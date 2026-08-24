@@ -307,7 +307,8 @@ describe('assertOrganizationStaffAvailability', () => {
         assignedStaffId: 'staff-1',
         status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
         startsAt: { lt: args.endsAt },
-        endsAt: { gt: args.startsAt },
+        // Buffer post-servicio: una reserva ocupa hasta su fin de BLOQUE.
+        blockedEndsAt: { gt: args.startsAt },
       },
       select: { id: true },
     })

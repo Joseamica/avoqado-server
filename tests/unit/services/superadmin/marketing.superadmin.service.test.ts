@@ -63,6 +63,7 @@ jest.mock('resend', () => ({
 
 // Import after mocks
 import * as marketingService from '../../../../src/services/superadmin/marketing.superadmin.service'
+import logger from '@/config/logger'
 
 describe('Marketing Service', () => {
   const testUserId = 'test-staff-123'
@@ -450,6 +451,98 @@ describe('Marketing Service', () => {
       })
 
       expect(mockPrisma.campaignDelivery.update).not.toHaveBeenCalled()
+    })
+
+    // Regression guard, 2026-08-23: transactional bounces (the nightly jobs, not
+    // marketing) have no CampaignDelivery row, so the handler dropped them with
+    // `{ handled: false }` and never logged a line. ~16 hard bounces a day were
+    // invisible outside of a raw log grep for the webhook's own INFO line.
+    describe('bounces with no matching CampaignDelivery (transactional email)', () => {
+      beforeEach(() => {
+        mockPrisma.campaignDelivery.findFirst.mockResolvedValue(null)
+        ;(logger.warn as jest.Mock).mockClear()
+        ;(logger.error as jest.Mock).mockClear()
+      })
+
+      const bouncedPayload = (to: string): marketingService.ResendWebhookPayload => ({
+        type: 'email.bounced',
+        data: {
+          email_id: 'resend-orphan-1',
+          to: [to],
+          from: 'Avoqado <noreply@avoqado.io>',
+          subject: 'Alerta de inventario bajo',
+          created_at: new Date().toISOString(),
+          bounce: {
+            type: 'Permanent',
+            subType: 'Suppressed',
+            message: 'The recipient is on the suppression list.',
+          },
+        },
+      })
+
+      it('logs the bounce instead of discarding it silently', async () => {
+        const result = await marketingService.handleResendWebhook(bouncedPayload('luis.castro@avoqado-full.avoqado.io'))
+
+        expect(logger.warn).toHaveBeenCalled()
+        const [message, meta] = (logger.warn as jest.Mock).mock.calls[0]
+        expect(message).toMatch(/bounce/i)
+        expect(meta).toMatchObject({
+          recipient: 'luis.castro@avoqado-full.avoqado.io',
+          bounceType: 'Permanent',
+          bounceSubType: 'Suppressed',
+        })
+        expect(result.handled).toBe(true)
+      })
+
+      it('says WHY the recipient was undeliverable so the log is actionable', async () => {
+        await marketingService.handleResendWebhook(bouncedPayload('admin@admin.com'))
+
+        const [, meta] = (logger.warn as jest.Mock).mock.calls[0]
+        expect(meta).toMatchObject({ recipient: 'admin@admin.com', recipientClass: 'SEED_ACCOUNT' })
+      })
+
+      it('reports a real address as deliverable-looking, so it reads as a genuine bounce', async () => {
+        await marketingService.handleResendWebhook(bouncedPayload('cliente.real@gmail.com'))
+
+        const [, meta] = (logger.warn as jest.Mock).mock.calls[0]
+        expect(meta.recipientClass).toBeNull()
+      })
+
+      it('logs spam complaints too — they hurt reputation more than a bounce', async () => {
+        const result = await marketingService.handleResendWebhook({
+          type: 'email.complained',
+          data: {
+            email_id: 'resend-orphan-2',
+            to: ['alguien@gmail.com'],
+            from: 'Avoqado <noreply@avoqado.io>',
+            created_at: new Date().toISOString(),
+          },
+        })
+
+        expect(logger.warn).toHaveBeenCalled()
+        expect((logger.warn as jest.Mock).mock.calls[0][0]).toMatch(/complaint|queja/i)
+        expect(result.handled).toBe(true)
+      })
+
+      it('stays quiet for opens and clicks — those are not worth a line per transactional email', async () => {
+        await marketingService.handleResendWebhook({
+          type: 'email.opened',
+          data: {
+            email_id: 'resend-orphan-3',
+            to: ['alguien@gmail.com'],
+            from: 'Avoqado <noreply@avoqado.io>',
+            created_at: new Date().toISOString(),
+          },
+        })
+
+        expect(logger.warn).not.toHaveBeenCalled()
+      })
+
+      it('never touches CampaignDelivery when there is no delivery row', async () => {
+        await marketingService.handleResendWebhook(bouncedPayload('admin@admin.com'))
+
+        expect(mockPrisma.campaignDelivery.update).not.toHaveBeenCalled()
+      })
     })
   })
 

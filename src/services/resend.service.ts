@@ -41,6 +41,7 @@
 
 import { Resend } from 'resend'
 import logger from '../config/logger'
+import { isDeliverableRecipient } from '../utils/undeliverableEmail'
 
 // Initialize Resend only if API key is available (skip in tests/dev without email)
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -772,6 +773,12 @@ export async function sendOnboardingWelcomeEmail(data: OnboardingWelcomeData): P
     return false
   }
 
+  // Demo/seed venues carry placeholder owner emails; sending to them only buys
+  // a bounce against the domain the real onboarding mail depends on.
+  if (!isDeliverableRecipient(data.ownerEmail, 'sendOnboardingWelcomeEmail', { venue: data.venueName })) {
+    return false
+  }
+
   const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
   const homeUrl = `${dashboardUrl}/venues/${data.venueSlug}/home`
   const docsUrl = `${dashboardUrl}/venues/${data.venueSlug}/edit/documents`
@@ -929,6 +936,10 @@ export async function sendNotificationEmail(
 ): Promise<boolean> {
   if (!resend) {
     logger.warn('📧 Resend not configured - skipping notification email')
+    return false
+  }
+
+  if (!isDeliverableRecipient(to, 'sendNotificationEmail', { subject })) {
     return false
   }
 

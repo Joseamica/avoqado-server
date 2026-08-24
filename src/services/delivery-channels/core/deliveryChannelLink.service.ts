@@ -41,6 +41,11 @@ const SAFE_SELECT = {
   lastMenuSyncAt: true,
   lastMenuHash: true,
   config: true,
+  // 🔴 Sin esta línea el campo EXISTE en la base pero muere en el camino: el tipo Safe lo
+  // promete y el select lo omitía, así que el POS recibía siempre null — y una pausa CON
+  // reloj se pintaba como pausa del administrador, sin cuenta regresiva y sin botón de
+  // reanudar. No es secreto; se expone.
+  snoozedUntil: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.DeliveryChannelLinkSelect
@@ -146,6 +151,23 @@ export interface UpdateChannelLinkInput {
   orderAcceptanceMode?: OrderAcceptanceMode
   autoSyncMenu?: boolean
   config?: Prisma.InputJsonValue | null
+}
+
+/**
+ * Los canales tal como los necesita el POS: id, proveedor, estado y hasta cuándo dura la
+ * pausa. NADA más.
+ *
+ * Existe aparte de `listChannelLinks` a propósito: aquélla calcula la tasa de inyección y
+ * el estado del menú —agregaciones sobre eventos— para el dashboard, que se abre unas veces
+ * al día. Esto lo consulta la pantalla de cocina cada 10 segundos desde CADA aparato:
+ * pagar esas agregaciones por cada latido convertiría un semáforo en carga de base.
+ */
+export async function listChannelsResumen(venueId: string) {
+  return prisma.deliveryChannelLink.findMany({
+    where: { venueId },
+    select: { id: true, provider: true, status: true, snoozedUntil: true },
+    orderBy: { createdAt: 'asc' },
+  })
 }
 
 /**

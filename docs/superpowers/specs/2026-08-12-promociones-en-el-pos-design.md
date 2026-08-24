@@ -312,7 +312,9 @@ donde la puso. Precedencia, en este orden: **tier → módulo → ajuste de pant
 `DRAFT` · `PUBLISHED` · `ARCHIVED`. Sólo `PUBLISHED` llega al POS. Al publicar se valida, y sin eso no se publica:
 
 - consistencia entre `type`, `pricingMode` y la estructura de grupos
-- `1 ≤ chargedQuantity ≤ quantity`; `price ≥ 0`; `priceDelta ≥ 0`
+- `0 ≤ chargedQuantity ≤ quantity`; `price ≥ 0`; `priceDelta ≥ 0`. El cero es DELIBERADO: `chargedQuantity: 0` significa "este componente va
+  de regalo" ("botanero gratis en tu compra"), una forma legítima de promoción. La v1 del spec decía `1 ≤` por conservadurismo; el validador
+  implementado permite 0 y este texto se alineó con esa decisión (2026-08-22).
 - todo `productId` existe, está activo y **pertenece al mismo venue** (check de tenant)
 - todo grupo tiene al menos una opción
 

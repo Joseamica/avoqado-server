@@ -668,6 +668,8 @@ async function createClassReservationForConsumer(
         productId: session.productId,
         startsAt: session.startsAt,
         endsAt: session.endsAt,
+        // Clase: sin buffer post-servicio, el bloque coincide con la sesión.
+        blockedEndsAt: session.endsAt,
         duration: session.duration,
         status: initialStatus,
         channel: ReservationChannel.APP,
