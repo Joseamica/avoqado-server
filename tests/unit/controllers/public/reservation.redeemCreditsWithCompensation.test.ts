@@ -28,8 +28,9 @@ describe('redeemCreditsWithCompensation', () => {
   it('canje exitoso → devuelve el resultado y NO cancela nada', async () => {
     const redeem = jest.fn(async () => ({ creditsUsed: 1, redeemed: true }))
     const cancel = jest.fn()
+    const recordAnomaly = jest.fn(async () => ({}))
 
-    const r = await redeemCreditsWithCompensation(args, { redeem, cancel })
+    const r = await redeemCreditsWithCompensation(args, { redeem, cancel, recordAnomaly })
 
     expect(r).toEqual({ creditsUsed: 1, redeemed: true })
     expect(cancel).not.toHaveBeenCalled()
@@ -41,8 +42,9 @@ describe('redeemCreditsWithCompensation', () => {
       throw boom
     })
     const cancel = jest.fn(async () => ({}))
+    const recordAnomaly = jest.fn(async () => ({}))
 
-    await expect(redeemCreditsWithCompensation(args, { redeem, cancel })).rejects.toBe(boom)
+    await expect(redeemCreditsWithCompensation(args, { redeem, cancel, recordAnomaly })).rejects.toBe(boom)
 
     expect(cancel).toHaveBeenCalledWith('v1', 'res-1', 'SYSTEM', CREDIT_REDEEM_FAILED_REASON)
     expect((logger as any).error).toHaveBeenCalledWith(expect.stringContaining('[CREDIT REDEEM FAILED]'), expect.anything())

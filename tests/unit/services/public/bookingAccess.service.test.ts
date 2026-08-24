@@ -90,7 +90,7 @@ describe('computeBookingAccess (compuesta)', () => {
     ;(getReservationSettings as jest.Mock).mockResolvedValue({})
 
     const r = await computeBookingAccess('venue-1')
-    expect(r.canCreateReservation).toBe(true)
+    expect(r?.canCreateReservation).toBe(true)
   })
 
   it('🔴 si los SETTINGS truenan → devuelve null (campo omitido) y se loguea; NUNCA propaga (auditoría 4: no puede tumbar login/register/OTP/portal tras una operación exitosa)', async () => {
@@ -110,7 +110,7 @@ describe('computeBookingAccess (compuesta)', () => {
 
     const r = await computeBookingAccess('venue-1')
 
-    expect(r.canCreateReservation).toBe(true)
+    expect(r?.canCreateReservation).toBe(true)
     expect((logger as any).error).toHaveBeenCalledWith(
       expect.stringContaining('bookingAccess'),
       expect.objectContaining({ venueId: 'venue-1' }),

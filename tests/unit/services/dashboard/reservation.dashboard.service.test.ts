@@ -90,6 +90,8 @@ function makeReservationSettings(
       requireEmail: false,
       requireAccount: false,
       showStaffPicker: overrides.showStaffPicker ?? false,
+      requireCustomerApproval: false,
+      customerApprovalNotificationRoles: [],
     },
     googleCalendar: {
       pushEnabled: false,

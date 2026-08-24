@@ -64,6 +64,8 @@ function settings(overrides: { staffAware?: boolean; picker?: boolean; pacing?: 
       requireEmail: false,
       requireAccount: false,
       showStaffPicker: overrides.picker ?? staffAware,
+      requireCustomerApproval: false,
+      customerApprovalNotificationRoles: [],
     },
     googleCalendar: {
       pushEnabled: false,

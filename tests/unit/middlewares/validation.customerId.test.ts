@@ -12,7 +12,7 @@ import { publicCheckoutSchema } from '@/schemas/dashboard/creditPack.schema'
  * alguien mandó. Ahora, `customerId` en el body de reserva o checkout público ⇒
  * `400 CUSTOMER_ID_NOT_ALLOWED` desde el middleware de validación.
  */
-function run(schema: z.ZodTypeAny, body: Record<string, unknown>, params: Record<string, string> = {}) {
+function run(schema: z.AnyZodObject, body: Record<string, unknown>, params: Record<string, string> = {}) {
   const req = { body, params, query: {} } as unknown as Request
   const res = {} as Response
   const next = jest.fn() as NextFunction
