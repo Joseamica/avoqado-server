@@ -183,6 +183,10 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // Que paso con el alta, para poder decirselo al equipo sin que lo adivine
     // del contenido del correo del cliente.
     let altaEstado: 'creada' | 'existente' | 'fallo' = 'fallo'
+    // Public conversion signal consumed by the landing Pixel. Only a brand-new
+    // persisted account counts as a completed registration; renewing the magic
+    // link for an unfinished account must not count the same person twice.
+    let registrationCompleted = false
     try {
       const alta = await signupFromLanding({
         email: String(email),
@@ -199,6 +203,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
       })
       yaEsCliente = alta.yaEsCliente
       altaEstado = alta.yaEsCliente ? 'existente' : 'creada'
+      registrationCompleted = !alta.alreadyExisted && !alta.yaEsCliente
       if (alta.magicLinkToken) {
         // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
         const apiUrl = process.env.PUBLIC_API_URL || 'https://api.avoqado.io'
@@ -493,9 +498,15 @@ Política de Privacidad: https://avoqado.io/privacy
     ])
 
     // Basta con que UNO de los internos llegue para no perder el lead.
-    if (!internosOk.some(Boolean)) {
+    const leadCreated = internosOk.some(Boolean)
+    const conversion = { leadCreated, registrationCompleted }
+    if (!leadCreated) {
       logger.error('[CONTACT_SUBMIT] Internal notification failed', { email, companyName, internos })
-      return res.status(502).json({ success: false, message: 'No se pudo notificar al equipo. Intenta de nuevo.' })
+      return res.status(502).json({
+        success: false,
+        message: 'No se pudo notificar al equipo. Intenta de nuevo.',
+        conversion,
+      })
     }
     internos.forEach((to, i) => {
       if (!internosOk[i]) logger.warn('[CONTACT_SUBMIT] Internal notification failed for one recipient', { to, companyName })
@@ -504,7 +515,7 @@ Política de Privacidad: https://avoqado.io/privacy
       logger.warn('[CONTACT_SUBMIT] Confirmation email failed (lead saved)', { email })
     }
 
-    return res.status(200).json({ success: true, message: 'Demo solicitada exitosamente' })
+    return res.status(200).json({ success: true, message: 'Demo solicitada exitosamente', conversion })
   } catch (err) {
     return next(err)
   }
