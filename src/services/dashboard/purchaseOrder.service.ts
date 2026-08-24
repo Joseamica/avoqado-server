@@ -23,6 +23,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { createStockBatch } from './fifoBatch.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import { sendPurchaseOrderEmail } from '../resend.service'
+import { isDeliverableRecipient } from '../../utils/undeliverableEmail'
 import logger from '@/config/logger'
 import PDFDocument from 'pdfkit'
 import { renderLabelsPdf, getUnitAbbreviation, type LabelItem } from '../labels/labelPdfRenderer'
@@ -387,6 +388,12 @@ export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrder
       unitPrice: item.unitPrice.toFixed(2),
       total: item.total.toFixed(2),
     }))
+
+    // A supplier email is free text typed by the venue, so it can be garbage.
+    // Guarded at the caller so the legacy template in resend.service stays untouched.
+    if (!isDeliverableRecipient(po.supplier?.email ?? '', 'sendPurchaseOrderEmail', { orderNumber: po.orderNumber })) {
+      return false
+    }
 
     // Send email
     const emailSent = await sendPurchaseOrderEmail({

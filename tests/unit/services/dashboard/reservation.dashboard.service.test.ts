@@ -766,11 +766,13 @@ describe('Reservation Dashboard Service', () => {
           baseEndsAt: appointmentInput.endsAt,
           finalEndsAt: appointmentInput.endsAt,
           canonicalBaseDurationMin: 60,
+          bufferAfterMin: 0,
           modifierDurationDelta: 0,
           finalDurationMin: 60,
           productIds: ['prod-1', 'prod-2'],
           modifierRows: [],
           modifierPriceDelta: new Prisma.Decimal(0),
+          blockedEndsAt: appointmentInput.endsAt,
         })
         const liveRow = {
           id: 'hold-matrix',
@@ -886,6 +888,7 @@ describe('Reservation Dashboard Service', () => {
         baseEndsAt: appointmentInput.endsAt,
         finalEndsAt: appointmentInput.endsAt,
         canonicalBaseDurationMin: 60,
+        bufferAfterMin: 0,
         modifierDurationDelta: 0,
         finalDurationMin: 60,
         productIds: ['prod-1'],
@@ -899,6 +902,7 @@ describe('Reservation Dashboard Service', () => {
           },
         ],
         modifierPriceDelta: new Prisma.Decimal(10),
+        blockedEndsAt: appointmentInput.endsAt,
       })
       prismaMock.reservationModifier.createMany.mockResolvedValue({ count: 1 } as any)
       const targets = jest.spyOn(calendarOutboxService, 'resolveReservationPushTargets').mockResolvedValue([{ id: 'connection-1' }] as any)

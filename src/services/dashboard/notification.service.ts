@@ -7,6 +7,7 @@ import socketManager from '../../communication/sockets'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
+import { filterDeliverableRecipients } from '../../utils/undeliverableEmail'
 
 /**
  * Template variables interface
@@ -317,7 +318,17 @@ async function sendEmailNotification(notification: any): Promise<boolean> {
       }
 
       // Remove duplicates (in case a superadmin is also the owner)
-      const uniqueRecipients = [...new Set(recipients)]
+      // ...then drop the provably-undeliverable ones. The OWNER address comes
+      // straight from `Staff`, so demo/seed venues put `owner@owner.com` here —
+      // a third party's domain, which both bounces and leaks the venue name.
+      // Filtered at the caller, not inside the sender, because this is where the
+      // list is built from the database.
+      const uniqueRecipients = filterDeliverableRecipients([...new Set(recipients)], 'kycSubmissionNotification')
+
+      if (uniqueRecipients.length === 0) {
+        logger.warn('📧 No deliverable recipients for KYC submission notification', { venueId })
+        return false
+      }
 
       logger.info(`📧 Found ${uniqueRecipients.length} recipients for KYC notification:`)
       logger.info(`   - ${onboardingAlias} (onboarding alias)`)

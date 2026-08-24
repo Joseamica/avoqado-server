@@ -23,7 +23,13 @@ function supervisorRow(employeeCode: string, fullName: string): StructureRow {
   }
 }
 
-function promoterRow(employeeCode: string, fullName: string, storeId: string, supervisorCode: string, isVacante = false): StructureRow {
+function promoterRow(
+  employeeCode: string,
+  fullName: string,
+  storeId: string,
+  supervisorCode: string | null,
+  isVacante = false,
+): StructureRow {
   return {
     employeeCode,
     fullName,
@@ -44,11 +50,7 @@ const SNAPSHOT: ProdSnapshot = {
     { id: 'v2', name: 'BAE BANTHI (4494)', status: 'ACTIVE' },
     { id: 'vx', name: 'Cubre Descanso', status: 'ACTIVE' },
   ],
-  staff: [
-    staff('sup_hugo', 'Hugo', 'González'),
-    staff('sup_juan', 'Juan', 'Nájera'),
-    staff('promo', 'Alain', 'Rodríguez'),
-  ],
+  staff: [staff('sup_hugo', 'Hugo', 'González'), staff('sup_juan', 'Juan', 'Nájera'), staff('promo', 'Alain', 'Rodríguez')],
   assignments: [{ staffId: 'sup_hugo', venueId: 'v1', role: 'MANAGER', active: true }],
 }
 
@@ -67,11 +69,6 @@ describe('planChanges', () => {
     expect(changes).toContainEqual(expect.objectContaining({ kind: 'SET_EMPLOYEE_CODE', staffId: 'promo', to: 'ALAIN01' }))
   })
 
-  it('NUNCA desasigna una cuenta de terminal', () => {
-    const changes = planChanges(ROWS, SNAPSHOT, OPTIONS).changes
-    expect(changes.some(c => 'staffId' in c && c.staffId === 'tpv')).toBe(false)
-  })
-
   it('es idempotente: sobre el resultado ya aplicado no propone nada', () => {
     const applied: ProdSnapshot = {
       ...SNAPSHOT,
@@ -83,7 +80,6 @@ describe('planChanges', () => {
       assignments: [
         { staffId: 'sup_juan', venueId: 'v1', role: 'MANAGER', active: true },
         { staffId: 'promo', venueId: 'v1', role: 'WAITER', active: true },
-        { staffId: 'tpv', venueId: 'v1', role: 'WAITER', active: true },
       ],
     }
     expect(planChanges(ROWS, applied, OPTIONS).changes).toEqual([])
@@ -124,18 +120,6 @@ describe('planChanges', () => {
     expect(result.unresolved).toContainEqual(expect.objectContaining({ reason: 'NOT_FOUND' }))
   })
 
-  it('NUNCA desasigna una cuenta de terminal con una asignación MANAGER activa', () => {
-    // Hoy las cuentas de terminal siempre son promotores (WAITER), pero la restricción "nunca tocar
-    // cuentas de terminal" no está limitada a ese rol: si por lo que sea quedara con una asignación
-    // MANAGER activa, tampoco debe generarse un cambio que la mencione.
-    const snapshotConTerminalManager: ProdSnapshot = {
-      ...SNAPSHOT,
-      assignments: [...SNAPSHOT.assignments, { staffId: 'tpv', venueId: 'v1', role: 'MANAGER', active: true }],
-    }
-    const changes = planChanges(ROWS, snapshotConTerminalManager, OPTIONS).changes
-    expect(changes.some(c => 'staffId' in c && c.staffId === 'tpv')).toBe(false)
-  })
-
   it('dos filas apuntando al mismo storeId: la primera gana y la segunda se reporta como DUPLICATE_STORE', () => {
     const filaDuplicada = promoterRow('OTRO01', 'Persona Duplicada', '2838', 'JUAN01')
     const rows = [...ROWS, filaDuplicada]
@@ -148,6 +132,56 @@ describe('planChanges', () => {
 
     // La fila extra se reporta en vez de procesarse en silencio.
     expect(result.unresolved).toContainEqual(expect.objectContaining({ row: filaDuplicada, reason: 'DUPLICATE_STORE' }))
+  })
+
+  it('marca las desasignaciones de promotor para revisión de SIMs', () => {
+    const conPromotor: ProdSnapshot = {
+      ...SNAPSHOT,
+      assignments: [...SNAPSHOT.assignments, { staffId: 'promo', venueId: 'v1', role: 'WAITER', active: true }],
+    }
+    const otro = [supervisorRow('JUAN01', 'Juan Joel Nájera Ortiz'), promoterRow('OTRO01', 'Hugo González', '2838', 'JUAN01')]
+    const salidas = planChanges(otro, conPromotor, OPTIONS).changes.filter(c => c.kind === 'UNASSIGN_PROMOTER')
+    expect(salidas).toHaveLength(1)
+    expect(salidas[0]).toMatchObject({ staffId: 'promo' })
+  })
+
+  it('lee promotores CASHIER también, no solo WAITER (setup-playtelecom-complete.ts los da de alta como CASHIER)', () => {
+    const conCashier: ProdSnapshot = {
+      ...SNAPSHOT,
+      staff: [...SNAPSHOT.staff, staff('promo_cashier', 'Otro', 'Cajero')],
+      assignments: [...SNAPSHOT.assignments, { staffId: 'promo_cashier', venueId: 'v1', role: 'CASHIER', active: true }],
+    }
+    // El Excel designa a 'promo' (Alain) para la tienda v1: el CASHIER que ya estaba debe verse
+    // como promotor real y recibir UNASSIGN_PROMOTER — si el conciliador solo leyera WAITER, el
+    // CASHIER sería invisible y quedarían DOS personas cobrando en la misma tienda.
+    const result = planChanges(ROWS, conCashier, OPTIONS)
+    expect(result.changes).toContainEqual(expect.objectContaining({ kind: 'UNASSIGN_PROMOTER', staffId: 'promo_cashier', venueId: 'v1' }))
+  })
+
+  it('colapsa ASSIGN_MANAGER + UNASSIGN_PROMOTER contradictorios sobre la misma persona y tienda: gana el ASSIGN', () => {
+    // sup_juan ya es promotor (WAITER) de v1. El nuevo Excel lo asciende a supervisor de v1 y pone
+    // a otra persona ('promo') como promotora. Sin colapsar, UNASSIGN_PROMOTER apagaría la MISMA
+    // fila StaffVenue que ASSIGN_MANAGER acababa de encender (una fila por [staffId, venueId]).
+    const snapshotConflicto: ProdSnapshot = {
+      ...SNAPSHOT,
+      assignments: [...SNAPSHOT.assignments, { staffId: 'sup_juan', venueId: 'v1', role: 'WAITER', active: true }],
+    }
+    const result = planChanges(ROWS, snapshotConflicto, OPTIONS)
+
+    expect(result.changes).toContainEqual(expect.objectContaining({ kind: 'ASSIGN_MANAGER', staffId: 'sup_juan', venueId: 'v1' }))
+    expect(result.changes.some(c => c.kind === 'UNASSIGN_PROMOTER' && c.staffId === 'sup_juan' && c.venueId === 'v1')).toBe(false)
+    // El promotor designado (Alain) se sigue asignando con normalidad.
+    expect(result.changes).toContainEqual(expect.objectContaining({ kind: 'ASSIGN_PROMOTER', staffId: 'promo', venueId: 'v1' }))
+  })
+
+  it('fila con tienda pero sin supervisor arriba se reporta como SIN_SUPERVISOR y no se procesa en silencio', () => {
+    // Alain resuelve bien contra prod (no es NOT_FOUND); lo único irregular es supervisorCode=null.
+    const filaSinSupervisor = promoterRow('ALAIN01', 'Alain Rodríguez Romero', '4494', null)
+    const result = planChanges([filaSinSupervisor], SNAPSHOT, OPTIONS)
+
+    expect(result.unresolved).toContainEqual(expect.objectContaining({ row: filaSinSupervisor, reason: 'SIN_SUPERVISOR' }))
+    // No se asigna como promotor de v2 ni se toca nada de esa tienda: se salta entera.
+    expect(result.changes.some(c => 'venueId' in c && c.venueId === 'v2')).toBe(false)
   })
 
   it('no toca asignaciones de otro venue (protege el filtro por venue.id)', () => {

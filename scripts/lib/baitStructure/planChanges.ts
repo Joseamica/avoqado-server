@@ -24,10 +24,31 @@ export type Change =
 
 export interface PlanResult {
   changes: Change[]
-  unresolved: Array<{ row: StructureRow; reason: 'AMBIGUOUS' | 'NOT_FOUND' | 'DUPLICATE_STORE'; candidates?: string[] }>
+  unresolved: Array<{
+    row: StructureRow
+    reason: 'AMBIGUOUS' | 'NOT_FOUND' | 'DUPLICATE_STORE' | 'SIN_SUPERVISOR'
+    candidates?: string[]
+  }>
   missingVenues: StructureRow[]
   orphanVenues: Array<{ id: string; name: string }>
 }
+
+/**
+ * Roles que la plataforma lee como "promotor" de un venue. `setup-playtelecom-complete.ts` da de
+ * alta promotores como CASHIER (además de WAITER), así que leer solo WAITER los vuelve invisibles
+ * y el conciliador terminaría asignando a un segundo promotor sobre la misma tienda.
+ */
+const PROMOTER_ROLES = ['CASHIER', 'WAITER']
+
+/**
+ * 🔴 El lado de SUPERVISOR se queda deliberadamente en MANAGER, y NO se amplía a ADMIN aunque el
+ * resto de la plataforma sí lea promotores como CASHIER+WAITER. Verificado contra producción
+ * (2026-08-23): hay 41 filas StaffVenue con role=ADMIN activas, y son el ADMINISTRADOR DE LA
+ * ORGANIZACIÓN (una persona en 40 tiendas, otra en 1) — no supervisores de piso. Ampliar aquí a
+ * ADMIN desataría UNASSIGN_MANAGER contra el administrador de 40 tiendas en cuanto el Excel no lo
+ * liste ahí como supervisor. No es un fix, es una regresión grave.
+ */
+const SUPERVISOR_ROLE = 'MANAGER'
 
 export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, options: PlanOptions): PlanResult {
   const changes: Change[] = []
@@ -46,7 +67,10 @@ export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, option
     if (storeId) venueByStoreId.set(storeId, venue)
   }
 
-  const activeOn = (venueId: string, role: string) => snapshot.assignments.filter(a => a.venueId === venueId && a.role === role && a.active)
+  const activeOn = (venueId: string, roles: string | string[]) => {
+    const roleSet = Array.isArray(roles) ? roles : [roles]
+    return snapshot.assignments.filter(a => a.venueId === venueId && roleSet.includes(a.role) && a.active)
+  }
 
   // Cada storeId se procesa UNA sola vez: la primera fila del Excel gana. El Excel lo manda el
   // cliente y cambia cada corrida — dos filas para la misma tienda es una anomalía que se reporta,
@@ -109,10 +133,18 @@ export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, option
     }
     touchedVenueIds.add(venue.id)
 
+    // Una fila con tienda pero sin supervisor arriba (Excel reordenado, o promotor listado antes
+    // de cualquier encabezado de supervisor) no se procesa en silencio: se reporta y se salta
+    // entera, para no tocar el supervisor viejo mientras el reporte implica que sí se revisó.
+    if (!row.supervisorCode) {
+      unresolved.push({ row, reason: 'SIN_SUPERVISOR' })
+      continue
+    }
+
     // --- supervisor de la tienda ---
-    const supervisorId = row.supervisorCode ? supervisorByCode.get(row.supervisorCode) : undefined
+    const supervisorId = supervisorByCode.get(row.supervisorCode)
     if (supervisorId) {
-      const managers = activeOn(venue.id, 'MANAGER')
+      const managers = activeOn(venue.id, SUPERVISOR_ROLE)
       if (!managers.some(m => m.staffId === supervisorId)) {
         changes.push({
           kind: 'ASSIGN_MANAGER',
@@ -134,7 +166,7 @@ export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, option
     }
 
     // --- promotor de la tienda ---
-    const realPromoters = activeOn(venue.id, 'WAITER')
+    const realPromoters = activeOn(venue.id, PROMOTER_ROLES)
     const designatedId = resolved.get(row)
 
     if (row.isVacante) {
@@ -188,5 +220,28 @@ export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, option
     }
   }
 
-  return { changes, unresolved, missingVenues, orphanVenues }
+  return { changes: collapseContradictions(changes), unresolved, missingVenues, orphanVenues }
+}
+
+/**
+ * Una persona tiene UNA sola fila por tienda (`@@unique([staffId, venueId])`). Si el mismo
+ * (staffId, venueId) recibe a la vez un ASSIGN (se vuelve supervisor o promotor de esa tienda) y
+ * un UNASSIGN (deja de ser supervisor o promotor de esa MISMA tienda) — típico cuando alguien pasa
+ * de promotor a supervisor de su propia tienda — el UNASSIGN, si se aplicara después, apagaría la
+ * fila que el ASSIGN acababa de encender: la tienda quedaría sin nadie activo mientras el reporte
+ * dice que sí quedó asignada. Gana el ASSIGN; el UNASSIGN contradictorio se descarta.
+ */
+function collapseContradictions(changes: Change[]): Change[] {
+  const assignedPairs = new Set(
+    changes
+      .filter(
+        (c): c is Extract<Change, { kind: 'ASSIGN_MANAGER' | 'ASSIGN_PROMOTER' }> =>
+          c.kind === 'ASSIGN_MANAGER' || c.kind === 'ASSIGN_PROMOTER',
+      )
+      .map(c => `${c.staffId}::${c.venueId}`),
+  )
+  return changes.filter(c => {
+    if (c.kind !== 'UNASSIGN_MANAGER' && c.kind !== 'UNASSIGN_PROMOTER') return true
+    return !assignedPairs.has(`${c.staffId}::${c.venueId}`)
+  })
 }

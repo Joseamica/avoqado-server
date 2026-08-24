@@ -12,6 +12,7 @@ import { NotificationChannel, NotificationPriority, NotificationType, StaffRole 
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { sendVenueNotification } from './notification.dashboard.service'
+import { filterDeliverableRecipients } from '../../utils/undeliverableEmail'
 
 /**
  * Context data for bad review notification
@@ -509,11 +510,19 @@ Notificación automática de Avoqado
 Review ID: ${data.reviewId}
     `
 
-    logger.info(`📧 Sending bad review email to ${data.recipients.length} recipients`)
+    // Recipients come from the venue's staff, so they carry the same demo/seed
+    // and TPV-service-account placeholders the nightly jobs did.
+    const recipients = filterDeliverableRecipients(data.recipients, 'sendBadReviewEmail')
+    if (recipients.length === 0) {
+      logger.warn('📧 No deliverable recipients for bad review email', { reviewId: data.reviewId })
+      return false
+    }
+
+    logger.info(`📧 Sending bad review email to ${recipients.length} recipients`)
 
     // Send to all recipients
     const results = await Promise.allSettled(
-      data.recipients.map(email =>
+      recipients.map(email =>
         resend.emails.send({
           from: FROM_EMAIL,
           to: email,
@@ -525,7 +534,7 @@ Review ID: ${data.reviewId}
     )
 
     const successCount = results.filter(r => r.status === 'fulfilled').length
-    logger.info(`✅ Bad review emails sent: ${successCount}/${data.recipients.length}`)
+    logger.info(`✅ Bad review emails sent: ${successCount}/${recipients.length}`)
 
     return successCount > 0
   } catch (error) {

@@ -81,8 +81,18 @@ El Excel declara `promotor → supervisor` **directo**. Avoqado lo deduce a trav
 tienda propia, y se rompe en dos casos:
 
 1. **Cubre descanso.** Las 3 personas comparten el venue `Cubre Descanso`, pero el Excel las reparte entre DOS supervisores (José Lopes →
-   Juan Nájera; Carlos Vicente Díaz y Heavan Leigh → René Cubos). Un venue admite un solo MANAGER, así que **hoy es irrepresentable**.
-   Requiere decisión de negocio (pregunta 5 a Isaac), no un cambio de schema especulativo.
+   Juan Nájera; Carlos Vicente Díaz y Heavan Leigh → René Cubos).
+
+   **Corrección (2026-08-23):** una versión anterior de este párrafo decía "un venue admite un solo MANAGER, así que hoy es
+   irrepresentable". **Eso es falso.** El único índice único de `StaffVenue` es `@@unique([staffId, venueId])`, que sólo impide que **una
+   misma persona** tenga dos filas en el mismo venue; nada impide dos MANAGER **distintos** en un venue, y el propio conciliador lo asume
+   (itera sobre N managers activos y desactiva los sobrantes). Que quede uno solo es una decisión de este conciliador, no una restricción
+   del schema.
+
+   **La limitación real es otra, y sí sigue en pie:** aunque los dos supervisores puedan colgar del mismo venue, el modelo no permite decir
+   que José Lopes reporta a Juan **mientras** Heavan reporta a René dentro de esa misma tienda. La relación promotor→supervisor pasa por la
+   tienda, y ahí las tres personas comparten una. Es decisión de negocio (pregunta 5 a Isaac), no un cambio de schema especulativo.
+
 2. **"ACTIVACIONES".** Braulio Niño y Ma. Elizabeth García salen como promotores sin tienda ni ID de tienda, bajo Hugo. Sin venue no hay
    dónde colgar la relación.
 
