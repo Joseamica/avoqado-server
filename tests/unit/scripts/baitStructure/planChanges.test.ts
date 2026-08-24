@@ -5,7 +5,7 @@ import { StructureRow } from '../../../../scripts/lib/baitStructure/types'
 const OPTIONS: PlanOptions = { bajaAusentes: false, vacantes: 'conservar' }
 
 function staff(id: string, firstName: string, lastName: string, over: Partial<ProdStaff> = {}): ProdStaff {
-  return { id, firstName, lastName, employeeCode: null, active: true, isTerminalAccount: false, ...over }
+  return { id, firstName, lastName, employeeCode: null, active: true, ...over }
 }
 
 function supervisorRow(employeeCode: string, fullName: string): StructureRow {
@@ -48,12 +48,8 @@ const SNAPSHOT: ProdSnapshot = {
     staff('sup_hugo', 'Hugo', 'González'),
     staff('sup_juan', 'Juan', 'Nájera'),
     staff('promo', 'Alain', 'Rodríguez'),
-    staff('tpv', 'TPV', 'Portal', { isTerminalAccount: true }),
   ],
-  assignments: [
-    { staffId: 'sup_hugo', venueId: 'v1', role: 'MANAGER', active: true },
-    { staffId: 'tpv', venueId: 'v1', role: 'WAITER', active: true },
-  ],
+  assignments: [{ staffId: 'sup_hugo', venueId: 'v1', role: 'MANAGER', active: true }],
 }
 
 const ROWS = [supervisorRow('JUAN01', 'Juan Joel Nájera Ortiz'), promoterRow('ALAIN01', 'Alain Rodríguez Romero', '2838', 'JUAN01')]

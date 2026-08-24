@@ -27,8 +27,6 @@ const OPTIONS: PlanOptions = {
   vacantes: arg('vacantes') === 'libre' ? 'libre' : 'conservar',
 }
 
-const TERMINAL_EMAIL = /^tpv-.*@internal\.avoqado\.io$/i
-
 async function readSnapshot(orgId: string): Promise<ProdSnapshot> {
   const venues = await prisma.venue.findMany({
     where: { organizationId: orgId },
@@ -42,7 +40,7 @@ async function readSnapshot(orgId: string): Promise<ProdSnapshot> {
       venueId: true,
       role: true,
       active: true,
-      staff: { select: { id: true, firstName: true, lastName: true, employeeCode: true, active: true, email: true } },
+      staff: { select: { id: true, firstName: true, lastName: true, employeeCode: true, active: true } },
     },
   })
 
@@ -55,7 +53,6 @@ async function readSnapshot(orgId: string): Promise<ProdSnapshot> {
         lastName: link.staff.lastName,
         employeeCode: link.staff.employeeCode,
         active: link.staff.active,
-        isTerminalAccount: TERMINAL_EMAIL.test(link.staff.email ?? ''),
       })
     }
   }

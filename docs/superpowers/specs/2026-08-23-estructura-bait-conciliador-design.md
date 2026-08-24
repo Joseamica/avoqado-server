@@ -42,6 +42,22 @@ Org `PlayTelecom` = `cmietitbn000zpr2d8213qkzq`, 48 venues.
 Los 4 supervisores del Excel ya existen: Elias Medina (19 tiendas hoy), Hugo González (9), René Cubos (18) y **Juan Nájera (1)** — el
 supervisor que en el archivo crece a 8 tiendas.
 
+### 🔴 Corrección de un hecho que yo di por bueno sin verificar (2026-08-23, tras el primer dry-run)
+
+Una versión anterior de este diseño afirmaba que **39 de las 42 filas `StaffVenue` con `role='WAITER'` activas eran "cuentas de terminal"**,
+por tener correo `tpv-…@internal.avoqado.io`, y que desasignarlas dejaría terminales sin poder cobrar. **Es falso, y era una deducción hecha
+desde el prefijo del correo sin mirar quién estaba detrás.**
+
+En esta organización **no existe ninguna cuenta de máquina**. Ese correo es simplemente cómo Avoqado da de alta a un promotor que no tiene
+correo propio. Las 42 filas son personas reales, con PIN de acceso y con SIMs en custodia — Karina de la Cruz 501, Yolanda González 481,
+Tirza Juárez 471, Ma. Elizabeth García 626. Braulio Niño es la excepción sólo porque sí registró un correo personal.
+
+**Cómo se detectó:** el primer dry-run contra producción devolvió **24 de 25 personas como `NOT_FOUND`**, cuando el análisis independiente
+decía que las 25 existían. El emparejador estaba excluyendo por esa heurística justo a las personas que debía encontrar.
+
+**Consecuencia de diseño:** el concepto `isTerminalAccount` se elimina del código. La protección real contra desasignar a quien no toca es
+otra, y ya existe por construcción: el conciliador sólo toca venues nombrados en el Excel, y toda baja es `active = false`, reversible.
+
 ## Cómo representa Avoqado esta estructura
 
 No hay un modelo "organigrama". La jerarquía es **derivada**, y el eslabón es la tienda:

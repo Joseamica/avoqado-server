@@ -2,7 +2,7 @@ import { extractStoreId, matchStaff, norm, ProdStaff } from '../../../../scripts
 import { StructureRow } from '../../../../scripts/lib/baitStructure/types'
 
 function staff(over: Partial<ProdStaff> & { id: string; firstName: string; lastName: string }): ProdStaff {
-  return { employeeCode: null, active: true, isTerminalAccount: false, ...over }
+  return { employeeCode: null, active: true, ...over }
 }
 
 function row(over: Partial<StructureRow> & { fullName: string }): StructureRow {
@@ -87,9 +87,17 @@ describe('matchStaff', () => {
     expect(matchStaff(row({ fullName: 'Persona Que No Existe' }), pool)).toEqual({ status: 'NOT_FOUND' })
   })
 
-  it('nunca empareja contra una cuenta de terminal', () => {
-    const conTpv = [staff({ id: 't1', firstName: 'Braulio', lastName: 'Nino', isTerminalAccount: true })]
-    expect(matchStaff(row({ fullName: 'Braulio Rodrigo Niño Burgos' }), conTpv)).toEqual({ status: 'NOT_FOUND' })
+  it('empareja a un promotor real aunque su cuenta se haya dado de alta desde una terminal', () => {
+    // Verificado contra producción (2026-08-23): el correo tpv-…@internal.avoqado.io NO identifica una
+    // cuenta de servicio de una terminal — es simplemente cómo la plataforma da de alta a un promotor
+    // sin correo propio. Karina de la Cruz (con 501 SIMs en custodia) es una de esas 42 personas reales.
+    // Como ProdStaff ya no lleva email, este caso se prueba por el lado del nombre: 's1' del pool
+    // (Karina de la Cruz) debe emparejar con el nombre completo del Excel sin ningún filtro que la excluya.
+    expect(matchStaff(row({ fullName: 'Marisol Karina de la Cruz Zermeño' }), pool)).toEqual({
+      status: 'MATCHED',
+      staffId: 's1',
+      via: 'looseName',
+    })
   })
 
   it('no empareja cuando la persona en la base solo aporta un token significativo', () => {

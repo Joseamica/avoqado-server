@@ -6,8 +6,6 @@ export interface ProdStaff {
   lastName: string
   employeeCode: string | null
   active: boolean
-  /** Cuenta de servicio de una terminal (email tpv-…@internal.avoqado.io). Nunca es una persona. */
-  isTerminalAccount: boolean
 }
 
 export type MatchResult =
@@ -55,9 +53,8 @@ function decide(matches: ProdStaff[], via: 'employeeCode' | 'exactName' | 'loose
 }
 
 export function matchStaff(row: StructureRow, pool: ProdStaff[]): MatchResult {
-  // Las cuentas de terminal no son personas: nunca son candidatas.
-  // Tampoco las personas desactivadas: evita resucitar bajas de personal, pruebas o duplicados.
-  const candidates = pool.filter(staff => !staff.isTerminalAccount && staff.active)
+  // Solo las personas desactivadas quedan fuera: evita resucitar bajas de personal, pruebas o duplicados.
+  const candidates = pool.filter(staff => staff.active)
 
   if (row.employeeCode) {
     const byCode = candidates.filter(s => s.employeeCode && norm(s.employeeCode) === norm(row.employeeCode))

@@ -18,8 +18,14 @@ defecto; `--apply` escribe. La jerarquía NO se modela: vive derivada en `StaffV
 
 - **Nunca `DELETE`.** Toda baja es `active = false` o `Venue.status`. Hay `Order`, `Payment`, `SaleVerification` y `SerializedItem` con FK a
   `Staff.id`.
-- 🔴 **Nunca tocar cuentas de terminal.** 39 de las 42 filas `StaffVenue` con `role='WAITER'` activas en la org son cuentas de TPV con email
-  `tpv-…@internal.avoqado.io`. Desasignarlas deja terminales sin poder cobrar. Toda desasignación de promotor DEBE excluirlas.
+- 🔴 **CORREGIDO 2026-08-23 tras el primer dry-run contra producción — la versión anterior de esta restricción era FALSA.** Decía: "39 de las
+  42 filas `StaffVenue` con `role='WAITER'` activas son cuentas de TPV (email `tpv-…@internal.avoqado.io`); desasignarlas deja terminales sin
+  poder cobrar". **No existe ninguna cuenta de máquina en esta organización.** El correo `tpv-…@internal.avoqado.io` es sencillamente cómo
+  Avoqado da de alta a un promotor que no tiene correo propio: esas 39 filas son personas reales, con PIN y con SIMs en custodia (Karina de
+  la Cruz 501, Yolanda González 481, Tirza Juárez 471…). La heurística del prefijo del correo se dedujo sin verificar quién estaba detrás.
+  **Consecuencia medida:** excluirlas del emparejamiento hizo que 24 de las 25 personas salieran `NOT_FOUND` en el primer dry-run. El
+  concepto `isTerminalAccount` se elimina del código; no hay nada que proteger por esa vía. La protección real es otra y ya existe: el
+  conciliador solo toca venues nombrados en el Excel, y toda baja es `active = false`, reversible.
 - **Nunca adivinar una persona.** Si un renglón del Excel resuelve a ≠1 staff, se reporta y se omite.
 - **Todo filtrado por `organizationId`.** Ninguna consulta ni escritura puede salir de la org.
 - **`ActivityLog` por cada mutación** (`.claude/rules/critical-warnings.md`), fuera de la transacción y fire-and-forget.

@@ -110,12 +110,9 @@ export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, option
     touchedVenueIds.add(venue.id)
 
     // --- supervisor de la tienda ---
-    // Las cuentas de terminal también son WAITER siempre, pero por si algún día una quedara con una
-    // asignación MANAGER activa, la restricción "nunca tocar cuentas de terminal" no está limitada a
-    // promotores: se filtra igual aquí.
     const supervisorId = row.supervisorCode ? supervisorByCode.get(row.supervisorCode) : undefined
     if (supervisorId) {
-      const managers = activeOn(venue.id, 'MANAGER').filter(a => !staffById.get(a.staffId)?.isTerminalAccount)
+      const managers = activeOn(venue.id, 'MANAGER')
       if (!managers.some(m => m.staffId === supervisorId)) {
         changes.push({
           kind: 'ASSIGN_MANAGER',
@@ -137,8 +134,7 @@ export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, option
     }
 
     // --- promotor de la tienda ---
-    // Las cuentas de terminal (tpv-…) también son WAITER: quedan SIEMPRE fuera.
-    const realPromoters = activeOn(venue.id, 'WAITER').filter(a => !staffById.get(a.staffId)?.isTerminalAccount)
+    const realPromoters = activeOn(venue.id, 'WAITER')
     const designatedId = resolved.get(row)
 
     if (row.isVacante) {
