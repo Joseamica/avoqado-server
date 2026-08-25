@@ -257,6 +257,9 @@ const prismaMock: any = {
   scaleProfile: createMockModel(),
   // Reservation / Booking models
   reservation: createMockModel(),
+  kioskCheckInChallenge: createMockModel(),
+  kioskCheckInAttempt: createMockModel(),
+  kioskOutreachOutbox: createMockModel(),
   classSession: createMockModel(),
   staffSchedule: createMockModel(),
   staffScheduleException: createMockModel(),

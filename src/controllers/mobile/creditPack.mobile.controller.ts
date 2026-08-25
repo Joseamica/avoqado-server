@@ -62,17 +62,17 @@ export const getBalance = async (req: Request, res: Response, next: NextFunction
 export const sellPack = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, packId } = req.params
-    const { customerId, amountPaid, note } = req.body
+    const { customerId, note } = req.body
 
     if (!customerId) {
       return res.status(400).json({ success: false, message: 'customerId es requerido' })
     }
 
     const staffVenueId = await resolveStaffVenueId(venueId, req.authContext?.userId || '')
-    const purchase = await creditPackService.sellPackInPerson(venueId, packId, customerId, staffVenueId, {
-      amountPaid: amountPaid != null ? Number(amountPaid) : undefined,
-      note,
-    })
+    // El monto ya NO viaja en el body: lo pone el servidor con el precio de lista.
+    // Para una venta con descuento real está el otro carril — se registra el cobro y
+    // se acredita con `fulfillCreditPackPurchaseFromPayment`, que toma el monto del cobro.
+    const purchase = await creditPackService.sellPackInPerson(venueId, packId, customerId, staffVenueId, { note })
     return res.status(201).json({ success: true, purchase })
   } catch (error) {
     next(error)

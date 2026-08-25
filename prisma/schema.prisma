@@ -493,11 +493,11 @@ model Venue {
   // ==========================================
   // RESERVATION / BOOKING SYSTEM
   // ==========================================
-  reservations        Reservation[]
-  slotHolds           SlotHold[]
-  classSessions       ClassSession[]
-  waitlistEntries     ReservationWaitlistEntry[]
-  reservationSettings ReservationSettings?
+  reservations           Reservation[]
+  slotHolds              SlotHold[]
+  classSessions          ClassSession[]
+  waitlistEntries        ReservationWaitlistEntry[]
+  reservationSettings    ReservationSettings?
   // Fase 1 — avisos de aprobación de clientes pendientes de entregar
   customerApprovalOutbox CustomerApprovalOutbox[]
 
@@ -619,7 +619,10 @@ model Venue {
   upsellAiRuns      UpsellAiRun[]
 
   // Promociones del POS (tier PRO, código PROMOTIONS)
-  promotions Promotion[]
+  promotions             Promotion[]
+  kioskCheckInChallenges KioskCheckInChallenge[]
+  kioskCheckInAttempts   KioskCheckInAttempt[]
+  kioskOutreachOutbox    KioskOutreachOutbox[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1254,15 +1257,15 @@ model StaffPasskey {
 /// Venue-specific role permission configurations.
 /// Allows OWNER and ADMIN to customize default permissions for each role.
 model VenueRolePermission {
-  id          String    @id @default(cuid())
-  venueId     String
-  venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  role        StaffRole
+  id                String    @id @default(cuid())
+  venueId           String
+  venue             Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  role              StaffRole
   /// Lo que este venue AGREGA sobre los permisos de fábrica del rol. Es aditivo a
   /// propósito: así, cuando la plataforma le suma permisos nuevos a un rol, los venues
   /// que ya habían personalizado también los reciben en vez de quedarse congelados en la
   /// lista del día que la guardaron (ver el test "keeps new OWNER defaults…", a3625d37).
-  permissions String[] // Custom permissions array: ["menu:read", "orders:create", ...]
+  permissions       String[] // Custom permissions array: ["menu:read", "orders:create", ...]
   /// Lo que este venue QUITA. Va aparte de `permissions` porque un solo campo no puede
   /// decir las dos cosas: si la lista guardada fuera "todo lo que el rol tiene", quitar
   /// funcionaría pero el venue dejaría de recibir los permisos nuevos. Con el campo
@@ -1272,7 +1275,7 @@ model VenueRolePermission {
   /// conserva IMPLICA al excluido, el excluido vuelve — y el dashboard lo muestra como
   /// "viene incluido en X" en vez de mentir. Decisión del founder (2026-08-18): lo
   /// incluido no se quita por separado, pero se ve.
-  deniedPermissions String[] @default([])
+  deniedPermissions String[]  @default([])
 
   // Audit trail
   modifiedBy String
@@ -3741,6 +3744,7 @@ model Payment {
 
   // Commission System
   commissionCalculations CommissionCalculation[]
+  creditPackPurchase     CreditPackPurchase?     @relation("CreditPackPurchasePayment")
 
   // Webhook reconciliation: Blumon TPV (and other providers) post webhooks that
   // we link back to Payments here. One Payment can have multiple events (initial
@@ -6344,18 +6348,18 @@ model Customer {
   // Sólo aplica cuando ReservationSettings.requireCustomerApproval está prendido; con el
   // switch apagado el gate ni siquiera lee estos campos. Default APPROVED: nadie que ya
   // exista pasa a PENDING jamás (ni en la migración ni al mover el switch).
-  approvalStatus CustomerApprovalStatus @default(APPROVED)
+  approvalStatus           CustomerApprovalStatus @default(APPROVED)
   /// Separa el CONTACTO de CRM (creado por staff, import o checkout) de la CUENTA que
   /// alguien activó con password/OTP/Consumer. Sólo una cuenta activada pide aprobación.
   accountActivatedAt       DateTime?
   approvalRequestedAt      DateTime?
   approvalDecidedAt        DateTime?
   approvalDecidedByStaffId String?
-  approvalDecisionReason   String? @db.Text
+  approvalDecisionReason   String?                @db.Text
   /// Token de fencing: sube en cada decisión. La reserva lo compara dentro de su
   /// transacción serializable, así la carrera aprobar-vs-reservar es determinista.
-  approvalVersion  Int    @default(0)
-  approvalDecidedBy Staff? @relation("CustomerApprovalDecider", fields: [approvalDecidedByStaffId], references: [id], onDelete: Restrict)
+  approvalVersion          Int                    @default(0)
+  approvalDecidedBy        Staff?                 @relation("CustomerApprovalDecider", fields: [approvalDecidedByStaffId], references: [id], onDelete: Restrict)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -6383,7 +6387,8 @@ model Customer {
   taxProfiles CustomerTaxProfile[]
 
   // Fase 1 — avisos de aprobación encolados para este cliente
-  approvalOutbox CustomerApprovalOutbox[]
+  approvalOutbox      CustomerApprovalOutbox[]
+  kioskOutreachOutbox KioskOutreachOutbox[]
 
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
@@ -8032,14 +8037,14 @@ model CustomerApprovalOutbox {
   customerId String
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
-  event CustomerApprovalEvent
+  event           CustomerApprovalEvent
   /// Ordena y suprime: nunca se entrega una versión vieja si ya salió una más nueva
   /// (evitaría que llegue "en espera" DESPUÉS de "aprobado").
   approvalVersion Int
   /// `${event}:${customerId}:${approvalVersion}` — repetir la misma decisión no encola de nuevo.
-  dedupeKey      String @unique
-  payloadVersion Int    @default(1)
-  payload        Json?
+  dedupeKey       String                @unique
+  payloadVersion  Int                   @default(1)
+  payload         Json?
 
   deliveries CustomerApprovalDelivery[]
 
@@ -8055,20 +8060,20 @@ model CustomerApprovalDelivery {
   outboxId String
   outbox   CustomerApprovalOutbox @relation(fields: [outboxId], references: [id], onDelete: Cascade)
 
-  recipient String // email o teléfono, según el canal
-  channel   CustomerApprovalChannel
+  recipient   String // email o teléfono, según el canal
+  channel     CustomerApprovalChannel
   /// Idempotency key que viaja al proveedor (Resend): si el proceso muere entre "aceptado" y
   /// `sentAt`, el reintento no genera un segundo correo.
-  providerKey String @unique
+  providerKey String                  @unique
 
   status        CustomerApprovalDeliveryStatus @default(PENDING)
   attempts      Int                            @default(0)
   nextAttemptAt DateTime                       @default(now())
   /// Claim con SKIP LOCKED: dos workers nunca entregan la misma fila.
-  leaseUntil DateTime?
-  lastError  String?   @db.Text
+  leaseUntil    DateTime?
+  lastError     String?                        @db.Text
   /// SÓLO tras confirmación del proveedor.
-  sentAt DateTime?
+  sentAt        DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -12472,6 +12477,15 @@ model ReservationSettings {
   minNoticeMin       Int     @default(60)
   noShowGraceMin     Int     @default(15)
 
+  /// Fase 9 del kiosco — aviso nocturno de renovación.
+  ///
+  /// APAGADO por defecto, y no es timidez: esto manda mensajes A LOS CLIENTES con el
+  /// nombre del negocio. Un mensaje enviado no se puede desenviar, así que prenderlo es
+  /// una decisión del negocio, nunca un default nuestro. Se compone con AND sobre el
+  /// consentimiento de marketing de CADA cliente: el negocio dice "quiero", la persona
+  /// dice "acepto", y sólo entonces sale.
+  nightlyOutreachEnabled Boolean @default(false)
+
   // Pacing
   pacingMaxPerSlot      Int? // null = no pacing limit
   onlineCapacityPercent Int    @default(100)
@@ -12502,14 +12516,14 @@ model ReservationSettings {
   waitlistNotifyWindow Int     @default(30) // minutes
 
   // Public booking
-  publicBookingEnabled Boolean @default(false)
-  showStaffPicker      Boolean @default(false)
-  requirePhone         Boolean @default(true)
-  requireEmail         Boolean @default(false)
-  requireAccount       Boolean @default(false) // when true, customer must log in or register before booking
+  publicBookingEnabled              Boolean     @default(false)
+  showStaffPicker                   Boolean     @default(false)
+  requirePhone                      Boolean     @default(true)
+  requireEmail                      Boolean     @default(false)
+  requireAccount                    Boolean     @default(false) // when true, customer must log in or register before booking
   /// Fase 1: el venue aprueba manualmente a cada cliente nuevo antes de dejarlo reservar.
   /// Exige requireAccount (CHECK en la migración): sin cuenta no hay a quién aprobar.
-  requireCustomerApproval Boolean @default(false)
+  requireCustomerApproval           Boolean     @default(false)
   /// Roles del venue que reciben el aviso "hay alguien esperando aprobación".
   customerApprovalNotificationRoles StaffRole[] @default([OWNER, ADMIN])
 
@@ -12958,6 +12972,13 @@ model CreditPackPurchase {
   stripeCheckoutSessionId String? @unique
   stripePaymentIntentId   String?
   amountPaid              Decimal @db.Decimal(10, 2)
+
+  // Cobro en persona (POS / terminal PAX). Es la MISMA idea que
+  // `stripeCheckoutSessionId` para el carril en linea: la unicidad es lo que hace
+  // idempotente el fulfillment. Sin esto, un reintento del PAX tras un timeout
+  // acredita el paquete dos veces por un solo cobro (Fase 4 del kiosco).
+  paymentId String?  @unique
+  payment   Payment? @relation("CreditPackPurchasePayment", fields: [paymentId], references: [id], onDelete: SetNull)
 
   // Relations
   itemBalances CreditItemBalance[]
@@ -13553,8 +13574,8 @@ model KdsOrder {
   /// definitiva: hasta entonces, sigue siendo retomable.
   printedAt      DateTime?
 
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([venueId, status])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
@@ -13679,11 +13700,11 @@ model PrintStation {
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  name         String // UI renders via sector terminology (Cocina/Barra/Almacén/…)
-  printerId    String? // primary printer (v1: no backup)
-  printer      Printer? @relation(fields: [printerId], references: [id], onDelete: SetNull)
-  copies       Int      @default(1) // v1: fixed 1 (copies>1 = post-v1)
-  isDefault    Boolean  @default(false) // fallback for unrouted items; ONE per venue (partial unique index in migration)
+  name      String // UI renders via sector terminology (Cocina/Barra/Almacén/…)
+  printerId String? // primary printer (v1: no backup)
+  printer   Printer? @relation(fields: [printerId], references: [id], onDelete: SetNull)
+  copies    Int      @default(1) // v1: fixed 1 (copies>1 = post-v1)
+  isDefault Boolean  @default(false) // fallback for unrouted items; ONE per venue (partial unique index in migration)
 
   /// ¿Aquí se EMPACA? La estación que recibe el ticket consolidado del pedido completo.
   ///
@@ -13697,9 +13718,9 @@ model PrintStation {
   /// ticket extra: el default es no cambiarle nada a quien no lo quiera. Y se marca aparte
   /// de `isDefault` a propósito — mandar el consolidado a la estación por default haría que
   /// la cocina reciba DOS papeles del mismo pedido, que es el doble-impreso clásico.
-  isPacking    Boolean  @default(false)
-  active       Boolean  @default(true)
-  displayOrder Int      @default(0)
+  isPacking    Boolean @default(false)
+  active       Boolean @default(true)
+  displayOrder Int     @default(0)
 
   // Routing back-relations (cascade resolves product override ?? category default ?? venue default)
   categories MenuCategory[]
@@ -15927,4 +15948,122 @@ model OrderPromotion {
 
   @@unique([orderId, instanceId])
   @@index([promotionId])
+}
+
+/// Fase 5 del kiosco — el reto de check-in.
+///
+/// El kiosco muestra un QR; el cliente lo abre en SU teléfono, con SU sesión, y ahí se
+/// identifica. El aparato nunca ve la identidad: sólo pregunta "¿ya lo resolvió alguien?".
+/// Por eso el secreto vive en el fragmento de la URL (que no viaja al servidor en el
+/// Referer) y aquí sólo queda su hash.
+model KioskCheckInChallenge {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  terminalId     String?
+  /// Cara del aparato: "A" (mostrador) o "B" (cliente). Existe desde el inicio aunque
+  /// hoy sólo se use B — un challenge de una cara no se consume desde la otra.
+  stationKey     String  @db.VarChar(8)
+  /// Generación de la sesión del kiosco. Al expirar por inactividad sube, y todo challenge
+  /// de una generación anterior queda muerto aunque no haya vencido su reloj.
+  kioskSessionId String  @db.VarChar(64)
+
+  /// sha256(secreto + OTP_PEPPER). El secreto en claro NUNCA se guarda ni se registra.
+  nonceHash String                      @unique
+  status    KioskCheckInChallengeStatus @default(PENDING)
+  expiresAt DateTime
+
+  consumedAt    DateTime?
+  customerId    String?
+  reservationId String?
+
+  /// Intentos fallidos contra ESTE reto. Durable a propósito: un limitador en memoria
+  /// se reinicia con el proceso y no se comparte entre instancias.
+  attempts    Int @default(0)
+  maxAttempts Int @default(5)
+  version     Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId, status, expiresAt])
+  @@index([terminalId, stationKey, status])
+}
+
+enum KioskCheckInChallengeStatus {
+  PENDING
+  CONSUMED
+  EXPIRED
+  CANCELLED
+}
+
+/// Contador de intentos DURABLE (ventana fija) para el respaldo "no aparezco en la lista".
+///
+/// El limitador que ya existe (`express-rate-limit`) vive en memoria: se reinicia con el
+/// proceso y no se comparte entre instancias, así que no frena a quien barre códigos con
+/// paciencia. Éste sí, porque el conteo está en la base.
+model KioskCheckInAttempt {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// "terminal:<id>" | "station:<key>" | "ip:<addr>" | "reservation:<id>"
+  scope       String   @db.VarChar(128)
+  windowStart DateTime
+  count       Int      @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, scope, windowStart])
+  @@index([windowStart])
+}
+
+/// Fase 9 del kiosco — la fila durable del aviso nocturno.
+///
+/// Mismo patrón que `CustomerApprovalOutbox`: la INTENCIÓN se graba en la base y la
+/// entrega ocurre después. Si el proceso muere a media noche, el aviso sigue aquí; y si
+/// el barrido se repite, `dedupeKey` impide que a alguien le llegue dos veces.
+model KioskOutreachOutbox {
+  id String @id @default(cuid())
+
+  venueId    String
+  venue      Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  event KioskOutreachEvent
+
+  /// `${event}:${customerId}:${yyyy-mm-dd}` — el barrido de la misma noche no reencola.
+  dedupeKey String @unique
+
+  /// Enlace de pago de la renovación, ya creado cuando se encoló: si el enlace no se pudo
+  /// crear, el aviso no se encola. Mandar "renueva" sin dónde renovar es peor que callar.
+  paymentLinkUrl String?
+  payload        Json?
+
+  status      KioskOutreachStatus @default(PENDING)
+  attempts    Int                 @default(0)
+  lastError   String?
+  leasedUntil DateTime?
+  sentAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, leasedUntil])
+  @@index([venueId, customerId])
+}
+
+enum KioskOutreachEvent {
+  /// Le quedan pocos créditos en su paquete.
+  CREDITS_RUNNING_OUT
+  /// Su paquete vence pronto.
+  PACK_EXPIRING
+}
+
+enum KioskOutreachStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
 }

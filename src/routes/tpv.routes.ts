@@ -37,6 +37,7 @@ import AppError from '../errors/AppError'
 import { getPromoterCashOut, withdrawAsPromoter } from '../services/dashboard/cash-out/cash-out.promoter.service'
 import { DEFAULT_PERMISSIONS, expandWildcards, resolvePermissions } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
@@ -7746,5 +7747,16 @@ router.post(
   validateRequest(ForceOverrideReferralSchema),
   referralsTpvController.forceOverride,
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kiosco — Fase 5: el reto de check-in
+//
+// El aparato pide un reto (QR), sondea si alguien lo resolvió, y como respaldo deja
+// teclear el código de confirmación. Nunca recibe la identidad de quien hizo check-in:
+// esta pantalla la ve la fila entera.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/kiosk/challenge', authenticateTokenMiddleware, kioskCheckInController.createChallenge)
+router.get('/kiosk/challenge/:challengeId', authenticateTokenMiddleware, kioskCheckInController.getChallenge)
+router.post('/kiosk/check-in-by-code', authenticateTokenMiddleware, kioskCheckInController.checkInByCode)
 
 export default router

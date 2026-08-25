@@ -50,6 +50,9 @@ export interface ReservationConfig {
     maxAdvanceDays: number
     minNoticeMin: number
     noShowGraceMin: number
+    /// Fase 9 — aviso nocturno de renovación. Apagado por defecto: manda mensajes al
+    /// cliente con el nombre del negocio, así que prenderlo es decisión suya.
+    nightlyOutreachEnabled: boolean
     pacingMaxPerSlot: number | null
     onlineCapacityPercent: number
     capacityMode: 'pacing' | 'per_staff'
@@ -135,6 +138,8 @@ type ReservationSettingsUpdateInput = Partial<{
   maxAdvanceDays: number
   minNoticeMin: number
   noShowGraceMin: number
+  /// Fase 9 — aviso nocturno de renovación (apagado por defecto).
+  nightlyOutreachEnabled: boolean
   pacingMaxPerSlot: number | null
   onlineCapacityPercent: number
   capacityMode: 'pacing' | 'per_staff'
@@ -211,6 +216,7 @@ export async function getReservationSettings(
       maxAdvanceDays: settings.maxAdvanceDays,
       minNoticeMin: settings.minNoticeMin,
       noShowGraceMin: settings.noShowGraceMin,
+      nightlyOutreachEnabled: settings.nightlyOutreachEnabled,
       pacingMaxPerSlot: settings.pacingMaxPerSlot,
       onlineCapacityPercent: settings.onlineCapacityPercent,
       capacityMode: settings.capacityMode === 'per_staff' ? 'per_staff' : 'pacing',
@@ -433,6 +439,7 @@ export function normalizeReservationSettingsUpdate(data: ReservationSettingsUpda
   if (data.maxAdvanceDays !== undefined) normalized.maxAdvanceDays = data.maxAdvanceDays
   if (data.minNoticeMin !== undefined) normalized.minNoticeMin = data.minNoticeMin
   if (data.noShowGraceMin !== undefined) normalized.noShowGraceMin = data.noShowGraceMin
+  if (data.nightlyOutreachEnabled !== undefined) normalized.nightlyOutreachEnabled = data.nightlyOutreachEnabled
   if (data.pacingMaxPerSlot !== undefined) normalized.pacingMaxPerSlot = data.pacingMaxPerSlot
   if (data.onlineCapacityPercent !== undefined) normalized.onlineCapacityPercent = data.onlineCapacityPercent
   if (data.capacityMode !== undefined) normalized.capacityMode = data.capacityMode
@@ -480,6 +487,7 @@ export function normalizeReservationSettingsUpdate(data: ReservationSettingsUpda
     if (data.scheduling.maxAdvanceDays !== undefined) normalized.maxAdvanceDays = data.scheduling.maxAdvanceDays
     if (data.scheduling.minNoticeMin !== undefined) normalized.minNoticeMin = data.scheduling.minNoticeMin
     if (data.scheduling.noShowGraceMin !== undefined) normalized.noShowGraceMin = data.scheduling.noShowGraceMin
+    if (data.scheduling.nightlyOutreachEnabled !== undefined) normalized.nightlyOutreachEnabled = data.scheduling.nightlyOutreachEnabled
     if (data.scheduling.pacingMaxPerSlot !== undefined) normalized.pacingMaxPerSlot = data.scheduling.pacingMaxPerSlot
     if (data.scheduling.onlineCapacityPercent !== undefined) normalized.onlineCapacityPercent = data.scheduling.onlineCapacityPercent
     if (data.scheduling.capacityMode !== undefined) normalized.capacityMode = data.scheduling.capacityMode
@@ -571,6 +579,7 @@ function getDefaultConfig(): ReservationConfig {
       maxAdvanceDays: 60,
       minNoticeMin: 60,
       noShowGraceMin: 15,
+      nightlyOutreachEnabled: false,
       pacingMaxPerSlot: null,
       onlineCapacityPercent: 100,
       capacityMode: 'pacing',

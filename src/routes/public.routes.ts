@@ -24,6 +24,8 @@ import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/t
 import { validateRequest } from '../middlewares/validation'
 import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
+import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
+import { kioskCheckInCors } from '../middlewares/kioskCheckInCors.middleware'
 import { checkPublicVenueFeature } from '../middlewares/checkFeatureAccess.middleware'
 import { venueChatAuth } from '../middlewares/venueChatAuth.middleware'
 import {
@@ -256,6 +258,21 @@ router.post(
   requireReservationsPlan,
   validateRequest(publicCheckoutSchema),
   creditPackPublicController.createCheckout,
+)
+
+// ---- Kiosco: consumir el reto de check-in desde el teléfono del cliente (Fase 5) ----
+//
+// 🔴 CORS ACOTADO, a diferencia del resto de /public (que es `origin: '*'` para poder
+// embeberse en cualquier sitio). Aquí no: este endpoint actúa sobre una sesión de cliente
+// autenticada, así que un `*` dejaría a cualquier página ajena dispararlo con la sesión
+// de quien la visite. Sólo el widget.
+router.post(
+  '/venues/:venueSlug/customer/checkin/:challengeId',
+  kioskCheckInCors,
+  writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  kioskCheckInController.consumeChallenge,
 )
 
 // ---- Customer Portal (authenticated) ----

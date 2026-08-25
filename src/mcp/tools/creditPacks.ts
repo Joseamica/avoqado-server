@@ -248,16 +248,15 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'sell_credit_pack',
-    'Sell a prepaid pack to a customer IN PERSON in a venue you can access — grants the credits after they pay at the POS ("véndele el paquete de 10 clases a Juan"). Find the customer by name/email/phone and the pack by name. Because it CREATES a paid purchase (records amountPaid + grants credits), by DEFAULT it only PREVIEWS; call again with confirm:true to apply. amountPaid defaults to the pack list price. This WRITES — requires creditPacks:sell.',
+    'Sell a prepaid pack to a customer IN PERSON in a venue you can access — grants the credits after they pay at the POS ("véndele el paquete de 10 clases a Juan"). Find the customer by name/email/phone and the pack by name. Because it CREATES a paid purchase (records the pack list price + grants credits), by DEFAULT it only PREVIEWS; call again with confirm:true to apply. The amount is ALWAYS the pack list price — it cannot be overridden from here; for a discounted sale, record the payment in the POS instead. This WRITES — requires creditPacks:sell.',
     {
       venueId: z.string().describe('Venue that owns the customer + pack (must be in your scope)'),
       customerSearch: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
       packSearch: z.string().min(1).describe('Credit pack name (partial, case-insensitive)'),
-      amountPaid: z.number().optional().describe('Amount paid in pesos (defaults to the pack list price)'),
       note: z.string().optional().describe('Optional note for the audit trail'),
       confirm: z.boolean().optional().describe('Must be true to actually sell; without it you get a preview'),
     },
-    async ({ venueId, customerSearch, packSearch, amountPaid, note, confirm }) => {
+    async ({ venueId, customerSearch, packSearch, note, confirm }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('creditPacks:sell', venueId) // permiso de MOSTRADOR, espejo de la ruta del POS (no el de catálogo)
 
@@ -308,7 +307,8 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
         })
       }
       const pack = packs[0]
-      const price = amountPaid ?? num(pack.price)
+      // El precio lo manda el catálogo, no quien llama.
+      const price = num(pack.price)
 
       if (!confirm) {
         return text({
@@ -329,7 +329,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
       if (!sv) return text({ ok: false, error: 'No pude resolver tu asignación a este local para registrar la venta.' })
 
       try {
-        const purchase = await sellPackInPerson(venueId, pack.id, c.id, sv.id, { amountPaid, note })
+        const purchase = await sellPackInPerson(venueId, pack.id, c.id, sv.id, { note })
         await auditMcpWrite(scope, {
           action: 'CREDIT_PACK_SOLD',
           entity: 'CreditPackPurchase',

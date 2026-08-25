@@ -16,7 +16,8 @@ import {
   type UpdateReservationInput,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
-import { checkInReservationAndOpenOrder } from '@/services/reservation/checkIn.service'
+import { checkInReservationAndOpenOrder, undoCheckIn } from '@/services/reservation/checkIn.service'
+import { getMyClassNow } from '@/services/reservation/coachClass.service'
 import { canVenueChargeOnline } from '@/services/payments/ecommerceCapability'
 import { getClassSession } from '@/services/dashboard/classSession.dashboard.service'
 import { getWaitlist, addToWaitlist } from '@/services/dashboard/reservationWaitlist.service'
@@ -73,6 +74,7 @@ const RESERVATION_FIELD_LABELS: Record<string, string> = {
   maxAdvanceDays: 'Días máximos de anticipación',
   minNoticeMin: 'Aviso mínimo (min)',
   noShowGraceMin: 'Gracia para no-show (min)',
+  nightlyOutreachEnabled: 'Aviso nocturno de renovación',
   pacingMaxPerSlot: 'Máximo por slot',
   onlineCapacityPercent: 'Capacidad online (%)',
   capacityMode: 'Modo de capacidad',
@@ -506,6 +508,56 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
   )
 
+  // D16 — deshacer un check-in. Existe porque el kiosco es autoservicio y alguien va a tocar
+  // el nombre de al lado: sin esto, CHECKED_IN es una puerta de un solo sentido.
+  server.tool(
+    'undo_check_in',
+    'Undo a check-in that was recorded by mistake in a venue you can access (e.g. someone tapped the wrong name on the self-service kiosk). Identify the reservation by confirmationCode. It returns the reservation to the status it had BEFORE the check-in, per its own status log. It REFUSES when the check-in opened an order that has already been paid — that case needs a refund, not an undo. This WRITES — requires reservations:update.',
+    {
+      venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
+      confirmationCode: z.string().min(1).describe('Reservation confirmation code, e.g. RES-PK6JHD'),
+      reason: z.string().max(280).optional().describe('Why it is being undone — stored in the reservation status log and the activity log'),
+    },
+    async ({ venueId, confirmationCode, reason }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('reservations:update', venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const reservation = await prisma.reservation.findFirst({
+        where: { ...where, confirmationCode },
+        select: { id: true, venueId: true, status: true },
+      })
+      if (!reservation) {
+        return text({ ok: false, error: `No encontre la reservacion ${confirmationCode} en ese venue.` })
+      }
+
+      try {
+        const result = await prisma.$transaction(tx =>
+          undoCheckIn(tx, {
+            reservationId: reservation.id,
+            venueId: reservation.venueId,
+            actor: { type: 'HUMAN', staffId: scope.staffId },
+            source: 'MCP',
+            now: new Date(),
+            reason,
+          }),
+        )
+        await auditMcpWrite(scope, {
+          action: 'RESERVATION_CHECK_IN_UNDONE',
+          entity: 'Reservation',
+          entityId: reservation.id,
+          venueId: reservation.venueId,
+          data: { confirmationCode, outcome: result.outcome, reason: reason ?? null },
+        })
+        return text({ ok: true, outcome: result.outcome, reservation: result.reservation })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+
   server.tool(
     'reservation_detail',
     'Full detail of ONE reservation in a venue you can access, by its confirmation code: status, when (start/end), party size, guest (name/phone/email), the table or the ALL services booked (multi-service appointments return the full `services` list with per-service duration + price, not just the lead one) plus any picked add-on `modifiers`, deposit (amount, status, paid-at), check-in / no-show timestamps, special requests and internal notes. The drill-down after the reservations list. Answers "dame los detalles de la reserva ABC123". Does NOT expose payment-processor references. Pass venueId + confirmationCode.',
@@ -650,6 +702,23 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
   )
 
+  // Fase 8 — la vista de quien da la clase. Estrecha a propósito: SU clase, sólo lectura.
+  server.tool(
+    'my_class_now',
+    "The class YOU are currently teaching in a venue you can access — who booked, who already checked in, and which spot each person has. Read-only, and scoped to sessions where you are the assigned staff: it never shows the venue's wider schedule. Returns nothing when you have no class right now, which is the normal state most of the day. Requires class-sessions:read-assigned.",
+    {
+      venueId: z.string().describe('Venue to look in (must be in your scope)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('class-sessions:read-assigned', venueId)
+      const clase = await getMyClassNow({ venueId, staffId: scope.staffId, now: new Date() })
+      if (!clase) return text({ ok: true, hasClass: false, message: 'No tienes una clase en curso ahora mismo.' })
+      return text({ ok: true, hasClass: true, class: clase })
+    },
+  )
+
+
   server.tool(
     'configure_reservations',
     'Change the reservation-engine configuration for a venue you can access — set any subset of the settings shown by reservation_settings. ALWAYS read reservation_settings first, ask the operator what they want for each thing, then call this with ONLY the fields to change (everything omitted stays as-is). By DEFAULT this only PREVIEWS the change; call again with confirm:true to save. This WRITES — requires reservations:update. PRO feature (RESERVATIONS).',
@@ -662,6 +731,12 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       maxAdvanceDays: z.number().int().positive().optional().describe('How many days ahead guests can book'),
       minNoticeMin: z.number().int().min(0).optional().describe('Minimum minutes of notice before a booking start'),
       noShowGraceMin: z.number().int().min(0).optional().describe('Grace minutes before a booking counts as a no-show'),
+      nightlyOutreachEnabled: z
+        .boolean()
+        .optional()
+        .describe(
+          'Nightly renewal reminder (kiosk Phase 9). OFF by default. When ON, customers whose pack is running out or about to expire get an email with a renewal link — but ONLY those who gave marketing consent. Messages go out in the venue name, so this is the venue owner\'s call.',
+        ),
       pacingMaxPerSlot: z.number().int().positive().nullable().optional().describe('Max bookings per slot; null = no limit'),
       onlineCapacityPercent: z.number().int().min(0).max(100).optional().describe('% of capacity exposed to online booking (e.g. 100, 50)'),
       capacityMode: z

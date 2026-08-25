@@ -38,6 +38,8 @@ export type CheckInSource = 'DASHBOARD' | 'POS_ANDROID' | 'POS_IOS' | 'MCP' | 'K
 export const RESERVATION_NOT_CHECKINABLE = 'RESERVATION_NOT_CHECKINABLE' as const
 export const CHECK_IN_OUTSIDE_WINDOW = 'CHECK_IN_OUTSIDE_WINDOW' as const
 export const ORDER_CREATION_FAILED = 'ORDER_CREATION_FAILED' as const
+export const CHECK_IN_UNDO_NOT_APPLICABLE = 'CHECK_IN_UNDO_NOT_APPLICABLE' as const
+export const CHECK_IN_UNDO_HAS_PAYMENT = 'CHECK_IN_UNDO_HAS_PAYMENT' as const
 
 /** Minutos antes de `startsAt` desde los que el kiosco admite el check-in. */
 export const KIOSK_EARLY_CHECK_IN_MIN = 20
@@ -286,4 +288,107 @@ export async function checkInReservationAndOpenOrder(cmd: CheckInCommand): Promi
     orderCreated,
     ...(orderError ? { orderError } : {}),
   }
+}
+
+
+export interface UndoCheckInCommand {
+  reservationId: string
+  venueId: string
+  actor: CheckInActor
+  source: CheckInSource
+  now: Date
+  reason?: string
+}
+
+export interface UndoCheckInResult<R = any> {
+  outcome: 'UNDONE' | 'ALREADY_UNDONE'
+  reservation: R
+}
+
+/**
+ * D16 — deshacer un check-in.
+ *
+ * El kiosco es autoservicio: tarde o temprano alguien toca el nombre de al lado. Sin esto,
+ * `CHECKED_IN` es una puerta de un solo sentido y la clase queda con un presente que nunca
+ * llegó (y, del otro lado, un no-show que sí vino).
+ *
+ * Vuelve al estado que la PROPIA bitácora de la reserva dice que tenía antes del check-in
+ * —no a un `CONFIRMED` inventado—, porque una reserva que estaba en `PENDING` debe regresar
+ * a `PENDING` o se estaría confirmando sola de rebote.
+ *
+ * 🔴 Se planta cuando el check-in abrió una orden y esa orden YA se cobró: revertir dejaría
+ * un cobro colgando de una reserva que afirma que nadie vino. Ese caso lo resuelve un
+ * reembolso, no un undo — y el error lo dice en vez de romper el cuadre en silencio.
+ */
+export async function undoCheckIn(tx: Prisma.TransactionClient, cmd: UndoCheckInCommand): Promise<UndoCheckInResult> {
+  const current = await tx.reservation.findFirst({ where: { id: cmd.reservationId, venueId: cmd.venueId } })
+  if (!current) throw new NotFoundError('Reservacion no encontrada')
+
+  // Ya deshecho (o nunca marcado): idempotente, como el propio check-in.
+  if (current.status !== 'CHECKED_IN') {
+    if ((CHECKINABLE as string[]).includes(current.status)) {
+      const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: cmd.reservationId }, include: RESERVATION_INCLUDE })
+      return { outcome: 'ALREADY_UNDONE', reservation }
+    }
+    throw new ConflictError(
+      `La reservacion esta en estado ${current.status}: deshacer el check-in ya no aplica`,
+      CHECK_IN_UNDO_NOT_APPLICABLE,
+    )
+  }
+
+  // 🔴 Dinero primero: si la orden del check-in ya cobró, esto no se deshace.
+  const orders = await tx.order.findMany({
+    where: { reservationId: cmd.reservationId, venueId: cmd.venueId },
+    select: { id: true, payments: { where: { status: 'COMPLETED' }, select: { id: true } } },
+  })
+  const paid = orders.find(o => o.payments.length > 0)
+  if (paid) {
+    throw new ConflictError(
+      'Esta reservacion ya tiene un cobro registrado: para revertirla hay que reembolsar, no deshacer el check-in',
+      CHECK_IN_UNDO_HAS_PAYMENT,
+      { orderId: paid.id },
+    )
+  }
+
+  // El estado previo sale de la bitácora: la última entrada ANTES del CHECKED_IN.
+  const entries = Array.isArray(current.statusLog) ? (current.statusLog as StatusLogEntry[]) : []
+  const lastCheckIn = entries.map(e => e.status).lastIndexOf('CHECKED_IN')
+  const previous = entries
+    .slice(0, lastCheckIn >= 0 ? lastCheckIn : entries.length)
+    .map(e => e.status)
+    .filter(st => (CHECKINABLE as string[]).includes(st))
+    .pop()
+  const target = (previous ?? 'CONFIRMED') as ReservationStatus
+
+  const statusLog: StatusLogEntry[] = [
+    ...entries,
+    { status: target, at: cmd.now.toISOString(), by: actorLabel(cmd.actor), source: cmd.source, reason: cmd.reason },
+  ]
+
+  // CAS: sólo gana quien todavía la encuentre en CHECKED_IN.
+  const cas = await tx.reservation.updateMany({
+    where: { id: cmd.reservationId, venueId: cmd.venueId, status: 'CHECKED_IN' },
+    data: { status: target, checkedInAt: null, statusLog: statusLog as unknown as Prisma.InputJsonValue },
+  })
+  if (cas.count === 0) {
+    const reread = await tx.reservation.findUniqueOrThrow({ where: { id: cmd.reservationId }, select: { status: true } })
+    throw new ConflictError(`La reservacion cambio a ${reread.status} mientras se deshacia el check-in`, CHECK_IN_UNDO_NOT_APPLICABLE)
+  }
+
+  const organizationId = await venueOrganizationId(tx, cmd.venueId)
+  await tx.activityLog.create({
+    data: {
+      ...activityActorFields(cmd.actor, organizationId),
+      venueId: cmd.venueId,
+      action: 'RESERVATION_CHECK_IN_UNDONE',
+      entity: 'Reservation',
+      entityId: cmd.reservationId,
+      data: { from: 'CHECKED_IN', to: target, confirmationCode: current.confirmationCode, source: cmd.source, reason: cmd.reason ?? null },
+    },
+  })
+
+  logger.info(`↩️ [CHECK_IN] ${current.confirmationCode} CHECKED_IN → ${target} (undo) source=${cmd.source} by=${actorLabel(cmd.actor)}`)
+
+  const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: cmd.reservationId }, include: RESERVATION_INCLUDE })
+  return { outcome: 'UNDONE', reservation }
 }

@@ -400,6 +400,13 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'reservations:update': ['reservations:read', 'reservations:update'],
   'reservations:cancel': ['reservations:read', 'reservations:cancel'],
 
+  // Fase 8 del kiosco — la vista de la instructora.
+  //
+  // ESTRECHO a propósito: deja ver LA CLASE QUE ELLA ESTÁ DANDO, y nada más. No implica
+  // `reservations:read`, que abre la agenda completa del negocio — quien da una clase de
+  // yoga no tiene por qué ver quién viene a las siete ni cuánto pagó.
+  'class-sessions:read-assigned': ['class-sessions:read-assigned'],
+
   // ===========================
   // SETTINGS
   // ===========================
@@ -710,6 +717,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * HOST: Seating and reservations management
    */
   [StaffRole.HOST]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:read',
     'menu:read',
     'orders:read',
@@ -763,6 +771,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * - Cannot create/edit menu items (MANAGER+ only)
    */
   [StaffRole.WAITER]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:read',
     'menu:read', // Read-only access to menus, categories, products, modifiers
     'orders:read',
@@ -894,6 +903,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * MANAGER: Operational management
    */
   [StaffRole.MANAGER]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:read',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -1053,6 +1063,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * ADMIN: Full venue management (excluding system-level permissions)
    */
   [StaffRole.ADMIN]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:*',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -1182,6 +1193,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * OWNER: Full organization access (excluding system-level permissions)
    */
   [StaffRole.OWNER]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:*',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -1324,6 +1336,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * SUPERADMIN: System-wide access
    */
   [StaffRole.SUPERADMIN]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     '*:*', // All permissions (covers sale-verifications:reopen and any future perm)
     'sale-verifications:reopen', // Explicit for clarity — reopen approved sales for re-review
     'sale-verifications:edit', // Explicit for clarity — edit/correct sales
@@ -1821,6 +1834,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
   tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
+  'class-sessions': ['class-sessions:read-assigned'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],
   customers: [

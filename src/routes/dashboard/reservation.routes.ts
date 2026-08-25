@@ -192,6 +192,8 @@ router.delete('/:id', checkPermission('reservations:cancel'), controller.deleteR
 
 router.post('/:id/confirm', checkPermission('reservations:update'), controller.confirmReservation)
 router.post('/:id/check-in', checkPermission('reservations:update'), controller.checkInReservation)
+// D16 — deshacer un check-in marcado por error (mismo permiso: es la operación inversa).
+router.post('/:id/check-in/undo', checkPermission('reservations:update'), controller.undoReservationCheckIn)
 router.post('/:id/complete', checkPermission('reservations:update'), controller.completeReservation)
 router.post('/:id/no-show', checkPermission('reservations:update'), controller.markNoShow)
 

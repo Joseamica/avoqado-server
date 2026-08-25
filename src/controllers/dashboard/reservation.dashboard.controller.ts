@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
-import { checkInReservationAndOpenOrder, deriveCheckInSource } from '../../services/reservation/checkIn.service'
+import { checkInReservationAndOpenOrder, deriveCheckInSource, undoCheckIn } from '../../services/reservation/checkIn.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings, isStaffAware, updateReservationSettings } from '../../services/dashboard/reservationSettings.service'
 import * as reservationBrandingService from '../../services/dashboard/reservationBranding.service'
@@ -254,6 +254,35 @@ export async function confirmReservation(req: Request, res: Response, next: Next
  * JWT de staff jamás produce KIOSK. Bajo impersonación el impersonationGuard ya bloqueó
  * la escritura antes de llegar aquí.
  */
+/**
+ * POST /venues/:venueId/reservations/:id/check-in/undo  (D16)
+ *
+ * El kiosco es autoservicio: alguien va a tocar el nombre de al lado. Sin esta puerta,
+ * `CHECKED_IN` no se revierte desde ninguna pantalla.
+ */
+export async function undoReservationCheckIn(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const { userId } = (req as any).authContext
+    const { id } = req.params
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 280) : undefined
+
+    const result = await prisma.$transaction(tx =>
+      undoCheckIn(tx, {
+        reservationId: id,
+        venueId,
+        actor: { type: 'HUMAN', staffId: userId },
+        source: deriveCheckInSource(req.headers['x-device-platform']),
+        now: new Date(),
+        reason,
+      }),
+    )
+    res.json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function checkInReservation(req: Request, res: Response, next: NextFunction) {
   try {
     const venueId = resolveVenueId(req)
