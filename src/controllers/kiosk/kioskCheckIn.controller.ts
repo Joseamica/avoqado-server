@@ -21,6 +21,7 @@ import {
 } from '@/services/reservation/kioskCheckIn.service'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
 import { createCheckoutSession, getAvailablePacks } from '@/services/dashboard/creditPack.public.service'
+import { canVenueChargeOnline } from '@/services/payments/ecommerceCapability'
 import prisma from '@/utils/prismaClient'
 
 /** Nada de esto se cachea, y el secreto no debe viajar en un `Referer`. */
@@ -167,8 +168,19 @@ export async function kioskPacks(req: Request, res: Response, next: NextFunction
   try {
     harden(res)
     const venueId = resolveVenueId(req)
-    const packs = await getAvailablePacks(venueId)
-    res.json({ packs })
+
+    // 🔴 Si el negocio no puede cobrar en línea, NO se ofrecen paquetes.
+    //
+    // El kiosco no debe presentar un camino que no puede terminar: el cliente elegiría un
+    // paquete, esperaría el QR y se toparía con un error después de haber decidido comprar.
+    // Es peor que no ofrecerlo. Se vio en la D3 con un venue sin Stripe conectado.
+    //
+    // `canSellOnline` viaja aparte del arreglo vacío para que la app pueda distinguir
+    // "este negocio no vende paquetes" de "no puede cobrarlos todavía" — el segundo es un
+    // pendiente de configuración del negocio, no una ausencia deliberada.
+    const canSellOnline = await canVenueChargeOnline(venueId)
+    const packs = canSellOnline ? await getAvailablePacks(venueId) : []
+    res.json({ packs, canSellOnline })
   } catch (error) {
     next(error)
   }
