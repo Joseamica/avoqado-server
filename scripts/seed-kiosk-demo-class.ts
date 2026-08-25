@@ -21,11 +21,20 @@ const TAG = 'kioskdemo_'
 /** El venue de demostración. Se puede pasar otro por argumento. */
 const DEFAULT_VENUE = 'cmpe65dfn06gr9k922yfpjnv1'
 
+/**
+ * Ocho, que es la clase LLENA del salón de yoga sembrado (2×4 tapetes). Con cuatro no se
+ * ve el caso que importa: si la lista entra completa en la cara del cliente o deja a media
+ * clase fuera de la vista.
+ */
 const NOMBRES: Array<[string, string, string]> = [
   ['Ana', 'Gómez', '5215512340001'],
   ['Regina', 'Ortiz', '5215512340002'],
   ['Paulina', 'Vega', '5215512340003'],
   ['Sofía', 'Ramírez', '5215512340004'],
+  ['Nadia', 'Bustos', '5215512340005'],
+  ['Ángela', 'Cruz', '5215512340006'],
+  ['Ñuño', 'Peña', '5215512340007'],
+  ['Zoe', 'Alarcón', '5215512340008'],
 ]
 
 function assertLocal() {
@@ -86,6 +95,8 @@ async function main() {
         classSessionId: session.id, startsAt, endsAt, blockedEndsAt: endsAt, duration: 60,
         partySize: 1, status: 'CONFIRMED', channel: 'WEB',
         confirmationCode: `KIOSK-000${i + 1}`,
+        // Un tapete a cada quien: es lo que permite ver "Lugar 3" al confirmar.
+        spotIds: [String(i + 1)],
       },
     })
   }
