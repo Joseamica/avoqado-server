@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "npx prisma generate && NODE_OPTIONS='--max-old-space-size=8192' tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json && npm run copy:assets",
-    "copy:assets": "mkdir -p dist/src/assets && cp -R src/assets/. dist/src/assets/",
+    "copy:assets": "mkdir -p dist/src/assets && cp -R src/assets/. dist/src/assets/ && node scripts/copy-mcp-internal-docs.js",
     "start": "node -r tsconfig-paths/register dist/src/server.js",
     "predev": "npm run kill-port",
     "dev": "NODE_ENV=development tsx watch src/server.ts | pino-pretty",

@@ -527,7 +527,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_tips',
-    'Tips each employee COLLECTED in a venue you can access, over a date range (default last 7 days) — the SOURCE OF TRUTH for per-employee tips. Attribution rule: each payment\'s tip goes to the staff who PROCESSED that payment (Payment.processedById), the SAME rule as the cash-closeout ("corte de caja"), so figures match what the venue already reviews there. Per staff: total tips + tipped-payment count; QR/self-serve payments nobody processed appear under `unattributed`; `total` equals tips_over_time for the same window. Answers "¿cuánta propina le toca a X? / propinas por empleado". ⚠️ Do NOT answer per-employee tip questions from staff_ranking — its `tips` column is attributed to the order CREATOR (a different rule) and is NOT what an employee collected. Pass venueId; optionally staffId, fromDate/toDate (YYYY-MM-DD, venue-local, toDate inclusive).',
+    'Tips each employee COLLECTED in a venue you can access, over a date range (default last 7 days) — the SOURCE OF TRUTH for per-employee tips. Attribution rule: each payment\'s tip goes to the staff who PROCESSED that payment, the SAME rule as the cash-closeout ("corte de caja"), so figures match what the venue already reviews there. Per staff: total tips + tipped-payment count; QR/self-serve payments nobody processed appear under `unattributed`; `total` equals tips_over_time for the same window. Answers "¿cuánta propina le toca a X? / propinas por empleado". ⚠️ Do NOT answer per-employee tip questions from staff_ranking — its `tips` column is attributed to the order CREATOR (a different rule) and is NOT what an employee collected. Pass venueId; optionally staffId, fromDate/toDate (YYYY-MM-DD, venue-local, toDate inclusive).',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
       staffId: z.string().optional().describe('Focus one employee; omit for all staff'),
@@ -558,7 +558,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         tippedPayments: result.count,
         staff,
         unattributed: result.unattributed,
-        note: 'Propina atribuida a quien COBRÓ cada pago (Payment.processedById) — la misma regla que el corte de caja. `unattributed` = pagos sin cajero (QR/autoservicio). NO uses los "tips" de staff_ranking para esta pregunta (ésos van al creador de la orden).',
+        note: 'Propina atribuida a quien COBRÓ cada pago — la misma regla que el corte de caja. `unattributed` = pagos sin cajero (QR/autoservicio). NO uses los "tips" de staff_ranking para esta pregunta (ésos van al creador de la orden).',
       })
     },
   )

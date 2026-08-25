@@ -144,7 +144,12 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       guestPhone: z.string().optional().describe('Guest phone'),
       guestEmail: z.string().optional().describe('Guest email'),
       productId: z.string().optional().describe('Service/product to book (appointment venues; omit for a table reservation)'),
-      staffId: z.string().trim().min(1).optional().describe('Exact Staff.id of the professional to assign (must be active in this venue)'),
+      staffId: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe('Exact staff id (as returned by list_staff) of the professional to assign (must be active in this venue)'),
       staffName: z
         .string()
         .trim()
@@ -557,7 +562,6 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
   )
 
-
   server.tool(
     'reservation_detail',
     'Full detail of ONE reservation in a venue you can access, by its confirmation code: status, when (start/end), party size, guest (name/phone/email), the table or the ALL services booked (multi-service appointments return the full `services` list with per-service duration + price, not just the lead one) plus any picked add-on `modifiers`, deposit (amount, status, paid-at), check-in / no-show timestamps, special requests and internal notes. The drill-down after the reservations list. Answers "dame los detalles de la reserva ABC123". Does NOT expose payment-processor references. Pass venueId + confirmationCode.',
@@ -718,7 +722,6 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
   )
 
-
   server.tool(
     'configure_reservations',
     'Change the reservation-engine configuration for a venue you can access — set any subset of the settings shown by reservation_settings. ALWAYS read reservation_settings first, ask the operator what they want for each thing, then call this with ONLY the fields to change (everything omitted stays as-is). By DEFAULT this only PREVIEWS the change; call again with confirm:true to save. This WRITES — requires reservations:update. PRO feature (RESERVATIONS).',
@@ -735,7 +738,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         .boolean()
         .optional()
         .describe(
-          'Nightly renewal reminder (kiosk Phase 9). OFF by default. When ON, customers whose pack is running out or about to expire get an email with a renewal link — but ONLY those who gave marketing consent. Messages go out in the venue name, so this is the venue owner\'s call.',
+          "Nightly renewal reminder (kiosk Phase 9). OFF by default. When ON, customers whose pack is running out or about to expire get an email with a renewal link — but ONLY those who gave marketing consent. Messages go out in the venue name, so this is the venue owner's call.",
         ),
       pacingMaxPerSlot: z.number().int().positive().nullable().optional().describe('Max bookings per slot; null = no limit'),
       onlineCapacityPercent: z.number().int().min(0).max(100).optional().describe('% of capacity exposed to online booking (e.g. 100, 50)'),
@@ -892,10 +895,10 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_schedule',
-    'Read the weekly schedule and date exceptions for one professional membership (StaffVenue) in a venue. Use list_staff to find the team member first. Requires teams:read and the RESERVATIONS feature.',
+    'Read the weekly schedule and date exceptions for one professional membership in a venue. Use list_staff to find the team member first. Requires teams:read and the RESERVATIONS feature.',
     {
       venueId: z.string().describe('Venue that owns the professional membership (must be in your scope)'),
-      staffVenueId: z.string().min(1).describe('StaffVenue.id of the professional in this venue'),
+      staffVenueId: z.string().min(1).describe('Membership id (staffVenueId from list_staff) of the professional in this venue'),
     },
     async ({ venueId, staffVenueId }) => {
       guard.venueFilter(venueId)
@@ -917,7 +920,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     'Replace one professional’s weekly schedule and date exceptions. By default returns a current→proposed preview; call again with confirm:true to write. Requires teams:update and the RESERVATIONS feature.',
     {
       venueId: z.string().describe('Venue that owns the professional membership (must be in your scope)'),
-      staffVenueId: z.string().min(1).describe('StaffVenue.id of the professional in this venue'),
+      staffVenueId: z.string().min(1).describe('Membership id (staffVenueId from list_staff) of the professional in this venue'),
       weekly: weeklyScheduleSchema.nullable().describe('Complete weekly schedule; null inherits venue operating hours'),
       exceptions: z.array(staffScheduleExceptionSchema).max(30).describe('Complete replacement list of OFF/HOURS date exceptions'),
       confirm: z.boolean().optional().describe('Must be true to write; otherwise returns a preview'),
@@ -988,7 +991,10 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().describe('Venue that owns the service (must be in your scope)'),
       productId: z.string().min(1).describe('Appointment Product.id'),
-      staffVenueIds: z.array(z.string().min(1)).max(100).describe('Complete replacement list of active StaffVenue.id values'),
+      staffVenueIds: z
+        .array(z.string().min(1))
+        .max(100)
+        .describe('Complete replacement list of active membership ids (staffVenueId from list_staff)'),
       confirm: z.boolean().optional().describe('Must be true to write; otherwise returns a preview'),
     },
     async ({ venueId, productId, staffVenueIds, confirm }) => {

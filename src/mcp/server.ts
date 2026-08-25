@@ -58,22 +58,8 @@ import { registerWhiteLabelOpsTools } from './tools/whiteLabelOps'
 import { registerInterVenueTransferTools } from './tools/interVenueTransfers'
 import { registerMasterCatalogTools } from './tools/masterCatalog'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
-
-/**
- * Server-level guidance the client (Claude/ChatGPT) hands to the model on every connection.
- * Born from a real incident: an operator pasted a COMBINED external sales report (Avoqado POS +
- * their own Stripe webpage + Fitpass) and the assistant summed the FILE and presented $461k as
- * "Avoqado sales" — when Avoqado had actually recorded $125k. The tools were never called. These
- * instructions make the live tools the source of truth and stop the assistant from trusting
- * pasted numbers, while setting the correct expectation about what Avoqado can and cannot see.
- */
-const AVOQADO_MCP_INSTRUCTIONS = `These tools expose the LIVE data of the operator's Avoqado venues and are the SOURCE OF TRUTH for what actually happened in Avoqado (sales, payments, orders, inventory, customers, reservations, CFDI…).
-
-When the operator asks about their real numbers:
-1. ALWAYS answer by CALLING these tools. Never compute the answer from a file, screenshot, export or figure the user pasted — that data may come from another system and be wrong for Avoqado.
-2. If the user provides a report/export/number, treat it as UNVERIFIED. Call the matching tool, compare, and explicitly FLAG any mismatch ("tu archivo dice X, pero en Avoqado son Y"). Never restate the file's numbers as if they were Avoqado's.
-3. SCOPE — say this when it matters: Avoqado only records money that flows THROUGH Avoqado (in-person POS terminal + cash, Avoqado payment links, Avoqado-processed card/CFDI). It does NOT see the venue's OTHER systems — their own Stripe webpage, Fitpass, other apps. So a combined/external report is normally LARGER than Avoqado and will NOT reconcile; that is expected, not a data error.
-4. Money is Mexican pesos in major units (e.g. 150.50, never cents). Dates are venue-local (America/Mexico_City).`
+import { buildMcpInstructions } from './instructions'
+import { registerHelpTools } from './tools/help'
 
 /** Flags gating PlayTelecom / white-label-only tool groups, computed once per connection. */
 export interface ToolRegistrationFlags {
@@ -92,6 +78,7 @@ export interface ToolRegistrationFlags {
  * tool still gates at call-time — this only controls whether the tool is advertised at all).
  */
 export function registerAllTools(server: McpServer, scope: McpScope, flags: ToolRegistrationFlags): void {
+  registerHelpTools(server, scope) // product guide for everyone; internal docs only when scope.isSuperAdmin
   registerVenueTools(server, scope)
   registerSalesTools(server, scope)
   registerOrderTools(server, scope)
@@ -162,8 +149,11 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
   // on writes. Undefined (dev/legacy token) → the guard leaves access unrestricted.
   if (scopes && scopes.length) scope.scopes = scopes
 
-  const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' }, { instructions: AVOQADO_MCP_INSTRUCTIONS })
-  instrumentTools(server, { staffId, org: activeOrg }) // log every tool call (must run BEFORE registering tools)
+  const isSuperAdmin = scope.isSuperAdmin === true
+  const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' }, { instructions: buildMcpInstructions({ isSuperAdmin }) })
+  // Log every tool call (must run BEFORE registering tools). isSuperAdmin: raw errors for staff,
+  // sanitized (generic message + ref) for customers — see sanitizeThrownError.
+  instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin })
 
   const [serializedEnabled, whiteLabelEnabled, catalogAccess] = await Promise.all([
     moduleService.anyVenueHasModule(scope.allowedVenueIds, MODULE_CODES.SERIALIZED_INVENTORY),
