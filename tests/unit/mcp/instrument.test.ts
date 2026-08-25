@@ -78,7 +78,7 @@ describe('instrumentTools — McpToolCall persistence', () => {
     // hand a customer's assistant internals (Prisma table/column names, connection strings…).
     // Operator-facing errors (ScopeError, AppError `isOperational`) still pass through untouched —
     // see tests/unit/mcp-customer/instrument.test.ts. Do NOT "fix" this back to expecting 'kaboom'.
-    const thrown = await registered.adjust_stock({ venueId: 'v1' }, {}).then(
+    const thrown = await (registered.adjust_stock({ venueId: 'v1' }, {}) as Promise<unknown>).then(
       () => null,
       (e: Error) => e,
     )
