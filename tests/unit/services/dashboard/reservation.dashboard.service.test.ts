@@ -57,6 +57,7 @@ function makeReservationSettings(
       maxAdvanceDays: 365,
       minNoticeMin: overrides.minNoticeMin ?? 0,
       noShowGraceMin: 15,
+      nightlyOutreachEnabled: false, // Prisma: @default(false) — el aviso nocturno nace apagado
       pacingMaxPerSlot: overrides.pacingMaxPerSlot ?? null,
       onlineCapacityPercent: overrides.onlineCapacityPercent ?? 100,
       capacityMode: overrides.capacityMode ?? 'pacing',

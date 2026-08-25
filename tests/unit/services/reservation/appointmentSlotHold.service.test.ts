@@ -32,6 +32,7 @@ function settings(overrides: { staffAware?: boolean; picker?: boolean; pacing?: 
       maxAdvanceDays: 365,
       minNoticeMin: 0,
       noShowGraceMin: 15,
+      nightlyOutreachEnabled: false, // Prisma: @default(false) — el aviso nocturno nace apagado
       pacingMaxPerSlot: overrides.pacing ?? 2,
       onlineCapacityPercent: 100,
       capacityMode: staffAware ? 'per_staff' : 'pacing',

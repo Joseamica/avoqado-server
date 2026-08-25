@@ -59,7 +59,11 @@ describe('Fase 4 · carril de dinero de los paquetes', () => {
       const { sellPackInPerson } = await import('@/services/mobile/creditPack.mobile.service')
 
       // Quien llama intenta acreditar un paquete de $1,500 diciendo que se pagó $1.
-      await sellPackInPerson('venue-1', 'pack-1', 'cust-1', 'staff-1', { amountPaid: 1 })
+      // El tipo de `opts` YA no admite `amountPaid` — ése fue justamente el arreglo, y por eso
+      // esto necesita un cast. El cast NO debilita la prueba: verifica la SEGUNDA capa, que el
+      // servidor siga poniendo el precio de lista aunque el campo llegue de todos modos (un
+      // cliente viejo, un body sin validar, una llamada en JS sin tipos).
+      await sellPackInPerson('venue-1', 'pack-1', 'cust-1', 'staff-1', { amountPaid: 1 } as unknown as { note?: string })
 
       const created = tx.creditPackPurchase.create.mock.calls[0][0].data
       expect(Number(created.amountPaid)).toBe(1500)
@@ -95,7 +99,10 @@ describe('Fase 4 · carril de dinero de los paquetes', () => {
       const { fulfillCreditPackPurchaseFromPayment } = await import('@/services/mobile/creditPack.mobile.service')
 
       await fulfillCreditPackPurchaseFromPayment({
-        paymentId: 'pay-1', venueId: 'venue-1', packId: 'pack-1', customerId: 'cust-1',
+        paymentId: 'pay-1',
+        venueId: 'venue-1',
+        packId: 'pack-1',
+        customerId: 'cust-1',
       })
 
       const created = tx.creditPackPurchase.create.mock.calls[0][0].data
@@ -109,7 +116,10 @@ describe('Fase 4 · carril de dinero de los paquetes', () => {
       const { fulfillCreditPackPurchaseFromPayment } = await import('@/services/mobile/creditPack.mobile.service')
 
       const again = await fulfillCreditPackPurchaseFromPayment({
-        paymentId: 'pay-1', venueId: 'venue-1', packId: 'pack-1', customerId: 'cust-1',
+        paymentId: 'pay-1',
+        venueId: 'venue-1',
+        packId: 'pack-1',
+        customerId: 'cust-1',
       })
 
       expect(again.id).toBe('purchase-1')

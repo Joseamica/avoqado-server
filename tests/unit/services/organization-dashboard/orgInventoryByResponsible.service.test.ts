@@ -1,0 +1,329 @@
+import {
+  buildInventoryByResponsible,
+  type InventoryItemInput,
+  type StaffInput,
+} from '@/services/organization-dashboard/orgInventoryByResponsible.service'
+
+const VIRTUAL = 'venue-virtual'
+const TIENDA_QRO = 'venue-qro'
+const TIENDA_SLP = 'venue-slp'
+
+function item(overrides: Partial<InventoryItemInput> = {}): InventoryItemInput {
+  return {
+    assignedPromoterId: 'prom-1',
+    assignedSupervisorId: 'sup-1',
+    custodyState: 'PROMOTER_HELD',
+    promoterAcceptedAt: new Date('2026-08-01T10:00:00.000Z'),
+    registeredFromVenueId: VIRTUAL,
+    saleVerificationStatus: null,
+    ...overrides,
+  }
+}
+
+function staff(overrides: Partial<StaffInput> = {}): StaffInput {
+  return {
+    id: 'prom-1',
+    name: 'Promotor Uno',
+    active: true,
+    venues: [{ venueId: TIENDA_QRO, city: 'Querétaro', startDate: new Date('2026-01-01') }],
+    ...overrides,
+  }
+}
+
+const SUP_1 = staff({ id: 'sup-1', name: 'Supervisor Uno', venues: [] })
+
+describe('buildInventoryByResponsible', () => {
+  describe('jerarquía ciudad › supervisor › promotor', () => {
+    it('agrupa al promotor bajo la ciudad de su sucursal y su supervisor', () => {
+      const result = buildInventoryByResponsible({
+        items: [item(), item()],
+        staff: [staff(), SUP_1],
+      })
+
+      expect(result.cities).toHaveLength(1)
+      expect(result.cities[0].city).toBe('Querétaro')
+      expect(result.cities[0].supervisors).toHaveLength(1)
+      expect(result.cities[0].supervisors[0].supervisorName).toBe('Supervisor Uno')
+      expect(result.cities[0].supervisors[0].promoters[0]).toMatchObject({
+        promoterName: 'Promotor Uno',
+        assigned: 2,
+      })
+    })
+
+    it('separa dos ciudades distintas', () => {
+      const result = buildInventoryByResponsible({
+        items: [item(), item({ assignedPromoterId: 'prom-2' })],
+        staff: [
+          staff(),
+          staff({
+            id: 'prom-2',
+            name: 'Promotor Dos',
+            venues: [{ venueId: TIENDA_SLP, city: 'San Luis Potosí', startDate: new Date('2026-01-01') }],
+          }),
+          SUP_1,
+        ],
+      })
+
+      expect(result.cities.map(c => c.city)).toEqual(['Querétaro', 'San Luis Potosí'])
+    })
+  })
+
+  describe('las 7 columnas', () => {
+    it('cuenta cada columna contra su estado', () => {
+      const result = buildInventoryByResponsible({
+        items: [
+          item({ custodyState: 'PROMOTER_PENDING', promoterAcceptedAt: null }),
+          item({ custodyState: 'PROMOTER_HELD' }),
+          item({ custodyState: 'PROMOTER_HELD' }),
+          item({ custodyState: 'SOLD', saleVerificationStatus: 'COMPLETED' }),
+          item({ custodyState: 'SOLD', saleVerificationStatus: 'PENDING' }),
+          item({ custodyState: 'SOLD', saleVerificationStatus: 'PROCESSING' }),
+          item({ custodyState: 'SOLD', saleVerificationStatus: 'FAILED' }),
+          item({ custodyState: 'SOLD', saleVerificationStatus: 'REJECTED' }),
+        ],
+        staff: [staff(), SUP_1],
+      })
+
+      expect(result.total).toMatchObject({
+        assigned: 8,
+        receptionApproved: 7, // el PROMOTER_PENDING no lo aceptó
+        inHandToday: 2,
+        saleApproved: 1,
+        saleInAdminReview: 2, // PENDING + PROCESSING
+        saleInPromoterReview: 1, // FAILED = "Revisar" del promotor
+        saleRejected: 1,
+      })
+    })
+
+    it('🔴 una venta RECHAZADA no regresa el SIM a "en mano" (decisión Isaac, 25-ago)', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ custodyState: 'SOLD', saleVerificationStatus: 'REJECTED' })],
+        staff: [staff(), SUP_1],
+      })
+
+      expect(result.total.saleRejected).toBe(1)
+      expect(result.total.inHandToday).toBe(0)
+    })
+
+    it('"en mano HOY" ignora los rechazados por el promotor y los del supervisor', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ custodyState: 'PROMOTER_REJECTED' }), item({ custodyState: 'PROMOTER_HELD' })],
+        staff: [staff(), SUP_1],
+      })
+
+      expect(result.total.inHandToday).toBe(1)
+    })
+  })
+
+  describe('deducción del supervisor (47% de los SIMs no lo traen)', () => {
+    it('deduce el supervisor del promotor a partir de los SIMs que sí lo traen', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ assignedSupervisorId: 'sup-1' }), item({ assignedSupervisorId: null }), item({ assignedSupervisorId: null })],
+        staff: [staff(), SUP_1],
+      })
+
+      const sup = result.cities[0].supervisors
+      expect(sup).toHaveLength(1)
+      expect(sup[0].supervisorName).toBe('Supervisor Uno')
+      expect(sup[0].promoters[0].assigned).toBe(3) // los 3 caen bajo él, no 1
+    })
+
+    it('con supervisores distintos gana el mayoritario, para que el promotor no se parta', () => {
+      const result = buildInventoryByResponsible({
+        items: [
+          item({ assignedSupervisorId: 'sup-1' }),
+          item({ assignedSupervisorId: 'sup-1' }),
+          item({ assignedSupervisorId: 'sup-2' }),
+          item({ assignedSupervisorId: null }),
+        ],
+        staff: [staff(), SUP_1, staff({ id: 'sup-2', name: 'Supervisor Dos', venues: [] })],
+      })
+
+      const sup = result.cities[0].supervisors
+      expect(sup).toHaveLength(1)
+      expect(sup[0].supervisorName).toBe('Supervisor Uno')
+      expect(sup[0].promoters[0].assigned).toBe(4)
+    })
+
+    it('sin ningún supervisor en sus SIMs, cae en un grupo visible y no se pierde', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ assignedSupervisorId: null })],
+        staff: [staff()],
+      })
+
+      expect(result.cities[0].supervisors[0].supervisorId).toBeNull()
+      expect(result.cities[0].supervisors[0].promoters[0].assigned).toBe(1)
+      expect(result.total.assigned).toBe(1)
+    })
+  })
+
+  describe('promotor con dos sucursales', () => {
+    it('usa la asignación MÁS RECIENTE (caso Tirza Juárez → Querétaro)', () => {
+      const tirza = staff({
+        id: 'prom-1',
+        name: 'Tirza Juárez',
+        venues: [
+          { venueId: TIENDA_SLP, city: 'San Luis Potosí', startDate: new Date('2026-03-25') },
+          { venueId: TIENDA_QRO, city: 'Querétaro', startDate: new Date('2026-07-17') },
+        ],
+      })
+
+      const result = buildInventoryByResponsible({ items: [item()], staff: [tirza, SUP_1] })
+
+      expect(result.cities).toHaveLength(1)
+      expect(result.cities[0].city).toBe('Querétaro')
+    })
+  })
+
+  describe('promotores dados de baja (los 338 SIMs)', () => {
+    it('los saca a un renglón aparte, visible, nunca escondido', () => {
+      const result = buildInventoryByResponsible({
+        items: [item(), item({ assignedPromoterId: 'baja-1' })],
+        staff: [staff(), SUP_1, staff({ id: 'baja-1', name: 'Ignacio Mitre', active: false, venues: [] })],
+      })
+
+      expect(result.cities).toHaveLength(1)
+      expect(result.cities[0].supervisors[0].promoters[0].promoterName).toBe('Promotor Uno')
+
+      expect(result.unassigned.promoters).toHaveLength(1)
+      expect(result.unassigned.promoters[0]).toMatchObject({ promoterName: 'Ignacio Mitre', assigned: 1 })
+    })
+
+    it('un promotor activo sin sucursal también cae ahí, no desaparece', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ assignedPromoterId: 'sin-suc' })],
+        staff: [staff({ id: 'sin-suc', name: 'Sin Sucursal', active: true, venues: [] }), SUP_1],
+      })
+
+      expect(result.cities).toHaveLength(0)
+      expect(result.unassigned.promoters[0].promoterName).toBe('Sin Sucursal')
+      expect(result.unassigned.assigned).toBe(1)
+    })
+  })
+
+  describe('Total País', () => {
+    it('suma las ciudades MÁS el renglón de bajas, para que nada se pierda', () => {
+      const result = buildInventoryByResponsible({
+        items: [item(), item({ assignedPromoterId: 'prom-2' }), item({ assignedPromoterId: 'baja-1' })],
+        staff: [
+          staff(),
+          staff({
+            id: 'prom-2',
+            name: 'Promotor Dos',
+            venues: [{ venueId: TIENDA_SLP, city: 'San Luis Potosí', startDate: new Date('2026-01-01') }],
+          }),
+          staff({ id: 'baja-1', name: 'Baja Uno', active: false, venues: [] }),
+          SUP_1,
+        ],
+      })
+
+      const sumaCiudades = result.cities.reduce((n, c) => n + c.assigned, 0)
+      expect(sumaCiudades).toBe(2)
+      expect(result.unassigned.assigned).toBe(1)
+      expect(result.total.assigned).toBe(3)
+    })
+
+    it('cada nivel suma a su padre', () => {
+      const result = buildInventoryByResponsible({
+        items: [item(), item(), item({ assignedPromoterId: 'prom-2' })],
+        staff: [staff(), staff({ id: 'prom-2', name: 'Promotor Dos' }), SUP_1],
+      })
+
+      const city = result.cities[0]
+      const sup = city.supervisors[0]
+      expect(sup.promoters.reduce((n, p) => n + p.assigned, 0)).toBe(sup.assigned)
+      expect(city.supervisors.reduce((n, s) => n + s.assigned, 0)).toBe(city.assigned)
+    })
+  })
+
+  describe('filtro de sucursal receptora', () => {
+    it('filtra por la sucursal receptora indicada', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ registeredFromVenueId: VIRTUAL }), item({ registeredFromVenueId: TIENDA_SLP })],
+        staff: [staff(), SUP_1],
+        receivingVenueId: VIRTUAL,
+      })
+
+      expect(result.total.assigned).toBe(1)
+    })
+
+    it('sin filtro muestra TODO — el supervisor tiene que poder cuadrar el conteo físico', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ registeredFromVenueId: VIRTUAL }), item({ registeredFromVenueId: TIENDA_SLP })],
+        staff: [staff(), SUP_1],
+      })
+
+      expect(result.total.assigned).toBe(2)
+    })
+
+    it('el filtro aplica PAREJO a las 7 columnas, para que la resta siga cuadrando', () => {
+      const result = buildInventoryByResponsible({
+        items: [
+          item({ registeredFromVenueId: VIRTUAL, custodyState: 'PROMOTER_HELD' }),
+          item({ registeredFromVenueId: TIENDA_SLP, custodyState: 'PROMOTER_HELD' }),
+          item({ registeredFromVenueId: TIENDA_SLP, custodyState: 'SOLD', saleVerificationStatus: 'COMPLETED' }),
+        ],
+        staff: [staff(), SUP_1],
+      })
+
+      const conFiltro = buildInventoryByResponsible({
+        items: [
+          item({ registeredFromVenueId: VIRTUAL, custodyState: 'PROMOTER_HELD' }),
+          item({ registeredFromVenueId: TIENDA_SLP, custodyState: 'PROMOTER_HELD' }),
+          item({ registeredFromVenueId: TIENDA_SLP, custodyState: 'SOLD', saleVerificationStatus: 'COMPLETED' }),
+        ],
+        staff: [staff(), SUP_1],
+        receivingVenueId: VIRTUAL,
+      })
+
+      expect(result.total).toMatchObject({ assigned: 3, inHandToday: 2, saleApproved: 1 })
+      expect(conFiltro.total).toMatchObject({ assigned: 1, inHandToday: 1, saleApproved: 0 })
+    })
+  })
+
+  describe('regresión: casos que no deben romperse', () => {
+    it('sin ítems devuelve una estructura vacía pero válida, no explota', () => {
+      const result = buildInventoryByResponsible({ items: [], staff: [] })
+
+      expect(result.cities).toEqual([])
+      expect(result.unassigned.promoters).toEqual([])
+      expect(result.total.assigned).toBe(0)
+      expect(result.total.inHandToday).toBe(0)
+    })
+
+    it('ignora ítems que todavía no tienen promotor (están con admin o supervisor)', () => {
+      const result = buildInventoryByResponsible({
+        items: [
+          item({ assignedPromoterId: null, custodyState: 'ADMIN_HELD' }),
+          item({ assignedPromoterId: null, custodyState: 'SUPERVISOR_HELD' }),
+          item(),
+        ],
+        staff: [staff(), SUP_1],
+      })
+
+      expect(result.total.assigned).toBe(1)
+    })
+
+    it('un promotor que no está en el catálogo de staff no tumba el reporte', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ assignedPromoterId: 'fantasma' })],
+        staff: [],
+      })
+
+      expect(result.total.assigned).toBe(1)
+      expect(result.unassigned.promoters).toHaveLength(1)
+    })
+
+    it('las ciudades salen ordenadas alfabéticamente, estable entre corridas', () => {
+      const mk = (id: string, city: string) =>
+        staff({ id, name: id, venues: [{ venueId: `v-${id}`, city, startDate: new Date('2026-01-01') }] })
+
+      const result = buildInventoryByResponsible({
+        items: [item({ assignedPromoterId: 'c' }), item({ assignedPromoterId: 'a' }), item({ assignedPromoterId: 'b' })],
+        staff: [mk('c', 'Zacatecas'), mk('a', 'Aguascalientes'), mk('b', 'Monterrey'), SUP_1],
+      })
+
+      expect(result.cities.map(c => c.city)).toEqual(['Aguascalientes', 'Monterrey', 'Zacatecas'])
+    })
+  })
+})
