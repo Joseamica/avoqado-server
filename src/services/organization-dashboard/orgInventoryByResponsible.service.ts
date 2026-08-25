@@ -13,6 +13,7 @@
  * Never Hardcode Client Names"). La sucursal receptora por la que se filtra
  * llega como parámetro.
  */
+import prisma from '../../utils/prismaClient'
 import type { SaleVerificationStatus, SerializedItemCustodyState } from '@prisma/client'
 
 /** Un ítem serializado con su estado de venta YA resuelto por quien lo carga. */
@@ -279,3 +280,116 @@ export function buildInventoryByResponsible(input: BuildInventoryByResponsibleIn
     unassigned: { label: UNASSIGNED_LABEL, promoters: unassignedPromoters, ...unassignedCounts },
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Carga de datos
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface FetchInventoryByResponsibleOptions {
+  /** Rango sobre `createdAt` del ítem. Ya resuelto a UTC por el borde HTTP
+   *  (`parseDbDateRange` con el timezone del venue) — este servicio nunca
+   *  interpreta un `YYYY-MM-DD` pelón. Ver `.claude/rules/critical-warnings.md`. */
+  dateFrom?: Date
+  dateTo?: Date
+  categoryId?: string | null
+  receivingVenueId?: string | null
+}
+
+/**
+ * Toma la verificación de venta que corresponde al ítem.
+ *
+ * Una orden puede traer varios pagos y sólo algunos con verificación; nos
+ * interesa la primera que exista, porque en este flujo la venta de un SIM
+ * produce una sola verificación. Si no hay ninguna, el ítem simplemente no
+ * suma a las columnas de venta.
+ */
+function pickVerificationStatus(orderItem: any): SaleVerificationStatus | null {
+  const payments = orderItem?.order?.payments ?? []
+  for (const payment of payments) {
+    if (payment?.saleVerification?.status) return payment.saleVerification.status
+  }
+  return null
+}
+
+export class OrgInventoryByResponsibleService {
+  /**
+   * Devuelve la tabla Ciudad › Supervisor › Promotor para una organización.
+   *
+   * El filtro de sucursal receptora se aplica dentro de la función pura y no en
+   * el `where` de Prisma, a propósito: así el conjunto sin filtrar y el filtrado
+   * salen de la MISMA consulta y no pueden discrepar entre sí.
+   */
+  async getInventoryByResponsible(organizationId: string, options: FetchInventoryByResponsibleOptions = {}) {
+    const { dateFrom, dateTo, categoryId, receivingVenueId } = options
+
+    const rows = await prisma.serializedItem.findMany({
+      where: {
+        organizationId,
+        assignedPromoterId: { not: null },
+        ...(categoryId ? { categoryId } : {}),
+        ...(dateFrom || dateTo ? { createdAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } } : {}),
+      },
+      select: {
+        assignedPromoterId: true,
+        assignedSupervisorId: true,
+        custodyState: true,
+        promoterAcceptedAt: true,
+        registeredFromVenueId: true,
+        orderItem: {
+          select: { order: { select: { payments: { select: { saleVerification: { select: { status: true } } } } } } },
+        },
+      },
+    })
+
+    const items: InventoryItemInput[] = rows.map(row => ({
+      assignedPromoterId: row.assignedPromoterId,
+      assignedSupervisorId: row.assignedSupervisorId,
+      custodyState: row.custodyState,
+      promoterAcceptedAt: row.promoterAcceptedAt,
+      registeredFromVenueId: row.registeredFromVenueId,
+      saleVerificationStatus: pickVerificationStatus(row.orderItem),
+    }))
+
+    // Los promotores dados de baja ya no tienen StaffVenue activo, así que el
+    // catálogo se arma desde los ids que aparecen en los ítems y NO desde los
+    // empleados vigentes — si no, esos SIMs se quedarían sin nombre y el
+    // renglón de bajas saldría anónimo.
+    const staffIds = new Set<string>()
+    for (const item of items) {
+      if (item.assignedPromoterId) staffIds.add(item.assignedPromoterId)
+      if (item.assignedSupervisorId) staffIds.add(item.assignedSupervisorId)
+    }
+
+    const staffRows =
+      staffIds.size > 0
+        ? await prisma.staff.findMany({
+            where: { id: { in: [...staffIds] } },
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              active: true,
+              venues: {
+                where: { active: true },
+                select: { venueId: true, startDate: true, venue: { select: { city: true, organizationId: true } } },
+              },
+            },
+          })
+        : []
+
+    const staff: StaffInput[] = staffRows.map(row => ({
+      id: row.id,
+      name: `${row.firstName} ${row.lastName}`.trim(),
+      active: row.active,
+      // Sólo las sucursales de ESTA organización: un promotor que también
+      // trabaje en otro tenant no debe arrastrar aquí la ciudad de allá.
+      venues: row.venues
+        .filter(v => v.venue?.organizationId === organizationId)
+        .map(v => ({ venueId: v.venueId, city: v.venue?.city ?? null, startDate: v.startDate })),
+    }))
+
+    return buildInventoryByResponsible({ items, staff, receivingVenueId })
+  }
+}
+
+export const orgInventoryByResponsibleService = new OrgInventoryByResponsibleService()

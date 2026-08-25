@@ -235,6 +235,7 @@ const prismaMock: any = {
   performanceGoal: createMockModel(),
   module: createMockModel(),
   venueModule: createMockModel(),
+  organizationModule: createMockModel(),
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),

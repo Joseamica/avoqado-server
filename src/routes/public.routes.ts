@@ -436,6 +436,27 @@ const utmSchema = z
     return Object.keys(limpio).length > 0 ? limpio : undefined
   })
 
+// El `hutk` es la cookie de HubSpot del visitante y es lo unico que le da
+// campana/origen al lead dentro del CRM. Se valida con la misma logica que los
+// UTMs — allowlist y descarte SILENCIOSO — y no con un `.regex()` a secas:
+// un token malformado tiraria el request entero con 400 y perderiamos el lead
+// por un dato de marketing. Formato real: 32 hex.
+const hutkSchema = z
+  .string()
+  .optional()
+  .transform(v => (typeof v === 'string' && /^[a-f0-9]{32}$/i.test(v.trim()) ? v.trim() : undefined))
+
+// Mismo criterio: viene de internet sin autenticar y termina como texto en el
+// CRM. Solo se acepta una URL http(s) recortada; cualquier otra cosa se tira.
+const paginaSchema = z
+  .string()
+  .optional()
+  .transform(v => {
+    if (typeof v !== 'string') return undefined
+    const s = v.trim().slice(0, 300)
+    return /^https?:\/\//i.test(s) ? s : undefined
+  })
+
 const contactSchema = z.object({
   body: z.object({
     firstName: z.string().trim().min(1, 'El nombre es requerido'),
@@ -450,6 +471,10 @@ const contactSchema = z.object({
     modules: z.string().optional(),
     source: z.string().optional(),
     utm: utmSchema,
+    // Contexto del visitante para el espejo en HubSpot (ver hubspot.client.ts).
+    hutk: hutkSchema,
+    pageUri: paginaSchema,
+    pageName: z.string().trim().max(120).optional(),
   }),
 })
 router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)
