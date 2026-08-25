@@ -163,11 +163,12 @@ function mapTpvRatingToNumeric(tpvRating: string): number | null {
 /**
  * 🔴 DINERO — Aviso de inventario que viaja PEGADO a un cobro que YA se registró.
  *
- * Existe porque el inventario se revisa DOS veces: una ANTES de cobrar
- * (`validatePreFlightInventory`, que sí puede prevenir y sí rechaza) y otra
- * DESPUÉS de que el Payment quedó comiteado. En la segunda ya no hay nada que
- * prevenir: rechazar ahí no des-cobra la tarjeta, sólo le miente al cajero, que
- * entonces vuelve a pasarla. Ese fue el doble cobro real.
+ * Existe porque el inventario se revisa DESPUÉS de que el Payment quedó
+ * comiteado (desde la paridad con Square, 2026-08-12, nada rechaza un cobro por
+ * stock; el pre-flight previo a la transacción se quitó el 2026-08-25 porque
+ * sólo duplicaba la consulta). Ahí ya no hay nada que prevenir: rechazar no
+ * des-cobra la tarjeta, sólo le miente al cajero, que entonces vuelve a
+ * pasarla. Ese fue el doble cobro real.
  *
  * Mismo criterio que el bloque 🚨 [Sobrepago] de este archivo: el pago se
  * registra SIEMPRE y lo que se elimina es la invisibilidad del problema.
@@ -395,105 +396,6 @@ async function validateOrderInventoryAvailability(
   return {
     available: issues.length === 0,
     issues: issues.length > 0 ? issues : undefined,
-  }
-}
-
-/**
- * ✅ WORLD-CLASS PATTERN: Pre-flight validation BEFORE payment capture (Stripe, Shopify, Toast POS)
- * Validates inventory availability before creating payment record
- * Prevents charging customers for orders that cannot be fulfilled
- *
- * @param order Order with items and existing payments
- * @param paymentAmount Payment amount being processed (including tip)
- * @throws BadRequestError if inventory validation fails for a full payment
- */
-async function validatePreFlightInventory(
-  order: {
-    id: string
-    venueId: string
-    total: any
-    items: Array<{
-      productId: string | null
-      product: { name: string } | null
-      productName?: string | null
-      quantity: number
-      weightQuantity?: any
-      areaTicketLineId?: string | null
-      modifiers?: any[]
-      paymentAllocations?: any[]
-    }>
-    payments: Array<{ amount: any; tipAmount: any; type?: string | null }>
-  },
-  paymentAmount: number,
-): Promise<void> {
-  // Calculate total payments (including this new one)
-  // 🔴 Sin los REFUND — misma definición que el recálculo del saldo. Un
-  // reembolso restando aquí hacía creer que la cuenta NO se completa con este
-  // cobro, y el pre-flight de inventario se saltaba en silencio.
-  const previousPayments = summarizeRefunds(order.payments).netPaidAmount.toNumber()
-  const totalPaid = previousPayments + paymentAmount
-  const originalTotal = parseFloat(order.total.toString())
-
-  // Check if this payment will fully pay the order
-  const remainingAmount = Math.max(0, originalTotal - totalPaid)
-  const willBeFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
-
-  // Only validate inventory if this payment will complete the order
-  if (willBeFullyPaid) {
-    const coveredAreaTicketLines = await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
-
-    // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
-    // Items with paymentAllocations have already been "claimed" by a previous split payment
-    // Their inventory will be deducted when the order is completed
-    const unpaidItems = order.items.filter(item => !item.paymentAllocations || item.paymentAllocations.length === 0)
-
-    // Filter out items with deleted products (null productId) - they can't be validated for inventory
-    const itemsToValidate = unpaidItems.filter(
-      (item): item is typeof item & { productId: string; product: { name: string } } =>
-        item.productId !== null && item.product !== null && (!item.areaTicketLineId || !coveredAreaTicketLines.has(item.areaTicketLineId)),
-    )
-
-    logger.info('🔍 PRE-FLIGHT: Checking inventory before creating payment', {
-      orderId: order.id,
-      venueId: order.venueId,
-      paymentAmount,
-      totalPaid,
-      originalTotal,
-      totalItems: order.items.length,
-      unpaidItems: unpaidItems.length,
-      itemsToValidate: itemsToValidate.length,
-      skippedDeletedProducts: unpaidItems.length - itemsToValidate.length,
-      paidItems: order.items.length - unpaidItems.length,
-    })
-
-    const validation = await validateOrderInventoryAvailability(order.venueId, itemsToValidate)
-
-    if (!validation.available) {
-      // 🔴 Ya NO se rechaza (punto 1, Square-parity 2026-08-12): cuando la app
-      // registra el cobro, el dinero físico ya se movió — el cajero ya recibió
-      // el efectivo o la terminal ya aprobó. Rechazar el registro no des-vende
-      // nada; sólo deja la venta sin anotar. El faltante se detecta otra vez
-      // tras el commit (pre-flight post-commit) y viaja al cajero como aviso
-      // estructurado, y el stock QUANTITY queda en negativo como señal.
-      logger.warn('⚠️ [Inventario] PRE-FLIGHT detectó faltante — el cobro procede y el faltante viajará como aviso', {
-        orderId: order.id,
-        venueId: order.venueId,
-        issues: validation.issues,
-      })
-    } else {
-      logger.info('✅ PRE-FLIGHT PASSED: Inventory available, proceeding with payment', {
-        orderId: order.id,
-        venueId: order.venueId,
-      })
-    }
-  } else {
-    logger.info('⏭️ PRE-FLIGHT SKIPPED: Partial payment, inventory validation deferred', {
-      orderId: order.id,
-      paymentAmount,
-      totalPaid,
-      originalTotal,
-      remainingAfterPayment: remainingAmount,
-    })
   }
 }
 
@@ -728,11 +630,10 @@ async function updateOrderTotalsForStandalonePayment(
   // `referenceNumber` NUEVOS, así que la deduplicación no lo atrapa. Doble cobro
   // irrecuperable, medido en producción.
   //
-  // La prevención de verdad ya existe y NO vive aquí: `validatePreFlightInventory`
-  // corre ANTES de la transacción y ahí sí rechaza sin haber cobrado. Este chequeo
-  // sólo puede disparar cuando el stock cambió entre ambos momentos (TOCTOU) o
-  // cuando los dos difieren al decidir "queda saldada" — y en los dos casos el
-  // dinero ya entró.
+  // Éste es el ÚNICO chequeo de inventario del camino de cobro. Desde la paridad con
+  // Square (2026-08-12) nada rechaza un cobro por stock, así que el pre-flight que
+  // corría ANTES de la transacción sólo duplicaba esta consulta y se quitó
+  // (2026-08-25). Cuando dispara, el dinero ya entró: se avisa, no se revierte.
   //
   // Mismo razonamiento, línea por línea, que el bloque 🚨 [Sobrepago] de arriba.
   const inventoryIssues: OrderInventoryWarning['issues'] = []
@@ -2004,6 +1905,10 @@ export async function recordOrderPayment(
   _orgId?: string,
 ) {
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
+  // Tiempo desde la entrada al servicio. La TPV abandona a los 10 s: cada hito lleva
+  // `elapsedMs` para que un cobro lento se pueda atribuir a un tramo, no adivinar.
+  const startedAt = Date.now()
+  const elapsedMs = () => Date.now() - startedAt
 
   // 🔴 Este camino cobra CONTRA UNA ORDEN desde la terminal, y la terminal es un
   // aparato de tarjeta: sus medios son efectivo y tarjeta, no el catálogo de tipos
@@ -2091,41 +1996,17 @@ export async function recordOrderPayment(
     }
   }
 
-  // Find the order directly by ID (include payments for pre-flight validation)
+  // Find the order directly by ID. Only scalar item fields are used from here on
+  // (`id`, `total`, `areaTicketLineId`); the product/modifier/allocation/venue/payments
+  // relations only fed the pre-transaction pre-flight removed on 2026-08-25, and the
+  // post-commit inventory check re-reads the order with what it needs.
   const activeOrder = await prisma.order.findUnique({
     where: {
       id: orderId,
       venueId,
     },
     include: {
-      items: {
-        include: {
-          product: true, // Need product.name for validation errors
-          // ✅ Include paymentAllocations to filter out paid items in PRE-FLIGHT
-          paymentAllocations: true,
-          // ✅ Include modifiers with inventory fields for pre-flight validation
-          modifiers: {
-            include: {
-              modifier: {
-                select: {
-                  id: true,
-                  name: true,
-                  groupId: true,
-                  rawMaterialId: true,
-                  quantityPerUnit: true,
-                  unit: true,
-                  inventoryMode: true,
-                },
-              },
-            },
-          },
-        },
-      },
-      venue: true,
-      payments: {
-        where: { status: 'COMPLETED' }, // Only count completed payments
-        select: { amount: true, tipAmount: true },
-      },
+      items: true,
     },
   })
 
@@ -2162,11 +2043,13 @@ export async function recordOrderPayment(
     throw new BadRequestError('Las ventas con vales requieren idempotencyKey. Reintenta el mismo pago con una llave estable.')
   }
 
-  // ✅ WORLD-CLASS PATTERN: Pre-flight validation BEFORE creating payment record (Stripe, Shopify, Toast POS)
-  // Validate inventory availability to prevent charging customers for orders we can't fulfill
-  // Vales v7 ya reservaron disponibilidad y consumen esas reservas dentro de su
-  // finalización transaccional; validarlas como inventario libre las restaría dos veces.
-  await validatePreFlightInventory(activeOrder, totalAmount + tipAmount)
+  // Ya NO hay pre-flight de inventario ANTES de registrar el cobro. Desde la paridad
+  // con Square (2026-08-12) ese chequeo no rechazaba nada — sólo repetía la misma
+  // consulta que hace `updateOrderTotalsForStandalonePayment` tras el commit y
+  // escribía dos líneas de log. Costaba ~1 s por cobro en un camino que el cliente
+  // abandona a los 10 s (prod 2026-08-25: 7 cobros abandonados en una ventana, sólo la
+  // idempotencia evitó el doble cobro). El ÚNICO chequeo de inventario vive post-commit
+  // y viaja al cajero como `inventoryWarning`, nunca como error.
 
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
@@ -2540,6 +2423,7 @@ export async function recordOrderPayment(
     grossAmount: totalAmount + tipAmount,
     feeAmount: payment.feeAmount,
     netAmount: payment.netAmount,
+    elapsedMs: elapsedMs(),
   })
   logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
 
@@ -2662,6 +2546,7 @@ export async function recordOrderPayment(
         paymentId: payment.id,
         orderId: activeOrder.id,
         amount: payment.amount,
+        elapsedMs: elapsedMs(),
       })
 
       // Create commission calculation for this payment (non-blocking)
@@ -2849,6 +2734,7 @@ export async function recordOrderPayment(
         paymentId: payment.id,
         orderId: activeOrder.id,
         paymentAmount: totalAmount + tipAmount,
+        elapsedMs: elapsedMs(),
       })
     } catch (updateError: any) {
       // ⚠️ Este re-throw ya NO puede alcanzar al inventario, y es a propósito.
@@ -2897,7 +2783,7 @@ export async function recordOrderPayment(
     }
   }
 
-  logger.info('Payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
+  logger.info('Payment recorded successfully', { paymentId: payment.id, amount: totalAmount, elapsedMs: elapsedMs() })
 
   // 🪝 Backfill any Blumon webhook that arrived BEFORE this Payment was recorded.
   // Fire-and-forget — never block the API response on reconciliation. The cron

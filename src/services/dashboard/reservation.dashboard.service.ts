@@ -745,8 +745,23 @@ export interface ReservationFilters {
 export const RESERVATION_INCLUDE = {
   customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
   table: { select: { id: true, number: true, capacity: true } },
-  product: { select: { id: true, name: true, price: true } },
+  // `layoutConfig` es el acomodo del salón (tapetes / reformers / bicis) que se
+  // arma en Ajustes del servicio. Va aquí porque `Reservation.spotIds` guarda
+  // IDs sueltos: sin el layout nadie puede traducir "3" a "Tapete 3".
+  product: { select: { id: true, name: true, price: true, layoutConfig: true } },
   assignedStaff: { select: { id: true, firstName: true, lastName: true } },
+  // 🔴 En una CLASE el instructor vive en la sesión, no en la reserva: medido,
+  // 44 de 44 sesiones traen `assignedStaffId` y 0 de 9 reservas de clase lo
+  // traen. Sin esto el kiosco y el POS no tienen forma de decir con quién es la
+  // clase — se perdía en silencio.
+  classSession: {
+    select: {
+      id: true,
+      capacity: true,
+      assignedStaff: { select: { id: true, firstName: true, lastName: true } },
+      product: { select: { id: true, name: true } },
+    },
+  },
   createdBy: { select: { id: true, firstName: true, lastName: true } },
   // Picked modifiers — surfaced so the dashboard reservation detail / TPV
   // shows the full breakdown and the cashier charges the correct total.
