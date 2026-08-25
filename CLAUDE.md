@@ -229,6 +229,13 @@ unfinished. Treat it like permissions: kept in lockstep.
 **Do NOT** add product feature tools to the admin MCP (`scripts/mcp/`), and **do NOT** merge `feat/admin-mcp` into develop just to add a
 tool — it is a separate internal tool, not driven by this rule.
 
+**Qué protege al MCP de un cliente hostil (no es el modelo — es el servidor):** (1) `guard` por venue/permiso en cada tool; (2)
+`mcp-rate-limit.middleware.ts` en `POST /mcp` — techo de volumen por staff/org/IP, configurable con `MCP_{STAFF,ORG,IP}_RATE_LIMIT_MAX`,
+responde JSON-RPC y **nunca** tumba el MCP si él mismo falla; (3) `instrument.ts` sanea los errores internos por AMBAS salidas —lanzados y
+devueltos como `ok:false`— dejando pasar los mensajes escritos para el operador; (4) `avoqado_internal_docs` sólo se registra si
+`scope.isSuperAdmin`. Hay un test que barre las ~250 descripciones del catálogo (`tests/unit/mcp-customer/catalog-no-internals.test.ts`): si
+tu tool nueva menciona Prisma, una tabla o `Modelo.campo`, falla ahí — el catálogo lo lee **todo** cliente conectado.
+
 **Every customer-MCP tool MUST honor these invariants** (full detail in `.claude/rules/critical-warnings.md`): (1) **money in PESOS, 1:1** —
 inputs/outputs in major units (`150.50`), NEVER cents (`* 100` only at Stripe/CFDI/provider boundaries; ledger `…Cents` fields convert ÷100
 before returning); (2) **dates are VENUE-LOCAL** — via `getVenueChartData` / `venueStartOfDay` / `parseDbDateRange`, never a bare
