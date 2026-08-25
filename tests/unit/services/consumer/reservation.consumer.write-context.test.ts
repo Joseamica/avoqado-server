@@ -5,6 +5,14 @@ import * as ecommerceCapability from '@/services/payments/ecommerceCapability'
 import * as appointmentSlotHoldService from '@/services/reservation/appointmentSlotHold.service'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
+
+// Fase 1: el vínculo Consumer→Customer activa la cuenta (y decide su aprobación) dentro de una
+// tx corta. Esta suite prueba el write-context de la reserva, no la aprobación: se simula.
+jest.mock('@/services/public/customerBookingAccess.service', () => ({
+  __esModule: true,
+  activateCustomerAccount: jest.fn(async () => ({ approvalStatus: 'APPROVED', requestsApproval: false, approvalVersion: 0 })),
+}))
 import { Prisma } from '@prisma/client'
 
 const startsAt = new Date('2026-08-21T15:00:00.000Z')
@@ -28,6 +36,9 @@ describe('consumer reservation write context', () => {
   beforeEach(() => {
     jest.restoreAllMocks()
     jest.resetAllMocks()
+    // Fase 1: el vínculo Consumer→Customer corre en una tx corta; el mock ejecuta el callback.
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+    ;(activateCustomerAccount as jest.Mock).mockResolvedValue({ approvalStatus: 'APPROVED', requestsApproval: false, approvalVersion: 0 })
     prismaMock.venue.findFirst.mockResolvedValue({ id: 'venue-1', slug: 'venue', name: 'Venue' } as any)
     prismaMock.consumer.findUnique.mockResolvedValue({
       id: 'consumer-1',

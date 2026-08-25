@@ -24,6 +24,7 @@ import AppError from './errors/AppError'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
 import { handleMcpRequest } from './mcp/server'
+import { mcpRateLimitMiddleware } from './middlewares/mcp-rate-limit.middleware'
 import { mountCustomerMcpAuth } from './mcp/oauth/router'
 import { provider as mcpOAuthProvider } from './mcp/oauth/provider'
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js'
@@ -166,6 +167,9 @@ app.post(
     verifier: mcpOAuthProvider,
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(MCP_RESOURCE_URL),
   }),
+  // Volume ceiling — AFTER auth so it can key on the caller's staffId/org. requireBearerAuth proves
+  // WHO calls; nothing limited HOW MUCH, leaving ~250 tools open to fuzzing at full speed.
+  mcpRateLimitMiddleware,
   express.json(),
   handleMcpRequest,
 )

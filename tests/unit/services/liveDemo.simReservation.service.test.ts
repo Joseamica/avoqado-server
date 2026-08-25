@@ -107,7 +107,10 @@ describe('simulateReservation — live demo sim reservation service', () => {
     expect(mockedCreateReservation).toHaveBeenCalledTimes(1)
     const [venueId, input, context] = mockedCreateReservation.mock.calls[0]
     expect(venueId).toBe(VENUE_ID)
-    expect(context).toEqual({ writeOrigin: 'PUBLIC' })
+    // Fase 1: el demo se etiqueta PUBLIC aunque no haya cliente detrás, así que va exento
+    // del gate de aprobación — si no, un venue de demo con el switch prendido pediría
+    // "inicia sesión para reservar" a nadie.
+    expect(context).toEqual({ writeOrigin: 'PUBLIC', skipCustomerApprovalGate: true })
     expect(input.channel).toBe('WEB')
     expect(input.guestName).toBe('Sofía Ramírez')
     expect(input.partySize).toBe(1)

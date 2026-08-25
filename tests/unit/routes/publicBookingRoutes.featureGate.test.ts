@@ -65,7 +65,15 @@ jest.mock('@/middlewares/customerAuth.middleware', () => ({
     req.customerAuth = { customerId: 'cust_1', venueId: 'venue_pub_1' }
     next()
   },
+  // Fase 0.B: la variante opcional va en create/checkout. Passthrough como invitado.
+  authenticateCustomerOptional: (req: any, _res: any, next: any) => {
+    req.customerAuth = null
+    next()
+  },
 }))
+// Fase 0.B: resolveVenueBySlug va antes de la identidad. NO se mockea: el real consulta
+// `prisma.venue.findFirst` (ya mockeado abajo), así los casos "slug desconocido" y "DB
+// caída" siguen probando lo mismo que antes — ahora el primero que los ve es el resolver.
 jest.mock('@/middlewares/consumerAuth.middleware', () => ({
   authenticateConsumer: (req: any, _res: any, next: any) => {
     req.consumerAuth = { consumerId: 'consumer_1' }
@@ -271,19 +279,22 @@ describe('public booking surface — entitled venues pass the gate', () => {
 })
 
 describe('public booking surface — pass-through and fail-open', () => {
-  it('unknown slug → middleware passes through to the controller (its 404 path), never 403', async () => {
+  it('unknown slug → 404 VENUE_NOT_FOUND desde resolveVenueBySlug, antes del gate y del controller (Fase 0.B)', async () => {
     venueFindFirst.mockResolvedValue(null) // slug does not resolve
 
-    // With the real controller this is its existing 404 ('Negocio no encontrado');
-    // here the mocked controller answers 200, proving the gate stepped aside.
+    // Antes el gate "se hacía a un lado" y el controller daba su 404. Ahora el resolver
+    // (que corre primero en la cadena create) lo decide él, con código. Nunca 403.
     const res = await request(server).post(`${P}/reservations`)
 
-    expect(res.status).toBe(200)
-    expect(res.body).toEqual({ ok: true })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual(expect.objectContaining({ code: 'VENUE_NOT_FOUND' }))
   })
 
-  it('unexpected gate error (DB down) → FAIL-OPEN: logged, controller reached', async () => {
-    venueFindFirst.mockRejectedValue(new Error('connection refused'))
+  it('unexpected gate error (DB down) → FAIL-OPEN del GATE: logged, controller reached', async () => {
+    // El fail-open es una propiedad del gate de plan, no del resolver: el resolver ya pasó
+    // (primera llamada resuelve el venue) y es la SEGUNDA consulta —la del plan— la que cae.
+    venueFindFirst.mockResolvedValue({ id: 'venue_pub_1', slug: 'venue-pub' })
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockRejectedValue(new Error('connection refused'))
 
     const res = await request(server).post(`${P}/reservations`)
 
@@ -344,8 +355,17 @@ describe('wiring — the gates are actually present in the route files (source r
 
   it.each([
     [/'\/venues\/:venueSlug\/availability',\s*readLimit,\s*requireReservationsPlan,/, 'availability GET'],
-    [/'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*requireReservationsPlan,/, 'create POST'],
-    [/'\/venues\/:venueSlug\/reservations\/hold',\s*writeLimit,\s*requireReservationsPlan,/, 'hold POST'],
+    // Fase 0.B: venue → identidad opcional → plan. El orden importa (401 de identidad gana a 403 de plan).
+    [
+      /'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      'create POST',
+    ],
+    // Fase 1: el hold aparta capacidad ⇒ pasa por el gate de aprobación, y para eso necesita
+    // identidad. Mismo orden que crear reserva: identidad ANTES del plan.
+    [
+      /'\/venues\/:venueSlug\/reservations\/hold',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      'hold POST',
+    ],
     [
       /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule\/availability',\s*readLimit,\s*requireReservationsPlan,/,
       'reschedule availability GET',
@@ -354,7 +374,10 @@ describe('wiring — the gates are actually present in the route files (source r
       /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule\/hold',\s*writeLimit,\s*requireReservationsPlan,/,
       'reschedule hold POST',
     ],
-    [/'\/venues\/:venueSlug\/credit-packs\/:packId\/checkout',\s*writeLimit,\s*requireReservationsPlan,/, 'pack checkout POST'],
+    [
+      /'\/venues\/:venueSlug\/credit-packs\/:packId\/checkout',\s*writeLimit,\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*requireReservationsPlan,/,
+      'pack checkout POST',
+    ],
   ])('public.routes.ts gates the create surface: %s (%s)', fragment => {
     expect(publicRoutesSrc).toMatch(fragment)
   })
@@ -365,10 +388,15 @@ describe('wiring — the gates are actually present in the route files (source r
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/reservations\/:cancelSecret\/cancel',\s*cancelLimit,\s*validateRequest/)
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/reservations\/:cancelSecret',\s*readLimit,\s*validateRequest/)
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/reservations\/hold\/:holdId',\s*cancelLimit,\s*validateRequest/)
+    // Fase 0.B: reschedule sigue SIN gate de plan (manage-existing), pero monta el resolver
+    // y la identidad opcional para rechazar un Authorization presente e inválido.
     expect(publicRoutesSrc).toMatch(
-      /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule',\s*cancelLimit,[^\n]*\n\s*validateRequest/,
+      /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule',\s*cancelLimit,[^\n]*\n\s*resolveVenueBySlug,\s*authenticateCustomerOptional,\s*validateRequest/,
     )
-    expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/credit-packs\/balance',\s*readLimit,\s*validateRequest/)
+    // Fase 0.B: el balance exige sesión (dato de cuenta) pero sigue SIN gate de plan.
+    expect(publicRoutesSrc).toMatch(
+      /'\/venues\/:venueSlug\/credit-packs\/balance',\s*readLimit,\s*resolveVenueBySlug,\s*authenticateCustomer,\s*validateRequest/,
+    )
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/info',\s*readLimit,\s*validateRequest/)
   })
 

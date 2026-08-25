@@ -22,7 +22,10 @@ import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public
 import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
-import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
+import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
+import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
+import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
+import { kioskCheckInCors } from '../middlewares/kioskCheckInCors.middleware'
 import { checkPublicVenueFeature } from '../middlewares/checkFeatureAccess.middleware'
 import { venueChatAuth } from '../middlewares/venueChatAuth.middleware'
 import {
@@ -140,9 +143,14 @@ router.get(
   reservationPublicController.getAvailability,
 )
 
+// Fase 0.B: el venue se resuelve ANTES de la identidad (el slug manda sobre el token), y
+// la identidad ANTES del plan (401 de "no eres tú" gana a 403 de "este venue no tiene PRO").
+// Cualquier Authorization presente se valida; sin header sigue siendo invitado.
 router.post(
   '/venues/:venueSlug/reservations',
   writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomerOptional,
   requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateReservationBodySchema })),
   reservationPublicController.createReservation,
@@ -151,9 +159,19 @@ router.post(
 // Slot hold (Square "Cita reservada durante 9:56" countdown). Minting belongs
 // to the paid create flow; releasing is deliberately ungated so a downgraded
 // venue cannot strand capacity until TTL.
+// Fase 1: el hold aparta capacidad, así que pasa por el gate de aprobación — y para eso
+// necesita identidad. Mismo orden EXACTO que crear reserva, y los tres pasos importan:
+// 🔴 `resolveVenueBySlug` va PRIMERO. Sin él, `authenticateCustomer*` no tiene contra qué
+// venue validar el token y responde 500 `CUSTOMER_AUTH_INTERNAL` — la ruta se cae para
+// TODOS, con o sin sesión. Lo cazó /full-testing con un cliente real; los tests unitarios
+// no lo ven porque montan el controlador sin la cadena de middlewares.
+// Después la identidad, y al final el plan: el 401 de "no eres tú" gana al 403 de "este
+// venue no tiene PRO".
 router.post(
   '/venues/:venueSlug/reservations/hold',
   writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomerOptional,
   requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateHoldBodySchema })),
   reservationPublicController.createHold,
@@ -196,9 +214,13 @@ router.post(
   validateRequest(z.object({ params: publicReservationParamsSchema, body: rescheduleHoldBodySchema })),
   reservationPublicController.createRescheduleHold,
 )
+// Fase 0.B: la autorización sigue siendo `cancelSecret`; la identidad opcional va SÓLO para
+// rechazar un Authorization presente pero inválido/ajeno (nunca degradar a invitado en silencio).
 router.post(
   '/venues/:venueSlug/reservations/:cancelSecret/reschedule',
   cancelLimit, // same rate envelope — destructive-ish public mutation
+  resolveVenueBySlug,
+  authenticateCustomerOptional,
   validateRequest(z.object({ params: publicReservationParamsSchema, body: publicRescheduleBodySchema })),
   reservationPublicController.rescheduleReservation,
 )
@@ -212,9 +234,13 @@ router.get(
   creditPackPublicController.getAvailablePacks,
 )
 
+// Fase 0.B: el balance es dato de CUENTA → sesión obligatoria (el slug manda sobre el
+// token). Sin plan gate: es lectura manage-existing (regla de oro de arriba).
 router.get(
   '/venues/:venueSlug/credit-packs/balance',
   readLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
   validateRequest(publicBalanceQuerySchema),
   creditPackPublicController.getCustomerBalance,
 )
@@ -222,12 +248,31 @@ router.get(
 // Checkout is a PRE-PAYMENT to book (create-flow surface) → gated. The pack
 // LIST + BALANCE reads above stay UNGATED: existing credit holders must always
 // be able to see what they already paid for, regardless of the venue's plan.
+// Fase 0.B: con sesión, la compra se liga al customer del token (el email del body no manda).
+// Sin header sigue siendo checkout de invitado.
 router.post(
   '/venues/:venueSlug/credit-packs/:packId/checkout',
   writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomerOptional,
   requireReservationsPlan,
   validateRequest(publicCheckoutSchema),
   creditPackPublicController.createCheckout,
+)
+
+// ---- Kiosco: consumir el reto de check-in desde el teléfono del cliente (Fase 5) ----
+//
+// 🔴 CORS ACOTADO, a diferencia del resto de /public (que es `origin: '*'` para poder
+// embeberse en cualquier sitio). Aquí no: este endpoint actúa sobre una sesión de cliente
+// autenticada, así que un `*` dejaría a cualquier página ajena dispararlo con la sesión
+// de quien la visite. Sólo el widget.
+router.post(
+  '/venues/:venueSlug/customer/checkin/:challengeId',
+  kioskCheckInCors,
+  writeLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  kioskCheckInController.consumeChallenge,
 )
 
 // ---- Customer Portal (authenticated) ----
@@ -236,11 +281,13 @@ router.post('/venues/:venueSlug/customer/register', authLimit, validateRequest(c
 
 router.post('/venues/:venueSlug/customer/login', authLimit, validateRequest(customerLoginSchema), customerPortalController.login)
 
-router.get('/venues/:venueSlug/customer/portal', readLimit, authenticateCustomer, customerPortalController.getPortal)
+// Fase 0.B: el slug manda. Antes el portal usaba sólo el venue del JWT e ignoraba la URL.
+router.get('/venues/:venueSlug/customer/portal', readLimit, resolveVenueBySlug, authenticateCustomer, customerPortalController.getPortal)
 
 router.patch(
   '/venues/:venueSlug/customer/profile',
   writeLimit,
+  resolveVenueBySlug,
   authenticateCustomer,
   validateRequest(customerUpdateProfileSchema),
   customerPortalController.updateProfile,
@@ -358,6 +405,58 @@ router.get(
 // El correo se valida con Zod y no a mano: el controller solo comprobaba que el campo
 // existiera, asi que un "noesemail" respondia 200 y la confirmacion al prospecto se perdia
 // en silencio (nadie se enteraba de que el lead nunca recibio nada).
+// Llaves de campana que la landing propaga (mismo listado que `restaurants.astro`).
+// Se filtra con allowlist y con tope de largo en vez de aceptar el `record` abierto:
+// esto viene de internet SIN autenticar y desde ahora se guarda en la columna JSON
+// del ActivityLog del alta, asi que un `utm` sin limite deja escribir basura
+// arbitraria en el registro de un lead. Lo que no este aqui se descarta en silencio.
+const UTM_KEYS = [
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_content',
+  'utm_term',
+  'gclid',
+  'gbraid',
+  'wbraid',
+  'fbclid',
+  'msclkid',
+] as const
+
+const utmSchema = z
+  .record(z.string(), z.string())
+  .optional()
+  .transform(u => {
+    if (!u) return undefined
+    const limpio: Record<string, string> = {}
+    for (const k of UTM_KEYS) {
+      const v = u[k]
+      if (typeof v === 'string' && v.trim()) limpio[k] = v.trim().slice(0, 200)
+    }
+    return Object.keys(limpio).length > 0 ? limpio : undefined
+  })
+
+// El `hutk` es la cookie de HubSpot del visitante y es lo unico que le da
+// campana/origen al lead dentro del CRM. Se valida con la misma logica que los
+// UTMs — allowlist y descarte SILENCIOSO — y no con un `.regex()` a secas:
+// un token malformado tiraria el request entero con 400 y perderiamos el lead
+// por un dato de marketing. Formato real: 32 hex.
+const hutkSchema = z
+  .string()
+  .optional()
+  .transform(v => (typeof v === 'string' && /^[a-f0-9]{32}$/i.test(v.trim()) ? v.trim() : undefined))
+
+// Mismo criterio: viene de internet sin autenticar y termina como texto en el
+// CRM. Solo se acepta una URL http(s) recortada; cualquier otra cosa se tira.
+const paginaSchema = z
+  .string()
+  .optional()
+  .transform(v => {
+    if (typeof v !== 'string') return undefined
+    const s = v.trim().slice(0, 300)
+    return /^https?:\/\//i.test(s) ? s : undefined
+  })
+
 const contactSchema = z.object({
   body: z.object({
     firstName: z.string().trim().min(1, 'El nombre es requerido'),
@@ -371,7 +470,11 @@ const contactSchema = z.object({
     businessType: z.string().optional(),
     modules: z.string().optional(),
     source: z.string().optional(),
-    utm: z.record(z.string(), z.string()).optional(),
+    utm: utmSchema,
+    // Contexto del visitante para el espejo en HubSpot (ver hubspot.client.ts).
+    hutk: hutkSchema,
+    pageUri: paginaSchema,
+    pageName: z.string().trim().max(120).optional(),
   }),
 })
 router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)

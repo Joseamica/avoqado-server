@@ -11,7 +11,6 @@ import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
 import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
 import { resolveModifierSelections, type ResolvedModifierRow } from '@/services/reservation/resolveModifierSelections'
-import { createOrderFromReservation } from '@/services/reservation/createOrderFromReservation'
 import {
   buildSyncKey,
   collapseSupersededOps,
@@ -22,7 +21,9 @@ import {
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import {
+  applyBufferToEndsAt,
   assertLegacyAppointmentDurationFloor,
+  resolveBufferAfterMin,
   normalizeBookedProductIds,
   reservationBookedProductIds,
   resolveAppointmentWindow,
@@ -45,6 +46,7 @@ import {
 } from '@/services/reservation/appointmentSlotHold.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { resolveServicesMany, type ServiceResolvable } from '@/services/reservation/reservation-services.resolver'
+import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 
 export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
@@ -264,6 +266,15 @@ export interface ReservationWriteContext {
   paymentPolicyOverride?: {
     deposits: ReservationConfig['deposits']
   }
+  /**
+   * Fase 1: salta el gate de aprobación de clientes. ÚNICO uso legítimo hoy: el Live Demo
+   * (`liveDemo.service.ts`), que etiqueta su reserva simulada como `PUBLIC` aunque no haya
+   * ningún cliente detrás — sin esta excepción, un venue de demo con el switch prendido
+   * rompería la demo con un 401 "inicia sesión". Es explícito y greppable a propósito:
+   * la alternativa (mirar el slug del venue) es justo lo que prohíbe la regla de no
+   * hardcodear clientes.
+   */
+  skipCustomerApprovalGate?: boolean
 }
 
 /**
@@ -301,6 +312,15 @@ export async function createReservation(
   const depositIdempotencyKey = `reservation:${crypto.randomUUID()}:deposit:v1`
 
   const reservation = await withSerializableRetry(async tx => {
+    // 🔴 Fase 1 — el gate va PRIMERO, dentro de la MISMA transacción serializable que va a
+    // apartar el lugar. Fuera de ella no sirve: "leo APPROVED → la dueña rechaza → inserto"
+    // commitea igual, porque Postgres puede serializarlo como "la reserva ocurrió antes del
+    // rechazo". Sólo se gatean los orígenes de cliente; el staff (DASHBOARD/MCP) decide por
+    // su cuenta y el Live Demo se exceptúa explícitamente.
+    if ((context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER') && !context.skipCustomerApprovalGate) {
+      await assertCustomerCanCreateReservation(tx, { customerId: data.customerId, venueId })
+    }
+
     const persistedSettings = await getReservationSettings(venueId, tx)
     const settings: ReservationConfig =
       context.writeOrigin === 'PUBLIC' && context.paymentPolicyOverride
@@ -333,6 +353,9 @@ export async function createReservation(
     let modifierDelta: Prisma.Decimal
     let finalEndsAt: Date
     let finalDuration: number
+    // Fin del BLOQUE DE AGENDA (`endsAt` + buffer del servicio). `finalEndsAt`
+    // sigue siendo la hora del cliente; esta es la que aparta calendario.
+    let blockedEndsAt: Date
 
     if (context.windowSemantics === 'base') {
       const resolvedWindow = await resolveAppointmentWindow(tx, {
@@ -347,6 +370,7 @@ export async function createReservation(
       modifierDelta = resolvedWindow.modifierPriceDelta
       finalEndsAt = resolvedWindow.finalEndsAt
       finalDuration = resolvedWindow.finalDurationMin
+      blockedEndsAt = resolvedWindow.blockedEndsAt
     } else {
       if (isAppointment && isStaffAware(settings)) {
         const rawIntervalDurationMin = (data.endsAt.getTime() - data.startsAt.getTime()) / 60_000
@@ -382,6 +406,7 @@ export async function createReservation(
         modifiers.totalDurationDelta === 0 ? data.endsAt : new Date(data.endsAt.getTime() + modifiers.totalDurationDelta * 60_000)
       const minimumEndsAt = new Date(data.startsAt.getTime() + finalDuration * 60_000)
       finalEndsAt = minimumEndsAt > rawEndsAtWithModifiers ? minimumEndsAt : rawEndsAtWithModifiers
+      blockedEndsAt = applyBufferToEndsAt(finalEndsAt, await resolveBufferAfterMin(tx, { venueId, productIds: bookedProductIds }))
     }
 
     let effectiveAssignedStaffId = data.assignedStaffId ?? null
@@ -539,7 +564,7 @@ export async function createReservation(
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         AND "startsAt" < ${finalEndsAt}
-        AND "endsAt" > ${data.startsAt}
+        AND "blockedEndsAt" > ${data.startsAt}
         AND "tableId" = ${data.tableId}
         FOR UPDATE NOWAIT
       `
@@ -555,7 +580,7 @@ export async function createReservation(
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         AND "startsAt" < ${finalEndsAt}
-        AND "endsAt" > ${data.startsAt}
+        AND "blockedEndsAt" > ${data.startsAt}
         AND "assignedStaffId" = ${effectiveAssignedStaffId}
         FOR UPDATE NOWAIT
       `
@@ -575,7 +600,7 @@ export async function createReservation(
           WHERE "venueId" = ${venueId}
             AND "productId" = ${leadProductId}
             AND "startsAt" < ${finalEndsAt}
-            AND "endsAt" > ${data.startsAt}
+            AND "blockedEndsAt" > ${data.startsAt}
             AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           FOR UPDATE
         `
@@ -606,6 +631,7 @@ export async function createReservation(
         channel: data.channel ?? 'DASHBOARD',
         startsAt: data.startsAt,
         endsAt: finalEndsAt,
+        blockedEndsAt,
         duration: finalDuration,
         customerId: data.customerId,
         guestName: data.guestName,
@@ -716,11 +742,26 @@ export interface ReservationFilters {
   search?: string // name, phone, confirmation code
 }
 
-const RESERVATION_INCLUDE = {
+export const RESERVATION_INCLUDE = {
   customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
   table: { select: { id: true, number: true, capacity: true } },
-  product: { select: { id: true, name: true, price: true } },
+  // `layoutConfig` es el acomodo del salón (tapetes / reformers / bicis) que se
+  // arma en Ajustes del servicio. Va aquí porque `Reservation.spotIds` guarda
+  // IDs sueltos: sin el layout nadie puede traducir "3" a "Tapete 3".
+  product: { select: { id: true, name: true, price: true, layoutConfig: true } },
   assignedStaff: { select: { id: true, firstName: true, lastName: true } },
+  // 🔴 En una CLASE el instructor vive en la sesión, no en la reserva: medido,
+  // 44 de 44 sesiones traen `assignedStaffId` y 0 de 9 reservas de clase lo
+  // traen. Sin esto el kiosco y el POS no tienen forma de decir con quién es la
+  // clase — se perdía en silencio.
+  classSession: {
+    select: {
+      id: true,
+      capacity: true,
+      assignedStaff: { select: { id: true, firstName: true, lastName: true } },
+      product: { select: { id: true, name: true } },
+    },
+  },
   createdBy: { select: { id: true, firstName: true, lastName: true } },
   // Picked modifiers — surfaced so the dashboard reservation detail / TPV
   // shows the full breakdown and the cashier charges the correct total.
@@ -746,7 +787,7 @@ interface ReservationService {
  * service and its 2nd service silently disappeared from the UI. We fetch the
  * products here and attach them as `services`, preserving booking order.
  */
-async function attachServices<T extends ServiceResolvable>(reservation: T) {
+export async function attachServices<T extends ServiceResolvable>(reservation: T) {
   const [withServices] = await attachServicesMany([reservation])
   return withServices
 }
@@ -1032,37 +1073,11 @@ export async function confirmReservation(venueId: string, reservationId: string,
   return transitionReservation(venueId, reservationId, 'CONFIRMED', confirmedById)
 }
 
-export async function checkInReservation(venueId: string, reservationId: string, checkedInBy: string) {
-  const transitioned = await transitionReservation(venueId, reservationId, 'CHECKED_IN', checkedInBy)
-  // Auto-create the TPV order so the cashier sees the booked services +
-  // picked modifiers pre-populated. Idempotent — re-check-in of an already
-  // converted reservation returns the existing order. Wrapped in a single
-  // SERIALIZABLE tx so the check-in + conversion either both happen or
-  // neither does.
-  let orderId: string | null = null
-  try {
-    const result = await withSerializableRetry(async tx =>
-      createOrderFromReservation(tx, {
-        reservationId,
-        venueId,
-        createdByStaffId: checkedInBy === 'CUSTOMER' || checkedInBy === 'SYSTEM' ? null : checkedInBy,
-      }),
-    )
-    orderId = result?.orderId ?? null
-  } catch (err) {
-    // Order auto-creation must NEVER block check-in. The reservation IS
-    // checked in; if conversion fails, the cashier creates the order
-    // manually like before.
-    logger.error(`[CHECK_IN] Order auto-create failed for reservation ${reservationId}: ${(err as Error).message}`)
-  }
-  // Surface the full booked services[] (Square-pattern multi-service bookings
-  // store the lead service in `product` but the ordered list in `productIds`)
-  // so the POS can print one kitchen/service comanda per booked service.
-  // Reuses the same helper getReservationById/getReservationsCalendar use —
-  // purely additive, `orderId` and every other field are preserved.
-  const withServices = await attachServices(transitioned)
-  return Object.assign(withServices, { orderId })
-}
+// Fase 0.C: `checkInReservation` se movió a src/services/reservation/checkIn.service.ts —
+// comando PURO en tx (CAS + statusLog + ActivityLog, idempotente, PENDING|CONFIRMED → CHECKED_IN,
+// sin orden) y wrapper `checkInReservationAndOpenOrder` (COUNTER: abre la orden fuera de la tx,
+// respuesta plana con orderId/orderCreated/orderError). Antes aquí: sólo CONFIRMED, no idempotente,
+// y el fallo de la orden se tragaba sin rastro.
 
 export async function completeReservation(venueId: string, reservationId: string) {
   return transitionReservation(venueId, reservationId, 'COMPLETED', null)
@@ -1606,7 +1621,7 @@ export async function updateReservation(
           AND id <> ${reservationId}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           AND "startsAt" < ${newEndsAt}
-          AND "endsAt" > ${newStartsAt}
+          AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
       if (tableConflicts.length > 0) {
@@ -1623,7 +1638,7 @@ export async function updateReservation(
           AND id <> ${reservationId}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           AND "startsAt" < ${newEndsAt}
-          AND "endsAt" > ${newStartsAt}
+          AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
       if (staffConflicts.length > 0) {
@@ -1642,7 +1657,7 @@ export async function updateReservation(
           AND "productId" = ${newProductId}
           AND id <> ${reservationId}
           AND "startsAt" < ${newEndsAt}
-          AND "endsAt" > ${newStartsAt}
+          AND "blockedEndsAt" > ${newStartsAt}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         FOR UPDATE
       `
@@ -1659,11 +1674,21 @@ export async function updateReservation(
       })
     }
 
+    // El bloque de agenda se recalcula SIEMPRE que la ventana o los servicios
+    // cambien: si `endsAt` se mueve y `blockedEndsAt` se queda con el valor
+    // viejo, la cita bloquea el horario anterior y libera el nuevo — un hueco
+    // silencioso que TypeScript no puede detectar en un update parcial.
+    const windowMoved = data.startsAt !== undefined || data.endsAt !== undefined || useLockedDuration || data.productId !== undefined
+    const newBlockedEndsAt = windowMoved
+      ? applyBufferToEndsAt(newEndsAt, await resolveBufferAfterMin(tx, { venueId, productIds: newProductIds }))
+      : undefined
+
     const updated = await tx.reservation.update({
       where: { id: reservationId },
       data: {
         ...(data.startsAt !== undefined && { startsAt: newStartsAt }),
         ...((data.endsAt !== undefined || useLockedDuration) && { endsAt: newEndsAt }),
+        ...(newBlockedEndsAt !== undefined && { blockedEndsAt: newBlockedEndsAt }),
         duration: finalDuration,
         ...(data.guestName !== undefined && { guestName: data.guestName }),
         ...(data.guestPhone !== undefined && { guestPhone: data.guestPhone }),
@@ -1948,7 +1973,7 @@ async function rescheduleAppointmentWithHold(args: {
           AND id <> ${reservation.id}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           AND "startsAt" < ${lockedHold.endsAt}
-          AND "endsAt" > ${newStartsAt}
+          AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
       if (tableConflicts.length > 0) {
@@ -1956,11 +1981,18 @@ async function rescheduleAppointmentWithHold(args: {
       }
     }
 
+    // La ventana se movió ⇒ el bloque de agenda se recalcula con ella.
+    const rescheduledBlockedEndsAt = applyBufferToEndsAt(
+      lockedHold.endsAt,
+      await resolveBufferAfterMin(tx, { venueId, productIds: reservationBookedProductIds(reservation) }),
+    )
+
     const updated = await tx.reservation.update({
       where: { id: reservation.id },
       data: {
         startsAt: newStartsAt,
         endsAt: lockedHold.endsAt,
+        blockedEndsAt: rescheduledBlockedEndsAt,
         duration: reservation.duration,
       },
       include: RESERVATION_INCLUDE,

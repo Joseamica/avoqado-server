@@ -1196,11 +1196,13 @@ describe('reservation availability controller boundaries', () => {
       baseEndsAt: endsAt,
       finalEndsAt: new Date(endsAt.getTime() + 15 * 60_000),
       canonicalBaseDurationMin: 60,
+      bufferAfterMin: 0,
       modifierDurationDelta: 15,
       finalDurationMin: 75,
       productIds: ['product-1'],
       modifierRows: [],
       modifierPriceDelta: new Prisma.Decimal(0),
+      blockedEndsAt: new Date(endsAt.getTime() + 15 * 60_000),
     })
     jest.spyOn(appointmentStaffAssignmentService, 'lockAppointmentVenue').mockResolvedValue()
     jest.spyOn(appointmentStaffAssignmentService, 'resolveStaffAssignment').mockResolvedValue('staff-1')

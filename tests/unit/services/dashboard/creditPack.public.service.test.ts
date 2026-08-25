@@ -264,7 +264,10 @@ describe('CreditPack Public Service', () => {
   // lookupCustomerCredits
   // ==========================================
 
-  describe('lookupCustomerCredits', () => {
+  // Fase 0.B (auditoría 2, P1 "canje invitado"): el balance es dato de CUENTA. Se consulta
+  // por el customerId de la sesión, nunca por email/teléfono de la query — con contacto,
+  // cualquiera que supiera tu email veía tus compras y obtenía un balanceId para gastarlas.
+  describe('lookupCustomerCredits (por sesión)', () => {
     it('should return customer with active purchases and balances', async () => {
       const customer = createMockCustomer()
       const purchase = createMockPurchase({
@@ -280,7 +283,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([purchase])
 
-      const result = await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      const result = await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
       expect(result.customer).toEqual({
         id: CUSTOMER_ID,
@@ -296,47 +299,32 @@ describe('CreditPack Public Service', () => {
       })
     })
 
-    it('should return null customer when not found', async () => {
+    it('should return null customer when the session customer no longer exists in the venue', async () => {
       prismaMock.customer.findFirst.mockResolvedValue(null)
 
-      const result = await lookupCustomerCredits(VENUE_ID, 'notfound@example.com')
+      const result = await lookupCustomerCredits(VENUE_ID, 'cust-borrado')
 
       expect(result.customer).toBeNull()
       expect(result.purchases).toEqual([])
     })
 
-    it('should throw BadRequestError when neither email nor phone provided', async () => {
-      await expect(lookupCustomerCredits(VENUE_ID)).rejects.toThrow(BadRequestError)
-      await expect(lookupCustomerCredits(VENUE_ID)).rejects.toThrow('Se requiere email o telefono para consultar creditos')
+    it('🔴 sin customerId (sin sesión) → 401 CUSTOMER_AUTH_REQUIRED, sin consultar nada', async () => {
+      await expect(lookupCustomerCredits(VENUE_ID, '')).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_AUTH_REQUIRED' })
+      await expect(lookupCustomerCredits(VENUE_ID, null as any)).rejects.toMatchObject({ statusCode: 401, code: 'CUSTOMER_AUTH_REQUIRED' })
+      expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackPurchase.findMany).not.toHaveBeenCalled()
     })
 
-    it('should find customer by email', async () => {
+    it('🔴 busca al customer SÓLO por id + venueId — nunca por email ni teléfono', async () => {
       const customer = createMockCustomer()
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(1)
       expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
-        where: {
-          venueId: VENUE_ID,
-          email: 'maria@example.com',
-        },
-      })
-    })
-
-    it('should find customer by phone', async () => {
-      const customer = createMockCustomer()
-      prismaMock.customer.findFirst.mockResolvedValue(customer)
-      prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
-
-      await lookupCustomerCredits(VENUE_ID, undefined, '+525551234567')
-
-      expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
-        where: {
-          venueId: VENUE_ID,
-          phone: '+525551234567',
-        },
+        where: { id: CUSTOMER_ID, venueId: VENUE_ID },
       })
     })
 
@@ -345,7 +333,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
       expect(prismaMock.creditPackPurchase.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -372,7 +360,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
       // The query uses OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }]
       // which excludes purchases whose expiresAt is in the past
@@ -385,7 +373,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits(VENUE_ID, 'maria@example.com')
+      await lookupCustomerCredits(VENUE_ID, CUSTOMER_ID)
 
       expect(prismaMock.creditPackPurchase.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -398,6 +386,56 @@ describe('CreditPack Public Service', () => {
   // ==========================================
   // createCheckoutSession
   // ==========================================
+
+  // Fase 0.B — checkout con sesión: el customerId del token manda sobre el email del body.
+  describe('createCheckoutSession — identidad de sesión (Fase 0.B)', () => {
+    const successUrl = 'https://example.com/success'
+    const cancelUrl = 'https://example.com/cancel'
+    const merchant = () => ({
+      id: 'ecm-stripe-1',
+      chargesEnabled: true,
+      platformFeeBps: 100,
+      providerCredentials: { connectAccountId: 'acct_test_123' },
+      provider: { code: 'STRIPE_CONNECT', active: true },
+    })
+
+    it('con customerId: la metadata de Stripe lleva customerId', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      mockStripeCheckoutCreate.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.com/cs_1' })
+
+      await createCheckoutSession(VENUE_ID, PACK_ID, 'ajeno@x.com', undefined, successUrl, cancelUrl, { customerId: 'c_sesion' })
+
+      const [params] = mockStripeCheckoutCreate.mock.calls[0]
+      expect(params.metadata).toEqual(expect.objectContaining({ customerId: 'c_sesion' }))
+    })
+
+    it('con customerId: maxPerCustomer cuenta por ese id, NO busca por el email del body', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ maxPerCustomer: 1 }))
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      prismaMock.creditPackPurchase.count.mockResolvedValue(1) // ya compró una
+
+      await expect(
+        createCheckoutSession(VENUE_ID, PACK_ID, 'otro@x.com', undefined, successUrl, cancelUrl, { customerId: 'c_sesion' }),
+      ).rejects.toThrow(/limite/i)
+
+      expect(prismaMock.creditPackPurchase.count).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ customerId: 'c_sesion' }) }),
+      )
+      expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('sin customerId (invitado): maxPerCustomer sigue resolviendo por email como hoy', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ maxPerCustomer: 1 }))
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'c_por_email' })
+      prismaMock.creditPackPurchase.count.mockResolvedValue(1)
+
+      await expect(createCheckoutSession(VENUE_ID, PACK_ID, 'maria@x.com', undefined, successUrl, cancelUrl)).rejects.toThrow(/limite/i)
+
+      expect(prismaMock.customer.findFirst).toHaveBeenCalled()
+    })
+  })
 
   describe('createCheckoutSession', () => {
     const successUrl = 'https://example.com/success'
@@ -576,7 +614,7 @@ describe('CreditPack Public Service', () => {
 
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null) // Not yet processed
-      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       prismaMock.customer.findUnique.mockResolvedValue(customer) // findOrCreateCustomer uses findUnique
       prismaMock.creditPackPurchase.create.mockResolvedValue(newPurchase)
       prismaMock.creditItemBalance.create.mockResolvedValueOnce(createMockBalance({ id: 'bal-1', productId: 'prod-yoga' }))
@@ -653,7 +691,7 @@ describe('CreditPack Public Service', () => {
 
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
-      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       prismaMock.customer.findUnique.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.create.mockResolvedValue(newPurchase)
       prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
@@ -691,7 +729,7 @@ describe('CreditPack Public Service', () => {
 
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
-      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       prismaMock.customer.findUnique.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.create.mockResolvedValue(newPurchase)
       prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
@@ -720,7 +758,7 @@ describe('CreditPack Public Service', () => {
 
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
-      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       prismaMock.customer.findUnique.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.create.mockResolvedValue(newPurchase)
       prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
@@ -749,7 +787,7 @@ describe('CreditPack Public Service', () => {
 
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
-      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       prismaMock.customer.findUnique.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.create.mockResolvedValue(newPurchase)
       prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
@@ -781,7 +819,7 @@ describe('CreditPack Public Service', () => {
 
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
-      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       // No customer found by email (email is undefined so findUnique by email is not called)
       // Found by phone
       prismaMock.customer.findUnique.mockResolvedValue(customer)
@@ -806,7 +844,7 @@ describe('CreditPack Public Service', () => {
 
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
-      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       // Not found by email or phone
       prismaMock.customer.findUnique.mockResolvedValue(null)
       prismaMock.customer.create.mockResolvedValue(newCustomer)
@@ -834,7 +872,7 @@ describe('CreditPack Public Service', () => {
 
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
-      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       prismaMock.customer.findUnique.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.create.mockResolvedValue(newPurchase)
       prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
@@ -866,6 +904,142 @@ describe('CreditPack Public Service', () => {
       expect(result).toBeUndefined()
       expect(prismaMock.creditPackPurchase.findUnique).not.toHaveBeenCalled()
       expect(prismaMock.creditPack.findUnique).not.toHaveBeenCalled()
+    })
+
+    // ==========================================
+    // Fase 0.B (auditoría 2, P1 "Stripe vuelve silenciosamente al contacto"):
+    // con metadata.customerId el fulfillment es FAIL-CLOSED. Si ese customer no
+    // resuelve en el venue (borrado / otro venue), NO se reasigna la compra a quien
+    // coincida por email: se registra MoneyAnomaly y se lanza. Inactivo conserva
+    // al dueño (el dinero es suyo; no podrá usarlo hasta reactivación).
+    // ==========================================
+    describe('identidad de sesión (metadata.customerId) — fail-closed', () => {
+      const SESSION_CUSTOMER_ID = 'cust-sesion-777'
+
+      const armHappyPath = (pack = createMockPack()) => {
+        prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+        prismaMock.creditPack.findFirst.mockResolvedValue(pack)
+        prismaMock.creditPackPurchase.create.mockImplementation(async ({ data }: any) =>
+          createMockPurchase({ ...data, id: 'purchase-new' }),
+        )
+        prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
+        prismaMock.creditTransaction.create.mockResolvedValue({})
+        prismaMock.customer.update.mockResolvedValue(createMockCustomer())
+        prismaMock.moneyAnomaly.create.mockResolvedValue({} as any)
+      }
+
+      it('🔴 customerId válido en el venue → la compra es de ESE customer; nunca busca ni crea por email/teléfono', async () => {
+        mockStripeCheckoutRetrieve.mockResolvedValue(
+          createMockStripeSession({ metadata: { ...createMockStripeSession().metadata, customerId: SESSION_CUSTOMER_ID } }),
+        )
+        armHappyPath()
+        prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ id: SESSION_CUSTOMER_ID }))
+
+        const result = await fulfillPurchase(checkoutSessionId)
+
+        expect(result).toBeTruthy()
+        expect(prismaMock.customer.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { id: SESSION_CUSTOMER_ID, venueId: VENUE_ID } }),
+        )
+        expect(prismaMock.customer.findUnique).not.toHaveBeenCalled() // findOrCreateCustomer (contacto) NO corre
+        expect(prismaMock.customer.create).not.toHaveBeenCalled()
+        expect(prismaMock.creditPackPurchase.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({ customerId: SESSION_CUSTOMER_ID, venueId: VENUE_ID }),
+        })
+        expect(prismaMock.moneyAnomaly.create).not.toHaveBeenCalled()
+      })
+
+      it('🔴 customerId BORRADO (no existe) → MoneyAnomaly + throw; NO crea compra ni reasigna por contacto', async () => {
+        mockStripeCheckoutRetrieve.mockResolvedValue(
+          createMockStripeSession({ metadata: { ...createMockStripeSession().metadata, customerId: 'cust-borrado' } }),
+        )
+        armHappyPath()
+        prismaMock.customer.findFirst.mockResolvedValue(null)
+        // Si el código cayera al contacto, este mock le daría un Customer "válido" — no debe usarlo.
+        prismaMock.customer.findUnique.mockResolvedValue(createMockCustomer())
+
+        await expect(fulfillPurchase(checkoutSessionId)).rejects.toMatchObject({ code: 'CREDIT_PACK_OWNER_UNRESOLVED' })
+
+        expect(prismaMock.moneyAnomaly.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            category: 'CREDIT_PACK_OWNER_UNRESOLVED',
+            stripeEventId: checkoutSessionId,
+            expectedState: expect.objectContaining({ customerId: 'cust-borrado', venueId: VENUE_ID }),
+          }),
+        })
+        expect(prismaMock.creditPackPurchase.create).not.toHaveBeenCalled()
+        expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
+        expect(prismaMock.customer.create).not.toHaveBeenCalled()
+      })
+
+      it('🔴 customerId de OTRO venue → la búsqueda va filtrada por venueId y, al no resolver, fail-closed igual', async () => {
+        mockStripeCheckoutRetrieve.mockResolvedValue(
+          createMockStripeSession({ metadata: { ...createMockStripeSession().metadata, customerId: 'cust-de-otro-venue' } }),
+        )
+        armHappyPath()
+        prismaMock.customer.findFirst.mockResolvedValue(null)
+
+        await expect(fulfillPurchase(checkoutSessionId)).rejects.toMatchObject({ code: 'CREDIT_PACK_OWNER_UNRESOLVED' })
+
+        expect(prismaMock.customer.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { id: 'cust-de-otro-venue', venueId: VENUE_ID } }),
+        )
+        expect(prismaMock.creditPackPurchase.create).not.toHaveBeenCalled()
+      })
+
+      it('customerId INACTIVO → conserva al dueño (el dinero es suyo), sin reasignar por contacto', async () => {
+        mockStripeCheckoutRetrieve.mockResolvedValue(
+          createMockStripeSession({ metadata: { ...createMockStripeSession().metadata, customerId: SESSION_CUSTOMER_ID } }),
+        )
+        armHappyPath()
+        prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ id: SESSION_CUSTOMER_ID, active: false }))
+
+        await fulfillPurchase(checkoutSessionId)
+
+        expect(prismaMock.creditPackPurchase.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({ customerId: SESSION_CUSTOMER_ID }),
+        })
+        expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
+        expect(prismaMock.moneyAnomaly.create).not.toHaveBeenCalled()
+      })
+
+      it('🔴 el pack se resuelve por {id, venueId} de la metadata, no sólo por id', async () => {
+        mockStripeCheckoutRetrieve.mockResolvedValue(
+          createMockStripeSession({ metadata: { ...createMockStripeSession().metadata, customerId: SESSION_CUSTOMER_ID } }),
+        )
+        armHappyPath()
+        prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ id: SESSION_CUSTOMER_ID }))
+
+        await fulfillPurchase(checkoutSessionId)
+
+        expect(prismaMock.creditPack.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: PACK_ID, venueId: VENUE_ID } }))
+        expect(prismaMock.creditPack.findUnique).not.toHaveBeenCalled()
+      })
+
+      it('anomalía duplicada (reintento de Stripe, P2002 en MoneyAnomaly) → no tapa el error real; sigue lanzando OWNER_UNRESOLVED', async () => {
+        mockStripeCheckoutRetrieve.mockResolvedValue(
+          createMockStripeSession({ metadata: { ...createMockStripeSession().metadata, customerId: 'cust-borrado' } }),
+        )
+        armHappyPath()
+        prismaMock.customer.findFirst.mockResolvedValue(null)
+        prismaMock.moneyAnomaly.create.mockRejectedValue(Object.assign(new Error('dup'), { code: 'P2002' }))
+
+        await expect(fulfillPurchase(checkoutSessionId)).rejects.toMatchObject({ code: 'CREDIT_PACK_OWNER_UNRESOLVED' })
+      })
+
+      it('regresión: SIN customerId (invitado) → findOrCreateCustomer por contacto como antes', async () => {
+        mockStripeCheckoutRetrieve.mockResolvedValue(createMockStripeSession())
+        armHappyPath()
+        prismaMock.customer.findUnique.mockResolvedValue(createMockCustomer())
+
+        await fulfillPurchase(checkoutSessionId)
+
+        expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+        expect(prismaMock.customer.findUnique).toHaveBeenCalled()
+        expect(prismaMock.creditPackPurchase.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({ customerId: CUSTOMER_ID }),
+        })
+      })
     })
   })
 
@@ -1219,7 +1393,7 @@ describe('CreditPack Public Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(customer)
       prismaMock.creditPackPurchase.findMany.mockResolvedValue([])
 
-      await lookupCustomerCredits('venue-ABC', 'test@example.com')
+      await lookupCustomerCredits('venue-ABC', 'cust-abc')
 
       expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
         where: expect.objectContaining({ venueId: 'venue-ABC' }),

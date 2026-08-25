@@ -14,6 +14,7 @@ import { CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerToken } from '@/jwt.service'
+import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 
 const SALT_ROUNDS = 10
 
@@ -31,68 +32,93 @@ export async function registerCustomer(
     where: { venueId_email: { venueId, email } },
   })
 
+  // Fase 0.B: un contacto desactivado no se "activa" poniéndole password desde el registro
+  // público. Reactivar es decisión del venue, no del cliente. Va ANTES del 400 "ya existe":
+  // si ya tenía password, el "inicia sesión" también le daría 401 — mejor decírselo aquí.
+  if (existing && existing.active === false) {
+    throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+  }
+
   if (existing?.password) {
     throw new BadRequestError('Ya existe una cuenta con este correo. Inicia sesión.')
   }
 
+  // El hash va FUERA de la transacción: son ~100 ms de CPU pura que no tocan la DB, y
+  // sostener una tx abierta mientras tanto desperdicia una conexión del pool.
   const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS)
 
-  let customer
-  if (existing) {
-    // Customer exists (created from booking/credit purchase) — set password
-    customer = await prisma.customer.update({
-      where: { id: existing.id },
-      data: {
-        password: hashedPassword,
-        provider: 'EMAIL',
-        ...(phone && !existing.phone ? { phone } : {}),
-        ...(firstName && !existing.firstName ? { firstName } : {}),
-        ...(lastName && !existing.lastName ? { lastName } : {}),
-      },
-    })
-  } else {
-    // Check if phone is already taken
-    if (phone) {
-      const phoneExists = await prisma.customer.findUnique({
-        where: { venueId_phone: { venueId, phone } },
+  // Fase 1: crear/actualizar el Customer y DECIDIR su estado de aprobación ocurren en la MISMA
+  // transacción. Si el registro se revierte, la solicitud de aprobación (y su correo encolado)
+  // se revierten con él; y nadie queda "en espera" de una cuenta que no existe.
+  const { customer, approvalStatus } = await prisma.$transaction(async tx => {
+    let customer
+    if (existing) {
+      // Customer exists (created from booking/credit purchase) — set password
+      customer = await tx.customer.update({
+        where: { id: existing.id },
+        data: {
+          password: hashedPassword,
+          provider: 'EMAIL',
+          ...(phone && !existing.phone ? { phone } : {}),
+          ...(firstName && !existing.firstName ? { firstName } : {}),
+          ...(lastName && !existing.lastName ? { lastName } : {}),
+        },
       })
-      if (phoneExists?.password) {
-        throw new BadRequestError('Ya existe una cuenta con este teléfono.')
+    } else {
+      // Check if phone is already taken
+      if (phone) {
+        const phoneExists = await tx.customer.findUnique({
+          where: { venueId_phone: { venueId, phone } },
+        })
+        // Fase 0.B: misma regla que el contacto por email — un contacto desactivado no se
+        // "activa" fusionándole email+password desde el registro público. Antes del 400.
+        if (phoneExists && phoneExists.active === false) {
+          throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+        }
+        if (phoneExists?.password) {
+          throw new BadRequestError('Ya existe una cuenta con este teléfono.')
+        }
+        if (phoneExists) {
+          // Phone customer exists without password — merge by setting email + password
+          customer = await tx.customer.update({
+            where: { id: phoneExists.id },
+            data: {
+              email,
+              password: hashedPassword,
+              provider: 'EMAIL',
+              ...(firstName ? { firstName } : {}),
+              ...(lastName ? { lastName } : {}),
+            },
+          })
+        }
       }
-      if (phoneExists) {
-        // Phone customer exists without password — merge by setting email + password
-        customer = await prisma.customer.update({
-          where: { id: phoneExists.id },
+
+      if (!customer) {
+        customer = await tx.customer.create({
           data: {
+            venueId,
             email,
+            phone: phone || null,
             password: hashedPassword,
             provider: 'EMAIL',
-            ...(firstName ? { firstName } : {}),
-            ...(lastName ? { lastName } : {}),
+            firstName: firstName || null,
+            lastName: lastName || null,
           },
         })
       }
     }
 
-    if (!customer) {
-      customer = await prisma.customer.create({
-        data: {
-          venueId,
-          email,
-          phone: phone || null,
-          password: hashedPassword,
-          provider: 'EMAIL',
-          firstName: firstName || null,
-          lastName: lastName || null,
-        },
-      })
-    }
-  }
+    const activation = await activateCustomerAccount(tx, { customerId: customer.id, venueId, origin: 'PASSWORD' })
+    return { customer, approvalStatus: activation.approvalStatus }
+  })
 
+  // El token se emite DESPUÉS del commit: si la transacción falló, nadie recibe sesión.
   const token = generateCustomerToken(customer.id, venueId)
 
   return {
     token,
+    /** Fase 1: el controller lo compone en `bookingAccess` para que el widget pinte "en espera". */
+    approvalStatus,
     customer: {
       id: customer.id,
       firstName: customer.firstName,
@@ -118,6 +144,12 @@ export async function loginCustomer(venueId: string, email: string, password: st
   const valid = await bcrypt.compare(password, customer.password)
   if (!valid) {
     throw new UnauthorizedError('Correo o contraseña incorrectos')
+  }
+
+  // Fase 0.B: una cuenta desactivada por el venue no recibe token por ninguna puerta.
+  // Se comprueba DESPUÉS del password para no revelar el estado a quien no lo sabe.
+  if (customer.active === false) {
+    throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
   }
 
   const token = generateCustomerToken(customer.id, venueId)

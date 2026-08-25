@@ -11,6 +11,8 @@ import {
 const MAX_BOOKED_PRODUCTS = 20
 const MAX_FINAL_DURATION_MIN = 1_440
 const BASE_WINDOW_TOLERANCE_MS = 60_000
+/** Tope del buffer post-servicio. Cuatro horas ya es un turno completo. */
+const MAX_BUFFER_AFTER_MIN = 240
 
 type ReservationDbClient = PrismaClient | Prisma.TransactionClient
 
@@ -32,6 +34,16 @@ export interface ResolvedAppointmentWindow {
   productIds: string[]
   modifierRows: ResolvedModifierRow[]
   modifierPriceDelta: Prisma.Decimal
+  /** Buffer post-servicio aplicado (0 = sin buffer). */
+  bufferAfterMin: number
+  /**
+   * Fin del BLOQUE DE AGENDA = `finalEndsAt` + `bufferAfterMin`.
+   *
+   * Es lo que persiste `Reservation.blockedEndsAt` y lo único que deben
+   * consultar disponibilidad y detección de solapamientos. `finalEndsAt` sigue
+   * siendo la hora del CLIENTE: no las intercambies.
+   */
+  blockedEndsAt: Date
 }
 
 export interface BookedProductInput {
@@ -115,10 +127,53 @@ export function reservationBookedProductIds(reservation: { productId: string | n
   return productIds
 }
 
+/**
+ * Normaliza el buffer guardado en el catálogo a un entero usable.
+ *
+ * Fail-safe deliberado: un valor corrupto (negativo, fraccionario, absurdo)
+ * degrada a 0 o al tope, NUNCA lanza. Un dato malo en un producto no puede
+ * impedirle vender una cita a un salón — el mismo criterio que la impresión
+ * offline, donde el "fail-safe" de no imprimir era peor que imprimir con datos
+ * viejos.
+ */
+function sanitizeBufferAfterMin(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return 0
+  return Math.min(value, MAX_BUFFER_AFTER_MIN)
+}
+
+/**
+ * El buffer post-servicio que aplica a un conjunto de servicios, sin exigir que
+ * la ventana completa se resuelva. Lo usan los caminos de escritura que ya
+ * calcularon su `endsAt` por otra vía (dashboard legacy, reprogramaciones).
+ *
+ * Filtra por `APPOINTMENTS_SERVICE`, así que una reserva de CLASE devuelve 0
+ * naturalmente: el buffer es un concepto de citas de servicio.
+ */
+export async function resolveBufferAfterMin(db: ReservationDbClient, args: { venueId: string; productIds: string[] }): Promise<number> {
+  const productIds = stableDedupe(args.productIds.map(id => id.trim()).filter(Boolean))
+  if (productIds.length === 0 || productIds.length > MAX_BOOKED_PRODUCTS) return 0
+
+  const products = await db.product.findMany({
+    where: { id: { in: productIds }, venueId: args.venueId, type: 'APPOINTMENTS_SERVICE' },
+    select: { bufferAfterMin: true },
+  })
+
+  let bufferAfterMin = 0
+  for (const product of products) {
+    bufferAfterMin = Math.max(bufferAfterMin, sanitizeBufferAfterMin(product.bufferAfterMin))
+  }
+  return bufferAfterMin
+}
+
+/** `endsAt` + buffer. Único lugar donde se compone el fin de bloque. */
+export function applyBufferToEndsAt(endsAt: Date, bufferAfterMin: number): Date {
+  return bufferAfterMin > 0 ? new Date(endsAt.getTime() + bufferAfterMin * 60_000) : endsAt
+}
+
 export async function resolveCanonicalAppointmentDuration(
   db: ReservationDbClient,
   args: CanonicalAppointmentDurationArgs,
-): Promise<{ productIds: string[]; canonicalBaseDurationMin: number }> {
+): Promise<{ productIds: string[]; canonicalBaseDurationMin: number; bufferAfterMin: number }> {
   const productIds = stableDedupe(args.productIds.map(id => id.trim()).filter(Boolean))
   if (productIds.length === 0 || productIds.length > MAX_BOOKED_PRODUCTS) {
     throw new BadRequestError('Selecciona entre 1 y 20 servicios de cita válidos')
@@ -130,7 +185,7 @@ export async function resolveCanonicalAppointmentDuration(
       venueId: args.venueId,
       type: 'APPOINTMENTS_SERVICE',
     },
-    select: { id: true, duration: true, durationMinutes: true },
+    select: { id: true, duration: true, durationMinutes: true, bufferAfterMin: true },
   })
 
   if (products.length !== productIds.length) {
@@ -139,6 +194,7 @@ export async function resolveCanonicalAppointmentDuration(
 
   const byId = new Map(products.map(product => [product.id, product]))
   let canonicalBaseDurationMin = 0
+  let bufferAfterMin = 0
   for (const productId of productIds) {
     const product = byId.get(productId)
     if (!product) {
@@ -149,9 +205,16 @@ export async function resolveCanonicalAppointmentDuration(
       throw new BadRequestError('Uno o más servicios tienen una duración inválida')
     }
     canonicalBaseDurationMin += duration
+    // UN solo buffer al final de la cita, el MAYOR de los servicios incluidos.
+    // Sumarlos inflaría una cita de tres servicios hasta volverla invendible, y
+    // la limpieza real ocurre una vez, al terminar la sesión completa.
+    bufferAfterMin = Math.max(bufferAfterMin, sanitizeBufferAfterMin(product.bufferAfterMin))
   }
 
-  return { productIds, canonicalBaseDurationMin }
+  // El buffer viaja APARTE de la duración canónica a propósito: si entrara aquí,
+  // el widget mostraría una hora de fin falsa y `APPOINTMENT_WINDOW_CHANGED`
+  // rechazaría ventanas correctas.
+  return { productIds, canonicalBaseDurationMin, bufferAfterMin }
 }
 
 /**
@@ -214,16 +277,21 @@ export async function resolveAppointmentWindow(
     throw new BadRequestError('La duración final de la cita debe estar entre 1 y 1440 minutos')
   }
 
+  // El buffer se aplica al FINAL, sobre la ventana ya ajustada por modificadores.
+  const finalEndsAt = new Date(input.startsAt.getTime() + finalDurationMin * 60_000)
+
   return {
     startsAt: input.startsAt,
     baseEndsAt: expectedBaseEndsAt,
-    finalEndsAt: new Date(input.startsAt.getTime() + finalDurationMin * 60_000),
+    finalEndsAt,
     canonicalBaseDurationMin: canonical.canonicalBaseDurationMin,
     modifierDurationDelta: modifiers.totalDurationDelta,
     finalDurationMin,
     productIds: canonical.productIds,
     modifierRows: modifiers.persistRows,
     modifierPriceDelta: modifiers.totalDelta,
+    bufferAfterMin: canonical.bufferAfterMin,
+    blockedEndsAt: new Date(finalEndsAt.getTime() + canonical.bufferAfterMin * 60_000),
   }
 }
 

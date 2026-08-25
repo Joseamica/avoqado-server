@@ -16,7 +16,11 @@ import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import prisma from '../../utils/prismaClient'
 import { StaffRole } from '@prisma/client'
-import { getOrgStockOverview, exportOrgStockExcel } from '../../controllers/dashboard/organizationStockControl.controller'
+import {
+  getOrgStockOverview,
+  exportOrgStockExcel,
+  getOrgInventoryByResponsible,
+} from '../../controllers/dashboard/organizationStockControl.controller'
 
 const router = Router({ mergeParams: true })
 
@@ -62,5 +66,10 @@ const requireOrgStockReader = requireOrgRole([StaffRole.OWNER, StaffRole.MANAGER
 
 router.get('/stock-control/overview', authenticateTokenMiddleware, requireOrgStockReader, getOrgStockOverview)
 router.get('/stock-control/export.xlsx', authenticateTokenMiddleware, requireOrgOwner, exportOrgStockExcel)
+
+// Tabla Ciudad › Supervisor › Promotor. Mismo gate de lectura que /overview:
+// los Supervisores (MANAGER) tienen que poder consultarla y exportarla para
+// auditar físicamente a sus promotores en tienda.
+router.get('/stock-control/by-responsible', authenticateTokenMiddleware, requireOrgStockReader, getOrgInventoryByResponsible)
 
 export default router

@@ -37,6 +37,7 @@ import AppError from '../errors/AppError'
 import { getPromoterCashOut, withdrawAsPromoter } from '../services/dashboard/cash-out/cash-out.promoter.service'
 import { DEFAULT_PERMISSIONS, expandWildcards, resolvePermissions } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
@@ -2158,7 +2159,30 @@ router.get('/terminals/:serialNumber/activation-status', activationController.ch
  *                   type: string
  *                   example: "Terminal not found with serial number: 2841548417"
  */
-router.get('/terminals/:serialNumber/config', validateRequest(serialNumberParamSchema), terminalController.getTerminalConfig)
+// ──────────────────────────────────────────────────────────────────────────────
+// 🔴 Este endpoint es PÚBLICO (sin auth) y devuelve la configuración del comercio.
+// El límite NO lo arregla —a quien ya tiene un serial le basta UNA petición— pero
+// encarece raspar muchos seriales y deja el intento visible en el log.
+// 60/min por IP es holgadísimo para uso legítimo: una terminal lo llama al arrancar,
+// así que ni un local con decenas de terminales reiniciando a la vez lo alcanza.
+// El arreglo de fondo (autenticar el endpoint y sacar credenciales del payload) exige
+// desplegar la app de PAX antes — 3-5 días por la firma — y va aparte.
+// ──────────────────────────────────────────────────────────────────────────────
+const terminalConfigLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => req.ip,
+  message: { error: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
+})
+
+router.get(
+  '/terminals/:serialNumber/config',
+  terminalConfigLimiter,
+  validateRequest(serialNumberParamSchema),
+  terminalController.getTerminalConfig,
+)
 
 // ==========================================
 // APP UPDATE ENDPOINTS (Dual Update System)
@@ -7723,5 +7747,16 @@ router.post(
   validateRequest(ForceOverrideReferralSchema),
   referralsTpvController.forceOverride,
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kiosco — Fase 5: el reto de check-in
+//
+// El aparato pide un reto (QR), sondea si alguien lo resolvió, y como respaldo deja
+// teclear el código de confirmación. Nunca recibe la identidad de quien hizo check-in:
+// esta pantalla la ve la fila entera.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/kiosk/challenge', authenticateTokenMiddleware, kioskCheckInController.createChallenge)
+router.get('/kiosk/challenge/:challengeId', authenticateTokenMiddleware, kioskCheckInController.getChallenge)
+router.post('/kiosk/check-in-by-code', authenticateTokenMiddleware, kioskCheckInController.checkInByCode)
 
 export default router

@@ -162,6 +162,8 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
     })
   }
   const DECISION_MAP = { approve: 'APPROVE', reject: 'REJECT', reject_final: 'REJECT_FINAL' } as const
+  /** Status each decision lands in — same table as the service (`DECISION_TARGET_STATUS`). */
+  const DECISION_TARGET_STATUS = { approve: 'COMPLETED', reject: 'FAILED', reject_final: 'REJECTED' } as const
 
   server.tool(
     'review_sale_verification',
@@ -196,6 +198,18 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
       const sale = await fetchSaleForPreview(saleVerificationId)
       if (!sale) return text({ ok: false, error: 'No encontré esa venta en tu organización.' })
       if (sale.status !== 'PENDING') {
+        // Same outcome already on file → idempotent success (nothing to write, nothing to audit).
+        // Mirrors the service's own no-op; a retry of the same decision must not read as a failure.
+        if (sale.status === DECISION_TARGET_STATUS[decision]) {
+          return text({
+            ok: true,
+            idempotent: true,
+            saleVerificationId,
+            decision: DECISION_MAP[decision],
+            status: sale.status,
+            message: `Esta venta ya estaba en ${sale.status}: la decisión "${decision}" ya se había aplicado. No se cambió nada.`,
+          })
+        }
         return text({
           ok: false,
           error: `Esta venta está en estado ${sale.status}, no PENDING. Solo se pueden aprobar/rechazar ventas PENDING. Si ya está COMPLETED y quieres re-evaluarla usa reopen_sale_verification; para corregir datos usa edit_sale_verification.`,
@@ -232,15 +246,21 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
           rejectionReasons,
           reviewNotes,
         })
-        await auditMcpWrite(scope, {
-          action: 'SALE_VERIFICATION_REVIEWED_VIA_MCP',
-          entity: 'SaleVerification',
-          entityId: saleVerificationId,
-          venueId: sale.venueId,
-          data: { decision: DECISION_MAP[decision], rejectionReasons: rejectionReasons ?? [], reviewNotes: reviewNotes ?? null },
-        })
+        // If the status moved between our preview read and the service call (race),
+        // the service resolved it as a no-op: nothing was written, so nothing to audit.
+        const noOp = (result as { idempotentNoOp?: true })?.idempotentNoOp === true
+        if (!noOp) {
+          await auditMcpWrite(scope, {
+            action: 'SALE_VERIFICATION_REVIEWED_VIA_MCP',
+            entity: 'SaleVerification',
+            entityId: saleVerificationId,
+            venueId: sale.venueId,
+            data: { decision: DECISION_MAP[decision], rejectionReasons: rejectionReasons ?? [], reviewNotes: reviewNotes ?? null },
+          })
+        }
         return text({
           ok: true,
+          ...(noOp ? { idempotent: true } : {}),
           saleVerificationId,
           decision: DECISION_MAP[decision],
           status: (result as { status?: string })?.status ?? null,

@@ -493,11 +493,13 @@ model Venue {
   // ==========================================
   // RESERVATION / BOOKING SYSTEM
   // ==========================================
-  reservations        Reservation[]
-  slotHolds           SlotHold[]
-  classSessions       ClassSession[]
-  waitlistEntries     ReservationWaitlistEntry[]
-  reservationSettings ReservationSettings?
+  reservations           Reservation[]
+  slotHolds              SlotHold[]
+  classSessions          ClassSession[]
+  waitlistEntries        ReservationWaitlistEntry[]
+  reservationSettings    ReservationSettings?
+  // Fase 1 — avisos de aprobación de clientes pendientes de entregar
+  customerApprovalOutbox CustomerApprovalOutbox[]
 
   // Per-venue defaults applied to NEW payment links + admin notification
   // preferences when a link is paid. See VenuePaymentLinkSettings for fields.
@@ -617,7 +619,10 @@ model Venue {
   upsellAiRuns      UpsellAiRun[]
 
   // Promociones del POS (tier PRO, código PROMOTIONS)
-  promotions Promotion[]
+  promotions             Promotion[]
+  kioskCheckInChallenges KioskCheckInChallenge[]
+  kioskCheckInAttempts   KioskCheckInAttempt[]
+  kioskOutreachOutbox    KioskOutreachOutbox[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1056,6 +1061,10 @@ model Staff {
   emailTemplatesCreated     EmailTemplate[]     @relation("EmailTemplateCreator")
   marketingCampaignsCreated MarketingCampaign[] @relation("MarketingCampaignCreator")
 
+  /// Fase 1 — clientes que ESTE staff aprobó o rechazó. onDelete: Restrict del lado del
+  /// Customer: dar de baja a un staff nunca borra la historia de quién decidió.
+  customerApprovalsDecided Customer[] @relation("CustomerApprovalDecider")
+
   // Payment Links
   paymentLinksCreated     PaymentLink[]            @relation("PaymentLinkCreatedBy")
   /// Payment links where THIS staff is one of the commission recipients
@@ -1248,15 +1257,15 @@ model StaffPasskey {
 /// Venue-specific role permission configurations.
 /// Allows OWNER and ADMIN to customize default permissions for each role.
 model VenueRolePermission {
-  id          String    @id @default(cuid())
-  venueId     String
-  venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  role        StaffRole
+  id                String    @id @default(cuid())
+  venueId           String
+  venue             Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  role              StaffRole
   /// Lo que este venue AGREGA sobre los permisos de fábrica del rol. Es aditivo a
   /// propósito: así, cuando la plataforma le suma permisos nuevos a un rol, los venues
   /// que ya habían personalizado también los reciben en vez de quedarse congelados en la
   /// lista del día que la guardaron (ver el test "keeps new OWNER defaults…", a3625d37).
-  permissions String[] // Custom permissions array: ["menu:read", "orders:create", ...]
+  permissions       String[] // Custom permissions array: ["menu:read", "orders:create", ...]
   /// Lo que este venue QUITA. Va aparte de `permissions` porque un solo campo no puede
   /// decir las dos cosas: si la lista guardada fuera "todo lo que el rol tiene", quitar
   /// funcionaría pero el venue dejaría de recibir los permisos nuevos. Con el campo
@@ -1266,7 +1275,7 @@ model VenueRolePermission {
   /// conserva IMPLICA al excluido, el excluido vuelve — y el dashboard lo muestra como
   /// "viene incluido en X" en vez de mentir. Decisión del founder (2026-08-18): lo
   /// incluido no se quita por separado, pero se ve.
-  deniedPermissions String[] @default([])
+  deniedPermissions String[]  @default([])
 
   // Audit trail
   modifiedBy String
@@ -1707,6 +1716,14 @@ model Product {
 
   // General-purpose duration (any product type, e.g., haircut = 45 min)
   durationMinutes Int? // Duration in minutes (optional, for scheduling/display)
+
+  // Tiempo de limpieza/preparación DESPUÉS del servicio (Square: "Block extra
+  // time after appointment"; Booksy: "Padding Time"). Aparta agenda pero NO
+  // mueve la hora de fin que ve el cliente — mezclarlas es el hack de Mindbody,
+  // que obliga a borrar la hora de fin de los correos. Null/0 = sin buffer, que
+  // es el comportamiento previo a esta columna.
+  // Plan: docs/plans/2026-08-22-buffer-y-ediciones-gcal.md
+  bufferAfterMin Int?
 
   // Inventory tracking configuration
   trackInventory  Boolean          @default(false)
@@ -3215,7 +3232,11 @@ model Order {
 
   // Originating reservation — set by check-in auto-conversion so the cashier
   // sees the booked services + picked modifiers pre-populated. Idempotency
-  // anchor: createOrderFromReservation skips when this order already exists.
+  // anchor: createOrderFromReservation skips when an ALIVE order already exists.
+  // DB-level guarantee (Fase 0.C, migration 20260822150000): partial unique index
+  // `Order_reservationId_alive_key` ON (reservationId) WHERE reservationId IS NOT NULL
+  // AND status NOT IN ('CANCELLED','DELETED') — Prisma can't express it here; the
+  // loser of a concurrent check-in gets P2002 and is handed the winner's order.
   reservationId String?
   reservation   Reservation? @relation("OrderFromReservation", fields: [reservationId], references: [id], onDelete: SetNull)
 
@@ -3723,6 +3744,7 @@ model Payment {
 
   // Commission System
   commissionCalculations CommissionCalculation[]
+  creditPackPurchase     CreditPackPurchase?     @relation("CreditPackPurchasePayment")
 
   // Webhook reconciliation: Blumon TPV (and other providers) post webhooks that
   // we link back to Payments here. One Payment can have multiple events (initial
@@ -6322,6 +6344,23 @@ model Customer {
 
   active Boolean @default(true)
 
+  // ---- Fase 1: aprobación del cliente por el venue -------------------------------------
+  // Sólo aplica cuando ReservationSettings.requireCustomerApproval está prendido; con el
+  // switch apagado el gate ni siquiera lee estos campos. Default APPROVED: nadie que ya
+  // exista pasa a PENDING jamás (ni en la migración ni al mover el switch).
+  approvalStatus           CustomerApprovalStatus @default(APPROVED)
+  /// Separa el CONTACTO de CRM (creado por staff, import o checkout) de la CUENTA que
+  /// alguien activó con password/OTP/Consumer. Sólo una cuenta activada pide aprobación.
+  accountActivatedAt       DateTime?
+  approvalRequestedAt      DateTime?
+  approvalDecidedAt        DateTime?
+  approvalDecidedByStaffId String?
+  approvalDecisionReason   String?                @db.Text
+  /// Token de fencing: sube en cada decisión. La reserva lo compara dentro de su
+  /// transacción serializable, así la carrera aprobar-vs-reservar es determinista.
+  approvalVersion          Int                    @default(0)
+  approvalDecidedBy        Staff?                 @relation("CustomerApprovalDecider", fields: [approvalDecidedByStaffId], references: [id], onDelete: Restrict)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -6347,6 +6386,10 @@ model Customer {
   // Facturación CFDI 4.0
   taxProfiles CustomerTaxProfile[]
 
+  // Fase 1 — avisos de aprobación encolados para este cliente
+  approvalOutbox      CustomerApprovalOutbox[]
+  kioskOutreachOutbox KioskOutreachOutbox[]
+
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
   @@unique([venueId, referralCode])
@@ -6354,6 +6397,8 @@ model Customer {
   @@index([consumerId])
   @@index([customerGroupId])
   @@index([referredByCustomerId])
+  /// Fase 1: la bandeja "En espera de aprobación" del dashboard, ordenada por antigüedad.
+  @@index([venueId, approvalStatus, approvalRequestedAt])
 }
 
 model Consumer {
@@ -6402,6 +6447,10 @@ model ConsumerAuthAccount {
 
 model OtpChallenge {
   id          String    @id @default(cuid())
+  // Fase 0.B: el reto está atado al venue. Un OTP pedido en A no verifica en B, y pedir uno
+  // en B no invalida el de A. Nullable sólo por la migración: los retos creados antes
+  // quedan con NULL y `verify` los RECHAZA (TTL 10 min ⇒ mueren solos; sin rama legacy).
+  venueId     String?
   channel     String // 'whatsapp' | 'email'
   destination String // E.164 phone OR lowercased email
   codeHash    String // sha256(code + OTP_PEPPER); never store plaintext
@@ -6413,6 +6462,7 @@ model OtpChallenge {
   createdAt   DateTime  @default(now())
 
   @@index([destination, expiresAt])
+  @@index([venueId, destination, channel])
 }
 
 model CustomerGroup {
@@ -7942,6 +7992,97 @@ enum AuthProvider {
   PHONE
 }
 
+/// Fase 1 — si el venue aprueba a quién le deja reservar. APPROVED es el default de todos
+/// (el switch apagado es el caso normal); PENDING sólo nace al ACTIVAR una cuenta con el
+/// switch prendido; REJECTED nunca cancela reservas ni revoca créditos ya existentes.
+enum CustomerApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// Los 4 avisos de la aprobación. `REQUESTED_STAFF` va a los roles configurados del venue;
+/// los otros tres, al cliente.
+enum CustomerApprovalEvent {
+  REQUESTED_STAFF
+  PENDING_CUSTOMER
+  APPROVED_CUSTOMER
+  REJECTED_CUSTOMER
+}
+
+enum CustomerApprovalDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  DEAD_LETTER
+  /// No se envió porque ya salió una versión MÁS NUEVA del mismo cliente: evita que llegue
+  /// "tu cuenta está en revisión" después de "ya puedes reservar". Es un desenlace normal,
+  /// no una falla — por eso NO es DEAD_LETTER, que es lo que alguien debe ir a revisar.
+  SUPERSEDED
+}
+
+enum CustomerApprovalChannel {
+  EMAIL
+  WHATSAPP
+}
+
+/// Fase 1 — el EVENTO lógico de aprobación, encolado DENTRO de la transacción que lo produce
+/// (activar cuenta o decidir). Separado de la entrega porque un evento tiene N destinatarios:
+/// entregar a 2 de 3 y reintentar duplicaría los 2 primeros si el dedupe viviera aquí.
+model CustomerApprovalOutbox {
+  id String @id @default(cuid())
+
+  venueId    String
+  venue      Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  event           CustomerApprovalEvent
+  /// Ordena y suprime: nunca se entrega una versión vieja si ya salió una más nueva
+  /// (evitaría que llegue "en espera" DESPUÉS de "aprobado").
+  approvalVersion Int
+  /// `${event}:${customerId}:${approvalVersion}` — repetir la misma decisión no encola de nuevo.
+  dedupeKey       String                @unique
+  payloadVersion  Int                   @default(1)
+  payload         Json?
+
+  deliveries CustomerApprovalDelivery[]
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId, customerId, approvalVersion])
+}
+
+/// La ENTREGA: una fila por destinatario y canal. Es la unidad que se reintenta.
+model CustomerApprovalDelivery {
+  id String @id @default(cuid())
+
+  outboxId String
+  outbox   CustomerApprovalOutbox @relation(fields: [outboxId], references: [id], onDelete: Cascade)
+
+  recipient   String // email o teléfono, según el canal
+  channel     CustomerApprovalChannel
+  /// Idempotency key que viaja al proveedor (Resend): si el proceso muere entre "aceptado" y
+  /// `sentAt`, el reintento no genera un segundo correo.
+  providerKey String                  @unique
+
+  status        CustomerApprovalDeliveryStatus @default(PENDING)
+  attempts      Int                            @default(0)
+  nextAttemptAt DateTime                       @default(now())
+  /// Claim con SKIP LOCKED: dos workers nunca entregan la misma fila.
+  leaseUntil    DateTime?
+  lastError     String?                        @db.Text
+  /// SÓLO tras confirmación del proveedor.
+  sentAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([outboxId, recipient, channel])
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseUntil])
+}
+
 enum LoyaltyTransactionType {
   EARN // Customer earns points (from purchase or visit)
   REDEEM // Customer redeems points (discount applied)
@@ -8149,6 +8290,11 @@ enum NotificationType {
   LOW_INVENTORY
   SYSTEM_MAINTENANCE
   FEATURE_UPDATED
+  /// El venue movió/estiró en Google Calendar un evento que Avoqado empujó. Ese
+  /// ajuste NO reprograma la cita; sólo aparta la agenda. Se avisa para que el
+  /// negocio entienda por qué apareció tiempo ocupado que él no bloqueó desde
+  /// Avoqado. Ver `services/google-calendar/own-event-edit.service.ts`.
+  CALENDAR_EVENT_EDITED
 
   // Admin notifications
   VENUE_APPROVAL_NEEDED
@@ -11943,6 +12089,21 @@ model Reservation {
   endsAt   DateTime
   duration Int // Minutes (denormalized for queries)
 
+  // Fin del BLOQUE DE AGENDA = endsAt + buffer del servicio (Product.bufferAfterMin).
+  //
+  // Tres marcas distintas que NUNCA se mezclan:
+  //   startsAt        inicio
+  //   endsAt          fin del servicio  → lo que ve el CLIENTE (correo, comprobante)
+  //   blockedEndsAt   fin del bloque    → lo que aparta el NEGOCIO (disponibilidad,
+  //                                       colisiones, evento de Google)
+  //
+  // 🔴 Materializada a propósito, NO calculada: varios sitios consultan solapamiento
+  // (reservationAvailability, appointmentStaffAssignment, reservation.dashboard) y
+  // uno que olvide sumar el buffer reintroduce la doble reserva en silencio.
+  // NOT NULL con backfill = endsAt: una fila sin este dato dejaría de bloquear su
+  // propio horario, que es peor que el bug que esto arregla.
+  blockedEndsAt DateTime
+
   // Guest info (linked Customer or anonymous)
   customerId String?
   customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
@@ -12052,6 +12213,10 @@ model Reservation {
   @@unique([venueId, confirmationCode])
   @@index([venueId, status, startsAt])
   @@index([venueId, startsAt, endsAt])
+  // Espejos de los dos índices de solapamiento, sobre el fin de BLOQUE. Sin
+  // ellos la disponibilidad pierde el índice al consultar blockedEndsAt.
+  @@index([venueId, startsAt, blockedEndsAt])
+  @@index([assignedStaffId, startsAt, blockedEndsAt])
   @@index([venueId, tableId, startsAt])
   @@index([venueId, productId, startsAt])
   @@index([venueId, classSessionId])
@@ -12312,6 +12477,15 @@ model ReservationSettings {
   minNoticeMin       Int     @default(60)
   noShowGraceMin     Int     @default(15)
 
+  /// Fase 9 del kiosco — aviso nocturno de renovación.
+  ///
+  /// APAGADO por defecto, y no es timidez: esto manda mensajes A LOS CLIENTES con el
+  /// nombre del negocio. Un mensaje enviado no se puede desenviar, así que prenderlo es
+  /// una decisión del negocio, nunca un default nuestro. Se compone con AND sobre el
+  /// consentimiento de marketing de CADA cliente: el negocio dice "quiero", la persona
+  /// dice "acepto", y sólo entonces sale.
+  nightlyOutreachEnabled Boolean @default(false)
+
   // Pacing
   pacingMaxPerSlot      Int? // null = no pacing limit
   onlineCapacityPercent Int    @default(100)
@@ -12342,11 +12516,16 @@ model ReservationSettings {
   waitlistNotifyWindow Int     @default(30) // minutes
 
   // Public booking
-  publicBookingEnabled Boolean @default(false)
-  showStaffPicker      Boolean @default(false)
-  requirePhone         Boolean @default(true)
-  requireEmail         Boolean @default(false)
-  requireAccount       Boolean @default(false) // when true, customer must log in or register before booking
+  publicBookingEnabled              Boolean     @default(false)
+  showStaffPicker                   Boolean     @default(false)
+  requirePhone                      Boolean     @default(true)
+  requireEmail                      Boolean     @default(false)
+  requireAccount                    Boolean     @default(false) // when true, customer must log in or register before booking
+  /// Fase 1: el venue aprueba manualmente a cada cliente nuevo antes de dejarlo reservar.
+  /// Exige requireAccount (CHECK en la migración): sin cuenta no hay a quién aprobar.
+  requireCustomerApproval           Boolean     @default(false)
+  /// Roles del venue que reciben el aviso "hay alguien esperando aprobación".
+  customerApprovalNotificationRoles StaffRole[] @default([OWNER, ADMIN])
 
   // Cancellation
   allowCustomerCancel         Boolean @default(true)
@@ -12793,6 +12972,13 @@ model CreditPackPurchase {
   stripeCheckoutSessionId String? @unique
   stripePaymentIntentId   String?
   amountPaid              Decimal @db.Decimal(10, 2)
+
+  // Cobro en persona (POS / terminal PAX). Es la MISMA idea que
+  // `stripeCheckoutSessionId` para el carril en linea: la unicidad es lo que hace
+  // idempotente el fulfillment. Sin esto, un reintento del PAX tras un timeout
+  // acredita el paquete dos veces por un solo cobro (Fase 4 del kiosco).
+  paymentId String?  @unique
+  payment   Payment? @relation("CreditPackPurchasePayment", fields: [paymentId], references: [id], onDelete: SetNull)
 
   // Relations
   itemBalances CreditItemBalance[]
@@ -13388,8 +13574,8 @@ model KdsOrder {
   /// definitiva: hasta entonces, sigue siendo retomable.
   printedAt      DateTime?
 
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([venueId, status])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
@@ -13514,11 +13700,11 @@ model PrintStation {
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  name         String // UI renders via sector terminology (Cocina/Barra/Almacén/…)
-  printerId    String? // primary printer (v1: no backup)
-  printer      Printer? @relation(fields: [printerId], references: [id], onDelete: SetNull)
-  copies       Int      @default(1) // v1: fixed 1 (copies>1 = post-v1)
-  isDefault    Boolean  @default(false) // fallback for unrouted items; ONE per venue (partial unique index in migration)
+  name      String // UI renders via sector terminology (Cocina/Barra/Almacén/…)
+  printerId String? // primary printer (v1: no backup)
+  printer   Printer? @relation(fields: [printerId], references: [id], onDelete: SetNull)
+  copies    Int      @default(1) // v1: fixed 1 (copies>1 = post-v1)
+  isDefault Boolean  @default(false) // fallback for unrouted items; ONE per venue (partial unique index in migration)
 
   /// ¿Aquí se EMPACA? La estación que recibe el ticket consolidado del pedido completo.
   ///
@@ -13532,9 +13718,9 @@ model PrintStation {
   /// ticket extra: el default es no cambiarle nada a quien no lo quiera. Y se marca aparte
   /// de `isDefault` a propósito — mandar el consolidado a la estación por default haría que
   /// la cocina reciba DOS papeles del mismo pedido, que es el doble-impreso clásico.
-  isPacking    Boolean  @default(false)
-  active       Boolean  @default(true)
-  displayOrder Int      @default(0)
+  isPacking    Boolean @default(false)
+  active       Boolean @default(true)
+  displayOrder Int     @default(0)
 
   // Routing back-relations (cascade resolves product override ?? category default ?? venue default)
   categories MenuCategory[]
@@ -15762,4 +15948,122 @@ model OrderPromotion {
 
   @@unique([orderId, instanceId])
   @@index([promotionId])
+}
+
+/// Fase 5 del kiosco — el reto de check-in.
+///
+/// El kiosco muestra un QR; el cliente lo abre en SU teléfono, con SU sesión, y ahí se
+/// identifica. El aparato nunca ve la identidad: sólo pregunta "¿ya lo resolvió alguien?".
+/// Por eso el secreto vive en el fragmento de la URL (que no viaja al servidor en el
+/// Referer) y aquí sólo queda su hash.
+model KioskCheckInChallenge {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  terminalId     String?
+  /// Cara del aparato: "A" (mostrador) o "B" (cliente). Existe desde el inicio aunque
+  /// hoy sólo se use B — un challenge de una cara no se consume desde la otra.
+  stationKey     String  @db.VarChar(8)
+  /// Generación de la sesión del kiosco. Al expirar por inactividad sube, y todo challenge
+  /// de una generación anterior queda muerto aunque no haya vencido su reloj.
+  kioskSessionId String  @db.VarChar(64)
+
+  /// sha256(secreto + OTP_PEPPER). El secreto en claro NUNCA se guarda ni se registra.
+  nonceHash String                      @unique
+  status    KioskCheckInChallengeStatus @default(PENDING)
+  expiresAt DateTime
+
+  consumedAt    DateTime?
+  customerId    String?
+  reservationId String?
+
+  /// Intentos fallidos contra ESTE reto. Durable a propósito: un limitador en memoria
+  /// se reinicia con el proceso y no se comparte entre instancias.
+  attempts    Int @default(0)
+  maxAttempts Int @default(5)
+  version     Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId, status, expiresAt])
+  @@index([terminalId, stationKey, status])
+}
+
+enum KioskCheckInChallengeStatus {
+  PENDING
+  CONSUMED
+  EXPIRED
+  CANCELLED
+}
+
+/// Contador de intentos DURABLE (ventana fija) para el respaldo "no aparezco en la lista".
+///
+/// El limitador que ya existe (`express-rate-limit`) vive en memoria: se reinicia con el
+/// proceso y no se comparte entre instancias, así que no frena a quien barre códigos con
+/// paciencia. Éste sí, porque el conteo está en la base.
+model KioskCheckInAttempt {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// "terminal:<id>" | "station:<key>" | "ip:<addr>" | "reservation:<id>"
+  scope       String   @db.VarChar(128)
+  windowStart DateTime
+  count       Int      @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, scope, windowStart])
+  @@index([windowStart])
+}
+
+/// Fase 9 del kiosco — la fila durable del aviso nocturno.
+///
+/// Mismo patrón que `CustomerApprovalOutbox`: la INTENCIÓN se graba en la base y la
+/// entrega ocurre después. Si el proceso muere a media noche, el aviso sigue aquí; y si
+/// el barrido se repite, `dedupeKey` impide que a alguien le llegue dos veces.
+model KioskOutreachOutbox {
+  id String @id @default(cuid())
+
+  venueId    String
+  venue      Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  event KioskOutreachEvent
+
+  /// `${event}:${customerId}:${yyyy-mm-dd}` — el barrido de la misma noche no reencola.
+  dedupeKey String @unique
+
+  /// Enlace de pago de la renovación, ya creado cuando se encoló: si el enlace no se pudo
+  /// crear, el aviso no se encola. Mandar "renueva" sin dónde renovar es peor que callar.
+  paymentLinkUrl String?
+  payload        Json?
+
+  status      KioskOutreachStatus @default(PENDING)
+  attempts    Int                 @default(0)
+  lastError   String?
+  leasedUntil DateTime?
+  sentAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, leasedUntil])
+  @@index([venueId, customerId])
+}
+
+enum KioskOutreachEvent {
+  /// Le quedan pocos créditos en su paquete.
+  CREDITS_RUNNING_OUT
+  /// Su paquete vence pronto.
+  PACK_EXPIRING
+}
+
+enum KioskOutreachStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
 }

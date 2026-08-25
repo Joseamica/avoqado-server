@@ -14,9 +14,10 @@ import { nanoid } from 'nanoid'
 import { Prisma, CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
+import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import emailService from '@/services/email.service'
 import { resolveChargeableStripeMerchant } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
@@ -68,7 +69,11 @@ export async function getAvailablePacks(venueId: string, productId?: string) {
 }
 
 /**
- * Lookup customer credits by email or phone.
+ * Lookup the credits of the AUTHENTICATED customer (Fase 0.B).
+ *
+ * Antes se buscaba por email/teléfono de la query: cualquiera que supiera tu email veía
+ * tus compras y obtenía un `balanceId` para canjearlo como invitado (auditoría 2, P1).
+ * El balance es dato de cuenta: sólo por `customerId` de la sesión, dentro del venue.
  *
  * Optional `opts.seats`: annotates each itemBalance with `sufficient: remainingQuantity >= seats`
  *   so the widget can disable balances that can't cover the booking.
@@ -79,35 +84,18 @@ export async function getAvailablePacks(venueId: string, productId?: string) {
  */
 export async function lookupCustomerCredits(
   venueId: string,
-  email?: string,
-  phone?: string,
+  customerId: string,
   opts?: { seats?: number; productId?: string; productIds?: string[] },
 ) {
-  if (!email && !phone) {
-    throw new BadRequestError('Se requiere email o telefono para consultar creditos')
+  if (!customerId) {
+    throw new UnauthorizedError('Inicia sesión para consultar tus créditos', 'CUSTOMER_AUTH_REQUIRED')
   }
 
   const seats = opts?.seats
   const productIds = opts?.productIds && opts.productIds.length > 0 ? opts.productIds : undefined
   const productId = productIds ? undefined : opts?.productId
 
-  // Find customer (strict by both when both are present, then fallback by either)
-  let customer = null
-  if (email && phone) {
-    customer = await prisma.customer.findFirst({
-      where: { venueId, email, phone },
-    })
-  }
-  if (!customer && email) {
-    customer = await prisma.customer.findFirst({
-      where: { venueId, email },
-    })
-  }
-  if (!customer && phone) {
-    customer = await prisma.customer.findFirst({
-      where: { venueId, phone },
-    })
-  }
+  const customer = await prisma.customer.findFirst({ where: { id: customerId, venueId } })
 
   if (!customer) {
     return { customer: null, purchases: [], requestedSeats: seats ?? null }
@@ -179,7 +167,21 @@ export async function createCheckoutSession(
   phone: string | undefined,
   successUrl: string,
   cancelUrl: string,
+  /**
+   * Fase 0.B: identidad de sesión. Cuando viene `customerId`, el límite por cliente se
+   * cuenta por ese id (no por el email del body, que es manipulable) y viaja en la
+   * metadata de Stripe para que el fulfillment ligue la compra a ESA cuenta.
+   */
+  identity?: { customerId?: string | null },
 ) {
+  const sessionCustomerId = identity?.customerId ?? null
+
+  // 🔴 Fase 1 — el gate va ANTES de Stripe, no después. Si el negocio no aprobó a esta
+  // persona, no se le cobra un paquete que no va a poder usar. Al revés (cobrar y rechazar
+  // luego) el dinero YA es suyo: por eso rechazar NO revoca créditos ya acreditados, y por
+  // eso el único punto donde se puede evitar el problema es aquí.
+  await prisma.$transaction(async tx => assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId }))
+
   const pack = await prisma.creditPack.findFirst({
     where: { id: packId, venueId, active: true },
   })
@@ -201,19 +203,19 @@ export async function createCheckoutSession(
     throw new BadRequestError('La cuenta Stripe Connect del negocio no está configurada.')
   }
 
-  // Check maxPerCustomer if applicable
-  if (pack.maxPerCustomer && (email || phone)) {
-    const customer = await prisma.customer.findFirst({
-      where: {
-        venueId,
-        ...(email ? { email } : { phone }),
-      },
-    })
+  // Check maxPerCustomer if applicable. Fase 0.B: con sesión, se cuenta por el customer del
+  // token; sin sesión, por email/teléfono como antes.
+  if (pack.maxPerCustomer) {
+    const limitCustomerId = sessionCustomerId
+      ? sessionCustomerId
+      : email || phone
+        ? ((await prisma.customer.findFirst({ where: { venueId, ...(email ? { email } : { phone }) }, select: { id: true } }))?.id ?? null)
+        : null
 
-    if (customer) {
+    if (limitCustomerId) {
       const purchaseCount = await prisma.creditPackPurchase.count({
         where: {
-          customerId: customer.id,
+          customerId: limitCustomerId,
           creditPackId: packId,
           status: { notIn: [CreditPurchaseStatus.REFUNDED] },
         },
@@ -265,6 +267,7 @@ export async function createCheckoutSession(
         venueId,
         packId: pack.id,
         ecommerceMerchantId: merchant.id,
+        ...(sessionCustomerId ? { customerId: sessionCustomerId } : {}),
         ...(phone ? { customerPhone: phone } : {}),
         ...(email ? { customerEmail: email } : {}),
       },
@@ -293,6 +296,53 @@ export async function createCheckoutSession(
 /**
  * Fulfill a credit pack purchase after successful payment (called from webhook)
  */
+export const CREDIT_PACK_OWNER_UNRESOLVED = 'CREDIT_PACK_OWNER_UNRESOLVED' as const
+
+/**
+ * Fase 0.B — dueño de una compra cuyo checkout nació con sesión de cliente. Fail-closed:
+ * si `customerId` no resuelve dentro del venue, registra `MoneyAnomaly` (categoría
+ * CREDIT_PACK_OWNER_UNRESOLVED, clave = id de la sesión de Checkout, así un reintento de
+ * Stripe no duplica la anomalía) y lanza un `ConflictError` con ese código. Nunca cae al
+ * contacto. Exportada para probarla sola.
+ */
+export async function resolveSessionCustomerForFulfillment(args: {
+  customerId: string
+  venueId: string
+  checkoutSessionId: string
+  packId: string
+}): Promise<{ id: string; approvalStatus?: string }> {
+  const customer = await prisma.customer.findFirst({ where: { id: args.customerId, venueId: args.venueId } })
+  if (customer) return customer
+
+  const expectedState = { customerId: args.customerId, venueId: args.venueId, packId: args.packId }
+  try {
+    await prisma.moneyAnomaly.create({
+      data: {
+        category: CREDIT_PACK_OWNER_UNRESOLVED,
+        // Clave de idempotencia: la sesión de Checkout identifica el dinero cobrado.
+        stripeEventId: args.checkoutSessionId,
+        expectedState,
+        observedState: { customerFoundInVenue: false, checkoutSessionId: args.checkoutSessionId },
+      },
+    })
+  } catch (err: any) {
+    // P2002 = ya registrada por una entrega anterior del webhook. Cualquier otra cosa
+    // tampoco debe tapar el error real: lo que importa es NO crear la compra.
+    if (err?.code !== 'P2002') {
+      logger.error('❌ [CREDIT PACK] No se pudo registrar MoneyAnomaly', { ...expectedState, err: err?.message })
+    }
+  }
+  logger.error('🚨 [CREDIT PACK] Money anomaly: compra pagada cuyo customer de sesión no resuelve en el venue', {
+    ...expectedState,
+    checkoutSessionId: args.checkoutSessionId,
+  })
+  throw new ConflictError(
+    'La compra está pagada pero su cliente ya no existe en este negocio. Requiere reconciliación manual.',
+    CREDIT_PACK_OWNER_UNRESOLVED,
+    expectedState,
+  )
+}
+
 export async function fulfillPurchase(checkoutSessionId: string, connectAccountId?: string) {
   // Retrieve session from Stripe. New purchases are created on the venue's
   // CONNECTED account (Stripe Connect), so the retrieve must be scoped with
@@ -327,19 +377,57 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
     return existing
   }
 
-  // Find credit pack with items
-  const pack = await prisma.creditPack.findUnique({
-    where: { id: packId },
+  // Find credit pack with items — scoped to the venue in the metadata (Fase 0.B).
+  const pack = await prisma.creditPack.findFirst({
+    where: { id: packId, venueId },
     include: { items: true },
   })
 
   if (!pack) {
-    logger.error('❌ [CREDIT PACK] Pack not found during fulfillment', { packId })
+    logger.error('❌ [CREDIT PACK] Pack not found during fulfillment', { packId, venueId })
     throw new Error(`CreditPack ${packId} not found`)
   }
 
-  // Find or create customer
-  const customer = await findOrCreateCustomer(venueId, email, phone)
+  // Fase 0.B: a quién pertenece la compra.
+  //
+  // Con `metadata.customerId` (el checkout nació con sesión de cliente) el fulfillment es
+  // FAIL-CLOSED: la compra es de ESE customer o de nadie. Si no resuelve en el venue
+  // (borrado, o id de otro venue), NO se reasigna a quien coincida por email/teléfono —
+  // eso era "Stripe vuelve silenciosamente al contacto" (auditoría 2): dinero pagado
+  // atribuido a otra identidad. Se registra MoneyAnomaly (reconciliación manual: la
+  // sesión de Stripe y el customerId quedan ahí) y se lanza. Un customer INACTIVO sí
+  // resuelve (no se filtra `active`): el dinero es suyo; no podrá usar los créditos hasta
+  // que el venue lo reactive (el canje exige sesión, y los emisores de token lo niegan).
+  //
+  // Sin customerId (checkout invitado) se resuelve/crea por contacto, como siempre.
+  const customer = metadata.customerId
+    ? await resolveSessionCustomerForFulfillment({ customerId: metadata.customerId, venueId, checkoutSessionId, packId })
+    : await findOrCreateCustomer(venueId, email, phone)
+
+  // 🔴 Fase 1 — el pago entró DESPUÉS de que el negocio rechazara a esta persona.
+  //
+  // Puede pasar: el gate corre antes de crear la sesión de Stripe, pero la URL sobrevive
+  // (~24 h). Si rechazan en medio, el cliente todavía puede pagar.
+  //
+  // Se ACREDITA igual, a propósito: el dinero ya salió de su tarjeta y quedarse con él sin
+  // darle nada es peor que cualquier alternativa. Lo que NO puede pasar es que ocurra en
+  // silencio — hasta aquí, nadie se enteraba. El rastro es lo que le permite al negocio
+  // decidir si lo reembolsa o si lo reconsidera.
+  if ((customer as { approvalStatus?: string }).approvalStatus === 'REJECTED') {
+    logger.warn('[CREDIT PACK] Pago recibido de un cliente RECHAZADO — se acredita y se deja rastro', {
+      venueId,
+      customerId: customer.id,
+      checkoutSessionId,
+      packId,
+    })
+    void logAction({
+      action: 'CREDIT_PACK_PAID_BY_REJECTED_CUSTOMER',
+      entity: 'Customer',
+      entityId: customer.id,
+      venueId,
+      data: { checkoutSessionId, packId, amountTotal: (session.amount_total || 0) / 100 },
+    })
+  }
 
   // Calculate expiration
   const expiresAt = pack.validityDays ? new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000) : null

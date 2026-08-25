@@ -1,6 +1,7 @@
 import { Prisma, ReservationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { ServiceUnavailableError } from '@/errors/AppError'
 import { VerifiedWebhookEvent } from './providers/provider.interface'
 import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
 import { finalizeVenueCheckout } from '@/services/dashboard/venueCheckout.service'
@@ -48,6 +49,114 @@ async function recordMoneyAnomaly(args: {
   })
 }
 
+/**
+ * A claim older than this without a materialized outcome belongs to a dead process. The work
+ * here is one Stripe retrieve + one DB transaction; 5 minutes is far beyond any legitimate
+ * run (Stripe's own request timeout is 80 s) while still letting a dead claim self-heal.
+ */
+export const STRIPE_CLAIM_LEASE_MS = 5 * 60_000
+export const STRIPE_EVENT_IN_PROGRESS = 'STRIPE_EVENT_IN_PROGRESS' as const
+export const STRIPE_WORK_NOT_MATERIALIZED = 'STRIPE_WORK_NOT_MATERIALIZED' as const
+
+/**
+ * Claim-then-work, RETRY-SAFE — with a LEASE.
+ *
+ * The claim (`ProcessedStripeEvent`, unique on [endpoint, stripeEventId]) goes FIRST so two
+ * concurrent deliveries of the same event can't both run the work. But a claim is not a
+ * receipt (auditoría 3/4): before, the claim stayed and the retry hit P2002 → "duplicate,
+ * ignored" — money charged, purchase never granted, no retry possible.
+ *
+ * Rules:
+ *   - Work throws → claim RELEASED, error propagates (non-2xx) → Stripe retries → re-runs.
+ *   - P2002 on the CLAIM = another delivery owns it. It is acknowledged (2xx) ONLY if the
+ *     outcome is already materialized (`isDone`). Otherwise:
+ *       · claim younger than the lease → the owner is still working: answer non-2xx
+ *         (STRIPE_EVENT_IN_PROGRESS) so Stripe retries later — never "done" on trust;
+ *       · claim older than the lease → the owner died mid-work (or its release failed):
+ *         drop the stale claim and run the work ourselves.
+ *   - Only a P2002 on the claim means "duplicate"; one born inside the work is a real failure.
+ *   - POSTCONDITION (auditoría 5): after `work()` returns, `isDone()` must be true. A
+ *     finalizer that returns normally without materializing (payment-link with no local
+ *     session) would otherwise leave claim + nothing + 2xx = a lost event. Instead: release
+ *     and throw STRIPE_WORK_NOT_MATERIALIZED so Stripe retries.
+ *   - FENCING (auditoría 5): every release is conditioned on the `processedAt` of the claim
+ *     THIS process knows (its own `create`, or the stale row it read). `processedAt` is the
+ *     claim's identity (one per insert); a slow owner can never delete a newer claim someone
+ *     else created after declaring it dead, so a third delivery can't slip in.
+ *
+ * Why no state column: `ProcessedStripeEvent.processedAt` is both the lease clock and the
+ * fencing token, and every piece of work here is idempotent on a unique key (purchase by
+ * checkout session, checkout session COMPLETED), so re-running after a dead claim is safe.
+ */
+async function withClaimedEvent(
+  event: VerifiedWebhookEvent,
+  label: string,
+  work: () => Promise<unknown>,
+  isDone: () => Promise<boolean>,
+): Promise<void> {
+  const where = { endpoint: 'connect', stripeEventId: event.id }
+  const claim = () =>
+    prisma.processedStripeEvent.create({
+      data: { ...where, eventType: event.type, account: event.account, payload: event.data as Prisma.InputJsonValue },
+    })
+  // Fenced release: only the claim with THIS processedAt (ours) is deleted.
+  const release = (processedAt: Date) => prisma.processedStripeEvent.deleteMany({ where: { ...where, processedAt } })
+
+  let mine: { processedAt: Date }
+  try {
+    mine = await claim()
+  } catch (error: any) {
+    if (error?.code !== 'P2002') throw error
+
+    if (await isDone()) {
+      logger.info(`ℹ️ [STRIPE CONNECT] Duplicate ${label} webhook ignored — outcome already materialized`, { eventId: event.id })
+      return
+    }
+    const existing = await prisma.processedStripeEvent.findUnique({ where: { endpoint_stripeEventId: where } })
+    const ageMs = existing ? Date.now() - existing.processedAt.getTime() : Number.POSITIVE_INFINITY
+    if (existing && ageMs < STRIPE_CLAIM_LEASE_MS) {
+      // Someone is (very likely) still working on it. Don't acknowledge; let Stripe retry.
+      throw new ServiceUnavailableError(`${label} webhook ${event.id} is being processed by another delivery`, STRIPE_EVENT_IN_PROGRESS)
+    }
+    logger.warn(`⚠️ [STRIPE CONNECT] Stale ${label} claim without outcome (${Math.round(ageMs / 1000)}s) — dropping it and re-running`, {
+      eventId: event.id,
+    })
+    if (existing) await release(existing.processedAt) // fenced: only that stale row, never a newer one
+    mine = await claim() // a concurrent re-claimer would P2002 here and propagate — fine, Stripe retries
+  }
+
+  const releaseMineAndFail = async (error: unknown, why: string) => {
+    try {
+      await release(mine.processedAt)
+      logger.error(`❌ [STRIPE CONNECT] ${label} ${why} — claim released so Stripe's retry re-runs it`, {
+        eventId: event.id,
+        err: (error as Error)?.message,
+      })
+    } catch (releaseErr) {
+      // The original failure is the one that matters; a stuck claim self-heals via the lease.
+      logger.error(`❌ [STRIPE CONNECT] ${label} ${why} AND the claim could not be released — lease will expire`, {
+        eventId: event.id,
+        err: (error as Error)?.message,
+        releaseErr: (releaseErr as Error)?.message,
+      })
+    }
+    throw error
+  }
+
+  try {
+    await work()
+  } catch (error) {
+    await releaseMineAndFail(error, 'work failed')
+  }
+
+  if (!(await isDone())) {
+    await releaseMineAndFail(
+      new ServiceUnavailableError(`${label} webhook ${event.id} finished without a materialized outcome`, STRIPE_WORK_NOT_MATERIALIZED),
+      'work returned without materializing',
+    )
+  }
+}
+
 async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
   const session = event.data as CheckoutSessionLike
   if (!session.id) {
@@ -70,60 +179,37 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
   // Checkout Session. 'payment_link' came from our public payment-link flow,
   // anything else (or missing) falls through to reservation-deposit handling.
   if (session.metadata?.type === 'payment_link') {
-    try {
-      // Idempotency: record the event first so duplicate deliveries no-op
-      // via the unique constraint on `stripeEventId`.
-      await prisma.processedStripeEvent.create({
-        data: {
-          stripeEventId: event.id,
-          endpoint: 'connect',
-          eventType: event.type,
-          account: event.account,
-          payload: event.data as Prisma.InputJsonValue,
-        },
-      })
-      await finalizePaymentLinkCheckout({
-        stripeSessionId: session.id,
-        paymentIntentId,
-        amountPaidCents: session.amount_total ?? null,
-      })
-    } catch (error: any) {
-      if (error?.code === 'P2002') {
-        logger.info('ℹ️ [STRIPE CONNECT] Duplicate payment-link webhook ignored', { eventId: event.id })
-        return
-      }
-      throw error
-    }
+    await withClaimedEvent(
+      event,
+      'payment-link',
+      () =>
+        finalizePaymentLinkCheckout({
+          stripeSessionId: session.id,
+          paymentIntentId,
+          amountPaidCents: session.amount_total ?? null,
+        }),
+      // Materialized = our CheckoutSession for this Stripe session is COMPLETED.
+      async () => {
+        const cs = await prisma.checkoutSession.findUnique({ where: { sessionId: session.id }, select: { status: true } })
+        return cs?.status === 'COMPLETED'
+      },
+    )
     return
   }
 
   // Credit-pack purchases now settle on the venue's connected account (money
   // routing fix), so their checkout.session.completed lands HERE, not on the
-  // platform webhook. Dispatch to the same fulfillment used before.
+  // platform webhook. Dispatch to the same fulfillment used before. Pass
+  // event.account so fulfillPurchase retrieves the session with the correct
+  // connected-account (stripeAccount) scope.
   if (session.metadata?.type === 'credit_pack_purchase') {
-    try {
-      // Claim the event first so duplicate deliveries no-op via the unique
-      // stripeEventId constraint (fulfillPurchase is also idempotent on
-      // stripeCheckoutSessionId — this just avoids a redundant Stripe retrieve).
-      await prisma.processedStripeEvent.create({
-        data: {
-          stripeEventId: event.id,
-          endpoint: 'connect',
-          eventType: event.type,
-          account: event.account,
-          payload: event.data as Prisma.InputJsonValue,
-        },
-      })
-      // Pass event.account so fulfillPurchase retrieves the session with the
-      // correct connected-account (stripeAccount) scope.
-      await fulfillCreditPackPurchase(session.id, event.account)
-    } catch (error: any) {
-      if (error?.code === 'P2002') {
-        logger.info('ℹ️ [STRIPE CONNECT] Duplicate credit-pack webhook ignored', { eventId: event.id })
-        return
-      }
-      throw error
-    }
+    await withClaimedEvent(
+      event,
+      'credit-pack',
+      () => fulfillCreditPackPurchase(session.id, event.account),
+      // Materialized = the purchase row for this checkout session exists (unique key).
+      async () => !!(await prisma.creditPackPurchase.findUnique({ where: { stripeCheckoutSessionId: session.id }, select: { id: true } })),
+    )
     return
   }
 

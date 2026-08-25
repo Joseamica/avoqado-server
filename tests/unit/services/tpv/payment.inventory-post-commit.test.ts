@@ -18,6 +18,12 @@
  * Detecta, loguea y deja que el faltante viaje como aviso; el stock QUANTITY
  * queda en negativo como señal. Regresión al final.)
  *
+ * (Actualización 2026-08-25: ese pre-flight PRE-transacción se QUITÓ — sólo
+ * duplicaba la consulta del chequeo post-commit y costaba ~1 s en un camino que
+ * la TPV abandona a los 10 s. Hoy el ÚNICO chequeo de inventario corre con el
+ * Payment ya comiteado; `getProductInventoryStatus` se consulta UNA vez por
+ * producto, así que los mocks de abajo alimentan directamente ese chequeo.)
+ *
  * Decisión de diseño — es LA MISMA que el bloque 🚨 [Sobrepago] 40 líneas
  * arriba en este mismo archivo (caso Mindform): cuando este código corre la
  * tarjeta YA se cobró; rechazar aquí no des-cobra nada, sólo desinforma. El
@@ -221,14 +227,13 @@ function alertasDeInventario() {
 }
 
 describe('recordOrderPayment — el inventario no puede desmentir un cobro ya registrado', () => {
-  describe('TOCTOU: el pre-flight PRE-cobro pasa y el POST-cobro encuentra el stock agotado', () => {
+  describe('El chequeo POST-cobro encuentra el stock agotado (otra venta se llevó el stock antes de registrar)', () => {
     beforeEach(() => {
       const order = makeOrder()
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
-      // 1ª llamada = pre-flight PRE-transacción (pasa, por eso el cobro se ejecuta).
-      // 2ª en adelante = pre-flight POST-commit: otra venta se llevó el stock.
-      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValueOnce(STOCK_OK).mockResolvedValue(STOCK_AGOTADO)
+      // Único chequeo de inventario = POST-commit: cuando corre, el Payment ya está comiteado.
+      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_AGOTADO)
     })
 
     it('NO lanza: el cobro quedó registrado, así que la respuesta dice que se cobró', async () => {
@@ -466,13 +471,13 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
     })
   })
 
-  describe('TOCTOU completo: las DOS puertas disparan por el mismo producto', () => {
-    it('el cajero ve UNA línea por producto, con el número disponible del pre-flight', async () => {
+  describe('Las DOS puertas post-cobro disparan por el mismo producto', () => {
+    it('el cajero ve UNA línea por producto, con el número disponible del chequeo post-cobro', async () => {
       const order = makeOrder()
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
-      // Pre-flight PRE-cobro pasa; el POST-cobro ve el faltante (available: 1)…
-      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValueOnce(STOCK_OK).mockResolvedValue(STOCK_AGOTADO)
+      // El chequeo POST-cobro ve el faltante (available: 1)…
+      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_AGOTADO)
       // …y acto seguido la deducción revienta por lo mismo (available: null).
       ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockRejectedValue(
         new Error('Insufficient stock. Needed: 5, Available: 1'),

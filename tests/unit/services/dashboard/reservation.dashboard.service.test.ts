@@ -5,7 +5,6 @@ import {
   getReservationByCancelSecret,
   getReservationStats,
   confirmReservation,
-  checkInReservation,
   completeReservation,
   markNoShow,
   cancelReservation,
@@ -58,6 +57,7 @@ function makeReservationSettings(
       maxAdvanceDays: 365,
       minNoticeMin: overrides.minNoticeMin ?? 0,
       noShowGraceMin: 15,
+      nightlyOutreachEnabled: false, // Prisma: @default(false) — el aviso nocturno nace apagado
       pacingMaxPerSlot: overrides.pacingMaxPerSlot ?? null,
       onlineCapacityPercent: overrides.onlineCapacityPercent ?? 100,
       capacityMode: overrides.capacityMode ?? 'pacing',
@@ -91,6 +91,8 @@ function makeReservationSettings(
       requireEmail: false,
       requireAccount: false,
       showStaffPicker: overrides.showStaffPicker ?? false,
+      requireCustomerApproval: false,
+      customerApprovalNotificationRoles: [],
     },
     googleCalendar: {
       pushEnabled: false,
@@ -178,6 +180,11 @@ describe('Reservation Dashboard Service', () => {
     // Task 4: resolveModifierSelections calls productModifierGroup.findMany in all reservation creations.
     // Default to empty array to maintain backward compatibility with existing tests that don't mock this.
     prismaMock.productModifierGroup.findMany.mockResolvedValue([])
+    // Buffer post-servicio: resolveBufferAfterMin hace su propio product.findMany
+    // en los caminos legacy de creación y reprogramación. Default a lista vacía
+    // = sin buffer, que es el comportamiento previo a esa columna. Los tests que
+    // necesitan filas concretas lo sobrescriben abajo.
+    prismaMock.product.findMany.mockResolvedValue([])
     jest.spyOn(appointmentStaffAssignmentService, 'lockAppointmentVenue').mockResolvedValue()
     jest.spyOn(appointmentStaffAssignmentService, 'resolveStaffAssignment').mockResolvedValue(STAFF_ID)
     jest.spyOn(appointmentStaffAssignmentService, 'assertOrganizationStaffAvailability').mockResolvedValue()
@@ -761,11 +768,13 @@ describe('Reservation Dashboard Service', () => {
           baseEndsAt: appointmentInput.endsAt,
           finalEndsAt: appointmentInput.endsAt,
           canonicalBaseDurationMin: 60,
+          bufferAfterMin: 0,
           modifierDurationDelta: 0,
           finalDurationMin: 60,
           productIds: ['prod-1', 'prod-2'],
           modifierRows: [],
           modifierPriceDelta: new Prisma.Decimal(0),
+          blockedEndsAt: appointmentInput.endsAt,
         })
         const liveRow = {
           id: 'hold-matrix',
@@ -881,6 +890,7 @@ describe('Reservation Dashboard Service', () => {
         baseEndsAt: appointmentInput.endsAt,
         finalEndsAt: appointmentInput.endsAt,
         canonicalBaseDurationMin: 60,
+        bufferAfterMin: 0,
         modifierDurationDelta: 0,
         finalDurationMin: 60,
         productIds: ['prod-1'],
@@ -894,6 +904,7 @@ describe('Reservation Dashboard Service', () => {
           },
         ],
         modifierPriceDelta: new Prisma.Decimal(10),
+        blockedEndsAt: appointmentInput.endsAt,
       })
       prismaMock.reservationModifier.createMany.mockResolvedValue({ count: 1 } as any)
       const targets = jest.spyOn(calendarOutboxService, 'resolveReservationPushTargets').mockResolvedValue([{ id: 'connection-1' }] as any)
@@ -1834,72 +1845,9 @@ describe('Reservation Dashboard Service', () => {
       })
     })
 
-    describe('checkInReservation', () => {
-      it('should transition CONFIRMED -> CHECKED_IN', async () => {
-        prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
-        prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
-        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
-
-        const result = await checkInReservation(VENUE_ID, 'res-1', STAFF_ID)
-
-        expect(result.status).toBe('CHECKED_IN')
-        expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
-          expect.objectContaining({
-            data: expect.objectContaining({
-              status: 'CHECKED_IN',
-              checkedInAt: expect.any(Date),
-            }),
-          }),
-        )
-      })
-
-      it('should reject PENDING -> CHECKED_IN (invalid)', async () => {
-        prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'PENDING' }))
-
-        await expect(checkInReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
-      })
-
-      // Additive contract — the check-in response must carry the full booked
-      // services[] (not just the lead `product`) so the POS can print one
-      // comanda per service, without losing anything it already returned.
-      it('includes services[] for ALL booked productIds on check-in (multi-service)', async () => {
-        prismaMock.reservation.findFirst.mockResolvedValue(
-          createMockReservation({ status: 'CONFIRMED', productId: 'p-baby', productIds: ['p-baby', 'p-manipedi'] }),
-        )
-        prismaMock.reservation.update.mockResolvedValue(
-          createMockReservation({ status: 'CHECKED_IN', productId: 'p-baby', productIds: ['p-baby', 'p-manipedi'] }),
-        )
-        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(
-          createMockReservation({ status: 'CHECKED_IN', productId: 'p-baby', productIds: ['p-baby', 'p-manipedi'] }),
-        )
-        prismaMock.product.findMany.mockResolvedValue([
-          { id: 'p-manipedi', name: 'Manicure + Pedicure + Spa', price: new Prisma.Decimal(800), duration: 70 },
-          { id: 'p-baby', name: 'Baby Boomer', price: new Prisma.Decimal(150), duration: 25 },
-        ] as any)
-
-        const result = await checkInReservation(VENUE_ID, 'res-1', STAFF_ID)
-
-        expect(result.services.map((s: any) => s.name)).toEqual(['Baby Boomer', 'Manicure + Pedicure + Spa'])
-        expect(prismaMock.product.findMany).toHaveBeenCalledWith(
-          expect.objectContaining({ where: { id: { in: ['p-baby', 'p-manipedi'] } } }),
-        )
-      })
-
-      // Regression guard — the additive change must not drop orderId or any
-      // pre-existing field the dashboard already consumes from this response.
-      it('still returns orderId and pre-existing fields alongside the new services[]', async () => {
-        prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
-        prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
-        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
-
-        const result = await checkInReservation(VENUE_ID, 'res-1', STAFF_ID)
-
-        expect(result.status).toBe('CHECKED_IN')
-        expect(result.confirmationCode).toBe('RES-ABC123')
-        expect(result).toHaveProperty('orderId')
-        expect(result.services).toEqual([]) // table-only reservation, no productId/productIds
-      })
-    })
+    // Fase 0.C: el check-in vive en src/services/reservation/checkIn.service.ts (comando puro +
+    // wrapper que abre la orden). PENDING → CHECKED_IN ahora es válido (las apps mandan PENDING)
+    // y es idempotente. Sus tests: tests/unit/services/reservation/checkIn.*.test.ts.
 
     describe('completeReservation', () => {
       it('should transition CHECKED_IN -> COMPLETED', async () => {
@@ -2034,7 +1982,6 @@ describe('Reservation Dashboard Service', () => {
         prismaMock.reservation.findFirst.mockResolvedValue(null)
 
         await expect(confirmReservation(VENUE_ID, 'nonexistent', STAFF_ID)).rejects.toThrow(NotFoundError)
-        await expect(checkInReservation(VENUE_ID, 'nonexistent', STAFF_ID)).rejects.toThrow(NotFoundError)
         await expect(completeReservation(VENUE_ID, 'nonexistent')).rejects.toThrow(NotFoundError)
         await expect(markNoShow(VENUE_ID, 'nonexistent', STAFF_ID)).rejects.toThrow(NotFoundError)
         await expect(cancelReservation(VENUE_ID, 'nonexistent', STAFF_ID)).rejects.toThrow(NotFoundError)
@@ -3250,7 +3197,6 @@ describe('Reservation Dashboard Service', () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: terminal }))
 
         await expect(confirmReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
-        await expect(checkInReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
         await expect(completeReservation(VENUE_ID, 'res-1')).rejects.toThrow(BadRequestError)
         await expect(markNoShow(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
         await expect(cancelReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
@@ -3380,6 +3326,9 @@ describe('rescheduleAppointmentReservation', () => {
     })
     prismaMock.reservation.findUnique.mockResolvedValue(makeAppt() as any)
     prismaMock.reservation.update.mockResolvedValue(makeAppt({ startsAt: newStart, endsAt: newEnd }) as any)
+    // Buffer post-servicio: la reprogramación recalcula el fin de bloque y para
+    // eso consulta el catálogo. Lista vacía = sin buffer (comportamiento previo).
+    prismaMock.product.findMany.mockResolvedValue([])
     prismaMock.slotHold.deleteMany.mockResolvedValue({ count: 1 } as any)
     jest.spyOn(calendarOutboxService, 'resolveReservationPushTargets').mockResolvedValue([{ id: 'connection-1' }] as any)
     jest.spyOn(calendarOutboxService, 'enqueuePush').mockResolvedValue(['outbox-1'])
@@ -3694,7 +3643,7 @@ describe('rescheduleAppointmentReservation', () => {
 
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
     expect((prismaMock.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')).toMatch(
-      /FROM "Reservation"[\s\S]*"venueId" = \?[\s\S]*"tableId" = \?[\s\S]*id <> \?[\s\S]*"startsAt" < \?[\s\S]*"endsAt" > \?[\s\S]*FOR UPDATE NOWAIT/i,
+      /FROM "Reservation"[\s\S]*"venueId" = \?[\s\S]*"tableId" = \?[\s\S]*id <> \?[\s\S]*"startsAt" < \?[\s\S]*"blockedEndsAt" > \?[\s\S]*FOR UPDATE NOWAIT/i,
     )
     expect(prismaMock.$queryRaw.mock.calls[0].slice(1)).toEqual([VENUE, 'table-1', 'res-appt-1', newEnd, newStart])
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()

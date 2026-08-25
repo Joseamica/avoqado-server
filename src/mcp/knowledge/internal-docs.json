@@ -1,0 +1,20 @@
+{
+  "_comment": "Allowlist of docs/*.md the SUPERADMIN-only `avoqado_internal_docs` MCP tool may serve. Anything not listed here is never exposed, even to a superadmin. scripts/copy-mcp-internal-docs.js copies exactly these into dist/docs at build time (the production image does not ship docs/).",
+  "docs": [
+    "ARCHITECTURE_OVERVIEW",
+    "PAYMENT_ARCHITECTURE",
+    "MERCHANT_MODELS_ARCHITECTURE",
+    "MONEYGIVER_SETTLEMENT_FLOW",
+    "PERMISSIONS_SYSTEM",
+    "DATABASE_SCHEMA",
+    "SCHEMA_MAP",
+    "BUSINESS_TYPES",
+    "INVENTORY_REFERENCE",
+    "DATETIME_SYNC",
+    "TPV_COMMAND_SYSTEM",
+    "TERMINAL_IDENTIFICATION",
+    "BLUMON_TWO_INTEGRATIONS",
+    "PAY_LATER_ORDER_CLASSIFICATION",
+    "ENUM_SYNC_REFERENCE"
+  ]
+}

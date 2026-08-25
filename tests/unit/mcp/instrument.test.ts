@@ -66,8 +66,39 @@ describe('instrumentTools — McpToolCall persistence', () => {
     )
   })
 
-  it('persists a thrown handler as outcome threw and RE-THROWS to the caller', async () => {
+  it('persists a thrown handler as outcome threw and RE-THROWS to the caller (message SANITIZED for a customer)', async () => {
     const { server, registered } = makeInstrumentedServer()
+    server.tool('adjust_stock', {}, async () => {
+      throw new Error('kaboom')
+    })
+
+    // The re-throw invariant is unchanged — an exception still propagates, never gets swallowed.
+    // What changed (2026-08-25): the MCP SDK forwards `error.message` to the AI client verbatim,
+    // so an UNEXPECTED exception is replaced with a generic message + reference id before it can
+    // hand a customer's assistant internals (Prisma table/column names, connection strings…).
+    // Operator-facing errors (ScopeError, AppError `isOperational`) still pass through untouched —
+    // see tests/unit/mcp-customer/instrument.test.ts. Do NOT "fix" this back to expecting 'kaboom'.
+    const thrown = await (registered.adjust_stock({ venueId: 'v1' }, {}) as Promise<unknown>).then(
+      () => null,
+      (e: Error) => e,
+    )
+    expect(thrown).toBeInstanceOf(Error)
+    expect(thrown!.message).toMatch(/^No pude completar "adjust_stock" por un error interno de Avoqado \(ref [0-9a-f]{8}\)/)
+    expect(thrown!.message).not.toMatch(/kaboom/)
+    await flush()
+
+    // The audit row keeps the REAL message, prefixed with the SAME ref the client was given —
+    // that pairing is what lets support resolve a user's "ref abc12345" back to the actual error.
+    const ref = thrown!.message.match(/ref ([0-9a-f]{8})/)![1]
+    expect(prismaMock.mcpToolCall.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ toolName: 'adjust_stock', outcome: 'threw', detail: `[${ref}] kaboom` }),
+      }),
+    )
+  })
+
+  it('a SUPERADMIN connection keeps the raw thrown message (debugging aid)', async () => {
+    const { server, registered } = makeInstrumentedServer({ staffId: 'staff_1', org: 'org_1', isSuperAdmin: true } as never)
     server.tool('adjust_stock', {}, async () => {
       throw new Error('kaboom')
     })

@@ -7,6 +7,8 @@
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
+import * as coachClassController from '../controllers/mobile/coachClass.mobile.controller'
+import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import * as promotionMobileController from '../controllers/mobile/promotion.mobile.controller'
 import * as tenderTypeMobileController from '../controllers/mobile/tenderType.mobile.controller'
 import * as orderMobileController from '../controllers/mobile/order.mobile.controller'
@@ -3185,6 +3187,35 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('orders:read'),
   areaTicketMobileController.listPendingFulfillment,
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fase 8 del kiosco — "Mi clase ahora"
+//
+// El permiso es el más estrecho del catálogo a propósito: quien da la clase ve SU clase
+// y nada más. `reservations:read` abriría la agenda entera del negocio.
+// ─────────────────────────────────────────────────────────────────────────────
+// Respaldo del kiosco: "no aparezco en la lista". El kiosco vive dentro de esta app y usa
+// la sesión que ya tiene (la credencial de aparato es la Fase 3, que el founder sacó del
+// piloto), así que entra por el espacio móvil y no por el de terminales.
+// Compra en el kiosco: catálogo y enlace de pago para el QR. Sin PIN de empleado a
+// propósito (decisión del founder) — lo que lo hace seguro es que el precio sale del
+// catálogo y el cliente paga con SU tarjeta en SU teléfono, no que se pida un PIN.
+router.get('/venues/:venueId/kiosk/packs', authenticateTokenMiddleware, kioskCheckInController.kioskPacks)
+router.post('/venues/:venueId/kiosk/pack-checkout', authenticateTokenMiddleware, kioskCheckInController.kioskPackCheckout)
+
+router.post(
+  '/venues/:venueId/kiosk/check-in',
+  authenticateTokenMiddleware,
+  checkPermission('reservations:update'),
+  kioskCheckInController.checkInByCode,
+)
+
+router.get(
+  '/venues/:venueId/my-class-now',
+  authenticateTokenMiddleware,
+  checkPermission('class-sessions:read-assigned'),
+  coachClassController.myClassNow,
 )
 
 export default router

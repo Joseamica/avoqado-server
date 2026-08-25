@@ -433,7 +433,13 @@ describe('runIncrementalPull', () => {
     expect(upsertArgs.connectionId).toBe('conn-1')
   })
 
-  it('avoqadoOrigin self-echo is skipped (NEITHER upserted NOR deleted)', async () => {
+  // FASE 2 (2026-08-23) — este contrato CAMBIÓ a propósito. El evento propio
+  // sigue sin importarse como ocupado (eso sería bloquearse a sí mismo), pero ya
+  // NO se ignora del todo: se evalúa por si el venue lo editó en Google. Cuando
+  // no hay una reserva viva detrás —como en este test, sin mapping— se limpia
+  // cualquier bloque residual de ese evento, que es el mecanismo que hace
+  // auto-reversible la fase 2. Ver `own-event-edit.service.ts`.
+  it('avoqadoOrigin self-echo NO se importa como ocupado; sin reserva detrás, limpia su bloque', async () => {
     setupConnectionWithSyncToken('st-1')
     eventsListMock.mockResolvedValueOnce({
       data: {
@@ -450,11 +456,12 @@ describe('runIncrementalPull', () => {
 
     await runIncrementalPull('conn-1')
 
+    // Lo que NO cambia: jamás se importa el evento propio como tiempo ocupado.
     expect(externalBusyBlockService.upsertBlock).not.toHaveBeenCalled()
-    // deleteMany should NOT be called for the echoed event.
+    // Lo que sí: sin reserva viva detrás, el bloque de ese evento se retira.
     const deleteCalls = (prisma.externalBusyBlock.deleteMany as jest.Mock).mock.calls
     const echoDeletes = deleteCalls.filter(c => c[0]?.where?.externalEventId === 'echo-1')
-    expect(echoDeletes).toHaveLength(0)
+    expect(echoDeletes).toHaveLength(1)
   })
 
   it('falls back to runBackfill when connection.syncToken is null', async () => {

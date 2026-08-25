@@ -3,6 +3,7 @@ import emailService from '../../services/email.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { signupFromLanding } from '../../services/onboarding/signup.service'
+import { sendLeadToHubspot, isHubspotEnabled } from '../../services/integrations/hubspot.client'
 import crypto from 'crypto'
 import prisma from '../../utils/prismaClient'
 
@@ -165,6 +166,9 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // Campos opcionales que manda la landing de sector (restaurantes): tipo de
     // negocio, módulos marcados en el formulario, origen y UTMs de la campaña.
     const { businessType, modules, source, utm } = req.body || {}
+    // Contexto del visitante para el espejo en HubSpot. Ya viene filtrado por
+    // `contactSchema`: si el navegador no traía la cookie, llega undefined.
+    const { hutk, pageUri, pageName } = req.body || {}
 
     if (!firstName || !lastName || !phone || !email || !companyName) {
       throw new BadRequestError('Todos los campos son requeridos')
@@ -183,6 +187,10 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // Que paso con el alta, para poder decirselo al equipo sin que lo adivine
     // del contenido del correo del cliente.
     let altaEstado: 'creada' | 'existente' | 'fallo' = 'fallo'
+    // Public conversion signal consumed by the landing Pixel. Only a brand-new
+    // persisted account counts as a completed registration; renewing the magic
+    // link for an unfinished account must not count the same person twice.
+    let registrationCompleted = false
     try {
       const alta = await signupFromLanding({
         email: String(email),
@@ -191,9 +199,15 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
         organizationName: String(companyName),
         phone: String(phone),
         source: source ? String(source) : undefined,
+        // Los UTMs viajan al alta, no solo al correo interno: pegados en un
+        // correo, "de que campana vino este lead" solo se contesta abriendo
+        // correos a mano. En el ActivityLog del alta si se puede consultar.
+        // Ya vienen filtrados por allowlist y recortados en `contactSchema`.
+        utm: utm as Record<string, string> | undefined,
       })
       yaEsCliente = alta.yaEsCliente
       altaEstado = alta.yaEsCliente ? 'existente' : 'creada'
+      registrationCompleted = !alta.alreadyExisted && !alta.yaEsCliente
       if (alta.magicLinkToken) {
         // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
         const apiUrl = process.env.PUBLIC_API_URL || 'https://api.avoqado.io'
@@ -468,7 +482,7 @@ Política de Privacidad: https://avoqado.io/privacy
     // cliente reciba el lead sin depender de un reenvio manual.
     const internos = [...new Set([CONTACT_NOTIFY_EMAIL, ONBOARDING_NOTIFY_EMAIL].filter(Boolean))]
 
-    const [internosOk, confirmSent] = await Promise.all([
+    const [internosOk, confirmSent, crmOk] = await Promise.all([
       Promise.all(
         internos.map(to =>
           emailService.sendEmail({
@@ -485,12 +499,33 @@ Política de Privacidad: https://avoqado.io/privacy
         html: confirmHtml,
         text: confirmText,
       }),
+      // Espejo comercial. Va EN PARALELO y su resultado no decide nada: el
+      // correo interno sigue siendo lo que garantiza que el lead no se pierda.
+      // Un cliente que ya existe se manda igual — HubSpot dedupe por correo, y
+      // que alguien con cuenta vuelva a llenar el formulario es justo el aviso
+      // que ventas necesita ver.
+      sendLeadToHubspot({
+        email: String(email),
+        firstName: String(firstName),
+        lastName: String(lastName),
+        phone: String(phone),
+        companyName: String(companyName),
+        hutk: hutk ? String(hutk) : undefined,
+        pageUri: pageUri ? String(pageUri) : undefined,
+        pageName: pageName ? String(pageName) : undefined,
+      }),
     ])
 
     // Basta con que UNO de los internos llegue para no perder el lead.
-    if (!internosOk.some(Boolean)) {
+    const leadCreated = internosOk.some(Boolean)
+    const conversion = { leadCreated, registrationCompleted }
+    if (!leadCreated) {
       logger.error('[CONTACT_SUBMIT] Internal notification failed', { email, companyName, internos })
-      return res.status(502).json({ success: false, message: 'No se pudo notificar al equipo. Intenta de nuevo.' })
+      return res.status(502).json({
+        success: false,
+        message: 'No se pudo notificar al equipo. Intenta de nuevo.',
+        conversion,
+      })
     }
     internos.forEach((to, i) => {
       if (!internosOk[i]) logger.warn('[CONTACT_SUBMIT] Internal notification failed for one recipient', { to, companyName })
@@ -498,8 +533,18 @@ Política de Privacidad: https://avoqado.io/privacy
     if (!confirmSent) {
       logger.warn('[CONTACT_SUBMIT] Confirmation email failed (lead saved)', { email })
     }
+    // Un CRM apagado y un CRM caído no son lo mismo: uno es configuración que
+    // falta, el otro es una integración rota que hay que ir a arreglar. El log
+    // tiene que poder distinguirlos sin abrir el código.
+    if (!crmOk) {
+      if (!isHubspotEnabled()) {
+        logger.info('[CONTACT_SUBMIT] HubSpot apagado; el lead vive en Avoqado y en el correo', { email })
+      } else {
+        logger.warn('[CONTACT_SUBMIT] El lead no llegó a HubSpot (sí está en Avoqado y en el correo)', { email })
+      }
+    }
 
-    return res.status(200).json({ success: true, message: 'Demo solicitada exitosamente' })
+    return res.status(200).json({ success: true, message: 'Demo solicitada exitosamente', conversion })
   } catch (err) {
     return next(err)
   }

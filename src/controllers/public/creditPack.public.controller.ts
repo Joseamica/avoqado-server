@@ -35,7 +35,11 @@ export async function getAvailablePacks(req: Request, res: Response, next: NextF
 }
 
 /**
- * GET /public/venues/:venueSlug/credit-packs/balance?email=&phone=&seats=N&productId=&productIds=a,b,c
+ * GET /public/venues/:venueSlug/credit-packs/balance?seats=N&productId=&productIds=a,b,c
+ *
+ * Fase 0.B: requiere sesión de cliente (`authenticateCustomer` en la ruta). El balance es
+ * del customer del token; `email`/`phone` en la query ya no identifican a nadie (antes,
+ * conocer el email de alguien bastaba para ver y canjear sus créditos).
  *
  * `seats` (optional): when provided, each balance is annotated with `sufficient: boolean`
  *   indicating whether remainingQuantity >= seats. Widget uses this to disable balances
@@ -50,10 +54,10 @@ export async function getAvailablePacks(req: Request, res: Response, next: NextF
 export async function getCustomerBalance(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueSlug } = req.params
-    const venue = await resolveVenueBySlug(venueSlug)
-    const { email, phone, seats, productId, productIds } = req.query as {
-      email?: string
-      phone?: string
+    // La ruta ya corrió resolveVenueBySlug (req.publicVenue); no repetir la consulta.
+    const venue = ((req as any).publicVenue as { id: string } | undefined) ?? (await resolveVenueBySlug(venueSlug))
+    const sessionCustomerId = ((req as any).customerAuth?.customerId as string | undefined) ?? ''
+    const { seats, productId, productIds } = req.query as {
       seats?: string
       productId?: string
       productIds?: string
@@ -71,7 +75,7 @@ export async function getCustomerBalance(req: Request, res: Response, next: Next
             .slice(0, 20)
         : undefined
 
-    const result = await creditPackPublicService.lookupCustomerCredits(venue.id, email, phone, {
+    const result = await creditPackPublicService.lookupCustomerCredits(venue.id, sessionCustomerId, {
       seats: seatsNum,
       productId,
       productIds: productIdsArr,
@@ -91,8 +95,13 @@ export async function createCheckout(req: Request, res: Response, next: NextFunc
     const { venueSlug, packId } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
     const { email, phone, successUrl, cancelUrl } = req.body
+    // Fase 0.B: con sesión (authenticateCustomerOptional ya validó el token contra el slug),
+    // la compra se liga al customer del token; el email del body no manda.
+    const sessionCustomerId = ((req as any).customerAuth?.customerId as string | undefined) ?? null
 
-    const result = await creditPackPublicService.createCheckoutSession(venue.id, packId, email, phone, successUrl, cancelUrl)
+    const result = await creditPackPublicService.createCheckoutSession(venue.id, packId, email, phone, successUrl, cancelUrl, {
+      customerId: sessionCustomerId,
+    })
 
     res.json(result)
   } catch (error) {

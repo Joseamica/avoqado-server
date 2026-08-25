@@ -109,11 +109,11 @@ describe('resolveCanonicalAppointmentDuration', () => {
         productIds: ['a', 'b', 'c'],
         settings: settings({ defaultDurationMin: 15 }),
       }),
-    ).resolves.toEqual({ productIds: ['a', 'b', 'c'], canonicalBaseDurationMin: 75 })
+    ).resolves.toEqual({ productIds: ['a', 'b', 'c'], canonicalBaseDurationMin: 75, bufferAfterMin: 0 })
 
     expect(db.product.findMany).toHaveBeenCalledWith({
       where: { id: { in: ['a', 'b', 'c'] }, venueId: 'venue-1', type: 'APPOINTMENTS_SERVICE' },
-      select: { id: true, duration: true, durationMinutes: true },
+      select: { id: true, duration: true, durationMinutes: true, bufferAfterMin: true },
     })
   })
 

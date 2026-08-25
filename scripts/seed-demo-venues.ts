@@ -849,6 +849,8 @@ async function seedReservation(
       status: ReservationStatus.CONFIRMED,
       startsAt,
       endsAt,
+      // El bloque de agenda coincide con el fin del servicio: estos datos no usan buffer.
+      blockedEndsAt: endsAt,
       duration: durationMin,
       customerId,
       partySize: 1,

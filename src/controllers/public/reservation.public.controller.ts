@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express'
+import { toPublicBookingPayload } from '@/services/public/publicBookingPayload'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
@@ -6,7 +7,6 @@ import { getReservationSettings, isStaffAware, type OperatingHours } from '../..
 import { mergeReservationBranding } from '../../services/dashboard/reservationBranding.service'
 import { checkExternalBusyBlock } from '../../services/reservation/external-busy-block.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
-import { verifyCustomerToken } from '../../jwt.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
@@ -23,8 +23,8 @@ import { es as esLocale } from 'date-fns/locale'
 import emailService from '../../services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
-import { phonesMatch, phoneLast10 } from '../../utils/phone'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { normalizeBookedProductIds, reservationBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 import {
   fastFailLiveHold,
@@ -113,20 +113,69 @@ export function resolveUpfrontPolicy(
 }
 
 /**
- * Opportunistically extract an authenticated customer from a Bearer token on
- * the public booking endpoint. Returns null when no token is present or the
- * token is invalid/expired — the caller decides whether anonymous is allowed
- * (e.g. `settings.publicBooking.requireAccount`).
+ * Pagar con créditos ⇒ NO hay depósito (auditoría 4, bloqueo 2).
+ *
+ * Antes `willUseCredits` sólo apagaba el prepago sintético de `upfrontPolicy=required`;
+ * `settings.deposits` seguía vivo, así que una cita podía canjear créditos Y abrir una sesión
+ * de Stripe de depósito. Si el cliente canjeaba y abandonaba el checkout, el job de depósitos
+ * cancelaba la reserva sin devolver los créditos, y la sesión de Stripe quedaba huérfana.
+ * Los créditos YA son el pago: el depósito se apaga para esa reserva. Pura, probada sola.
  */
-function tryReadAuthenticatedCustomer(req: Request): { customerId: string; venueId: string } | null {
-  const authHeader = req.headers.authorization
-  if (!authHeader?.startsWith('Bearer ')) return null
-  try {
-    const payload = verifyCustomerToken(authHeader.slice(7))
-    return { customerId: payload.sub, venueId: payload.venueId }
-  } catch {
-    return null
+type DepositsShape = { enabled: boolean; mode: string; [k: string]: unknown }
+
+export function resolveDepositsWhenPayingWithCredits<D extends DepositsShape | undefined>(input: {
+  wantsCredits: boolean
+  deposits: D
+}): D {
+  if (!input.wantsCredits) return input.deposits
+  // El spread conserva el resto del shape del venue (ventana, %, monto) y sólo apaga el depósito.
+  return { ...(input.deposits ?? {}), enabled: false, mode: 'none' } as unknown as D
+}
+
+/**
+ * Fase 0.B — con qué identidad se liga una reserva pública.
+ *
+ * La ÚNICA fuente de identidad es `req.customerAuth`, que pone el middleware
+ * `authenticateCustomerOptional` después de haber rechazado ya tokens inválidos,
+ * expirados, de otro venue o de cuentas inactivas. Aquí ya no se lee el header.
+ *
+ * 🔴 El body NUNCA confiere identidad. Antes, con `requireAccount`, un
+ * `customerId` suelto en el body —sin token— satisfacía el login
+ * (`!authenticatedCustomer && !bodyCustomerId`), y un token de OTRO venue
+ * quedaba truthy y también lo satisfacía. Las dos puertas se cierran aquí.
+ *
+ * Función pura para poder probarla sin Express (patrón del repo:
+ * `computeCancelDecision`).
+ */
+export function resolveBookingIdentity(input: {
+  customerAuth: { customerId: string; venueId: string } | null | undefined
+  requireAccount: boolean
+  bodyCustomerId: unknown
+  /** Si true, un customerId en el body que difiera del token es 400 (el body no manda). */
+  rejectBodyCustomerId?: boolean
+  /**
+   * Si true, la reserva quiere pagar con créditos (`creditItemBalanceId[s]`). Los créditos
+   * son de CUENTA: sin sesión es 401 aunque el venue admita invitados. Se decide aquí,
+   * antes de insertar nada, porque en cita el canje corre en OTRA transacción y un 401
+   * tardío dejaría una reserva huérfana.
+   */
+  wantsCredits?: boolean
+}): { ok: true; customerId: string | null } | { ok: false; code: 'CUSTOMER_AUTH_REQUIRED' | 'CUSTOMER_ID_NOT_ALLOWED' } {
+  const auth = input.customerAuth ?? null
+  const bodyId = typeof input.bodyCustomerId === 'string' && input.bodyCustomerId.length > 0 ? input.bodyCustomerId : null
+
+  if (auth) {
+    if (input.rejectBodyCustomerId && bodyId && bodyId !== auth.customerId) {
+      return { ok: false, code: 'CUSTOMER_ID_NOT_ALLOWED' }
+    }
+    return { ok: true, customerId: auth.customerId }
   }
+
+  if (input.requireAccount || input.wantsCredits) {
+    return { ok: false, code: 'CUSTOMER_AUTH_REQUIRED' }
+  }
+  // Invitado. El bodyId se descarta a propósito: sin sesión no liga nada.
+  return { ok: true, customerId: null }
 }
 
 async function resolveVenueBySlug(venueSlug: string) {
@@ -394,7 +443,10 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
       branding: mergeReservationBranding(reservationBranding, venueInfoRest.primaryColor),
       products,
       timezone: venue.timezone || 'America/Mexico_City',
-      publicBooking: settings.publicBooking,
+      // Lista blanca: esta respuesta es ANÓNIMA. Copiar el objeto entero publicaba en
+      // internet cada campo nuevo de la config — así se filtró
+      // `customerApprovalNotificationRoles`. Ver `publicBookingPayload.ts`.
+      publicBooking: toPublicBookingPayload(settings.publicBooking as Record<string, unknown>),
       // Venue-chat availability. `canMessage` is the single gate the booking
       // surfaces use to decide whether to render a "message us" affordance, so
       // a dead-end (no relay + no phone) never shows the customer a button that
@@ -697,25 +749,37 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
     }
 
-    // Always bind a valid Bearer JWT to the booking, independent of
-    // `requireAccount`. When the customer is logged in, their bookings need
-    // to surface in "Mis Reservaciones" and anchor any credit redemption to
-    // the same identity — even at venues that allow anonymous guest bookings.
-    // We trust the JWT (signed server-side) but verify the embedded venueId
-    // matches the URL slug so a token minted for venue A can't be replayed
-    // against venue B. Public unauthenticated body.customerId is NEVER
-    // trusted to set customerId here — that path is only honored under
-    // requireAccount, where the operator has opted in to that contract.
-    const authenticatedCustomer = tryReadAuthenticatedCustomer(req)
-    if (authenticatedCustomer && authenticatedCustomer.venueId === venue.id) {
-      req.body.customerId = authenticatedCustomer.customerId
-    }
-
-    if (settings.publicBooking.requireAccount) {
-      const bodyCustomerId = typeof req.body?.customerId === 'string' ? req.body.customerId : null
-      if (!authenticatedCustomer && !bodyCustomerId) {
-        throw new UnauthorizedError('Este negocio requiere iniciar sesion para reservar.')
+    // Fase 0.B — la identidad viene SÓLO de `req.customerAuth` (middleware
+    // `authenticateCustomerOptional`, que ya rechazó tokens ajenos/inválidos/inactivos).
+    // El body nunca confiere identidad: con sesión se liga al token; sin sesión y
+    // con `requireAccount`, 401; sin sesión y sin `requireAccount`, invitado.
+    const wantsCredits =
+      (typeof req.body?.creditItemBalanceId === 'string' && req.body.creditItemBalanceId.length > 0) ||
+      (Array.isArray(req.body?.creditItemBalanceIds) && req.body.creditItemBalanceIds.length > 0)
+    const identity = resolveBookingIdentity({
+      customerAuth: (req as any).customerAuth,
+      requireAccount: settings.publicBooking.requireAccount,
+      bodyCustomerId: req.body?.customerId,
+      rejectBodyCustomerId: true,
+      wantsCredits,
+    })
+    if (!identity.ok) {
+      if (identity.code === 'CUSTOMER_AUTH_REQUIRED') {
+        throw new UnauthorizedError(
+          wantsCredits && !settings.publicBooking.requireAccount
+            ? 'Inicia sesión para pagar con tus créditos.'
+            : 'Este negocio requiere iniciar sesion para reservar.',
+          'CUSTOMER_AUTH_REQUIRED',
+        )
       }
+      throw new BadRequestError('No se acepta customerId en el cuerpo de la solicitud.', 'CUSTOMER_ID_NOT_ALLOWED')
+    }
+    // Se escribe el resultado (o se borra) para que ningún camino posterior lea un
+    // customerId que no venga de la sesión.
+    if (identity.customerId) {
+      req.body.customerId = identity.customerId
+    } else {
+      delete req.body.customerId
     }
 
     // Validate required fields based on config
@@ -862,7 +926,13 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // checkout (will charge) vs CONFIRMED + amount-owed-at-venue (no Stripe yet).
     if (req.body.classSessionId) {
       const stripeMerchantPreflight = await resolveActiveStripeMerchant(venue.id)
-      const reservation = await createClassReservation(venue.id, req.body, settings, !!stripeMerchantPreflight)
+      const reservation = await createClassReservation(
+        venue.id,
+        req.body,
+        settings,
+        !!stripeMerchantPreflight,
+        ((req as any).customerAuth?.customerId as string | undefined) ?? null,
+      )
 
       // When the class requires upfront cash AND the venue has Stripe configured,
       // the reservation landed in PENDING + depositStatus PENDING. Mint a Stripe
@@ -1078,6 +1148,14 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
     }
 
+    // Auditoría 4: pagar con créditos ⇒ NO hay depósito (ni prepago sintético ni
+    // settings.deposits). Evita la sesión de Stripe huérfana y el caso "canjeó y abandonó
+    // el checkout → el job de depósitos cancela sin devolver créditos".
+    if (wantsCredits) {
+      effectiveDeposits = resolveDepositsWhenPayingWithCredits({ wantsCredits, deposits: effectiveDeposits })
+      paymentPolicyOverride = { deposits: effectiveDeposits }
+    }
+
     const depositPreview = await previewDepositRequirement(venue.id, req.body, { ...settings, deposits: effectiveDeposits })
     const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
 
@@ -1134,6 +1212,39 @@ export async function createReservation(req: Request, res: Response, next: NextF
         ...(normalAppointmentHold ? { appointmentHoldId: normalAppointmentHold.id } : {}),
       },
     )
+
+    // Auditoría 4: el canje va ANTES de cualquier depósito/sesión de Stripe (que con créditos
+    // ya no existe) — si el canje falla, la compensación cancela una reserva sin efectos
+    // externos colgando.
+    // Credit redemption for non-class appointments. Lives outside the
+    // reservation transaction (reservationService.createReservation owns its
+    // own tx and doesn't expose it). Auditoría 3: if the redemption fails the
+    // reservation must NOT stay alive holding the slot — it is cancelled as
+    // compensation (SYSTEM / CREDIT_REDEEM_FAILED) and the error surfaces.
+    let creditRedeemed = false
+    let creditsUsed = 0
+    const balanceIds: string[] = Array.isArray(req.body.creditItemBalanceIds)
+      ? req.body.creditItemBalanceIds.filter((id: unknown): id is string => typeof id === 'string')
+      : req.body.creditItemBalanceId
+        ? [req.body.creditItemBalanceId]
+        : []
+    if (balanceIds.length > 0) {
+      const seats = (req.body.spotIds?.length || req.body.partySize || 1) as number
+      const result = await redeemCreditsWithCompensation({
+        venueId: venue.id,
+        reservationId: reservation.id,
+        confirmationCode: reservation.confirmationCode,
+        balanceIds,
+        creditsPerBalance: seats,
+        // Fase 0.B: el dueño de los créditos es el customer de la sesión (obligatoria).
+        customerId: ((req as any).customerAuth?.customerId as string | undefined) ?? null,
+        customerEmail: req.body.guestEmail,
+        customerPhone: req.body.guestPhone,
+        expectedProductIds: incomingProductIds.length > 0 ? incomingProductIds : req.body.productId ? [req.body.productId] : undefined,
+      })
+      creditRedeemed = result.redeemed
+      creditsUsed = result.creditsUsed
+    }
 
     // Owes-at-venue fallback (policy=required + no Stripe merchant): the
     // reservation was just created CONFIRMED with no deposit. Stamp the
@@ -1214,45 +1325,6 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // Burn the slot hold now that the reservation exists. Best-effort —
     // failures are logged but do not poison the committed booking response.
     await finalizeReservationSideEffects()
-
-    // Credit redemption for non-class appointments. Lives outside the
-    // reservation transaction (reservationService.createReservation owns its
-    // own tx and doesn't expose it), so on the rare failure case the
-    // reservation stands but credits are NOT consumed — the customer's
-    // unaffected, ops can reconcile from the [CREDIT REDEEM FAILED] log.
-    let creditRedeemed = false
-    let creditsUsed = 0
-    const balanceIds: string[] = Array.isArray(req.body.creditItemBalanceIds)
-      ? req.body.creditItemBalanceIds.filter((id: unknown): id is string => typeof id === 'string')
-      : req.body.creditItemBalanceId
-        ? [req.body.creditItemBalanceId]
-        : []
-    if (balanceIds.length > 0) {
-      try {
-        const seats = (req.body.spotIds?.length || req.body.partySize || 1) as number
-        const result = await prisma.$transaction(async tx =>
-          redeemCreditsForReservation(tx, {
-            venueId: venue.id,
-            reservationId: reservation.id,
-            confirmationCode: reservation.confirmationCode,
-            balanceIds,
-            creditsPerBalance: seats,
-            customerEmail: req.body.guestEmail,
-            customerPhone: req.body.guestPhone,
-            expectedProductIds: incomingProductIds.length > 0 ? incomingProductIds : req.body.productId ? [req.body.productId] : undefined,
-          }),
-        )
-        creditRedeemed = result.redeemed
-        creditsUsed = result.creditsUsed
-      } catch (error) {
-        logger.error(
-          `[CREDIT REDEEM FAILED] reservation=${reservation.confirmationCode} balances=${balanceIds.join(',')} err=${(error as Error).message}`,
-        )
-        // Surface the error to the customer so they can fix the input rather
-        // than think they paid with credits when they didn't.
-        throw error
-      }
-    }
 
     // Booking confirmation email — only fires when the reservation is already
     // CONFIRMED at this point (no-deposit flow OR pay-at-venue). For the
@@ -1805,6 +1877,50 @@ export async function cancelReservation(req: Request, res: Response, next: NextF
 // CLASS Reservation — Serializable transaction with capacity check
 // ==========================================
 
+/**
+ * Fase 0.B — a qué Customer se liga una reserva de clase: SÓLO al de la sesión.
+ *
+ * Antes se ligaba siempre al Customer que coincidía por email/teléfono del body, aunque
+ * hubiera sesión (una alumna con sesión que tecleara el email de otra quedaba ligada a la
+ * otra). Y el invitado tampoco liga por contacto (auditoría 2, P1 #1): email/teléfono
+ * vienen del body y el body nunca confiere identidad. La reserva invitada queda con
+ * `customerId=null`, igual que la cita invitada; el portal la recupera por
+ * `guestEmail`/`guestPhone` del Customer verificado (customerPortal contactFilter).
+ * Pura, para probarla sola.
+ */
+export function resolveClassCustomerBinding(input: { sessionCustomerId: string | null | undefined }): {
+  customerId: string | null
+  source: 'SESSION' | 'NONE'
+} {
+  if (input.sessionCustomerId) return { customerId: input.sessionCustomerId, source: 'SESSION' }
+  return { customerId: null, source: 'NONE' }
+}
+
+/**
+ * Fase 0.B — quién puede gastar créditos al reservar: SÓLO el customer de la sesión.
+ *
+ * Antes, sin sesión, el dueño se resolvía por `guestEmail/guestPhone` del body; como el
+ * balance también era público por contacto, conocer el email de alguien bastaba para
+ * obtener un balanceId y gastar sus créditos (auditoría 2, P1). Compartido por los dos
+ * caminos que canjean (clase inline y `redeemCreditsForReservation` de cita).
+ *
+ * - sin sesión → 401 CUSTOMER_AUTH_REQUIRED (antes de tocar la DB)
+ * - sesión cuyo customer ya no existe en el venue → 400
+ */
+export async function requireSessionCustomerForCredits(
+  tx: Prisma.TransactionClient,
+  input: { sessionCustomerId: string | null | undefined; venueId: string },
+): Promise<{ id: string }> {
+  if (!input.sessionCustomerId) {
+    throw new UnauthorizedError('Inicia sesión para pagar con tus créditos', 'CUSTOMER_AUTH_REQUIRED')
+  }
+  const customer = await tx.customer.findFirst({ where: { id: input.sessionCustomerId, venueId: input.venueId }, select: { id: true } })
+  if (!customer) {
+    throw new BadRequestError('No se encontro el cliente para canjear creditos')
+  }
+  return customer
+}
+
 async function createClassReservation(
   venueId: string,
   body: {
@@ -1819,6 +1935,8 @@ async function createClassReservation(
   },
   moduleConfig: any,
   hasStripeMerchant: boolean,
+  /** Fase 0.B: customerId de la sesión (req.customerAuth), o null si es invitado. */
+  sessionCustomerId: string | null = null,
 ) {
   const requestedSpotIds = body.spotIds ?? []
   // If spotIds provided, partySize = number of spots selected
@@ -1828,6 +1946,11 @@ async function createClassReservation(
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
   return withSerializableRetry(async tx => {
+    // Fase 1: el gate va primero, dentro de la MISMA tx que aparta el lugar. Las clases
+    // tienen su propia transacción (lock de la sesión) y no pasan por `createReservation`,
+    // así que el gate del servicio de citas no las cubre.
+    await assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId })
+
     // Lock the ClassSession row and verify it exists + belongs to venue
     const sessions = await tx.$queryRaw<
       { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
@@ -1964,34 +2087,12 @@ async function createClassReservation(
     })
     const finalCode = existing ? reservationService.generateConfirmationCode() : confirmationCode
 
-    // Auto-link to a registered Customer when the guest data matches one. This
-    // makes the booking show up in the customer portal "Mis Reservaciones" and
-    // anchors loyalty/credits to the same identity.
-    // Auto-link matching: exact email OR canonical phone. Phone is matched
-    // format-independently — coarse-prefilter existing customers by the trailing
-    // 10 digits, then canonical-verify with phonesMatch — because guest-typed and
-    // stored phone strings aren't consistently normalized across write paths.
-    const phoneLast10Digits = body.guestPhone ? phoneLast10(body.guestPhone) : null
-    // Fetch candidate customers: exact email OR normalized-phone last-10 match.
-    // The phone side strips non-digits from the STORED "phone" column in SQL so
-    // formatting differences don't hide a real returning customer (a Prisma
-    // `endsWith` compares raw text and misses "55 1234 5678"). phonesMatch below
-    // is the canonical verify. Column names are compile-time literals here.
-    const emailCond = body.guestEmail ? Prisma.sql`"email" = ${body.guestEmail}` : Prisma.sql`FALSE`
-    const phoneCond = phoneLast10Digits
-      ? Prisma.sql`right(regexp_replace("phone", '[^0-9]', '', 'g'), 10) = ${phoneLast10Digits}`
-      : Prisma.sql`FALSE`
-    const matchCandidates =
-      body.guestEmail || phoneLast10Digits
-        ? await tx.$queryRaw<{ id: string; email: string | null; phone: string | null }[]>`
-            SELECT "id", "email", "phone"
-            FROM "Customer"
-            WHERE "venueId" = ${venueId}
-              AND (${emailCond} OR ${phoneCond})
-          `
-        : []
-    const matchedCustomer =
-      matchCandidates.find(c => (body.guestEmail && c.email === body.guestEmail) || phonesMatch(c.phone, body.guestPhone)) ?? null
+    // Fase 0.B: la reserva se liga SÓLO al Customer de la sesión. Antes aquí había un
+    // auto-link por email/teléfono del body (query raw sobre "Customer" con phonesMatch);
+    // se retiró porque el body no confiere identidad — ver resolveClassCustomerBinding.
+    // El portal sigue mostrando la reserva invitada por guestEmail/guestPhone.
+    const binding = resolveClassCustomerBinding({ sessionCustomerId })
+    const matchedCustomer = binding.customerId ? { id: binding.customerId } : null
 
     // Three states for the reservation row:
     // 1. requiresUpfrontCash (policy=required + venue has Stripe): PENDING +
@@ -2017,6 +2118,9 @@ async function createClassReservation(
         productId: session.productId,
         startsAt: session.startsAt,
         endsAt: session.endsAt,
+        // Una CLASE no lleva buffer post-servicio (es de citas): el bloque de
+        // agenda coincide con la sesión.
+        blockedEndsAt: session.endsAt,
         duration: session.duration,
         status: effectiveStatus,
         channel: 'WEB',
@@ -2046,17 +2150,8 @@ async function createClassReservation(
     let creditRedeemed = false
     let creditsUsed = 0
     if (body.creditItemBalanceId) {
-      // Find customer by email/phone
-      const customer = await tx.customer.findFirst({
-        where: {
-          venueId,
-          OR: [...(body.guestEmail ? [{ email: body.guestEmail }] : []), ...(body.guestPhone ? [{ phone: body.guestPhone }] : [])],
-        },
-      })
-
-      if (!customer) {
-        throw new BadRequestError('No se encontro el cliente para canjear creditos')
-      }
+      // Fase 0.B: los créditos son SÓLO del customer de la sesión; sin sesión → 401.
+      const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId, venueId })
 
       // Lock and verify balance
       const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
@@ -2288,6 +2383,15 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       }
     }
 
+    // 🔴 Fase 1 — un hold aparta 10 minutos de capacidad REAL: si esta persona no puede
+    // reservar, tampoco puede bloquearle el lugar a quien sí. La ruta antes ni autenticaba;
+    // se le montó `authenticateCustomerOptional` para que exista identidad que gatear.
+    //
+    // El gate NO se ejecuta aquí: viaja a la transacción que mintea (abajo). Hacerlo aquí,
+    // en una transacción corta aparte, dejaba una ventana entre "puede" y "aparta" en la que
+    // cabía un rechazo — y el rechazado se quedaba con el lugar. (Auditoría Codex #3.)
+    const holdCustomerId = ((req as any).customerAuth?.customerId as string | undefined) ?? null
+
     // Lazy GC — cheap, runs once per hold creation.
     void pruneExpiredHolds()
 
@@ -2312,6 +2416,7 @@ export async function createHold(req: Request, res: Response, next: NextFunction
         staffId: body.staffId,
         modifierSelections: body.modifierSelections,
         windowSemantics: body.windowSemantics,
+        customerId: holdCustomerId,
       })
     } else {
       // Class holds — wrap in a transaction so the
@@ -2319,6 +2424,10 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       // commits with.
       const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
       hold = await prisma.$transaction(async tx => {
+        // Fase 1: el gate, primero y dentro de ESTA transacción — igual que en la rama de
+        // cita. Orden de locks: Customer → sesión de clase, el mismo en todos los caminos.
+        await assertCustomerCanCreateReservation(tx, { customerId: holdCustomerId, venueId: venue.id })
+
         const externalBlock = await checkExternalBusyBlock(tx, {
           venueId: venue.id,
           staffId: null,
@@ -2415,6 +2524,91 @@ export async function validateHoldForReservation(args: {
 // CREDIT REDEMPTION (shared helper)
 // ==========================================
 
+export const CREDIT_REDEEM_FAILED_REASON = 'CREDIT_REDEEM_FAILED' as const
+
+type RedeemArgs = Parameters<typeof redeemCreditsForReservation>[1]
+
+/**
+ * Canje de créditos para una CITA ya creada, con COMPENSACIÓN (auditoría 3, P1).
+ *
+ * La cita se confirma en su propia transacción (`reservationService.createReservation`) y el
+ * canje corre en otra. Si el canje falla —saldo insuficiente, producto distinto, compra
+ * expirada, DB— la reserva NO puede quedar viva ocupando el lugar sin créditos cobrados: se
+ * cancela como SYSTEM con razón CREDIT_REDEEM_FAILED (cancelReservation ya maneja outbox de
+ * calendario; reembolso y depósito son no-op porque nada se cobró) y el error ORIGINAL se
+ * propaga al cliente. Si la compensación también falla, se loguea fuerte y gana el error
+ * original. `deps` inyectables para probarlo solo.
+ */
+export const RESERVATION_CREDIT_COMPENSATION_FAILED = 'RESERVATION_CREDIT_COMPENSATION_FAILED' as const
+
+type CompensationAnomaly = {
+  category: typeof RESERVATION_CREDIT_COMPENSATION_FAILED
+  reservationId: string
+  expectedState: Prisma.InputJsonValue
+  observedState: Prisma.InputJsonValue
+}
+
+export async function redeemCreditsWithCompensation(
+  args: RedeemArgs,
+  deps: {
+    redeem: (a: RedeemArgs) => Promise<{ creditsUsed: number; redeemed: boolean }>
+    cancel: (venueId: string, reservationId: string, by: string, reason: string) => Promise<unknown>
+    /** Rastro DURABLE cuando la compensación falla (auditoría 4): un log no es reintento. */
+    recordAnomaly: (a: CompensationAnomaly) => Promise<unknown>
+  } = {
+    redeem: a => prisma.$transaction(tx => redeemCreditsForReservation(tx, a)),
+    cancel: (venueId, reservationId, by, reason) => reservationService.cancelReservation(venueId, reservationId, by, reason),
+    recordAnomaly: a => prisma.moneyAnomaly.create({ data: { ...a, stripeEventId: null } }),
+  },
+): Promise<{ creditsUsed: number; redeemed: boolean }> {
+  try {
+    return await deps.redeem(args)
+  } catch (error) {
+    logger.error(
+      `[CREDIT REDEEM FAILED] reservation=${args.confirmationCode} balances=${args.balanceIds.join(',')} — cancelling as compensation`,
+      {
+        reservationId: args.reservationId,
+        err: (error as Error)?.message,
+      },
+    )
+    try {
+      await deps.cancel(args.venueId, args.reservationId, 'SYSTEM', CREDIT_REDEEM_FAILED_REASON)
+    } catch (cancelErr) {
+      logger.error(
+        `[CREDIT REDEEM FAILED] la compensación (cancelar) también falló — la reserva ${args.confirmationCode} queda VIVA sin créditos`,
+        {
+          reservationId: args.reservationId,
+          err: (error as Error)?.message,
+          cancelErr: (cancelErr as Error)?.message,
+        },
+      )
+      // Sin esto la reserva viva sólo existiría en un log. MoneyAnomaly es la cola de
+      // reconciliación que ops ya revisa (misma tabla que los depósitos de Stripe).
+      try {
+        await deps.recordAnomaly({
+          category: RESERVATION_CREDIT_COMPENSATION_FAILED,
+          reservationId: args.reservationId,
+          expectedState: { status: 'CANCELLED', reason: CREDIT_REDEEM_FAILED_REASON, balanceIds: args.balanceIds },
+          observedState: {
+            status: 'ALIVE_WITHOUT_CREDITS',
+            confirmationCode: args.confirmationCode,
+            redeemError: (error as Error)?.message ?? String(error),
+            cancelError: (cancelErr as Error)?.message ?? String(cancelErr),
+          },
+        })
+      } catch (anomalyErr) {
+        logger.error('[CREDIT REDEEM FAILED] ni la MoneyAnomaly pudo registrarse — reconciliar a mano', {
+          reservationId: args.reservationId,
+          anomalyErr: (anomalyErr as Error)?.message,
+        })
+      }
+    }
+    // Surface the original error so the customer can fix the input rather
+    // than think they paid with credits when they didn't.
+    throw error
+  }
+}
+
 /**
  * Redeems credits from one or more CreditItemBalance rows against a reservation.
  * Mirrors the inline class-path logic but works for any reservation type and
@@ -2442,6 +2636,12 @@ export async function redeemCreditsForReservation(
     /** One balance ID per redemption (length 1 = legacy single-product). */
     balanceIds: string[]
     creditsPerBalance: number
+    /**
+     * Fase 0.B: identidad de SESIÓN — obligatoria para canjear. El dueño de los créditos es
+     * este customer; sin sesión es 401 CUSTOMER_AUTH_REQUIRED (ver requireSessionCustomerForCredits).
+     */
+    customerId?: string | null
+    /** Sólo informativos (mensajes/emails); NO identifican al dueño de los créditos. */
     customerEmail?: string
     customerPhone?: string
     /** When provided, every balance.productId MUST match one of these (no
@@ -2454,16 +2654,7 @@ export async function redeemCreditsForReservation(
     return { creditsUsed: 0, redeemed: false }
   }
 
-  // Find customer by email/phone (same logic as class path).
-  const customer = await tx.customer.findFirst({
-    where: {
-      venueId: args.venueId,
-      OR: [...(args.customerEmail ? [{ email: args.customerEmail }] : []), ...(args.customerPhone ? [{ phone: args.customerPhone }] : [])],
-    },
-  })
-  if (!customer) {
-    throw new BadRequestError('No se encontro el cliente para canjear creditos')
-  }
+  const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId: args.customerId, venueId: args.venueId })
 
   let totalCreditsUsed = 0
   for (const balanceId of args.balanceIds) {

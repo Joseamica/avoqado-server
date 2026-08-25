@@ -11,6 +11,7 @@ import { ROLE_HIERARCHY } from '@/lib/permissions'
 import { StaffRole } from '@prisma/client'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { stockDashboardService } from '@/services/stock-dashboard/stockDashboard.service'
+import { orgInventoryByResponsibleService } from '@/services/organization-dashboard/orgInventoryByResponsible.service'
 import { simRegistrationService } from '@/services/serialized-inventory/simRegistration.service'
 import { hasPermission } from '@/services/access/access.service'
 
@@ -29,6 +30,27 @@ const CUSTODY_STATE_ES: Record<string, string> = {
 
 export function registerSerializedTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  /**
+   * Org-level read gate for the responsible-inventory table: there must be an
+   * active org in this connection AND at least one of its venues with the
+   * serialized-inventory module on. Read-only, so it needs no write permission
+   * beyond the connection's own scope.
+   */
+  async function requireOrgSerializedAccess(): Promise<{ orgId: string } | { moduleOff: true }> {
+    if (!scope.activeOrg) {
+      throw new ScopeError('No hay una organización activa en esta conexión — reconéctate eligiendo una organización.')
+    }
+    // SERIALIZED_INVENTORY es un MODULE: se gatea con isModuleEnabled (incluye
+    // el fallback org-level), NUNCA con el resolver de Features/tier — cruzarlos
+    // falla en silencio porque casi todos los venues están grandfathered.
+    const orgVenueIds = [...scope.perVenueAccess.entries()]
+      .filter(([, access]) => access.organizationId === scope.activeOrg)
+      .map(([venueId]) => venueId)
+    const flags = await Promise.all(orgVenueIds.map(id => moduleService.isModuleEnabled(id, MODULE_CODES.SERIALIZED_INVENTORY)))
+    if (!flags.some(Boolean)) return { moduleOff: true }
+    return { orgId: scope.activeOrg }
+  }
 
   /** Org-level gate: caller must hold `sim-custody:approve-registration` in SOME venue of the active org. Mirrors cash-out's requireOrgReadAccess. */
   function requireOrgApprovalAccess(): string {
@@ -772,6 +794,38 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
         simRegistrationService.countPendingStockApprovals(orgId),
       ])
       return text({ queue, orgId, count, ...page })
+    },
+  )
+
+  server.tool(
+    'inventory_by_responsible',
+    'Tabla de control de inventario serializado por responsable, en tres niveles: ciudad › supervisor › promotor. Por cada promotor devuelve cuántos se le asignaron, cuántos aceptó de recibido, cuántos trae EN MANO HOY, y el estado de sus ventas (aprobada, en revisión de admin, en revisión por el promotor, rechazada). Responde "¿cuántos SIMs debe traer físicamente cada promotor?" y sirve para auditar en tienda. Los promotores dados de baja o sin sucursal salen en un grupo aparte para que nada quede fuera del conteo. Filtro opcional por sucursal receptora (el punto por donde entró el inventario) y por tipo.',
+    {
+      receivingVenueId: z
+        .string()
+        .optional()
+        .describe('Sólo el inventario que entró por esta sucursal receptora; omítelo para ver TODO lo que el promotor trae en la mano'),
+      categoryId: z.string().optional().describe('Sólo un tipo de artículo'),
+    },
+    async ({ receivingVenueId, categoryId }) => {
+      const access = await requireOrgSerializedAccess()
+      if ('moduleOff' in access) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      const orgId = access.orgId
+
+      const data = await orgInventoryByResponsibleService.getInventoryByResponsible(orgId, {
+        receivingVenueId: receivingVenueId ?? null,
+        categoryId: categoryId ?? null,
+      })
+
+      return text({
+        ok: true,
+        scope: receivingVenueId ? 'filtrado por sucursal receptora' : 'todo el inventario en manos de promotores',
+        totalPais: data.total,
+        ciudades: data.cities,
+        sinSucursalOBajas: data.unassigned,
+      })
     },
   )
 }

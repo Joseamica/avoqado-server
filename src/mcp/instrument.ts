@@ -1,11 +1,68 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { randomBytes } from 'crypto'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { ScopeError, genericErrorMessage, looksInternal } from './errors'
 
 /** Identity behind an MCP request — for attributing tool calls in the logs. */
 interface ToolCallContext {
   staffId: string
   org: string
+  /** Platform SUPERADMIN connection → thrown errors are passed through RAW (useful for debugging). */
+  isSuperAdmin?: boolean
+}
+
+/**
+ * Errors whose message was WRITTEN for the operator and is safe to hand to the AI client:
+ * ScopeError (guard: out of scope / read-only connection / permission) and the app's operational
+ * errors (AppError subclasses: BadRequest / NotFound / Conflict… — Spanish, user-facing by design).
+ */
+function isUserFacingError(err: unknown): boolean {
+  if (err instanceof ScopeError) return true
+  return typeof err === 'object' && err !== null && (err as { isOperational?: unknown }).isOperational === true
+}
+
+/**
+ * Replace an UNEXPECTED exception with a generic message + reference id for non-superadmin
+ * connections. The MCP SDK forwards `error.message` of anything a handler throws straight to the
+ * client as `isError` content — so a Prisma validation error ("Invalid `prisma.venue.findMany()`
+ * invocation… Argument `id`…"), a provider SDK failure or a TypeError would otherwise hand a
+ * customer's assistant table/column names and stack internals. Someone probing the tools with odd
+ * parameters on purpose is exactly the caller who must NOT get that. The full message stays in our
+ * logs (BetterStack) and in McpToolCall.detail, keyed by the same `ref` we give the client.
+ */
+export function sanitizeThrownError(err: unknown, toolName: string, ctx: ToolCallContext): { error: Error; ref: string | null } {
+  if (ctx.isSuperAdmin || isUserFacingError(err)) return { error: err as Error, ref: null }
+  const ref = randomBytes(4).toString('hex')
+  return { error: new Error(genericErrorMessage(toolName, ref)), ref }
+}
+
+/**
+ * Second half of the same guarantee, for the OTHER error path: ~68 tools `catch` and RETURN
+ * `text({ ok: false, error: (err as Error).message })` instead of throwing. Those never reach
+ * `sanitizeThrownError`, so an ORM failure inside such a tool would still hand a customer's
+ * assistant table/column names. Here we inspect the RESULT and rewrite only when the message
+ * carries an internal shape (`looksInternal`) — operator-facing Spanish messages pass untouched,
+ * and a result we do not rewrite is returned by IDENTITY (tools' output is never altered).
+ */
+export function sanitizeToolResult(result: unknown, toolName: string, ctx: ToolCallContext): { result: unknown; ref: string | null } {
+  if (ctx.isSuperAdmin) return { result, ref: null }
+  const r = result as { content?: Array<{ type?: string; text?: string }> } | null
+  const idx = r?.content?.findIndex(c => c?.type === 'text' || typeof c?.text === 'string') ?? -1
+  if (!r?.content || idx < 0) return { result, ref: null }
+  const raw = r.content[idx].text
+  if (typeof raw !== 'string') return { result, ref: null }
+  let parsed: { ok?: boolean; error?: unknown }
+  try {
+    parsed = JSON.parse(raw) as { ok?: boolean; error?: unknown }
+  } catch {
+    return { result, ref: null } // prose content — tools only put internals in the JSON `error`
+  }
+  if (parsed?.ok !== false || typeof parsed.error !== 'string' || !looksInternal(parsed.error)) return { result, ref: null }
+  const ref = randomBytes(4).toString('hex')
+  const content = [...r.content]
+  content[idx] = { ...content[idx], text: JSON.stringify({ ...parsed, error: genericErrorMessage(toolName, ref) }, null, 2) }
+  return { result: { ...r, content }, ref }
 }
 
 type ToolFn = (...args: unknown[]) => unknown
@@ -116,16 +173,24 @@ function makePatched(original: ToolFn, ctx: ToolCallContext): ToolFn {
         const result = await cb(...cbArgs)
         const ms = Date.now() - start
         const { ok, detail } = resultOutcome(result)
+        // Redact an internal error the tool RETURNED (ok:false) before it reaches the client.
+        const { result: safe, ref } = ok ? { result, ref: null } : sanitizeToolResult(result, name, ctx)
         if (ok) logger.info(`mcp.tool ${name} ok`, { ...meta, ms })
-        else logger.warn(`mcp.tool ${name} returned error`, { ...meta, ms, detail })
-        void recordMcpCall({ ...audit, outcome: ok ? 'ok' : 'error', detail: ok ? null : (detail ?? null), durationMs: ms })
-        return result
+        else logger.warn(`mcp.tool ${name} returned error`, { ...meta, ms, detail, ...(ref ? { ref } : {}) })
+        void recordMcpCall({
+          ...audit,
+          outcome: ok ? 'ok' : 'error',
+          detail: ok ? null : ref ? `[${ref}] ${detail ?? ''}` : (detail ?? null),
+          durationMs: ms,
+        })
+        return safe
       } catch (err) {
         const ms = Date.now() - start
         const message = (err as Error).message
-        logger.error(`mcp.tool ${name} threw`, { ...meta, ms, error: message })
-        void recordMcpCall({ ...audit, outcome: 'threw', detail: message ?? null, durationMs: ms })
-        throw err
+        const { error, ref } = sanitizeThrownError(err, name, ctx)
+        logger.error(`mcp.tool ${name} threw`, { ...meta, ms, error: message, ...(ref ? { ref } : {}) })
+        void recordMcpCall({ ...audit, outcome: 'threw', detail: (ref ? `[${ref}] ${message}` : message) ?? null, durationMs: ms })
+        throw error
       }
     }
     toolArgs[cbIndex] = wrapped

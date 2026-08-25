@@ -235,6 +235,7 @@ const prismaMock: any = {
   performanceGoal: createMockModel(),
   module: createMockModel(),
   venueModule: createMockModel(),
+  organizationModule: createMockModel(),
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),
@@ -257,6 +258,9 @@ const prismaMock: any = {
   scaleProfile: createMockModel(),
   // Reservation / Booking models
   reservation: createMockModel(),
+  kioskCheckInChallenge: createMockModel(),
+  kioskCheckInAttempt: createMockModel(),
+  kioskOutreachOutbox: createMockModel(),
   classSession: createMockModel(),
   staffSchedule: createMockModel(),
   staffScheduleException: createMockModel(),
@@ -281,6 +285,13 @@ const prismaMock: any = {
   creditPackPurchase: createMockModel(),
   creditItemBalance: createMockModel(),
   creditTransaction: createMockModel(),
+  // Money reconciliation (Fase 0.B: fulfillment fail-closed registra anomalías)
+  moneyAnomaly: createMockModel(),
+  // Stripe webhook idempotency claims (Connect + platform)
+  processedStripeEvent: createMockModel(),
+  // Fase 1: outbox de avisos de aprobación de clientes (evento + entrega por destinatario)
+  customerApprovalOutbox: createMockModel(),
+  customerApprovalDelivery: createMockModel(),
   // Payment Link models
   paymentLink: createMockModel(),
   checkoutSession: createMockModel(),

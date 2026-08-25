@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
+import { logAction } from './activity-log.service'
 
 // ============================================================
 // Sale Verification Dashboard Service
@@ -34,6 +35,12 @@ interface SaleVerificationDashboardResponse {
   updatedAt: Date
   /** True if this payment has an associated sale verification record */
   hasVerification: boolean
+  /**
+   * Present (true) ONLY when the request re-sent a decision that was already recorded:
+   * nothing was written, audited or emitted — the row on file is returned as-is.
+   * Absent on a real review, so existing clients see no change.
+   */
+  idempotentNoOp?: true
   // Back-office review metadata (PlayTelecom / Walmart documentation flow)
   reviewedById: string | null
   reviewedAt: Date | null
@@ -454,6 +461,108 @@ export interface ReviewSaleVerificationParams {
   reviewNotes?: string
 }
 
+/** Status each decision lands the verification in. */
+const DECISION_TARGET_STATUS: Record<ReviewDecision, 'COMPLETED' | 'FAILED' | 'REJECTED'> = {
+  APPROVE: 'COMPLETED',
+  REJECT: 'FAILED',
+  REJECT_FINAL: 'REJECTED',
+}
+
+/**
+ * ActivityLog action per decision. The owner audit screen reads ONLY
+ * ActivityLog — `reviewedById`/`reviewedAt` on the row get overwritten on
+ * reopen + re-review, so without these the approval history is invisible
+ * (prod 2026-08-25: 0 rows for the primary financial decision, while the
+ * secondary EDIT path already had 140).
+ */
+export const SALE_VERIFICATION_REVIEW_AUDIT_ACTION: Record<ReviewDecision, string> = {
+  APPROVE: 'SALE_VERIFICATION_APPROVED',
+  REJECT: 'SALE_VERIFICATION_SENT_BACK',
+  REJECT_FINAL: 'SALE_VERIFICATION_REJECTED',
+}
+
+/** Relations the review response needs — shared by the write and the idempotent read. */
+const reviewInclude = {
+  staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
+  reviewedBy: { select: { id: true, firstName: true, lastName: true } },
+  payment: {
+    select: {
+      id: true,
+      amount: true,
+      status: true,
+      createdAt: true,
+      order: { select: { id: true, orderNumber: true, total: true, tags: true } },
+    },
+  },
+} satisfies Prisma.SaleVerificationInclude
+
+type ReviewRow = Prisma.SaleVerificationGetPayload<{ include: typeof reviewInclude }>
+
+/**
+ * Resolve an already-reviewed verification against the decision being (re)sent.
+ * Same outcome → the recorded review, flagged as no-op. Different outcome → 409.
+ * Tenant-scoped: the row is re-read with `venueId` so the outcome can never come
+ * from another venue's verification.
+ */
+async function resolveAlreadyReviewed(
+  id: string,
+  venueId: string,
+  params: ReviewSaleVerificationParams,
+): Promise<SaleVerificationDashboardResponse> {
+  const current = await prisma.saleVerification.findUnique({ where: { id, venueId }, include: reviewInclude })
+  if (!current) {
+    throw createServiceError('Sale verification not found', 404)
+  }
+  if (current.status !== DECISION_TARGET_STATUS[params.decision]) {
+    throw createServiceError(`Sale verification already reviewed (status=${current.status})`, 409)
+  }
+  // Same decision already recorded → no write, no audit, no socket. Return what is on file.
+  logger.info(
+    `[SALE VERIFICATION REVIEW] Verification ${id} is already ${current.status}; ${params.decision} re-sent by ${params.reviewedById} — returning the recorded review (idempotent no-op)`,
+  )
+  return { ...toReviewResponse(current), idempotentNoOp: true }
+}
+
+function toReviewResponse(row: ReviewRow): SaleVerificationDashboardResponse {
+  return {
+    id: row.id,
+    venueId: row.venueId,
+    paymentId: row.paymentId,
+    staffId: row.staffId,
+    photos: row.photos,
+    scannedProducts: (row.scannedProducts as unknown as ScannedProduct[]) ?? [],
+    status: row.status,
+    inventoryDeducted: row.inventoryDeducted,
+    deviceId: row.deviceId,
+    notes: row.notes,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    hasVerification: true,
+    reviewedById: row.reviewedById,
+    reviewedAt: row.reviewedAt,
+    reviewNotes: row.reviewNotes,
+    rejectionReasons: row.rejectionReasons,
+    reviewedBy: row.reviewedBy ?? null,
+    staff: row.staff ?? null,
+    payment: row.payment
+      ? {
+          id: row.payment.id,
+          amount: typeof row.payment.amount === 'number' ? row.payment.amount : Number(row.payment.amount),
+          status: row.payment.status,
+          createdAt: row.payment.createdAt,
+          order: row.payment.order
+            ? {
+                id: row.payment.order.id,
+                orderNumber: row.payment.order.orderNumber,
+                total: Number(row.payment.order.total),
+                tags: row.payment.order.tags,
+              }
+            : null,
+        }
+      : null,
+  }
+}
+
 interface ServiceError extends Error {
   statusCode?: number
 }
@@ -500,11 +609,19 @@ export function assertPromoterFeedback(reviewNotes?: string | null): string {
  *
  * Validations:
  *   - Verification must exist and belong to the given venue
- *   - Verification must be in PENDING status (no double-review)
+ *   - Verification must be in PENDING status. An already-reviewed one:
+ *       · SAME outcome re-sent → idempotent no-op: the recorded review is returned
+ *         untouched (first reviewer + timestamp stay). Prod 2026-08-25: an OWNER
+ *         approving in batch re-clicked the same row 3× in 13 s because the UI gave
+ *         no feedback for ~3 s, and got a red 409 on an action that had worked.
+ *         Same idea as the payment path's `idempotencyKey` retry.
+ *       · CONFLICTING outcome → 409 (reopen it first; that path is explicit).
  *   - REJECT requires reviewNotes with >= PROMOTER_FEEDBACK_MIN_CHARS chars (never a silent
  *     "revisar" — the promoter must know WHAT to fix). rejectionReasons stay optional.
  *
  * Side-effects:
+ *   - Writes an ActivityLog row (`SALE_VERIFICATION_REVIEW_AUDIT_ACTION[decision]`) — this is
+ *     the decision Walmart pays PlayTelecom for; the owner audit screen must see it.
  *   - Emits SALE_VERIFICATION_REVIEWED socket event to the promoter (staff) so their TPV refreshes in real time
  */
 export async function reviewSaleVerification(
@@ -529,7 +646,7 @@ export async function reviewSaleVerification(
   }
 
   if (existing.status !== 'PENDING') {
-    throw createServiceError(`Sale verification already reviewed (status=${existing.status})`, 409)
+    return resolveAlreadyReviewed(existing.id, venueId, params)
   }
 
   const reasons = params.rejectionReasons ?? []
@@ -542,31 +659,50 @@ export async function reviewSaleVerification(
 
   const trimmedNotes = params.reviewNotes?.trim() || null
 
-  const newStatus: 'COMPLETED' | 'FAILED' | 'REJECTED' =
-    params.decision === 'APPROVE' ? 'COMPLETED' : params.decision === 'REJECT_FINAL' ? 'REJECTED' : 'FAILED'
+  const newStatus = DECISION_TARGET_STATUS[params.decision]
 
-  const updated = await prisma.saleVerification.update({
-    where: { id: params.saleVerificationId },
-    data: {
-      status: newStatus,
-      reviewedById: params.reviewedById,
-      reviewedAt: new Date(),
-      reviewNotes: trimmedNotes,
-      // Reasons only apply to the fixable "Revisar" (FAILED) path. REJECTED is terminal.
-      rejectionReasons: params.decision === 'REJECT' ? reasons : [],
-    },
-    include: {
-      staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
-      reviewedBy: { select: { id: true, firstName: true, lastName: true } },
-      payment: {
-        select: {
-          id: true,
-          amount: true,
-          status: true,
-          createdAt: true,
-          order: { select: { id: true, orderNumber: true, total: true, tags: true } },
-        },
+  // Atomic transition: the write only lands if the row is STILL PENDING (and in this
+  // venue). Two overlapping reviews — a double-submit, or two reviewers on the same
+  // sale — cannot both win: the loser gets P2025 and is resolved against what the
+  // winner recorded (same decision → no-op, different decision → 409), so the
+  // Walmart-payment decision is never overwritten by a late second write.
+  let updated: ReviewRow
+  try {
+    updated = await prisma.saleVerification.update({
+      where: { id: params.saleVerificationId, venueId, status: 'PENDING' },
+      data: {
+        status: newStatus,
+        reviewedById: params.reviewedById,
+        reviewedAt: new Date(),
+        reviewNotes: trimmedNotes,
+        // Reasons only apply to the fixable "Revisar" (FAILED) path. REJECTED is terminal.
+        rejectionReasons: params.decision === 'REJECT' ? reasons : [],
       },
+      include: reviewInclude,
+    })
+  } catch (err: any) {
+    if (err?.code === 'P2025') {
+      return resolveAlreadyReviewed(params.saleVerificationId, venueId, params)
+    }
+    throw err
+  }
+
+  // Audit the decision itself. Fire-and-forget: `logAction` never throws and runs
+  // OUTSIDE any transaction, so an audit failure can never undo the review.
+  void logAction({
+    staffId: params.reviewedById,
+    venueId,
+    action: SALE_VERIFICATION_REVIEW_AUDIT_ACTION[params.decision],
+    entity: 'SaleVerification',
+    entityId: updated.id,
+    data: {
+      decision: params.decision,
+      previousStatus: 'PENDING',
+      newStatus,
+      paymentId: updated.paymentId,
+      promoterId: existing.staffId,
+      rejectionReasons: updated.rejectionReasons,
+      reviewNotes: trimmedNotes,
     },
   })
 
@@ -585,41 +721,5 @@ export async function reviewSaleVerification(
     logger.warn(`[SALE VERIFICATION REVIEW] Socket emit failed for staff ${existing.staffId}: ${err?.message ?? err}`)
   }
 
-  return {
-    id: updated.id,
-    venueId: updated.venueId,
-    paymentId: updated.paymentId,
-    staffId: updated.staffId,
-    photos: updated.photos,
-    scannedProducts: (updated.scannedProducts as unknown as ScannedProduct[]) ?? [],
-    status: updated.status,
-    inventoryDeducted: updated.inventoryDeducted,
-    deviceId: updated.deviceId,
-    notes: updated.notes,
-    createdAt: updated.createdAt,
-    updatedAt: updated.updatedAt,
-    hasVerification: true,
-    reviewedById: updated.reviewedById,
-    reviewedAt: updated.reviewedAt,
-    reviewNotes: updated.reviewNotes,
-    rejectionReasons: updated.rejectionReasons,
-    reviewedBy: updated.reviewedBy ?? null,
-    staff: updated.staff ?? null,
-    payment: updated.payment
-      ? {
-          id: updated.payment.id,
-          amount: typeof updated.payment.amount === 'number' ? updated.payment.amount : Number(updated.payment.amount),
-          status: updated.payment.status,
-          createdAt: updated.payment.createdAt,
-          order: updated.payment.order
-            ? {
-                id: updated.payment.order.id,
-                orderNumber: updated.payment.order.orderNumber,
-                total: Number(updated.payment.order.total),
-                tags: updated.payment.order.tags,
-              }
-            : null,
-        }
-      : null,
-  }
+  return toReviewResponse(updated)
 }

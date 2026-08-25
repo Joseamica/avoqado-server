@@ -166,6 +166,8 @@ import {
   UpdateCustomerSchema,
   CustomersQuerySchema,
   CustomerParamsSchema,
+  CustomerApprovalDecisionSchema,
+  CustomersAwaitingApprovalQuerySchema,
   VenueIdParamsSchema as CustomerVenueIdParamsSchema,
 } from '../schemas/dashboard/customer.schema'
 import { SettleOrderSchema } from '../schemas/dashboard/order.schema'
@@ -9065,6 +9067,45 @@ router.get(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/awaiting-approval:
+ *   get:
+ *     summary: Clientes en espera de aprobación para reservar en línea (Fase 1)
+ *     tags: [Customers]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 20 }
+ *     responses:
+ *       200: { description: Lista paginada, del más antiguo al más reciente }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+// 🔴 VA ANTES de `/customers/:customerId` (igual que `/customers/stats`): si se registra
+// después, Express casa "awaiting-approval" como un customerId y el schema lo rechaza con
+// un 400 incomprensible.
+router.get(
+  '/venues/:venueId/customers/awaiting-approval',
+  authenticateTokenMiddleware,
+  // La aprobación de clientes es parte de reservaciones (PRO): si el venue perdió el plan,
+  // la bandeja y el botón se apagan con él. Sin esto, un venue degradado seguiría decidiendo
+  // sobre una función que ya no tiene — y peor, dejando gente RECHAZADA que quedaría
+  // bloqueada el día que vuelva a contratar.
+  checkFeatureAccess('RESERVATIONS'),
+  checkPermission('customers:approve'),
+  validateRequest(CustomersAwaitingApprovalQuerySchema),
+  customerController.getCustomersAwaitingApproval,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/customers/{customerId}:
  *   get:
  *     tags: [Customer Management]
@@ -9273,6 +9314,51 @@ router.post(
   checkPermission('customers:settle-balance'),
   validateRequest(CustomerParamsSchema),
   customerController.settleCustomerBalance,
+)
+
+// ---------------------------------------------------------------------------
+// Fase 1 — aprobación de clientes (el negocio decide quién puede reservar online)
+// ---------------------------------------------------------------------------
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/approval:
+ *   patch:
+ *     summary: Aprobar o rechazar a un cliente para reservar en línea
+ *     description: >
+ *       Sólo OWNER/ADMIN por default (permiso `customers:approve`). `expectedVersion` es un
+ *       write-CAS: si alguien más decidió primero, responde 409 en vez de pisar su decisión.
+ *     tags: [Customers]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [decision, expectedVersion]
+ *             properties:
+ *               decision: { type: string, enum: [APPROVED, REJECTED] }
+ *               reason: { type: string, maxLength: 500 }
+ *               expectedVersion: { type: integer, minimum: 0 }
+ *     responses:
+ *       200: { description: Decisión aplicada (o idempotente si ya estaba decidida igual) }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       409: { description: Alguien más decidió primero }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.patch(
+  '/venues/:venueId/customers/:customerId/approval',
+  authenticateTokenMiddleware,
+  // La aprobación de clientes es parte de reservaciones (PRO): si el venue perdió el plan,
+  // la bandeja y el botón se apagan con él. Sin esto, un venue degradado seguiría decidiendo
+  // sobre una función que ya no tiene — y peor, dejando gente RECHAZADA que quedaría
+  // bloqueada el día que vuelva a contratar.
+  checkFeatureAccess('RESERVATIONS'),
+  checkPermission('customers:approve'),
+  validateRequest(CustomerApprovalDecisionSchema),
+  customerController.decideCustomerApproval,
 )
 
 // ============================================================================

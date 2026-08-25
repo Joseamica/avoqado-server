@@ -1,0 +1,32 @@
+-- Fase 0.C — UNA orden viva por reserva.
+--
+-- Dos check-ins concurrentes de la misma reserva podían abrir dos órdenes TPV: el
+-- `findFirst` de idempotencia de createOrderFromReservation no es atómico. Este índice
+-- parcial lo garantiza en la base: el perdedor recibe P2002, que el wrapper de check-in
+-- atrapa FUERA de la transacción y resuelve devolviendo la orden del ganador.
+--
+-- Predicado = "orden viva": CANCELLED y DELETED no cuentan (una orden cancelada no debe
+-- bloquear su reemplazo). COMPLETED sí cuenta. Es el MISMO predicado que usa el
+-- `findFirst` previo (createOrderFromReservation.ts, ALIVE_ORDER_EXCLUDED_STATUSES).
+--
+-- CONCURRENTLY (auditoría 5): un CREATE INDEX normal bloquea las escrituras en "Order"
+-- durante el escaneo — en prod eso frena cobros. Precedente en este repo:
+-- 20260808121000_index_venue_organization_key_concurrently. No va dentro de BEGIN/COMMIT.
+--
+-- ANTES de aplicar en prod: `npx tsx scripts/audit-duplicate-reservation-orders.ts`
+-- debe salir con "Sin duplicados" (agrupa EXACTAMENTE como este índice: por reservationId,
+-- sin venue). Si hay duplicados, la creación falla y hay que resolverlos a mano (nunca
+-- cancelar una orden PAGADA por script).
+--
+-- RUNBOOK si falla a medias: un CREATE INDEX CONCURRENTLY interrumpido deja un índice
+-- INVÁLIDO (pg_index.indisvalid = false) que bloquea el reintento. Recuperación:
+--   SELECT indexrelid::regclass, indisvalid FROM pg_index
+--    WHERE indexrelid = '"Order_reservationId_alive_key"'::regclass;
+--   DROP INDEX CONCURRENTLY IF EXISTS "Order_reservationId_alive_key";  -- sólo si indisvalid = false
+--   y volver a correr `prisma migrate deploy` (o `migrate resolve --rolled-back` + deploy).
+--
+-- Prisma no puede expresar índices parciales en schema.prisma (precedente:
+-- PrintStation_venueId_default_key, TerminalPaymentRequest_active_slot).
+CREATE UNIQUE INDEX CONCURRENTLY "Order_reservationId_alive_key"
+  ON "Order" ("reservationId")
+  WHERE "reservationId" IS NOT NULL AND "status" NOT IN ('CANCELLED', 'DELETED');

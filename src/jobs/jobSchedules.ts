@@ -13,4 +13,7 @@ export const DATABASE_JOB_SCHEDULES = {
   catalogPublicationWatchdog: '32 * * * * *',
   shiftCloseWatchdog: '35 * * * * *',
   inventoryPostingSweeper: '44 */2 * * * *',
+  // Fase 1: avisos de aprobación de clientes. Segundo 20/50, hueco libre entre el monitor
+  // de POS (:17) y el sweeper de gcal (:23) — el escalonado es lo que evita la estampida.
+  customerApprovalOutbox: '20,50 * * * * *',
 } as const

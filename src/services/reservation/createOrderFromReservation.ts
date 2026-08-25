@@ -1,5 +1,8 @@
-import { Prisma, OrderType, OrderSource } from '@prisma/client'
+import { Prisma, OrderType, OrderSource, OrderStatus } from '@prisma/client'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
+
+/** Statuses that do NOT count as "the reservation already has an order". Mirrors the partial unique index. */
+export const ALIVE_ORDER_EXCLUDED_STATUSES: OrderStatus[] = ['CANCELLED', 'DELETED']
 
 interface CreateOrderFromReservationInput {
   reservationId: string
@@ -33,9 +36,13 @@ export async function createOrderFromReservation(
 ): Promise<CreateOrderResult | null> {
   const { reservationId, venueId } = input
 
-  // 1. Idempotency check
+  // 1. Idempotency check — only an ALIVE order counts. Same predicate as the
+  // partial unique index `Order_reservationId_alive_key` (status NOT IN
+  // CANCELLED, DELETED): a cancelled order must not block its replacement,
+  // and two concurrent check-ins can't both insert (the loser gets P2002,
+  // which the caller catches OUTSIDE the tx and resolves to the winner's order).
   const existing = await tx.order.findFirst({
-    where: { reservationId, venueId },
+    where: { reservationId, venueId, status: { notIn: ALIVE_ORDER_EXCLUDED_STATUSES } },
     select: { id: true },
   })
   if (existing) return { orderId: existing.id, created: false }

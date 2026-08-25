@@ -165,13 +165,14 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
   })
 
   describe('recordOrderPayment - Priority 1C', () => {
-    it('should validate inventory BEFORE completing order (pre-flight)', async () => {
+    it('validates inventory ONCE, after the payment is committed (the pre-transaction pre-flight was removed 2026-08-25)', async () => {
       // Setup
       const mockOrder = {
         id: mockOrderId,
         venueId: mockVenueId,
         orderNumber: 'ORD-001',
         total: new Decimal(100),
+        subtotal: new Decimal(100),
         paymentStatus: 'PENDING',
         source: 'TPV',
         externalId: null,
@@ -219,8 +220,14 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       // Execute
       await (paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')
 
-      // Verify - getProductInventoryStatus was called for validation
+      // Verify - the post-commit check consulted inventory for the product, exactly once
+      // (before 2026-08-25 this ran twice: a pre-transaction pre-flight that only logged + this one)
       expect(productInventoryService.getProductInventoryStatus).toHaveBeenCalledWith(mockVenueId, 'prod-1')
+      expect(productInventoryService.getProductInventoryStatus).toHaveBeenCalledTimes(1)
+      // And the payment was committed BEFORE inventory was consulted
+      const paymentCreateOrder = (prisma.payment.create as jest.Mock).mock.invocationCallOrder[0]
+      const inventoryCheckOrder = (productInventoryService.getProductInventoryStatus as jest.Mock).mock.invocationCallOrder[0]
+      expect(paymentCreateOrder).toBeLessThan(inventoryCheckOrder)
     })
 
     it('should reject payment when inventory validation fails (RECIPE method)', async () => {

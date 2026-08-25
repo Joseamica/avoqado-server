@@ -53,6 +53,8 @@ import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 import { venueCommissionSettlementJob } from './jobs/venue-commission-settlement.job'
 import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
 import { gcalOutboxSweeperJob } from './jobs/gcal-outbox-sweeper.job'
+import { customerApprovalOutboxJob } from './jobs/customer-approval-outbox.job'
+import { kioskOutreachJob } from './jobs/kiosk-outreach.job'
 import { gcalChannelRenewalJob } from './jobs/gcal-channel-renewal.job'
 import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
 import { gcalPruningJob } from './jobs/gcal-pruning.job'
@@ -233,6 +235,10 @@ const gracefulShutdown = async (signal: string) => {
       gcalHorizonRefreshJob.stop()
       gcalPruningJob.stop()
       gcalHealthCheckJob.stop()
+
+      // Fase 1: avisos de aprobación de clientes
+      customerApprovalOutboxJob.stop()
+      kioskOutreachJob.stop()
 
       // Stop Mercado Pago marketplace jobs
       mercadoPagoTokenRefreshJob.stop()
@@ -527,6 +533,9 @@ const startApplication = async (retries = 3) => {
       gcalInboxSweeperJob.start()
       // Outbox sweeper: drives pushes for outbox rows the RMQ consumer missed (every 30s)
       gcalOutboxSweeperJob.start()
+      // Fase 1: entrega los avisos de aprobación de clientes (cada 30s)
+      customerApprovalOutboxJob.start()
+      kioskOutreachJob.start()
       // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
       gcalChannelRenewalJob.start()
       // Horizon refresh: re-sync events newly inside the booking window (daily 04:00)

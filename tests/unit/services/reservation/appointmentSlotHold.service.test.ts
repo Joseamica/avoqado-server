@@ -32,6 +32,7 @@ function settings(overrides: { staffAware?: boolean; picker?: boolean; pacing?: 
       maxAdvanceDays: 365,
       minNoticeMin: 0,
       noShowGraceMin: 15,
+      nightlyOutreachEnabled: false, // Prisma: @default(false) — el aviso nocturno nace apagado
       pacingMaxPerSlot: overrides.pacing ?? 2,
       onlineCapacityPercent: 100,
       capacityMode: staffAware ? 'per_staff' : 'pacing',
@@ -64,6 +65,8 @@ function settings(overrides: { staffAware?: boolean; picker?: boolean; pacing?: 
       requireEmail: false,
       requireAccount: false,
       showStaffPicker: overrides.picker ?? staffAware,
+      requireCustomerApproval: false,
+      customerApprovalNotificationRoles: [],
     },
     googleCalendar: {
       pushEnabled: false,
@@ -82,11 +85,13 @@ function baseResolvedWindow() {
     baseEndsAt: rawEndsAt,
     finalEndsAt,
     canonicalBaseDurationMin: 60,
+    bufferAfterMin: 0,
     modifierDurationDelta: 15,
     finalDurationMin: 75,
     productIds: [productId],
     modifierRows: [],
     modifierPriceDelta: new Prisma.Decimal(0),
+    blockedEndsAt: finalEndsAt,
   }
 }
 
@@ -100,6 +105,7 @@ describe('mintNormalAppointmentHold', () => {
     jest.spyOn(windowService, 'resolveCanonicalAppointmentDuration').mockResolvedValue({
       productIds: [productId],
       canonicalBaseDurationMin: 60,
+      bufferAfterMin: 0,
     })
     jest.spyOn(windowService, 'assertLegacyAppointmentDurationFloor').mockResolvedValue()
     jest.spyOn(modifierService, 'resolveModifierSelections').mockResolvedValue({
@@ -305,6 +311,7 @@ describe('mintRescheduleAppointmentHold', () => {
       jest.spyOn(windowService, 'resolveCanonicalAppointmentDuration').mockImplementation(async () => ({
         productIds: [productId, 'product-2'],
         canonicalBaseDurationMin: currentDuration,
+        bufferAfterMin: 0,
       }))
 
       await mintRescheduleAppointmentHold({

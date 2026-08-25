@@ -400,6 +400,13 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'reservations:update': ['reservations:read', 'reservations:update'],
   'reservations:cancel': ['reservations:read', 'reservations:cancel'],
 
+  // Fase 8 del kiosco — la vista de la instructora.
+  //
+  // ESTRECHO a propósito: deja ver LA CLASE QUE ELLA ESTÁ DANDO, y nada más. No implica
+  // `reservations:read`, que abre la agenda completa del negocio — quien da una clase de
+  // yoga no tiene por qué ver quién viene a las siete ni cuánto pagó.
+  'class-sessions:read-assigned': ['class-sessions:read-assigned'],
+
   // ===========================
   // SETTINGS
   // ===========================
@@ -422,6 +429,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'discounts:create': ['discounts:read', 'discounts:create', 'products:read', 'customers:read'],
   // Managing the tender-type catalog implies being able to read it.
   'tender-types:manage': ['tender-types:read', 'tender-types:manage'],
+  // Fase 1: aprobar a un cliente implica poder verlo — la pantalla de "en espera" lista
+  // Customers, así que sin `customers:read` el permiso sería un botón sin bandeja.
+  'customers:approve': ['customers:approve', 'customers:read'],
   'discounts:update': ['discounts:read', 'discounts:update'],
   'discounts:delete': ['discounts:read', 'discounts:delete'],
   // Upsell "¿Algo más?" — sugerencias en la pantalla del cliente y la franja del cajero.
@@ -707,6 +717,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * HOST: Seating and reservations management
    */
   [StaffRole.HOST]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:read',
     'menu:read',
     'orders:read',
@@ -760,6 +771,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * - Cannot create/edit menu items (MANAGER+ only)
    */
   [StaffRole.WAITER]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:read',
     'menu:read', // Read-only access to menus, categories, products, modifiers
     'orders:read',
@@ -891,6 +903,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * MANAGER: Operational management
    */
   [StaffRole.MANAGER]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:read',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -969,7 +982,16 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'teams:update',
     'teams:delete',
     'teams:invite',
-    'customers:*', // Phase 1: Customer System
+    // 🔴 Fase 1: MANAGER tenía `customers:*`. Se abrió a sus cinco permisos explícitos —
+    // que son EXACTAMENTE los que la plataforma usa hoy, así que no pierde nada— para que
+    // el comodín no le conceda en silencio `customers:approve`. Decidir a quién se le deja
+    // reservar en línea es decisión de dueño (founder, 2026-08-22), no del turno.
+    // Si mañana nace otro `customers:algo`, hay que decidir a mano si MANAGER lo lleva.
+    'customers:read', // Phase 1: Customer System
+    'customers:create',
+    'customers:update',
+    'customers:delete',
+    'customers:settle-balance',
     'customer-groups:*', // Phase 1: Customer System
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
@@ -1041,6 +1063,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * ADMIN: Full venue management (excluding system-level permissions)
    */
   [StaffRole.ADMIN]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:*',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -1170,6 +1193,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * OWNER: Full organization access (excluding system-level permissions)
    */
   [StaffRole.OWNER]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:*',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -1312,6 +1336,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * SUPERADMIN: System-wide access
    */
   [StaffRole.SUPERADMIN]: [
+    'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     '*:*', // All permissions (covers sale-verifications:reopen and any future perm)
     'sale-verifications:reopen', // Explicit for clarity — reopen approved sales for re-review
     'sale-verifications:edit', // Explicit for clarity — edit/correct sales
@@ -1809,9 +1834,19 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
   tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
+  'class-sessions': ['class-sessions:read-assigned'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],
-  customers: ['customers:read', 'customers:create', 'customers:update', 'customers:delete', 'customers:settle-balance'],
+  customers: [
+    'customers:read',
+    'customers:create',
+    'customers:update',
+    'customers:delete',
+    'customers:settle-balance',
+    // Fase 1: aprobar/rechazar a un cliente para que pueda reservar en línea. Default
+    // OWNER/ADMIN; se expone aquí para que un venue pueda concedérselo a MANAGER a mano.
+    'customers:approve',
+  ],
   'customer-groups': ['customer-groups:read', 'customer-groups:create', 'customer-groups:update', 'customer-groups:delete'],
   loyalty: ['loyalty:read', 'loyalty:create', 'loyalty:update', 'loyalty:delete', 'loyalty:redeem', 'loyalty:adjust', 'loyalty:expire'],
   discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete', 'discounts:apply'],

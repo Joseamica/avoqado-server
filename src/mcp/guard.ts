@@ -1,10 +1,11 @@
 import { hasPermission } from '@/services/access/access.service'
 import logger from '@/config/logger'
 import type { McpScope } from './scope'
+import { ScopeError } from './errors'
+
+export { ScopeError }
 
 const SENSITIVE_PAYMENT_FIELDS = ['maskedPan', 'referenceNumber', 'authorizationNumber'] as const
-
-export class ScopeError extends Error {}
 
 /**
  * OAuth scope enforcement: a WRITE action requires the mcp:write scope. Read actions

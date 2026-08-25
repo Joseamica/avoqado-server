@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { StaffRole } from '@prisma/client'
+import { rejectBodyCustomerId } from '../common/publicIdentity.schema'
 
 // ==========================================
 // RESERVATION SCHEMAS — Zod validation (Spanish messages)
@@ -452,6 +454,7 @@ export const updateReservationSettingsBodySchema = z
     maxAdvanceDays: z.number().int().min(0).max(365).optional(),
     minNoticeMin: z.number().int().min(0).max(10080).optional(),
     noShowGraceMin: z.number().int().min(0).max(240).optional(),
+    nightlyOutreachEnabled: z.boolean().optional(),
     pacingMaxPerSlot: z.number().int().min(1).max(1000).nullable().optional(),
     onlineCapacityPercent: z.number().int().min(1).max(100).optional(),
     capacityMode: z.enum(['pacing', 'per_staff']).optional(),
@@ -490,6 +493,7 @@ export const updateReservationSettingsBodySchema = z
         maxAdvanceDays: z.number().int().min(0).max(365).optional(),
         minNoticeMin: z.number().int().min(0).max(10080).optional(),
         noShowGraceMin: z.number().int().min(0).max(240).optional(),
+        nightlyOutreachEnabled: z.boolean().optional(),
         pacingMaxPerSlot: z.number().int().min(1).max(1000).nullable().optional(),
         onlineCapacityPercent: z.number().int().min(1).max(100).optional(),
         capacityMode: z.enum(['pacing', 'per_staff']).optional(),
@@ -539,6 +543,20 @@ export const updateReservationSettingsBodySchema = z
         requireEmail: z.boolean().optional(),
         requireAccount: z.boolean().optional(),
         showStaffPicker: z.boolean().optional(),
+        // Fase 1 — el negocio aprueba a mano a cada cliente nuevo antes de dejarlo reservar.
+        requireCustomerApproval: z.boolean().optional(),
+        // Lista NO vacía a propósito: prender el switch sin avisarle a nadie deja las
+        // solicitudes esperando en una bandeja que nadie sabe que existe.
+        customerApprovalNotificationRoles: z
+          .array(z.nativeEnum(StaffRole))
+          .min(1, 'Elige al menos un rol que reciba el aviso de aprobación')
+          .max(9)
+          .optional(),
+      })
+      .refine(pb => !(pb.requireCustomerApproval === true) || pb.requireAccount === true, {
+        message:
+          'Para aprobar clientes primero activa "Requerir cuenta" en Reservaciones > Configuración: sin cuenta no hay a quién aprobar',
+        path: ['requireCustomerApproval'],
       })
       .optional(),
     payments: z
@@ -554,91 +572,93 @@ export const updateReservationSettingsBodySchema = z
 
 // ---- Public Booking ----
 
-export const publicCreateReservationBodySchema = z
-  .object({
-    startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }).optional(),
-    endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }).optional(),
-    duration: z.number().int().min(1, 'La duracion minima es 1 minuto').max(1440).optional(),
-    guestName: z.string().min(1, 'El nombre es requerido').max(200),
-    guestPhone: z.string().min(1, 'El telefono es requerido').max(20).optional(),
-    guestEmail: z.string().email('Email invalido').max(200).optional(),
-    partySize: z.number().int().min(1).max(100).optional(),
-    productId: bookedProductIdWireSchema.optional(),
-    // Multi-service appointments (Square pattern). When present, the controller
-    // sums durations + sets productId = productIds[0] for back-compat.
-    productIds: bookedProductIdsWireSchema.optional(),
-    staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).min(1, 'staffId es requerido').optional(),
-    windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
-    classSessionId: z.string().optional(),
-    spotIds: z.array(z.string().min(1)).max(100).optional(),
-    specialRequests: z.string().max(2000).optional(),
-    creditItemBalanceId: z.string().optional(), // Credit pack: redeems N credits on booking (N = partySize / spotIds.length)
-    // Multi-service /appointments — one balance per selected service. Server
-    // iterates and redeems creditsPerBalance from each. When both fields are
-    // present, the array wins.
-    creditItemBalanceIds: z.array(z.string().min(1)).max(20).optional(),
-    // Transitional hold bridge — when present and valid, create excludes this
-    // trusted row from its authoritative checks and deletes it best-effort
-    // after commit. Atomic consumption arrives with the Release A protocol.
-    holdId: z.string().optional(),
-    modifierSelections: reservationModifierSelectionsSchema.optional(),
-    // Syntax and hostname policy are enforced by the checkout controller.
-    // Keep malformed candidates parseable so they can be ignored in favor of
-    // the server default instead of failing an otherwise valid reservation.
-    successUrl: z.string().max(2048).optional(),
-    cancelUrl: z.string().max(2048).optional(),
-  })
-  .superRefine((data, ctx) => {
-    if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'La duracion minima sin windowSemantics=base es 5 minutos',
+export const publicCreateReservationBodySchema = rejectBodyCustomerId(
+  z
+    .object({
+      startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }).optional(),
+      endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }).optional(),
+      duration: z.number().int().min(1, 'La duracion minima es 1 minuto').max(1440).optional(),
+      guestName: z.string().min(1, 'El nombre es requerido').max(200),
+      guestPhone: z.string().min(1, 'El telefono es requerido').max(20).optional(),
+      guestEmail: z.string().email('Email invalido').max(200).optional(),
+      partySize: z.number().int().min(1).max(100).optional(),
+      productId: bookedProductIdWireSchema.optional(),
+      // Multi-service appointments (Square pattern). When present, the controller
+      // sums durations + sets productId = productIds[0] for back-compat.
+      productIds: bookedProductIdsWireSchema.optional(),
+      staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).min(1, 'staffId es requerido').optional(),
+      windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
+      classSessionId: z.string().optional(),
+      spotIds: z.array(z.string().min(1)).max(100).optional(),
+      specialRequests: z.string().max(2000).optional(),
+      creditItemBalanceId: z.string().optional(), // Credit pack: redeems N credits on booking (N = partySize / spotIds.length)
+      // Multi-service /appointments — one balance per selected service. Server
+      // iterates and redeems creditsPerBalance from each. When both fields are
+      // present, the array wins.
+      creditItemBalanceIds: z.array(z.string().min(1)).max(20).optional(),
+      // Transitional hold bridge — when present and valid, create excludes this
+      // trusted row from its authoritative checks and deletes it best-effort
+      // after commit. Atomic consumption arrives with the Release A protocol.
+      holdId: z.string().optional(),
+      modifierSelections: reservationModifierSelectionsSchema.optional(),
+      // Syntax and hostname policy are enforced by the checkout controller.
+      // Keep malformed candidates parseable so they can be ignored in favor of
+      // the server default instead of failing an otherwise valid reservation.
+      successUrl: z.string().max(2048).optional(),
+      cancelUrl: z.string().max(2048).optional(),
+    })
+    .superRefine((data, ctx) => {
+      if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'La duracion minima sin windowSemantics=base es 5 minutos',
+          path: ['duration'],
+        })
+      }
+      if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'La duracion maxima sin windowSemantics=base es 480 minutos',
+          path: ['duration'],
+        })
+      }
+    })
+    .refine(
+      data => {
+        // CLASS bookings get times from the session — startsAt/endsAt/duration not required
+        if (data.classSessionId) return true
+        return data.startsAt != null && data.endsAt != null && data.duration != null
+      },
+      {
+        message: 'startsAt, endsAt y duration son requeridos para reservaciones sin classSessionId',
+        path: ['startsAt'],
+      },
+    )
+    .refine(
+      data => {
+        if (data.classSessionId) return true
+        if (!data.startsAt || !data.endsAt) return true // validated above
+        return data.endsAt > data.startsAt
+      },
+      {
+        message: 'La fecha de fin debe ser posterior a la fecha de inicio',
+        path: ['endsAt'],
+      },
+    )
+    .refine(
+      data => {
+        // Skip duration check for CLASS bookings — duration comes from the session
+        if (data.classSessionId || data.windowSemantics === 'base') return true
+        if (!data.startsAt || !data.endsAt || data.duration == null) return true // validated above
+        const diffMin = Math.round((data.endsAt.getTime() - data.startsAt.getTime()) / 60000)
+        return Math.abs(diffMin - data.duration) <= 1
+      },
+      {
+        message: 'La duracion no coincide con el rango de fechas',
         path: ['duration'],
-      })
-    }
-    if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'La duracion maxima sin windowSemantics=base es 480 minutos',
-        path: ['duration'],
-      })
-    }
-  })
-  .refine(
-    data => {
-      // CLASS bookings get times from the session — startsAt/endsAt/duration not required
-      if (data.classSessionId) return true
-      return data.startsAt != null && data.endsAt != null && data.duration != null
-    },
-    {
-      message: 'startsAt, endsAt y duration son requeridos para reservaciones sin classSessionId',
-      path: ['startsAt'],
-    },
-  )
-  .refine(
-    data => {
-      if (data.classSessionId) return true
-      if (!data.startsAt || !data.endsAt) return true // validated above
-      return data.endsAt > data.startsAt
-    },
-    {
-      message: 'La fecha de fin debe ser posterior a la fecha de inicio',
-      path: ['endsAt'],
-    },
-  )
-  .refine(
-    data => {
-      // Skip duration check for CLASS bookings — duration comes from the session
-      if (data.classSessionId || data.windowSemantics === 'base') return true
-      if (!data.startsAt || !data.endsAt || data.duration == null) return true // validated above
-      const diffMin = Math.round((data.endsAt.getTime() - data.startsAt.getTime()) / 60000)
-      return Math.abs(diffMin - data.duration) <= 1
-    },
-    {
-      message: 'La duracion no coincide con el rango de fechas',
-      path: ['duration'],
-    },
-  )
+      },
+    ),
+)
 
 // ---- Param Schemas ----
 

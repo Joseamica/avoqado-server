@@ -75,11 +75,38 @@ describe('review_sale_verification', () => {
     )
     expect(mockAudit).toHaveBeenCalled()
   })
-  it('not PENDING → guides to reopen, service not called', async () => {
+  it('not PENDING with a CONFLICTING decision → guides to reopen, service not called', async () => {
+    mockFindFirst.mockResolvedValue({ ...PENDING, status: 'COMPLETED' })
+    const out = parse(
+      await call('review_sale_verification', {
+        saleVerificationId: 'sv1',
+        decision: 'reject',
+        reviewNotes: 'Falta la imagen de vinculación',
+        confirm: true,
+      }),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/reopen_sale_verification/)
+    expect(mockReview).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+  it('not PENDING but the SAME outcome already on file → idempotent ok, nothing written or audited', async () => {
     mockFindFirst.mockResolvedValue({ ...PENDING, status: 'COMPLETED' })
     const out = parse(await call('review_sale_verification', { saleVerificationId: 'sv1', decision: 'approve', confirm: true }))
-    expect(out.ok).toBe(false)
+    expect(out.ok).toBe(true)
+    expect(out.idempotent).toBe(true)
+    expect(out.status).toBe('COMPLETED')
     expect(mockReview).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+  it('race: status moved between preview and write → service no-op is NOT audited as a write', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    mockReview.mockResolvedValue({ id: 'sv1', status: 'COMPLETED', idempotentNoOp: true })
+    const out = parse(await call('review_sale_verification', { saleVerificationId: 'sv1', decision: 'approve', confirm: true }))
+    expect(out.ok).toBe(true)
+    expect(out.idempotent).toBe(true)
+    expect(mockReview).toHaveBeenCalledTimes(1)
+    expect(mockAudit).not.toHaveBeenCalled()
   })
   it('reject without reason/notes → error, service not called', async () => {
     mockFindFirst.mockResolvedValue(PENDING)

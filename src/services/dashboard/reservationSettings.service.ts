@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client'
+import { Prisma, StaffRole } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
@@ -50,6 +50,9 @@ export interface ReservationConfig {
     maxAdvanceDays: number
     minNoticeMin: number
     noShowGraceMin: number
+    /// Fase 9 — aviso nocturno de renovación. Apagado por defecto: manda mensajes al
+    /// cliente con el nombre del negocio, así que prenderlo es decisión suya.
+    nightlyOutreachEnabled: boolean
     pacingMaxPerSlot: number | null
     onlineCapacityPercent: number
     capacityMode: 'pacing' | 'per_staff'
@@ -99,6 +102,9 @@ export interface ReservationConfig {
     requirePhone: boolean
     requireEmail: boolean
     requireAccount: boolean
+    /// Fase 1 — el venue aprueba a mano a cada cliente nuevo antes de dejarlo reservar.
+    requireCustomerApproval: boolean
+    customerApprovalNotificationRoles: StaffRole[]
     showStaffPicker: boolean
   }
   /**
@@ -132,6 +138,8 @@ type ReservationSettingsUpdateInput = Partial<{
   maxAdvanceDays: number
   minNoticeMin: number
   noShowGraceMin: number
+  /// Fase 9 — aviso nocturno de renovación (apagado por defecto).
+  nightlyOutreachEnabled: boolean
   pacingMaxPerSlot: number | null
   onlineCapacityPercent: number
   capacityMode: 'pacing' | 'per_staff'
@@ -149,6 +157,8 @@ type ReservationSettingsUpdateInput = Partial<{
   requireEmail: boolean
   requireAccount: boolean
   showStaffPicker: boolean
+  requireCustomerApproval: boolean
+  customerApprovalNotificationRoles: StaffRole[]
   allowCustomerCancel: boolean
   minHoursBeforeCancel: number | null
   minHoursBeforeStart: number | null
@@ -206,6 +216,7 @@ export async function getReservationSettings(
       maxAdvanceDays: settings.maxAdvanceDays,
       minNoticeMin: settings.minNoticeMin,
       noShowGraceMin: settings.noShowGraceMin,
+      nightlyOutreachEnabled: settings.nightlyOutreachEnabled,
       pacingMaxPerSlot: settings.pacingMaxPerSlot,
       onlineCapacityPercent: settings.onlineCapacityPercent,
       capacityMode: settings.capacityMode === 'per_staff' ? 'per_staff' : 'pacing',
@@ -250,6 +261,8 @@ export async function getReservationSettings(
       requirePhone: settings.requirePhone,
       requireEmail: settings.requireEmail,
       requireAccount: settings.requireAccount ?? false,
+      requireCustomerApproval: settings.requireCustomerApproval ?? false,
+      customerApprovalNotificationRoles: settings.customerApprovalNotificationRoles ?? [],
       showStaffPicker: settings.showStaffPicker ?? false,
     },
     googleCalendar: {
@@ -313,6 +326,23 @@ export async function updateReservationSettings(venueId: string, data: Reservati
     if (enablesCharging && !(await canVenueChargeOnline(venueId))) {
       throw new BadRequestError(
         'Necesitas dar de alta un proveedor de e-commerce (Stripe/Mercado Pago) para cobrar o pre-cobrar reservaciones.',
+      )
+    }
+
+    // 🔴 Fase 1 — aprobar clientes exige que se pida cuenta: sin cuenta no hay a quién
+    // aprobar. El CHECK de la migración lo garantiza en la base, pero ahí el fallo sale como
+    // un 500 ilegible; aquí sale como una instrucción de qué prender primero. Se evalúa
+    // contra la fila ACTUAL, no sólo contra el payload: prender la aprobación en un venue que
+    // ya pide cuenta es válido aunque el payload no mencione `requireAccount`.
+    const nextRequireApproval =
+      typeof normalized.requireCustomerApproval === 'boolean'
+        ? normalized.requireCustomerApproval
+        : (current?.requireCustomerApproval ?? false)
+    const nextRequireAccount =
+      typeof normalized.requireAccount === 'boolean' ? normalized.requireAccount : (current?.requireAccount ?? false)
+    if (nextRequireApproval && !nextRequireAccount) {
+      throw new BadRequestError(
+        'Para aprobar clientes primero activa "Requerir cuenta" en Reservaciones > Configuración: sin cuenta no hay a quién aprobar.',
       )
     }
 
@@ -396,7 +426,10 @@ export async function updateReservationSettings(venueId: string, data: Reservati
   return settings
 }
 
-function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput): Prisma.ReservationSettingsUpdateInput {
+// Exportada sólo para poder probarla: es el mapeo del contrato de la API a columnas, y un
+// campo que se cae aquí desaparece EN SILENCIO — el PUT responde 200 y no cambia nada. Así
+// se perdió el switch de aprobación de clientes hasta que lo cazó una auditoría.
+export function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput): Prisma.ReservationSettingsUpdateInput {
   const normalized: Prisma.ReservationSettingsUpdateInput = {}
 
   // Flat payload support (legacy)
@@ -406,6 +439,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.maxAdvanceDays !== undefined) normalized.maxAdvanceDays = data.maxAdvanceDays
   if (data.minNoticeMin !== undefined) normalized.minNoticeMin = data.minNoticeMin
   if (data.noShowGraceMin !== undefined) normalized.noShowGraceMin = data.noShowGraceMin
+  if (data.nightlyOutreachEnabled !== undefined) normalized.nightlyOutreachEnabled = data.nightlyOutreachEnabled
   if (data.pacingMaxPerSlot !== undefined) normalized.pacingMaxPerSlot = data.pacingMaxPerSlot
   if (data.onlineCapacityPercent !== undefined) normalized.onlineCapacityPercent = data.onlineCapacityPercent
   if (data.capacityMode !== undefined) normalized.capacityMode = data.capacityMode
@@ -423,6 +457,11 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.requireEmail !== undefined) normalized.requireEmail = data.requireEmail
   if (data.requireAccount !== undefined) normalized.requireAccount = data.requireAccount
   if (data.showStaffPicker !== undefined) normalized.showStaffPicker = data.showStaffPicker
+  // Fase 1 — el payload PLANO es el que usa el MCP. Sin estas dos líneas, `configure_reservations`
+  // respondería "listo" sin cambiar nada.
+  if (data.requireCustomerApproval !== undefined) normalized.requireCustomerApproval = data.requireCustomerApproval
+  if (data.customerApprovalNotificationRoles !== undefined)
+    normalized.customerApprovalNotificationRoles = data.customerApprovalNotificationRoles
   if (data.allowCustomerCancel !== undefined) normalized.allowCustomerCancel = data.allowCustomerCancel
   if (data.minHoursBeforeCancel !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeCancel
   if (data.minHoursBeforeStart !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeStart
@@ -448,6 +487,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.scheduling.maxAdvanceDays !== undefined) normalized.maxAdvanceDays = data.scheduling.maxAdvanceDays
     if (data.scheduling.minNoticeMin !== undefined) normalized.minNoticeMin = data.scheduling.minNoticeMin
     if (data.scheduling.noShowGraceMin !== undefined) normalized.noShowGraceMin = data.scheduling.noShowGraceMin
+    if (data.scheduling.nightlyOutreachEnabled !== undefined) normalized.nightlyOutreachEnabled = data.scheduling.nightlyOutreachEnabled
     if (data.scheduling.pacingMaxPerSlot !== undefined) normalized.pacingMaxPerSlot = data.scheduling.pacingMaxPerSlot
     if (data.scheduling.onlineCapacityPercent !== undefined) normalized.onlineCapacityPercent = data.scheduling.onlineCapacityPercent
     if (data.scheduling.capacityMode !== undefined) normalized.capacityMode = data.scheduling.capacityMode
@@ -467,6 +507,12 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.publicBooking.requireEmail !== undefined) normalized.requireEmail = data.publicBooking.requireEmail
     if (data.publicBooking.requireAccount !== undefined) normalized.requireAccount = data.publicBooking.requireAccount
     if (data.publicBooking.showStaffPicker !== undefined) normalized.showStaffPicker = data.publicBooking.showStaffPicker
+    // Fase 1. El schema ya garantiza que prender esto viene con `requireAccount: true`; aquí
+    // sólo se copia. El CHECK de la migración es la última red, no la primera.
+    if (data.publicBooking.requireCustomerApproval !== undefined)
+      normalized.requireCustomerApproval = data.publicBooking.requireCustomerApproval
+    if (data.publicBooking.customerApprovalNotificationRoles !== undefined)
+      normalized.customerApprovalNotificationRoles = data.publicBooking.customerApprovalNotificationRoles
   }
 
   if (data.cancellation) {
@@ -533,6 +579,7 @@ function getDefaultConfig(): ReservationConfig {
       maxAdvanceDays: 60,
       minNoticeMin: 60,
       noShowGraceMin: 15,
+      nightlyOutreachEnabled: false,
       pacingMaxPerSlot: null,
       onlineCapacityPercent: 100,
       capacityMode: 'pacing',
@@ -576,6 +623,8 @@ function getDefaultConfig(): ReservationConfig {
       requirePhone: true,
       requireEmail: false,
       requireAccount: false,
+      requireCustomerApproval: false,
+      customerApprovalNotificationRoles: [StaffRole.OWNER, StaffRole.ADMIN],
       showStaffPicker: false,
     },
     googleCalendar: {

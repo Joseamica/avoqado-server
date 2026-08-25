@@ -47,6 +47,7 @@ import logger from '@/config/logger'
 import { getRabbitMQChannel, POS_COMMANDS_EXCHANGE } from '@/communication/rabbitmq/connection'
 import { decryptToken, encryptToken } from '@/services/google-calendar/encryption.service'
 import { upsertBlock } from '@/services/google-calendar/external-busy-block.service'
+import { applyOwnEventEdit } from '@/services/google-calendar/own-event-edit.service'
 import { buildOAuthClient, refreshAccessToken } from '@/services/google-calendar/oauth.service'
 import prisma from '@/utils/prismaClient'
 
@@ -185,7 +186,20 @@ export async function runBackfill(connectionId: string): Promise<void> {
 
       for (const ev of events) {
         if (!ev.id) continue
-        if (isAvoqadoOrigin(ev)) continue
+        if (isAvoqadoOrigin(ev)) {
+          // Evento propio: no se importa como ocupado (sería bloquearse a sí
+          // mismo), pero SÍ se revisa si el venue lo movió — ver
+          // `own-event-edit.service.ts`.
+          await applyOwnEventEdit(tx, {
+            connectionId: conn.id,
+            venueId: conn.venueId,
+            staffId: conn.staffId,
+            externalCalendarId: conn.selectedCalendarId,
+            calendarTimeZone: conn.selectedCalendarTimeZone,
+            event: ev,
+          })
+          continue
+        }
         if (ev.transparency === 'transparent') continue
         if (isSelfDeclined(ev)) continue
 
@@ -302,7 +316,19 @@ export async function runIncrementalPull(connectionId: string): Promise<void> {
           })
           continue
         }
-        if (isAvoqadoOrigin(ev)) continue
+        if (isAvoqadoOrigin(ev)) {
+          // Ver nota en `runBackfill`: el evento propio no se importa, pero su
+          // EDICIÓN por parte del venue sí aparta agenda.
+          await applyOwnEventEdit(tx, {
+            connectionId: conn.id,
+            venueId: conn.venueId,
+            staffId: conn.staffId,
+            externalCalendarId: conn.selectedCalendarId,
+            calendarTimeZone: conn.selectedCalendarTimeZone,
+            event: ev,
+          })
+          continue
+        }
         if (ev.transparency === 'transparent' || isSelfDeclined(ev)) {
           await tx.externalBusyBlock.deleteMany({
             where: { googleConnectionId: conn.id, externalEventId: ev.id },

@@ -16,9 +16,12 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   rescheduleAppointmentReservation: (...a: unknown[]) => mockReschedule(...(a as [])),
   cancelReservation: jest.fn(),
   confirmReservation: (...a: unknown[]) => mockConfirm(...(a as [])),
-  checkInReservation: (...a: unknown[]) => mockCheckIn(...(a as [])),
   completeReservation: (...a: unknown[]) => mockComplete(...(a as [])),
   markNoShow: (...a: unknown[]) => mockNoShow(...(a as [])),
+}))
+// Fase 0.C: el check-in vive en su propio módulo (comando puro + wrapper que abre la orden).
+jest.mock('@/services/reservation/checkIn.service', () => ({
+  checkInReservationAndOpenOrder: (...a: unknown[]) => mockCheckIn(...(a as [])),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -61,9 +64,17 @@ describe('set_reservation_status dispatch', () => {
     expect(mockConfirm).toHaveBeenCalledWith('v1', 'r1', 'SYSTEM')
     expect(mockCheckIn).not.toHaveBeenCalled()
   })
-  it("'checked_in' → checkInReservation", async () => {
+  it("'checked_in' → checkInReservationAndOpenOrder con actor HUMAN = staff de la conexión y source=MCP (Fase 0.C)", async () => {
     await call('checked_in')
-    expect(mockCheckIn).toHaveBeenCalledWith('v1', 'r1', 'SYSTEM')
+    expect(mockCheckIn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reservationId: 'r1',
+        venueId: 'v1',
+        actor: { type: 'HUMAN', staffId: 's1' },
+        source: 'MCP',
+        now: expect.any(Date),
+      }),
+    )
   })
   it("'completed' → completeReservation (no actor arg)", async () => {
     await call('completed')

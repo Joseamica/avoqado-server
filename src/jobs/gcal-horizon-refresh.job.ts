@@ -29,6 +29,7 @@ import prisma from '../utils/prismaClient'
 import { buildOAuthClient } from '../services/google-calendar/oauth.service'
 import { decryptToken } from '../services/google-calendar/encryption.service'
 import { upsertBlock } from '../services/google-calendar/external-busy-block.service'
+import { applyOwnEventEdit } from '../services/google-calendar/own-event-edit.service'
 import { runBackfill } from '../services/google-calendar/pull.service'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -139,7 +140,19 @@ export class GcalHorizonRefreshJob {
           await prisma.$transaction(async tx => {
             for (const ev of collected) {
               if (!ev.id) continue
-              if (ev.extendedProperties?.private?.avoqadoOrigin === 'avoqado') continue
+              if (ev.extendedProperties?.private?.avoqadoOrigin === 'avoqado') {
+                // El evento propio no se importa como ocupado, pero su edición
+                // por parte del venue sí aparta agenda (`own-event-edit.service`).
+                await applyOwnEventEdit(tx, {
+                  connectionId: conn.id,
+                  venueId: conn.venueId,
+                  staffId: conn.staffId,
+                  externalCalendarId: conn.selectedCalendarId,
+                  calendarTimeZone: conn.selectedCalendarTimeZone,
+                  event: ev,
+                })
+                continue
+              }
               if (ev.transparency === 'transparent') continue
               const selfDeclined = (ev.attendees ?? []).some(a => a.self && a.responseStatus === 'declined')
               if (selfDeclined) continue

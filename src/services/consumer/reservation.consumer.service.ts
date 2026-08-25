@@ -1,6 +1,6 @@
-import { CreditPurchaseStatus, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
+import { CreditPurchaseStatus, Prisma, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
@@ -8,6 +8,7 @@ import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import { resolveChargeableStripeMerchant as resolveActiveStripeMerchant } from '@/services/payments/ecommerceCapability'
 import logger from '@/config/logger'
+import { activateCustomerAccount, assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
@@ -164,26 +165,40 @@ async function createReservationDepositCheckout(
   }
 }
 
-async function ensureVenueCustomer(venueId: string, consumerId: string) {
-  const consumer = await prisma.consumer.findUnique({
+/**
+ * Fase 0.B: un Customer que el venue desactivó no se vincula ni se usa desde la app de
+ * consumidor, en ninguna de las tres ramas. No se crea un duplicado (chocaría con los
+ * índices únicos por venue) ni se degrada a invitado: reactivar es decisión del venue.
+ * `=== false` a propósito: `active` es @default(true); un registro sin el campo no es inactivo.
+ */
+function assertCustomerActive(customer: { active?: boolean | null } | null | undefined) {
+  if (customer && customer.active === false) {
+    throw new UnauthorizedError('Esta cuenta está desactivada en este negocio', 'CUSTOMER_INACTIVE')
+  }
+}
+
+export async function ensureVenueCustomer(tx: Prisma.TransactionClient, venueId: string, consumerId: string) {
+  const consumer = await tx.consumer.findUnique({
     where: { id: consumerId },
     select: { id: true, email: true, phone: true, firstName: true, lastName: true, active: true },
   })
   if (!consumer || !consumer.active) throw new BadRequestError('Cuenta de consumidor no disponible')
 
-  const existingByConsumer = await prisma.customer.findFirst({
+  const existingByConsumer = await tx.customer.findFirst({
     where: { venueId, consumerId },
   })
+  assertCustomerActive(existingByConsumer)
   if (existingByConsumer) return { consumer, customer: existingByConsumer }
 
   const existingByEmail = consumer.email
-    ? await prisma.customer.findUnique({
+    ? await tx.customer.findUnique({
         where: { venueId_email: { venueId, email: consumer.email } },
       })
     : null
+  assertCustomerActive(existingByEmail)
 
   if (existingByEmail) {
-    const customer = await prisma.customer.update({
+    const customer = await tx.customer.update({
       where: { id: existingByEmail.id },
       data: {
         consumerId,
@@ -196,13 +211,14 @@ async function ensureVenueCustomer(venueId: string, consumerId: string) {
   }
 
   const existingByPhone = consumer.phone
-    ? await prisma.customer.findUnique({
+    ? await tx.customer.findUnique({
         where: { venueId_phone: { venueId, phone: consumer.phone } },
       })
     : null
+  assertCustomerActive(existingByPhone)
 
   if (existingByPhone) {
-    const customer = await prisma.customer.update({
+    const customer = await tx.customer.update({
       where: { id: existingByPhone.id },
       data: {
         consumerId,
@@ -214,7 +230,7 @@ async function ensureVenueCustomer(venueId: string, consumerId: string) {
     return { consumer, customer }
   }
 
-  const customer = await prisma.customer.create({
+  const customer = await tx.customer.create({
     data: {
       venueId,
       consumerId,
@@ -227,6 +243,22 @@ async function ensureVenueCustomer(venueId: string, consumerId: string) {
   })
 
   return { consumer, customer }
+}
+
+/**
+ * Fase 1 — envoltorio transaccional del vínculo Consumer→Customer.
+ *
+ * Abre una transacción CORTA: sólo Consumer + Customer + activación. Deliberadamente NO
+ * envuelve `createReservationForConsumer` entero — ése abre después sus propias transacciones
+ * serializables y puede llamar a Stripe, y sostener una tx durante una llamada de red es lo
+ * que agota el pool de conexiones.
+ */
+export async function ensureVenueCustomerActivated(venueId: string, consumerId: string) {
+  return prisma.$transaction(async tx => {
+    const { consumer, customer } = await ensureVenueCustomer(tx, venueId, consumerId)
+    const activation = await activateCustomerAccount(tx, { customerId: customer.id, venueId, origin: 'CONSUMER' })
+    return { consumer, customer, approvalStatus: activation.approvalStatus }
+  })
 }
 
 export async function createReservationForConsumer(consumerId: string, venueSlug: string, input: ConsumerReservationInput) {
@@ -250,7 +282,7 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
   }
 
-  const { consumer, customer } = await ensureVenueCustomer(venue.id, consumerId)
+  const { consumer, customer } = await ensureVenueCustomerActivated(venue.id, consumerId)
   const guestName = input.guestName ?? displayName(consumer)
   const guestEmail = input.guestEmail ?? consumer.email ?? undefined
   const guestPhone = input.guestPhone ?? consumer.phone ?? undefined
@@ -553,6 +585,11 @@ async function createClassReservationForConsumer(
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
   return withSerializableRetry(async tx => {
+    // Fase 1: el gate va primero, dentro de la MISMA tx que aparta el lugar. Las clases no
+    // pasan por `createReservation` (tienen su propia transacción con lock de la sesión),
+    // así que necesitan su propia llamada — el gate del servicio de citas no las cubre.
+    await assertCustomerCanCreateReservation(tx, { customerId: body.customerId, venueId })
+
     const sessions = await tx.$queryRaw<
       { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
     >`
@@ -631,6 +668,8 @@ async function createClassReservationForConsumer(
         productId: session.productId,
         startsAt: session.startsAt,
         endsAt: session.endsAt,
+        // Clase: sin buffer post-servicio, el bloque coincide con la sesión.
+        blockedEndsAt: session.endsAt,
         duration: session.duration,
         status: initialStatus,
         channel: ReservationChannel.APP,

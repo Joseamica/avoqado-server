@@ -26,14 +26,17 @@ class AppError extends Error {
 }
 
 export class BadRequestError extends AppError {
-  constructor(message: string = 'Solicitud incorrecta') {
-    super(message, 400)
+  constructor(message: string = 'Solicitud incorrecta', code?: string, details?: unknown) {
+    super(message, 400, true, code, details)
   }
 }
 
 export class NotFoundError extends AppError {
-  constructor(message: string = 'Recurso no encontrado') {
-    super(message, 404)
+  // `code` y `details` son opcionales y llegaron después (Fase 5 del kiosco): era la única
+  // de esta familia que no dejaba mandar un código legible por máquina, y el 404 genérico
+  // del check-in necesita decir CHECK_IN_NOT_FOUND sin distinguirse de los demás 404.
+  constructor(message: string = 'Recurso no encontrado', code?: string, details?: unknown) {
+    super(message, 404, true, code, details)
   }
 }
 
@@ -44,8 +47,8 @@ export class ConflictError extends AppError {
 }
 
 export class UnauthorizedError extends AppError {
-  constructor(message: string = 'No autorizado') {
-    super(message, 401)
+  constructor(message: string = 'No autorizado', code?: string) {
+    super(message, 401, true, code)
   }
 }
 
@@ -100,8 +103,18 @@ export class ForbiddenError extends AppError {
 }
 
 export class ValidationError extends AppError {
-  constructor(message: string = 'Error de validación') {
-    super(message, 422)
+  constructor(message: string = 'Error de validación', code?: string, details?: unknown) {
+    super(message, 422, true, code, details)
+  }
+}
+
+/**
+ * 410 — el recurso existió y ya no. Distinto de 404 a propósito: al cliente del kiosco
+ * hay que poder decirle "este QR ya venció, pide otro" sin dejarlo adivinando.
+ */
+export class GoneError extends AppError {
+  constructor(message: string = 'El recurso ya no está disponible', code?: string, details?: unknown) {
+    super(message, 410, true, code, details)
   }
 }
 
