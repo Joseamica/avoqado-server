@@ -3198,6 +3198,12 @@ router.get(
 // Respaldo del kiosco: "no aparezco en la lista". El kiosco vive dentro de esta app y usa
 // la sesión que ya tiene (la credencial de aparato es la Fase 3, que el founder sacó del
 // piloto), así que entra por el espacio móvil y no por el de terminales.
+// Compra en el kiosco: catálogo y enlace de pago para el QR. Sin PIN de empleado a
+// propósito (decisión del founder) — lo que lo hace seguro es que el precio sale del
+// catálogo y el cliente paga con SU tarjeta en SU teléfono, no que se pida un PIN.
+router.get('/venues/:venueId/kiosk/packs', authenticateTokenMiddleware, kioskCheckInController.kioskPacks)
+router.post('/venues/:venueId/kiosk/pack-checkout', authenticateTokenMiddleware, kioskCheckInController.kioskPackCheckout)
+
 router.post(
   '/venues/:venueId/kiosk/check-in',
   authenticateTokenMiddleware,

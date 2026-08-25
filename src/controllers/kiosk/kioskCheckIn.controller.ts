@@ -20,6 +20,8 @@ import {
   getKioskCheckInChallengeStatus,
 } from '@/services/reservation/kioskCheckIn.service'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { createCheckoutSession, getAvailablePacks } from '@/services/dashboard/creditPack.public.service'
+import prisma from '@/utils/prismaClient'
 
 /** Nada de esto se cachea, y el secreto no debe viajar en un `Referer`. */
 function harden(res: Response) {
@@ -148,6 +150,64 @@ export async function consumeChallenge(req: Request, res: Response, next: NextFu
       ip: req.ip,
     })
     res.json(out)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/kiosk/packs
+ *
+ * Los paquetes que el kiosco puede ofrecer. Precio de CATÁLOGO, sin excepción: el kiosco
+ * no elige cuánto cobrar, y eso es lo que hace que un cobro sin PIN de empleado sea
+ * seguro. (Decisión del founder: el autoservicio NO pide PIN — un kiosco que lo pide no
+ * es un kiosco. La frontera no es "dinero sí/no", es quién decide el monto.)
+ */
+export async function kioskPacks(req: Request, res: Response, next: NextFunction) {
+  try {
+    harden(res)
+    const venueId = resolveVenueId(req)
+    const packs = await getAvailablePacks(venueId)
+    res.json({ packs })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kiosk/pack-checkout
+ *
+ * Devuelve una URL de pago para enseñarla como QR.
+ *
+ * 🔴 El cliente paga en SU teléfono, no en la pantalla del kiosco. Es lo que dice el spec
+ * ("CreditPack → PAX o Stripe Checkout como QR") y resuelve tres cosas de una:
+ *   · nadie mete su tarjeta en un aparato compartido de la entrada;
+ *   · el kiosco no tiene que averiguar quién eres antes de cobrarte, así que no se
+ *     convierte en un buscador de personas; y
+ *   · reutiliza el carril de pago en línea que YA existe y ya está probado, en vez de
+ *     estrenar código nuevo en el camino del dinero.
+ */
+export async function kioskPackCheckout(req: Request, res: Response, next: NextFunction) {
+  try {
+    harden(res)
+    const venueId = resolveVenueId(req)
+    const packId = String(req.body?.packId ?? '')
+    if (!packId) throw new BadRequestError('packId es requerido')
+
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } })
+    if (!venue) throw new BadRequestError('Local no encontrado')
+
+    const base = process.env.BOOKING_SITE_URL ?? 'https://book.avoqado.io'
+    const session = await createCheckoutSession(
+      venueId,
+      packId,
+      undefined,
+      undefined,
+      `${base}/${venue.slug}?packs=1&ok=1`,
+      `${base}/${venue.slug}?packs=1`,
+    )
+
+    res.json({ url: (session as { url?: string }).url ?? null })
   } catch (error) {
     next(error)
   }
