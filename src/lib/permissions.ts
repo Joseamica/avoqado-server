@@ -237,6 +237,13 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'staff-documents:read': ['staff-documents:read', 'teams:read'],
   'staff-documents:write': ['staff-documents:write', 'staff-documents:read', 'teams:read'],
 
+  // Asistencia (revisión del checador). Puerta PROPIA a propósito: `tpv-time-entries:write` lo
+  // tienen CASHIER y WAITER para checarse a sí mismos, y reusarlo convertía a cualquier mesero
+  // en administrador de la asistencia de sus compañeros (auditoría Codex 2026-08-26, P1).
+  // Un permiso que ya tienen roles de piso nunca gobierna una acción administrativa.
+  'attendance:read': ['attendance:read', 'teams:read'],
+  'attendance:manage': ['attendance:manage', 'attendance:read', 'teams:read'],
+
   // ===========================
   // TPV (Point of Sale)
   // ===========================
@@ -911,6 +918,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.MANAGER]: [
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'attendance:read', // Revisar el checador — nunca a roles de piso
+    'attendance:manage',
     'home:read',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -1071,6 +1080,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.ADMIN]: [
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'attendance:read', // Revisar el checador — nunca a roles de piso
+    'attendance:manage',
     'staff-documents:read', // Expediente del personal — datos sensibles, sólo OWNER/ADMIN
     'staff-documents:write',
     'home:*',
@@ -1203,6 +1214,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.OWNER]: [
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'attendance:read', // Revisar el checador — nunca a roles de piso
+    'attendance:manage',
     'staff-documents:read', // Expediente del personal — datos sensibles, sólo OWNER/ADMIN
     'staff-documents:write',
     'home:*',
@@ -1844,6 +1857,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   reviews: ['reviews:read', 'reviews:respond'],
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
   'staff-documents': ['staff-documents:read', 'staff-documents:write'],
+  attendance: ['attendance:read', 'attendance:manage'],
   tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
   'class-sessions': ['class-sessions:read-assigned'],

@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as attendanceService from '../../services/dashboard/attendance.dashboard.service'
+import * as workScheduleService from '../../services/dashboard/workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
 
 export async function getTimeEntries(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -43,18 +44,39 @@ export async function getStaffTimeSummary(req: Request, res: Response, next: Nex
   }
 }
 
-export async function validateTimeEntry(req: Request, res: Response, next: NextFunction): Promise<void> {
+/** GET /venues/:venueId/attendance/report — puntualidad: retardos, faltas y salidas tempranas. */
+export async function getReport(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { venueId, timeEntryId } = req.params
-    const validatedById = req.authContext?.userId
+    const result = await attendanceService.getAttendanceReport(
+      req.params.venueId,
+      req.query.startDate as string,
+      req.query.endDate as string,
+    )
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
 
-    if (!validatedById) {
+/** GET /venues/:venueId/team/:staffVenueId/work-schedule — el cuadrante de una persona. */
+export async function getWorkSchedule(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const result = await workScheduleService.getWorkSchedule(req.params.venueId, req.params.staffVenueId)
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** PUT /venues/:venueId/team/:staffVenueId/work-schedule — reemplaza el cuadrante completo. */
+export async function replaceWorkSchedule(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const actorId = (req as any).authContext?.userId
+    if (!actorId) {
       res.status(401).json({ error: 'Authentication required' })
       return
     }
-
-    const { status, note } = req.body
-    const result = await attendanceService.validateVenueTimeEntry(venueId, timeEntryId, validatedById, status, note)
+    const result = await workScheduleService.replaceWorkSchedule(req.params.venueId, req.params.staffVenueId, req.body, actorId)
     res.status(200).json(result)
   } catch (error) {
     next(error)

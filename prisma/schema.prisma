@@ -379,6 +379,10 @@ model Venue {
   customerGroups CustomerGroup[]
   loyaltyConfig  LoyaltyConfig?
   walletPasses   WalletPass[]
+  stampCards     StampCard[]
+  walletCardDesign WalletCardDesign?
+  stampEvents    StampEvent[]
+  stampRewards   StampReward[]
 
   // Referral Program
   referralProgramConfig ReferralProgramConfig?
@@ -835,6 +839,10 @@ model VenueSettings {
   promoterLocationEndHour   Int     @default(18)
 
   // Auto Clock-Out (HR automation - Square-style)
+  /// Minutos de gracia antes de contar un retardo. 10 por defecto: castigar el minuto exacto
+  /// convierte el semáforo en ruido y nadie lo vuelve a mirar. Configurable porque una
+  /// clínica con citas y una tienda de barrio no toleran lo mismo.
+  attendanceGraceMinutes  Int     @default(10)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
   autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
   maxShiftDurationEnabled Boolean @default(false) // Enable max shift duration enforcement
@@ -1203,6 +1211,10 @@ model StaffVenue {
   @@index([role])
   @@index([pin]) // ✅ Índice para búsquedas de PIN
   @@index([permissionSetId])
+  stampEventsCreated StampEvent[] @relation("StampEventCreatedBy")
+  /// Cuadrante LABORAL (jornada). Distinto de `schedule`, que es disponibilidad para citas.
+  workSchedule           StaffWorkSchedule?
+  workScheduleExceptions StaffWorkScheduleException[]
 }
 
 // ==========================================
@@ -3133,10 +3145,58 @@ enum StaffDocumentType {
 /// El borrado es SUAVE. Un expediente laboral no se tira: en México hay obligación de
 /// conservar ciertos documentos después de que la persona se va, y un borrado duro deja al
 /// negocio sin con qué responder. `deletedAt` lo saca de la vista, no de la historia.
+/// Cuadrante laboral: a qué hora ENTRA A TRABAJAR una persona.
+///
+/// 🔴 No confundir con `StaffSchedule`, que es la DISPONIBILIDAD PARA CITAS (a qué horas
+/// puede atender clientes), ni con `Shift`, que es el CORTE DE CAJA (dinero, fondo, arqueo).
+/// Son tres cosas distintas y mezclarlas en una tabla fue el error que este comentario
+/// existe para evitar.
+///
+/// `weekly` guarda la misma forma que `OperatingHours` (lunes…domingo con rangos), para que
+/// el dashboard reutilice el editor que ya conoce.
+model StaffWorkSchedule {
+  id           String     @id @default(cuid())
+  staffVenueId String     @unique
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  venueId      String
+
+  weekly Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+}
+
+/// Excepción al cuadrante: un día libre, o un día con horario distinto.
+model StaffWorkScheduleException {
+  id           String     @id @default(cuid())
+  staffVenueId String
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  venueId      String
+
+  /// 'YYYY-MM-DD' en fecha del negocio, igual que las excepciones de citas.
+  startDate String
+  endDate   String
+  /// OFF = descanso o vacaciones · HOURS = ese día entra y sale a otra hora.
+  kind      String
+  startTime String?
+  endTime   String?
+  note      String?
+
+  createdAt DateTime @default(now())
+
+  @@index([staffVenueId, startDate, endDate])
+  @@index([venueId, startDate])
+}
+
 model StaffDocument {
   id      String @id @default(cuid())
   staffId String
-  staff   Staff  @relation("StaffDocumentOwner", fields: [staffId], references: [id], onDelete: Cascade)
+  /// Restrict, NO Cascade: un borrado físico del Staff (ruta superadmin) arrastraría el
+  /// expediente entero saltándose `deletedAt`. Con Restrict, borrar a alguien con documentos
+  /// vivos falla en la base, que es la última red (auditoría Codex 2026-08-26, P1).
+  staff   Staff  @relation("StaffDocumentOwner", fields: [staffId], references: [id], onDelete: Restrict)
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
@@ -3145,7 +3205,10 @@ model StaffDocument {
   label String?
 
   fileName  String
-  fileUrl   String
+  /// 🔴 RUTA en el prefijo privado de Storage (`private/...`), NUNCA una URL. El archivo se
+  /// entrega sólo con una URL firmada que caduca, generada al leer. Guardar una URL aquí
+  /// sería guardar una llave permanente (auditoría Codex 26-ago, P1: Storage público).
+  storagePath String
   mimeType  String
   sizeBytes Int
 
@@ -3498,6 +3561,7 @@ model Order {
   @@index([venueId, customerIdentifier, paymentStatus])
   @@index([venueId, createdAt])
   @@index([venueId, status, createdAt])
+  stampEvents StampEvent[]
 }
 
 // Junction table for many-to-many Order <-> Customer relationship
@@ -6540,6 +6604,8 @@ model Customer {
   orders              Order[]
   loyaltyTransactions LoyaltyTransaction[]
   walletPasses        WalletPass[]
+  stampCards          StampCard[]
+  stampRewards        StampReward[]
 
   // Discount System (Phase 2)
   customerDiscounts CustomerDiscount[]
@@ -6677,6 +6743,26 @@ model LoyaltyConfig {
   pointsPerDollar Decimal @default(1) @db.Decimal(5, 2) // 1 point per $1 spent
   pointsPerVisit  Int     @default(0) // Bonus points per visit (e.g., 10)
 
+  // ==========================================
+  // Mecanica de SELLOS (Plan B) — independiente de los puntos
+  // ==========================================
+  // 🔴 Banderas INDEPENDIENTES, no un enum exclusivo: un gimnasio puede querer
+  // puntos por gasto Y paquetes de clases a la vez (hallazgo C14 de la auditoria).
+  stampsEnabled   Boolean @default(false)
+  /// Cuantos sellos pide una cartilla nueva. Al abrirse se CONGELA en la cartilla.
+  stampsRequired  Int     @default(10)
+  /// Tope por cliente por dia, calculado en la zona horaria del VENUE. Evita que
+  /// alguien junte una cartilla entera con cinco cafes en una sola visita.
+  maxStampsPerDay Int     @default(1)
+
+  /// El premio, ejecutable — no un texto (hallazgo C2 de la auditoria).
+  stampRewardType      StampRewardType @default(FREE_PRODUCT)
+  /// Pesos (FIXED_AMOUNT) o porcentaje 0-100 (PERCENTAGE). Null si es producto.
+  stampRewardValue     Decimal?        @db.Decimal(10, 2)
+  stampRewardProductId String?
+  /// Lo que lee el cliente en su tarjeta.
+  stampRewardLabel     String          @default("Un producto gratis")
+
   // Redemption rules
   redemptionRate   Decimal @default(0.01) @db.Decimal(5, 4) // $0.01 per point
   minPointsRedeem  Int     @default(100) // Minimum points to redeem
@@ -6768,6 +6854,210 @@ model WalletPass {
 
   @@index([venueId, updatedAt])
   @@index([customerId])
+}
+
+enum StampEventType {
+  EARN
+  REVERSAL
+  ADJUST
+}
+
+/// Como se VE la credencial de un negocio en la cartera del cliente.
+///
+/// 🔴 Vive APARTE de `LoyaltyConfig` a proposito. La credencial no es solo de sellos:
+/// tambien lleva puntos, clases de un paquete y membresia (decision D4b del founder).
+/// Si el diseño colgara del programa de lealtad, un negocio que emite credenciales sin
+/// sellos no tendria donde guardar sus colores.
+///
+/// 🔴 Las imagenes las SUBE el negocio como PNG con las medidas exactas de Apple; no se
+/// derivan de `Venue.logo`, que guarda JPG — y Apple rechaza todo lo que no sea PNG
+/// dentro de un pase, en silencio. Convertirlo exigiria una libreria de imagenes en el
+/// camino de emision. Es el mismo camino que toma Loyalz, que tampoco reusa un logo
+/// generico: pide uno de 480x150 y un icono aparte de 512x512.
+model WalletCardDesign {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// Logo de la tarjeta, arriba a la izquierda. PNG 480x150.
+  logoUrl String?
+  /// Icono chico: lista de pases y notificacion en pantalla bloqueada. PNG 512x512.
+  /// 🔴 Un pase SIN icono no se abre en Wallet y falla EN SILENCIO (probado en un
+  /// iPhone real). Cuando falta, la emision genera uno de color solido: jamas se
+  /// emite un pase sin el.
+  iconUrl String?
+
+  // ── Colores en hex #RRGGBB. Se validan al escribir, no aqui. ──
+  /// Los defaults son los tokens REALES del tema oscuro de avoqado-android
+  /// (`designsystem/theme/Color.kt`), no una paleta inventada.
+  backgroundColor  String @default("#1C1C1E")
+  textColor        String @default("#FFFFFF")
+  labelColor       String @default("#98989D")
+  stripColor       String @default("#2C2C2E")
+  stampFilledColor String @default("#7ADD2C")
+
+  /// Null = se DERIVA del color del sello lleno, y ese es el default a proposito: un
+  /// contorno gris fijo sobre fondo oscuro deja invisibles los sellos que FALTAN, que
+  /// es lo unico que quiere ver un cliente nuevo con cero sellos.
+  stampEmptyColor String?
+
+  stampShape WalletStampShape @default(CIRCLE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Formas que el motor sabe DIBUJAR sin librerias de imagenes (ver `pngCanvas.ts`).
+/// Un negocio que quiera su propio simbolo sube una imagen; estas son las que se
+/// generan al vuelo con el color que el elija.
+/// 🔴 Hay iconos por GIRO y no solo figuras geometricas porque un circulo se ve
+/// igual en la tarjeta de una cafeteria que en la de un gimnasio, y eso es lo que
+/// hace que una tarjeta parezca de plantilla.
+enum WalletStampShape {
+  CIRCLE
+  STAR
+  HEART
+  SQUARE
+  /// Taza — cafeterias, restaurantes
+  CUP
+  /// Tijeras — esteticas, salones, barberias
+  SCISSORS
+  /// Mancuerna — gimnasios, estudios
+  DUMBBELL
+  /// Flor — spas, florerias, bienestar
+  FLOWER
+  /// Bolsa — tiendas, retail
+  BAG
+}
+
+enum StampRewardType {
+  FREE_PRODUCT
+  FIXED_AMOUNT
+  PERCENTAGE
+}
+
+enum StampRewardStatus {
+  PENDING
+  REDEEMED
+  EXPIRED
+}
+
+/// Una cartilla de sellos de un cliente en un negocio ("junta 7 y el 8 va gratis").
+///
+/// Es un CICLO, no un contador global: al llenarse nace la siguiente. Asi el cliente
+/// nunca pierde lo que compre entre que llena una cartilla y pasa a canjear su premio.
+model StampCard {
+  id String @id @default(cuid())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// 1, 2, 3... Cuantas cartillas ha llenado este cliente en este negocio.
+  cycle Int @default(1)
+
+  /// 🔴 CONGELADO al abrir la cartilla, a proposito. Si el negocio cambia de "al 7"
+  /// a "al 10" a media tarde, quien ya junto 6 NO puede descubrir que ahora le
+  /// faltan 4. El cambio aplica a las cartillas que nazcan despues.
+  stampsRequired Int
+
+  /// Cache de lectura. La verdad son los eventos; esto se actualiza SIEMPRE en la
+  /// misma transaccion que el evento que lo mueve.
+  stampsEarned Int @default(0)
+
+  completedAt DateTime?
+
+  events  StampEvent[]
+  rewards StampReward[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([customerId, venueId, cycle])
+  @@index([venueId, customerId])
+}
+
+/// El libro de sellos: cada otorgamiento, reversion y ajuste, con su autor.
+///
+/// 🔴 Es un LIBRO, no un contador. Un contador no puede contestar "quien le puso
+/// ese sello y cuando", que es justo lo que hace vendible el producto frente a la
+/// tarjeta de carton: ahi el empleado sella de mas a su amiga y nadie se entera.
+/// Tampoco se puede revertir un contador sin perder la historia.
+model StampEvent {
+  id String @id @default(cuid())
+
+  stampCardId String
+  stampCard   StampCard @relation(fields: [stampCardId], references: [id], onDelete: Cascade)
+
+  type     StampEventType
+  /// Positivo en EARN, negativo en REVERSAL. ADJUST puede ser cualquiera.
+  quantity Int            @default(1)
+
+  /// La orden que lo genero. Junto con venueId forma la llave de idempotencia:
+  /// un pago produce EXACTAMENTE un sello, aunque el cobro se reintente.
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  /// Desnormalizado para poder poner el indice unico parcial (venueId, orderId).
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// 🔴 Quien lo puso. El criterio "100% de sellos atribuibles" depende de esto.
+  createdById String?
+  createdBy   StaffVenue? @relation("StampEventCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  /// En que terminal. Sin esto no se puede investigar un patron raro de sellos.
+  terminalId String?
+
+  reason String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([stampCardId, createdAt])
+  @@index([venueId, createdAt])
+}
+
+/// Un premio ganado al completar una cartilla. Vive hasta que se canjea.
+///
+/// 🔴 Sus condiciones se CONGELAN al ganarlo. Si el negocio cambia el premio de
+/// "un cafe" a "10% de descuento", quien ya lo gano recibe lo que se le prometio.
+model StampReward {
+  id String @id @default(cuid())
+
+  /// Una cartilla completa genera exactamente UN premio.
+  stampCardId String    @unique
+  stampCard   StampCard @relation(fields: [stampCardId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  status StampRewardStatus @default(PENDING)
+
+  /// El premio congelado, no un texto: esto es lo que se ejecuta al canjear.
+  rewardType      StampRewardType
+  /// Monto en pesos (FIXED_AMOUNT) o porcentaje 0-100 (PERCENTAGE). Null en producto.
+  rewardValue     Decimal?        @db.Decimal(10, 2)
+  rewardProductId String?
+  /// Lo que ve el cliente en su tarjeta ("Un cafe gratis").
+  rewardLabel     String
+
+  redeemedAt DateTime?
+  expiresAt  DateTime?
+
+  /// El descuento que produjo al canjearse. Es lo que permite devolver el premio
+  /// si alguien quita ese descuento de la cuenta.
+  orderDiscountId String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId, status])
+  @@index([venueId, status])
 }
 
 // NOTE: REFERRAL PROGRAM

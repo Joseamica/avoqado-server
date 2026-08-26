@@ -15,7 +15,7 @@ const mockLogAction = jest.fn()
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
 
 import { getVenueStaffTimeSummary, validateVenueTimeEntry } from '@/services/dashboard/attendance.dashboard.service'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { NotFoundError } from '@/errors/AppError'
 
 const VENUE_ID = 'venue-1'
 const OTHER_VENUE_ID = 'venue-2'
@@ -46,81 +46,6 @@ describe('getVenueStaffTimeSummary — aislamiento entre negocios', () => {
 
     expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ staffId: STAFF_ID, venueId: VENUE_ID }) }),
-    )
-  })
-})
-
-describe('validateVenueTimeEntry', () => {
-  beforeEach(() => {
-    prismaMock.timeEntry.findFirst.mockReset()
-    prismaMock.timeEntry.update.mockReset().mockResolvedValue({ id: TIME_ENTRY_ID } as any)
-    mockLogAction.mockReset()
-  })
-
-  it('no aprueba una checada de otro negocio', async () => {
-    // La consulta filtra por venueId, asi que un id ajeno simplemente no aparece.
-    prismaMock.timeEntry.findFirst.mockResolvedValue(null)
-
-    await expect(validateVenueTimeEntry(OTHER_VENUE_ID, TIME_ENTRY_ID, VALIDATOR_ID, 'APPROVED')).rejects.toThrow(NotFoundError)
-
-    expect(prismaMock.timeEntry.update).not.toHaveBeenCalled()
-  })
-
-  it('busca la checada acotada al negocio, nunca por id suelto', async () => {
-    prismaMock.timeEntry.findFirst.mockResolvedValue({ id: TIME_ENTRY_ID, staffId: STAFF_ID, venueId: VENUE_ID } as any)
-
-    await validateVenueTimeEntry(VENUE_ID, TIME_ENTRY_ID, VALIDATOR_ID, 'APPROVED')
-
-    expect(prismaMock.timeEntry.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ id: TIME_ENTRY_ID, venueId: VENUE_ID }) }),
-    )
-  })
-
-  it('rechaza un estado que no sea aprobar o rechazar', async () => {
-    await expect(validateVenueTimeEntry(VENUE_ID, TIME_ENTRY_ID, VALIDATOR_ID, 'PENDING' as never)).rejects.toThrow(BadRequestError)
-
-    expect(prismaMock.timeEntry.findFirst).not.toHaveBeenCalled()
-  })
-
-  it('guarda quien valido y cuando, con su nota', async () => {
-    prismaMock.timeEntry.findFirst.mockResolvedValue({ id: TIME_ENTRY_ID, staffId: STAFF_ID, venueId: VENUE_ID } as any)
-
-    await validateVenueTimeEntry(VENUE_ID, TIME_ENTRY_ID, VALIDATOR_ID, 'REJECTED', 'La foto no es de la sucursal')
-
-    expect(prismaMock.timeEntry.update).toHaveBeenCalledWith({
-      where: { id: TIME_ENTRY_ID },
-      data: expect.objectContaining({
-        validationStatus: 'REJECTED',
-        validatedBy: VALIDATOR_ID,
-        validatedAt: expect.any(Date),
-        validationNote: 'La foto no es de la sucursal',
-      }),
-    })
-  })
-
-  it('deja rastro en la bitacora del negocio', async () => {
-    prismaMock.timeEntry.findFirst.mockResolvedValue({ id: TIME_ENTRY_ID, staffId: STAFF_ID, venueId: VENUE_ID } as any)
-
-    await validateVenueTimeEntry(VENUE_ID, TIME_ENTRY_ID, VALIDATOR_ID, 'APPROVED')
-
-    expect(mockLogAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        staffId: VALIDATOR_ID,
-        venueId: VENUE_ID,
-        action: 'TIME_ENTRY_APPROVED',
-        entity: 'TimeEntry',
-        entityId: TIME_ENTRY_ID,
-      }),
-    )
-  })
-
-  it('guarda la nota como null cuando no se escribio ninguna', async () => {
-    prismaMock.timeEntry.findFirst.mockResolvedValue({ id: TIME_ENTRY_ID, staffId: STAFF_ID, venueId: VENUE_ID } as any)
-
-    await validateVenueTimeEntry(VENUE_ID, TIME_ENTRY_ID, VALIDATOR_ID, 'APPROVED')
-
-    expect(prismaMock.timeEntry.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ validationNote: null }) }),
     )
   })
 })

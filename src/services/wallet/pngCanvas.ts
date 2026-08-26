@@ -11,6 +11,12 @@ import { deflateSync } from 'zlib'
 
 export type Rgb = [number, number, number]
 
+/**
+ * Pertenencia de un punto a una forma, en coordenadas normalizadas: el centro es
+ * (0,0) y el borde cae cerca de radio 1. `y` crece hacia ABAJO, como en la imagen.
+ */
+export type ShapeFn = (nx: number, ny: number) => boolean
+
 /** Verde de marca de Avoqado, para negocios sin color propio configurado. */
 export const FALLBACK_RGB: Rgb = [122, 221, 44]
 
@@ -92,6 +98,108 @@ export function encodePng(width: number, height: number, pixels: Buffer): Buffer
 }
 
 /** Lienzo de píxeles RGB con lo mínimo para dibujar una banda de sellos. */
+/** Luminosidad percibida, 0 a 1. Coeficientes de Rec. 709. */
+function luminosidad(c: Rgb): number {
+  return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255
+}
+
+/** Contraste de WCAG entre dos colores: 1 = idénticos, 21 = negro sobre blanco. */
+export function contrastRatio(a: Rgb, b: Rgb): number {
+  const canal = (v: number) => {
+    const s = v / 255
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4)
+  }
+  const rel = (c: Rgb) => 0.2126 * canal(c[0]) + 0.7152 * canal(c[1]) + 0.0722 * canal(c[2])
+  const x = rel(a) + 0.05
+  const y = rel(b) + 0.05
+  return x > y ? x / y : y / x
+}
+
+/**
+ * El color del contorno de un sello que AUN NO se gana.
+ *
+ * 🔴 Este cálculo ya se rompió DOS veces, en direcciones opuestas, y las dos veces
+ * el síntoma fue el mismo: un cliente nuevo —con CERO sellos— no puede contar
+ * cuántos le faltan, que es el único dato que busca en su tarjeta.
+ *
+ *   1. Un gris fijo del tema desaparecía sobre el fondo OSCURO.
+ *   2. "Mezcla el fondo hacia el acento" desaparecía sobre el fondo CLARO: el
+ *      acento de casi cualquier negocio ya es un color vivo y claro.
+ *
+ * Y un tercer caso lo destapó la prueba de contraste, no el ojo: mirar sólo la
+ * luminosidad del FONDO no basta. Un acento oscuro —un vino, un azul marino— sobre
+ * un fondo oscuro tampoco se separa, por mucho que la dirección sea la correcta.
+ *
+ * Por eso aquí no hay una constante de mezcla: se elige la dirección con la que hay
+ * espacio (hacia blanco si el fondo es oscuro, hacia negro si es claro) y se empuja
+ * el acento por ella lo MÍNIMO necesario para alcanzar contraste. Conservar el tono
+ * del negocio importa: si el contorno fuera gris neutro, la marca sólo se vería en
+ * los sellos ya ganados, y un cliente nuevo no vería ni rastro de ella.
+ */
+export function outlineColor(fondo: Rgb, acento: Rgb): Rgb {
+  // 2.2 es el mínimo con el que una línea de 2-3 píxeles todavía se lee como una
+  // figura contable. No es el 3.0 que WCAG pide para texto: un círculo grande se
+  // distingue con menos contraste que una letra.
+  const MINIMO = 2.2
+  const extremo: Rgb = luminosidad(fondo) < 0.5 ? [255, 255, 255] : [0, 0, 0]
+
+  for (let t = 0; t <= 1; t += 0.05) {
+    const candidato = mix(acento, extremo, t)
+    if (contrastRatio(candidato, fondo) >= MINIMO) return candidato
+  }
+  // Inalcanzable en la práctica: en el extremo puro el contraste es máximo. Está
+  // por si alguien baja el umbral hasta un valor imposible.
+  return extremo
+}
+
+/**
+ * El color de un sello NO ganado cuando se dibuja RELLENO (los iconos con piezas
+ * finas, que en contorno se parten).
+ *
+ * 🔴 Es una funcion distinta de `outlineColor` y no una duplicacion: los dos colores
+ * tienen que cumplir cosas distintas, y confundirlos deja la cartilla inservible.
+ *
+ * Un sello de CONTORNO ya se distingue del ganado por su FORMA —uno es una linea,
+ * el otro una mancha— asi que a su color solo se le pide verse contra el fondo, y
+ * quedarse en el acento puro es correcto. Un sello RELLENO se distingue del ganado
+ * UNICAMENTE por el color: si sale igual, la fila entera se ve ganada y el cliente
+ * no puede contar cuantos lleva. Paso exactamente eso con la taza, las tijeras y la
+ * mancuerna, y no lo habria visto ninguna prueba de estructura.
+ *
+ * Por eso este color arranca en el FONDO y se acerca al acento lo justo: queda
+ * visible contra el fondo y, por construccion, lejos del acento puro.
+ */
+export function dimFillColor(fondo: Rgb, acento: Rgb): Rgb {
+  // 🔴 2.5 contra el sello ganado, no 1.7. Con 1.7 los numeros "cumplian" y la
+  // cartilla seguia siendo dificil de leer: dos verdes rellenos a 1.76 de distancia
+  // se distinguen midiendolos, no mirandolos. Se ve al renderizar el tema claro.
+  //
+  // Se intenta el objetivo bueno primero y se va cediendo: asi un negocio con
+  // colores comodos obtiene mucha separacion, y uno con colores dificiles obtiene
+  // la mejor posible — pero NUNCA el acento tal cual, que es el defecto que dejaba
+  // la fila entera pareciendo ganada.
+  for (const objetivo of [2.5, 2.0, 1.7]) {
+    // 1) El camino natural: partir del FONDO y acercarse al acento lo justo. Da un
+    //    tono apagado, emparentado con la marca y lejos del acento por construccion.
+    for (let t = 0.15; t <= 1; t += 0.05) {
+      const c = mix(fondo, acento, t)
+      if (contrastRatio(c, fondo) >= 1.7 && contrastRatio(c, acento) >= objetivo) return c
+    }
+
+    // 2) Cuando el acento apenas contrasta con el fondo —un verde lima sobre casi
+    //    blanco— NO HAY HUECO entre los dos y el camino de arriba no encuentra nada.
+    //    Se sale del par empujando el acento hacia el extremo opuesto al fondo.
+    const extremo: Rgb = luminosidad(fondo) < 0.5 ? [255, 255, 255] : [0, 0, 0]
+    for (let t = 0.1; t <= 1; t += 0.05) {
+      const c = mix(acento, extremo, t)
+      if (contrastRatio(c, acento) >= objetivo && contrastRatio(c, fondo) >= 1.7) return c
+    }
+  }
+
+  // Inalcanzable con colores reales: en el extremo puro el contraste es maximo.
+  return outlineColor(fondo, acento)
+}
+
 export class Canvas {
   readonly pixels: Buffer
 
@@ -144,6 +252,47 @@ export class Canvas {
             const py = y + (sy + 0.5) * step
             const d = Math.hypot(px - cx, py - cy)
             if (d <= radius && (stroke === 0 || d >= inner)) hits++
+          }
+        }
+        if (hits > 0) this.blend(x, y, color, hits / (S * S))
+      }
+    }
+  }
+
+  /**
+   * Dibuja cualquier forma centrada, rellena o de contorno, con bordes suaves.
+   *
+   * La forma se describe con una funcion de PERTENENCIA en coordenadas normalizadas
+   * —el centro es (0,0) y el borde cae cerca de radio 1— en vez de con una lista de
+   * lineas. Eso es lo que permite que el contorno salga gratis: el borde de grosor
+   * `stroke` es "esta dentro de la forma pero NO dentro de la misma forma encogida",
+   * y encoger es dividir el punto entre la escala. Con listas de lineas habria que
+   * calcular un poligono paralelo por forma, que es donde salen las esquinas rotas.
+   *
+   * 🔴 El suavizado no es un lujo: sin el, una estrella de 30 pixeles se ve como una
+   * escalera, y una tarjeta con diez escaleras parece rota, no minimalista.
+   */
+  shape(cx: number, cy: number, radius: number, color: Rgb, inside: ShapeFn, opts: { strokeWidth?: number } = {}): void {
+    const stroke = opts.strokeWidth ?? 0
+    // Escala de la forma interior. Con `stroke` >= radio no queda hueco: es relleno.
+    const innerScale = stroke > 0 && stroke < radius ? (radius - stroke) / radius : 0
+    const x0 = Math.max(0, Math.floor(cx - radius - 1))
+    const x1 = Math.min(this.width - 1, Math.ceil(cx + radius + 1))
+    const y0 = Math.max(0, Math.floor(cy - radius - 1))
+    const y1 = Math.min(this.height - 1, Math.ceil(cy + radius + 1))
+    const S = 3
+    const step = 1 / S
+
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        let hits = 0
+        for (let sy = 0; sy < S; sy++) {
+          for (let sx = 0; sx < S; sx++) {
+            const nx = (x + (sx + 0.5) * step - cx) / radius
+            const ny = (y + (sy + 0.5) * step - cy) / radius
+            if (!inside(nx, ny)) continue
+            if (innerScale > 0 && inside(nx / innerScale, ny / innerScale)) continue
+            hits++
           }
         }
         if (hits > 0) this.blend(x, y, color, hits / (S * S))

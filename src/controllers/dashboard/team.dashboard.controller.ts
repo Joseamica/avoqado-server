@@ -231,7 +231,8 @@ export async function hardDeleteTeamMember(req: Request, res: Response, next: Ne
       return
     }
 
-    const result = await teamService.hardDeleteTeamMember(venueId, teamMemberId, confirmDeletion)
+    const actorId = req.authContext?.userId
+    const result = await teamService.hardDeleteTeamMember(venueId, teamMemberId, confirmDeletion, actorId)
 
     res.status(200).json({
       message: 'Team member permanently deleted',

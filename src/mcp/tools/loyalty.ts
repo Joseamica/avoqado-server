@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
+import { getCardDesign, saveCardDesign } from '@/services/wallet/cardDesign.service'
 import { getCustomerLoyalty, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { planGateMessage } from '../planGate'
 
@@ -306,6 +307,111 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
             pointsExpireDays: (cfg as { pointsExpireDays: number | null }).pointsExpireDays,
           },
         })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  // ==========================================
+  // CREDENCIAL DEL CLIENTE — como se VE la tarjeta
+  // ==========================================
+
+  server.tool(
+    'wallet_card_design',
+    "Read how a venue's customer wallet card LOOKS: its colours (card background, text, labels, the stamp band, and the stamps themselves), the shape of the stamps, and whether the venue uploaded its own logo and icon. This is the card customers keep in Apple Wallet, so it carries the VENUE's branding, not Avoqado's. A venue that never configured it returns the default theme colours rather than an error. Read-only; requires loyalty:read.",
+    {
+      venueId: z.string().describe('Venue whose card design to read (must be in your scope)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('loyalty:read', venueId)
+      const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'La credencial del cliente')
+      if (planGate) return text({ ok: false, planRequired: true, error: planGate })
+
+      const design = await getCardDesign(venueId)
+      return text({
+        ok: true,
+        design,
+        // Se dice explicitamente: un operador que pregunta por su tarjeta quiere
+        // saber si esta saliendo con la marca de Avoqado o con la suya.
+        usandoLogoPropio: Boolean(design.logoUrl),
+        usandoIconoPropio: Boolean(design.iconUrl),
+      })
+    },
+  )
+
+  server.tool(
+    'configure_wallet_card',
+    "Change how a venue's customer wallet card LOOKS: its colours (given as #RRGGBB), the shape of the stamps (CIRCLE, STAR, HEART or SQUARE), and the URLs of its own logo and icon images. Only the fields you pass change; anything you omit keeps its current value. Because EVERY customer of that venue sees this card on their phone, by DEFAULT it only PREVIEWS (current → new per field); call again with confirm:true to apply. Requires loyalty:update.",
+    {
+      venueId: z.string().describe('Venue whose card to restyle (must be in your scope)'),
+      backgroundColor: z.string().optional().describe('Card background, #RRGGBB'),
+      textColor: z.string().optional().describe('Colour of the values, #RRGGBB'),
+      labelColor: z.string().optional().describe('Colour of the small labels, #RRGGBB'),
+      stripColor: z.string().optional().describe('Background of the stamp band, #RRGGBB'),
+      stampFilledColor: z.string().optional().describe('Colour of an earned stamp, #RRGGBB'),
+      stampEmptyColor: z.string().nullable().optional().describe('Outline of a missing stamp; null = derive it from the earned colour'),
+      stampShape: z.enum(['CIRCLE', 'STAR', 'HEART', 'SQUARE']).optional().describe('Shape of each stamp'),
+      logoUrl: z.string().nullable().optional().describe("https URL of the venue's own logo image; null removes it"),
+      iconUrl: z.string().nullable().optional().describe("https URL of the venue's own icon image; null removes it"),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview (current → new)'),
+    },
+    async ({ venueId, confirm, ...campos }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('loyalty:update', venueId)
+      const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'La credencial del cliente')
+      if (planGate) return text({ ok: false, planRequired: true, error: planGate })
+
+      const patch = Object.fromEntries(Object.entries(campos).filter(([, v]) => v !== undefined))
+      if (Object.keys(patch).length === 0) return text({ ok: false, error: 'No pasaste ningún campo para cambiar.' })
+
+      const actual = await getCardDesign(venueId)
+
+      const LBL: Record<string, string> = {
+        backgroundColor: 'Fondo de la tarjeta',
+        textColor: 'Color del texto',
+        labelColor: 'Color de las etiquetas',
+        stripColor: 'Fondo de la banda de sellos',
+        stampFilledColor: 'Sello ganado',
+        stampEmptyColor: 'Sello que falta',
+        stampShape: 'Forma del sello',
+        logoUrl: 'Logo del negocio',
+        iconUrl: 'Icono del negocio',
+      }
+
+      if (!confirm) {
+        // 🔴 Vista previa obligatoria: esto lo ve TODO cliente del negocio en su
+        // telefono, y un color equivocado no da ningun error — Apple lo ignora y
+        // pinta la tarjeta gris. Que un humano lea el cambio antes es la unica
+        // barrera contra una peticion vaga malinterpretada.
+        const changes = Object.entries(patch).map(([k, to]) => ({
+          label: LBL[k] ?? k,
+          from: (actual as unknown as Record<string, unknown>)[k] ?? null,
+          to,
+        }))
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          changes,
+          message: `Esto cambiará cómo ven su tarjeta TODOS los clientes de este negocio:\n${changes
+            .map(c => `• ${c.label}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`)
+            .join('\n')}\n\nConfirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      }
+
+      try {
+        // El servicio valida el formato de cada color: un valor invalido se rechaza
+        // aqui y nunca llega a la tarjeta de nadie.
+        const design = await saveCardDesign(venueId, patch as Parameters<typeof saveCardDesign>[1])
+        await auditMcpWrite(scope, {
+          action: 'WALLET_CARD_DESIGN_UPDATED',
+          entity: 'WalletCardDesign',
+          entityId: venueId,
+          venueId,
+          data: patch,
+        })
+        return text({ ok: true, design })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

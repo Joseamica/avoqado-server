@@ -22,6 +22,7 @@ import prisma from '@/utils/prismaClient'
 import { LoyaltyTransactionType } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
+import { grantStamp } from '../wallet/stampLedger.service'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -201,6 +202,34 @@ export async function earnPoints(
 
   if (!config.active) {
     return { pointsEarned: 0, newBalance: 0 }
+  }
+
+  // ── SELLOS (Plan B) ────────────────────────────────────────────────────────
+  //
+  // 🔴 Va AQUÍ, antes del chequeo de idempotencia de puntos y del `return` de
+  // `pointsEarned === 0` que está más abajo.
+  //
+  // Un negocio que usa SELLOS y no puntos tiene `pointsPerDollar` en 0, así que
+  // ese return lo sacaría de la función antes de sellar nada — y el defecto sería
+  // INVISIBLE: los puntos seguirían "funcionando" (dando cero) mientras su
+  // programa de sellos no arranca jamás.
+  //
+  // Aislado en su propio try/catch a propósito: un fallo al sellar NO puede
+  // impedir que se acumulen los puntos, igual que un fallo de lealtad no impide
+  // un cobro. Y `grantStamp` es no-op cuando el venue no tiene sellos habilitados
+  // (nacen en `false`), así que para los venues de hoy esto no cambia nada.
+  //
+  // Se le pasa la config que ya tenemos: esta función corre en CADA cobro de CADA
+  // negocio, y releerla serían miles de consultas diarias que no aportan nada.
+  try {
+    await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
+  } catch (stampError: any) {
+    logger.error('⚠️ Falló el sellado — los puntos siguen su curso', {
+      venueId,
+      customerId,
+      orderId,
+      error: stampError?.message,
+    })
   }
 
   // 🔒 IDEMPOTENCY CHECK: Prevent double-earning on payment retries

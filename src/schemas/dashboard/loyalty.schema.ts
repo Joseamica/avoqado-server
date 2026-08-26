@@ -106,3 +106,40 @@ export type CalculateDiscountInput = z.infer<typeof CalculateDiscountSchema>['bo
 export type RedeemPointsInput = z.infer<typeof RedeemPointsSchema>['body']
 export type AdjustPointsInput = z.infer<typeof AdjustPointsSchema>['body']
 export type LoyaltyTransactionsQuery = z.infer<typeof LoyaltyTransactionsQuerySchema>['query']
+
+/**
+ * Diseño de la credencial del cliente (Apple/Google Wallet).
+ *
+ * 🔴 Los colores se validan aquí Y en el servicio, y no es duplicación ociosa: por
+ * esta puerta entra el dashboard, pero el servicio también lo llaman el MCP y los
+ * scripts. Un color mal formado no revienta — Apple lo ignora y pinta la tarjeta
+ * gris, semanas después, en el iPhone de un cliente.
+ */
+const hexColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'El color debe venir como #RRGGBB, por ejemplo #7ADD2C')
+
+export const CardDesignUpdateSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('El identificador del negocio no es válido'),
+  }),
+  // 🔴 `.strict()`: un campo desconocido se rechaza en vez de ignorarse. Sin esto,
+  // un `venueId` en el cuerpo pasaría al upsert y reescribiría a qué negocio
+  // pertenece el diseño.
+  body: z
+    .object({
+      logoUrl: z.string().url('El logo debe ser una URL válida').nullable().optional(),
+      iconUrl: z.string().url('El icono debe ser una URL válida').nullable().optional(),
+      backgroundColor: hexColorSchema.optional(),
+      textColor: hexColorSchema.optional(),
+      labelColor: hexColorSchema.optional(),
+      stripColor: hexColorSchema.optional(),
+      stampFilledColor: hexColorSchema.optional(),
+      // Null es válido y significa "derívalo del color del sello lleno".
+      stampEmptyColor: hexColorSchema.nullable().optional(),
+      stampShape: z
+        .enum(['CIRCLE', 'STAR', 'HEART', 'SQUARE'], {
+          errorMap: () => ({ message: 'La forma del sello debe ser CIRCLE, STAR, HEART o SQUARE' }),
+        })
+        .optional(),
+    })
+    .strict('Hay un campo que no pertenece al diseño de la tarjeta'),
+})

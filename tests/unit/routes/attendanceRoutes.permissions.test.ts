@@ -5,10 +5,11 @@
  * REVISION al dueno de un negocio normal, que antes solo existia en el panel de
  * organizacion tras el acceso white-label.
  *
- * Se reusan `tpv-time-entries:read` / `:write` en vez de inventar un permiso nuevo,
- * porque ya distinguen exactamente a quien revisa (OWNER, ADMIN, MANAGER) de quien solo
- * checa (CASHIER, WAITER). Un permiso mal puesto aqui no truena: falla en silencio —
- * o el gerente ve un 403 sin explicacion, o un cajero puede aprobarse sus propias horas.
+ * Permiso PROPIO `attendance:read` / `:manage` (OWNER, ADMIN, MANAGER). La primera version
+ * reusaba `tpv-time-entries:*`, y `:write` lo tienen CASHIER y WAITER para checarse a si
+ * mismos: eso convertia a cualquier mesero en administrador de la asistencia de sus
+ * companeros (auditoria Codex 2026-08-26, P1). Un permiso de piso nunca gobierna
+ * administracion — si alguien vuelve a "simplificar" esto, estas pruebas lo cazan.
  */
 import router from '@/routes/dashboard.routes'
 
@@ -37,14 +38,21 @@ describe('rutas de asistencia — candados', () => {
     ['/venues/:venueId/time-entries'],
     ['/venues/:venueId/time-entries/active'],
     ['/venues/:venueId/time-entries/summary/:staffId'],
-  ])('leer %s exige tpv-time-entries:read', path => {
-    expect(find('get', path)?.permission).toBe('tpv-time-entries:read')
+    ['/venues/:venueId/attendance/report'],
+    ['/venues/:venueId/team/:staffVenueId/work-schedule'],
+  ])('leer %s exige attendance:read', path => {
+    expect(find('get', path)?.permission).toBe('attendance:read')
   })
 
-  it('aprobar una checada exige tpv-time-entries:write, no solo :read', () => {
-    // Con :read bastaria, un cajero — que tiene :write pero no :read — quedaria fuera y
-    // un VIEWER quedaria dentro. La escritura es la que decide si unas horas se pagan.
-    expect(find('post', '/venues/:venueId/time-entries/:timeEntryId/validate')?.permission).toBe('tpv-time-entries:write')
+  it.each([['put', '/venues/:venueId/team/:staffVenueId/work-schedule']])('%s %s exige attendance:manage', (method, path) => {
+    expect(find(method, path)?.permission).toBe('attendance:manage')
+  })
+
+  it('🔴 ninguna ruta de asistencia se conforma con un permiso de piso', () => {
+    // `tpv-time-entries:write` lo tienen CASHIER y WAITER para checarse. Si vuelve aquí,
+    // un mesero puede editar el cuadrante de sus companeros.
+    const floor = audited.filter(r => /time-entries|attendance|work-schedule/.test(r.path) && r.permission.startsWith('tpv-time-entries:'))
+    expect(floor).toEqual([])
   })
 
   it('el dashboard NO expone marcar entrada ni salida', () => {
@@ -71,6 +79,10 @@ describe('rutas del expediente del personal — candados', () => {
     expect(find('get', '/venues/:venueId/team/:staffId/documents')?.permission).toBe('staff-documents:read')
   })
 
+  it('abrir un documento (URL firmada) exige staff-documents:read', () => {
+    expect(find('get', '/venues/:venueId/staff-documents/:documentId/url')?.permission).toBe('staff-documents:read')
+  })
+
   it('subir un documento exige staff-documents:write', () => {
     expect(find('post', '/venues/:venueId/team/:staffId/documents')?.permission).toBe('staff-documents:write')
   })
@@ -83,5 +95,14 @@ describe('rutas del expediente del personal — candados', () => {
     const docRoutes = audited.filter(r => /documents/.test(r.path))
     expect(docRoutes.length).toBeGreaterThan(0)
     expect(docRoutes.every(r => r.permission.startsWith('staff-documents:'))).toBe(true)
+  })
+})
+
+describe('la pantalla genérica NO aprueba checadas', () => {
+  const audited = collectAuditedRoutes(router)
+  it('no existe ruta de validar en el dashboard genérico — eso es flujo de PlayTelecom', () => {
+    // Square no aprueba checadas (aprueba solicitudes de corrección del empleado). Validar
+    // cada checada es la operación de PT, que vive en storesAnalysis con gate white-label.
+    expect(audited.find(r => /time-entries\/:timeEntryId\/validate/.test(r.path))).toBeUndefined()
   })
 })

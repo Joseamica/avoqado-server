@@ -1034,13 +1034,13 @@ export async function removeTeamMember(venueId: string, teamMemberId: string): P
  */
 const HARD_DELETE_PROTECTED_ROLE_MESSAGE =
   'No se puede eliminar permanentemente a un propietario. Cambia primero su rol si necesitas darlo de baja.'
-const HARD_DELETE_LAST_ADMIN_MESSAGE =
-  'No se puede eliminar permanentemente al ultimo administrador del negocio.'
+const HARD_DELETE_LAST_ADMIN_MESSAGE = 'No se puede eliminar permanentemente al ultimo administrador del negocio.'
 
 export async function hardDeleteTeamMember(
   venueId: string,
   teamMemberId: string,
   confirmDeletion: boolean,
+  actorId?: string,
 ): Promise<{ deletedRecords: Record<string, number> }> {
   if (!confirmDeletion) {
     throw new BadRequestError('Deletion must be explicitly confirmed')
@@ -1184,7 +1184,19 @@ export async function hardDeleteTeamMember(
     teamMemberId,
     venueId,
     staffId,
+    actorId,
     deletedRecords,
+  })
+
+  // Rastro DURABLE, no sólo en el log: un borrado irreversible tiene que poder responderse
+  // con "quién y cuándo" meses después (auditoría Codex 2026-08-26, P2).
+  logAction({
+    staffId: actorId,
+    venueId,
+    action: 'TEAM_MEMBER_HARD_DELETED',
+    entity: 'StaffVenue',
+    entityId: teamMemberId,
+    data: { staffId, deletedRecords },
   })
 
   return { deletedRecords }

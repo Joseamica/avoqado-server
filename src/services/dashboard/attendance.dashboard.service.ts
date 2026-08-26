@@ -11,13 +11,14 @@
  * `staffId` / `timeEntryId` sueltos porque nacieron dentro de una sesión de terminal ya
  * atada a su venue; expuestas por HTTP, ese id llega del cliente y hay que comprobarlo.
  */
+import { DateTime } from 'luxon'
+
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { logAction } from './activity-log.service'
-import { getCurrentlyClockedInStaff, getStaffTimeSummary, getTimeEntries } from '../tpv/time-entry.tpv.service'
+import { getCurrentlyClockedInStaff, getTimeEntries } from '../tpv/time-entry.tpv.service'
+import { evaluateAttendance, type AttendanceStatus } from './attendanceEvaluator'
+import { resolveExpectedDay, type WeeklyWorkSchedule, type WorkScheduleException } from './workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
-
-export type TimeEntryValidationDecision = 'APPROVED' | 'REJECTED'
 
 export interface VenueTimeEntriesQuery {
   staffId?: string
@@ -30,7 +31,15 @@ export interface VenueTimeEntriesQuery {
 
 /** Checadas del negocio. `getTimeEntries` ya filtra por venueId, así que basta con pasarlo. */
 export async function getVenueTimeEntries(venueId: string, query: VenueTimeEntriesQuery = {}) {
-  return getTimeEntries({ venueId, ...query })
+  // El motor TPV hace `new Date(startDate)` — medianoche UTC, no del negocio. Se le pasan
+  // instantes ya resueltos en la zona del venue para que el día final entre completo.
+  const { from, to } = await venueDateRange(venueId, query.startDate, query.endDate)
+  return getTimeEntries({
+    venueId,
+    ...query,
+    startDate: from?.toISOString(),
+    endDate: to?.toISOString(),
+  })
 }
 
 /** Quién está dentro en este momento. Ya viene acotado al venue. */
@@ -54,54 +63,181 @@ export async function getVenueStaffTimeSummary(venueId: string, staffId: string,
     throw new NotFoundError('Ese empleado no pertenece a este negocio')
   }
 
-  return getStaffTimeSummary({ staffId, startDate, endDate })
+  // 🔴 NO se delega a `getStaffTimeSummary`: esa función filtra sólo por staffId y sumaba las
+  // horas de TODOS los negocios donde trabaja la persona (auditoría Codex 2026-08-26, P1).
+  // Aquí se acota a este venue y se interpreta el rango en SU zona horaria.
+  const { from, to } = await venueDateRange(venueId, startDate, endDate)
+  const entries = await prisma.timeEntry.findMany({
+    where: { staffId, venueId, clockInTime: { gte: from, lte: to } },
+    select: { totalHours: true, breakMinutes: true },
+  })
+
+  const totalHours = entries.reduce((sum, e) => sum + Number(e.totalHours ?? 0), 0)
+  const totalBreakMinutes = entries.reduce((sum, e) => sum + (e.breakMinutes ?? 0), 0)
+  return {
+    staffId,
+    venueId,
+    period: { startDate, endDate },
+    totalHours: Number(totalHours.toFixed(2)),
+    totalBreakMinutes,
+    totalShifts: entries.length,
+    averageHoursPerShift: entries.length ? Number((totalHours / entries.length).toFixed(2)) : 0,
+  }
 }
 
 /**
- * Aprobar o rechazar una checada.
- *
- * Equivale a `organizationDashboard.validateTimeEntry`, pero acotado por venue en vez de
- * por organización, y sin el depósito bancario: ese campo es del flujo de promotores de
- * PlayTelecom y no significa nada para un negocio normal.
+ * Convierte un rango 'YYYY-MM-DD' (fecha del NEGOCIO) en dos instantes UTC que cubren esos
+ * días completos EN LA ZONA DEL VENUE. `new Date('2026-08-20')` es medianoche UTC — en México,
+ * el 19 a las 18:00 — y dejaba fuera casi todo el día final (auditoría Codex, P1).
  */
-export async function validateVenueTimeEntry(
+async function venueDateRange(venueId: string, startDate?: string, endDate?: string) {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const tz = venue?.timezone || 'America/Mexico_City'
+  return {
+    from: startDate ? DateTime.fromISO(startDate, { zone: tz }).startOf('day').toJSDate() : undefined,
+    to: endDate ? DateTime.fromISO(endDate, { zone: tz }).endOf('day').toJSDate() : undefined,
+  }
+}
+
+/**
+ * Reporte de puntualidad: junta el cuadrante con lo que realmente pasó.
+ *
+ * 🔴 Todo se resuelve en la zona del NEGOCIO. El cuadrante dice "9:00" en hora local y las
+ * checadas se guardan en UTC; compararlas crudas hace que en México todo el mundo llegue
+ * seis horas tarde.
+ *
+ * A quien NO tiene cuadrante no se le juzga (`NO_SCHEDULE`), nunca se le marca falta: un
+ * negocio que aún no armó sus horarios no debe abrir la pantalla y ver a todo su personal
+ * en rojo.
+ */
+export interface AttendanceReportRow {
+  staffId: string
+  staffVenueId: string
+  name: string
+  date: string
+  expectedStart: string | null
+  expectedEnd: string | null
+  clockInTime: Date | null
+  clockOutTime: Date | null
+  status: AttendanceStatus
+  lateMinutes: number
+  earlyLeaveMinutes: number
+}
+
+export async function getAttendanceReport(
   venueId: string,
-  timeEntryId: string,
-  validatedById: string,
-  status: TimeEntryValidationDecision,
-  note?: string,
-) {
-  if (status !== 'APPROVED' && status !== 'REJECTED') {
-    throw new BadRequestError('La validación sólo puede ser APPROVED o REJECTED')
-  }
-
-  const timeEntry = await prisma.timeEntry.findFirst({
-    where: { id: timeEntryId, venueId },
-    select: { id: true, staffId: true },
+  startDate: string,
+  endDate: string,
+): Promise<{ rows: AttendanceReportRow[]; graceMinutes: number; timezone: string }> {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { timezone: true, settings: { select: { attendanceGraceMinutes: true } } },
   })
+  if (!venue) throw new NotFoundError('Negocio no encontrado')
 
-  if (!timeEntry) {
-    throw new NotFoundError('Checada no encontrada en este negocio')
-  }
+  const timezone = venue.timezone || 'America/Mexico_City'
+  const graceMinutes = venue.settings?.attendanceGraceMinutes ?? 10
 
-  const updated = await prisma.timeEntry.update({
-    where: { id: timeEntryId },
-    data: {
-      validationStatus: status,
-      validatedBy: validatedById,
-      validatedAt: new Date(),
-      validationNote: note || null,
+  const memberships = await prisma.staffVenue.findMany({
+    where: { venueId, active: true },
+    select: {
+      id: true,
+      staffId: true,
+      staff: { select: { firstName: true, lastName: true } },
+      workSchedule: { select: { weekly: true } },
+      workScheduleExceptions: {
+        where: { startDate: { lte: endDate }, endDate: { gte: startDate } },
+        select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true },
+      },
     },
   })
 
-  logAction({
-    staffId: validatedById,
-    venueId,
-    action: `TIME_ENTRY_${status}`,
-    entity: 'TimeEntry',
-    entityId: timeEntryId,
-    data: { note: note || null },
+  // Un solo barrido de checadas para todo el rango: pedirlas por persona y por día haría
+  // una consulta por celda de la tabla.
+  const entries = await prisma.timeEntry.findMany({
+    where: {
+      venueId,
+      clockInTime: {
+        gte: DateTime.fromISO(startDate, { zone: timezone }).startOf('day').toJSDate(),
+        lte: DateTime.fromISO(endDate, { zone: timezone }).endOf('day').toJSDate(),
+      },
+    },
+    select: { staffId: true, clockInTime: true, clockOutTime: true, validationStatus: true },
+    orderBy: { clockInTime: 'asc' },
   })
 
-  return updated
+  const byStaffAndDay = new Map<string, { clockInTime: Date; clockOutTime: Date | null }>()
+  for (const entry of entries) {
+    // Una checada RECHAZADA por el gerente no cuenta como presencia: si contara, rechazarla
+    // no serviría de nada (auditoría Codex, P2).
+    if (entry.validationStatus === 'REJECTED') continue
+    const day = DateTime.fromJSDate(entry.clockInTime).setZone(timezone).toISODate()
+    const key = `${entry.staffId}|${day}`
+    // La PRIMERA entrada del día manda: si alguien checó, salió a comer y volvió a checar,
+    // su hora de llegada es la primera, no la última.
+    if (!byStaffAndDay.has(key)) byStaffAndDay.set(key, { clockInTime: entry.clockInTime, clockOutTime: entry.clockOutTime })
+    else byStaffAndDay.get(key)!.clockOutTime = entry.clockOutTime ?? byStaffAndDay.get(key)!.clockOutTime
+  }
+
+  const start = DateTime.fromISO(startDate, { zone: timezone })
+  const end = DateTime.fromISO(endDate, { zone: timezone })
+  if (!start.isValid || !end.isValid) throw new BadRequestError('Fechas inválidas')
+  if (end < start) throw new BadRequestError('El rango termina antes de empezar')
+  // Tope: el reporte materializa personas × días en memoria. 92 días cubre un trimestre;
+  // sin tope, "0001-01-01..9999-12-31" tumba el proceso (auditoría Codex, P2).
+  if (end.diff(start, 'days').days > 92) throw new BadRequestError('El rango máximo es de 92 días')
+
+  // Hoy en la zona del negocio. Un día que aún no termina NO puede ser falta: la persona
+  // todavía puede llegar. Días futuros tampoco se juzgan.
+  const todayIso = DateTime.now().setZone(timezone).toISODate()!
+
+  const days: string[] = []
+  for (let d = start; d <= end; d = d.plus({ days: 1 })) {
+    days.push(d.toISODate()!)
+  }
+
+  const rows: AttendanceReportRow[] = []
+  for (const membership of memberships) {
+    const weekly = (membership.workSchedule?.weekly as unknown as WeeklyWorkSchedule) ?? null
+    const exceptions = membership.workScheduleExceptions as unknown as WorkScheduleException[]
+
+    for (const date of days) {
+      const expected = resolveExpectedDay(weekly, exceptions, date)
+      const actual = byStaffAndDay.get(`${membership.staffId}|${date}`)
+
+      // Sin checada en un día que no ha terminado (hoy o futuro): pendiente, no falta.
+      const dayStillOpen = date >= todayIso
+      const evaluation =
+        !actual && dayStillOpen && !expected.isDayOff && expected.start
+          ? { status: 'PENDING' as const, lateMinutes: 0, earlyLeaveMinutes: 0 }
+          : evaluateAttendance({
+              expectedStart: expected.start,
+              expectedEnd: expected.end,
+              timezone,
+              graceMinutes,
+              clockInTime: actual?.clockInTime ?? null,
+              clockOutTime: actual?.clockOutTime ?? null,
+              isDayOff: expected.isDayOff,
+            })
+
+      // Los días sin nada que contar no llegan a la pantalla: descanso sin novedad y gente
+      // sin cuadrante que tampoco marcó. Llenar la tabla de filas vacías la vuelve ilegible.
+      if ((evaluation.status === 'DAY_OFF' || evaluation.status === 'NO_SCHEDULE' || evaluation.status === 'PENDING') && !actual) continue
+
+      rows.push({
+        staffId: membership.staffId,
+        staffVenueId: membership.id,
+        name: `${membership.staff.firstName} ${membership.staff.lastName}`.trim(),
+        date,
+        expectedStart: expected.start,
+        expectedEnd: expected.end,
+        clockInTime: actual?.clockInTime ?? null,
+        clockOutTime: actual?.clockOutTime ?? null,
+        ...evaluation,
+      })
+    }
+  }
+
+  rows.sort((a, b) => (a.date === b.date ? a.name.localeCompare(b.name) : b.date.localeCompare(a.date)))
+  return { rows, graceMinutes, timezone }
 }

@@ -2,6 +2,7 @@ import type { StaffDocumentType } from '@prisma/client'
 
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { savePrivateFile, signPrivateFileUrl } from '../privateStorage.service'
 import { logAction } from './activity-log.service'
 
 /**
@@ -21,13 +22,20 @@ export interface StaffDocumentInput {
   type: StaffDocumentType
   /** Nombre libre. Obligatorio cuando `type` es OTHER, donde el tipo no dice nada. */
   label?: string | null
-  fileName: string
-  fileUrl: string
-  mimeType: string
-  sizeBytes: number
   expiresAt?: string | null
   notes?: string | null
 }
+
+/** El archivo llega por multer: el navegador NUNCA habla con Storage directamente. */
+export interface UploadedFile {
+  originalname: string
+  mimetype: string
+  size: number
+  buffer: Buffer
+}
+
+/** Minutos de vida de una URL firmada. Suficiente para abrir el PDF; inútil si se filtra. */
+export const SIGNED_URL_MINUTES = 10
 
 /** Comprueba que la persona trabaje en ESTE negocio antes de tocar su expediente. */
 async function requireStaffOfVenue(venueId: string, staffId: string): Promise<void> {
@@ -49,7 +57,6 @@ export async function listStaffDocuments(venueId: string, staffId: string) {
       type: true,
       label: true,
       fileName: true,
-      fileUrl: true,
       mimeType: true,
       sizeBytes: true,
       expiresAt: true,
@@ -60,7 +67,13 @@ export async function listStaffDocuments(venueId: string, staffId: string) {
   })
 }
 
-export async function addStaffDocument(venueId: string, staffId: string, input: StaffDocumentInput, uploadedById: string) {
+export async function addStaffDocument(
+  venueId: string,
+  staffId: string,
+  input: StaffDocumentInput,
+  file: UploadedFile,
+  uploadedById: string,
+) {
   await requireStaffOfVenue(venueId, staffId)
 
   // "Otro" sin nombre no le dice nada a quien abra la carpeta dentro de un año.
@@ -68,17 +81,29 @@ export async function addStaffDocument(venueId: string, staffId: string, input: 
     throw new BadRequestError('Ponle un nombre al documento para saber qué es.')
   }
 
+  // 🔴 El archivo va a la caja fuerte (`private/...`), no al Storage público donde viven
+  // los logos y las fotos de la PAX. Se guarda la RUTA; la URL se firma al leer.
+  const { path } = await savePrivateFile({
+    scope: `staff/${venueId}/${staffId}`,
+    fileName: file.originalname,
+    buffer: file.buffer,
+    contentType: file.mimetype,
+  })
+
   const document = await prisma.staffDocument.create({
     data: {
       staffId,
       venueId,
       type: input.type,
       label: input.label?.trim() || null,
-      fileName: input.fileName,
-      fileUrl: input.fileUrl,
-      mimeType: input.mimeType,
-      sizeBytes: input.sizeBytes,
-      expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
+      fileName: file.originalname,
+      storagePath: path,
+      mimeType: file.mimetype,
+      sizeBytes: file.size,
+      // 'YYYY-MM-DD' es una FECHA, no un instante: se ancla al mediodía UTC para que en
+      // cualquier zona de América siga siendo ese mismo día (auditoría Codex, P1: en México
+      // `new Date('2026-08-20')` se mostraba como 19 de agosto).
+      expiresAt: input.expiresAt ? new Date(`${input.expiresAt}T12:00:00.000Z`) : null,
       notes: input.notes?.trim() || null,
       uploadedById,
     },
@@ -122,4 +147,27 @@ export async function removeStaffDocument(venueId: string, documentId: string, a
   })
 
   return updated
+}
+
+/** URL de lectura que caduca. Se firma en cada petición; no se guarda nunca. */
+export async function getStaffDocumentUrl(venueId: string, documentId: string, actorId: string) {
+  const document = await prisma.staffDocument.findFirst({
+    where: { id: documentId, venueId, deletedAt: null },
+    select: { id: true, staffId: true, storagePath: true, fileName: true, mimeType: true },
+  })
+  if (!document) throw new NotFoundError('Documento no encontrado en este negocio')
+
+  const url = await signPrivateFileUrl(document.storagePath, SIGNED_URL_MINUTES)
+
+  // Abrir un documento sensible deja rastro: quién vio el expediente de quién.
+  logAction({
+    staffId: actorId,
+    venueId,
+    action: 'STAFF_DOCUMENT_VIEWED',
+    entity: 'StaffDocument',
+    entityId: documentId,
+    data: { staffId: document.staffId },
+  })
+
+  return { url, expiresInMinutes: SIGNED_URL_MINUTES, fileName: document.fileName, mimeType: document.mimeType }
 }

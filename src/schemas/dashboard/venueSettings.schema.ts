@@ -44,6 +44,8 @@ export const UpdateVenueSettingsSchema = z.object({
     autoCloseShifts: z.boolean().optional(),
     shiftDuration: z.number().int().min(1).max(24).optional(),
     enableShifts: z.boolean().optional(),
+    // Asistencia: minutos de gracia antes de contar un retardo (fase 2 del checador).
+    attendanceGraceMinutes: z.coerce.number().int().min(0).max(120).optional(),
     cashReconciliationEnabled: z.boolean().optional(),
     requirePinLogin: z.boolean().optional(),
     // Propiedad de mesa (PRO): solo el mesero dueño modifica/cierra sus mesas;

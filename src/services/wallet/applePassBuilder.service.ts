@@ -24,8 +24,23 @@ export interface PassContent {
   rewardLabel: string
 }
 
+/**
+ * Los tres colores que Apple entiende en un `storeCard`. Llegan como argumento y no
+ * se leen de la base a proposito: este archivo es logica PURA y probarlo no puede
+ * exigir una conexion. Los colores de los SELLOS no viven aqui — van dentro de la
+ * imagen de la banda, que dibuja el firmador.
+ */
+export interface PassColors {
+  /** Hex #RRGGBB. Si viene mal formado se cae al token del tema. */
+  background: string
+  text: string
+  label: string
+}
+
 export interface BuildStoreCardArgs {
   brand: PassBrand
+  /** Omitido = los tokens del tema oscuro de avoqado-android. */
+  colors?: PassColors
   content: PassContent
   serialNumber: string
   authToken: string
@@ -34,9 +49,18 @@ export interface BuildStoreCardArgs {
   teamIdentifier: string
 }
 
-/** Verde de marca de Avoqado, para negocios que no configuraron el suyo. */
-const AVOQADO_VERDE = 'rgb(122,221,44)'
-const NEGRO = 'rgb(17,17,17)'
+/**
+ * 🔴 Tokens del tema REAL de `avoqado-android` (`designsystem/theme/Color.kt`), no
+ * una paleta inventada. Es un sistema estilo iOS: superficies neutras y el verde
+ * de marca como ÚNICO acento.
+ *
+ * El fondo va neutro y no con el color del negocio a propósito: un fondo saturado
+ * satura la tarjeta entera y pelea con el contenido. El negocio se ve reflejado en
+ * el ACENTO (los sellos), que es donde la mirada cae.
+ */
+const SURFACE_DARK = 'rgb(28,28,30)' // SurfaceDark
+const ON_SURFACE_DARK = 'rgb(255,255,255)' // OnSurfaceDark
+const ON_SURFACE_VARIANT_DARK = 'rgb(152,152,157)' // OnSurfaceVariantDark
 
 /**
  * Apple sólo entiende `rgb(r,g,b)`.
@@ -73,9 +97,16 @@ export function buildStoreCardPass(args: BuildStoreCardArgs): Record<string, unk
     organizationName: brand.name,
     description: `Tarjeta de ${brand.name}`,
 
-    backgroundColor: hexToRgbCss(brand.primaryColor, AVOQADO_VERDE),
-    foregroundColor: NEGRO,
-    labelColor: NEGRO,
+    // 🔴 El negocio elige sus colores; el token del tema es la RED DE SEGURIDAD.
+    // `hexToRgbCss` devuelve el fallback ante cualquier valor que Apple no entienda,
+    // asi que una fila con basura produce una tarjeta con la marca de Avoqado — fea
+    // para el negocio, pero legible. Sin fallback produciria una tarjeta GRIS, que
+    // es lo que Apple pinta cuando no entiende un color y no avisa de ello.
+    backgroundColor: hexToRgbCss(args.colors?.background ?? null, SURFACE_DARK),
+    foregroundColor: hexToRgbCss(args.colors?.text ?? null, ON_SURFACE_DARK),
+    // Las etiquetas en gris secundario: el valor es lo que se lee, la etiqueta
+    // sólo lo acompaña. Igualarlas hace que la tarjeta se vea plana y ruidosa.
+    labelColor: hexToRgbCss(args.colors?.label ?? null, ON_SURFACE_VARIANT_DARK),
 
     barcodes: [
       {

@@ -19,6 +19,13 @@
 
 import { Request, Response } from 'express'
 import * as loyaltyService from '@/services/dashboard/loyalty.dashboard.service'
+import * as cardDesignService from '@/services/wallet/cardDesign.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { readPngSize } from '@/services/wallet/remotePng'
+import { stampStripPng } from '@/services/wallet/stampStripPng'
+import { buildStoragePath, uploadFileToStorage } from '@/services/storage.service'
+import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import prisma from '@/utils/prismaClient'
 
 /**
  * Resolve the caller's StaffVenue.id from their Staff.id (authContext.userId) + venue.
@@ -165,4 +172,175 @@ export async function expireOldPoints(req: Request, res: Response) {
   const result = await loyaltyService.expireOldPoints(venueId)
 
   return res.status(200).json(result)
+}
+
+// ==========================================
+// DISEÑO DE LA CREDENCIAL (Apple/Google Wallet)
+// ==========================================
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/loyalty/card-design
+ *
+ * Siempre responde 200 con un diseño usable: un negocio que nunca configuró nada
+ * recibe los defaults del tema, no un 404. La pantalla de edición necesita valores
+ * con los que pintar la vista previa desde el primer momento.
+ */
+export async function getCardDesignHandler(req: Request, res: Response) {
+  const { venueId } = req.params
+  const design = await cardDesignService.getCardDesign(venueId)
+  return res.status(200).json(design)
+}
+
+/**
+ * PUT /api/v1/dashboard/venues/:venueId/loyalty/card-design
+ *
+ * Parcial a propósito: sólo escribe las claves que llegaron. Un PUT que exigiera el
+ * objeto completo borraría el logo cada vez que alguien cambia un color desde una
+ * pantalla que no cargó ese campo.
+ */
+export async function updateCardDesignHandler(req: Request, res: Response) {
+  const { venueId } = req.params
+  const { userId } = (req as any).authContext
+
+  const anterior = await cardDesignService.getCardDesign(venueId)
+  const design = await cardDesignService.saveCardDesign(venueId, req.body)
+
+  // 🔴 Se registra QUÉ cambió, no un volcado de los dos objetos completos. Quien
+  // abra la bitácora porque "la tarjeta amaneció de otro color" quiere leer
+  // `backgroundColor: #1C1C1E → #FF0000`, no dos bloques de doce campos idénticos
+  // entre los que tiene que encontrar la diferencia a ojo.
+  const cambios: Record<string, string> = {}
+  for (const campo of Object.keys(design) as (keyof typeof design)[]) {
+    const antes = anterior[campo] ?? null
+    const despues = design[campo] ?? null
+    if (antes !== despues) cambios[campo] = `${antes ?? '—'} → ${despues ?? '—'}`
+  }
+
+  // El diseño es lo que ve TODO cliente del negocio en su teléfono. Fire-and-forget
+  // y fuera de cualquier transacción: un fallo de auditoría no puede tumbar el
+  // guardado. Un cambio sin diferencias igual se registra — que alguien haya tocado
+  // la pantalla y guardado sin cambiar nada también es información.
+  void logAction({
+    action: 'WALLET_CARD_DESIGN_UPDATED',
+    entity: 'WalletCardDesign',
+    entityId: venueId,
+    staffId: userId,
+    venueId,
+    data: cambios,
+  })
+
+  return res.status(200).json(design)
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/loyalty/card-design/image
+ *
+ * Sube el logo o el icono de la credencial. Campo del formulario: `image`.
+ * Query o cuerpo: `kind` = "logo" | "icon".
+ *
+ * 🔴 Valida el archivo AQUÍ, no al emitir el pase. Apple sólo acepta PNG dentro de
+ * un pase y rechaza el resto EN SILENCIO: sin esta puerta, alguien sube un JPG
+ * renombrado, ve "listo" en su pantalla, y el defecto aparece semanas después
+ * cuando un cliente no puede abrir su tarjeta — sin nada que lo relacione con
+ * aquella subida.
+ */
+export async function uploadCardImageHandler(req: Request, res: Response) {
+  const { venueId } = req.params
+  const kind = String(req.query.kind ?? req.body?.kind ?? '').toLowerCase()
+  const file = (req as any).file as { buffer: Buffer; originalname: string } | undefined
+
+  if (!file) throw new BadRequestError('No llegó ningún archivo. Manda la imagen en el campo "image".')
+  if (kind !== 'logo' && kind !== 'icon') {
+    throw new BadRequestError('Falta indicar qué imagen es: "logo" o "icon".')
+  }
+
+  // 🔴 Por los BYTES, no por la extensión ni por el tipo que declaró el navegador:
+  // los dos se pueden renombrar, el encabezado del archivo no.
+  const size = readPngSize(file.buffer)
+  if (!size) {
+    throw new BadRequestError(
+      'El archivo no es un PNG. Apple sólo acepta PNG dentro de una tarjeta — si tienes un JPG, expórtalo como PNG y vuelve a intentar.',
+    )
+  }
+
+  // Mínimos por debajo de los cuales la imagen se ve borrosa en cualquier pantalla
+  // moderna. Se rechaza sólo lo inservible; lo demás se acepta y se comenta.
+  const avisos: string[] = []
+  if (kind === 'logo') {
+    if (size.width < 160)
+      throw new BadRequestError(`El logo es muy chico (${size.width}px de ancho). Necesita al menos 160px, idealmente 480×150.`)
+    const proporcion = size.width / size.height
+    if (proporcion < 1.5)
+      avisos.push('Tu logo es casi cuadrado. En la tarjeta se verá pequeño porque el espacio es alargado; uno horizontal luce mejor.')
+    if (size.width < 480)
+      avisos.push(`Para que se vea nítido en pantallas Retina conviene subirlo a 480×150. El tuyo mide ${size.width}×${size.height}.`)
+  } else {
+    if (size.width < 116 || size.height < 116) {
+      throw new BadRequestError(`El icono es muy chico (${size.width}×${size.height}). Necesita al menos 116×116, idealmente 512×512.`)
+    }
+    const desviacion = Math.abs(size.width - size.height) / Math.max(size.width, size.height)
+    if (desviacion > 0.1) avisos.push(`El icono debe ser cuadrado. El tuyo mide ${size.width}×${size.height} y se verá deformado.`)
+  }
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } })
+  if (!venue) throw new NotFoundError('Negocio no encontrado')
+
+  // Nombre estable por tipo: subir un logo nuevo REEMPLAZA al anterior en vez de
+  // dejar basura acumulándose en el almacenamiento con cada intento de diseño.
+  const path = buildStoragePath(`venues/${venue.slug}/wallet/${kind}.png`)
+  const url = await uploadFileToStorage(file.buffer, path, 'image/png')
+
+  const campo = kind === 'logo' ? 'logoUrl' : 'iconUrl'
+  const design = await cardDesignService.saveCardDesign(venueId, { [campo]: url })
+
+  void logAction({
+    action: 'WALLET_CARD_IMAGE_UPLOADED',
+    entity: 'WalletCardDesign',
+    entityId: venueId,
+    staffId: (req as any).authContext.userId,
+    venueId,
+    data: { kind, width: size.width, height: size.height },
+  })
+
+  return res.status(200).json({ url, design, avisos, dimensiones: size })
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/loyalty/card-design/strip.png
+ *
+ * La banda de sellos como imagen, con los colores que se le pasen por query.
+ *
+ * 🔴 Existe para que la vista previa del dashboard use EXACTAMENTE el mismo
+ * generador que produce el pase, en vez de reimplementar los iconos y el cálculo de
+ * contraste en el navegador. Dos implementaciones del mismo dibujo divergen — es
+ * cuestión de tiempo — y una vista previa que diverge es peor que no tenerla: el
+ * negocio guarda convencido de haber visto el resultado.
+ *
+ * Acepta los colores por query (no lee la fila) para poder pintar el borrador que el
+ * usuario está tocando, antes de guardarlo.
+ */
+export async function cardStripPreviewHandler(req: Request, res: Response) {
+  const { venueId } = req.params
+  const q = req.query as Record<string, string | undefined>
+
+  const guardado = await cardDesignService.getCardDesign(venueId)
+  const hexOrNull = (v: string | undefined) => (v && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null)
+
+  const png = stampStripPng({
+    // Tamaño @2x, el mismo que va dentro del pase.
+    width: 750,
+    height: 246,
+    earned: Math.max(0, Math.min(30, Number(q.earned) || 0)),
+    required: Math.max(1, Math.min(30, Number(q.required) || 10)),
+    bgHex: hexOrNull(q.strip) ?? guardado.stripColor,
+    filledHex: hexOrNull(q.filled) ?? guardado.stampFilledColor,
+    emptyHex: hexOrNull(q.empty) ?? guardado.stampEmptyColor,
+    shape: (q.shape as any) ?? guardado.stampShape,
+  })
+
+  // Sin caché: la vista previa cambia con cada ajuste y una respuesta guardada
+  // mostraría el color anterior, que es justo lo que confunde.
+  res.setHeader('Content-Type', 'image/png')
+  res.setHeader('Cache-Control', 'no-store')
+  res.send(png)
 }

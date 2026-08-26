@@ -265,6 +265,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PurchaseOrderInvoice: 'Inventory & Stock',
   PurchaseOrderInvoiceLine: 'Inventory & Stock',
   StaffDocument: 'Staff, Auth, Permissions & Time',
+  StaffWorkSchedule: 'Staff, Auth, Permissions & Time',
+  StaffWorkScheduleException: 'Staff, Auth, Permissions & Time',
 
   // 8. Serialized Inventory
   SerializedItem: 'Serialized Inventory',
@@ -415,6 +417,10 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   LoyaltyConfig: 'Discounts, Loyalty & Credit Packs',
   LoyaltyTransaction: 'Discounts, Loyalty & Credit Packs',
   WalletPass: 'Discounts, Loyalty & Credit Packs',
+  WalletCardDesign: 'Discounts, Loyalty & Credit Packs',
+  StampCard: 'Discounts, Loyalty & Credit Packs',
+  StampEvent: 'Discounts, Loyalty & Credit Packs',
+  StampReward: 'Discounts, Loyalty & Credit Packs',
   CreditPack: 'Discounts, Loyalty & Credit Packs',
   CreditPackItem: 'Discounts, Loyalty & Credit Packs',
   CreditPackPurchase: 'Discounts, Loyalty & Credit Packs',

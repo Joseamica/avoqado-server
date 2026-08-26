@@ -4,6 +4,8 @@ import { NotFoundError } from '../../errors/AppError'
 import { issueApplePass } from '../../services/wallet/walletPass.service'
 import { buildStoreCardPass } from '../../services/wallet/applePassBuilder.service'
 import { signPass } from '../../services/wallet/applePassSigner.service'
+import { getCardDesign } from '../../services/wallet/cardDesign.service'
+import { getStampCardStatus } from '../../services/wallet/stampLedger.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { env } from '../../config/env'
 
@@ -11,13 +13,6 @@ import { env } from '../../config/env'
 // CREDENCIAL DE CLIENTE — APPLE WALLET (público, sin sesión)
 // El iPhone descarga el .pkpass directamente; no hay token de usuario que exigir.
 // ==========================================
-
-// 🔴 FIJOS a propósito, Plan A. El motor de sellos es el Plan B: hoy nada suma
-// sellos al cobrar, así que estos números NO reflejan el saldo de nadie. Sirven
-// para que el pase se vea real en una demostración, no para operar.
-// Cuando llegue el Plan B, salen del libro de sellos del cliente.
-const STAMPS_EARNED = 3
-const STAMPS_REQUIRED = 10
 
 /**
  * GET /api/v1/public/venues/:venueSlug/wallet/apple/:customerId
@@ -45,7 +40,14 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
     })
     if (!customer) throw new NotFoundError('Cliente no encontrado')
 
-    const pass = await issueApplePass(venue.id, customer.id)
+    // Los tres en paralelo: ninguno depende del otro y la emisión es interactiva.
+    const [pass, design, stamps] = await Promise.all([
+      issueApplePass(venue.id, customer.id),
+      getCardDesign(venue.id),
+      // 🔴 El avance REAL del cliente, no un número de muestra. Es lo que hace que
+      // la tarjeta sirva: el cajero cobra, el sello sube, y el cliente lo ve.
+      getStampCardStatus(venue.id, customer.id),
+    ])
 
     const passJson = buildStoreCardPass({
       brand: {
@@ -54,9 +56,16 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
         primaryColor: venue.primaryColor,
         secondaryColor: venue.secondaryColor,
       },
-      // Plan A: el avance va fijo a propósito. El motor de sellos de verdad es el
-      // Plan B — enseñar esto como producto terminado sería vender humo.
-      content: { stampsEarned: STAMPS_EARNED, stampsRequired: STAMPS_REQUIRED, rewardLabel: 'Un café gratis' },
+      colors: {
+        background: design.backgroundColor,
+        text: design.textColor,
+        label: design.labelColor,
+      },
+      content: {
+        stampsEarned: stamps.stampsEarned,
+        stampsRequired: stamps.stampsRequired,
+        rewardLabel: stamps.rewardLabel,
+      },
       serialNumber: pass.serialNumber,
       authToken: pass.authToken,
       qrToken: pass.qrToken,
@@ -65,8 +74,9 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
     })
 
     const buffer = await signPass(passJson, {
-      brandColor: venue.primaryColor,
-      stamps: { earned: STAMPS_EARNED, required: STAMPS_REQUIRED },
+      brandColor: design.stampFilledColor,
+      stamps: { earned: stamps.stampsEarned, required: stamps.stampsRequired },
+      design,
     })
 
     // Auditoría: emitir una credencial es una mutación que identifica a un cliente.
@@ -78,7 +88,7 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
       entity: 'WalletPass',
       entityId: pass.id,
       venueId: venue.id,
-      data: { customerId: customer.id, platform: 'APPLE' },
+      data: { customerId: customer.id, platform: 'APPLE', stampsEarned: stamps.stampsEarned, stampsRequired: stamps.stampsRequired },
     })
 
     // 🔴 Este Content-Type es lo que hace que el iPhone abra Wallet. Con

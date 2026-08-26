@@ -14,6 +14,13 @@ import {
 } from '../../../../src/services/dashboard/loyalty.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
 import * as loyaltyMobileService from '../../../../src/services/mobile/loyalty.mobile.service'
+import * as stampLedger from '../../../../src/services/wallet/stampLedger.service'
+
+// El sellado se engancha DENTRO de earnPoints; aquí sólo se prueba que se llama
+// bien y, sobre todo, que no puede romper la acumulación de puntos.
+jest.mock('../../../../src/services/wallet/stampLedger.service', () => ({
+  grantStamp: jest.fn().mockResolvedValue({ granted: false, reason: 'STAMPS_DISABLED' }),
+}))
 
 // El canje seguro vive en el servicio del POS; aquí sólo se prueba que el del panel delega.
 jest.mock('../../../../src/services/mobile/loyalty.mobile.service', () => ({
@@ -785,5 +792,84 @@ describe('Loyalty Dashboard Service', () => {
         }),
       )
     })
+  })
+})
+
+/**
+ * 🔴 REGRESIÓN. `earnPoints` corre en CADA cobro de CADA negocio: es la función
+ * más caliente del sistema de lealtad. Enganchar los sellos aquí sólo es aceptable
+ * si no puede alterar en nada lo que ya hace.
+ */
+describe('earnPoints + sellos (Plan B)', () => {
+  const mockedGrantStamp = stampLedger.grantStamp as jest.Mock
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockedGrantStamp.mockResolvedValue({ granted: false, reason: 'STAMPS_DISABLED' })
+  })
+
+  it('🔴 un negocio SIN sellos se comporta EXACTAMENTE como antes', async () => {
+    const mockConfig = createMockLoyaltyConfig({ pointsPerDollar: new Decimal(1) })
+    const mockTransaction = createMockTransaction({ points: 50 })
+
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
+    prismaMock.$transaction.mockResolvedValue([mockTransaction, { loyaltyPoints: 550 }] as any)
+
+    const result = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+
+    // Los puntos siguen su curso, intactos.
+    expect(result.pointsEarned).toBe(50)
+    expect(result.newBalance).toBe(550)
+  })
+
+  it('🔴 un negocio con sellos y CERO puntos SÍ sella', async () => {
+    // Este es el test que justifica el diseño entero. `earnPoints` sale temprano
+    // cuando los puntos calculados son 0 — y un negocio que usa SELLOS y no puntos
+    // tiene pointsPerDollar en 0. Si el sellado fuera después de ese return, ese
+    // negocio nunca sellaría nada y el defecto sería invisible.
+    const mockConfig = createMockLoyaltyConfig({ pointsPerDollar: new Decimal(0), pointsPerVisit: 0 })
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
+    mockedGrantStamp.mockResolvedValue({ granted: true, stampsEarned: 3, stampsRequired: 7 })
+
+    const result = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+
+    expect(mockedGrantStamp).toHaveBeenCalledWith('venue-123', 'customer-123', 'order-123', expect.any(Object))
+    // Y aun así devuelve 0 puntos, que es lo correcto: ese negocio no da puntos.
+    expect(result.pointsEarned).toBe(0)
+  })
+
+  it('🔴 si el sellado TRUENA, los puntos se acumulan igual', async () => {
+    // Un fallo de lealtad no puede tumbar un cobro. Esta es la razón de que el
+    // sellado viva en su propio bloque de captura.
+    const mockConfig = createMockLoyaltyConfig({ pointsPerDollar: new Decimal(1) })
+    const mockTransaction = createMockTransaction({ points: 50 })
+
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
+    prismaMock.$transaction.mockResolvedValue([mockTransaction, { loyaltyPoints: 550 }] as any)
+    mockedGrantStamp.mockRejectedValue(new Error('la base se cayó'))
+
+    const result = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+
+    expect(result.pointsEarned).toBe(50)
+    expect(result.newBalance).toBe(550)
+  })
+
+  it('pasa el autor del sello, para que quede atribuible', async () => {
+    const mockConfig = createMockLoyaltyConfig({ pointsPerDollar: new Decimal(1) })
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
+    prismaMock.$transaction.mockResolvedValue([createMockTransaction(), { loyaltyPoints: 1 }] as any)
+
+    await earnPoints('venue-123', 'customer-123', 50, 'order-123', 'staffvenue-9')
+
+    expect(mockedGrantStamp).toHaveBeenCalledWith(
+      'venue-123',
+      'customer-123',
+      'order-123',
+      expect.objectContaining({ staffVenueId: 'staffvenue-9' }),
+    )
   })
 })

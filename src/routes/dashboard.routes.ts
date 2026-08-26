@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
+import { requireVenueRole } from '../middlewares/requireVenueRole.middleware'
 import { authorizeRole } from '../middlewares/authorizeRole.middleware'
 import { chatbotRateLimitMiddleware } from '../middlewares/chatbot-rate-limit.middleware'
 import { tokenBudgetMiddleware } from '../middlewares/token-budget.middleware'
@@ -109,9 +110,11 @@ import {
 } from '../schemas/dashboard/assistant.schema'
 import {
   StaffTimeSummarySchema,
-  ValidateTimeEntrySchema,
   VenueIdOnlySchema,
   VenueTimeEntriesQuerySchema,
+  AttendanceReportSchema,
+  WorkScheduleParamsSchema,
+  ReplaceWorkScheduleSchema,
 } from '../schemas/dashboard/attendance.schema'
 import { AddStaffDocumentSchema, StaffDocumentIdParamsSchema, StaffDocumentsParamsSchema } from '../schemas/dashboard/staffDocument.schema'
 import {
@@ -210,6 +213,7 @@ import {
   LoyaltyTransactionsQuerySchema,
   LoyaltyParamsSchema,
   LoyaltyVenueParamsSchema,
+  CardDesignUpdateSchema,
 } from '../schemas/dashboard/loyalty.schema'
 import {
   getDiscountsQuerySchema,
@@ -375,6 +379,20 @@ const documentUpload = multer({
     } else {
       cb(new Error('Only PDF, JPG, JPEG, and PNG files are allowed'))
     }
+  },
+})
+
+// Imágenes de la credencial del cliente — memoria, 3MB, SÓLO PNG.
+// 🔴 Sólo PNG y no "png o jpg": Apple rechaza cualquier otra cosa dentro de un pase,
+// y lo hace en silencio. Aceptar un JPG aquí sería aceptar un archivo que garantiza
+// que la tarjeta no abra. El tipo declarado igual se vuelve a verificar por bytes en
+// el controlador, porque el navegador lo puede decir mal.
+const walletImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 3 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'image/png') cb(null, true)
+    else cb(new Error('La imagen de la tarjeta debe ser un PNG.'))
   },
 })
 
@@ -7598,7 +7616,10 @@ router.put(
 router.delete(
   '/venues/:venueId/team/:teamMemberId/hard-delete',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN]),
+  // 🔴 NO `authorizeRole`: ése mira el rol del JWT y dejaba a un OWNER de otro venue borrar
+  // aquí con sólo cambiar la URL (auditoría Codex 2026-08-26, P1). Este resuelve el rol
+  // contra StaffVenue del venue de la ruta.
+  requireVenueRole([StaffRole.OWNER]),
   validateRequest(TeamMemberParamsSchema),
   teamController.hardDeleteTeamMember,
 )
@@ -7622,12 +7643,35 @@ router.get(
   staffDocumentController.listDocuments,
 )
 
+// El archivo entra por AQUÍ (multer, en memoria) y el servidor lo guarda en el prefijo
+// privado. El navegador nunca toca Storage: así el INE no cae en el árbol público donde
+// viven los logos y las fotos de la PAX (auditoría Codex 26-ago, P1 — opción B del founder).
+const staffDocumentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(file.mimetype)) cb(null, true)
+    else cb(new Error('Sólo PDF o imagen (JPG, PNG, WebP)'))
+  },
+})
+
 router.post(
   '/venues/:venueId/team/:staffId/documents',
   authenticateTokenMiddleware,
   checkPermission('staff-documents:write'),
+  // preserveContext: multer reanuda la petición fuera del contexto del logger y cada línea
+  // de abajo perdería el venue. Hay un guardrail que falla si se omite.
+  preserveContext(staffDocumentUpload.single('file')),
   validateRequest(AddStaffDocumentSchema),
   staffDocumentController.addDocument,
+)
+
+router.get(
+  '/venues/:venueId/staff-documents/:documentId/url',
+  authenticateTokenMiddleware,
+  checkPermission('staff-documents:read'),
+  validateRequest(StaffDocumentIdParamsSchema),
+  staffDocumentController.getDocumentUrl,
 )
 
 router.delete(
@@ -7646,9 +7690,10 @@ router.delete(
 // rutas NO permiten marcar entrada ni salida — eso solo pasa en el aparato del negocio,
 // donde la foto y el GPS significan algo. Aqui solo se lee y se aprueba.
 //
-// Permiso: se reusa `tpv-time-entries:read` / `:write`, que ya existen y ya distinguen
-// a quien revisa (OWNER, ADMIN, MANAGER) de quien solo checa (CASHIER, WAITER). El
-// prefijo dice "tpv" por donde nacio, no por donde se puede usar.
+// Permiso PROPIO `attendance:read` / `:manage` (OWNER, ADMIN, MANAGER). Antes reusaba
+// `tpv-time-entries:*`, y `:write` lo tienen CASHIER y WAITER para checarse a sí mismos:
+// eso convertía a cualquier mesero en administrador de la asistencia de sus compañeros
+// (auditoría Codex 2026-08-26, P1). Un permiso de piso nunca gobierna administración.
 
 /**
  * @openapi
@@ -7664,7 +7709,7 @@ router.delete(
 router.get(
   '/venues/:venueId/time-entries',
   authenticateTokenMiddleware,
-  checkPermission('tpv-time-entries:read'),
+  checkPermission('attendance:read'),
   validateRequest(VenueTimeEntriesQuerySchema),
   attendanceController.getTimeEntries,
 )
@@ -7682,7 +7727,7 @@ router.get(
 router.get(
   '/venues/:venueId/time-entries/active',
   authenticateTokenMiddleware,
-  checkPermission('tpv-time-entries:read'),
+  checkPermission('attendance:read'),
   validateRequest(VenueIdOnlySchema),
   attendanceController.getActiveStaff,
 )
@@ -7701,28 +7746,43 @@ router.get(
 router.get(
   '/venues/:venueId/time-entries/summary/:staffId',
   authenticateTokenMiddleware,
-  checkPermission('tpv-time-entries:read'),
+  checkPermission('attendance:read'),
   validateRequest(StaffTimeSummarySchema),
   attendanceController.getStaffTimeSummary,
 )
 
-/**
- * @openapi
- * /api/v1/dashboard/venues/{venueId}/time-entries/{timeEntryId}/validate:
- *   post:
- *     tags: [Attendance]
- *     summary: Aprobar o rechazar una checada
- *     security: [{ bearerAuth: [] }]
- *     responses:
- *       200: { description: Checada validada }
- *       404: { description: La checada no es de este negocio }
- */
-router.post(
-  '/venues/:venueId/time-entries/:timeEntryId/validate',
+// ── Fase 2: el cuadrante y el reporte de puntualidad ──────────────────────────
+//
+// El cuadrante dice a qué hora DEBÍA entrar cada quien; sin él, el checador sólo puede
+// mostrar horas sueltas. Los aparatos NO se enteran de nada: siguen mandando la checada
+// cruda y el juicio se hace aquí, contra la zona horaria del negocio.
+//
+// NO hay ruta de "validar/aprobar" en el dashboard genérico (se quitó el 26-ago): Square no
+// aprueba checadas, aprueba solicitudes de corrección del empleado. Validar cada checada es
+// la operación de PlayTelecom, que vive en storesAnalysis con gate white-label.
+
+router.get(
+  '/venues/:venueId/attendance/report',
   authenticateTokenMiddleware,
-  checkPermission('tpv-time-entries:write'),
-  validateRequest(ValidateTimeEntrySchema),
-  attendanceController.validateTimeEntry,
+  checkPermission('attendance:read'),
+  validateRequest(AttendanceReportSchema),
+  attendanceController.getReport,
+)
+
+router.get(
+  '/venues/:venueId/team/:staffVenueId/work-schedule',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:read'),
+  validateRequest(WorkScheduleParamsSchema),
+  attendanceController.getWorkSchedule,
+)
+
+router.put(
+  '/venues/:venueId/team/:staffVenueId/work-schedule',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(ReplaceWorkScheduleSchema),
+  attendanceController.replaceWorkSchedule,
 )
 
 // ==========================================
@@ -9815,6 +9875,126 @@ router.use('/venues/:venueId/customers/:customerId/loyalty', authenticateTokenMi
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/card-design:
+ *   get:
+ *     tags: [Loyalty Program]
+ *     summary: Diseño de la credencial del cliente (Apple/Google Wallet)
+ *     description: >
+ *       Siempre responde 200. Un negocio que nunca lo configuró recibe los colores
+ *       por defecto del tema, no un 404 — la pantalla necesita valores con los que
+ *       pintar la vista previa desde el primer momento.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: El diseño vigente }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/card-design/image:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Sube el logo o el icono de la credencial
+ *     description: >
+ *       Campo `image` (PNG, máx 3MB) y `kind` = logo | icon. Valida el archivo por
+ *       sus bytes y sus dimensiones antes de guardarlo, y devuelve avisos cuando la
+ *       imagen sirve pero no es la ideal.
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: URL de la imagen, el diseño actualizado y los avisos }
+ *       400: { description: No es PNG, o es demasiado chica }
+ */
+router.post(
+  '/venues/:venueId/loyalty/card-design/image',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:update'),
+  // 🔴 `preserveContext`: multer reanuda el request desde el stream del cuerpo, que
+  // es anterior al contexto de ejecución — sin envolverlo, todo lo que se registre
+  // debajo pierde de qué negocio era. Hay una prueba que falla si falta.
+  preserveContext(walletImageUpload.single('image')),
+  loyaltyController.uploadCardImageHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/card-design/strip.png:
+ *   get:
+ *     tags: [Loyalty Program]
+ *     summary: La banda de sellos como imagen, para la vista previa
+ *     description: >
+ *       Usa el MISMO generador que produce el pase, así que lo que se ve aquí es lo
+ *       que el cliente va a recibir. Los colores llegan por query para poder pintar
+ *       el borrador antes de guardarlo.
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: PNG de 750×246 }
+ */
+router.get(
+  '/venues/:venueId/loyalty/card-design/strip.png',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  loyaltyController.cardStripPreviewHandler,
+)
+
+router.get(
+  '/venues/:venueId/loyalty/card-design',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  validateRequest(LoyaltyVenueParamsSchema),
+  loyaltyController.getCardDesignHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/card-design:
+ *   put:
+ *     tags: [Loyalty Program]
+ *     summary: Actualiza el diseño de la credencial
+ *     description: >
+ *       Parcial: sólo escribe las claves que llegaron. Mandar el objeto completo no
+ *       es obligatorio, y un campo ausente NO borra lo que ya estaba guardado.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               logoUrl: { type: string, nullable: true }
+ *               iconUrl: { type: string, nullable: true }
+ *               backgroundColor: { type: string, example: '#1C1C1E' }
+ *               textColor: { type: string, example: '#FFFFFF' }
+ *               labelColor: { type: string, example: '#98989D' }
+ *               stripColor: { type: string, example: '#2C2C2E' }
+ *               stampFilledColor: { type: string, example: '#7ADD2C' }
+ *               stampEmptyColor: { type: string, nullable: true }
+ *               stampShape: { type: string, enum: [CIRCLE, STAR, HEART, SQUARE] }
+ *     responses:
+ *       200: { description: El diseño actualizado }
+ *       400: { description: Un color mal formado o un campo que no pertenece }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.put(
+  '/venues/:venueId/loyalty/card-design',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:update'),
+  validateRequest(CardDesignUpdateSchema),
+  loyaltyController.updateCardDesignHandler,
+)
+
 router.get(
   '/venues/:venueId/loyalty/config',
   authenticateTokenMiddleware,
