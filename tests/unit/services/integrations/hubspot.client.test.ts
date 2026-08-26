@@ -81,6 +81,37 @@ describe('hubspot.client', () => {
     })
   })
 
+  it('manda la calificación del paso 2 con los nombres internos reales del portal', async () => {
+    await sendLeadToHubspot({
+      ...LEAD,
+      businessType: 'Estética, salón o barbería',
+      branches: '2 a 5',
+      revenue: '$50,000 a $150,000',
+      modules: 'citas, inventario',
+    })
+
+    const [, body] = mockPost.mock.calls[0]
+    const porNombre = Object.fromEntries(body.fields.map((f: { name: string; value: string }) => [f.name, f.value]))
+    expect(porNombre.giro_del_negocio).toBe('Estética, salón o barbería')
+    expect(porNombre.sucursales).toBe('2 a 5')
+    expect(porNombre.ventas_al_mes).toBe('$50,000 a $150,000')
+    expect(porNombre.modulos_de_interes).toBe('citas, inventario')
+  })
+
+  it('omite la calificación cuando el visitante se saltó el paso 2', async () => {
+    // 🔴 Es lo que evita perder el lead entero: la Forms API rechaza el envío
+    // completo si llega un campo vacío que no aplica.
+    await sendLeadToHubspot(LEAD)
+
+    const [, body] = mockPost.mock.calls[0]
+    const nombres = body.fields.map((f: { name: string }) => f.name)
+    expect(nombres).not.toContain('giro_del_negocio')
+    expect(nombres).not.toContain('sucursales')
+    expect(nombres).not.toContain('ventas_al_mes')
+    expect(nombres).not.toContain('modulos_de_interes')
+    expect(nombres).toHaveLength(5)
+  })
+
   it('omite context por completo si no hay nada que mandar (HubSpot rechaza un hutk vacío)', async () => {
     await sendLeadToHubspot(LEAD)
 
