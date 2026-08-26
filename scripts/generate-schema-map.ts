@@ -411,6 +411,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CouponRedemption: 'Discounts, Loyalty & Credit Packs',
   LoyaltyConfig: 'Discounts, Loyalty & Credit Packs',
   LoyaltyTransaction: 'Discounts, Loyalty & Credit Packs',
+  WalletPass: 'Discounts, Loyalty & Credit Packs',
   CreditPack: 'Discounts, Loyalty & Credit Packs',
   CreditPackItem: 'Discounts, Loyalty & Credit Packs',
   CreditPackPurchase: 'Discounts, Loyalty & Credit Packs',

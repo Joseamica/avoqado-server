@@ -74,6 +74,82 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'staff_attendance',
+    'Attendance (time clock) of a venue you can access: who is clocked in RIGHT NOW, and the clock-in/clock-out records for a date range with hours worked, break minutes and whether a manager already approved or rejected each one. Answers "\u00bfqui\u00e9n est\u00e1 trabajando ahora?", "\u00bfa qu\u00e9 hora lleg\u00f3 Ana?", "\u00bfqu\u00e9 checadas faltan por aprobar?". Staff clock in on the venue terminal or app \u2014 this tool only READS. Pass venueId; omit dates for today.',
+    {
+      venueId: z.string().describe('Venue whose attendance to read (must be in your scope)'),
+      onlyActive: z.boolean().optional().describe('Only who is clocked in right now (ignores the date range)'),
+      startDate: z.string().optional().describe('Range start, YYYY-MM-DD (defaults to today)'),
+      endDate: z.string().optional().describe('Range end, YYYY-MM-DD (defaults to today)'),
+      pendingOnly: z.boolean().optional().describe('Only finished shifts still awaiting a manager decision'),
+      limit: z.number().int().positive().max(200).optional().describe('Max records to return (default 100)'),
+    },
+    async ({ venueId, onlyActive, startDate, endDate, pendingOnly, limit }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // Same gate as the dashboard route: the roles that review attendance, not the ones that clock in.
+      guard.requirePermission('tpv-time-entries:read', venueId)
+
+      if (onlyActive) {
+        const active = await prisma.timeEntry.findMany({
+          where: { ...where, status: { in: ['CLOCKED_IN', 'ON_BREAK'] } },
+          select: { id: true, clockInTime: true, status: true, staff: { select: { firstName: true, lastName: true } } },
+          orderBy: { clockInTime: 'asc' },
+        })
+        return text({
+          venueId,
+          count: active.length,
+          onShift: active.map(e => ({
+            timeEntryId: e.id,
+            name: `${e.staff.firstName} ${e.staff.lastName}`.trim(),
+            since: e.clockInTime,
+            onBreak: e.status === 'ON_BREAK',
+          })),
+        })
+      }
+
+      const from = startDate ? new Date(`${startDate}T00:00:00.000Z`) : undefined
+      const to = endDate ? new Date(`${endDate}T23:59:59.999Z`) : undefined
+
+      const rows = await prisma.timeEntry.findMany({
+        where: {
+          ...where,
+          ...(from || to ? { clockInTime: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {}),
+          ...(pendingOnly ? { validationStatus: 'PENDING', clockOutTime: { not: null } } : {}),
+        },
+        select: {
+          id: true,
+          clockInTime: true,
+          clockOutTime: true,
+          totalHours: true,
+          breakMinutes: true,
+          status: true,
+          validationStatus: true,
+          autoClockOut: true,
+          staff: { select: { firstName: true, lastName: true } },
+        },
+        orderBy: { clockInTime: 'desc' },
+        take: limit ?? 100,
+      })
+
+      return text({
+        venueId,
+        count: rows.length,
+        entries: rows.map(r => ({
+          timeEntryId: r.id,
+          name: `${r.staff.firstName} ${r.staff.lastName}`.trim(),
+          clockIn: r.clockInTime,
+          clockOut: r.clockOutTime,
+          hours: r.totalHours == null ? null : Number(r.totalHours),
+          breakMinutes: r.breakMinutes ?? 0,
+          stillIn: r.clockOutTime === null,
+          autoClosedBySystem: r.autoClockOut,
+          review: r.validationStatus,
+        })),
+      })
+    },
+  )
+
+  server.tool(
     'staff_detail',
     'Detail of ONE team member of a venue you can access, found by name: their account status and the role they hold at EACH of your venues where they work. The drill-down after list_staff — answers "¿qué rol tiene Juan? ¿en qué locales trabaja? ¿está activo?". Does NOT expose contact details (email/phone). If the name matches several people it returns them so you can be specific. Pass venueId + name.',
     {

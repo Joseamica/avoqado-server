@@ -1,0 +1,59 @@
+import { PKPass } from 'passkit-generator'
+import { env } from '../../config/env'
+import { BadRequestError } from '../../errors/AppError'
+
+/**
+ * El ÚNICO punto del sistema que toca el certificado de Apple.
+ *
+ * 🔴 Separado del constructor a propósito. El contenido del pase —donde de verdad
+ * se cometen los errores caros— se prueba sin secretos en `applePassBuilder`; aquí
+ * sólo vive la criptografía. Mezclarlos significaría que nadie puede correr las
+ * pruebas del pase sin tener un certificado de Apple a la mano, ni en CI.
+ *
+ * Las cinco piezas y por qué son cinco:
+ *   APPLE_PASS_TYPE_ID          identifica el tipo de pase; debe coincidir EXACTO
+ *                               con el del certificado o el iPhone lo rechaza
+ *   APPLE_TEAM_ID               el equipo de desarrollador
+ *   APPLE_PASS_CERT_PEM_BASE64  el certificado, sin llave
+ *   APPLE_PASS_KEY_PEM_BASE64   la llave privada, sin certificado
+ *   APPLE_WWDR_PEM_BASE64       el intermedio de Apple (G4) que encadena la firma
+ *
+ * 🔴 Certificado y llave son archivos DISTINTOS. `passkit-generator` no come un
+ * `.p12`: hay que separarlo con openssl (ver el Plan A, Tarea 0). Pasar el mismo
+ * buffer como `signerCert` y `signerKey` —error fácil— falla con un mensaje de
+ * OpenSSL que no dice cuál de las dos estaba mal.
+ */
+
+export function walletSigningAvailable(): boolean {
+  return Boolean(
+    env.APPLE_PASS_CERT_PEM_BASE64 &&
+      env.APPLE_PASS_KEY_PEM_BASE64 &&
+      env.APPLE_WWDR_PEM_BASE64 &&
+      env.APPLE_PASS_TYPE_ID &&
+      env.APPLE_TEAM_ID,
+  )
+}
+
+export async function signPass(passJson: Record<string, unknown>): Promise<Buffer> {
+  if (!walletSigningAvailable()) {
+    // El mensaje nombra las variables a propósito: quien lea este error en
+    // producción necesita saber QUÉ poner, no que "algo falló al firmar".
+    throw new BadRequestError(
+      'El certificado de Apple no está configurado en este servidor. Faltan una o más de: ' +
+        'APPLE_PASS_CERT_PEM_BASE64, APPLE_PASS_KEY_PEM_BASE64, APPLE_WWDR_PEM_BASE64, ' +
+        'APPLE_PASS_TYPE_ID, APPLE_TEAM_ID.',
+    )
+  }
+
+  const pass = new PKPass(
+    { 'pass.json': Buffer.from(JSON.stringify(passJson)) },
+    {
+      wwdr: Buffer.from(env.APPLE_WWDR_PEM_BASE64 as string, 'base64'),
+      signerCert: Buffer.from(env.APPLE_PASS_CERT_PEM_BASE64 as string, 'base64'),
+      signerKey: Buffer.from(env.APPLE_PASS_KEY_PEM_BASE64 as string, 'base64'),
+      signerKeyPassphrase: env.APPLE_PASS_KEY_PASSWORD,
+    },
+  )
+
+  return pass.getAsBuffer()
+}

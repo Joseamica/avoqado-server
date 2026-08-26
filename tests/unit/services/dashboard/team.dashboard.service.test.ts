@@ -463,8 +463,10 @@ describe('hardDeleteTeamMember — future commitment safety', () => {
       staffVenue: 1,
     })
     expect(loggerInfoMock).toHaveBeenCalledTimes(1)
+    // El mensaje perdio el sufijo "(SUPERADMIN)" cuando el borrado se abrio al OWNER:
+    // decia quien PODIA ejecutarlo, y ya no era cierto.
     expect(loggerInfoMock).toHaveBeenCalledWith(
-      'Team member hard deleted (SUPERADMIN)',
+      'Team member hard deleted',
       expect.objectContaining({ staffId: 'staff-attempt-2', deletedRecords: result.deletedRecords }),
     )
     expect(prismaMock.staff.delete).not.toHaveBeenCalled()
