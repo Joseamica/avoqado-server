@@ -54,3 +54,34 @@ describe('rutas de asistencia — candados', () => {
     expect(clockRoutes).toEqual([])
   })
 })
+
+/**
+ * Candados del expediente del personal.
+ *
+ * 🔴 Aquí viven identificación, CURP, número de seguro social y contratos. El permiso es
+ * PROPIO a propósito: `teams:read` lo tiene MANAGER, y un gerente no debe poder abrir la
+ * identificación de sus compañeros. Si alguien "simplifica" esto a `teams:read`, estas
+ * pruebas lo cazan.
+ */
+describe('rutas del expediente del personal — candados', () => {
+  const audited = collectAuditedRoutes(router)
+  const find = (method: string, path: string) => audited.find(r => r.method === method && r.path === path)
+
+  it('leer el expediente exige staff-documents:read, NUNCA teams:read', () => {
+    expect(find('get', '/venues/:venueId/team/:staffId/documents')?.permission).toBe('staff-documents:read')
+  })
+
+  it('subir un documento exige staff-documents:write', () => {
+    expect(find('post', '/venues/:venueId/team/:staffId/documents')?.permission).toBe('staff-documents:write')
+  })
+
+  it('dar de baja un documento exige staff-documents:write', () => {
+    expect(find('delete', '/venues/:venueId/staff-documents/:documentId')?.permission).toBe('staff-documents:write')
+  })
+
+  it('ninguna ruta del expediente se conforma con un permiso de equipo', () => {
+    const docRoutes = audited.filter(r => /documents/.test(r.path))
+    expect(docRoutes.length).toBeGreaterThan(0)
+    expect(docRoutes.every(r => r.permission.startsWith('staff-documents:'))).toBe(true)
+  })
+})

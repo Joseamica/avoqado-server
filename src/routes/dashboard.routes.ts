@@ -32,6 +32,7 @@ import { StaffRole } from '../security'
 // Importa el SCHEMA de Zod, no el tipo DTO, para el middleware de validación
 import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
 import * as attendanceController from '../controllers/dashboard/attendance.dashboard.controller'
+import * as staffDocumentController from '../controllers/dashboard/staffDocument.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
 import * as availableBalanceController from '../controllers/dashboard/availableBalance.dashboard.controller'
 import * as settlementIncidentController from '../controllers/dashboard/settlementIncident.dashboard.controller'
@@ -112,6 +113,7 @@ import {
   VenueIdOnlySchema,
   VenueTimeEntriesQuerySchema,
 } from '../schemas/dashboard/attendance.schema'
+import { AddStaffDocumentSchema, StaffDocumentIdParamsSchema, StaffDocumentsParamsSchema } from '../schemas/dashboard/staffDocument.schema'
 import {
   dateRangeQuerySchema,
   timelineQuerySchema,
@@ -7599,6 +7601,41 @@ router.delete(
   authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN]),
   validateRequest(TeamMemberParamsSchema),
   teamController.hardDeleteTeamMember,
+)
+
+// ==========================================
+// STAFF DOCUMENTS (EXPEDIENTE) ROUTES
+// ==========================================
+//
+// 🔴 DATOS PERSONALES SENSIBLES: identificación, CURP, número de seguro social, contratos.
+// Puerta PROPIA (`staff-documents:*`), no `teams:read` — ese lo tiene MANAGER, y un gerente
+// no debe poder abrir la identificación de sus compañeros. Por defecto sólo OWNER y ADMIN.
+//
+// Dar de baja un documento NO borra la fila: en México hay obligación de conservar ciertos
+// documentos laborales después de que la persona se va.
+
+router.get(
+  '/venues/:venueId/team/:staffId/documents',
+  authenticateTokenMiddleware,
+  checkPermission('staff-documents:read'),
+  validateRequest(StaffDocumentsParamsSchema),
+  staffDocumentController.listDocuments,
+)
+
+router.post(
+  '/venues/:venueId/team/:staffId/documents',
+  authenticateTokenMiddleware,
+  checkPermission('staff-documents:write'),
+  validateRequest(AddStaffDocumentSchema),
+  staffDocumentController.addDocument,
+)
+
+router.delete(
+  '/venues/:venueId/staff-documents/:documentId',
+  authenticateTokenMiddleware,
+  checkPermission('staff-documents:write'),
+  validateRequest(StaffDocumentIdParamsSchema),
+  staffDocumentController.removeDocument,
 )
 
 // ==========================================

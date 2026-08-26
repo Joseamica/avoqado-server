@@ -12,6 +12,13 @@ import { env } from '../../config/env'
 // El iPhone descarga el .pkpass directamente; no hay token de usuario que exigir.
 // ==========================================
 
+// 🔴 FIJOS a propósito, Plan A. El motor de sellos es el Plan B: hoy nada suma
+// sellos al cobrar, así que estos números NO reflejan el saldo de nadie. Sirven
+// para que el pase se vea real en una demostración, no para operar.
+// Cuando llegue el Plan B, salen del libro de sellos del cliente.
+const STAMPS_EARNED = 3
+const STAMPS_REQUIRED = 10
+
 /**
  * GET /api/v1/public/venues/:venueSlug/wallet/apple/:customerId
  *
@@ -49,7 +56,7 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
       },
       // Plan A: el avance va fijo a propósito. El motor de sellos de verdad es el
       // Plan B — enseñar esto como producto terminado sería vender humo.
-      content: { stampsEarned: 0, stampsRequired: 10, rewardLabel: 'Al juntar 10 sellos' },
+      content: { stampsEarned: STAMPS_EARNED, stampsRequired: STAMPS_REQUIRED, rewardLabel: 'Un café gratis' },
       serialNumber: pass.serialNumber,
       authToken: pass.authToken,
       qrToken: pass.qrToken,
@@ -57,7 +64,10 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
       teamIdentifier: env.APPLE_TEAM_ID as string,
     })
 
-    const buffer = await signPass(passJson, venue.primaryColor)
+    const buffer = await signPass(passJson, {
+      brandColor: venue.primaryColor,
+      stamps: { earned: STAMPS_EARNED, required: STAMPS_REQUIRED },
+    })
 
     // Auditoría: emitir una credencial es una mutación que identifica a un cliente.
     // Fire-and-forget y FUERA de cualquier transacción — un fallo de auditoría no

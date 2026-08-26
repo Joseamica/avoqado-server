@@ -90,22 +90,41 @@ export function buildStoreCardPass(args: BuildStoreCardArgs): Record<string, unk
       },
     ],
 
+    // 🔴 SIN primaryFields a propósito. En un storeCard con banda, los campos
+    // primarios se dibujan ENCIMA de ella — y taparían justo los sellos, que son
+    // lo único que el cliente mira. El conteo se va al encabezado, que vive
+    // arriba a la derecha, fuera de la banda.
     storeCard: {
-      primaryFields: [
+      headerFields: [
         {
           key: 'stamps',
-          label: 'Sellos',
-          value: `${content.stampsEarned} de ${content.stampsRequired}`,
+          label: 'SELLOS',
+          value: `${content.stampsEarned}/${content.stampsRequired}`,
         },
       ],
       secondaryFields: [
         {
           key: 'reward',
-          // 🔴 "Premio", no "Tu premio": con el placeholder por defecto la etiqueta
-          // y el valor salian IDENTICOS en la tarjeta ("Tu premio / Tu premio"),
-          // que en un iPhone se lee como un error. Solo se ve renderizando.
-          label: 'Premio',
+          // 🔴 "PREMIO", no "Tu premio": con el placeholder por defecto la etiqueta
+          // y el valor salían IDÉNTICOS en la tarjeta ("Tu premio / Tu premio"),
+          // que en un iPhone se lee como un error. Sólo se ve renderizando.
+          label: 'PREMIO',
           value: content.rewardLabel,
+        },
+      ],
+      // El reverso: donde el cliente resuelve sus dudas sin preguntarle a nadie.
+      backFields: [
+        {
+          key: 'howto',
+          label: 'Cómo funciona',
+          value:
+            `Junta ${content.stampsRequired} sellos y obtén ${content.rewardLabel.toLowerCase()}. ` +
+            'Muestra el código de esta tarjeta al pagar y el negocio te pone tu sello.',
+        },
+        {
+          key: 'privacy',
+          label: 'Tus datos',
+          value: 'Esta tarjeta la emite Avoqado para el negocio. Puedes eliminarla cuando quieras desde tu cartera.',
         },
       ],
     },

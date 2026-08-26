@@ -264,6 +264,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PurchaseOrderItem: 'Inventory & Stock',
   PurchaseOrderInvoice: 'Inventory & Stock',
   PurchaseOrderInvoiceLine: 'Inventory & Stock',
+  StaffDocument: 'Staff, Auth, Permissions & Time',
 
   // 8. Serialized Inventory
   SerializedItem: 'Serialized Inventory',

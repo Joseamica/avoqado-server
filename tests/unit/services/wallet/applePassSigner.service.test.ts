@@ -86,22 +86,67 @@ describe('signPass', () => {
   it('🔴 SIEMPRE incluye icon.png e icon@2x.png, o el iPhone no abre Wallet', async () => {
     setEnv(COMPLETO)
 
-    await signPass({ formatVersion: 1 }, '#7ADD2C')
+    await signPass({ formatVersion: 1 }, { brandColor: '#7ADD2C' })
 
     // Este es el test que faltaba y costó una prueba en un iPhone real (25-ago).
     // Sin icon.png el pase se firma bien, la cadena de certificados valida, y el
     // telefono lo degrada a una vista previa de archivo generica SIN decir por que.
-    expect(Object.keys(archivosDelPase).sort()).toEqual(['icon.png', 'icon@2x.png', 'pass.json'])
+    expect(Object.keys(archivosDelPase).sort()).toEqual([
+      'icon.png',
+      'icon@2x.png',
+      'logo.png',
+      'logo@2x.png',
+      'pass.json',
+    ])
     expect(archivosDelPase['icon.png'].subarray(0, 8)).toEqual(
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     )
+  })
+
+  it('🔴 con sellos, incluye la banda en sus dos tamaños', async () => {
+    setEnv(COMPLETO)
+
+    await signPass({ formatVersion: 1 }, { brandColor: '#7ADD2C', stamps: { earned: 3, required: 10 } })
+
+    // La banda es lo que hace que la tarjeta se reconozca como cartilla de sellos.
+    // Sin @2x se ve pixeleada en cualquier iPhone de los últimos diez años.
+    expect(Object.keys(archivosDelPase).sort()).toEqual([
+      'icon.png',
+      'icon@2x.png',
+      'logo.png',
+      'logo@2x.png',
+      'pass.json',
+      'strip.png',
+      'strip@2x.png',
+    ])
+  })
+
+  it('sin sellos, el pase sale sin banda en vez de con una vacía', async () => {
+    setEnv(COMPLETO)
+
+    await signPass({ formatVersion: 1 }, { brandColor: '#7ADD2C' })
+
+    expect(Object.keys(archivosDelPase)).not.toContain('strip.png')
+  })
+
+  it('🔴 el logo va BLANQUEADO: el original desaparece sobre el fondo verde', async () => {
+    setEnv(COMPLETO)
+
+    await signPass({ formatVersion: 1 }, { brandColor: '#7ADD2C' })
+
+    // El isotipo original es verde y el fondo de la tarjeta tambien: sobre la
+    // tarjeta desaparecia entero y solo sobrevivia el punto naranja. Se ve
+    // mirando la tarjeta, no leyendo el codigo.
+    const logo = archivosDelPase['logo.png']
+    expect(logo.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    expect(logo.length).toBeGreaterThan(1000)
   })
 
   it('un negocio sin color igual recibe iconos válidos', async () => {
     setEnv(COMPLETO)
 
     // Caso real: "Restaurante El Atole" tiene primaryColor = "".
-    await signPass({ formatVersion: 1 }, '')
+    await signPass({ formatVersion: 1 }, { brandColor: '' })
 
     expect(archivosDelPase['icon.png']).toBeInstanceOf(Buffer)
     expect(archivosDelPase['icon.png'].length).toBeGreaterThan(50)

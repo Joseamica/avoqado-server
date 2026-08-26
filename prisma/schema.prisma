@@ -424,6 +424,7 @@ model Venue {
   suppliers                   Supplier[]
   purchaseOrders              PurchaseOrder[]
   purchaseOrderInvoices       PurchaseOrderInvoice[]
+  staffDocuments              StaffDocument[]
   pricingPolicies             PricingPolicy[]
   rawMaterialMovements        RawMaterialMovement[]
   lowStockAlerts              LowStockAlert[]
@@ -947,6 +948,11 @@ model Staff {
 
   /// Facturas de proveedor que esta persona subió a una orden de compra.
   purchaseInvoicesUploaded PurchaseOrderInvoice[]
+
+  /// Su propio expediente.
+  documents         StaffDocument[] @relation("StaffDocumentOwner")
+  /// Documentos que ESTA persona subió al expediente de alguien más.
+  documentsUploaded StaffDocument[] @relation("StaffDocumentUploader")
 
   areaTicketsIssued             AreaTicket[]                   @relation("AreaTicketIssuedByStaff")
   areaTicketCheckoutSessions    AreaTicketCheckoutSession[]    @relation("AreaTicketCheckoutStaff")
@@ -3100,6 +3106,68 @@ model Shift {
 // ==========================================
 // NOTE: TIME TRACKING
 // ==========================================
+
+/// Tipo de documento del expediente. Los nombres son de RRHH, no de Avoqado: es lo que el
+/// dueño busca cuando abre la carpeta de alguien.
+enum StaffDocumentType {
+  /// Identificación oficial (INE, pasaporte).
+  ID
+  CURP
+  /// Número de Seguridad Social (IMSS).
+  SOCIAL_SECURITY
+  RFC
+  CONTRACT
+  /// Certificado, diploma o licencia — suelen vencer.
+  CERTIFICATION
+  MEDICAL
+  OTHER
+}
+
+/// Un documento del expediente de una persona.
+///
+/// 🔴 Contiene DATOS PERSONALES SENSIBLES. Vive detrás de su propio permiso
+/// (`staff-documents:read` / `:write`), que por defecto sólo tienen OWNER y ADMIN. Reusar
+/// `teams:read` lo habría abierto a MANAGER, y un gerente no debe poder abrir la
+/// identificación de sus compañeros.
+///
+/// El borrado es SUAVE. Un expediente laboral no se tira: en México hay obligación de
+/// conservar ciertos documentos después de que la persona se va, y un borrado duro deja al
+/// negocio sin con qué responder. `deletedAt` lo saca de la vista, no de la historia.
+model StaffDocument {
+  id      String @id @default(cuid())
+  staffId String
+  staff   Staff  @relation("StaffDocumentOwner", fields: [staffId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  type StaffDocumentType
+  /// Nombre libre. Obligatorio en la práctica cuando `type` es OTHER, donde el tipo no dice nada.
+  label String?
+
+  fileName  String
+  fileUrl   String
+  mimeType  String
+  sizeBytes Int
+
+  /// Para lo que caduca (certificados, licencias, permisos de trabajo). Null = no vence.
+  expiresAt DateTime?
+
+  notes String?
+
+  uploadedById String?
+  uploadedBy   Staff?  @relation("StaffDocumentUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  deletedAt   DateTime?
+  deletedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([staffId, deletedAt])
+  @@index([venueId, deletedAt])
+  /// Los avisos de vencimiento barren por esta.
+  @@index([venueId, expiresAt])
+}
 
 model TimeEntry {
   id      String @id @default(cuid())

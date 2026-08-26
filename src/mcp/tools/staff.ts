@@ -74,8 +74,8 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
-    'staff_attendance',
-    'Attendance (time clock) of a venue you can access: who is clocked in RIGHT NOW, and the clock-in/clock-out records for a date range with hours worked, break minutes and whether a manager already approved or rejected each one. Answers "\u00bfqui\u00e9n est\u00e1 trabajando ahora?", "\u00bfa qu\u00e9 hora lleg\u00f3 Ana?", "\u00bfqu\u00e9 checadas faltan por aprobar?". Staff clock in on the venue terminal or app \u2014 this tool only READS. Pass venueId; omit dates for today.',
+    'venue_attendance',
+    'Attendance (time clock) of ONE venue you can access: who is clocked in RIGHT NOW, and the clock-in/clock-out records for a date range with hours worked, break minutes and whether a manager already approved or rejected each one. Answers "\u00bfqui\u00e9n est\u00e1 trabajando ahora?", "\u00bfa qu\u00e9 hora lleg\u00f3 Ana?", "\u00bfqu\u00e9 checadas faltan por aprobar?". Staff clock in on the venue terminal or app \u2014 this tool only READS. Pass venueId; omit dates for today. For an ORGANIZATION-wide roll-up with late/absent status, white-label operators have staff_attendance instead.',
     {
       venueId: z.string().describe('Venue whose attendance to read (must be in your scope)'),
       onlyActive: z.boolean().optional().describe('Only who is clocked in right now (ignores the date range)'),
@@ -144,6 +144,57 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
           stillIn: r.clockOutTime === null,
           autoClosedBySystem: r.autoClockOut,
           review: r.validationStatus,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'staff_documents',
+    'Documents on file for ONE team member of a venue you can access: type (ID, CURP, social security, contract, certification…), file name, who uploaded it, when, and its expiry date if it has one. 🔴 This is an EXPENSE of TRUST: the underlying files are personal data, so this tool returns only the METADATA — never the file contents or a download link. Answers "\u00bfya tenemos el contrato de Ana?", "\u00bfa qui\u00e9n le vence un certificado?". Requires the dedicated staff-documents:read permission (OWNER/ADMIN), NOT teams:read. Pass venueId + staffId.',
+    {
+      venueId: z.string().describe('Venue the person works at (must be in your scope)'),
+      staffId: z.string().describe('Staff id, from list_staff'),
+      expiringOnly: z.boolean().optional().describe('Only documents with an expiry date already set'),
+    },
+    async ({ venueId, staffId, expiringOnly }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // Puerta propia: `teams:read` la tiene MANAGER, y un gerente no debe leer el
+      // expediente de sus compañeros ni siquiera a través de un agente.
+      guard.requirePermission('staff-documents:read', venueId)
+
+      const docs = await prisma.staffDocument.findMany({
+        where: {
+          ...where,
+          staffId,
+          deletedAt: null,
+          ...(expiringOnly ? { expiresAt: { not: null } } : {}),
+        },
+        select: {
+          id: true,
+          type: true,
+          label: true,
+          fileName: true,
+          expiresAt: true,
+          createdAt: true,
+          uploadedBy: { select: { firstName: true, lastName: true } },
+        },
+        orderBy: [{ type: 'asc' }, { createdAt: 'desc' }],
+      })
+
+      return text({
+        venueId,
+        staffId,
+        count: docs.length,
+        // Deliberadamente SIN fileUrl: el agente sabe QUE existe, no puede abrirlo.
+        documents: docs.map(d => ({
+          documentId: d.id,
+          type: d.type,
+          label: d.label,
+          fileName: d.fileName,
+          expiresAt: d.expiresAt,
+          uploadedAt: d.createdAt,
+          uploadedBy: d.uploadedBy ? `${d.uploadedBy.firstName} ${d.uploadedBy.lastName}`.trim() : null,
         })),
       })
     },

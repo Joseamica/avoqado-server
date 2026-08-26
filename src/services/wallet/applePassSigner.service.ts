@@ -1,5 +1,7 @@
 import { PKPass } from 'passkit-generator'
 import { solidPng } from './solidPng'
+import { stampStripPng } from './stampStripPng'
+import { avoqadoLogoPng, avoqadoLogo2xPng } from './avoqadoLogo'
 import { env } from '../../config/env'
 import { BadRequestError } from '../../errors/AppError'
 
@@ -46,7 +48,14 @@ export function walletSigningAvailable(): boolean {
  * El icono se genera con el color del negocio, no con uno de Avoqado, para que la
  * marca blanca llegue hasta la notificación de la pantalla de bloqueo.
  */
-export async function signPass(passJson: Record<string, unknown>, brandColor?: string | null): Promise<Buffer> {
+export interface SignPassOptions {
+  brandColor?: string | null
+  /** Sellos ganados y requeridos. Si se omite, el pase va sin banda. */
+  stamps?: { earned: number; required: number }
+}
+
+export async function signPass(passJson: Record<string, unknown>, options: SignPassOptions = {}): Promise<Buffer> {
+  const { brandColor, stamps } = options
   if (!walletSigningAvailable()) {
     // El mensaje nombra las variables a propósito: quien lea este error en
     // producción necesita saber QUÉ poner, no que "algo falló al firmar".
@@ -64,6 +73,20 @@ export async function signPass(passJson: Record<string, unknown>, brandColor?: s
       // `icon@2x.png` es el que usan las pantallas Retina, o sea todas.
       'icon.png': solidPng(29, 29, brandColor),
       'icon@2x.png': solidPng(58, 58, brandColor),
+      // La banda con los sellos dibujados. Es lo que convierte un rectángulo de
+      // color con texto en algo que se reconoce como cartilla de un vistazo.
+      // Tamaños que Apple espera para storeCard: 375×123 y su @2x.
+      // El logo de arriba a la izquierda. Hoy siempre el de Avoqado: `Venue.logo`
+      // guarda JPG y Apple sólo acepta PNG en los pases, así que usar el del
+      // negocio exige convertirlo en runtime. Pendiente documentado.
+      'logo.png': avoqadoLogoPng(),
+      'logo@2x.png': avoqadoLogo2xPng(),
+      ...(stamps
+        ? {
+            'strip.png': stampStripPng({ width: 375, height: 123, ...stamps, bgHex: brandColor }),
+            'strip@2x.png': stampStripPng({ width: 750, height: 246, ...stamps, bgHex: brandColor }),
+          }
+        : {}),
     },
     {
       wwdr: Buffer.from(env.APPLE_WWDR_PEM_BASE64 as string, 'base64'),

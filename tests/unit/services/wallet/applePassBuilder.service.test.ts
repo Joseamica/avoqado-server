@@ -51,11 +51,30 @@ describe('buildStoreCardPass', () => {
 
   it('muestra el avance en lenguaje de persona, no de programador', () => {
     const pass = buildStoreCardPass(base) as any
-    expect(pass.storeCard.primaryFields[0].value).toBe('3 de 10')
+    expect(pass.storeCard.headerFields[0].value).toBe('3/10')
     expect(pass.storeCard.secondaryFields[0].value).toBe('Un café gratis')
-    // La etiqueta NO puede repetir el valor: con el placeholder por defecto salia
+    // La etiqueta NO puede repetir el valor: con el placeholder por defecto salía
     // "Tu premio / Tu premio" en la tarjeta real, y se lee como un error.
-    expect(pass.storeCard.secondaryFields[0].label).toBe('Premio')
+    expect(pass.storeCard.secondaryFields[0].label).toBe('PREMIO')
+  })
+
+  it('🔴 NO usa primaryFields: taparían la banda de sellos', () => {
+    const pass = buildStoreCardPass(base) as any
+    // En un storeCard con banda, los campos primarios se dibujan ENCIMA de ella.
+    // Poner ahí el conteo taparía justo los círculos, que son lo único que el
+    // cliente mira. El conteo va al encabezado, arriba a la derecha.
+    expect(pass.storeCard.primaryFields).toBeUndefined()
+    expect(pass.storeCard.headerFields).toHaveLength(1)
+  })
+
+  it('el reverso explica cómo funciona, sin que el cliente pregunte', () => {
+    const pass = buildStoreCardPass(base) as any
+    const reverso = JSON.stringify(pass.storeCard.backFields)
+    expect(reverso).toContain('10 sellos')
+    expect(reverso).toContain('un café gratis')
+    // Y dice quién emite la tarjeta y cómo deshacerse de ella: es marca blanca,
+    // pero el cliente tiene derecho a saber de dónde salió.
+    expect(reverso).toContain('Avoqado')
   })
 
   it('convierte el color de marca a rgb, que es lo único que Apple entiende', () => {
