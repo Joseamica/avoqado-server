@@ -122,12 +122,15 @@ export async function clockOut(req: Request, res: Response, next: NextFunction) 
 export async function startBreak(req: Request, res: Response, next: NextFunction) {
   try {
     const { timeEntryId } = req.params
+    // El venue sale del TOKEN: ni el body ni la URL deciden a qué negocio pertenece la checada (Codex P1-1).
+    const { venueId } = (req as any).authContext
     const { staffId } = req.body
 
     logger.info(`Start break request: timeEntryId=${timeEntryId}, staffId=${staffId}`)
 
     const timeEntry = await timeEntryService.startBreak({
       timeEntryId,
+      venueId,
       staffId,
     })
 
@@ -146,12 +149,15 @@ export async function startBreak(req: Request, res: Response, next: NextFunction
 export async function endBreak(req: Request, res: Response, next: NextFunction) {
   try {
     const { timeEntryId } = req.params
+    // El venue sale del TOKEN: ni el body ni la URL deciden a qué negocio pertenece la checada (Codex P1-1).
+    const { venueId } = (req as any).authContext
     const { staffId } = req.body
 
     logger.info(`End break request: timeEntryId=${timeEntryId}, staffId=${staffId}`)
 
     const timeEntry = await timeEntryService.endBreak({
       timeEntryId,
+      venueId,
       staffId,
     })
 
@@ -213,10 +219,13 @@ export async function getStaffTimeSummary(req: Request, res: Response, next: Nex
       })
     }
 
+    // Acotado al venue del token: el resumen es de ESTE negocio, no de todos los de la persona (Codex P1-2).
+    const { venueId } = (req as any).authContext
     logger.info(`Get staff time summary: staffId=${staffId}`)
 
     const summary = await timeEntryService.getStaffTimeSummary({
       staffId,
+      venueId,
       startDate: startDate as string,
       endDate: endDate as string,
     })

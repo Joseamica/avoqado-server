@@ -3525,14 +3525,27 @@ router.post('/venues/:venueId/time-entries/clock-in', authenticateTokenMiddlewar
 router.post('/venues/:venueId/time-entries/clock-out', authenticateTokenMiddleware, validateVenueAccess, timeEntryController.clockOut)
 
 /**
- * Start break
+ * Start / end break.
+ *
+ * Sin `:venueId` en la ruta (contrato de la TPV, que sólo manda el id). El aislamiento va
+ * en el controlador: la checada se busca acotada al venue DEL TOKEN — antes se buscaba por
+ * `id + staffId` y la TPV no manda staffId, así que cualquier token pausaba checadas de
+ * otro venue (auditoría Codex fase 2, P1-1).
  */
 router.post('/time-entries/:timeEntryId/break/start', authenticateTokenMiddleware, timeEntryController.startBreak)
+router.post('/time-entries/:timeEntryId/break/end', authenticateTokenMiddleware, timeEntryController.endBreak)
 
 /**
- * End break
+ * Ver checadas PROPIAS nunca pide permiso (el reloj de pared tiene que funcionar para un
+ * mesero); ver las de OTRA persona es administrar asistencia y exige
+ * `tpv-time-entries:read`. Mismo patrón que los middlewares por sub-acción de
+ * `.claude/rules/permissions-policy.md`. (Auditoría Codex fase 2, P1-2.)
  */
-router.post('/time-entries/:timeEntryId/break/end', authenticateTokenMiddleware, timeEntryController.endBreak)
+const selfOrTimeEntriesRead = (req: Request, res: Response, next: NextFunction) => {
+  const authContext = (req as any).authContext
+  if (authContext?.userId && req.params.staffId === authContext.userId) return next()
+  return checkPermission('tpv-time-entries:read')(req, res, next)
+}
 
 /**
  * Get time entries for a venue (manager view — all staff).
@@ -3560,14 +3573,15 @@ router.get(
 router.get(
   '/venues/:venueId/staff/:staffId/time-entries',
   authenticateTokenMiddleware,
-  // No permission check - staff can always see their OWN entries
+  validateVenueAccess, // el venue de la URL tiene que ser el del token (P1-2)
+  selfOrTimeEntriesRead, // las propias sin permiso; las ajenas con tpv-time-entries:read
   timeEntryController.getMyTimeEntries,
 )
 
 /**
- * Get staff time summary
+ * Get staff time summary. Sin `:venueId` en la ruta: el controlador acota al venue del token.
  */
-router.get('/staff/:staffId/time-summary', authenticateTokenMiddleware, timeEntryController.getStaffTimeSummary)
+router.get('/staff/:staffId/time-summary', authenticateTokenMiddleware, selfOrTimeEntriesRead, timeEntryController.getStaffTimeSummary)
 
 /**
  * Get currently clocked in staff.

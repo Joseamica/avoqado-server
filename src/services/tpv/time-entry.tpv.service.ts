@@ -29,7 +29,13 @@ interface ClockOutParams {
 
 interface BreakParams {
   timeEntryId: string
-  staffId: string
+  /**
+   * Venue DEL TOKEN, nunca del body ni de la URL. La checada se busca acotada a él:
+   * sin esto, un token de A podía pausar/reanudar checadas de B (auditoría Codex P1-1).
+   */
+  venueId: string
+  /** La TPV real no lo manda (sólo el id en la ruta); si viene, se respeta además del venue. */
+  staffId?: string
 }
 
 interface TimeEntriesQueryParams {
@@ -44,6 +50,8 @@ interface TimeEntriesQueryParams {
 
 interface TimeSummaryParams {
   staffId: string
+  /** Venue del token: el resumen es de ESTE negocio, no de todos los de la persona (P1-2). */
+  venueId: string
   startDate: string // ISO date string
   endDate: string // ISO date string
 }
@@ -310,13 +318,15 @@ export async function clockOut(params: ClockOutParams) {
  * Start a break
  */
 export async function startBreak(params: BreakParams) {
-  const { timeEntryId, staffId } = params
+  const { timeEntryId, staffId, venueId } = params
 
-  // Find time entry and verify ownership
+  // Acotada al venue del token. `staffId` sólo si el cliente lo mandó: con `undefined`
+  // Prisma lo ignora, y eso es lo que hacía que antes el filtro fuera un no-op.
   const timeEntry = await prisma.timeEntry.findFirst({
     where: {
       id: timeEntryId,
-      staffId,
+      venueId,
+      ...(staffId ? { staffId } : {}),
       status: TimeEntryStatus.CLOCKED_IN,
     },
     include: {
@@ -365,13 +375,15 @@ export async function startBreak(params: BreakParams) {
  * End a break
  */
 export async function endBreak(params: BreakParams) {
-  const { timeEntryId, staffId } = params
+  const { timeEntryId, staffId, venueId } = params
 
-  // Find time entry and verify ownership
+  // Acotada al venue del token. `staffId` sólo si el cliente lo mandó: con `undefined`
+  // Prisma lo ignora, y eso es lo que hacía que antes el filtro fuera un no-op.
   const timeEntry = await prisma.timeEntry.findFirst({
     where: {
       id: timeEntryId,
-      staffId,
+      venueId,
+      ...(staffId ? { staffId } : {}),
       status: TimeEntryStatus.ON_BREAK,
     },
     include: {
@@ -497,11 +509,12 @@ export async function getTimeEntries(params: TimeEntriesQueryParams) {
  * Get time summary for a staff member
  */
 export async function getStaffTimeSummary(params: TimeSummaryParams) {
-  const { staffId, startDate, endDate } = params
+  const { staffId, venueId, startDate, endDate } = params
 
   const timeEntries = await prisma.timeEntry.findMany({
     where: {
       staffId,
+      venueId,
       clockInTime: {
         gte: new Date(startDate),
         lte: new Date(endDate),

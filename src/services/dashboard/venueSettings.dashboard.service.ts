@@ -180,6 +180,11 @@ export async function updateVenueSettings(
     // rama: sin esta línea el switch se vería encendido en el dashboard y la
     // fila nacería en false — el POS nunca ofrecería el PIN.
     ...(typeof updates.managerPinOverrideEnabled === 'boolean' && { managerPinOverrideEnabled: updates.managerPinOverrideEnabled }),
+    // Interruptor de asistencia. 53 de 68 venues locales NO tienen fila: sin estas dos
+    // líneas el primer "apagar" de un negocio caía en esta rama, Postgres ponía true/10 y
+    // el dashboard enseñaba el valor pedido, no el guardado (auditoría Codex fase 2, P2-1).
+    ...(typeof updates.attendanceEnabled === 'boolean' && { attendanceEnabled: updates.attendanceEnabled }),
+    ...(typeof updates.attendanceGraceMinutes === 'number' && { attendanceGraceMinutes: updates.attendanceGraceMinutes }),
   }
 
   const hasCashReconciliationUpdate = Object.prototype.hasOwnProperty.call(updates, 'cashReconciliationEnabled')
@@ -227,6 +232,10 @@ export async function updateVenueSettings(
     })
   }
 
+  // Lo de antes, para que la bitácora diga "de X a Y" y no sólo "cambió". Un venue sin fila
+  // no tiene "antes": queda `undefined` y así se registra.
+  const previous = (await prisma.venueSettings.findUnique({ where: { venueId } })) as Record<string, unknown> | null
+
   // Upsert settings (create if not exists, update if exists)
   const settings = await prisma.venueSettings.upsert({
     where: { venueId },
@@ -234,16 +243,22 @@ export async function updateVenueSettings(
     update: updates,
   })
 
-  logger.info(`Updated VenueSettings for venue: ${venueId}`, {
-    updatedFields: Object.keys(updates),
-  })
+  const updatedFields = Object.keys(updates)
+  logger.info(`Updated VenueSettings for venue: ${venueId}`, { updatedFields })
 
+  // Con actor: apagar la asistencia de un negocio tiene que decir QUIÉN lo hizo (Codex P3-1).
   logAction({
+    staffId: actorStaffId,
     venueId,
     action: 'SETTINGS_UPDATED',
     entity: 'VenueSettings',
     entityId: venueId,
-    data: { updatedFields: Object.keys(updates) },
+    data: {
+      updatedFields,
+      changes: Object.fromEntries(
+        updatedFields.map(k => [k, { from: previous?.[k], to: (updates as Record<string, unknown>)[k] }]),
+      ) as unknown as Prisma.InputJsonValue,
+    },
   })
 
   return settings

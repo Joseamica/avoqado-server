@@ -228,6 +228,9 @@ export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
               status: true, // Single source of truth for venue state
               kycStatus: true, // Include KYC status for frontend
               organizationId: true, // For deriving orgId in token generation
+              // El login era PEOR que auth/status: omitía settings por completo, así que hasta
+              // el primer refresco el sidebar no sabía ni de turnos ni de asistencia (Codex, hallazgo 1).
+              settings: { select: { enableShifts: true, hiddenSidebarItems: true, attendanceEnabled: true, attendanceGraceMinutes: true } },
             },
           },
           permissionSet: true,
@@ -521,6 +524,7 @@ export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
         roleDisplayName,
         status: sv.venue.status, // Single source of truth for venue state
         kycStatus: sv.venue.kycStatus, // KYC compliance status
+        settings: sv.venue.settings ?? null,
         permissions, // Include permissions in response
         permissionSetId: sv.permissionSet?.id ?? null,
         permissionSetName: sv.permissionSet?.name ?? null,

@@ -613,7 +613,11 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
 
   // Time Entries
   'tpv-time-entries:read': ['tpv-time-entries:read', 'teams:read'],
-  'tpv-time-entries:write': ['tpv-time-entries:write', 'tpv-time-entries:read', 'teams:read'],
+  // Checarse (write) NO implica ver las checadas de los demás (read). `read` es MANAGER+ por
+  // diseño —así lo documenta la propia TPV— pero esta implicación se lo regalaba a meseros y
+  // cajeros, que con él listaban la asistencia de todo el venue (auditoría Codex fase 2, P1-2).
+  // Ver las PROPIAS checadas nunca pide permiso: la ruta de autoservicio lo resuelve por identidad.
+  'tpv-time-entries:write': ['tpv-time-entries:write', 'teams:read'],
 
   // Tables & Floor Management
   'tpv-tables:assign': ['tpv-tables:assign', 'tables:read', 'tables:update', 'orders:read'],

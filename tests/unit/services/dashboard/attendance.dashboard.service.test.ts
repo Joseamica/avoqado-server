@@ -14,14 +14,11 @@ import { prismaMock } from '@tests/__helpers__/setup'
 const mockLogAction = jest.fn()
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
 
-import { getVenueStaffTimeSummary, validateVenueTimeEntry } from '@/services/dashboard/attendance.dashboard.service'
+import { getVenueStaffTimeSummary } from '@/services/dashboard/attendance.dashboard.service'
 import { NotFoundError } from '@/errors/AppError'
 
 const VENUE_ID = 'venue-1'
-const OTHER_VENUE_ID = 'venue-2'
 const STAFF_ID = 'staff-1'
-const TIME_ENTRY_ID = 'te-1'
-const VALIDATOR_ID = 'staff-boss'
 
 describe('getVenueStaffTimeSummary — aislamiento entre negocios', () => {
   beforeEach(() => {

@@ -62,9 +62,17 @@ export function resolveExpectedDay(
   exceptions: WorkScheduleException[],
   dateIso: string,
 ): ExpectedDay {
+  // Desempate determinista (Codex P2-6): misma duración → gana OFF sobre HOURS (descansar es
+  // la instrucción más conservadora: no genera una falta), y luego la que empieza más tarde
+  // (la más reciente). Sin esto, dos excepciones del mismo día dependían del orden de Postgres.
   const applicable = (exceptions ?? [])
     .filter(e => e.startDate <= dateIso && dateIso <= e.endDate)
-    .sort((a, b) => spanDays(a) - spanDays(b))
+    .sort(
+      (a, b) =>
+        spanDays(a) - spanDays(b) ||
+        (a.kind === 'OFF' ? 0 : 1) - (b.kind === 'OFF' ? 0 : 1) ||
+        b.startDate.localeCompare(a.startDate),
+    )
 
   const winner = applicable[0]
   if (winner) {

@@ -7,6 +7,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 import * as timeEntryService from '../../services/mobile/time-entry.mobile.service'
 
 /**
@@ -32,7 +33,9 @@ export const identifyByPin = async (req: Request, res: Response, next: NextFunct
       ...result,
     })
   } catch (error) {
-    logger.error('Error in identifyByPin controller:', error)
+    // Un AppError operacional (403 apagado, 401 PIN, 400 ya adentro) ya lo registra el handler
+    // global como warn; duplicarlo aquí a nivel error llenaba las alertas de falsos incendios (Codex #6).
+    if (!(error instanceof AppError)) logger.error('Error in identifyByPin controller:', error)
     next(error)
   }
 }
@@ -69,7 +72,9 @@ export const clockIn = async (req: Request, res: Response, next: NextFunction) =
       timeEntry,
     })
   } catch (error) {
-    logger.error('Error in clockIn controller:', error)
+    // Un AppError operacional (403 apagado, 401 PIN, 400 ya adentro) ya lo registra el handler
+    // global como warn; duplicarlo aquí a nivel error llenaba las alertas de falsos incendios (Codex #6).
+    if (!(error instanceof AppError)) logger.error('Error in clockIn controller:', error)
     next(error)
   }
 }
@@ -105,7 +110,9 @@ export const clockOut = async (req: Request, res: Response, next: NextFunction) 
       timeEntry,
     })
   } catch (error) {
-    logger.error('Error in clockOut controller:', error)
+    // Un AppError operacional (403 apagado, 401 PIN, 400 ya adentro) ya lo registra el handler
+    // global como warn; duplicarlo aquí a nivel error llenaba las alertas de falsos incendios (Codex #6).
+    if (!(error instanceof AppError)) logger.error('Error in clockOut controller:', error)
     next(error)
   }
 }
@@ -133,7 +140,9 @@ export const startBreak = async (req: Request, res: Response, next: NextFunction
       timeEntry: result,
     })
   } catch (error) {
-    logger.error('Error in startBreak controller:', error)
+    // Un AppError operacional (403 apagado, 401 PIN, 400 ya adentro) ya lo registra el handler
+    // global como warn; duplicarlo aquí a nivel error llenaba las alertas de falsos incendios (Codex #6).
+    if (!(error instanceof AppError)) logger.error('Error in startBreak controller:', error)
     next(error)
   }
 }
@@ -161,7 +170,9 @@ export const endBreak = async (req: Request, res: Response, next: NextFunction) 
       timeEntry: result,
     })
   } catch (error) {
-    logger.error('Error in endBreak controller:', error)
+    // Un AppError operacional (403 apagado, 401 PIN, 400 ya adentro) ya lo registra el handler
+    // global como warn; duplicarlo aquí a nivel error llenaba las alertas de falsos incendios (Codex #6).
+    if (!(error instanceof AppError)) logger.error('Error in endBreak controller:', error)
     next(error)
   }
 }

@@ -124,6 +124,9 @@ export interface AttendanceReportRow {
   earlyLeaveMinutes: number
 }
 
+/** Tope inclusivo del reporte de puntualidad, en días. */
+export const MAX_REPORT_DAYS = 92
+
 export async function getAttendanceReport(
   venueId: string,
   startDate: string,
@@ -138,15 +141,40 @@ export async function getAttendanceReport(
   const timezone = venue.timezone || 'America/Mexico_City'
   const graceMinutes = venue.settings?.attendanceGraceMinutes ?? 10
 
+  // Validar ANTES de consultar: un rango absurdo (0001-01-01..9999-12-31) no debe costar ni
+  // una consulta, y menos traerse toda la historia del venue (auditoría Codex fase 2, P2-2).
+  const start = DateTime.fromISO(startDate, { zone: timezone })
+  const end = DateTime.fromISO(endDate, { zone: timezone })
+  if (!start.isValid || !end.isValid) throw new BadRequestError('Fechas inválidas')
+  if (end < start) throw new BadRequestError('El rango termina antes de empezar')
+  // Tope INCLUSIVO: el reporte materializa personas × días en memoria; 92 días cubren un
+  // trimestre. Del día 1 al día 92 hay diff 91 — `> 92` dejaba pasar 93 (Codex P2-2).
+  if (end.diff(start, 'days').days > MAX_REPORT_DAYS - 1) throw new BadRequestError(`El rango máximo es de ${MAX_REPORT_DAYS} días`)
+
+  const rangeStart = start.startOf('day').toJSDate()
+  const rangeEnd = end.endOf('day').toJSDate()
+
+  // Quien estuvo en el equipo en ALGÚN momento del rango, aunque hoy ya no esté: dar de baja
+  // pone `active=false, endDate=hoy`, y su historia no debe desaparecer del reporte de la
+  // quincena. Y quien entró el día 20 no puede tener faltas del 1 al 19 (Codex P2-4).
   const memberships = await prisma.staffVenue.findMany({
-    where: { venueId, active: true },
+    where: {
+      venueId,
+      startDate: { lte: rangeEnd },
+      OR: [{ active: true, endDate: null }, { endDate: { gte: rangeStart } }],
+    },
     select: {
       id: true,
       staffId: true,
+      startDate: true,
+      endDate: true,
       staff: { select: { firstName: true, lastName: true } },
       workSchedule: { select: { weekly: true } },
       workScheduleExceptions: {
         where: { startDate: { lte: endDate }, endDate: { gte: startDate } },
+        // Orden fijo: el desempate final vive en `resolveExpectedDay`, pero la entrada no debe
+        // depender del plan de Postgres (Codex P2-6).
+        orderBy: [{ startDate: 'asc' }, { createdAt: 'asc' }],
         select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true },
       },
     },
@@ -155,13 +183,7 @@ export async function getAttendanceReport(
   // Un solo barrido de checadas para todo el rango: pedirlas por persona y por día haría
   // una consulta por celda de la tabla.
   const entries = await prisma.timeEntry.findMany({
-    where: {
-      venueId,
-      clockInTime: {
-        gte: DateTime.fromISO(startDate, { zone: timezone }).startOf('day').toJSDate(),
-        lte: DateTime.fromISO(endDate, { zone: timezone }).endOf('day').toJSDate(),
-      },
-    },
+    where: { venueId, clockInTime: { gte: rangeStart, lte: rangeEnd } },
     select: { staffId: true, clockInTime: true, clockOutTime: true, validationStatus: true },
     orderBy: { clockInTime: 'asc' },
   })
@@ -179,14 +201,6 @@ export async function getAttendanceReport(
     else byStaffAndDay.get(key)!.clockOutTime = entry.clockOutTime ?? byStaffAndDay.get(key)!.clockOutTime
   }
 
-  const start = DateTime.fromISO(startDate, { zone: timezone })
-  const end = DateTime.fromISO(endDate, { zone: timezone })
-  if (!start.isValid || !end.isValid) throw new BadRequestError('Fechas inválidas')
-  if (end < start) throw new BadRequestError('El rango termina antes de empezar')
-  // Tope: el reporte materializa personas × días en memoria. 92 días cubre un trimestre;
-  // sin tope, "0001-01-01..9999-12-31" tumba el proceso (auditoría Codex, P2).
-  if (end.diff(start, 'days').days > 92) throw new BadRequestError('El rango máximo es de 92 días')
-
   // Hoy en la zona del negocio. Un día que aún no termina NO puede ser falta: la persona
   // todavía puede llegar. Días futuros tampoco se juzgan.
   const todayIso = DateTime.now().setZone(timezone).toISODate()!
@@ -200,8 +214,12 @@ export async function getAttendanceReport(
   for (const membership of memberships) {
     const weekly = (membership.workSchedule?.weekly as unknown as WeeklyWorkSchedule) ?? null
     const exceptions = membership.workScheduleExceptions as unknown as WorkScheduleException[]
+    // Ventana de pertenencia en fechas del negocio: fuera de ella no se juzga a nadie.
+    const joinedIso = DateTime.fromJSDate(membership.startDate).setZone(timezone).toISODate()!
+    const leftIso = membership.endDate ? DateTime.fromJSDate(membership.endDate).setZone(timezone).toISODate()! : null
 
     for (const date of days) {
+      if (date < joinedIso || (leftIso && date > leftIso)) continue
       const expected = resolveExpectedDay(weekly, exceptions, date)
       const actual = byStaffAndDay.get(`${membership.staffId}|${date}`)
 

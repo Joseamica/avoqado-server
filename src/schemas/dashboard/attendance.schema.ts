@@ -1,8 +1,14 @@
+import { DateTime } from 'luxon'
 import { z } from 'zod'
 import { TimeEntryStatus } from '@prisma/client'
 
 /** Fecha en formato YYYY-MM-DD, tal como la manda el selector de rango del dashboard. */
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha debe venir como YYYY-MM-DD')
+const isoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha debe venir como YYYY-MM-DD')
+  // El regex sólo mira la FORMA: `2026-13-40` pasaba y se guardaba tal cual (columna de texto).
+  // Luxon rechaza mes 13 y día 40 (auditoría Codex fase 2, hallazgo 3).
+  .refine(value => DateTime.fromISO(value).isValid, 'Esa fecha no existe en el calendario')
 
 export const VenueTimeEntriesQuerySchema = z.object({
   params: z.object({

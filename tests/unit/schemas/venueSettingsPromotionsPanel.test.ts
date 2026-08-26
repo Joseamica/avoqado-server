@@ -24,7 +24,7 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     venue: { findUnique: jest.fn() },
-    venueSettings: { upsert: jest.fn() },
+    venueSettings: { findUnique: jest.fn() /* el servicio lee el 'antes' para la bitácora (Codex P3-1) */, upsert: jest.fn() },
   },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
