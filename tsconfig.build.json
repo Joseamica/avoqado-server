@@ -1,4 +1,10 @@
 {
   "extends": "./tsconfig.json",
+  // El build de PRODUCCIÓN nunca es incremental: un .tsbuildinfo rancio puede saltarse
+  // emisiones y desplegar un dist viejo. El typecheck incremental vive en tsconfig.typecheck.json.
+  "compilerOptions": {
+    "incremental": false,
+    "tsBuildInfoFile": null
+  },
   "exclude": ["node_modules", "dist", "tests", "scripts"]
 }

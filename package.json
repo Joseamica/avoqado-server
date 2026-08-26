@@ -72,7 +72,9 @@
     "dev:clean-sessions": "npx ts-node -r tsconfig-paths/register scripts/cleanup-old-sessions.ts",
     "dev:logs": "tail -f logs/$(ls -t logs/development*.log | head -1)",
     "sdk:test": "npx ts-node -r tsconfig-paths/register scripts/test-ecommerce-merchant-endpoints.ts",
-    "sdk:errors": "npx ts-node -r tsconfig-paths/register scripts/test-error-parser.ts"
+    "sdk:errors": "npx ts-node -r tsconfig-paths/register scripts/test-error-parser.ts",
+    "typecheck:build": "NODE_OPTIONS='--max-old-space-size=8192' tsc -p tsconfig.typecheck.json",
+    "typecheck:fast": "npx -y -p typescript@7.0.2 tsc -p tsconfig.ts7.json"
   },
   "keywords": [],
   "author": "",

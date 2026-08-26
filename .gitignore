@@ -43,3 +43,4 @@ graphify-out/
 
 # macOS: Finder deja esto en cada carpeta que se abre
 .DS_Store
+*.tsbuildinfo

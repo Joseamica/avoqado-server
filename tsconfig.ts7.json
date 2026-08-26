@@ -1,0 +1,37 @@
+{
+  "//": "Typecheck R\u00c1PIDO con TypeScript 7 (compilador nativo en Go): mismo alcance que tsconfig.build.json pero con moduleResolution bundler, que acepta los ~125 import() din\u00e1micos sin extensi\u00f3n que nodenext rechaza. NO emite nada y NO lo usa el build de producci\u00f3n (ese sigue en TS 5.8 + commonjs, sin cambios). Uso: npm run typecheck:fast. El compilador NO se instala como dependencia (colisionar\u00eda con el TS 5.8 de eslint/ts-jest): se invoca con npx -p. La verdad pre-commit sigue siendo tsconfig.typecheck.json (TS 5.8, sem\u00e1ntica id\u00e9ntica al build).",
+  "compilerOptions": {
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ],
+      "@tests/*": [
+        "./tests/*"
+      ]
+    },
+    "target": "es2020",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "typeRoots": [
+      "./node_modules/@types"
+    ],
+    "noEmit": true,
+    "types": [
+      "node",
+      "jest"
+    ]
+  },
+  "include": [
+    "src/**/*.ts",
+    "prisma/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

@@ -1,5 +1,7 @@
 {
   "compilerOptions": {
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/tsc/full.tsbuildinfo",
     "baseUrl": ".", // Adding baseUrl can sometimes help with path resolution consistency
     "paths": {
       "@/*": ["src/*"],
