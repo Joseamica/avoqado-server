@@ -2,7 +2,7 @@ import { PKPass } from 'passkit-generator'
 import { solidPng } from './solidPng'
 import { stampStripPng } from './stampStripPng'
 import { avoqadoLogoPng, avoqadoLogo2xPng } from './avoqadoLogo'
-import { fetchPng } from './remotePng'
+import { fetchDecodedPng, fetchPng } from './remotePng'
 import { WalletStampShape } from '@prisma/client'
 import { env } from '../../config/env'
 import { BadRequestError } from '../../errors/AppError'
@@ -65,6 +65,8 @@ export interface SignPassOptions {
     stampFilledColor?: string | null
     stampEmptyColor?: string | null
     stampShape?: WalletStampShape | null
+    /** El sello propio del negocio. Cuando existe, manda sobre `stampShape`. */
+    stampImageUrl?: string | null
   }
 }
 
@@ -83,7 +85,11 @@ export async function signPass(passJson: Record<string, unknown>, options: SignP
   // 🔴 En paralelo y con respaldo. Si el logo del negocio no carga, el pase sale con
   // el de Avoqado — feo para su marca, pero se emite. Bloquear la credencial de un
   // cliente porque una imagen dio 404 cambia un problema estetico por uno operativo.
-  const [logoPropio, iconoPropio] = await Promise.all([fetchPng(design?.logoUrl), fetchPng(design?.iconUrl)])
+  const [logoPropio, iconoPropio, selloPropio] = await Promise.all([
+    fetchPng(design?.logoUrl),
+    fetchPng(design?.iconUrl),
+    fetchDecodedPng(design?.stampImageUrl),
+  ])
 
   // El icono NUNCA falta: sin el, Apple rechaza el pase EN SILENCIO. Cuando el
   // negocio no subio uno, se genera de color solido con su color de marca.
@@ -95,6 +101,7 @@ export async function signPass(passJson: Record<string, unknown>, options: SignP
     filledHex: design?.stampFilledColor ?? brandColor ?? null,
     emptyHex: design?.stampEmptyColor ?? null,
     shape: design?.stampShape ?? null,
+    stampImage: selloPropio,
   }
 
   const pass = new PKPass(

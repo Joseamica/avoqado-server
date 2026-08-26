@@ -1,4 +1,5 @@
 import logger from '../../config/logger'
+import { decodePng, type DecodedPng } from './pngDecode'
 
 /**
  * Trae una imagen que el negocio subió, para meterla en su pase.
@@ -82,4 +83,19 @@ export function readPngSize(buffer: Buffer): PngSize | null {
   // El nombre del chunk vive en los bytes 12..16 y debe decir 'IHDR'.
   if (buffer.subarray(12, 16).toString('ascii') !== 'IHDR') return null
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) }
+}
+
+/**
+ * Trae una imagen del negocio y la ABRE, lista para componerla.
+ *
+ * Devuelve null ante cualquier tropiezo — red, formato, un PNG entrelazado — y el
+ * dibujo cae a la forma del catálogo. La credencial de un cliente no puede depender
+ * de que el archivo del negocio esté impecable.
+ */
+export async function fetchDecodedPng(url: string | null | undefined): Promise<DecodedPng | null> {
+  const buffer = await fetchPng(url)
+  if (!buffer) return null
+  const abierto = decodePng(buffer)
+  if (!abierto) logger.warn('El PNG llegó pero no se pudo abrir; se usa la forma del catálogo', { url })
+  return abierto
 }

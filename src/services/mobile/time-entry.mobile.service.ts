@@ -9,6 +9,7 @@
  */
 
 import { TimeEntryStatus } from '@prisma/client'
+import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
 import logger from '../../config/logger'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -164,6 +165,9 @@ export async function identifyByPin(venueId: string, pin: string) {
  */
 export async function clockIn(params: ClockInParams) {
   const { venueId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy, note } = params
+
+  // Interruptor de asistencia: apagado = 403 con mensaje que la app ya sabe mostrar.
+  await assertAttendanceEnabled(venueId)
 
   logger.info(`📱 [TIME-ENTRY.MOBILE] Clock-in request | venue=${venueId}`)
 

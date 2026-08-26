@@ -21,7 +21,7 @@ import { Request, Response } from 'express'
 import * as loyaltyService from '@/services/dashboard/loyalty.dashboard.service'
 import * as cardDesignService from '@/services/wallet/cardDesign.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { readPngSize } from '@/services/wallet/remotePng'
+import { fetchDecodedPng, readPngSize } from '@/services/wallet/remotePng'
 import { stampStripPng } from '@/services/wallet/stampStripPng'
 import { buildStoragePath, uploadFileToStorage } from '@/services/storage.service'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -250,8 +250,8 @@ export async function uploadCardImageHandler(req: Request, res: Response) {
   const file = (req as any).file as { buffer: Buffer; originalname: string } | undefined
 
   if (!file) throw new BadRequestError('No llegó ningún archivo. Manda la imagen en el campo "image".')
-  if (kind !== 'logo' && kind !== 'icon') {
-    throw new BadRequestError('Falta indicar qué imagen es: "logo" o "icon".')
+  if (kind !== 'logo' && kind !== 'icon' && kind !== 'stamp') {
+    throw new BadRequestError('Falta indicar qué imagen es: "logo", "icon" o "stamp".')
   }
 
   // 🔴 Por los BYTES, no por la extensión ni por el tipo que declaró el navegador:
@@ -274,12 +274,27 @@ export async function uploadCardImageHandler(req: Request, res: Response) {
       avisos.push('Tu logo es casi cuadrado. En la tarjeta se verá pequeño porque el espacio es alargado; uno horizontal luce mejor.')
     if (size.width < 480)
       avisos.push(`Para que se vea nítido en pantallas Retina conviene subirlo a 480×150. El tuyo mide ${size.width}×${size.height}.`)
-  } else {
+  } else if (kind === 'icon') {
     if (size.width < 116 || size.height < 116) {
       throw new BadRequestError(`El icono es muy chico (${size.width}×${size.height}). Necesita al menos 116×116, idealmente 512×512.`)
     }
     const desviacion = Math.abs(size.width - size.height) / Math.max(size.width, size.height)
     if (desviacion > 0.1) avisos.push(`El icono debe ser cuadrado. El tuyo mide ${size.width}×${size.height} y se verá deformado.`)
+  } else {
+    // El sello se dibuja a unos 60 píxeles: 96 es el mínimo con el que aún se ve
+    // limpio en una pantalla Retina.
+    if (size.width < 96 || size.height < 96) {
+      throw new BadRequestError(`El sello es muy chico (${size.width}×${size.height}). Necesita al menos 96×96, idealmente 256×256.`)
+    }
+    const desviacion = Math.abs(size.width - size.height) / Math.max(size.width, size.height)
+    if (desviacion > 0.25) {
+      avisos.push(
+        `Tu sello es bastante alargado (${size.width}×${size.height}). En la fila se verá más chico que uno cuadrado, porque tiene que caber completo.`,
+      )
+    }
+    // 🔴 El aviso que de verdad evita una tarjeta fea: un sello sin transparencia
+    // sale como un cuadro de color macizo sobre la banda.
+    avisos.push('Si tu sello tiene fondo transparente se verá mucho mejor: un PNG con fondo blanco sale como un cuadro sobre la banda.')
   }
 
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } })
@@ -290,7 +305,7 @@ export async function uploadCardImageHandler(req: Request, res: Response) {
   const path = buildStoragePath(`venues/${venue.slug}/wallet/${kind}.png`)
   const url = await uploadFileToStorage(file.buffer, path, 'image/png')
 
-  const campo = kind === 'logo' ? 'logoUrl' : 'iconUrl'
+  const campo = kind === 'logo' ? 'logoUrl' : kind === 'icon' ? 'iconUrl' : 'stampImageUrl'
   const design = await cardDesignService.saveCardDesign(venueId, { [campo]: url })
 
   void logAction({
@@ -324,6 +339,9 @@ export async function cardStripPreviewHandler(req: Request, res: Response) {
   const q = req.query as Record<string, string | undefined>
 
   const guardado = await cardDesignService.getCardDesign(venueId)
+  // La vista previa usa el sello guardado: una imagen se sube antes de poder verse,
+  // así que no hay borrador que pintar como con los colores.
+  const selloPropio = await fetchDecodedPng(guardado.stampImageUrl)
   const hexOrNull = (v: string | undefined) => (v && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null)
 
   const png = stampStripPng({
@@ -336,6 +354,7 @@ export async function cardStripPreviewHandler(req: Request, res: Response) {
     filledHex: hexOrNull(q.filled) ?? guardado.stampFilledColor,
     emptyHex: hexOrNull(q.empty) ?? guardado.stampEmptyColor,
     shape: (q.shape as any) ?? guardado.stampShape,
+    stampImage: selloPropio,
   })
 
   // Sin caché: la vista previa cambia con cada ajuste y una respuesta guardada

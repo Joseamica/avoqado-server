@@ -842,6 +842,11 @@ model VenueSettings {
   /// Minutos de gracia antes de contar un retardo. 10 por defecto: castigar el minuto exacto
   /// convierte el semáforo en ruido y nadie lo vuelve a mirar. Configurable porque una
   /// clínica con citas y una tienda de barrio no toleran lo mismo.
+  /// Interruptor del control de asistencia. Apagado = el servidor RECHAZA checadas (así los
+  /// aparatos se enteran sin recompilar) y el dashboard esconde la sección. Default true:
+  /// los negocios existentes venían checando y no se les apaga por migración.
+  /// 🔴 Independiente de `enableShifts` (caja). Rieles distintos.
+  attendanceEnabled       Boolean @default(true)
   attendanceGraceMinutes  Int     @default(10)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
   autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
@@ -6902,6 +6907,15 @@ model WalletCardDesign {
   stampEmptyColor String?
 
   stampShape WalletStampShape @default(CIRCLE)
+
+  /// El sello propio del negocio: un PNG que sube. Cuando existe, MANDA sobre
+  /// `stampShape` y sobre los colores de sello.
+  ///
+  /// 🔴 Es UNA sola imagen a proposito. La version "todavia no lo ganas" se genera
+  /// bajandole la fuerza contra el fondo, en vez de exigir un segundo archivo como
+  /// hace Loyalz: pedir dos subidas antes de poder usar la funcion es friccion que
+  /// no compra nada para el negocio que solo quiere su logo ahi.
+  stampImageUrl String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

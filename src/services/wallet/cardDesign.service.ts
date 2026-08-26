@@ -25,6 +25,8 @@ export interface CardDesign {
   /** Null = se deriva del color del sello lleno. Ver `stampStripPng.ts`. */
   stampEmptyColor: string | null
   stampShape: WalletStampShape
+  /** El sello propio del negocio. Cuando existe, manda sobre `stampShape`. */
+  stampImageUrl: string | null
 }
 
 /**
@@ -42,6 +44,7 @@ export const DEFAULT_CARD_DESIGN: CardDesign = {
   stampFilledColor: '#7ADD2C',
   stampEmptyColor: null,
   stampShape: WalletStampShape.CIRCLE,
+  stampImageUrl: null,
 }
 
 /** Los campos que un negocio puede editar. `id`, `venueId` y las fechas no. */
@@ -74,7 +77,7 @@ export function assertValidDesign(patch: CardDesignPatch): void {
     }
   }
 
-  for (const field of ['logoUrl', 'iconUrl'] as const) {
+  for (const field of ['logoUrl', 'iconUrl', 'stampImageUrl'] as const) {
     const value = patch[field]
     if (value === undefined || value === null) continue
     if (typeof value !== 'string' || !/^https:\/\//i.test(value.trim())) {
@@ -98,6 +101,7 @@ export async function getCardDesign(venueId: string): Promise<CardDesign> {
     stampFilledColor: row.stampFilledColor,
     stampEmptyColor: row.stampEmptyColor,
     stampShape: row.stampShape,
+    stampImageUrl: row.stampImageUrl,
   }
 }
 

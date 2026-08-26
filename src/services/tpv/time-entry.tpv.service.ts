@@ -1,4 +1,5 @@
 import prisma from '../../utils/prismaClient'
+import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
 import { TimeEntryStatus } from '@prisma/client'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 
@@ -166,6 +167,9 @@ function calculateTotalBreakMinutes(breaks: Array<{ startTime: Date; endTime: Da
  */
 export async function clockIn(params: ClockInParams) {
   const { venueId, staffId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy, facadePhotoUrl } = params
+
+  // Interruptor de asistencia: apagado = 403 con mensaje que la app ya sabe mostrar.
+  await assertAttendanceEnabled(venueId)
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)

@@ -45,6 +45,7 @@ export const UpdateVenueSettingsSchema = z.object({
     shiftDuration: z.number().int().min(1).max(24).optional(),
     enableShifts: z.boolean().optional(),
     // Asistencia: minutos de gracia antes de contar un retardo (fase 2 del checador).
+    attendanceEnabled: z.boolean().optional(),
     attendanceGraceMinutes: z.coerce.number().int().min(0).max(120).optional(),
     cashReconciliationEnabled: z.boolean().optional(),
     requirePinLogin: z.boolean().optional(),

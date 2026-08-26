@@ -128,6 +128,7 @@ export const CardDesignUpdateSchema = z.object({
     .object({
       logoUrl: z.string().url('El logo debe ser una URL válida').nullable().optional(),
       iconUrl: z.string().url('El icono debe ser una URL válida').nullable().optional(),
+      stampImageUrl: z.string().url('El sello debe ser una URL válida').nullable().optional(),
       backgroundColor: hexColorSchema.optional(),
       textColor: hexColorSchema.optional(),
       labelColor: hexColorSchema.optional(),

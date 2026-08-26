@@ -300,6 +300,70 @@ export class Canvas {
     }
   }
 
+  /**
+   * Dibuja una imagen ya abierta, centrada y escalada a un cuadro de `size`.
+   *
+   * 🔴 El escalado promedia el AREA de origen de cada pixel destino, no toma el mas
+   * cercano. Un sello sube a 512 px y se dibuja a ~60: tomando el pixel mas cercano
+   * se tiran 8 de cada 9 y el icono sale con los bordes rotos, que es exactamente
+   * como se ve una imagen "pixeleada" — y el negocio culparia a su archivo, no al
+   * escalado.
+   *
+   * `opacity` es lo que convierte el sello ganado en el que FALTA: la misma imagen,
+   * compuesta mas debil contra el fondo. Asi el negocio sube UN archivo y no dos,
+   * que es lo que Loyalz obliga a hacer.
+   */
+  drawImage(
+    img: { width: number; height: number; pixels: Buffer },
+    cx: number,
+    cy: number,
+    size: number,
+    opts: { opacity?: number } = {},
+  ): void {
+    const opacity = opts.opacity ?? 1
+    if (img.width <= 0 || img.height <= 0 || size <= 0 || opacity <= 0) return
+
+    // Se respeta la proporcion: un sello alargado no se deforma para llenar el
+    // cuadro, se centra dentro de el.
+    const escala = size / Math.max(img.width, img.height)
+    const destW = Math.max(1, Math.round(img.width * escala))
+    const destH = Math.max(1, Math.round(img.height * escala))
+    const x0 = Math.round(cx - destW / 2)
+    const y0 = Math.round(cy - destH / 2)
+
+    for (let dy = 0; dy < destH; dy++) {
+      // Franja de origen que corresponde a esta fila destino.
+      const sy0 = Math.floor((dy * img.height) / destH)
+      const sy1 = Math.max(sy0 + 1, Math.floor(((dy + 1) * img.height) / destH))
+      for (let dx = 0; dx < destW; dx++) {
+        const sx0 = Math.floor((dx * img.width) / destW)
+        const sx1 = Math.max(sx0 + 1, Math.floor(((dx + 1) * img.width) / destW))
+
+        let r = 0
+        let g = 0
+        let b = 0
+        let a = 0
+        let n = 0
+        for (let sy = sy0; sy < sy1; sy++) {
+          for (let sx = sx0; sx < sx1; sx++) {
+            const i = (sy * img.width + sx) * 4
+            const al = img.pixels[i + 3] / 255
+            // 🔴 El color se promedia PONDERADO por su alfa. Sin eso, los pixeles
+            // transparentes —que suelen venir en negro— ensucian el borde con un
+            // halo oscuro alrededor de todo el icono.
+            r += img.pixels[i] * al
+            g += img.pixels[i + 1] * al
+            b += img.pixels[i + 2] * al
+            a += al
+            n++
+          }
+        }
+        if (!n || a <= 0) continue
+        this.blend(x0 + dx, y0 + dy, [r / a, g / a, b / a], (a / n) * opacity)
+      }
+    }
+  }
+
   toPng(): Buffer {
     return encodePng(this.width, this.height, this.pixels)
   }

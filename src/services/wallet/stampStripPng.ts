@@ -1,6 +1,7 @@
 import { WalletStampShape } from '@prisma/client'
 import { Canvas, dimFillColor, hexToRgb, outlineColor, Rgb } from './pngCanvas'
 import { stampEmptyStyle, stampShapeFn } from './stampShapes'
+import type { DecodedPng } from './pngDecode'
 
 /**
  * La banda superior de la tarjeta: los sellos dibujados.
@@ -47,9 +48,38 @@ export interface StampStripOptions {
   emptyHex?: string | null
   /** Forma del sello. Por defecto, circulo. */
   shape?: WalletStampShape | null
+  /**
+   * El sello propio del negocio, ya abierto. Cuando viene, MANDA sobre `shape`.
+   *
+   * 🔴 Sólo se pide UNA imagen. La versión "todavía no lo ganas" se genera bajándole
+   * la fuerza contra el fondo, en vez de exigir un segundo archivo como hace Loyalz:
+   * pedir dos subidas antes de poder usar la función es fricción que no compra nada
+   * para el negocio que sólo quiere su logo ahí.
+   */
+  stampImage?: DecodedPng | null
 }
 
-export function stampStripPng({ width, height, earned, required, bgHex, filledHex, emptyHex, shape }: StampStripOptions): Buffer {
+/**
+ * Cuánto queda del sello propio cuando aún no se gana.
+ *
+ * 0.30 salió de mirarlo: por encima se confunde con uno ganado —y entonces la fila
+ * entera parece completa—, y por debajo desaparece contra el fondo. Es el mismo
+ * problema que resuelve `dimFillColor` para los iconos dibujados, sólo que aquí no
+ * se puede elegir el color: la imagen es del negocio y se respeta.
+ */
+const OPACIDAD_SIN_GANAR = 0.3
+
+export function stampStripPng({
+  width,
+  height,
+  earned,
+  required,
+  bgHex,
+  filledHex,
+  emptyHex,
+  shape,
+  stampImage,
+}: StampStripOptions): Buffer {
   const fondo = hexToRgb(bgHex, hexToRgb(SURFACE_CONTAINER_DARK))
   const lleno = hexToRgb(filledHex, hexToRgb(AVOQADO_GREEN))
   // 🔴 El contorno se DERIVA del fondo y del acento, no de un token gris fijo.
@@ -113,7 +143,11 @@ export function stampStripPng({ width, height, earned, required, bgHex, filledHe
     const cx = margenX + celdaAncho * (col + 0.5)
     const cy = margenY + celdaAlto * (fila + 0.5)
 
-    if (i < llenos) {
+    if (stampImage) {
+      // El sello propio del negocio: la misma imagen para los dos estados, más
+      // débil cuando todavía no se gana.
+      canvas.drawImage(stampImage, cx, cy, radio * 2, { opacity: i < llenos ? 1 : OPACIDAD_SIN_GANAR })
+    } else if (i < llenos) {
       canvas.shape(cx, cy, radio, lleno, forma)
     } else if (estiloVacio === 'solid') {
       // Icono con piezas finas: relleno apagado. El contorno lo partiría.
