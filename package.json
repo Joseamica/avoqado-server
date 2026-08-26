@@ -135,6 +135,7 @@
     "openai": "^5.15.0",
     "otplib": "^13.1.1",
     "papaparse": "^5.5.3",
+    "passkit-generator": "^3.5.7",
     "pdf-to-img": "^5.0.0",
     "pdfkit": "^0.17.2",
     "pg": "^8.16.0",
