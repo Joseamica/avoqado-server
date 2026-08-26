@@ -57,7 +57,7 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
       teamIdentifier: env.APPLE_TEAM_ID as string,
     })
 
-    const buffer = await signPass(passJson)
+    const buffer = await signPass(passJson, venue.primaryColor)
 
     // Auditoría: emitir una credencial es una mutación que identifica a un cliente.
     // Fire-and-forget y FUERA de cualquier transacción — un fallo de auditoría no

@@ -1,4 +1,5 @@
 import { PKPass } from 'passkit-generator'
+import { solidPng } from './solidPng'
 import { env } from '../../config/env'
 import { BadRequestError } from '../../errors/AppError'
 
@@ -34,7 +35,18 @@ export function walletSigningAvailable(): boolean {
   )
 }
 
-export async function signPass(passJson: Record<string, unknown>): Promise<Buffer> {
+/**
+ * 🔴 `brandColor` NO es cosmético: sin `icon.png` Apple RECHAZA el pase.
+ *
+ * Y lo rechaza en silencio — el archivo se firma bien, la cadena de certificados
+ * valida, y el iPhone lo abre como una vista previa de archivo genérica ("Pass ·
+ * 4 KB") en vez de ofrecer agregarlo a Wallet. No hay mensaje de error. Costó una
+ * prueba en un iPhone real descubrirlo (25-ago).
+ *
+ * El icono se genera con el color del negocio, no con uno de Avoqado, para que la
+ * marca blanca llegue hasta la notificación de la pantalla de bloqueo.
+ */
+export async function signPass(passJson: Record<string, unknown>, brandColor?: string | null): Promise<Buffer> {
   if (!walletSigningAvailable()) {
     // El mensaje nombra las variables a propósito: quien lea este error en
     // producción necesita saber QUÉ poner, no que "algo falló al firmar".
@@ -46,7 +58,13 @@ export async function signPass(passJson: Record<string, unknown>): Promise<Buffe
   }
 
   const pass = new PKPass(
-    { 'pass.json': Buffer.from(JSON.stringify(passJson)) },
+    {
+      'pass.json': Buffer.from(JSON.stringify(passJson)),
+      // 🔴 OBLIGATORIOS. `icon.png` es el que decide si Wallet acepta el pase;
+      // `icon@2x.png` es el que usan las pantallas Retina, o sea todas.
+      'icon.png': solidPng(29, 29, brandColor),
+      'icon@2x.png': solidPng(58, 58, brandColor),
+    },
     {
       wwdr: Buffer.from(env.APPLE_WWDR_PEM_BASE64 as string, 'base64'),
       signerCert: Buffer.from(env.APPLE_PASS_CERT_PEM_BASE64 as string, 'base64'),

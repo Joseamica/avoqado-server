@@ -423,6 +423,7 @@ model Venue {
   rawMaterials                RawMaterial[]
   suppliers                   Supplier[]
   purchaseOrders              PurchaseOrder[]
+  purchaseOrderInvoices       PurchaseOrderInvoice[]
   pricingPolicies             PricingPolicy[]
   rawMaterialMovements        RawMaterialMovement[]
   lowStockAlerts              LowStockAlert[]
@@ -943,6 +944,9 @@ model Staff {
   /// Entregas de vales por área ejecutadas por esta persona (AREA_TICKETS §5.5) —
   /// es el "por Rosa" que ve el área al reintentar una entrega ya hecha.
   fulfillmentsDelivered OrderFulfillment[] @relation("OrderFulfillmentStaff")
+
+  /// Facturas de proveedor que esta persona subió a una orden de compra.
+  purchaseInvoicesUploaded PurchaseOrderInvoice[]
 
   areaTicketsIssued             AreaTicket[]                   @relation("AreaTicketIssuedByStaff")
   areaTicketCheckoutSessions    AreaTicketCheckoutSession[]    @relation("AreaTicketCheckoutStaff")
@@ -2205,8 +2209,9 @@ model Supplier {
   deletedBy String? // Staff ID who deleted
 
   // Relations
-  pricing        SupplierPricing[]
-  purchaseOrders PurchaseOrder[]
+  pricing         SupplierPricing[]
+  purchaseOrders  PurchaseOrder[]
+  purchaseInvoices PurchaseOrderInvoice[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2298,7 +2303,8 @@ model PurchaseOrder {
   notes String?
 
   // Relations
-  items PurchaseOrderItem[]
+  items    PurchaseOrderItem[]
+  invoices PurchaseOrderInvoice[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2379,9 +2385,106 @@ model PurchaseOrderItem {
   // su delta sale de los lotes vivos.
   inventoryMovements InventoryMovement[]
 
+  /// Renglones de factura que quedaron casados con este renglón de la orden.
+  invoiceLines PurchaseOrderInvoiceLine[]
+
   @@index([purchaseOrderId])
   @@index([rawMaterialId])
   @@index([productId])
+}
+
+/// El CFDI que el proveedor emitio por una orden de compra.
+///
+/// NO adivina que compraste: la orden ya lo sabe. Esto COMPRUEBA que te cobraron lo que
+/// pediste. Una orden puede tener varias facturas (entregas parciales), por eso es una
+/// lista y no un campo en `PurchaseOrder`.
+///
+/// 🔴 Subir una factura NUNCA toca el inventario ni `StockBatch.costPerUnit`. El costo se
+/// congela al RECIBIR desde `PurchaseOrderItem.unitPrice`; revaluarlo aqui cambiaria el
+/// costo de ventas que YA ocurrieron con ese lote. Una diferencia se AVISA (`matchStatus`),
+/// no se corrige — misma postura que Odoo, que manda la diferencia a una cuenta aparte.
+model PurchaseOrderInvoice {
+  id              String        @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  venueId         String
+  venue           Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// Emisor del CFDI. Se guarda aunque no coincida con el proveedor de la orden: el
+  /// desajuste es justo lo que hay que poder ver.
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  /// Folio fiscal. Unico POR NEGOCIO: la misma factura no se sube dos veces. No es global
+  /// porque dos negocios distintos pueden, legitimamente, recibir el mismo CFDI de un
+  /// corporativo que factura a varios.
+  uuid          String
+  serie         String?
+  folio         String?
+  emisorRfc     String
+  emisorNombre  String
+  fechaEmision  DateTime
+
+  /// Centavos enteros, como el resto de lo fiscal.
+  subtotalCents Int
+  descuentoCents Int @default(0)
+  ivaCents      Int  @default(0)
+  totalCents    Int
+
+  xmlUrl String?
+
+  matchStatus InvoiceMatchStatus @default(PENDING)
+  /// Detalle legible de que difiere y por cuanto. Lo consume la pantalla; no se calcula dos veces.
+  matchNotes  Json?
+
+  uploadedById String?
+  uploadedBy   Staff?  @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  lines PurchaseOrderInvoiceLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, uuid])
+  @@index([purchaseOrderId])
+  @@index([venueId, fechaEmision])
+  @@index([supplierId])
+  @@index([matchStatus])
+}
+
+/// Un renglon del CFDI, con el renglon de la orden al que quedo casado (si caso).
+///
+/// `supplierItemCode` es el `NoIdentificacion` del SAT: como llama el PROVEEDOR a ese
+/// producto. Es lo unico estable entre una factura y la siguiente — la descripcion es texto
+/// libre y cambia. Guardarlo aqui es lo que alimenta la fase 2 (reconocer solo) sin trabajo
+/// extra: cada conciliacion deja el mapeo hecho.
+model PurchaseOrderInvoiceLine {
+  id        String               @id @default(cuid())
+  invoiceId String
+  invoice   PurchaseOrderInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  /// Renglon de la orden al que caso. Null = quedo sin casar y se resuelve a mano.
+  /// `SetNull` y no `Cascade`: si el renglon de la orden desaparece, la factura sigue
+  /// siendo evidencia de lo que el proveedor cobro.
+  purchaseOrderItemId String?
+  purchaseOrderItem   PurchaseOrderItem? @relation(fields: [purchaseOrderItemId], references: [id], onDelete: SetNull)
+
+  supplierItemCode String?
+  descripcion      String
+  claveProdServ    String?
+  /// Catalogo de unidades del SAT (`KGM`, `H87`…), NO nuestro enum `Unit`.
+  claveUnidad      String?
+
+  cantidad           Decimal @db.Decimal(12, 3)
+  valorUnitarioCents Int
+  importeCents       Int
+  descuentoCents     Int     @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([invoiceId])
+  @@index([purchaseOrderItemId])
+  @@index([supplierItemCode])
 }
 
 // Pricing policies for products
@@ -9102,6 +9205,21 @@ enum RawMaterialCategory {
   CLEANING
   PACKAGING
   OTHER
+}
+
+/// Veredicto de conciliar una factura contra su orden de compra.
+/// Ninguno de estos estados modifica inventario ni costos: describen, no corrigen.
+enum InvoiceMatchStatus {
+  /// Recien subida, aun sin conciliar.
+  PENDING
+  /// Proveedor, totales y renglones cuadran.
+  MATCHED
+  /// El emisor del CFDI no es el proveedor de la orden.
+  SUPPLIER_MISMATCH
+  /// Los totales no cuadran con lo pedido.
+  AMOUNT_MISMATCH
+  /// Los totales cuadran pero algun renglon no pudo casarse.
+  LINES_MISMATCH
 }
 
 enum PurchaseOrderStatus {

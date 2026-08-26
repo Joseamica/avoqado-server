@@ -108,8 +108,10 @@ const cfdiConConceptos = (conceptos: string) => `<?xml version="1.0" encoding="U
   </cfdi:Complemento>
 </cfdi:Comprobante>`
 
-const CAFE = '<cfdi:Concepto ClaveProdServ="50201706" NoIdentificacion="CAF-001" Cantidad="10" ClaveUnidad="KGM" Unidad="Kilogramo" Descripcion="Café tostado grano" ValorUnitario="80.00" Importe="800.00"/>'
-const AZUCAR = '<cfdi:Concepto ClaveProdServ="50161509" NoIdentificacion="AZU-500" Cantidad="4" ClaveUnidad="KGM" Descripcion="Azúcar refinada" ValorUnitario="50.00" Importe="200.00"/>'
+const CAFE =
+  '<cfdi:Concepto ClaveProdServ="50201706" NoIdentificacion="CAF-001" Cantidad="10" ClaveUnidad="KGM" Unidad="Kilogramo" Descripcion="Café tostado grano" ValorUnitario="80.00" Importe="800.00"/>'
+const AZUCAR =
+  '<cfdi:Concepto ClaveProdServ="50161509" NoIdentificacion="AZU-500" Cantidad="4" ClaveUnidad="KGM" Descripcion="Azúcar refinada" ValorUnitario="50.00" Importe="200.00"/>'
 
 describe('parseCfdiReceived — conceptos', () => {
   it('lee un renglón con su código de proveedor, cantidad e importes', () => {
@@ -144,7 +146,8 @@ describe('parseCfdiReceived — conceptos', () => {
   it('tolera un renglón sin código de proveedor', () => {
     // `NoIdentificacion` es OPCIONAL en el CFDI. Sin el, ese renglon no puede casarse solo:
     // queda a mano. Lo que no puede pasar es que reviente la lectura entera.
-    const sinCodigo = '<cfdi:Concepto ClaveProdServ="50201706" Cantidad="1" ClaveUnidad="H87" Descripcion="Flete" ValorUnitario="150.00" Importe="150.00"/>'
+    const sinCodigo =
+      '<cfdi:Concepto ClaveProdServ="50201706" Cantidad="1" ClaveUnidad="H87" Descripcion="Flete" ValorUnitario="150.00" Importe="150.00"/>'
     const { conceptos } = parseCfdiReceived(cfdiConConceptos(sinCodigo), OUR_RFC)
 
     expect(conceptos[0].supplierItemCode).toBeNull()
@@ -152,7 +155,8 @@ describe('parseCfdiReceived — conceptos', () => {
   })
 
   it('lee el descuento por renglón cuando viene', () => {
-    const conDescuento = '<cfdi:Concepto ClaveProdServ="50201706" NoIdentificacion="CAF-001" Cantidad="10" ClaveUnidad="KGM" Descripcion="Café" ValorUnitario="80.00" Importe="800.00" Descuento="50.00"/>'
+    const conDescuento =
+      '<cfdi:Concepto ClaveProdServ="50201706" NoIdentificacion="CAF-001" Cantidad="10" ClaveUnidad="KGM" Descripcion="Café" ValorUnitario="80.00" Importe="800.00" Descuento="50.00"/>'
     const { conceptos } = parseCfdiReceived(cfdiConDescuentoWrap(conDescuento), OUR_RFC)
 
     expect(conceptos[0].descuentoCents).toBe(50_00)

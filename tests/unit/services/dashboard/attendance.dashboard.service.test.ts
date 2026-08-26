@@ -14,10 +14,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 const mockLogAction = jest.fn()
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
 
-import {
-  getVenueStaffTimeSummary,
-  validateVenueTimeEntry,
-} from '@/services/dashboard/attendance.dashboard.service'
+import { getVenueStaffTimeSummary, validateVenueTimeEntry } from '@/services/dashboard/attendance.dashboard.service'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 
 const VENUE_ID = 'venue-1'

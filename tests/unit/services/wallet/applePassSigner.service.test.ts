@@ -14,6 +14,17 @@
 
 const envMock: Record<string, string | undefined> = {}
 
+// Captura los archivos que se le entregan a PKPass, que es lo unico que decide
+// si Apple acepta el pase.
+const archivosDelPase: Record<string, Buffer> = {}
+jest.mock('passkit-generator', () => ({
+  PKPass: jest.fn().mockImplementation((buffers: Record<string, Buffer>) => {
+    for (const k of Object.keys(archivosDelPase)) delete archivosDelPase[k]
+    Object.assign(archivosDelPase, buffers)
+    return { getAsBuffer: async () => Buffer.from('pkpass') }
+  }),
+}))
+
 jest.mock('../../../../src/config/env', () => ({
   get env() {
     return envMock
@@ -70,5 +81,29 @@ describe('signPass', () => {
     // El mensaje tiene que nombrar las variables: quien lo lea en producción
     // necesita saber qué poner, no que "algo falló".
     await expect(signPass({})).rejects.toThrow(/APPLE_PASS_CERT_PEM_BASE64/)
+  })
+
+  it('🔴 SIEMPRE incluye icon.png e icon@2x.png, o el iPhone no abre Wallet', async () => {
+    setEnv(COMPLETO)
+
+    await signPass({ formatVersion: 1 }, '#7ADD2C')
+
+    // Este es el test que faltaba y costó una prueba en un iPhone real (25-ago).
+    // Sin icon.png el pase se firma bien, la cadena de certificados valida, y el
+    // telefono lo degrada a una vista previa de archivo generica SIN decir por que.
+    expect(Object.keys(archivosDelPase).sort()).toEqual(['icon.png', 'icon@2x.png', 'pass.json'])
+    expect(archivosDelPase['icon.png'].subarray(0, 8)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )
+  })
+
+  it('un negocio sin color igual recibe iconos válidos', async () => {
+    setEnv(COMPLETO)
+
+    // Caso real: "Restaurante El Atole" tiene primaryColor = "".
+    await signPass({ formatVersion: 1 }, '')
+
+    expect(archivosDelPase['icon.png']).toBeInstanceOf(Buffer)
+    expect(archivosDelPase['icon.png'].length).toBeGreaterThan(50)
   })
 })

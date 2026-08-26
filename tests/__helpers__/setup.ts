@@ -209,6 +209,8 @@ const prismaMock: any = {
   // Compras (un modelo sin registrar aquí revienta con "Cannot read properties of undefined")
   supplier: createMockModel(),
   purchaseOrder: createMockModel(),
+  purchaseOrderInvoice: createMockModel(),
+  purchaseOrderInvoiceLine: createMockModel(),
   purchaseOrderItem: createMockModel(),
   // Payment config & analytics models
   merchantAccount: createMockModel(),
