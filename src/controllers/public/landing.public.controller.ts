@@ -513,6 +513,14 @@ Política de Privacidad: https://avoqado.io/privacy
         hutk: hutk ? String(hutk) : undefined,
         pageUri: pageUri ? String(pageUri) : undefined,
         pageName: pageName ? String(pageName) : undefined,
+        // La calificación del paso 2 — sin esto el CRM recibe un nombre y un
+        // correo, que es justo lo que no sirve para preparar una llamada.
+        // `employees` se llama así por herencia del formulario original, pero
+        // el dato que trae son SUCURSALES.
+        businessType: businessType ? String(businessType) : undefined,
+        branches: employees ? String(employees) : undefined,
+        revenue: revenue ? String(revenue) : undefined,
+        modules: modules ? String(modules) : undefined,
       }),
     ])
 

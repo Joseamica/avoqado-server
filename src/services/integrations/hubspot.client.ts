@@ -57,17 +57,28 @@ export interface HubspotLead {
   hutk?: string
   pageUri?: string
   pageName?: string
+  // Calificación del paso 2 del formulario. Opcional a propósito: ese paso se
+  // puede omitir y el lead sigue valiendo. Cada uno tiene su propiedad
+  // personalizada en HubSpot, todas de texto libre — ver la nota de abajo.
+  businessType?: string
+  branches?: string
+  revenue?: string
+  modules?: string
 }
 
 /**
  * Copia un lead al CRM. Devuelve `true` sólo si HubSpot confirmó el alta.
  *
- * Los campos que se mandan son los estándar de todo portal (`email`,
- * `firstname`, `lastname`, `phone`, `company`): la Forms API rechaza el envío
- * COMPLETO con `FIELD_NOT_IN_FORM_DEFINITION` si llega un campo que no está en
- * la definición del formulario, así que mandar de más aquí no degrada el lead,
- * lo pierde. La calificación (giro, sucursales, ventas, módulos) entra cuando
- * existan sus propiedades personalizadas en HubSpot y estén en el formulario.
+ * 🔴 La Forms API rechaza el envío COMPLETO con `FIELD_NOT_IN_FORM_DEFINITION`
+ * si llega UN campo que no está en la definición del formulario. Mandar de más
+ * aquí no degrada el lead: lo pierde entero. Por eso los nombres de abajo son
+ * literales verificados contra el portal, no inventados, y por eso los campos
+ * vacíos se filtran antes de salir.
+ *
+ * Las cuatro propiedades de calificación son de TEXTO LIBRE a propósito, no
+ * desplegables: un desplegable obliga a que el valor coincida exacto con su
+ * lista, y el día que alguien agregue un giro nuevo en la landing, HubSpot
+ * rechazaría ese lead completo. Se segmenta igual con filtros "contiene".
  */
 export async function sendLeadToHubspot(lead: HubspotLead): Promise<boolean> {
   if (!isHubspotEnabled()) return false
@@ -78,7 +89,12 @@ export async function sendLeadToHubspot(lead: HubspotLead): Promise<boolean> {
     { name: 'lastname', value: lead.lastName },
     { name: 'phone', value: lead.phone },
     { name: 'company', value: lead.companyName },
-  ].filter(f => typeof f.value === 'string' && f.value.trim() !== '')
+    // Nombres internos verificados en el portal 51907484 (2026-08-25).
+    { name: 'giro_del_negocio', value: lead.businessType },
+    { name: 'sucursales', value: lead.branches },
+    { name: 'ventas_al_mes', value: lead.revenue },
+    { name: 'modulos_de_interes', value: lead.modules },
+  ].filter(f => typeof f.value === 'string' && f.value.trim() !== '') as { name: string; value: string }[]
 
   // `context` es lo que convierte un renglón en un lead con historia. Se omite
   // cada campo vacío: HubSpot rechaza un `hutk` presente pero inválido.
