@@ -4666,7 +4666,7 @@ router.delete('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkP
  *       401:
  *         description: Unauthorized
  *       403:
- *         description: Forbidden - SUPERADMIN role required
+ *         description: Forbidden - OWNER or SUPERADMIN role required
  *       404:
  *         description: Terminal not found
  */
@@ -7543,9 +7543,9 @@ router.put(
  * /api/v2/dashboard/{venueId}/team/{teamMemberId}/hard-delete:
  *   delete:
  *     tags: [Team]
- *     summary: Hard delete team member (SUPERADMIN only)
+ *     summary: Hard delete team member (OWNER and above)
  *     description: |
- *       **SUPERADMIN ONLY**: Permanently deletes ALL data associated with a team member.
+ *       **OWNER or SUPERADMIN**: Permanently deletes the member's venue access and commission data.
  *       This includes: commission calculations, commission payouts, milestone progress,
  *       tip distributions, commission overrides, and the staff venue record itself.
  *
@@ -7589,7 +7589,7 @@ router.put(
 router.delete(
   '/venues/:venueId/team/:teamMemberId/hard-delete',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.SUPERADMIN]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN]),
   validateRequest(TeamMemberParamsSchema),
   teamController.hardDeleteTeamMember,
 )

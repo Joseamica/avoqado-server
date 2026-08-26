@@ -13,6 +13,12 @@ import {
   expireOldPoints,
 } from '../../../../src/services/dashboard/loyalty.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import * as loyaltyMobileService from '../../../../src/services/mobile/loyalty.mobile.service'
+
+// El canje seguro vive en el servicio del POS; aquí sólo se prueba que el del panel delega.
+jest.mock('../../../../src/services/mobile/loyalty.mobile.service', () => ({
+  redeemPointsToOrder: jest.fn(),
+}))
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 import { LoyaltyTransactionType } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -468,94 +474,72 @@ describe('Loyalty Dashboard Service', () => {
     })
   })
 
+  // 🔴 DINERO. `redeemPoints` quemaba los puntos y sólo DEVOLVÍA el monto del
+  // descuento: nadie creaba el OrderDiscount, así que el cliente perdía su saldo
+  // y la cuenta no bajaba un peso. El endpoint
+  // `POST /api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/redeem`
+  // está vivo en producción con permiso `loyalty:redeem`; hoy ninguna pantalla lo
+  // dispara, pero el método ya existe en el dashboard (`loyalty.service.ts`)
+  // esperando a que alguien lo conecte.
+  //
+  // Ahora delega en `redeemPointsToOrder`, que quema los puntos y crea el
+  // OrderDiscount en la MISMA transacción, topa contra la base (subtotal −
+  // descuentos, no total) y usa decremento condicional contra el doble canje
+  // concurrente. Las validaciones (programa activo, saldo, mínimo, orden ya
+  // pagada) viven allá y NO se duplican aquí — un segundo juego de reglas es
+  // exactamente cómo nacieron los dos caminos divergentes.
   describe('redeemPoints', () => {
-    it('should redeem points and update balance atomically', async () => {
-      const mockConfig = createMockLoyaltyConfig({ redemptionRate: new Decimal(0.01), minPointsRedeem: 100 })
-      const mockCustomer = createMockCustomer({ loyaltyPoints: 500 })
-      const mockTransaction = createMockTransaction({ type: LoyaltyTransactionType.REDEEM, points: -200 })
-      const updatedCustomer = { loyaltyPoints: 300 }
+    const mockedRedeemToOrder = loyaltyMobileService.redeemPointsToOrder as jest.Mock
 
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.customer.findFirst.mockResolvedValue(mockCustomer as any)
-      prismaMock.$transaction.mockResolvedValue([mockTransaction, updatedCustomer] as any)
+    beforeEach(() => {
+      mockedRedeemToOrder.mockReset()
+    })
+
+    it('delega en el camino transaccional que SÍ crea el OrderDiscount', async () => {
+      mockedRedeemToOrder.mockResolvedValue({
+        pointsRedeemed: 200,
+        discountAmount: 2,
+        newBalance: 300,
+        order: { total: 98 },
+      })
+
+      await redeemPoints('venue-123', 'customer-123', 200, 'order-123', 'staff-123')
+
+      // Ojo con el orden: allá es (venueId, orderId, customerId, points, staffId),
+      // aquí es (venueId, customerId, points, orderId, staffId). Invertirlos canjea
+      // los puntos de la orden equivocada.
+      expect(mockedRedeemToOrder).toHaveBeenCalledWith('venue-123', 'order-123', 'customer-123', 200, 'staff-123')
+    })
+
+    it('conserva los tres campos del contrato de la API', async () => {
+      mockedRedeemToOrder.mockResolvedValue({
+        pointsRedeemed: 200,
+        discountAmount: 2,
+        newBalance: 300,
+        order: { total: 98 },
+      })
 
       const result = await redeemPoints('venue-123', 'customer-123', 200, 'order-123', 'staff-123')
 
+      // Clientes viejos siguen leyendo estos tres. `order` se agrega, no reemplaza.
       expect(result.pointsRedeemed).toBe(200)
-      expect(result.discountAmount).toBe(2) // 200 * 0.01 = 2
+      expect(result.discountAmount).toBe(2)
       expect(result.newBalance).toBe(300)
-      expect(prismaMock.$transaction).toHaveBeenCalled()
     })
 
-    it('should throw BadRequestError if loyalty config is inactive', async () => {
-      const mockConfig = createMockLoyaltyConfig({ active: false })
+    it('propaga el error del camino transaccional sin quemar puntos por su cuenta', async () => {
+      mockedRedeemToOrder.mockRejectedValue(new BadRequestError('Puntos insuficientes: el cliente tiene 150'))
 
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-
-      await expect(redeemPoints('venue-123', 'customer-123', 200, 'order-123')).rejects.toThrow(BadRequestError)
-
+      // El mensaje EXACTO del delegado. El camino viejo tenía el suyo propio en
+      // inglés ('Insufficient points. Customer has ...'), así que esta aserción es
+      // lo que distingue delegar de volver a validar aquí: con el código anterior
+      // el test pasaba igual, y por eso no probaba nada.
       await expect(redeemPoints('venue-123', 'customer-123', 200, 'order-123')).rejects.toThrow(
-        'Loyalty program is not enabled for this venue',
+        'Puntos insuficientes: el cliente tiene 150',
       )
-    })
 
-    it('should throw BadRequestError if customer has insufficient points', async () => {
-      const mockConfig = createMockLoyaltyConfig()
-      const mockCustomer = createMockCustomer({ loyaltyPoints: 150 })
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.customer.findFirst.mockResolvedValue(mockCustomer as any)
-
-      await expect(redeemPoints('venue-123', 'customer-123', 200, 'order-123')).rejects.toThrow(BadRequestError)
-
-      await expect(redeemPoints('venue-123', 'customer-123', 200, 'order-123')).rejects.toThrow(
-        'Insufficient points. Customer has 150 points, tried to redeem 200',
-      )
-    })
-
-    it('should throw BadRequestError if points < minPointsRedeem', async () => {
-      const mockConfig = createMockLoyaltyConfig({ minPointsRedeem: 100 })
-      const mockCustomer = createMockCustomer({ loyaltyPoints: 500 })
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.customer.findFirst.mockResolvedValue(mockCustomer as any)
-
-      await expect(redeemPoints('venue-123', 'customer-123', 50, 'order-123')).rejects.toThrow(BadRequestError)
-
-      await expect(redeemPoints('venue-123', 'customer-123', 50, 'order-123')).rejects.toThrow('Minimum 100 points required for redemption')
-    })
-
-    it('should create transaction with negative points', async () => {
-      const mockConfig = createMockLoyaltyConfig()
-      const mockCustomer = createMockCustomer({ loyaltyPoints: 500 })
-      const mockTransaction = createMockTransaction({ type: LoyaltyTransactionType.REDEEM, points: -200 })
-      const updatedCustomer = { loyaltyPoints: 300 }
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.customer.findFirst.mockResolvedValue(mockCustomer as any)
-      prismaMock.$transaction.mockResolvedValue([mockTransaction, updatedCustomer] as any)
-
-      const result = await redeemPoints('venue-123', 'customer-123', 200, 'order-123')
-
-      // Verify points were redeemed with negative transaction
-      expect(result.pointsRedeemed).toBe(200)
-      expect(result.newBalance).toBe(300)
-      expect(prismaMock.$transaction).toHaveBeenCalled()
-    })
-
-    it('should round discount amount to 2 decimal places', async () => {
-      const mockConfig = createMockLoyaltyConfig({ redemptionRate: new Decimal(0.01234) })
-      const mockCustomer = createMockCustomer({ loyaltyPoints: 500 })
-      const mockTransaction = createMockTransaction()
-      const updatedCustomer = { loyaltyPoints: 400 }
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.customer.findFirst.mockResolvedValue(mockCustomer as any)
-      prismaMock.$transaction.mockResolvedValue([mockTransaction, updatedCustomer] as any)
-
-      const result = await redeemPoints('venue-123', 'customer-123', 100, 'order-123')
-
-      expect(result.discountAmount).toBe(1.23) // 100 * 0.01234 = 1.234 → 1.23
+      // Y este servicio ya no abre ninguna transacción propia contra Postgres.
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
     })
   })
 

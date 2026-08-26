@@ -79,7 +79,27 @@ export interface UnassignedNode extends ResponsibleCounts {
   promoters: PromoterNode[]
 }
 
-export interface InventoryByResponsible {
+export interface FilterOption {
+  id: string
+  name: string
+  itemCount: number
+}
+
+export interface InventoryFilters {
+  receivingVenues: FilterOption[]
+  categories: FilterOption[]
+  /**
+   * Almacén de entrada de la organización, con el que la pantalla abre
+   * preseleccionada. Sale de la configuración del módulo — NUNCA del nombre ni
+   * del slug del venue (`.claude/rules/critical-warnings.md`). Si nadie lo ha
+   * configurado es `null` y la tabla abre mostrando TODO, que es el default
+   * seguro: mostrar de más nunca esconde inventario.
+   */
+  defaultReceivingVenueId: string | null
+}
+
+/** Lo que devuelve la agregación pura: sin filtros, que no puede conocer. */
+export interface InventoryByResponsibleTable {
   /** La fila "Total País": ciudades + el renglón de no asignables. */
   total: ResponsibleCounts
   cities: CityNode[]
@@ -88,6 +108,12 @@ export interface InventoryByResponsible {
    * contradice el objetivo de control al 100% (decisión founder, 24-ago-2026).
    */
   unassigned: UnassignedNode
+}
+
+/** Lo que sirve el endpoint: la tabla más las opciones de los selectores. */
+export interface InventoryByResponsible extends InventoryByResponsibleTable {
+  /** Opciones para los selectores, SIEMPRE sobre el universo sin filtrar. */
+  filters: InventoryFilters
 }
 
 const UNKNOWN_PROMOTER_LABEL = 'Promotor no identificado'
@@ -197,7 +223,7 @@ function resolveSupervisorId(items: InventoryItemInput[]): string | null {
   return winner
 }
 
-export function buildInventoryByResponsible(input: BuildInventoryByResponsibleInput): InventoryByResponsible {
+export function buildInventoryByResponsible(input: BuildInventoryByResponsibleInput): InventoryByResponsibleTable {
   const { items, staff, receivingVenueId } = input
 
   const staffById = new Map(staff.map(s => [s.id, s]))
@@ -311,6 +337,19 @@ function pickVerificationStatus(orderItem: any): SaleVerificationStatus | null {
   return null
 }
 
+/** Cuenta ítems por opción y ordena por nombre, para que el selector sea estable. */
+function tally(rows: any[], pick: (row: any) => { id: string; name: string } | null | undefined): FilterOption[] {
+  const map = new Map<string, FilterOption>()
+  for (const row of rows) {
+    const opt = pick(row)
+    if (!opt) continue
+    const existing = map.get(opt.id)
+    if (existing) existing.itemCount += 1
+    else map.set(opt.id, { id: opt.id, name: opt.name, itemCount: 1 })
+  }
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'))
+}
+
 export class OrgInventoryByResponsibleService {
   /**
    * Devuelve la tabla Ciudad › Supervisor › Promotor para una organización.
@@ -326,7 +365,6 @@ export class OrgInventoryByResponsibleService {
       where: {
         organizationId,
         assignedPromoterId: { not: null },
-        ...(categoryId ? { categoryId } : {}),
         ...(dateFrom || dateTo ? { createdAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } } : {}),
       },
       select: {
@@ -335,6 +373,9 @@ export class OrgInventoryByResponsibleService {
         custodyState: true,
         promoterAcceptedAt: true,
         registeredFromVenueId: true,
+        registeredFromVenue: { select: { id: true, name: true } },
+        categoryId: true,
+        category: { select: { id: true, name: true } },
         orderItem: {
           select: { order: { select: { payments: { select: { saleVerification: { select: { status: true } } } } } } },
         },
@@ -388,7 +429,26 @@ export class OrgInventoryByResponsibleService {
         .map(v => ({ venueId: v.venueId, city: v.venue?.city ?? null, startDate: v.startDate })),
     }))
 
-    return buildInventoryByResponsible({ items, staff, receivingVenueId })
+    // Las opciones de los selectores se calculan sobre el universo SIN filtrar:
+    // si salieran del conjunto ya filtrado, elegir una sucursal dejaría el
+    // selector con una sola opción y el usuario no podría volver atrás.
+    const receivingVenues = tally(rows, r => r.registeredFromVenue)
+    const categories = tally(rows, r => r.category)
+
+    const moduleRow = await prisma.organizationModule.findFirst({
+      where: { organizationId, enabled: true, module: { code: 'SERIALIZED_INVENTORY' } },
+      select: { config: true },
+    })
+    const rawDefault = (moduleRow?.config as Record<string, unknown> | null)?.defaultReceivingVenueId
+    const configuredDefault = typeof rawDefault === 'string' && rawDefault.trim() !== '' ? rawDefault : null
+    // Un default que apunte a una sucursal inexistente dejaría la tabla vacía
+    // sin explicación: se ignora y se abre mostrando todo.
+    const defaultReceivingVenueId = receivingVenues.some(v => v.id === configuredDefault) ? configuredDefault : null
+
+    const scopedByCategory = categoryId ? items.filter((_, i) => rows[i].categoryId === categoryId) : items
+
+    const result = buildInventoryByResponsible({ items: scopedByCategory, staff, receivingVenueId })
+    return { ...result, filters: { receivingVenues, categories, defaultReceivingVenueId } }
   }
 }
 

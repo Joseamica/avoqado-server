@@ -493,3 +493,76 @@ describe('hardDeleteTeamMember — future commitment safety', () => {
     expect(prismaMock.staff.delete).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * El borrado permanente pasó de ser exclusivo de SUPERADMIN a estar disponible para
+ * el OWNER del negocio. Con SUPERADMIN bastaba la confianza del operador; abierto al
+ * dueño hacen falta las mismas dos guardas que ya protegían la baja suave, porque
+ * ahora sí hay alguien con motivo para borrar a un par.
+ */
+describe('hardDeleteTeamMember — guardas al abrirlo al OWNER', () => {
+  beforeEach(() => {
+    prismaMock.$transaction.mockReset().mockImplementation(async (callback: any) => callback(prismaMock))
+    prismaMock.$queryRaw.mockReset().mockResolvedValue([{ id: TEAM_MEMBER_ID, staffId: STAFF_ID, role: StaffRole.WAITER }])
+    prismaMock.staffVenue.count.mockReset().mockResolvedValue(2)
+    prismaMock.reservation.findFirst.mockReset().mockResolvedValue(null)
+    prismaMock.classSession.findFirst.mockReset().mockResolvedValue(null)
+    prismaMock.slotHold.findMany.mockReset().mockResolvedValue([])
+    prismaMock.commissionPayout.deleteMany.mockReset().mockResolvedValue({ count: 0 })
+    prismaMock.commissionCalculation.deleteMany.mockReset().mockResolvedValue({ count: 0 })
+    prismaMock.milestoneAchievement.deleteMany.mockReset().mockResolvedValue({ count: 0 })
+    prismaMock.commissionOverride.deleteMany.mockReset().mockResolvedValue({ count: 0 })
+    prismaMock.staffVenue.delete.mockReset().mockResolvedValue({ id: TEAM_MEMBER_ID })
+    prismaMock.staff.delete.mockReset()
+    lockAppointmentVenueMock.mockReset().mockResolvedValue(undefined)
+    loggerInfoMock.mockReset()
+  })
+
+  it.each([[StaffRole.OWNER], [StaffRole.SUPERADMIN]])('no borra a un %s', async role => {
+    prismaMock.$queryRaw.mockResolvedValue([{ id: TEAM_MEMBER_ID, staffId: STAFF_ID, role }])
+
+    await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, true)).rejects.toThrow(ConflictError)
+
+    expectNoHardDeleteWrites()
+  })
+
+  it('no deja al negocio sin ningún administrador activo', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ id: TEAM_MEMBER_ID, staffId: STAFF_ID, role: StaffRole.ADMIN }])
+    prismaMock.staffVenue.count.mockResolvedValue(0)
+
+    await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, true)).rejects.toThrow(ConflictError)
+
+    expectNoHardDeleteWrites()
+  })
+
+  it('sí borra a un ADMIN cuando queda otro administrador', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ id: TEAM_MEMBER_ID, staffId: STAFF_ID, role: StaffRole.ADMIN }])
+    prismaMock.staffVenue.count.mockResolvedValue(1)
+
+    await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, true)).resolves.toEqual(
+      expect.objectContaining({ deletedRecords: expect.objectContaining({ staffVenue: 1 }) }),
+    )
+  })
+
+  it('no cuenta administradores cuando el rol no es de administración', async () => {
+    // Un mesero nunca puede ser el último administrador: la consulta extra sobra.
+    await expect(hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, true)).resolves.toBeDefined()
+
+    expect(prismaMock.staffVenue.count).not.toHaveBeenCalled()
+  })
+
+  it('cuenta sólo administradores activos de ESTE negocio, excluyendo al que se borra', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ id: TEAM_MEMBER_ID, staffId: STAFF_ID, role: StaffRole.ADMIN }])
+
+    await hardDeleteTeamMember(VENUE_ID, TEAM_MEMBER_ID, true)
+
+    expect(prismaMock.staffVenue.count).toHaveBeenCalledWith({
+      where: {
+        venueId: VENUE_ID,
+        role: { in: [StaffRole.OWNER, StaffRole.ADMIN] },
+        active: true,
+        id: { not: TEAM_MEMBER_ID },
+      },
+    })
+  })
+})

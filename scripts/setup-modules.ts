@@ -39,6 +39,12 @@ export async function setupModules() {
       description:
         'Productos con código de barras único (SIMs, joyas, electrónicos). Cada item tiene un identificador único y se vende individualmente.',
       defaultConfig: {
+        // Almacén de entrada de la organización: el venue por el que se dan de
+        // alta los items antes de repartirlos. La pantalla de inventario por
+        // responsable abre filtrada por él. Vacío = abre mostrando todo.
+        // 🔴 Se guarda el ID, NUNCA el nombre ni el slug: atar comportamiento al
+        // nombre de un venue se rompe en silencio si el cliente lo renombra.
+        defaultReceivingVenueId: '',
         labels: {
           item: 'Producto',
           barcode: 'Código de Barras',
@@ -132,6 +138,10 @@ export async function setupModules() {
       configSchema: {
         type: 'object',
         properties: {
+          // ID del venue que hace de almacén de entrada. Declarado aquí para que
+          // AJV lo acepte y para que sea descubrible: un campo que sólo vive en la
+          // base de un cliente es invisible para quien lea el módulo.
+          defaultReceivingVenueId: { type: 'string' },
           labels: {
             type: 'object',
             properties: {

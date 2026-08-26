@@ -1019,15 +1019,24 @@ export async function removeTeamMember(venueId: string, teamMemberId: string): P
 }
 
 /**
- * Hard delete team member - SUPERADMIN ONLY
- * Permanently removes all data associated with the team member from the venue.
- * This includes: commissions, tip distributions, milestone progress, and the staff venue record.
+ * Hard delete team member - OWNER and SUPERADMIN
+ * Permanently removes the member's venue access plus their commission data
+ * (payouts, calculations, overrides, milestones).
  *
- * WARNING: This action is irreversible and should only be used for:
- * - GDPR "right to be forgotten" requests
- * - Removing test/demo data
- * - Legal compliance requirements
+ * The Staff row and their orders/payments are intentionally kept: those are
+ * financial history that must survive the person leaving. For the everyday
+ * "this person no longer works here" case use removeTeamMember, which
+ * deactivates and keeps everything — the same call Square makes, since it has
+ * no permanent delete for team members at all.
+ *
+ * WARNING: irreversible. Guarded so it cannot remove an owner or the venue's
+ * last administrator.
  */
+const HARD_DELETE_PROTECTED_ROLE_MESSAGE =
+  'No se puede eliminar permanentemente a un propietario. Cambia primero su rol si necesitas darlo de baja.'
+const HARD_DELETE_LAST_ADMIN_MESSAGE =
+  'No se puede eliminar permanentemente al ultimo administrador del negocio.'
+
 export async function hardDeleteTeamMember(
   venueId: string,
   teamMemberId: string,
@@ -1038,8 +1047,8 @@ export async function hardDeleteTeamMember(
   }
 
   const { staffId, deletedRecords } = await withSerializableRetry(async tx => {
-    const memberships = await tx.$queryRaw<Array<{ id: string; staffId: string }>>(Prisma.sql`
-      SELECT id, "staffId"
+    const memberships = await tx.$queryRaw<Array<{ id: string; staffId: string; role: StaffRole }>>(Prisma.sql`
+      SELECT id, "staffId", role
       FROM "StaffVenue"
       WHERE id = ${teamMemberId}
         AND "venueId" = ${venueId}
@@ -1051,6 +1060,29 @@ export async function hardDeleteTeamMember(
     }
 
     const staffId = memberships[0].staffId
+    const memberRole = memberships[0].role
+
+    // El borrado permanente lo puede ejecutar el OWNER, no solo un SUPERADMIN. Estas dos
+    // guardas son las mismas que ya protegian la baja suave: sin ellas, abrir la accion al
+    // dueno permitiria borrar a un par o dejar el negocio sin nadie que lo administre.
+    if (memberRole === StaffRole.OWNER || memberRole === StaffRole.SUPERADMIN) {
+      throw new ConflictError(HARD_DELETE_PROTECTED_ROLE_MESSAGE)
+    }
+
+    if (memberRole === StaffRole.ADMIN) {
+      const remainingAdmins = await tx.staffVenue.count({
+        where: {
+          venueId,
+          role: { in: [StaffRole.OWNER, StaffRole.ADMIN] },
+          active: true,
+          id: { not: teamMemberId },
+        },
+      })
+      if (remainingAdmins === 0) {
+        throw new ConflictError(HARD_DELETE_LAST_ADMIN_MESSAGE)
+      }
+    }
+
     const futureReservation = await tx.reservation.findFirst({
       where: {
         venueId,
@@ -1148,7 +1180,7 @@ export async function hardDeleteTeamMember(
     return { staffId, deletedRecords }
   })
 
-  logger.info('Team member hard deleted (SUPERADMIN)', {
+  logger.info('Team member hard deleted', {
     teamMemberId,
     venueId,
     staffId,

@@ -291,64 +291,40 @@ export async function earnPoints(
 }
 
 /**
- * Redeem loyalty points for discount
- * Called during checkout when customer wants to use points
+ * Canjea puntos por un descuento en la cuenta.
+ *
+ * 🔴 DINERO. Esta función QUEMABA los puntos y sólo DEVOLVÍA el monto del
+ * descuento: nadie creaba el OrderDiscount, así que el saldo del cliente
+ * desaparecía y la cuenta no bajaba un peso. El endpoint que la expone
+ * (`POST /api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/redeem`,
+ * permiso `loyalty:redeem`) está vivo en producción; lo único que evitó el daño
+ * es que ninguna pantalla lo llamaba todavía — el método ya existe esperando en
+ * `avoqado-web-dashboard/src/services/loyalty.service.ts`.
+ *
+ * Ahora delega en el ÚNICO canje que mueve las dos cosas juntas.
+ * `redeemPointsToOrder` hace, en UNA transacción: crea la LoyaltyTransaction
+ * REDEEM, decrementa el saldo de forma CONDICIONAL (`updateMany` con
+ * `loyaltyPoints: { gte }`, que es lo que impide que dos canjes concurrentes
+ * quemen los mismos puntos) y crea el OrderDiscount ligado a esa transacción
+ * — ese vínculo es lo que permite devolver los puntos si el descuento se quita.
+ * Además topa el descuento contra la BASE (subtotal − descuentos) y no contra
+ * el total, que incluye cargos por servicio que un descuento no compensa.
+ *
+ * No se duplican aquí las validaciones (programa activo, saldo, mínimo, orden
+ * ya pagada): viven en el delegado. Un segundo juego de reglas es exactamente
+ * cómo nacieron estos dos caminos divergentes.
+ *
+ * Import dinámico a propósito: `loyalty.mobile.service` importa
+ * `getOrCreateLoyaltyConfig` de este archivo, así que un import estático cierra
+ * un ciclo. Mismo patrón que ya usa `order.mobile.service`.
+ *
+ * 🔴 `staffId` tiene que ser un **Staff.id**, NO un StaffVenue.id: el delegado
+ * resuelve la fila de StaffVenue por su cuenta. Pasarle un StaffVenue.id no
+ * revienta — devuelve undefined y pierde la atribución en silencio.
  */
-export async function redeemPoints(
-  venueId: string,
-  customerId: string,
-  points: number,
-  orderId: string,
-  staffId?: string,
-): Promise<{ pointsRedeemed: number; discountAmount: number; newBalance: number }> {
-  const config = await getOrCreateLoyaltyConfig(venueId)
-
-  if (!config.active) {
-    throw new BadRequestError('Loyalty program is not enabled for this venue')
-  }
-
-  // Validate customer has enough points
-  const currentBalance = await getCustomerPointsBalance(venueId, customerId)
-
-  if (currentBalance < points) {
-    throw new BadRequestError(`Insufficient points. Customer has ${currentBalance} points, tried to redeem ${points}`)
-  }
-
-  if (points < config.minPointsRedeem) {
-    throw new BadRequestError(`Minimum ${config.minPointsRedeem} points required for redemption`)
-  }
-
-  // Calculate discount value
-  const discountAmount = points * config.redemptionRate
-
-  // Create transaction and update customer balance
-  const [_transaction, customer] = await prisma.$transaction([
-    prisma.loyaltyTransaction.create({
-      data: {
-        customerId,
-        type: LoyaltyTransactionType.REDEEM,
-        points: -points, // Negative for redemption
-        orderId,
-        reason: `Redeemed ${points} points for $${discountAmount.toFixed(2)} discount`,
-        createdById: staffId,
-      },
-    }),
-    prisma.customer.update({
-      where: { id: customerId },
-      data: {
-        loyaltyPoints: { decrement: points },
-      },
-      select: {
-        loyaltyPoints: true,
-      },
-    }),
-  ])
-
-  return {
-    pointsRedeemed: points,
-    discountAmount: Math.round(discountAmount * 100) / 100,
-    newBalance: customer.loyaltyPoints,
-  }
+export async function redeemPoints(venueId: string, customerId: string, points: number, orderId: string, staffId?: string) {
+  const { redeemPointsToOrder } = await import('../mobile/loyalty.mobile.service')
+  return redeemPointsToOrder(venueId, orderId, customerId, points, staffId)
 }
 
 /**
