@@ -1486,7 +1486,7 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
           select: { id: true, name: true, price: true, duration: true },
         })
       : []
-    const serviceById = new Map(serviceRows.map(p => [p.id, p]))
+    const serviceById = new Map(serviceRows.map(p => [p.id, p] as const))
     const services = serviceIds
       .map(id => serviceById.get(id))
       .filter((p): p is NonNullable<typeof p> => Boolean(p))

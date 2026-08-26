@@ -52,8 +52,9 @@ export async function createOAuthSession(args: CreateOAuthSessionArgs) {
       intent: args.intent,
       venueId: args.venueId,
       staffId: args.staffId,
-      encryptedRefreshToken: args.encryptedRefreshToken,
-      encryptedAccessToken: args.encryptedAccessToken,
+      // new Uint8Array(buf): mismos bytes; TS7 ya no considera Buffer asignable a Bytes de Prisma
+      encryptedRefreshToken: new Uint8Array(args.encryptedRefreshToken),
+      encryptedAccessToken: new Uint8Array(args.encryptedAccessToken),
       accessTokenExpiresAt: args.accessTokenExpiresAt,
       googleAccountEmail: args.googleAccountEmail,
       googleAccountSub: args.googleAccountSub,
