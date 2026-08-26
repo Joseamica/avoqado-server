@@ -230,6 +230,13 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'teams:delete': ['teams:read', 'teams:delete'],
   'teams:invite': ['teams:read', 'teams:invite'],
 
+  // Expediente del personal. Puerta PROPIA a propósito: son datos personales sensibles
+  // (identificación, CURP, número de seguro social, contratos). Reusar `teams:read` los
+  // abriría a MANAGER, que lo tiene — y un gerente no debe poder abrir la identificación
+  // de sus compañeros. Ver el expediente implica poder ver al equipo, no al revés.
+  'staff-documents:read': ['staff-documents:read', 'teams:read'],
+  'staff-documents:write': ['staff-documents:write', 'staff-documents:read', 'teams:read'],
+
   // ===========================
   // TPV (Point of Sale)
   // ===========================
@@ -1064,6 +1071,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.ADMIN]: [
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'staff-documents:read', // Expediente del personal — datos sensibles, sólo OWNER/ADMIN
+    'staff-documents:write',
     'home:*',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -1194,6 +1203,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.OWNER]: [
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'staff-documents:read', // Expediente del personal — datos sensibles, sólo OWNER/ADMIN
+    'staff-documents:write',
     'home:*',
     'catalog-venue:read',
     'catalog-venue:request-override',
@@ -1832,6 +1843,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   ],
   reviews: ['reviews:read', 'reviews:respond'],
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
+  'staff-documents': ['staff-documents:read', 'staff-documents:write'],
   tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
   'class-sessions': ['class-sessions:read-assigned'],

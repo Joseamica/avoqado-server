@@ -1,0 +1,12 @@
+{
+  // Mismo alcance que tsconfig.build.json (src + prisma, sin tests ni scripts) pero SIN EMITIR.
+  // Existe para que el typecheck pueda ser incremental sin arriesgar un `dist` rancio:
+  // `tsconfig.build.json` produce el artefacto de producción y se deja siempre desde cero.
+  // Uso: ./scripts/avq-verify.sh avoqado-server npx tsc -p tsconfig.typecheck.json
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/tsc/build.tsbuildinfo"
+  }
+}

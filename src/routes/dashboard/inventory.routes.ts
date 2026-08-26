@@ -13,6 +13,7 @@ import * as recipeController from '../../controllers/dashboard/inventory/recipe.
 import * as pricingController from '../../controllers/dashboard/inventory/pricing.controller'
 import * as supplierController from '../../controllers/dashboard/inventory/supplier.controller'
 import * as purchaseOrderController from '../../controllers/dashboard/inventory/purchaseOrder.controller'
+import * as purchaseOrderInvoiceController from '../../controllers/dashboard/inventory/purchaseOrderInvoice.controller'
 import * as alertController from '../../controllers/dashboard/inventory/alert.controller'
 import * as reportController from '../../controllers/dashboard/inventory/report.controller'
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
@@ -999,6 +1000,28 @@ router.post(
  *     summary: Generate PDF for purchase order
  */
 router.get('/purchase-orders/:purchaseOrderId/pdf', checkPermission('inventory:read'), purchaseOrderController.generatePDF)
+
+// ── Factura del proveedor sobre la orden ──────────────────────────────────────
+//
+// La factura NO dice qué compraste: la orden ya lo sabe. Esto comprueba que te cobraron lo
+// que pediste, y 🔴 NUNCA toca inventario ni costos — una diferencia se avisa vía
+// `matchStatus`, no se corrige.
+//
+// Doble candado a propósito: el router entero ya exige INVENTORY_TRACKING (arriba), y esta
+// ruta añade CFDI porque además lee un comprobante fiscal. Hoy ambos son PREMIUM; si algún
+// día se separan, la ruta seguirá pidiendo las dos capacidades que de verdad usa.
+router.get(
+  '/purchase-orders/:purchaseOrderId/invoices',
+  checkFeatureAccess('CFDI'),
+  checkPermission('inventory:read'),
+  purchaseOrderInvoiceController.listInvoices,
+)
+router.post(
+  '/purchase-orders/:purchaseOrderId/invoices',
+  checkFeatureAccess('CFDI'),
+  checkPermission('inventory:update'),
+  purchaseOrderInvoiceController.attachInvoice,
+)
 
 // ===========================================
 // PRODUCT LABELS ROUTES

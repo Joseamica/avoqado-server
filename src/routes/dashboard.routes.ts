@@ -31,6 +31,8 @@ import { StaffRole } from '../security'
 
 // Importa el SCHEMA de Zod, no el tipo DTO, para el middleware de validación
 import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
+import * as attendanceController from '../controllers/dashboard/attendance.dashboard.controller'
+import * as staffDocumentController from '../controllers/dashboard/staffDocument.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
 import * as availableBalanceController from '../controllers/dashboard/availableBalance.dashboard.controller'
 import * as settlementIncidentController from '../controllers/dashboard/settlementIncident.dashboard.controller'
@@ -105,6 +107,13 @@ import {
   assistantQuerySchema,
   feedbackSubmissionSchema,
 } from '../schemas/dashboard/assistant.schema'
+import {
+  StaffTimeSummarySchema,
+  ValidateTimeEntrySchema,
+  VenueIdOnlySchema,
+  VenueTimeEntriesQuerySchema,
+} from '../schemas/dashboard/attendance.schema'
+import { AddStaffDocumentSchema, StaffDocumentIdParamsSchema, StaffDocumentsParamsSchema } from '../schemas/dashboard/staffDocument.schema'
 import {
   dateRangeQuerySchema,
   timelineQuerySchema,
@@ -4666,7 +4675,7 @@ router.delete('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkP
  *       401:
  *         description: Unauthorized
  *       403:
- *         description: Forbidden - SUPERADMIN role required
+ *         description: Forbidden - OWNER or SUPERADMIN role required
  *       404:
  *         description: Terminal not found
  */
@@ -7543,9 +7552,9 @@ router.put(
  * /api/v2/dashboard/{venueId}/team/{teamMemberId}/hard-delete:
  *   delete:
  *     tags: [Team]
- *     summary: Hard delete team member (SUPERADMIN only)
+ *     summary: Hard delete team member (OWNER and above)
  *     description: |
- *       **SUPERADMIN ONLY**: Permanently deletes ALL data associated with a team member.
+ *       **OWNER or SUPERADMIN**: Permanently deletes the member's venue access and commission data.
  *       This includes: commission calculations, commission payouts, milestone progress,
  *       tip distributions, commission overrides, and the staff venue record itself.
  *
@@ -7589,9 +7598,131 @@ router.put(
 router.delete(
   '/venues/:venueId/team/:teamMemberId/hard-delete',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.SUPERADMIN]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN]),
   validateRequest(TeamMemberParamsSchema),
   teamController.hardDeleteTeamMember,
+)
+
+// ==========================================
+// STAFF DOCUMENTS (EXPEDIENTE) ROUTES
+// ==========================================
+//
+// 🔴 DATOS PERSONALES SENSIBLES: identificación, CURP, número de seguro social, contratos.
+// Puerta PROPIA (`staff-documents:*`), no `teams:read` — ese lo tiene MANAGER, y un gerente
+// no debe poder abrir la identificación de sus compañeros. Por defecto sólo OWNER y ADMIN.
+//
+// Dar de baja un documento NO borra la fila: en México hay obligación de conservar ciertos
+// documentos laborales después de que la persona se va.
+
+router.get(
+  '/venues/:venueId/team/:staffId/documents',
+  authenticateTokenMiddleware,
+  checkPermission('staff-documents:read'),
+  validateRequest(StaffDocumentsParamsSchema),
+  staffDocumentController.listDocuments,
+)
+
+router.post(
+  '/venues/:venueId/team/:staffId/documents',
+  authenticateTokenMiddleware,
+  checkPermission('staff-documents:write'),
+  validateRequest(AddStaffDocumentSchema),
+  staffDocumentController.addDocument,
+)
+
+router.delete(
+  '/venues/:venueId/staff-documents/:documentId',
+  authenticateTokenMiddleware,
+  checkPermission('staff-documents:write'),
+  validateRequest(StaffDocumentIdParamsSchema),
+  staffDocumentController.removeDocument,
+)
+
+// ==========================================
+// ATTENDANCE (TIME CLOCK) ROUTES
+// ==========================================
+//
+// El checador ya lo consumen la TPV, Android e iOS contra `/tpv` y `/mobile`. Estas
+// rutas NO permiten marcar entrada ni salida — eso solo pasa en el aparato del negocio,
+// donde la foto y el GPS significan algo. Aqui solo se lee y se aprueba.
+//
+// Permiso: se reusa `tpv-time-entries:read` / `:write`, que ya existen y ya distinguen
+// a quien revisa (OWNER, ADMIN, MANAGER) de quien solo checa (CASHIER, WAITER). El
+// prefijo dice "tpv" por donde nacio, no por donde se puede usar.
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/time-entries:
+ *   get:
+ *     tags: [Attendance]
+ *     summary: Checadas del negocio, con filtros opcionales
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Lista de checadas }
+ *       403: { description: Forbidden - requires tpv-time-entries:read }
+ */
+router.get(
+  '/venues/:venueId/time-entries',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-time-entries:read'),
+  validateRequest(VenueTimeEntriesQuerySchema),
+  attendanceController.getTimeEntries,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/time-entries/active:
+ *   get:
+ *     tags: [Attendance]
+ *     summary: Quien esta dentro en este momento
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Personal con checada abierta }
+ */
+router.get(
+  '/venues/:venueId/time-entries/active',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-time-entries:read'),
+  validateRequest(VenueIdOnlySchema),
+  attendanceController.getActiveStaff,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/time-entries/summary/{staffId}:
+ *   get:
+ *     tags: [Attendance]
+ *     summary: Horas trabajadas por una persona en un rango
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Total de horas y descansos }
+ *       404: { description: El empleado no pertenece a este negocio }
+ */
+router.get(
+  '/venues/:venueId/time-entries/summary/:staffId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-time-entries:read'),
+  validateRequest(StaffTimeSummarySchema),
+  attendanceController.getStaffTimeSummary,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/time-entries/{timeEntryId}/validate:
+ *   post:
+ *     tags: [Attendance]
+ *     summary: Aprobar o rechazar una checada
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Checada validada }
+ *       404: { description: La checada no es de este negocio }
+ */
+router.post(
+  '/venues/:venueId/time-entries/:timeEntryId/validate',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-time-entries:write'),
+  validateRequest(ValidateTimeEntrySchema),
+  attendanceController.validateTimeEntry,
 )
 
 // ==========================================

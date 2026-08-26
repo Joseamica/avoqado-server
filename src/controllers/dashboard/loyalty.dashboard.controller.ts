@@ -107,9 +107,13 @@ export async function redeemPoints(req: Request, res: Response) {
   const { venueId, customerId } = req.params
   const { points, orderId } = req.body
   const authContext = (req as any).authContext
-  const staffId = authContext?.userId ? await getStaffVenueId(venueId, authContext.userId) : undefined
 
-  const result = await loyaltyService.redeemPoints(venueId, customerId, points, orderId, staffId)
+  // 🔴 Se pasa el Staff.id CRUDO, no el StaffVenue.id. El canje real vive en
+  // `redeemPointsToOrder` y resuelve la fila de StaffVenue por su cuenta;
+  // traducirlo aquí — como sí hacen adjustPoints y sus vecinos, que llaman
+  // servicios que esperan un StaffVenue.id — le entrega un id que nunca va a
+  // encontrar en `staffId_venueId`, y la atribución del canje se pierde SIN error.
+  const result = await loyaltyService.redeemPoints(venueId, customerId, points, orderId, authContext?.userId)
 
   return res.status(200).json(result)
 }

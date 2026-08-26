@@ -460,7 +460,7 @@ export async function handleAuthError(connectionId: string): Promise<void> {
     await prisma.googleCalendarConnection.update({
       where: { id: conn.id },
       data: {
-        accessTokenCiphertext: encryptToken(creds.access_token),
+        accessTokenCiphertext: new Uint8Array(encryptToken(creds.access_token)),
         accessTokenExpiresAt: new Date(creds.expiry_date ?? Date.now() + 3_600_000),
       },
     })

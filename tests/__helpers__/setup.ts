@@ -142,6 +142,7 @@ const prismaMock: any = {
   customerGroup: createMockModel(),
   loyaltyConfig: createMockModel(),
   loyaltyTransaction: createMockModel(),
+  walletPass: createMockModel(),
   // Discount & Coupon models
   discount: createMockModel(),
   couponCode: createMockModel(),
@@ -208,6 +209,9 @@ const prismaMock: any = {
   // Compras (un modelo sin registrar aquí revienta con "Cannot read properties of undefined")
   supplier: createMockModel(),
   purchaseOrder: createMockModel(),
+  purchaseOrderInvoice: createMockModel(),
+  purchaseOrderInvoiceLine: createMockModel(),
+  staffDocument: createMockModel(),
   purchaseOrderItem: createMockModel(),
   // Payment config & analytics models
   merchantAccount: createMockModel(),

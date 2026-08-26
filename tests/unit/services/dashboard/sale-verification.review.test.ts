@@ -309,7 +309,7 @@ describe('reviewSaleVerification', () => {
   // only one land; the loser (P2025) is resolved against what the winner recorded.
   // ---------------------------------------------------------------------------
 
-  it('race loser with the SAME decision: no second write/audit/socket, returns the winner\'s review', async () => {
+  it("race loser with the SAME decision: no second write/audit/socket, returns the winner's review", async () => {
     const winnerRow = buildUpdatedRow({ reviewedById: 'staff-winner' })
     mockedFindUnique.mockResolvedValueOnce(baseExisting).mockResolvedValueOnce(winnerRow)
     mockedUpdate.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }))
@@ -328,7 +328,7 @@ describe('reviewSaleVerification', () => {
     expect(mockedBroadcast).not.toHaveBeenCalled()
   })
 
-  it('race loser with a CONFLICTING decision: 409, the winner\'s decision stands', async () => {
+  it("race loser with a CONFLICTING decision: 409, the winner's decision stands", async () => {
     mockedFindUnique.mockResolvedValueOnce(baseExisting).mockResolvedValueOnce(buildUpdatedRow({ status: 'COMPLETED' }))
     mockedUpdate.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }))
 

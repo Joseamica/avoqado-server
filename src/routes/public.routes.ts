@@ -16,6 +16,7 @@ import * as customerPortalController from '../controllers/public/customerPortal.
 import * as otpAuthController from '../controllers/public/otpAuth.public.controller'
 import * as paymentLinkPublicController from '../controllers/public/paymentLink.public.controller'
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
+import * as walletPassController from '../controllers/public/walletPass.public.controller'
 import { submitContact, submitLabsBrief, continuarOnboarding } from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
@@ -370,6 +371,30 @@ router.post(
 // connected processor with a host/customer-provided amount — no payment link.
 
 router.get('/venues/:venueSlug/checkout-info', readLimit, validateRequest(venueCheckoutInfoSchema), venueCheckoutController.getCheckoutInfo)
+
+// ==========================================
+// CREDENCIAL DE CLIENTE — Apple Wallet
+// ==========================================
+// Publica porque el iPhone descarga el .pkpass sin sesion. El aislamiento no lo da
+// un token: el controlador exige que el cliente pertenezca a ESE venue.
+//
+// El codigo LOYALTY_WALLET queda en PRO sin tocar basePlan.service: el gating es
+// permitir-por-default, asi que un codigo que NO esta en PREMIUM_ONLY_CODES lo
+// obtienen PRO y PREMIUM, y FREE no. Agregarlo a esa lista lo volveria PREMIUM.
+//
+// El mensaje es para el CLIENTE FINAL: el plan es del negocio, no suyo, asi que
+// nunca menciona planes ni mejoras de suscripcion.
+const requireWalletPlan = checkPublicVenueFeature(
+  'LOYALTY_WALLET',
+  'Este negocio todavia no tiene tarjeta digital disponible.',
+)
+
+router.get(
+  '/venues/:venueSlug/wallet/apple/:customerId',
+  readLimit,
+  requireWalletPlan,
+  walletPassController.downloadApplePass,
+)
 
 router.post(
   '/venues/:venueSlug/checkout/payment-intent',

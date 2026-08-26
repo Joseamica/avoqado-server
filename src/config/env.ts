@@ -184,6 +184,26 @@ const envSchema = z.object({
   // payments fail with code 2034. Default unset / false in prod.
   MP_SANDBOX_MODE: z.enum(['true', 'false']).optional(),
 
+  // ==========================================
+  // Apple Wallet — credencial de cliente (Plan A)
+  // ==========================================
+  // 🔴 TODAS opcionales a propósito. Si se declaran requeridas, cualquier entorno
+  // sin certificado — CI, la máquina de otro desarrollador, los tests — muere al
+  // importar este archivo, porque un parseo fallido hace `process.exit(1)` y se
+  // lleva la API entera (pagos, POS, órdenes) por una tarjeta de lealtad.
+  // La ausencia se maneja al firmar: `walletSigningAvailable()` lo reporta y el
+  // endpoint responde un error entendible en vez de tronar.
+  //
+  // 🔴 PEM, no .p12: `passkit-generator` pide el certificado y la llave POR
+  // SEPARADO. Pasarle un .p12 falla con un error de OpenSSL que no dice cuál de
+  // las dos piezas estaba mal. Conversión en el Plan A, Tarea 0.
+  APPLE_PASS_TYPE_ID: z.string().optional(), // pass.io.avoqado.loyalty
+  APPLE_TEAM_ID: z.string().optional(),
+  APPLE_PASS_CERT_PEM_BASE64: z.string().optional(), // pass-cert.pem en base64
+  APPLE_PASS_KEY_PEM_BASE64: z.string().optional(), // pass-key.pem en base64
+  APPLE_PASS_KEY_PASSWORD: z.string().optional(), // la puesta al exportar la llave
+  APPLE_WWDR_PEM_BASE64: z.string().optional(), // wwdr.pem (G4) en base64
+
   // Google OAuth
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),

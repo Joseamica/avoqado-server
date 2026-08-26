@@ -23,11 +23,45 @@ const TIPO_COMPROBANTE: Record<string, CreateExpenseInput['comprobanteTipo']> = 
   T: 'TRASLADO',
 }
 
+/**
+ * Un renglón del CFDI, tal como lo necesita la conciliación contra una orden de compra.
+ *
+ * `supplierItemCode` es el `NoIdentificacion` del SAT: el código con el que el PROVEEDOR llama
+ * a ese producto. Es lo único estable entre una factura y la siguiente — la descripción es
+ * texto libre y cambia. Es opcional en el CFDI: sin él, ese renglón no se puede casar solo.
+ */
+export interface CfdiConcepto {
+  supplierItemCode: string | null
+  descripcion: string
+  claveProdServ: string | null
+  /** Catálogo de unidades del SAT (`KGM`, `H87`…), NO nuestro enum `Unit`. */
+  claveUnidad: string | null
+  cantidad: number
+  valorUnitarioCents: number
+  importeCents: number
+  descuentoCents: number
+}
+
+export interface CfdiReceived {
+  expense: CreateExpenseInput
+  conceptos: CfdiConcepto[]
+}
+
 const pesos = (s: string | number | undefined): number => Math.round(parseFloat(String(s ?? '0')) * 100)
 const toArray = <T>(x: T | T[] | undefined): T[] => (x == null ? [] : Array.isArray(x) ? x : [x])
 
-/** Parsea un CFDI 4.0 recibido. `ourRfc` = RFC del contribuyente receptor (debe coincidir). */
+/**
+ * Parsea un CFDI 4.0 recibido. `ourRfc` = RFC del contribuyente receptor (debe coincidir).
+ *
+ * Se mantiene con la MISMA firma y el MISMO valor de retorno que antes de que existieran los
+ * conceptos: el Buzón de gastos, que sólo necesita totales, no cambia una línea.
+ */
 export function parseCfdiXml(xml: string, ourRfc: string): CreateExpenseInput {
+  return parseCfdiReceived(xml, ourRfc).expense
+}
+
+/** Igual que `parseCfdiXml`, más el detalle de renglones que la conciliación necesita. */
+export function parseCfdiReceived(xml: string, ourRfc: string): CfdiReceived {
   if (!xml || !xml.trim()) throw new BadRequestError('El XML del CFDI está vacío.')
 
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', removeNSPrefix: true })
@@ -96,7 +130,19 @@ export function parseCfdiXml(xml: string, ourRfc: string): CreateExpenseInput {
   const descuentoCents = pesos(c['@_Descuento'])
   const totalCents = pesos(c['@_Total'])
 
-  return {
+  // Renglones. `Conceptos.Concepto` llega como objeto cuando hay uno solo: toArray lo normaliza.
+  const conceptos: CfdiConcepto[] = toArray<any>(c.Conceptos?.Concepto).map(co => ({
+    supplierItemCode: co['@_NoIdentificacion'] != null ? String(co['@_NoIdentificacion']).trim() || null : null,
+    descripcion: String(co['@_Descripcion'] ?? '').trim(),
+    claveProdServ: co['@_ClaveProdServ'] != null ? String(co['@_ClaveProdServ']).trim() : null,
+    claveUnidad: co['@_ClaveUnidad'] != null ? String(co['@_ClaveUnidad']).trim() : null,
+    cantidad: parseFloat(String(co['@_Cantidad'] ?? '0')) || 0,
+    valorUnitarioCents: pesos(co['@_ValorUnitario']),
+    importeCents: pesos(co['@_Importe']),
+    descuentoCents: pesos(co['@_Descuento']),
+  }))
+
+  const expense: CreateExpenseInput = {
     proveedorRfc: String(emisor['@_Rfc']).toUpperCase().trim(),
     proveedorNombre: String(emisor['@_Nombre'] ?? emisor['@_Rfc']).trim(),
     proveedorRegimen: emisor['@_RegimenFiscal'] ? String(emisor['@_RegimenFiscal']) : null,
@@ -121,4 +167,6 @@ export function parseCfdiXml(xml: string, ourRfc: string): CreateExpenseInput {
     folio: c['@_Folio'] ? String(c['@_Folio']) : null,
     source: 'XML_UPLOAD',
   }
+
+  return { expense, conceptos }
 }
