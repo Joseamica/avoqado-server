@@ -101,7 +101,10 @@ export function buildStoreCardPass(args: BuildStoreCardArgs): Record<string, unk
       secondaryFields: [
         {
           key: 'reward',
-          label: 'Tu premio',
+          // 🔴 "Premio", no "Tu premio": con el placeholder por defecto la etiqueta
+          // y el valor salian IDENTICOS en la tarjeta ("Tu premio / Tu premio"),
+          // que en un iPhone se lee como un error. Solo se ve renderizando.
+          label: 'Premio',
           value: content.rewardLabel,
         },
       ],

@@ -49,7 +49,7 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
       },
       // Plan A: el avance va fijo a propósito. El motor de sellos de verdad es el
       // Plan B — enseñar esto como producto terminado sería vender humo.
-      content: { stampsEarned: 0, stampsRequired: 10, rewardLabel: 'Tu premio' },
+      content: { stampsEarned: 0, stampsRequired: 10, rewardLabel: 'Al juntar 10 sellos' },
       serialNumber: pass.serialNumber,
       authToken: pass.authToken,
       qrToken: pass.qrToken,

@@ -53,6 +53,9 @@ describe('buildStoreCardPass', () => {
     const pass = buildStoreCardPass(base) as any
     expect(pass.storeCard.primaryFields[0].value).toBe('3 de 10')
     expect(pass.storeCard.secondaryFields[0].value).toBe('Un café gratis')
+    // La etiqueta NO puede repetir el valor: con el placeholder por defecto salia
+    // "Tu premio / Tu premio" en la tarjeta real, y se lee como un error.
+    expect(pass.storeCard.secondaryFields[0].label).toBe('Premio')
   })
 
   it('convierte el color de marca a rgb, que es lo único que Apple entiende', () => {
