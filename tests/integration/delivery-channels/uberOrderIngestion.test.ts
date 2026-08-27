@@ -205,12 +205,16 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
   it('🔴 EL PEDIDO REAL de Uber, de punta a punta: JSON crudo → traductor → venta', async () => {
     // Cierra el círculo con el pedido que de verdad hizo Uber el 2026-08-20.
     const { mapUberOrder } = await import('@/services/delivery-channels/providers/uber-eats/uber.mapper')
-    const crudo = await import('../../fixtures/delivery/uber/pedido-real-delivery-by-uber.json')
+    const crudo = await import('../../fixtures/delivery/uber/pedido-real-uapi.json')
 
-    const { order } = await ingestDeliveryOrder(mapUberOrder(crudo.default ?? crudo), link)
+    // Id único por corrida: la suite del processor ingiere el MISMO fixture y
+    // `Order.externalId` es unique global — compartir id acopla las suites entre sí.
+    const fixture = JSON.parse(JSON.stringify(crudo.default ?? crudo))
+    fixture.order.id = `uapi-ing-${Date.now()}`
+    const { order } = await ingestDeliveryOrder(mapUberOrder(fixture), link)
 
-    expect(order.externalId).toBe('UBER_EATS:dbe79abc-5a6a-4b3d-85fb-cb7b15e77645')
-    expect(order.orderNumber).toBe('77645')
+    expect(order.externalId).toBe(`UBER_EATS:${fixture.order.id}`)
+    expect(order.orderNumber).toBe('EF5A9')
     expect(order.total.toString()).toBe('1') // MX$1.00 del Best Burger
     expect(order.tipAmount.toString()).toBe('0') // reparte Uber ⇒ la propina no llega al comercio
 

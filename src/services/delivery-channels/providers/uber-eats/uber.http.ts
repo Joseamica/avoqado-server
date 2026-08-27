@@ -199,7 +199,11 @@ export async function exchangeUberAuthCode(opts: {
  */
 export function orderIdFromResourceHref(href: unknown): string | null {
   if (typeof href !== 'string' || href.length === 0) return null
-  const m = href.match(/\/eats\/order\/([^/?#]+)/)
+  // Las DOS familias: la clásica (`/eats/order/{id}`) y el uAPI (`/delivery/order/{id}`).
+  // Las tiendas re-integradas a v1.0.0 pueden apuntar el webhook a cualquiera de las dos;
+  // aceptar sólo una perdería pedidos completos en silencio — el webhook se ACKea con 200
+  // y el puntero muere aquí.
+  const m = href.match(/\/(?:eats|delivery)\/order\/([^/?#]+)/)
   if (!m) return null
   const id = decodeURIComponent(m[1]).trim()
   return id.length > 0 ? id : null
@@ -215,7 +219,7 @@ export interface UberRequestDeps {
 
 export interface UberRequestOptions {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
-  /** Ruta con la barra inicial, sin host: `/v2/eats/order/{id}`. */
+  /** Ruta con la barra inicial, sin host: `/v1/delivery/order/{id}`. */
   path: string
   /** OBLIGATORIO en cualquier método distinto de GET: es lo que el candado autoriza. */
   storeId?: string
@@ -248,7 +252,7 @@ export async function uberRequest(deps: UberRequestDeps, opts: UberRequestOption
     // Hallado por auditoría externa el 2026-08-20.
     //
     // Sólo aplica a rutas DE TIENDA (`/stores/{id}/…`). Las rutas de PEDIDO
-    // (`/v1/eats/orders/{orderId}/accept_pos_order`) no llevan la tienda en la ruta y eso
+    // (`/v1/delivery/order/{orderId}/accept`) no llevan la tienda en la ruta y eso
     // es correcto — exigirla ahí rompería aceptar y rechazar pedidos.
     const enRuta = opts.path.match(/\/stores?\/([^/?#]+)/i)
     if (enRuta && decodeURIComponent(enRuta[1]).toLowerCase() !== opts.storeId.toLowerCase()) {

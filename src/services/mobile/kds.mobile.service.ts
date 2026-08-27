@@ -8,6 +8,7 @@
 
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { markDeliveryOrderReady } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
 import prisma from '../../utils/prismaClient'
 import type { KdsOrderStatus } from '@prisma/client'
 
@@ -237,7 +238,30 @@ export async function updateKdsOrderStatus(venueId: string, orderId: string, new
   })
 
   logger.info(`KDS order #${updated.orderNumber} status -> ${upperStatus}`)
+
+  // "Listo" en la cocina = avisarle al marketplace que mande al repartidor. Best-effort y
+  // FUERA del camino del tablero: un marketplace caído no puede impedir que la cocina
+  // avance sus comandas. Para ventas que no son de delivery es un no-op adentro.
+  if ((upperStatus === KdsStatus.READY || upperStatus === KdsStatus.COMPLETED) && updated.orderId) {
+    avisarListoAlMarketplace(venueId, updated.orderId, updated.orderNumber)
+  }
+
   return formatKdsOrder(updated)
+}
+
+/**
+ * Fire-and-forget: el aviso de "listo" al marketplace nunca bloquea ni tumba el KDS.
+ * Uber trata el reintento como éxito (409 = "ya estaba listo"), así que avisar dos veces
+ * (READY y luego COMPLETED) es inofensivo.
+ */
+function avisarListoAlMarketplace(venueId: string, orderId: string, orderNumber: string): void {
+  void markDeliveryOrderReady(venueId, orderId).catch(error => {
+    logger.warn('No se pudo avisar el "listo" al marketplace (la comanda avanzó igual)', {
+      orderId,
+      orderNumber,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  })
 }
 
 // MARK: - Bump Order (instant complete)
@@ -264,6 +288,13 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
   })
 
   logger.info(`KDS order #${updated.orderNumber} bumped to COMPLETED`)
+
+  // El bump salta directo a COMPLETED sin pasar por READY — el aviso al marketplace no se
+  // puede perder por tomar el atajo.
+  if (updated.orderId) {
+    avisarListoAlMarketplace(venueId, updated.orderId, updated.orderNumber)
+  }
+
   return formatKdsOrder(updated)
 }
 

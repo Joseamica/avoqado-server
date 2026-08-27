@@ -264,7 +264,7 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
 
     // 4. Convertirlo en venta.
     const normalizado = uberAdapter.normalizeOrder(crudo)
-    const { order, kitchenTicketCreated } = await ingestDeliveryOrder(normalizado, link)
+    const { order, created, kitchenTicketCreated } = await ingestDeliveryOrder(normalizado, link)
 
     // 🔴 REQUISITO DE UBER, y además es seguridad de una persona: la integración debe
     // RECHAZAR el pedido cuando no puede transmitir alergias o instrucciones especiales
@@ -276,7 +276,14 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     // SIN enterarse de la alergia — y nadie nota que faltó nada. Cancelar es peor servicio y
     // muchísimo mejor que eso.
     const traeInstrucciones = normalizado.items.some(i => typeof i.notes === 'string' && i.notes.trim().length > 0)
-    if (traeInstrucciones && !kitchenTicketCreated && !normalizado.scheduledFor) {
+    // 🔴 `created` en la condición NO es opcional: los webhooks de Uber son at-least-once,
+    // y en un evento DUPLICADO la ingesta idempotente reusa la venta SIN recrear la comanda
+    // (kitchenTicketCreated=false). Sin `created`, cada reintento de webhook de un pedido
+    // con nota se leía como "instrucciones sin transmitir" y CANCELABA en Uber un pedido
+    // perfectamente bueno que la cocina ya estaba preparando. Lo destapó el fixture real
+    // del uAPI (trae "Sin cebolla, por favor"); el clásico no traía nota y el hueco quedó
+    // invisible.
+    if (traeInstrucciones && created && !kitchenTicketCreated && !normalizado.scheduledFor) {
       logger.error('🚨 [Uber] el pedido trae INSTRUCCIONES y no llegaron a la cocina — se CANCELA', {
         eventRowId,
         orderId: order.id,

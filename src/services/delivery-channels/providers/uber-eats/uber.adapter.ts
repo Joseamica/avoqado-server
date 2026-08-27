@@ -131,11 +131,13 @@ export const uberAdapter = {
    * lo cancele por plazo vencido.
    */
   async acceptOrder(orderId: string, storeId: string): Promise<UberActionResult> {
+    // uAPI. Body `{}` verificado contra el sandbox (27-ago): pasa la validación de campos —
+    // el clásico `accept_pos_order` ya no lo rastrea la validación de Uber.
     const r = await uberApi({
       method: 'POST',
-      path: `/v1/eats/orders/${encodeURIComponent(orderId)}/accept_pos_order`,
+      path: `/v1/delivery/order/${encodeURIComponent(orderId)}/accept`,
       storeId,
-      body: { reason: 'Aceptado por el POS' },
+      body: {},
     })
     const ok = r.status < 400 || r.status === 409
     if (!ok) logger.warn('Uber rechazó el accept', { orderId, status: r.status, cuerpo: r.text.slice(0, 200) })
@@ -190,9 +192,10 @@ export const uberAdapter = {
   async cancelOrder(orderId: string, storeId: string, reason = 'OUT_OF_ITEMS'): Promise<UberActionResult> {
     const r = await uberApi({
       method: 'POST',
-      path: `/v1/eats/orders/${encodeURIComponent(orderId)}/cancel`,
+      path: `/v1/delivery/order/${encodeURIComponent(orderId)}/cancel`,
       storeId,
-      body: { reason, cancelling_party: 'MERCHANT' },
+      // Body `{}` verificado contra el sandbox: pasa la validación de campos del uAPI.
+      body: {},
     })
     const ok = r.status < 400
     if (!ok) logger.error('🚨 Uber rechazó la cancelación', { orderId, status: r.status, cuerpo: r.text.slice(0, 200) })
@@ -259,14 +262,63 @@ export const uberAdapter = {
 
   /** Rechaza el pedido. A diferencia del accept, un 409 aquí NO es éxito: el estado difiere. */
   async denyOrder(orderId: string, storeId: string, reason: UberDenyReason = 'OTHER'): Promise<UberActionResult> {
+    // uAPI: `deny_reason.info` es REQUERIDO (verificado con el 400 de validación del
+    // sandbox: "info is a required field"). `type` viaja también con el motivo del POS.
     const r = await uberApi({
       method: 'POST',
-      path: `/v1/eats/orders/${encodeURIComponent(orderId)}/deny_pos_order`,
+      path: `/v1/delivery/order/${encodeURIComponent(orderId)}/deny`,
       storeId,
-      body: { reason: { explanation: reason } },
+      body: { deny_reason: { type: reason, info: reason } },
     })
     const ok = r.status < 400
     if (!ok) logger.warn('Uber rechazó el deny', { orderId, status: r.status, cuerpo: r.text.slice(0, 200) })
+    return { ok, status: r.status, raw: r.text }
+  },
+
+  /**
+   * "La comida ya está lista." Le dice a Uber que puede mandar (o apurar) al repartidor.
+   *
+   * 🔴 Capacidad NUEVA que la validación de Uber exige ver funcionando (caso 59605086:
+   * "Order: Mark Order as Ready"). Se dispara cuando la COCINA marca listo en el KDS — el
+   * mismo gesto que ya hacía para pedidos de mesa, sin botón nuevo.
+   *
+   * El 409 cuenta como éxito, igual que el accept: "ya estaba listo" tras un reintento no
+   * es un error.
+   */
+  async markOrderReady(orderId: string, storeId: string): Promise<UberActionResult> {
+    const r = await uberApi({
+      method: 'POST',
+      path: `/v1/delivery/order/${encodeURIComponent(orderId)}/ready`,
+      storeId,
+      body: {},
+    })
+    const ok = r.status < 400 || r.status === 409
+    if (!ok) logger.warn('Uber rechazó el ready', { orderId, status: r.status, cuerpo: r.text.slice(0, 200) })
+    return { ok, status: r.status, raw: r.text }
+  },
+
+  /**
+   * "No tengo este artículo" DESPUÉS de aceptar: avisa al cliente en la app de Uber para
+   * que decida (cancelar o modificar), en vez de recibir una bolsa incompleta sin aviso.
+   *
+   * Contrato verificado con los 400 de validación del sandbox (27-ago):
+   * `fulfillment_issues[].issue_type` válido ("OUT_OF_ITEM" avanza la validación) y cada
+   * issue exige `item.cart_item_id` — el id de LÍNEA del pedido, no el del menú.
+   */
+  async resolveFulfillmentIssues(orderId: string, storeId: string, cartItemIds: string[]): Promise<UberActionResult> {
+    const r = await uberApi({
+      method: 'POST',
+      path: `/v1/delivery/order/${encodeURIComponent(orderId)}/resolve-fulfillment-issues`,
+      storeId,
+      body: {
+        fulfillment_issues: cartItemIds.map(cartItemId => ({
+          issue_type: 'OUT_OF_ITEM',
+          item: { cart_item_id: cartItemId },
+        })),
+      },
+    })
+    const ok = r.status < 400
+    if (!ok) logger.warn('Uber rechazó el resolve-fulfillment-issues', { orderId, status: r.status, cuerpo: r.text.slice(0, 200) })
     return { ok, status: r.status, raw: r.text }
   },
 }

@@ -71,7 +71,12 @@ export async function fetchUberOrder(orderId: string): Promise<UberResponse> {
     throw new Error(`fetchUberOrder requiere un orderId no vacío, recibió: ${JSON.stringify(orderId)}`)
   }
 
-  const r = await uberApi({ method: 'GET', path: `/v2/eats/order/${encodeURIComponent(orderId)}` })
+  // 🔴 uAPI (`/v1/delivery/*`), no la familia clásica (`/v2/eats/*`): la validación de Uber
+  // (caso 59605086, 27-ago) rastrea SÓLO esta familia — las tiendas de prueba se
+  // re-integraron a "API version 1.0.0". `expand=carts,payment` no es opcional: sin él el
+  // pedido llega SIN artículos ni dinero (verificado: 1.1 KB pelones contra 5.2 KB
+  // completos), y el mapper lo rechazaría por no poder determinar la venta.
+  const r = await uberApi({ method: 'GET', path: `/v1/delivery/order/${encodeURIComponent(orderId)}?expand=carts,payment` })
 
   if (r.status >= 400) {
     logger.warn('Uber devolvió error al traer el pedido', {

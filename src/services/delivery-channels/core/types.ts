@@ -216,6 +216,20 @@ export interface DirectDeliveryAdapter {
    *  · cancelar = deshacerlo DESPUÉS. Cuesta más caro: el cliente ya está esperando su comida.
    */
   cancelOrder?(orderId: string, storeId: string, reason?: DenyReason): Promise<ActionResult>
+
+  /**
+   * "La comida ya está lista": avisa al proveedor que puede mandar (o apurar) al repartidor.
+   * Capacidad que la validación de producción de Uber exige ver funcionando (caso 59605086,
+   * "Order: Mark Order as Ready"). La dispara el KDS al marcar listo — sin botón nuevo.
+   */
+  markOrderReady?(orderId: string, storeId: string): Promise<ActionResult>
+
+  /**
+   * "No tengo estos artículos" DESPUÉS de aceptar: el proveedor avisa al cliente en su app
+   * para que decida (cancelar o modificar) en vez de recibir una bolsa incompleta.
+   * `cartItemIds` son ids de LÍNEA del pedido del proveedor, no de nuestro menú.
+   */
+  resolveFulfillmentIssues?(orderId: string, storeId: string, cartItemIds: string[]): Promise<ActionResult>
   markReady?(orderId: string, storeId: string): Promise<ActionResult>
 
   publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown; precios?: unknown }): Promise<ActionResult>

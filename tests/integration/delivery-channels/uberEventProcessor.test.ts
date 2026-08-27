@@ -10,7 +10,14 @@ import prisma from '@/utils/prismaClient'
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import { listKdsOrders } from '@/services/mobile/kds.mobile.service'
-import pedidoReal from '../../fixtures/delivery/uber/pedido-real-delivery-by-uber.json'
+import fixtureUapi from '../../fixtures/delivery/uber/pedido-real-uapi.json'
+
+// El pedido PELÓN, sin el sobre `{order}`: el mapper acepta ambos, y así los spreads de los
+// tests (`{...pedidoReal, id}`) mutan el nivel correcto. Fixture uAPI real del sandbox.
+// Id ÚNICO POR CORRIDA: `Order.externalId` es unique GLOBAL, y otra suite (la de ingesta)
+// también ingiere este mismo fixture — compartir el id hace que una suite dependa del orden
+// en que corrió la otra (fallaba en conjunto y pasaba en aislado).
+const pedidoReal: any = { ...(fixtureUapi as any).order, id: `uapi-ev-${Date.now()}` }
 
 const STORE = `store-${Date.now()}`
 
@@ -314,7 +321,13 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
     const conNota = {
       ...pedidoReal,
       id: `alergia-${Date.now()}`,
-      cart: { ...pedidoReal.cart, items: [{ ...pedidoReal.cart.items[0], special_instructions: 'ALÉRGICO AL CACAHUATE' }] },
+      // uAPI: la nota vive en carts[].items[].customer_request.special_instructions.
+      carts: [
+        {
+          ...pedidoReal.carts[0],
+          items: [{ ...pedidoReal.carts[0].items[0], customer_request: { special_instructions: 'ALÉRGICO AL CACAHUATE' } }],
+        },
+      ],
     }
     const cancelados: string[] = []
     // Se simula el fallo de la comanda tirando la tabla de KDS con un venue inexistente NO
@@ -347,7 +360,13 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
     // Id propio: otros tests de este archivo cancelan el pedido de la fixture, y reingerir
     // devuelve esa orden ya CANCELADA (idempotencia). Compartir id entre casos hace que un
     // test dependa del orden de ejecución del anterior.
-    const sinNota = { ...pedidoReal, id: `sinnota-${Date.now()}` }
+    // El fixture uAPI real SÍ trae nota ("Sin cebolla, por favor"): para probar el caso sin
+    // nota hay que QUITARLA, no basta con clonar.
+    const sinNota = {
+      ...pedidoReal,
+      id: `sinnota-${Date.now()}`,
+      carts: [{ ...pedidoReal.carts[0], items: [{ ...pedidoReal.carts[0].items[0], customer_request: undefined }] }],
+    }
     const original = prisma.kdsOrder.create
     ;(prisma as any).kdsOrder.create = jest.fn().mockRejectedValue(new Error('KDS caído'))
     try {

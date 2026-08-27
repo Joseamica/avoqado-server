@@ -202,9 +202,11 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
     })
 
     // Con el token del COMERCIANTE: sus tiendas, no las nuestras.
+    // uAPI (`/v1/delivery/stores`): es el "Get Stores to User" que la validación de Uber
+    // rastrea (caso 59605086) — el clásico `/v1/eats/stores` ya no cuenta para ellos.
     const lista = await uberRequest(
       { environment: e, token: userToken.access_token, writableStores: new Set() },
-      { method: 'GET', path: '/v1/eats/stores' },
+      { method: 'GET', path: '/v1/delivery/stores' },
     )
 
     // 🔴 Un 401/500 de Uber NO es "no hay tiendas". Antes ambos casos devolvían 200 con el
@@ -217,7 +219,9 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
       return
     }
 
-    const tiendas: Array<{ store_id?: string; name?: string }> = (lista.json as { stores?: [] })?.stores ?? []
+    // uAPI: cada tienda trae `id`; la familia clásica traía `store_id`. Se aceptan ambos —
+    // un shape inesperado no puede convertir una cuenta con tiendas en "sin tiendas".
+    const tiendas: Array<{ id?: string; store_id?: string; name?: string }> = (lista.json as { stores?: [] })?.stores ?? []
     if (tiendas.length === 0) {
       res.status(200).send(page('Autorizado, pero sin tiendas', '<p>Uber no devolvió ninguna tienda para esta cuenta.</p>'))
       return
@@ -237,7 +241,7 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
     let bloqueadas = 0
 
     for (const t of tiendas) {
-      const storeId = t.store_id
+      const storeId = t.id ?? t.store_id
       if (!storeId) continue
 
       let link = await prisma.deliveryChannelLink.findUnique({
