@@ -11540,6 +11540,13 @@ model CommissionConfig {
   filterByCategories Boolean  @default(false)
   categoryIds        String[] // Array of MenuCategory IDs
 
+  // Asistencia → comisiones (decisión del founder 2026-08-26): regla POR ESQUEMA, apagada de
+  // fábrica. Prendida, un día con llegada TARDE (fuera de tolerancia) recorta la comisión de
+  // ese día en attendanceLatePenaltyRate (0.2500 = pierde el 25%). Sólo retardo: una falta no
+  // genera ventas, y sin cuadrante o con la asistencia del venue apagada la regla es inerte.
+  attendanceLinked          Boolean  @default(false)
+  attendanceLatePenaltyRate Decimal? @db.Decimal(5, 4)
+
   // Goal-based tiers — use staff's monthly sales goal as tier threshold
   useGoalAsTier Boolean  @default(false)
   goalBonusRate Decimal? @db.Decimal(5, 4) // Rate when goal is exceeded (e.g., 0.0600 = 6%)
@@ -11767,6 +11774,9 @@ model CommissionCalculation {
   calcType CommissionCalcType
   tier     Int? // Tier level if tiered
   tierName String? // Tier name for display
+  // Castigo por retardo aplicado a ESTE cálculo (snapshot; null = sin castigo). El neto ya lo
+  // trae descontado — esto deja el rastro de cuánto y por qué.
+  attendancePenaltyRate Decimal? @db.Decimal(5, 4)
 
   // Status
   status       CommissionCalcStatus @default(CALCULATED)

@@ -22,6 +22,20 @@ import { logAction } from '../activity-log.service'
 // Type Definitions
 // ============================================
 
+/**
+ * Asistencia → comisiones: el porcentaje de castigo vive en (0, 1] — 0.25 = pierde el 25% del
+ * día con retardo. Prender la regla sin porcentaje sería un interruptor que no hace nada.
+ */
+function validateAttendanceRule(data: { attendanceLinked?: boolean; attendanceLatePenaltyRate?: number | null }): void {
+  const rate = data.attendanceLatePenaltyRate
+  if (rate !== undefined && rate !== null && (!Number.isFinite(rate) || rate <= 0 || rate > 1)) {
+    throw new BadRequestError('El castigo por retardo debe ser un porcentaje entre 1 y 100 (0.25 = 25%).')
+  }
+  if (data.attendanceLinked === true && (rate === undefined || rate === null)) {
+    throw new BadRequestError('La regla de asistencia necesita su porcentaje de castigo para poder prenderse.')
+  }
+}
+
 export interface CreateCommissionConfigInput {
   name: string
   description?: string
@@ -43,6 +57,8 @@ export interface CreateCommissionConfigInput {
   effectiveFrom?: Date
   effectiveTo?: Date | null
   orgId?: string
+  attendanceLinked?: boolean
+  attendanceLatePenaltyRate?: number | null
 }
 
 export interface UpdateCommissionConfigInput {
@@ -66,6 +82,8 @@ export interface UpdateCommissionConfigInput {
   effectiveFrom?: Date
   effectiveTo?: Date | null
   active?: boolean
+  attendanceLinked?: boolean
+  attendanceLatePenaltyRate?: number | null
 }
 
 export interface CommissionConfigFilters {
@@ -226,6 +244,8 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
     }
   }
 
+  validateAttendanceRule(data)
+
   const config = await prisma.commissionConfig.create({
     data: {
       venueId,
@@ -247,6 +267,8 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
       categoryIds: data.categoryIds ?? [],
       useGoalAsTier: data.useGoalAsTier ?? false,
       goalBonusRate: data.goalBonusRate ?? null,
+      attendanceLinked: data.attendanceLinked ?? false,
+      attendanceLatePenaltyRate: data.attendanceLatePenaltyRate ?? null,
       effectiveFrom: data.effectiveFrom ?? new Date(),
       effectiveTo: data.effectiveTo,
       createdById,
@@ -292,6 +314,7 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
  * Note: Some fields cannot be changed if calculations exist
  */
 export async function updateCommissionConfig(configId: string, venueId: string, data: UpdateCommissionConfigInput): Promise<any> {
+  validateAttendanceRule(data)
   // Verify config exists and belongs to venue
   const existing = await prisma.commissionConfig.findFirst({
     where: {
@@ -367,6 +390,8 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
   if (data.categoryIds !== undefined) updateData.categoryIds = data.categoryIds
   if (data.useGoalAsTier !== undefined) updateData.useGoalAsTier = data.useGoalAsTier
   if (data.goalBonusRate !== undefined) updateData.goalBonusRate = data.goalBonusRate
+  if (data.attendanceLinked !== undefined) updateData.attendanceLinked = data.attendanceLinked
+  if (data.attendanceLatePenaltyRate !== undefined) updateData.attendanceLatePenaltyRate = data.attendanceLatePenaltyRate
   if (data.effectiveFrom !== undefined) updateData.effectiveFrom = data.effectiveFrom
   if (data.effectiveTo !== undefined) updateData.effectiveTo = data.effectiveTo
   if (data.active !== undefined) updateData.active = data.active
@@ -510,6 +535,8 @@ export async function copyCommissionConfig(
         includeTips: overrides?.includeTips ?? source.includeTips,
         includeDiscount: overrides?.includeDiscount ?? source.includeDiscount,
         includeTax: overrides?.includeTax ?? source.includeTax,
+        attendanceLinked: source.attendanceLinked,
+        attendanceLatePenaltyRate: source.attendanceLatePenaltyRate,
         roleRates: source.roleRates ?? Prisma.JsonNull,
         filterByCategories: source.filterByCategories,
         categoryIds: source.categoryIds,

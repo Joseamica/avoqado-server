@@ -40,6 +40,8 @@ interface SchemeRow {
   categoryIds: string[]
   useGoalAsTier: boolean
   goalBonusRate: { toString(): string } | null
+  attendanceLinked: boolean
+  attendanceLatePenaltyRate: { toString(): string } | null
   tiers: TierRow[]
 }
 
@@ -72,6 +74,9 @@ export function formatScheme(config: SchemeRow, categoryName: Map<string, string
     appliesTo: config.filterByCategories ? config.categoryIds.map(id => categoryName.get(id) ?? id) : 'ALL_CATEGORIES',
     useGoalAsTier: config.useGoalAsTier,
     goalBonusRate: config.goalBonusRate == null ? null : Number(config.goalBonusRate),
+    // Asistencia → comisiones: prendida, un día con retardo pierde este porcentaje del día.
+    attendanceLinked: config.attendanceLinked,
+    attendanceLatePenaltyRate: config.attendanceLatePenaltyRate == null ? null : Number(config.attendanceLatePenaltyRate),
     tiers: config.tiers.map(t => ({
       level: t.tierLevel,
       name: t.tierName,

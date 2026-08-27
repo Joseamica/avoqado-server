@@ -25,6 +25,7 @@ import logger from '../../../config/logger'
 import { Prisma, CommissionCalcType, CommissionCalcStatus, PaymentType } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
+import { applyAttendancePenalty, resolveAttendancePenaltyRate } from './commission-attendance'
 import {
   findActiveCommissionConfig,
   findActiveCommissionConfigs,
@@ -149,6 +150,15 @@ async function createCalcForConfig(
   grossCommission = Math.round(grossCommission * 100) / 100
   netCommission = Math.round(netCommission * 100) / 100
 
+  // Asistencia → comisiones: sólo si el esquema la prendió; falla abierta (comisión completa).
+  const attendancePenaltyRate = await resolveAttendancePenaltyRate({
+    config,
+    staffId: recipientStaffId,
+    venueId: payment.venueId,
+    at: payment.createdAt,
+  })
+  netCommission = applyAttendancePenalty(netCommission, attendancePenaltyRate)
+
   const calculation = await prisma.commissionCalculation.create({
     data: {
       venueId: payment.venueId,
@@ -167,6 +177,7 @@ async function createCalcForConfig(
       calcType: config.calcType,
       tier: tierLevel,
       tierName,
+      attendancePenaltyRate,
       status: CommissionCalcStatus.CALCULATED,
       calculatedAt: new Date(),
     },
@@ -1174,10 +1185,20 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
     grossCommission = Math.round(grossCommission * 100) / 100
     netCommission = Math.round(netCommission * 100) / 100
 
+    // Cada persona del split se juzga con SU asistencia — el retardo de una no toca a la otra.
+    const attendancePenaltyRate = await resolveAttendancePenaltyRate({
+      config,
+      staffId,
+      venueId: payment.venueId,
+      at: payment.createdAt,
+    })
+    netCommission = applyAttendancePenalty(netCommission, attendancePenaltyRate)
+
     const calc = await prisma.commissionCalculation.create({
       data: {
         venueId: payment.venueId,
         staffId,
+        attendancePenaltyRate,
         paymentId: payment.id,
         orderId: payment.orderId,
         shiftId: payment.shift?.id,

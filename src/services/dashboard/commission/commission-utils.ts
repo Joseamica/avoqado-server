@@ -51,6 +51,8 @@ export interface CommissionConfigWithRelations {
   categoryIds: string[]
   useGoalAsTier: boolean
   goalBonusRate: Decimal | null
+  attendanceLinked: boolean
+  attendanceLatePenaltyRate: Decimal | null
   effectiveFrom: Date
   effectiveTo: Date | null
   tiers?: CommissionTierData[]
