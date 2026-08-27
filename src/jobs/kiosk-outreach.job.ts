@@ -31,8 +31,26 @@ export class KioskOutreachJob {
     // 4:30 a. m. hora del centro: el negocio ya cerró y el cliente lo lee al despertar.
     // Mandarlo a las 11 de la noche se siente intrusivo; a las 9 a. m. compite con todo
     // lo demás de su bandeja.
-    this.enqueueJob = scheduleJob('kiosk-outreach-enqueue', '0 30 4 * * *', async () => { await this.enqueue() }, null, false, TIMEZONE)
-    this.sweepJob = scheduleJob('kiosk-outreach-sweep', '0 * * * * *', async () => { await this.sweep() }, null, false, TIMEZONE)
+    this.enqueueJob = scheduleJob(
+      'kiosk-outreach-enqueue',
+      '0 30 4 * * *',
+      async () => {
+        await this.enqueue()
+      },
+      null,
+      false,
+      TIMEZONE,
+    )
+    this.sweepJob = scheduleJob(
+      'kiosk-outreach-sweep',
+      '0 * * * * *',
+      async () => {
+        await this.sweep()
+      },
+      null,
+      false,
+      TIMEZONE,
+    )
   }
 
   start(): void {

@@ -22,7 +22,10 @@ import { getAttendanceReport, MAX_REPORT_DAYS } from '@/services/dashboard/atten
 const db = prisma as any
 const V = 'venue-1'
 const weekly = Object.fromEntries(
-  ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(d => [d, { enabled: true, ranges: [{ open: '09:00', close: '18:00' }] }]),
+  ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(d => [
+    d,
+    { enabled: true, ranges: [{ open: '09:00', close: '18:00' }] },
+  ]),
 )
 
 function membership(over: Partial<{ id: string; staffId: string; startDate: Date; endDate: Date | null }> = {}) {

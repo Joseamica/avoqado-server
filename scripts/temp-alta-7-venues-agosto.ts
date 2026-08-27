@@ -181,7 +181,9 @@ async function main() {
   }
   const roleConfigTemplates = await prisma.venueRoleConfig.findMany({ where: { venueId: ROLE_CONFIG_TEMPLATE_VENUE_ID } })
   if (roleConfigTemplates.length !== 8) {
-    console.error(`❌ Esperaba 8 VenueRoleConfig en el molde ${ROLE_CONFIG_TEMPLATE_VENUE_ID}, encontré ${roleConfigTemplates.length}. Abortando.`)
+    console.error(
+      `❌ Esperaba 8 VenueRoleConfig en el molde ${ROLE_CONFIG_TEMPLATE_VENUE_ID}, encontré ${roleConfigTemplates.length}. Abortando.`,
+    )
     return
   }
 
@@ -212,7 +214,9 @@ async function main() {
     console.log(`     4. CREAR VenuePaymentConfig → merchant compartido ${MERCHANT_ID}`)
     console.log(`     5. CREAR VenuePricingStructure (3%/3%/3.5%/3.3%, $3 fija, IVA 16%)`)
     console.log(`     6. CLONAR 8 VenueRoleConfig del molde UNIDAD PAVON`)
-    console.log(`     7. CREAR StaffVenue ×7: 6 back-office (5 OWNER + 1 ADMIN) + 1 MANAGER (${nv.supervisorLabel}) — SIN promotor, SIN pin`)
+    console.log(
+      `     7. CREAR StaffVenue ×7: 6 back-office (5 OWNER + 1 ADMIN) + 1 MANAGER (${nv.supervisorLabel}) — SIN promotor, SIN pin`,
+    )
     console.log(`     8. ActivityLog VENUE_CREATED + KYC_APPROVED (actor superadmin)`)
   }
 
@@ -230,91 +234,94 @@ async function main() {
     }
     const result = await prisma.$transaction(
       async tx => {
-      const venue = await tx.venue.create({
-        data: {
-          organizationId: ORG_ID,
-          name: nv.name,
-          slug: nv.slug,
-          type: 'OTHER',
-          timezone: 'America/Mexico_City',
-          currency: 'MXN',
-          country: 'MX',
-          status: 'ACTIVE',
-          kycStatus: 'VERIFIED',
-          operationalRole: 'STORE',
-          salesEnabled: true,
-          address: nv.address,
-          city: nv.city,
-          state: nv.state,
-          latitude: new Prisma.Decimal(nv.latitude),
-          longitude: new Prisma.Decimal(nv.longitude),
-          active: true,
-        },
-      })
-
-      await tx.venueSettings.create({
-        data: {
-          venueId: venue.id,
-          requirePinLogin: true,
-          trackPromoterLocation: true,
-          promoterLocationStartHour: 11,
-          promoterLocationEndHour: 18,
-        },
-      })
-
-      await tx.venueModule.create({
-        data: {
-          venueId: venue.id,
-          moduleId: 'cm6mod001serialized',
-          enabled: true,
-          config: moduleConfig,
-          enabledBy: SUPERADMIN_ACTOR_ID,
-          enabledAt: now,
-        },
-      })
-
-      await tx.venuePaymentConfig.create({
-        data: { venueId: venue.id, primaryAccountId: MERCHANT_ID, preferredProcessor: 'AUTO' },
-      })
-
-      await tx.venuePricingStructure.create({
-        data: {
-          venueId: venue.id,
-          ...pricingCanonical,
-          effectiveFrom: now,
-          notes: `Clonada de la tarifa canónica PT — alta ${nv.name} (Asana 1217743599033218)`,
-        },
-      })
-
-      for (const rc of roleConfigTemplates) {
-        await tx.venueRoleConfig.create({
+        const venue = await tx.venue.create({
           data: {
-            ...strip(rc, ['id', 'venueId', 'createdAt', 'updatedAt']),
-            venueId: venue.id,
+            organizationId: ORG_ID,
+            name: nv.name,
+            slug: nv.slug,
+            type: 'OTHER',
+            timezone: 'America/Mexico_City',
+            currency: 'MXN',
+            country: 'MX',
+            status: 'ACTIVE',
+            kycStatus: 'VERIFIED',
+            operationalRole: 'STORE',
+            salesEnabled: true,
+            address: nv.address,
+            city: nv.city,
+            state: nv.state,
+            latitude: new Prisma.Decimal(nv.latitude),
+            longitude: new Prisma.Decimal(nv.longitude),
+            active: true,
           },
         })
-      }
 
-      for (const bo of BACK_OFFICE) {
-        await tx.staffVenue.create({ data: { staffId: bo.staffId, venueId: venue.id, role: bo.role, active: true } })
-      }
-      const supervisorSv = await tx.staffVenue.create({
-        data: { staffId: nv.supervisorId, venueId: venue.id, role: 'MANAGER', active: true },
-      })
+        await tx.venueSettings.create({
+          data: {
+            venueId: venue.id,
+            requirePinLogin: true,
+            trackPromoterLocation: true,
+            promoterLocationStartHour: 11,
+            promoterLocationEndHour: 18,
+          },
+        })
 
-      const log = (action: string, entity: string, entityId: string, data: any) =>
-        tx.activityLog.create({ data: { action, entity, entityId, staffId: SUPERADMIN_ACTOR_ID, venueId: venue.id, data } })
-      await log('VENUE_CREATED', 'Venue', venue.id, {
-        name: nv.name,
-        slug: nv.slug,
-        reason: 'Alta de 7 venues nuevos PT (Asana 1217743599033218)',
-      })
-      await log('KYC_APPROVED', 'Venue', venue.id, { kycStatus: 'VERIFIED', reason: 'Alta directa PT, mismo patrón que MB Ciudad Satélite' })
-      await log('STAFF_VENUE_ASSIGNED', 'StaffVenue', supervisorSv.id, {
-        staffId: nv.supervisorId,
-        role: 'MANAGER',
-        label: nv.supervisorLabel,
-      })
+        await tx.venueModule.create({
+          data: {
+            venueId: venue.id,
+            moduleId: 'cm6mod001serialized',
+            enabled: true,
+            config: moduleConfig,
+            enabledBy: SUPERADMIN_ACTOR_ID,
+            enabledAt: now,
+          },
+        })
+
+        await tx.venuePaymentConfig.create({
+          data: { venueId: venue.id, primaryAccountId: MERCHANT_ID, preferredProcessor: 'AUTO' },
+        })
+
+        await tx.venuePricingStructure.create({
+          data: {
+            venueId: venue.id,
+            ...pricingCanonical,
+            effectiveFrom: now,
+            notes: `Clonada de la tarifa canónica PT — alta ${nv.name} (Asana 1217743599033218)`,
+          },
+        })
+
+        for (const rc of roleConfigTemplates) {
+          await tx.venueRoleConfig.create({
+            data: {
+              ...strip(rc, ['id', 'venueId', 'createdAt', 'updatedAt']),
+              venueId: venue.id,
+            },
+          })
+        }
+
+        for (const bo of BACK_OFFICE) {
+          await tx.staffVenue.create({ data: { staffId: bo.staffId, venueId: venue.id, role: bo.role, active: true } })
+        }
+        const supervisorSv = await tx.staffVenue.create({
+          data: { staffId: nv.supervisorId, venueId: venue.id, role: 'MANAGER', active: true },
+        })
+
+        const log = (action: string, entity: string, entityId: string, data: any) =>
+          tx.activityLog.create({ data: { action, entity, entityId, staffId: SUPERADMIN_ACTOR_ID, venueId: venue.id, data } })
+        await log('VENUE_CREATED', 'Venue', venue.id, {
+          name: nv.name,
+          slug: nv.slug,
+          reason: 'Alta de 7 venues nuevos PT (Asana 1217743599033218)',
+        })
+        await log('KYC_APPROVED', 'Venue', venue.id, {
+          kycStatus: 'VERIFIED',
+          reason: 'Alta directa PT, mismo patrón que MB Ciudad Satélite',
+        })
+        await log('STAFF_VENUE_ASSIGNED', 'StaffVenue', supervisorSv.id, {
+          staffId: nv.supervisorId,
+          role: 'MANAGER',
+          label: nv.supervisorLabel,
+        })
 
         return { venueId: venue.id }
       },

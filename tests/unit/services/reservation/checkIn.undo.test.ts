@@ -45,7 +45,13 @@ describe('Fase 5 · deshacer el check-in', () => {
     }
   })
 
-  const cmd = () => ({ reservationId: 'res-1', venueId: 'venue-1', actor, source: 'DASHBOARD' as const, now: new Date('2026-08-24T18:05:00Z') })
+  const cmd = () => ({
+    reservationId: 'res-1',
+    venueId: 'venue-1',
+    actor,
+    source: 'DASHBOARD' as const,
+    now: new Date('2026-08-24T18:05:00Z'),
+  })
 
   it('🔴 devuelve la reserva al estado que tenía ANTES del check-in', async () => {
     const { undoCheckIn } = await import('@/services/reservation/checkIn.service')

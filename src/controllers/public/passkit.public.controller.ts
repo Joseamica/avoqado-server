@@ -1,5 +1,10 @@
 import { Request, Response } from 'express'
-import { listUpdatedSerials, registerDevice, resolvePassForDownload, unregisterDevice } from '../../services/wallet/passkitWebService.service'
+import {
+  listUpdatedSerials,
+  registerDevice,
+  resolvePassForDownload,
+  unregisterDevice,
+} from '../../services/wallet/passkitWebService.service'
 import { buildAndSignPassForCustomer } from '../../services/wallet/issuePass.service'
 import logger from '../../config/logger'
 

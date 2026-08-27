@@ -51,7 +51,12 @@ describe('el tipo viaja completo', () => {
   })
 
   it('sin tipo se guarda null (descanso simple — filas previas siguen valiendo)', async () => {
-    await replaceWorkSchedule('venue-1', 'sv-1', { weekly, exceptions: [{ startDate: '2026-09-01', endDate: '2026-09-01', kind: 'OFF' }] }, 'a')
+    await replaceWorkSchedule(
+      'venue-1',
+      'sv-1',
+      { weekly, exceptions: [{ startDate: '2026-09-01', endDate: '2026-09-01', kind: 'OFF' }] },
+      'a',
+    )
     expect(db.__tx.staffWorkScheduleException.createMany.mock.calls[0][0].data[0].type).toBeNull()
   })
 
@@ -60,7 +65,12 @@ describe('el tipo viaja completo', () => {
       replaceWorkSchedule(
         'venue-1',
         'sv-1',
-        { weekly, exceptions: [{ startDate: '2026-09-01', endDate: '2026-09-01', kind: 'HOURS', startTime: '10:00', endTime: '14:00', type: 'VACATION' }] },
+        {
+          weekly,
+          exceptions: [
+            { startDate: '2026-09-01', endDate: '2026-09-01', kind: 'HOURS', startTime: '10:00', endTime: '14:00', type: 'VACATION' },
+          ],
+        },
         'a',
       ),
     ).rejects.toThrow(/ausencia/)
@@ -68,7 +78,16 @@ describe('el tipo viaja completo', () => {
 
   it('getWorkSchedule devuelve el tipo', async () => {
     db.staffWorkScheduleException.findMany.mockResolvedValue([
-      { id: 'e1', startDate: '2026-09-01', endDate: '2026-09-05', kind: 'OFF', startTime: null, endTime: null, note: null, type: 'SICK_LEAVE' },
+      {
+        id: 'e1',
+        startDate: '2026-09-01',
+        endDate: '2026-09-05',
+        kind: 'OFF',
+        startTime: null,
+        endTime: null,
+        note: null,
+        type: 'SICK_LEAVE',
+      },
     ])
     const r = await getWorkSchedule('venue-1', 'sv-1')
     expect(r.exceptions[0]).toEqual(expect.objectContaining({ type: 'SICK_LEAVE' }))

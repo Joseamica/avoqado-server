@@ -36,7 +36,12 @@ beforeEach(() => {
   jest.clearAllMocks()
   db.venue.findUnique.mockResolvedValue({ id: 'venue-1' })
   db.venueSettings.findUnique.mockResolvedValue(null) // venue SIN fila todavía
-  db.venueSettings.upsert.mockImplementation(async (args: any) => ({ id: 'settings-1', venueId: 'venue-1', ...args.create, ...args.update }))
+  db.venueSettings.upsert.mockImplementation(async (args: any) => ({
+    id: 'settings-1',
+    venueId: 'venue-1',
+    ...args.create,
+    ...args.update,
+  }))
 })
 
 describe('updateVenueSettings — asistencia', () => {

@@ -333,7 +333,12 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       organizationId?: string
       organization?: { id: string; name: string } | null
       // Sidebar visibility settings
-      settings?: { enableShifts: boolean; hiddenSidebarItems: string[]; attendanceEnabled?: boolean; attendanceGraceMinutes?: number } | null
+      settings?: {
+        enableShifts: boolean
+        hiddenSidebarItems: string[]
+        attendanceEnabled?: boolean
+        attendanceGraceMinutes?: number
+      } | null
       // PIN for TPV access (user's own PIN, venue-specific)
       pin?: string | null
     }

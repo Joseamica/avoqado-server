@@ -59,9 +59,7 @@ function spotLabel(spotIds: unknown, layoutConfig: unknown): string | null {
   const ids = Array.isArray(spotIds) ? spotIds : []
   if (ids.length === 0) return null
   const layout = (layoutConfig ?? {}) as { spots?: Array<{ id?: string; label?: string }> }
-  const labels = ids
-    .map(id => layout.spots?.find(sp => sp.id === id)?.label ?? null)
-    .filter((x): x is string => Boolean(x))
+  const labels = ids.map(id => layout.spots?.find(sp => sp.id === id)?.label ?? null).filter((x): x is string => Boolean(x))
   return labels.length > 0 ? labels.join(', ') : null
 }
 
@@ -104,9 +102,7 @@ export async function getMyClassNow(args: { venueId: string; staffId: string; no
 
   const attendees: CoachClassAttendee[] = session.reservations.map(r => ({
     reservationId: r.id,
-    displayName: r.customer
-      ? displayName(r.customer.firstName, r.customer.lastName)
-      : displayNameFromFull(r.guestName),
+    displayName: r.customer ? displayName(r.customer.firstName, r.customer.lastName) : displayNameFromFull(r.guestName),
     status: r.status,
     checkedIn: r.status === 'CHECKED_IN',
     spotLabel: spotLabel(r.spotIds, session.product?.layoutConfig),

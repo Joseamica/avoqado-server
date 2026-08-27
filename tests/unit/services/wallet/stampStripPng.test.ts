@@ -90,12 +90,8 @@ describe('stampStripPng', () => {
   })
 
   it('un negocio sin color no rompe la banda', () => {
-    expect(stampStripPng({ width: 300, height: 100, earned: 1, required: 10, bgHex: '' }).subarray(0, 8).equals(PNG_SIGNATURE)).toBe(
-      true,
-    )
-    expect(stampStripPng({ width: 300, height: 100, earned: 1, required: 10, bgHex: null }).subarray(0, 8).equals(PNG_SIGNATURE)).toBe(
-      true,
-    )
+    expect(stampStripPng({ width: 300, height: 100, earned: 1, required: 10, bgHex: '' }).subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true)
+    expect(stampStripPng({ width: 300, height: 100, earned: 1, required: 10, bgHex: null }).subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true)
   })
 
   it('required en 0 o negativo no cuelga el proceso', () => {

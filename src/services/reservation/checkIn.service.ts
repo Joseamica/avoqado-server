@@ -290,7 +290,6 @@ export async function checkInReservationAndOpenOrder(cmd: CheckInCommand): Promi
   }
 }
 
-
 export interface UndoCheckInCommand {
   reservationId: string
   venueId: string

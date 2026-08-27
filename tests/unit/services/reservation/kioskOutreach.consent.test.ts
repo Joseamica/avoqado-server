@@ -53,15 +53,16 @@ describe('Fase 9 · candados del aviso nocturno', () => {
   })
 
   it('🔴 quien se dio de baja ENTRE el barrido y el envío ya no recibe', async () => {
-    prismaMock.kioskOutreachOutbox.findMany
-      .mockResolvedValueOnce([{ id: 'ob-1' }] as any)
-      .mockResolvedValueOnce([
-        {
-          id: 'ob-1', event: 'CREDITS_RUNNING_OUT', paymentLinkUrl: 'https://x', payload: {},
-          venue: { name: 'Mindform' },
-          customer: { email: 'a@b.com', firstName: 'Ana', marketingConsent: false },
-        },
-      ] as any)
+    prismaMock.kioskOutreachOutbox.findMany.mockResolvedValueOnce([{ id: 'ob-1' }] as any).mockResolvedValueOnce([
+      {
+        id: 'ob-1',
+        event: 'CREDITS_RUNNING_OUT',
+        paymentLinkUrl: 'https://x',
+        payload: {},
+        venue: { name: 'Mindform' },
+        customer: { email: 'a@b.com', firstName: 'Ana', marketingConsent: false },
+      },
+    ] as any)
 
     const { sweepOnce } = await import('@/services/reservation/kioskOutreach.service')
     const out = await sweepOnce({ now })
@@ -74,15 +75,16 @@ describe('Fase 9 · candados del aviso nocturno', () => {
   })
 
   it('🔴 con consentimiento vivo sí sale, y lleva el enlace para renovar', async () => {
-    prismaMock.kioskOutreachOutbox.findMany
-      .mockResolvedValueOnce([{ id: 'ob-2' }] as any)
-      .mockResolvedValueOnce([
-        {
-          id: 'ob-2', event: 'PACK_EXPIRING', paymentLinkUrl: 'https://book.avoqado.io/mindform?packs=1',
-          payload: { packName: '10 clases' }, venue: { name: 'Mindform' },
-          customer: { email: 'a@b.com', firstName: 'Ana', marketingConsent: true },
-        },
-      ] as any)
+    prismaMock.kioskOutreachOutbox.findMany.mockResolvedValueOnce([{ id: 'ob-2' }] as any).mockResolvedValueOnce([
+      {
+        id: 'ob-2',
+        event: 'PACK_EXPIRING',
+        paymentLinkUrl: 'https://book.avoqado.io/mindform?packs=1',
+        payload: { packName: '10 clases' },
+        venue: { name: 'Mindform' },
+        customer: { email: 'a@b.com', firstName: 'Ana', marketingConsent: true },
+      },
+    ] as any)
 
     const { sweepOnce } = await import('@/services/reservation/kioskOutreach.service')
     const out = await sweepOnce({ now })

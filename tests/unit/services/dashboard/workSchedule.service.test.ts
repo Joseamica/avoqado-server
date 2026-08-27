@@ -38,7 +38,9 @@ describe('resolveExpectedDay', () => {
   it('🔴 una excepción de descanso GANA sobre el cuadrante semanal', () => {
     // Sin esto, alguien de vacaciones aparece como falta todos los días.
     const vacaciones = [{ startDate: '2026-08-17', endDate: '2026-08-24', kind: 'OFF' as const }]
-    expect(resolveExpectedDay(weekly, vacaciones, '2026-08-20')).toEqual(expect.objectContaining({ start: null, end: null, isDayOff: true }))
+    expect(resolveExpectedDay(weekly, vacaciones, '2026-08-20')).toEqual(
+      expect.objectContaining({ start: null, end: null, isDayOff: true }),
+    )
   })
 
   it('una excepción de horario GANA sobre el cuadrante semanal', () => {
@@ -78,7 +80,16 @@ describe('resolveExpectedDay', () => {
 
   it('toma el primer y el último rango del día: entra en el primero, sale en el último', () => {
     // Turno partido: 9-14 y 16-20. Se espera entrada 9:00 y salida 20:00.
-    const partido = { ...weekly, thursday: { enabled: true, ranges: [{ open: '09:00', close: '14:00' }, { open: '16:00', close: '20:00' }] } }
+    const partido = {
+      ...weekly,
+      thursday: {
+        enabled: true,
+        ranges: [
+          { open: '09:00', close: '14:00' },
+          { open: '16:00', close: '20:00' },
+        ],
+      },
+    }
     expect(resolveExpectedDay(partido, [], '2026-08-20')).toEqual({ start: '09:00', end: '20:00', isDayOff: false })
   })
 })

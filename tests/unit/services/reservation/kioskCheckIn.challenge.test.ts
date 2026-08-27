@@ -32,7 +32,11 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
       const { createKioskCheckInChallenge } = await import('@/services/reservation/kioskCheckIn.service')
       const out = await createKioskCheckInChallenge({
-        venueId: 'venue-1', terminalId: 'term-1', stationKey: 'B', kioskSessionId: 'sess-1', now,
+        venueId: 'venue-1',
+        terminalId: 'term-1',
+        stationKey: 'B',
+        kioskSessionId: 'sess-1',
+        now,
       })
 
       const written = prismaMock.kioskCheckInChallenge.create.mock.calls[0][0].data
@@ -58,8 +62,13 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
   describe('lo que ve el aparato mientras espera', () => {
     it('🔴 el sondeo NO devuelve NADA de la persona', async () => {
       prismaMock.kioskCheckInChallenge.findFirst.mockResolvedValue({
-        id: 'ch-1', venueId: 'venue-1', status: 'CONSUMED', expiresAt: future,
-        customerId: 'cust-1', reservationId: 'res-1', nonceHash: 'x'.repeat(64),
+        id: 'ch-1',
+        venueId: 'venue-1',
+        status: 'CONSUMED',
+        expiresAt: future,
+        customerId: 'cust-1',
+        reservationId: 'res-1',
+        nonceHash: 'x'.repeat(64),
       } as any)
 
       const { getKioskCheckInChallengeStatus } = await import('@/services/reservation/kioskCheckIn.service')
@@ -75,8 +84,15 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
   describe('consumirlo', () => {
     const challenge = {
-      id: 'ch-1', venueId: 'venue-1', status: 'PENDING', expiresAt: future,
-      attempts: 0, maxAttempts: 5, customerId: null, reservationId: null, stationKey: 'B',
+      id: 'ch-1',
+      venueId: 'venue-1',
+      status: 'PENDING',
+      expiresAt: future,
+      attempts: 0,
+      maxAttempts: 5,
+      customerId: null,
+      reservationId: null,
+      stationKey: 'B',
     }
 
     it('🔴 un secreto equivocado responde 404 GENÉRICO — nunca "casi"', async () => {
@@ -91,7 +107,8 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
     it('🔴 vencido responde 410, no 404: hay que poder decir "pide otro QR"', async () => {
       prismaMock.kioskCheckInChallenge.findFirst.mockResolvedValue({
-        ...challenge, expiresAt: new Date('2026-08-24T17:59:00Z'),
+        ...challenge,
+        expiresAt: new Date('2026-08-24T17:59:00Z'),
       } as any)
 
       const { consumeKioskCheckInChallenge, __hashSecretForTest } = await import('@/services/reservation/kioskCheckIn.service')
@@ -103,7 +120,10 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
     it('🔴 otra persona NO puede reclamar un reto ya consumido', async () => {
       prismaMock.kioskCheckInChallenge.findFirst.mockResolvedValue({
-        ...challenge, status: 'CONSUMED', customerId: 'cust-1', reservationId: 'res-1',
+        ...challenge,
+        status: 'CONSUMED',
+        customerId: 'cust-1',
+        reservationId: 'res-1',
       } as any)
 
       const { consumeKioskCheckInChallenge } = await import('@/services/reservation/kioskCheckIn.service')
@@ -114,13 +134,20 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
 
     it('🔴 la MISMA persona repitiendo obtiene el mismo resultado, no un error', async () => {
       prismaMock.kioskCheckInChallenge.findFirst.mockResolvedValue({
-        ...challenge, status: 'CONSUMED', customerId: 'cust-1', reservationId: 'res-1',
+        ...challenge,
+        status: 'CONSUMED',
+        customerId: 'cust-1',
+        reservationId: 'res-1',
       } as any)
       prismaMock.reservation.findFirst.mockResolvedValue({ id: 'res-1', status: 'CHECKED_IN' } as any)
 
       const { consumeKioskCheckInChallenge } = await import('@/services/reservation/kioskCheckIn.service')
       const out = await consumeKioskCheckInChallenge({
-        venueId: 'venue-1', challengeId: 'ch-1', secret: 'abc', customerId: 'cust-1', now,
+        venueId: 'venue-1',
+        challengeId: 'ch-1',
+        secret: 'abc',
+        customerId: 'cust-1',
+        now,
       })
       expect(out.outcome).toBe('ALREADY_CHECKED_IN')
     })
@@ -142,9 +169,9 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
       prismaMock.kioskCheckInAttempt.upsert.mockResolvedValue({ count: 11 } as any)
 
       const { assertDurableRateLimit } = await import('@/services/reservation/kioskCheckIn.service')
-      await expect(
-        assertDurableRateLimit({ venueId: 'venue-1', scope: 'ip:1.2.3.4', now, max: 10 }),
-      ).rejects.toMatchObject({ statusCode: 429 })
+      await expect(assertDurableRateLimit({ venueId: 'venue-1', scope: 'ip:1.2.3.4', now, max: 10 })).rejects.toMatchObject({
+        statusCode: 429,
+      })
     })
   })
 })

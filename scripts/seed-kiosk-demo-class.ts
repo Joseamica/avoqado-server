@@ -79,9 +79,15 @@ async function main() {
 
   const session = await prisma.classSession.create({
     data: {
-      id: TAG + 'session', venueId, productId: product.id,
-      startsAt, endsAt, duration: 60, capacity: 8,
-      assignedStaffId: staff?.assignedStaffId ?? null, status: 'SCHEDULED',
+      id: TAG + 'session',
+      venueId,
+      productId: product.id,
+      startsAt,
+      endsAt,
+      duration: 60,
+      capacity: 8,
+      assignedStaffId: staff?.assignedStaffId ?? null,
+      status: 'SCHEDULED',
     },
   })
 
@@ -91,9 +97,18 @@ async function main() {
     })
     await prisma.reservation.create({
       data: {
-        id: `${TAG}r${i}`, venueId, customerId: customer.id, productId: product.id,
-        classSessionId: session.id, startsAt, endsAt, blockedEndsAt: endsAt, duration: 60,
-        partySize: 1, status: 'CONFIRMED', channel: 'WEB',
+        id: `${TAG}r${i}`,
+        venueId,
+        customerId: customer.id,
+        productId: product.id,
+        classSessionId: session.id,
+        startsAt,
+        endsAt,
+        blockedEndsAt: endsAt,
+        duration: 60,
+        partySize: 1,
+        status: 'CONFIRMED',
+        channel: 'WEB',
         confirmationCode: `KIOSK-000${i + 1}`,
         // Un tapete a cada quien: es lo que permite ver "Lugar 3" al confirmar.
         spotIds: [String(i + 1)],
@@ -109,5 +124,8 @@ async function main() {
 }
 
 main()
-  .catch(e => { console.error('💥', e); process.exit(1) })
+  .catch(e => {
+    console.error('💥', e)
+    process.exit(1)
+  })
   .finally(() => prisma.$disconnect())

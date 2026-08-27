@@ -119,13 +119,7 @@ const PURCHASE_INCLUDE = {
  * entries + customer.totalSpent) but records the POS payment instead of a Stripe
  * session. `amountPaid` defaults to the pack's list price.
  */
-export async function sellPackInPerson(
-  venueId: string,
-  packId: string,
-  customerId: string,
-  staffId: string,
-  opts?: { note?: string },
-) {
+export async function sellPackInPerson(venueId: string, packId: string, customerId: string, staffId: string, opts?: { note?: string }) {
   const pack = await prisma.creditPack.findUnique({
     where: { id: packId },
     include: { items: true },
@@ -213,8 +207,7 @@ export async function fulfillCreditPackPurchaseFromPayment(args: {
   let purchase
   try {
     purchase = await prisma.$transaction(
-      async tx =>
-        grantPackInTx(tx, { pack: pack as PackWithItems, venueId, customerId, staffId, amountPaid, paymentId, note }),
+      async tx => grantPackInTx(tx, { pack: pack as PackWithItems, venueId, customerId, staffId, amountPaid, paymentId, note }),
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     )
   } catch (err) {

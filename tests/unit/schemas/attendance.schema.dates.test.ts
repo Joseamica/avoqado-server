@@ -11,19 +11,31 @@ const weekly = Object.fromEntries(
 
 describe('isoDate', () => {
   it('rechaza mes 13 y día 40 aunque tengan la forma correcta', () => {
-    const r = ReplaceWorkScheduleSchema.safeParse({ params, body: { weekly, exceptions: [{ startDate: '2026-13-40', endDate: '2026-13-41', kind: 'OFF' }] } })
+    const r = ReplaceWorkScheduleSchema.safeParse({
+      params,
+      body: { weekly, exceptions: [{ startDate: '2026-13-40', endDate: '2026-13-41', kind: 'OFF' }] },
+    })
     expect(r.success).toBe(false)
     expect(JSON.stringify(r.success ? null : r.error.issues)).toMatch(/calendario/)
   })
 
   it('rechaza el 30 de febrero', () => {
-    const r = AttendanceReportSchema.safeParse({ params: { venueId: params.venueId }, query: { startDate: '2026-02-30', endDate: '2026-03-01' } })
+    const r = AttendanceReportSchema.safeParse({
+      params: { venueId: params.venueId },
+      query: { startDate: '2026-02-30', endDate: '2026-03-01' },
+    })
     expect(r.success).toBe(false)
   })
 
   it('regresión: una fecha real sigue pasando, y la forma DD-MM-YYYY sigue fallando por forma', () => {
-    expect(AttendanceReportSchema.safeParse({ params: { venueId: params.venueId }, query: { startDate: '2026-02-28', endDate: '2026-03-01' } }).success).toBe(true)
-    const bad = AttendanceReportSchema.safeParse({ params: { venueId: params.venueId }, query: { startDate: '28-02-2026', endDate: '2026-03-01' } })
+    expect(
+      AttendanceReportSchema.safeParse({ params: { venueId: params.venueId }, query: { startDate: '2026-02-28', endDate: '2026-03-01' } })
+        .success,
+    ).toBe(true)
+    const bad = AttendanceReportSchema.safeParse({
+      params: { venueId: params.venueId },
+      query: { startDate: '28-02-2026', endDate: '2026-03-01' },
+    })
     expect(bad.success).toBe(false)
     expect(JSON.stringify(bad.success ? null : bad.error.issues)).toMatch(/YYYY-MM-DD/)
   })

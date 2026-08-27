@@ -91,16 +91,8 @@ describe('signPass', () => {
     // Este es el test que faltaba y costó una prueba en un iPhone real (25-ago).
     // Sin icon.png el pase se firma bien, la cadena de certificados valida, y el
     // telefono lo degrada a una vista previa de archivo generica SIN decir por que.
-    expect(Object.keys(archivosDelPase).sort()).toEqual([
-      'icon.png',
-      'icon@2x.png',
-      'logo.png',
-      'logo@2x.png',
-      'pass.json',
-    ])
-    expect(archivosDelPase['icon.png'].subarray(0, 8)).toEqual(
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    )
+    expect(Object.keys(archivosDelPase).sort()).toEqual(['icon.png', 'icon@2x.png', 'logo.png', 'logo@2x.png', 'pass.json'])
+    expect(archivosDelPase['icon.png'].subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
   })
 
   it('🔴 con sellos, incluye la banda en sus dos tamaños', async () => {

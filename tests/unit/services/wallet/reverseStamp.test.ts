@@ -72,8 +72,6 @@ describe('reverseStampForOrder', () => {
     // sello.
     await reverseStampForOrder('v1', 'o1')
 
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'STAMP_REVERSED', venueId: 'v1' }),
-    )
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'STAMP_REVERSED', venueId: 'v1' }))
   })
 })

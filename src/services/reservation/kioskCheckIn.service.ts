@@ -358,10 +358,7 @@ export async function checkInByIdentifier(args: {
       startsAt: { gte: windowFrom, lte: windowTo },
       ...(phoneTail
         ? {
-            OR: [
-              { guestPhone: { endsWith: phoneTail } },
-              { customer: { phone: { endsWith: phoneTail } } },
-            ],
+            OR: [{ guestPhone: { endsWith: phoneTail } }, { customer: { phone: { endsWith: phoneTail } } }],
           }
         : { confirmationCode: code }),
     },
@@ -387,9 +384,7 @@ export async function checkInByIdentifier(args: {
       : shortNameFromFull(reservation.guestName),
     title: reservation.product?.name ?? 'Tu clase',
     startsAt: reservation.startsAt,
-    staffLabel: reservation.classSession?.assignedStaff?.firstName
-      ? `con ${reservation.classSession.assignedStaff.firstName}`
-      : null,
+    staffLabel: reservation.classSession?.assignedStaff?.firstName ? `con ${reservation.classSession.assignedStaff.firstName}` : null,
   }
 
   if (reservation.status === 'CHECKED_IN') {

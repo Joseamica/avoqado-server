@@ -44,9 +44,7 @@ describe('notifyPassUpdated', () => {
     // pregunta, y se vuelve a dormir con el saldo viejo.
     await notifyPassUpdated('wp1')
 
-    expect(prismaMock.walletPass.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'wp1' } }),
-    )
+    expect(prismaMock.walletPass.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'wp1' } }))
   })
 
   it('🔴 un aparato que ya no tiene la tarjeta se BORRA del registro', async () => {

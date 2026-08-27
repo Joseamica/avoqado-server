@@ -32,7 +32,12 @@ const membership = (over: Record<string, unknown> = {}) => ({
   workScheduleExceptions: [],
   ...over,
 })
-const entry = (iso: string, out?: string) => ({ staffId: 'staff-1', clockInTime: new Date(iso), clockOutTime: out ? new Date(out) : null, validationStatus: null })
+const entry = (iso: string, out?: string) => ({
+  staffId: 'staff-1',
+  clockInTime: new Date(iso),
+  clockOutTime: out ? new Date(out) : null,
+  validationStatus: null,
+})
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -48,7 +53,9 @@ describe('getPayrollSummary', () => {
   it('semana con 3 asistencias (1 tarde), 1 vacación y 1 falta: los números que van a la nómina', async () => {
     db.staffVenue.findMany.mockResolvedValue([
       membership({
-        workScheduleExceptions: [{ startDate: '2026-08-20', endDate: '2026-08-20', kind: 'OFF', type: 'VACATION', startTime: null, endTime: null }],
+        workScheduleExceptions: [
+          { startDate: '2026-08-20', endDate: '2026-08-20', kind: 'OFF', type: 'VACATION', startTime: null, endTime: null },
+        ],
       }),
     ])
     db.timeEntry.findMany.mockResolvedValue([
@@ -80,7 +87,9 @@ describe('getPayrollSummary', () => {
   it('la vacación NUNCA aparece como falta (ese es el punto de la fase 3)', async () => {
     db.staffVenue.findMany.mockResolvedValue([
       membership({
-        workScheduleExceptions: [{ startDate: '2026-08-17', endDate: '2026-08-21', kind: 'OFF', type: 'VACATION', startTime: null, endTime: null }],
+        workScheduleExceptions: [
+          { startDate: '2026-08-17', endDate: '2026-08-21', kind: 'OFF', type: 'VACATION', startTime: null, endTime: null },
+        ],
       }),
     ])
     const { rows } = await run()

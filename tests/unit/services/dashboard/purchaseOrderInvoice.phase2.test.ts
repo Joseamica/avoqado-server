@@ -18,7 +18,11 @@ jest.mock('@/services/fiscal/chartOfAccounts.service', () => ({
   resolveScopeOrNull: (...a: unknown[]) => mockResolveScope(...(a as [])),
 }))
 
-import { attachInvoiceToPurchaseOrder, identifyInvoiceLine, registerSupplierInvoice } from '@/services/dashboard/purchaseOrderInvoice.service'
+import {
+  attachInvoiceToPurchaseOrder,
+  identifyInvoiceLine,
+  registerSupplierInvoice,
+} from '@/services/dashboard/purchaseOrderInvoice.service'
 
 const VENUE_ID = 'venue-1'
 const OUR_RFC = 'EKU9003173C9'
@@ -165,9 +169,9 @@ describe('identifyInvoiceLine — una persona confirma, el sistema aprende', () 
 
   it('el insumo debe existir EN ESTE negocio: un id ajeno no identifica nada', async () => {
     prismaMock.rawMaterial.findFirst.mockResolvedValue(null)
-    await expect(identifyInvoiceLine({ venueId: VENUE_ID, invoiceId: 'inv-1', lineId: 'line-1', rawMaterialId: 'rm-ajeno' })).rejects.toThrow(
-      /no existe/,
-    )
+    await expect(
+      identifyInvoiceLine({ venueId: VENUE_ID, invoiceId: 'inv-1', lineId: 'line-1', rawMaterialId: 'rm-ajeno' }),
+    ).rejects.toThrow(/no existe/)
     expect(prismaMock.purchaseOrderInvoiceLine.update).not.toHaveBeenCalled()
   })
 
