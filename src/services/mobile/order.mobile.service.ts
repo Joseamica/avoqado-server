@@ -1463,11 +1463,17 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
   // for a discount that no longer exists. Both moves share one transaction.
   const { refundLoyaltyForOrderDiscount } = await import('./loyalty.mobile.service')
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const { refund, totals } = await prisma.$transaction(async tx => {
+  // 🔴 MISMA regla para el premio de una cartilla de sellos: si se quita su descuento,
+  // el premio vuelve a estar disponible. Sin esto el cliente pagó siete visitas por un
+  // descuento que ya no existe y el premio queda marcado como canjeado para siempre.
+  // Va en la MISMA transacción por la misma razón que los puntos.
+  const { refundStampRewardForOrderDiscount } = await import('../wallet/redeemStampReward.service')
+  const { refund, stampRefund, totals } = await prisma.$transaction(async tx => {
     const refunded = await refundLoyaltyForOrderDiscount(tx, venueId, row, staffId)
+    const stamp = await refundStampRewardForOrderDiscount(tx, venueId, row)
     await tx.orderDiscount.delete({ where: { id: row.id } })
     const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-    return { refund: refunded, totals: t }
+    return { refund: refunded, stampRefund: stamp, totals: t }
   })
 
   void (await import('../dashboard/activity-log.service')).logAction({
@@ -1476,7 +1482,12 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
     entityId: orderId,
     staffId,
     venueId,
-    data: { orderDiscountId, name: row.name, pointsRefunded: refund?.pointsRefunded ?? 0 },
+    data: {
+      orderDiscountId,
+      name: row.name,
+      pointsRefunded: refund?.pointsRefunded ?? 0,
+      stampRewardReturned: stampRefund?.rewardId ?? null,
+    },
   })
 
   return totals

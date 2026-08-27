@@ -2,10 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { issueApplePass } from '../../services/wallet/walletPass.service'
-import { buildStoreCardPass } from '../../services/wallet/applePassBuilder.service'
-import { signPass } from '../../services/wallet/applePassSigner.service'
-import { getCardDesign } from '../../services/wallet/cardDesign.service'
-import { getStampCardStatus } from '../../services/wallet/stampLedger.service'
+import { buildAndSignPassForCustomer } from '../../services/wallet/issuePass.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { env } from '../../config/env'
 
@@ -40,44 +37,13 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
     })
     if (!customer) throw new NotFoundError('Cliente no encontrado')
 
-    // Los tres en paralelo: ninguno depende del otro y la emisión es interactiva.
-    const [pass, design, stamps] = await Promise.all([
-      issueApplePass(venue.id, customer.id),
-      getCardDesign(venue.id),
-      // 🔴 El avance REAL del cliente, no un número de muestra. Es lo que hace que
-      // la tarjeta sirva: el cajero cobra, el sello sube, y el cliente lo ve.
-      getStampCardStatus(venue.id, customer.id),
-    ])
-
-    const passJson = buildStoreCardPass({
-      brand: {
-        name: venue.name,
-        logo: venue.logo,
-        primaryColor: venue.primaryColor,
-        secondaryColor: venue.secondaryColor,
-      },
-      colors: {
-        background: design.backgroundColor,
-        text: design.textColor,
-        label: design.labelColor,
-      },
-      content: {
-        stampsEarned: stamps.stampsEarned,
-        stampsRequired: stamps.stampsRequired,
-        rewardLabel: stamps.rewardLabel,
-      },
-      serialNumber: pass.serialNumber,
-      authToken: pass.authToken,
-      qrToken: pass.qrToken,
-      passTypeIdentifier: env.APPLE_PASS_TYPE_ID as string,
-      teamIdentifier: env.APPLE_TEAM_ID as string,
-    })
-
-    const buffer = await signPass(passJson, {
-      brandColor: design.stampFilledColor,
-      stamps: { earned: stamps.stampsEarned, required: stamps.stampsRequired },
-      design,
-    })
+    // 🔴 UN solo lugar arma y firma el pase: `issuePass.service`. Lo usan esta
+    // descarga y la actualización que pide Apple cuando el saldo cambia. Si cada
+    // camino lo armara por su cuenta, un día divergirían y la versión actualizada
+    // mostraría algo distinto de la que el cliente descargó, sin que nada falle.
+    const pass = await issueApplePass(venue.id, customer.id)
+    const buffer = await buildAndSignPassForCustomer(venue.id, customer.id)
+    if (!buffer) throw new NotFoundError('No se pudo generar la credencial')
 
     // Auditoría: emitir una credencial es una mutación que identifica a un cliente.
     // Fire-and-forget y FUERA de cualquier transacción — un fallo de auditoría no
@@ -88,7 +54,7 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
       entity: 'WalletPass',
       entityId: pass.id,
       venueId: venue.id,
-      data: { customerId: customer.id, platform: 'APPLE', stampsEarned: stamps.stampsEarned, stampsRequired: stamps.stampsRequired },
+      data: { customerId: customer.id, platform: 'APPLE' },
     })
 
     // 🔴 Este Content-Type es lo que hace que el iPhone abra Wallet. Con

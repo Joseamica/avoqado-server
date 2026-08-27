@@ -41,6 +41,19 @@ export interface BuildStoreCardArgs {
   brand: PassBrand
   /** Omitido = los tokens del tema oscuro de avoqado-android. */
   colors?: PassColors
+  /**
+   * Dónde puede preguntar el iPhone por los cambios de esta tarjeta.
+   *
+   * 🔴 Sin esto el aparato NUNCA se registra y la tarjeta se queda con el saldo del
+   * momento en que se descargó. No falla ni avisa: sólo no cambia nunca, y eso se
+   * descubre semanas después con un cliente reclamando su sello.
+   *
+   * Se OMITE a propósito cuando no hay una URL que Apple pueda alcanzar (desarrollo):
+   * apuntar a algo que no responde deja al iPhone reintentando contra el vacío.
+   * Omitirla entrega una tarjeta que simplemente no se auto-actualiza, que es el
+   * comportamiento honesto.
+   */
+  webServiceURL?: string | null
   content: PassContent
   serialNumber: string
   authToken: string
@@ -91,6 +104,9 @@ export function buildStoreCardPass(args: BuildStoreCardArgs): Record<string, unk
     // la que ya tenía, y el cliente termina con duplicados.
     serialNumber: args.serialNumber,
     authenticationToken: args.authToken,
+
+    // Sólo cuando hay una URL pública de verdad. Ver `webServiceURL` arriba.
+    ...(args.webServiceURL ? { webServiceURL: args.webServiceURL } : {}),
 
     // Marca blanca: el cliente guarda la tarjeta de SU cafetería, no la de su
     // proveedor de punto de venta. Es la razón por la que este producto se vende.

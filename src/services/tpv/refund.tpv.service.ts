@@ -518,7 +518,30 @@ export async function recordRefund(
   })
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // STEP 6: Generate digital receipt for refund
+  // STEP 6: Revertir el sello que esta venta había otorgado
+  //
+  // 🔴 Sin esto el cliente avanza en su cartilla por una compra que devolvió, y acaba
+  // cobrando un premio que no se ganó.
+  //
+  // 🔴 En try/catch a propósito, igual que el recibo de abajo: cuando esto corre, el
+  // dinero YA se devolvió al cliente. Si un fallo al revertir el sello propagara, el
+  // reembolso se vería fallido con el dinero fuera — infinitamente peor que un sello
+  // de más. La reversión es idempotente, así que se puede reintentar después.
+  // ═══════════════════════════════════════════════════════════════════════════
+  try {
+    const { reverseStampForOrder } = await import('../wallet/stampLedger.service')
+    await reverseStampForOrder(venueId, originalPayment.orderId)
+  } catch (error) {
+    logger.error('No se pudo revertir el sello de una venta reembolsada', {
+      venueId,
+      orderId: originalPayment.orderId,
+      refundPaymentId: result.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STEP 7: Generate digital receipt for refund
   // ═══════════════════════════════════════════════════════════════════════════
   let digitalReceipt = null
   try {
@@ -539,7 +562,7 @@ export async function recordRefund(
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // STEP 6: Return response matching Android app's expected format
+  // STEP 8: Return response matching Android app's expected format
   // ═══════════════════════════════════════════════════════════════════════════
   return {
     id: result.id,

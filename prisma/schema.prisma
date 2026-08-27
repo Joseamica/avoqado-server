@@ -6859,12 +6859,46 @@ model WalletPass {
 
   @@index([venueId, updatedAt])
   @@index([customerId])
+
+  /// Los aparatos que piden enterarse cuando esta tarjeta cambia.
+  registrations WalletPassRegistration[]
 }
 
 enum StampEventType {
   EARN
   REVERSAL
   ADJUST
+}
+
+/// Un telefono que pidio recibir las actualizaciones de un pase.
+///
+/// Apple registra el aparato la primera vez que el cliente agrega la tarjeta a su
+/// cartera, y manda un `pushToken` con el que se le puede avisar. El aviso es un
+/// sobre VACIO: solo despierta al telefono, que enseguida vuelve a preguntar por el
+/// pase completo. El contenido nunca viaja en el push.
+///
+/// 🔴 La llave es (aparato, pase): el MISMO cliente puede tener su tarjeta en su
+/// iPhone y en su iPad, y los dos tienen que enterarse. Guardar un solo aparato por
+/// pase dejaria uno de los dos congelado sin que nadie lo note.
+model WalletPassRegistration {
+  id String @id @default(cuid())
+
+  /// Identificador que Apple asigna al aparato. NO es el serial del telefono: es
+  /// propio de nuestro servidor y no identifica a la persona.
+  deviceLibraryIdentifier String
+
+  walletPassId String
+  walletPass   WalletPass @relation(fields: [walletPassId], references: [id], onDelete: Cascade)
+
+  /// Con esto se le avisa a ESE aparato. Apple lo puede rotar: al re-registrarse se
+  /// pisa el anterior en vez de crear una fila nueva.
+  pushToken String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([deviceLibraryIdentifier, walletPassId])
+  @@index([walletPassId])
 }
 
 /// Como se VE la credencial de un negocio en la cartera del cliente.

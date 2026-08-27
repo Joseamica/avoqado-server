@@ -21,6 +21,8 @@ import { Request, Response } from 'express'
 import * as loyaltyService from '@/services/dashboard/loyalty.dashboard.service'
 import * as cardDesignService from '@/services/wallet/cardDesign.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
+import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { fetchDecodedPng, readPngSize } from '@/services/wallet/remotePng'
 import { stampStripPng } from '@/services/wallet/stampStripPng'
 import { buildStoragePath, uploadFileToStorage } from '@/services/storage.service'
@@ -362,4 +364,46 @@ export async function cardStripPreviewHandler(req: Request, res: Response) {
   res.setHeader('Content-Type', 'image/png')
   res.setHeader('Cache-Control', 'no-store')
   res.send(png)
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/loyalty/stamp-rewards/:rewardId/redeem
+ *
+ * Canjea el premio de una cartilla llena sobre una cuenta abierta.
+ *
+ * 🔴 DINERO: baja lo que el cliente paga. El servicio protege contra el doble canje
+ * con un cambio de estado condicional; este controlador sólo traduce HTTP.
+ */
+export async function redeemStampRewardHandler(req: Request, res: Response) {
+  const { venueId, rewardId } = req.params
+  const { orderId } = req.body
+  const { userId } = (req as any).authContext
+
+  const result = await redeemStampReward(venueId, orderId, rewardId, { staffId: userId })
+
+  return res.status(200).json(result)
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/loyalty/customers/:customerId/stamp-card
+ *
+ * El avance de un cliente y los premios que ya ganó pero no ha cobrado.
+ *
+ * Siempre responde 200: un cliente sin cartilla recibe ceros, no un 404. La pantalla
+ * lo usa para decidir si enseñar el botón de canje, y un error ahí escondería la
+ * sección entera en vez de mostrarla vacía.
+ */
+export async function getStampCardHandler(req: Request, res: Response) {
+  const { venueId, customerId } = req.params
+
+  const [estado, pendientes] = await Promise.all([
+    getStampCardStatus(venueId, customerId),
+    prisma.stampReward.findMany({
+      where: { venueId, customerId, status: 'PENDING' },
+      select: { id: true, rewardLabel: true, rewardType: true, rewardValue: true, expiresAt: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    }),
+  ])
+
+  return res.status(200).json({ ...estado, rewardsToClaim: pendientes })
 }

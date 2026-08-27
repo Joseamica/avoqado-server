@@ -105,6 +105,29 @@ describe('buildStoreCardPass', () => {
     expect(pass.teamIdentifier).toBe('TEAM123')
     expect(pass.authenticationToken).toBe('tok-auth-largo')
   })
+
+  describe('actualización automática', () => {
+    it('🔴 con una URL pública, el pase dice dónde preguntar por sus cambios', () => {
+      // Sin `webServiceURL` el iPhone NUNCA se registra, y la tarjeta se queda con el
+      // saldo del momento en que se descargó. No falla, no avisa: sólo no cambia
+      // nunca, y eso se descubre semanas después con un cliente reclamando.
+      const pass = buildStoreCardPass({ ...base, webServiceURL: 'https://api.avoqado.io/passkit' }) as any
+
+      expect(pass.webServiceURL).toBe('https://api.avoqado.io/passkit')
+      // El token del pase es lo único que autentica esas llamadas de Apple.
+      expect(pass.authenticationToken).toBe(base.authToken)
+    })
+
+    it('🔴 SIN URL pública, el pase se emite igual y sin la clave', () => {
+      // En desarrollo no hay URL que Apple pueda alcanzar. Poner una que no responde
+      // deja al iPhone reintentando contra el vacío; omitirla simplemente entrega una
+      // tarjeta que no se auto-actualiza, que es el comportamiento honesto.
+      const pass = buildStoreCardPass(base) as any
+
+      expect(pass.webServiceURL).toBeUndefined()
+      expect(pass.serialNumber).toBeDefined()
+    })
+  })
 })
 
 function isRgbBackground(pass: Record<string, unknown>): boolean {

@@ -144,6 +144,7 @@ const prismaMock: any = {
   loyaltyTransaction: createMockModel(),
   walletPass: createMockModel(),
   walletCardDesign: createMockModel(),
+  walletPassRegistration: createMockModel(),
   stampCard: createMockModel(),
   stampEvent: createMockModel(),
   stampReward: createMockModel(),

@@ -214,6 +214,7 @@ import {
   LoyaltyParamsSchema,
   LoyaltyVenueParamsSchema,
   CardDesignUpdateSchema,
+  RedeemStampRewardSchema,
 } from '../schemas/dashboard/loyalty.schema'
 import {
   getDiscountsQuerySchema,
@@ -9936,6 +9937,60 @@ router.post(
  *     responses:
  *       200: { description: PNG de 750×246 }
  */
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/stamp-rewards/{rewardId}/redeem:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Canjea el premio de una cartilla llena sobre una cuenta abierta
+ *     description: >
+ *       🔴 DINERO. Quema el premio y crea el descuento en la MISMA transacción, con
+ *       un cambio de estado condicional: dos cajeros que canjeen a la vez no pueden
+ *       regalar el mismo premio dos veces. No aplica sobre cuentas ya pagadas.
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [orderId]
+ *             properties:
+ *               orderId: { type: string }
+ *     responses:
+ *       200: { description: El descuento aplicado y la cuenta recalculada }
+ *       400: { description: Ya canjeado, vencido, o la cuenta ya está pagada }
+ *       404: { description: Premio u orden no encontrados en este negocio }
+ */
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/customers/{customerId}/stamp-card:
+ *   get:
+ *     tags: [Loyalty Program]
+ *     summary: Avance de la cartilla de un cliente y premios sin cobrar
+ *     description: >
+ *       El número de sellos viene de la CARTILLA, no de la configuración vigente: una
+ *       cartilla conserva la regla con la que nació, así que a quien va a la mitad no
+ *       le cambia la meta si el negocio la modifica.
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Avance y premios por cobrar }
+ */
+router.get(
+  '/venues/:venueId/loyalty/customers/:customerId/stamp-card',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  loyaltyController.getStampCardHandler,
+)
+
+router.post(
+  '/venues/:venueId/loyalty/stamp-rewards/:rewardId/redeem',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:redeem'),
+  validateRequest(RedeemStampRewardSchema),
+  loyaltyController.redeemStampRewardHandler,
+)
+
 router.get(
   '/venues/:venueId/loyalty/card-design/strip.png',
   authenticateTokenMiddleware,

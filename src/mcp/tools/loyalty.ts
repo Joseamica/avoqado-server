@@ -7,6 +7,8 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
 import { getCardDesign, saveCardDesign } from '@/services/wallet/cardDesign.service'
+import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
+import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
 import { getCustomerLoyalty, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { planGateMessage } from '../planGate'
 
@@ -412,6 +414,94 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
           data: patch,
         })
         return text({ ok: true, design })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  // ==========================================
+  // CARTILLA DE SELLOS — avance y canje del premio
+  // ==========================================
+
+  server.tool(
+    'stamp_card_status',
+    "Read a customer's stamp card at a venue: how many stamps they have on the card in progress, how many that card needs, what the reward is, and how many rewards they already earned but have not claimed yet. Note the required count comes from the CARD, not from the current settings — a card keeps the rule it was opened with, so a customer half-way through is not affected when the venue changes the target. Read-only; requires loyalty:read.",
+    {
+      venueId: z.string().describe('Venue whose card to read (must be in your scope)'),
+      customerId: z.string().describe('Customer whose card to read'),
+    },
+    async ({ venueId, customerId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('loyalty:read', venueId)
+      const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad')
+      if (planGate) return text({ ok: false, planRequired: true, error: planGate })
+
+      const estado = await getStampCardStatus(venueId, customerId)
+      const pendientes = await prisma.stampReward.findMany({
+        where: { venueId, customerId, status: 'PENDING' },
+        select: { id: true, rewardLabel: true, rewardType: true, expiresAt: true },
+        orderBy: { createdAt: 'asc' },
+      })
+
+      return text({ ok: true, ...estado, rewardsToClaim: pendientes })
+    },
+  )
+
+  server.tool(
+    'redeem_stamp_reward',
+    "Apply a customer's earned stamp-card reward to an OPEN bill, as a discount. This LOWERS what the customer pays, so by DEFAULT it only PREVIEWS what would happen; call again with confirm:true to actually apply it. It refuses on a bill that is already paid or partly paid, on a reward that was already claimed or has expired, and on a bill with nothing left to discount. A percentage reward is computed on the bill, and a free-product reward takes the most expensive item on it so the customer never pays a difference. Requires loyalty:redeem.",
+    {
+      venueId: z.string().describe('Venue where the bill is open (must be in your scope)'),
+      orderId: z.string().describe('The open bill to apply the reward to'),
+      rewardId: z.string().describe('The earned reward to claim (see stamp_card_status)'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply it; without it you get a preview'),
+    },
+    async ({ venueId, orderId, rewardId, confirm }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('loyalty:redeem', venueId) // 🔴 dinero: permiso propio, no `loyalty:update`
+      const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad')
+      if (planGate) return text({ ok: false, planRequired: true, error: planGate })
+
+      if (!confirm) {
+        // 🔴 Vista previa obligatoria: esto REGALA producto. Un id equivocado
+        // interpretado de una petición vaga sale del inventario de alguien.
+        const premio = await prisma.stampReward.findFirst({
+          where: { id: rewardId, ...where },
+          select: { rewardLabel: true, status: true, expiresAt: true },
+        })
+        if (!premio) return text({ ok: false, error: 'Ese premio no existe en este negocio.' })
+
+        const cuenta = await prisma.order.findFirst({
+          where: { id: orderId, ...where },
+          select: { orderNumber: true, total: true, paymentStatus: true },
+        })
+        if (!cuenta) return text({ ok: false, error: 'Esa cuenta no existe en este negocio.' })
+
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          reward: premio.rewardLabel,
+          rewardStatus: premio.status,
+          order: { number: cuenta.orderNumber, total: Number(cuenta.total), paymentStatus: cuenta.paymentStatus },
+          message:
+            `Vas a aplicar "${premio.rewardLabel}" a la cuenta ${cuenta.orderNumber}, que hoy va en $${Number(cuenta.total).toFixed(2)}.\n` +
+            'El premio se quema y no se puede volver a usar. Confirma con el operador; luego vuelve a llamar con confirm:true.',
+        })
+      }
+
+      try {
+        const r = await redeemStampReward(venueId, orderId, rewardId, { staffId: scope.staffId })
+        // El servicio ya escribe su propio ActivityLog; esto deja además el rastro
+        // de que la acción vino del MCP y no del mostrador.
+        await auditMcpWrite(scope, {
+          action: 'STAMP_REWARD_REDEEMED',
+          entity: 'StampReward',
+          entityId: rewardId,
+          venueId,
+          data: { orderId, discountAmount: r.discountAmount },
+        })
+        return text({ ok: true, applied: r.rewardLabel, discountAmount: r.discountAmount })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

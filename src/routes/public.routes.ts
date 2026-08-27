@@ -77,6 +77,8 @@ import {
   venueCheckoutSessionSchema,
 } from '../schemas/public/venueCheckout.schema'
 
+import * as passkitController from '../controllers/public/passkit.public.controller'
+
 const router = Router()
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
@@ -384,17 +386,9 @@ router.get('/venues/:venueSlug/checkout-info', readLimit, validateRequest(venueC
 //
 // El mensaje es para el CLIENTE FINAL: el plan es del negocio, no suyo, asi que
 // nunca menciona planes ni mejoras de suscripcion.
-const requireWalletPlan = checkPublicVenueFeature(
-  'LOYALTY_WALLET',
-  'Este negocio todavia no tiene tarjeta digital disponible.',
-)
+const requireWalletPlan = checkPublicVenueFeature('LOYALTY_WALLET', 'Este negocio todavia no tiene tarjeta digital disponible.')
 
-router.get(
-  '/venues/:venueSlug/wallet/apple/:customerId',
-  readLimit,
-  requireWalletPlan,
-  walletPassController.downloadApplePass,
-)
+router.get('/venues/:venueSlug/wallet/apple/:customerId', readLimit, requireWalletPlan, walletPassController.downloadApplePass)
 
 router.post(
   '/venues/:venueSlug/checkout/payment-intent',
@@ -592,5 +586,27 @@ router.post(
 const unsubscribePostLimit = rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false })
 router.get('/unsubscribe', readLimit, getUnsubscribePage)
 router.post('/unsubscribe', unsubscribePostLimit, postUnsubscribe)
+
+// ==========================================
+// SERVICIO WEB DE PASSKIT — lo llama APPLE, no nuestro dashboard
+// ==========================================
+//
+// 🔴 Sin autenticación de sesión a propósito: el que llama es el iPhone de un cliente.
+// Lo que los protege es el token que viaja dentro del propio pase, verificado en
+// tiempo constante dentro del servicio.
+//
+// Las rutas son las que Apple espera EXACTAMENTE. Un path distinto no da error: Apple
+// simplemente nunca llama, y las tarjetas se quedan congeladas sin una sola señal.
+router.post(
+  '/passkit/v1/devices/:deviceLibraryIdentifier/registrations/:passTypeIdentifier/:serialNumber',
+  passkitController.registerDeviceHandler,
+)
+router.delete(
+  '/passkit/v1/devices/:deviceLibraryIdentifier/registrations/:passTypeIdentifier/:serialNumber',
+  passkitController.unregisterDeviceHandler,
+)
+router.get('/passkit/v1/devices/:deviceLibraryIdentifier/registrations/:passTypeIdentifier', passkitController.listUpdatedSerialsHandler)
+router.get('/passkit/v1/passes/:passTypeIdentifier/:serialNumber', passkitController.downloadUpdatedPassHandler)
+router.post('/passkit/v1/log', passkitController.passkitLogHandler)
 
 export default router

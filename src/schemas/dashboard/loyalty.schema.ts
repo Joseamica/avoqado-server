@@ -144,3 +144,18 @@ export const CardDesignUpdateSchema = z.object({
     })
     .strict('Hay un campo que no pertenece al diseño de la tarjeta'),
 })
+
+/**
+ * Canje de un premio de cartilla. 🔴 DINERO: baja lo que el cliente paga.
+ */
+export const RedeemStampRewardSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('El identificador del negocio no es válido'),
+    rewardId: z.string().cuid('El identificador del premio no es válido'),
+  }),
+  body: z
+    .object({
+      orderId: z.string().cuid('El identificador de la cuenta no es válido'),
+    })
+    .strict('Hay un campo que no pertenece al canje'),
+})

@@ -2,6 +2,8 @@ import { LoyaltyConfig, Prisma, StampEventType, StampRewardStatus } from '@prism
 import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
+import { logAction } from '../dashboard/activity-log.service'
+import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
 
 /**
  * El libro de sellos: otorgar, contar y auditar.
@@ -204,6 +206,12 @@ export async function grantStamp(
       return { ganados, meta, completed: true as const, rewardId: premio.id }
     })
 
+    // 🔴 El sello subió: avisarle al teléfono del cliente. Sin esto su tarjeta sigue
+    // mostrando el número anterior hasta que la vuelva a descargar — que en la
+    // práctica no ocurre nunca. Fire-and-forget: el aviso es un extra, el cobro es el
+    // negocio, y `notifyCustomerPassUpdated` nunca lanza.
+    void notifyCustomerPassUpdated(venueId, customerId)
+
     return {
       granted: true,
       stampCardId: cardId,
@@ -262,4 +270,90 @@ export async function getStampCardStatus(venueId: string, customerId: string): P
     rewardLabel: config?.stampRewardLabel ?? 'Un producto gratis',
     pendingRewards,
   }
+}
+
+export interface ReverseStampResult {
+  reversed: boolean
+  stampCardId?: string
+}
+
+/**
+ * Revierte el sello que otorgó una venta que se reembolsó.
+ *
+ * 🔴 DINERO. Sin esto el cliente avanza en su cartilla por algo que devolvió, y acaba
+ * cobrando un premio que no se ganó. Con un café son centavos; con varios clientes
+ * haciéndolo, es una cartilla regalada cada semana.
+ *
+ * 🔴 Es un LIBRO, no un contador: el evento original se QUEDA y nace un asiento
+ * contrario. Borrar el EARN haría desaparecer el rastro de que ese cliente sí compró,
+ * y el día que reclame no habría con qué reconstruir su historia.
+ *
+ * Nunca lanza por no encontrar nada: la inmensa mayoría de los reembolsos son de
+ * ventas sin cartilla, y este camino corre en todos.
+ */
+export async function reverseStampForOrder(
+  venueId: string,
+  orderId: string,
+  options: { staffVenueId?: string } = {},
+): Promise<ReverseStampResult> {
+  const otorgado = await prisma.stampEvent.findFirst({
+    where: { venueId, orderId, type: StampEventType.EARN },
+    select: { id: true, stampCardId: true, quantity: true },
+  })
+  if (!otorgado) return { reversed: false }
+
+  // 🔴 Un mismo cobro puede reembolsarse en partes, y cada parte pasa por aquí. Sin
+  // este guard el cliente perdería dos sellos por una sola compra devuelta.
+  const yaRevertido = await prisma.stampEvent.count({
+    where: { venueId, orderId, type: StampEventType.REVERSAL },
+  })
+  if (yaRevertido > 0) return { reversed: false, stampCardId: otorgado.stampCardId }
+
+  const cantidad = otorgado.quantity ?? 1
+
+  await prisma.$transaction(async tx => {
+    await tx.stampEvent.create({
+      data: {
+        stampCardId: otorgado.stampCardId,
+        venueId,
+        orderId,
+        type: StampEventType.REVERSAL,
+        // Negativo: el libro se lee sumando, así que el asiento contrario resta.
+        quantity: -cantidad,
+        createdById: options.staffVenueId,
+      },
+    })
+
+    // El contador vive en la MISMA transacción que su asiento. Si se separan, un
+    // fallo a medias deja al cliente viendo un avance que el libro no respalda.
+    await tx.stampCard.update({
+      where: { id: otorgado.stampCardId },
+      data: { stampsEarned: { decrement: cantidad } },
+    })
+  })
+
+  // 🔴 Quitar un sello SÍ se registra; otorgarlo NO.
+  //
+  // Otorgar pasa en cada cobro de cada negocio: registrarlo inflaría la bitácora
+  // hasta volverla inútil, y la regla del repo es explícita — se registran las
+  // ANOMALÍAS que un dueño audita, no el ruido de todos los días. El sello otorgado
+  // ya queda en su propio libro (`StampEvent`), que es donde se reconstruye.
+  //
+  // Quitarlo es justo lo que alguien va a mirar cuando un cliente reclame que perdió
+  // un sello. Fire-and-forget: un fallo de auditoría no puede deshacer la reversión.
+  void logAction({
+    action: 'STAMP_REVERSED',
+    entity: 'StampCard',
+    entityId: otorgado.stampCardId,
+    venueId,
+    data: { orderId, quantity: cantidad, motivo: 'La venta que lo otorgó fue reembolsada' },
+  })
+
+  // El sello se fue: la tarjeta tiene que reflejarlo igual que cuando sube.
+  const cliente = await prisma.stampCard.findUnique({ where: { id: otorgado.stampCardId }, select: { customerId: true } })
+  if (cliente) void notifyCustomerPassUpdated(venueId, cliente.customerId)
+
+  logger.info('Sello revertido por reembolso', { venueId, orderId, stampCardId: otorgado.stampCardId })
+
+  return { reversed: true, stampCardId: otorgado.stampCardId }
 }
