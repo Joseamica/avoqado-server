@@ -86,9 +86,26 @@ export interface CreateOrderInput {
    *  pattern (order.tpv.service.ts createOrder): a repeated venueId+externalId
    *  returns the existing order instead of creating a duplicate. */
   externalId?: string | null
+  /**
+   * Premio de cartilla de sellos a aplicar EN LA CREACIÓN.
+   *
+   * 🔴 Va aquí y no en una segunda llamada porque el punto de venta cobra el total
+   * que devuelve el servidor: si el descuento llegara después, quedaría una ventana
+   * con la cuenta al total completo y el cliente podría pagar de más.
+   *
+   * Aditivo y opcional: sin él, el cuerpo y la respuesta quedan idénticos.
+   */
+  stampRewardId?: string | null
 }
 
 export interface CreatedOrderResponse {
+  /**
+   * Qué pasó con el premio, si venía uno. Ausente cuando no venía.
+   *
+   * 🔴 Se devuelve aunque NO se haya aplicado: el cajero tiene que poder ver por qué
+   * el cliente no recibió su descuento, en vez de descubrirlo cuando reclame.
+   */
+  stampReward?: StampRewardOnOrderResult
   id: string
   orderNumber: string
   status: string
@@ -1076,6 +1093,17 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     )
   }
 
+  // 🔴 El premio se aplica AQUÍ, con la orden ya creada y antes de devolverla: el
+  // punto de venta cobra el total que sale de esta respuesta.
+  const stampReward = await applyStampRewardToNewOrder(venueId, order.id, input.stampRewardId, input.staffId)
+
+  // 🔴 Y si se aplicó, hay que RELEER. `order` es el objeto en memoria de antes del
+  // descuento; devolverlo tal cual haría que el aparato cobre el total sin descontar
+  // — el premio quemado y el cliente pagando completo, que es la peor combinación.
+  const orderFinal = stampReward.applied
+    ? ((await prisma.order.findUnique({ where: { id: order.id }, include: createdOrderInclude })) ?? order)
+    : order
+
   // Emit Socket.IO event for real-time order creation
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
@@ -1084,12 +1112,12 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       orderNumber: order.orderNumber,
       orderType: order.type,
       source: order.source,
-      total: Number(order.total),
+      total: Number(orderFinal.total),
     })
   }
 
   // Flatten and return response
-  return toCreatedOrderResponse(order)
+  return { ...toCreatedOrderResponse(orderFinal as typeof order), ...(input.stampRewardId ? { stampReward } : {}) }
 }
 
 /**
@@ -3129,5 +3157,48 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
         orderNumber: null,
       })
     }
+  }
+}
+
+export interface StampRewardOnOrderResult {
+  applied: boolean
+  discountAmount?: number
+  rewardLabel?: string
+  /** Por qué no se aplicó. El cajero tiene que poder verlo. */
+  reason?: string
+}
+
+/**
+ * Aplica el premio de una cartilla a una orden RECIÉN creada.
+ *
+ * 🔴 DINERO, y el MOMENTO es lo que importa. El punto de venta cobra el total que le
+ * devuelve el servidor, no el que calculó el carrito (`adoptarTotalDelServer`), así que
+ * el descuento tiene que existir antes de que ese total viaje al aparato. Con dos
+ * llamadas separadas —crear la orden y luego canjear— queda una ventana en la que la
+ * cuenta existe con el total completo, y si el cobro entra ahí el cliente paga de más.
+ *
+ * 🔴 Un premio que no se puede aplicar NO tumba la venta, pero TAMPOCO se ignora en
+ * silencio. Tumbarla dejaría al cajero sin poder cobrar por culpa de un premio;
+ * ignorarla dejaría al cliente pagando completo sin que nadie se entere. La única
+ * salida honesta es cobrar el total real y decir por qué no se aplicó.
+ */
+export async function applyStampRewardToNewOrder(
+  venueId: string,
+  orderId: string,
+  stampRewardId: string | null | undefined,
+  staffId?: string,
+): Promise<StampRewardOnOrderResult> {
+  // El caso normal: la inmensa mayoría de las ventas no trae premio, y no puede costar
+  // ni una consulta de más.
+  if (!stampRewardId) return { applied: false }
+
+  try {
+    const { redeemStampReward } = await import('../wallet/redeemStampReward.service')
+    const r = await redeemStampReward(venueId, orderId, stampRewardId, { staffId })
+    return { applied: true, discountAmount: r.discountAmount, rewardLabel: r.rewardLabel }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    logger.warn('No se pudo aplicar el premio a una venta nueva', { venueId, orderId, stampRewardId, reason })
+    return { applied: false, reason }
   }
 }

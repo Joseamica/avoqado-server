@@ -69,6 +69,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       splitType,
       reservationId,
       externalId,
+      stampRewardId,
     } = req.body
 
     // Validate required fields
@@ -198,6 +199,10 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       splitType,
       reservationId: typeof reservationId === 'string' ? reservationId : null,
       externalId: typeof externalId === 'string' ? externalId : null,
+      // 🔴 Premio de cartilla a aplicar EN LA CREACIÓN: el punto de venta cobra el
+      // total que sale de esta respuesta, así que el descuento tiene que existir antes
+      // de devolverla. Aditivo — sin él, todo queda igual que antes.
+      stampRewardId: typeof stampRewardId === 'string' ? stampRewardId : null,
     })
 
     res.status(201).json({
