@@ -114,6 +114,8 @@ import {
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../services/master-catalog/catalogGovernance.service'
 
+import * as walletScanController from '../controllers/tpv/walletScan.tpv.controller'
+
 const router = express.Router()
 
 // Touch terminal.lastHeartbeat as a side-effect of any authenticated TPV request.
@@ -7772,5 +7774,36 @@ router.post(
 router.post('/kiosk/challenge', authenticateTokenMiddleware, kioskCheckInController.createChallenge)
 router.get('/kiosk/challenge/:challengeId', authenticateTokenMiddleware, kioskCheckInController.getChallenge)
 router.post('/kiosk/check-in-by-code', authenticateTokenMiddleware, kioskCheckInController.checkInByCode)
+
+/**
+ * @openapi
+ * /api/v1/tpv/venues/{venueId}/wallet/scan:
+ *   post:
+ *     tags: [TPV]
+ *     summary: Resuelve el QR de la tarjeta de un cliente
+ *     description: >
+ *       Devuelve el NOMBRE del cliente, su avance de sellos y los premios que tiene sin
+ *       cobrar — lo que el cajero necesita ver al momento de cobrar. No devuelve
+ *       teléfono ni correo. Un código que no resuelve responde 200 con found:false, no
+ *       404: nada distingue un código ajeno de uno inventado.
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [qrToken]
+ *             properties:
+ *               qrToken: { type: string }
+ *     responses:
+ *       200: { description: El cliente y su cartilla, o found:false }
+ */
+router.post(
+  '/venues/:venueId/wallet/scan',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  walletScanController.scanWalletPassHandler,
+)
 
 export default router

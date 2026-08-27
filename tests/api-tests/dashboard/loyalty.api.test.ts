@@ -36,7 +36,18 @@ beforeAll(async () => {
   }))
 
   // Mock loyalty controller (function names MUST match actual controller exports)
-  jest.mock('@/controllers/dashboard/loyalty.dashboard.controller', () => ({
+  // 🔴 El mock se envuelve en un Proxy y NO es una lista fija.
+  //
+  // Antes lo era, y se rompía sola: este archivo monta el router COMPLETO, así que
+  // cualquier handler que alguien agregara al controlador llegaba como `undefined` y
+  // Express reventaba al montar la ruta — con un error que apunta a `router.post(...)`
+  // en `dashboard.routes.ts` y no dice una palabra del mock. Le costó un CI en rojo a
+  // la primera persona que agregó handlers después de escribir esto.
+  //
+  // Con el Proxy, un handler no listado responde 200 vacío: suficiente para lo que
+  // este archivo prueba (autenticación y permisos, no la lógica del handler), y el
+  // test deja de ser un campo minado para quien toque el controlador.
+  const handlersSimulados: Record<string, unknown> = {
     __esModule: true,
     getLoyaltyConfig: (_req: any, res: any) =>
       res.status(200).json({
@@ -60,7 +71,21 @@ beforeAll(async () => {
     adjustPoints: (_req: any, res: any) => res.status(200).json({ pointsAdjusted: 50, newBalance: 550 }),
     getLoyaltyTransactions: (_req: any, res: any) => res.status(200).json({ data: [], meta: { totalCount: 0 }, currentBalance: 500 }),
     expireOldPoints: (_req: any, res: any) => res.status(200).json({ customersAffected: 5, pointsExpired: 200 }),
-  }))
+  }
+
+  jest.mock('@/controllers/dashboard/loyalty.dashboard.controller', () => {
+    return new Proxy(handlersSimulados, {
+      get(target, prop: string) {
+        if (prop in target) return target[prop]
+        // Cualquier handler nuevo: responde 200 sin cuerpo. Las pruebas de este
+        // archivo miran el código de estado de auth/permisos, no el contenido.
+        if (typeof prop === 'string' && prop.endsWith('Handler')) {
+          return (_req: any, res: any) => res.sendStatus(200)
+        }
+        return undefined
+      },
+    })
+  })
 
   // Import app after mocks
   const mod = await import('@/app')
