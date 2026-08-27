@@ -23,9 +23,11 @@ relatedArticles:
 
 ## Antes de empezar
 
-Mi perfil corresponde a tu usuario, no al local. Cambios como nombre, idioma o preferencias personales afectan tu experiencia dentro del Dashboard, pero no cambian datos publicos del venue ni permisos de otros miembros del equipo.
+Mi perfil corresponde a tu usuario, no al local. Cambios como nombre, idioma o preferencias personales afectan tu experiencia dentro del
+Dashboard, pero no cambian datos publicos del venue ni permisos de otros miembros del equipo.
 
-Si quieres cambiar acceso, rol o sucursales asignadas, eso se hace desde **Equipo > Miembros** o **Configuracion > Permisos y roles**, no desde tu perfil.
+Si quieres cambiar acceso, rol o sucursales asignadas, eso se hace desde **Equipo > Miembros** o **Configuracion > Permisos y roles**, no
+desde tu perfil.
 
 ## Pasos
 
@@ -38,14 +40,19 @@ Si quieres cambiar acceso, rol o sucursales asignadas, eso se hace desde **Equip
 
 ## Problemas frecuentes
 
-Si no puedes cambiar el correo, puede estar bloqueado por seguridad o por el proveedor de acceso. Si cambias idioma y parte del Dashboard no se actualiza, recarga la pagina. Si no recibes notificaciones, revisa preferencias, correo correcto y permisos del navegador. Si faltan sucursales o modulos, no es un problema de perfil: pide a un administrador revisar permisos.
+Si no puedes cambiar el correo, puede estar bloqueado por seguridad o por el proveedor de acceso. Si cambias idioma y parte del Dashboard no
+se actualiza, recarga la pagina. Si no recibes notificaciones, revisa preferencias, correo correcto y permisos del navegador. Si faltan
+sucursales o modulos, no es un problema de perfil: pide a un administrador revisar permisos.
 
 ## Diferencia entre perfil y venue
 
-Tu perfil identifica a la persona que usa el Dashboard. El venue representa el local o sucursal. Editar perfil no cambia nombre comercial, direccion, imagenes, documentos fiscales, integraciones ni facturacion del local. Para esos cambios usa **Configuracion > Editar Local**.
+Tu perfil identifica a la persona que usa el Dashboard. El venue representa el local o sucursal. Editar perfil no cambia nombre comercial,
+direccion, imagenes, documentos fiscales, integraciones ni facturacion del local. Para esos cambios usa **Configuracion > Editar Local**.
 
-Mantener esta diferencia clara reduce errores: una persona puede tener el mismo perfil en varias sucursales, pero cada sucursal conserva configuracion, permisos y datos propios.
+Mantener esta diferencia clara reduce errores: una persona puede tener el mismo perfil en varias sucursales, pero cada sucursal conserva
+configuracion, permisos y datos propios.
 
 ## Cuando pedir ayuda
 
-Pide soporte si tu nombre o correo aparecen incorrectos, si no puedes entrar a preferencias, si no recibes correos importantes o si tu perfil muestra informacion de otro usuario. Incluye correo de acceso y captura de la seccion afectada.
+Pide soporte si tu nombre o correo aparecen incorrectos, si no puedes entrar a preferencias, si no recibes correos importantes o si tu
+perfil muestra informacion de otro usuario. Incluye correo de acceso y captura de la seccion afectada.

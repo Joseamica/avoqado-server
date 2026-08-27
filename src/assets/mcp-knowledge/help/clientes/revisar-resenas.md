@@ -18,9 +18,11 @@ relatedArticles:
 
 ## Antes de empezar
 
-Resenas sirve para dar seguimiento a comentarios y calificaciones de clientes. Antes de responder o escalar un caso, revisa el contexto: fecha, fuente, calificacion, comentario y si hay una visita o pedido relacionado.
+Resenas sirve para dar seguimiento a comentarios y calificaciones de clientes. Antes de responder o escalar un caso, revisa el contexto:
+fecha, fuente, calificacion, comentario y si hay una visita o pedido relacionado.
 
-Si las resenas vienen de una integracion externa, como Google, la sincronizacion puede depender de que la integracion este conectada en configuracion.
+Si las resenas vienen de una integracion externa, como Google, la sincronizacion puede depender de que la integracion este conectada en
+configuracion.
 
 ## Pasos
 
@@ -33,16 +35,21 @@ Si las resenas vienen de una integracion externa, como Google, la sincronizacion
 
 ## Problemas frecuentes
 
-Si no aparecen resenas, revisa sucursal e integracion. Si falta una resena reciente, espera sincronizacion o valida la fuente externa. Si no puedes responder, puede faltar permiso de respuesta. Si una resena negativa se repite, documenta el patron y revisa operacion antes de responder de forma generica.
+Si no aparecen resenas, revisa sucursal e integracion. Si falta una resena reciente, espera sincronizacion o valida la fuente externa. Si no
+puedes responder, puede faltar permiso de respuesta. Si una resena negativa se repite, documenta el patron y revisa operacion antes de
+responder de forma generica.
 
 Para seguimiento, registra quien tomo el caso, que accion se hara y si se necesita contactar al cliente por otro canal.
 
 ## Flujo recomendado de seguimiento
 
-Clasifica las resenas en tres grupos: informativas, urgentes y recurrentes. Las informativas ayudan a entender percepcion general; las urgentes requieren respuesta o contacto; las recurrentes indican un problema operativo que conviene revisar con gerencia.
+Clasifica las resenas en tres grupos: informativas, urgentes y recurrentes. Las informativas ayudan a entender percepcion general; las
+urgentes requieren respuesta o contacto; las recurrentes indican un problema operativo que conviene revisar con gerencia.
 
-Antes de responder, evita prometer compensaciones o cambios que el equipo no pueda cumplir. Si la resena menciona fecha, mesa, producto o empleado, busca contexto en pedidos o reservaciones antes de contestar.
+Antes de responder, evita prometer compensaciones o cambios que el equipo no pueda cumplir. Si la resena menciona fecha, mesa, producto o
+empleado, busca contexto en pedidos o reservaciones antes de contestar.
 
 ## Cuando pedir ayuda
 
-Escala si una integracion deja de sincronizar, si una respuesta no se publica o si una resena contiene informacion sensible que requiere manejo cuidadoso. Incluye fuente, sucursal, fecha y captura del comentario.
+Escala si una integracion deja de sincronizar, si una respuesta no se publica o si una resena contiene informacion sensible que requiere
+manejo cuidadoso. Incluye fuente, sucursal, fecha y captura del comentario.

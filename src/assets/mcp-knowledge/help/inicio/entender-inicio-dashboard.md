@@ -17,9 +17,11 @@ sourceRepo: avoqado-web-dashboard
 
 ## Antes de empezar
 
-Inicio es una vista de resumen. Sirve para detectar rapidamente como va el local, pero no reemplaza los reportes detallados. Para investigar un pago, pedido, liquidacion o producto especifico, entra a la seccion correspondiente desde el menu lateral.
+Inicio es una vista de resumen. Sirve para detectar rapidamente como va el local, pero no reemplaza los reportes detallados. Para investigar
+un pago, pedido, liquidacion o producto especifico, entra a la seccion correspondiente desde el menu lateral.
 
-La informacion depende de la sucursal activa, del rango de fechas y de los permisos de tu usuario. Si administras varias sucursales, revisa primero que el local activo sea el correcto.
+La informacion depende de la sucursal activa, del rango de fechas y de los permisos de tu usuario. Si administras varias sucursales, revisa
+primero que el local activo sea el correcto.
 
 ## Pasos
 
@@ -32,14 +34,20 @@ La informacion depende de la sucursal activa, del rango de fechas y de los permi
 
 ## Problemas frecuentes
 
-Si los datos se ven en cero, revisa sucursal, fecha y permisos. Si una tarjeta no carga, puede depender de KYC, pagos activos o una funcion no habilitada para el local. Si el resumen no coincide con saldo disponible, recuerda que ventas y liquidaciones no siempre se depositan el mismo dia.
+Si los datos se ven en cero, revisa sucursal, fecha y permisos. Si una tarjeta no carga, puede depender de KYC, pagos activos o una funcion
+no habilitada para el local. Si el resumen no coincide con saldo disponible, recuerda que ventas y liquidaciones no siempre se depositan el
+mismo dia.
 
 ## Como usar el inicio en operacion
 
-Usa Inicio como tablero de lectura rapida. Al abrir turno, revisa si el local activo es correcto y si las tarjetas principales cargan. Durante el dia, úsalo para detectar cambios fuertes en ventas, actividad o pagos recientes. Al cierre, úsalo solo como referencia y confirma cifras en reportes.
+Usa Inicio como tablero de lectura rapida. Al abrir turno, revisa si el local activo es correcto y si las tarjetas principales cargan.
+Durante el dia, úsalo para detectar cambios fuertes en ventas, actividad o pagos recientes. Al cierre, úsalo solo como referencia y confirma
+cifras en reportes.
 
-Si ves una metrica inesperada, evita corregir datos desde otra seccion sin investigar primero. Abre el listado de origen: pagos para transacciones, pedidos para ordenes, inventario para existencias y reportes para totales.
+Si ves una metrica inesperada, evita corregir datos desde otra seccion sin investigar primero. Abre el listado de origen: pagos para
+transacciones, pedidos para ordenes, inventario para existencias y reportes para totales.
 
 ## Cuando pedir ayuda
 
-Escala si una tarjeta queda cargando, si el inicio muestra datos de una sucursal distinta o si una accion rapida lleva a una seccion incorrecta. Comparte usuario, sucursal, hora de consulta y captura de la tarjeta afectada.
+Escala si una tarjeta queda cargando, si el inicio muestra datos de una sucursal distinta o si una accion rapida lleva a una seccion
+incorrecta. Comparte usuario, sucursal, hora de consulta y captura de la tarjeta afectada.

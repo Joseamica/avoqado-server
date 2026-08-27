@@ -24,9 +24,12 @@ relatedArticles:
 
 ## Antes de empezar
 
-Reservaciones avanzadas cubre piezas que complementan el calendario y la lista de espera: comunicaciones, invitaciones a clientes y widget avanzado. Algunas entradas pueden aparecer como proximamente en el Dashboard; cuando eso ocurra, configura primero reservas online, reglas generales y canales disponibles.
+Reservaciones avanzadas cubre piezas que complementan el calendario y la lista de espera: comunicaciones, invitaciones a clientes y widget
+avanzado. Algunas entradas pueden aparecer como proximamente en el Dashboard; cuando eso ocurra, configura primero reservas online, reglas
+generales y canales disponibles.
 
-Antes de activar comunicaciones o invitaciones, define tono, responsable y datos de contacto. Un mensaje automatico puede afectar experiencia del cliente, por lo que conviene revisarlo como parte de la operacion del restaurante, no solo como un ajuste tecnico.
+Antes de activar comunicaciones o invitaciones, define tono, responsable y datos de contacto. Un mensaje automatico puede afectar
+experiencia del cliente, por lo que conviene revisarlo como parte de la operacion del restaurante, no solo como un ajuste tecnico.
 
 ## Pasos
 
@@ -39,14 +42,19 @@ Antes de activar comunicaciones o invitaciones, define tono, responsable y datos
 
 ## Problemas frecuentes
 
-Si una entrada avanzada no abre, puede seguir marcada como proximamente. Si los clientes no reciben mensajes, revisa primero datos de contacto, canal, consentimiento y estado de la reserva. Si el widget no muestra horarios, valida reglas de disponibilidad y reservas online. Si una invitacion llega con informacion incorrecta, revisa nombre del local, direccion y datos de contacto.
+Si una entrada avanzada no abre, puede seguir marcada como proximamente. Si los clientes no reciben mensajes, revisa primero datos de
+contacto, canal, consentimiento y estado de la reserva. Si el widget no muestra horarios, valida reglas de disponibilidad y reservas online.
+Si una invitacion llega con informacion incorrecta, revisa nombre del local, direccion y datos de contacto.
 
 ## Checklist antes de publicar
 
-Confirma horario de reservacion, capacidad, reglas de cancelacion, tolerancia, mensajes de confirmacion y datos visibles al cliente. Si instalas un widget en un sitio externo, prueba desde escritorio y telefono, usando una fecha real y un numero de personas valido.
+Confirma horario de reservacion, capacidad, reglas de cancelacion, tolerancia, mensajes de confirmacion y datos visibles al cliente. Si
+instalas un widget en un sitio externo, prueba desde escritorio y telefono, usando una fecha real y un numero de personas valido.
 
-Cuando uses invitaciones, segmenta con cuidado. No envies una campana masiva sin confirmar que el enlace, disponibilidad y mensaje final estan listos. El objetivo es traer clientes al flujo correcto, no saturar al equipo con dudas.
+Cuando uses invitaciones, segmenta con cuidado. No envies una campana masiva sin confirmar que el enlace, disponibilidad y mensaje final
+estan listos. El objetivo es traer clientes al flujo correcto, no saturar al equipo con dudas.
 
 ## Cuando pedir ayuda
 
-Pide soporte si una comunicacion automatica se envia con datos incorrectos, si el widget avanzado no aparece despues de activarlo o si las invitaciones fallan para varios clientes. Incluye venue, canal, fecha de prueba, captura del ajuste y ejemplo del mensaje recibido.
+Pide soporte si una comunicacion automatica se envia con datos incorrectos, si el widget avanzado no aparece despues de activarlo o si las
+invitaciones fallan para varios clientes. Incluye venue, canal, fecha de prueba, captura del ajuste y ejemplo del mensaje recibido.

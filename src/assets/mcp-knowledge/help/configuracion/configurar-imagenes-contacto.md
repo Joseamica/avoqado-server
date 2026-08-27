@@ -19,9 +19,12 @@ relatedArticles:
 
 ## Antes de empezar
 
-La configuracion de imagenes y contacto controla informacion que otros equipos usan para identificar el local: nombre comercial, telefono, correo, direccion, imagenes y datos publicos relacionados. Antes de cambiarla, confirma que estas en la sucursal correcta y que el negocio aprobo el texto o imagen final.
+La configuracion de imagenes y contacto controla informacion que otros equipos usan para identificar el local: nombre comercial, telefono,
+correo, direccion, imagenes y datos publicos relacionados. Antes de cambiarla, confirma que estas en la sucursal correcta y que el negocio
+aprobo el texto o imagen final.
 
-Usa imagenes limpias, con buena resolucion y sin texto pequeno que se pierda en pantallas chicas. Si el local tiene varias sucursales, no reutilices automaticamente la misma informacion: direccion, telefono, correo operativo y fotos pueden cambiar por venue.
+Usa imagenes limpias, con buena resolucion y sin texto pequeno que se pierda en pantallas chicas. Si el local tiene varias sucursales, no
+reutilices automaticamente la misma informacion: direccion, telefono, correo operativo y fotos pueden cambiar por venue.
 
 ## Pasos
 
@@ -35,14 +38,19 @@ Usa imagenes limpias, con buena resolucion y sin texto pequeno que se pierda en 
 
 ## Problemas frecuentes
 
-Si no puedes entrar a **Editar Local**, tu rol no tiene permiso administrativo sobre venues. Si una imagen no carga, revisa formato, peso y conexion antes de intentar de nuevo. Si guardaste pero sigues viendo datos viejos, recarga el Dashboard y revisa que estes en la misma sucursal. Si el cambio aparece en Dashboard pero no en un canal externo, puede existir cache o sincronizacion pendiente.
+Si no puedes entrar a **Editar Local**, tu rol no tiene permiso administrativo sobre venues. Si una imagen no carga, revisa formato, peso y
+conexion antes de intentar de nuevo. Si guardaste pero sigues viendo datos viejos, recarga el Dashboard y revisa que estes en la misma
+sucursal. Si el cambio aparece en Dashboard pero no en un canal externo, puede existir cache o sincronizacion pendiente.
 
 ## Que revisar antes de publicar
 
-Valida que el telefono tenga clave correcta, que el correo llegue a una bandeja atendida y que la direccion sea la que el cliente debe usar. Tambien revisa que las imagenes no muestren menus viejos, promociones vencidas o informacion que no aplique a la sucursal actual.
+Valida que el telefono tenga clave correcta, que el correo llegue a una bandeja atendida y que la direccion sea la que el cliente debe usar.
+Tambien revisa que las imagenes no muestren menus viejos, promociones vencidas o informacion que no aplique a la sucursal actual.
 
-Cuando cambies una imagen de marca, avisa al equipo que atiende clientes. Esto evita que soporte o ventas compartan capturas con branding anterior mientras el Dashboard ya muestra la version nueva.
+Cuando cambies una imagen de marca, avisa al equipo que atiende clientes. Esto evita que soporte o ventas compartan capturas con branding
+anterior mientras el Dashboard ya muestra la version nueva.
 
 ## Cuando pedir ayuda
 
-Contacta soporte si una imagen aprobada no se guarda, si el Dashboard muestra informacion de otra sucursal o si un dato publico se actualiza en una parte pero no en otra. Incluye venue, campo modificado, fecha del cambio y captura de la pantalla donde se ve el problema.
+Contacta soporte si una imagen aprobada no se guarda, si el Dashboard muestra informacion de otra sucursal o si un dato publico se actualiza
+en una parte pero no en otra. Incluye venue, campo modificado, fecha del cambio y captura de la pantalla donde se ve el problema.

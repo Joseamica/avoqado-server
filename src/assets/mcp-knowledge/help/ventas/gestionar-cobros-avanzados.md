@@ -22,9 +22,12 @@ relatedArticles:
 
 ## Antes de empezar
 
-Cobros avanzados cubre pantallas sensibles: configuracion de pagos, cuentas merchant, terminal virtual y disputas. Algunas opciones aparecen solo para superadmin o soporte porque pueden afectar procesamiento, liquidaciones o cumplimiento. Si eres OWNER o ADMIN y no ves **Payment Config** o **Merchant Accounts**, no asumas que esta roto: puede estar restringido por rol.
+Cobros avanzados cubre pantallas sensibles: configuracion de pagos, cuentas merchant, terminal virtual y disputas. Algunas opciones aparecen
+solo para superadmin o soporte porque pueden afectar procesamiento, liquidaciones o cumplimiento. Si eres OWNER o ADMIN y no ves **Payment
+Config** o **Merchant Accounts**, no asumas que esta roto: puede estar restringido por rol.
 
-Antes de cambiar cualquier configuracion, identifica si el objetivo es activar cobros, revisar una cuenta procesadora, cobrar manualmente o responder una disputa. Cada caso requiere informacion distinta.
+Antes de cambiar cualquier configuracion, identifica si el objetivo es activar cobros, revisar una cuenta procesadora, cobrar manualmente o
+responder una disputa. Cada caso requiere informacion distinta.
 
 ## Pasos
 
@@ -37,14 +40,20 @@ Antes de cambiar cualquier configuracion, identifica si el objetivo es activar c
 
 ## Problemas frecuentes
 
-Si una ruta te redirige o no aparece en el menu, revisa rol, permisos, KYC y si la funcion esta activa para el local. Si una cuenta merchant aparece incompleta, no intentes crear otra sin validar con soporte. Si una disputa no tiene evidencia suficiente, recopila recibo, orden, fecha, monto y comprobante de entrega o consumo antes de responder.
+Si una ruta te redirige o no aparece en el menu, revisa rol, permisos, KYC y si la funcion esta activa para el local. Si una cuenta merchant
+aparece incompleta, no intentes crear otra sin validar con soporte. Si una disputa no tiene evidencia suficiente, recopila recibo, orden,
+fecha, monto y comprobante de entrega o consumo antes de responder.
 
 ## Que datos tener listos
 
-Para configuracion de pagos, prepara venue, proveedor, moneda, estado KYC y metodo de liquidacion esperado. Para terminal virtual, valida si el local esta autorizado a hacer cobros manuales. Para disputas, prepara informacion que demuestre que el cargo fue valido, sin compartir datos sensibles completos del cliente.
+Para configuracion de pagos, prepara venue, proveedor, moneda, estado KYC y metodo de liquidacion esperado. Para terminal virtual, valida si
+el local esta autorizado a hacer cobros manuales. Para disputas, prepara informacion que demuestre que el cargo fue valido, sin compartir
+datos sensibles completos del cliente.
 
-Las pantallas de cobros avanzados tienen mayor riesgo operativo que un reporte. Un cambio incorrecto puede dejar de procesar pagos o afectar conciliacion, asi que cualquier ajuste debe tener aprobacion interna.
+Las pantallas de cobros avanzados tienen mayor riesgo operativo que un reporte. Un cambio incorrecto puede dejar de procesar pagos o afectar
+conciliacion, asi que cualquier ajuste debe tener aprobacion interna.
 
 ## Cuando pedir ayuda
 
-Escala a soporte si una cuenta merchant esta bloqueada, si la configuracion de pagos muestra errores, si terminal virtual no esta disponible despues de activarse o si una disputa requiere respuesta formal. Incluye venue, ruta, proveedor, monto, fecha y captura del estado.
+Escala a soporte si una cuenta merchant esta bloqueada, si la configuracion de pagos muestra errores, si terminal virtual no esta disponible
+despues de activarse o si una disputa requiere respuesta formal. Incluye venue, ruta, proveedor, monto, fecha y captura del estado.

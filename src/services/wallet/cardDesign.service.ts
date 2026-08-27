@@ -86,6 +86,29 @@ export function assertValidDesign(patch: CardDesignPatch): void {
   }
 }
 
+/**
+ * Le pone una versión a la dirección de una imagen recién subida.
+ *
+ * 🔴 Nació de un bug reportado usando la pantalla: "me equivoqué al subir esta foto y
+ * ya no la puedo cambiar". El archivo se guarda con un nombre ESTABLE
+ * (`venues/<slug>/wallet/icon.png`) para no acumular basura con cada intento de diseño
+ * — eso sigue siendo correcto. Lo que estaba mal es que la dirección guardada era la
+ * misma para siempre: el archivo cambiaba y el navegador seguía sirviendo el anterior
+ * de su caché.
+ *
+ * El síntoma es el peor posible: el negocio sube la imagen correcta, ve la equivocada,
+ * y concluye que la pantalla está rota.
+ *
+ * Se conservan los demás parámetros (Firebase devuelve `alt=media&token=…`) y se
+ * REEMPLAZA cualquier `v` anterior, para que no se acumulen entre subidas.
+ */
+export function versionedStorageUrl(url: string, version: number = Date.now()): string {
+  const [base, query = ''] = url.split('?')
+  const params = new URLSearchParams(query)
+  params.set('v', String(version))
+  return `${base}?${params.toString()}`
+}
+
 /** El diseño del negocio, o los defaults si nunca lo configuró. */
 export async function getCardDesign(venueId: string): Promise<CardDesign> {
   const row = await prisma.walletCardDesign.findUnique({ where: { venueId } })

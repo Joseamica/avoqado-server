@@ -365,7 +365,12 @@ describe('buildInventoryByResponsible', () => {
       const result = buildInventoryByResponsible({
         items: [],
         staff: [
-          staff({ id: 'sup-9', name: 'Juan Nájera', role: 'SUPERVISOR', venues: [{ venueId: TIENDA_SLP, city: 'San Luis Potosí', startDate: new Date('2026-01-01') }] }),
+          staff({
+            id: 'sup-9',
+            name: 'Juan Nájera',
+            role: 'SUPERVISOR',
+            venues: [{ venueId: TIENDA_SLP, city: 'San Luis Potosí', startDate: new Date('2026-01-01') }],
+          }),
         ],
       })
 

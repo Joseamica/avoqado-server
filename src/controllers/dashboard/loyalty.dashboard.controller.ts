@@ -305,7 +305,14 @@ export async function uploadCardImageHandler(req: Request, res: Response) {
   // Nombre estable por tipo: subir un logo nuevo REEMPLAZA al anterior en vez de
   // dejar basura acumulándose en el almacenamiento con cada intento de diseño.
   const path = buildStoragePath(`venues/${venue.slug}/wallet/${kind}.png`)
-  const url = await uploadFileToStorage(file.buffer, path, 'image/png')
+  const subida = await uploadFileToStorage(file.buffer, path, 'image/png')
+
+  // 🔴 Con VERSIÓN en la dirección. El archivo se reemplaza (nombre estable, sin
+  // basura acumulada), pero sin esto la dirección quedaba idéntica y el navegador
+  // seguía sirviendo la imagen anterior de su caché: el negocio subía la correcta,
+  // veía la equivocada, y concluía que la pantalla estaba rota. Bug reportado por el
+  // founder usando la pantalla (27-ago).
+  const url = cardDesignService.versionedStorageUrl(subida)
 
   const campo = kind === 'logo' ? 'logoUrl' : kind === 'icon' ? 'iconUrl' : 'stampImageUrl'
   const design = await cardDesignService.saveCardDesign(venueId, { [campo]: url })
