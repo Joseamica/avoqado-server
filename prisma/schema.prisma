@@ -16830,12 +16830,34 @@ model PlatformAnnouncementDelivery {
   staff          Staff                @relation(fields: [staffId], references: [id], onDelete: Cascade)
   venueId        String // por qué negocio le llegó
 
-  deliveredAt DateTime @default(now())
+  /// Estado de la ENTREGA del aviso al buzón. La fila nace PENDING al publicar y un job
+  /// la convierte en la `Notification`. Mismo patrón que `CustomerApprovalDelivery`.
+  status        PlatformAnnouncementDeliveryStatus @default(PENDING)
+  attempts      Int                                @default(0)
+  nextAttemptAt DateTime                           @default(now())
+  leaseUntil    DateTime?
+  lastError     String?                            @db.Text
+
+  /// La Notification que se creó para esta entrega (rastro, y evita recrearla).
+  notificationId String?
+
+  deliveredAt DateTime? // cuándo llegó al buzón de verdad
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([announcementId, staffId, venueId])
   @@index([staffId, announcementId])
   @@index([announcementId])
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseUntil])
   @@map("platform_announcement_deliveries")
+}
+
+enum PlatformAnnouncementDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
 }
 
 enum PlatformAnnouncementStatus {

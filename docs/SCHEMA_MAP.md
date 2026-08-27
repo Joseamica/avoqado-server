@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **351 models / 337 enums / ~16,800 lines**. Nobody reads it top to bottom. This file is the **index**: 22 domains,
+`prisma/schema.prisma` is **351 models / 338 enums / ~16,800 lines**. Nobody reads it top to bottom. This file is the **index**: 22 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 

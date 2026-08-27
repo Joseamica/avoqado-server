@@ -19,4 +19,6 @@ export const DATABASE_JOB_SCHEDULES = {
   // Anuncios de plataforma programados. Cada 5 min en el segundo 47 — hueco libre entre
   // el sweeper de inventario (:44) y el de gcal (:53).
   publishScheduledAnnouncements: '47 */5 * * * *',
+  // Entrega de anuncios encolados. Cada 30 s en los segundos 6 y 36, huecos libres.
+  announcementOutbox: '6,36 * * * * *',
 } as const

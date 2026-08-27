@@ -161,15 +161,30 @@ export async function listAnnouncementsForStaff(staffId: string, opts: { limit: 
  * no significa que alguien haya abierto el anuncio.
  */
 export async function getAnnouncementMetrics(announcementId: string) {
-  const [reached, read, opened, cta] = await Promise.all([
-    // El alcance sale de los ACUSES, que sólo escribe el publisher: una Notification
-    // fabricada por un usuario ya no puede inflar el número que ve el superadmin.
+  const [reached, delivered, read, opened, cta] = await Promise.all([
     prisma.platformAnnouncementDelivery.count({ where: { announcementId } }),
+    prisma.platformAnnouncementDelivery.count({ where: { announcementId, status: 'SENT' } }),
+    // 🔴 Los leídos se cuentan por los ACUSES entregados, uniendo con su Notification.
+    // Contar `Notification` sueltas dejaba el número inflable: cualquiera con
+    // `notifications:send` puede crear una con esos campos y marcarla leída.
     prisma.notification.count({
-      where: { entityType: ENTITY, entityId: announcementId, type: NotificationType.ANNOUNCEMENT, isRead: true },
+      where: {
+        entityType: ENTITY,
+        entityId: announcementId,
+        type: NotificationType.ANNOUNCEMENT,
+        isRead: true,
+        id: {
+          in: (
+            await prisma.platformAnnouncementDelivery.findMany({
+              where: { announcementId, notificationId: { not: null } },
+              select: { notificationId: true },
+            })
+          ).map(d => d.notificationId as string),
+        },
+      },
     }),
     prisma.platformAnnouncementClick.count({ where: { announcementId } }),
     prisma.platformAnnouncementClick.count({ where: { announcementId, ctaAt: { not: null } } }),
   ])
-  return { reached, read, opened, cta }
+  return { reached, delivered, read, opened, cta }
 }

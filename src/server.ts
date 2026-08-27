@@ -55,6 +55,7 @@ import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
 import { gcalOutboxSweeperJob } from './jobs/gcal-outbox-sweeper.job'
 import { customerApprovalOutboxJob } from './jobs/customer-approval-outbox.job'
 import { publishScheduledAnnouncementsJob } from './jobs/publishScheduledAnnouncements.job'
+import { announcementOutboxJob } from './jobs/announcementOutbox.job'
 import { kioskOutreachJob } from './jobs/kiosk-outreach.job'
 import { gcalChannelRenewalJob } from './jobs/gcal-channel-renewal.job'
 import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
@@ -242,6 +243,7 @@ const gracefulShutdown = async (signal: string) => {
       kioskOutreachJob.stop()
       // Anuncios de plataforma programados
       publishScheduledAnnouncementsJob.stop()
+      announcementOutboxJob.stop()
 
       // Stop Mercado Pago marketplace jobs
       mercadoPagoTokenRefreshJob.stop()
@@ -541,6 +543,8 @@ const startApplication = async (retries = 3) => {
       kioskOutreachJob.start()
       // Publica los anuncios de plataforma cuya hora programada ya llegó (cada 5 min)
       publishScheduledAnnouncementsJob.start()
+      // Entrega los anuncios encolados (cada 30 s)
+      announcementOutboxJob.start()
       // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
       gcalChannelRenewalJob.start()
       // Horizon refresh: re-sync events newly inside the booking window (daily 04:00)
