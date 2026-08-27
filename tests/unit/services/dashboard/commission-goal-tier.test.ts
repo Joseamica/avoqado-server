@@ -34,6 +34,9 @@ const mockGetEffectiveGoals = getEffectiveGoals as jest.MockedFunction<typeof ge
 
 const createGoalConfig = (overrides: Partial<CommissionConfigWithRelations> = {}): CommissionConfigWithRelations => ({
   id: 'config-1',
+  // Asistencia → comisiones: apagada, como nace todo esquema.
+  attendanceLinked: false,
+  attendanceLatePenaltyRate: null,
   venueId: 'venue-1',
   name: 'Goal-Based Config',
   priority: 1,

@@ -120,6 +120,8 @@ describe('getRecipientStaffId', () => {
 describe('calculateFinalRate', () => {
   const baseConfig: CommissionConfigWithRelations = {
     id: 'config-1',
+    attendanceLinked: false,
+    attendanceLatePenaltyRate: null,
     venueId: 'venue-1',
     name: 'Test Config',
     priority: 1,

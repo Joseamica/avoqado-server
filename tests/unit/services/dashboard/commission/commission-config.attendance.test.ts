@@ -50,7 +50,7 @@ describe('asistencia → comisiones en el config', () => {
     await expect(
       createCommissionConfig('venue-1', { name: 'X', defaultRate: 0.03, attendanceLinked: true } as any, 'staff-1'),
     ).rejects.toThrow(/porcentaje/)
-    await expect(updateCommissionConfig('cfg-1', 'venue-1', { attendanceLinked: true } as any, 'staff-1')).rejects.toThrow(/porcentaje/)
+    await expect(updateCommissionConfig('cfg-1', 'venue-1', { attendanceLinked: true } as any)).rejects.toThrow(/porcentaje/)
   })
 
   it('porcentaje fuera de (0,1] se rechaza en crear y en actualizar', async () => {
@@ -66,7 +66,7 @@ describe('asistencia → comisiones en el config', () => {
   })
 
   it('actualizar sólo el porcentaje (regla ya prendida) pasa', async () => {
-    await updateCommissionConfig('cfg-1', 'venue-1', { attendanceLatePenaltyRate: 0.5 } as any, 'staff-1')
+    await updateCommissionConfig('cfg-1', 'venue-1', { attendanceLatePenaltyRate: 0.5 } as any)
     expect(db.commissionConfig.update.mock.calls[0][0].data).toEqual(expect.objectContaining({ attendanceLatePenaltyRate: 0.5 }))
   })
 })
