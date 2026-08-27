@@ -17,7 +17,13 @@ jest.mock('@/services/dashboard/appointmentStaffAssignment.service', () => ({
   lockAppointmentVenue: jest.fn(),
 }))
 
-import { getTeamMembers, updateTeamMember, inviteTeamMember, hardDeleteTeamMember } from '@/services/dashboard/team.dashboard.service'
+import {
+  getTeamMembers,
+  updateTeamMember,
+  inviteTeamMember,
+  hardDeleteTeamMember,
+  getDeactivationImpact,
+} from '@/services/dashboard/team.dashboard.service'
 import { StaffRole } from '@prisma/client'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
@@ -565,6 +571,125 @@ describe('hardDeleteTeamMember — guardas al abrirlo al OWNER', () => {
         active: true,
         id: { not: TEAM_MEMBER_ID },
       },
+    })
+  })
+})
+
+/**
+ * GET .../team/:teamMemberId/deactivation-impact — aviso (no candado) para que la
+ * pantalla de baja de personal muestre si esa persona trae inventario serializado
+ * en custodia o verificaciones de venta pendientes antes de confirmar la baja.
+ *
+ * `teamMemberId` es el id de StaffVenue, NO el de Staff — el mismo id que usa
+ * removeTeamMember. Confundirlos (usar teamMemberId donde va staffId) hace que el
+ * conteo salga en cero SIEMPRE, que es el peor resultado posible: un aviso que nunca
+ * avisa. Varias pruebas de abajo verifican explícitamente que las consultas usan
+ * staffVenue.staffId y no el teamMemberId crudo.
+ */
+describe('getDeactivationImpact — aviso de custodia al dar de baja', () => {
+  const ORGANIZATION_ID = 'org-1'
+
+  beforeEach(() => {
+    prismaMock.staffVenue.findFirst.mockReset()
+    prismaMock.venue.findUnique.mockReset()
+    prismaMock.serializedItem.count.mockReset()
+    prismaMock.saleVerification.count.mockReset()
+
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      id: TEAM_MEMBER_ID,
+      staffId: STAFF_ID,
+      venueId: VENUE_ID,
+      staff: { firstName: 'Isela Judith', lastName: 'Chavez Leal' },
+    } as any)
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: ORGANIZATION_ID } as any)
+    prismaMock.serializedItem.count.mockResolvedValue(0)
+    prismaMock.saleVerification.count.mockResolvedValue(0)
+  })
+
+  it('lanza NotFoundError en español cuando el teamMemberId no pertenece a este venue', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+
+    await expect(getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)).rejects.toThrow(NotFoundError)
+    await expect(getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)).rejects.toThrow('Miembro del equipo no encontrado en este venue')
+
+    expect(prismaMock.serializedItem.count).not.toHaveBeenCalled()
+    expect(prismaMock.saleVerification.count).not.toHaveBeenCalled()
+  })
+
+  it('busca al miembro del equipo acotado al venueId de la ruta (aislamiento de tenant)', async () => {
+    await getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)
+
+    expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: TEAM_MEMBER_ID, venueId: VENUE_ID } }),
+    )
+  })
+
+  it('arma staffName con nombre y apellido de la persona', async () => {
+    const result = await getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)
+
+    expect(result.staffName).toBe('Isela Judith Chavez Leal')
+  })
+
+  it('cuenta serializedItemsInCustody usando el staffId de Staff, NUNCA el teamMemberId de StaffVenue', async () => {
+    prismaMock.serializedItem.count.mockResolvedValue(93)
+
+    const result = await getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)
+
+    expect(result.serializedItemsInCustody).toBe(93)
+    const callArg = prismaMock.serializedItem.count.mock.calls[0][0] as any
+    expect(callArg.where.assignedPromoterId).toBe(STAFF_ID)
+    expect(callArg.where.assignedPromoterId).not.toBe(TEAM_MEMBER_ID)
+  })
+
+  it('excluye los artículos ya vendidos (custodyState=SOLD) del conteo de custodia', async () => {
+    await getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)
+
+    const callArg = prismaMock.serializedItem.count.mock.calls[0][0] as any
+    expect(callArg.where.custodyState).toEqual({ not: 'SOLD' })
+  })
+
+  it('incluye el pool a nivel organización (venueId=null) sin salirse del tenant del venue', async () => {
+    await getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)
+
+    const callArg = prismaMock.serializedItem.count.mock.calls[0][0] as any
+    expect(callArg.where.OR).toEqual(expect.arrayContaining([{ venueId: VENUE_ID }, { organizationId: ORGANIZATION_ID, venueId: null }]))
+  })
+
+  it('cae a filtrar sólo por venueId si el venue no resuelve organizationId', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(null)
+
+    await getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)
+
+    const callArg = prismaMock.serializedItem.count.mock.calls[0][0] as any
+    expect(callArg.where.venueId).toBe(VENUE_ID)
+    expect(callArg.where.OR).toBeUndefined()
+  })
+
+  it('cuenta pendingSaleVerifications sólo en estados NO finales (PENDING, PROCESSING, FAILED), acotado a este venue y persona', async () => {
+    prismaMock.saleVerification.count.mockResolvedValue(4)
+
+    const result = await getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)
+
+    expect(result.pendingSaleVerifications).toBe(4)
+    expect(prismaMock.saleVerification.count).toHaveBeenCalledWith({
+      where: {
+        venueId: VENUE_ID,
+        staffId: STAFF_ID,
+        status: { in: ['PENDING', 'PROCESSING', 'FAILED'] },
+      },
+    })
+  })
+
+  it('devuelve cero limpio cuando la persona no trae nada', async () => {
+    prismaMock.serializedItem.count.mockResolvedValue(0)
+    prismaMock.saleVerification.count.mockResolvedValue(0)
+
+    const result = await getDeactivationImpact(VENUE_ID, TEAM_MEMBER_ID)
+
+    expect(result).toEqual({
+      staffName: 'Isela Judith Chavez Leal',
+      serializedItemsInCustody: 0,
+      pendingSaleVerifications: 0,
     })
   })
 })

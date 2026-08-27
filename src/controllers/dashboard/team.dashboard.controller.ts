@@ -164,6 +164,21 @@ export async function removeTeamMember(req: Request, res: Response, next: NextFu
   }
 }
 
+export async function getDeactivationImpact(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const teamMemberId: string = req.params.teamMemberId
+
+    const impact = await teamService.getDeactivationImpact(venueId, teamMemberId)
+
+    res.status(200).json({
+      data: impact,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function getPendingInvitations(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const venueId: string = req.params.venueId

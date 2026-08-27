@@ -7560,6 +7560,48 @@ router.delete(
   teamController.removeTeamMember,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team/{teamMemberId}/deactivation-impact:
+ *   get:
+ *     tags: [Team Management]
+ *     summary: Preview the impact of deactivating a team member (does not deactivate)
+ *     description: |
+ *       Read-only check the "remove team member" screen calls BEFORE the user confirms,
+ *       so it can warn (not block) when the person still has serialized inventory
+ *       (SIMs / ICCIDs) in custody or unresolved sale verifications. Uses the same
+ *       `teams:delete` permission as the delete endpoint — whoever can remove the
+ *       member is who needs the warning.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: teamMemberId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Deactivation impact preview
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     staffName: { type: string }
+ *                     serializedItemsInCustody: { type: integer }
+ *                     pendingSaleVerifications: { type: integer }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/team/:teamMemberId/deactivation-impact',
+  authenticateTokenMiddleware,
+  checkPermission('teams:delete'),
+  validateRequest(TeamMemberParamsSchema),
+  teamController.getDeactivationImpact,
+)
+
 router.put(
   '/venues/:venueId/team/:teamMemberId/permission-set',
   authenticateTokenMiddleware,

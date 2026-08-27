@@ -1,5 +1,13 @@
 import prisma from '../../utils/prismaClient'
-import { Prisma, StaffRole, InvitationType, InvitationStatus, OrgRole } from '@prisma/client'
+import {
+  Prisma,
+  StaffRole,
+  InvitationType,
+  InvitationStatus,
+  OrgRole,
+  SerializedItemCustodyState,
+  SaleVerificationStatus,
+} from '@prisma/client'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import emailService from '../email.service'
@@ -964,6 +972,84 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     averageRating: Number(updatedStaffVenue.averageRating),
     permissionSetId: updatedStaffVenue.permissionSet?.id ?? null,
     permissionSetName: updatedStaffVenue.permissionSet?.name ?? null,
+  }
+}
+
+// Estados de SaleVerification que NO son finales (prisma/schema.prisma, enum
+// SaleVerificationStatus): PENDING y PROCESSING todavía esperan trabajo, y FAILED
+// ("Revisar") es corregible por el propio promotor en la TPV — sólo COMPLETED
+// ("Venta correcta"), REJECTED ("Rechazada", terminal) y SKIPPED son finales.
+const NON_FINAL_SALE_VERIFICATION_STATUSES: SaleVerificationStatus[] = [
+  SaleVerificationStatus.PENDING,
+  SaleVerificationStatus.PROCESSING,
+  SaleVerificationStatus.FAILED,
+]
+
+export interface DeactivationImpact {
+  staffName: string
+  serializedItemsInCustody: number
+  pendingSaleVerifications: number
+}
+
+/**
+ * Aviso (NO candado) para la pantalla de baja de personal: cuánto inventario
+ * serializado trae esta persona en custodia y cuántas verificaciones de venta le
+ * quedan pendientes. No bloquea nada — removeTeamMember sigue funcionando igual;
+ * esto sólo le da a la pantalla con qué avisar ANTES de que el usuario confirme.
+ *
+ * `teamMemberId` es el id de StaffVenue (igual que removeTeamMember), no el de
+ * Staff — se resuelve el staffId real antes de consultar custodia/verificaciones,
+ * porque filtrar por el id equivocado deja el conteo en cero siempre.
+ */
+export async function getDeactivationImpact(venueId: string, teamMemberId: string): Promise<DeactivationImpact> {
+  const [staffVenue, venue] = await Promise.all([
+    prisma.staffVenue.findFirst({
+      where: { id: teamMemberId, venueId },
+      include: { staff: { select: { firstName: true, lastName: true } } },
+    }),
+    prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    }),
+  ])
+
+  if (!staffVenue) {
+    throw new NotFoundError('Miembro del equipo no encontrado en este venue')
+  }
+
+  const staffId = staffVenue.staffId
+
+  // Mismo alcance que el resto del stock dashboard (stockDashboard.service.ts
+  // getItemScope): un artículo serializado puede vivir a nivel del venue O a nivel
+  // de la organización (venueId=null, ej. el pool de PlayTelecom). Los dos casos son
+  // el MISMO inquilino — no es fuga de tenant incluir el pool de la organización de
+  // este venue — y excluirlo dejaría el conteo en cero para promotores cuyas SIMs
+  // se registraron a nivel organización, que es justo el caso real que motivó esto.
+  const serializedItemScope: Prisma.SerializedItemWhereInput = venue?.organizationId
+    ? { OR: [{ venueId }, { organizationId: venue.organizationId, venueId: null }] }
+    : { venueId }
+
+  const [serializedItemsInCustody, pendingSaleVerifications] = await Promise.all([
+    prisma.serializedItem.count({
+      where: {
+        ...serializedItemScope,
+        assignedPromoterId: staffId,
+        custodyState: { not: SerializedItemCustodyState.SOLD },
+      },
+    }),
+    prisma.saleVerification.count({
+      where: {
+        venueId,
+        staffId,
+        status: { in: NON_FINAL_SALE_VERIFICATION_STATUSES },
+      },
+    }),
+  ])
+
+  return {
+    staffName: `${staffVenue.staff.firstName} ${staffVenue.staff.lastName}`.trim(),
+    serializedItemsInCustody,
+    pendingSaleVerifications,
   }
 }
 
