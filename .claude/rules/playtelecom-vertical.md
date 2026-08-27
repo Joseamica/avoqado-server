@@ -74,3 +74,49 @@ one.
   (`SerializedItem.assignedPromoterId`), pending sales (`Order`/`SaleVerification`/ `SimRegistrationRequest` not yet completed).
 - **Moving a PT terminal between stores** (e.g. a "Cubre Descanso" relief promoter's PAX getting re-parented to the real store) is a
   money-safety issue, not just a config change — see `avoqado-tpv/.claude/rules/serialized-inventory-and-sim-custody.md`.
+
+## 🔴 Cada petición manual de Isaac es un hueco de producto — detéctalo y propónlo
+
+**Instrucción directa del founder (2026-08-27):** _"Isaac me pide muchas cosas y cambios manuales, y la finalidad de todo es que no nos pida
+nada, que él lo pueda hacer. Si Claude detecta que Isaac pide algo que él mismo no puede hacer en el dashboard, sugerirme creárselo y
+también preguntárselo a él para ver si le parece."_
+
+El cliente no pide features: pide resultados. Cuando pide "crea estos venues", "mueve estas ventas", "da de baja a esta persona", lo que
+está diciendo es **"no puedo hacerlo yo"**. Cada una de esas peticiones es un hueco de autoservicio disfrazado de tarea.
+
+### Cuándo se dispara
+
+Cuando la petición de Isaac te obligue a **cualquiera** de estas cosas:
+
+- correr un script (`scripts/*.ts`) contra producción,
+- escribir SQL a mano,
+- pedirle un Excel para que tú lo apliques,
+- o cualquier acción que él no pueda ejecutar desde el dashboard con su propio usuario.
+
+### Qué hacer — las tres, siempre
+
+1. **Resuelve lo que pidió.** La regla no bloquea la entrega; el cliente necesita su resultado hoy.
+2. **Propónselo al founder**, con el costo real: qué pantalla haría falta, dónde vive, y cuánto pesa contra el trabajo manual recurrente que
+   evita.
+3. **Pregúntaselo a Isaac en el MISMO task**, en lenguaje de negocio, y con opciones ordenadas por costo. No le presentes una sola salida:
+   dale de dos a cuatro, di cuál recomiendas y por qué, y deja claro qué necesitarías de él. Él conoce su operación y a veces la salida
+   barata le sirve igual.
+
+🔴 **Y antes de proponer, verifica el porqué contra los datos.** En este mismo vertical se le describió a Isaac un "proceso semanal" que en
+realidad **nunca existió** (se había hecho una sola vez, a mano, en julio) — iba a decidir apoyado en eso. Una afirmación sobre cómo opera
+el cliente se comprueba contando eventos en la base, nunca de memoria ni de una nota vieja.
+
+### Huecos ya detectados (crece con cada petición)
+
+| Lo que Isaac pidió                             | Lo que hoy exige                              | Estado                                                                                                                           |
+| ---------------------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Actualizar la estructura desde su Excel        | `conciliar-estructura-bait.ts` contra prod    | 🔴 sin autoservicio                                                                                                              |
+| Dar de alta 6 tiendas nuevas                   | otra sesión las creó a mano                   | 🔴 sin autoservicio                                                                                                              |
+| Dar de baja a quien ya no trabaja              | `baja-personal-bait.ts`                       | 🔴 sin autoservicio                                                                                                              |
+| Mover una terminal de tienda                   | `mover-terminal-bait.ts` + borrado de fábrica | 🔴 sin autoservicio                                                                                                              |
+| Reasignar ventas de cubre descanso a su tienda | script + Excel que él manda                   | 🟢 **pantalla aprobada** por Isaac y por el founder (2026-08-25), gratis detrás del módulo `SERIALIZED_INVENTORY`; sin construir |
+
+**La llave que vuelve barato todo esto ya existe:** `Staff.employeeCode` guarda el número de empleado de Bait, que Isaac confirmó como "el
+nuevo dato pivote para unir fuentes de información", y el ID de tienda vive en `Venue.name` entre paréntesis. Cualquier pantalla de carga
+masiva para PT debe unir por esos dos números, **nunca por nombre** — 12 de 25 personas tienen nombre corto en Avoqado y largo en los
+archivos del cliente.

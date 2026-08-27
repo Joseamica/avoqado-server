@@ -38,6 +38,15 @@ export interface StaffInput {
   name: string
   active: boolean
   venues: StaffVenueInput[]
+  /**
+   * Cuando viene, la persona aparece en la tabla AUNQUE no tenga ni un SIM.
+   *
+   * Isaac Mayoral lo pidió el 27-ago-2026 ("generar la estructura correcta"):
+   * un promotor en cero también es información — dice que no le han asignado
+   * nada. Sin esto, 11 de los 32 promotores activos eran invisibles.
+   * Es opcional para no cambiar el comportamiento de quien no lo pasa.
+   */
+  role?: 'PROMOTER' | 'SUPERVISOR'
 }
 
 export interface BuildInventoryByResponsibleInput {
@@ -46,6 +55,13 @@ export interface BuildInventoryByResponsibleInput {
   staff: StaffInput[]
   /** Filtro "Sucursal Receptora". `undefined`/`null` = todas. */
   receivingVenueId?: string | null
+  /**
+   * Supervisor de cada sucursal, para colgar de alguien a los promotores que no
+   * tienen SIMs: sin inventario no hay de dónde deducirlo (`resolveSupervisorId`
+   * mira los ítems). Sin este mapa caen en "sin supervisor", que sigue siendo
+   * visible.
+   */
+  venueSupervisors?: Record<string, string>
 }
 
 export interface ResponsibleCounts {
@@ -115,6 +131,14 @@ export interface InventoryByResponsible extends InventoryByResponsibleTable {
   /** Opciones para los selectores, SIEMPRE sobre el universo sin filtrar. */
   filters: InventoryFilters
 }
+
+interface SupervisorGroup {
+  supervisorId: string | null
+  supervisorName: string
+  promoters: PromoterNode[]
+}
+
+type SupervisorMap = Map<string, SupervisorGroup>
 
 const UNKNOWN_PROMOTER_LABEL = 'Promotor no identificado'
 const NO_SUPERVISOR_LABEL = 'Sin supervisor asignado'
@@ -223,8 +247,14 @@ function resolveSupervisorId(items: InventoryItemInput[]): string | null {
   return winner
 }
 
+/** La sucursal de la asignación más reciente — mismo desempate que `resolveCity`. */
+function mostRecentVenueId(staff: StaffInput): string | null {
+  if (staff.venues.length === 0) return null
+  return staff.venues.reduce((best, v) => (v.startDate.getTime() > best.startDate.getTime() ? v : best)).venueId
+}
+
 export function buildInventoryByResponsible(input: BuildInventoryByResponsibleInput): InventoryByResponsibleTable {
-  const { items, staff, receivingVenueId } = input
+  const { items, staff, receivingVenueId, venueSupervisors } = input
 
   const staffById = new Map(staff.map(s => [s.id, s]))
 
@@ -244,7 +274,9 @@ export function buildInventoryByResponsible(input: BuildInventoryByResponsibleIn
     else byPromoter.set(id, [item])
   }
 
-  const cityMap = new Map<string, Map<string, { supervisorId: string | null; supervisorName: string; promoters: PromoterNode[] }>>()
+  // Alias con nombre: sin él, un `?? (new Map() as SupervisorMap)` sin tipar degrada la inferencia
+  // y los callbacks de abajo quedan con parámetros `any` implícitos (TS7006).
+  const cityMap = new Map<string, SupervisorMap>()
   const unassignedPromoters: PromoterNode[] = []
 
   for (const [promoterId, promoterItems] of [...byPromoter.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
@@ -268,12 +300,44 @@ export function buildInventoryByResponsible(input: BuildInventoryByResponsibleIn
     const supervisorId = resolveSupervisorId(promoterItems)
     const supervisorName = supervisorId ? (staffById.get(supervisorId)?.name ?? NO_SUPERVISOR_LABEL) : NO_SUPERVISOR_LABEL
 
-    const supervisors = cityMap.get(city) ?? new Map()
+    const supervisors = cityMap.get(city) ?? (new Map() as SupervisorMap)
     cityMap.set(city, supervisors)
 
     const key = supervisorId ?? '__none__'
     const group = supervisors.get(key) ?? { supervisorId, supervisorName, promoters: [] }
     group.promoters.push(node)
+    supervisors.set(key, group)
+  }
+
+  // ── Estructura completa ────────────────────────────────────────────────────
+  // Hasta aquí sólo existen quienes tienen SIMs. Se agregan las personas del
+  // catálogo que traen `role`, con la fila en ceros, para que la tabla refleje
+  // la organización y no sólo el inventario.
+  for (const person of staff) {
+    if (!person.role || !person.active) continue
+
+    const city = resolveCity(person)
+    if (city === null) continue // sin sucursal no hay dónde ponerlo; no se inventa
+
+    const supervisors = cityMap.get(city) ?? (new Map() as SupervisorMap)
+    cityMap.set(city, supervisors)
+
+    if (person.role === 'SUPERVISOR') {
+      if (!supervisors.has(person.id)) {
+        supervisors.set(person.id, { supervisorId: person.id, supervisorName: person.name, promoters: [] })
+      }
+      continue
+    }
+
+    // Promotor: sólo si no salió ya por sus ítems.
+    const yaEsta = [...supervisors.values()].some(g => g.promoters.some(pr => pr.promoterId === person.id))
+    if (yaEsta || byPromoter.has(person.id)) continue
+
+    const supervisorId = venueSupervisors?.[mostRecentVenueId(person) ?? ''] ?? null
+    const supervisorName = supervisorId ? (staffById.get(supervisorId)?.name ?? NO_SUPERVISOR_LABEL) : NO_SUPERVISOR_LABEL
+    const key = supervisorId ?? '__none__'
+    const group = supervisors.get(key) ?? { supervisorId, supervisorName, promoters: [] }
+    group.promoters.push({ promoterId: person.id, promoterName: person.name, ...emptyCounts() })
     supervisors.set(key, group)
   }
 
@@ -404,7 +468,16 @@ export class OrgInventoryByResponsibleService {
     const staffRows =
       staffIds.size > 0
         ? await prisma.staff.findMany({
-            where: { id: { in: [...staffIds] } },
+            // Además de quienes aparecen en los ítems, se trae la PLANTILLA ACTIVA:
+            // promotores y supervisores sin un solo SIM también deben verse
+            // (pedido de Isaac, 27-ago-2026). Sin esto, 11 de 32 promotores
+            // activos quedaban invisibles en la tabla.
+            where: {
+              OR: [
+                { id: { in: [...staffIds] } },
+                { active: true, venues: { some: { active: true, role: { in: ['WAITER', 'MANAGER'] }, venue: { organizationId } } } },
+              ],
+            },
             select: {
               id: true,
               firstName: true,
@@ -412,22 +485,38 @@ export class OrgInventoryByResponsibleService {
               active: true,
               venues: {
                 where: { active: true },
-                select: { venueId: true, startDate: true, venue: { select: { city: true, organizationId: true } } },
+                select: { venueId: true, startDate: true, role: true, venue: { select: { city: true, organizationId: true } } },
               },
             },
           })
         : []
 
-    const staff: StaffInput[] = staffRows.map(row => ({
-      id: row.id,
-      name: `${row.firstName} ${row.lastName}`.trim(),
-      active: row.active,
+    const staff: StaffInput[] = staffRows.map(row => {
       // Sólo las sucursales de ESTA organización: un promotor que también
       // trabaje en otro tenant no debe arrastrar aquí la ciudad de allá.
-      venues: row.venues
-        .filter(v => v.venue?.organizationId === organizationId)
-        .map(v => ({ venueId: v.venueId, city: v.venue?.city ?? null, startDate: v.startDate })),
-    }))
+      const venues = row.venues.filter(v => v.venue?.organizationId === organizationId)
+      const roles = new Set(venues.map(v => v.role))
+      return {
+        id: row.id,
+        name: `${row.firstName} ${row.lastName}`.trim(),
+        active: row.active,
+        venues: venues.map(v => ({ venueId: v.venueId, city: v.venue?.city ?? null, startDate: v.startDate })),
+        // MANAGER manda sobre WAITER: quien supervisa en alguna sucursal se
+        // muestra como supervisor, no colgado de sí mismo como promotor.
+        role: roles.has('MANAGER') ? ('SUPERVISOR' as const) : roles.has('WAITER') ? ('PROMOTER' as const) : undefined,
+      }
+    })
+
+    // Supervisor de cada sucursal: es la única pista para colgar de alguien a un
+    // promotor que no tiene SIMs (sin inventario no hay de dónde deducirlo).
+    const venueSupervisors: Record<string, string> = {}
+    for (const row of staffRows) {
+      for (const v of row.venues) {
+        if (v.role === 'MANAGER' && v.venue?.organizationId === organizationId && !venueSupervisors[v.venueId]) {
+          venueSupervisors[v.venueId] = row.id
+        }
+      }
+    }
 
     // Las opciones de los selectores se calculan sobre el universo SIN filtrar:
     // si salieran del conjunto ya filtrado, elegir una sucursal dejaría el
@@ -447,7 +536,7 @@ export class OrgInventoryByResponsibleService {
 
     const scopedByCategory = categoryId ? items.filter((_, i) => rows[i].categoryId === categoryId) : items
 
-    const result = buildInventoryByResponsible({ items: scopedByCategory, staff, receivingVenueId })
+    const result = buildInventoryByResponsible({ items: scopedByCategory, staff, receivingVenueId, venueSupervisors })
     return { ...result, filters: { receivingVenues, categories, defaultReceivingVenueId } }
   }
 }

@@ -258,7 +258,23 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       stampRewardLabel: z.string().min(1).max(60).optional().describe('How the reward reads on the wallet card'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview (current → new)'),
     },
-    async ({ venueId, active, pointsPerDollar, pointsPerVisit, redemptionRate, minPointsToRedeem, pointsExpireDays, stampsEnabled, stampsRequired, maxStampsPerDay, stampRewardType, stampRewardValue, stampRewardProductId, stampRewardLabel, confirm }) => {
+    async ({
+      venueId,
+      active,
+      pointsPerDollar,
+      pointsPerVisit,
+      redemptionRate,
+      minPointsToRedeem,
+      pointsExpireDays,
+      stampsEnabled,
+      stampsRequired,
+      maxStampsPerDay,
+      stampRewardType,
+      stampRewardValue,
+      stampRewardProductId,
+      stampRewardLabel,
+      confirm,
+    }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('loyalty:update', venueId) // write gate (per-venue role)
       const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier

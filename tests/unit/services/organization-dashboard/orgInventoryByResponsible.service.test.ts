@@ -326,4 +326,72 @@ describe('buildInventoryByResponsible', () => {
       expect(result.cities.map(c => c.city)).toEqual(['Aguascalientes', 'Monterrey', 'Zacatecas'])
     })
   })
+
+  describe('estructura completa: promotores sin SIMs (pedido de Isaac, 27-ago)', () => {
+    it('muestra al promotor activo aunque tenga CERO SIMs asignados', () => {
+      const result = buildInventoryByResponsible({
+        items: [item()],
+        staff: [staff(), SUP_1, staff({ id: 'sin-sims', name: 'Joana Sánchez', role: 'PROMOTER' })],
+      })
+
+      const nombres = result.cities.flatMap(c => c.supervisors.flatMap(s => s.promoters.map(p => p.promoterName)))
+      expect(nombres).toContain('Joana Sánchez')
+      const joana = result.cities[0].supervisors.flatMap(s => s.promoters).find(p => p.promoterName === 'Joana Sánchez')!
+      expect(joana.assigned).toBe(0)
+      expect(joana.inHandToday).toBe(0)
+    })
+
+    it('un promotor en cero NO altera los totales', () => {
+      const conCero = buildInventoryByResponsible({
+        items: [item()],
+        staff: [staff(), SUP_1, staff({ id: 'sin-sims', name: 'Joana Sánchez', role: 'PROMOTER' })],
+      })
+      expect(conCero.total.assigned).toBe(1)
+      expect(conCero.total.inHandToday).toBe(1)
+    })
+
+    it('lo agrupa bajo el supervisor de SU sucursal, que es la única pista cuando no hay SIMs', () => {
+      const result = buildInventoryByResponsible({
+        items: [item()],
+        staff: [staff(), SUP_1, staff({ id: 'sin-sims', name: 'Joana Sánchez', role: 'PROMOTER' })],
+        venueSupervisors: { [TIENDA_QRO]: 'sup-1' },
+      })
+
+      const sup = result.cities[0].supervisors.find(s => s.supervisorId === 'sup-1')!
+      expect(sup.promoters.map(p => p.promoterName)).toContain('Joana Sánchez')
+    })
+
+    it('un SUPERVISOR activo sin promotores con SIMs también aparece (caso Juan Nájera)', () => {
+      const result = buildInventoryByResponsible({
+        items: [],
+        staff: [
+          staff({ id: 'sup-9', name: 'Juan Nájera', role: 'SUPERVISOR', venues: [{ venueId: TIENDA_SLP, city: 'San Luis Potosí', startDate: new Date('2026-01-01') }] }),
+        ],
+      })
+
+      expect(result.cities.map(c => c.city)).toContain('San Luis Potosí')
+      const sup = result.cities[0].supervisors[0]
+      expect(sup.supervisorName).toBe('Juan Nájera')
+      expect(sup.assigned).toBe(0)
+    })
+
+    it('un promotor DADO DE BAJA sin SIMs no ensucia la tabla', () => {
+      const result = buildInventoryByResponsible({
+        items: [item()],
+        staff: [staff(), SUP_1, staff({ id: 'baja-sin-sims', name: 'Baja Vacía', active: false, role: 'PROMOTER', venues: [] })],
+      })
+
+      expect(result.unassigned.promoters.map(p => p.promoterName)).not.toContain('Baja Vacía')
+    })
+
+    it('regresión: sin `role` en el catálogo, el comportamiento anterior no cambia', () => {
+      const result = buildInventoryByResponsible({
+        items: [item()],
+        staff: [staff(), SUP_1, staff({ id: 'otro', name: 'No Debe Salir' })],
+      })
+
+      const nombres = result.cities.flatMap(c => c.supervisors.flatMap(s => s.promoters.map(p => p.promoterName)))
+      expect(nombres).not.toContain('No Debe Salir')
+    })
+  })
 })

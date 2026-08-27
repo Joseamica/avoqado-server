@@ -57,9 +57,7 @@ describe('updateLoyaltyConfig — programa de sellos', () => {
 
   describe('lo que impide regalar de más', () => {
     it('rechaza prender con PERCENTAGE sin decir el porcentaje', async () => {
-      await expect(
-        updateLoyaltyConfig(VENUE, { stampsEnabled: true, stampRewardType: 'PERCENTAGE' }),
-      ).rejects.toThrow(BadRequestError)
+      await expect(updateLoyaltyConfig(VENUE, { stampsEnabled: true, stampRewardType: 'PERCENTAGE' })).rejects.toThrow(BadRequestError)
     })
 
     it('rechaza un porcentaje mayor a 100 — descontaría más que la cuenta', async () => {

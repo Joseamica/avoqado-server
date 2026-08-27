@@ -9,8 +9,7 @@ import { UpdateLoyaltyConfigSchema } from '@/schemas/dashboard/loyalty.schema'
  * respondería 200 sin haber prendido nada. Ya pasó en este repo con `migrateMerchant`.
  */
 describe('UpdateLoyaltyConfigSchema — campos de sellos', () => {
-  const parse = (body: Record<string, unknown>) =>
-    UpdateLoyaltyConfigSchema.safeParse({ body, params: { venueId: 'v1' }, query: {} })
+  const parse = (body: Record<string, unknown>) => UpdateLoyaltyConfigSchema.safeParse({ body, params: { venueId: 'v1' }, query: {} })
 
   it('deja pasar los siete campos del programa de sellos', () => {
     const r = parse({
