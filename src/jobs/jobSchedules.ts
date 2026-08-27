@@ -16,4 +16,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // Fase 1: avisos de aprobación de clientes. Segundo 20/50, hueco libre entre el monitor
   // de POS (:17) y el sweeper de gcal (:23) — el escalonado es lo que evita la estampida.
   customerApprovalOutbox: '20,50 * * * * *',
+  // Anuncios de plataforma programados. Cada 5 min en el segundo 47 — hueco libre entre
+  // el sweeper de inventario (:44) y el de gcal (:53).
+  publishScheduledAnnouncements: '47 */5 * * * *',
 } as const

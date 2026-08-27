@@ -12,6 +12,7 @@
 import bcrypt from 'bcryptjs'
 import { CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerToken } from '@/jwt.service'
 import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
@@ -297,6 +298,32 @@ export async function getCustomerPortal(venueId: string, customerId: string) {
     }),
   ])
 
+  // 🔴 De esto depende que el boton "Guardar mi tarjeta" aparezca en el widget. Se
+  // consulta la configuracion ANTES del avance: si el negocio no usa sellos, leer una
+  // cartilla que no existe es una consulta por cada apertura del portal, en TODOS los
+  // venues — y la mayoria no usa sellos.
+  const stampCard = await (async () => {
+    const apagada = { enabled: false as const, stampsEarned: 0, stampsRequired: 0, rewardLabel: '' }
+    try {
+      const config = await prisma.loyaltyConfig.findUnique({
+        where: { venueId },
+        select: { stampsEnabled: true },
+      })
+      if (!config?.stampsEnabled) return apagada
+      const estado = await getStampCardStatus(venueId, customer.id)
+      return {
+        enabled: true as const,
+        stampsEarned: estado.stampsEarned,
+        stampsRequired: estado.stampsRequired,
+        rewardLabel: estado.rewardLabel,
+      }
+    } catch {
+      // El portal es donde el cliente ve sus reservaciones y sus creditos. Que no se
+      // pueda leer una cartilla no puede dejarlo sin nada: se degrada a "sin tarjeta".
+      return apagada
+    }
+  })()
+
   return {
     customer,
     credits: { purchases },
@@ -304,5 +331,6 @@ export async function getCustomerPortal(venueId: string, customerId: string) {
       upcoming: upcomingReservations,
       past: pastReservations,
     },
+    stampCard,
   }
 }

@@ -67,6 +67,7 @@ import { registerDeviceMiddleware } from '../middlewares/registerDevice.middlewa
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
+import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 
 const router = Router()
 
@@ -1905,6 +1906,12 @@ router.patch(
 // ============================================================================
 
 router.get('/notifications', authenticateTokenMiddleware, notificationMobileController.getUserNotifications)
+
+// ===== Anuncios de plataforma (aditivo: el buzon de /notifications NO se toca) =====
+router.get('/announcements/:id', authenticateTokenMiddleware, announcementReadController.getDetail)
+router.post('/announcements/:id/open', authenticateTokenMiddleware, announcementReadController.open)
+router.post('/announcements/:id/cta', authenticateTokenMiddleware, announcementReadController.cta)
+
 router.get('/notifications/unread-count', authenticateTokenMiddleware, notificationMobileController.getUnreadCount)
 router.patch('/notifications/:notificationId/read', authenticateTokenMiddleware, notificationMobileController.markAsRead)
 router.patch('/notifications/mark-all-read', authenticateTokenMiddleware, notificationMobileController.markAllAsRead)

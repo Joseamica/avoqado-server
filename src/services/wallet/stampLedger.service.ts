@@ -4,6 +4,7 @@ import { venueStartOfDay, venueEndOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
+import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
 
 /**
  * El libro de sellos: otorgar, contar y auditar.
@@ -211,6 +212,12 @@ export async function grantStamp(
     // práctica no ocurre nunca. Fire-and-forget: el aviso es un extra, el cobro es el
     // negocio, y `notifyCustomerPassUpdated` nunca lanza.
     void notifyCustomerPassUpdated(venueId, customerId)
+
+    // 🔴 Y si es su PRIMER sello, mandarle la liga para que guarde la tarjeta. Sin
+    // esto la tarjeta existe y el cliente no se entera: el motor lleva semanas
+    // funcionando sin que nadie tenga una. Mismo fire-and-forget que el aviso de
+    // arriba — `sendFirstStampEmailIfDue` decide si toca y nunca lanza.
+    void sendFirstStampEmailIfDue(venueId, customerId, cardId)
 
     return {
       granted: true,
