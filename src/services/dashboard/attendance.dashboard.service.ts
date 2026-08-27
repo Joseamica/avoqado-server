@@ -17,7 +17,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { getCurrentlyClockedInStaff, getTimeEntries } from '../tpv/time-entry.tpv.service'
 import { evaluateAttendance, type AttendanceStatus } from './attendanceEvaluator'
-import { resolveExpectedDay, type WeeklyWorkSchedule, type WorkScheduleException } from './workSchedule.service'
+import { type ExpectedDay, resolveExpectedDay, type WeeklyWorkSchedule, type WorkScheduleException } from './workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
 
 export interface VenueTimeEntriesQuery {
@@ -182,23 +182,50 @@ export async function getAttendanceReport(
 
   // Un solo barrido de checadas para todo el rango: pedirlas por persona y por día haría
   // una consulta por celda de la tabla.
+  // El tope superior se asoma hasta el MEDIODÍA siguiente al rango: la llegada de las 00:05
+  // del día rangeEnd+1 pertenece al turno nocturno que empezó el último día del rango.
+  const entriesUntil = end.plus({ days: 1 }).startOf('day').plus({ hours: 12 }).toJSDate()
   const entries = await prisma.timeEntry.findMany({
-    where: { venueId, clockInTime: { gte: rangeStart, lte: rangeEnd } },
+    where: { venueId, clockInTime: { gte: rangeStart, lte: entriesUntil } },
     select: { staffId: true, clockInTime: true, clockOutTime: true, validationStatus: true },
     orderBy: { clockInTime: 'asc' },
   })
 
-  const byStaffAndDay = new Map<string, { clockInTime: Date; clockOutTime: Date | null }>()
+  interface DayEntry {
+    clockInTime: Date
+    clockOutTime: Date | null
+    /** 'HH:mm' local del negocio, para decidir a qué turno pertenece. */
+    localTime: string
+  }
+  const byStaffAndDay = new Map<string, DayEntry[]>()
   for (const entry of entries) {
     // Una checada RECHAZADA por el gerente no cuenta como presencia: si contara, rechazarla
     // no serviría de nada (auditoría Codex, P2).
     if (entry.validationStatus === 'REJECTED') continue
-    const day = DateTime.fromJSDate(entry.clockInTime).setZone(timezone).toISODate()
-    const key = `${entry.staffId}|${day}`
-    // La PRIMERA entrada del día manda: si alguien checó, salió a comer y volvió a checar,
-    // su hora de llegada es la primera, no la última.
-    if (!byStaffAndDay.has(key)) byStaffAndDay.set(key, { clockInTime: entry.clockInTime, clockOutTime: entry.clockOutTime })
-    else byStaffAndDay.get(key)!.clockOutTime = entry.clockOutTime ?? byStaffAndDay.get(key)!.clockOutTime
+    const local = DateTime.fromJSDate(entry.clockInTime).setZone(timezone)
+    const key = `${entry.staffId}|${local.toISODate()}`
+    if (!byStaffAndDay.has(key)) byStaffAndDay.set(key, [])
+    byStaffAndDay.get(key)!.push({ clockInTime: entry.clockInTime, clockOutTime: entry.clockOutTime, localTime: local.toFormat('HH:mm') })
+  }
+
+  /**
+   * A qué DÍA pertenece cada checada (turnos nocturnos, decisión del founder 2026-08-26):
+   * en un día con turno que cruza la medianoche cuenta la checada de la TARDE (≥ 12:00) de
+   * ese día o, si no la hay, la de la MADRUGADA del día siguiente ANTES de la hora de salida
+   * — la llegada tarde después de medianoche. El tope por la hora de salida evita robarle su
+   * checada de las 08:55 a un turno diurno del día siguiente cuando el nocturno quedó en
+   * falta. Una checada usada por un día no se reusa (`consumed`).
+   */
+  const consumed = new Set<DayEntry>()
+  const pickEntryForDay = (staffId: string, date: string, expected: ExpectedDay): DayEntry | null => {
+    const overnight = !!expected.start && !!expected.end && expected.end <= expected.start
+    const dayList = byStaffAndDay.get(`${staffId}|${date}`) ?? []
+    if (!overnight) return dayList.find(e => !consumed.has(e)) ?? null
+    const evening = dayList.find(e => !consumed.has(e) && e.localTime >= '12:00')
+    if (evening) return evening
+    const nextDate = DateTime.fromISO(date, { zone: timezone }).plus({ days: 1 }).toISODate()!
+    const nextList = byStaffAndDay.get(`${staffId}|${nextDate}`) ?? []
+    return nextList.find(e => !consumed.has(e) && e.localTime < expected.end!) ?? null
   }
 
   // Hoy en la zona del negocio. Un día que aún no termina NO puede ser falta: la persona
@@ -221,7 +248,27 @@ export async function getAttendanceReport(
     for (const date of days) {
       if (date < joinedIso || (leftIso && date > leftIso)) continue
       const expected = resolveExpectedDay(weekly, exceptions, date)
-      const actual = byStaffAndDay.get(`${membership.staffId}|${date}`)
+      const picked = pickEntryForDay(membership.staffId, date, expected)
+      let actual: { clockInTime: Date; clockOutTime: Date | null } | null = null
+      if (picked) {
+        consumed.add(picked)
+        // La PRIMERA entrada manda como llegada; la salida es la ÚLTIMA registrada de ese
+        // mismo día (salió a comer y volvió a checar), y esas continuaciones se consumen
+        // para que ningún otro día las reuse. SOLO aplica cuando la checada elegida es del
+        // MISMO día evaluado y solo hacia adelante: la madrugada del jueves que pertenece
+        // al turno nocturno del miércoles no arrastra la checada de la NOCHE del jueves,
+        // que es de su propio turno.
+        const pickedDate = DateTime.fromJSDate(picked.clockInTime).setZone(timezone).toISODate()
+        let clockOutTime = picked.clockOutTime
+        if (pickedDate === date) {
+          for (const sib of byStaffAndDay.get(`${membership.staffId}|${pickedDate}`) ?? []) {
+            if (sib === picked || consumed.has(sib) || sib.localTime <= picked.localTime) continue
+            consumed.add(sib)
+            clockOutTime = sib.clockOutTime ?? clockOutTime
+          }
+        }
+        actual = { clockInTime: picked.clockInTime, clockOutTime }
+      }
 
       // Sin checada en un día que no ha terminado (hoy o futuro): pendiente, no falta.
       const dayStillOpen = date >= todayIso
@@ -233,6 +280,7 @@ export async function getAttendanceReport(
               expectedEnd: expected.end,
               timezone,
               graceMinutes,
+              scheduleDate: date,
               clockInTime: actual?.clockInTime ?? null,
               clockOutTime: actual?.clockOutTime ?? null,
               isDayOff: expected.isDayOff,

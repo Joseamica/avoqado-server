@@ -61,10 +61,17 @@ const DayScheduleSchema = z
     // El resolvedor toma el PRIMER y el ÚLTIMO rango tal cual llegan. Fuera de orden,
     // "[16-20, 9-14]" se leía como entrada 16:00 y salida 14:00 del día siguiente
     // (auditoría Codex, P2). Se exige orden y sin solapes; abrir==cerrar tampoco vale.
+    //
+    // Un rango con open > close CRUZA LA MEDIANOCHE (22:00–06:00, decisión del founder
+    // 2026-08-26) y sólo puede ser el ÚLTIMO del día: corre hacia el día siguiente y
+    // cualquier rango posterior quedaría dentro de él.
     for (let i = 0; i < day.ranges.length; i++) {
       const r = day.ranges[i]
-      if (r.open >= r.close)
+      const overnight = r.open > r.close
+      if (r.open === r.close)
         ctx.addIssue({ code: 'custom', message: `El rango ${r.open}–${r.close} termina antes de empezar`, path: ['ranges', i] })
+      if (overnight && i !== day.ranges.length - 1)
+        ctx.addIssue({ code: 'custom', message: 'Un turno que cruza la medianoche debe ser el último rango del día', path: ['ranges', i] })
       if (i > 0 && day.ranges[i - 1].close > r.open)
         ctx.addIssue({ code: 'custom', message: 'Los rangos deben ir en orden y sin traslaparse', path: ['ranges', i] })
     }

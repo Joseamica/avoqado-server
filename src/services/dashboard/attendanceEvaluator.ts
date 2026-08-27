@@ -29,6 +29,13 @@ export interface EvaluateAttendanceInput {
   clockOutTime?: Date | null
   /** Día de descanso: ni la falta ni el retardo aplican. */
   isDayOff?: boolean
+  /**
+   * Día del TURNO ('YYYY-MM-DD', calendario del negocio). Sin él, la hora esperada se ancla
+   * al día de la LLEGADA — y en un turno nocturno (22:00–06:00) llegar el jueves 00:05 se
+   * compararía contra el JUEVES 22:00 y saldría "a tiempo" con 22 horas de anticipación.
+   * El reporte lo pasa siempre; quien evalúe una checada suelta puede omitirlo.
+   */
+  scheduleDate?: string
 }
 
 export interface AttendanceEvaluation {
@@ -57,15 +64,18 @@ export function evaluateAttendance(input: EvaluateAttendanceInput): AttendanceEv
   if (!input.clockInTime) return none('ABSENT')
 
   const localIn = DateTime.fromJSDate(input.clockInTime).setZone(input.timezone)
-  const shouldStart = expectedMoment(localIn, input.expectedStart)
+  const scheduleDay = input.scheduleDate ? DateTime.fromISO(input.scheduleDate, { zone: input.timezone }) : null
+  const anchor = scheduleDay?.isValid ? scheduleDay : localIn
+  const shouldStart = expectedMoment(anchor, input.expectedStart)
   const lateMinutes = Math.max(0, Math.round(localIn.diff(shouldStart, 'minutes').minutes))
 
   let earlyLeaveMinutes = 0
   if (input.clockOutTime) {
     const localOut = DateTime.fromJSDate(input.clockOutTime).setZone(input.timezone)
-    // El fin se ancla al día de la ENTRADA: un turno que cruza la medianoche termina al día
-    // siguiente, y anclarlo a la salida lo mediría contra el día equivocado.
-    let shouldEnd = expectedMoment(localIn, input.expectedEnd)
+    // El fin se ancla al día del TURNO (o de la entrada, sin scheduleDate): un turno que
+    // cruza la medianoche termina al día siguiente, y anclarlo a la salida lo mediría
+    // contra el día equivocado.
+    let shouldEnd = expectedMoment(anchor, input.expectedEnd)
     if (shouldEnd <= shouldStart) shouldEnd = shouldEnd.plus({ days: 1 })
     earlyLeaveMinutes = Math.max(0, Math.round(shouldEnd.diff(localOut, 'minutes').minutes))
   }
