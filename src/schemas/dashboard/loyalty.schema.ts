@@ -25,6 +25,23 @@ export const UpdateLoyaltyConfigSchema = z.object({
       .optional(),
     pointsExpirationDays: z.number().int().min(0, 'Points expiration days must be non-negative').optional(),
     enabled: z.boolean().optional(),
+
+    // ── Programa de sellos (la tarjeta de la cartera) ────────────────────────
+    // Sin estas líneas `validateRequest` borra los campos antes del servicio y la
+    // pantalla queda muerta con un 200 mentiroso. Los rangos duros (cartilla de 2 a
+    // 50, premio coherente con su tipo, producto del mismo venue) viven en
+    // `updateLoyaltyConfig`, que es por donde también entra el MCP.
+    stampsEnabled: z.boolean().optional(),
+    stampsRequired: z.number().int('La cartilla se cuenta en sellos enteros').min(2).max(50).optional(),
+    maxStampsPerDay: z.number().int('El tope diario se cuenta en sellos enteros').min(1).optional(),
+    stampRewardType: z
+      .enum(['FREE_PRODUCT', 'FIXED_AMOUNT', 'PERCENTAGE'], {
+        errorMap: () => ({ message: 'Tipo de premio inválido: FREE_PRODUCT, FIXED_AMOUNT o PERCENTAGE' }),
+      })
+      .optional(),
+    stampRewardValue: z.number().min(0, 'El valor del premio no puede ser negativo').nullable().optional(),
+    stampRewardProductId: z.string().nullable().optional(),
+    stampRewardLabel: z.string().min(1).max(60, 'La etiqueta del premio no cabe en la tarjeta').optional(),
   }),
 })
 

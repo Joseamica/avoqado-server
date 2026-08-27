@@ -13,7 +13,7 @@ import crypto from 'crypto'
 import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import * as jwtService from '../../jwt.service'
-import { getEffectiveRolePermissions } from '../../lib/permissions'
+import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
 import { getRoleDisplayNamesForVenues } from '../dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../dashboard/activity-log.service'
 import logger from '@/config/logger'
@@ -148,6 +148,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
           venues: {
             where: { active: true },
             include: {
+              permissionSet: true,
               venue: {
                 select: {
                   id: true,
@@ -263,7 +264,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
   const venueIds = staff.venues.map(sv => sv.venueId)
   const customRolePermissions = await prisma.venueRolePermission.findMany({
     where: { venueId: { in: venueIds } },
-    select: { venueId: true, role: true, permissions: true },
+    select: { venueId: true, role: true, permissions: true, deniedPermissions: true },
   })
   const roleDisplayNames = await getRoleDisplayNamesForVenues(staff.venues.map(sv => ({ venueId: sv.venueId, role: sv.role })))
 
@@ -280,7 +281,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
     lastLogin: staff.lastLoginAt,
     venues: staff.venues.map(sv => {
       const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
-      const permissions = getEffectiveRolePermissions(sv.role, customPerms?.permissions as string[] | undefined)
+      const permissions = resolveStaffVenuePermissions(sv, customPerms)
 
       return {
         id: sv.venue.id,
@@ -531,6 +532,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
       venues: {
         where: { active: true },
         include: {
+          permissionSet: true,
           venue: {
             select: {
               id: true,
@@ -628,7 +630,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   const venueIds = staff.venues.map(sv => sv.venueId)
   const customRolePermissions = await prisma.venueRolePermission.findMany({
     where: { venueId: { in: venueIds } },
-    select: { venueId: true, role: true, permissions: true },
+    select: { venueId: true, role: true, permissions: true, deniedPermissions: true },
   })
   const roleDisplayNames = await getRoleDisplayNamesForVenues(staff.venues.map(sv => ({ venueId: sv.venueId, role: sv.role })))
 
@@ -645,7 +647,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     lastLogin: staff.lastLoginAt,
     venues: staff.venues.map(sv => {
       const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
-      const permissions = getEffectiveRolePermissions(sv.role, customPerms?.permissions as string[] | undefined)
+      const permissions = resolveStaffVenuePermissions(sv, customPerms)
 
       return {
         id: sv.venue.id,

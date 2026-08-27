@@ -19,7 +19,7 @@
 
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
-import { LoyaltyTransactionType } from '@prisma/client'
+import { StampRewardType, LoyaltyTransactionType } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import { grantStamp } from '../wallet/stampLedger.service'
@@ -74,6 +74,14 @@ export async function updateLoyaltyConfig(
     minPointsRedeem?: number
     pointsExpireDays?: number | null
     active?: boolean
+    // --- Programa de sellos (la tarjeta de la cartera) ---
+    stampsEnabled?: boolean
+    stampsRequired?: number
+    maxStampsPerDay?: number
+    stampRewardType?: StampRewardType
+    stampRewardValue?: number | null
+    stampRewardProductId?: string | null
+    stampRewardLabel?: string
   },
 ) {
   // Validate inputs
@@ -93,8 +101,61 @@ export async function updateLoyaltyConfig(
     throw new BadRequestError('Points expiration days must be non-negative or null')
   }
 
+  // ── Programa de sellos ───────────────────────────────────────────────────
+  // Estos campos deciden CUÁNTO SE REGALA, así que se validan aquí y no sólo en la
+  // pantalla: el MCP y cualquier cliente futuro entran por este mismo camino.
+  const MIN_SELLOS = 2
+  const MAX_SELLOS = 50
+
+  if (data.stampsRequired !== undefined) {
+    if (!Number.isInteger(data.stampsRequired) || data.stampsRequired < MIN_SELLOS) {
+      // Una cartilla de 1 sello regala en CADA compra; de 0 rompe el cálculo del avance.
+      throw new BadRequestError(`La cartilla necesita al menos ${MIN_SELLOS} sellos`)
+    }
+    if (data.stampsRequired > MAX_SELLOS) {
+      throw new BadRequestError(`La cartilla no puede pedir más de ${MAX_SELLOS} sellos`)
+    }
+  }
+  if (data.maxStampsPerDay !== undefined && (!Number.isInteger(data.maxStampsPerDay) || data.maxStampsPerDay < 1)) {
+    throw new BadRequestError('El tope de sellos por día debe ser al menos 1')
+  }
+
   // Ensure config exists
-  await getOrCreateLoyaltyConfig(venueId)
+  const configActual = await getOrCreateLoyaltyConfig(venueId)
+
+  // El premio sólo se exige completo cuando el programa QUEDA ENCENDIDO. Apagar nunca
+  // se bloquea: si no, una configuración a medias dejaría al negocio atrapado sin poder
+  // desactivar lo que ya está prendido.
+  const quedaEncendido = data.stampsEnabled ?? configActual.stampsEnabled
+  if (quedaEncendido) {
+    const tipo = data.stampRewardType ?? configActual.stampRewardType
+    const crudo = data.stampRewardValue !== undefined ? data.stampRewardValue : configActual.stampRewardValue
+    const valor = crudo === null || crudo === undefined ? null : Number(crudo)
+
+    if (tipo === StampRewardType.PERCENTAGE) {
+      if (valor === null || !(valor > 0)) {
+        throw new BadRequestError('Un premio de porcentaje necesita un porcentaje mayor a 0')
+      }
+      if (valor > 100) {
+        throw new BadRequestError('El porcentaje del premio no puede pasar de 100')
+      }
+    }
+    if (tipo === StampRewardType.FIXED_AMOUNT && (valor === null || !(valor > 0))) {
+      throw new BadRequestError('Un premio de monto fijo necesita un monto mayor a 0')
+    }
+  }
+
+  // Aislamiento: el producto del premio tiene que ser de ESTE negocio. Sin esto, un id
+  // de otro venue se guardaría sin ruido y el premio apuntaría fuera del catálogo.
+  if (data.stampRewardProductId) {
+    const producto = await prisma.product.findFirst({
+      where: { id: data.stampRewardProductId, venueId },
+      select: { id: true },
+    })
+    if (!producto) {
+      throw new BadRequestError('El producto del premio no pertenece a este negocio')
+    }
+  }
 
   const config = await prisma.loyaltyConfig.update({
     where: { venueId },
@@ -106,7 +167,16 @@ export async function updateLoyaltyConfig(
     action: 'LOYALTY_CONFIG_UPDATED',
     entity: 'LoyaltyConfig',
     entityId: venueId,
-    data: { active: config.active },
+    data: {
+      active: config.active,
+      // Prender los sellos o cambiar el premio es lo que un dueño audita después
+      // ("¿quién puso 3 sellos en vez de 10?"), así que va al registro.
+      ...(data.stampsEnabled !== undefined ? { stampsEnabled: config.stampsEnabled } : {}),
+      ...(data.stampsRequired !== undefined ? { stampsRequired: config.stampsRequired } : {}),
+      ...(data.stampRewardType !== undefined ? { stampRewardType: config.stampRewardType } : {}),
+      ...(data.stampRewardValue !== undefined ? { stampRewardValue: Number(config.stampRewardValue ?? 0) } : {}),
+      ...(data.stampRewardLabel !== undefined ? { stampRewardLabel: config.stampRewardLabel } : {}),
+    },
   })
 
   return {

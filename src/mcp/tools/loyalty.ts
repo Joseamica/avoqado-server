@@ -36,6 +36,13 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
           redemptionRate: true,
           minPointsRedeem: true,
           pointsExpireDays: true,
+          stampsEnabled: true,
+          stampsRequired: true,
+          maxStampsPerDay: true,
+          stampRewardType: true,
+          stampRewardValue: true,
+          stampRewardProductId: true,
+          stampRewardLabel: true,
         },
       })
       return text({
@@ -239,9 +246,19 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       redemptionRate: z.number().min(0).optional().describe('Money value of 1 point (e.g. 0.05)'),
       minPointsToRedeem: z.number().int().min(0).optional().describe('Minimum points required to redeem'),
       pointsExpireDays: z.number().int().positive().nullable().optional().describe('Days until points expire; null = never'),
+      stampsEnabled: z.boolean().optional().describe('Turn the STAMP card on/off (buy N, get a reward)'),
+      stampsRequired: z.number().int().min(2).max(50).optional().describe('Stamps needed to fill one card'),
+      maxStampsPerDay: z.number().int().min(1).optional().describe('Max stamps one customer earns per day'),
+      stampRewardType: z
+        .enum(['FREE_PRODUCT', 'FIXED_AMOUNT', 'PERCENTAGE'])
+        .optional()
+        .describe('What a full card wins: FREE_PRODUCT (priciest item on the check), FIXED_AMOUNT or PERCENTAGE'),
+      stampRewardValue: z.number().min(0).nullable().optional().describe('Amount ($) or percentage (0-100) of the reward'),
+      stampRewardProductId: z.string().nullable().optional().describe('Product the reward refers to; must belong to the venue'),
+      stampRewardLabel: z.string().min(1).max(60).optional().describe('How the reward reads on the wallet card'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview (current → new)'),
     },
-    async ({ venueId, active, pointsPerDollar, pointsPerVisit, redemptionRate, minPointsToRedeem, pointsExpireDays, confirm }) => {
+    async ({ venueId, active, pointsPerDollar, pointsPerVisit, redemptionRate, minPointsToRedeem, pointsExpireDays, stampsEnabled, stampsRequired, maxStampsPerDay, stampRewardType, stampRewardValue, stampRewardProductId, stampRewardLabel, confirm }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('loyalty:update', venueId) // write gate (per-venue role)
       const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier
@@ -253,6 +270,13 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
         ...(redemptionRate !== undefined ? { redemptionRate } : {}),
         ...(minPointsToRedeem !== undefined ? { minPointsRedeem: minPointsToRedeem } : {}),
         ...(pointsExpireDays !== undefined ? { pointsExpireDays } : {}),
+        ...(stampsEnabled !== undefined ? { stampsEnabled } : {}),
+        ...(stampsRequired !== undefined ? { stampsRequired } : {}),
+        ...(maxStampsPerDay !== undefined ? { maxStampsPerDay } : {}),
+        ...(stampRewardType !== undefined ? { stampRewardType } : {}),
+        ...(stampRewardValue !== undefined ? { stampRewardValue } : {}),
+        ...(stampRewardProductId !== undefined ? { stampRewardProductId } : {}),
+        ...(stampRewardLabel !== undefined ? { stampRewardLabel } : {}),
       }
       if (Object.keys(data).length === 0) return text({ ok: false, error: 'No pasaste ningún campo para configurar.' })
 
@@ -278,6 +302,13 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
           redemptionRate: 'Valor de 1 punto ($)',
           minPointsRedeem: 'Mínimo para canjear',
           pointsExpireDays: 'Días para expirar',
+          stampsEnabled: 'Tarjeta de sellos activa',
+          stampsRequired: 'Sellos para llenar la cartilla',
+          maxStampsPerDay: 'Tope de sellos por dia',
+          stampRewardType: 'Tipo de premio',
+          stampRewardValue: 'Valor del premio',
+          stampRewardProductId: 'Producto del premio',
+          stampRewardLabel: 'Como se lee el premio',
         }
         const num = (v: unknown) => (v != null && typeof v === 'object' && 'toString' in v ? Number(v) : v)
         const changes = Object.entries(data).map(([k, to]) => ({ label: LBL[k] ?? k, from: cur ? (num(cur[k]) ?? null) : null, to }))
