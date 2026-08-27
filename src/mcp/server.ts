@@ -48,6 +48,7 @@ import { registerPromoterLocationTools } from './tools/promoterLocation'
 import { registerTerminalLocationTools } from './tools/terminalLocation'
 import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
+import { registerAnnouncementTools } from './tools/announcements'
 import { registerLandingLeadTools } from './tools/landingLeads'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPrinterTools } from './tools/printers'
@@ -117,6 +118,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerPlanAdminTools(server, scope)
   registerAccountingTools(server, scope)
   registerActivityLogTools(server, scope)
+  registerAnnouncementTools(server, scope)
   registerLandingLeadTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPrinterTools(server, scope)

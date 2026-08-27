@@ -46,6 +46,7 @@ import * as googleIntegrationController from '../controllers/dashboard/googleInt
 import * as menuController from '../controllers/dashboard/menu.dashboard.controller'
 import * as modifierInventoryAnalyticsController from '../controllers/dashboard/modifierInventoryAnalytics.controller'
 import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
+import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
 import * as refundController from '../controllers/dashboard/refund.dashboard.controller'
@@ -8037,6 +8038,13 @@ router.put(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  */
 router.get('/notifications', authenticateTokenMiddleware, notificationController.getUserNotifications)
+
+// ===== Anuncios de plataforma (aditivo: el buzon de /notifications NO se toca) =====
+// 🔴 /banner va ANTES de /:id — si no, Express lee "banner" como un id.
+router.get('/announcements/banner', authenticateTokenMiddleware, announcementReadController.banner)
+router.get('/announcements/:id', authenticateTokenMiddleware, announcementReadController.getDetail)
+router.post('/announcements/:id/open', authenticateTokenMiddleware, announcementReadController.open)
+router.post('/announcements/:id/cta', authenticateTokenMiddleware, announcementReadController.cta)
 
 /**
  * @openapi

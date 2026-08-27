@@ -3312,6 +3312,132 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     })
   }
 
+  /**
+   * Le manda al CLIENTE FINAL la liga de su tarjeta de sellos.
+   *
+   * 🔴 El lector NO es el negocio: aqui no se habla de planes, del dashboard ni de
+   * suscripciones. El cliente tiene relacion con el café, no con Avoqado — por eso
+   * el asunto nombra al negocio y nosotros solo aparecemos en el pie.
+   *
+   * Momento de envio: al ganar su PRIMER sello, no al darse de alta. Es lo que hace
+   * Square ("after each transaction ... will only be sent if you provided an email
+   * address"), y ademas evita mandarle una cartilla en 0/7 a alguien que todavia no
+   * compro nada.
+   */
+  async sendWalletPassEmail(
+    email: string,
+    data: {
+      venueName: string
+      customerName: string
+      /** La ruta publica del `.pkpass`. Va en el CTA Y en el texto plano. */
+      passUrl: string
+      stampsEarned: number
+      stampsRequired: number
+      /** Lo que el negocio prometio. Puede venir vacio: no todos lo escriben. */
+      rewardLabel: string
+    },
+  ): Promise<boolean> {
+    const subject = `Tu tarjeta de ${data.venueName}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const saludo = data.customerName?.trim() ? `Hola ${data.customerName.trim()},` : 'Hola,'
+    const faltan = Math.max(0, data.stampsRequired - data.stampsEarned)
+
+    // El premio solo se menciona si el negocio lo escribio. Un "Tu premio: " vacio
+    // se lee como un correo roto, y prometer algo sin nombre no convence a nadie.
+    const premio = data.rewardLabel?.trim() ?? ''
+    const lineaPremio = premio
+      ? `<p style="margin: 0 0 24px 0; font-size: 14px; color: #000;">Al juntar ${data.stampsRequired}, te ganas: <strong>${premio}</strong>.</p>`
+      : `<p style="margin: 0 0 24px 0; font-size: 14px; color: #000;">Al juntar ${data.stampsRequired} sellos, te ganas tu premio.</p>`
+    const lineaPremioTexto = premio
+      ? `Al juntar ${data.stampsRequired}, te ganas: ${premio}.`
+      : `Al juntar ${data.stampsRequired} sellos, te ganas tu premio.`
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">
+      Ya tienes tu tarjeta de ${data.venueName}
+    </h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">
+      ${saludo} gu&aacute;rdala en tu iPhone y tus sellos se suman solos.
+    </p>
+
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666; border-bottom: 1px solid #e5e7eb;">Sellos</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000; border-bottom: 1px solid #e5e7eb;">${data.stampsEarned} de ${data.stampsRequired}</td>
+      </tr>
+      <tr>
+        <td style="padding: 12px 16px; font-size: 13px; color: #666;">Te faltan</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000;">${faltan} ${faltan === 1 ? 'sello' : 'sellos'}</td>
+      </tr>
+    </table>
+
+    ${lineaPremio}
+
+    <div style="margin: 0 0 24px 0;">
+      <a href="${data.passUrl}" style="display: inline-block; background-color:#000000; color: #ffffff; padding: 12px 24px; border-radius:6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Guardar mi tarjeta
+      </a>
+    </div>
+
+    <p style="margin: 0 0 32px 0; font-size: 13px; color: #666;">
+      &Aacute;brelo desde tu iPhone. Por ahora la tarjeta solo se guarda en iPhone; la versi&oacute;n para Android viene en camino.
+    </p>
+
+    <div style="padding-top: 8px; border-top: 1px solid #e5e7eb;">
+      <div style="margin: 16px 0;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Recibiste este correo porque ${data.venueName} te dio un sello en tu tarjeta.
+      </p>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        <a href="https://avoqado.io/privacy" style="color: #666; text-decoration: underline;">Aviso de privacidad</a>
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `Ya tienes tu tarjeta de ${data.venueName}
+
+${saludo} guardala en tu iPhone y tus sellos se suman solos.
+
+Sellos: ${data.stampsEarned} de ${data.stampsRequired}
+Te faltan: ${faltan} ${faltan === 1 ? 'sello' : 'sellos'}
+${lineaPremioTexto}
+
+Guardar mi tarjeta: ${data.passUrl}
+
+Abrelo desde tu iPhone. Por ahora la tarjeta solo se guarda en iPhone; la version para Android viene en camino.
+
+---
+Recibiste este correo porque ${data.venueName} te dio un sello en tu tarjeta.
+Servicios Tecnologicos Avo S.A. de C.V.
+Aviso de privacidad: https://avoqado.io/privacy`
+
+    return this.sendEmail({ to: email, subject, html, text })
+  }
+
   async sendReservationRescheduledEmail(email: string, data: ReservationRescheduledEmailData): Promise<boolean> {
     const subject = `Tu reservacion en ${data.venueName} cambio de horario`
     const logoUrl = 'https://avoqado.io/isotipo.svg'

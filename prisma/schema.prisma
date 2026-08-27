@@ -980,6 +980,11 @@ model Staff {
   notificationPreferences NotificationPreference[]
   deviceTokens            DeviceToken[]
 
+  /// Anuncios de plataforma que esta persona abrió (ver PlatformAnnouncementClick).
+  platformAnnouncementClicks PlatformAnnouncementClick[]
+  /// Acuses de recibo de anuncios de plataforma (ver PlatformAnnouncementDelivery).
+  platformAnnouncementDeliveries PlatformAnnouncementDelivery[]
+
   // AI Training
   chatTrainingData   ChatTrainingData[]  @relation("UserChatTraining")
   chatConversations  ChatConversation[]  @relation("UserChatConversations")
@@ -16713,4 +16718,129 @@ enum KioskOutreachStatus {
   SENT
   FAILED
   SKIPPED
+}
+
+// ============================================================================
+// ANUNCIOS DE PLATAFORMA — Avoqado le habla a sus negocios
+//
+// Diseño: docs/superpowers/specs/2026-08-27-anuncios-de-plataforma-design.md
+//
+// 🔴 El anuncio se guarda UNA vez y al PUBLICAR se reparte una Notification
+// normal por persona alcanzada, atada con entityType:'PlatformAnnouncement' +
+// entityId. Por eso el buzón de dashboard/Android/iOS no se toca: paginación,
+// no-leídos, marcar-leído y borrar siguen operando sobre filas reales.
+//
+// 🔴 Es GLOBAL a propósito (lo escribe Avoqado, no un venue): rompe la regla de
+// aislamiento por tenant en la ESCRITURA. El aislamiento vive en la LECTURA —
+// sólo abre el detalle quien tiene una Notification suya apuntando al anuncio.
+// ============================================================================
+
+model PlatformAnnouncement {
+  id String @id @default(cuid())
+
+  // Contenido — title y body son obligatorios y auto-suficientes:
+  // los bloques amplían, nunca sustituyen.
+  title    String
+  body     String               @db.Text
+  imageUrl String? // portada del banner y de la campana
+  priority NotificationPriority @default(NORMAL)
+
+  /// Contenido ampliado que se ve al hacer clic: arreglo ordenado de bloques
+  /// (heading | paragraph | bullets | image | gallery | specs | callout |
+  /// button | video | divider). Un cliente IGNORA los tipos que no conoce.
+  contentBlocks Json?
+
+  // Llamada a la acción
+  actionLabel String?
+  actionUrl   String?
+
+  // A quién le llega. Todos los filtros son AND; lista vacía = sin filtrar por ese eje.
+  audienceRoles    StaffRole[] @default([OWNER, ADMIN])
+  targetPlanTiers  PlanTier[]  @default([])
+  targetCategories String[]    @default([]) // BusinessCategory (vive en TypeScript)
+  targetVenueIds   String[]    @default([])
+
+  // Dónde se ve, además del buzón
+  showAsBanner Boolean @default(false)
+
+  // Vigencia
+  status       PlatformAnnouncementStatus @default(DRAFT)
+  publishedAt  DateTime?
+  scheduledFor DateTime?
+  expiresAt    DateTime?
+
+  // Resultado del reparto: idempotencia (deliveredAt) y métrica de alcance
+  deliveredCount Int       @default(0)
+  deliveredAt    DateTime?
+
+  // Auditoría
+  createdBy     String // Staff SUPERADMIN
+  createdByName String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clicks     PlatformAnnouncementClick[]
+  deliveries PlatformAnnouncementDelivery[]
+
+  @@index([status, publishedAt])
+  @@index([status, scheduledFor])
+  @@index([status, showAsBanner])
+  @@map("platform_announcements")
+}
+
+/// Sólo nace cuando alguien ABRE el detalle o toca el botón. NO hay fila por
+/// persona alcanzada: el alcance se cuenta con las Notification repartidas.
+model PlatformAnnouncementClick {
+  id             String               @id @default(cuid())
+  announcementId String
+  announcement   PlatformAnnouncement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  staffId        String
+  staff          Staff                @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId        String? // desde qué negocio lo abrió
+
+  openedAt DateTime  @default(now()) // abrió el detalle
+  ctaAt    DateTime? // tocó el botón principal
+
+  @@unique([announcementId, staffId])
+  @@index([announcementId])
+  @@index([staffId])
+  @@map("platform_announcement_clicks")
+}
+
+/// Acuse de recibo: a esta persona, en este negocio, SE LE ENTREGÓ este anuncio.
+///
+/// 🔴 Es la autoridad de lectura, y existe por dos razones que se resolvieron juntas:
+///
+///  1. **No es fabricable.** Sólo la escribe el publisher. La `Notification` sí es
+///     fabricable — `POST /dashboard/notifications` (permiso `notifications:send`) acepta
+///     `entityType` y `entityId` libres —, así que autorizar con ella era autorizar con un
+///     dato que el propio usuario puede escribir.
+///  2. **Es histórica.** Lo que se entregó, se entregó. Antes se revalidaba la audiencia
+///     ACTUAL en cada lectura, y eso le quitaba el anuncio a quien cambiaba de plan —
+///     incluyendo el caso que importa: un negocio GRATIS que ve el anuncio de una función
+///     PRO, la compra, y al subir de plan perdería justo el aviso que lo convenció.
+///
+/// El @@unique es lo que hace el reparto reintentable: `skipDuplicates` sí funciona.
+model PlatformAnnouncementDelivery {
+  id             String               @id @default(cuid())
+  announcementId String
+  announcement   PlatformAnnouncement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  staffId        String
+  staff          Staff                @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId        String // por qué negocio le llegó
+
+  deliveredAt DateTime @default(now())
+
+  @@unique([announcementId, staffId, venueId])
+  @@index([staffId, announcementId])
+  @@index([announcementId])
+  @@map("platform_announcement_deliveries")
+}
+
+enum PlatformAnnouncementStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
 }

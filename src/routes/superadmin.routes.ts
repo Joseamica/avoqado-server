@@ -39,6 +39,7 @@ import billingRoutes from './superadmin/billing.routes'
 import reportsRoutes from './superadmin/reports.routes'
 import deliveryActivationRoutes from './superadmin/deliveryActivation.routes'
 import masterCatalogRoutes from './superadmin/masterCatalog.routes'
+import announcementRoutes from './superadmin/announcement.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
@@ -49,6 +50,7 @@ router.use(authenticateTokenMiddleware)
 router.use(authorizeRole([StaffRole.SUPERADMIN]))
 
 // Mount superadmin sub-routes
+router.use('/announcements', announcementRoutes)
 router.use('/kyc', kycReviewRoutes)
 router.use('/payment-providers', paymentProviderRoutes)
 router.use('/merchant-accounts', merchantAccountRoutes)
