@@ -639,6 +639,7 @@ model Venue {
   @@index([slug])
   @@index([active])
   @@index([status]) // For filtering by operational status
+  supplierItemCodes SupplierItemCode[]
 }
 
 enum VenueChatMode {
@@ -1151,6 +1152,7 @@ model Staff {
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
+  supplierItemCodes SupplierItemCode[]
 }
 
 model StaffVenue {
@@ -1858,6 +1860,8 @@ model Product {
   @@index([type])
   @@index([syncStatus]) // ✅ NUEVO ÍNDICE
   @@index([venueId, upsellEnabled])
+  supplierItemCodes SupplierItemCode[]
+  invoiceLines PurchaseOrderInvoiceLine[]
 }
 
 model Inventory {
@@ -2107,6 +2111,8 @@ model RawMaterial {
   @@index([active])
   @@index([currentStock]) // For low stock queries
   @@index([deletedAt]) // For filtering out deleted records
+  supplierItemCodes SupplierItemCode[]
+  invoiceLines PurchaseOrderInvoiceLine[]
 }
 
 // Presentaciones de compra/salida por insumo (CEDIS): la unidad en que se compra
@@ -2244,6 +2250,7 @@ model Supplier {
   @@index([active])
   @@index([rating])
   @@index([deletedAt]) // For filtering out deleted records
+  itemCodes SupplierItemCode[]
 }
 
 // Supplier pricing history for raw materials
@@ -2428,8 +2435,10 @@ model PurchaseOrderItem {
 /// no se corrige — misma postura que Odoo, que manda la diferencia a una cuenta aparte.
 model PurchaseOrderInvoice {
   id              String        @id @default(cuid())
-  purchaseOrderId String
-  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  /// Null = factura SIN orden previa (fase 2): llego sola, se identifica y se aprende.
+  /// SetNull y no Cascade: si la orden se borra, la factura sigue siendo evidencia fiscal.
+  purchaseOrderId String?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
   venueId         String
   venue           Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
@@ -2495,6 +2504,14 @@ model PurchaseOrderInvoiceLine {
   supplierItemCode String?
   descripcion      String
   claveProdServ    String?
+
+  /// Que ES este renglon (fase 2): insumo O producto, nunca ambos (CHECK en la base).
+  /// Se llena solo cuando el codigo del proveedor ya se conoce, o cuando una persona lo
+  /// confirma — jamas por parecido de texto.
+  rawMaterialId String?
+  rawMaterial   RawMaterial? @relation(fields: [rawMaterialId], references: [id], onDelete: SetNull)
+  productId     String?
+  product       Product?     @relation(fields: [productId], references: [id], onDelete: SetNull)
   /// Catalogo de unidades del SAT (`KGM`, `H87`…), NO nuestro enum `Unit`.
   claveUnidad      String?
 
@@ -2508,6 +2525,41 @@ model PurchaseOrderInvoiceLine {
   @@index([invoiceId])
   @@index([purchaseOrderItemId])
   @@index([supplierItemCode])
+}
+
+/// Fase 2 de la factura: lo que el proveedor llama `NoIdentificacion` en su CFDI, traducido
+/// a NUESTRO catalogo. La primera vez lo confirma una persona; las siguientes facturas del
+/// proveedor reconocen solas. El mapeo es del PROVEEDOR (no de una orden): por eso sirve
+/// para ordenes nuevas y para facturas sin orden.
+model SupplierItemCode {
+  id       String @id @default(cuid())
+  venueId  String
+  venue    Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  /// `NoIdentificacion` del CFDI, tal cual lo manda el proveedor.
+  code String
+
+  /// XOR con CHECK en la base (mismo patron que PurchaseOrderItem): insumo O producto.
+  rawMaterialId String?
+  rawMaterial   RawMaterial? @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+  productId     String?
+  product       Product?     @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// Ultima descripcion vista en una factura, para que la pantalla ayude a reconocerlo.
+  lastDescription String?
+
+  createdById String?
+  createdBy   Staff?  @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, supplierId, code])
+  @@index([supplierId])
+  @@index([rawMaterialId])
+  @@index([productId])
 }
 
 // Pricing policies for products
@@ -3188,6 +3240,10 @@ model StaffWorkScheduleException {
   startTime String?
   endTime   String?
   note      String?
+  /// Sólo para kind=OFF (fase 3 del checador): por qué no viene. null = descanso simple
+  /// (filas previas y el default). REST · VACATION · PAID_LEAVE · UNPAID_LEAVE · SICK_LEAVE ·
+  /// JUSTIFIED_ABSENCE. Con goce o sin goce lo deriva el código, no un segundo campo.
+  type String?
 
   createdAt DateTime @default(now())
 
@@ -9626,6 +9682,11 @@ enum InvoiceMatchStatus {
   AMOUNT_MISMATCH
   /// Los totales cuadran pero algun renglon no pudo casarse.
   LINES_MISMATCH
+  /// Entrega parcial: lo facturado (sumando las facturas previas de la orden) todavia no
+  /// llega al total de la orden, y esta factura por si misma cuadra. No es un error.
+  PARTIAL
+  /// Factura sin orden previa (fase 2): no hay contra que conciliar; se identifica y se aprende.
+  NO_ORDER
 }
 
 enum PurchaseOrderStatus {

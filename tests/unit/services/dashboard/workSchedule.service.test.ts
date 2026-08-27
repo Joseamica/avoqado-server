@@ -28,7 +28,7 @@ describe('resolveExpectedDay', () => {
   })
 
   it('un día apagado en el cuadrante es descanso', () => {
-    expect(resolveExpectedDay(weekly, [], '2026-08-22')).toEqual({ start: null, end: null, isDayOff: true })
+    expect(resolveExpectedDay(weekly, [], '2026-08-22')).toEqual(expect.objectContaining({ start: null, end: null, isDayOff: true }))
   })
 
   it('sin cuadrante no hay nada que esperar', () => {
@@ -38,7 +38,7 @@ describe('resolveExpectedDay', () => {
   it('🔴 una excepción de descanso GANA sobre el cuadrante semanal', () => {
     // Sin esto, alguien de vacaciones aparece como falta todos los días.
     const vacaciones = [{ startDate: '2026-08-17', endDate: '2026-08-24', kind: 'OFF' as const }]
-    expect(resolveExpectedDay(weekly, vacaciones, '2026-08-20')).toEqual({ start: null, end: null, isDayOff: true })
+    expect(resolveExpectedDay(weekly, vacaciones, '2026-08-20')).toEqual(expect.objectContaining({ start: null, end: null, isDayOff: true }))
   })
 
   it('una excepción de horario GANA sobre el cuadrante semanal', () => {
@@ -73,7 +73,7 @@ describe('resolveExpectedDay', () => {
 
   it('un día habilitado pero sin rangos es descanso, no un horario vacío', () => {
     const raro = { ...weekly, thursday: { enabled: true, ranges: [] } }
-    expect(resolveExpectedDay(raro, [], '2026-08-20')).toEqual({ start: null, end: null, isDayOff: true })
+    expect(resolveExpectedDay(raro, [], '2026-08-20')).toEqual(expect.objectContaining({ start: null, end: null, isDayOff: true }))
   })
 
   it('toma el primer y el último rango del día: entra en el primero, sale en el último', () => {

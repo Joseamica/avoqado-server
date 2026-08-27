@@ -22,6 +22,12 @@ export interface MatchVerdictInput {
   supplierMatches: boolean | null
   invoiceTotalCents: number
   orderTotalCents: number
+  /**
+   * Lo YA facturado por otras facturas de ESTA orden, en centavos. Una orden puede
+   * facturarse en varias entregas: la comparación va contra la SUMA, no contra esta factura
+   * sola — si no, la primera factura legítima de una entrega parcial sale como descuadre.
+   */
+  previousInvoicesTotalCents?: number
   unmatchedConceptos: number
   unmatchedOrderItemIds: string[]
 }
@@ -29,8 +35,12 @@ export interface MatchVerdictInput {
 export interface MatchVerdictNotes {
   invoiceTotalCents: number
   orderTotalCents: number
-  /** Positivo = el proveedor cobró de MÁS. Negativo = de menos. */
+  /** Positivo = el proveedor cobró de MÁS. Negativo = de menos. (Sólo ESTA factura.) */
   totalDifferenceCents: number
+  /** Lo facturado por TODAS las facturas de la orden, esta incluida. */
+  accumulatedInvoicedCents: number
+  /** accumulated − orden. 0 = la orden quedó completamente facturada. */
+  accumulatedDifferenceCents: number
   unmatchedConceptos: number
   unmatchedOrderItemIds: string[]
   /** true cuando el proveedor no tiene RFC capturado y por eso no se verificó el emisor. */
@@ -43,12 +53,17 @@ export interface MatchVerdict {
 }
 
 export function decideMatchVerdict(input: MatchVerdictInput): MatchVerdict {
+  const previous = input.previousInvoicesTotalCents ?? 0
   const totalDifferenceCents = input.invoiceTotalCents - input.orderTotalCents
+  const accumulatedInvoicedCents = previous + input.invoiceTotalCents
+  const accumulatedDifferenceCents = accumulatedInvoicedCents - input.orderTotalCents
 
   const notes: MatchVerdictNotes = {
     invoiceTotalCents: input.invoiceTotalCents,
     orderTotalCents: input.orderTotalCents,
     totalDifferenceCents,
+    accumulatedInvoicedCents,
+    accumulatedDifferenceCents,
     unmatchedConceptos: input.unmatchedConceptos,
     unmatchedOrderItemIds: input.unmatchedOrderItemIds,
     ...(input.supplierMatches === null ? { supplierUnverified: true } : {}),
@@ -58,7 +73,20 @@ export function decideMatchVerdict(input: MatchVerdictInput): MatchVerdict {
   // significa nada; y entre dinero y renglones, lo que se le reclama al proveedor primero
   // es el dinero.
   if (input.supplierMatches === false) return { status: 'SUPPLIER_MISMATCH', notes }
-  if (totalDifferenceCents !== 0) return { status: 'AMOUNT_MISMATCH', notes }
+
+  // Cobraron de MÁS (sumando lo ya facturado de la orden): eso sí se reclama.
+  if (accumulatedDifferenceCents > 0) return { status: 'AMOUNT_MISMATCH', notes }
+
+  if (accumulatedDifferenceCents < 0) {
+    // Entrega parcial: lo facturado aún no llega al total. NO es un error — la primera
+    // factura legítima de $500 sobre una orden de $1,000 salía como descuadre (riesgo
+    // documentado en el spec). Pero sólo si ESTA factura está limpia: un concepto que no
+    // casó con nada sigue siendo problema de renglones. Los renglones de la orden sin
+    // cubrir son lo ESPERADO en una parcial y no cuentan en contra.
+    if (input.unmatchedConceptos > 0) return { status: 'LINES_MISMATCH', notes }
+    return { status: 'PARTIAL', notes }
+  }
+
   if (input.unmatchedConceptos > 0 || input.unmatchedOrderItemIds.length > 0) {
     return { status: 'LINES_MISMATCH', notes }
   }

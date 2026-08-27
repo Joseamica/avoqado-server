@@ -113,6 +113,7 @@ import {
   VenueIdOnlySchema,
   VenueTimeEntriesQuerySchema,
   AttendanceReportSchema,
+  PayrollSummarySchema,
   WorkScheduleParamsSchema,
   ReplaceWorkScheduleSchema,
 } from '../schemas/dashboard/attendance.schema'
@@ -7768,6 +7769,17 @@ router.get(
   checkPermission('attendance:read'),
   validateRequest(AttendanceReportSchema),
   attendanceController.getReport,
+)
+
+// Fase 3 — el puente a nómina: días exigibles, trabajados, retardos, faltas y ausencias POR
+// TIPO (vacaciones, permiso con/sin goce, incapacidad, falta justificada) más horas del
+// periodo. Mismo permiso que el reporte: quien revisa asistencia arma la nómina.
+router.get(
+  '/venues/:venueId/attendance/payroll-summary',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:read'),
+  validateRequest(PayrollSummarySchema),
+  attendanceController.getPayrollSummary,
 )
 
 router.get(

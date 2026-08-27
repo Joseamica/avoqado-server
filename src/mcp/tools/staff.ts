@@ -74,6 +74,23 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'attendance_payroll_summary',
+    'Fase 3 del checador — payroll bridge for ONE venue: per-person period numbers a payroll needs (scheduled/worked days, late days + minutes, absences BY TYPE — vacation, paid/unpaid leave, sick leave, justified — and worked hours). Same permission as the dashboard payroll view.',
+    {
+      venueId: z.string().describe('Venue whose payroll summary to read (must be in your scope)'),
+      startDate: z.string().describe('Period start, YYYY-MM-DD (venue-local)'),
+      endDate: z.string().describe('Period end, YYYY-MM-DD (max 92 days)'),
+    },
+    async ({ venueId, startDate, endDate }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('attendance:read', venueId)
+      const { getPayrollSummary } = await import('../../services/dashboard/attendancePayroll.service')
+      const summary = await getPayrollSummary(venueId, startDate, endDate)
+      return text(summary)
+    },
+  )
+
+  server.tool(
     'venue_attendance',
     'Attendance (time clock) of ONE venue you can access: who is clocked in RIGHT NOW, and the clock-in/clock-out records for a date range with hours worked, break minutes and whether a manager already approved or rejected each one. Answers "\u00bfqui\u00e9n est\u00e1 trabajando ahora?", "\u00bfa qu\u00e9 hora lleg\u00f3 Ana?", "\u00bfqu\u00e9 checadas faltan por aprobar?". Staff clock in on the venue terminal or app \u2014 this tool only READS. Pass venueId; omit dates for today. For an ORGANIZATION-wide roll-up with late/absent status, white-label operators have staff_attendance instead.',
     {

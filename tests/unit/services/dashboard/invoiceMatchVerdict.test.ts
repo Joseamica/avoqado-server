@@ -34,9 +34,11 @@ describe('decideMatchVerdict', () => {
     expect(v.notes.totalDifferenceCents).toBe(200_00)
   })
 
-  it('la diferencia lleva signo: cobraron de MENOS también se avisa', () => {
+  it('cobraron de MENOS con renglones limpios ya NO es descuadre: es entrega PARCIAL (spec)', () => {
     const v = decideMatchVerdict({ ...base, invoiceTotalCents: 900_00 })
+    expect(v.status).toBe('PARTIAL')
     expect(v.notes.totalDifferenceCents).toBe(-100_00)
+    expect(v.notes.accumulatedDifferenceCents).toBe(-100_00)
   })
 
   it('totales cuadran pero un renglón no casó → LINES_MISMATCH', () => {
@@ -85,5 +87,39 @@ describe('decideMatchVerdict — proveedor sin RFC capturado', () => {
 
   it('no verificar al proveedor no tapa un desajuste de importe', () => {
     expect(decideMatchVerdict({ ...sinRfc, invoiceTotalCents: 1200_00 }).status).toBe('AMOUNT_MISMATCH')
+  })
+})
+
+describe('decideMatchVerdict — la orden se factura en VARIAS entregas (riesgo del spec)', () => {
+  const base = {
+    supplierMatches: true,
+    invoiceTotalCents: 500_00,
+    orderTotalCents: 1000_00,
+    unmatchedConceptos: 0,
+    unmatchedOrderItemIds: ['item-pendiente'] as string[],
+  }
+
+  it('la PRIMERA factura legítima de $500 sobre una orden de $1,000 es PARTIAL, no descuadre', () => {
+    const v = decideMatchVerdict(base)
+    expect(v.status).toBe('PARTIAL')
+    // los renglones de la orden sin cubrir son lo ESPERADO en una parcial: no cuentan en contra
+    expect(v.notes.accumulatedInvoicedCents).toBe(500_00)
+  })
+
+  it('la SEGUNDA factura que completa la orden la deja MATCHED, sumando la previa', () => {
+    const v = decideMatchVerdict({ ...base, previousInvoicesTotalCents: 500_00, unmatchedOrderItemIds: [] })
+    expect(v.status).toBe('MATCHED')
+    expect(v.notes.accumulatedDifferenceCents).toBe(0)
+  })
+
+  it('facturar de MÁS entre todas las facturas sí es descuadre, aunque esta sola quepa', () => {
+    const v = decideMatchVerdict({ ...base, previousInvoicesTotalCents: 800_00, invoiceTotalCents: 300_00 })
+    expect(v.status).toBe('AMOUNT_MISMATCH')
+    expect(v.notes.accumulatedDifferenceCents).toBe(100_00)
+  })
+
+  it('una parcial con un concepto que no casó con nada sigue siendo problema de renglones', () => {
+    const v = decideMatchVerdict({ ...base, unmatchedConceptos: 1 })
+    expect(v.status).toBe('LINES_MISMATCH')
   })
 })

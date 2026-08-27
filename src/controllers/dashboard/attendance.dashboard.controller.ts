@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as attendanceService from '../../services/dashboard/attendance.dashboard.service'
+import * as attendancePayrollService from '../../services/dashboard/attendancePayroll.service'
 import * as workScheduleService from '../../services/dashboard/workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
 
@@ -48,6 +49,20 @@ export async function getStaffTimeSummary(req: Request, res: Response, next: Nex
 export async function getReport(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const result = await attendanceService.getAttendanceReport(
+      req.params.venueId,
+      req.query.startDate as string,
+      req.query.endDate as string,
+    )
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** GET /venues/:venueId/attendance/payroll-summary — fase 3: los números del periodo para la nómina. */
+export async function getPayrollSummary(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const result = await attendancePayrollService.getPayrollSummary(
       req.params.venueId,
       req.query.startDate as string,
       req.query.endDate as string,

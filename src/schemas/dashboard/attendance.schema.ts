@@ -48,6 +48,11 @@ export const AttendanceReportSchema = z.object({
   query: z.object({ startDate: isoDate, endDate: isoDate }),
 })
 
+export const PayrollSummarySchema = z.object({
+  params: z.object({ venueId: z.string().cuid() }),
+  query: z.object({ startDate: isoDate, endDate: isoDate }),
+})
+
 export const WorkScheduleParamsSchema = z.object({
   params: z.object({ venueId: z.string().cuid(), staffVenueId: z.string().cuid() }),
 })
@@ -97,6 +102,8 @@ export const ReplaceWorkScheduleSchema = z.object({
           startDate: isoDate,
           endDate: isoDate,
           kind: z.enum(['OFF', 'HOURS']),
+          // Fase 3: por qué no viene. Sólo con OFF — cambiar el horario no es faltar.
+          type: z.enum(['REST', 'VACATION', 'PAID_LEAVE', 'UNPAID_LEAVE', 'SICK_LEAVE', 'JUSTIFIED_ABSENCE']).optional().nullable(),
           startTime: hhmm.optional().nullable(),
           endTime: hhmm.optional().nullable(),
           note: z.string().trim().max(200).optional().nullable(),

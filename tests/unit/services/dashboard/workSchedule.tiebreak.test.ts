@@ -10,8 +10,8 @@ const HOURS = { startDate: '2026-08-26', endDate: '2026-08-26', kind: 'HOURS' as
 
 describe('resolveExpectedDay — desempate', () => {
   it('misma duración, OFF y HOURS: gana OFF sin importar el orden de entrada', () => {
-    expect(resolveExpectedDay(weekly, [OFF, HOURS], '2026-08-26')).toEqual({ start: null, end: null, isDayOff: true })
-    expect(resolveExpectedDay(weekly, [HOURS, OFF], '2026-08-26')).toEqual({ start: null, end: null, isDayOff: true })
+    expect(resolveExpectedDay(weekly, [OFF, HOURS], '2026-08-26')).toEqual(expect.objectContaining({ isDayOff: true }))
+    expect(resolveExpectedDay(weekly, [HOURS, OFF], '2026-08-26')).toEqual(expect.objectContaining({ isDayOff: true }))
   })
 
   it('dos HOURS de igual duración: gana la que empieza más tarde (la más reciente), en ambos órdenes', () => {

@@ -56,6 +56,10 @@ describe('attachInvoiceToPurchaseOrder', () => {
     prismaMock.purchaseOrder.findFirst.mockReset().mockResolvedValue(order() as any)
     prismaMock.purchaseOrderInvoice.findFirst.mockReset().mockResolvedValue(null)
     prismaMock.purchaseOrderInvoiceLine.findMany.mockReset().mockResolvedValue([])
+    // Fase 2: códigos aprendidos (vacíos por default) y suma de facturas previas de la orden.
+    prismaMock.supplierItemCode.findMany.mockReset().mockResolvedValue([])
+    prismaMock.supplierItemCode.upsert.mockReset().mockResolvedValue({} as any)
+    prismaMock.purchaseOrderInvoice.aggregate.mockReset().mockResolvedValue({ _sum: { totalCents: null } } as any)
     prismaMock.purchaseOrderInvoice.create.mockReset().mockResolvedValue({ id: 'inv-1', uuid: 'u', lines: [] } as any)
     prismaMock.stockBatch.create.mockReset()
     prismaMock.stockBatch.update.mockReset()

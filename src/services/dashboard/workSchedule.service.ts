@@ -29,12 +29,19 @@ export interface WorkScheduleException {
   kind: 'OFF' | 'HOURS'
   startTime?: string | null
   endTime?: string | null
+  /**
+   * Fase 3: por qué no viene (sólo kind=OFF). null = descanso simple. Referente Sesame:
+   * vacaciones · permiso con/sin goce · incapacidad · falta justificada.
+   */
+  type?: string | null
 }
 
 export interface ExpectedDay {
   start: string | null
   end: string | null
   isDayOff: boolean
+  /** Tipo de la excepción OFF ganadora (VACATION, SICK_LEAVE…). null = descanso sin más. */
+  absenceType?: string | null
 }
 
 const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const
@@ -69,14 +76,12 @@ export function resolveExpectedDay(
     .filter(e => e.startDate <= dateIso && dateIso <= e.endDate)
     .sort(
       (a, b) =>
-        spanDays(a) - spanDays(b) ||
-        (a.kind === 'OFF' ? 0 : 1) - (b.kind === 'OFF' ? 0 : 1) ||
-        b.startDate.localeCompare(a.startDate),
+        spanDays(a) - spanDays(b) || (a.kind === 'OFF' ? 0 : 1) - (b.kind === 'OFF' ? 0 : 1) || b.startDate.localeCompare(a.startDate),
     )
 
   const winner = applicable[0]
   if (winner) {
-    if (winner.kind === 'OFF') return { start: null, end: null, isDayOff: true }
+    if (winner.kind === 'OFF') return { start: null, end: null, isDayOff: true, absenceType: winner.type ?? null }
     if (winner.startTime && winner.endTime) {
       return { start: winner.startTime, end: winner.endTime, isDayOff: false }
     }
@@ -124,6 +129,7 @@ export async function getWorkSchedule(venueId: string, staffVenueId: string) {
       startTime: e.startTime,
       endTime: e.endTime,
       note: e.note,
+      type: e.type,
     })),
   }
 }
@@ -143,6 +149,9 @@ export async function replaceWorkSchedule(
     }
     if (exception.kind === 'HOURS' && (!exception.startTime || !exception.endTime)) {
       throw new BadRequestError('Un día con horario distinto necesita hora de entrada y de salida.')
+    }
+    if (exception.type && exception.kind !== 'OFF') {
+      throw new BadRequestError('Un tipo de ausencia sólo aplica a días sin turno (OFF): cambiar el horario no es faltar.')
     }
   }
 
@@ -171,6 +180,7 @@ export async function replaceWorkSchedule(
           startTime: e.startTime ?? null,
           endTime: e.endTime ?? null,
           note: e.note ?? null,
+          type: e.type ?? null,
         })),
       })
     }

@@ -127,11 +127,21 @@ export interface AttendanceReportRow {
 /** Tope inclusivo del reporte de puntualidad, en días. */
 export const MAX_REPORT_DAYS = 92
 
-export async function getAttendanceReport(
+/**
+ * Una celda por persona-día de TODO el rango, sin esconder nada: la rejilla es la única
+ * verdad que comparten el reporte de puntualidad (que filtra los días sin novedad) y el
+ * resumen de nómina de la fase 3 (que necesita también vacaciones, permisos y descansos).
+ */
+export interface AttendanceGridCell extends AttendanceReportRow {
+  /** Tipo de la excepción OFF que ganó ese día (VACATION, SICK_LEAVE…). null = no es ausencia tipificada. */
+  absenceType: string | null
+}
+
+export async function buildAttendanceGrid(
   venueId: string,
   startDate: string,
   endDate: string,
-): Promise<{ rows: AttendanceReportRow[]; graceMinutes: number; timezone: string }> {
+): Promise<{ cells: AttendanceGridCell[]; graceMinutes: number; timezone: string }> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
     select: { timezone: true, settings: { select: { attendanceGraceMinutes: true } } },
@@ -175,7 +185,7 @@ export async function getAttendanceReport(
         // Orden fijo: el desempate final vive en `resolveExpectedDay`, pero la entrada no debe
         // depender del plan de Postgres (Codex P2-6).
         orderBy: [{ startDate: 'asc' }, { createdAt: 'asc' }],
-        select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true },
+        select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true, type: true },
       },
     },
   })
@@ -237,7 +247,7 @@ export async function getAttendanceReport(
     days.push(d.toISODate()!)
   }
 
-  const rows: AttendanceReportRow[] = []
+  const rows: AttendanceGridCell[] = []
   for (const membership of memberships) {
     const weekly = (membership.workSchedule?.weekly as unknown as WeeklyWorkSchedule) ?? null
     const exceptions = membership.workScheduleExceptions as unknown as WorkScheduleException[]
@@ -286,11 +296,8 @@ export async function getAttendanceReport(
               isDayOff: expected.isDayOff,
             })
 
-      // Los días sin nada que contar no llegan a la pantalla: descanso sin novedad y gente
-      // sin cuadrante que tampoco marcó. Llenar la tabla de filas vacías la vuelve ilegible.
-      if ((evaluation.status === 'DAY_OFF' || evaluation.status === 'NO_SCHEDULE' || evaluation.status === 'PENDING') && !actual) continue
-
       rows.push({
+        absenceType: expected.isDayOff ? (expected.absenceType ?? null) : null,
         staffId: membership.staffId,
         staffVenueId: membership.id,
         name: `${membership.staff.firstName} ${membership.staff.lastName}`.trim(),
@@ -305,5 +312,17 @@ export async function getAttendanceReport(
   }
 
   rows.sort((a, b) => (a.date === b.date ? a.name.localeCompare(b.name) : b.date.localeCompare(a.date)))
+  return { cells: rows, graceMinutes, timezone }
+}
+
+export async function getAttendanceReport(
+  venueId: string,
+  startDate: string,
+  endDate: string,
+): Promise<{ rows: AttendanceReportRow[]; graceMinutes: number; timezone: string }> {
+  const { cells, graceMinutes, timezone } = await buildAttendanceGrid(venueId, startDate, endDate)
+  // Los días sin nada que contar no llegan a la pantalla: descanso sin novedad y gente
+  // sin cuadrante que tampoco marcó. Llenar la tabla de filas vacías la vuelve ilegible.
+  const rows = cells.filter(c => !((c.status === 'DAY_OFF' || c.status === 'NO_SCHEDULE' || c.status === 'PENDING') && !c.clockInTime))
   return { rows, graceMinutes, timezone }
 }

@@ -1023,6 +1023,22 @@ router.post(
   purchaseOrderInvoiceController.attachInvoice,
 )
 
+// Fase 2 — la factura que llegó SIN orden, y el aprendizaje de códigos del proveedor.
+// Mismo doble candado: INVENTORY_TRACKING (router entero) + CFDI (lee un comprobante fiscal).
+router.get('/supplier-invoices', checkFeatureAccess('CFDI'), checkPermission('inventory:read'), purchaseOrderInvoiceController.listAll)
+router.post(
+  '/supplier-invoices',
+  checkFeatureAccess('CFDI'),
+  checkPermission('inventory:update'),
+  purchaseOrderInvoiceController.registerStandalone,
+)
+router.post(
+  '/purchase-invoices/:invoiceId/lines/:lineId/identify',
+  checkFeatureAccess('CFDI'),
+  checkPermission('inventory:update'),
+  purchaseOrderInvoiceController.identifyLine,
+)
+
 // ===========================================
 // PRODUCT LABELS ROUTES
 // ===========================================

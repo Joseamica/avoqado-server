@@ -264,6 +264,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PurchaseOrderItem: 'Inventory & Stock',
   PurchaseOrderInvoice: 'Inventory & Stock',
   PurchaseOrderInvoiceLine: 'Inventory & Stock',
+  SupplierItemCode: 'Inventory & Stock',
   StaffDocument: 'Staff, Auth, Permissions & Time',
   StaffWorkSchedule: 'Staff, Auth, Permissions & Time',
   StaffWorkScheduleException: 'Staff, Auth, Permissions & Time',
