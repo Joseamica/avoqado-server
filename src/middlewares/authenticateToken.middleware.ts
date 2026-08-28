@@ -9,20 +9,80 @@ import { enforceImpersonationRules } from './impersonationGuard.middleware'
 import { enrichContext } from '../observability/executionContext'
 import { getVenueName } from '../observability/venueNames'
 import { isSessionAliveCached } from '../services/auth/sessionCache'
-import { UnauthorizedError } from '../errors/AppError'
+import { ForbiddenError, UnauthorizedError } from '../errors/AppError'
+
+// ────────────────────────────────────────────────────────────────────────────────────────
+// SESIONES REVOCABLES — corte del rollout legacy (Parte A, Task 15)
+//
+// Narrativa completa, la aritmética de los 90 días y quién mueve la bandera:
+// `docs/auth-rollout-legacy.md`. Aquí sólo el mecanismo.
+//
+// Dos entradas independientes — CUALQUIERA de las dos basta para forzar la fase 4
+// (rechazar legacy en TODAS partes, no sólo en lo nuevo):
+//
+//  1. `AUTH_LEGACY_TOKEN_PHASE` — bandera manual (1-4, default 1). La mueve a mano quien
+//     opera el rollout, según el checklist del documento de arriba.
+//  2. `AUTH_LEGACY_TOKEN_CUTOFF_AT` — fecha de corte YA CALCULADA (ISO 8601). Si ya se
+//     cumplió, fuerza fase 4 SOLA, sin que nadie tenga que acordarse de tocar la bandera.
+//     Esto es lo que hace que el corte NO dependa de que un humano note que la telemetría
+//     llegó a cero: un aparato dormido (una tablet apagada tres semanas) jamás aparece en
+//     ninguna métrica, pero el reloj sigue corriendo igual.
+//
+// Ante cualquier valor ausente o inválido se cae al lado que NUNCA echa a nadie de más
+// (fase 1, sin fecha) — el mismo principio que ya usa `passwordChangeGuard.ts`.
+const LEGACY_PHASE_ENV_VAR = 'AUTH_LEGACY_TOKEN_PHASE'
+const LEGACY_CUTOFF_ENV_VAR = 'AUTH_LEGACY_TOKEN_CUTOFF_AT'
+
+type FaseDelRolloutLegacy = 1 | 2 | 3 | 4
+
+function leerFaseManual(): FaseDelRolloutLegacy {
+  const crudo = process.env[LEGACY_PHASE_ENV_VAR]
+  const n = crudo === undefined ? NaN : Number(crudo)
+  if (!Number.isFinite(n)) return 1
+  if (n >= 4) return 4
+  if (n === 2 || n === 3) return n
+  return 1
+}
+
+function leerFechaDeCorte(): Date | null {
+  const crudo = process.env[LEGACY_CUTOFF_ENV_VAR]
+  if (!crudo) return null
+  const fecha = new Date(crudo)
+  return Number.isNaN(fecha.getTime()) ? null : fecha
+}
+
+/**
+ * Fase EFECTIVA del rollout de tokens legacy, en este instante. Exportada porque además de
+ * gobernar este middleware es lo que un futuro endpoint de status (o un log de arranque)
+ * debería leer, en vez de inventar una segunda fuente de verdad.
+ *
+ * Las fases 1-3 se comportan IGUAL para este middleware: legacy pasa en rutas normales, y
+ * `requireVersionedSession` ya lo rechaza desde el día 1 sin importar la fase — son hitos
+ * operativos (ver el documento), no ramas de código. La única transición que el código
+ * distingue es "todavía no" vs "fase 4": legacy rechazado en TODAS partes.
+ */
+export function faseDelRolloutLegacy(): FaseDelRolloutLegacy {
+  const manual = leerFaseManual()
+  if (manual >= 4) return 4
+  const corte = leerFechaDeCorte()
+  if (corte && Date.now() >= corte.getTime()) return 4
+  return manual
+}
+
+/** Cookie primero (Dashboard Web); si no hay, header `Authorization: Bearer` (TPV/API/móvil). */
+function extraerToken(req: Request): string | undefined {
+  const cookieToken = req.cookies?.accessToken
+  if (cookieToken) return cookieToken
+  const authHeader = req.headers['authorization']
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader.substring(7)
+  }
+  return undefined
+}
 
 export const authenticateTokenMiddleware = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    // BUSCAR EN COOKIES PRIMERO (Dashboard Web)
-    let token = req.cookies?.accessToken
-
-    // Si no hay cookie, buscar en Authorization header (TPV/API)
-    if (!token) {
-      const authHeader = req.headers['authorization']
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        token = authHeader.substring(7)
-      }
-    }
+    const token = extraerToken(req)
 
     if (!token) {
       res.status(401).json({
@@ -98,11 +158,22 @@ export const authenticateTokenMiddleware = async (req: Request, res: Response, n
     // Android e iOS sin `sid`, y bloquearlos expulsaría a todo el producto de golpe. Solo
     // cuando el token SÍ trae `sid` se pregunta a la caché (que cae a la base si Redis no
     // responde, y nunca acepta por defecto si las dos fallan).
+    //
+    // Eso es cierto MIENTRAS la fase efectiva del rollout no llegue a 4 — ver
+    // `faseDelRolloutLegacy` arriba y `docs/auth-rollout-legacy.md`.
     if (decoded.sid) {
       const viva = await isSessionAliveCached(decoded.sid)
       if (!viva) {
         return next(new UnauthorizedError('Sesión cerrada. Inicia sesión de nuevo.'))
       }
+    } else if (faseDelRolloutLegacy() >= 4) {
+      // FASE 4: pasada la fecha de corte (o forzada a mano con AUTH_LEGACY_TOKEN_PHASE=4),
+      // un token SIN `sid` ya no se acepta en NINGUNA ruta — ni siquiera las de siempre.
+      // El corte es sobre la AUSENCIA de `sid`: un token CON sid nunca cae en esta rama, sin
+      // importar qué tan vieja sea la fecha de corte (arriba, en el `if`).
+      return next(
+        new UnauthorizedError('Tu sesión es de una versión anterior y ya no se admite. Inicia sesión de nuevo.', 'LEGACY_TOKEN_RETIRED'),
+      )
     }
 
     // Construir el contexto con semántica de impersonación (RFC 8693 act claim).
@@ -179,6 +250,54 @@ export const authenticateTokenMiddleware = async (req: Request, res: Response, n
       error: 'Unauthorized',
       ...(code && { code }),
       message,
+    })
+  }
+}
+
+/**
+ * Candado de "lo nuevo" — la Parte C construye `switch-user` MONTADO sobre este guard, en la
+ * cadena de la ruta, DESPUÉS de `authenticateTokenMiddleware`. Un token SIN `sid` jamás pasa
+ * por aquí, desde el día 1 de la fase 1, sin importar `faseDelRolloutLegacy` ni la fecha de
+ * corte: lo nuevo nace exigiendo identidad de sesión, no espera al rollout. Ver
+ * `docs/auth-rollout-legacy.md` (Fase 3).
+ *
+ * Vuelve a verificar el JWT en vez de leer `req.authContext` (que no expone `sid`/`v`) para
+ * no tener que ampliar `AuthContext` — ese tipo lo consume medio backend y esta tarea no lo
+ * toca. El costo es un `jwt.verify` extra por petición, sólo en las rutas que usan este
+ * guard: insignificante comparado con ampliar una interfaz compartida por el resto del repo.
+ */
+export const requireVersionedSession = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const token = extraerToken(req)
+    if (!token) {
+      res.status(401).json({
+        error: 'Unauthorized',
+        message: 'No authentication token provided',
+      })
+      return
+    }
+
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!, {
+      algorithms: ['HS256'],
+    }) as AvoqadoJwtPayload
+
+    if (!decoded.sid) {
+      return next(
+        new ForbiddenError(
+          'Esta operación requiere una sesión con identidad de dispositivo. Vuelve a iniciar sesión.',
+          'LEGACY_TOKEN_NOT_ALLOWED',
+        ),
+      )
+    }
+
+    next()
+  } catch {
+    // Defensivo: en la cadena real `authenticateTokenMiddleware` ya habría atrapado un token
+    // ausente/vencido/inválido antes de llegar aquí. Este guard no es la autenticación
+    // primaria, sólo la exigencia extra de versión — por eso no distingue el motivo.
+    res.status(401).json({
+      error: 'Unauthorized',
+      message: 'Invalid or expired token',
     })
   }
 }
