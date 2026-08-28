@@ -46,6 +46,14 @@ De los cuatro, **sólo el #4 se queja**. Los otros tres fallan callados, y el #2
    anuncios. Sin eso, dos pods reprocesan el mismo evento y la cocina prepara el pedido dos veces (nada lo atrapa: `KdsOrder.orderId` no
    tiene índice único y no puede tenerlo).
 
+6. 🔴 **Caché de sesiones revocables → compartida** (`src/services/auth/sessionCache.ts`). Es memoria del proceso, con TTL de 60 s, y la
+   consulta el middleware de auth en **cada petición**. Con 2 pods, revocar una sesión en el pod A **no invalida el pod B**: el token
+   revocado sigue entrando por B hasta que su entrada expire. Falla callado y en el peor lugar posible — es justo el mecanismo que existe
+   para expulsar a alguien. Se migra a una caché compartida, o se baja el TTL a 0 (que equivale a consultar la base siempre, correcto pero
+   más lento). La base **siempre** es la verdad: la caché nunca acepta por defecto, así que el modo degradado es seguro, sólo lento.
+7. **Desconexión de sockets por sesión/aparato** (`SocketManager`). Cierra los sockets del proceso local; con 2 pods, revocar deja vivos
+   los sockets conectados al otro. Se resuelve con el adapter de Redis del punto 1 más un pub/sub que propague la orden de desconectar.
+
 Excepción deliberada que NO se migra: el dedupe de `registerDevice.middleware.ts:33` es en proceso **a propósito** — meter una dependencia
 dura de Redis en el camino del cobro es peor que un dedupe imperfecto. Lee el comentario antes de "arreglarlo".
 
