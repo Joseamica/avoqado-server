@@ -221,7 +221,9 @@ export const syncEvents = async (req: Request, res: Response, next: NextFunction
     }
 
     const appVersion = (req.headers['x-app-version'] as string | undefined) ?? null
-    const result = await cashDrawerService.syncEvents(venueId, events, appVersion)
+    // El autor autenticado: `/sync` ya no se cree a ciegas el `staffId` del cuerpo.
+    const actorStaffId = (req as any).authContext?.userId ?? null
+    const result = await cashDrawerService.syncEvents(venueId, events, appVersion, actorStaffId)
 
     return res.json({ success: true, ...result })
   } catch (error) {

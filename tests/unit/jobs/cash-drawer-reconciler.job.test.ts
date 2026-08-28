@@ -30,6 +30,7 @@ jest.mock('@/services/shared/cashDrawerPosting', () => ({
 
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { CashDrawerReconcilerJob, defaults } from '@/jobs/cash-drawer-reconciler.job'
+import { prismaMock } from '../../__helpers__/setup'
 import { postCashRefundToDrawer } from '@/services/shared/cashDrawerPosting'
 
 const noopCron = { start: jest.fn(), stop: jest.fn() }
@@ -171,5 +172,42 @@ describe('CashDrawerReconcilerJob.runNow', () => {
     await defaults.postRefund({ id: 'ref-9', venueId: 'v-1', orderId: null, amount: -80, tipAmount: -20, method: 'CASH' } as never, 's-1')
     const arg = (postCashRefundToDrawer as jest.Mock).mock.calls[0][0]
     expect(Math.abs(Number(arg.amount))).toBeCloseTo(100, 2)
+  })
+
+  // 🔴 Un pago que nació en OTRO sistema de punto de venta no pudo entrar al cajón de
+  // Avoqado: su efectivo lo recibió la caja de ese otro sistema. El fallback legacy
+  // (`fundsFlow` nulo + method CASH) los daba por dinero del cajón, así que si su fecha caía
+  // dentro de una sesión el barrido los reponía e inflaba el esperado — un faltante inventado
+  // que se le carga al cajero. Medido en producción: 6,634 pagos de SoftRestaurant en esa
+  // situación (hoy inertes, porque su venue no abre cajón y quedan fuera de la ventana de 7
+  // días; el filtro cierra la puerta antes de que eso cambie).
+  it('🔴 no repone pagos que nacieron en OTRO sistema de punto de venta', async () => {
+    ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([])
+    ;(prismaMock as any).payment = { findMany: jest.fn().mockResolvedValue([]) }
+    await defaults.findUnpostedCashPayments(new Date('2026-08-20'), new Date('2026-08-27'), 200)
+
+    // El filtro vive en el SQL, que es donde se acota el trabajo.
+    const sql = ((prismaMock as any).$queryRaw as jest.Mock).mock.calls[0][0].join('?')
+    expect(sql).toContain(`"originSystem" = 'AVOQADO'`)
+    expect(sql).toContain('NOT EXISTS') // sin su movimiento de caja
+    expect(sql).toContain('CashDrawerSession') // y dentro de una sesión: sólo lo reparable
+  })
+
+  // 🔴 El presupuesto del barrido (200 filas) se gastaba en casos IMPOSIBLES. El filtro de
+  // "ya posteado" corría en JS DESPUÉS del `take`, y nada excluía los pagos que caen fuera de
+  // toda sesión de caja — que nunca se pueden reponer y, por ser los más antiguos, encabezan
+  // la fila para siempre. Medido en producción (28-ago): 467 candidatos en la ventana de 7
+  // días, 466 sin evento y CERO reparables. Un pago que sí necesitara reposición quedaría
+  // detrás de esos 466 y el barrido no lo alcanzaría nunca. Ahora las dos condiciones se
+  // resuelven en SQL, así que el `take` sólo se gasta en lo que de verdad se puede reponer.
+  it('🔴 el barrido sólo pide lo REPARABLE: sin evento y dentro de una sesión', async () => {
+    ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([])
+    ;(prismaMock as any).payment = { findMany: jest.fn() }
+
+    const r = await defaults.findUnpostedCashPayments(new Date('2026-08-20'), new Date('2026-08-27'), 200)
+
+    expect(r).toEqual([])
+    // sin candidatos no se pide nada más: el barrido deja de traer 200 filas para descartarlas
+    expect((prismaMock as any).payment.findMany).not.toHaveBeenCalled()
   })
 })

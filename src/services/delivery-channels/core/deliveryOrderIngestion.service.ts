@@ -126,7 +126,16 @@ async function resolveProductId(
 export async function ingestDeliveryOrder(
   normalized: NormalizedDeliveryOrder,
   link: DeliveryChannelLink,
-): Promise<{ order: Order; created: boolean; kitchenTicketCreated: boolean }> {
+): Promise<{
+  order: Order
+  /** La orden NO existía antes de esta pasada. */
+  created: boolean
+  /** La comanda se creó EN ESTA pasada. */
+  kitchenTicketCreated: boolean
+  /** HAY comanda, la haya creado esta pasada o una anterior. Es lo que decide si un pedido
+   *  con instrucciones especiales debe cancelarse: `created` respondía otra pregunta. */
+  hayComanda: boolean
+}> {
   // 🔴 Dinero primero: un pedido cuyo reparto no cuadra NUNCA debe tocar la base — se
   // verifica ANTES de resolver el venue o abrir la transacción. Compara también contra los
   // renglones (Hallazgo 2, auditoría externa 2026-08-20): saleAmount debe cuadrar con la suma
@@ -144,7 +153,12 @@ export async function ingestDeliveryOrder(
   // dentro/fuera del total"): Order.total NUNCA incluye propina — Payment.tipAmount es la
   // verdad. Antes el total incluía la propina Y `Payment.tipAmount` la repetía: se contaba
   // dos veces. Ese defecto es la razón por la que Uber llegó a tener su propia ingesta.
-  const total = subtotal.plus(merchantFees)
+  // El descuento (promociones del canal) se guarda APARTE y RESTA del total, como en
+  // cualquier POS: `subtotal` es el bruto y `Order.discountAmount` deja ver cuánto costó la
+  // promoción. Antes se ignoraba y la venta quedaba registrada al precio de lista, por
+  // encima de lo que la plataforma iba a depositar.
+  const descuento = D(p.discountAmount ?? '0.00')
+  const total = subtotal.plus(merchantFees).minus(descuento)
   const pagadoExterno = D(p.externallyPaidSale).plus(D(p.externallyPaidTip))
   const porCobrar = D(p.cashDueSale).plus(D(p.cashDueTip))
   const paymentStatus = porCobrar.isZero() ? PaymentStatus.PAID : pagadoExterno.isZero() ? PaymentStatus.PENDING : PaymentStatus.PARTIAL
@@ -218,6 +232,7 @@ export async function ingestDeliveryOrder(
           // México: el IVA ya va incluido en el precio — el impuesto que reporta el
           // proveedor no es fuente fiscal (spec §5 de Uber, aplicado igual aquí).
           taxAmount: new Prisma.Decimal(0),
+          discountAmount: descuento,
           tipAmount: tip,
           total,
           // Partial payment tracking: cuánto liquidó la plataforma vs. cuánto queda por
@@ -492,7 +507,23 @@ export async function ingestDeliveryOrder(
   // (`KdsOrder.orderId` no es único, así que dos procesadores simultáneos podrían crear dos;
   //  es un empate mucho menos dañino que no imprimir nada, y el mismo que ya existía.)
   const comandaYaExiste = isNew ? false : (await prisma.kdsOrder.count({ where: { orderId: order.id } })) > 0
-  if (!comandaYaExiste && !normalized.scheduledFor) {
+
+  // 🔴 Y la tercera pregunta, que faltaba: ¿el pedido sigue VIVO? Cancelar BORRA las filas de
+  // KDS (`cancelDeliveryOrder`), así que al reprocesar un evento de un pedido ya cancelado
+  // `comandaYaExiste` vuelve a ser false y se imprimía una comanda NUEVA. La orden sigue
+  // CANCELLED —el upsert sólo toca `posRawData` y `syncedAt`—, o sea que la cocina prepara
+  // comida que nadie va a recoger y ese ticket ya no sale del tablero por ninguna vía de
+  // cancelación. Los eventos se reprocesan solos: el job de reconciliación reintenta los
+  // FAILED y los RECEIVED que quedaron a medias.
+  const pedidoCancelado = order.status === OrderStatus.CANCELLED
+  if (pedidoCancelado) {
+    logger.warn('[DeliveryIngest] reingesta de un pedido CANCELADO: no se imprime comanda', {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+    })
+  }
+
+  if (!comandaYaExiste && !pedidoCancelado && !normalized.scheduledFor) {
     try {
       await prisma.kdsOrder.create({
         data: {
@@ -571,5 +602,10 @@ export async function ingestDeliveryOrder(
     }
   }
 
-  return { order, created: isNew, kitchenTicketCreated }
+  // `hayComanda` es lo que el processor de Uber necesita para decidir si CANCELAR un pedido
+  // cuyas instrucciones no llegaron a la cocina: la haya creado esta pasada o una anterior.
+  // `created` (la orden no existía) respondía otra pregunta y desarmaba esa red de seguridad
+  // en cualquier reproceso. Se conserva `kitchenTicketCreated` porque es otra cosa: si la
+  // comanda se creó AHORA.
+  return { order, created: isNew, kitchenTicketCreated, hayComanda: comandaYaExiste || kitchenTicketCreated }
 }

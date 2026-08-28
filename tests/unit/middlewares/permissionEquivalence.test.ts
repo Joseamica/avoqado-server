@@ -20,7 +20,7 @@ jest.mock('@/config/logger', () => ({
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
-import { PERMISO_VER_ESPERADO, tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { marcarPermiso, PERMISO_VER_ESPERADO, tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 import { prismaMock } from '../../__helpers__/setup'
 
 const VENUE = 'venue-1'
@@ -114,15 +114,34 @@ describe('tienePermisoEnVenue responde lo mismo que checkPermission', () => {
     })
   }
 
-  // 🔴 Falla CERRADO: si la base truena, se OCULTA el dato. Es el lado seguro aquí,
-  // al revés que en un gate de acceso, donde ocultar dejaría a alguien sin trabajar.
-  it('un fallo de base oculta el dato en vez de revelarlo', async () => {
+  // 🔴 Falla CERRADO: si la base truena, se OCULTA el dato. Es el lado seguro aquí, al revés
+  // que en un gate de acceso, donde ocultar dejaría a alguien sin trabajar.
+  //
+  // El nombre viejo de esta prueba mentía: decía "oculta el dato" pero sólo comprobaba que
+  // `tienePermisoEnVenue` LANZARA — nunca ejercitaba el `catch` de `marcarPermiso`, que es
+  // quien de verdad decide qué ve el usuario. Ahora se prueban las dos mitades.
+  it('el resolver PROPAGA el error de base (no se lo traga en silencio)', async () => {
     ;(prismaMock as any).staffVenue = {
       findFirst: jest.fn(async () => {
         throw new Error('P2024: pool agotado')
       }),
     }
     await expect(tienePermisoEnVenue(pedido(), PERMISO_VER_ESPERADO)).rejects.toThrow()
+  })
+
+  it('🔴 y `marcarPermiso` lo convierte en OCULTAR, sin tumbar la petición', async () => {
+    ;(prismaMock as any).staffVenue = {
+      findFirst: jest.fn(async () => {
+        throw new Error('P2024: pool agotado')
+      }),
+    }
+    const req = pedido()
+    let siguio = false
+    await marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado')(req, {} as any, () => {
+      siguio = true
+    })
+    expect(req.puedeVerEsperado).toBe(false) // se oculta
+    expect(siguio).toBe(true) // y la lectura sigue: un fallo de infra no deja al cajero sin su caja
   })
 
   it('sin authContext no revela nada', async () => {

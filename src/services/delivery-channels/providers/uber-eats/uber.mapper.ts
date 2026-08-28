@@ -130,6 +130,12 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
         order_total?: { gross?: UapiMoney }
         item_charges?: { total?: { gross?: UapiMoney }; price_breakdown?: UapiBreakdownEntry[] }
         tips?: { total?: { gross?: UapiMoney } }
+        /**
+         * Promociones aplicadas al pedido (con IVA, como todo `gross`). Venía en el payload
+         * desde siempre y el tipo no la declaraba, así que nadie podía leerla sin que el
+         * compilador se quejara — parte de por qué el descuento se perdía en silencio.
+         */
+        promotions?: { total?: { gross?: UapiMoney } }
         fees?: { total?: { gross?: UapiMoney } }
       }
     }
@@ -353,7 +359,14 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
   const subTotal = montoE5Requerido(detail?.item_charges?.total?.gross, 'payment_detail.item_charges.total.gross')
   const total = montoE5Requerido(detail?.order_total?.gross, 'payment_detail.order_total.gross')
   const propina = montoE5(detail?.tips?.total?.gross, 'payment_detail.tips.total.gross')
-  const cargosComercio = Prisma.Decimal.max(new Prisma.Decimal(0), total.minus(subTotal).minus(propina))
+  // 🔴 La PROMOCIÓN. Venía en el mensaje desde siempre y no la leía nadie: `order_total` es
+  // lo que el cliente pagó YA con el descuento, así que `total − subTotal` salía NEGATIVO y
+  // el `max(0, …)` lo aplastaba a cero. El pedido se registraba como si se hubiera cobrado el
+  // precio de lista, y el reporte de ventas quedaba por encima del depósito de Uber.
+  const descuento = montoE5(detail?.promotions?.total?.gross, 'payment_detail.promotions.total.gross')
+  // Los cargos del comercio se miden contra el precio YA descontado: sumarle el descuento de
+  // vuelta convertiría la promoción en un cargo inventado.
+  const cargosComercio = Prisma.Decimal.max(new Prisma.Decimal(0), total.plus(descuento).minus(subTotal).minus(propina))
 
   return {
     externalId: d.id,
@@ -362,10 +375,14 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     items,
     payment: {
       currency: 'MXN',
+      // BRUTO, como Square: las ventas brutas no se ajustan por descuentos, y así los
+      // renglones siguen cuadrando al centavo contra este número.
       saleAmount: aPesos(subTotal),
       merchantFees: aPesos(cargosComercio),
+      discountAmount: aPesos(descuento),
       tipAmount: aPesos(propina),
-      externallyPaidSale: aPesos(subTotal.plus(cargosComercio)),
+      // Lo que Uber liquida SÍ baja por la promoción: es lo que de verdad va a depositar.
+      externallyPaidSale: aPesos(subTotal.plus(cargosComercio).minus(descuento)),
       externallyPaidTip: aPesos(propina),
       cashDueSale: '0.00',
       cashDueTip: '0.00',

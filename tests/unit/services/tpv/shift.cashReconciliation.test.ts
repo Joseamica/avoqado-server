@@ -164,6 +164,33 @@ describe('closeShiftForVenueWithResult cash reconciliation', () => {
     })
   })
 
+  // 🔴 Conteo ciego: con el cajón todavía ABIERTO y quien cierra sin `cash-drawer:view-expected`,
+  // `resolveShiftCashDrawer` ya no devuelve `expectedAmount`. El bloque ENTERO tiene que
+  // omitirse, no mandarse a medias: en la PAX `CashDrawerSummaryDto.expectedAmount` es un
+  // `Double` NO nullable y Gson rellena un primitivo ausente con 0.0, así que la terminal
+  // imprimiría "Esperado en el cajón: $0.00" — una cifra de dinero FALSA en el papel del corte.
+  // El objeto sí es opcional allá, y la pantalla ya sabe no pintar la sección.
+  it('omits the WHOLE cashDrawer block when the expected amount is withheld (blind count)', async () => {
+    ;(resolveShiftCashDrawer as jest.Mock).mockResolvedValueOnce({
+      sessionId: 'drawer-1',
+      status: 'OPEN',
+      counted: false,
+      actualAmount: null,
+      overShort: null,
+      // sin `expectedAmount`: el llamante no tiene el permiso y la caja sigue abierta
+    })
+    mockPrisma.payment.findMany.mockResolvedValue([payment('5000.00')])
+
+    const result = await closeShiftForVenueWithResult(VENUE_ID, SHIFT_ID, {
+      cashReconciliationAction: 'COUNTED',
+      countedCash: '6000.00',
+    })
+
+    expect('cashDrawer' in result.reconciliation).toBe(false)
+    // y el turno cierra igual: esto nunca puede tumbar un cierre ya commiteado
+    expect(result.reconciliation).toMatchObject({ outcome: 'APPLIED', countedCash: '6000.00' })
+  })
+
   it('closes the shift normally when the drawer lookup fails (cashDrawer omitted, never a crash)', async () => {
     ;(resolveShiftCashDrawer as jest.Mock).mockRejectedValueOnce(new Error('db down'))
     mockPrisma.payment.findMany.mockResolvedValue([payment('5000.00')])

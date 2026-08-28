@@ -95,14 +95,52 @@ interface Dependencies {
  * semántico fino (`paymentCountsAsDrawerCash`) se aplica en memoria porque su precedencia
  * (fundsFlow → snapshot → legacy) no cabe en un `where`; el SQL sólo acota candidatos.
  */
+/**
+ * Candidatos a reposición: ventas en efectivo SIN su movimiento de caja.
+ *
+ * 🔴 Las dos condiciones que acotan el trabajo se resuelven en SQL, no en JS. Antes el filtro
+ * de "ya posteado" corría DESPUÉS del `take: 200`, y nada excluía los pagos que caen fuera de
+ * toda sesión de caja — que no se pueden reponer nunca (meterlos en una caja posterior movería
+ * dinero histórico a un cierre ajeno) y que, por ser los más antiguos, encabezan la fila de
+ * forma permanente. Medido en producción el 28-ago: 467 candidatos en la ventana de 7 días,
+ * 466 sin evento y CERO reparables. El presupuesto se gastaba entero en casos imposibles, y un
+ * pago que sí hiciera falta reponer habría quedado detrás de esos 466 sin ser alcanzado jamás.
+ */
 async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: number): Promise<UnpostedCashPayment[]> {
+  const candidatos = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT p.id
+    FROM "Payment" p
+    WHERE p.status = 'COMPLETED'
+      AND p.type NOT IN ('REFUND', 'TEST')
+      AND p."originSystem" = 'AVOQADO'
+      AND p."createdAt" >= ${since}
+      AND p."createdAt" <= ${until}
+      AND (
+        p."fundsFlow" = 'CASH_DRAWER'
+        OR (p."fundsFlow" IS NULL AND (p.method = 'CASH' OR p."tenderCountsAsCash" = true))
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM "CashDrawerEvent" e
+        WHERE e."venueId" = p."venueId" AND e."localId" = 'srv-cash-sale:' || p.id
+      )
+      AND EXISTS (
+        SELECT 1 FROM "CashDrawerSession" s
+        WHERE s."venueId" = p."venueId"
+          AND p."createdAt" >= s."openedAt"
+          AND p."createdAt" <= COALESCE(s."closedAt", NOW())
+      )
+    ORDER BY p."createdAt" ASC
+    LIMIT ${limit}
+  `
+  if (candidatos.length === 0) return []
+
+  const soloEstos = candidatos.map(c => c.id)
+  // 🔴 El filtro por `originSystem` vive también en el SQL de arriba: un pago que nació en
+  // OTRO sistema de punto de venta (SoftRestaurant vía `pos-sync`) recibió su efectivo en la
+  // caja de ESE sistema. Medido en producción: 6,634 en esa situación, hoy inertes porque su
+  // venue no abre cajón — el filtro cierra la puerta antes de que eso cambie.
   const rows = await prisma.payment.findMany({
-    where: {
-      status: 'COMPLETED',
-      type: { notIn: ['REFUND', 'TEST'] },
-      createdAt: { gte: since, lte: until },
-      OR: [{ fundsFlow: 'CASH_DRAWER' }, { fundsFlow: null, method: 'CASH' }, { fundsFlow: null, tenderCountsAsCash: true }],
-    },
+    where: { id: { in: soloEstos } },
     select: {
       id: true,
       venueId: true,
@@ -118,13 +156,9 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
     orderBy: { createdAt: 'asc' },
     take: limit,
   })
-  if (rows.length === 0) return []
-  const existing = await prisma.cashDrawerEvent.findMany({
-    where: { localId: { in: rows.map(r => cashSaleDrawerLocalId(r.id)) } },
-    select: { localId: true },
-  })
-  const posted = new Set(existing.map(e => e.localId))
-  return rows.filter(r => !posted.has(cashSaleDrawerLocalId(r.id))) as UnpostedCashPayment[]
+  // El anti-join ya se hizo en SQL: aquí no queda nada que filtrar, y se ahorra la consulta
+  // extra que antes traía los `localId` de las 200 filas para descartarlas en memoria.
+  return rows as UnpostedCashPayment[]
 }
 
 async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number): Promise<UnpostedCashPayment[]> {
@@ -133,6 +167,8 @@ async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number
       status: 'COMPLETED',
       type: 'REFUND',
       createdAt: { gte: since, lte: until },
+      // Mismo criterio que las ventas: sólo lo que cobró (y devolvió) Avoqado.
+      originSystem: 'AVOQADO',
       OR: [{ fundsFlow: 'CASH_DRAWER' }, { fundsFlow: null, method: 'CASH' }, { fundsFlow: null, tenderCountsAsCash: true }],
     },
     select: {

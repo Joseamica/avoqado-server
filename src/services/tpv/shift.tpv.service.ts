@@ -1676,7 +1676,14 @@ async function closeShiftUsingRequest(
         resolveShiftCashDrawer(venueId, updatedShift.startTime, updatedShift.endTime ?? new Date()),
         new Promise<null>(resolve => setTimeout(() => resolve(null), 1500).unref?.()),
       ])
-      if (drawer) {
+      // 🔴 Con el conteo ciego, `expectedAmount` puede venir ausente (cajón todavía ABIERTO y
+      // quien cierra sin `cash-drawer:view-expected`). En ese caso NO se adjunta el bloque:
+      // `CashDrawerSummaryDto.expectedAmount` es un `Double` NO nullable en la PAX y Gson
+      // rellena un primitivo ausente con 0.0, así que la terminal imprimiría "Esperado en el
+      // cajón: $0.00" — una cifra de dinero FALSA. El objeto entero sí es opcional allá
+      // (`cashDrawer: CashDrawerSummaryDto? = null`) y la pantalla ya sabe no pintar la
+      // sección, que es exactamente lo que debe pasar cuando no se puede mostrar el número.
+      if (drawer && drawer.expectedAmount !== undefined) {
         reconciliation.cashDrawer = {
           sessionId: drawer.sessionId,
           // P1 (Codex 27-ago): la PAX debe poder decir DE QUÉ caja es el número — aparato y horario.

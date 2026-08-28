@@ -419,7 +419,13 @@ export async function closeSession(params: CloseSessionParams) {
 
   const session = await prisma.cashDrawerSession.findFirst({
     where: { venueId, status: 'OPEN' },
-    select: { id: true },
+    // 🔴 `startingAmount` viene de SU COLUMNA. Derivarlo del primer evento `OPEN` hacía que
+    // el fondo de caja dependiera de una fila que el propio cliente podía insertar por
+    // `/sync`, y que además ordenaba por una fecha suya: un `OPEN` de $0 antedatado borraba
+    // el fondo real del esperado y le inventaba al cajero un sobrante del tamaño del fondo.
+    // Es la misma columna que leen el dashboard, el turno de la PAX y `cashDrawerPosting`,
+    // así que los cuatro dicen por fin el mismo número.
+    select: { id: true, startingAmount: true },
   })
   if (!session) {
     throw new NotFoundError('No hay una caja abierta')
@@ -460,7 +466,7 @@ export async function closeSession(params: CloseSessionParams) {
       throw new NotFoundError('No hay una caja abierta')
     }
     const events = await tx.cashDrawerEvent.findMany({ where: { sessionId: session.id }, orderBy: { createdAt: 'asc' } })
-    const startingAmount = events.find(e => e.type === 'OPEN')?.amount ?? 0
+    const startingAmount = session.startingAmount
     const expected = calculateExpectedAmount({ startingAmount, events })
     const diff = Number(actualDecimal) - expected
     await tx.cashDrawerSession.update({ where: { id: session.id }, data: { overShort: new Decimal(diff.toFixed(2)) } })
@@ -619,7 +625,7 @@ interface SyncEvent {
  * descarte de abajo por DATO (N días con `droppedCashSales = 0`) y no por "ya están todos
  * actualizados" — decisión del founder (27-ago): nada de gates manuales, nada de código muerto.
  */
-export async function syncEvents(venueId: string, events: SyncEvent[], appVersion?: string | null) {
+export async function syncEvents(venueId: string, events: SyncEvent[], appVersion?: string | null, actorStaffId?: string | null) {
   const session = await getOpenSession(venueId)
 
   if (!events || events.length === 0) {
@@ -650,8 +656,24 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   // escribe en la columna indexada. Validar sólo `pay-in`/`pay-out` dejaría el hueco
   // abierto por donde entra el lote. Se valida lo que de verdad vamos a insertar (los
   // `CASH_SALE` se descartan más abajo, así que su llave nunca toca el índice).
+  // 🔴 LISTA BLANCA de tipos, no lista negra. Un POS sin internet sólo puede haber hecho
+  // ingresos y retiros: abrir y cerrar la caja son operaciones del servidor, con su propia
+  // ruta y su propio candado. Descartar sólo `CASH_SALE` dejaba pasar `OPEN` y `CLOSE`, que
+  // son valores válidos del enum de Prisma — y un `OPEN` inyectado se convertía en el fondo
+  // de caja del cierre, así que uno de $0 antedatado borraba el fondo real del arqueo firmado.
+  const TIPOS_DEL_CLIENTE = new Set(['PAY_IN', 'PAY_OUT'])
+  const droppedInvalidTypes = events.filter(e => e.type !== 'CASH_SALE' && !TIPOS_DEL_CLIENTE.has(e.type)).length
+  if (droppedInvalidTypes > 0) {
+    logger.warn('💵 [CASH-DRAWER] /sync descartó eventos de un tipo que el cliente no puede empujar', {
+      venueId,
+      sessionId: session.id,
+      droppedInvalidTypes,
+      tipos: [...new Set(events.filter(e => !TIPOS_DEL_CLIENTE.has(e.type) && e.type !== 'CASH_SALE').map(e => e.type))],
+    })
+  }
+
   const acceptedEvents = events
-    .filter(event => event.type !== 'CASH_SALE')
+    .filter(event => TIPOS_DEL_CLIENTE.has(event.type))
     .map(event => ({ ...event, localId: normalizeLocalId(event.localId, 'events[].localId') }))
 
   if (droppedCashSales > 0) {
@@ -668,18 +690,48 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
     return { syncedCount: 0, events: [] }
   }
 
-  const toRow = (event: SyncEvent) => ({
+  // 🔴 La FECHA la acota el servidor. El cliente la manda porque el movimiento ocurrió sin
+  // red y su hora real importa, pero no puede caer FUERA de la vida de la caja: una fecha
+  // anterior a la apertura le ganaba el `orderBy createdAt asc` a los eventos legítimos, y
+  // una futura desordena el corte. Se recorta al rango [apertura, ahora] en vez de
+  // rechazarse, para no perder un movimiento real por un reloj mal puesto en el aparato.
+  const ahora = new Date()
+  const aperturaMs = new Date(session.openedAt).getTime()
+  const acotarFecha = (valor?: string | Date | null): Date => {
+    if (!valor) return ahora
+    const t = new Date(valor).getTime()
+    if (Number.isNaN(t)) return ahora
+    return new Date(Math.min(Math.max(t, aperturaMs), ahora.getTime()))
+  }
+
+  const toRow = (event: SyncEvent, autor: { staffId: string; staffName: string }) => ({
     sessionId: session.id,
     venueId,
     type: event.type,
     amount: dollarsToDecimal(event.amount),
     note: event.note || null,
-    staffId: event.staffId,
-    staffName: event.staffName,
+    staffId: autor.staffId,
+    staffName: autor.staffName,
     orderId: event.orderId || null,
     localId: event.localId || null,
-    createdAt: event.createdAt ? new Date(event.createdAt) : new Date(),
+    createdAt: acotarFecha(event.createdAt),
   })
+
+  // 🔴 El AUTOR se comprueba contra el venue. El POS es compartido y el movimiento pudo
+  // hacerlo alguien distinto de quien sincroniza, así que el `staffId` del cuerpo se
+  // respeta —pero sólo si esa persona de verdad trabaja aquí—. Un id ajeno o inventado cae
+  // al del token: antes, cualquiera con `payments:create` podía colgarle un retiro a un
+  // compañero, o a alguien de otro negocio.
+  const idsDelCuerpo = [...new Set(acceptedEvents.map(e => e.staffId).filter(Boolean))] as string[]
+  const validos = new Set<string>()
+  for (const id of idsDelCuerpo) {
+    const pertenece = await prisma.staffVenue.findFirst({ where: { staffId: id, venueId }, select: { id: true } })
+    if (pertenece) validos.add(id)
+  }
+  const autorDe = (event: SyncEvent) =>
+    event.staffId && validos.has(event.staffId)
+      ? { staffId: event.staffId, staffName: event.staffName }
+      : { staffId: (actorStaffId ?? event.staffId) as string, staffName: event.staffName }
 
   // 🔴 `createMany` + `skipDuplicates` en vez de un `create` por evento — SOLO
   // para los eventos que traen `localId`.
@@ -708,10 +760,22 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   // o entra el lote completo, o el reintento parte de cero.
   const { insertedCount, unkeyedRows } = await prisma.$transaction(
     async tx => {
+      // 🔴 CANDADO, dentro de la transacción y ANTES de insertar. `syncEvents` era el único
+      // escritor de `CashDrawerEvent` que no tocaba la fila de la sesión: leía "está abierta"
+      // fuera de la transacción y luego insertaba, así que un lote podía aterrizar en una caja
+      // que otro aparato acababa de cerrar y firmar — y nada recalculaba su diferencia. Mismo
+      // UPDATE condicional que usan la venta (`createEventUnderSessionLock`) y el movimiento
+      // manual (`lockOrThrow`), y el mismo error que las apps ya saben interpretar.
+      const lock = await tx.cashDrawerSession.updateMany({
+        where: { id: session.id, status: 'OPEN' },
+        data: { updatedAt: new Date() },
+      })
+      if (!lock || lock.count === 0) throw new NotFoundError('No hay una caja abierta')
+
       let inserted = 0
       if (keyed.length > 0) {
         const result = await tx.cashDrawerEvent.createMany({
-          data: keyed.map(toRow),
+          data: keyed.map(e => toRow(e, autorDe(e))),
           skipDuplicates: true,
         })
         inserted += result.count
@@ -719,7 +783,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
 
       const createdUnkeyed = [] as Awaited<ReturnType<typeof prisma.cashDrawerEvent.create>>[]
       for (const event of unkeyed) {
-        createdUnkeyed.push(await tx.cashDrawerEvent.create({ data: toRow(event) }))
+        createdUnkeyed.push(await tx.cashDrawerEvent.create({ data: toRow(event, autorDe(event)) }))
       }
       inserted += createdUnkeyed.length
 

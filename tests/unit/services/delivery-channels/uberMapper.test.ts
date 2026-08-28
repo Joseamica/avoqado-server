@@ -102,6 +102,42 @@ describe('uber.mapper (uAPI) — contra el pedido real', () => {
     expect(r.payment.externallyPaidSale).toBe('11.00')
   })
 
+  // ── Promociones ───────────────────────────────────────────────────────────────────
+  //
+  // 🔴 Uber manda TRES cifras en el mismo mensaje: lo que valen los artículos
+  // (`item_charges`), lo que valió la promoción (`promotions.total`) y lo que el cliente
+  // pagó (`order_total`). El mapper sólo leía la primera y la tercera, y la resta —que sale
+  // NEGATIVA cuando hay promoción, justo la señal de que algo no cuadra— se aplastaba a cero
+  // con `max(0, …)`. Resultado: el pedido se registraba como si el cliente hubiera pagado el
+  // precio de lista, y el reporte de ventas del negocio quedaba inflado contra su depósito.
+  //
+  // Se registra como lo hace el mercado (Square: ventas brutas SIN ajustar, descuentos como
+  // deducción visible, netas = la resta; Fudo tiene «Descuentos ($)» como línea propia):
+  // `saleAmount` sigue siendo el BRUTO —así los renglones siguen cuadrando al centavo— y el
+  // descuento viaja aparte. Lo que la plataforma liquida sí baja.
+  //
+  // Los montos de Uber son `gross`, o sea CON IVA incluido, que es como se maneja el precio
+  // en México: el descuento se aplica sobre el precio con impuesto, no sobre una base sin él.
+  it('🔴 una promoción se registra como DESCUENTO, no desaparece', () => {
+    const p = pedidoReal()
+    // Artículos $1.00; promoción de $0.20; el cliente paga $0.80.
+    p.order.payment.payment_detail.promotions.total.gross = e5(20_000)
+    p.order.payment.payment_detail.order_total.gross = e5(80_000)
+
+    const r = mapUberOrder(p)
+
+    expect(r.payment.saleAmount).toBe('1.00') // bruto: cuadra con los renglones
+    expect(r.payment.discountAmount).toBe('0.20') // la promoción, visible
+    expect(r.payment.externallyPaidSale).toBe('0.80') // lo que Uber liquida
+  })
+
+  it('sin promoción nada cambia (el caso de siempre)', () => {
+    const r = mapUberOrder(pedidoReal())
+    expect(r.payment.saleAmount).toBe('1.00')
+    expect(r.payment.discountAmount).toBe('0.00')
+    expect(r.payment.externallyPaidSale).toBe('1.00')
+  })
+
   // ── Rechazar en vez de adivinar (la política que protege el dinero) ────────────────
 
   it('🔴 RECHAZA un fulfillment_type distinto de DELIVERY_BY_UBER — BYOC/pickup sin pedido real que los verifique', () => {
