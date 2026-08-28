@@ -2208,6 +2208,8 @@ router.post(
   '/venues/:venueId/cash-drawer/open',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  // Mismo criterio que `current`: quien puede ver el esperado lo recibe también al abrir.
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   cashDrawerMobileController.openSession,
 )
 

@@ -45,7 +45,7 @@ export const openSession = async (req: Request, res: Response, next: NextFunctio
       staffName: staffName || 'Staff',
       startingAmount: Number(startingAmount),
       deviceName,
-    })
+    }, (req as any).puedeVerEsperado === true)
 
     return res.status(201).json({ success: true, data: session })
   } catch (error) {

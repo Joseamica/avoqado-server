@@ -107,7 +107,13 @@ async function resolveMobileStaffName(staffId: string | null | undefined, provid
   }
 }
 
-export async function openSession(params: OpenSessionParams) {
+/**
+ * @param incluirEsperado ¿el llamante tiene `cash-drawer:view-expected`? Al abrir, el esperado
+ * ES el fondo que la persona acaba de teclear, así que ocultarlo no protege nada — pero sin el
+ * flag el mismo usuario lo veía en `current` y no aquí, y un contrato que responde distinto
+ * según el endpoint es el tipo de incoherencia que después nadie sabe explicar.
+ */
+export async function openSession(params: OpenSessionParams, incluirEsperado = false) {
   const { venueId, staffId, startingAmount, deviceName } = params
   const staffName = await resolveMobileStaffName(staffId, params.staffName)
 
@@ -173,7 +179,7 @@ export async function openSession(params: OpenSessionParams) {
     data: { startingAmount: Number(amountDecimal), deviceName, source: 'MOBILE' },
   })
 
-  return formatSession(session)
+  return formatSession(session, incluirEsperado)
 }
 
 // ============================================================================
