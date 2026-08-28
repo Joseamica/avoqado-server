@@ -180,7 +180,11 @@ export async function getShifts(
  * [openedAt, closedAt] cubre el inicio del turno; si no hay, `null` y el turno se ve como hoy.
  * `counted` es explícito: una caja cerrada sin conteo nunca se pinta como cuadrada.
  */
-export async function resolveShiftCashDrawer(venueId: string, startTime: Date | null, endTime?: Date | null) {
+// @param incluirEsperado ¿el llamante tiene `cash-drawer:view-expected`? Con `false` (el
+// default) el esperado y el fondo se omiten MIENTRAS el cajón siga abierto: es el mismo
+// conteo ciego que aplica el endpoint del cajón, y sin él bastaba abrir el detalle del turno
+// para leer la cifra. Un cajón ya CERRADO revela siempre: ese resultado ya está firmado.
+export async function resolveShiftCashDrawer(venueId: string, startTime: Date | null, endTime?: Date | null, incluirEsperado = false) {
   if (!startTime) return null
   // 🔴 P1 (Codex 27-ago): se ancla al CIERRE del turno (o a "ahora" si sigue abierto), no a su inicio.
   // Turno 08–20 con cajón A (07–12) y B (12–20): el que operó al cerrar es B; anclar al inicio
@@ -212,15 +216,16 @@ export async function resolveShiftCashDrawer(venueId: string, startTime: Date | 
     closedByName: session.closedByName ?? null,
     openedAt: session.openedAt.toISOString(),
     closedAt: session.closedAt ? session.closedAt.toISOString() : null,
-    startingAmount: money(session.startingAmount),
-    expectedAmount: calculateExpectedAmount(session),
+    ...(incluirEsperado || session.status !== 'OPEN'
+      ? { startingAmount: money(session.startingAmount), expectedAmount: calculateExpectedAmount(session) }
+      : {}),
     counted,
     actualAmount: counted ? money(session.actualAmount) : null,
     overShort: counted && session.overShort != null ? money(session.overShort) : null,
   }
 }
 
-export async function getShiftById(venueId: string, shiftId: string): Promise<any | null> {
+export async function getShiftById(venueId: string, shiftId: string, incluirEsperado = false): Promise<any | null> {
   const shift = await prisma.shift.findFirst({
     where: {
       id: shiftId,
@@ -518,7 +523,7 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
   // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
   let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
   try {
-    cashDrawer = await resolveShiftCashDrawer(venueId, (shift as any).startTime ?? null, (shift as any).endTime ?? null)
+    cashDrawer = await resolveShiftCashDrawer(venueId, (shift as any).startTime ?? null, (shift as any).endTime ?? null, incluirEsperado)
   } catch (err) {
     logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
       shiftId,

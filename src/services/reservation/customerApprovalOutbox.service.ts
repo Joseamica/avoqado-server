@@ -233,10 +233,16 @@ type ClaimedDelivery = {
     event: string
     customerId: string
     approvalVersion: number
+    payload: Prisma.JsonValue | null
     venue: { name: string; slug: string }
     customer: { firstName: string | null; lastName: string | null }
   }
-  reason?: string | null
+}
+
+function rejectionReasonFromPayload(payload: Prisma.JsonValue | null): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const reason = (payload as Prisma.JsonObject).reason
+  return typeof reason === 'string' && reason.length > 0 ? reason : null
 }
 
 /**
@@ -335,7 +341,7 @@ export async function deliverClaimed(
         customerName,
         bookingUrl: bookingUrlFor(d.outbox.venue.slug),
         dashboardUrl: dashboardInboxUrlFor(d.outbox.venue.slug),
-        reason: d.reason ?? null,
+        reason: rejectionReasonFromPayload(d.outbox.payload),
         idempotencyKey: d.providerKey,
       })
 
@@ -388,6 +394,7 @@ export async function sweepOnce(input: { limit?: number; now?: Date } = {}): Pro
           event: true,
           customerId: true,
           approvalVersion: true,
+          payload: true,
           venue: { select: { name: true, slug: true } },
           customer: { select: { firstName: true, lastName: true } },
         },

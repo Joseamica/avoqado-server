@@ -17,6 +17,17 @@ describe('reverseStampForOrder', () => {
     prismaMock.stampEvent.count.mockResolvedValue(0)
     prismaMock.stampEvent.create.mockResolvedValue({ id: 'se2' } as any)
     prismaMock.stampCard.update.mockResolvedValue({} as any)
+    prismaMock.stampCard.findUnique.mockResolvedValue({
+      id: 'sc1',
+      venueId: 'v1',
+      customerId: 'c1',
+      cycle: 1,
+      stampsEarned: 6,
+      stampsRequired: 7,
+      completedAt: null,
+    } as any)
+    prismaMock.stampCard.findFirst.mockResolvedValue(null)
+    prismaMock.stampReward.updateMany.mockResolvedValue({ count: 0 } as any)
   })
 
   it('🔴 revierte el sello SIN borrar el original', async () => {
@@ -40,6 +51,33 @@ describe('reverseStampForOrder', () => {
     expect(prismaMock.stampCard.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'sc1' }, data: expect.objectContaining({ stampsEarned: { decrement: 1 } }) }),
     )
+  })
+
+  it('🔴 si el sello completó la cartilla, la reabre y cancela el premio pendiente', async () => {
+    prismaMock.stampCard.findUnique.mockResolvedValue({
+      id: 'sc1',
+      venueId: 'v1',
+      customerId: 'c1',
+      cycle: 1,
+      stampsEarned: 7,
+      stampsRequired: 7,
+      completedAt: new Date('2026-08-20T18:00:00.000Z'),
+    } as any)
+    prismaMock.stampCard.findFirst.mockResolvedValue({ id: 'sc2', stampsEarned: 0, completedAt: null } as any)
+    prismaMock.stampReward.updateMany.mockResolvedValue({ count: 1 } as any)
+
+    await reverseStampForOrder('v1', 'o1')
+
+    expect(prismaMock.stampCard.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'sc1' },
+        data: expect.objectContaining({ stampsEarned: { decrement: 1 }, completedAt: null }),
+      }),
+    )
+    expect(prismaMock.stampReward.updateMany).toHaveBeenCalledWith({
+      where: { stampCardId: 'sc1', status: 'PENDING' },
+      data: { status: 'CANCELLED' },
+    })
   })
 
   it('🔴 un reembolso parcial y otro total no revierten DOS veces', async () => {

@@ -54,7 +54,9 @@ describe('Fase 5 · reto de check-in del kiosco', () => {
       await createKioskCheckInChallenge({ venueId: 'venue-1', terminalId: 'term-1', stationKey: 'B', kioskSessionId: 'sess-1', now })
 
       expect(prismaMock.kioskCheckInChallenge.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ terminalId: 'term-1', stationKey: 'B', status: 'PENDING' }) }),
+        expect.objectContaining({
+          where: expect.objectContaining({ venueId: 'venue-1', terminalId: 'term-1', stationKey: 'B', status: 'PENDING' }),
+        }),
       )
     })
   })

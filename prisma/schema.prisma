@@ -7113,6 +7113,7 @@ enum StampRewardStatus {
   PENDING
   REDEEMED
   EXPIRED
+  CANCELLED
 }
 
 /// Una cartilla de sellos de un cliente en un negocio ("junta 7 y el 8 va gratis").

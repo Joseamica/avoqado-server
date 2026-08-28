@@ -19,9 +19,11 @@ describe('Fase 9 · candados del aviso nocturno', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    sendEmail.mockResolvedValue(true)
     prismaMock.kioskOutreachOutbox.create.mockResolvedValue({ id: 'ob-1' } as any)
     prismaMock.kioskOutreachOutbox.updateMany.mockResolvedValue({ count: 1 } as any)
     prismaMock.kioskOutreachOutbox.update.mockResolvedValue({} as any)
+    prismaMock.$queryRaw.mockResolvedValue([] as any)
   })
 
   it('🔴 el negocio que NO lo prendió no manda nada', async () => {
@@ -53,9 +55,12 @@ describe('Fase 9 · candados del aviso nocturno', () => {
   })
 
   it('🔴 quien se dio de baja ENTRE el barrido y el envío ya no recibe', async () => {
-    prismaMock.kioskOutreachOutbox.findMany.mockResolvedValueOnce([{ id: 'ob-1' }] as any).mockResolvedValueOnce([
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'ob-1' }] as any)
+    prismaMock.kioskOutreachOutbox.findMany.mockResolvedValue([
       {
         id: 'ob-1',
+        dedupeKey: 'CREDITS_RUNNING_OUT:cust-1:2026-08-24',
+        attempts: 1,
         event: 'CREDITS_RUNNING_OUT',
         paymentLinkUrl: 'https://x',
         payload: {},
@@ -69,15 +74,18 @@ describe('Fase 9 · candados del aviso nocturno', () => {
 
     expect(sendEmail).not.toHaveBeenCalled()
     expect(out.sent).toBe(0)
-    expect(prismaMock.kioskOutreachOutbox.update).toHaveBeenCalledWith(
+    expect(prismaMock.kioskOutreachOutbox.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'SKIPPED', lastError: 'MARKETING_CONSENT_REVOKED' }) }),
     )
   })
 
   it('🔴 con consentimiento vivo sí sale, y lleva el enlace para renovar', async () => {
-    prismaMock.kioskOutreachOutbox.findMany.mockResolvedValueOnce([{ id: 'ob-2' }] as any).mockResolvedValueOnce([
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'ob-2' }] as any)
+    prismaMock.kioskOutreachOutbox.findMany.mockResolvedValue([
       {
         id: 'ob-2',
+        dedupeKey: 'PACK_EXPIRING:cust-1:2026-08-24',
+        attempts: 1,
         event: 'PACK_EXPIRING',
         paymentLinkUrl: 'https://book.avoqado.io/mindform?packs=1',
         payload: { packName: '10 clases' },
@@ -93,5 +101,47 @@ describe('Fase 9 · candados del aviso nocturno', () => {
     const mail = sendEmail.mock.calls[0][0]
     expect(mail.to).toBe('a@b.com')
     expect(mail.html).toContain('https://book.avoqado.io/mindform?packs=1')
+    expect(mail.idempotencyKey).toBe('PACK_EXPIRING:cust-1:2026-08-24')
+  })
+
+  it('reclama PENDING y FAILED de forma atómica con SKIP LOCKED', async () => {
+    const { sweepOnce } = await import('@/services/reservation/kioskOutreach.service')
+
+    await sweepOnce({ now })
+
+    expect(prismaMock.kioskOutreachOutbox.updateMany).not.toHaveBeenCalled()
+    const query = prismaMock.$queryRaw.mock.calls[0][0] as any
+    const sql = (query.strings ?? []).join('?')
+    expect(sql).toMatch(/status IN \('PENDING', 'FAILED'\)/)
+    expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/)
+    expect(sql).toMatch(/UPDATE "KioskOutreachOutbox"/)
+  })
+
+  it('vuelve a intentar una fila FAILED y conserva idempotencia ante un crash después del envío', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'ob-failed' }] as any)
+    prismaMock.kioskOutreachOutbox.findMany.mockResolvedValue([
+      {
+        id: 'ob-failed',
+        dedupeKey: 'CREDITS_RUNNING_OUT:cust-1:2026-08-24',
+        attempts: 2,
+        event: 'CREDITS_RUNNING_OUT',
+        paymentLinkUrl: 'https://book.avoqado.io/mindform?packs=1',
+        payload: { packName: '10 clases' },
+        venue: { name: 'Mindform' },
+        customer: { email: 'a@b.com', firstName: 'Ana', marketingConsent: true },
+      },
+    ] as any)
+
+    const { sweepOnce } = await import('@/services/reservation/kioskOutreach.service')
+    const out = await sweepOnce({ now })
+
+    expect(out.sent).toBe(1)
+    expect(sendEmail).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: 'CREDITS_RUNNING_OUT:cust-1:2026-08-24' }))
+    expect(prismaMock.kioskOutreachOutbox.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'ob-failed', attempts: 2, leasedUntil: expect.any(Date) }),
+        data: expect.objectContaining({ status: 'SENT' }),
+      }),
+    )
   })
 })

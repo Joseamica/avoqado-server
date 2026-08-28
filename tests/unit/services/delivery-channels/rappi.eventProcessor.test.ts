@@ -111,6 +111,18 @@ describe('processRappiEvent', () => {
     expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, expect.stringContaining('ACCEPT_400'))
   })
 
+  it('si aceptar LANZA, persiste FAILED en vez de dejar el evento en RECEIVED', async () => {
+    const aceptarLanza = jest.fn(async () => {
+      throw new Error('tienda fuera del allowlist de escritura')
+    })
+
+    const r = await processRappiEvent('evt1', { aceptar: aceptarLanza })
+
+    expect(r).toMatchObject({ outcome: 'FAILED', accepted: false, error: expect.stringContaining('allowlist') })
+    expect(mockIngest).not.toHaveBeenCalled()
+    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, expect.stringContaining('ACCEPT:'))
+  })
+
   // ── La red de dinero manda sobre el reloj ────────────────────────────────────────
   it('🔴 si el dinero NO CUADRA no se acepta NADA — un pedido que no podemos registrar no se toma', async () => {
     const descuadrado = payloadPedido({ totals: { total_products_with_discount: 99999, other_totals: { tip: 0 } } })

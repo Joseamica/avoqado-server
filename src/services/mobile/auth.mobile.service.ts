@@ -8,13 +8,14 @@
  * - Passkey (WebAuthn) authentication for passwordless login
  */
 
-import { AuthMethod, type VenueStatus } from '@prisma/client'
+import { AuthMethod, type VenueStatus, type Session } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import crypto from 'crypto'
 import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import * as jwtService from '../../jwt.service'
 import { createSession } from '@/services/auth/session.service'
+import { issueGrant, rotateGrant } from '@/services/auth/refreshGrant.service'
 import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
 import { OPERATIONAL_VENUE_STATUSES, venueStatusMessage } from '../../lib/venueStatus.constants'
 import { mensajeDeCorte, motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
@@ -30,6 +31,24 @@ import {
   type AuthenticatorTransportFuture,
   type RegistrationResponseJSON,
 } from '@simplewebauthn/server'
+
+// ============================================================================
+// REFRESH GRANTS (Parte A — sesiones revocables, Task 10)
+// ============================================================================
+
+// Misma regla de duración que `jwtService.generateRefreshToken` (7 días normal, 90 días
+// con "recordarme"). Se duplica aquí a propósito en vez de decodificar el token recién
+// firmado: en los tests unitarios `generateRefreshToken` suele venir mockeado a un string
+// fijo que NO es un JWT real, y verificarlo de vuelta reventaría esos tests con un error de
+// formato. Si esa duración cambia en jwt.service.ts, cambia también aquí.
+const REFRESH_TOKEN_TTL_SECONDS = 604_800
+const REFRESH_TOKEN_TTL_SECONDS_REMEMBER_ME = 7_776_000
+
+/** Fecha de vencimiento para sellar `RefreshGrant.expiresAt` al emitir (login) o rotar (refresh) un grant. */
+function refreshGrantExpiry(rememberMe?: boolean): Date {
+  const ttlSeconds = rememberMe ? REFRESH_TOKEN_TTL_SECONDS_REMEMBER_ME : REFRESH_TOKEN_TTL_SECONDS
+  return new Date(Date.now() + ttlSeconds * 1000)
+}
 
 // ============================================================================
 // PASSKEY (WebAuthn) AUTHENTICATION
@@ -247,6 +266,11 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
     sid: session.id,
   })
   const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe, selectedVenue.venueId, { sid: session.id })
+
+  // 7.1. Task 10: emitir el PRIMER RefreshGrant de la sesión — sin esto no hay nada que
+  // `rotateGrant` pueda rotar en el primer refresco, y ese refresco fallaría como
+  // "reutilizado" para toda sesión nacida de un passkey. Una familia nueva por sesión.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry(rememberMe))
 
   // 8. Update last login
   await prisma.staff.update({
@@ -622,6 +646,12 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   })
   const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe, selectedVenue.venueId, { sid: session.id })
 
+  // 6.1. Task 10: emitir el PRIMER RefreshGrant de la sesión — sin esto no hay nada que
+  // `rotateGrant` pueda rotar en el primer refresco, y ese refresco fallaría como
+  // "reutilizado" para toda sesión nacida de un login por contraseña. Una familia nueva
+  // por sesión.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry(rememberMe))
+
   // 7. Update last login and reset failed attempts
   await prisma.staff.update({
     where: { id: staff.id },
@@ -766,6 +796,31 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
     throw new AuthenticationError(mensajeDeCorte(motivoDelCorte))
   }
 
+  // 1.1. Task 10: la Session del token — SÓLO si el token trae `sid`. Uno LEGACY (emitido
+  // antes de esta sesión revocable) no tiene sesión ni grant que rotar y sigue el camino
+  // de siempre, sin tocar nada de lo de abajo.
+  let session: Session | null = null
+  if (payload.sid) {
+    session = await prisma.session.findUnique({ where: { id: payload.sid } })
+
+    // Una sesión inexistente (borrada) o ya revocada no puede seguir renovando tokens —
+    // hoy sólo pasa vía `rotateGrant` (que ya lo cacha por el lado del grant), pero es la
+    // misma garantía al nivel de la Session, para cuando exista otra vía de revocación.
+    if (!session || session.revokedAt) {
+      logger.warn('🔐 [MOBILE AUTH] Refresh rejected: session missing or revoked')
+      throw new AuthenticationError('Tu sesión ya no es válida. Vuelve a iniciar sesión.')
+    }
+
+    // 🔴 Ruling Task 10 (desviación deliberada del spec, que pedía rechazar `requestedVenueId`
+    // SIEMPRE): sólo una sesión por PIN queda anclada a su sucursal — es el hueco real que
+    // encontró Codex, una sesión PIN escapándose a otro local sin contraseña. PASSWORD/
+    // BIOMETRIC conservan el comportamiento de hoy (auth.mobile.controller.ts:64-66). Hoy es
+    // inerte: la Parte C (cambio de usuario por PIN) todavía no existe.
+    if (session.authMethod === AuthMethod.PIN && requestedVenueId && requestedVenueId !== session.venueId) {
+      throw new ForbiddenError('Para cambiar de sucursal necesitas iniciar sesión con tu contraseña.')
+    }
+  }
+
   // 2. Find the staff
   const staff = await prisma.staff.findUnique({
     where: { id: payload.sub },
@@ -836,10 +891,36 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   const carried = payload.venueId ? operationalVenues.find(v => v.venueId === payload.venueId) : undefined
   const selectedVenue = requested ?? carried ?? operationalVenues[0]
 
-  // 4. Generate new tokens (derive orgId from venue)
+  // 4. Generate new tokens (derive orgId from venue) — conserva `sid` cuando el token
+  // viejo tenía sesión; un legacy sin `session` sigue emitiendo tokens sin `sid`, tal
+  // cual como hoy.
   const refreshOrgId = selectedVenue.venue.organizationId
-  const newAccessToken = jwtService.generateAccessToken(staff.id, refreshOrgId, selectedVenue.venueId, selectedVenue.role)
-  const newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId, undefined, selectedVenue.venueId)
+  const sidOpts = session ? { sid: session.id } : undefined
+  const newAccessToken = jwtService.generateAccessToken(
+    staff.id,
+    refreshOrgId,
+    selectedVenue.venueId,
+    selectedVenue.role,
+    undefined,
+    sidOpts,
+  )
+  let newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId, undefined, selectedVenue.venueId, sidOpts)
+
+  // 4.1. Task 10: rotar el grant de verdad — `issueGrant`/`rotateGrant` (Tasks 8 y 9) no
+  // tenían ningún llamador hasta aquí. Un refresh token reutilizado (robado y reproducido
+  // después de que el legítimo ya rotó) se rechaza; uno legítimo consume su grant viejo y
+  // el sucesor (que puede ser el mismo token de arriba, o uno anterior si esto es una
+  // retransmisión — Task 9) es el que se devuelve.
+  if (session) {
+    // Igual que hoy: un refresco NUNCA extiende a 90 días — sólo el login con
+    // "recordarme" lo hace. Por eso aquí siempre es la duración corta (7 días).
+    const resultado = await rotateGrant(refreshToken, newRefreshToken, refreshGrantExpiry())
+    if ('reutilizado' in resultado) {
+      logger.warn('🔐 [MOBILE AUTH] Refresh rejected: grant reuse detected', { sessionId: session.id })
+      throw new AuthenticationError('Tu sesión ya no es válida. Vuelve a iniciar sesión.')
+    }
+    newRefreshToken = resultado.sucesor
+  }
 
   logger.info(`🔐 [MOBILE AUTH] Token refreshed for: ${staff.email}`)
 

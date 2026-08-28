@@ -9,6 +9,7 @@ import { parseDeliverectOrder } from '../services/delivery-channels/providers/de
 import { ingestDeliveryOrder } from '../services/delivery-channels/core/deliveryOrderIngestion.service'
 import { markEventResult } from '../services/delivery-channels/core/deliveryWebhookEvent.service'
 import { processUberEvent } from '../services/delivery-channels/providers/uber-eats/uber.eventProcessor'
+import { processRappiEvent } from '../services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { scheduleJob } from '../observability/jobContext'
 
 /**
@@ -67,7 +68,7 @@ export class DeliveryWebhookReconciliationJob {
    * `reprocesarSegunProveedor` — pasarle a uno el traductor de otro revienta el payload y
    * mata un pedido real. Al integrar Rappi/DiDi se amplía aquí Y allá, nunca sólo aquí.
    */
-  private static readonly RECONCILABLE_PROVIDERS = [DeliveryProvider.DELIVERECT, DeliveryProvider.UBER_EATS]
+  private static readonly RECONCILABLE_PROVIDERS = [DeliveryProvider.DELIVERECT, DeliveryProvider.UBER_EATS, DeliveryProvider.RAPPI]
 
   /**
    * Errores TERMINALES: reintentarlos no puede cambiar el resultado, así que la fila se
@@ -302,6 +303,23 @@ export class DeliveryWebhookReconciliationJob {
     event: { id: string; provider: DeliveryProvider; payload: unknown; externalEventId: string; venueId: string | null },
     channelLink: Parameters<typeof ingestDeliveryOrder>[1],
   ): Promise<boolean> {
+    if (event.provider === DeliveryProvider.RAPPI) {
+      const r = await processRappiEvent(event.id)
+      if (
+        r.outcome === 'PROCESSED' ||
+        r.outcome === 'ALREADY_DONE' ||
+        r.outcome === 'NOT_AN_ORDER' ||
+        r.outcome === 'CANCELLED' ||
+        r.outcome === 'SCHEDULED_NOTED' ||
+        r.outcome === 'MENU_VERDICT' ||
+        r.outcome === 'STORE_STATE'
+      ) {
+        return true
+      }
+      if (r.outcome === 'ORPHANED') return false
+      throw new Error(r.error ?? 'Rappi: fallo desconocido al reprocesar')
+    }
+
     if (event.provider === DeliveryProvider.UBER_EATS) {
       // El procesador de Uber hace el camino completo (traer, aceptar, ingerir, marcar) y
       // NO lanza: reporta el desenlace. Traducirlo es lo que decide reintento vs. rendición.

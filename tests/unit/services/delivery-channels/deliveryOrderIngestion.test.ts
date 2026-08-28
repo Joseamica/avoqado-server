@@ -175,6 +175,41 @@ describe('ingestDeliveryOrder', () => {
     )
   })
 
+  it('usa externalData como SKU local y conserva externalId como id del proveedor', async () => {
+    const rappiLink = { ...link, provider: 'RAPPI' }
+    const normalized = makeNormalized({
+      externalId: 'RAPPI-ORDER-1',
+      items: [
+        {
+          externalId: 'rappi-item-729970',
+          externalData: 'SKU-AVOQADO-0007',
+          name: 'Producto 8',
+          quantity: 2,
+          unitPrice: '45.00',
+          total: '90.00',
+          modifiers: [],
+        },
+      ],
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.product.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args.where?.venueId_sku?.sku === 'SKU-AVOQADO-0007' ? { id: 'prod-rappi' } : null,
+    )
+
+    await ingestDeliveryOrder(normalized, rappiLink)
+
+    expect(prisma.orderItem.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          productId: 'prod-rappi',
+          productSku: 'SKU-AVOQADO-0007',
+          externalId: 'RAPPI:RAPPI-ORDER-1-rappi-item-729970-0',
+        }),
+      }),
+    )
+    expect(prisma.product.create).not.toHaveBeenCalled()
+  })
+
   it('unitPrice/total de la línea pasan TAL CUAL del contrato normalizado, sin recomputar (el mapper ya hizo la cuenta)', async () => {
     // total (110) deliberadamente distinto de unitPrice×quantity (90) — si el servicio
     // recomputara localmente en vez de confiar en el mapper, este test lo detectaría.

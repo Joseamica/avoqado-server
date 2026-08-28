@@ -73,6 +73,7 @@ export interface LockedRescheduleReservation {
   venueId: string
   startsAt: Date
   endsAt: Date
+  blockedEndsAt: Date
   duration: number
   productId: string | null
   productIds: string[]
@@ -169,7 +170,7 @@ export async function lockReservationForReschedule(
   args: { venueId: string; reservationId: string },
 ): Promise<LockedRescheduleReservation> {
   const rows = await tx.$queryRaw<LockedRescheduleReservation[]>`
-    SELECT id, "venueId", "startsAt", "endsAt", duration, "productId", "productIds", "tableId",
+    SELECT id, "venueId", "startsAt", "endsAt", "blockedEndsAt", duration, "productId", "productIds", "tableId",
            "assignedStaffId", "partySize", "classSessionId", status
     FROM "Reservation"
     WHERE id = ${args.reservationId} AND "venueId" = ${args.venueId}

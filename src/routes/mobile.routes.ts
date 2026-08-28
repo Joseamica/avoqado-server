@@ -60,6 +60,7 @@ import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-li
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateVenueAccess, requireVenueMembership } from '../middlewares/validateVenueAccess.middleware'
 import { pinLoginRateLimiter, pinOverrideRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
@@ -2190,6 +2191,11 @@ router.get(
   '/venues/:venueId/cash-drawer/current',
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
+  // No bloquea: sólo marca si puede ver el efectivo esperado. Sin el permiso, la respuesta
+  // llega sin ese campo mientras la caja esté abierta (conteo ciego). El POS no lo lee —lo
+  // calcula con `startingAmount` y los eventos, que sí siguen viajando—, así que ninguna app
+  // instalada cambia de comportamiento.
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   cashDrawerMobileController.getCurrent,
 )
 

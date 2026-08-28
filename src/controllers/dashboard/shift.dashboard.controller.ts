@@ -34,7 +34,7 @@ export async function getShift(req: Request, res: Response, next: NextFunction):
     const venueId: string = req.params.venueId
     const shiftId: string = req.params.shiftId
 
-    const result = await shiftDashboardService.getShiftById(venueId, shiftId)
+    const result = await shiftDashboardService.getShiftById(venueId, shiftId, (req as any).puedeVerEsperado === true)
 
     if (!result) {
       res.status(404).json({

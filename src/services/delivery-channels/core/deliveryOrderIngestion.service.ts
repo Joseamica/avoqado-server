@@ -243,10 +243,12 @@ export async function ingestDeliveryOrder(
         // completa, perdiendo el pedido pagado permanentemente (ver C1 en el review original).
         for (let idx = 0; idx < normalized.items.length; idx++) {
           const item = normalized.items[idx]
-          // sku determinístico: el externalId del canal, o (si vino vacío) un placeholder
-          // derivado del NOMBRE — nunca `Date.now()`, que generaría un producto nuevo por
-          // ocurrencia.
-          const sku = item.externalId || `delivery-unknown-${toPlaceholderSlug(item.name)}`
+          // `externalData` es el SKU que Avoqado escribió al publicar el menú; el
+          // `externalId` pertenece al catálogo del proveedor. Resolverlos al revés crea
+          // placeholders para productos que sí existen (Rappi devuelve ambos campos).
+          // Si el proveedor no devuelve nuestro SKU, el id externo sigue siendo el fallback
+          // determinístico — nunca `Date.now()`, que generaría un producto por ocurrencia.
+          const sku = item.externalData || item.externalId || `delivery-unknown-${toPlaceholderSlug(item.name)}`
           const productId = await resolveProductId(
             tx,
             venue.id,

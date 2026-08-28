@@ -5,6 +5,7 @@ const mockCustomerFindMany = jest.fn()
 const mockCustomerCount = jest.fn()
 const mockDecide = jest.fn()
 const mockAudit = jest.fn()
+const mockPlanGate = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -18,6 +19,7 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...(a as [])) }))
 jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
   __esModule: true,
   decideCustomerApprovalFromDashboard: (...a: unknown[]) => mockDecide(...(a as [])),
@@ -51,13 +53,25 @@ const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[
 beforeAll(() => {
   registerCustomerTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockPlanGate.mockResolvedValue(null)
+})
 
 describe('customers_awaiting_approval (lectura)', () => {
   const call = (args: Record<string, unknown>) => handlers.get('customers_awaiting_approval')!(args, {})
 
   it('🔴 rechaza un venue fuera del alcance del operador', async () => {
     await expect(call({ venueId: 'foreign' })).rejects.toThrow('out of scope')
+  })
+
+  it('🔴 un venue sin RESERVATIONS no puede leer la cola por MCP', async () => {
+    mockPlanGate.mockResolvedValue('Las reservaciones requieren un plan superior')
+
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect(out).toMatchObject({ ok: false, planRequired: true })
+    expect(mockCustomerFindMany).not.toHaveBeenCalled()
   })
 
   it('🔴 lista sólo PENDING de ESE venue, del más antiguo al más reciente', async () => {
@@ -94,6 +108,16 @@ describe('customers_awaiting_approval (lectura)', () => {
 
 describe('decide_customer_approval (write con confirm de dos pasos)', () => {
   const call = (args: Record<string, unknown>) => handlers.get('decide_customer_approval')!(args, {})
+
+  it('🔴 un venue sin RESERVATIONS no puede decidir por MCP', async () => {
+    mockPlanGate.mockResolvedValue('Las reservaciones requieren un plan superior')
+
+    const out = parse(await call({ venueId: 'v1', customerId: 'c1', decision: 'REJECTED', confirm: true }))
+
+    expect(out).toMatchObject({ ok: false, planRequired: true })
+    expect(mockCustomerFindMany).not.toHaveBeenCalled()
+    expect(mockDecide).not.toHaveBeenCalled()
+  })
 
   it('🔴 exige el permiso `customers:approve`, no `customers:update`', async () => {
     await expect(call({ venueId: 'no-perm', customerId: 'c1', decision: 'APPROVED' })).rejects.toThrow('customers:approve')

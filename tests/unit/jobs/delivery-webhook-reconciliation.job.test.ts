@@ -26,6 +26,9 @@ jest.mock('@/services/delivery-channels/core/deliveryWebhookEvent.service', () =
 jest.mock('@/services/delivery-channels/providers/uber-eats/uber.eventProcessor', () => ({
   processUberEvent: jest.fn(),
 }))
+jest.mock('@/services/delivery-channels/providers/rappi/rappi.eventProcessor', () => ({
+  processRappiEvent: jest.fn(),
+}))
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
@@ -34,6 +37,7 @@ import { parseDeliverectOrder } from '@/services/delivery-channels/providers/del
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { markEventResult } from '@/services/delivery-channels/core/deliveryWebhookEvent.service'
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
+import { processRappiEvent } from '@/services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { DeliveryWebhookReconciliationJob } from '@/jobs/delivery-webhook-reconciliation.job'
 
 const mockedFindMany = (prisma as any).deliveryOrderEvent.findMany as jest.Mock
@@ -44,6 +48,7 @@ const mockedParse = parseDeliverectOrder as jest.Mock
 const mockedIngest = ingestDeliveryOrder as jest.Mock
 const mockedMarkEventResult = markEventResult as jest.Mock
 const mockedProcessUber = processUberEvent as jest.Mock
+const mockedProcessRappi = processRappiEvent as jest.Mock
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -83,6 +88,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
       mockedIngest,
       mockedMarkEventResult,
       mockedProcessUber,
+      mockedProcessRappi,
     ].forEach(m => m.mockReset())
     mockedRetry.mockImplementation((fn: () => Promise<any>) => fn())
     mockedUpdateMany.mockResolvedValue({ count: 0 })
@@ -173,7 +179,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
     const scanWhere = mockedFindMany.mock.calls[0][0].where
     const filtroProveedor = scanWhere.AND.find((c: any) => c.provider !== undefined)
     expect(filtroProveedor).toBeDefined()
-    expect(filtroProveedor.provider.in.sort()).toEqual(['DELIVERECT', 'UBER_EATS'])
+    expect(filtroProveedor.provider.in.sort()).toEqual(['DELIVERECT', 'RAPPI', 'UBER_EATS'])
   })
 
   it('channelLinkId null (channel link deleted) → marked ORPHANED immediately, regardless of age, WITH the per-event 🚨 ops alert', async () => {
@@ -503,6 +509,27 @@ describe('DeliveryWebhookReconciliationJob', () => {
       const barridoWhere = mockedFindMany.mock.calls[1][0].where
       expect(barridoWhere.provider.in).toContain('UBER_EATS')
       expect(result.orphaned).toBe(1)
+    })
+  })
+
+  describe('Rappi', () => {
+    it('reprocesa por el procesador de Rappi, nunca por el parser de Deliverect', async () => {
+      const event = makeEvent({
+        id: 'evt_rappi',
+        provider: 'RAPPI',
+        externalEventId: 'rappi-event-1',
+        channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+        channelLinkId: 'link_rappi',
+        payload: { order_detail: { order_id: 'rappi-order-1' } },
+      })
+      mockedFindMany.mockResolvedValueOnce([event]).mockResolvedValueOnce([])
+      mockedProcessRappi.mockResolvedValueOnce({ outcome: 'PROCESSED', orderId: 'ord_rappi', accepted: true })
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessRappi).toHaveBeenCalledWith('evt_rappi')
+      expect(mockedParse).not.toHaveBeenCalled()
+      expect(result.reprocessed).toBe(1)
     })
   })
 })

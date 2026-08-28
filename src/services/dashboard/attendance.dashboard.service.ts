@@ -152,11 +152,22 @@ export interface AttendanceGridCell extends AttendanceReportRow {
   absenceType: string | null
 }
 
+export interface AttendanceWorkedTotals {
+  totalHours: number
+  breakMinutes: number
+}
+
 export async function buildAttendanceGrid(
   venueId: string,
   startDate: string,
   endDate: string,
-): Promise<{ cells: AttendanceGridCell[]; graceMinutes: number; timezone: string }> {
+): Promise<{
+  cells: AttendanceGridCell[]
+  graceMinutes: number
+  timezone: string
+  /** Sólo las checadas que la rejilla atribuyó a un día del periodo. */
+  workedTotalsByStaff: Map<string, AttendanceWorkedTotals>
+}> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
     select: { timezone: true, settings: { select: { attendanceGraceMinutes: true, rotatingShiftsEnabled: true } } },
@@ -221,13 +232,23 @@ export async function buildAttendanceGrid(
   const entriesUntil = end.plus({ days: 1 }).endOf('day').toJSDate()
   const entries = await prisma.timeEntry.findMany({
     where: { venueId, clockInTime: { gte: rangeStart, lte: entriesUntil } },
-    select: { staffId: true, clockInTime: true, clockOutTime: true, validationStatus: true },
+    select: {
+      staffId: true,
+      clockInTime: true,
+      clockOutTime: true,
+      validationStatus: true,
+      totalHours: true,
+      breakMinutes: true,
+    },
     orderBy: { clockInTime: 'asc' },
   })
 
   interface DayEntry {
+    staffId: string
     clockInTime: Date
     clockOutTime: Date | null
+    totalHours: number
+    breakMinutes: number
     /** 'HH:mm' local del negocio, para decidir a qué turno pertenece. */
     localTime: string
   }
@@ -239,7 +260,14 @@ export async function buildAttendanceGrid(
     const local = DateTime.fromJSDate(entry.clockInTime).setZone(timezone)
     const key = `${entry.staffId}|${local.toISODate()}`
     if (!byStaffAndDay.has(key)) byStaffAndDay.set(key, [])
-    byStaffAndDay.get(key)!.push({ clockInTime: entry.clockInTime, clockOutTime: entry.clockOutTime, localTime: local.toFormat('HH:mm') })
+    byStaffAndDay.get(key)!.push({
+      staffId: entry.staffId,
+      clockInTime: entry.clockInTime,
+      clockOutTime: entry.clockOutTime,
+      totalHours: Number(entry.totalHours ?? 0),
+      breakMinutes: entry.breakMinutes ?? 0,
+      localTime: local.toFormat('HH:mm'),
+    })
   }
 
   /**
@@ -343,7 +371,15 @@ export async function buildAttendanceGrid(
   }
 
   rows.sort((a, b) => (a.date === b.date ? a.name.localeCompare(b.name) : b.date.localeCompare(a.date)))
-  return { cells: rows, graceMinutes, timezone }
+  const workedTotalsByStaff = new Map<string, AttendanceWorkedTotals>()
+  for (const entry of consumed) {
+    const current = workedTotalsByStaff.get(entry.staffId) ?? { totalHours: 0, breakMinutes: 0 }
+    current.totalHours += entry.totalHours
+    current.breakMinutes += entry.breakMinutes
+    workedTotalsByStaff.set(entry.staffId, current)
+  }
+
+  return { cells: rows, graceMinutes, timezone, workedTotalsByStaff }
 }
 
 export async function getAttendanceReport(

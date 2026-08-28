@@ -72,7 +72,7 @@ export async function redeemStampReward(
 ): Promise<RedeemStampRewardResult> {
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true },
+    select: { id: true, customerId: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true },
   })
 
   if (!order) throw new NotFoundError('Orden no encontrada')
@@ -81,10 +81,14 @@ export async function redeemStampReward(
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede aplicar un premio a una cuenta ya pagada.')
   }
+  if (!order.customerId) {
+    throw new BadRequestError('La cuenta debe estar vinculada al cliente dueño del premio.')
+  }
+  const customerId = order.customerId
 
   // 🔴 Filtrado por venue: sin eso, el premio de una sucursal bajaría la cuenta de
   // otra. Un premio ajeno simplemente no existe para este negocio.
-  const reward = await prisma.stampReward.findFirst({ where: { id: rewardId, venueId } })
+  const reward = await prisma.stampReward.findFirst({ where: { id: rewardId, venueId, customerId } })
   if (!reward) throw new NotFoundError('Premio no encontrado')
 
   // Atajo barato: la garantía de verdad contra el doble canje es el UPDATE
@@ -118,7 +122,7 @@ export async function redeemStampReward(
     // exija el estado anterior. Si no encuentra la fila en PENDING, alguien más ganó
     // la carrera y aquí no se crea ningún descuento.
     const quemado = await tx.stampReward.updateMany({
-      where: { id: rewardId, venueId, status: StampRewardStatus.PENDING },
+      where: { id: rewardId, venueId, customerId, status: StampRewardStatus.PENDING },
       data: { status: StampRewardStatus.REDEEMED, redeemedAt: new Date() },
     })
     if (quemado.count === 0) {

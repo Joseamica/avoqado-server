@@ -58,7 +58,7 @@ describe('arqueo del cajón — la venta suma, el reembolso resta una sola vez',
       }),
     }
 
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
 
     expect(session?.expectedAmount).toBe(350)
   })
@@ -81,7 +81,7 @@ describe('arqueo del cajón — la venta suma, el reembolso resta una sola vez',
       }),
     }
 
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
 
     expect(session?.expectedAmount).toBe(320)
   })

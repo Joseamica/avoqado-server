@@ -1355,6 +1355,33 @@ describe('Reservation Dashboard Service', () => {
       )
     })
 
+    it('uses the new reservation blocked end in table overlap checks', async () => {
+      const startsAt = new Date('2026-03-01T14:00:00Z')
+      const endsAt = new Date('2026-03-01T15:00:00Z')
+      const blockedEndsAt = new Date('2026-03-01T15:30:00Z')
+      prismaMock.product.findFirst.mockResolvedValue({
+        id: 'prod-1',
+        price: new Prisma.Decimal(100),
+        eventCapacity: null,
+        type: 'APPOINTMENTS_SERVICE',
+      } as any)
+      prismaMock.product.findMany.mockResolvedValue([{ bufferAfterMin: 30 }] as any)
+      prismaMock.reservation.findUnique.mockResolvedValue(null)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+
+      await createReservation(
+        VENUE_ID,
+        { startsAt, endsAt, duration: 60, productId: 'prod-1', tableId: 'table-1' },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      const tableOverlapCall = prismaMock.$queryRaw.mock.calls.find((call: unknown[]) =>
+        String((call[0] as TemplateStringsArray).join('?')).includes('AND "tableId" = ?'),
+      )
+      expect(tableOverlapCall?.slice(1)).toEqual([VENUE_ID, blockedEndsAt, startsAt, 'table-1'])
+    })
+
     it('should create a PENDING reservation when autoConfirm is false', async () => {
       const mockCreated = createMockReservation({ status: 'PENDING', confirmedAt: null })
       jest.spyOn(reservationSettingsService, 'getReservationSettings').mockResolvedValue(makeReservationSettings({ autoConfirm: false }))
@@ -2701,6 +2728,29 @@ describe('Reservation Dashboard Service', () => {
       await expect(updateReservation(VENUE_ID, 'res-1', { tableId: 'table-2' }, DASHBOARD_WRITE, STAFF_ID)).rejects.toThrow(ConflictError)
     })
 
+    it('uses the moved reservation blocked end in update overlap checks', async () => {
+      const existing = createMockReservation({ status: 'CONFIRMED', tableId: 'table-1', productId: 'prod-1', productIds: [] })
+      const startsAt = new Date('2026-03-02T14:00:00Z')
+      const endsAt = new Date('2026-03-02T15:00:00Z')
+      const blockedEndsAt = new Date('2026-03-02T15:30:00Z')
+      ;(appointmentSlotHoldService.lockReservationForReschedule as jest.Mock).mockResolvedValue(lockedReservation(existing))
+      prismaMock.product.findFirst.mockResolvedValue({
+        id: 'prod-1',
+        price: new Prisma.Decimal(100),
+        eventCapacity: null,
+        type: 'APPOINTMENTS_SERVICE',
+      } as any)
+      prismaMock.product.findMany.mockResolvedValue([{ bufferAfterMin: 30 }] as any)
+      prismaMock.reservation.update.mockResolvedValue({ ...existing, startsAt, endsAt } as any)
+
+      await updateReservation(VENUE_ID, existing.id, { startsAt, endsAt, duration: 60 }, DASHBOARD_WRITE, STAFF_ID)
+
+      const tableOverlapCall = prismaMock.$queryRaw.mock.calls.find((call: unknown[]) =>
+        String((call[0] as TemplateStringsArray).join('?')).includes('AND "tableId" = ?'),
+      )
+      expect(tableOverlapCall?.slice(1)).toEqual([VENUE_ID, 'table-1', existing.id, blockedEndsAt, startsAt])
+    })
+
     it('should check staff conflicts when changing staff', async () => {
       const existing = createMockReservation({ status: 'CONFIRMED', assignedStaffId: null })
 
@@ -3628,6 +3678,7 @@ describe('rescheduleAppointmentReservation', () => {
 
   it('revalidates the exact table of a hybrid appointment inside the locked consume transaction', async () => {
     jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue(lockedIdentity({ tableId: 'table-1' }))
+    prismaMock.product.findMany.mockResolvedValue([{ bufferAfterMin: 30 }] as any)
     prismaMock.$queryRaw.mockResolvedValue([{ id: 'other-reservation', confirmationCode: 'RES-OTHER' }])
 
     await expect(
@@ -3645,7 +3696,13 @@ describe('rescheduleAppointmentReservation', () => {
     expect((prismaMock.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')).toMatch(
       /FROM "Reservation"[\s\S]*"venueId" = \?[\s\S]*"tableId" = \?[\s\S]*id <> \?[\s\S]*"startsAt" < \?[\s\S]*"blockedEndsAt" > \?[\s\S]*FOR UPDATE NOWAIT/i,
     )
-    expect(prismaMock.$queryRaw.mock.calls[0].slice(1)).toEqual([VENUE, 'table-1', 'res-appt-1', newEnd, newStart])
+    expect(prismaMock.$queryRaw.mock.calls[0].slice(1)).toEqual([
+      VENUE,
+      'table-1',
+      'res-appt-1',
+      new Date('2026-09-02T16:30:00.000Z'),
+      newStart,
+    ])
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()
     expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
   })

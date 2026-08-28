@@ -98,4 +98,29 @@ describe('atribución de checadas en turnos nocturnos', () => {
     const rows = await rowsFor('2026-08-19', '2026-08-19')
     expect(rows[0]).toMatchObject({ date: '2026-08-19', status: 'LATE', lateMinutes: 20 })
   })
+
+  it('un día partido cuyo último rango cruza medianoche conserva la entrada matutina', async () => {
+    db.staffVenue.findMany.mockResolvedValue([
+      {
+        ...membership,
+        workSchedule: {
+          weekly: {
+            ...weekly,
+            wednesday: {
+              enabled: true,
+              ranges: [
+                { open: '09:00', close: '14:00' },
+                { open: '22:00', close: '06:00' },
+              ],
+            },
+          },
+        },
+      },
+    ])
+    db.timeEntry.findMany.mockResolvedValue([entry('2026-08-19T15:00:00.000Z')]) // mié 09:00 local
+
+    const rows = await rowsFor('2026-08-19', '2026-08-19')
+
+    expect(rows[0]).toMatchObject({ date: '2026-08-19', status: 'ON_TIME', lateMinutes: 0 })
+  })
 })

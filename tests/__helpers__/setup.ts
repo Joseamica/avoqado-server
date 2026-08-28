@@ -104,6 +104,12 @@ const prismaMock: any = {
   // properties of undefined (reading 'create')" — misma clase de bug que venueFeature.findMany
   // más abajo. staffPasskey es lo que verifyPasskeyAssertion consulta para resolver la credencial.
   session: createMockModel(),
+  // Parte A (sesiones revocables) — Task 10: el login (password y passkey) ahora emite el
+  // PRIMER RefreshGrant justo después de crear la Session (issueGrant → prisma.refreshGrant
+  // .create). Sin esta entrada, cualquier test que ejercite loginWithEmail/
+  // verifyPasskeyAssertion sin conocer los grants revienta con "Cannot read properties of
+  // undefined (reading 'create')" — misma clase de bug que session arriba.
+  refreshGrant: createMockModel(),
   staffPasskey: createMockModel(),
   chatTrainingData: createMockModel(),
   chatFeedback: createMockModel(),
@@ -395,6 +401,9 @@ prismaMock.venueSettings.findUnique.mockResolvedValue(null)
 // sessions yet (auth.permisosDeLaApp.test.ts, auth.loginSuspendedVenue.test.ts) keep passing;
 // tests exercising the Session itself override with their own mockResolvedValue.
 prismaMock.session.create.mockResolvedValue({ id: 'session-mock-default' })
+// Parte A (sesiones revocables) — Task 10: idem, para el primer RefreshGrant que el login
+// emite justo después (issueGrant). Mismo motivo que el default de session.create arriba.
+prismaMock.refreshGrant.create.mockResolvedValue({ id: 'refresh-grant-mock-default' })
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

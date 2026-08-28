@@ -8,6 +8,7 @@ import { auditMcpWrite } from '../audit'
 import { inviteTeamMember, updateTeamMember } from '@/services/dashboard/team.dashboard.service'
 import { ROLE_HIERARCHY } from '@/lib/permissions'
 import { StaffRole } from '@prisma/client'
+import { DateTime } from 'luxon'
 
 // SUPERADMIN deliberately excluded — an agent must never be able to grant it.
 const INVITE_ROLE_MAP: Record<string, StaffRole> = {
@@ -142,8 +143,11 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         })
       }
 
-      const from = startDate ? new Date(`${startDate}T00:00:00.000Z`) : undefined
-      const to = endDate ? new Date(`${endDate}T23:59:59.999Z`) : undefined
+      const venue =
+        startDate || endDate ? await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }) : null
+      const timezone = venue?.timezone || 'America/Mexico_City'
+      const from = startDate ? DateTime.fromISO(startDate, { zone: timezone }).startOf('day').toJSDate() : undefined
+      const to = endDate ? DateTime.fromISO(endDate, { zone: timezone }).endOf('day').toJSDate() : undefined
 
       const rows = await prisma.timeEntry.findMany({
         where: {

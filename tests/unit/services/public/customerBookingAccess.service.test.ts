@@ -276,7 +276,9 @@ describe('decideCustomerApproval — write-CAS, idempotencia y rastro', () => {
     expect(tx.customer.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ approvalStatus: 'REJECTED', approvalDecisionReason: 'No es socia' }) }),
     )
-    expect(tx.customerApprovalOutbox.create).toHaveBeenCalledWith({ data: expect.objectContaining({ event: 'REJECTED_CUSTOMER' }) })
+    expect(tx.customerApprovalOutbox.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ event: 'REJECTED_CUSTOMER', payload: { reason: 'No es socia' } }),
+    })
   })
 
   it('🔴 preaprobación anticipada: un Customer SIN cuenta puede decidirse (sella approvalDecidedAt)', async () => {

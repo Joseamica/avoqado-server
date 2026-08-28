@@ -87,6 +87,17 @@ export function createGuard(scope: McpScope) {
       }
       return { venueId: { in: scope.allowedVenueIds } }
     },
+    /**
+     * ¿Tiene el permiso? Consulta sin lanzar ni registrar denegación — para decidir qué
+     * INCLUIR en una respuesta, no si dejar pasar. Nace del conteo ciego del cajón: la
+     * herramienta se responde igual, pero sin el efectivo esperado para quien no puede
+     * verlo. Usa el MISMO `hasPermission` que `requirePermission` para que no puedan
+     * contestar cosas distintas.
+     */
+    tienePermiso(permission: string, venueId: string): boolean {
+      const access = scope.perVenueAccess.get(venueId)
+      return !!access && hasPermission(access, permission)
+    },
     /** Gate an action by permission, evaluated for a SPECIFIC venue (roles differ per venue). */
     requirePermission(permission: string, venueId: string): void {
       enforceWriteScope(scope, permission)

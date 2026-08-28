@@ -954,7 +954,8 @@ export interface CashReconciliationResult {
     deviceName: string | null
     openedAt: string
     closedAt: string | null
-    expectedAmount: number
+    /** Ausente si quien cierra no tiene `cash-drawer:view-expected` y el cajón sigue abierto. */
+    expectedAmount?: number
     counted: boolean
     actualAmount: number | null
     overShort: number | null

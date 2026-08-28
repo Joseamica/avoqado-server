@@ -14,7 +14,7 @@ import * as cashDrawerService from '../../services/mobile/cash-drawer.mobile.ser
 export const getCurrent = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const session = await cashDrawerService.getCurrentSession(venueId)
+    const session = await cashDrawerService.getCurrentSession(venueId, (req as any).puedeVerEsperado === true)
 
     return res.json({
       success: true,

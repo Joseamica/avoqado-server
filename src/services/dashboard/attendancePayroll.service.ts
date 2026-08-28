@@ -1,6 +1,3 @@
-import { DateTime } from 'luxon'
-
-import prisma from '../../utils/prismaClient'
 import { buildAttendanceGrid } from './attendance.dashboard.service'
 
 /**
@@ -39,24 +36,13 @@ export async function getPayrollSummary(
   startDate: string,
   endDate: string,
 ): Promise<{ rows: PayrollSummaryRow[]; timezone: string; startDate: string; endDate: string }> {
-  const { cells, timezone } = await buildAttendanceGrid(venueId, startDate, endDate)
-
-  // Horas y descansos del periodo, por persona, EXCLUYENDO checadas rechazadas por el gerente
-  // (misma regla que la rejilla: una checada rechazada no cuenta como presencia).
-  const rangeStart = DateTime.fromISO(startDate, { zone: timezone }).startOf('day').toJSDate()
-  const rangeEnd = DateTime.fromISO(endDate, { zone: timezone }).endOf('day').toJSDate()
-  const hours = await prisma.timeEntry.groupBy({
-    by: ['staffId'],
-    where: { venueId, clockInTime: { gte: rangeStart, lte: rangeEnd }, validationStatus: { not: 'REJECTED' } },
-    _sum: { totalHours: true, breakMinutes: true },
-  })
-  const hoursByStaff = new Map(hours.map(h => [h.staffId, h._sum]))
+  const { cells, timezone, workedTotalsByStaff } = await buildAttendanceGrid(venueId, startDate, endDate)
 
   const byMembership = new Map<string, PayrollSummaryRow>()
   for (const cell of cells) {
     let row = byMembership.get(cell.staffVenueId)
     if (!row) {
-      const sum = hoursByStaff.get(cell.staffId)
+      const sum = workedTotalsByStaff.get(cell.staffId)
       row = {
         staffId: cell.staffId,
         staffVenueId: cell.staffVenueId,

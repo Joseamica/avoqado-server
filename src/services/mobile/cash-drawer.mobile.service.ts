@@ -57,7 +57,7 @@ function normalizeLocalId(raw: unknown, campo = 'localId'): string | null {
 /**
  * Get the current open cash drawer session for a venue, including all events.
  */
-export async function getCurrentSession(venueId: string) {
+export async function getCurrentSession(venueId: string, incluirEsperado = false) {
   const session = await prisma.cashDrawerSession.findFirst({
     where: { venueId, status: 'OPEN' },
     include: {
@@ -71,7 +71,7 @@ export async function getCurrentSession(venueId: string) {
     return null
   }
 
-  return formatSession(session)
+  return formatSession(session, incluirEsperado)
 }
 
 // ============================================================================
@@ -287,10 +287,15 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
       const inserted = localId
         ? await tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
         : { count: (await tx.cashDrawerEvent.create({ data: row })) ? 1 : 0 }
-      const stored = localId ? await tx.cashDrawerEvent.findFirst({ where: { venueId, localId } }) : await tx.cashDrawerEvent.findFirst({ where: { sessionId: session.id, type }, orderBy: { createdAt: 'desc' } })
+      const stored = localId
+        ? await tx.cashDrawerEvent.findFirst({ where: { venueId, localId } })
+        : await tx.cashDrawerEvent.findFirst({ where: { sessionId: session.id, type }, orderBy: { createdAt: 'desc' } })
       if (!stored) throw new InternalServerError('No se pudo confirmar el movimiento de caja')
       if (inserted.count > 0) {
-        const full = await tx.cashDrawerSession.findUnique({ where: { id: session.id }, select: { actualAmount: true, overShort: true, startingAmount: true, events: { select: { type: true, amount: true } } } })
+        const full = await tx.cashDrawerSession.findUnique({
+          where: { id: session.id },
+          select: { actualAmount: true, overShort: true, startingAmount: true, events: { select: { type: true, amount: true } } },
+        })
         if (full && full.actualAmount !== null) {
           const expected = calculateExpectedAmount({ startingAmount: full.startingAmount, events: full.events })
           const overShort = Number(full.actualAmount) - expected
@@ -301,7 +306,15 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
             action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
             entity: 'CashDrawerSession',
             entityId: session.id,
-            data: { cause: type, eventId: stored.id, amount: Number(amountDecimal), overShortBefore: full.overShort != null ? Number(full.overShort) : null, overShortAfter: overShort, expectedAfter: expected, source: 'MOBILE_OFFLINE_REPLAY' },
+            data: {
+              cause: type,
+              eventId: stored.id,
+              amount: Number(amountDecimal),
+              overShortBefore: full.overShort != null ? Number(full.overShort) : null,
+              overShortAfter: overShort,
+              expectedAfter: expected,
+              source: 'MOBILE_OFFLINE_REPLAY',
+            },
           })
         }
       }
@@ -507,7 +520,7 @@ export async function getHistory(venueId: string, page: number = 1, pageSize: nu
   ])
 
   return {
-    sessions: sessions.map(formatSession),
+    sessions: sessions.map(s => formatSession(s)),
     pagination: {
       page,
       pageSize,
@@ -802,8 +815,23 @@ function dollarsToDecimal(dollars: number): Decimal {
   return new Decimal(Number(dollars).toFixed(2))
 }
 
-function formatSession(session: any) {
+/**
+ * @param incluirEsperado ¿el llamante tiene `cash-drawer:view-expected`? Con `false` (el
+ * default) NO se sirve `expectedAmount` mientras la caja está ABIERTA — el conteo ciego
+ * dejaría de serlo si el número viaja en la respuesta que el propio cajero puede pedir.
+ *
+ * 🔴 `startingAmount` y `events` SÍ se siguen mandando siempre: el POS los necesita para
+ * calcular su esperado EN EL APARATO, que es lo que le permite cerrar sin internet. Por eso
+ * aquí el conteo ciego lo aplica el cliente (ya lo hace, tras `cash-drawer:view-expected`) y
+ * el servidor sólo deja de servirlo hecho. Ningún cliente lee este campo hoy —Android e iOS
+ * lo calculan— así que omitirlo no cambia nada en los aparatos ya instalados.
+ *
+ * Una sesión CERRADA lo revela siempre: ese es el resultado que el cajero debe ver al
+ * confirmar su conteo, y por eso el cierre no necesita tratarse aparte.
+ */
+function formatSession(session: any, incluirEsperado = false) {
   const expectedAmount = calculateExpectedAmount(session)
+  const revelar = incluirEsperado || session.status !== 'OPEN'
 
   return {
     id: session.id,
@@ -818,7 +846,7 @@ function formatSession(session: any) {
     closedByName: session.closedByName,
     closedAt: session.closedAt ? session.closedAt.toISOString() : null,
     actualAmount: session.actualAmount ? toDollars(session.actualAmount) : null,
-    expectedAmount: Number(expectedAmount.toFixed(2)),
+    ...(revelar ? { expectedAmount: Number(expectedAmount.toFixed(2)) } : {}),
     overShort: session.overShort ? toDollars(session.overShort) : null,
     closingNote: session.closingNote,
     events: session.events ? session.events.map(formatEvent) : [],

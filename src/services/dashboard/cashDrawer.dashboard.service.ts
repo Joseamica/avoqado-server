@@ -35,11 +35,14 @@ export interface DrawerSessionView {
   closedByStaffId: string | null
   closedByName: string | null
   closedAt: string | null
-  startingAmount: number
-  cashSales: number
-  payIns: number
-  payOuts: number
-  expectedAmount: number
+  // 🔴 OPCIONALES por el conteo ciego: a quien no tiene `cash-drawer:view-expected` no se
+  // le sirven mientras la caja está ABIERTA. No basta con ocultar `expectedAmount`, porque
+  // `startingAmount + cashSales + payIns − payOuts` ES el esperado.
+  startingAmount?: number
+  cashSales?: number
+  payIns?: number
+  payOuts?: number
+  expectedAmount?: number
   /** true sólo si el cajero CONTÓ al cerrar; con false, `actualAmount` y `overShort` son null */
   counted: boolean
   actualAmount: number | null
@@ -63,9 +66,16 @@ function sumByType(events: Array<{ type: string; amount: unknown }>, type: strin
   return money(events.filter(e => e.type === type).reduce((acc, e) => acc + Number(e.amount), 0))
 }
 
-function toView(session: any): DrawerSessionView {
+/**
+ * @param incluirEsperado ¿el llamante tiene `cash-drawer:view-expected`? Con `false` —el
+ * default, para que un llamador nuevo que lo olvide oculte en vez de filtrar— se omiten el
+ * esperado y sus sumandos MIENTRAS la caja está abierta. Una vez cerrada el resultado ya
+ * está firmado y se revela: eso es justamente el diseño del conteo ciego.
+ */
+function toView(session: any, incluirEsperado = false): DrawerSessionView {
   const events: Array<{ type: string; amount: unknown }> = session.events ?? []
   const counted = session.actualAmount !== null && session.actualAmount !== undefined
+  const revelar = incluirEsperado || session.status !== 'OPEN'
   return {
     id: session.id,
     status: session.status,
@@ -76,11 +86,15 @@ function toView(session: any): DrawerSessionView {
     closedByStaffId: session.closedByStaffId ?? null,
     closedByName: session.closedByName ?? null,
     closedAt: session.closedAt ? session.closedAt.toISOString() : null,
-    startingAmount: money(session.startingAmount),
-    cashSales: sumByType(events, 'CASH_SALE'),
-    payIns: sumByType(events, 'PAY_IN'),
-    payOuts: sumByType(events, 'PAY_OUT'),
-    expectedAmount: calculateExpectedAmount({ ...session, events }),
+    ...(revelar
+      ? {
+          startingAmount: money(session.startingAmount),
+          cashSales: sumByType(events, 'CASH_SALE'),
+          payIns: sumByType(events, 'PAY_IN'),
+          payOuts: sumByType(events, 'PAY_OUT'),
+          expectedAmount: calculateExpectedAmount({ ...session, events }),
+        }
+      : {}),
     counted,
     actualAmount: counted ? money(session.actualAmount) : null,
     overShort: counted && session.overShort !== null && session.overShort !== undefined ? money(session.overShort) : null,
@@ -92,7 +106,7 @@ function toView(session: any): DrawerSessionView {
 const EVENTS_INCLUDE = { events: { orderBy: { createdAt: 'asc' as const } } }
 
 /** La caja de AHORA: la sesión abierta (si hay) y las anomalías que el dueño debe saber. */
-export async function getDrawerStatus(venueId: string): Promise<DrawerStatus> {
+export async function getDrawerStatus(venueId: string, incluirEsperado = false): Promise<DrawerStatus> {
   const open = await prisma.cashDrawerSession.findMany({
     where: { venueId, status: 'OPEN' },
     include: EVENTS_INCLUDE,
@@ -108,7 +122,7 @@ export async function getDrawerStatus(venueId: string): Promise<DrawerStatus> {
     })
   }
 
-  return { open: open.length ? toView(open[0]) : null, anomalies }
+  return { open: open.length ? toView(open[0], incluirEsperado) : null, anomalies }
 }
 
 export interface DrawerSessionsQuery {
@@ -117,7 +131,7 @@ export interface DrawerSessionsQuery {
 }
 
 /** Historial completo (abiertas y cerradas), la más reciente primero. */
-export async function getDrawerSessions(venueId: string, { page, pageSize }: DrawerSessionsQuery) {
+export async function getDrawerSessions(venueId: string, { page, pageSize }: DrawerSessionsQuery, incluirEsperado = false) {
   const skip = (page - 1) * pageSize
   const where = { venueId }
 
@@ -127,7 +141,7 @@ export async function getDrawerSessions(venueId: string, { page, pageSize }: Dra
   ])
 
   return {
-    sessions: rows.map(toView),
+    sessions: rows.map(r => toView(r, incluirEsperado)),
     pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
   }
 }

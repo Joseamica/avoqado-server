@@ -272,6 +272,7 @@ export async function decideCustomerApproval(
       event,
       approvalVersion: nextVersion,
       dedupeKey: dedupeKey(event, input.customerId, nextVersion),
+      ...(input.decision === 'REJECTED' ? { payload: { reason: input.reason ?? null } } : {}),
     },
   })
 

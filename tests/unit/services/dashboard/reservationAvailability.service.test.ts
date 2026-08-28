@@ -174,6 +174,31 @@ describe('Reservation Availability Service', () => {
       expect(elevenAm).toBeDefined()
     })
 
+    it('blocks an earlier slot when its own post-service buffer reaches a later reservation', async () => {
+      prismaMock.product.findMany.mockResolvedValue([
+        { id: 'product-1', duration: 60, durationMinutes: null, bufferAfterMin: 30 },
+      ] as any)
+      prismaMock.product.findFirst.mockResolvedValue({ eventCapacity: null, type: 'APPOINTMENTS_SERVICE' } as any)
+      prismaMock.reservation.findMany.mockResolvedValue([
+        createMockReservation({
+          startsAt: at(13, 15),
+          endsAt: at(14, 15),
+          blockedEndsAt: at(14, 15),
+          tableId: null,
+          productId: 'product-1',
+          product: { type: 'APPOINTMENTS_SERVICE' },
+        }),
+      ])
+      prismaMock.table.findMany.mockResolvedValue([])
+      prismaMock.staff.findMany.mockResolvedValue([])
+      prismaMock.slotHold.findMany.mockResolvedValue([])
+
+      const result = await getSlots({ productId: 'product-1' })
+
+      expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeUndefined()
+      expect(result.find(slot => slot.startsAt.getUTCHours() === 11)).toBeDefined()
+    })
+
     it('should include slots with available tables even when others are booked', async () => {
       const tables = [createMockTable({ id: 'table-1', capacity: 4 }), createMockTable({ id: 'table-2', number: '2', capacity: 6 })]
 
@@ -614,7 +639,11 @@ describe('Reservation Availability Service', () => {
           primeStaffAwareAvailability()
           const result = await getSlots({ productId: 'product-1', productIds: ['product-1'], fixedDurationMin }, staffAwareConfig())
           expect(result[0].endsAt.getTime() - result[0].startsAt.getTime()).toBe(fixedDurationMin * 60_000)
-          expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+          expect(prismaMock.product.findMany).toHaveBeenCalledTimes(1)
+          expect(prismaMock.product.findMany).toHaveBeenCalledWith({
+            where: { id: { in: ['product-1'] }, venueId: VENUE_ID, type: 'APPOINTMENTS_SERVICE' },
+            select: { bufferAfterMin: true },
+          })
         },
       )
 
@@ -675,6 +704,27 @@ describe('Reservation Availability Service', () => {
         const result = await getSlots(
           { productId: 'product-1', productIds: ['product-1'], staffId: 'staff-a', includeFull: true },
           staffAwareConfig(1),
+        )
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeUndefined()
+      })
+
+      it('removes a requested staff slot when its own buffer reaches a later appointment', async () => {
+        primeStaffAwareAvailability({
+          products: [{ id: 'product-1', duration: 60, durationMinutes: null, bufferAfterMin: 30 }],
+          staffConflicts: [
+            {
+              assignedStaffId: 'staff-a',
+              startsAt: at(13, 15),
+              endsAt: at(14, 15),
+              blockedEndsAt: at(14, 15),
+            },
+          ],
+        })
+
+        const result = await getSlots(
+          { productId: 'product-1', productIds: ['product-1'], staffId: 'staff-a' },
+          staffAwareConfig(null),
         )
 
         expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeUndefined()

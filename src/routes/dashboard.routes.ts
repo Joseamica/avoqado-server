@@ -4,6 +4,7 @@ import multer from 'multer'
 import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { requireVenueRole } from '../middlewares/requireVenueRole.middleware'
 import { authorizeRole } from '../middlewares/authorizeRole.middleware'
@@ -8175,22 +8176,34 @@ router.get('/venues/:venueId/shifts/summary', authenticateTokenMiddleware, check
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
-router.get('/venues/:venueId/shifts/:shiftId', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShift)
+router.get(
+  '/venues/:venueId/shifts/:shiftId',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:read'),
+  // El detalle del turno adjunta el arqueo del cajón: mismo conteo ciego que su endpoint.
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
+  shiftController.getShift,
+)
 
 // ── Cajón físico (CashDrawerSession) — SÓLO LECTURA ─────────────────────────────────────
 // Fase 1 de la unificación de caja (auditoría 27-ago). El cajón lo escriben Android y la TPV
 // (`cashDrawerPosting`) y hasta hoy sólo tenía rutas /mobile: el dueño no podía ver el
 // arqueo desde ningún lado. Mismo permiso que el arqueo de la PAX: es el mismo dato.
+// `marcarPermiso` NO bloquea: sólo etiqueta si el llamante puede ver el efectivo esperado
+// (`cash-drawer:view-expected`, MANAGER+). Entrar sigue siendo `shifts:read`; lo que cambia
+// es que un cajero recibe la caja SIN el esperado ni sus sumandos mientras esté abierta.
 router.get(
   '/venues/:venueId/cash-drawer/status',
   authenticateTokenMiddleware,
   checkPermission('shifts:read'),
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   cashDrawerController.getDrawerStatus,
 )
 router.get(
   '/venues/:venueId/cash-drawer/sessions',
   authenticateTokenMiddleware,
   checkPermission('shifts:read'),
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   cashDrawerController.getDrawerSessions,
 )
 

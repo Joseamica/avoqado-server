@@ -119,7 +119,7 @@ export async function createKioskCheckInChallenge(args: {
   // Un solo QR vivo por cara. La base también lo garantiza (índice único parcial), pero
   // cancelar aquí es lo que evita chocar contra él en la operación normal.
   await prisma.kioskCheckInChallenge.updateMany({
-    where: { terminalId: args.terminalId, stationKey: args.stationKey, status: 'PENDING' },
+    where: { venueId: args.venueId, terminalId: args.terminalId, stationKey: args.stationKey, status: 'PENDING' },
     data: { status: 'CANCELLED' },
   })
 
