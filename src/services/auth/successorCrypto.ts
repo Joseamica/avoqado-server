@@ -35,6 +35,12 @@
  * de la llave jamás rompa el arranque del servidor ni el refresh en sí — sólo desactiva la
  * retransmisión (un entorno sin la llave se comporta como hoy: un reintento se trata como
  * reutilización real).
+ *
+ * 🔴 [Auditoría Task 9, hallazgo crítico] `sucesorCifradoDisponible()` también valida el
+ * FORMATO de la llave (hex de 32 bytes), no sólo su presencia — segunda capa detrás del
+ * `.regex` de `env.ts`: si algún día `env` llega mockeado o construido de otra forma con un
+ * valor de 64 chars no-hex, una llave mal formada se comporta como "sin llave" (retransmisión
+ * desactivada) en vez de que `crypto.createCipheriv` lance sin captura a media rotación.
  */
 import crypto from 'crypto'
 import { env } from '@/config/env'
@@ -53,17 +59,23 @@ function aad(datos: SucesorAAD): Buffer {
   return Buffer.from(`${datos.grantId}.${datos.familyId}.${datos.sessionId}`, 'utf8')
 }
 
+const FORMATO_LLAVE = /^[0-9a-f]{64}$/i
+
+function llaveValida(hex: string | undefined): hex is string {
+  return typeof hex === 'string' && FORMATO_LLAVE.test(hex)
+}
+
 function llave(): Buffer {
   const hex = env.SESSION_SUCCESSOR_ENC_KEY
-  if (!hex) {
-    throw new Error('SESSION_SUCCESSOR_ENC_KEY no está configurada — no se puede cifrar/descifrar el sucesor')
+  if (!llaveValida(hex)) {
+    throw new Error('SESSION_SUCCESSOR_ENC_KEY no está configurada o no es hex de 32 bytes — no se puede cifrar/descifrar el sucesor')
   }
   return Buffer.from(hex, 'hex')
 }
 
-/** true si hay llave configurada. El llamador la usa para decidir si guarda sucesor cifrado. */
+/** true si hay llave configurada Y con formato válido. El llamador la usa para decidir si guarda sucesor cifrado. */
 export function sucesorCifradoDisponible(): boolean {
-  return Boolean(env.SESSION_SUCCESSOR_ENC_KEY)
+  return llaveValida(env.SESSION_SUCCESSOR_ENC_KEY)
 }
 
 /** Cifra el token sucesor. Lanza si `SESSION_SUCCESSOR_ENC_KEY` no está configurada. */

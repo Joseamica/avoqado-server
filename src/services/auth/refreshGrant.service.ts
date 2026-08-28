@@ -32,8 +32,8 @@ const VENTANA_RETRANSMISION_MS = 60_000
  * que dura — por eso también se revoca la `Session` (lo que de verdad invalida un access
  * token ya emitido, vía `sid` + `isSessionAliveCached`) y se invalida su caché.
  */
-async function revocarFamilia(familyId: string): Promise<void> {
-  await prisma.refreshGrant.updateMany({
+async function revocarFamilia(familyId: string, client: Prisma.TransactionClient = prisma): Promise<void> {
+  await client.refreshGrant.updateMany({
     where: { familyId, revokedAt: null },
     data: { revokedAt: new Date() },
   })
@@ -96,33 +96,62 @@ export async function limpiarSucesoresVencidos(): Promise<number> {
  * nunca al revés — la mutación real sigue protegida por el `updateMany` condicional de
  * abajo) y se decide entre dos caminos:
  *
- * - **Retransmisión legítima** (`successorEnc` vigente, `successorEncExpiresAt > ahora`):
- *   se descifra y se devuelve **el mismo** sucesor que ya se acuñó la primera vez. Nunca
- *   se acuña uno distinto ni se toca la `Session` — no es robo, es un eco.
- * - **Reutilización real** (fuera de la ventana, o sin sucesor guardado — p.ej. la llave
- *   de cifrado no estaba configurada cuando se rotó): se revoca la familia entera y la
- *   `Session`, y se invalida su caché. Éste es el camino caro, y es el correcto: un
- *   refresh consumido que reaparece pasados los 60 s ya no tiene forma honesta de existir.
+ * - **Retransmisión legítima** (`successorEnc` vigente, `successorEncExpiresAt > ahora`, Y la
+ *   familia SIGUE VIVA — `!previo.revokedAt`): se descifra y se devuelve **el mismo** sucesor
+ *   que ya se acuñó la primera vez. Nunca se acuña uno distinto ni se toca la `Session` — no
+ *   es robo, es un eco.
+ * - **Reutilización real** (fuera de la ventana, sin sucesor guardado — p.ej. la llave de
+ *   cifrado no estaba configurada cuando se rotó — el descifrado falla por un motivo
+ *   operativo, o **la familia ya fue revocada por OTRO grant de la cadena**): se revoca la
+ *   familia entera y la `Session` en UNA transacción, y se invalida su caché. Éste es el
+ *   camino caro, y es el correcto: un refresh consumido que reaparece pasados los 60 s, o
+ *   cuya familia ya está muerta, ya no tiene forma honesta de existir.
+ *
+ * 🔴 [Auditoría Task 9] `previo.revokedAt` importa aunque ESTE grant no haya sido el que
+ * disparó la reutilización: `revocarFamilia` revoca TODOS los grants vivos de la familia de
+ * un jalón, así que un HERMANO de `previo` puede haber sido el que detectó el robo. Sin este
+ * chequeo, un reintento legítimo —dentro de SU PROPIA ventana de 60s— de un grant cuya
+ * familia ya murió se devolvía como retransmisión: el llamador nunca se entera de que la
+ * familia está muerta, y ninguna alerta atada a `reutilizado` se dispara.
+ *
+ * 🔴 [Auditoría Task 9] `revocarFamilia` + `revokeSession` viajan en UNA transacción: sin
+ * esto, si el proceso muere entre las dos, la familia queda revocada pero la `Session` sigue
+ * viva con su access token hasta 10 minutos — justo el escenario que esta tarea existe para
+ * cerrar. `invalidateSession` (Redis) va DESPUÉS del commit: es best-effort y jamás debe
+ * poder hacer fallar o revertir la transacción de la base de datos.
  */
 export async function rotateGrant(token: string, nuevoToken: string, nuevoExpiresAt: Date): Promise<ResultadoRotacion> {
   const tokenHash = hashToken(token)
 
   const previo = await prisma.refreshGrant.findUnique({ where: { tokenHash } })
   if (previo && previo.consumedAt) {
-    if (previo.successorEnc && previo.successorEncExpiresAt && previo.successorEncExpiresAt > new Date()) {
-      const sucesor = descifrarSucesor(previo.successorEnc, {
-        grantId: previo.id,
-        familyId: previo.familyId,
-        sessionId: previo.sessionId,
-      })
-      return { sucesor, sessionId: previo.sessionId, familyId: previo.familyId, retransmision: true }
+    if (previo.successorEnc && previo.successorEncExpiresAt && previo.successorEncExpiresAt > new Date() && !previo.revokedAt) {
+      try {
+        const sucesor = descifrarSucesor(previo.successorEnc, {
+          grantId: previo.id,
+          familyId: previo.familyId,
+          sessionId: previo.sessionId,
+        })
+        return { sucesor, sessionId: previo.sessionId, familyId: previo.familyId, retransmision: true }
+      } catch {
+        // 🔴 [Auditoría Task 9, hallazgo menor] Un descifrado que falla por un motivo
+        // OPERATIVO (la llave se rotó a media ventana, el ciphertext se corrompió) no debe
+        // propagar y reventar el refresh: cae a reutilización real, la salida segura por
+        // defecto — nunca "no se puede saber, así que dejamos pasar".
+      }
     }
 
-    // Reutilización real: fuera de la ventana de retransmisión, o nunca se guardó sucesor
-    // (p. ej. SESSION_SUCCESSOR_ENC_KEY no estaba configurada al rotar).
-    await revocarFamilia(previo.familyId)
-    await revokeSession(previo.sessionId, 'refresh_reuse_detected')
-    await invalidateSession(previo.sessionId) // después del "commit" de arriba
+    // Reutilización real: fuera de la ventana de retransmisión, la familia ya estaba
+    // revocada por otro grant de la cadena, nunca se guardó sucesor (p. ej.
+    // SESSION_SUCCESSOR_ENC_KEY no estaba configurada al rotar), o el descifrado falló.
+    //
+    // 🔴 [Auditoría Task 9] revocarFamilia + revokeSession comparten UNA transacción — ver el
+    // docstring de arriba. invalidateSession (Redis) va DESPUÉS del commit, best-effort.
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await revocarFamilia(previo.familyId, tx)
+      await revokeSession(previo.sessionId, 'refresh_reuse_detected', tx)
+    })
+    await invalidateSession(previo.sessionId) // después del commit de arriba
     return REUTILIZADO
   }
 

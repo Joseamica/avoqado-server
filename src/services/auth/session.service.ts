@@ -1,5 +1,5 @@
 import prisma from '@/utils/prismaClient'
-import { AuthMethod, Session } from '@prisma/client'
+import { AuthMethod, Prisma, Session } from '@prisma/client'
 
 /**
  * Crea una Session — el registro cuyo `id` viaja como claim `sid` dentro del JWT (ver
@@ -29,9 +29,15 @@ export async function createSession(input: {
  * Idempotente: revocar dos veces no es un error. El `where` lleva `revokedAt: null` para que
  * la segunda llamada no toque nada (en vez de leer-y-luego-escribir), así que `count` puede
  * salir en 0 sin que eso sea una falla.
+ *
+ * 🔴 [Auditoría Task 9, hallazgo importante] Acepta un `Prisma.TransactionClient` opcional
+ * para que quien revoca una Session por reutilización de refresh pueda meterla en la MISMA
+ * transacción que revoca la familia de grants — ver `revocarFamilia`/`rotateGrant` en
+ * `refreshGrant.service.ts`. Sin `client`, usa el `prisma` de siempre: comportamiento
+ * idéntico al de antes de esta tarea para cualquier otro llamador.
  */
-export async function revokeSession(sessionId: string, reason: string): Promise<void> {
-  await prisma.session.updateMany({
+export async function revokeSession(sessionId: string, reason: string, client: Prisma.TransactionClient = prisma): Promise<void> {
+  await client.session.updateMany({
     where: { id: sessionId, revokedAt: null },
     data: { revokedAt: new Date(), revokedReason: reason },
   })

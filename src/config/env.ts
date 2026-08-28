@@ -46,7 +46,17 @@ const envSchema = z.object({
   // `src/services/auth/successorCrypto.ts`. OPCIONAL: si falta, ningún entorno se cae al
   // arrancar; simplemente no se guarda sucesor cifrado y un reintento de refresh se trata
   // como reutilización real (el comportamiento de hoy, sin esta tarea).
-  SESSION_SUCCESSOR_ENC_KEY: z.string().length(64, 'SESSION_SUCCESSOR_ENC_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  // 🔴 [Auditoria Task 9, hallazgo critico] `.length(64, ...)` solo contaba caracteres — un
+  // valor de 64 chars con una letra fuera de [0-9a-f] pasaba Zod, el servidor arrancaba
+  // normal, y `Buffer.from(hex, 'hex')` trunca en el primer byte invalido produciendo una
+  // llave de longitud arbitraria: `crypto.createCipheriv` lanza SIN captura en cada rotacion
+  // de refresh de TODA la plataforma, no solo en la retransmision. El `.regex` cierra eso en
+  // el arranque, donde Zod ya prometia validar el formato pero no lo hacia.
+  SESSION_SUCCESSOR_ENC_KEY: z
+    .string()
+    .length(64, 'SESSION_SUCCESSOR_ENC_KEY debe ser hex de 32 bytes (64 chars)')
+    .regex(/^[0-9a-f]{64}$/i, 'SESSION_SUCCESSOR_ENC_KEY debe ser hex de 32 bytes (64 chars)')
+    .optional(),
 
   // ─────────────────────────────────────────────────────────────────────────
   // INFRASTRUCTURE
