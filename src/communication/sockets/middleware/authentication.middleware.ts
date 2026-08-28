@@ -9,6 +9,36 @@ import { isSessionAliveCached } from '../../../services/auth/sessionCache'
 import { onWithContext } from '../../../observability/socketContext'
 
 /**
+ * Tope de vida de un socket antes de forzar su desconexión (y a que el cliente
+ * reconecte), sin importar cuánto le falte al JWT para vencer de verdad.
+ *
+ * 🔴 [Auditoría, hallazgo Crítico] `setTimeout` recibe el delay como un entero de
+ * 32 bits: Node CLAMPA A 1 MS cualquier valor mayor a 2_147_483_647 ms (~24.8 días)
+ * — en silencio salvo por un `TimeoutOverflowWarning`, verificado a mano con
+ * `node -e`. El token de la PAX dura 30 días EXACTOS
+ * (`TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS`, `security.ts`), y lo mismo el
+ * "recuérdame" de dashboard/móvil y los tokens de cliente/consumidor
+ * (`jwt.service.ts`, `expiresIn: 2592000`) — los cuatro superan el límite.
+ * Encadenar el cierre al `exp` real, sin tope, desconectaba CUALQUIER socket de
+ * una terminal PAX a los milisegundos de autenticar, no a los 30 días — la app se
+ * veía conectar→desconectar en bucle y el mesero podía cobrar dos veces porque el
+ * dashboard nunca se enteraba del primer cobro.
+ *
+ * La respuesta no es encadenar temporizadores para llegar exacto al `exp` real
+ * (correcto, pero sospechoso): es preguntarse si tiene sentido que un socket viva
+ * 30 días sin que nadie vuelva a comprobar nada. No lo tiene. Un socket que se
+ * desconecta cada 24h y deja que el cliente reconecte es MÁS SANO que uno abierto
+ * sin supervisión por un mes — y no es sólo evitar el desborde: cada reconexión
+ * vuelve a correr el handshake COMPLETO (`jwt.verify`, `isSessionAliveCached`, el
+ * candado de venue operativo), así que una revocación o un venue suspendido que el
+ * socket se hubiera perdido en el camino se detecta en la siguiente reconexión —
+ * no hasta que el JWT por fin venza, semanas después. `disconnectBySession` sigue
+ * siendo el mecanismo EAGER (dispara al momento de revocar); este tope es la red
+ * de seguridad de fondo para el resto de la vida del socket.
+ */
+export const SOCKET_LIFETIME_CAP_MS = 24 * 60 * 60 * 1000 // 24h — bien por debajo del límite de 32 bits (~24.8 días)
+
+/**
  * Socket Authentication Middleware
  * Adapts the existing JWT middleware pattern for Socket.io connections
  * Following the same security.ts and authenticateToken.middleware.ts patterns
@@ -172,10 +202,17 @@ export const socketAuthenticationMiddleware = async (socket: AuthenticatedSocket
     // razón (p. ej. `disconnectBySession` ya lo cerró por una revocación).
     if (typeof decoded.exp === 'number') {
       const msHastaVencer = Math.max(0, decoded.exp * 1000 - Date.now())
+      // Math.min con el tope de arriba — nunca se le pasa a setTimeout un delay mayor
+      // al límite de 32 bits, sin importar qué tan lejos esté el exp real del token.
+      const msHastaCierre = Math.min(msHastaVencer, SOCKET_LIFETIME_CAP_MS)
       const cierrePorVencimiento = setTimeout(() => {
-        logger.info('Socket disconnected: token expired', { correlationId, socketId: socket.id })
+        logger.info('Socket disconnected: token expired or lifetime cap reached', {
+          correlationId,
+          socketId: socket.id,
+          alcanzoElTope: msHastaVencer > SOCKET_LIFETIME_CAP_MS,
+        })
         socket.disconnect(true)
-      }, msHastaVencer)
+      }, msHastaCierre)
       // onWithContext, no socket.on directo: la regla del módulo (ver
       // tests/unit/observability/socketContext.test.ts, "no file calls socket.on directly").
       onWithContext(socket, 'disconnect', () => clearTimeout(cierrePorVencimiento))

@@ -36,7 +36,7 @@
  */
 import { EventEmitter } from 'events'
 import jwt from 'jsonwebtoken'
-import { socketAuthenticationMiddleware } from '@/communication/sockets/middleware/authentication.middleware'
+import { socketAuthenticationMiddleware, SOCKET_LIFETIME_CAP_MS } from '@/communication/sockets/middleware/authentication.middleware'
 import { SocketManager } from '@/communication/sockets/managers/socketManager'
 import { ConnectionController } from '@/communication/sockets/controllers/connection.controller'
 import { RoomManagerService } from '@/communication/sockets/services/roomManager.service'
@@ -172,6 +172,53 @@ describe('socketAuthenticationMiddleware — sesiones revocables', () => {
 
       // El temporizador ya se limpió: disconnect() NO se vuelve a llamar por vencimiento.
       expect(sock.disconnect).not.toHaveBeenCalled()
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  // ────────────────────────────────────────────────────────────────────────────────
+  // 🔴 [CRÍTICO, hallazgo de revisión] `setTimeout` usa un entero de 32 bits: Node
+  // CLAMPA A 1 MS cualquier delay mayor a 2_147_483_647 ms (~24.8 días). El token de
+  // la PAX dura 30 días EXACTOS (TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS, security.ts) y
+  // también dashboard/móvil con "recuérdame" y los tokens de cliente/consumidor
+  // (jwt.service.ts, expiresIn: 2592000) — los cuatro superan el límite. Sin tope,
+  // CUALQUIER socket de una terminal PAX se desconectaba a los milisegundos de
+  // autenticar, no a los 30 días.
+  // ────────────────────────────────────────────────────────────────────────────────
+  it('🔴 [CRÍTICO] un exp de 30 dias (token real de la PAX) NO desconecta el socket casi de inmediato', async () => {
+    // Sin fake timers, a propósito: el bug es el CLAMP nativo de Node sobre el
+    // setTimeout real — con fake timers el mock no clampa nada, sólo espera lo que se
+    // le pida, así que no reproduce el síntoma. Se prueba con timers REALES y una
+    // espera corta: si el código sigue roto, el socket ya estará desconectado a los
+    // pocos milisegundos (verificado a mano con `node -e`: se dispara en ~11ms); si
+    // está arreglado, no.
+    ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(true)
+    const TREINTA_DIAS_SEGUNDOS = 60 * 60 * 24 * 30 // TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS
+    const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + TREINTA_DIAS_SEGUNDOS })
+
+    await socketAuthenticationMiddleware(sock, jest.fn())
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    expect(sock.disconnect).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el candado de vencimiento tiene un TOPE — no encadena hasta los 30 dias completos del exp', async () => {
+    jest.useFakeTimers()
+    try {
+      ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(true)
+      const TREINTA_DIAS_SEGUNDOS = 60 * 60 * 24 * 30
+      const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + TREINTA_DIAS_SEGUNDOS })
+
+      await socketAuthenticationMiddleware(sock, jest.fn())
+
+      // Un instante antes del tope: todavía no se desconecta (no es un clamp a 1ms).
+      jest.advanceTimersByTime(SOCKET_LIFETIME_CAP_MS - 1_000)
+      expect(sock.disconnect).not.toHaveBeenCalled()
+
+      // Al llegar al tope: se desconecta, aunque al exp real le falten ~29 días.
+      jest.advanceTimersByTime(1_000)
+      expect(sock.disconnect).toHaveBeenCalled()
     } finally {
       jest.useRealTimers()
     }
