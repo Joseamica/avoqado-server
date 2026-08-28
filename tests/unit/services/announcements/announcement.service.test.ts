@@ -72,11 +72,31 @@ describe('publishAnnouncement — encola, no reparte', () => {
     expect(mockDelivCreate.mock.calls[0][0].skipDuplicates).toBe(true)
   })
 
+  // Comprueba la PROPIEDAD (ARCHIVED nunca es reclamable), no la forma del `where`:
+  // el claim tiene dos brazos y afirmar `where.status.in` ataba la prueba a uno solo.
   it('el claim excluye ARCHIVED: un archive concurrente no se pierde', async () => {
     await publishAnnouncement('a1')
     const where = mockUpdateMany.mock.calls[0][0].where
-    expect(where.status.in).toEqual(['DRAFT', 'SCHEDULED'])
     expect(JSON.stringify(where)).not.toContain('ARCHIVED')
+    const brazos = where.OR ?? [where]
+    expect(brazos.some((b: any) => b.status?.in?.includes('DRAFT'))).toBe(true)
+  })
+
+  // 🔴 Un reparto que quedó a medias TIENE que poder reintentarse. El estado
+  // (PUBLISHED, deliveredAt: null) lo produce cualquier fallo entre el claim y el
+  // final: un `createMany` que truena, la cuenta, un redeploy. La guarda temprana
+  // mira `deliveredAt` y el claim mira `status`, así que ese estado se cuela por la
+  // primera y, sin este brazo, el claim lo rechaza: publicar de nuevo contesta
+  // `alreadyPublished` sin encolar a nadie y NO hay otra vía de recuperación —el job
+  // programado sólo toma SCHEDULED y el outbox sólo drena lo ya insertado—, así que
+  // el anuncio llega a una fracción de la gente para siempre. Reintentar es seguro
+  // porque el @@unique de las entregas hace idempotente el reencolado.
+  it('🔴 reintenta un reparto a medias: PUBLISHED con deliveredAt nulo se vuelve a encolar', async () => {
+    await publishAnnouncement('a1')
+    const where = mockUpdateMany.mock.calls[0][0].where
+    const brazos = where.OR ?? [where]
+    const reintento = brazos.some((b: any) => b.status === 'PUBLISHED' && b.deliveredAt === null)
+    expect(reintento).toBe(true)
   })
 
   it('el conteo sale de las filas encoladas de verdad, no de la audiencia', async () => {

@@ -2,6 +2,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { scheduleCron } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { limpiarSucesoresVencidos } from '../services/auth/refreshGrant.service'
 
 const INACTIVITY_DAYS = 7
 
@@ -26,11 +27,25 @@ export async function runVenueChatInactivityCleanup(): Promise<void> {
   }
 }
 
+// Task 9 (sesiones revocables): borra físicamente el sucesor cifrado de refresh tokens
+// cuya ventana de retransmisión (60 s) ya venció. Piggyback deliberado sobre el MISMO
+// tick horario en vez de un cron propio — es una sola `updateMany` idempotente, no
+// justifica otro slot; ver `refreshGrant.service.ts` → `limpiarSucesoresVencidos`.
+async function runRefreshGrantSuccessorCleanup(): Promise<void> {
+  const count = await limpiarSucesoresVencidos()
+  if (count > 0) {
+    logger.info(`[Inactivity Cleanup] Purged ${count} expired refresh-grant successor ciphertext row(s)`)
+  }
+}
+
 export function startVenueChatInactivityCleanupJob(): void {
   logger.info('[Inactivity Cleanup] ⏰ Job started. Runs hourly.')
   scheduleCron('venue-chat-inactivity-cleanup', '0 * * * *', () => {
     runVenueChatInactivityCleanup().catch(err => {
       logger.error('[Inactivity Cleanup] Job iteration failed', { err })
+    })
+    runRefreshGrantSuccessorCleanup().catch(err => {
+      logger.error('[Inactivity Cleanup] Refresh-grant successor cleanup failed', { err })
     })
   })
 }

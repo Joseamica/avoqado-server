@@ -16923,7 +16923,11 @@ model PlatformAnnouncementDelivery {
   deliveredAt DateTime? // cuándo llegó al buzón de verdad
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  // `@default(now())` no es cosmético: Render aplica las migraciones en el BUILD, con el
+  // servidor VIEJO todavía sirviendo tráfico, y su cliente Prisma no conoce esta columna.
+  // Sin default en la base, sus INSERT de entregas violarían el NOT NULL hasta que el
+  // servidor nuevo tome el relevo. Declararlo aquí mantiene el schema y la DB en sintonía.
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([announcementId, staffId, venueId])
   @@index([staffId, announcementId])

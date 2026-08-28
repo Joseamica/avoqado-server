@@ -145,6 +145,9 @@ export async function getAssignments(venueId: string, from: string, to: string) 
       startTime: true,
       endTime: true,
       status: true,
+      // Lo exige `publishAssignments` en cada borrador y el dashboard arma ese payload con
+      // esta respuesta: sin el campo, publicar la semana responde 400 siempre.
+      updatedAt: true,
     },
     orderBy: [{ date: 'asc' }],
   })
@@ -168,13 +171,18 @@ export async function replaceAssignments(venueId: string, input: { from: string;
   const staffVenueIds = [...new Set(items.map(i => i.staffVenueId))]
   const templateIds = [...new Set(items.map(i => i.templateId).filter((x): x is string => !!x))]
   const [members, templates] = await Promise.all([
-    staffVenueIds.length ? prisma.staffVenue.findMany({ where: { id: { in: staffVenueIds }, venueId }, select: { id: true } }) : Promise.resolve([] as Array<{ id: string }>),
-    templateIds.length ? prisma.workShiftTemplate.findMany({ where: { id: { in: templateIds }, venueId, active: true } }) : Promise.resolve([]),
+    staffVenueIds.length
+      ? prisma.staffVenue.findMany({ where: { id: { in: staffVenueIds }, venueId }, select: { id: true } })
+      : Promise.resolve([] as Array<{ id: string }>),
+    templateIds.length
+      ? prisma.workShiftTemplate.findMany({ where: { id: { in: templateIds }, venueId, active: true } })
+      : Promise.resolve([]),
   ])
   const memberSet = new Set(members.map(m => m.id))
   const templateById = new Map(templates.map(t => [t.id, t]))
   for (const id of staffVenueIds) if (!memberSet.has(id)) throw new BadRequestError('Ese empleado no pertenece a este negocio')
-  for (const id of templateIds) if (!templateById.has(id)) throw new BadRequestError('Ese turno no existe en este negocio o está dado de baja')
+  for (const id of templateIds)
+    if (!templateById.has(id)) throw new BadRequestError('Ese turno no existe en este negocio o está dado de baja')
 
   await prisma.$transaction(async tx => {
     for (const it of items) {
@@ -190,7 +198,14 @@ export async function replaceAssignments(venueId: string, input: { from: string;
       })
     }
   })
-  logAction({ staffId: actorId, venueId, action: 'WORK_SHIFT_ASSIGNMENTS_UPDATED', entity: 'WorkShiftAssignment', entityId: `${input.from}..${input.to}`, data: { cells: items.length } })
+  logAction({
+    staffId: actorId,
+    venueId,
+    action: 'WORK_SHIFT_ASSIGNMENTS_UPDATED',
+    entity: 'WorkShiftAssignment',
+    entityId: `${input.from}..${input.to}`,
+    data: { cells: items.length },
+  })
   return getAssignments(venueId, input.from, input.to)
 }
 
@@ -219,10 +234,13 @@ export async function publishAssignments(
   for (const [id, sentUpdatedAt] of wanted) {
     const current = byId.get(id)
     if (!current) conflicts.push({ id, reason: 'GONE' })
-    else if (current.updatedAt.toISOString() !== new Date(sentUpdatedAt).toISOString()) conflicts.push({ id, staffVenueId: current.staffVenueId, date: current.date, reason: 'CHANGED' })
+    else if (current.updatedAt.toISOString() !== new Date(sentUpdatedAt).toISOString())
+      conflicts.push({ id, staffVenueId: current.staffVenueId, date: current.date, reason: 'CHANGED' })
   }
   if (conflicts.length) {
-    throw new ConflictError('Alguien más cambió borradores de esta semana: revísalos antes de publicar', 'WORK_SHIFT_DRAFT_CONFLICT', { conflicts })
+    throw new ConflictError('Alguien más cambió borradores de esta semana: revísalos antes de publicar', 'WORK_SHIFT_DRAFT_CONFLICT', {
+      conflicts,
+    })
   }
   const toPublish = drafts.filter(d => wanted.has(d.id))
   const skipped = drafts.length - toPublish.length
@@ -231,8 +249,14 @@ export async function publishAssignments(
   await prisma.$transaction(async tx => {
     for (const d of toPublish) {
       // el CAS se repite DENTRO de la transacción: si cambió entre la lectura y aquí, se aborta entera
-      const cas = await tx.workShiftAssignment.updateMany({ where: { id: d.id, status: 'DRAFT', updatedAt: d.updatedAt }, data: { updatedAt: d.updatedAt } })
-      if (cas.count !== 1) throw new ConflictError('Alguien más cambió borradores de esta semana: revísalos antes de publicar', 'WORK_SHIFT_DRAFT_CONFLICT', { conflicts: [{ id: d.id, staffVenueId: d.staffVenueId, date: d.date, reason: 'CHANGED' }] })
+      const cas = await tx.workShiftAssignment.updateMany({
+        where: { id: d.id, status: 'DRAFT', updatedAt: d.updatedAt },
+        data: { updatedAt: d.updatedAt },
+      })
+      if (cas.count !== 1)
+        throw new ConflictError('Alguien más cambió borradores de esta semana: revísalos antes de publicar', 'WORK_SHIFT_DRAFT_CONFLICT', {
+          conflicts: [{ id: d.id, staffVenueId: d.staffVenueId, date: d.date, reason: 'CHANGED' }],
+        })
       await tx.workShiftAssignment.deleteMany({ where: { staffVenueId: d.staffVenueId, date: d.date, status: 'PUBLISHED' } })
       if (d.templateId) {
         await tx.workShiftAssignment.update({ where: { id: d.id }, data: { status: 'PUBLISHED' } })
@@ -243,6 +267,13 @@ export async function publishAssignments(
       }
     }
   })
-  logAction({ staffId: actorId, venueId, action: 'WORK_SHIFT_ASSIGNMENTS_PUBLISHED', entity: 'WorkShiftAssignment', entityId: `${input.from}..${input.to}`, data: { published, cleared, skipped } })
+  logAction({
+    staffId: actorId,
+    venueId,
+    action: 'WORK_SHIFT_ASSIGNMENTS_PUBLISHED',
+    entity: 'WorkShiftAssignment',
+    entityId: `${input.from}..${input.to}`,
+    data: { published, cleared, skipped },
+  })
   return { published, cleared, skipped }
 }

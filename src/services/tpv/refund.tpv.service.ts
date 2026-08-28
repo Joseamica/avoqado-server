@@ -426,7 +426,12 @@ export async function recordRefund(
       venueId,
       refundPaymentId: result.id,
       orderId: originalPayment.orderId ?? null,
-      amount: result.amount,
+      // 🔴 El cajón sólo ve BILLETES: sale la venta MÁS la propina devuelta. El Payment
+      // del reembolso guarda el split contable (`amount` = venta, `tipAmount` = propina),
+      // pero el CASH_SALE original entró como `amount + tipAmount`, así que pasar sólo la
+      // venta dejaba el esperado arriba por el importe de la propina ⇒ faltante inventado
+      // al cerrar. Misma convención que `refund.dashboard` (pasa el total) y `refund.mobile`.
+      amount: new Decimal(result.amount).plus(new Decimal(result.tipAmount ?? 0)),
       reason: refundData.reason ?? null,
       method: originalPayment.method,
       fundsFlow: (originalPayment as any).fundsFlow ?? null,

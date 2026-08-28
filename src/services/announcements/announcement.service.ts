@@ -35,11 +35,23 @@ export async function publishAnnouncement(id: string): Promise<{ delivered: numb
     return { delivered: anuncio.deliveredCount, alreadyPublished: true }
   }
 
-  // CAS por estado: un `archive` concurrente ya no puede quedar sobrescrito a PUBLISHED.
+  // CAS por estado: un `archive` concurrente no puede quedar sobrescrito a PUBLISHED —
+  // ARCHIVED no encaja en ninguno de los dos brazos.
+  //
+  // 🔴 El segundo brazo permite REINTENTAR un reparto que quedó a medias (`PUBLISHED` con
+  // `deliveredAt` nulo). Ese estado lo produce cualquier fallo entre el claim y el final:
+  // un `createMany` que truena, la cuenta, un redeploy. Sin él, la guarda de arriba —que
+  // mira `deliveredAt`— deja pasar y el claim rechaza, así que publicar de nuevo contesta
+  // `alreadyPublished` sin encolar a nadie; y no hay otra vía de recuperación, porque el
+  // job programado sólo toma SCHEDULED y el outbox sólo drena lo ya insertado. Reintentar
+  // es seguro: el @@unique de las entregas vuelve idempotente el reencolado.
   const claim = await prisma.platformAnnouncement.updateMany({
     where: {
       id,
-      status: { in: [PlatformAnnouncementStatus.DRAFT, PlatformAnnouncementStatus.SCHEDULED] },
+      OR: [
+        { status: { in: [PlatformAnnouncementStatus.DRAFT, PlatformAnnouncementStatus.SCHEDULED] } },
+        { status: PlatformAnnouncementStatus.PUBLISHED, deliveredAt: null },
+      ],
     },
     data: {
       status: PlatformAnnouncementStatus.PUBLISHED,

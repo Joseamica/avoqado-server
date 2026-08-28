@@ -23,9 +23,14 @@ jest.mock('@/config/logger', () => ({
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ start: jest.fn(), stop: jest.fn() })) }))
+jest.mock('@/services/shared/cashDrawerPosting', () => ({
+  postCashSaleToDrawer: jest.fn().mockResolvedValue('POSTED'),
+  postCashRefundToDrawer: jest.fn().mockResolvedValue('POSTED'),
+}))
 
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { CashDrawerReconcilerJob } from '@/jobs/cash-drawer-reconciler.job'
+import { CashDrawerReconcilerJob, defaults } from '@/jobs/cash-drawer-reconciler.job'
+import { postCashRefundToDrawer } from '@/services/shared/cashDrawerPosting'
 
 const noopCron = { start: jest.fn(), stop: jest.fn() }
 const t = (iso: string) => new Date(iso)
@@ -153,5 +158,18 @@ describe('CashDrawerReconcilerJob.runNow', () => {
     const { job } = makeJob({ findUnpostedCashPayments: lento })
     const [a, b] = await Promise.all([job.runNow(), job.runNow()])
     expect([a.skipped, b.skipped].filter(Boolean)).toHaveLength(1)
+  })
+
+  // 🔴 El repost REAL (no el mock inyectado por los demás casos): el cajón sólo ve
+  // billetes, así que reponer un reembolso tiene que sacar venta + propina. El
+  // `Payment` del reembolso guarda el split contable (`amount` = venta, `tipAmount` =
+  // propina) y la venta original entró como la SUMA; pasar sólo `amount` deja el
+  // esperado arriba por la propina — y como el repost es idempotente por `localId`,
+  // ese faltante inventado ya no se puede corregir nunca.
+  it('🔴 el repost de un reembolso saca del cajón venta + propina, no sólo la venta', async () => {
+    ;(postCashRefundToDrawer as jest.Mock).mockClear()
+    await defaults.postRefund({ id: 'ref-9', venueId: 'v-1', orderId: null, amount: -80, tipAmount: -20, method: 'CASH' } as never, 's-1')
+    const arg = (postCashRefundToDrawer as jest.Mock).mock.calls[0][0]
+    expect(Math.abs(Number(arg.amount))).toBeCloseTo(100, 2)
   })
 })

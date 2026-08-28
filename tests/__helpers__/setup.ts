@@ -19,6 +19,10 @@ process.env.COOKIE_SECRET = 'test-cookie-secret'
 process.env.OTP_PEPPER = 'test-otp-pepper-secret-1234567890'
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test'
 process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
+// Parte A (sesiones revocables) — Task 9: cifra el sucesor del refresh token durante la
+// ventana de retransmisión de 60 s (successorCrypto.ts). Debe ser hex de 32 bytes (64
+// chars) para pasar el validador de env.ts, igual que GOOGLE_CALENDAR_TOKEN_KEY abajo.
+process.env.SESSION_SUCCESSOR_ENC_KEY = process.env.SESSION_SUCCESSOR_ENC_KEY || 'b'.repeat(64)
 // Stripe key must be set before any service module imports — TokenBudgetService
 // instantiates its Stripe client in the constructor (singleton), and tests rely
 // on jest.mock('stripe') hooking that constructor. Without this, CI (which has

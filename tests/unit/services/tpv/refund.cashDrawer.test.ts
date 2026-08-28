@@ -25,7 +25,7 @@ import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'venue-1'
 
-function armar(method: 'CASH' | 'CREDIT_CARD') {
+function armar(method: 'CASH' | 'CREDIT_CARD', tip = 0) {
   const original = {
     id: 'pay-orig',
     venueId: VENUE,
@@ -33,7 +33,7 @@ function armar(method: 'CASH' | 'CREDIT_CARD') {
     method,
     fundsFlow: method === 'CASH' ? 'CASH_DRAWER' : 'AVOQADO_PROCESSED',
     amount: 300,
-    tipAmount: 0,
+    tipAmount: tip,
     status: 'COMPLETED',
     type: 'REGULAR',
     processorData: {},
@@ -81,6 +81,20 @@ describe('reembolso desde la TPV', () => {
     expect(postCashRefundToDrawer).toHaveBeenCalledWith(
       expect.objectContaining({ venueId: VENUE, refundPaymentId: 'pay-refund', method: 'CASH', fundsFlow: 'CASH_DRAWER' }),
     )
+  })
+
+  it('🔴 un reembolso TOTAL de una venta CON PROPINA saca del cajón venta + propina', async () => {
+    // Venta $300 + propina $20 en efectivo: el CASH_SALE entró al cajón como 320
+    // (`postCashSaleToDrawer` suma amount + tipAmount). Devolver los $320 tiene que
+    // sacar 320, no 300: el `Payment` del reembolso parte el monto en venta y propina,
+    // pero el cajón sólo ve billetes — misma regla que `refund.dashboard`, que pasa el
+    // TOTAL con un comentario explícito. Con el split a medias el esperado queda $20
+    // arriba y el cierre le inventa un faltante de $20 al cajero.
+    armar('CASH', 20)
+    await fn(VENUE, cuerpo(32000)).catch(() => {}) // el body de la PAX viene en CENTAVOS
+    expect(postCashRefundToDrawer).toHaveBeenCalledTimes(1)
+    const arg = (postCashRefundToDrawer as jest.Mock).mock.calls[0][0]
+    expect(Math.abs(Number(arg.amount))).toBeCloseTo(320, 2)
   })
 
   it('🔴 un reembolso de TARJETA no toca el cajón', async () => {

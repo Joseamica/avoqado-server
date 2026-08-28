@@ -1,3 +1,4 @@
+import { Decimal } from '@prisma/client/runtime/library'
 import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { logAction } from '../services/dashboard/activity-log.service'
@@ -167,7 +168,9 @@ async function findSessionsCoveringDb(venueId: string, at: Date): Promise<Sessio
   })
 }
 
-const defaults: Dependencies = {
+// Se exporta para poder probar los posts REALES: los tests del barrido inyectan
+// dependencias, así que sin esto `postSale`/`postRefund` nunca se ejercitan.
+export const defaults: Dependencies = {
   now: () => new Date(),
   retryEntry: retry,
   findUnpostedCashPayments: findUnpostedCashPaymentsDb,
@@ -194,7 +197,10 @@ const defaults: Dependencies = {
       venueId: p.venueId,
       refundPaymentId: p.id,
       orderId: p.orderId,
-      amount: p.amount as never,
+      // 🔴 Venta + propina: el cajón sólo ve billetes y el CASH_SALE original entró como la
+      // SUMA. Reponer sólo `amount` deja el esperado arriba por la propina, y como el repost
+      // es idempotente por `localId` ese faltante inventado ya no se puede corregir.
+      amount: new Decimal(String(p.amount ?? 0)).plus(new Decimal(String(p.tipAmount ?? 0))),
       method: p.method,
       fundsFlow: p.fundsFlow,
       tenderTypeId: p.tenderTypeId,

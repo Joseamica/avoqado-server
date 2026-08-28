@@ -301,7 +301,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `ReferralRewardGrant` → `schema.prisma:L7365`
 - `ReferralTierReward` → `schema.prisma:L7337`
 - `ReferralTierUnlock` → `schema.prisma:L7410`
-- `RefreshGrant` → `schema.prisma:L16987`
+- `RefreshGrant` → `schema.prisma:L16991`
 - `Reservation` → `schema.prisma:L12789`
 - `ReservationGoogleEventMapping` → `schema.prisma:L13559`
 - `ReservationModifier` → `schema.prisma:L12969`
@@ -316,7 +316,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `SerializedItem` → `schema.prisma:L11273`
 - `SerializedItemCustodyEvent` → `schema.prisma:L11437`
 - `ServiceCharge` → `schema.prisma:L7874`
-- `Session` → `schema.prisma:L16966`
+- `Session` → `schema.prisma:L16970`
 - `SettlementConfiguration` → `schema.prisma:L6340`
 - `SettlementConfirmation` → `schema.prisma:L6453`
 - `SettlementIncident` → `schema.prisma:L6404`
