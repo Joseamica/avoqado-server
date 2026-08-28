@@ -3,17 +3,17 @@
  *
  * NEW FEATURE: hoy el JWT de un socket se verifica UNA sola vez, en el handshake, y el
  * contexto queda estático (`authentication.middleware.ts`) — una conexión abierta sobrevive
- * tanto al VENCIMIENTO del token como a la REVOCACIÓN de la sesión. Esta suite fija tres
- * cosas:
+ * tanto al VENCIMIENTO del token como a la REVOCACIÓN de la sesión. Esta suite fija:
  *
  * 1. El handshake rechaza una sesión revocada (mismo contrato que
  *    `authenticateToken.middleware.ts`, ver `authenticateToken.session.test.ts`): un token
  *    con `sid` se valida contra `isSessionAliveCached`; un token LEGACY (sin `sid`) sigue
  *    conectando exactamente como hoy, SIN tocar la caché — hay tokens vivos así en
  *    dashboard, PAX, Android e iOS.
- * 2. Al conectar se programa el cierre del socket para cuando venza `exp` del propio JWT —
- *    un access robado no puede abrir un socket y mantenerlo vivo para siempre. El
- *    temporizador se limpia en `disconnect` (no debe quedar corriendo de más).
+ * 2. Mientras el socket sigue abierto, se REVALIDA periódicamente (cada
+ *    `REVALIDATION_INTERVAL_MS`, sobre el MISMO socket) que la sesión sigue viva y el
+ *    token no venció — y sólo entonces se desconecta. El intervalo se limpia en
+ *    `disconnect` (no debe quedar corriendo de más).
  * 3. `SocketManager.disconnectBySession(sid)` cierra, sobre el registro LOCAL de sockets
  *    (correcto y suficiente: producción corre UNA sola instancia — `.claude/rules/
  *    una-sola-instancia.md` — así que todo socket vivo de esa sesión está en este mismo
@@ -29,14 +29,25 @@
  * `Socket extends EventEmitter`, así que `.on`/`.disconnect`/`.emit` viven en el
  * PROTOTIPO — un spread sólo copia propiedades PROPIAS y los pierde en silencio
  * (verificado con un `EventEmitter` real: `{...emitter}.on` sale `undefined`). Nada los
- * llamaba antes, así que el hueco era invisible; el candado de vencimiento de esta tarea
+ * llamaba antes, así que el hueco era invisible; el candado de revalidación de esta tarea
  * SÍ los llama (`socket.on('disconnect', …)`, `socket.disconnect()`), así que sin
  * arreglarlo el re-auth manual habría empezado a fallar con "Invalid or expired token"
  * para CUALQUIER token, incluido uno perfectamente válido.
+ *
+ * 🔴 5ª cosa — SEGUNDA ronda de revisión: la primera versión de esta tarea cerraba el
+ * socket con un temporizador único (tope de 24h o `exp` real). Eso rompía algo que no se
+ * había visto: cuando el SERVIDOR cierra un socket de Socket.IO, la razón viaja como
+ * `"io server disconnect"`, y los clientes (JS y Java) SE SALTAN la reconexión automática
+ * para esa razón a propósito — ninguno de nuestros clientes reconecta solo. Con un tope de
+ * 24h, una terminal PAX se quedaba muda cada día sin ningún error visible. La respuesta:
+ * revalidar sin cerrar sockets sanos (ver `REVALIDATION_INTERVAL_MS` en
+ * `authentication.middleware.ts`). Esta suite ya NO prueba "se cierra al vencer el tope" —
+ * prueba lo contrario: un socket sano NUNCA se cierra, y sólo se cierra cuando la
+ * revalidación misma encuentra un motivo real.
  */
 import { EventEmitter } from 'events'
 import jwt from 'jsonwebtoken'
-import { socketAuthenticationMiddleware, SOCKET_LIFETIME_CAP_MS } from '@/communication/sockets/middleware/authentication.middleware'
+import { socketAuthenticationMiddleware, REVALIDATION_INTERVAL_MS } from '@/communication/sockets/middleware/authentication.middleware'
 import { SocketManager } from '@/communication/sockets/managers/socketManager'
 import { ConnectionController } from '@/communication/sockets/controllers/connection.controller'
 import { RoomManagerService } from '@/communication/sockets/services/roomManager.service'
@@ -124,29 +135,38 @@ describe('socketAuthenticationMiddleware — sesiones revocables', () => {
     expect(socket.authContext).toMatchObject({ userId: 'st1', venueId: 'v1', sessionId: 's1' })
   })
 
-  it('🔴 programa el cierre de la conexion al vencer exp', async () => {
+  // ────────────────────────────────────────────────────────────────────────────────
+  // 🔴 [CRÍTICO, primera ronda] `setTimeout` usa un entero de 32 bits: Node CLAMPA A
+  // 1 MS cualquier delay mayor a 2_147_483_647 ms (~24.8 días). El token de la PAX
+  // dura 30 días EXACTOS (TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS, security.ts) y también
+  // dashboard/móvil con "recuérdame" y los tokens de cliente/consumidor
+  // (jwt.service.ts, expiresIn: 2592000) — los cuatro superan el límite.
+  //
+  // 🔴 [CRÍTICO, segunda ronda] La primera corrección (tope de 24h) desbordaba menos,
+  // pero cerraba sockets SANOS — y ni socket.io-client (JS) ni socket.io-client-java
+  // reconectan solos cuando es el SERVIDOR quien cierra (`reason: "io server
+  // disconnect"`, ambos lo saltan a propósito). Con eso, una terminal PAX se quedaba
+  // muda cada día sin un solo error visible. La versión final NUNCA cierra un socket
+  // sano — revalida cada `REVALIDATION_INTERVAL_MS` sobre el MISMO socket, y sólo
+  // desconecta cuando la revalidación misma encuentra un motivo real.
+  // ────────────────────────────────────────────────────────────────────────────────
+
+  it('🔴 [CRÍTICO] un socket sano (sesion viva, token no vencido) NUNCA se cierra — ni con el viejo tope de 24h', async () => {
     jest.useFakeTimers()
     try {
       ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(true)
-      const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + 600 })
+      const TREINTA_DIAS_SEGUNDOS = 60 * 60 * 24 * 30 // TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS
+      const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + TREINTA_DIAS_SEGUNDOS })
 
       await socketAuthenticationMiddleware(sock, jest.fn())
-      jest.advanceTimersByTime(601_000)
 
-      expect(sock.disconnect).toHaveBeenCalled()
-    } finally {
-      jest.useRealTimers()
-    }
-  })
-
-  it('no cierra la conexion ANTES de que venza exp', async () => {
-    jest.useFakeTimers()
-    try {
-      ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(true)
-      const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + 600 })
-
-      await socketAuthenticationMiddleware(sock, jest.fn())
-      jest.advanceTimersByTime(599_000)
+      // 25h: más allá del tope de la primera corrección (24h). La sesión sigue "viva"
+      // todo el tiempo (mock constante) — un socket sano no tiene por qué cerrarse
+      // jamás, así que 25h, 25 días o 25 meses darían el mismo resultado.
+      // advanceTimersByTimeAsync (no la versión síncrona): la revalidación es async
+      // (`await isSessionAliveCached`) y cada uno de los ~150 disparos del intervalo
+      // (25h / 10min) necesita que su microtarea drene antes del siguiente.
+      await jest.advanceTimersByTimeAsync(25 * 60 * 60 * 1000)
 
       expect(sock.disconnect).not.toHaveBeenCalled()
     } finally {
@@ -154,56 +174,7 @@ describe('socketAuthenticationMiddleware — sesiones revocables', () => {
     }
   })
 
-  it('🔴 limpia el temporizador de vencimiento al desconectarse — no se dispara de mas', async () => {
-    jest.useFakeTimers()
-    try {
-      ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(true)
-      const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + 600 })
-
-      await socketAuthenticationMiddleware(sock, jest.fn())
-
-      // El socket se registró para limpiar el temporizador en 'disconnect' — lo simulamos
-      // disparando el handler que la implementación registró con socket.on.
-      const handlerDeDisconnect = sock.on.mock.calls.find(([evento]) => evento === 'disconnect')?.[1]
-      expect(handlerDeDisconnect).toBeDefined()
-      handlerDeDisconnect()
-
-      jest.advanceTimersByTime(601_000)
-
-      // El temporizador ya se limpió: disconnect() NO se vuelve a llamar por vencimiento.
-      expect(sock.disconnect).not.toHaveBeenCalled()
-    } finally {
-      jest.useRealTimers()
-    }
-  })
-
-  // ────────────────────────────────────────────────────────────────────────────────
-  // 🔴 [CRÍTICO, hallazgo de revisión] `setTimeout` usa un entero de 32 bits: Node
-  // CLAMPA A 1 MS cualquier delay mayor a 2_147_483_647 ms (~24.8 días). El token de
-  // la PAX dura 30 días EXACTOS (TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS, security.ts) y
-  // también dashboard/móvil con "recuérdame" y los tokens de cliente/consumidor
-  // (jwt.service.ts, expiresIn: 2592000) — los cuatro superan el límite. Sin tope,
-  // CUALQUIER socket de una terminal PAX se desconectaba a los milisegundos de
-  // autenticar, no a los 30 días.
-  // ────────────────────────────────────────────────────────────────────────────────
-  it('🔴 [CRÍTICO] un exp de 30 dias (token real de la PAX) NO desconecta el socket casi de inmediato', async () => {
-    // Sin fake timers, a propósito: el bug es el CLAMP nativo de Node sobre el
-    // setTimeout real — con fake timers el mock no clampa nada, sólo espera lo que se
-    // le pida, así que no reproduce el síntoma. Se prueba con timers REALES y una
-    // espera corta: si el código sigue roto, el socket ya estará desconectado a los
-    // pocos milisegundos (verificado a mano con `node -e`: se dispara en ~11ms); si
-    // está arreglado, no.
-    ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(true)
-    const TREINTA_DIAS_SEGUNDOS = 60 * 60 * 24 * 30 // TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS
-    const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + TREINTA_DIAS_SEGUNDOS })
-
-    await socketAuthenticationMiddleware(sock, jest.fn())
-    await new Promise(resolve => setTimeout(resolve, 100))
-
-    expect(sock.disconnect).not.toHaveBeenCalled()
-  })
-
-  it('🔴 el candado de vencimiento tiene un TOPE — no encadena hasta los 30 dias completos del exp', async () => {
+  it('🔴 desconecta en la SIGUIENTE revalidacion si la sesion se revoca a media vida', async () => {
     jest.useFakeTimers()
     try {
       ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(true)
@@ -212,13 +183,86 @@ describe('socketAuthenticationMiddleware — sesiones revocables', () => {
 
       await socketAuthenticationMiddleware(sock, jest.fn())
 
-      // Un instante antes del tope: todavía no se desconecta (no es un clamp a 1ms).
-      jest.advanceTimersByTime(SOCKET_LIFETIME_CAP_MS - 1_000)
+      // Una vuelta con la sesión todavía viva: no pasa nada.
+      await jest.advanceTimersByTimeAsync(REVALIDATION_INTERVAL_MS)
       expect(sock.disconnect).not.toHaveBeenCalled()
 
-      // Al llegar al tope: se desconecta, aunque al exp real le falten ~29 días.
-      jest.advanceTimersByTime(1_000)
-      expect(sock.disconnect).toHaveBeenCalled()
+      // La sesión se revoca DESPUÉS de conectar (a media vida del socket) — como si
+      // alguien hubiera tocado "cerrar sesión" mientras la terminal seguía prendida.
+      ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(false)
+      await jest.advanceTimersByTimeAsync(REVALIDATION_INTERVAL_MS)
+
+      expect(sock.disconnect).toHaveBeenCalledWith(true)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('🔴 limpia el intervalo de revalidacion al desconectarse — no se dispara de mas', async () => {
+    jest.useFakeTimers()
+    try {
+      ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(true)
+      const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + 60 * 60 * 24 * 30 })
+
+      await socketAuthenticationMiddleware(sock, jest.fn())
+      const llamadasAlConectar = (sessionCache.isSessionAliveCached as jest.Mock).mock.calls.length
+
+      // El socket se registró para limpiar el intervalo en 'disconnect' — lo simulamos
+      // disparando el handler que la implementación registró con socket.on.
+      const handlerDeDisconnect = sock.on.mock.calls.find(([evento]) => evento === 'disconnect')?.[1]
+      expect(handlerDeDisconnect).toBeDefined()
+      handlerDeDisconnect()
+
+      // Varias vueltas de sobra — si el intervalo no se hubiera limpiado, cada una
+      // habría llamado isSessionAliveCached otra vez.
+      await jest.advanceTimersByTimeAsync(REVALIDATION_INTERVAL_MS * 5)
+
+      expect((sessionCache.isSessionAliveCached as jest.Mock).mock.calls.length).toBe(llamadasAlConectar)
+      expect(sock.disconnect).not.toHaveBeenCalled() // el disconnect fue simulado, no forzado por el candado
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('🔴 un LEGACY sin sid tambien se desconecta cuando SU exp vence — pero jamas consulta la sesion', async () => {
+    jest.useFakeTimers()
+    try {
+      // 15 min: entre la primera vuelta (10 min, exp aún no vence) y la segunda
+      // (20 min, exp ya vencido) — separa a propósito las dos revalidaciones.
+      const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', exp: ahora() + 15 * 60 })
+
+      await socketAuthenticationMiddleware(sock, jest.fn())
+      expect(sessionCache.isSessionAliveCached).not.toHaveBeenCalled() // legacy: nunca en el handshake
+
+      await jest.advanceTimersByTimeAsync(REVALIDATION_INTERVAL_MS) // 10 min — exp (15 min) aún no llega
+      expect(sock.disconnect).not.toHaveBeenCalled()
+
+      await jest.advanceTimersByTimeAsync(REVALIDATION_INTERVAL_MS) // 20 min — exp ya pasó
+      expect(sock.disconnect).toHaveBeenCalledWith(true)
+
+      // Ni en el handshake ni en ninguna de las dos vueltas: un legacy no tiene sid,
+      // así que la revalidación periódica nunca tuvo sesión que consultar.
+      expect(sessionCache.isSessionAliveCached).not.toHaveBeenCalled()
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('🔴 falla CERRADO si la revalidacion truena (la base cae, etc.) — nunca se deja el socket abierto "por si acaso"', async () => {
+    jest.useFakeTimers()
+    try {
+      ;(sessionCache.isSessionAliveCached as jest.Mock)
+        .mockResolvedValueOnce(true) // el handshake: la sesión vive, el socket conecta
+        .mockRejectedValueOnce(new Error('la base no responde')) // la revalidación periódica truena
+      const sock = handshake({ sub: 'st1', venueId: 'v1', role: 'CASHIER', sid: 's1', exp: ahora() + 60 * 60 * 24 * 30 })
+
+      await socketAuthenticationMiddleware(sock, jest.fn())
+      expect(sock.disconnect).not.toHaveBeenCalled() // el handshake conectó normal
+
+      await jest.advanceTimersByTimeAsync(REVALIDATION_INTERVAL_MS)
+
+      // Mismo criterio que sessionCache.ts: un error NUNCA se traduce en "dejar pasar".
+      expect(sock.disconnect).toHaveBeenCalledWith(true)
     } finally {
       jest.useRealTimers()
     }
