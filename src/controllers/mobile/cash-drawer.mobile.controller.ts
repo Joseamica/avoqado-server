@@ -217,7 +217,8 @@ export const syncEvents = async (req: Request, res: Response, next: NextFunction
       return res.status(400).json({ success: false, message: 'events array es requerido' })
     }
 
-    const result = await cashDrawerService.syncEvents(venueId, events)
+    const appVersion = (req.headers['x-app-version'] as string | undefined) ?? null
+    const result = await cashDrawerService.syncEvents(venueId, events, appVersion)
 
     return res.json({ success: true, ...result })
   } catch (error) {

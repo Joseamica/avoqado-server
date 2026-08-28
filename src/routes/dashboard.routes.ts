@@ -70,6 +70,7 @@ import {
 import * as promotionDashboardController from '../controllers/dashboard/promotion.dashboard.controller'
 import * as couponController from '../controllers/dashboard/coupon.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
+import * as cashDrawerController from '../controllers/dashboard/cashDrawer.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
@@ -7964,6 +7965,23 @@ router.get('/venues/:venueId/shifts/summary', authenticateTokenMiddleware, check
  */
 router.get('/venues/:venueId/shifts/:shiftId', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShift)
 
+// ── Cajón físico (CashDrawerSession) — SÓLO LECTURA ─────────────────────────────────────
+// Fase 1 de la unificación de caja (auditoría 27-ago). El cajón lo escriben Android y la TPV
+// (`cashDrawerPosting`) y hasta hoy sólo tenía rutas /mobile: el dueño no podía ver el
+// arqueo desde ningún lado. Mismo permiso que el arqueo de la PAX: es el mismo dato.
+router.get(
+  '/venues/:venueId/cash-drawer/status',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:read'),
+  cashDrawerController.getDrawerStatus,
+)
+router.get(
+  '/venues/:venueId/cash-drawer/sessions',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:read'),
+  cashDrawerController.getDrawerSessions,
+)
+
 /**
  * @openapi
  * /api/v1/dashboard/venues/{venueId}/shifts/{shiftId}:
@@ -8041,7 +8059,7 @@ router.get('/notifications', authenticateTokenMiddleware, notificationController
 
 // ===== Anuncios de plataforma (aditivo: el buzon de /notifications NO se toca) =====
 // 🔴 /banner va ANTES de /:id — si no, Express lee "banner" como un id.
-router.get('/announcements/banner', authenticateTokenMiddleware, announcementReadController.banner)
+router.get('/announcements/home', authenticateTokenMiddleware, announcementReadController.home)
 router.get('/announcements/:id', authenticateTokenMiddleware, announcementReadController.getDetail)
 router.post('/announcements/:id/open', authenticateTokenMiddleware, announcementReadController.open)
 router.post('/announcements/:id/cta', authenticateTokenMiddleware, announcementReadController.cta)

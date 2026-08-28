@@ -16763,6 +16763,15 @@ model PlatformAnnouncement {
   // Dónde se ve, además del buzón
   showAsBanner Boolean @default(false)
 
+  /// Interrumpe con una ventana la próxima vez que la persona entre. Se cierra UNA vez
+  /// (al cerrarla su aviso queda leído) y después vive sólo en la campana.
+  ///
+  /// 🔴 Es por anuncio, no global (decisión del founder, 2026-08-27): si todos los
+  /// anuncios interrumpen, la gente aprende a cerrarlos sin leer y se pierde justo el
+  /// canal que se está construyendo. Se reserva para lo que no se puede perder — un
+  /// cambio de precios, una fecha límite.
+  showAsModal Boolean @default(false)
+
   // Vigencia
   status       PlatformAnnouncementStatus @default(DRAFT)
   publishedAt  DateTime?

@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { issueApplePass } from '../../services/wallet/walletPass.service'
 import { buildAndSignPassForCustomer } from '../../services/wallet/issuePass.service'
+import { getPublicCardInfo } from '../../services/wallet/publicCardInfo.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { env } from '../../config/env'
 
@@ -63,6 +64,27 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
     res.setHeader('Content-Type', 'application/vnd.apple.pkpass')
     res.setHeader('Content-Disposition', `attachment; filename="${venue.name}.pkpass"`)
     res.send(buffer)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/public/venues/:venueSlug/stamp-card
+ *
+ * La marca del negocio y si tiene sellos — lo que la pagina publica de la tarjeta
+ * necesita para dibujarse ANTES de que el cliente se identifique.
+ *
+ * 🔴 Deliberadamente NO pasa por el camino de reservaciones. Ese tiene un candado que
+ * cierra el widget entero cuando el negocio no acepta citas, y una tarjeta de sellos
+ * no depende de eso: un café con sellos y sin reservas debe poder repartir tarjetas.
+ */
+export async function getStampCardInfo(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueSlug } = req.params
+    const info = await getPublicCardInfo(venueSlug)
+    if (!info) throw new NotFoundError('Negocio no encontrado')
+    res.json(info)
   } catch (error) {
     next(error)
   }

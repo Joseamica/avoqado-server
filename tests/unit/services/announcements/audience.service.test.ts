@@ -71,13 +71,39 @@ describe('audience.service', () => {
     expect(mockFindMany).not.toHaveBeenCalled()
   })
 
-  // ===== REGRESION / RIESGO DE NEGOCIO =====
-  it('un venue SIN plan nunca cae en un filtro por plan', async () => {
+  // 🔴 Decision del founder (27-ago), y salio de un caso real: publico un anuncio
+  // filtrando por GRATIS y no le llego a 11 de sus 14 negocios activos, porque tienen
+  // `planTier` NULL. El dashboard les pinta la etiqueta "Free", asi que la diferencia
+  // entre "sin plan" y "Gratis" es invisible desde afuera.
+  it('un venue SIN plan cuenta como GRATIS', async () => {
     mockFindMany.mockResolvedValue([])
     await resolveAudience({ ...sinFiltros, targetPlanTiers: [PlanTier.GRATIS] })
     const where = mockFindMany.mock.calls[0][0].where
-    expect(where.venue.planTier).toEqual({ in: [PlanTier.GRATIS] })
-    expect(JSON.stringify(where)).not.toContain('null')
+    expect(where.venue.OR).toEqual([{ planTier: { in: [PlanTier.GRATIS] } }, { planTier: null }])
+    expect(where.venue.planTier).toBeUndefined()
+  })
+
+  it('filtrar por PRO NO arrastra a los que no tienen plan', async () => {
+    mockFindMany.mockResolvedValue([])
+    await resolveAudience({ ...sinFiltros, targetPlanTiers: [PlanTier.PRO] })
+    const where = mockFindMany.mock.calls[0][0].where
+    expect(where.venue.planTier).toEqual({ in: [PlanTier.PRO] })
+    expect(where.venue.OR).toBeUndefined()
+  })
+
+  it('GRATIS junto a otro plan tambien incluye a los sin plan', async () => {
+    mockFindMany.mockResolvedValue([])
+    await resolveAudience({ ...sinFiltros, targetPlanTiers: [PlanTier.GRATIS, PlanTier.PRO] })
+    const where = mockFindMany.mock.calls[0][0].where
+    expect(where.venue.OR).toEqual([{ planTier: { in: [PlanTier.GRATIS, PlanTier.PRO] } }, { planTier: null }])
+  })
+
+  // ===== REGRESION / RIESGO DE NEGOCIO =====
+  it('el filtro por plan sigue acotando: PREMIUM no alcanza a nadie mas', async () => {
+    mockFindMany.mockResolvedValue([])
+    await resolveAudience({ ...sinFiltros, targetPlanTiers: [PlanTier.PREMIUM] })
+    const where = mockFindMany.mock.calls[0][0].where
+    expect(where.venue.planTier).toEqual({ in: [PlanTier.PREMIUM] })
   })
 })
 

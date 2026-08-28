@@ -105,6 +105,13 @@ export interface CashSaleDrawerPosting extends TenderSemanticsPayment {
   staffId?: string | null
   staffName?: string | null
   orderId?: string | null
+  /**
+   * Fase 3 (barrido de reconciliación): la sesión EXACTA en la que ocurrió el movimiento. Sin
+   * esto el helper toma la caja OPEN de AHORA — correcto para el cobro inline, pero un barrido
+   * que repone una venta del martes la metería en la caja abierta del jueves. El barrido
+   * resuelve la sesión por ventana [openedAt, closedAt] y la pasa aquí.
+   */
+  targetSessionId?: string | null
 }
 
 export type CashSaleDrawerOutcome =
@@ -152,10 +159,15 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
     // efectivo: un movimiento de caja en cero sólo ensucia el listado del corte.
     if (total.lessThanOrEqualTo(0)) return 'NOT_DRAWER_CASH'
 
-    const session = await prisma.cashDrawerSession.findFirst({
-      where: { venueId: posting.venueId, status: 'OPEN' },
-      select: { id: true },
-    })
+    const session = posting.targetSessionId
+      ? await prisma.cashDrawerSession.findFirst({
+          where: { id: posting.targetSessionId, venueId: posting.venueId },
+          select: { id: true },
+        })
+      : await prisma.cashDrawerSession.findFirst({
+          where: { venueId: posting.venueId, status: 'OPEN' },
+          select: { id: true },
+        })
     // 🔴 FAIL-OPEN: sin caja abierta no pasa nada y el cobro sigue. La caja PREVIENE
     // descuadres, no autoriza ventas.
     if (!session) return 'NO_OPEN_DRAWER'
@@ -255,6 +267,13 @@ export interface CashRefundDrawerPosting extends TenderSemanticsPayment {
   orderId?: string | null
   /** Motivo, ya legible. La nota final la arma este archivo con el prefijo del contrato. */
   reason?: string | null
+  /**
+   * Fase 3 (barrido de reconciliación): la sesión EXACTA en la que ocurrió el movimiento. Sin
+   * esto el helper toma la caja OPEN de AHORA — correcto para el cobro inline, pero un barrido
+   * que repone una venta del martes la metería en la caja abierta del jueves. El barrido
+   * resuelve la sesión por ventana [openedAt, closedAt] y la pasa aquí.
+   */
+  targetSessionId?: string | null
 }
 
 export type CashRefundDrawerOutcome = CashSaleDrawerOutcome
@@ -301,10 +320,15 @@ export async function postCashRefundToDrawer(posting: CashRefundDrawerPosting): 
     const total = new Decimal(String(posting.amount ?? 0)).abs()
     if (total.lessThanOrEqualTo(0)) return 'NOT_DRAWER_CASH'
 
-    const session = await prisma.cashDrawerSession.findFirst({
-      where: { venueId: posting.venueId, status: 'OPEN' },
-      select: { id: true },
-    })
+    const session = posting.targetSessionId
+      ? await prisma.cashDrawerSession.findFirst({
+          where: { id: posting.targetSessionId, venueId: posting.venueId },
+          select: { id: true },
+        })
+      : await prisma.cashDrawerSession.findFirst({
+          where: { venueId: posting.venueId, status: 'OPEN' },
+          select: { id: true },
+        })
     // 🔴 FAIL-OPEN: sin caja abierta no pasa nada y el reembolso sigue su curso. La caja
     // jamás puede impedir devolverle su dinero a un cliente.
     if (!session) return 'NO_OPEN_DRAWER'

@@ -6,6 +6,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { getExpectedCashAmount, getCloseoutHistory } from '@/services/dashboard/cashCloseout.dashboard.service'
+import { getDrawerStatus, getDrawerSessions } from '@/services/dashboard/cashDrawer.dashboard.service'
 
 const money = (d: { toString(): string } | null): number | null => (d == null ? null : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -69,6 +70,35 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
           cashDifference: money(s.cashDifference),
         })),
       })
+    },
+  )
+
+  // ── Cajón físico — fase 1 de la unificación de caja (auditoría 27-ago) ─────────────────
+  // `list_shifts` es la PAX (Shift); esto es el cajón que escriben Android y la TPV al cobrar.
+  // Hasta hoy el MCP no podía leerlo. Mismo permiso que el arqueo de la PAX: es el mismo dato.
+  server.tool(
+    'get_cash_drawer_status',
+    'The PHYSICAL cash drawer right now (caja física) for a venue you can access: whether a drawer is open, who opened it and when, starting cash, cash sales, pay-ins/pay-outs, and the EXPECTED cash — the same number the cashier sees at close. Also reports anomalies (e.g. more than one drawer open at once). This is the drawer written by the Android POS and by the terminal on every cash sale; it is NOT the shift (turno) of list_shifts. Answers "¿está abierta la caja? ¿cuánto efectivo debería haber ahorita?". Pass venueId. Read-only.',
+    { venueId: z.string().describe('Venue whose physical drawer to read (must be in your scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('shifts:read', venueId)
+      return text({ venueId, ...(await getDrawerStatus(venueId)) })
+    },
+  )
+
+  server.tool(
+    'list_cash_drawer_sessions',
+    'History of PHYSICAL cash drawer sessions (arqueos de caja) for a venue you can access, newest first, open and closed alike. Each session: who opened/closed it and when, device, starting cash, cash sales, pay-ins, pay-outs, expected cash, whether the cashier actually COUNTED at close (`counted`), the counted amount and the over/short (positive = sobrante, negative = faltante). A session with counted=false was closed WITHOUT counting — never treat it as reconciled. Answers "¿hubo faltante ayer? ¿quién cerró la caja el martes? ¿cuántas veces cerraron sin contar?". Pass venueId. Read-only.',
+    {
+      venueId: z.string().describe('Venue whose drawer sessions to read (must be in your scope)'),
+      page: z.number().int().positive().optional().describe('Page (default 1)'),
+      pageSize: z.number().int().positive().max(50).optional().describe('Sessions per page (default 20, max 50)'),
+    },
+    async ({ venueId, page, pageSize }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('shifts:read', venueId)
+      return text({ venueId, ...(await getDrawerSessions(venueId, { page: page ?? 1, pageSize: pageSize ?? 20 })) })
     },
   )
 

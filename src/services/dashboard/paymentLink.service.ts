@@ -1218,6 +1218,17 @@ export async function createStripePaymentIntentForPaymentLink(
  * reports if something exotic comes through. Add new mappings as we enable
  * more Stripe payment methods.
  */
+/**
+ * Fase 2 de la unificación de caja: TODO pago que entra por Stripe lo liquida Stripe → Avoqado,
+ * sin importar cómo lo pagó el cliente. OXXO se ledgea como CASH (`mapStripeMethodToPaymentMethod`)
+ * porque así lo reporta el banco, pero ese efectivo lo cobró OXXO al cliente: NUNCA entró al cajón
+ * del negocio. Sin este sello, el fallback legacy (`method === 'CASH'`) lo contaba como efectivo
+ * físico y el arqueo le exigía al cajero un dinero que jamás tuvo en la mano (auditoría 27-ago §2.2).
+ */
+export function fundsFlowForStripePayment(_stripeType: string | null | undefined): 'AVOQADO_PROCESSED' {
+  return 'AVOQADO_PROCESSED'
+}
+
 export function mapStripeMethodToPaymentMethod(
   stripeType: string | null | undefined,
 ): 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'CRYPTOCURRENCY' | 'OTHER' {
@@ -1663,11 +1674,14 @@ export async function finalizePaymentLinkCheckout(args: {
     // OXXO ledgered as CASH, SPEI as BANK_TRANSFER, etc. instead of every-
     // thing falling into CREDIT_CARD. Useful for revenue breakdowns later.
     const method = mapStripeMethodToPaymentMethod(args.stripePaymentMethodType)
+    const fundsFlow = fundsFlowForStripePayment(args.stripePaymentMethodType)
 
     const createdPayment = await tx.payment.create({
       data: {
         venueId,
         orderId: order.id,
+        // 🔴 Sello explícito: Stripe liquida este dinero. Ver fundsFlowForStripePayment.
+        fundsFlow,
         // Commission attribution. Payment.processedById gets the FIRST
         // attributed staff (used by receipts/reports as the "named seller").
         // The full split — 1/N per staff when there are multiple — is

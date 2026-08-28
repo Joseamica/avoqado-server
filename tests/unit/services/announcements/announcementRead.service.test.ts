@@ -5,6 +5,7 @@ import {
   recordOpen,
   recordCta,
   listAnnouncementsForStaff,
+  getActiveForHome,
 } from '../../../../src/services/announcements/announcementRead.service'
 import { ForbiddenError } from '../../../../src/errors/AppError'
 
@@ -77,44 +78,104 @@ describe('announcementRead.service', () => {
     })
   })
 
-  describe('getActiveBanner', () => {
-    const banner = (id: string, priority: string, publishedAt: Date) => ({ id, priority, publishedAt })
+  describe('el banner, dentro de getActiveForHome', () => {
+    const banner = (id: string, priority: string, publishedAt: Date) => ({
+      id,
+      priority,
+      publishedAt,
+      showAsBanner: true,
+      showAsModal: false,
+    })
 
+    // ===== CASOS NUEVOS =====
     it('el Home recibe UN solo banner, el que la base ordeno primero', async () => {
       mockAnnMany.mockResolvedValue([banner('a3', 'HIGH', new Date('2026-08-25')), banner('a1', 'NORMAL', new Date('2026-08-20'))])
       mockAcuseMany.mockResolvedValue([{ announcementId: 'a3' }, { announcementId: 'a1' }])
-      await expect(getActiveBanner('s1')).resolves.toMatchObject({ id: 'a3' })
+      mockNotifMany.mockResolvedValue([])
+      const r = await getActiveForHome('s1')
+      expect(r.banner?.id).toBe('a3')
     })
 
-    it('pide los banners activos a la BASE, con su orden', async () => {
+    it('pide los anuncios activos a la BASE, con su orden', async () => {
       mockAnnMany.mockResolvedValue([])
-      await getActiveBanner('s1')
+      await getActiveForHome('s1')
       const args = mockAnnMany.mock.calls[0][0]
       expect(args.where.status).toBe('PUBLISHED')
-      expect(args.where.showAsBanner).toBe(true)
       expect(args.where.OR).toEqual([{ expiresAt: null }, { expiresAt: { gt: expect.any(Date) } }])
+      expect(args.where.AND).toEqual([{ OR: [{ showAsBanner: true }, { showAsModal: true }] }])
       expect(args.orderBy).toEqual([{ priority: 'desc' }, { publishedAt: 'desc' }])
     })
 
-    // 🔴 P1: antes se tomaban los 50 avisos mas recientes y LUEGO se filtraba por banner,
-    // asi que 50 avisos normales escondian un banner vigente.
+    // 🔴 P1 de la auditoria: antes se tomaban los 50 avisos mas recientes y LUEGO se
+    // filtraba por banner, asi que 50 avisos normales escondian un banner vigente.
+    // El recorte va sobre anuncios activos, que son pocos por naturaleza.
     it('un banner vigente NO se esconde detras de avisos recientes', async () => {
       mockAnnMany.mockResolvedValue([banner('viejo-vigente', 'HIGH', new Date('2026-01-01'))])
       mockAcuseMany.mockResolvedValue([{ announcementId: 'viejo-vigente' }])
-      await expect(getActiveBanner('s1')).resolves.toMatchObject({ id: 'viejo-vigente' })
+      mockNotifMany.mockResolvedValue([])
+      const r = await getActiveForHome('s1')
+      expect(r.banner?.id).toBe('viejo-vigente')
     })
 
     it('no enseña un banner que no le repartieron', async () => {
       mockAnnMany.mockResolvedValue([banner('a1', 'HIGH', new Date())])
       mockAcuseMany.mockResolvedValue([])
-      await expect(getActiveBanner('s1')).resolves.toBeNull()
+      const r = await getActiveForHome('s1')
+      expect(r.banner).toBeNull()
+    })
+  })
+
+  describe('getActiveForHome — banner y ventana del inicio', () => {
+    const anuncio = (over = {}) => ({
+      id: 'a1',
+      title: 'Cambian los precios',
+      body: 'A partir del 1 de octubre.',
+      priority: 'HIGH',
+      showAsBanner: true,
+      showAsModal: false,
+      publishedAt: new Date(),
+      ...over,
+    })
+
+    // ===== CASOS NUEVOS =====
+    it('la ventana solo sale si el aviso NO esta leido', async () => {
+      mockAnnMany.mockResolvedValue([anuncio({ showAsModal: true })])
+      mockAcuseMany.mockResolvedValue([{ announcementId: 'a1' }])
+      mockNotifMany.mockResolvedValue([{ entityId: 'a1', isRead: false }])
+      const r = await getActiveForHome('s1')
+      expect(r.modal?.id).toBe('a1')
+    })
+
+    // 🔴 Lo que pidio el founder: se cierra UNA vez y despues vive en la campanita.
+    // Cerrar marca el aviso como leido, y por eso deja de interrumpir.
+    it('una vez leido, la ventana YA NO interrumpe', async () => {
+      mockAnnMany.mockResolvedValue([anuncio({ showAsModal: true })])
+      mockAcuseMany.mockResolvedValue([{ announcementId: 'a1' }])
+      mockNotifMany.mockResolvedValue([{ entityId: 'a1', isRead: true }])
+      const r = await getActiveForHome('s1')
+      expect(r.modal).toBeNull()
+    })
+
+    it('un anuncio puede ser banner sin ser ventana', async () => {
+      mockAnnMany.mockResolvedValue([anuncio({ showAsBanner: true, showAsModal: false })])
+      mockAcuseMany.mockResolvedValue([{ announcementId: 'a1' }])
+      mockNotifMany.mockResolvedValue([{ entityId: 'a1', isRead: false }])
+      const r = await getActiveForHome('s1')
+      expect(r.banner?.id).toBe('a1')
+      expect(r.modal).toBeNull()
+    })
+
+    it('sin acuse no sale ni banner ni ventana, aunque el anuncio exista', async () => {
+      mockAnnMany.mockResolvedValue([anuncio({ showAsModal: true })])
+      mockAcuseMany.mockResolvedValue([])
+      const r = await getActiveForHome('atacante')
+      expect(r).toEqual({ banner: null, modal: null })
     })
 
     // ===== REGRESION =====
-    it('sin banner activo devuelve null, no truena', async () => {
+    it('sin anuncios activos no truena', async () => {
       mockAnnMany.mockResolvedValue([])
-      await expect(getActiveBanner('s1')).resolves.toBeNull()
-      expect(mockAcuseMany).not.toHaveBeenCalled()
+      await expect(getActiveForHome('s1')).resolves.toEqual({ banner: null, modal: null })
     })
   })
 

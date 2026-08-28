@@ -7,6 +7,7 @@ import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
+import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 // La ÚNICA definición de "qué cuenta como pagado y cuánto se devolvió" — la
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
@@ -709,6 +710,7 @@ export async function settleOrder(
   // una orden de $100, con paidAmount pisado. Con el CAS sobre `version`, un
   // cambio entre la relectura y la transición hace count=0 y no se cobra nada.
   let postingId: string | null = null
+  let settlementPaymentId: string | null = null
   const settledAmount = await prisma.$transaction(async tx => {
     const fresh = await tx.order.findFirst({
       where: { id: orderId, venueId },
@@ -761,13 +763,16 @@ export async function settleOrder(
     }
 
     // Create a payment record to track the settlement
-    await tx.payment.create({
+    const settlementPayment = await tx.payment.create({
       data: {
         venueId,
         orderId,
         amount: toSettle,
         tipAmount: 0,
         method: 'CASH', // Default to cash for manual settlements
+        // 🔴 Decisión del founder (27-ago): el efectivo liquidado desde el dashboard SÍ entró
+        // al cajón. Sello explícito para no depender del fallback por método (fase 2).
+        fundsFlow: 'CASH_DRAWER',
         status: 'COMPLETED',
         feePercentage: 0,
         feeAmount: 0,
@@ -794,9 +799,36 @@ export async function settleOrder(
       staffId: null,
     })
     postingId = posting?.id ?? null
+    settlementPaymentId = settlementPayment.id
 
     return toSettle
   })
+
+  // Fase 2 de la unificación de caja: la liquidación en efectivo TAMBIÉN sube el cajón.
+  // Antes el reporte de ventas subía y el arqueo no ⇒ FALTANTE falso al cerrar. Va DESPUÉS
+  // del commit y falla abierto: el dinero ya está liquidado, el cajón sólo lo refleja.
+  if (settledAmount !== null && settlementPaymentId) {
+    try {
+      await postCashSaleToDrawer({
+        venueId,
+        paymentId: settlementPaymentId,
+        orderId,
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        amount: settledAmount,
+        tipAmount: 0,
+        method: 'CASH',
+        fundsFlow: 'CASH_DRAWER',
+        staffId: null,
+      })
+    } catch (err) {
+      logger.error('[CASH-DRAWER] Falló registrar la liquidación en el cajón (la liquidación NO se afecta)', {
+        orderId,
+        paymentId: settlementPaymentId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   if (settledAmount === null) {
     return {

@@ -18,6 +18,11 @@ Hace fila: un trabajo pesado a la vez en esta Mac, que corre con ~20 sesiones de
 dos lados y compara** (periodo de prueba hasta el 2026-09-01). Si dice `DIFIEREN` o `INCONCLUSO`, **ningún resultado vale**: investiga por
 qué y ajusta la regla.
 
+⚠️ **La única excepción conocida:** si el Alienware se queja de un campo de Prisma que SÍ existe en el `schema.prisma` y el local está
+limpio, gana el local y **no** se planta `forzar-dual`. Era la carrera del cliente de Prisma compartido entre worktrees, cerrada el
+2026-08-27; si vuelve a verse, es un hueco nuevo y hay que reportarlo. Prueba que lo cubre:
+`scripts/tests/avq-verify-prisma-client.test.sh`.
+
 Detalle completo: `Avoqado/CLAUDE.md`, sección "Verificación repartida".
 
 Agent configurations for Claude Code subagents working on this codebase. This file is NOT auto-loaded — read it when adopting a role.

@@ -61,44 +61,56 @@ export async function recordCta(announcementId: string, staffId: string, venueId
 }
 
 /**
- * El banner del Home.
+ * Lo que el inicio del dashboard necesita de una sola llamada: el banner y la ventana.
  *
- * 🔴 Devuelve UNO solo: gana la prioridad más alta y, a igualdad, el publicado más
- * reciente. Apilar banners convierte el Home en un tablero de avisos y deja de leerse
- * ninguno. Los demás siguen visibles en la campana.
+ * Son dos cosas distintas del MISMO anuncio o de anuncios distintos:
+ *  - `banner`: la tira en el Home. Discreto, convive con el trabajo.
+ *  - `modal`: la ventana que interrumpe. 🔴 Sólo mientras su aviso siga SIN LEER — al
+ *    cerrarla se marca leído, así que interrumpe una vez y después vive en la campana.
+ *    Es exactamente lo que pidió el founder, y lo que evita que la gente aprenda a
+ *    cerrar ventanas sin leerlas.
+ *
+ * Los dos pasan por el acuse de recibo: sin él no se enseña nada.
  */
-/**
- * El banner del Home.
- *
- * 🔴 Se consulta AL REVÉS de como estaba: primero los banners activos (son pocos por
- * naturaleza y hay índice `[status, showAsBanner]`), y después si a esta persona le
- * tocaron. La versión anterior tomaba los 50 avisos más recientes de la persona y LUEGO
- * filtraba por banner: cincuenta avisos normales nuevos escondían indefinidamente un
- * banner vigente (hallazgo P1 de la segunda auditoría).
- *
- * Devuelve UNO solo: gana la prioridad más alta y, a igualdad, el publicado más reciente.
- * Apilar banners convierte el Home en un tablero de avisos y deja de leerse ninguno.
- */
-export async function getActiveBanner(staffId: string) {
+export async function getActiveForHome(staffId: string) {
   const ahora = new Date()
-  const banners = await prisma.platformAnnouncement.findMany({
+  const activos = await prisma.platformAnnouncement.findMany({
     where: {
       status: PlatformAnnouncementStatus.PUBLISHED,
-      showAsBanner: true,
       OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
+      AND: [{ OR: [{ showAsBanner: true }, { showAsModal: true }] }],
     },
     orderBy: [{ priority: 'desc' }, { publishedAt: 'desc' }],
     take: 20,
   })
-  if (banners.length === 0) return null
+  if (activos.length === 0) return { banner: null, modal: null }
 
   const acuses = await prisma.platformAnnouncementDelivery.findMany({
-    where: { staffId, announcementId: { in: banners.map(b => b.id) } },
+    where: { staffId, announcementId: { in: activos.map(a => a.id) } },
     select: { announcementId: true },
   })
+  if (acuses.length === 0) return { banner: null, modal: null }
   const recibidos = new Set(acuses.map(a => a.announcementId))
 
-  return banners.find(b => recibidos.has(b.id)) ?? null
+  const mios = activos.filter(a => recibidos.has(a.id))
+  if (mios.length === 0) return { banner: null, modal: null }
+
+  // El estado de lectura decide si la ventana sigue interrumpiendo.
+  const avisos = await prisma.notification.findMany({
+    where: {
+      recipientId: staffId,
+      entityType: ENTITY,
+      type: NotificationType.ANNOUNCEMENT,
+      entityId: { in: mios.map(a => a.id) },
+    },
+    select: { entityId: true, isRead: true },
+  })
+  const sinLeer = new Set(avisos.filter(n => !n.isRead).map(n => n.entityId))
+
+  return {
+    banner: mios.find(a => a.showAsBanner) ?? null,
+    modal: mios.find(a => a.showAsModal && sinLeer.has(a.id)) ?? null,
+  }
 }
 
 /**

@@ -61,7 +61,7 @@ export async function deliverClaimed(ids: string[], opts: { now: Date }): Promis
     where: { id: { in: ids } },
     include: {
       announcement: {
-        select: { id: true, title: true, body: true, actionLabel: true, priority: true },
+        select: { id: true, title: true, body: true, actionLabel: true, actionUrl: true, priority: true },
       },
     },
   })
@@ -80,7 +80,12 @@ export async function deliverClaimed(ids: string[], opts: { now: Date }): Promis
           title: d.announcement.title,
           message: d.announcement.body,
           actionLabel: d.announcement.actionLabel ?? undefined,
-          actionUrl: `/announcements/${d.announcement.id}`,
+          // 🔴 NO se pone una ruta del detalle aquí. La versión anterior mandaba a
+          // `/announcements/<id>`, que sólo existe en el superadmin: en el dashboard del
+          // cliente daba 404 (lo encontró el founder el 27-ago). El detalle del anuncio
+          // se abre en un modal desde el propio buzón, reconociéndolo por `entityType`.
+          // Este campo queda para el botón que el anuncio traiga configurado, si trae.
+          actionUrl: d.announcement.actionUrl ?? undefined,
           entityType: 'PlatformAnnouncement',
           entityId: d.announcement.id,
           priority: d.announcement.priority,

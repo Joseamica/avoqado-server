@@ -494,7 +494,13 @@ interface SyncEvent {
  * Bulk sync events from mobile (for offline-first support).
  * Creates multiple events in a single transaction.
  */
-export async function syncEvents(venueId: string, events: SyncEvent[]) {
+/**
+ * `appVersion` (header `x-app-version`) sólo alimenta la MÉTRICA de compatibilidad: cuántos
+ * `CASH_SALE` empujan todavía las apps viejas y desde qué versión. Es lo que permite retirar el
+ * descarte de abajo por DATO (N días con `droppedCashSales = 0`) y no por "ya están todos
+ * actualizados" — decisión del founder (27-ago): nada de gates manuales, nada de código muerto.
+ */
+export async function syncEvents(venueId: string, events: SyncEvent[], appVersion?: string | null) {
   const session = await getOpenSession(venueId)
 
   if (!events || events.length === 0) {
@@ -613,7 +619,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
     action: 'CASH_DRAWER_SYNC',
     entity: 'CashDrawerSession',
     entityId: session.id,
-    data: { eventCount: insertedCount, receivedCount: events.length, source: 'MOBILE' },
+    data: { eventCount: insertedCount, receivedCount: events.length, droppedCashSales, appVersion: appVersion ?? null, source: 'MOBILE' },
   })
 
   // `createMany` no devuelve las filas: las del lote con llave se releen por su
@@ -662,7 +668,12 @@ async function getOpenSession(venueId: string) {
  *     no vuelve a entrar por el enganche de ventas.
  *   · `PAY_IN` — entradas a mano; siguen siendo del cliente.
  */
-function calculateExpectedAmount(session: any): number {
+/**
+ * Exportada para que el dashboard (`cashDrawer.dashboard.service`) muestre EXACTAMENTE el
+ * mismo esperado que vio el cajero al cerrar. Dos fórmulas = dos verdades para el mismo
+ * dinero, que es justo lo que la unificación de caja está quitando.
+ */
+export function calculateExpectedAmount(session: any): number {
   let expected = Number(session.startingAmount)
 
   for (const event of session.events) {

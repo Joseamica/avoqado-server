@@ -1,4 +1,5 @@
 import { PaymentType, TransactionStatus, CardBrand, CardEntryMode, Prisma } from '@prisma/client'
+import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -414,6 +415,32 @@ export async function recordRefund(
     originalPaymentId: refundData.originalPaymentId,
     amount: refundAmountInPesos,
   })
+
+  // Fase 2 de la unificación de caja: el reembolso en efectivo desde la TPV BAJA el cajón.
+  // Sus gemelos `refund.mobile` y `refund.dashboard` ya lo hacían; éste no, y devolver $200
+  // desde la PAX dejaba el esperado $200 arriba ⇒ SOBRANTE falso al cerrar. El helper decide
+  // con la semántica del pago REAL (fundsFlow → tender → legacy); tarjeta = NOT_DRAWER_CASH.
+  // Después del commit y fail-open: el dinero ya salió, el cajón sólo lo refleja.
+  try {
+    await postCashRefundToDrawer({
+      venueId,
+      refundPaymentId: result.id,
+      orderId: originalPayment.orderId ?? null,
+      amount: result.amount,
+      reason: refundData.reason ?? null,
+      method: originalPayment.method,
+      fundsFlow: (originalPayment as any).fundsFlow ?? null,
+      tenderTypeId: (originalPayment as any).tenderTypeId ?? null,
+      tenderCountsAsCash: (originalPayment as any).tenderCountsAsCash ?? null,
+      staffId: refundData.staffId ?? null,
+      staffName: null,
+    })
+  } catch (err) {
+    logger.error('[CASH-DRAWER] Falló registrar el reembolso en el cajón (el reembolso NO se afecta)', {
+      refundPaymentId: result.id,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
 
   void logAction({
     staffId: refundData.staffId ?? null,

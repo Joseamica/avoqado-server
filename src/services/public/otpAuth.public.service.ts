@@ -183,6 +183,43 @@ async function resolveIdentity(tx: Prisma.TransactionClient, venueId: string, ke
   const where = key.phone ? { venueId_phone: { venueId, phone: key.phone } } : { venueId_email: { venueId, email: key.email! } }
   let customer = await tx.customer.findUnique({ where: where as any })
   if (!customer) customer = await tx.customer.findFirst({ where: { venueId, consumerId: consumer.id } })
+
+  // 🔴 Tercer intento: por los ULTIMOS 10 DIGITOS del telefono.
+  //
+  // Los dos de arriba comparan el telefono normalizado a E.164 (`+525512345678`),
+  // pero los clientes que ya existen lo tienen guardado como lo escribio quien los dio
+  // de alta: `5512345678`, `55 1234 5678`, `(55) 1234-5678`. Sin este paso no se les
+  // reconoce y se les crea una ficha NUEVA: el cliente pierde sus sellos, sus puntos y
+  // su historial, y el negocio acaba con dos fichas de la misma persona.
+  //
+  // Medido en la base local el 2026-08-27: 681 de 682 clientes con telefono lo tienen
+  // SIN normalizar — o sea, practicamente todos. Salio al probar el cartel del
+  // mostrador, que es lo que va a mandar a TODOS los clientes por este camino.
+  //
+  // Es el MISMO patron que `findGuestNameFromPastReservations` ya usaba aqui abajo
+  // para las reservaciones: filtro barato en SQL por los ultimos 10 digitos, y
+  // `phonesMatch` como verificacion canonica — porque dos paises distintos pueden
+  // compartir esos 10 digitos y no son la misma persona.
+  if (!customer && key.phone) {
+    const last10 = phoneLast10(key.phone)
+    if (last10) {
+      const candidatos = await tx.$queryRaw<{ id: string; phone: string | null }[]>`
+        SELECT "id", "phone"
+        FROM "Customer"
+        WHERE "venueId" = ${venueId}
+          AND "phone" IS NOT NULL
+          AND right(regexp_replace("phone", '[^0-9]', '', 'g'), 10) = ${last10}
+        ORDER BY "createdAt" ASC
+        LIMIT 20
+      `
+      const elegido = candidatos.find(c => phonesMatch(c.phone, key.phone))
+      // Se relee por Prisma en vez de usar la fila cruda: el resto de la funcion
+      // espera el modelo completo (`active`, `consumerId`), no las dos columnas
+      // que pidio el filtro.
+      if (elegido) customer = await tx.customer.findUnique({ where: { id: elegido.id } })
+    }
+  }
+
   if (!customer) {
     const seededName = await findGuestNameFromPastReservations(tx, venueId, key)
     customer = await tx.customer.create({

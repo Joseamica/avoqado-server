@@ -95,6 +95,24 @@ describe('announcementOutbox.service', () => {
 
     // 🔴 El CAS: si otro worker tomo la fila mientras esta entregaba, el resultado
     // NO se acepta. Sin esto, dos workers marcarian SENT la misma fila.
+    // 🔴 Bug real encontrado por el founder (27-ago): el aviso apuntaba a
+    // `/announcements/<id>`, una ruta que SOLO existe en el superadmin. En el dashboard
+    // del cliente daba 404. El detalle se abre en un modal, no navegando.
+    it('NO manda al cliente a una ruta que no existe en su dashboard', async () => {
+      mockDelivFind.mockResolvedValue([entrega()])
+      await deliverClaimed(['d1'], { now: AHORA })
+      const data = mockNotifCreate.mock.calls[0][0].data
+      expect(data.actionUrl).toBeUndefined()
+    })
+
+    it('si el anuncio trae su propio boton, ese SI viaja', async () => {
+      mockDelivFind.mockResolvedValue([
+        entrega({ announcement: { ...entrega().announcement, actionUrl: 'https://avoqado.io/terminales' } }),
+      ])
+      await deliverClaimed(['d1'], { now: AHORA })
+      expect(mockNotifCreate.mock.calls[0][0].data.actionUrl).toBe('https://avoqado.io/terminales')
+    })
+
     it('el resultado se escribe con CAS sobre attempts y leaseUntil', async () => {
       mockDelivFind.mockResolvedValue([entrega()])
       await deliverClaimed(['d1'], { now: AHORA })

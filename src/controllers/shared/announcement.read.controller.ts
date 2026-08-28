@@ -5,7 +5,7 @@
  * `Notification` normal; estas rutas sólo sirven el detalle y registran la interacción.
  */
 import { Request, Response, NextFunction } from 'express'
-import { getAnnouncementForStaff, getActiveBanner, recordOpen, recordCta } from '../../services/announcements/announcementRead.service'
+import { getAnnouncementForStaff, getActiveForHome, recordOpen, recordCta } from '../../services/announcements/announcementRead.service'
 
 export const getDetail = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -17,10 +17,15 @@ export const getDetail = async (req: Request, res: Response, next: NextFunction)
   }
 }
 
-export const banner = async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * Lo que el inicio del dashboard pide de una sola vez: el banner y la ventana que
+ * interrumpe. Reemplaza al endpoint `/banner`, que sólo daba la mitad.
+ */
+export const home = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { userId } = (req as any).authContext
-    res.json({ success: true, data: { announcement: await getActiveBanner(userId) } })
+    const data = await getActiveForHome(userId)
+    res.json({ success: true, data })
   } catch (error) {
     next(error)
   }

@@ -390,6 +390,16 @@ const requireWalletPlan = checkPublicVenueFeature('LOYALTY_WALLET', 'Este negoci
 
 router.get('/venues/:venueSlug/wallet/apple/:customerId', readLimit, requireWalletPlan, walletPassController.downloadApplePass)
 
+// La marca del negocio y si tiene sellos, para la pagina publica de la tarjeta
+// (`book.avoqado.io/<negocio>/tarjeta`, la del cartel del mostrador).
+//
+// 🔴 Ruta propia y NO `/info`: aquella cierra con 400 cuando el negocio apago las
+// reservaciones publicas, y son 69 de 73 los negocios activos que ni siquiera las
+// tienen configuradas. Un café con sellos no puede quedar fuera de su propia tarjeta
+// por no aceptar citas. Mismo candado de PLAN que la descarga del pase, para que la
+// pagina no prometa algo que el ultimo paso va a negar.
+router.get('/venues/:venueSlug/stamp-card', readLimit, requireWalletPlan, walletPassController.getStampCardInfo)
+
 router.post(
   '/venues/:venueSlug/checkout/payment-intent',
   writeLimit,
