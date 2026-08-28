@@ -6,7 +6,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: {
     $queryRaw: jest.fn(),
     platformAnnouncementDelivery: { findMany: jest.fn(), updateMany: jest.fn() },
-    notification: { create: jest.fn() },
+    notification: { create: jest.fn(), findFirst: jest.fn() },
   },
 }))
 
@@ -14,6 +14,7 @@ const mockRaw = prisma.$queryRaw as unknown as jest.Mock
 const mockDelivFind = prisma.platformAnnouncementDelivery.findMany as unknown as jest.Mock
 const mockDelivUpdate = prisma.platformAnnouncementDelivery.updateMany as unknown as jest.Mock
 const mockNotifCreate = prisma.notification.create as unknown as jest.Mock
+const mockNotifFirst = prisma.notification.findFirst as unknown as jest.Mock
 
 const AHORA = new Date('2026-08-27T12:00:00.000Z')
 
@@ -38,6 +39,7 @@ describe('announcementOutbox.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockNotifCreate.mockResolvedValue({ id: 'n1' })
+    mockNotifFirst.mockResolvedValue(null)
     mockDelivUpdate.mockResolvedValue({ count: 1 })
   })
 
@@ -111,6 +113,25 @@ describe('announcementOutbox.service', () => {
       ])
       await deliverClaimed(['d1'], { now: AHORA })
       expect(mockNotifCreate.mock.calls[0][0].data.actionUrl).toBe('https://avoqado.io/terminales')
+    })
+
+    // 🔴 UN aviso por PERSONA, no uno por sucursal. El founder es dueño de 12 negocios y
+    // el mismo anuncio le llegaba 12 veces a la campana — que además NO filtra por
+    // sucursal, así que las veía todas juntas. Un anuncio de plataforma no pertenece a
+    // una sucursal: es para la persona.
+    it('no crea un aviso si esa persona ya tiene el de este anuncio', async () => {
+      mockDelivFind.mockResolvedValue([entrega()])
+      mockNotifFirst.mockResolvedValue({ id: 'ya-existe' })
+      await deliverClaimed(['d1'], { now: AHORA })
+      expect(mockNotifCreate).not.toHaveBeenCalled()
+    })
+
+    it('reusa el aviso que ya existe para marcar la entrega como enviada', async () => {
+      mockDelivFind.mockResolvedValue([entrega()])
+      mockNotifFirst.mockResolvedValue({ id: 'ya-existe' })
+      const r = await deliverClaimed(['d1'], { now: AHORA })
+      expect(r.sent).toBe(1)
+      expect(mockDelivUpdate.mock.calls[0][0].data.notificationId).toBe('ya-existe')
     })
 
     it('el resultado se escribe con CAS sobre attempts y leaseUntil', async () => {

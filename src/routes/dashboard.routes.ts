@@ -8063,6 +8063,7 @@ router.get('/announcements/home', authenticateTokenMiddleware, announcementReadC
 router.get('/announcements/:id', authenticateTokenMiddleware, announcementReadController.getDetail)
 router.post('/announcements/:id/open', authenticateTokenMiddleware, announcementReadController.open)
 router.post('/announcements/:id/cta', authenticateTokenMiddleware, announcementReadController.cta)
+router.post('/announcements/:id/dismiss', authenticateTokenMiddleware, announcementReadController.dismiss)
 
 /**
  * @openapi
@@ -8130,6 +8131,8 @@ router.patch('/notifications/mark-all-read', authenticateTokenMiddleware, notifi
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
+// 🔴 ANTES que `/:id`, si no Express toma la ruta sin id como si fuera un id.
+router.delete('/notifications', authenticateTokenMiddleware, notificationController.deleteAllNotifications)
 router.delete('/notifications/:id', authenticateTokenMiddleware, notificationController.deleteNotification)
 
 /**

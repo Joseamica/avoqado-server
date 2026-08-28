@@ -1,3 +1,4 @@
+import { calculateExpectedAmount } from '../mobile/cash-drawer.mobile.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -166,6 +167,42 @@ export async function getShifts(
       hasNextPage: page < totalPages,
       hasPrevPage: page > 1,
     },
+  }
+}
+
+/**
+ * Fase 5 de la unificación de caja: el arqueo del CAJÓN que cubrió este turno.
+ *
+ * `Shift` calculaba su propio "efectivo esperado" a partir de sus pagos y el cajón (Android +
+ * TPV) el suyo: dos números para el mismo dinero. Aquí el turno EXPONE el del cajón — campo
+ * nuevo y opcional, nada de lo que ya devolvía cambia. Una PAX vieja lo ignora; la nueva lo
+ * usa en vez de calcular aparte. Se elige la sesión del mismo venue cuya ventana
+ * [openedAt, closedAt] cubre el inicio del turno; si no hay, `null` y el turno se ve como hoy.
+ * `counted` es explícito: una caja cerrada sin conteo nunca se pinta como cuadrada.
+ */
+export async function resolveShiftCashDrawer(venueId: string, startTime: Date | null) {
+  if (!startTime) return null
+  const session = await prisma.cashDrawerSession.findFirst({
+    where: { venueId, openedAt: { lte: startTime }, OR: [{ closedAt: null }, { closedAt: { gte: startTime } }] },
+    include: { events: { orderBy: { createdAt: 'asc' } } },
+    orderBy: { openedAt: 'desc' },
+  })
+  if (!session) return null
+  const money = (v: unknown) => Number(Number(v).toFixed(2))
+  const counted = session.actualAmount !== null && session.actualAmount !== undefined
+  return {
+    sessionId: session.id,
+    status: session.status,
+    deviceName: session.deviceName ?? null,
+    openedByName: session.openedByName,
+    closedByName: session.closedByName ?? null,
+    openedAt: session.openedAt.toISOString(),
+    closedAt: session.closedAt ? session.closedAt.toISOString() : null,
+    startingAmount: money(session.startingAmount),
+    expectedAmount: calculateExpectedAmount(session),
+    counted,
+    actualAmount: counted ? money(session.actualAmount) : null,
+    overShort: counted && session.overShort != null ? money(session.overShort) : null,
   }
 }
 
@@ -464,6 +501,8 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
   const finalTotalSales = calculatedTotalSales > 0 ? calculatedTotalSales : Number(shift.totalSales)
   const finalTotalTips = calculatedTotalTips > 0 ? calculatedTotalTips : Number(shift.totalTips)
 
+  const cashDrawer = await resolveShiftCashDrawer(venueId, (shift as any).startTime ?? null)
+
   return {
     id: shift.id,
     venueId: shift.venueId,
@@ -481,6 +520,8 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
     venue: shift.venue,
     createdAt: (shift as any).createdAt,
     updatedAt: (shift as any).updatedAt,
+    // Fase 5 de la unificación de caja: el arqueo del cajón que cubrió el turno (aditivo, puede ser null)
+    cashDrawer,
     // NEW: Detailed breakdowns
     payments: formattedPayments,
     orders: formattedOrders,

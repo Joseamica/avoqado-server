@@ -1,0 +1,13 @@
+-- Fase 4 de la unificación de caja: UNA caja abierta por negocio, garantizada en la BASE.
+--
+-- `openSession` hacía check-then-create sin candado: dos requests simultáneos pasaban el
+-- findFirst antes de que ninguno creara, y el venue quedaba con DOS sesiones OPEN — las
+-- lecturas posteriores (`findFirst`) elegían una al azar y el arqueo se partía en dos.
+--
+-- Índice único PARCIAL, igual que `PrintStation_venueId_packing_key` (20260822042123): el
+-- parcial deja cualquier cantidad de sesiones CLOSED por venue y sólo restringe las OPEN.
+-- Un unique normal sobre (venueId) prohibiría el historial entero.
+--
+-- Prisma no declara índices parciales en el schema: vive sólo aquí. El servicio traduce el
+-- P2002 al mismo ConflictError que las apps ya conocen (cash-drawer.mobile.service.ts).
+CREATE UNIQUE INDEX "CashDrawerSession_venueId_open_key" ON "CashDrawerSession"("venueId") WHERE "status" = 'OPEN';

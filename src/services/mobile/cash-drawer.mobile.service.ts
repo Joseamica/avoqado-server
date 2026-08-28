@@ -10,6 +10,7 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { Decimal } from '@prisma/client/runtime/library'
+import { Prisma } from '@prisma/client'
 
 /**
  * Largo máximo de la llave de idempotencia que un cliente puede mandar.
@@ -106,31 +107,43 @@ export async function openSession(params: OpenSessionParams) {
 
   const amountDecimal = dollarsToDecimal(startingAmount)
 
-  const session = await prisma.cashDrawerSession.create({
-    data: {
-      venueId,
-      openedByStaffId: staffId,
-      openedByName: staffName,
-      startingAmount: amountDecimal,
-      deviceName: deviceName || null,
-      status: 'OPEN',
-      events: {
-        create: {
-          venueId,
-          type: 'OPEN',
-          amount: amountDecimal,
-          staffId,
-          staffName,
-          note: `Caja abierta con $${amountDecimal}`,
+  // Fase 4: el check de arriba es la respuesta amable del caso normal, pero NO evita la
+  // carrera (dos requests pasan el findFirst antes de que ninguno cree). Lo que la evita es el
+  // índice único parcial `CashDrawerSession(venueId) WHERE status='OPEN'` (migración
+  // 20260827_cash_drawer_one_open_per_venue). Aquí sólo se traduce ese choque al MISMO
+  // ConflictError que las apps ya conocen, en vez de dejar escapar un P2002 como 500.
+  const session = await prisma.cashDrawerSession
+    .create({
+      data: {
+        venueId,
+        openedByStaffId: staffId,
+        openedByName: staffName,
+        startingAmount: amountDecimal,
+        deviceName: deviceName || null,
+        status: 'OPEN',
+        events: {
+          create: {
+            venueId,
+            type: 'OPEN',
+            amount: amountDecimal,
+            staffId,
+            staffName,
+            note: `Caja abierta con $${amountDecimal}`,
+          },
         },
       },
-    },
-    include: {
-      events: {
-        orderBy: { createdAt: 'desc' },
+      include: {
+        events: {
+          orderBy: { createdAt: 'desc' },
+        },
       },
-    },
-  })
+    })
+    .catch((error: unknown) => {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictError('Ya existe una caja abierta. Cierra la caja actual antes de abrir una nueva.')
+      }
+      throw error
+    })
 
   logAction({
     staffId,
@@ -314,46 +327,49 @@ export async function closeSession(params: CloseSessionParams) {
 
   const session = await prisma.cashDrawerSession.findFirst({
     where: { venueId, status: 'OPEN' },
-    include: {
-      events: true,
-    },
+    select: { id: true },
   })
-
   if (!session) {
     throw new NotFoundError('No hay una caja abierta')
   }
-
-  // Calculate expected amount from events
-  const expectedAmount = calculateExpectedAmount(session)
   const actualDecimal = dollarsToDecimal(actualAmount)
-  const overShort = Number(actualDecimal) - expectedAmount
 
-  const closedSession = await prisma.cashDrawerSession.update({
-    where: { id: session.id },
-    data: {
-      status: 'CLOSED',
-      closedByStaffId: staffId,
-      closedByName: staffName,
-      closedAt: new Date(),
-      actualAmount: actualDecimal,
-      overShort: new Decimal(overShort.toFixed(2)),
-      closingNote: note || null,
-      events: {
-        create: {
-          venueId,
-          type: 'CLOSE',
-          amount: actualDecimal,
-          staffId,
-          staffName,
-          note: note || null,
-        },
+  // Fase 4: el cierre es UNA transacción con CAS. Antes era leer → calcular → actualizar en
+  // tres pasos sueltos: una venta que entrara entre "leer" y "escribir" dejaba el `overShort`
+  // obsoleto, y dos cierres simultáneos se pisaban y creaban dos eventos CLOSE. Ahora:
+  //   · los eventos se leen DENTRO de la tx (lo que ella ve es lo que se firma);
+  //   · el `updateMany where status='OPEN'` es el candado: quien pierde la carrera no
+  //     actualiza nada y recibe el mismo "no hay caja abierta" que ya conocen las apps;
+  //   · el CLOSE se crea sólo si el CAS ganó.
+  const { closedSession, expectedAmount, overShort } = await prisma.$transaction(async tx => {
+    const events = await tx.cashDrawerEvent.findMany({ where: { sessionId: session.id }, orderBy: { createdAt: 'asc' } })
+    const startingAmount = events.find(e => e.type === 'OPEN')?.amount ?? 0
+    const expected = calculateExpectedAmount({ startingAmount, events })
+    const diff = Number(actualDecimal) - expected
+    const won = await tx.cashDrawerSession.updateMany({
+      where: { id: session.id, venueId, status: 'OPEN' },
+      data: {
+        status: 'CLOSED',
+        closedByStaffId: staffId,
+        closedByName: staffName,
+        closedAt: new Date(),
+        actualAmount: actualDecimal,
+        overShort: new Decimal(diff.toFixed(2)),
+        closingNote: note || null,
       },
-    },
-    include: {
-      events: {
-        orderBy: { createdAt: 'desc' },
-      },
-    },
+    })
+    if (won.count !== 1) {
+      throw new NotFoundError('No hay una caja abierta')
+    }
+    await tx.cashDrawerEvent.create({
+      data: { sessionId: session.id, venueId, type: 'CLOSE', amount: actualDecimal, staffId, staffName, note: note || null },
+    })
+    const closed = await tx.cashDrawerSession.findUnique({
+      where: { id: session.id },
+      include: { events: { orderBy: { createdAt: 'desc' } } },
+    })
+    if (!closed) throw new NotFoundError('No hay una caja abierta')
+    return { closedSession: closed, expectedAmount: expected, overShort: diff }
   })
 
   logAction({

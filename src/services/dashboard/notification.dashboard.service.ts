@@ -338,6 +338,22 @@ export async function markAllNotificationsAsRead(userId: string, venueId?: strin
 /**
  * Delete notification
  */
+/**
+ * Borra TODAS las notificaciones de una persona.
+ *
+ * 🔴 Existe porque "Seleccionar todo" sólo marcaba las 20 que estaban cargadas en
+ * pantalla: se borraban 20, la lista se rellenaba con las siguientes y parecía que nada
+ * pasaba. El nombre mentía. Lo reportó el founder el 2026-08-27 con 27 notificaciones:
+ * borró 20 y le quedaron 7.
+ *
+ * Acotado al `recipientId` de quien pide: nadie puede vaciar el buzón de otro.
+ */
+export async function deleteAllNotifications(userId: string): Promise<{ deleted: number }> {
+  const { count } = await prisma.notification.deleteMany({ where: { recipientId: userId } })
+  logger.info('Buzón vaciado', { userId, deleted: count })
+  return { deleted: count }
+}
+
 export async function deleteNotification(notificationId: string, userId: string): Promise<void> {
   const notification = await prisma.notification.findFirst({
     where: {

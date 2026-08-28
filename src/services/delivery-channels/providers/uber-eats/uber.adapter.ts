@@ -301,9 +301,14 @@ export const uberAdapter = {
    * "No tengo este artículo" DESPUÉS de aceptar: avisa al cliente en la app de Uber para
    * que decida (cancelar o modificar), en vez de recibir una bolsa incompleta sin aviso.
    *
-   * Contrato verificado con los 400 de validación del sandbox (27-ago):
-   * `fulfillment_issues[].issue_type` válido ("OUT_OF_ITEM" avanza la validación) y cada
-   * issue exige `item.cart_item_id` — el id de LÍNEA del pedido, no el del menú.
+   * Contrato verificado contra un pedido REAL del sandbox (27-ago), no contra la doc:
+   * `issue_type: 'OUT_OF_ITEM'`, `item.cart_item_id` (el id de LÍNEA del pedido, no el del
+   * menú) y **`action_type` es OBLIGATORIO** — sin él Uber responde 400 "All items within
+   * fulfillment_issues must have a valid action_type passed". De los 7 valores probados sólo
+   * `REMOVE_ITEM` pasa la validación; los demás repiten el mismo 400.
+   *
+   * 🔴 Sólo se puede ANTES de marcar listo: después Uber contesta "cannot modify order that
+   * has already been marked ready".
    */
   async resolveFulfillmentIssues(orderId: string, storeId: string, cartItemIds: string[]): Promise<UberActionResult> {
     const r = await uberApi({
@@ -313,6 +318,7 @@ export const uberAdapter = {
       body: {
         fulfillment_issues: cartItemIds.map(cartItemId => ({
           issue_type: 'OUT_OF_ITEM',
+          action_type: 'REMOVE_ITEM',
           item: { cart_item_id: cartItemId },
         })),
       },

@@ -8,7 +8,10 @@
  * Cuando una consulta muestre N días con 0 descartes, el descarte se retira. Esta prueba fija
  * el contrato de esa métrica.
  */
-jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() } }))
+jest.mock('@/config/logger', () => ({
+  __esModule: true,
+  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+}))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -41,11 +44,15 @@ describe('métrica de compatibilidad en CASH_DRAWER_SYNC', () => {
 
   it('una app actualizada que no empuja CASH_SALE registra 0 — es lo que se mide para retirar el descarte', async () => {
     await syncEvents(VENUE, [ev('PAY_OUT', 30)], '2.40.0')
-    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ droppedCashSales: 0, appVersion: '2.40.0' }) }))
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ droppedCashSales: 0, appVersion: '2.40.0' }) }),
+    )
   })
 
   it('sin header de versión, appVersion queda null (app muy vieja): también cuenta', async () => {
     await syncEvents(VENUE, [ev('CASH_SALE', 100), ev('PAY_IN', 5)])
-    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ droppedCashSales: 1, appVersion: null }) }))
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ droppedCashSales: 1, appVersion: null }) }),
+    )
   })
 })

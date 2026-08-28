@@ -1,3 +1,4 @@
+import { resolveShiftCashDrawer } from '../dashboard/shift.dashboard.service'
 import { Prisma, Shift, ShiftStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
@@ -941,6 +942,19 @@ export interface CashReconciliationResult {
   outcome: CashReconciliationOutcome
   countedCash?: string
   cashDifference?: string
+  /**
+   * Fase 5 de la unificación de caja: el arqueo del CAJÓN físico que cubrió este turno
+   * (Android + TPV al cobrar). Campo NUEVO y OPCIONAL: sólo viaja cuando hay una caja que
+   * cubre el turno; una PAX vieja lo ignora. La PAX nueva lo muestra junto a su propia
+   * conciliación para que el cajero vea las DOS verdades — y si no coinciden, se note.
+   */
+  cashDrawer?: {
+    sessionId: string
+    expectedAmount: number
+    counted: boolean
+    actualAmount: number | null
+    overShort: number | null
+  }
 }
 
 export interface ShiftCloseRequestContext {
@@ -1646,6 +1660,26 @@ async function closeShiftUsingRequest(
     }
     if (outcome === 'APPLIED' && cashDifference) {
       reconciliation.cashDifference = moneyString(cashDifference)
+    }
+    // Fase 5: la PAX LEE el cajón. Se adjunta el arqueo de la caja física que cubrió el
+    // turno (campo opcional; se omite si no hay caja). Es informativo — nunca puede hacer
+    // fallar un cierre que ya está commiteado, por eso el try/catch.
+    try {
+      const drawer = await resolveShiftCashDrawer(venueId, updatedShift.startTime)
+      if (drawer) {
+        reconciliation.cashDrawer = {
+          sessionId: drawer.sessionId,
+          expectedAmount: drawer.expectedAmount,
+          counted: drawer.counted,
+          actualAmount: drawer.actualAmount,
+          overShort: drawer.overShort,
+        }
+      }
+    } catch (err) {
+      logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al cierre del turno', {
+        shiftId: updatedShift.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
 
     return { shift: updatedShift, reconciliation }

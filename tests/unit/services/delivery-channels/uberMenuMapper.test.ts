@@ -102,6 +102,43 @@ describe('uber.menuMapper', () => {
     expect(p.modifier_groups[0].modifier_options).toEqual([{ id: 'MOD-QUESO', type: 'ITEM' }])
   })
 
+  it('🔴 el PRODUCTO apunta a su grupo: sin esto los extras existen pero nadie puede elegirlos', () => {
+    // Defecto real, medido en la tienda sandbox el 27-ago: publicábamos los 3 grupos con sus
+    // 9 opciones y NINGÚN artículo los referenciaba (`items con modifier_group_ids: 0`). En
+    // Uber Eats la hamburguesa salía pelona — el cliente no podía pedir queso extra, y los
+    // modificadores quedaban colgando como artículos sueltos. Los tests pasaban porque
+    // verificaban el grupo, no el enlace.
+    const conMods = menu({
+      categories: [
+        {
+          name: 'Tacos',
+          products: [
+            {
+              ...menu().categories[0].products[0],
+              modifierGroups: [
+                {
+                  id: 'g1',
+                  name: 'Extras',
+                  required: false,
+                  allowMultiple: true,
+                  minSelections: 0,
+                  maxSelections: 3,
+                  modifiers: [{ plu: 'MOD-QUESO', name: 'Queso', price: 12 }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    const p = mapSnapshotToUberMenu(conMods)
+    const padre = p.items.find(i => i.id === menu().categories[0].products[0].plu)!
+
+    expect(padre.modifier_group_ids).toEqual({ ids: ['grp-g1'] })
+    // …y el modificador NO arrastra grupos propios (no es un producto vendible con extras).
+    expect(p.items.find(i => i.id === 'MOD-QUESO')!.modifier_group_ids).toBeUndefined()
+  })
+
   it('🔴 el horario por default es 24/7 y eso SOLO sirve para la tienda de pruebas', () => {
     // Publicar 24/7 en un negocio real lo muestra siempre abierto: le entran pedidos a las
     // 3 de la mañana que nadie va a cocinar, y Uber cuenta eso contra su tasa de inyección.
@@ -262,5 +299,38 @@ describe('uber.menuMapper', () => {
       expect(q.quantity.min_permitted).toBe(0)
       expect(q.quantity.max_permitted).toBe(1)
     })
+  })
+})
+
+describe('uber.menuMapper — colisión de ids entre producto y opción', () => {
+  it('🔴 ABORTA la publicación si un modificador usa el id de un producto', () => {
+    // Uber guarda productos Y opciones en el MISMO arreglo `items`. Si comparten id, uno
+    // pisa al otro: el cliente vería un extra vendido como producto, al precio equivocado
+    // (Codex, 3ª pasada). Fallar deja vivo el menú anterior, que es lo seguro.
+    const m = menu({
+      categories: [
+        {
+          name: 'Tacos',
+          products: [
+            {
+              ...menu().categories[0].products[0],
+              modifierGroups: [
+                {
+                  id: 'g1',
+                  name: 'Extras',
+                  required: false,
+                  allowMultiple: true,
+                  minSelections: 0,
+                  maxSelections: 3,
+                  // El PLU del modificador es EL MISMO que el sku del producto padre.
+                  modifiers: [{ plu: menu().categories[0].products[0].plu, name: 'Queso', price: 12 }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(() => mapSnapshotToUberMenu(m)).toThrow(/ya lo ocupa un PRODUCTO/)
   })
 })

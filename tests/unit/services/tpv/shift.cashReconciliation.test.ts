@@ -31,6 +31,10 @@ jest.mock('@/services/access/cashReconciliationAccess.service', () => ({
   isCashReconciliationEnabled: jest.fn(),
 }))
 
+jest.mock('@/services/dashboard/shift.dashboard.service', () => ({
+  resolveShiftCashDrawer: jest.fn().mockResolvedValue(null),
+}))
+import { resolveShiftCashDrawer } from '@/services/dashboard/shift.dashboard.service'
 import prisma from '@/utils/prismaClient'
 import { publishCommand } from '@/communication/rabbitmq/publisher'
 import { isCashReconciliationEnabled } from '@/services/access/cashReconciliationAccess.service'
@@ -128,6 +132,48 @@ describe('closeShiftForVenueWithResult cash reconciliation', () => {
         }),
       }),
     })
+  })
+
+  // Fase 5 (unificación de caja): la PAX lee el cajón de Android al cerrar, como campo NUEVO y opcional.
+  it('attaches the physical drawer (cashDrawer) to the close result when a session covers the shift', async () => {
+    ;(resolveShiftCashDrawer as jest.Mock).mockResolvedValueOnce({
+      sessionId: 'drawer-1',
+      status: 'CLOSED',
+      expectedAmount: 1406,
+      counted: true,
+      actualAmount: 1400,
+      overShort: -6,
+    })
+    mockPrisma.payment.findMany.mockResolvedValue([payment('5000.00')])
+
+    const result = await closeShiftForVenueWithResult(VENUE_ID, SHIFT_ID, {
+      cashReconciliationAction: 'COUNTED',
+      countedCash: '6000.00',
+    })
+
+    expect(resolveShiftCashDrawer).toHaveBeenCalledWith(VENUE_ID, shift.startTime)
+    // El contrato viejo NO cambia: los mismos tres campos siguen ahí, con los mismos valores.
+    expect(result.reconciliation).toMatchObject({ outcome: 'APPLIED', countedCash: '6000.00', cashDifference: '0.00' })
+    expect(result.reconciliation.cashDrawer).toEqual({
+      sessionId: 'drawer-1',
+      expectedAmount: 1406,
+      counted: true,
+      actualAmount: 1400,
+      overShort: -6,
+    })
+  })
+
+  it('closes the shift normally when the drawer lookup fails (cashDrawer omitted, never a crash)', async () => {
+    ;(resolveShiftCashDrawer as jest.Mock).mockRejectedValueOnce(new Error('db down'))
+    mockPrisma.payment.findMany.mockResolvedValue([payment('5000.00')])
+
+    const result = await closeShiftForVenueWithResult(VENUE_ID, SHIFT_ID, {
+      cashReconciliationAction: 'COUNTED',
+      countedCash: '6000.00',
+    })
+
+    expect(result.reconciliation).toEqual({ outcome: 'APPLIED', countedCash: '6000.00', cashDifference: '0.00' })
+    expect('cashDrawer' in result.reconciliation).toBe(false)
   })
 
   it('fails the additive feature closed without preventing the shift close', async () => {

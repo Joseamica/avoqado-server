@@ -37,6 +37,7 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
         quantity: 2,
         unitPrice: '304.00',
         total: '608.00',
+        notes: 'Sin cebolla, por favor',
         modifiers: [{ externalId: 'Leche_entera', name: 'Leche entera', quantity: 1, price: '10.00' }],
       },
     ],
@@ -131,6 +132,16 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
     expect(items[0].modifiers[0].name).toBe('Leche entera')
   })
 
+  it('🔴 la instrucción del cliente llega a la LÍNEA — es lo que la cocina lee', async () => {
+    // Defecto real encontrado con el pedido D8180 del sandbox de Uber (27-ago): el mapper
+    // extraía `customer_request.special_instructions` correctamente y la ingesta NO la
+    // escribía. La comanda salía sin la nota y se preparaba el platillo equivocado. Ningún
+    // test lo vio porque todos verificaban al mapper, que estaba bien.
+    const { order } = await ingestDeliveryOrder(pedido('ord-nota'), link)
+    const items = await prisma.orderItem.findMany({ where: { orderId: order.id } })
+    expect(items[0].notes).toBe('Sin cebolla, por favor')
+  })
+
   it('la comanda de cocina guarda los modificadores en la MISMA forma que el POS', async () => {
     // 🔴 Este caso existe porque el de arriba pasaba mientras la cocina estaba rota: afirmaba
     // sobre `OrderItem` —la tabla de la VENTA— y la pantalla de cocina lee `KdsOrderItem`, que
@@ -176,6 +187,44 @@ describe('ingesta de pedido Uber → Order + Payment (durable)', () => {
     expect(b.order.id).toBe(a.order.id)
     expect(b.created).toBe(false)
     expect(await prisma.payment.count({ where: { orderId: a.order.id } })).toBe(1)
+  })
+
+  it('🔴 si la comanda se perdió, el reintento la REPONE — un pedido pagado no se queda sin cocina', async () => {
+    // Hallazgo de Codex (27-ago). Los webhooks son at-least-once y la comanda se crea FUERA
+    // de la transacción que guarda la venta: si el proceso muere en medio, el reintento veía
+    // `created=false` y se saltaba la comanda para siempre. Nadie se enteraba — no hay error,
+    // sólo un pedido cobrado que la cocina nunca ve. Se simula borrando la comanda.
+    const a = await ingestDeliveryOrder(pedido('ord-kds-perdida'), link)
+    expect(await prisma.kdsOrder.count({ where: { orderId: a.order.id } })).toBe(1)
+
+    await prisma.kdsOrder.deleteMany({ where: { orderId: a.order.id } })
+
+    const b = await ingestDeliveryOrder(pedido('ord-kds-perdida'), link)
+    expect(b.order.id).toBe(a.order.id) // sigue siendo la MISMA venta: no se duplica
+    expect(b.created).toBe(false)
+    expect(b.kitchenTicketCreated).toBe(true) // …pero la comanda vuelve
+    expect(await prisma.kdsOrder.count({ where: { orderId: a.order.id } })).toBe(1)
+
+    // 🔴 …y vuelve CON RUTEO. Sin releer los renglones existentes, la comanda repuesta
+    // salía sin productId/categoryId y todo caía al ticket "SIN ESTACIÓN" (Codex, 2ª pasada).
+    const repuesta = await prisma.kdsOrder.findFirstOrThrow({ where: { orderId: a.order.id }, include: { items: true } })
+    expect(repuesta.items.length).toBeGreaterThan(0)
+    expect(repuesta.items.every(i => i.productId !== null)).toBe(true)
+
+    // 🔴 …y el ruteo apunta al renglón CORRECTO, no sólo a "alguno". Se aparea por el índice
+    // del externalId porque `createdAt` no es estable dentro de una misma transacción: si se
+    // desordenara, los tacos saldrían en la impresora de la barra.
+    const originales = await prisma.orderItem.findMany({ where: { orderId: a.order.id } })
+    for (const linea of repuesta.items) {
+      const original = originales.find(o => o.productName === linea.productName)
+      expect(linea.productId).toBe(original?.productId ?? null)
+    }
+  })
+
+  it('…y si la comanda YA existe, el reintento no la duplica', async () => {
+    const a = await ingestDeliveryOrder(pedido('ord-kds-ok'), link)
+    await ingestDeliveryOrder(pedido('ord-kds-ok'), link)
+    expect(await prisma.kdsOrder.count({ where: { orderId: a.order.id } })).toBe(1)
   })
 
   it('producto que NO resuelve ⇒ entra igual, ligado a un placeholder inactivo para re-mapear', async () => {

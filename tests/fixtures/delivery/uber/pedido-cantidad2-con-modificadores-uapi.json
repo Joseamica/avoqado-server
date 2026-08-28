@@ -1,0 +1,486 @@
+{
+ "order": {
+  "id": "d054dd5b-c161-4552-bf7c-8195e485a920",
+  "display_id": "5A920",
+  "state": "ACCEPTED",
+  "ordering_platform": "UBER_EATS",
+  "store": {
+   "id": "77abff2e-e700-406d-aaba-5a50b41504dc",
+   "name": "Avoqado Sandbox 1",
+   "timezone": "America/Mexico_City",
+   "partner_identifiers": [
+    {
+     "value": "1sC9taNVAljTqMzXtif3T1SC8dZxQ5JF",
+     "type": "ORDER_MANAGER_CLIENT_ID"
+    },
+    {
+     "value": "cmpe64yq2001f9k92m0lbhmf4",
+     "type": "INTEGRATOR_STORE_ID"
+    },
+    {
+     "value": "avoqado",
+     "type": "INTEGRATOR_BRAND_ID"
+    }
+   ],
+   "uber_merchant_type": {
+    "type": "MERCHANT_TYPE_RESTAURANT"
+   }
+  },
+  "customers": [
+   {
+    "id": "b8fb8824-e1cd-59dd-aae4-d93ab8d1f345",
+    "name": {
+     "display_name": "Avoqado S.",
+     "first_name": "Avoqado",
+     "last_name": "S."
+    },
+    "order_history": {
+     "past_order_count": 0
+    },
+    "is_primary_customer": true,
+    "contact": {
+     "phone": {
+      "country_iso2": "US",
+      "number": "+52 33 1930 9789",
+      "pin_code": "076 05 741"
+     }
+    },
+    "can_respond_to_fulfillment_issues": false
+   }
+  ],
+  "carts": [
+   {
+    "id": "fdda3dfd-7d12-4982-a2a8-d10d266bd6ef",
+    "revision_id": "a53f7998-9a0c-5fc5-acbd-e2f56c657eb5",
+    "items": [
+     {
+      "id": "HAMBURGUESAS-003",
+      "cart_item_id": "7c830b67-b574-4c3e-bc5a-9891e8862397",
+      "customer_id": "b8fb8824-e1cd-59dd-aae4-d93ab8d1f345",
+      "external_data": "HAMBURGUESAS-003",
+      "title": "Hamburguesa Doble",
+      "quantity": {
+       "amount": 2,
+       "unit": "PIECE"
+      },
+      "selected_modifier_groups": [
+       {
+        "id": "grp-cmpe6530u00xw9k92w0jp2t2x",
+        "title": "Tamaño",
+        "selected_items": [
+         {
+          "id": "MOD-cmpe6531100y29k92ciixcub0",
+          "cart_item_id": "edaf177f-8c7e-40eb-9f2e-b9be62e8dcfb",
+          "external_data": "MOD-cmpe6531100y29k92ciixcub0",
+          "title": "Mediano",
+          "quantity": {
+           "amount": 1,
+           "unit": "PIECE"
+          },
+          "default_quantity": {
+           "amount": 0,
+           "unit": "PIECE"
+          }
+         }
+        ]
+       },
+       {
+        "id": "grp-cmpe6531500y49k9256bjws2c",
+        "title": "Aderezos",
+        "selected_items": [
+         {
+          "id": "MOD-cmpe6531700y99k92gskezs5q",
+          "cart_item_id": "e48e08c4-3237-482d-ba0a-3ae61c3b8ea7",
+          "external_data": "MOD-cmpe6531700y99k92gskezs5q",
+          "title": "Ranch",
+          "quantity": {
+           "amount": 1,
+           "unit": "PIECE"
+          },
+          "default_quantity": {
+           "amount": 0,
+           "unit": "PIECE"
+          }
+         }
+        ]
+       }
+      ],
+      "picture_url": "https://tb-static.uber.com/prod/image-proc/processed_images/476d13618e13ef079ee4792fa0585a3a/d03e52b3c8af19d8fa8222e23efd9cfa.jpeg"
+     }
+    ],
+    "include_single_use_items": false,
+    "restricted_items": {
+     "alcohol": {
+      "contain_alcoholic_item": false
+     }
+    }
+   }
+  ],
+  "payment": {
+   "payment_detail": {
+    "order_total": {
+     "net": {
+      "amount_e5": 33739000,
+      "currency_code": "MXN",
+      "formatted": "$337.39"
+     },
+     "tax": {
+      "amount_e5": 5061000,
+      "currency_code": "MXN",
+      "formatted": "$50.61"
+     },
+     "gross": {
+      "amount_e5": 38800000,
+      "currency_code": "MXN",
+      "formatted": "$388.00"
+     },
+     "display_amount": "$388.00",
+     "is_tax_inclusive": true
+    },
+    "item_charges": {
+     "total": {
+      "net": {
+       "amount_e5": 33739000,
+       "currency_code": "MXN",
+       "formatted": "$337.39"
+      },
+      "tax": {
+       "amount_e5": 5061000,
+       "currency_code": "MXN",
+       "formatted": "$50.61"
+      },
+      "gross": {
+       "amount_e5": 38800000,
+       "currency_code": "MXN",
+       "formatted": "$388.00"
+      },
+      "display_amount": "$388.00",
+      "is_tax_inclusive": true
+     },
+     "price_breakdown": [
+      {
+       "cart_item_id": "0a0c4d11-f299-4bbf-a135-2497de39d541",
+       "price_type": "CUSTOMIZATION",
+       "quantity": {
+        "amount": 1,
+        "unit": "PIECE"
+       },
+       "total": {
+        "gross": {
+         "amount_e5": 0,
+         "currency_code": "MXN",
+         "formatted": "$0.00"
+        },
+        "display_amount": "$0.00"
+       }
+      },
+      {
+       "cart_item_id": "7c830b67-b574-4c3e-bc5a-9891e8862397",
+       "price_type": "ITEM",
+       "quantity": {
+        "amount": 2,
+        "unit": "PIECE"
+       },
+       "total": {
+        "gross": {
+         "amount_e5": 33800000,
+         "currency_code": "MXN",
+         "formatted": "$338.00"
+        },
+        "display_amount": "$338.00"
+       },
+       "unit": {
+        "gross": {
+         "amount_e5": 16900000,
+         "currency_code": "MXN",
+         "formatted": "$169.00"
+        },
+        "display_amount": "$169.00"
+       }
+      },
+      {
+       "cart_item_id": "b7377045-25e4-4742-bc27-44f266b99851",
+       "price_type": "CUSTOMIZATION",
+       "quantity": {
+        "amount": 1,
+        "unit": "PIECE"
+       },
+       "total": {
+        "gross": {
+         "amount_e5": 0,
+         "currency_code": "MXN",
+         "formatted": "$0.00"
+        },
+        "display_amount": "$0.00"
+       }
+      },
+      {
+       "cart_item_id": "e48e08c4-3237-482d-ba0a-3ae61c3b8ea7",
+       "price_type": "OPTION",
+       "quantity": {
+        "amount": 1,
+        "unit": "PIECE"
+       },
+       "total": {
+        "gross": {
+         "amount_e5": 1000000,
+         "currency_code": "MXN",
+         "formatted": "$10.00"
+        },
+        "display_amount": "$10.00"
+       },
+       "unit": {
+        "gross": {
+         "amount_e5": 1000000,
+         "currency_code": "MXN",
+         "formatted": "$10.00"
+        },
+        "display_amount": "$10.00"
+       }
+      },
+      {
+       "cart_item_id": "edaf177f-8c7e-40eb-9f2e-b9be62e8dcfb",
+       "price_type": "OPTION",
+       "quantity": {
+        "amount": 1,
+        "unit": "PIECE"
+       },
+       "total": {
+        "gross": {
+         "amount_e5": 1500000,
+         "currency_code": "MXN",
+         "formatted": "$15.00"
+        },
+        "display_amount": "$15.00"
+       },
+       "unit": {
+        "gross": {
+         "amount_e5": 1500000,
+         "currency_code": "MXN",
+         "formatted": "$15.00"
+        },
+        "display_amount": "$15.00"
+       }
+      }
+     ]
+    },
+    "fees": {
+     "total": {
+      "net": {
+       "amount_e5": 0,
+       "currency_code": "MXN",
+       "formatted": "$0.00"
+      },
+      "tax": {
+       "amount_e5": 0,
+       "currency_code": "MXN",
+       "formatted": "$0.00"
+      },
+      "gross": {
+       "amount_e5": 0,
+       "currency_code": "MXN",
+       "formatted": "$0.00"
+      },
+      "display_amount": "$0.00",
+      "is_tax_inclusive": true
+     }
+    },
+    "promotions": {
+     "total": {
+      "net": {
+       "amount_e5": 0,
+       "currency_code": "MXN",
+       "formatted": "MX$0.00"
+      },
+      "tax": {
+       "amount_e5": 0,
+       "currency_code": "MXN",
+       "formatted": "$0.00"
+      },
+      "gross": {
+       "amount_e5": 0,
+       "currency_code": "MXN",
+       "formatted": "MX$0.00"
+      },
+      "display_amount": "MX$0.00",
+      "is_tax_inclusive": true
+     },
+     "order_total_excluding_promos": {
+      "net": {
+       "amount_e5": 33739000,
+       "currency_code": "MXN",
+       "formatted": "$337.39"
+      },
+      "tax": {
+       "amount_e5": 5061000,
+       "currency_code": "MXN",
+       "formatted": "$50.61"
+      },
+      "gross": {
+       "amount_e5": 38800000,
+       "currency_code": "MXN",
+       "formatted": "$388.00"
+      },
+      "display_amount": "$388.00",
+      "is_tax_inclusive": true
+     }
+    },
+    "currency_code": "MXN",
+    "marketplace_fee_due_to_uber": {
+     "net": {
+      "amount_e5": 0,
+      "currency_code": "MXN",
+      "formatted": "$0.00"
+     },
+     "tax": {
+      "amount_e5": 0,
+      "currency_code": "MXN",
+      "formatted": "$0.00"
+     },
+     "gross": {
+      "amount_e5": 0,
+      "currency_code": "MXN",
+      "formatted": "$0.00"
+     },
+     "display_amount": "$0.00",
+     "is_tax_inclusive": true
+    }
+   },
+   "tax_reporting": {
+    "breakdown": {
+     "items": [
+      {
+       "instance_id": "7c830b67-b574-4c3e-bc5a-9891e8862397",
+       "description": "ITEM",
+       "gross_amount": {
+        "amount_e5": 38800000,
+        "currency_code": "MXN",
+        "formatted": "$388.00"
+       },
+       "net_amount": {
+        "amount_e5": 33739130,
+        "currency_code": "MXN",
+        "formatted": "$337.39"
+       },
+       "total_tax": {
+        "amount_e5": 5060869,
+        "currency_code": "MXN",
+        "formatted": "$50.61"
+       },
+       "taxes": [
+        {
+         "is_inclusive": true,
+         "rate": "0.15",
+         "calculated_tax": {
+          "amount_e5": 5060869,
+          "currency_code": "MXN",
+          "formatted": "$50.61"
+         },
+         "taxable_amount": {
+          "amount_e5": 38800000,
+          "currency_code": "MXN",
+          "formatted": "$388.00"
+         },
+         "tax_remittance": "MERCHANT"
+        }
+       ]
+      }
+     ],
+     "fees": [
+      {
+       "instance_id": "7c830b67-b574-4c3e-bc5a-9891e8862397",
+       "description": "SERVICE_FEE",
+       "gross_amount": {
+        "amount_e5": 2716000,
+        "currency_code": "MXN",
+        "formatted": "$27.16"
+       },
+       "net_amount": {
+        "amount_e5": 2341380,
+        "currency_code": "MXN",
+        "formatted": "$23.41"
+       },
+       "total_tax": {
+        "amount_e5": 374620,
+        "currency_code": "MXN",
+        "formatted": "$3.75"
+       },
+       "taxes": [
+        {
+         "is_inclusive": true,
+         "rate": "0.16",
+         "calculated_tax": {
+          "amount_e5": 374620,
+          "currency_code": "MXN",
+          "formatted": "$3.75"
+         }
+        }
+       ]
+      },
+      {
+       "instance_id": "7c830b67-b574-4c3e-bc5a-9891e8862397",
+       "description": "DELIVERY_FEE",
+       "gross_amount": {
+        "amount_e5": 4100000,
+        "currency_code": "MXN",
+        "formatted": "$41.00"
+       },
+       "net_amount": {
+        "amount_e5": 3534480,
+        "currency_code": "MXN",
+        "formatted": "$35.34"
+       },
+       "total_tax": {
+        "amount_e5": 565520,
+        "currency_code": "MXN",
+        "formatted": "$5.66"
+       },
+       "taxes": [
+        {
+         "is_inclusive": true,
+         "rate": "0.16",
+         "calculated_tax": {
+          "amount_e5": 565520,
+          "currency_code": "MXN",
+          "formatted": "$5.66"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "tender_types": null
+  },
+  "status": "ACTIVE",
+  "preparation_status": "PREPARING",
+  "estimated_unfulfilled_at": "2026-08-27T20:27:12-06:00",
+  "is_order_accuracy_risk": false,
+  "preparation_time": {
+   "ready_for_pickup_time_secs": 839,
+   "source": "DEFAULT",
+   "ready_for_pickup_time": "2026-08-27T20:30:46-06:00"
+  },
+  "action_eligibility": {
+   "adjust_ready_for_pickup_time": {
+    "is_eligible": true,
+    "reason": "ORDER_VALID_STATE"
+   },
+   "mark_out_of_item": {
+    "is_eligible": true,
+    "reason": "ORDER_VALID_STATE"
+   },
+   "cancel": {
+    "is_eligible": true,
+    "reason": "ORDER_VALID_STATE"
+   },
+   "mark_cannot_fulfill": {
+    "is_eligible": false,
+    "reason": "NO_ORDER_INSTRUCTIONS"
+   }
+  },
+  "fulfillment_type": "DELIVERY_BY_UBER",
+  "created_time": "2026-08-27T20:15:42-06:00",
+  "has_membership_pass": false
+ }
+}

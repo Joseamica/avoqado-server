@@ -72,6 +72,38 @@ export async function deliverClaimed(ids: string[], opts: { now: Date }): Promis
   for (const d of claimed) {
     const casWhere = { id: d.id, attempts: d.attempts, leaseUntil: d.leaseUntil }
     try {
+      // 🔴 UN aviso por PERSONA, no uno por sucursal.
+      //
+      // La entrega SÍ es por (persona, venue) — eso es lo que mide el alcance por
+      // negocio. Pero el aviso del buzón es uno solo: un anuncio de plataforma no
+      // pertenece a una sucursal, y la campana del dashboard ni siquiera filtra por
+      // sucursal, así que repartir uno por venue le mostraba 12 copias idénticas a quien
+      // administra 12 negocios. Lo encontró el founder el 2026-08-27.
+      const existente = await prisma.notification.findFirst({
+        where: {
+          recipientId: d.staffId,
+          entityType: 'PlatformAnnouncement',
+          entityId: d.announcement.id,
+          type: NotificationType.ANNOUNCEMENT,
+        },
+        select: { id: true },
+      })
+
+      if (existente) {
+        const r = await prisma.platformAnnouncementDelivery.updateMany({
+          where: casWhere,
+          data: {
+            status: PlatformAnnouncementDeliveryStatus.SENT,
+            notificationId: existente.id,
+            deliveredAt: opts.now,
+            leaseUntil: null,
+            lastError: null,
+          },
+        })
+        if (r.count > 0) sent++
+        continue
+      }
+
       const notif = await prisma.notification.create({
         data: {
           recipientId: d.staffId,

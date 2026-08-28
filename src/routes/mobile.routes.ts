@@ -1908,9 +1908,12 @@ router.patch(
 router.get('/notifications', authenticateTokenMiddleware, notificationMobileController.getUserNotifications)
 
 // ===== Anuncios de plataforma (aditivo: el buzon de /notifications NO se toca) =====
+// 🔴 `/home` va ANTES que `/:id`, si no Express toma "home" como un id.
+router.get('/announcements/home', authenticateTokenMiddleware, announcementReadController.home)
 router.get('/announcements/:id', authenticateTokenMiddleware, announcementReadController.getDetail)
 router.post('/announcements/:id/open', authenticateTokenMiddleware, announcementReadController.open)
 router.post('/announcements/:id/cta', authenticateTokenMiddleware, announcementReadController.cta)
+router.post('/announcements/:id/dismiss', authenticateTokenMiddleware, announcementReadController.dismiss)
 
 router.get('/notifications/unread-count', authenticateTokenMiddleware, notificationMobileController.getUnreadCount)
 router.patch('/notifications/:notificationId/read', authenticateTokenMiddleware, notificationMobileController.markAsRead)

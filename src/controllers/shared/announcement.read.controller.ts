@@ -5,7 +5,13 @@
  * `Notification` normal; estas rutas sólo sirven el detalle y registran la interacción.
  */
 import { Request, Response, NextFunction } from 'express'
-import { getAnnouncementForStaff, getActiveForHome, recordOpen, recordCta } from '../../services/announcements/announcementRead.service'
+import {
+  getAnnouncementForStaff,
+  getActiveForHome,
+  recordOpen,
+  recordCta,
+  recordDismiss,
+} from '../../services/announcements/announcementRead.service'
 
 export const getDetail = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -35,6 +41,16 @@ export const open = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { userId, venueId } = (req as any).authContext
     await recordOpen(req.params.id, userId, venueId)
+    res.json({ success: true })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const dismiss = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { userId, venueId } = (req as any).authContext
+    await recordDismiss(req.params.id, userId, venueId)
     res.json({ success: true })
   } catch (error) {
     next(error)

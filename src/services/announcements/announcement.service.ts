@@ -96,13 +96,46 @@ export interface AnnouncementInput {
   targetCategories: string[]
   targetVenueIds: string[]
   showAsBanner: boolean
+  showAsModal: boolean
   expiresAt?: Date
 }
 
+/**
+ * La lista del compositor, con el alcance REAL de cada anuncio.
+ *
+ * 🔴 `deliveredCount` cuenta ENTREGAS (persona × sucursal), y eso engaña: alguien dueño
+ * de 12 negocios generaba 12 de esas entregas él solo, así que un anuncio parecía haber
+ * llegado a mucha más gente de la que llegó. Se devuelven los dos números que importan,
+ * los mismos que el compositor enseña antes de publicar: negocios y personas.
+ */
 export async function listAnnouncements() {
-  return prisma.platformAnnouncement.findMany({
+  const anuncios = await prisma.platformAnnouncement.findMany({
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
+  if (anuncios.length === 0) return []
+
+  const ids = anuncios.map(a => a.id)
+  const [porVenue, porPersona] = await Promise.all([
+    prisma.platformAnnouncementDelivery.groupBy({
+      by: ['announcementId', 'venueId'],
+      where: { announcementId: { in: ids } },
+    }),
+    prisma.platformAnnouncementDelivery.groupBy({
+      by: ['announcementId', 'staffId'],
+      where: { announcementId: { in: ids } },
+    }),
+  ])
+
+  const negocios = new Map<string, number>()
+  porVenue.forEach(g => negocios.set(g.announcementId, (negocios.get(g.announcementId) ?? 0) + 1))
+  const personas = new Map<string, number>()
+  porPersona.forEach(g => personas.set(g.announcementId, (personas.get(g.announcementId) ?? 0) + 1))
+
+  return anuncios.map(a => ({
+    ...a,
+    reachedVenues: negocios.get(a.id) ?? 0,
+    reachedPeople: personas.get(a.id) ?? 0,
+  }))
 }
 
 export async function createAnnouncement(input: AnnouncementInput, createdBy: string, createdByName: string) {
