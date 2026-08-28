@@ -40,6 +40,14 @@ const envSchema = z.object({
   JWT_SECRET: z.string().optional(), // Legacy alias for ACCESS_TOKEN_SECRET
   OTP_PEPPER: z.string().min(16), // Server secret peppering WhatsApp/email login OTP hashes
 
+  // Sesiones revocables — Parte A, Task 9: llave AES-256-GCM (hex de 32 bytes) que cifra
+  // el sucesor del refresh token durante la ventana de retransmisión de 60 s
+  // (`RefreshGrant.successorEnc`). Vive FUERA de Postgres a propósito — ver
+  // `src/services/auth/successorCrypto.ts`. OPCIONAL: si falta, ningún entorno se cae al
+  // arrancar; simplemente no se guarda sucesor cifrado y un reintento de refresh se trata
+  // como reutilización real (el comportamiento de hoy, sin esta tarea).
+  SESSION_SUCCESSOR_ENC_KEY: z.string().length(64, 'SESSION_SUCCESSOR_ENC_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+
   // ─────────────────────────────────────────────────────────────────────────
   // INFRASTRUCTURE
   // ─────────────────────────────────────────────────────────────────────────
