@@ -21,8 +21,17 @@ import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'venue-1'
 const venta = (over: Record<string, unknown> = {}) => ({
-  venueId: VENUE, paymentId: 'p-1', method: 'CASH', status: 'COMPLETED', type: 'REGULAR',
-  amount: 100, tipAmount: 0, staffId: 'staff-1', staffName: 'Cajero', orderId: 'o-1', ...over,
+  venueId: VENUE,
+  paymentId: 'p-1',
+  method: 'CASH',
+  status: 'COMPLETED',
+  type: 'REGULAR',
+  amount: 100,
+  tipAmount: 0,
+  staffId: 'staff-1',
+  staffName: 'Cajero',
+  orderId: 'o-1',
+  ...over,
 })
 
 describe('candado de sesión al sumar al cajón (P1 venta tardía)', () => {
@@ -60,8 +69,15 @@ describe('candado de sesión al sumar al cajón (P1 venta tardía)', () => {
   it('el reembolso (PAY_OUT) usa el mismo candado', async () => {
     updateMany.mockResolvedValue({ count: 0 })
     const out = await postCashRefundToDrawer({
-      venueId: VENUE, refundPaymentId: 'r-1', method: 'CASH', status: 'COMPLETED', type: 'REFUND',
-      amount: -50, staffId: 'staff-1', staffName: 'Cajero', reason: 'x',
+      venueId: VENUE,
+      refundPaymentId: 'r-1',
+      method: 'CASH',
+      status: 'COMPLETED',
+      type: 'REFUND',
+      amount: -50,
+      staffId: 'staff-1',
+      staffName: 'Cajero',
+      reason: 'x',
     } as any)
     expect(out).toBe('DRAWER_CLOSED')
     expect(createMany).not.toHaveBeenCalled()

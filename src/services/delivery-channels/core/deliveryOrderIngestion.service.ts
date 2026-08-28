@@ -440,7 +440,6 @@ export async function ingestDeliveryOrder(
   // COMPLETA: el cliente ya pagó en Uber y su venta no existiría en el sistema, por no haber
   // podido averiguar a qué categoría pertenece un taco.
 
-
   // 🔴 En un REINTENTO (la venta ya existía) `renglonesCreados` viene VACÍO: se llena sólo
   // dentro de la transacción que crea los renglones. Sin esto, la comanda repuesta más abajo
   // volvía sin `productId` ni `categoryId` — o sea sin ruteo: todo al ticket "SIN ESTACIÓN"

@@ -194,7 +194,6 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     porLinea.set(b.cart_item_id, b)
   }
 
-
   // 🔴 QUÉ SE RECHAZA, Y POR QUÉ NO ES EL NOMBRE DEL TIPO (corregido tras la auditoría de
   // Codex, 27-ago). La versión anterior rechazaba cualquier `price_type` fuera de la lista
   // conocida. Suena prudente y es una VENTA PERDIDA: `processUberEvent` ACEPTA el pedido en

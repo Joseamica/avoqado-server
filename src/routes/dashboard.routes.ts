@@ -7850,12 +7850,48 @@ router.put(
 
 // Turnos ROTATIVOS de trabajo (fase 1 "como Sesame"). Mismos permisos que el cuadrante:
 // leer `attendance:read`, escribir `attendance:manage`. El interruptor vive en VenueSettings.
-router.get('/venues/:venueId/work-shifts/templates', authenticateTokenMiddleware, checkPermission('attendance:read'), validateRequest(WorkShiftTemplatesQuerySchema), attendanceController.listWorkShiftTemplates)
-router.post('/venues/:venueId/work-shifts/templates', authenticateTokenMiddleware, checkPermission('attendance:manage'), validateRequest(CreateWorkShiftTemplateSchema), attendanceController.createWorkShiftTemplate)
-router.put('/venues/:venueId/work-shifts/templates/:templateId', authenticateTokenMiddleware, checkPermission('attendance:manage'), validateRequest(UpdateWorkShiftTemplateSchema), attendanceController.updateWorkShiftTemplate)
-router.get('/venues/:venueId/work-shifts/assignments', authenticateTokenMiddleware, checkPermission('attendance:read'), validateRequest(WorkShiftAssignmentsQuerySchema), attendanceController.getWorkShiftAssignments)
-router.put('/venues/:venueId/work-shifts/assignments', authenticateTokenMiddleware, checkPermission('attendance:manage'), validateRequest(ReplaceWorkShiftAssignmentsSchema), attendanceController.replaceWorkShiftAssignments)
-router.post('/venues/:venueId/work-shifts/assignments/publish', authenticateTokenMiddleware, checkPermission('attendance:manage'), validateRequest(PublishWorkShiftAssignmentsSchema), attendanceController.publishWorkShiftAssignments)
+router.get(
+  '/venues/:venueId/work-shifts/templates',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:read'),
+  validateRequest(WorkShiftTemplatesQuerySchema),
+  attendanceController.listWorkShiftTemplates,
+)
+router.post(
+  '/venues/:venueId/work-shifts/templates',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(CreateWorkShiftTemplateSchema),
+  attendanceController.createWorkShiftTemplate,
+)
+router.put(
+  '/venues/:venueId/work-shifts/templates/:templateId',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(UpdateWorkShiftTemplateSchema),
+  attendanceController.updateWorkShiftTemplate,
+)
+router.get(
+  '/venues/:venueId/work-shifts/assignments',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:read'),
+  validateRequest(WorkShiftAssignmentsQuerySchema),
+  attendanceController.getWorkShiftAssignments,
+)
+router.put(
+  '/venues/:venueId/work-shifts/assignments',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(ReplaceWorkShiftAssignmentsSchema),
+  attendanceController.replaceWorkShiftAssignments,
+)
+router.post(
+  '/venues/:venueId/work-shifts/assignments/publish',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(PublishWorkShiftAssignmentsSchema),
+  attendanceController.publishWorkShiftAssignments,
+)
 
 // ==========================================
 // SHIFTS ROUTES

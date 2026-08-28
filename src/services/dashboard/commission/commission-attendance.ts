@@ -55,7 +55,10 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
   try {
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      select: { timezone: true, settings: { select: { attendanceEnabled: true, attendanceGraceMinutes: true, rotatingShiftsEnabled: true } } },
+      select: {
+        timezone: true,
+        settings: { select: { attendanceEnabled: true, attendanceGraceMinutes: true, rotatingShiftsEnabled: true } },
+      },
     })
     if (!venue) return null
     // Venue con el checador apagado: la regla es inerte, sin consultar nada más.
@@ -77,14 +80,24 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
           select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true },
         },
         ...(rotating
-          ? { workShiftAssignments: { where: { date: { in: [dateIso, prevIso] }, status: 'PUBLISHED' }, select: { date: true, startTime: true, endTime: true, status: true } } }
+          ? {
+              workShiftAssignments: {
+                where: { date: { in: [dateIso, prevIso] }, status: 'PUBLISHED' },
+                select: { date: true, startTime: true, endTime: true, status: true },
+              },
+            }
           : {}),
       },
     })
     if (!membership) return null
     const weekly = (membership.workSchedule?.weekly as unknown as WeeklyWorkSchedule) ?? null
     const exceptions = membership.workScheduleExceptions as unknown as WorkScheduleException[]
-    const assignments = ((membership as any).workShiftAssignments ?? []) as Array<{ date: string; startTime: string; endTime: string; status: string }>
+    const assignments = ((membership as any).workShiftAssignments ?? []) as Array<{
+      date: string
+      startTime: string
+      endTime: string
+      status: string
+    }>
     const expectedFor = (iso: string) => resolveExpectedDay(weekly, exceptions, iso, assignments.find(a => a.date === iso) ?? null)
 
     // 🔴 Misma regla que el reporte de asistencia (Codex 27-ago: divergían). Una venta de madrugada
@@ -108,7 +121,10 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
       where: {
         venueId,
         staffId,
-        clockInTime: { gte: shiftDay.startOf('day').toJSDate(), lte: shiftDay.plus({ days: 1 }).startOf('day').plus({ hours: 12 }).toJSDate() },
+        clockInTime: {
+          gte: shiftDay.startOf('day').toJSDate(),
+          lte: shiftDay.plus({ days: 1 }).startOf('day').plus({ hours: 12 }).toJSDate(),
+        },
         validationStatus: { not: 'REJECTED' },
       },
       orderBy: { clockInTime: 'asc' },

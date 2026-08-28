@@ -50,7 +50,9 @@ beforeEach(() => {
 
 describe('fase 4 · doble apertura', () => {
   it('🔴 si dos aperturas chocan en el índice único, la segunda recibe el ConflictError de siempre (no un 500)', async () => {
-    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}),
+    ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(null), // el check pasó (carrera)
       create: jest.fn().mockRejectedValue(new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'x' })),
     }
@@ -65,7 +67,8 @@ describe('fase 4 · cierre con candado', () => {
     const updateMany = jest.fn().mockResolvedValue({ count: 1 })
     const findMany = jest.fn().mockResolvedValue([evt('OPEN', 100), evt('CASH_SALE', 250)])
     const update = jest.fn().mockResolvedValue({})
-    ;(prismaMock as any).cashDrawerSession = { update: jest.fn().mockResolvedValue({}),
+    ;(prismaMock as any).cashDrawerSession = {
+      update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(abierta()),
       updateMany,
       update,
@@ -77,7 +80,9 @@ describe('fase 4 · cierre con candado', () => {
     expect(updateMany.mock.invocationCallOrder[0]).toBeLessThan(findMany.mock.invocationCallOrder[0])
     expect(updateMany.mock.calls[0][0].where).toMatchObject({ id: 's-1', status: 'OPEN' })
     // y la diferencia se escribe DESPUÉS con lo que se leyó bajo el candado: 340 − (100 + 250) = −10
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 's-1' }, data: expect.objectContaining({ overShort: expect.anything() }) }))
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 's-1' }, data: expect.objectContaining({ overShort: expect.anything() }) }),
+    )
     expect(Number(update.mock.calls[0][0].data.overShort)).toBe(-10)
   })
 
@@ -98,7 +103,8 @@ describe('fase 4 · cierre con candado', () => {
 
   it('🔴 el esperado se calcula DENTRO de la transacción sobre los eventos que ella ve: una venta que entró tarde cuenta', async () => {
     // fuera de la tx la sesión tenía 100+250; dentro ya hay otra venta de 80 ⇒ esperado 430
-    ;(prismaMock as any).cashDrawerSession = { update: jest.fn().mockResolvedValue({}),
+    ;(prismaMock as any).cashDrawerSession = {
+      update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(abierta()),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       findUnique: jest.fn().mockResolvedValue({

@@ -33,8 +33,7 @@ function conGiro(type: string | null) {
   venueMock.mockResolvedValue({ id: 'v1', type })
   cfgMock.mockResolvedValue([])
 }
-const nombre = (cfgs: Array<{ role: string; displayName: string }>, role: StaffRole) =>
-  cfgs.find(c => c.role === role)!.displayName
+const nombre = (cfgs: Array<{ role: string; displayName: string }>, role: StaffRole) => cfgs.find(c => c.role === role)!.displayName
 
 beforeEach(() => jest.clearAllMocks())
 

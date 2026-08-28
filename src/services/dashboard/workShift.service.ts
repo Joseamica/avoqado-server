@@ -66,11 +66,23 @@ export async function createTemplate(venueId: string, input: TemplateInput, acto
       sortOrder: input.sortOrder ?? 0,
     },
   })
-  logAction({ staffId: actorId, venueId, action: 'WORK_SHIFT_TEMPLATE_CREATED', entity: 'WorkShiftTemplate', entityId: template.id, data: { name, startTime: input.startTime, endTime: input.endTime } })
+  logAction({
+    staffId: actorId,
+    venueId,
+    action: 'WORK_SHIFT_TEMPLATE_CREATED',
+    entity: 'WorkShiftTemplate',
+    entityId: template.id,
+    data: { name, startTime: input.startTime, endTime: input.endTime },
+  })
   return template
 }
 
-export async function updateTemplate(venueId: string, templateId: string, input: Partial<TemplateInput> & { active?: boolean }, actorId: string) {
+export async function updateTemplate(
+  venueId: string,
+  templateId: string,
+  input: Partial<TemplateInput> & { active?: boolean },
+  actorId: string,
+) {
   const existing = await prisma.workShiftTemplate.findFirst({ where: { id: templateId, venueId } })
   if (!existing) throw new NotFoundError('Ese turno no existe en este negocio')
   const startTime = input.startTime ?? existing.startTime
@@ -88,7 +100,14 @@ export async function updateTemplate(venueId: string, templateId: string, input:
       ...(input.active !== undefined && { active: input.active }),
     },
   })
-  logAction({ staffId: actorId, venueId, action: 'WORK_SHIFT_TEMPLATE_UPDATED', entity: 'WorkShiftTemplate', entityId: templateId, data: input })
+  logAction({
+    staffId: actorId,
+    venueId,
+    action: 'WORK_SHIFT_TEMPLATE_UPDATED',
+    entity: 'WorkShiftTemplate',
+    entityId: templateId,
+    data: input,
+  })
   return template
 }
 
@@ -114,7 +133,16 @@ export async function getAssignments(venueId: string, from: string, to: string) 
   assertRange(from, to)
   return prisma.workShiftAssignment.findMany({
     where: { venueId, date: { gte: from, lte: to } },
-    select: { id: true, staffVenueId: true, date: true, templateId: true, templateName: true, startTime: true, endTime: true, status: true },
+    select: {
+      id: true,
+      staffVenueId: true,
+      date: true,
+      templateId: true,
+      templateName: true,
+      startTime: true,
+      endTime: true,
+      status: true,
+    },
     orderBy: [{ date: 'asc' }],
   })
 }
@@ -136,13 +164,18 @@ export async function replaceAssignments(venueId: string, input: { from: string;
   const staffVenueIds = [...new Set(items.map(i => i.staffVenueId))]
   const templateIds = [...new Set(items.map(i => i.templateId).filter((x): x is string => !!x))]
   const [members, templates] = await Promise.all([
-    staffVenueIds.length ? prisma.staffVenue.findMany({ where: { id: { in: staffVenueIds }, venueId }, select: { id: true } }) : Promise.resolve([] as Array<{ id: string }>),
-    templateIds.length ? prisma.workShiftTemplate.findMany({ where: { id: { in: templateIds }, venueId, active: true } }) : Promise.resolve([]),
+    staffVenueIds.length
+      ? prisma.staffVenue.findMany({ where: { id: { in: staffVenueIds }, venueId }, select: { id: true } })
+      : Promise.resolve([] as Array<{ id: string }>),
+    templateIds.length
+      ? prisma.workShiftTemplate.findMany({ where: { id: { in: templateIds }, venueId, active: true } })
+      : Promise.resolve([]),
   ])
   const memberSet = new Set(members.map(m => m.id))
   const templateById = new Map(templates.map(t => [t.id, t]))
   for (const id of staffVenueIds) if (!memberSet.has(id)) throw new BadRequestError('Ese empleado no pertenece a este negocio')
-  for (const id of templateIds) if (!templateById.has(id)) throw new BadRequestError('Ese turno no existe en este negocio o está dado de baja')
+  for (const id of templateIds)
+    if (!templateById.has(id)) throw new BadRequestError('Ese turno no existe en este negocio o está dado de baja')
 
   await prisma.$transaction(async tx => {
     for (const it of items) {
@@ -159,7 +192,14 @@ export async function replaceAssignments(venueId: string, input: { from: string;
       })
     }
   })
-  logAction({ staffId: actorId, venueId, action: 'WORK_SHIFT_ASSIGNMENTS_UPDATED', entity: 'WorkShiftAssignment', entityId: `${input.from}..${input.to}`, data: { cells: items.length } })
+  logAction({
+    staffId: actorId,
+    venueId,
+    action: 'WORK_SHIFT_ASSIGNMENTS_UPDATED',
+    entity: 'WorkShiftAssignment',
+    entityId: `${input.from}..${input.to}`,
+    data: { cells: items.length },
+  })
   return getAssignments(venueId, input.from, input.to)
 }
 
@@ -170,6 +210,13 @@ export async function publishAssignments(venueId: string, input: { from: string;
     where: { venueId, date: { gte: input.from, lte: input.to }, status: 'DRAFT' },
     data: { status: 'PUBLISHED' },
   })
-  logAction({ staffId: actorId, venueId, action: 'WORK_SHIFT_ASSIGNMENTS_PUBLISHED', entity: 'WorkShiftAssignment', entityId: `${input.from}..${input.to}`, data: { published: r.count } })
+  logAction({
+    staffId: actorId,
+    venueId,
+    action: 'WORK_SHIFT_ASSIGNMENTS_PUBLISHED',
+    entity: 'WorkShiftAssignment',
+    entityId: `${input.from}..${input.to}`,
+    data: { published: r.count },
+  })
   return { published: r.count }
 }

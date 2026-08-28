@@ -23,10 +23,16 @@ describe('resolveExpectedDay · asignación de turno rotativo', () => {
   })
   it('🔴 la excepción manual (vacaciones) sigue ganando sobre la asignación', () => {
     const vac = [{ startDate: '2026-08-17', endDate: '2026-08-24', kind: 'OFF' as const, type: 'VACATION' }]
-    expect(resolveExpectedDay(weekly, vac, '2026-08-20', cierre)).toEqual(expect.objectContaining({ isDayOff: true, absenceType: 'VACATION' }))
+    expect(resolveExpectedDay(weekly, vac, '2026-08-20', cierre)).toEqual(
+      expect.objectContaining({ isDayOff: true, absenceType: 'VACATION' }),
+    )
   })
   it('un borrador (DRAFT) NO cuenta: se cae al horario fijo', () => {
-    expect(resolveExpectedDay(weekly, [], '2026-08-20', { ...cierre, status: 'DRAFT' })).toEqual({ start: '09:00', end: '18:00', isDayOff: false })
+    expect(resolveExpectedDay(weekly, [], '2026-08-20', { ...cierre, status: 'DRAFT' })).toEqual({
+      start: '09:00',
+      end: '18:00',
+      isDayOff: false,
+    })
   })
   it('sin asignación todo sigue igual que hoy', () => {
     expect(resolveExpectedDay(weekly, [], '2026-08-20', null)).toEqual({ start: '09:00', end: '18:00', isDayOff: false })

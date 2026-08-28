@@ -133,9 +133,7 @@ describe('🔴 el REPORTE no puede contradecir a la orden', () => {
       guestEmail: null,
       specialRequests: null,
       assignedStaffId: null,
-      modifiers: [
-        { productId: 'product-1', modifierId: 'mod-1', name: 'Esmalte de color', quantity: 1, price: new Prisma.Decimal(50) },
-      ],
+      modifiers: [{ productId: 'product-1', modifierId: 'mod-1', name: 'Esmalte de color', quantity: 1, price: new Prisma.Decimal(50) }],
     } as any)
   })
 

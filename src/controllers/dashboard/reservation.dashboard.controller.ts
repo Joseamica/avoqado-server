@@ -34,8 +34,7 @@ function resolveVenueId(req: Request): string {
  * 🔴 Un INSTANTE explicito (trae hora) se respeta tal cual: quien pidio un momento exacto no
  * quiere el dia entero.
  */
-const esDiaCivil = (d: Date) =>
-  d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0
+const esDiaCivil = (d: Date) => d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0
 
 async function venueTimezoneOf(venueId: string): Promise<string> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })

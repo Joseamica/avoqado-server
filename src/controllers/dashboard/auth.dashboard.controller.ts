@@ -260,7 +260,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 enableShifts: true,
                 hiddenSidebarItems: true,
                 attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
-                    rotatingShiftsEnabled: true,
+                rotatingShiftsEnabled: true,
                 attendanceGraceMinutes: true,
               },
             },
@@ -484,7 +484,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
               enableShifts: true,
               hiddenSidebarItems: true,
               attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
-                    rotatingShiftsEnabled: true,
+              rotatingShiftsEnabled: true,
               attendanceGraceMinutes: true,
             },
           },
@@ -603,7 +603,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 enableShifts: true,
                 hiddenSidebarItems: true,
                 attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
-                    rotatingShiftsEnabled: true,
+                rotatingShiftsEnabled: true,
                 attendanceGraceMinutes: true,
               },
             },

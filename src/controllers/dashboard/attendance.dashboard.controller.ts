@@ -134,14 +134,20 @@ export const getWorkShiftAssignments = async (req: Request, res: Response, next:
 }
 export const replaceWorkShiftAssignments = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    res.json({ success: true, data: await workShiftService.replaceAssignments(req.params.venueId, req.body, req.authContext?.userId || '') })
+    res.json({
+      success: true,
+      data: await workShiftService.replaceAssignments(req.params.venueId, req.body, req.authContext?.userId || ''),
+    })
   } catch (e) {
     next(e)
   }
 }
 export const publishWorkShiftAssignments = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    res.json({ success: true, data: await workShiftService.publishAssignments(req.params.venueId, req.body, req.authContext?.userId || '') })
+    res.json({
+      success: true,
+      data: await workShiftService.publishAssignments(req.params.venueId, req.body, req.authContext?.userId || ''),
+    })
   } catch (e) {
     next(e)
   }

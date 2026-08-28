@@ -190,7 +190,10 @@ export async function buildAttendanceGrid(
       },
       // Turnos rotativos: sólo cuentan las PUBLICADAS, y sólo si el venue los prendió.
       workShiftAssignments: rotating
-        ? { where: { date: { gte: startDate, lte: endDate }, status: 'PUBLISHED' }, select: { date: true, startTime: true, endTime: true, status: true } }
+        ? {
+            where: { date: { gte: startDate, lte: endDate }, status: 'PUBLISHED' },
+            select: { date: true, startTime: true, endTime: true, status: true },
+          }
         : false,
     },
   })
@@ -263,7 +266,11 @@ export async function buildAttendanceGrid(
     for (const date of days) {
       if (date < joinedIso || (leftIso && date > leftIso)) continue
       const assignment = rotating
-        ? ((membership as any).workShiftAssignments as Array<{ date: string; startTime: string; endTime: string; status: string }> | undefined)?.find(a => a.date === date) ?? null
+        ? ((
+            (membership as any).workShiftAssignments as
+              | Array<{ date: string; startTime: string; endTime: string; status: string }>
+              | undefined
+          )?.find(a => a.date === date) ?? null)
         : null
       const expected = resolveExpectedDay(weekly, exceptions, date, assignment)
       const picked = pickEntryForDay(membership.staffId, date, expected)

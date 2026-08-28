@@ -160,7 +160,10 @@ describe('turno nocturno (22:00–06:00) — la venta de madrugada pertenece al 
 // ─── Turnos ROTATIVOS (fase 1 "como Sesame"): la asignación PUBLICADA manda si el venue los prendió ───
 describe('turno rotativo asignado', () => {
   function primeRotating(enabled: boolean, clockInIso: string, status = 'PUBLISHED') {
-    db.venue.findUnique.mockResolvedValue({ timezone: TZ, settings: { attendanceEnabled: true, attendanceGraceMinutes: 10, rotatingShiftsEnabled: enabled } })
+    db.venue.findUnique.mockResolvedValue({
+      timezone: TZ,
+      settings: { attendanceEnabled: true, attendanceGraceMinutes: 10, rotatingShiftsEnabled: enabled },
+    })
     db.staffVenue.findFirst.mockResolvedValue({
       id: 'sv-1',
       workSchedule: { weekly },
