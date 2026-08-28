@@ -1,3 +1,4 @@
+import * as workShiftService from '../../services/dashboard/workShift.service'
 import { NextFunction, Request, Response } from 'express'
 import * as attendanceService from '../../services/dashboard/attendance.dashboard.service'
 import * as attendancePayrollService from '../../services/dashboard/attendancePayroll.service'
@@ -95,5 +96,53 @@ export async function replaceWorkSchedule(req: Request, res: Response, next: Nex
     res.status(200).json(result)
   } catch (error) {
     next(error)
+  }
+}
+
+// ─── Turnos rotativos (fase 1 "como Sesame") ────────────────────────────────────────────
+export const listWorkShiftTemplates = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const includeInactive = String((req.query as any)?.includeInactive) === 'true'
+    res.json({ success: true, data: await workShiftService.listTemplates(req.params.venueId, includeInactive) })
+  } catch (e) {
+    next(e)
+  }
+}
+export const createWorkShiftTemplate = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const t = await workShiftService.createTemplate(req.params.venueId, req.body, req.authContext?.userId || '')
+    res.status(201).json({ success: true, data: t })
+  } catch (e) {
+    next(e)
+  }
+}
+export const updateWorkShiftTemplate = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const t = await workShiftService.updateTemplate(req.params.venueId, req.params.templateId, req.body, req.authContext?.userId || '')
+    res.json({ success: true, data: t })
+  } catch (e) {
+    next(e)
+  }
+}
+export const getWorkShiftAssignments = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { from, to } = req.query as { from: string; to: string }
+    res.json({ success: true, data: await workShiftService.getAssignments(req.params.venueId, from, to) })
+  } catch (e) {
+    next(e)
+  }
+}
+export const replaceWorkShiftAssignments = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({ success: true, data: await workShiftService.replaceAssignments(req.params.venueId, req.body, req.authContext?.userId || '') })
+  } catch (e) {
+    next(e)
+  }
+}
+export const publishWorkShiftAssignments = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({ success: true, data: await workShiftService.publishAssignments(req.params.venueId, req.body, req.authContext?.userId || '') })
+  } catch (e) {
+    next(e)
   }
 }

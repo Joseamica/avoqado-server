@@ -89,8 +89,27 @@ interface OpenSessionParams {
 /**
  * Open a new cash drawer session. Only one session can be open per venue at a time.
  */
+/**
+ * Las apps mandan `staffName` opcional y el controlador rellenaba 'Staff' cuando faltaba — así el
+ * dashboard («Caja física») decía "Abierta por Staff" (visto en /full-testing 27-ago). Si viene un
+ * nombre real se respeta; si no, se resuelve del `Staff` y sólo en último caso queda 'Staff'.
+ */
+async function resolveMobileStaffName(staffId: string | null | undefined, provided?: string | null): Promise<string> {
+  const given = (provided || '').trim()
+  if (given && given !== 'Staff') return given
+  if (!staffId) return given || 'Staff'
+  try {
+    const staff = await prisma.staff.findUnique({ where: { id: staffId }, select: { firstName: true, lastName: true } })
+    const name = [staff?.firstName, staff?.lastName].filter(Boolean).join(' ').trim()
+    return name || given || 'Staff'
+  } catch {
+    return given || 'Staff'
+  }
+}
+
 export async function openSession(params: OpenSessionParams) {
-  const { venueId, staffId, staffName, startingAmount, deviceName } = params
+  const { venueId, staffId, startingAmount, deviceName } = params
+  const staffName = await resolveMobileStaffName(staffId, params.staffName)
 
   if (startingAmount < 0) {
     throw new BadRequestError('El monto inicial no puede ser negativo')
@@ -210,7 +229,8 @@ export interface DrawerEventResult {
  * Si pudiera, la idempotencia se convertiría en una puerta para mover dinero sin dejar rastro.
  */
 async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayInOutParams): Promise<DrawerEventResult> {
-  const { venueId, staffId, staffName, amount, note } = params
+  const { venueId, staffId, amount, note } = params
+  const staffName = await resolveMobileStaffName(staffId, params.staffName)
 
   if (amount <= 0) {
     throw new BadRequestError('El monto debe ser mayor a 0')
@@ -319,7 +339,8 @@ interface CloseSessionParams {
  * Calculates expected amount from events and determines over/short.
  */
 export async function closeSession(params: CloseSessionParams) {
-  const { venueId, staffId, staffName, actualAmount, note } = params
+  const { venueId, staffId, actualAmount, note } = params
+  const staffName = await resolveMobileStaffName(staffId, params.staffName)
 
   if (actualAmount < 0) {
     throw new BadRequestError('El monto no puede ser negativo')
@@ -342,25 +363,30 @@ export async function closeSession(params: CloseSessionParams) {
   //     actualiza nada y recibe el mismo "no hay caja abierta" que ya conocen las apps;
   //   · el CLOSE se crea sólo si el CAS ganó.
   const { closedSession, expectedAmount, overShort } = await prisma.$transaction(async tx => {
-    const events = await tx.cashDrawerEvent.findMany({ where: { sessionId: session.id }, orderBy: { createdAt: 'asc' } })
-    const startingAmount = events.find(e => e.type === 'OPEN')?.amount ?? 0
-    const expected = calculateExpectedAmount({ startingAmount, events })
-    const diff = Number(actualDecimal) - expected
+    // 🔴 P1 (Codex 27-ago): el CAS va PRIMERO. El UPDATE toma el candado de la fila; un cobro que
+    // quiera sumar al cajón (createEventUnderSessionLock, con `status='OPEN'`) se queda esperando
+    // y al re-evaluar ya no encuentra la caja abierta. Sólo entonces se leen los eventos: lo que
+    // se lee bajo el candado es exactamente lo que se firma.
+    const closedAt = new Date()
     const won = await tx.cashDrawerSession.updateMany({
       where: { id: session.id, venueId, status: 'OPEN' },
       data: {
         status: 'CLOSED',
         closedByStaffId: staffId,
         closedByName: staffName,
-        closedAt: new Date(),
+        closedAt,
         actualAmount: actualDecimal,
-        overShort: new Decimal(diff.toFixed(2)),
         closingNote: note || null,
       },
     })
     if (won.count !== 1) {
       throw new NotFoundError('No hay una caja abierta')
     }
+    const events = await tx.cashDrawerEvent.findMany({ where: { sessionId: session.id }, orderBy: { createdAt: 'asc' } })
+    const startingAmount = events.find(e => e.type === 'OPEN')?.amount ?? 0
+    const expected = calculateExpectedAmount({ startingAmount, events })
+    const diff = Number(actualDecimal) - expected
+    await tx.cashDrawerSession.update({ where: { id: session.id }, data: { overShort: new Decimal(diff.toFixed(2)) } })
     await tx.cashDrawerEvent.create({
       data: { sessionId: session.id, venueId, type: 'CLOSE', amount: actualDecimal, staffId, staffName, note: note || null },
     })

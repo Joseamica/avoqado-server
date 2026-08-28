@@ -95,13 +95,42 @@ describe('getShiftById · cashDrawer (fase 5)', () => {
     expect(r.cashDifference).toBeNull()
   })
 
-  it('🔴 busca la sesión del MISMO venue cuya ventana cubre el inicio del turno', async () => {
+  it('🔴 P1 Codex: busca la sesión del MISMO venue cuya ventana cubre el CIERRE del turno (el cajón vigente al cerrar), no su inicio', async () => {
     const findFirst = jest.fn().mockResolvedValue(null)
     ;(prismaMock as any).cashDrawerSession = { findFirst }
     await getShiftById(VENUE, 'shift-1')
     const where = findFirst.mock.calls[0][0].where
     expect(where.venueId).toBe(VENUE)
-    expect(where.openedAt).toEqual({ lte: new Date('2026-08-20T14:30:00Z') })
+    expect(where.openedAt).toEqual({ lte: new Date('2026-08-20T22:00:00Z') })
+  })
+
+  it('🔴 turno 08–20 con cajón A (07–12) y cajón B (12–20): elige B, el que operó al cierre', async () => {
+    const A = caja({ id: 'A', openedAt: new Date('2026-08-20T07:00:00Z'), closedAt: new Date('2026-08-20T12:00:00Z') })
+    const B = caja({ id: 'B', openedAt: new Date('2026-08-20T12:00:00Z'), closedAt: new Date('2026-08-20T22:30:00Z') })
+    const findFirst = jest.fn().mockImplementation(async ({ where }: any) => {
+      const anchor = where.openedAt.lte as Date
+      return [B, A].find(c => c.openedAt <= anchor && (!c.closedAt || c.closedAt >= anchor)) ?? null
+    })
+    ;(prismaMock as any).cashDrawerSession = { findFirst }
+    const r = await getShiftById(VENUE, 'shift-1')
+    expect(r.cashDrawer.sessionId).toBe('B')
+  })
+
+  it('si ninguna sesión cubre el cierre, cae a la última que se traslapó con el turno', async () => {
+    const A = caja({ id: 'A', openedAt: new Date('2026-08-20T07:00:00Z'), closedAt: new Date('2026-08-20T12:00:00Z') })
+    const findFirst = jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(A)
+    ;(prismaMock as any).cashDrawerSession = { findFirst }
+    const r = await getShiftById(VENUE, 'shift-1')
+    expect(r.cashDrawer.sessionId).toBe('A')
+    const fallback = findFirst.mock.calls[1][0].where
+    expect(fallback.OR).toEqual([{ closedAt: null }, { closedAt: { gte: new Date('2026-08-20T14:30:00Z') } }])
+  })
+
+  it('🔴 P2 Codex: si la consulta del cajón truena, el detalle del turno sigue respondiendo (cashDrawer null), nunca un 500 en el endpoint viejo', async () => {
+    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockRejectedValue(new Error('db down')) }
+    const r = await getShiftById(VENUE, 'shift-1')
+    expect(r.cashDrawer).toBeNull()
+    expect(r.cashDeclared).toBe(1000)
   })
 
   it('sin caja que lo cubra, cashDrawer es null y el turno se ve igual que siempre', async () => {

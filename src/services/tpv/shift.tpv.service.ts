@@ -950,6 +950,10 @@ export interface CashReconciliationResult {
    */
   cashDrawer?: {
     sessionId: string
+    status: string
+    deviceName: string | null
+    openedAt: string
+    closedAt: string | null
     expectedAmount: number
     counted: boolean
     actualAmount: number | null
@@ -1665,10 +1669,15 @@ async function closeShiftUsingRequest(
     // turno (campo opcional; se omite si no hay caja). Es informativo — nunca puede hacer
     // fallar un cierre que ya está commiteado, por eso el try/catch.
     try {
-      const drawer = await resolveShiftCashDrawer(venueId, updatedShift.startTime)
+      const drawer = await resolveShiftCashDrawer(venueId, updatedShift.startTime, updatedShift.endTime ?? new Date())
       if (drawer) {
         reconciliation.cashDrawer = {
           sessionId: drawer.sessionId,
+          // P1 (Codex 27-ago): la PAX debe poder decir DE QUÉ caja es el número — aparato y horario.
+          status: drawer.status,
+          deviceName: drawer.deviceName,
+          openedAt: drawer.openedAt,
+          closedAt: drawer.closedAt,
           expectedAmount: drawer.expectedAmount,
           counted: drawer.counted,
           actualAmount: drawer.actualAmount,

@@ -9,7 +9,7 @@
  */
 
 import { NextFunction, Request, Response } from 'express'
-import logger from '../../config/logger'
+import { logControllerError } from '../../errors/logControllerError'
 import * as authMobileService from '../../services/mobile/auth.mobile.service'
 import { requestPasswordReset } from '../../services/dashboard/auth.service'
 
@@ -46,7 +46,7 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
       refreshToken: result.refreshToken,
     })
   } catch (error) {
-    logger.error('Error in mobile login controller:', error)
+    logControllerError('mobile login', error)
     next(error)
   }
 }
@@ -80,7 +80,7 @@ export const refresh = async (req: Request, res: Response, next: NextFunction) =
       refreshToken: result.refreshToken,
     })
   } catch (error) {
-    logger.error('Error in mobile refresh controller:', error)
+    logControllerError('mobile refresh', error)
     next(error)
   }
 }
@@ -109,7 +109,7 @@ export const passkeyChallenge = async (req: Request, res: Response, next: NextFu
       userVerification: result.userVerification,
     })
   } catch (error) {
-    logger.error('Error in passkeyChallenge controller:', error)
+    logControllerError('mobile passkeyChallenge', error)
     next(error)
   }
 }
@@ -185,7 +185,7 @@ export const passkeyVerify = async (req: Request, res: Response, next: NextFunct
       refreshToken: result.refreshToken,
     })
   } catch (error) {
-    logger.error('Error in passkeyVerify controller:', error)
+    logControllerError('mobile passkeyVerify', error)
     next(error)
   }
 }
@@ -210,7 +210,7 @@ export const passkeyRegisterChallenge = async (req: Request, res: Response, next
       ...result,
     })
   } catch (error) {
-    logger.error('Error in passkeyRegisterChallenge controller:', error)
+    logControllerError('mobile passkeyRegisterChallenge', error)
     next(error)
   }
 }
@@ -244,7 +244,7 @@ export const passkeyRegisterVerify = async (req: Request, res: Response, next: N
       passkey: result,
     })
   } catch (error) {
-    logger.error('Error in passkeyRegisterVerify controller:', error)
+    logControllerError('mobile passkeyRegisterVerify', error)
     next(error)
   }
 }
@@ -265,7 +265,7 @@ export const listPasskeys = async (req: Request, res: Response, next: NextFuncti
     const passkeys = await authMobileService.listPasskeys(staffId)
     res.status(200).json({ success: true, passkeys })
   } catch (error) {
-    logger.error('Error in listPasskeys controller:', error)
+    logControllerError('mobile listPasskeys', error)
     next(error)
   }
 }
@@ -286,7 +286,7 @@ export const deletePasskey = async (req: Request, res: Response, next: NextFunct
     await authMobileService.deletePasskey(staffId, req.params.passkeyId)
     res.status(200).json({ success: true, message: 'Passkey eliminado' })
   } catch (error) {
-    logger.error('Error in deletePasskey controller:', error)
+    logControllerError('mobile deletePasskey', error)
     next(error)
   }
 }
@@ -321,7 +321,7 @@ export const requestReset = async (req: Request, res: Response, _next: NextFunct
       message: result.message,
     })
   } catch (error) {
-    logger.error('Error in mobile requestReset controller:', error)
+    logControllerError('mobile requestReset', error)
     // Security: don't reveal internal errors
     res.status(200).json({
       success: true,

@@ -849,6 +849,11 @@ model VenueSettings {
   /// 🔴 Independiente de `enableShifts` (caja). Rieles distintos.
   attendanceEnabled       Boolean @default(true)
   attendanceGraceMinutes  Int     @default(10)
+  /// Turnos ROTATIVOS de trabajo (referente Sesame: "Abre / Inter / Cierre" que rotan). Apagado de
+  /// fábrica y explícito por venue: crear una plantilla puede ser prueba y no debe cambiar en silencio
+  /// la fuente de retardos y comisiones (Codex, 27-ago). Prendido, una asignación PUBLICADA gana sobre
+  /// la jornada fija; apagado, las asignaciones se ignoran. El ICP (jornada fija) nunca lo ve.
+  rotatingShiftsEnabled   Boolean @default(false)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
   autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
   maxShiftDurationEnabled Boolean @default(false) // Enable max shift duration enforcement
@@ -1236,6 +1241,7 @@ model StaffVenue {
   /// Cuadrante LABORAL (jornada). Distinto de `schedule`, que es disponibilidad para citas.
   workSchedule           StaffWorkSchedule?
   workScheduleExceptions StaffWorkScheduleException[]
+  workShiftAssignments   WorkShiftAssignment[]
 }
 
 // ==========================================
@@ -3237,6 +3243,53 @@ model StaffWorkSchedule {
   updatedAt DateTime @updatedAt
 
   @@index([venueId])
+}
+
+/// Turno de TRABAJO (plantilla): "Abre 08–16", "Inter 09–17", "Cierre 11–19". Sesame los llama
+/// Turnos y CONVIVEN con la jornada fija (StaffWorkSchedule): cada negocio usa lo que le sirve. Se
+/// prende por venue (VenueSettings.rotatingShiftsEnabled). Fase 1 del checador "como Sesame".
+model WorkShiftTemplate {
+  id           String   @id @default(cuid())
+  venueId      String
+  name         String
+  abbreviation String
+  color        String   @default("#7ADD2C")
+  /// 'HH:mm' en hora del negocio. endTime <= startTime = cruza la medianoche.
+  startTime    String
+  endTime      String
+  active       Boolean  @default(true)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignments WorkShiftAssignment[]
+
+  @@index([venueId])
+}
+
+/// Asignación persona × día de un turno de trabajo. Guarda COPIA de las horas: cambiar la plantilla
+/// "Abre" mañana no reescribe semanas ya publicadas (Codex). Tabla propia y NO
+/// StaffWorkScheduleException: el endpoint del cuadrante borra y recrea todas las excepciones de la
+/// persona en cada guardado — reusarlo destruiría el cuadrante al editar un horario.
+model WorkShiftAssignment {
+  id           String     @id @default(cuid())
+  venueId      String
+  staffVenueId String
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  /// 'YYYY-MM-DD' en fecha del negocio.
+  date         String
+  templateId   String?
+  template     WorkShiftTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateName String
+  startTime    String
+  endTime      String
+  /// DRAFT = se está armando · PUBLISHED = cuenta para asistencia y comisiones.
+  status       String     @default("DRAFT")
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([staffVenueId, date])
+  @@index([venueId, date])
 }
 
 /// Excepción al cuadrante: un día libre, o un día con horario distinto.

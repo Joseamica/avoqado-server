@@ -55,7 +55,7 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
   try {
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      select: { timezone: true, settings: { select: { attendanceEnabled: true, attendanceGraceMinutes: true } } },
+      select: { timezone: true, settings: { select: { attendanceEnabled: true, attendanceGraceMinutes: true, rotatingShiftsEnabled: true } } },
     })
     if (!venue) return null
     // Venue con el checador apagado: la regla es inerte, sin consultar nada más.
@@ -66,51 +66,72 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
     const day = DateTime.fromJSDate(at).setZone(timezone)
     const dateIso = day.toISODate()!
 
+    const rotating = (venue.settings as any)?.rotatingShiftsEnabled === true
+    const prevIso = day.minus({ days: 1 }).toISODate()!
     const membership = await prisma.staffVenue.findFirst({
       where: { staffId, venueId },
       select: {
         workSchedule: { select: { weekly: true } },
         workScheduleExceptions: {
-          where: { startDate: { lte: dateIso }, endDate: { gte: dateIso } },
+          where: { startDate: { lte: dateIso }, endDate: { gte: prevIso } },
           select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true },
         },
+        ...(rotating
+          ? { workShiftAssignments: { where: { date: { in: [dateIso, prevIso] }, status: 'PUBLISHED' }, select: { date: true, startTime: true, endTime: true, status: true } } }
+          : {}),
       },
     })
     if (!membership) return null
+    const weekly = (membership.workSchedule?.weekly as unknown as WeeklyWorkSchedule) ?? null
+    const exceptions = membership.workScheduleExceptions as unknown as WorkScheduleException[]
+    const assignments = ((membership as any).workShiftAssignments ?? []) as Array<{ date: string; startTime: string; endTime: string; status: string }>
+    const expectedFor = (iso: string) => resolveExpectedDay(weekly, exceptions, iso, assignments.find(a => a.date === iso) ?? null)
 
-    const expected = resolveExpectedDay(
-      (membership.workSchedule?.weekly as unknown as WeeklyWorkSchedule) ?? null,
-      membership.workScheduleExceptions as unknown as WorkScheduleException[],
-      dateIso,
-    )
-    // Sin cuadrante o día libre: no se juzga (mismo principio que el reporte).
+    // 🔴 Misma regla que el reporte de asistencia (Codex 27-ago: divergían). Una venta de madrugada
+    // pertenece al turno NOCTURNO del día anterior si ese turno cruza la medianoche y la venta cae
+    // antes de su hora de salida; si no, al turno del día. Y para el turno nocturno cuenta la
+    // checada de la TARDE (≥ 12:00) de su día o, si no la hay, la de la madrugada siguiente antes
+    // de la salida.
+    let scheduleDate = dateIso
+    let expected = expectedFor(dateIso)
+    const localTime = day.toFormat('HH:mm')
+    const prevExpected = expectedFor(prevIso)
+    const prevOvernight = !prevExpected.isDayOff && !!prevExpected.start && !!prevExpected.end && prevExpected.end <= prevExpected.start
+    if (prevOvernight && localTime < prevExpected.end!) {
+      scheduleDate = prevIso
+      expected = prevExpected
+    }
     if (expected.isDayOff || !expected.start || !expected.end) return null
-
-    // La PRIMERA checada no rechazada del día calendario del pago. Una checada RECHAZADA por
-    // el gerente no cuenta como presencia (misma regla que el reporte de puntualidad).
-    const entry = await prisma.timeEntry.findFirst({
+    const shiftDay = DateTime.fromISO(scheduleDate, { zone: timezone })
+    const overnight = expected.end <= expected.start
+    const entries = await prisma.timeEntry.findMany({
       where: {
         venueId,
         staffId,
-        clockInTime: { gte: day.startOf('day').toJSDate(), lte: day.endOf('day').toJSDate() },
+        clockInTime: { gte: shiftDay.startOf('day').toJSDate(), lte: shiftDay.plus({ days: 1 }).startOf('day').plus({ hours: 12 }).toJSDate() },
         validationStatus: { not: 'REJECTED' },
       },
       orderBy: { clockInTime: 'asc' },
       select: { clockInTime: true },
     })
-    // Falta (sin checada): no genera ventas — y si este pago existe con otra atribución, el
-    // castigo por falta no está definido. Sólo el retardo castiga.
+    const withLocal = entries.map(e => {
+      const local = DateTime.fromJSDate(e.clockInTime).setZone(timezone)
+      return { clockInTime: e.clockInTime, dateIso: local.toISODate()!, localTime: local.toFormat('HH:mm') }
+    })
+    const entry = overnight
+      ? (withLocal.find(e => e.dateIso === scheduleDate && e.localTime >= '12:00') ??
+        withLocal.find(e => e.dateIso !== scheduleDate && e.localTime < expected.end!) ??
+        null)
+      : (withLocal.find(e => e.dateIso === scheduleDate) ?? null)
     if (!entry) return null
-
     const evaluation = evaluateAttendance({
       expectedStart: expected.start,
       expectedEnd: expected.end,
       timezone,
       graceMinutes,
       clockInTime: entry.clockInTime,
-      scheduleDate: dateIso,
+      scheduleDate,
     })
-
     return evaluation.status === 'LATE' ? rate : null
   } catch (error) {
     logger.warn('asistencia→comisiones: no se pudo evaluar el día; la comisión se paga completa (falla abierta)', {

@@ -118,19 +118,35 @@ function mapearItems(items: RappiItem[]): NormalizedDeliveryItem[] {
     // 🔴 Los modificadores cuestan dinero y van EN el total del renglón. La glosario de
     // Rappi confirma que el `sku` es "el identificador que el ALIADO otorga" — el nuestro.
     const subitems = it.subitems ?? []
-    const modifiers = subitems.map((sub, j) => {
-      const cantSub = Number.isFinite(sub.quantity) && (sub.quantity as number) > 0 ? (sub.quantity as number) : 1
-      return {
-        externalId: String(sub.sku ?? sub.id ?? '').trim() || `rappi-sub-${idx}-${j}`,
-        name: sub.name?.trim() || 'Modificador',
-        quantity: cantSub,
-        price: D(sub.price ?? 0)
-          .mul(cantSub)
-          .toFixed(2),
-      }
-    })
+    const extras = subitems.map((sub, j) => ({
+      sub,
+      j,
+      /** Cuántos de ESTE extra pidió por cada unidad del producto. */
+      cantidadPropia: Number.isFinite(sub.quantity) && (sub.quantity as number) > 0 ? (sub.quantity as number) : 1,
+      unitario: D(sub.price ?? 0),
+    }))
 
-    const extrasPorUnidad = modifiers.reduce((acc, m) => acc.plus(new Prisma.Decimal(m.price)), new Prisma.Decimal(0))
+    // Lo que cuestan los extras en UNA unidad del producto. Es lo que multiplica `total`.
+    const extrasPorUnidad = extras.reduce((acc, e) => acc.plus(e.unitario.mul(e.cantidadPropia)), new Prisma.Decimal(0))
+
+    // 🔴 El reparto entre `price` y `quantity` NO es cosmético: el dashboard suma el ingreso
+    // del renglón con `unitPrice × cantidad + Σ(price × quantity)` (`lineGrossSql`), y NO
+    // multiplica los modificadores por la cantidad del padre. Así que ese producto tiene que
+    // dar por sí solo la contribución COMPLETA del extra a la línea. El contrato lo fija
+    // `core/types.ts`: `price` ya viene multiplicado por la cantidad del PADRE, `quantity` es
+    // la cantidad PROPIA. Guardar el precio "a secas" reportaba de menos (2 ensaladas con
+    // burrata: $230 sobre una venta de $260) y multiplicarlo por su propia cantidad reportaba
+    // de más (1 ensalada con 2 burratas: $220 sobre $160). Los dos son dinero que no cuadra.
+    //
+    // El reparto tampoco se puede invertir aunque el producto salga igual: el KDS imprime
+    // "2x Queso burrata" leyendo `quantity`, y en 2 ensaladas con una burrata cada una eso
+    // le mentiría a la cocina.
+    const modifiers = extras.map(({ sub, j, cantidadPropia, unitario }) => ({
+      externalId: String(sub.sku ?? sub.id ?? '').trim() || `rappi-sub-${idx}-${j}`,
+      name: sub.name?.trim() || 'Modificador',
+      quantity: cantidadPropia,
+      price: unitario.mul(cantidad).toFixed(2),
+    }))
 
     return {
       // El `sku` es NUESTRO identificador del producto (el que publicamos en el menú); el

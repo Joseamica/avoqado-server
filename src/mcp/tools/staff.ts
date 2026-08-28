@@ -25,6 +25,24 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
+    'work_shifts',
+    'Rotating WORK shifts (fase 1 "como Sesame"): the venue\'s shift templates (e.g. Abre 08–16, Cierre 11–19) and the person×day assignments for a date range (max 31 days), with DRAFT/PUBLISHED status. Only PUBLISHED assignments count for attendance and commissions, and only when the venue enabled rotating shifts. Read-only. Pass venueId, from and to (YYYY-MM-DD).',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+      from: z.string().describe('Start date YYYY-MM-DD'),
+      to: z.string().describe('End date YYYY-MM-DD (max 31 days)'),
+    },
+    async ({ venueId, from, to }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('attendance:read', venueId)
+      const { listTemplates, getAssignments } = await import('../../services/dashboard/workShift.service')
+      const settings = await prisma.venueSettings.findUnique({ where: { venueId }, select: { rotatingShiftsEnabled: true } })
+      const [templates, assignments] = await Promise.all([listTemplates(venueId, true), getAssignments(venueId, from, to)])
+      return text({ venueId, rotatingShiftsEnabled: settings?.rotatingShiftsEnabled ?? false, templates, assignments })
+    },
+  )
+
+  server.tool(
     'list_staff',
     'List the team (roster) of a venue you can access: each member\'s membership id, staff id, name, role and whether their account is active. The IDs can be passed to reservation staff/schedule tools. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead.',
     {

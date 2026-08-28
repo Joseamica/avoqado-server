@@ -151,11 +151,12 @@ describe('closeShiftForVenueWithResult cash reconciliation', () => {
       countedCash: '6000.00',
     })
 
-    expect(resolveShiftCashDrawer).toHaveBeenCalledWith(VENUE_ID, shift.startTime)
+    expect(resolveShiftCashDrawer).toHaveBeenCalledWith(VENUE_ID, shift.startTime, expect.any(Date))
     // El contrato viejo NO cambia: los mismos tres campos siguen ahí, con los mismos valores.
     expect(result.reconciliation).toMatchObject({ outcome: 'APPLIED', countedCash: '6000.00', cashDifference: '0.00' })
-    expect(result.reconciliation.cashDrawer).toEqual({
+    expect(result.reconciliation.cashDrawer).toMatchObject({
       sessionId: 'drawer-1',
+      status: 'CLOSED',
       expectedAmount: 1406,
       counted: true,
       actualAmount: 1400,

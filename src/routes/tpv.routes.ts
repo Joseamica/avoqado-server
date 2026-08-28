@@ -1438,6 +1438,36 @@ router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPe
  *                       type: string
  *                     cashDifference:
  *                       type: string
+ *                     cashDrawer:
+ *                       type: object
+ *                       nullable: true
+ *                       description: Fase 5 (unificación de caja) — arqueo del CAJÓN físico (Android/iOS) vigente al cerrar el turno. Campo NUEVO y opcional; ausente si ninguna caja cubrió el turno.
+ *                       properties:
+ *                         sessionId:
+ *                           type: string
+ *                         status:
+ *                           type: string
+ *                           enum: [OPEN, CLOSED]
+ *                         deviceName:
+ *                           type: string
+ *                           nullable: true
+ *                         openedAt:
+ *                           type: string
+ *                           format: date-time
+ *                         closedAt:
+ *                           type: string
+ *                           format: date-time
+ *                           nullable: true
+ *                         expectedAmount:
+ *                           type: number
+ *                         counted:
+ *                           type: boolean
+ *                         actualAmount:
+ *                           type: number
+ *                           nullable: true
+ *                         overShort:
+ *                           type: number
+ *                           nullable: true
  *       400:
  *         description: Bad request - Shift already closed
  *       401:

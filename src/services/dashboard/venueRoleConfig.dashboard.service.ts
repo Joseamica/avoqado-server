@@ -22,6 +22,8 @@ import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { RoleConfigItem, RoleConfigResponse } from '@/schemas/dashboard/venueRoleConfig.schema'
 import prisma from '@/utils/prismaClient'
+import { getBusinessCategory } from '@/utils/businessCategory'
+import { SECTOR_ROLE_DEFAULTS } from '@/utils/roleDisplay'
 import { logAction } from './activity-log.service'
 
 /**
@@ -76,12 +78,18 @@ export async function getVenueRoleConfigs(venueId: string): Promise<RoleConfigRe
   // Verify venue exists
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { id: true },
+    select: { id: true, type: true },
   })
 
   if (!venue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
+
+  // 🔴 Los nombres por defecto salen del GIRO, no de una lista fija de restaurante.
+  // Sin esto una estetica veia «Mesero» y una tienda tambien. Y NO se puede arreglar en el
+  // dashboard: este endpoint devuelve SIEMPRE una fila por rol, asi que el front las trata
+  // como personalizacion del venue y ganan sobre cualquier default suyo.
+  const sectorNames = sectorRoleDefaults(venue.type)
 
   // Get all custom configs for this venue
   const customConfigs = await prisma.venueRoleConfig.findMany({
@@ -114,7 +122,7 @@ export async function getVenueRoleConfigs(venueId: string): Promise<RoleConfigRe
     // Return defaults for unconfigured roles
     return {
       role,
-      displayName: DEFAULT_ROLE_DISPLAY_NAMES[role],
+      displayName: sectorNames[role] ?? DEFAULT_ROLE_DISPLAY_NAMES[role],
       description: null,
       icon: null,
       color: null,
@@ -331,4 +339,27 @@ export async function resetAllRoleConfigs(venueId: string): Promise<void> {
     entity: 'VenueRoleConfig',
     entityId: venueId,
   })
+}
+
+/**
+ * Nombres de rol por defecto para el giro de un venue.
+ *
+ * 🔴 `Venue.type` es un `VenueType`, que NO es el mismo enum que `BusinessType`:
+ * TELECOMUNICACIONES, HOTEL_RESTAURANT y FITNESS_STUDIO existen solo en el primero y hacen
+ * fallar a `getBusinessCategory`. Por eso se traducen antes, y todo va dentro de un try:
+ * un giro desconocido debe degradar al default generico, nunca tumbar la consulta.
+ */
+function sectorRoleDefaults(venueType: string | null | undefined): Partial<Record<StaffRole, string>> {
+  if (!venueType) return {}
+  const equivalencias: Record<string, string> = {
+    HOTEL_RESTAURANT: 'RESTAURANT',
+    FITNESS_STUDIO: 'FITNESS',
+    TELECOMUNICACIONES: 'RETAIL_STORE',
+  }
+  const tipo = equivalencias[venueType] ?? venueType
+  try {
+    return SECTOR_ROLE_DEFAULTS[getBusinessCategory(tipo as never)]?.es ?? {}
+  } catch {
+    return {}
+  }
 }

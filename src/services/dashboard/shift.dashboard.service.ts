@@ -180,13 +180,27 @@ export async function getShifts(
  * [openedAt, closedAt] cubre el inicio del turno; si no hay, `null` y el turno se ve como hoy.
  * `counted` es explícito: una caja cerrada sin conteo nunca se pinta como cuadrada.
  */
-export async function resolveShiftCashDrawer(venueId: string, startTime: Date | null) {
+export async function resolveShiftCashDrawer(venueId: string, startTime: Date | null, endTime?: Date | null) {
   if (!startTime) return null
-  const session = await prisma.cashDrawerSession.findFirst({
-    where: { venueId, openedAt: { lte: startTime }, OR: [{ closedAt: null }, { closedAt: { gte: startTime } }] },
-    include: { events: { orderBy: { createdAt: 'asc' } } },
-    orderBy: { openedAt: 'desc' },
-  })
+  // 🔴 P1 (Codex 27-ago): se ancla al CIERRE del turno (o a "ahora" si sigue abierto), no a su inicio.
+  // Turno 08–20 con cajón A (07–12) y B (12–20): el que operó al cerrar es B; anclar al inicio
+  // devolvía A y la PAX enseñaba el arqueo de otro cajón sin decirlo. El índice único parcial
+  // (fase 4) garantiza UNA caja abierta por venue en cada instante, así que "la que cubre el
+  // ancla" es única. Si ninguna cubre el ancla (la caja se cerró antes que el turno), se cae a la
+  // última que se traslapó con el turno.
+  const anchor = endTime ?? new Date()
+  const include = { events: { orderBy: { createdAt: 'asc' as const } } }
+  const session =
+    (await prisma.cashDrawerSession.findFirst({
+      where: { venueId, openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: anchor } }] },
+      include,
+      orderBy: { openedAt: 'desc' },
+    })) ??
+    (await prisma.cashDrawerSession.findFirst({
+      where: { venueId, openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: startTime } }] },
+      include,
+      orderBy: { openedAt: 'desc' },
+    }))
   if (!session) return null
   const money = (v: unknown) => Number(Number(v).toFixed(2))
   const counted = session.actualAmount !== null && session.actualAmount !== undefined
@@ -501,7 +515,16 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
   const finalTotalSales = calculatedTotalSales > 0 ? calculatedTotalSales : Number(shift.totalSales)
   const finalTotalTips = calculatedTotalTips > 0 ? calculatedTotalTips : Number(shift.totalTips)
 
-  const cashDrawer = await resolveShiftCashDrawer(venueId, (shift as any).startTime ?? null)
+  // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
+  let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
+  try {
+    cashDrawer = await resolveShiftCashDrawer(venueId, (shift as any).startTime ?? null, (shift as any).endTime ?? null)
+  } catch (err) {
+    logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
+      shiftId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
 
   return {
     id: shift.id,

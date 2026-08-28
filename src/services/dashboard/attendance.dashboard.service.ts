@@ -144,12 +144,13 @@ export async function buildAttendanceGrid(
 ): Promise<{ cells: AttendanceGridCell[]; graceMinutes: number; timezone: string }> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { timezone: true, settings: { select: { attendanceGraceMinutes: true } } },
+    select: { timezone: true, settings: { select: { attendanceGraceMinutes: true, rotatingShiftsEnabled: true } } },
   })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
 
   const timezone = venue.timezone || 'America/Mexico_City'
   const graceMinutes = venue.settings?.attendanceGraceMinutes ?? 10
+  const rotating = venue.settings?.rotatingShiftsEnabled === true
 
   // Validar ANTES de consultar: un rango absurdo (0001-01-01..9999-12-31) no debe costar ni
   // una consulta, y menos traerse toda la historia del venue (auditoría Codex fase 2, P2-2).
@@ -187,6 +188,10 @@ export async function buildAttendanceGrid(
         orderBy: [{ startDate: 'asc' }, { createdAt: 'asc' }],
         select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true, type: true },
       },
+      // Turnos rotativos: sólo cuentan las PUBLICADAS, y sólo si el venue los prendió.
+      workShiftAssignments: rotating
+        ? { where: { date: { gte: startDate, lte: endDate }, status: 'PUBLISHED' }, select: { date: true, startTime: true, endTime: true, status: true } }
+        : false,
     },
   })
 
@@ -257,7 +262,10 @@ export async function buildAttendanceGrid(
 
     for (const date of days) {
       if (date < joinedIso || (leftIso && date > leftIso)) continue
-      const expected = resolveExpectedDay(weekly, exceptions, date)
+      const assignment = rotating
+        ? ((membership as any).workShiftAssignments as Array<{ date: string; startTime: string; endTime: string; status: string }> | undefined)?.find(a => a.date === date) ?? null
+        : null
+      const expected = resolveExpectedDay(weekly, exceptions, date, assignment)
       const picked = pickEntryForDay(membership.staffId, date, expected)
       let actual: { clockInTime: Date; clockOutTime: Date | null } | null = null
       if (picked) {

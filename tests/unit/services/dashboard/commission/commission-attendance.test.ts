@@ -16,7 +16,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     venue: { findUnique: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
-    timeEntry: { findFirst: jest.fn() },
+    timeEntry: { findMany: jest.fn() },
   },
 }))
 jest.mock('@/config/logger', () => ({
@@ -42,7 +42,7 @@ function primeHappyPath(clockInIso: string | null, over: Record<string, unknown>
     ...over,
   })
   db.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', workSchedule: { weekly }, workScheduleExceptions: [] })
-  db.timeEntry.findFirst.mockResolvedValue(clockInIso ? { clockInTime: new Date(clockInIso) } : null)
+  db.timeEntry.findMany.mockResolvedValue(clockInIso ? [{ clockInTime: new Date(clockInIso) }] : [])
 }
 
 beforeEach(() => jest.clearAllMocks())
@@ -97,7 +97,7 @@ describe('resolveAttendancePenaltyRate', () => {
     db.venue.findUnique.mockResolvedValue({ timezone: TZ, settings: { attendanceEnabled: false, attendanceGraceMinutes: 10 } })
     expect(await resolveAttendancePenaltyRate({ config: linked(), ...base })).toBeNull()
     expect(db.staffVenue.findFirst).not.toHaveBeenCalled()
-    expect(db.timeEntry.findFirst).not.toHaveBeenCalled()
+    expect(db.timeEntry.findMany).not.toHaveBeenCalled()
   })
 
   it('FALLA ABIERTA: si la base truena, null y sin excepción — la comisión se paga completa', async () => {
@@ -108,7 +108,7 @@ describe('resolveAttendancePenaltyRate', () => {
   it('la checada RECHAZADA por el gerente no cuenta: el filtro excluye REJECTED', async () => {
     primeHappyPath('2026-08-26T15:25:00.000Z')
     await resolveAttendancePenaltyRate({ config: linked(), ...base })
-    const where = db.timeEntry.findFirst.mock.calls[0][0].where
+    const where = db.timeEntry.findMany.mock.calls[0][0].where
     expect(JSON.stringify(where)).toMatch(/REJECTED/)
   })
 
@@ -131,5 +131,56 @@ describe('applyAttendancePenalty (puro)', () => {
   it('sin castigo devuelve el monto intacto', () => {
     expect(applyAttendancePenalty(100, null)).toBe(100)
     expect(applyAttendancePenalty(100, 0)).toBe(100)
+  })
+})
+
+// ─── Turno NOCTURNO: misma atribución que el reporte de asistencia (Codex 27-ago: divergían) ───
+describe('turno nocturno (22:00–06:00) — la venta de madrugada pertenece al turno de AYER', () => {
+  const nightWeekly = { wednesday: { enabled: true, ranges: [{ open: '22:00', close: '06:00' }] } }
+  const SALE_THU_0100 = new Date('2026-08-27T07:00:00.000Z') // jue 01:00 local
+  function primeNight(entries: string[]) {
+    db.venue.findUnique.mockResolvedValue({ timezone: TZ, settings: { attendanceEnabled: true, attendanceGraceMinutes: 10 } })
+    db.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', workSchedule: { weekly: nightWeekly }, workScheduleExceptions: [] })
+    db.timeEntry.findMany.mockResolvedValue(entries.map(iso => ({ clockInTime: new Date(iso) })))
+  }
+  it('🔴 checó el miércoles 22:25 (25 min tarde) y vendió el jueves 01:00 → se castiga contra el turno del MIÉRCOLES', async () => {
+    primeNight(['2026-08-27T04:25:00.000Z']) // mié 22:25 local
+    expect(await resolveAttendancePenaltyRate({ config: linked(0.25), ...base, at: SALE_THU_0100 })).toBe(0.25)
+  })
+  it('checó el miércoles 21:55 → a tiempo → null', async () => {
+    primeNight(['2026-08-27T03:55:00.000Z'])
+    expect(await resolveAttendancePenaltyRate({ config: linked(0.25), ...base, at: SALE_THU_0100 })).toBeNull()
+  })
+  it('🔴 sin checada de la tarde, cuenta la de la MADRUGADA siguiente antes de la salida (jue 00:05 = 2h05 tarde)', async () => {
+    primeNight(['2026-08-27T06:05:00.000Z']) // jue 00:05 local
+    expect(await resolveAttendancePenaltyRate({ config: linked(0.25), ...base, at: SALE_THU_0100 })).toBe(0.25)
+  })
+})
+
+// ─── Turnos ROTATIVOS (fase 1 "como Sesame"): la asignación PUBLICADA manda si el venue los prendió ───
+describe('turno rotativo asignado', () => {
+  function primeRotating(enabled: boolean, clockInIso: string, status = 'PUBLISHED') {
+    db.venue.findUnique.mockResolvedValue({ timezone: TZ, settings: { attendanceEnabled: true, attendanceGraceMinutes: 10, rotatingShiftsEnabled: enabled } })
+    db.staffVenue.findFirst.mockResolvedValue({
+      id: 'sv-1',
+      workSchedule: { weekly },
+      workScheduleExceptions: [],
+      workShiftAssignments: enabled ? [{ date: '2026-08-26', startTime: '11:00', endTime: '19:00', status }] : undefined,
+    })
+    db.timeEntry.findMany.mockResolvedValue([{ clockInTime: new Date(clockInIso) }])
+  }
+  it('🔴 con turnos prendidos, "Cierre 11–19" gana a la jornada fija 09–18: checar 09:25 NO es retardo', async () => {
+    primeRotating(true, '2026-08-26T15:25:00.000Z') // 09:25 local
+    expect(await resolveAttendancePenaltyRate({ config: linked(0.25), ...base })).toBeNull()
+  })
+  it('… y checar 11:25 SÍ lo es', async () => {
+    primeRotating(true, '2026-08-26T17:25:00.000Z') // 11:25 local
+    expect(await resolveAttendancePenaltyRate({ config: linked(0.25), ...base })).toBe(0.25)
+  })
+  it('🔴 con el interruptor APAGADO la asignación se ignora y manda la jornada fija (09:25 = retardo)', async () => {
+    primeRotating(false, '2026-08-26T15:25:00.000Z')
+    expect(await resolveAttendancePenaltyRate({ config: linked(0.25), ...base })).toBe(0.25)
+    // y ni siquiera se piden las asignaciones
+    expect(db.staffVenue.findFirst.mock.calls[0][0].select.workShiftAssignments).toBeUndefined()
   })
 })

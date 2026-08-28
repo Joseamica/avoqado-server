@@ -51,6 +51,7 @@
  *    outbox —o un reintento del cliente— es un no-op, no un segundo movimiento de caja.
  */
 
+import { Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
 import prisma from '../../utils/prismaClient'
@@ -125,6 +126,8 @@ export type CashSaleDrawerOutcome =
   | 'NOT_COMPLETED'
   /** El negocio no trae caja abierta — normal, no todos usan el cajón. */
   | 'NO_OPEN_DRAWER'
+  /** La caja se cerró entre encontrarla y escribir: el movimiento NO entra a una caja cerrada (fail-open). */
+  | 'DRAWER_CLOSED'
   /** Falló la escritura. Se loguea y el cobro sigue: NUNCA se propaga. */
   | 'FAILED'
 
@@ -181,22 +184,24 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
     // `createMany` + `skipDuplicates` en vez de `create`: con `create`, el replay de un
     // intent del outbox chocaría con el índice único y lanzaría P2002 DESPUÉS de que el
     // cobro ya está commiteado — un error en la respuesta de una venta que sí ocurrió.
-    const result = await prisma.cashDrawerEvent.createMany({
-      data: [
-        {
-          sessionId: session.id,
-          venueId: posting.venueId,
-          type: 'CASH_SALE',
-          amount: total,
-          staffId: posting.staffId || 'SYSTEM',
-          staffName,
-          orderId: posting.orderId || null,
-          note: null,
-          localId: cashSaleDrawerLocalId(posting.paymentId),
-        },
-      ],
-      skipDuplicates: true,
+    const result = await createEventUnderSessionLock(session.id, !posting.targetSessionId, {
+      sessionId: session.id,
+      venueId: posting.venueId,
+      type: 'CASH_SALE',
+      amount: total,
+      staffId: posting.staffId || 'SYSTEM',
+      staffName,
+      orderId: posting.orderId || null,
+      note: null,
+      localId: cashSaleDrawerLocalId(posting.paymentId),
     })
+    if (!result) {
+      logger.info('💵 [CASH-DRAWER] La caja se cerró mientras se registraba el movimiento — no entra a una caja cerrada', {
+        venueId: posting.venueId,
+        sessionId: session.id,
+      })
+      return 'DRAWER_CLOSED'
+    }
 
     if (result.count === 0) {
       logger.info('💵 [CASH-DRAWER] Venta en efectivo ya registrada en el cajón (replay) — no se duplica', {
@@ -339,22 +344,24 @@ export async function postCashRefundToDrawer(posting: CashRefundDrawerPosting): 
     // `createMany` + `skipDuplicates`: el reembolso YA está commiteado cuando se llega
     // aquí, así que un P2002 de un reintento sería un error en la respuesta de una
     // devolución que sí ocurrió. El índice `@@unique([venueId, localId])` es el candado.
-    const result = await prisma.cashDrawerEvent.createMany({
-      data: [
-        {
-          sessionId: session.id,
-          venueId: posting.venueId,
-          type: 'PAY_OUT',
-          amount: total,
-          staffId: posting.staffId || 'SYSTEM',
-          staffName,
-          orderId: posting.orderId || null,
-          note,
-          localId: cashRefundDrawerLocalId(posting.refundPaymentId),
-        },
-      ],
-      skipDuplicates: true,
+    const result = await createEventUnderSessionLock(session.id, !posting.targetSessionId, {
+      sessionId: session.id,
+      venueId: posting.venueId,
+      type: 'PAY_OUT',
+      amount: total,
+      staffId: posting.staffId || 'SYSTEM',
+      staffName,
+      orderId: posting.orderId || null,
+      note,
+      localId: cashRefundDrawerLocalId(posting.refundPaymentId),
     })
+    if (!result) {
+      logger.info('💵 [CASH-DRAWER] La caja se cerró mientras se registraba el movimiento — no entra a una caja cerrada', {
+        venueId: posting.venueId,
+        sessionId: session.id,
+      })
+      return 'DRAWER_CLOSED'
+    }
 
     if (result.count === 0) {
       logger.info('💸 [CASH-DRAWER] Reembolso en efectivo ya registrado en el cajón (reintento) — no se resta dos veces', {
@@ -384,6 +391,32 @@ export async function postCashRefundToDrawer(posting: CashRefundDrawerPosting): 
 }
 
 /** Nombre legible del cajero para el listado de movimientos. Nunca lanza. */
+/**
+ * P1 de la auditoría de Codex (27-ago): la venta tardía entraba a una caja YA CERRADA.
+ *
+ * El cierre (`closeSession`) toma su CAS a CLOSED y luego lee los eventos. Un movimiento que hubiera
+ * encontrado la sesión OPEN un instante antes seguía insertándose después — el `overShort` firmado
+ * no lo incluía. Aquí el insert va en una transacción que PRIMERO toca la fila de la sesión con
+ * `status='OPEN'`: el UPDATE toma el candado de fila; si el cierre ya la marcó CLOSED (commiteado o
+ * no), esperamos y al re-evaluar el WHERE no hay fila → `null`, y el helper responde DRAWER_CLOSED.
+ * Con `targetSessionId` (el barrido de la fase 3 reparando una ventana cerrada) el candado NO exige
+ * OPEN: ahí reparar una sesión cerrada es justo el propósito.
+ */
+async function createEventUnderSessionLock(
+  sessionId: string,
+  requireOpen: boolean,
+  data: Prisma.CashDrawerEventCreateManyInput,
+): Promise<{ count: number } | null> {
+  return prisma.$transaction(async tx => {
+    const lock = await tx.cashDrawerSession.updateMany({
+      where: requireOpen ? { id: sessionId, status: 'OPEN' } : { id: sessionId },
+      data: { updatedAt: new Date() },
+    })
+    if (!lock || lock.count === 0) return null
+    return tx.cashDrawerEvent.createMany({ data: [data], skipDuplicates: true })
+  })
+}
+
 async function resolveStaffName(staffId?: string | null): Promise<string> {
   if (!staffId) return 'Sistema'
   try {

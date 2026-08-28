@@ -11,7 +11,7 @@ import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/perm
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { verifyAccessToken } from '../../jwt.service'
-import { revokeAllSessions } from '../../utils/passwordChangeGuard'
+import { mensajeDeCorte, motivoDeSesionInvalidada, revokeAllSessions } from '../../utils/passwordChangeGuard'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 
@@ -109,6 +109,24 @@ export const getAuthStatus = async (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!) as any
 
+    // 🔴 Esta ruta NO lleva `authenticateTokenMiddleware` a proposito ("controller
+    // handles token presence internally for flexibility"), asi que el corte de
+    // sesion hay que aplicarlo AQUI o no se aplica: sin esto, tras "cerrar sesion
+    // en todos mis dispositivos" —o tras un cambio de contrasena— los endpoints de
+    // datos contestaban 401 y esta ruta seguia diciendo `authenticated: true`, y el
+    // otro navegador o tablet se seguia pintando con sesion viva. Encontrado en la
+    // pasada en vivo de /full-testing, no por una prueba.
+    const motivoDelCorte = await motivoDeSesionInvalidada(decoded.sub, decoded.iat)
+    if (motivoDelCorte) {
+      logger.info('[AUTH] 📊 Session cut off - returning unauthenticated', { motivo: motivoDelCorte })
+      res.clearCookie('accessToken')
+      return res.status(200).json({
+        authenticated: false,
+        user: null,
+        message: mensajeDeCorte(motivoDelCorte),
+      })
+    }
+
     // Buscar staff con venues y organization (World-Class Pattern: Need org to detect OWNER during onboarding)
     const staff = await prisma.staff.findUnique({
       where: { id: decoded.sub },
@@ -189,6 +207,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                     enableShifts: true,
                     hiddenSidebarItems: true,
                     attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
+                    rotatingShiftsEnabled: true,
                     attendanceGraceMinutes: true,
                   },
                 },
@@ -241,6 +260,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 enableShifts: true,
                 hiddenSidebarItems: true,
                 attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
+                    rotatingShiftsEnabled: true,
                 attendanceGraceMinutes: true,
               },
             },
@@ -338,6 +358,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         enableShifts: boolean
         hiddenSidebarItems: string[]
         attendanceEnabled?: boolean
+        rotatingShiftsEnabled?: boolean
         attendanceGraceMinutes?: number
       } | null
       // PIN for TPV access (user's own PIN, venue-specific)
@@ -463,6 +484,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
               enableShifts: true,
               hiddenSidebarItems: true,
               attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
+                    rotatingShiftsEnabled: true,
               attendanceGraceMinutes: true,
             },
           },
@@ -581,6 +603,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 enableShifts: true,
                 hiddenSidebarItems: true,
                 attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
+                    rotatingShiftsEnabled: true,
                 attendanceGraceMinutes: true,
               },
             },

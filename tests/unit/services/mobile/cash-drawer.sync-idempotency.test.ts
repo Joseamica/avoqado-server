@@ -40,7 +40,11 @@ describe('syncEvents — idempotencia del cajón', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(sesion) }
+    ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue(sesion),
+    }
     ;(prismaMock as any).cashDrawerEvent = {
       createMany: jest.fn().mockResolvedValue({ count: 1 }),
       findMany: jest.fn().mockResolvedValue([]),

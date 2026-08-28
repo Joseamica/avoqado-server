@@ -32,7 +32,7 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
     createdPayment = undefined
     // El prismaMock compartido (tests/__helpers__/setup.ts) no declara los modelos del
     // cajón. Se agregan AQUÍ y no allá para no tocar un helper que otras sesiones editan.
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn() }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst: jest.fn() }
     // Desde la extracción del helper compartido (`services/shared/cashDrawerPosting`),
     // el movimiento entra por `createMany` + `skipDuplicates` en vez de un `create`
     // ciego: mismo movimiento, ahora con llave de idempotencia.
