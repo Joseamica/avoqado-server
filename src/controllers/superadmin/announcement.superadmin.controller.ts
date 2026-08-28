@@ -131,8 +131,9 @@ export const create = async (req: Request, res: Response, next: NextFunction) =>
 
 export const update = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const { userId } = (req as any).authContext
     const input = announcementSchema.partial().parse(req.body)
-    res.json({ success: true, data: { announcement: await updateAnnouncement(req.params.id, input) } })
+    res.json({ success: true, data: { announcement: await updateAnnouncement(req.params.id, input, userId) } })
   } catch (error) {
     next(errorDeValidacion(error) ?? error)
   }
@@ -149,12 +150,13 @@ export const previewAudience = async (req: Request, res: Response, next: NextFun
 
 export const publish = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const { userId } = (req as any).authContext
     const { scheduledFor } = z.object({ scheduledFor: z.coerce.date().optional() }).parse(req.body ?? {})
     if (scheduledFor) {
-      const announcement = await scheduleAnnouncement(req.params.id, scheduledFor)
+      const announcement = await scheduleAnnouncement(req.params.id, scheduledFor, userId)
       return res.json({ success: true, data: { announcement, scheduled: true } })
     }
-    res.json({ success: true, data: await publishAnnouncement(req.params.id) })
+    res.json({ success: true, data: await publishAnnouncement(req.params.id, userId) })
   } catch (error) {
     next(error)
   }
@@ -162,7 +164,8 @@ export const publish = async (req: Request, res: Response, next: NextFunction) =
 
 export const archive = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    res.json({ success: true, data: { announcement: await archiveAnnouncement(req.params.id) } })
+    const { userId } = (req as any).authContext
+    res.json({ success: true, data: { announcement: await archiveAnnouncement(req.params.id, userId) } })
   } catch (error) {
     next(error)
   }

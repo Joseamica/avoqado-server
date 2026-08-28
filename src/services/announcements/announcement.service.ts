@@ -3,6 +3,36 @@ import prisma from '../../utils/prismaClient'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import { resolveAudience } from './audience.service'
+import { logAction } from '../dashboard/activity-log.service'
+
+/**
+ * Rastro de lo que el superadmin le manda a los negocios.
+ *
+ * 🔴 La regla del repo es dura: una mutación sin `ActivityLog` está incompleta. Publicar
+ * un anuncio llega a cientos de buzones y es justo lo que alguien audita después
+ * ("¿quién mandó esto?"), pero hasta hoy no dejaba rastro.
+ *
+ * Va SIEMPRE después de que el cambio ya ocurrió, y sin `await` encadenado: si la
+ * bitácora truena, la operación NO puede fallar por eso. `venueId` va nulo a propósito —
+ * un anuncio de plataforma no pertenece a un negocio. Sin actor humano (el job que
+ * publica lo programado) el `staffId` nulo YA dice que no lo hizo una persona.
+ */
+function rastro(action: string, id: string, performedBy?: string, data?: Record<string, unknown>): void {
+  // `Promise.resolve` envuelve por si logAction cambia de forma: la bitácora jamás
+  // puede reventar la operación que acaba de ocurrir.
+  void Promise.resolve(
+    logAction({
+      action,
+      entity: 'PlatformAnnouncement',
+      entityId: id,
+      staffId: performedBy ?? null,
+      venueId: null,
+      data: (data ?? {}) as never,
+    }),
+  ).catch(() => {
+    /* logAction ya registra su propio fallo; aquí sólo se evita un rechazo sin atender */
+  })
+}
 
 /** Tamaño del lote de reparto. Miles de filas en un solo createMany bloquean la tabla. */
 const LOTE = 500
@@ -22,7 +52,7 @@ const LOTE = 500
  *
  * Es el mismo patrón que `customerApprovalOutbox`, que ya está probado en este repo.
  */
-export async function publishAnnouncement(id: string): Promise<{ delivered: number; alreadyPublished: boolean }> {
+export async function publishAnnouncement(id: string, performedBy?: string): Promise<{ delivered: number; alreadyPublished: boolean }> {
   const anuncio = await prisma.platformAnnouncement.findUnique({ where: { id } })
   if (!anuncio) throw new NotFoundError('Anuncio no encontrado')
 
@@ -88,6 +118,8 @@ export async function publishAnnouncement(id: string): Promise<{ delivered: numb
   })
 
   logger.info('Anuncio publicado y encolado', { announcementId: id, encoladas })
+  // Sin `performedBy` es el job de lo programado: el staffId nulo ya dice que no fue una persona.
+  rastro('PLATFORM_ANNOUNCEMENT_PUBLISHED', id, performedBy, { encoladas, title: anuncio.title })
   return { delivered: encoladas, alreadyPublished: false }
 }
 
@@ -151,7 +183,7 @@ export async function listAnnouncements() {
 }
 
 export async function createAnnouncement(input: AnnouncementInput, createdBy: string, createdByName: string) {
-  return prisma.platformAnnouncement.create({
+  const creado = await prisma.platformAnnouncement.create({
     data: {
       ...input,
       contentBlocks: (input.contentBlocks ?? undefined) as Prisma.InputJsonValue | undefined,
@@ -159,6 +191,14 @@ export async function createAnnouncement(input: AnnouncementInput, createdBy: st
       createdByName,
     },
   })
+  rastro('PLATFORM_ANNOUNCEMENT_CREATED', creado.id, createdBy, {
+    title: input.title,
+    audienceRoles: input.audienceRoles,
+    targetPlanTiers: input.targetPlanTiers,
+    targetCategories: input.targetCategories,
+    venuesElegidosAMano: input.targetVenueIds.length,
+  })
+  return creado
 }
 
 /**
@@ -166,23 +206,25 @@ export async function createAnnouncement(input: AnnouncementInput, createdBy: st
  * cambiarle el texto aquí NO cambia lo que la gente ya recibió, así que dejarlo
  * editable daría una falsa sensación de corrección.
  */
-export async function updateAnnouncement(id: string, input: Partial<AnnouncementInput>) {
+export async function updateAnnouncement(id: string, input: Partial<AnnouncementInput>, performedBy?: string) {
   const actual = await prisma.platformAnnouncement.findUnique({ where: { id } })
   if (!actual) throw new NotFoundError('Anuncio no encontrado')
   if (actual.status !== PlatformAnnouncementStatus.DRAFT && actual.status !== PlatformAnnouncementStatus.SCHEDULED) {
     throw new BadRequestError('Sólo se puede editar un anuncio en borrador o programado')
   }
-  return prisma.platformAnnouncement.update({
+  const guardado = await prisma.platformAnnouncement.update({
     where: { id },
     data: {
       ...input,
       contentBlocks: (input.contentBlocks ?? undefined) as Prisma.InputJsonValue | undefined,
     },
   })
+  rastro('PLATFORM_ANNOUNCEMENT_UPDATED', id, performedBy, { campos: Object.keys(input) })
+  return guardado
 }
 
 /** Programa el reparto para más tarde. El job lo publica cuando llegue la hora. */
-export async function scheduleAnnouncement(id: string, scheduledFor: Date) {
+export async function scheduleAnnouncement(id: string, scheduledFor: Date, performedBy?: string) {
   const actual = await prisma.platformAnnouncement.findUnique({ where: { id } })
   if (!actual) throw new NotFoundError('Anuncio no encontrado')
   if (actual.deliveredAt) throw new BadRequestError('Este anuncio ya se repartió')
@@ -194,18 +236,22 @@ export async function scheduleAnnouncement(id: string, scheduledFor: Date) {
   if (actual.expiresAt && scheduledFor >= actual.expiresAt) {
     throw new BadRequestError('La fecha de publicación debe ser anterior a la de caducidad')
   }
-  return prisma.platformAnnouncement.update({
+  const programado = await prisma.platformAnnouncement.update({
     where: { id },
     data: { status: PlatformAnnouncementStatus.SCHEDULED, scheduledFor },
   })
+  rastro('PLATFORM_ANNOUNCEMENT_SCHEDULED', id, performedBy, { scheduledFor: scheduledFor.toISOString() })
+  return programado
 }
 
 /** Lo retira sin borrarlo: deja de salir como banner y deja de contarse como activo. */
-export async function archiveAnnouncement(id: string) {
+export async function archiveAnnouncement(id: string, performedBy?: string) {
   const actual = await prisma.platformAnnouncement.findUnique({ where: { id } })
   if (!actual) throw new NotFoundError('Anuncio no encontrado')
-  return prisma.platformAnnouncement.update({
+  const archivado = await prisma.platformAnnouncement.update({
     where: { id },
     data: { status: PlatformAnnouncementStatus.ARCHIVED },
   })
+  rastro('PLATFORM_ANNOUNCEMENT_ARCHIVED', id, performedBy, { estadoAnterior: actual.status })
+  return archivado
 }

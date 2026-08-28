@@ -14,6 +14,11 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
 jest.mock('../../../../src/services/announcements/audience.service', () => ({
   resolveAudience: jest.fn(),
 }))
+// La bitácora es nueva en este servicio: sin este mock, `logAction` real intenta escribir
+// en un `prisma.activityLog` que este archivo no declara y truena en pruebas que no la miran.
+jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn().mockResolvedValue(undefined),
+}))
 
 const mockFind = prisma.platformAnnouncement.findUnique as unknown as jest.Mock
 const mockUpdate = prisma.platformAnnouncement.update as unknown as jest.Mock
