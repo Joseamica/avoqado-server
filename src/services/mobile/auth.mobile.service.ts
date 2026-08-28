@@ -8,12 +8,13 @@
  * - Passkey (WebAuthn) authentication for passwordless login
  */
 
-import type { VenueStatus } from '@prisma/client'
+import { AuthMethod, type VenueStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import crypto from 'crypto'
 import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import * as jwtService from '../../jwt.service'
+import { createSession } from '@/services/auth/session.service'
 import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
 import { OPERATIONAL_VENUE_STATUSES, venueStatusMessage } from '../../lib/venueStatus.constants'
 import { mensajeDeCorte, motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
@@ -232,10 +233,20 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
   // 6. Check venue access
   const selectedVenue = pickOperationalVenueForLogin(staff.venues)
 
+  // 6.1. Crear la Session ANTES de los tokens — su id viaja como `sid` en ambos. El passkey
+  // es biometría/PIN del dispositivo, no una contraseña: authMethod queda BIOMETRIC.
+  const session = await createSession({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    authMethod: AuthMethod.BIOMETRIC,
+  })
+
   // 7. Generate tokens (derive orgId from venue)
   const venueOrgId = selectedVenue.venue.organizationId
-  const accessToken = jwtService.generateAccessToken(staff.id, venueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
-  const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe, selectedVenue.venueId)
+  const accessToken = jwtService.generateAccessToken(staff.id, venueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe, {
+    sid: session.id,
+  })
+  const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe, selectedVenue.venueId, { sid: session.id })
 
   // 8. Update last login
   await prisma.staff.update({
@@ -596,10 +607,20 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   // 5. Check venue access
   const selectedVenue = pickOperationalVenueForLogin(staff.venues, 'NO_VENUE_ACCESS')
 
+  // 5.1. Crear la Session ANTES de los tokens — su id viaja como `sid` en ambos, que es lo
+  // que hace que revocarla (cerrar sesión desde otro lado) signifique algo de verdad.
+  const session = await createSession({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    authMethod: AuthMethod.PASSWORD,
+  })
+
   // 6. Generate tokens (derive orgId from venue)
   const emailLoginOrgId = selectedVenue.venue.organizationId
-  const accessToken = jwtService.generateAccessToken(staff.id, emailLoginOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
-  const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe, selectedVenue.venueId)
+  const accessToken = jwtService.generateAccessToken(staff.id, emailLoginOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe, {
+    sid: session.id,
+  })
+  const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe, selectedVenue.venueId, { sid: session.id })
 
   // 7. Update last login and reset failed attempts
   await prisma.staff.update({

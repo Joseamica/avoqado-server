@@ -94,6 +94,13 @@ const prismaMock: any = {
   notificationPreference: createMockModel(),
   notificationTemplate: createMockModel(),
   staffVenue: createMockModel(),
+  // Parte A (sesiones revocables) — Task 6: el login móvil (password y passkey) ahora
+  // crea una Session ANTES de emitir tokens. Sin esta entrada, cualquier test que ejercite
+  // loginWithEmail/verifyPasskeyAssertion sin conocer la Session revienta con "Cannot read
+  // properties of undefined (reading 'create')" — misma clase de bug que venueFeature.findMany
+  // más abajo. staffPasskey es lo que verifyPasskeyAssertion consulta para resolver la credencial.
+  session: createMockModel(),
+  staffPasskey: createMockModel(),
   chatTrainingData: createMockModel(),
   chatFeedback: createMockModel(),
   learnedPatterns: createMockModel(),
@@ -378,6 +385,12 @@ prismaMock.venueFeature.findMany.mockResolvedValue([])
 // above. Default to null (= no VenueSettings row → design defaults TAB/SIDE_PANEL); tests
 // that exercise the promotions block override with their own mockResolvedValue/mockRejectedValue.
 prismaMock.venueSettings.findUnique.mockResolvedValue(null)
+// Parte A (sesiones revocables) — Task 6: loginWithEmail/verifyPasskeyAssertion now call
+// createSession(...) → prisma.session.create(...) BEFORE minting tokens (they need the row's
+// `id` for the `sid` claim). Default so pre-existing mobile-auth tests that don't know about
+// sessions yet (auth.permisosDeLaApp.test.ts, auth.loginSuspendedVenue.test.ts) keep passing;
+// tests exercising the Session itself override with their own mockResolvedValue.
+prismaMock.session.create.mockResolvedValue({ id: 'session-mock-default' })
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)
