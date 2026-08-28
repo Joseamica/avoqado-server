@@ -9,6 +9,13 @@ export interface SocketAuthContext extends AuthContext {
   socketId: string
   connectedAt: Date
   lastActivity: Date
+  /**
+   * Session.id (claim `sid` del JWT) — Parte A, Task 11 (sesiones revocables).
+   * Ausente para tokens LEGACY sin `sid` (dashboard/PAX/Android/iOS anteriores al
+   * rollout). Es lo que permite a `SocketManager.disconnectBySession` encontrar y
+   * cerrar los sockets de una sesión revocada.
+   */
+  sessionId?: string
 }
 
 /**

@@ -570,6 +570,36 @@ export class SocketManager implements ISocketManager {
   }
 
   /**
+   * Sesiones revocables (Parte A, Task 11) — cierra, sobre el registro LOCAL de
+   * `RoomManagerService`, todos los sockets abiertos de una `Session` revocada.
+   *
+   * Correcto y suficiente con UNA sola instancia (`.claude/rules/una-sola-instancia.md`):
+   * todo socket vivo de esa sesión está en este mismo proceso — no hace falta pub/sub ni
+   * Redis. El día que el server escale a 2+ instancias, esto necesita una capa
+   * compartida (puntos 6-7 del checklist de esa misma regla).
+   *
+   * Se llama DESPUÉS de que `revokeSession`/`revokeAllSessionsForStaff` ya commitearon,
+   * igual que `invalidateSession` (la caché de sesión) — y, como esa, es best-effort: un
+   * fallo cerrando UN socket nunca debe impedir que se cierren los demás, ni puede tumbar
+   * al llamador (la revocación en sí ya ocurrió). Por eso nunca propaga — cada socket se
+   * desconecta en su propio try/catch.
+   */
+  public disconnectBySession(sessionId: string): void {
+    const sockets = this.roomManager.getSessionSockets(sessionId)
+    for (const socket of sockets) {
+      try {
+        socket.disconnect(true)
+      } catch (error) {
+        logger.error('Failed to disconnect socket for revoked session', {
+          sessionId,
+          socketId: socket.id,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+      }
+    }
+  }
+
+  /**
    * Get server statistics
    */
   public getServerStats() {

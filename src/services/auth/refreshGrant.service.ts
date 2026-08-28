@@ -5,6 +5,7 @@ import { cifrarSucesor, descifrarSucesor, sucesorCifradoDisponible } from './suc
 import { revokeSession } from './session.service'
 import { invalidateSession } from './sessionCache'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+import socketManager from '@/communication/sockets/managers/socketManager'
 
 /** SHA-256 en hex. El token en claro NUNCA se guarda. */
 export function hashToken(token: string): string {
@@ -152,6 +153,11 @@ export async function rotateGrant(token: string, nuevoToken: string, nuevoExpire
       await revokeSession(previo.sessionId, 'refresh_reuse_detected', tx)
     })
     await invalidateSession(previo.sessionId) // después del commit de arriba
+    // Sesiones revocables (Task 11): cierra, best-effort, cualquier socket que ya
+    // estuviera abierto con esta Session — el access token robado que disparó la
+    // reutilización puede tener uno abierto ahora mismo. Nunca truena (ver docstring de
+    // `disconnectBySession`), así que no hace falta su propio try/catch aquí.
+    socketManager.disconnectBySession(previo.sessionId)
     return REUTILIZADO
   }
 

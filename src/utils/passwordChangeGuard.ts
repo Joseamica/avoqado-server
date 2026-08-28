@@ -29,6 +29,7 @@ import prisma from './prismaClient'
 import logger from '../config/logger'
 import { revokeAllSessionsForStaff } from '../services/auth/session.service'
 import { invalidateSession } from '../services/auth/sessionCache'
+import socketManager from '../communication/sockets/managers/socketManager'
 
 /**
  * Margen para relojes desfasados entre procesos. Sin el, alguien que cambia su
@@ -195,6 +196,12 @@ export async function cerrarSesionesNuevasPorCambioDeContrasena(staffId: string)
     const vivas = await prisma.session.findMany({ where: { staffId, revokedAt: null }, select: { id: true } })
     await revokeAllSessionsForStaff(staffId, 'password_changed')
     await Promise.all(vivas.map(s => invalidateSession(s.id)))
+    // Sesiones revocables (Parte A, Task 11): además de invalidar la caché, cerrar los
+    // sockets que ya estaban abiertos con esas Session — si no, quien tenía el socket
+    // abierto sigue recibiendo eventos en tiempo real con una sesión que ya no vive, hasta
+    // que algo más lo desconecte. Nunca truena (best-effort por diseño, ver su docstring);
+    // el try/catch de esta función es sólo la red de seguridad de las líneas de arriba.
+    vivas.forEach(s => socketManager.disconnectBySession(s.id))
   } catch (err) {
     logger.warn('[AUTH] No se pudieron cerrar las Session nuevas tras el cambio de contrasena', { staffId, err })
   }
