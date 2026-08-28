@@ -172,6 +172,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   McpToolCall: 'Staff, Auth, Permissions & Time',
   StaffPasskey: 'Staff, Auth, Permissions & Time',
   user_sessions: 'Staff, Auth, Permissions & Time',
+  Session: 'Staff, Auth, Permissions & Time',
+  RefreshGrant: 'Staff, Auth, Permissions & Time',
   PermissionSet: 'Staff, Auth, Permissions & Time',
   VenueRoleConfig: 'Staff, Auth, Permissions & Time',
   VenueRolePermission: 'Staff, Auth, Permissions & Time',

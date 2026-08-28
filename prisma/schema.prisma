@@ -985,6 +985,9 @@ model Staff {
   /// Acuses de recibo de anuncios de plataforma (ver PlatformAnnouncementDelivery).
   platformAnnouncementDeliveries PlatformAnnouncementDelivery[]
 
+  /// Sesiones autenticadas revocables (JWT `sid`). Ver modelo `Session`.
+  sessions Session[]
+
   // AI Training
   chatTrainingData   ChatTrainingData[]  @relation("UserChatTraining")
   chatConversations  ChatConversation[]  @relation("UserChatConversations")
@@ -16886,4 +16889,62 @@ enum PlatformAnnouncementStatus {
   SCHEDULED
   PUBLISHED
   ARCHIVED
+}
+
+// ==========================================
+// SESIONES REVOCABLES (Parte A del plan de sesiones)
+// ==========================================
+//
+// El JWT hoy es autónomo: nadie puede invalidarlo, así que "cerrar sesión" no hace nada
+// del lado del servidor. `Session.id` es el claim `sid` dentro del JWT — el resto del plan
+// (revocación, refresh rotation, dispositivos) se construye sobre estos dos modelos.
+
+enum AuthMethod {
+  PASSWORD
+  PIN
+  BIOMETRIC
+}
+
+/// Una sesión autenticada — el `sid` que el JWT lleva adentro. Revocarla es lo que hace que
+/// "cerrar sesión" signifique algo: un token cuyo `sid` apunta a una Session con `revokedAt`
+/// puesto deja de ser válido, aunque su firma y expiración sigan intactas.
+model Session {
+  id              String         @id @default(cuid())
+  staffId         String
+  staff           Staff          @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId         String
+  deviceId        String?
+  authMethod      AuthMethod
+  parentSessionId String?
+  createdAt       DateTime       @default(now())
+  lastSeenAt      DateTime       @default(now())
+  revokedAt       DateTime?
+  revokedReason   String?
+  refreshGrants   RefreshGrant[]
+
+  @@index([staffId, revokedAt])
+  @@index([deviceId, revokedAt])
+  @@index([venueId, revokedAt])
+}
+
+/// Un refresh token emitido para una Session, con rotación y familia (reuse detection).
+/// `tokenHash` guarda SHA-256 del refresh token — nunca el token en claro.
+model RefreshGrant {
+  id        String  @id @default(cuid())
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  familyId  String
+  tokenHash String  @unique
+
+  /// Refresh sucesor CIFRADO (AEAD), sólo durante la ventana de retransmisión de 60 s.
+  /// 🔴 La llave vive FUERA de Postgres (SESSION_SUCCESSOR_ENC_KEY). Se borra físicamente al vencer.
+  successorEnc          String?
+  successorEncExpiresAt DateTime?
+  consumedAt            DateTime?
+  rotatedToId           String?
+  expiresAt             DateTime
+  revokedAt             DateTime?
+
+  @@index([familyId, revokedAt])
+  @@index([successorEncExpiresAt])
 }
