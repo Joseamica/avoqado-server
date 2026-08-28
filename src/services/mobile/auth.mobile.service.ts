@@ -262,8 +262,11 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
 
   // 7. Generate tokens (derive orgId from venue)
   const venueOrgId = selectedVenue.venue.organizationId
+  // Task 12: mismo criterio que el login por contraseña — este servicio sólo lo usan
+  // avoqado-android/avoqado-ios (el POS).
   const accessToken = jwtService.generateAccessToken(staff.id, venueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe, {
     sid: session.id,
+    pos: true,
   })
   const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe, selectedVenue.venueId, { sid: session.id })
 
@@ -641,8 +644,11 @@ export async function loginWithEmail(email: string, password: string, rememberMe
 
   // 6. Generate tokens (derive orgId from venue)
   const emailLoginOrgId = selectedVenue.venue.organizationId
+  // Task 12: este login sólo lo usan avoqado-android/avoqado-ios (el POS) — `pos: true`
+  // acorta el access a 600s, ganándole a `rememberMe`. Ver el porqué en jwt.service.ts.
   const accessToken = jwtService.generateAccessToken(staff.id, emailLoginOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe, {
     sid: session.id,
+    pos: true,
   })
   const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe, selectedVenue.venueId, { sid: session.id })
 
@@ -896,13 +902,20 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   // cual como hoy.
   const refreshOrgId = selectedVenue.venue.organizationId
   const sidOpts = session ? { sid: session.id } : undefined
+  // Task 12: este endpoint (`POST /mobile/auth/refresh`) sólo lo llaman avoqado-android/
+  // avoqado-ios — nunca el dashboard ni la TPV, que refrescan por su propio carril — así
+  // que el access que sale de aquí es tan POS como el que salió del login. Sin re-marcar
+  // `pos: true` en CADA refresco, el primer ciclo (~10 min después de entrar) devolvería
+  // un access de 24h y el acortamiento sólo protegería los primeros 10 minutos de la
+  // sesión, no la sesión completa. `pos` NO se mete en el refresh token (sidOpts se queda
+  // igual abajo) — no tiene consumidor ahí, sólo `generateAccessToken` lee `opts.pos`.
   const newAccessToken = jwtService.generateAccessToken(
     staff.id,
     refreshOrgId,
     selectedVenue.venueId,
     selectedVenue.role,
     undefined,
-    sidOpts,
+    { ...sidOpts, pos: true },
   )
   let newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId, undefined, selectedVenue.venueId, sidOpts)
 

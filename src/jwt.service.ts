@@ -63,10 +63,14 @@ export interface RefreshTokenPayload extends jwt.JwtPayload {
  * @param organizationId - ID de la Organización (from venue or StaffOrganization)
  * @param venueId - ID del Venue para la sesión actual
  * @param role - Rol del Staff en el Venue actual
- * @param rememberMe - Si true, extiende la duración del token a 30 días
- * @param opts - `sid` (Session.id) agrega el claim de sesión revocable; `pos` se
- *   acepta y se ignora aquí (lo usa la Task 12 para tokens de 10 min en el POS).
- *   Opcional: un llamador que no lo pasa sigue emitiendo un token legacy sin `sid`/`v`.
+ * @param rememberMe - Si true, extiende la duración del token a 30 días. Un `opts.pos`
+ *   verdadero lo ignora: el POS nunca emite un access de larga duración.
+ * @param opts - `sid` (Session.id) agrega el claim de sesión revocable; `pos: true`
+ *   acorta el access a 600 s (10 min) SIN IMPORTAR `rememberMe` — Task 12: sin DPoP, un
+ *   access token copiado sirve desde cualquier aparato mientras viva, así que el POS
+ *   nunca emite uno de larga duración. `pos` le gana a `rememberMe` a propósito.
+ *   Opcional: un llamador que no lo pasa sigue emitiendo un token legacy sin `sid`/`v`,
+ *   con la duración de siempre.
  * @returns El token de acceso firmado.
  */
 export function generateAccessToken(
@@ -91,9 +95,12 @@ export function generateAccessToken(
   }
   // Explicitly type the secret and options
   const secret: Secret = ACCESS_TOKEN_SECRET!
+  // Task 12: POS gana sobre rememberMe (no existe un "recuérdame" de 30 días en el POS) y
+  // sobre la duración normal — 600s es la mitigación a que este servidor no usa DPoP.
+  const expiresIn = opts?.pos ? 600 : rememberMe ? 2592000 : 86400
   const options: SignOptions = {
-    // rememberMe: 30 days (2592000 seconds), normal: 24 hours (86400 seconds)
-    expiresIn: rememberMe ? 2592000 : 86400,
+    // rememberMe: 30 days (2592000 seconds), normal: 24 hours (86400 seconds), POS: 10 min (600 seconds)
+    expiresIn,
     algorithm: 'HS256', // SECURITY: Explicitly specify algorithm
   }
   return jwt.sign(payload, secret, options)

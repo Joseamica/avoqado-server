@@ -128,8 +128,10 @@ describe('login por contraseña — crea Session y emite sid', () => {
     await loginWithEmail('heidi@amaena.com', 'la-contraseña', true)
 
     // rememberMe (5º arg de access, 3º de refresh) sigue en `true`; `opts` va DESPUÉS, no en su lugar.
+    // Task 12: `pos: true` viaja en el access (nunca en el refresh) — el login móvil es siempre POS.
     expect(jwtService.generateAccessToken).toHaveBeenCalledWith('staff_heidi', 'org_1', VENUE_ID, 'WAITER', true, {
       sid: 'sess-remember-me',
+      pos: true,
     })
     expect(jwtService.generateRefreshToken).toHaveBeenCalledWith('staff_heidi', 'org_1', true, VENUE_ID, { sid: 'sess-remember-me' })
   })
@@ -192,6 +194,7 @@ describe('login por passkey — crea Session BIOMETRIC y emite sid', () => {
 
     expect(jwtService.generateAccessToken).toHaveBeenCalledWith('staff_heidi', 'org_1', VENUE_ID, 'WAITER', undefined, {
       sid: 'sess-passkey',
+      pos: true,
     })
     expect(jwtService.generateRefreshToken).toHaveBeenCalledWith('staff_heidi', 'org_1', undefined, VENUE_ID, { sid: 'sess-passkey' })
   })
