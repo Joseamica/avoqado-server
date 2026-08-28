@@ -13,6 +13,7 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from './venueRoleConfig.dashboard.service'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
+import { cerrarSesionesNuevasPorCambioDeContrasena } from '@/utils/passwordChangeGuard'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
@@ -856,10 +857,13 @@ export async function resetPassword(data: ResetPasswordDto) {
   // 9. Every open session on every device is already dead: `lastPasswordReset`
   // above is the cutoff `passwordChangeGuard` compares each token's `iat`
   // against, and it is enforced on all three rails — the auth middleware, the
-  // TPV refresh and the mobile refresh. No Redis needed, and none was ever the
-  // blocker. What this does NOT give is per-device revocation (killing ONE lost
-  // tablet without logging the person out everywhere); that needs persisted,
-  // rotating refresh tokens, the way `src/mcp/oauth/tokenStore.ts` already does.
+  // TPV refresh and the mobile refresh.
+  //
+  // Same reset, second lever (Task 7): a JWT that carries a `sid` (Session
+  // table, T1-T6) also needs its `Session` row closed — otherwise the corte
+  // above and the Session rows stop agreeing. Best-effort, see
+  // `cerrarSesionesNuevasPorCambioDeContrasena`.
+  await cerrarSesionesNuevasPorCambioDeContrasena(staff.id)
 
   logger.info(`Password reset successfully for staff: ${staff.email}`)
 

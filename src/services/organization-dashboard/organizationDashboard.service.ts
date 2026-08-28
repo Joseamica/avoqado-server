@@ -22,6 +22,7 @@ import {
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { computeTerminalMigration, type MigrationCommandLike } from '../dashboard/terminals.superadmin.service'
+import { cerrarSesionesNuevasPorCambioDeContrasena } from '../../utils/passwordChangeGuard'
 
 // Types for organization dashboard
 export interface OrgCategoryBreakdown {
@@ -2894,6 +2895,11 @@ class OrganizationDashboardService {
         lastPasswordReset: new Date(),
       },
     })
+
+    // 🔴 Same reset, second lever (Task 7): also close the new `Session` rows
+    // (T1-T6), so a token carrying `sid` dies the same way as one that
+    // doesn't. Best-effort — see `cerrarSesionesNuevasPorCambioDeContrasena`.
+    await cerrarSesionesNuevasPorCambioDeContrasena(userId)
 
     // Audit WHO reset WHOM. `performedBy` (the caller's staffId) is required for a
     // meaningful trail — a password reset without it is unattributable. Authorization

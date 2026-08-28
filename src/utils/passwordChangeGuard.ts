@@ -26,6 +26,9 @@
  * consulta a la base a CADA request autenticado del dashboard y de las TPV.
  */
 import prisma from './prismaClient'
+import logger from '../config/logger'
+import { revokeAllSessionsForStaff } from '../services/auth/session.service'
+import { invalidateSession } from '../services/auth/sessionCache'
 
 /**
  * Margen para relojes desfasados entre procesos. Sin el, alguien que cambia su
@@ -163,4 +166,36 @@ export async function revokeAllSessions(staffId: string): Promise<Date> {
   await prisma.staff.update({ where: { id: staffId }, data: { sessionsRevokedAt: ahora } })
   cache.delete(staffId)
   return ahora
+}
+
+/**
+ * Cuando se cambia la contrasena, tambien hay que cerrar las `Session` NUEVAS
+ * (T1-T6) — si no, el corte de arriba (basado en `lastPasswordReset`) y las
+ * Session dejan de decir lo mismo. Un token que trae `sid` (los que emite el
+ * login movil desde la Task 6) YA muere en el refresco por el `iat` viejo,
+ * pero la fila `Session` que ese `sid` senala se quedaria con
+ * `revokedAt: null`, y `isSessionAliveCached` seguiria sirviendo "viva" en
+ * OTRA instancia hasta por el TTL de la cache (ver `sessionCache.ts`).
+ *
+ * Best-effort a proposito: el corte de `lastPasswordReset` YA protege en cada
+ * request, sincrónicamente — esto es defensa en profundidad para las Session
+ * con `sid`. Un tropiezo aqui (Postgres o Redis caidos) NUNCA puede bloquear
+ * el cambio de contrasena en si, que es la operacion que de verdad importa.
+ *
+ * 🔴 Primero se leen las Session vivas, LUEGO se revocan (`revokeAllSessionsForStaff`,
+ * que ya commitea su propio UPDATE atomico), y SOLO DESPUES se invalida cada
+ * una en la cache — invalidar antes del commit dejaria una ventana donde una
+ * lectura concurrente repuebla "viva" justo antes de que la base la marque
+ * revocada. Vive AQUI y no dentro de `session.service` porque `sessionCache`
+ * ya importa `session.service`: si `session.service` importara la cache
+ * habria un ciclo de imports (decision de la Task 4).
+ */
+export async function cerrarSesionesNuevasPorCambioDeContrasena(staffId: string): Promise<void> {
+  try {
+    const vivas = await prisma.session.findMany({ where: { staffId, revokedAt: null }, select: { id: true } })
+    await revokeAllSessionsForStaff(staffId, 'password_changed')
+    await Promise.all(vivas.map(s => invalidateSession(s.id)))
+  } catch (err) {
+    logger.warn('[AUTH] No se pudieron cerrar las Session nuevas tras el cambio de contrasena', { staffId, err })
+  }
 }

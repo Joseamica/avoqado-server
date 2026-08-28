@@ -6,6 +6,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { deleteOrRetainStaffWithH1Provenance } from './staffDeletion.service'
+import { cerrarSesionesNuevasPorCambioDeContrasena } from '@/utils/passwordChangeGuard'
 
 // ===========================================
 // TYPES
@@ -665,6 +666,11 @@ export async function resetPassword(staffId: string, newPassword: string, perfor
       lastPasswordReset: new Date(),
     },
   })
+
+  // 🔴 Same reset, second lever: close the new `Session` rows (T1-T6) too, so a
+  // token carrying `sid` dies the same way as one that doesn't. Best-effort —
+  // see `cerrarSesionesNuevasPorCambioDeContrasena`.
+  await cerrarSesionesNuevasPorCambioDeContrasena(staffId)
 
   logger.info(`[STAFF-SUPERADMIN] Password reset for staff`, { staffId, email: staff.email })
 
