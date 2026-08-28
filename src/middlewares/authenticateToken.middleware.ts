@@ -8,6 +8,8 @@ import { mensajeDeCorte, motivoDeSesionInvalidada } from '../utils/passwordChang
 import { enforceImpersonationRules } from './impersonationGuard.middleware'
 import { enrichContext } from '../observability/executionContext'
 import { getVenueName } from '../observability/venueNames'
+import { isSessionAliveCached } from '../services/auth/sessionCache'
+import { UnauthorizedError } from '../errors/AppError'
 
 export const authenticateTokenMiddleware = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
@@ -86,6 +88,20 @@ export const authenticateTokenMiddleware = async (req: Request, res: Response, n
           message: 'La sesión de impersonación ha expirado.',
         })
         return
+      }
+    }
+
+    // SESIONES REVOCABLES: si el token trae `sid`, la sesión debe seguir viva.
+    //
+    // Un token LEGACY (sin `sid`, emitido antes de este rollout) pasa exactamente como
+    // hasta hoy, SIN consultar nada: ahora mismo hay tokens vivos de dashboard, PAX,
+    // Android e iOS sin `sid`, y bloquearlos expulsaría a todo el producto de golpe. Solo
+    // cuando el token SÍ trae `sid` se pregunta a la caché (que cae a la base si Redis no
+    // responde, y nunca acepta por defecto si las dos fallan).
+    if (decoded.sid) {
+      const viva = await isSessionAliveCached(decoded.sid)
+      if (!viva) {
+        return next(new UnauthorizedError('Sesión cerrada. Inicia sesión de nuevo.'))
       }
     }
 
