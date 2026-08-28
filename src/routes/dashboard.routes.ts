@@ -7848,6 +7848,167 @@ router.put(
   attendanceController.replaceWorkSchedule,
 )
 
+/**
+ * @openapi
+ * components:
+ *   parameters:
+ *     WorkShiftVenueId:
+ *       in: path
+ *       name: venueId
+ *       required: true
+ *       schema: { type: string }
+ *     WorkShiftTemplateId:
+ *       in: path
+ *       name: templateId
+ *       required: true
+ *       schema: { type: string }
+ *   schemas:
+ *     WorkShiftTemplateInput:
+ *       type: object
+ *       required: [name, abbreviation, startTime, endTime]
+ *       properties:
+ *         name: { type: string, maxLength: 40 }
+ *         abbreviation: { type: string, maxLength: 4 }
+ *         color: { type: string, example: '#7ADD2C' }
+ *         startTime: { type: string, example: '08:00' }
+ *         endTime: { type: string, example: '16:00', description: 'endTime <= startTime = cruza la medianoche' }
+ *         sortOrder: { type: integer }
+ *     WorkShiftAssignment:
+ *       type: object
+ *       properties:
+ *         id: { type: string }
+ *         staffVenueId: { type: string }
+ *         date: { type: string, example: '2026-08-24' }
+ *         templateId: { type: string, nullable: true, description: 'null en un DRAFT = vaciar la celda al publicar' }
+ *         templateName: { type: string }
+ *         startTime: { type: string }
+ *         endTime: { type: string }
+ *         status: { type: string, enum: [DRAFT, PUBLISHED] }
+ *         updatedAt: { type: string, format: date-time, description: 'revisión; se manda de vuelta al publicar' }
+ * /api/v1/dashboard/venues/{venueId}/work-shifts/templates:
+ *   get:
+ *     summary: Plantillas de turno de trabajo (rotativos) del venue
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *       - in: query
+ *         name: includeInactive
+ *         schema: { type: string, enum: ['true', 'false'] }
+ *     responses:
+ *       200: { description: Lista de plantillas }
+ *   post:
+ *     summary: Crear plantilla de turno (attendance:manage)
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/WorkShiftTemplateInput' }
+ *     responses:
+ *       201: { description: Plantilla creada }
+ * /api/v1/dashboard/venues/{venueId}/work-shifts/templates/{templateId}:
+ *   put:
+ *     summary: Editar o dar de baja (active=false) una plantilla (attendance:manage)
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *       - $ref: '#/components/parameters/WorkShiftTemplateId'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             allOf:
+ *               - $ref: '#/components/schemas/WorkShiftTemplateInput'
+ *               - type: object
+ *                 properties:
+ *                   active: { type: boolean }
+ *     responses:
+ *       200: { description: Plantilla actualizada }
+ *       404: { description: La plantilla no es de este venue }
+ * /api/v1/dashboard/venues/{venueId}/work-shifts/assignments:
+ *   get:
+ *     summary: Asignaciones persona×día en un rango (máx. 31 días), PUBLISHED y DRAFT
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema: { type: string, example: '2026-08-24' }
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema: { type: string, example: '2026-08-30' }
+ *     responses:
+ *       200:
+ *         description: Lista de asignaciones
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/WorkShiftAssignment' }
+ *   put:
+ *     summary: Guardar celdas como BORRADOR (fila aparte; no despublica). templateId null = vaciar al publicar (attendance:manage)
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [from, to, items]
+ *             properties:
+ *               from: { type: string, example: '2026-08-24' }
+ *               to: { type: string, example: '2026-08-30' }
+ *               items:
+ *                 type: array
+ *                 maxItems: 600
+ *                 items:
+ *                   type: object
+ *                   required: [staffVenueId, date, templateId]
+ *                   properties:
+ *                     staffVenueId: { type: string }
+ *                     date: { type: string, example: '2026-08-25' }
+ *                     templateId: { type: string, nullable: true }
+ *     responses:
+ *       200: { description: Asignaciones del rango tras guardar }
+ *       400: { description: Fecha fuera del rango, inexistente, empleado o plantilla de otro venue }
+ * /api/v1/dashboard/venues/{venueId}/work-shifts/assignments/publish:
+ *   post:
+ *     summary: Publicar los borradores REVISADOS con su revisión — todo o nada (attendance:manage)
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [from, to, drafts]
+ *             properties:
+ *               from: { type: string }
+ *               to: { type: string }
+ *               drafts:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [id, updatedAt]
+ *                   properties:
+ *                     id: { type: string }
+ *                     updatedAt: { type: string, format: date-time }
+ *     responses:
+ *       200: { description: '{ published, cleared, skipped }' }
+ *       409: { description: 'WORK_SHIFT_DRAFT_CONFLICT — alguien cambió un borrador; details.conflicts trae las celdas' }
+ */
 // Turnos ROTATIVOS de trabajo (fase 1 "como Sesame"). Mismos permisos que el cuadrante:
 // leer `attendance:read`, escribir `attendance:manage`. El interruptor vive en VenueSettings.
 router.get(

@@ -55,6 +55,20 @@ function armar(method: 'CASH' | 'CREDIT_CARD') {
   return original
 }
 
+// The body the PAX actually sends: `RefundRequestData` requires the fields that
+// identify the transaction at the processor, plus the venue it belongs to.
+const cuerpo = (amount: number) => ({
+  venueId: VENUE,
+  originalPaymentId: 'pay-orig',
+  amount,
+  reason: 'cliente',
+  staffId: 'staff-1',
+  authorizationNumber: '123456',
+  referenceNumber: 'ref-1',
+  isPartialRefund: true,
+  currency: 'MXN',
+})
+
 beforeEach(() => jest.clearAllMocks())
 
 describe('reembolso desde la TPV', () => {
@@ -62,7 +76,7 @@ describe('reembolso desde la TPV', () => {
 
   it('🔴 un reembolso en EFECTIVO publica PAY_OUT al cajón con el monto devuelto', async () => {
     armar('CASH')
-    await fn(VENUE, { originalPaymentId: 'pay-orig', amount: 200, reason: 'cliente', staffId: 'staff-1' }).catch(() => {})
+    await fn(VENUE, cuerpo(200)).catch(() => {})
     expect(postCashRefundToDrawer).toHaveBeenCalledTimes(1)
     expect(postCashRefundToDrawer).toHaveBeenCalledWith(
       expect.objectContaining({ venueId: VENUE, refundPaymentId: 'pay-refund', method: 'CASH', fundsFlow: 'CASH_DRAWER' }),
@@ -71,7 +85,7 @@ describe('reembolso desde la TPV', () => {
 
   it('🔴 un reembolso de TARJETA no toca el cajón', async () => {
     armar('CREDIT_CARD')
-    await fn(VENUE, { originalPaymentId: 'pay-orig', amount: 200, reason: 'cliente', staffId: 'staff-1' }).catch(() => {})
+    await fn(VENUE, cuerpo(200)).catch(() => {})
     // El helper decide con paymentCountsAsDrawerCash; aquí basta con que reciba el fundsFlow real
     if ((postCashRefundToDrawer as jest.Mock).mock.calls.length) {
       expect(postCashRefundToDrawer).toHaveBeenCalledWith(expect.objectContaining({ fundsFlow: 'AVOQADO_PROCESSED' }))

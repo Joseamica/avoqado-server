@@ -3288,7 +3288,9 @@ model WorkShiftAssignment {
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
-  @@unique([staffVenueId, date])
+  /// Una fila PUBLISHED y otra DRAFT pueden convivir en la misma celda: editar en borrador NO despublica
+  /// el horario vigente (Codex, 2ª auditoría). Un DRAFT con templateId null = "vaciar al publicar".
+  @@unique([staffVenueId, date, status])
   @@index([venueId, date])
 }
 

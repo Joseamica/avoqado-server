@@ -68,7 +68,7 @@ beforeEach(() => {
 
 describe('getDrawerStatus — la caja de ahora', () => {
   it('el esperado es inicial + ventas + entradas − salidas: 100 + 250 + 50 − 80 = 320', async () => {
-    ;(prismaMock as any).cashDrawerSession = {
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([sesion()]),
     }
 
@@ -84,7 +84,7 @@ describe('getDrawerStatus — la caja de ahora', () => {
   })
 
   it('sin caja abierta: open es null y no hay anomalías', async () => {
-    ;(prismaMock as any).cashDrawerSession = { findMany: jest.fn().mockResolvedValue([]) }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findMany: jest.fn().mockResolvedValue([]) }
 
     const status = await getDrawerStatus(VENUE)
 
@@ -93,7 +93,7 @@ describe('getDrawerStatus — la caja de ahora', () => {
   })
 
   it('🔴 dos cajas OPEN en el mismo venue NO se esconden: se reporta la anomalía', async () => {
-    ;(prismaMock as any).cashDrawerSession = {
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}),
       findMany: jest
         .fn()
         .mockResolvedValue([sesion({ id: 'session-2', openedAt: new Date('2026-08-16T09:00:00.000Z') }), sesion({ id: 'session-1' })]),
@@ -108,7 +108,7 @@ describe('getDrawerStatus — la caja de ahora', () => {
 
   it('filtra SIEMPRE por el venue pedido', async () => {
     const findMany = jest.fn().mockResolvedValue([])
-    ;(prismaMock as any).cashDrawerSession = { findMany }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findMany }
 
     await getDrawerStatus(VENUE)
 
@@ -118,7 +118,7 @@ describe('getDrawerStatus — la caja de ahora', () => {
 
 describe('getDrawerSessions — el historial que el dueño no podía ver', () => {
   it('🔴 una sesión cerrada SIN conteo se declara counted=false y overShort=null — nunca "cuadró"', async () => {
-    ;(prismaMock as any).cashDrawerSession = {
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([
         sesion({
           status: 'CLOSED',
@@ -139,7 +139,7 @@ describe('getDrawerSessions — el historial que el dueño no podía ver', () =>
   })
 
   it('una sesión cerrada CON conteo trae el faltante real: contó 300 contra 320 esperados = −20', async () => {
-    ;(prismaMock as any).cashDrawerSession = {
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}),
       findMany: jest
         .fn()
         .mockResolvedValue([
@@ -157,7 +157,7 @@ describe('getDrawerSessions — el historial que el dueño no podía ver', () =>
 
   it('🔴 el historial trae TODAS las sesiones (también las OPEN olvidadas), no sólo las cerradas', async () => {
     const findMany = jest.fn().mockResolvedValue([])
-    ;(prismaMock as any).cashDrawerSession = { findMany, count: jest.fn().mockResolvedValue(0) }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findMany, count: jest.fn().mockResolvedValue(0) }
 
     await getDrawerSessions(VENUE, { page: 1, pageSize: 20 })
 
@@ -167,7 +167,7 @@ describe('getDrawerSessions — el historial que el dueño no podía ver', () =>
   })
 
   it('pagina y reporta el total', async () => {
-    ;(prismaMock as any).cashDrawerSession = {
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([sesion()]),
       count: jest.fn().mockResolvedValue(43),
     }

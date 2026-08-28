@@ -187,6 +187,12 @@ interface PayInOutParams {
   amount: number // dollars (e.g. 20.00 = $20.00)
   note?: string
   /**
+   * Caja a la que pertenece el movimiento (cola offline, Codex 3ª auditoría). Sin él se usa la abierta.
+   * Si ESA caja ya cerró, el movimiento se acepta igual sobre ella —el dinero sí salió del cajón— con
+   * recálculo del overShort y bitácora `CASH_DRAWER_ADJUSTED_AFTER_CLOSE`; nunca se carga a otra caja.
+   */
+  sessionId?: string | null
+  /**
    * 🔴 LLAVE DE IDEMPOTENCIA DEL POS. OPCIONAL y ADITIVA (contrato /mobile: una app ya
    * distribuida que no la mande se comporta EXACTAMENTE como hoy).
    *
@@ -238,8 +244,10 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
 
   // Se valida ANTES de tocar la base: una llave basura no puede llegar al índice único.
   const localId = normalizeLocalId(params.localId)
-
-  const session = await getOpenSession(venueId)
+  const session = params.sessionId
+    ? await prisma.cashDrawerSession.findFirst({ where: { id: params.sessionId, venueId }, select: { id: true, status: true } })
+    : await getOpenSession(venueId)
+  if (!session) throw new NotFoundError('Esa caja no existe en este negocio')
   const amountDecimal = dollarsToDecimal(amount)
 
   const row = {
@@ -254,6 +262,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   }
 
   const action = type === 'PAY_IN' ? 'CASH_DRAWER_PAY_IN' : 'CASH_DRAWER_PAY_OUT'
+
   const auditar = (entityId: string) =>
     logAction({
       staffId,
@@ -267,13 +276,60 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   // Sin llave: EXACTAMENTE el `create` de siempre. Las apps ya distribuidas no cambian de
   // camino ni de comportamiento — simplemente no ganan la protección (Postgres permite
   // varios NULL en un índice único, así que aquí no hay nada que deduplicar).
+
+  // 🔴 Caja YA CERRADA (llega tarde desde la cola de un aparato): el dinero sí salió/entró del cajón,
+  // así que el movimiento se acepta SOBRE ESA caja, bajo candado, con recálculo del overShort firmado y
+  // bitácora con los valores anterior/nuevo. Cargarlo a la caja abierta de hoy sería atribuirlo mal;
+  // rechazarlo, perderlo.
+  if ((session as { status?: string }).status === 'CLOSED') {
+    const result = await prisma.$transaction(async tx => {
+      await tx.cashDrawerSession.updateMany({ where: { id: session.id }, data: { updatedAt: new Date() } })
+      const inserted = localId
+        ? await tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+        : { count: (await tx.cashDrawerEvent.create({ data: row })) ? 1 : 0 }
+      const stored = localId ? await tx.cashDrawerEvent.findFirst({ where: { venueId, localId } }) : await tx.cashDrawerEvent.findFirst({ where: { sessionId: session.id, type }, orderBy: { createdAt: 'desc' } })
+      if (!stored) throw new InternalServerError('No se pudo confirmar el movimiento de caja')
+      if (inserted.count > 0) {
+        const full = await tx.cashDrawerSession.findUnique({ where: { id: session.id }, select: { actualAmount: true, overShort: true, startingAmount: true, events: { select: { type: true, amount: true } } } })
+        if (full && full.actualAmount !== null) {
+          const expected = calculateExpectedAmount({ startingAmount: full.startingAmount, events: full.events })
+          const overShort = Number(full.actualAmount) - expected
+          await tx.cashDrawerSession.update({ where: { id: session.id }, data: { overShort: new Decimal(overShort.toFixed(2)) } })
+          logAction({
+            staffId,
+            venueId,
+            action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
+            entity: 'CashDrawerSession',
+            entityId: session.id,
+            data: { cause: type, eventId: stored.id, amount: Number(amountDecimal), overShortBefore: full.overShort != null ? Number(full.overShort) : null, overShortAfter: overShort, expectedAfter: expected, source: 'MOBILE_OFFLINE_REPLAY' },
+          })
+        }
+      }
+      return { stored, created: inserted.count > 0 }
+    })
+    if (result.created) auditar(result.stored.id)
+    return { event: formatEvent(result.stored), created: result.created }
+  }
+  // 🔴 P1 (Codex, 2ª auditoría): el movimiento MANUAL se colaba en una caja que el cierre acababa de
+  // firmar. Mismo candado que la venta: dentro de la transacción se TOCA la fila con status='OPEN'
+  // (UPDATE = candado de fila); si el cierre ya la marcó CLOSED, al re-evaluar no hay fila y el
+  // movimiento se rechaza con el mismo "no hay caja abierta" que las apps ya conocen.
+  const lockOrThrow = async (tx: Prisma.TransactionClient) => {
+    const lock = await tx.cashDrawerSession.updateMany({ where: { id: session.id, status: 'OPEN' }, data: { updatedAt: new Date() } })
+    if (!lock || lock.count === 0) throw new NotFoundError('No hay una caja abierta')
+  }
   if (!localId) {
-    const event = await prisma.cashDrawerEvent.create({ data: row })
+    const event = await prisma.$transaction(async tx => {
+      await lockOrThrow(tx)
+      return tx.cashDrawerEvent.create({ data: row })
+    })
     auditar(event.id)
     return { event: formatEvent(event), created: true }
   }
-
-  const result = await prisma.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+  const result = await prisma.$transaction(async tx => {
+    await lockOrThrow(tx)
+    return tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+  })
   const stored = await prisma.cashDrawerEvent.findFirst({ where: { venueId, localId } })
 
   if (!stored) {
@@ -327,6 +383,8 @@ export async function payOut(params: PayInOutParams): Promise<DrawerEventResult>
 // ============================================================================
 
 interface CloseSessionParams {
+  /** Id de la caja que el aparato cerró (cola offline). Si ya no es la abierta, 404 en vez de cerrar otra. */
+  sessionId?: string | null
   venueId: string
   staffId: string
   staffName: string
@@ -351,6 +409,12 @@ export async function closeSession(params: CloseSessionParams) {
     select: { id: true },
   })
   if (!session) {
+    throw new NotFoundError('No hay una caja abierta')
+  }
+  // 🔴 P1 (Codex, 2ª auditoría): un cierre ENCOLADO en el aparato (sin red) llega tarde. Si trae el
+  // id de SU caja y la caja abierta ahora es OTRA, no se cierra la ajena con el conteo de la vieja:
+  // se contesta el mismo 404, que el aparato entiende como "esa ya no está abierta".
+  if (params.sessionId && params.sessionId !== session.id) {
     throw new NotFoundError('No hay una caja abierta')
   }
   const actualDecimal = dollarsToDecimal(actualAmount)

@@ -80,7 +80,7 @@ beforeEach(() => {
 
 describe('getShiftById · cashDrawer (fase 5)', () => {
   it('🔴 expone el arqueo del cajón que cubrió el turno, con esperado / contado / diferencia y counted', async () => {
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(caja()) }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue(caja()) }
     const r = await getShiftById(VENUE, 'shift-1')
     expect(r.cashDrawer).toMatchObject({
       sessionId: 'cds-1',
@@ -97,7 +97,7 @@ describe('getShiftById · cashDrawer (fase 5)', () => {
 
   it('🔴 P1 Codex: busca la sesión del MISMO venue cuya ventana cubre el CIERRE del turno (el cajón vigente al cerrar), no su inicio', async () => {
     const findFirst = jest.fn().mockResolvedValue(null)
-    ;(prismaMock as any).cashDrawerSession = { findFirst }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst }
     await getShiftById(VENUE, 'shift-1')
     const where = findFirst.mock.calls[0][0].where
     expect(where.venueId).toBe(VENUE)
@@ -111,7 +111,7 @@ describe('getShiftById · cashDrawer (fase 5)', () => {
       const anchor = where.openedAt.lte as Date
       return [B, A].find(c => c.openedAt <= anchor && (!c.closedAt || c.closedAt >= anchor)) ?? null
     })
-    ;(prismaMock as any).cashDrawerSession = { findFirst }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst }
     const r = await getShiftById(VENUE, 'shift-1')
     expect(r.cashDrawer.sessionId).toBe('B')
   })
@@ -119,7 +119,7 @@ describe('getShiftById · cashDrawer (fase 5)', () => {
   it('si ninguna sesión cubre el cierre, cae a la última que se traslapó con el turno', async () => {
     const A = caja({ id: 'A', openedAt: new Date('2026-08-20T07:00:00Z'), closedAt: new Date('2026-08-20T12:00:00Z') })
     const findFirst = jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(A)
-    ;(prismaMock as any).cashDrawerSession = { findFirst }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst }
     const r = await getShiftById(VENUE, 'shift-1')
     expect(r.cashDrawer.sessionId).toBe('A')
     const fallback = findFirst.mock.calls[1][0].where
@@ -127,21 +127,21 @@ describe('getShiftById · cashDrawer (fase 5)', () => {
   })
 
   it('🔴 P2 Codex: si la consulta del cajón truena, el detalle del turno sigue respondiendo (cashDrawer null), nunca un 500 en el endpoint viejo', async () => {
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockRejectedValue(new Error('db down')) }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockRejectedValue(new Error('db down')) }
     const r = await getShiftById(VENUE, 'shift-1')
     expect(r.cashDrawer).toBeNull()
     expect(r.cashDeclared).toBe(1000)
   })
 
   it('sin caja que lo cubra, cashDrawer es null y el turno se ve igual que siempre', async () => {
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(null) }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue(null) }
     const r = await getShiftById(VENUE, 'shift-1')
     expect(r.cashDrawer).toBeNull()
     expect(r.cashDeclared).toBe(1000)
   })
 
   it('🔴 una caja cerrada SIN conteo trae counted=false y overShort=null — nunca "cuadró"', async () => {
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(caja({ actualAmount: null, overShort: null })) }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue(caja({ actualAmount: null, overShort: null })) }
     const r = await getShiftById(VENUE, 'shift-1')
     expect(r.cashDrawer).toMatchObject({ counted: false, actualAmount: null, overShort: null, expectedAmount: 1300 })
   })

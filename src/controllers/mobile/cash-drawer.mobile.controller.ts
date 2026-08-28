@@ -97,6 +97,7 @@ export const payIn = async (req: Request, res: Response, next: NextFunction) => 
       amount: Number(amount),
       note,
       localId,
+      sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event })
@@ -126,6 +127,7 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
       amount: Number(amount),
       note,
       localId,
+      sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event })
@@ -142,7 +144,7 @@ export const closeSession = async (req: Request, res: Response, next: NextFuncti
   try {
     const { venueId } = req.params
     const staffId = req.authContext?.userId || ''
-    const { actualAmount, note, staffName } = req.body
+    const { actualAmount, note, staffName, sessionId } = req.body
 
     if (actualAmount === undefined || actualAmount === null) {
       return res.status(400).json({ success: false, message: 'actualAmount es requerido' })
@@ -154,6 +156,7 @@ export const closeSession = async (req: Request, res: Response, next: NextFuncti
       staffName: staffName || 'Staff',
       actualAmount: Number(actualAmount),
       note,
+      sessionId: typeof sessionId === 'string' ? sessionId : null,
     })
 
     return res.json({ success: true, data: session })

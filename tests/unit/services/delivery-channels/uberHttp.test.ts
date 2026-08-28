@@ -259,7 +259,7 @@ describe('🔴 toda llamada a Uber lleva timeout', () => {
   it('uberRequest manda un AbortSignal', async () => {
     const espia = jest.fn().mockResolvedValue({ status: 200, text: async () => '{}' })
     await uberRequest(
-      { environment: 'SANDBOX', token: 't', fetchImpl: espia as unknown as typeof fetch },
+      { environment: 'SANDBOX', token: 't', writableStores: new Set(), fetchImpl: espia as unknown as typeof fetch },
       { method: 'GET', path: '/v1/delivery/stores' },
     )
     const opciones = espia.mock.calls[0][1]

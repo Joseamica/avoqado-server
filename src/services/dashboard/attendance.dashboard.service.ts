@@ -128,6 +128,21 @@ export interface AttendanceReportRow {
 export const MAX_REPORT_DAYS = 92
 
 /**
+ * Desde qué hora del MISMO día cuenta una checada para un turno que cruza la medianoche: dos horas
+ * antes de la entrada, con tope en las 12:00 (para un 22:00–06:00 sigue siendo 12:00; para un
+ * 10:00–06:00 es 08:00 — antes se ignoraba la entrada puntual de las 10:00, Codex P2). Misma regla en
+ * comisiones.
+ */
+export function overnightSameDayThreshold(start: string): string {
+  const [h, m] = start.split(':').map(Number)
+  const minutes = Math.max(0, h * 60 + m - 120)
+  const hh = String(Math.floor(minutes / 60)).padStart(2, '0')
+  const mm = String(minutes % 60).padStart(2, '0')
+  const t = `${hh}:${mm}`
+  return t < '12:00' ? t : '12:00'
+}
+
+/**
  * Una celda por persona-día de TODO el rango, sin esconder nada: la rejilla es la única
  * verdad que comparten el reporte de puntualidad (que filtra los días sin novedad) y el
  * resumen de nómina de la fase 3 (que necesita también vacaciones, permisos y descansos).
@@ -202,7 +217,8 @@ export async function buildAttendanceGrid(
   // una consulta por celda de la tabla.
   // El tope superior se asoma hasta el MEDIODÍA siguiente al rango: la llegada de las 00:05
   // del día rangeEnd+1 pertenece al turno nocturno que empezó el último día del rango.
-  const entriesUntil = end.plus({ days: 1 }).startOf('day').plus({ hours: 12 }).toJSDate()
+  // Hasta el FIN del día siguiente: un turno nocturno puede terminar después del mediodía (Codex P2).
+  const entriesUntil = end.plus({ days: 1 }).endOf('day').toJSDate()
   const entries = await prisma.timeEntry.findMany({
     where: { venueId, clockInTime: { gte: rangeStart, lte: entriesUntil } },
     select: { staffId: true, clockInTime: true, clockOutTime: true, validationStatus: true },
@@ -239,7 +255,7 @@ export async function buildAttendanceGrid(
     const overnight = !!expected.start && !!expected.end && expected.end <= expected.start
     const dayList = byStaffAndDay.get(`${staffId}|${date}`) ?? []
     if (!overnight) return dayList.find(e => !consumed.has(e)) ?? null
-    const evening = dayList.find(e => !consumed.has(e) && e.localTime >= '12:00')
+    const evening = dayList.find(e => !consumed.has(e) && e.localTime >= overnightSameDayThreshold(expected.start!))
     if (evening) return evening
     const nextDate = DateTime.fromISO(date, { zone: timezone }).plus({ days: 1 }).toISODate()!
     const nextList = byStaffAndDay.get(`${staffId}|${nextDate}`) ?? []

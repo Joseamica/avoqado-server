@@ -1,7 +1,6 @@
 import prisma from '../../../../src/utils/prismaClient'
 import {
   getAnnouncementForStaff,
-  getActiveBanner,
   recordOpen,
   recordCta,
   listAnnouncementsForStaff,

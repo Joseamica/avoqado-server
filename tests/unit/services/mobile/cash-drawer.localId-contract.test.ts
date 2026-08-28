@@ -125,7 +125,7 @@ function arqueoEnCentavos(rows: ClientRow[], startingCents: number): number {
 describe('contrato `localId` del cajón — el servidor manda la llave que ya tiene guardada', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(SESSION_ROW) }
+    ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue(SESSION_ROW) }
   })
 
   // --------------------------------------------------------------------------

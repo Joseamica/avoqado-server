@@ -151,5 +151,10 @@ export const ReplaceWorkShiftAssignmentsSchema = z.object({
 })
 export const PublishWorkShiftAssignmentsSchema = z.object({
   params: z.object({ venueId: z.string().cuid() }),
-  body: z.object({ from: shiftIsoDate, to: shiftIsoDate }),
+  body: z.object({
+    from: shiftIsoDate,
+    to: shiftIsoDate,
+    /** Revisión de cada borrador que el gerente tiene enfrente (CAS todo-o-nada; 409 si alguno cambió). */
+    drafts: z.array(z.object({ id: z.string().cuid(), updatedAt: z.string().datetime() })).max(600),
+  }),
 })

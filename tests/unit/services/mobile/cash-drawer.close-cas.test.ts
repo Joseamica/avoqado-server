@@ -67,8 +67,7 @@ describe('fase 4 · cierre con candado', () => {
     const updateMany = jest.fn().mockResolvedValue({ count: 1 })
     const findMany = jest.fn().mockResolvedValue([evt('OPEN', 100), evt('CASH_SALE', 250)])
     const update = jest.fn().mockResolvedValue({})
-    ;(prismaMock as any).cashDrawerSession = {
-      update: jest.fn().mockResolvedValue({}),
+    ;(prismaMock as any).cashDrawerSession = { update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(abierta()),
       updateMany,
       update,

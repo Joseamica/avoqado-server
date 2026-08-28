@@ -85,7 +85,7 @@ const insertar = (data: any): FilaCajon => {
 }
 
 const montarBaseDeDatos = () => {
-  ;(prismaMock as any).cashDrawerSession = {
+  ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}),
     findFirst: jest.fn(async ({ where }: any) => {
       const venueId = where.venueId
       if (!SESION_DE[venueId]) return null

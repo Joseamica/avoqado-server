@@ -23,7 +23,7 @@ const sesion = { id: 'session-1', venueId: VENUE, status: 'OPEN' }
 
 beforeEach(() => {
   jest.clearAllMocks()
-  ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(sesion) }
+  ;(prismaMock as any).cashDrawerSession = { updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue(sesion) }
   ;(prismaMock as any).cashDrawerEvent = {
     createMany: jest.fn().mockResolvedValue({ count: 1 }),
     findMany: jest.fn().mockResolvedValue([]),
@@ -32,7 +32,7 @@ beforeEach(() => {
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
 })
 
-const ev = (type: string, amount: number) => ({ type, amount, staffId: 'staff-1', staffName: 'Cajero' })
+const ev = (type: 'PAY_IN' | 'PAY_OUT' | 'CASH_SALE', amount: number) => ({ type, amount, staffId: 'staff-1', staffName: 'Cajero' })
 
 describe('métrica de compatibilidad en CASH_DRAWER_SYNC', () => {
   it('🔴 registra cuántos CASH_SALE descartó y la versión de la app que los mandó', async () => {

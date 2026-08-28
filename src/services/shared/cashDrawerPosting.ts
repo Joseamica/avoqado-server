@@ -56,6 +56,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { logAction } from '../dashboard/activity-log.service'
 import { paymentCountsAsDrawerCash, TenderSemanticsPayment } from './tenderSemantics'
 
 /**
@@ -413,7 +414,34 @@ async function createEventUnderSessionLock(
       data: { updatedAt: new Date() },
     })
     if (!lock || lock.count === 0) return null
-    return tx.cashDrawerEvent.createMany({ data: [data], skipDuplicates: true })
+    const result = await tx.cashDrawerEvent.createMany({ data: [data], skipDuplicates: true })
+    // 🔴 P1 (Codex, 2ª auditoría): el barrido (fase 3) repone dentro de una caja YA CERRADA y contada.
+    // Sin esto el esperado subía y el `overShort` firmado se quedaba viejo: "esperado 1,100 / contado
+    // 1,000 / diferencia 0". Se recalcula con la MISMA fórmula del cierre, bajo el mismo candado.
+    if (!requireOpen && result.count > 0) {
+      const session = await tx.cashDrawerSession.findUnique({
+        where: { id: sessionId },
+        select: { venueId: true, status: true, actualAmount: true, overShort: true, startingAmount: true, events: { select: { type: true, amount: true } } },
+      })
+      if (session && session.status === 'CLOSED' && session.actualAmount !== null) {
+        const { calculateExpectedAmount } = await import('../mobile/cash-drawer.mobile.service')
+        const expected = calculateExpectedAmount({ startingAmount: session.startingAmount, events: session.events })
+        const overShort = Number(session.actualAmount) - expected
+        await tx.cashDrawerSession.update({ where: { id: sessionId }, data: { overShort: new Decimal(overShort.toFixed(2)) } })
+        logger.info('💵 [CASH-DRAWER] Movimiento repuesto en una caja cerrada: overShort recalculado', { sessionId, expected, overShort })
+        // Un resultado FIRMADO cambió después del cierre: queda en bitácora con antes/después y la causa
+        // (Codex 3ª auditoría) — es lo que un dueño mira cuando el corte de ayer ya no dice lo mismo.
+        logAction({
+          staffId: data.staffId && data.staffId !== 'SYSTEM' ? data.staffId : undefined,
+          venueId: session.venueId,
+          action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
+          entity: 'CashDrawerSession',
+          entityId: sessionId,
+          data: { cause: data.type, localId: data.localId ?? null, amount: Number(data.amount), overShortBefore: session.overShort != null ? Number(session.overShort) : null, overShortAfter: overShort, expectedAfter: expected, source: 'RECONCILER' },
+        })
+      }
+    }
+    return result
   })
 }
 

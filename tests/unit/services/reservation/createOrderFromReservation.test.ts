@@ -138,7 +138,7 @@ describe('🔴 el REPORTE no puede contradecir a la orden', () => {
   })
 
   it('lineGross del renglón == lo que se cobró (3 manicures con esmalte)', async () => {
-    await createOrderFromReservation(prismaMock as any, 'venue-1', 'reservation-1')
+    await createOrderFromReservation(prismaMock as any, { reservationId: 'reservation-1', venueId: 'venue-1' })
 
     const item = (prismaMock.orderItem.create as jest.Mock).mock.calls[0][0].data
     const mods = (prismaMock.orderItemModifier.createMany as jest.Mock).mock.calls[0][0].data

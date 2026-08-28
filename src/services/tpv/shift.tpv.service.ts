@@ -1669,7 +1669,12 @@ async function closeShiftUsingRequest(
     // turno (campo opcional; se omite si no hay caja). Es informativo — nunca puede hacer
     // fallar un cierre que ya está commiteado, por eso el try/catch.
     try {
-      const drawer = await resolveShiftCashDrawer(venueId, updatedShift.startTime, updatedShift.endTime ?? new Date())
+      // P2 (Codex): el turno YA está cerrado y commiteado; la PAX espera 12 s. Una consulta lenta no
+      // puede convertir un cierre exitoso en un NetworkError: si tarda más de 1.5 s, va sin el campo.
+      const drawer = await Promise.race([
+        resolveShiftCashDrawer(venueId, updatedShift.startTime, updatedShift.endTime ?? new Date()),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 1500).unref?.()),
+      ])
       if (drawer) {
         reconciliation.cashDrawer = {
           sessionId: drawer.sessionId,

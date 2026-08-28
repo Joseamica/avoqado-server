@@ -12,6 +12,7 @@
  * says which state it is, never a bare "no puedes entrar": the repo's own rule
  * is that switched-off has to be visible and explained.
  */
+import { VenueStatus } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import * as jwtService from '../../../../src/jwt.service'
 import bcrypt from 'bcryptjs'
@@ -21,7 +22,7 @@ import { loginWithEmail, pickOperationalVenueForLogin } from '../../../../src/se
 
 const prismaMock = prisma as any
 
-const venue = (id: string, status: string) => ({
+const venue = (id: string, status: VenueStatus) => ({
   venueId: id,
   role: 'MANAGER',
   permissionSetId: null,
@@ -69,33 +70,33 @@ beforeEach(() => {
 
 describe('pickOperationalVenueForLogin', () => {
   it('🔴 keeps the operational shop and skips the suspended one', () => {
-    const picked = pickOperationalVenueForLogin([venue('suspendida', 'SUSPENDED'), venue('abierta', 'ACTIVE')] as never)
+    const picked = pickOperationalVenueForLogin([venue('suspendida', 'SUSPENDED'), venue('abierta', 'ACTIVE')])
 
     expect(picked.venueId).toBe('abierta')
   })
 
   it('🔴 stops the login when NOTHING of theirs is operational, naming the state', () => {
-    expect(() => pickOperationalVenueForLogin([venue('unica', 'SUSPENDED')] as never)).toThrow(/suspendido temporalmente/i)
-    expect(() => pickOperationalVenueForLogin([venue('unica', 'ADMIN_SUSPENDED')] as never)).toThrow(/suspendido por el administrador/i)
-    expect(() => pickOperationalVenueForLogin([venue('unica', 'CLOSED')] as never)).toThrow(/cerrado permanentemente/i)
+    expect(() => pickOperationalVenueForLogin([venue('unica', 'SUSPENDED')])).toThrow(/suspendido temporalmente/i)
+    expect(() => pickOperationalVenueForLogin([venue('unica', 'ADMIN_SUSPENDED')])).toThrow(/suspendido por el administrador/i)
+    expect(() => pickOperationalVenueForLogin([venue('unica', 'CLOSED')])).toThrow(/cerrado permanentemente/i)
   })
 
   it('does not put a specific reason on several shops with different states', () => {
     // Saying "cerrado permanentemente" to someone whose other shop is only
     // paused for a week would be a lie that costs a support call.
-    expect(() => pickOperationalVenueForLogin([venue('a', 'CLOSED'), venue('b', 'SUSPENDED')] as never)).toThrow(
+    expect(() => pickOperationalVenueForLogin([venue('a', 'CLOSED'), venue('b', 'SUSPENDED')])).toThrow(
       /ninguno de tus establecimientos/i,
     )
   })
 
   it('stops someone with no shops at all', () => {
-    expect(() => pickOperationalVenueForLogin([] as never)).toThrow(/no tienes acceso/i)
+    expect(() => pickOperationalVenueForLogin([])).toThrow(/no tienes acceso/i)
   })
 
   // REGRESSION — the statuses that must keep working, or onboarding venues,
   // trials and the public demo all lose the ability to log in.
-  it.each(['LIVE_DEMO', 'TRIAL', 'ONBOARDING', 'PENDING_ACTIVATION', 'ACTIVE'])('lets %s through', status => {
-    expect(pickOperationalVenueForLogin([venue('v', status)] as never).venueId).toBe('v')
+  it.each<VenueStatus>(['LIVE_DEMO', 'TRIAL', 'ONBOARDING', 'PENDING_ACTIVATION', 'ACTIVE'])('lets %s through', status => {
+    expect(pickOperationalVenueForLogin([venue('v', status)]).venueId).toBe('v')
   })
 })
 

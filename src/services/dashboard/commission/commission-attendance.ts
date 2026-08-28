@@ -2,6 +2,7 @@ import { DateTime } from 'luxon'
 
 import logger from '../../../config/logger'
 import prisma from '../../../utils/prismaClient'
+import { overnightSameDayThreshold } from '../attendance.dashboard.service'
 import { evaluateAttendance } from '../attendanceEvaluator'
 import { resolveExpectedDay, type WeeklyWorkSchedule, type WorkScheduleException } from '../workSchedule.service'
 
@@ -123,7 +124,7 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
         staffId,
         clockInTime: {
           gte: shiftDay.startOf('day').toJSDate(),
-          lte: shiftDay.plus({ days: 1 }).startOf('day').plus({ hours: 12 }).toJSDate(),
+          lte: shiftDay.plus({ days: 1 }).endOf('day').toJSDate(),
         },
         validationStatus: { not: 'REJECTED' },
       },
@@ -135,7 +136,7 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
       return { clockInTime: e.clockInTime, dateIso: local.toISODate()!, localTime: local.toFormat('HH:mm') }
     })
     const entry = overnight
-      ? (withLocal.find(e => e.dateIso === scheduleDate && e.localTime >= '12:00') ??
+      ? (withLocal.find(e => e.dateIso === scheduleDate && e.localTime >= overnightSameDayThreshold(expected.start!)) ??
         withLocal.find(e => e.dateIso !== scheduleDate && e.localTime < expected.end!) ??
         null)
       : (withLocal.find(e => e.dateIso === scheduleDate) ?? null)
