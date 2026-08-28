@@ -34,6 +34,10 @@ export interface AccessTokenPayload extends jwt.JwtPayload {
    * When present, the session is an impersonation session and must be treated as read-only.
    */
   act?: ImpersonationActClaim
+  /** Session.id. Ausente en tokens legacy emitidos antes del rollout. */
+  sid?: string
+  /** Versión del formato de token. 1 = con sid. Ausente = legacy. */
+  v?: number
 }
 
 /**
@@ -45,6 +49,10 @@ export interface RefreshTokenPayload extends jwt.JwtPayload {
   venueId?: string // Venue en el que estaba la sesión. Opcional: los tokens
   // emitidos antes de este campo no lo traen y caen al primer venue del staff.
   tokenId: string // ID único para el token de refresco
+  /** Session.id. Ausente en tokens legacy emitidos antes del rollout. */
+  sid?: string
+  /** Versión del formato de token. 1 = con sid. Ausente = legacy. */
+  v?: number
 }
 
 // --- Token Generation Functions ---
@@ -56,6 +64,9 @@ export interface RefreshTokenPayload extends jwt.JwtPayload {
  * @param venueId - ID del Venue para la sesión actual
  * @param role - Rol del Staff en el Venue actual
  * @param rememberMe - Si true, extiende la duración del token a 30 días
+ * @param opts - `sid` (Session.id) agrega el claim de sesión revocable; `pos` se
+ *   acepta y se ignora aquí (lo usa la Task 12 para tokens de 10 min en el POS).
+ *   Opcional: un llamador que no lo pasa sigue emitiendo un token legacy sin `sid`/`v`.
  * @returns El token de acceso firmado.
  */
 export function generateAccessToken(
@@ -64,6 +75,7 @@ export function generateAccessToken(
   venueId: string,
   role: StaffRole,
   rememberMe?: boolean,
+  opts?: { sid?: string; pos?: boolean },
 ): string {
   const payload: Omit<AccessTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
@@ -75,6 +87,7 @@ export function generateAccessToken(
     // - Session invalidation on password change
     // - Revoking compromised tokens
     jti: crypto.randomUUID(),
+    ...(opts?.sid ? { sid: opts.sid, v: 1 } : {}),
   }
   // Explicitly type the secret and options
   const secret: Secret = ACCESS_TOKEN_SECRET!
@@ -136,9 +149,17 @@ export function generateImpersonationAccessToken(
  * @param staffId - ID del Staff (Staff.id)
  * @param organizationId - (Opcional) ID de la Organización
  * @param rememberMe - Si true, extiende la duración del token a 90 días
+ * @param opts - `sid` (Session.id) agrega el claim de sesión revocable. Opcional:
+ *   un llamador que no lo pasa sigue emitiendo un token legacy sin `sid`/`v`.
  * @returns El token de refresco firmado.
  */
-export function generateRefreshToken(staffId: string, organizationId?: string, rememberMe?: boolean, venueId?: string): string {
+export function generateRefreshToken(
+  staffId: string,
+  organizationId?: string,
+  rememberMe?: boolean,
+  venueId?: string,
+  opts?: { sid?: string },
+): string {
   const payload: Omit<RefreshTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
     tokenId: crypto.randomBytes(16).toString('hex'), // Genera un ID único para el token
@@ -149,6 +170,10 @@ export function generateRefreshToken(staffId: string, organizationId?: string, r
   // El venue viaja en el refresh para que renovar la sesión no la mude de local.
   if (venueId) {
     payload.venueId = venueId
+  }
+  if (opts?.sid) {
+    payload.sid = opts.sid
+    payload.v = 1
   }
   // Explicitly type the secret and options
   const secret: Secret = REFRESH_TOKEN_SECRET!
