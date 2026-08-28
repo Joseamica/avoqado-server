@@ -170,10 +170,15 @@ export async function ingestDeliveryOrder(
     })
   }
 
-  const existing = await prisma.order.findUnique({
-    where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
-  })
-  const isNew = !existing
+  // 🔴 "¿Es nueva?" se resuelve DENTRO de la transacción, junto al upsert que la crea
+  // (hallazgo de Codex). Preguntándolo antes, dos procesadores del mismo pedido leían los dos
+  // "no existe", los dos creían haberla creado, y el perdedor chocaba contra los renglones
+  // únicos — con el pedido ya aceptado en Uber. Dentro de la transacción la lectura y la
+  // escritura son el mismo instante lógico.
+  // (La concurrencia realista ya está acotada por dos lados: el ingreso del webhook descarta
+  //  el duplicado con su índice único, y el job de reconciliación ya no se encima consigo
+  //  mismo. Esto cierra el resto.)
+  const nuevaState: { valor: boolean } = { valor: false }
   // Holder para que TS no estreche la asignación dentro del callback async.
   const postingState: { id: string | null } = { id: null }
   // Fuera de la transacción a propósito: la comanda se arma DESPUÉS y necesita los productos
@@ -182,6 +187,14 @@ export async function ingestDeliveryOrder(
 
   const order = await prisma.$transaction(
     async tx => {
+      const yaExistia = await tx.order.findUnique({
+        where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
+        select: { id: true },
+      })
+      nuevaState.valor = !yaExistia
+      // Nombre local para el resto de la transacción. El de afuera se declara al cerrarla.
+      const esNueva = nuevaState.valor
+
       const order = await tx.order.upsert({
         where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
         update: { posRawData: normalized.raw as Prisma.InputJsonValue, syncedAt: new Date() },
@@ -218,7 +231,7 @@ export async function ingestDeliveryOrder(
         },
       })
 
-      if (isNew) {
+      if (esNueva) {
         // Renglones recién creados: el vale de inventario se arma con ELLOS (ids
         // reales), no con los items normalizados del canal.
         const createdItems: unknown[] = []
@@ -364,6 +377,11 @@ export async function ingestDeliveryOrder(
     { timeout: 20_000, maxWait: 10_000 },
   )
 
+  // Lo decidió la transacción (ver `nuevaState` arriba). Va AQUÍ, pegado a su cierre, y no
+  // más abajo: declararlo después de su primer uso compila igual y revienta en runtime con
+  // "Cannot access 'isNew' before initialization" — lo cazaron los tests, no el typecheck.
+  const isNew = nuevaState.valor
+
   // Aplicar el descuento YA COMMITEADA la ingesta. Nunca puede tumbar un pedido
   // que el canal ya cobró: si truena, el vale queda pendiente y el sweeper lo
   // retoma. El pedido es un hecho; la deducción es reintentable.
@@ -421,6 +439,8 @@ export async function ingestDeliveryOrder(
   // al ticket "SIN ESTACIÓN", que igual se imprime—. Dejarla propagar tumbaría la INGESTA
   // COMPLETA: el cliente ya pagó en Uber y su venta no existiría en el sistema, por no haber
   // podido averiguar a qué categoría pertenece un taco.
+
+
   // 🔴 En un REINTENTO (la venta ya existía) `renglonesCreados` viene VACÍO: se llena sólo
   // dentro de la transacción que crea los renglones. Sin esto, la comanda repuesta más abajo
   // volvía sin `productId` ni `categoryId` — o sea sin ruteo: todo al ticket "SIN ESTACIÓN"

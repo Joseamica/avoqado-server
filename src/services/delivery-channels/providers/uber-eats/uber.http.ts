@@ -40,6 +40,9 @@ export function uberHostsFor(environment: UberEnvironment): UberHosts {
   return hosts
 }
 
+/** Techo de espera de CUALQUIER llamada a Uber. Ver la nota en `uberRequest`. */
+const TIMEOUT_MS = 25_000
+
 export interface UberCredentials {
   clientId: string
   clientSecret: string
@@ -89,6 +92,7 @@ export function createUberTokenFetcher(deps: UberTokenFetcherDeps): () => Promis
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: cuerpo.toString(),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
     })
 
     const texto = await r.text()
@@ -174,6 +178,7 @@ export async function exchangeUberAuthCode(opts: {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: cuerpo.toString(),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   })
 
   const texto = await r.text()
@@ -280,7 +285,20 @@ export async function uberRequest(deps: UberRequestDeps, opts: UberRequestOption
     cuerpo = JSON.stringify(opts.body)
   }
 
-  const r = await doFetch(`${api}${opts.path}`, { method: opts.method, headers, body: cuerpo })
+  // 🔴 TIMEOUT, o una llamada colgada congela lo que la esperaba (hallazgo de Codex, 4ª
+  // pasada). El caso concreto: el job de reconciliación tiene un candado de "una pasada a la
+  // vez"; si una llamada a Uber nunca responde, ese candado no se suelta NUNCA y el job deja
+  // de rescatar pedidos para siempre, sin un solo error en el log. `fetch` de Node no trae
+  // límite propio: espera indefinidamente.
+  //
+  // 25s: por debajo del plazo de ~11.5 min que Uber da para aceptar (así un reintento aún
+  // llega a tiempo) y muy por encima de lo que tardan estas llamadas en la práctica.
+  const r = await doFetch(`${api}${opts.path}`, {
+    method: opts.method,
+    headers,
+    body: cuerpo,
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  })
   const texto = await r.text()
 
   let json: unknown = null

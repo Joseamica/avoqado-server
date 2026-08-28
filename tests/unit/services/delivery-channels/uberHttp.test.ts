@@ -250,3 +250,20 @@ describe('uber.http', () => {
     })
   })
 })
+
+describe('🔴 toda llamada a Uber lleva timeout', () => {
+  // Sin él, una llamada colgada congela a quien la esperaba. El caso concreto: el job de
+  // reconciliación tiene un candado de "una pasada a la vez"; una llamada que nunca responde
+  // deja ese candado puesto PARA SIEMPRE y el job deja de rescatar pedidos, sin un solo
+  // error en el log. `fetch` de Node espera indefinidamente (Codex, 4ª pasada).
+  it('uberRequest manda un AbortSignal', async () => {
+    const espia = jest.fn().mockResolvedValue({ status: 200, text: async () => '{}' })
+    await uberRequest(
+      { environment: 'SANDBOX', token: 't', fetchImpl: espia as unknown as typeof fetch },
+      { method: 'GET', path: '/v1/delivery/stores' },
+    )
+    const opciones = espia.mock.calls[0][1]
+    expect(opciones.signal).toBeDefined()
+    expect(typeof opciones.signal.aborted).toBe('boolean')
+  })
+})

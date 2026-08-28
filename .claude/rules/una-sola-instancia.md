@@ -26,6 +26,7 @@ instancia). Eso no necesita ningún cambio de código y deja todo lo de abajo co
 | 2   | **Crons duplicados**           | Los ~40 jobs viven DENTRO del proceso web (`src/server.ts`) → cada uno corre 2 veces. Incluye jobs de DINERO: `money-integrity-watchdog`, `settlement-detection`, `blumon-webhook-reconciliation`, `commission-aggregation`, `monthly-overage-billing`.                                                                                                               | `src/server.ts` + `src/jobs/jobSchedules.ts`                                                                         |
 | 3   | **Rate limiters en memoria**   | Los 32 `rateLimit({...})` cuentan por proceso → 2 pods = el doble de intentos permitidos. En `pin-login` y `password-reset` eso es tu defensa contra fuerza bruta partida a la mitad. 🔴 **Y `mcp-rate-limit.middleware.ts` NO usa `rateLimit({...})`** — tiene su propio store en memoria, así que un `grep 'rateLimit({'` para migrar a Redis lo SALTA en silencio. | `src/middlewares/*-rate-limit.middleware.ts`                                                                         |
 | 4   | **Challenge store en memoria** | El reto de auth se emite en un pod y se valida en otro → login móvil que falla aleatoriamente.                                                                                                                                                                                                                                                                        | `src/services/mobile/auth.mobile.service.ts:34`                                                                      |
+| 5   | **Candado "una pasada a la vez" del job de delivery** | `DeliveryWebhookReconciliationJob.enCurso` es un booleano EN MEMORIA: con 2 pods, los dos reprocesan a la vez el MISMO evento FAILED y pueden crear DOS comandas del mismo pedido — la cocina prepara la comida dos veces. `KdsOrder.orderId` NO tiene índice único (y no puede tenerlo: ya hay órdenes con 2 comandas legítimas del sync offline de Android), así que nada lo atrapa aguas abajo. Con 2 instancias hay que mover el candado a la base: un *lease* atómico sobre `DeliveryOrderEvent` (`updateMany` empujando `nextAttemptAt` al futuro al seleccionar), que es el patrón que ya usa el outbox de anuncios. | `src/jobs/delivery-webhook-reconciliation.job.ts` (`enCurso`, `runOnce`) |
 
 De los cuatro, **sólo el #4 se queja**. Los otros tres fallan callados, y el #2 mueve dinero.
 
@@ -40,6 +41,10 @@ De los cuatro, **sólo el #4 se queja**. Los otros tres fallan callados, y el #2
    (`src/services/google-calendar/pull.service.ts:357` explica por qué se eligió eso sobre un `SETNX`). Un job de dinero corriendo dos veces
    es peor que el server lento.
 4. **Challenge store de auth móvil → Redis** (o a una tabla).
+5. **Lease en la base para el job de delivery.** Su candado `enCurso` es en memoria: con 2 pods no sirve. Se sustituye por un *claim*
+   atómico sobre `DeliveryOrderEvent` — `updateMany` empujando `nextAttemptAt` al futuro EN la selección, que es el patrón del outbox de
+   anuncios. Sin eso, dos pods reprocesan el mismo evento y la cocina prepara el pedido dos veces (nada lo atrapa: `KdsOrder.orderId` no
+   tiene índice único y no puede tenerlo).
 
 Excepción deliberada que NO se migra: el dedupe de `registerDevice.middleware.ts:33` es en proceso **a propósito** — meter una dependencia
 dura de Redis en el camino del cobro es peor que un dedupe imperfecto. Lee el comentario antes de "arreglarlo".

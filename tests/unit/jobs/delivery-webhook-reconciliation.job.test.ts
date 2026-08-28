@@ -506,3 +506,52 @@ describe('DeliveryWebhookReconciliationJob', () => {
     })
   })
 })
+
+describe('🔴 una sola pasada a la vez', () => {
+  // El cron dispara cada 2 minutos con `void this.runOnce()`, sin esperar a la anterior. Una
+  // pasada lenta se encimaba con la siguiente, las dos tomaban el MISMO evento FAILED y las
+  // dos lo reprocesaban: DOS comandas del mismo pedido (`KdsOrder.orderId` no es único) y la
+  // cocina preparando la comida dos veces (Codex, 2ª pasada).
+  it('el segundo tick se salta mientras el primero sigue corriendo', async () => {
+    const job = new DeliveryWebhookReconciliationJob()
+
+    let soltar!: () => void
+    const enEspera = new Promise<void>(res => {
+      soltar = res
+    })
+    const espia = jest
+      .spyOn(job as unknown as { reprocessStuckEvents: () => Promise<unknown> }, 'reprocessStuckEvents')
+      .mockImplementation(async () => {
+        await enEspera
+        return { reprocessed: 0, orphanedImmediate: 0 }
+      })
+    jest.spyOn(job as unknown as { markOrphaned: () => Promise<number> }, 'markOrphaned').mockResolvedValue(0)
+
+    const primera = job.runOnce()
+    const segunda = await job.runOnce() // no debe entrar
+
+    expect(segunda).toEqual({ reprocessed: 0, orphaned: 0 })
+    expect(espia).toHaveBeenCalledTimes(1)
+
+    soltar()
+    await primera
+
+    // …y al terminar, el candado se suelta: el siguiente tick SÍ corre.
+    await job.runOnce()
+    expect(espia).toHaveBeenCalledTimes(2)
+  })
+
+  it('🔴 si la pasada REVIENTA, el candado se suelta — si no, el job queda muerto para siempre', async () => {
+    const job = new DeliveryWebhookReconciliationJob()
+    const espia = jest
+      .spyOn(job as unknown as { reprocessStuckEvents: () => Promise<unknown> }, 'reprocessStuckEvents')
+      .mockRejectedValueOnce(new Error('la base se cayó'))
+      .mockResolvedValue({ reprocessed: 0, orphanedImmediate: 0 })
+    jest.spyOn(job as unknown as { markOrphaned: () => Promise<number> }, 'markOrphaned').mockResolvedValue(0)
+
+    await job.runOnce() // truena por dentro, no lanza
+    await job.runOnce() // debe poder correr
+
+    expect(espia).toHaveBeenCalledTimes(2)
+  })
+})

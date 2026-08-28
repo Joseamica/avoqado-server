@@ -95,6 +95,9 @@ export class DeliveryWebhookReconciliationJob {
   /** Backoff cap in minutes for `nextAttemptAt` scheduling (exponential: 2^attemptCount, capped here). */
   private readonly BACKOFF_CAP_MINUTES = 60
 
+  /** Candado en memoria: una sola pasada a la vez (ver `runOnce`). */
+  private enCurso = false
+
   start(): void {
     if (this.job) return
     this.job = scheduleJob(
@@ -121,6 +124,18 @@ export class DeliveryWebhookReconciliationJob {
    * the next tick, same as `blumon-webhook-reconciliation.job.ts`).
    */
   async runOnce(): Promise<{ reprocessed: number; orphaned: number }> {
+    // 🔴 UNA pasada a la vez. El cron dispara cada 2 minutos con `void this.runOnce()`, sin
+    // esperar a que la anterior termine: una pasada lenta (lote grande, Uber respondiendo
+    // despacio) se encima con la siguiente, las dos seleccionan el MISMO evento FAILED y las
+    // dos lo reprocesan. Eso puede crear DOS comandas del mismo pedido —`KdsOrder.orderId`
+    // no es único— y la cocina prepara la comida dos veces (hallazgo de Codex, 2ª pasada;
+    // medido: el webhook NO participa de esta carrera porque su índice único descarta el
+    // duplicado en el ingreso, y los eventos RECEIVED sólo entran al job tras 10 minutos).
+    if (this.enCurso) {
+      logger.warn('🛵 [Delivery recon] La pasada anterior sigue corriendo — se salta este tick')
+      return { reprocessed: 0, orphaned: 0 }
+    }
+    this.enCurso = true
     const startedAt = Date.now()
     try {
       const { reprocessed, orphanedImmediate } = await this.reprocessStuckEvents()
@@ -136,6 +151,10 @@ export class DeliveryWebhookReconciliationJob {
         stack: err instanceof Error ? err.stack : undefined,
       })
       return { reprocessed: 0, orphaned: 0 }
+    } finally {
+      // En `finally`: si la pasada revienta, el flag DEBE soltarse o el job queda muerto
+      // para siempre y nadie rescata un solo pedido.
+      this.enCurso = false
     }
   }
 
