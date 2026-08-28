@@ -403,7 +403,7 @@ describe('Dashboard Auth Controller', () => {
       })
       expect(mockSessionDestroy).toHaveBeenCalled()
       expect(res.status).toHaveBeenCalledWith(200)
-      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' })
+      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso', allDevices: false })
     })
 
     it('should clear cookies and return success if no session exists', async () => {
@@ -415,7 +415,7 @@ describe('Dashboard Auth Controller', () => {
 
       expect(res.clearCookie).toHaveBeenCalledTimes(2)
       expect(res.status).toHaveBeenCalledWith(200)
-      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' })
+      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso', allDevices: false })
     })
 
     it('should log an error if session destruction fails but still return success', async () => {
@@ -430,7 +430,7 @@ describe('Dashboard Auth Controller', () => {
       expect(mockSessionDestroy).toHaveBeenCalled()
       expect(logger.error).toHaveBeenCalledWith('[AUTH] 🚪 Error destroying session:', mockSessionError)
       expect(res.status).toHaveBeenCalledWith(200)
-      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' })
+      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso', allDevices: false })
     })
 
     it('should set secure cookies if NODE_ENV is production', async () => {

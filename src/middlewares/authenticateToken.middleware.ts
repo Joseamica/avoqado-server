@@ -4,7 +4,7 @@ import { AuthContext, AvoqadoJwtPayload, buildAuthContextFromPayload } from '../
 import { IMPERSONATION_ERROR_CODES } from '../types/impersonation'
 import * as liveDemoService from '../services/liveDemo.service'
 import { isJtiRevoked } from '../utils/tokenRevocation'
-import { sesionInvalidadaPorCambioDeContrasena } from '../utils/passwordChangeGuard'
+import { mensajeDeCorte, motivoDeSesionInvalidada } from '../utils/passwordChangeGuard'
 import { enforceImpersonationRules } from './impersonationGuard.middleware'
 import { enrichContext } from '../observability/executionContext'
 import { getVenueName } from '../observability/venueNames'
@@ -47,22 +47,27 @@ export const authenticateTokenMiddleware = async (req: Request, res: Response, n
       return
     }
 
-    // SEGURIDAD: cambiar la contrasena echa a las sesiones que ya estaban abiertas.
+    // SEGURIDAD: el corte de sesion echa a las sesiones que ya estaban abiertas.
     //
     // Sin esto, el dueno que corre a un gerente le cambia la contrasena creyendo
     // que lo dejo fuera, y el gerente sigue entrando desde su celular hasta 90
     // dias (lo que dura el refresh token con "recordarme"). Como los JWT son
     // autonomos, la unica forma de matarlos sin inventar infraestructura es
-    // comparar cuando se emitio el token contra cuando se cambio la contrasena.
+    // comparar cuando se emitio el token contra la fecha del corte.
+    //
+    // El corte tiene DOS disparadores —cambio de contrasena y "cerrar sesion en
+    // todos mis dispositivos"— y el mensaje dice CUAL fue: ensenarle "tu
+    // contrasena cambio" a quien acaba de cerrar sus sesiones lo manda a
+    // recuperar una contrasena que nadie toco.
     //
     // Se compara contra `sub` (el Staff dueno del token). En impersonacion eso
-    // es el administrador que actua, que es justo a quien hay que echar si le
-    // cambiaron la contrasena.
-    if (await sesionInvalidadaPorCambioDeContrasena(decoded.sub, decoded.iat)) {
+    // es el administrador que actua, que es justo a quien hay que echar.
+    const motivoDelCorte = await motivoDeSesionInvalidada(decoded.sub, decoded.iat)
+    if (motivoDelCorte) {
       res.clearCookie('accessToken')
       res.status(401).json({
         error: 'Unauthorized',
-        message: 'Tu contraseña cambió. Vuelve a iniciar sesión.',
+        message: mensajeDeCorte(motivoDelCorte),
       })
       return
     }

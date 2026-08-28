@@ -11,6 +11,7 @@ import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/perm
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { verifyAccessToken } from '../../jwt.service'
+import { revokeAllSessions } from '../../utils/passwordChangeGuard'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 
@@ -839,19 +840,53 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     // "Error al cerrar sesión", so without this guard a stumble while writing the audit
     // entry would leave someone unable to sign out. The audit trail is best-effort;
     // signing out is not.
+    // "Cerrar sesión en TODOS mis dispositivos" travels as a flag on the sign-out
+    // the client already calls, which is where Square puts it too: signing out
+    // offers "this session" or "all sessions", and "all" reaches the Dashboard,
+    // the POS and the KDS alike. It is answered honestly below — `allDevices`
+    // in the response is what ACTUALLY happened, never what was requested.
+    const wantsAllDevices = req.body?.allDevices === true
+    let revokedEverywhere = false
+
     try {
       const authHeader = req.headers?.authorization
       const logoutToken = req.cookies?.accessToken ?? (authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined)
       if (logoutToken) {
         const payload = verifyAccessToken(logoutToken)
         if (payload?.sub) {
+          // 🔴 `payload` comes from verifyAccessToken — the SIGNATURE, never
+          // `jwt.decode`. This route deliberately carries no auth middleware, so
+          // a decoded-not-verified `sub` would let anyone post a forged cookie
+          // and kill every session of any staff id they can guess: a one-request
+          // lockout of the owner, from an endpoint that asks for no credentials.
+          if (wantsAllDevices) {
+            try {
+              await revokeAllSessions(payload.sub)
+              revokedEverywhere = true
+              void logAction({
+                staffId: payload.sub,
+                venueId: payload.venueId ?? null,
+                action: 'STAFF_SESSIONS_REVOKED',
+                entity: 'Staff',
+                entityId: payload.sub,
+                data: { source: 'dashboard', reason: 'logout_all_devices' },
+                ipAddress: req.ip,
+                userAgent: req.get?.('user-agent'),
+              })
+            } catch (revokeError) {
+              // Signing out of THIS device must never be blocked by a failure to
+              // reach the others; the response just won't claim it happened.
+              logger.error('[AUTH] 🚪 Failed to revoke the sessions on the other devices', revokeError)
+            }
+          }
+
           void logAction({
             staffId: payload.sub,
             venueId: payload.venueId ?? null,
             action: 'STAFF_LOGOUT',
             entity: 'Staff',
             entityId: payload.sub,
-            data: { source: 'dashboard' },
+            data: { source: 'dashboard', allDevices: revokedEverywhere },
             ipAddress: req.ip,
             userAgent: req.get?.('user-agent'),
           })
@@ -894,7 +929,10 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     logger.info('[AUTH] 🚪 Logout complete - sending response')
     res.status(200).json({
       success: true,
-      message: 'Logout exitoso',
+      message: revokedEverywhere ? 'Cerramos tu sesión en todos tus dispositivos' : 'Logout exitoso',
+      // What ACTUALLY happened, so the UI never promises the other devices are
+      // out when the write failed or the token could not be verified.
+      allDevices: revokedEverywhere,
     })
   } catch (error) {
     logger.error('[AUTH] 🚪 Logout error:', error)

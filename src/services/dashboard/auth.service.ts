@@ -853,8 +853,13 @@ export async function resetPassword(data: ResetPasswordDto) {
     throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
   }
 
-  // 9. TODO: Invalidate all refresh tokens (force re-login on all devices)
-  // This requires Redis session management implementation
+  // 9. Every open session on every device is already dead: `lastPasswordReset`
+  // above is the cutoff `passwordChangeGuard` compares each token's `iat`
+  // against, and it is enforced on all three rails — the auth middleware, the
+  // TPV refresh and the mobile refresh. No Redis needed, and none was ever the
+  // blocker. What this does NOT give is per-device revocation (killing ONE lost
+  // tablet without logging the person out everywhere); that needs persisted,
+  // rotating refresh tokens, the way `src/mcp/oauth/tokenStore.ts` already does.
 
   logger.info(`Password reset successfully for staff: ${staff.email}`)
 

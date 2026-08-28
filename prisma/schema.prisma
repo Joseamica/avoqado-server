@@ -1061,6 +1061,12 @@ model Staff {
   resetTokenExpiry  DateTime?
   resetTokenUsedAt  DateTime?
   lastPasswordReset DateTime?
+  /// Cutoff for "log me out of every device". Same mechanism as
+  /// `lastPasswordReset` — `passwordChangeGuard` refuses any token whose `iat`
+  /// predates the LATER of the two — but with a second trigger: the person (or
+  /// a lost device) rather than a password change. Null for everyone who has
+  /// never pressed the button.
+  sessionsRevokedAt DateTime?
 
   // ✅ PlayTelecom / White-Label Dashboard relations
   cashDeposits     CashDeposit[]
@@ -16810,6 +16816,12 @@ model PlatformAnnouncementClick {
 
   openedAt DateTime  @default(now()) // abrió el detalle
   ctaAt    DateTime? // tocó el botón principal
+
+  /// Cerró la ventana que interrumpe. 🔴 Es la ÚNICA señal que la apaga, y existe porque
+  /// `Notification.isRead` NO sirve: la campana del dashboard marca TODO como leído nada
+  /// más abrirla, así que asomarse al buzón apagaba una ventana que la persona nunca vio.
+  /// Lo encontró el founder el 2026-08-27 probándolo.
+  dismissedAt DateTime?
 
   @@unique([announcementId, staffId])
   @@index([announcementId])
