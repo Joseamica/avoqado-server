@@ -105,6 +105,26 @@ export const ANALYTICS_VENUE_STATUSES: VenueStatus[] = [
 // =============================================================================
 
 /**
+ * Why this venue can't be used, in words the person can act on.
+ *
+ * Lives here, not inlined at a call site, because the PAX and the mobile apps
+ * both show it: two copies of this copy drift, and the one that drifts is the
+ * one telling a paying customer why they can't get in.
+ */
+export function venueStatusMessage(status: VenueStatus): string {
+  switch (status) {
+    case VenueStatus.SUSPENDED:
+      return 'Este establecimiento está suspendido temporalmente. Contacta al administrador para más información.'
+    case VenueStatus.ADMIN_SUSPENDED:
+      return 'Este establecimiento ha sido suspendido por el administrador. Contacta a soporte para más información.'
+    case VenueStatus.CLOSED:
+      return 'Este establecimiento ha sido cerrado permanentemente.'
+    default:
+      return 'Este establecimiento no está operacional.'
+  }
+}
+
+/**
  * Check if a venue status allows operations (login, payments, etc.)
  */
 export function isVenueOperational(status: VenueStatus): boolean {

@@ -8,12 +8,15 @@
  * - Passkey (WebAuthn) authentication for passwordless login
  */
 
+import type { VenueStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import crypto from 'crypto'
 import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import * as jwtService from '../../jwt.service'
 import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
+import { OPERATIONAL_VENUE_STATUSES, venueStatusMessage } from '../../lib/venueStatus.constants'
+import { mensajeDeCorte, motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
 import { getRoleDisplayNamesForVenues } from '../dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../dashboard/activity-log.service'
 import logger from '@/config/logger'
@@ -227,11 +230,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
   }
 
   // 6. Check venue access
-  if (staff.venues.length === 0) {
-    throw new ForbiddenError('No tienes acceso a ningún establecimiento')
-  }
-
-  const selectedVenue = staff.venues[0]
+  const selectedVenue = pickOperationalVenueForLogin(staff.venues)
 
   // 7. Generate tokens (derive orgId from venue)
   const venueOrgId = selectedVenue.venue.organizationId
@@ -595,11 +594,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   }
 
   // 5. Check venue access
-  if (staff.venues.length === 0) {
-    throw new ForbiddenError('No tienes acceso a ningún establecimiento', 'NO_VENUE_ACCESS')
-  }
-
-  const selectedVenue = staff.venues[0]
+  const selectedVenue = pickOperationalVenueForLogin(staff.venues, 'NO_VENUE_ACCESS')
 
   // 6. Generate tokens (derive orgId from venue)
   const emailLoginOrgId = selectedVenue.venue.organizationId
@@ -674,6 +669,43 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   }
 }
 
+/**
+ * The venue a mobile login lands on — never a suspended or closed one.
+ *
+ * The PAX has blocked this since day one and the dashboard simply does not list
+ * a non-operational venue; mobile was the rail nobody applied it to, so a shop
+ * cut off for non-payment kept handing out fresh 24h sessions.
+ *
+ * 🔴 It FILTERS, it does not slam the door. Someone with three shops and one
+ * suspended keeps working in the other two, exactly like the dashboard. Only
+ * when nothing of theirs is operational does the login stop — and then it says
+ * WHICH state it is, because the rule in this repo is that switched-off has to
+ * be visible and explained, never a bare "no puedes entrar".
+ *
+ * The specific reason is given only for a SINGLE venue. With several, naming
+ * one state would lie about the others ("cerrado permanentemente" to someone
+ * whose other shop is merely paused for a week).
+ *
+ * `noAccessCode` keeps each rail's existing error code untouched: the email
+ * login has always answered `NO_VENUE_ACCESS` and the passkey one nothing, and
+ * an error code is part of the contract the apps in the field already read.
+ */
+export function pickOperationalVenueForLogin<T extends { venue: { status: VenueStatus } }>(venues: T[], noAccessCode?: string): T {
+  if (venues.length === 0) {
+    throw new ForbiddenError('No tienes acceso a ningún establecimiento', noAccessCode)
+  }
+
+  const operational = venues.filter(sv => OPERATIONAL_VENUE_STATUSES.includes(sv.venue.status))
+  if (operational.length > 0) return operational[0]
+
+  throw new ForbiddenError(
+    venues.length === 1
+      ? venueStatusMessage(venues[0].venue.status)
+      : 'Ninguno de tus establecimientos está disponible en este momento. Contacta a soporte.',
+    'VENUE_NOT_OPERATIONAL',
+  )
+}
+
 // ============================================================================
 // TOKEN REFRESH
 // ============================================================================
@@ -698,6 +730,19 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   } catch {
     logger.warn('🔐 [MOBILE AUTH] Invalid refresh token')
     throw new AuthenticationError('Token de refresco inválido o expirado')
+  }
+
+  // SECURITY: a refresh token older than the last password change is dead.
+  //
+  // Without this the middleware guard is decorative: the fired manager's access
+  // token gets killed, the app refreshes on its own, and out comes a new one
+  // with a fresh `iat` that sails straight past the guard — for up to 90 days,
+  // the life of a "remember me" refresh token. A session has to die on BOTH
+  // rails or it doesn't die at all. Same check the TPV rail already does.
+  const motivoDelCorte = await motivoDeSesionInvalidada(payload.sub, payload.iat)
+  if (motivoDelCorte) {
+    logger.warn('🔐 [MOBILE AUTH] Refresh rejected: token predates the session cutoff', { motivo: motivoDelCorte })
+    throw new AuthenticationError(mensajeDeCorte(motivoDelCorte))
   }
 
   // 2. Find the staff
@@ -751,8 +796,24 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   if (requestedVenueId && !requested) {
     throw new ForbiddenError('No tienes acceso a este establecimiento')
   }
-  const carried = payload.venueId ? staff.venues.find(v => v.venueId === payload.venueId) : undefined
-  const selectedVenue = requested ?? carried ?? staff.venues[0]
+
+  // SECURITY: a suspended or closed venue cannot keep minting sessions.
+  //
+  // `venue.status` was already being read here and then ignored, so a venue cut
+  // off for non-payment — or closed for good — went on renewing its staff's
+  // tokens forever. The TPV rail has blocked this since day one; this is the
+  // mobile half of the same rule.
+  const operationalVenues = staff.venues.filter(sv => OPERATIONAL_VENUE_STATUSES.includes(sv.venue.status))
+
+  if (requested && !OPERATIONAL_VENUE_STATUSES.includes(requested.venue.status)) {
+    throw new ForbiddenError('Este establecimiento no está operativo')
+  }
+  if (operationalVenues.length === 0) {
+    throw new ForbiddenError('Ninguno de tus establecimientos está operativo')
+  }
+
+  const carried = payload.venueId ? operationalVenues.find(v => v.venueId === payload.venueId) : undefined
+  const selectedVenue = requested ?? carried ?? operationalVenues[0]
 
   // 4. Generate new tokens (derive orgId from venue)
   const refreshOrgId = selectedVenue.venue.organizationId
