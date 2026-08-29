@@ -16,6 +16,7 @@ import { StaffRole, AuthMethod } from '@prisma/client'
 
 jest.mock('../../../../src/utils/prismaClient')
 jest.mock('@/services/auth/session.service')
+jest.mock('@/services/auth/sessionCache')
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -23,6 +24,7 @@ jest.mock('@/config/logger', () => ({
 
 import prisma from '../../../../src/utils/prismaClient'
 import * as sessionService from '@/services/auth/session.service'
+import { invalidateSession } from '@/services/auth/sessionCache'
 import { switchUserByPin } from '../../../../src/services/mobile/switch-user.mobile.service'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service' // mockeado global en setup.ts
 
@@ -64,6 +66,9 @@ describe('switchUserByPin', () => {
     revokeSessionMock.mockResolvedValue(undefined)
     mockPrisma.staffVenue = { findFirst: jest.fn().mockResolvedValue(staffVenueEncontrado()) }
     mockPrisma.venueRolePermission = { findFirst: jest.fn().mockResolvedValue(null) }
+    // El nombre visible del rol sale de aquí (getRoleDisplayNamesForVenues); sin este mock el
+    // servicio revienta por una razón ajena a lo que cada prueba mira.
+    mockPrisma.venueRoleConfig = { findMany: jest.fn().mockResolvedValue([]) }
     mockPrisma.activityLog = { create: jest.fn().mockResolvedValue({}) }
     mockPrisma.$transaction = jest.fn(async (fn: any) => (typeof fn === 'function' ? fn(mockPrisma) : Promise.all(fn)))
   })
@@ -77,11 +82,16 @@ describe('switchUserByPin', () => {
     // El founder lo definió así: "es como un logout login pero con pin". Si la forma
     // difiere, el cliente tiene que escribir un SEGUNDO camino de guardado y refresco, y
     // ahí es donde aparecen los defectos: una pantalla que se queda con los permisos viejos.
+    // 🔴 `user`, NO `staff`: verificado llamando al login real. La primera version usaba `staff`
+    // y la app habria leido undefined sin un solo error de por medio.
     expect(r).toHaveProperty('accessToken')
     expect(r).toHaveProperty('refreshToken')
-    expect(r.staff.id).toBe('staff_ana')
-    expect(r.staff.venues[0].role).toBe(StaffRole.WAITER)
-    expect(Array.isArray(r.staff.venues[0].permissions)).toBe(true)
+    expect(r).toHaveProperty('user')
+    expect(r).not.toHaveProperty('staff')
+    expect(r.user.venues[0]).toHaveProperty('roleDisplayName')
+    expect(r.user.id).toBe('staff_ana')
+    expect(r.user.venues[0].role).toBe(StaffRole.WAITER)
+    expect(Array.isArray(r.user.venues[0].permissions)).toBe(true)
   })
 
   it('crea la sesión entrante con authMethod PIN y colgada de la saliente', async () => {
@@ -96,6 +106,16 @@ describe('switchUserByPin', () => {
     await llamar()
 
     expect(revokeSessionMock).toHaveBeenCalledWith(SESION_ACTUAL, expect.stringContaining('switch'))
+  })
+
+  it('🔴 INVALIDA la caché de la sesión saliente — revocar sin invalidar la deja viva hasta 60 s', async () => {
+    // Encontrado EN VIVO, no con mocks: tras cambiar de usuario, el token del anterior seguía
+    // devolviendo 200. `revokeSession` escribe en la base, pero el middleware pregunta a una
+    // caché de 60 s (`isSessionAliveCached`). En un mostrador, 60 segundos con el token del
+    // dueño todavía sirviendo es exactamente el hueco que esta feature venía a cerrar.
+    await llamar()
+
+    expect(invalidateSession).toHaveBeenCalledWith(SESION_ACTUAL)
   })
 
   it('🔴 sólo busca en ESTE venue, con la persona y su acceso activos', async () => {
@@ -128,8 +148,8 @@ describe('switchUserByPin', () => {
   it('🔴 aunque la forma sea la del login, trae SÓLO este negocio — no las otras sucursales', async () => {
     const r: any = await llamar()
 
-    expect(r.staff.venues).toHaveLength(1)
-    expect(r.staff.venues[0].id).toBe(VENUE)
+    expect(r.user.venues).toHaveLength(1)
+    expect(r.user.venues[0].id).toBe(VENUE)
   })
 
   it('deja rastro en la bitácora: quién entró, a quién relevó y en qué sesión', async () => {

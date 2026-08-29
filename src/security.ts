@@ -15,6 +15,8 @@ export interface AvoqadoJwtPayload extends jwt.JwtPayload {
   venueId: string // Venue actual de operación
   role: StaffRole // StaffVenue.role para el venueId actual
   terminalSerialNumber?: string // Terminal serial (e.g., "AVQD-2841548417") for auto-attribution
+  /** `Session.id` — sesiones revocables (Parte A). Ausente en tokens legacy anteriores al rollout. */
+  sid?: string
   /** OAuth 2.0 RFC 8693 `act` claim — present only during impersonation sessions. */
   act?: ImpersonationActClaim
 }
@@ -37,6 +39,18 @@ export interface AuthContext {
   venueId: string
   role: StaffRole
   terminalSerialNumber?: string // Terminal serial from JWT (for auto-attribution on orders/payments)
+
+  /**
+   * `Session.id` de la sesión con la que se autenticó esta petición.
+   *
+   * Lo necesita cualquier operación que actúe SOBRE la sesión en curso — el caso que lo destapó
+   * es cambiar de usuario por PIN, que releva a quien estaba dentro y tiene que CERRAR su sesión.
+   * Antes, el middleware comprobaba que estuviera viva y lo tiraba.
+   *
+   * 🔴 Opcional a propósito: un token legacy (sin `sid`) no lo trae, y eso no puede romper nada
+   * — lo contrario expulsaría de golpe a todos los aparatos que aún no migran.
+   */
+  sid?: string
 
   // Impersonation (optional for back-compat with existing AuthContext construction sites).
   // When absent / false, treat as non-impersonating; `realUserId`/`realRole` fall back to `userId`/`role`.
@@ -318,6 +332,7 @@ export function buildAuthContextFromPayload(jwtPayload: AvoqadoJwtPayload): Auth
     venueId: jwtPayload.venueId,
     role,
     ...(jwtPayload.terminalSerialNumber && { terminalSerialNumber: jwtPayload.terminalSerialNumber }),
+    ...(jwtPayload.sid && { sid: jwtPayload.sid }),
     realUserId,
     realRole,
     isImpersonating,

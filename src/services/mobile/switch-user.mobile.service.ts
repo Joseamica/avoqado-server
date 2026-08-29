@@ -33,9 +33,11 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { AuthenticationError } from '../../errors/AppError'
 import { createSession, revokeSession } from '@/services/auth/session.service'
+import { invalidateSession } from '@/services/auth/sessionCache'
 import { issueGrant } from '@/services/auth/refreshGrant.service'
 import { refreshGrantExpiry } from './auth.mobile.service'
 import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
+import { getRoleDisplayNamesForVenues } from '../dashboard/venueRoleConfig.dashboard.service'
 import * as jwtService from '../../jwt.service'
 import { logAction } from '../dashboard/activity-log.service'
 import crypto from 'crypto'
@@ -118,6 +120,12 @@ export async function switchUserByPin(params: SwitchUserParams) {
   // SUS permisos aunque en la pantalla ya esté otra persona.
   await revokeSession(sesionActualId, 'switch_user')
 
+  // 🔴 Invalidar la caché NO es opcional, y esto se encontró EN VIVO: revocar escribe en la base,
+  // pero el middleware pregunta a una caché de 60 s (`isSessionAliveCached`). Sin esta línea el
+  // token del anterior seguía devolviendo 200 durante un minuto entero después del relevo — en un
+  // mostrador, tiempo de sobra para justo lo que esta feature viene a cerrar.
+  await invalidateSession(sesionActualId)
+
   // Tokens con el MISMO criterio que el login móvil: `pos: true` (access corto, este carril lo
   // usan sólo avoqado-android y avoqado-ios) y el `sid` de la sesión recién creada en ambos.
   const accessToken = jwtService.generateAccessToken(
@@ -150,13 +158,23 @@ export async function switchUserByPin(params: SwitchUserParams) {
 
   logger.info(`🔐 [SWITCH-USER] ${staffVenue.staff.email} tomó el aparato | venue=${venueId}`)
 
-  // 🔑 La forma es la MISMA del login (ver el docstring de arriba): el cliente reusa su camino de
-  // guardado y refresca la UI entera. Con UNA sola sucursal: aunque la persona trabaje en varias,
-  // este relevo es de ESTE mostrador y no tiene por qué revelar las demás.
+  // 🔑 La forma es la MISMA del login, y esto se verificó LLAMANDO al endpoint real, no leyendo
+  // el código: el login móvil responde `{ success, message, user, accessToken, refreshToken }` —
+  // con `user`, NO con `staff`, y con `lastLogin` y `roleDisplayName` dentro de cada venue. La
+  // primera versión de este servicio devolvía `staff` y le faltaban esos dos campos; la app
+  // habría recibido `undefined` donde espera el nombre del rol, y sin un solo error de por medio.
+  //
+  // Por eso tampoco se envuelve en `{ data: ... }`, que es la convención general de la casa: aquí
+  // manda el contrato que puso el founder — «es como un logout login pero con pin» —, y eso sólo
+  // se cumple si el cliente puede reusar EXACTAMENTE su camino de guardado del login.
+  const roleDisplayNames = await getRoleDisplayNamesForVenues([{ venueId, role: staffVenue.role }])
+
   return {
+    success: true,
+    message: 'Usuario cambiado',
     accessToken,
     refreshToken,
-    staff: {
+    user: {
       id: staffVenue.staff.id,
       email: staffVenue.staff.email,
       firstName: staffVenue.staff.firstName,
@@ -165,6 +183,9 @@ export async function switchUserByPin(params: SwitchUserParams) {
       photoUrl: staffVenue.staff.photoUrl,
       phone: staffVenue.staff.phone,
       createdAt: staffVenue.staff.createdAt,
+      lastLogin: new Date(),
+      // 🔴 SÓLO este negocio, aunque la forma sea la del login: el relevo es de ESTE mostrador y
+      // no tiene por qué revelar en qué otras sucursales trabaja la persona que acaba de entrar.
       venues: [
         {
           id: staffVenue.venue.id,
@@ -173,6 +194,7 @@ export async function switchUserByPin(params: SwitchUserParams) {
           logo: staffVenue.venue.logo,
           type: staffVenue.venue.type,
           role: staffVenue.role,
+          roleDisplayName: roleDisplayNames.get(`${venueId}:${staffVenue.role}`),
           status: staffVenue.venue.status,
           kycStatus: staffVenue.venue.kycStatus,
           timezone: staffVenue.venue.timezone,
