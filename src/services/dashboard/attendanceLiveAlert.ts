@@ -1,4 +1,6 @@
 import { DateTime } from 'luxon'
+import prisma from '@/utils/prismaClient'
+import { resolveExpectedDay } from './workSchedule.service'
 
 /**
  * Aviso EN VIVO de asistencia: "¿ya debería haber llegado y no ha llegado?".
@@ -79,4 +81,105 @@ export function evaluarAvisoEnVivo(input: EvaluarAvisoInput): EvaluacionDeAviso 
   if (minutosTarde <= input.graceMinutes) return sinAviso
 
   return { aviso: 'RETARDO', minutosTarde }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Quién va tarde AHORA — la parte que toca la base
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PersonaTarde {
+  staffVenueId: string
+  staffId: string
+  nombre: string
+  /** Día del TURNO al que pertenece el retardo ('YYYY-MM-DD' del negocio). */
+  scheduleDate: string
+  /** Hora de entrada esperada, "HH:mm". */
+  esperada: string
+  minutosTarde: number
+}
+
+/**
+ * 🔴 UNA sola recolección para el job y para el MCP.
+ *
+ * Si el job y la herramienta que contesta "¿quién falta?" recolectaran por separado, acabarían
+ * divergiendo — es exactamente el defecto que ya apareció entre el reporte de asistencia y las
+ * comisiones con los turnos nocturnos, y que costó unificar después.
+ *
+ * NO decide si avisar ni a quién: sólo dice quién va tarde ahora mismo. El interruptor del aviso,
+ * la deduplicación y los destinatarios viven en el job.
+ */
+export async function quienVaTarde(venueId: string, now: Date): Promise<{ venueId: string; ahora: string; tarde: PersonaTarde[] }> {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { timezone: true, settings: { select: { attendanceGraceMinutes: true, rotatingShiftsEnabled: true } } },
+  })
+  const zona = venue?.timezone || 'America/Mexico_City'
+  const graceMinutes = venue?.settings?.attendanceGraceMinutes ?? 10
+  const hoy = DateTime.fromJSDate(now).setZone(zona)
+  // HOY y AYER: un turno nocturno de ayer sigue vivo a las 2 de la mañana.
+  const dias = [hoy.toISODate(), hoy.minus({ days: 1 }).toISODate()].filter(Boolean) as string[]
+  const ayer = dias[dias.length - 1]
+  const hoyIso = dias[0]
+
+  const personas = await prisma.staffVenue.findMany({
+    where: { venueId, active: true, OR: [{ endDate: null }, { endDate: { gte: hoy.startOf('day').toJSDate() } }] },
+    select: {
+      id: true,
+      staffId: true,
+      staff: { select: { firstName: true, lastName: true } },
+      workSchedule: { select: { weekly: true } },
+      // 🔴 `workScheduleExceptions`, NO `scheduleExceptions`: ese último es la disponibilidad
+      // para CITAS y reservas, otro modelo y otra cosa.
+      workScheduleExceptions: {
+        where: { startDate: { lte: hoyIso }, endDate: { gte: ayer } },
+        orderBy: [{ startDate: 'asc' as const }, { createdAt: 'asc' as const }],
+        select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true, type: true },
+      },
+      workShiftAssignments: venue?.settings?.rotatingShiftsEnabled
+        ? { where: { date: { in: dias }, status: 'PUBLISHED' }, select: { date: true, startTime: true, endTime: true, status: true } }
+        : (false as const),
+    },
+  })
+
+  // Una sola pasada de checadas para todo el grupo: pedirlas por persona haría una consulta por fila.
+  const desde = DateTime.fromISO(ayer, { zone: zona }).startOf('day').toJSDate()
+  const checadas = await prisma.timeEntry.findMany({
+    where: { venueId, staffId: { in: personas.map(p => p.staffId) }, clockInTime: { gte: desde } },
+    select: { staffId: true, clockInTime: true },
+    orderBy: { clockInTime: 'asc' },
+  })
+  const primeraChecada = new Map<string, Date>()
+  for (const c of checadas) if (!primeraChecada.has(c.staffId)) primeraChecada.set(c.staffId, c.clockInTime)
+
+  const tarde: PersonaTarde[] = []
+  for (const persona of personas) {
+    for (const dia of dias) {
+      const asignacion = (persona as any).workShiftAssignments?.find((a: any) => a.date === dia) ?? null
+      const esperado = resolveExpectedDay(persona.workSchedule?.weekly as any, persona.workScheduleExceptions as any, dia, asignacion as any)
+
+      const veredicto = evaluarAvisoEnVivo({
+        expectedStart: esperado.start,
+        expectedEnd: esperado.end,
+        timezone: zona,
+        graceMinutes,
+        clockInTime: primeraChecada.get(persona.staffId) ?? null,
+        scheduleDate: dia,
+        isDayOff: esperado.isDayOff,
+        now,
+      })
+      if (veredicto.aviso !== 'RETARDO') continue
+
+      tarde.push({
+        staffVenueId: persona.id,
+        staffId: persona.staffId,
+        nombre: `${persona.staff.firstName ?? ''} ${persona.staff.lastName ?? ''}`.trim() || 'Sin nombre',
+        scheduleDate: dia,
+        esperada: esperado.start as string,
+        minutosTarde: veredicto.minutosTarde,
+      })
+    }
+  }
+
+  return { venueId, ahora: hoy.toISO() ?? '', tarde }
 }

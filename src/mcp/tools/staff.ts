@@ -26,6 +26,20 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
+    'who_is_late_now',
+    'Who SHOULD already be at work RIGHT NOW and has not clocked in yet, for ONE venue. Answers "\u00bfya llegaron todos?", "\u00bfqui\u00e9n falta?", "\u00bfalguien lleg\u00f3 tarde hoy?" while the day is still happening \u2014 the attendance report answers the same question AFTER the fact. Uses the venue schedule (fixed roster, rotating shifts and exceptions) plus the venue tolerance in minutes; someone without a schedule is never judged, and a day off is never judged. Read-only.',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('attendance:read', venueId)
+      const { quienVaTarde } = await import('../../services/dashboard/attendanceLiveAlert')
+      return text(await quienVaTarde(venueId, new Date()))
+    },
+  )
+
+  server.tool(
     'work_shifts',
     'Rotating WORK shifts (fase 1 "como Sesame"): the venue\'s shift templates (e.g. Abre 08–16, Cierre 11–19) and the person×day assignments for a date range (max 31 days), with DRAFT/PUBLISHED status. Only PUBLISHED assignments count for attendance and commissions, and only when the venue enabled rotating shifts. Read-only. Pass venueId, from and to (YYYY-MM-DD).',
     {

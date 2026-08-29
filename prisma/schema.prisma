@@ -849,6 +849,12 @@ model VenueSettings {
   /// 🔴 Independiente de `enableShifts` (caja). Rieles distintos.
   attendanceEnabled       Boolean @default(true)
   attendanceGraceMinutes  Int     @default(10)
+  /// Aviso EN VIVO cuando alguien no ha checado y ya pasó su hora + la tolerancia: llega al
+  /// dashboard Y por correo a OWNER/ADMIN/MANAGER. **Apagado de fábrica**: manda correos, y un
+  /// negocio no puede empezar a recibirlos por una actualización que no pidió. Sin este
+  /// interruptor el único apagador sería un UPDATE en Postgres — el anti-patrón que la regla de
+  /// activación del workspace prohíbe explícitamente.
+  attendanceLateAlertEnabled Boolean @default(false)
   /// Turnos ROTATIVOS de trabajo (referente Sesame: "Abre / Inter / Cierre" que rotan). Apagado de
   /// fábrica y explícito por venue: crear una plantilla puede ser prueba y no debe cambiar en silencio
   /// la fuente de retardos y comisiones (Codex, 27-ago). Prendido, una asignación PUBLICADA gana sobre
