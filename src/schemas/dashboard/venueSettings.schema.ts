@@ -47,6 +47,7 @@ export const UpdateVenueSettingsSchema = z.object({
     // Asistencia: minutos de gracia antes de contar un retardo (fase 2 del checador).
     attendanceEnabled: z.boolean().optional(),
     attendanceGraceMinutes: z.coerce.number().int().min(0).max(120).optional(),
+    attendanceLateAlertEnabled: z.boolean().optional(),
     // Turnos rotativos (fase 1 "como Sesame"): interruptor explícito por venue.
     rotatingShiftsEnabled: z.boolean().optional(),
     cashReconciliationEnabled: z.boolean().optional(),
