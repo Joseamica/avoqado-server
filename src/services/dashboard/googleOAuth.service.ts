@@ -1,12 +1,13 @@
 import { OAuth2Client } from 'google-auth-library'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
+import { StaffRole, OrgRole, InvitationStatus, AuthMethod } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId } from '../staffOrganization.service'
 import { assertCanAddSeatsBulk } from '../access/seatCap.service'
 import { logAction } from './activity-log.service'
+import { createSession } from '@/services/auth/session.service'
 
 // Validate Google OAuth configuration
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
@@ -475,9 +476,24 @@ export async function loginWithGoogle(
 
   // Generate tokens (derive orgId from venue)
   const googleOrgId = selectedVenue.venue.organizationId
-  const accessToken = jwtService.generateAccessToken(staff.id, googleOrgId, selectedVenue.venueId, selectedVenue.role)
 
-  const refreshToken = jwtService.generateRefreshToken(staff.id, googleOrgId)
+  // Parte A (sesiones revocables): igual que el login por contraseña — la Session nace
+  // antes que los tokens y su id viaja como `sid`. Entrar con Google no puede ser la
+  // puerta que se queda sin poder cancelarse.
+  //
+  // 🔴 `undefined` explícito en el 5º (rememberMe) para alcanzar el 6º (opts); y sin
+  // `pos: true`, que es del POS y no del panel web.
+  const session = await createSession({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    authMethod: AuthMethod.PASSWORD,
+  })
+
+  const accessToken = jwtService.generateAccessToken(staff.id, googleOrgId, selectedVenue.venueId, selectedVenue.role, undefined, {
+    sid: session.id,
+  })
+
+  const refreshToken = jwtService.generateRefreshToken(staff.id, googleOrgId, undefined, selectedVenue.venueId, { sid: session.id })
 
   // Access log. `loginWithGoogleOneTap` delegates here, so this single row covers both SSO
   // paths. The method is recorded separately because in a security review signing in with a

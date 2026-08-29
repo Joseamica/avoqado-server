@@ -87,6 +87,14 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 const assertCanAddSeatsBulk = jest.fn().mockResolvedValue(undefined)
 jest.mock('../../../src/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk }))
 
+// Parte A (sesiones revocables): loginWithGoogle ahora crea una `Session` antes de emitir
+// los tokens. El mock de prisma de este archivo enumera sus modelos a mano y no incluye
+// `session`, asi que el servicio real reventaria aqui por una razon que no tiene nada que
+// ver con lo que este archivo prueba (la paridad al aceptar una invitacion).
+jest.mock('@/services/auth/session.service', () => ({
+  createSession: jest.fn().mockResolvedValue({ id: 'sess_google_test' }),
+}))
+
 const logAction = jest.fn()
 jest.mock('../../../src/services/dashboard/activity-log.service', () => ({ logAction }))
 
