@@ -6,8 +6,9 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
-import { sendNotification } from '../services/dashboard/notification.service'
-import { quienVaTarde } from '../services/dashboard/attendanceLiveAlert'
+import { getNotificationPreferences, sendNotification } from '../services/dashboard/notification.service'
+import { sendNotificationEmail } from '../services/resend.service'
+import { type PersonaTarde, quienVaTarde } from '../services/dashboard/attendanceLiveAlert'
 
 /**
  * Aviso EN VIVO de retardo.
@@ -91,6 +92,10 @@ export class AttendanceLateAlertJob {
         const destinatarios = await this.quienDebeEnterarse(venue.id)
         if (destinatarios.length === 0) continue
 
+        // Lo que le toca a cada destinatario en ESTA pasada, para poder mandarle UN correo
+        // con la lista en vez de uno por nombre.
+        const nuevosPorDestinatario = new Map<string, PersonaTarde[]>()
+
         for (const persona of tarde) {
           const llave = `${persona.staffVenueId}:${persona.scheduleDate}`
           // 🔴 El dedup es POR DESTINATARIO (P1 #2 de Codex). Buscando "cualquier notificación de
@@ -106,6 +111,8 @@ export class AttendanceLateAlertJob {
           if (pendientes.length === 0) continue
 
           for (const recipientId of pendientes) {
+            // 🔴 En la CAMPANA va uno por persona: cada nombre es una acción pendiente, y marcar
+            // "ya le hablé a Ana" no puede borrar a Carlos. El correo se manda aparte, agrupado.
             await sendNotification({
               recipientId,
               venueId: venue.id,
@@ -116,15 +123,15 @@ export class AttendanceLateAlertJob {
               entityType: 'AttendanceLateAlert',
               entityId: llave,
               priority: NotificationPriority.NORMAL,
-              // 🔴 Correo ADEMÁS del aviso en el dashboard: es lo que hace que el dueño se entere
-              // cuando no está en el local, que es justo cuando esto sirve. Igual que Square.
-              // La preferencia de cada persona (`NotificationPreference`) puede recortarlo.
-              channels: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+              channels: [NotificationChannel.IN_APP],
               metadata: { staffVenueId: persona.staffVenueId, scheduleDate: persona.scheduleDate, minutosTarde: persona.minutosTarde },
             })
+            nuevosPorDestinatario.set(recipientId, [...(nuevosPorDestinatario.get(recipientId) ?? []), persona])
           }
           avisados++
         }
+
+        await this.mandarResumenPorCorreo(venue.id, nuevosPorDestinatario)
       } catch (e) {
         // Un venue que truena no puede impedir los avisos de los demás.
         logger.error(`[attendance-late-alert] falló el venue ${venue.name}: ${(e as Error).message}`)
@@ -133,6 +140,45 @@ export class AttendanceLateAlertJob {
 
     if (avisados > 0) logger.info(`[attendance-late-alert] ${avisados} aviso(s) de retardo en ${venues.length} venue(s)`)
     return { avisados, venues: venues.length }
+  }
+
+  /**
+   * 🔴 UN correo por persona-que-lo-recibe y por pasada, con la LISTA — no uno por nombre.
+   *
+   * Decisión del founder (29-ago). El dato que la sostiene: los turnos empiezan a horas distintas
+   * ("abre 8:00 / inter 9:00 / cierre 11:00"), así que en un día normal los retardos caen en
+   * pasadas distintas y agrupar no cambia nada — sólo hay uno. Donde SÍ cambia es el día malo
+   * (festivo sin marcar, cierre imprevisto): 12 personas × 3 jefes eran 36 correos de golpe, la
+   * forma más rápida de que alguien apague la función para siempre. Agrupado son 3.
+   *
+   * 🔴 No hay referente que copiar: Square NO manda este aviso al gerente — sólo al propio
+   * empleado, y sus dueños llevan años pidiéndolo en el foro (buscado en vivo, 29-ago).
+   *
+   * Se respeta la preferencia de cada quien: si alguien apagó el correo para este tipo, no le
+   * llega — igual que haría `sendNotification`. Un fallo al mandar NO tumba el job: la campana
+   * ya quedó puesta, que es el registro que importa.
+   */
+  private async mandarResumenPorCorreo(venueId: string, porDestinatario: Map<string, PersonaTarde[]>): Promise<void> {
+    for (const [recipientId, personas] of porDestinatario) {
+      if (personas.length === 0) continue
+      try {
+        const pref = await getNotificationPreferences(recipientId, venueId, NotificationType.ATTENDANCE_LATE)
+        if (!pref.enabled) continue
+        // `channels` null = sin preferencia explícita: se manda, que es el default de esta alerta.
+        if (pref.channels && pref.channels.length > 0 && !pref.channels.includes(NotificationChannel.EMAIL)) continue
+
+        const staff = await prisma.staff.findUnique({ where: { id: recipientId }, select: { email: true } })
+        if (!staff?.email) continue
+
+        const titulo =
+          personas.length === 1 ? `${personas[0].nombre} no ha checado` : `${personas.length} personas no han checado`
+        const cuerpo = personas.map(p => `${p.nombre} — entraba a las ${p.esperada}, lleva ${p.minutosTarde} min`).join('\n')
+
+        await sendNotificationEmail(staff.email, titulo, titulo, cuerpo, undefined, 'Ver asistencia')
+      } catch (e) {
+        logger.error(`[attendance-late-alert] no se pudo mandar el resumen a ${recipientId}: ${(e as Error).message}`)
+      }
+    }
   }
 
   /**
