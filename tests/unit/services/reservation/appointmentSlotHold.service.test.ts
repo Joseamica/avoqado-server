@@ -533,6 +533,8 @@ describe('reschedule policy and locked hold identity', () => {
     venueId,
     startsAt,
     endsAt: rawEndsAt,
+    // backfill documentado en el schema: sin buffer, el bloque termina con el servicio.
+    blockedEndsAt: rawEndsAt,
     duration: 60,
     productId,
     productIds: [productId, 'product-2'],

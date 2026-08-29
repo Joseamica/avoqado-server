@@ -8,7 +8,9 @@ const mockClient = Object.assign(new EventEmitter(), {
   request: jest.fn(() => mockRequest),
   close: jest.fn(),
 })
-const mockConnect = jest.fn(() => mockClient)
+// Acepta argumentos variádicos: `connect(...args)` los reenvía y sin el rest el spread no
+// tiene parámetro donde caer.
+const mockConnect = jest.fn((..._args: unknown[]) => mockClient)
 
 jest.mock('http2', () => ({
   connect: (...args: unknown[]) => mockConnect(...args),

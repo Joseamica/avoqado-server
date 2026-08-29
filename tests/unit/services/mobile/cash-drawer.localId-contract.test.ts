@@ -244,7 +244,11 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
   it('el `expectedAmount` que calcula el servidor no cambió: 5230.00', async () => {
     const session = await getCurrentSession(VENUE, true)
 
-    expect(session!.expectedAmount).toBe(5230)
-    expect(Math.round(session!.expectedAmount * 100)).toBe(CENTS_CORRECTO)
+    // `expectedAmount` es opcional desde el conteo ciego (se omite a quien no tiene
+    // `cash-drawer:view-expected`). Aquí se pide con permiso, así que viene — pero se lee sin
+    // `!` para que la prueba siga fallando, y no reventando, si algún día dejara de venir.
+    const esperado = session?.expectedAmount ?? 0
+    expect(esperado).toBe(5230)
+    expect(Math.round(esperado * 100)).toBe(CENTS_CORRECTO)
   })
 })

@@ -2028,6 +2028,9 @@ describe('Reservation Dashboard Service', () => {
         venueId: reservation.venueId,
         startsAt: reservation.startsAt,
         endsAt: reservation.endsAt,
+        // `blockedEndsAt` es NOT NULL y su backfill documentado en el schema es `endsAt`
+        // (sin buffer, el bloque del negocio termina cuando termina el servicio).
+        blockedEndsAt: (reservation as { blockedEndsAt?: Date }).blockedEndsAt ?? reservation.endsAt,
         duration: reservation.duration,
         productId: reservation.productId,
         productIds: reservation.productIds,
@@ -2850,6 +2853,8 @@ describe('Reservation Dashboard Service', () => {
         venueId: existing.venueId,
         startsAt: existing.startsAt,
         endsAt: existing.endsAt,
+        // backfill documentado en el schema: sin buffer, el bloque termina con el servicio.
+        blockedEndsAt: existing.endsAt,
         duration: existing.duration,
         productId: existing.productId,
         productIds: existing.productIds,
@@ -2912,6 +2917,8 @@ describe('Reservation Dashboard Service', () => {
         venueId: existing.venueId,
         startsAt: existing.startsAt,
         endsAt: existing.endsAt,
+        // backfill documentado en el schema: sin buffer, el bloque termina con el servicio.
+        blockedEndsAt: existing.endsAt,
         duration: existing.duration,
         productId: existing.productId,
         productIds: existing.productIds,
@@ -3338,6 +3345,8 @@ describe('rescheduleAppointmentReservation', () => {
       venueId: reservation.venueId,
       startsAt: reservation.startsAt,
       endsAt: reservation.endsAt,
+      // backfill documentado en el schema: sin buffer, el bloque termina con el servicio.
+      blockedEndsAt: (reservation as { blockedEndsAt?: Date }).blockedEndsAt ?? reservation.endsAt,
       duration: reservation.duration,
       productId: reservation.productId,
       productIds: reservation.productIds,
