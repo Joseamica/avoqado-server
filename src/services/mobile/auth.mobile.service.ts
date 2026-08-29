@@ -44,8 +44,13 @@ import {
 const REFRESH_TOKEN_TTL_SECONDS = 604_800
 const REFRESH_TOKEN_TTL_SECONDS_REMEMBER_ME = 7_776_000
 
-/** Fecha de vencimiento para sellar `RefreshGrant.expiresAt` al emitir (login) o rotar (refresh) un grant. */
-function refreshGrantExpiry(rememberMe?: boolean): Date {
+/**
+ * Fecha de vencimiento para sellar `RefreshGrant.expiresAt` al emitir (login) o rotar (refresh) un grant.
+ *
+ * Exportada para que `switch-user.mobile.service.ts` selle con LA MISMA regla: duplicar el TTL
+ * daría dos vencimientos distintos para el mismo tipo de token según por dónde entró la persona.
+ */
+export function refreshGrantExpiry(rememberMe?: boolean): Date {
   const ttlSeconds = rememberMe ? REFRESH_TOKEN_TTL_SECONDS_REMEMBER_ME : REFRESH_TOKEN_TTL_SECONDS
   return new Date(Date.now() + ttlSeconds * 1000)
 }
@@ -909,14 +914,10 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   // un access de 24h y el acortamiento sólo protegería los primeros 10 minutos de la
   // sesión, no la sesión completa. `pos` NO se mete en el refresh token (sidOpts se queda
   // igual abajo) — no tiene consumidor ahí, sólo `generateAccessToken` lee `opts.pos`.
-  const newAccessToken = jwtService.generateAccessToken(
-    staff.id,
-    refreshOrgId,
-    selectedVenue.venueId,
-    selectedVenue.role,
-    undefined,
-    { ...sidOpts, pos: true },
-  )
+  const newAccessToken = jwtService.generateAccessToken(staff.id, refreshOrgId, selectedVenue.venueId, selectedVenue.role, undefined, {
+    ...sidOpts,
+    pos: true,
+  })
   let newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId, undefined, selectedVenue.venueId, sidOpts)
 
   // 4.1. Task 10: rotar el grant de verdad — `issueGrant`/`rotateGrant` (Tasks 8 y 9) no
