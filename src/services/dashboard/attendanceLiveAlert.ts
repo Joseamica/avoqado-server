@@ -41,6 +41,64 @@ export interface EvaluacionDeAviso {
   minutosTarde: number
 }
 
+/**
+ * Cuánto antes de su hora puede llegar alguien y que siga contando como ESTE turno. Llegar
+ * temprano es normal; 6 h cubre incluso al que abre el local muy antes.
+ */
+const MARGEN_LLEGADA_TEMPRANA_HORAS = 6
+
+/**
+ * 🔴 Cuánto tiempo sigue teniendo sentido AVISAR de un retardo.
+ *
+ * P1 #3 de Codex (29-ago): no había tope por arriba más que la hora de salida, así que prender el
+ * interruptor a las 16:30 sobre un turno 09:00–17:00 hacía que el siguiente tick avisara por TODOS
+ * los ausentes del día, con cientos de minutos de retraso. Con 12 personas y 3 responsables son 36
+ * correos de golpe — la forma más rápida de que alguien apague la función para siempre.
+ *
+ * Pasadas 2 horas ya no es una alerta: es una falta, y la falta la cuenta el reporte. Una alerta
+ * existe para poder hacer algo —llamarle, mover a alguien a cubrir— y a las 4 horas ya no se puede.
+ */
+const VIGENCIA_DEL_AVISO_MINUTOS = 120
+
+export interface VentanaDelTurno {
+  expectedStart: string
+  expectedEnd: string
+  /** Día del TURNO ('YYYY-MM-DD' del negocio). */
+  scheduleDate: string
+  timezone: string
+}
+
+/**
+ * 🔴 De todas las checadas de una persona, cuál pertenece a ESTE turno.
+ *
+ * P1 #1 de Codex (29-ago), reproducido contra la base antes de arreglarlo: la checada se buscaba
+ * por PERSONA y el mismo valor servía para juzgar hoy y ayer, así que **la checada de ayer apagaba
+ * el aviso de hoy**. Con casi todo el mundo trabajando el día anterior, el aviso no habría servido
+ * para nadie.
+ *
+ * La ventana es `[entrada − 6 h, salida]`: hacia atrás para quien llega temprano, y hacia adelante
+ * cortada en la salida porque después ya es otro turno — sin ese tope, un nocturno se daría por
+ * cubierto con la entrada de la mañana siguiente, que es de otra persona-turno.
+ */
+export function checadaDelTurno(checadas: Date[], turno: VentanaDelTurno): Date | null {
+  const dia = DateTime.fromISO(turno.scheduleDate, { zone: turno.timezone })
+  if (!dia.isValid) return null
+
+  const entrada = momentoEsperado(dia, turno.expectedStart)
+  let salida = momentoEsperado(dia, turno.expectedEnd)
+  if (salida <= entrada) salida = salida.plus({ days: 1 })
+  const desde = entrada.minus({ hours: MARGEN_LLEGADA_TEMPRANA_HORAS })
+
+  const dentro = checadas
+    .filter(c => {
+      const m = DateTime.fromJSDate(c).setZone(turno.timezone)
+      return m >= desde && m <= salida
+    })
+    .sort((a, b) => a.getTime() - b.getTime())
+
+  return dentro[0] ?? null
+}
+
 const sinAviso: EvaluacionDeAviso = { aviso: 'NINGUNO', minutosTarde: 0 }
 
 /** "09:00" sobre el día dado, en la zona del negocio. */
@@ -80,6 +138,10 @@ export function evaluarAvisoEnVivo(input: EvaluarAvisoInput): EvaluacionDeAviso 
   const minutosTarde = Math.round(ahora.diff(entrada, 'minutes').minutes)
   if (minutosTarde <= input.graceMinutes) return sinAviso
 
+  // 🔴 Un aviso caduca: pasadas 2 h ya no es un retardo accionable sino una falta, y la falta la
+  // cuenta el reporte. Sin esto, prender el interruptor por la tarde disparaba el día entero.
+  if (minutosTarde > input.graceMinutes + VIGENCIA_DEL_AVISO_MINUTOS) return sinAviso
+
   return { aviso: 'RETARDO', minutosTarde }
 }
 
@@ -114,7 +176,13 @@ export async function quienVaTarde(venueId: string, now: Date): Promise<{ venueI
     where: { id: venueId },
     select: { timezone: true, settings: { select: { attendanceGraceMinutes: true, rotatingShiftsEnabled: true } } },
   })
-  const zona = venue?.timezone || 'America/Mexico_City'
+  // 🔴 Una zona nula o inválida NO cae a México en silencio (P2 #3 de Codex): un venue de
+  // Tijuana o Cancún recibiría avisos corridos una o dos horas, y una zona basura produce un
+  // DateTime inválido que deja el venue sin evaluar cada diez minutos sin que nadie lo sepa.
+  const zona = venue?.timezone ?? ''
+  if (!DateTime.local().setZone(zona).isValid) {
+    throw new Error(`Zona horaria inválida o ausente en el venue ${venueId}: ${JSON.stringify(venue?.timezone)}`)
+  }
   const graceMinutes = venue?.settings?.attendanceGraceMinutes ?? 10
   const hoy = DateTime.fromJSDate(now).setZone(zona)
   // HOY y AYER: un turno nocturno de ayer sigue vivo a las 2 de la mañana.
@@ -149,8 +217,14 @@ export async function quienVaTarde(venueId: string, now: Date): Promise<{ venueI
     select: { staffId: true, clockInTime: true },
     orderBy: { clockInTime: 'asc' },
   })
-  const primeraChecada = new Map<string, Date>()
-  for (const c of checadas) if (!primeraChecada.has(c.staffId)) primeraChecada.set(c.staffId, c.clockInTime)
+  // TODAS las checadas por persona: cuál cuenta lo decide `checadaDelTurno` por TURNO, porque
+  // la misma persona puede tener la de ayer y la de hoy en esta ventana.
+  const checadasPorPersona = new Map<string, Date[]>()
+  for (const c of checadas) {
+    const lista = checadasPorPersona.get(c.staffId) ?? []
+    lista.push(c.clockInTime)
+    checadasPorPersona.set(c.staffId, lista)
+  }
 
   const tarde: PersonaTarde[] = []
   for (const persona of personas) {
@@ -163,7 +237,15 @@ export async function quienVaTarde(venueId: string, now: Date): Promise<{ venueI
         expectedEnd: esperado.end,
         timezone: zona,
         graceMinutes,
-        clockInTime: primeraChecada.get(persona.staffId) ?? null,
+        clockInTime:
+          esperado.start && esperado.end
+            ? checadaDelTurno(checadasPorPersona.get(persona.staffId) ?? [], {
+                expectedStart: esperado.start,
+                expectedEnd: esperado.end,
+                scheduleDate: dia,
+                timezone: zona,
+              })
+            : null,
         scheduleDate: dia,
         isDayOff: esperado.isDayOff,
         now,

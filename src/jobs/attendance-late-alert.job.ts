@@ -25,11 +25,12 @@ import { quienVaTarde } from '../services/dashboard/attendanceLiveAlert'
  * (`attendanceEnabled` + `attendanceLateAlertEnabled`, este último APAGADO de fábrica). Manda
  * correos: un negocio no puede empezar a recibirlos por una actualización que no pidió.
  *
- * ⚠️ LÍMITE DECLARADO: el "una vez por persona por día" se resuelve consultando si ya existe la
- * notificación antes de mandarla. NO es atómico: dos corridas simultáneas podrían mandar dos
- * correos. Se acepta a propósito — el daño es un correo repetido, no un número equivocado, y
- * cerrarlo pide un índice único y su migración. Hoy los crons corren en UNA sola instancia
- * (`.claude/rules/una-sola-instancia.md`), así que la ventana es teórica.
+ * ⚠️ LÍMITE DECLARADO: el dedup consulta-luego-escribe, POR DESTINATARIO, y no es atómico. Dos
+ * corridas simultáneas del mismo tick podrían mandar un correo repetido a la misma persona. Se
+ * acepta: el daño es una repetición, no una pérdida — y perder era el defecto real (P1 #2), que
+ * venía de deduplicar sin mirar el destinatario. Hoy los crons corren en UNA sola instancia
+ * (`.claude/rules/una-sola-instancia.md`), así que la ventana es estrecha; `runNow()` la abre si
+ * alguien lo dispara a mano mientras el cron corre.
  */
 export class AttendanceLateAlertJob {
   private job: CronJob | null = null
@@ -92,13 +93,19 @@ export class AttendanceLateAlertJob {
 
         for (const persona of tarde) {
           const llave = `${persona.staffVenueId}:${persona.scheduleDate}`
-          const yaAvisado = await prisma.notification.findFirst({
+          // 🔴 El dedup es POR DESTINATARIO (P1 #2 de Codex). Buscando "cualquier notificación de
+          // esta persona" bastaba con que al OWNER le llegara la suya para que un corte del proceso
+          // dejara a ADMIN y MANAGER sin aviso PARA SIEMPRE: la corrida siguiente encontraba la del
+          // OWNER y saltaba a los tres. El daño posible no era "un correo repetido" como decía este
+          // comentario, sino la pérdida silenciosa y permanente de un aviso legítimo.
+          const yaAvisados = await prisma.notification.findMany({
             where: { venueId: venue.id, type: NotificationType.ATTENDANCE_LATE, entityType: 'AttendanceLateAlert', entityId: llave },
-            select: { id: true },
+            select: { recipientId: true },
           })
-          if (yaAvisado) continue
+          const pendientes = destinatarios.filter(id => !yaAvisados.some(n => n.recipientId === id))
+          if (pendientes.length === 0) continue
 
-          for (const recipientId of destinatarios) {
+          for (const recipientId of pendientes) {
             await sendNotification({
               recipientId,
               venueId: venue.id,

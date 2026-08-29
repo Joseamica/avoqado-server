@@ -1,4 +1,4 @@
-import { evaluarAvisoEnVivo } from '@/services/dashboard/attendanceLiveAlert'
+import { checadaDelTurno, evaluarAvisoEnVivo } from '@/services/dashboard/attendanceLiveAlert'
 
 /**
  * 🔴 CUÁNDO SE AVISA DE UN RETARDO, Y CUÁNDO NO.
@@ -84,6 +84,27 @@ describe('evaluarAvisoEnVivo', () => {
     expect(evaluarAvisoEnVivo({ ...base, now: enMexico('09:00', '2026-08-29') }).aviso).toBe('NINGUNO')
   })
 
+  // ── Vigencia: un aviso caduca ─────────────────────────────────────────────
+
+  /**
+   * 🔴 P1 #3 de Codex (29-ago). No había tope más que la hora de salida, así que prender el
+   * interruptor a las 16:30 sobre un turno 09:00–17:00 hacía que el siguiente tick avisara por
+   * TODOS los ausentes del día. Con 12 personas y 3 responsables: 36 correos de golpe — la forma
+   * más rápida de que alguien apague la función para siempre.
+   *
+   * Pasadas 2 h ya no es un retardo accionable sino una falta, y la falta la cuenta el reporte.
+   */
+  it('deja de avisar pasadas 2 horas: ya es falta, no retardo', () => {
+    // 09:00 + 10 de tolerancia + 120 de vigencia = 11:10 es el último momento con aviso.
+    expect(evaluarAvisoEnVivo({ ...base, now: enMexico('11:05') }).aviso).toBe('RETARDO')
+    expect(evaluarAvisoEnVivo({ ...base, now: enMexico('11:15') }).aviso).toBe('NINGUNO')
+  })
+
+  /** El caso que lo motivó: prender el interruptor a media tarde no puede disparar el día entero. */
+  it('prender el aviso a las 16:30 NO dispara el turno completo', () => {
+    expect(evaluarAvisoEnVivo({ ...base, now: enMexico('16:30') }).aviso).toBe('NINGUNO')
+  })
+
   // ── Zona horaria: donde esto se rompe en silencio ──────────────────────────
 
   /**
@@ -108,13 +129,111 @@ describe('evaluarAvisoEnVivo', () => {
    */
   it('ancla el turno nocturno al día del TURNO, no al del reloj', () => {
     const nocturno = { ...base, expectedStart: '22:00', expectedEnd: '06:00', scheduleDate: '2026-08-28' }
-    expect(evaluarAvisoEnVivo({ ...nocturno, now: enMexico('00:30', '2026-08-29') }).aviso).toBe('RETARDO')
+    // 🔑 El instante que DISCRIMINA es después de medianoche: a las 00:05 del 29, anclado al día
+    // del TURNO (el 28) son 125 min de retraso; anclado al día del RELOJ (el 29) las 22:00 aún no
+    // han llegado y saldría "todavía no es hora", callando más de dos horas de retraso.
+    // Se mide dentro de la vigencia a propósito: un aviso suprimido devuelve 0 minutos y no
+    // permitiría distinguir el anclaje bueno del malo.
+    const cruzandoMedianoche = evaluarAvisoEnVivo({ ...nocturno, now: enMexico('00:05', '2026-08-29') })
+    expect(cruzandoMedianoche.aviso).toBe('RETARDO')
+    expect(cruzandoMedianoche.minutosTarde).toBe(125)
+    // Antes de su hora no hay nada que avisar.
     expect(evaluarAvisoEnVivo({ ...nocturno, now: enMexico('21:30') }).aviso).toBe('NINGUNO')
+    expect(evaluarAvisoEnVivo({ ...nocturno, now: enMexico('21:30') }).minutosTarde).toBe(0)
   })
 
-  it('un turno nocturno sigue vivo hasta su salida de madrugada', () => {
+  /** Dentro de la vigencia, el nocturno avisa igual que cualquier otro turno. */
+  it('el nocturno avisa cuando el retraso es reciente, ya cruzada la medianoche', () => {
     const nocturno = { ...base, expectedStart: '22:00', expectedEnd: '06:00', scheduleDate: '2026-08-28' }
-    expect(evaluarAvisoEnVivo({ ...nocturno, now: enMexico('05:30', '2026-08-29') }).aviso).toBe('RETARDO')
+    expect(evaluarAvisoEnVivo({ ...nocturno, now: enMexico('23:45') }).aviso).toBe('RETARDO')
+    expect(evaluarAvisoEnVivo({ ...nocturno, now: enMexico('00:05', '2026-08-29') }).aviso).toBe('RETARDO')
+  })
+
+  /**
+   * 🔴 La vigencia aplica IGUAL al nocturno: a las 05:30 lleva 7.5 h y eso ya es una falta, no un
+   * retardo — aunque el turno siga técnicamente vivo hasta las 06:00. La regla es la misma para
+   * todos los turnos; si divergiera, el nocturno sería el único que puede avisar de madrugada por
+   * algo que pasó antes de la cena.
+   */
+  it('el nocturno tampoco avisa fuera de la vigencia', () => {
+    const nocturno = { ...base, expectedStart: '22:00', expectedEnd: '06:00', scheduleDate: '2026-08-28' }
+    expect(evaluarAvisoEnVivo({ ...nocturno, now: enMexico('05:30', '2026-08-29') }).aviso).toBe('NINGUNO')
     expect(evaluarAvisoEnVivo({ ...nocturno, now: enMexico('06:30', '2026-08-29') }).aviso).toBe('NINGUNO')
+  })
+})
+
+
+/**
+ * 🔴 A QUÉ TURNO PERTENECE UNA CHECADA.
+ *
+ * P1 #1 de la auditoría de Codex (29-ago), CONFIRMADO reproduciéndolo contra la base: la checada
+ * se buscaba por PERSONA y el mismo valor se usaba para juzgar hoy Y ayer. Consecuencia: **la
+ * checada de ayer apagaba el aviso de hoy**. Medido — sin checada previa avisaba; con una checada
+ * del día anterior el MISMO retardo daba 0 avisos.
+ *
+ * En un negocio real casi todo el mundo trabajó ayer, así que el aviso no habría servido para
+ * prácticamente nadie. Los 19 escenarios del /full-testing no lo vieron porque en todos la persona
+ * NO tenía checadas previas: se probó "ya checó hoy", nunca "checó ayer y hoy no".
+ *
+ * El margen hacia atrás existe para quien llega temprano; hacia adelante el límite es la salida,
+ * porque después ya es otro turno.
+ */
+describe('checadaDelTurno', () => {
+  const turnoDiurno = {
+    expectedStart: '09:00',
+    expectedEnd: '17:00',
+    scheduleDate: '2026-08-29',
+    timezone: 'America/Mexico_City',
+  }
+  const enMexico = (iso: string) => new Date(`${iso}-06:00`)
+
+  it('la checada de AYER no cuenta para el turno de HOY', () => {
+    expect(checadaDelTurno([enMexico('2026-08-28T09:00:00')], turnoDiurno)).toBeNull()
+  })
+
+  it('la checada de hoy dentro del turno sí cuenta', () => {
+    const hoy = enMexico('2026-08-29T09:05:00')
+    expect(checadaDelTurno([hoy], turnoDiurno)).toEqual(hoy)
+  })
+
+  /** Con las dos en la lista, se toma la de hoy — no la primera. */
+  it('entre la de ayer y la de hoy, elige la de HOY', () => {
+    const hoy = enMexico('2026-08-29T09:40:00')
+    expect(checadaDelTurno([enMexico('2026-08-28T09:00:00'), hoy], turnoDiurno)).toEqual(hoy)
+  })
+
+  /** Llegar temprano es normal y no puede leerse como no haber llegado. */
+  it('llegar temprano cuenta', () => {
+    const temprano = enMexico('2026-08-29T07:30:00')
+    expect(checadaDelTurno([temprano], turnoDiurno)).toEqual(temprano)
+  })
+
+  /** Después de la salida ya es otro turno, no éste. */
+  it('una checada posterior a la salida no cuenta para este turno', () => {
+    expect(checadaDelTurno([enMexico('2026-08-29T18:00:00')], turnoDiurno)).toBeNull()
+  })
+
+  const turnoNocturno = {
+    expectedStart: '22:00',
+    expectedEnd: '06:00',
+    scheduleDate: '2026-08-28',
+    timezone: 'America/Mexico_City',
+  }
+
+  it('el turno nocturno reclama su propia entrada de la noche', () => {
+    const entrada = enMexico('2026-08-28T22:10:00')
+    expect(checadaDelTurno([entrada], turnoNocturno)).toEqual(entrada)
+  })
+
+  /**
+   * 🔴 La entrada de la MAÑANA SIGUIENTE no es del nocturno: pertenece al turno diurno del 29.
+   * Sin este tope, el nocturno se daría por cubierto con la llegada de otra persona-turno.
+   */
+  it('el turno nocturno no se queda con la entrada del día siguiente', () => {
+    expect(checadaDelTurno([enMexico('2026-08-29T08:55:00')], turnoNocturno)).toBeNull()
+  })
+
+  it('sin checadas devuelve null', () => {
+    expect(checadaDelTurno([], turnoDiurno)).toBeNull()
   })
 })
