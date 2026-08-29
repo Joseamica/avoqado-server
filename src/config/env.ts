@@ -315,6 +315,32 @@ if (!parsed.success) {
 export const env = parsed.data
 
 /**
+ * Guardia de la llave que cifra el sucesor del refresh token (Parte A, sesiones revocables).
+ *
+ * La variable es OPCIONAL a propósito —tumbar toda la API porque falta la config de UNA pieza
+ * es desproporcionado— pero `opcional` se volvió `silenciosa`: el /full-testing del 2026-08-28
+ * encontró que nunca se había puesto, así que la ventana de retransmisión de 60 s NO EXISTÍA y
+ * cualquier reintento del refresco se leía como robo y REVOCABA la sesión. En un POS con
+ * internet malo eso deja al cajero fuera a media venta, que es justo lo que esa pieza existía
+ * para evitar. El código hacía lo diseñado; nadie se enteraba porque nada lo decía.
+ *
+ * Mismo patrón y mismo razonamiento que el guardia de `EXTERNAL_BANK_API_BASE` de abajo:
+ * `logger.error` y NO `process.exit`, porque un error de arranque sí entra a la alerta de
+ * Better Stack — que es exactamente lo que faltaba. En desarrollo no se avisa: un dev local no
+ * despliega nada, y un error rojo que sale siempre se aprende a ignorar.
+ */
+const ENTORNOS_DESPLEGADOS = ['production', 'staging'] as const
+
+if ((ENTORNOS_DESPLEGADOS as readonly string[]).includes(env.NODE_ENV) && !env.SESSION_SUCCESSOR_ENC_KEY) {
+  logger.error(
+    '🔴 SESSION_SUCCESSOR_ENC_KEY no está configurada: la ventana de retransmisión de 60 s del ' +
+      'refresh token queda APAGADA. Cualquier reintento del refresco (red intermitente en el ' +
+      'mostrador) se lee como reutilización y REVOCA la sesión — el cajero queda fuera a media ' +
+      'venta. Generar con `openssl rand -hex 32` y ponerla en el entorno del despliegue.',
+  )
+}
+
+/**
  * Guardia de ambiente de la integración bancaria (mueve DINERO REAL).
  *
  * Cambiar el default ya cubre el caso "borraron la variable". Falta el otro: que alguien la

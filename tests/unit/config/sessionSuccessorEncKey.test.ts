@@ -72,7 +72,7 @@ describe('SESSION_SUCCESSOR_ENC_KEY', () => {
     const { env } = await loadEnv({ SESSION_SUCCESSOR_ENC_KEY: llaveMixta })
 
     expect(exit).not.toHaveBeenCalled()
-    expect(env.SESSION_SUCCESSOR_ENC_KEY).toBe(llaveMixta)
+    expect(env?.SESSION_SUCCESSOR_ENC_KEY).toBe(llaveMixta)
     exit.mockRestore()
   })
 
@@ -82,7 +82,7 @@ describe('SESSION_SUCCESSOR_ENC_KEY', () => {
     const { env } = await loadEnv({ SESSION_SUCCESSOR_ENC_KEY: undefined })
 
     expect(exit).not.toHaveBeenCalled()
-    expect(env.SESSION_SUCCESSOR_ENC_KEY).toBeUndefined()
+    expect(env?.SESSION_SUCCESSOR_ENC_KEY).toBeUndefined()
   })
 
   it('una longitud distinta de 64 (aunque sea hex válido) se sigue rechazando — el `.regex` no reemplaza al `.length`', async () => {
@@ -92,6 +92,65 @@ describe('SESSION_SUCCESSOR_ENC_KEY', () => {
 
     expect(exit).toHaveBeenCalledWith(1)
     expect(errors.some(e => e.includes('SESSION_SUCCESSOR_ENC_KEY'))).toBe(true)
+    exit.mockRestore()
+  })
+})
+
+/**
+ * Aviso de arranque cuando la llave falta en un entorno desplegado.
+ *
+ * Por qué existe: la llave es OPCIONAL a propósito (arriba), y esa decisión es correcta —
+ * tumbar TODA la API porque falta la config de una sola pieza es desproporcionado. Pero
+ * "opcional" se convirtió en "silenciosa": el `/full-testing` del 2026-08-28 encontró que en
+ * el entorno real la llave nunca se puso, así que la ventana de retransmisión de 60 s NO
+ * EXISTÍA y cualquier reintento del refresco se leía como robo y REVOCABA la sesión. En un
+ * POS con internet malo eso deja al cajero fuera a media venta — justo lo que esa pieza
+ * existía para evitar. Nadie se enteró porque nada lo decía.
+ *
+ * Mismo patrón, y mismo razonamiento, que el guardia de `EXTERNAL_BANK_API_BASE` unas líneas
+ * más abajo en `env.ts`: `logger.error` y NO `process.exit`, porque un error de arranque sí
+ * entra a la alerta de Better Stack y eso es exactamente lo que faltaba.
+ */
+describe('SESSION_SUCCESSOR_ENC_KEY — aviso de arranque en entornos desplegados', () => {
+  const mencionaLaLlave = (errores: string[]) => errores.filter(e => e.includes('SESSION_SUCCESSOR_ENC_KEY'))
+
+  it('🔴 en producción SIN la llave avisa fuerte, y el aviso dice la consecuencia (la sesión del cajero se revoca)', async () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
+
+    const { errors } = await loadEnv({ NODE_ENV: 'production', SESSION_SUCCESSOR_ENC_KEY: undefined })
+
+    const avisos = mencionaLaLlave(errors)
+    expect(avisos.length).toBeGreaterThan(0)
+    // No basta con nombrar la variable: quien lea la alerta a las 3 AM tiene que entender
+    // qué se rompe. Sin esto el aviso es tan inútil como el silencio que reemplaza.
+    expect(avisos.join(' ')).toMatch(/retransmisi[oó]n|revoc/i)
+    exit.mockRestore()
+  })
+
+  it('en staging SIN la llave también avisa — es un entorno desplegado con aparatos reales conectados', async () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
+
+    const { errors } = await loadEnv({ NODE_ENV: 'staging', SESSION_SUCCESSOR_ENC_KEY: undefined })
+
+    expect(mencionaLaLlave(errors).length).toBeGreaterThan(0)
+    exit.mockRestore()
+  })
+
+  it('en producción CON la llave no avisa nada — el aviso que sale siempre es ruido que se aprende a ignorar', async () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
+
+    const { errors } = await loadEnv({ NODE_ENV: 'production', SESSION_SUCCESSOR_ENC_KEY: 'a'.repeat(64) })
+
+    expect(mencionaLaLlave(errors)).toEqual([])
+    exit.mockRestore()
+  })
+
+  it('en development SIN la llave NO avisa — un dev local no despliega nada y no debe ver un error rojo al arrancar', async () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
+
+    const { errors } = await loadEnv({ NODE_ENV: 'development', SESSION_SUCCESSOR_ENC_KEY: undefined })
+
+    expect(mencionaLaLlave(errors)).toEqual([])
     exit.mockRestore()
   })
 })

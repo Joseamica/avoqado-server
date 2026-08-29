@@ -40,6 +40,12 @@ services:
         sync: false
       - key: OTP_PEPPER
         sync: false
+      # Parte A (sesiones revocables): cifra el sucesor del refresh token durante la ventana de
+      # retransmisión de 60 s. Hex de 32 bytes (64 chars); el valor se teclea en el Render Dashboard.
+      # 🔴 Sin ella, un reintento del refresco por red intermitente se lee como robo y REVOCA la
+      # sesión del cajero a media venta. Generar con: openssl rand -hex 32
+      - key: SESSION_SUCCESSOR_ENC_KEY
+        sync: false
       - key: RABBITMQ_URL
         sync: false
       - key: OPENAI_API_KEY
@@ -102,6 +108,12 @@ services:
       - key: SESSION_SECRET
         sync: false
       - key: OTP_PEPPER
+        sync: false
+      # Parte A (sesiones revocables): cifra el sucesor del refresh token durante la ventana de
+      # retransmisión de 60 s. Hex de 32 bytes (64 chars); el valor se teclea en el Render Dashboard.
+      # 🔴 Sin ella, un reintento del refresco por red intermitente se lee como robo y REVOCA la
+      # sesión del cajero a media venta. Generar con: openssl rand -hex 32
+      - key: SESSION_SUCCESSOR_ENC_KEY
         sync: false
       - key: RABBITMQ_URL
         sync: false
