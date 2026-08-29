@@ -17,6 +17,10 @@ import { StaffRole, AuthMethod } from '@prisma/client'
 jest.mock('../../../../src/utils/prismaClient')
 jest.mock('@/services/auth/session.service')
 jest.mock('@/services/auth/sessionCache')
+jest.mock('@/communication/sockets/managers/socketManager', () => ({
+  __esModule: true,
+  default: { disconnectBySession: jest.fn() },
+}))
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -25,6 +29,7 @@ jest.mock('@/config/logger', () => ({
 import prisma from '../../../../src/utils/prismaClient'
 import * as sessionService from '@/services/auth/session.service'
 import { invalidateSession } from '@/services/auth/sessionCache'
+import socketManager from '@/communication/sockets/managers/socketManager'
 import { switchUserByPin } from '../../../../src/services/mobile/switch-user.mobile.service'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service' // mockeado global en setup.ts
 
@@ -116,6 +121,15 @@ describe('switchUserByPin', () => {
     await llamar()
 
     expect(invalidateSession).toHaveBeenCalledWith(SESION_ACTUAL)
+  })
+
+  it('🔴 CIERRA el socket del anterior — si no, sigue recibiendo avisos en tiempo real como él', async () => {
+    // Revocar la sesión y vaciar la caché corta el acceso HTTP, pero el socket ya abierto vive
+    // aparte: sin cerrarlo, el aparato sigue recibiendo eventos bajo la identidad de quien acaba
+    // de salir hasta que la revalidación periódica lo cace, y eso son hasta 10 minutos.
+    await llamar()
+
+    expect(socketManager.disconnectBySession).toHaveBeenCalledWith(SESION_ACTUAL)
   })
 
   it('🔴 sólo busca en ESTE venue, con la persona y su acceso activos', async () => {

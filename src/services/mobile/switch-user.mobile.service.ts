@@ -34,6 +34,7 @@ import logger from '../../config/logger'
 import { AuthenticationError } from '../../errors/AppError'
 import { createSession, revokeSession } from '@/services/auth/session.service'
 import { invalidateSession } from '@/services/auth/sessionCache'
+import socketManager from '@/communication/sockets/managers/socketManager'
 import { issueGrant } from '@/services/auth/refreshGrant.service'
 import { refreshGrantExpiry } from './auth.mobile.service'
 import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
@@ -130,6 +131,14 @@ export async function switchUserByPin(params: SwitchUserParams) {
   // token del anterior seguía devolviendo 200 durante un minuto entero después del relevo — en un
   // mostrador, tiempo de sobra para justo lo que esta feature viene a cerrar.
   await invalidateSession(sesionActualId)
+
+  // 🔴 Y el socket. Revocar corta el acceso HTTP, pero una conexión ya abierta vive aparte: sin
+  // esto el aparato sigue recibiendo eventos en tiempo real bajo la identidad de quien acaba de
+  // salir, hasta que la revalidación periódica lo cace — hasta 10 minutos. Mismo patrón que usan
+  // el cambio de contraseña y la detección de reúso del refresh. Nunca lanza (ver su docstring),
+  // así que no necesita su propio try/catch: un socket que no se pudo cerrar no puede impedir
+  // que alguien tome el aparato.
+  socketManager.disconnectBySession(sesionActualId)
 
   // Tokens con el MISMO criterio que el login móvil: `pos: true` (access corto, este carril lo
   // usan sólo avoqado-android y avoqado-ios) y el `sid` de la sesión recién creada en ambos.

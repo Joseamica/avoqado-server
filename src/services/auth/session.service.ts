@@ -1,6 +1,7 @@
 import prisma from '@/utils/prismaClient'
 import { AuthMethod, Prisma, Session } from '@prisma/client'
 import { invalidateSession } from './sessionCache'
+import socketManager from '@/communication/sockets/managers/socketManager'
 
 /**
  * Crea una Session — el registro cuyo `id` viaja como claim `sid` dentro del JWT (ver
@@ -88,9 +89,12 @@ export async function revokeSessionsForDevice(input: { venueId: string; deviceId
     data: { revokedAt: new Date(), revokedReason: input.reason },
   })
 
-  // Best-effort y después del commit, como el resto de los revocadores de la casa.
+  // Best-effort y después del commit, como el resto de los revocadores de la casa. El socket
+  // también: cortar el acceso HTTP y dejar la conexión abierta significaría que la tablet que
+  // acabas de sacar sigue recibiendo los eventos del negocio en tiempo real.
   for (const s of vivas) {
     await invalidateSession(s.id)
+    socketManager.disconnectBySession(s.id)
   }
 
   return result.count
