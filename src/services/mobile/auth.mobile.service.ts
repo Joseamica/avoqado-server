@@ -551,7 +551,7 @@ export async function deletePasskey(staffId: string, passkeyId: string) {
  * @param rememberMe - Whether to extend token expiration (30 days vs 24 hours)
  * @returns Login result with tokens and user data
  */
-export async function loginWithEmail(email: string, password: string, rememberMe?: boolean) {
+export async function loginWithEmail(email: string, password: string, rememberMe?: boolean, deviceId?: string) {
   logger.info(`🔐 [MOBILE AUTH] Login attempt for: ${email}`)
 
   // 1. Find staff with all active venues
@@ -645,6 +645,9 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     staffId: staff.id,
     venueId: selectedVenue.venueId,
     authMethod: AuthMethod.PASSWORD,
+    // El aparato donde nació la sesión. Es lo que permite «sacar esta tablet» sin echar a la
+    // persona de su teléfono: se revoca por aparato, no por persona.
+    deviceId,
   })
 
   // 6. Generate tokens (derive orgId from venue)

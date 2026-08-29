@@ -27,6 +27,7 @@ export const switchUser = async (req: Request, res: Response, next: NextFunction
       pin,
       sesionActualId: ctx?.sid ?? null,
       staffSalienteId: ctx?.userId ?? null,
+      deviceId: typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : null,
     })
 
     logger.info('Cambio de usuario por PIN', { venueId, entra: resultado.user.id, sale: ctx?.userId ?? null })

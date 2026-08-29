@@ -35,7 +35,13 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
       })
     }
 
-    const result = await authMobileService.loginWithEmail(email, password, rememberMe === true)
+    // El aparato: el MISMO `X-Device-Id` que el registro de aparatos usa desde julio, no una
+    // identidad nueva. Es lo que después permite «sacar esta tablet» desde el dashboard sin
+    // cerrarle la sesión a esa persona en su teléfono. Una app vieja que no lo mande deja la
+    // sesión sin aparato, y eso está bien: se guarda null y sigue funcionando como hoy.
+    const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : undefined
+
+    const result = await authMobileService.loginWithEmail(email, password, rememberMe === true, deviceId)
 
     // Return tokens in body for mobile apps
     res.status(200).json({

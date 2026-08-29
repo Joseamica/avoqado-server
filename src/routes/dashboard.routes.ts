@@ -4415,6 +4415,43 @@ router.use('/cash-out', authenticateTokenMiddleware, cashOutRoutes)
  */
 router.get('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTerminals)
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/{deviceId}/sessions:
+ *   delete:
+ *     tags: [Dashboard - Terminals]
+ *     summary: Sacar un aparato — cierra las sesiones abiertas en él
+ *     description: |
+ *       Cierra TODAS las sesiones vivas de ese aparato en ese negocio. El caso real es una tablet
+ *       perdida o robada: quien la tenga deja de poder operar al instante.
+ *
+ *       No es lo mismo que «cerrar sesión en todos mis dispositivos», que es por PERSONA y la
+ *       sacaría también de su propio teléfono. Aquí se cierra por APARATO.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: deviceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: El `deviceUid` del aparato (el mismo del registro de aparatos).
+ *     responses:
+ *       200: { description: Sesiones cerradas; devuelve cuántas }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.delete(
+  '/venues/:venueId/tpvs/:deviceId/sessions',
+  authenticateTokenMiddleware,
+  // Mismo permiso que ya gobierna administrar terminales: sacar un aparato es gestionarlo, y
+  // crear un permiso nuevo para esto obligaría a repartirlo en cinco sitios para que fuera
+  // otorgable — coste sin ganancia, porque quien administra terminales es justo quien debe poder.
+  checkPermission('tpv:update'),
+  tpvController.revokeDeviceSessions,
+)
+
 // Create TPV (terminal)
 router.post('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:create'), tpvController.createTpv)
 

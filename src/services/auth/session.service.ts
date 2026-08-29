@@ -1,5 +1,6 @@
 import prisma from '@/utils/prismaClient'
 import { AuthMethod, Prisma, Session } from '@prisma/client'
+import { invalidateSession } from './sessionCache'
 
 /**
  * Crea una Session — el registro cuyo `id` viaja como claim `sid` dentro del JWT (ver
@@ -18,7 +19,11 @@ export async function createSession(input: {
     data: {
       staffId: input.staffId,
       venueId: input.venueId,
-      deviceId: input.deviceId ?? null,
+      // 🔴 `?? null` no basta: una cadena vacía es un valor válido para `??` y se guardaría tal
+      // cual. Y `deviceId: ''` es peligroso, no sólo feo — revocar «las sesiones de este
+      // aparato» con la cadena vacía alcanzaría a TODAS las sesiones sin aparato del venue, o
+      // sea sacaría a gente de tablets que nadie tocó.
+      deviceId: input.deviceId?.trim() || null,
       authMethod: input.authMethod,
       parentSessionId: input.parentSessionId ?? null,
     },
@@ -49,6 +54,45 @@ export async function revokeAllSessionsForStaff(staffId: string, reason: string)
     where: { staffId, revokedAt: null },
     data: { revokedAt: new Date(), revokedReason: reason },
   })
+  return result.count
+}
+
+/**
+ * Cierra las sesiones abiertas en UN aparato — «sacar esta tablet» desde el dashboard.
+ *
+ * Por qué hace falta, y por qué no basta con lo que ya había: hoy se puede cerrar la sesión de una
+ * PERSONA (`revokeAllSessionsForStaff`, que dispara «cerrar sesión en todos mis dispositivos» y el
+ * cambio de contraseña). Pero lo que se pierde o se roba es el APARATO, y echar a la persona la
+ * saca también de su propio teléfono, que no tiene nada que ver con la tablet extraviada.
+ *
+ * 🔴 Un `deviceId` vacío NO revoca nada. Sin esta guarda, «sacar el aparato sin id» alcanzaría a
+ * todas las sesiones del venue que nacieron sin aparato — es decir, sacaría a gente de tablets que
+ * nadie tocó. Es el mismo motivo por el que `createSession` normaliza la cadena vacía a null.
+ *
+ * La caché se invalida DESPUÉS de escribir en la base y sesión por sesión: sin eso el token sigue
+ * sirviendo hasta 60 s, que es justo lo que se midió en vivo con el cambio de usuario. Una tablet
+ * robada que sigue cobrando un minuto no es una tablet sacada.
+ */
+export async function revokeSessionsForDevice(input: { venueId: string; deviceId: string; reason: string }): Promise<number> {
+  const deviceId = input.deviceId?.trim()
+  if (!deviceId) return 0
+
+  const vivas = await prisma.session.findMany({
+    where: { venueId: input.venueId, deviceId, revokedAt: null },
+    select: { id: true },
+  })
+  if (vivas.length === 0) return 0
+
+  const result = await prisma.session.updateMany({
+    where: { venueId: input.venueId, deviceId, revokedAt: null },
+    data: { revokedAt: new Date(), revokedReason: input.reason },
+  })
+
+  // Best-effort y después del commit, como el resto de los revocadores de la casa.
+  for (const s of vivas) {
+    await invalidateSession(s.id)
+  }
+
   return result.count
 }
 

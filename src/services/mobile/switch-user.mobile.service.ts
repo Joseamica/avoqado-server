@@ -57,10 +57,14 @@ export interface SwitchUserParams {
   sesionActualId?: string | null
   /** Quién estaba operando, sólo para la bitácora. */
   staffSalienteId?: string | null
+  /** El aparato (`X-Device-Id`). Se hereda a la sesión entrante: el relevo ocurre en la MISMA
+   *  tablet, así que sacar ese aparato desde el dashboard tiene que alcanzar también a quien
+   *  entró por PIN. */
+  deviceId?: string | null
 }
 
 export async function switchUserByPin(params: SwitchUserParams) {
-  const { venueId, pin, sesionActualId, staffSalienteId } = params
+  const { venueId, pin, sesionActualId, staffSalienteId, deviceId } = params
 
   // 🔴 Sin sesión viva no hay cambio de usuario. Esta línea ES el modelo de seguridad de esta
   // feature: el PIN nunca abre una tablet fría, sólo releva a quien ya estaba dentro.
@@ -113,6 +117,7 @@ export async function switchUserByPin(params: SwitchUserParams) {
     venueId,
     authMethod: AuthMethod.PIN,
     parentSessionId: sesionActualId,
+    deviceId,
   })
 
   // 🔴 Revocar la saliente es lo que hace que esto sea un relevo y no una segunda llave: sin
