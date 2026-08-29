@@ -44,6 +44,7 @@ import { reservationAutoNoShowJob } from './jobs/reservation-auto-no-show.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 import { cashOutSettlementJob } from './jobs/cash-out-settlement.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
+import { attendanceLateAlertJob } from './jobs/attendance-late-alert.job'
 import { monthlyOverageBillingJob } from './jobs/monthly-overage-billing.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
@@ -214,6 +215,7 @@ const gracefulShutdown = async (signal: string) => {
       // Stop auto clock-out job
       logger.info('Stopping auto clock-out job...')
       autoClockOutJob.stop()
+      attendanceLateAlertJob.stop()
 
       // Stop nightly sales summary job
       logger.info('Stopping nightly sales summary job...')
@@ -507,6 +509,7 @@ const startApplication = async (retries = 3) => {
 
       // Start auto clock-out job (every 15 minutes for HR automation)
       autoClockOutJob.start()
+      attendanceLateAlertJob.start()
 
       // Bill chatbot token overage at period rollover (daily at 3:17 AM Mexico City)
       monthlyOverageBillingJob.start()

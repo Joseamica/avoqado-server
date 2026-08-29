@@ -8968,6 +8968,9 @@ enum NotificationType {
 
   // Staff notifications
   SHIFT_REMINDER
+  /// Alguien no ha checado y ya pasó su hora de entrada más la tolerancia.
+  /// Se emite EN VIVO, mientras todavía se puede hacer algo — no es el reporte del día.
+  ATTENDANCE_LATE
   SHIFT_ENDED
   NEW_STAFF_JOINED
 
