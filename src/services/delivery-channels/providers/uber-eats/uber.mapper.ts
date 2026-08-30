@@ -124,6 +124,8 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
         }>
       }>
     }>
+    status?: unknown
+    scheduled_order_target_delivery_time_range?: { start_time?: unknown; end_time?: unknown }
     payment?: {
       payment_detail?: {
         currency_code?: string
@@ -395,16 +397,45 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     },
     raw,
     placedAt: d.created_time ? new Date(d.created_time) : new Date(),
-    // ⚠️ Nombres de la familia CLÁSICA, aceptados como candidatos: el uAPI aún no nos ha
-    // enseñado su campo de programado (Uber activó la función en las tiendas de prueba el
-    // 27-ago; se confirma con el primer pedido programado real del ejercicio de validación).
-    // Sin este puente, el flujo de programados ya construido —venta sin comanda + release a
-    // su hora— quedaría muerto mientras tanto. Sólo cuenta como programado si el propio
-    // pedido dice serlo: `estimated_ready_for_pickup_at` solo es una ESTIMACIÓN de Uber.
-    scheduledFor:
-      (d as { scheduled_order?: unknown }).scheduled_order === true &&
-      typeof (d as { estimated_ready_for_pickup_at?: unknown }).estimated_ready_for_pickup_at === 'string'
-        ? new Date((d as { estimated_ready_for_pickup_at: string }).estimated_ready_for_pickup_at)
-        : null,
+    // 🔴 PROGRAMADO — cableado con un pedido REAL (8919c3ff-…, 30-ago), no con el puente
+    // que había antes. Ese puente leía los nombres de la API CLÁSICA
+    // (`scheduled_order` + `estimated_ready_for_pickup_at`) y en el uAPI NO EXISTEN: un
+    // pedido agendado para MAÑANA entró como normal y su comanda salió a la cocina HOY.
+    // Se midió: `scheduledFor: null` y una comanda creada al instante.
+    //
+    // Lo que el uAPI sí manda:
+    //   status: "SCHEDULED"                                   ← la marca, arriba del todo
+    //   scheduled_order_target_delivery_time_range: {start_time, end_time}
+    //   action_eligibility.adjust_ready_for_pickup_time.reason = "SCHEDULED_ORDER_NOT_YET_ACTIVE"
+    //
+    // Se usa el INICIO de la ventana de entrega. Es lo que el flujo ya construido necesita
+    // para no mandar la comanda hasta su hora, y llegar tarde a un pedido agendado es peor
+    // que prepararlo con holgura.
+    scheduledFor: fechaProgramada(d),
   }
+}
+
+/**
+ * La hora para la que el cliente agendó el pedido, o `null` si es para ahora.
+ *
+ * Se exige que el pedido DIGA que está programado (`status: "SCHEDULED"`) antes de mirar la
+ * ventana: sin esa condición, cualquier estimación de entrega convertiría un pedido normal en
+ * uno agendado y la cocina no lo vería hasta esa hora — un pedido que el cliente espera YA.
+ */
+function fechaProgramada(d: { status?: unknown; scheduled_order_target_delivery_time_range?: { start_time?: unknown } }): Date | null {
+  if (d.status !== 'SCHEDULED') return null
+
+  const inicio = d.scheduled_order_target_delivery_time_range?.start_time
+  if (typeof inicio !== 'string') return null
+
+  // 🔴 SE EXIGE EL FORMATO, no basta con que `new Date` no falle. Lo destapó una prueba:
+  // `new Date('mañana como a las 8')` NO devuelve Invalid Date — devuelve
+  // 2001-08-01T05:00:00Z, porque el parser de JavaScript encuentra "a las 8" y arma una
+  // fecha con lo que puede. O sea que una cadena basura produce una fecha VÁLIDA y
+  // completamente equivocada, que es peor que un error: el pedido se liberaría a una hora
+  // inventada —en el pasado, así que a la cocina de inmediato— sin que nada falle.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(inicio)) return null
+
+  const cuando = new Date(inicio)
+  return Number.isNaN(cuando.getTime()) ? null : cuando
 }

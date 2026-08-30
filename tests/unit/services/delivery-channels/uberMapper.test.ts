@@ -471,3 +471,55 @@ describe('uber.mapper (uAPI) — cantidad IMPOSIBLE en un modificador', () => {
     expect(() => mapUberOrder(conCantidadMod(v))).toThrow(/modificador .* no es un entero positivo/)
   })
 })
+
+describe('🔴 pedido PROGRAMADO — cableado con el payload real', () => {
+  // Pedido real del sandbox (8919c3ff-…, 30-ago), agendado para el día siguiente.
+  //
+  // 🔴 EL DEFECTO QUE ESTO ARREGLA, medido en vivo: el puente anterior leía los nombres de la
+  // API CLÁSICA (`scheduled_order` + `estimated_ready_for_pickup_at`), que en el uAPI NO
+  // EXISTEN. El pedido entró con `scheduledFor: null` y su comanda salió a la cocina el
+  // MISMO DÍA — comida preparada con un día de anticipación, y el cliente esperándola al
+  // otro. Ningún test lo vio porque nunca habíamos tenido un pedido programado real.
+  const PROG = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-programado-uapi.json')
+  const programado = () => JSON.parse(fs.readFileSync(PROG, 'utf8'))
+
+  it('lee la hora del INICIO de la ventana de entrega', () => {
+    const r = mapUberOrder(programado())
+    expect(r.scheduledFor).toBeInstanceOf(Date)
+    // La ventana real del pedido: 2026-08-31 00:00 a 00:30, hora de México (-06:00).
+    expect(r.scheduledFor!.toISOString()).toBe('2026-08-31T06:00:00.000Z')
+  })
+
+  it('🔴 un pedido NORMAL no se vuelve programado — si no, la cocina no lo vería', () => {
+    const p = programado()
+    p.order.status = 'ACTIVE'
+    expect(mapUberOrder(p).scheduledFor).toBeNull()
+  })
+
+  it('🔴 exige `status: SCHEDULED`, no basta con que traiga una ventana de entrega', () => {
+    // Sin esta condición, cualquier estimación de entrega convertiría un pedido que el
+    // cliente espera YA en uno agendado, y la comanda no saldría hasta esa hora.
+    const p = programado()
+    delete p.order.status
+    expect(mapUberOrder(p).scheduledFor).toBeNull()
+  })
+
+  it.each(['mañana como a las 8', '', 'ayer', '31/08/2026', 12345])(
+    '🔴 una ventana ilegible (%s) NO se convierte en una fecha inventada',
+    valor => {
+      // Lo destapó esta misma prueba: `new Date('mañana como a las 8')` NO da Invalid Date,
+      // da 2001-08-01 — el parser de JS arma una fecha con lo que encuentra. Una fecha
+      // VÁLIDA y equivocada es peor que un error: el pedido se liberaría a una hora
+      // inventada, en el pasado, o sea directo a la cocina.
+      const p = programado()
+      p.order.scheduled_order_target_delivery_time_range.start_time = valor
+      expect(mapUberOrder(p).scheduledFor).toBeNull()
+    },
+  )
+
+  it('el dinero del pedido programado se traduce igual que cualquier otro', () => {
+    const r = mapUberOrder(programado())
+    const suma = r.items.reduce((a, i) => a + Number(i.total), 0)
+    expect(suma.toFixed(2)).toBe(Number(r.payment.saleAmount).toFixed(2))
+  })
+})

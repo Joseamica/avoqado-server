@@ -456,8 +456,13 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       const programado = {
         ...pedidoReal,
         id: `prog-${Date.now()}`,
-        scheduled_order: true,
-        estimated_ready_for_pickup_at: '2026-08-21T02:00:00Z',
+        // 🔴 Los campos REALES del uAPI (verificados con el pedido 8919c3ff-…, 30-ago).
+        // Antes decían `scheduled_order` + `estimated_ready_for_pickup_at`, que son de la API
+        // CLÁSICA y en el uAPI NO EXISTEN: el test pasaba sobre un payload que Uber nunca
+        // manda, mientras un pedido programado real entraba como normal y su comanda salía a
+        // la cocina un día antes.
+        status: 'SCHEDULED',
+        scheduled_order_target_delivery_time_range: { start_time: '2026-08-21T02:00:00Z', end_time: '2026-08-21T02:30:00Z' },
       }
       const id = `ev-prog-${Date.now()}`
       const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'orders.scheduled.notification', programado.id)), {
@@ -475,8 +480,13 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       const programado = {
         ...pedidoReal,
         id: `prog2-${Date.now()}`,
-        scheduled_order: true,
-        estimated_ready_for_pickup_at: '2026-08-21T02:00:00Z',
+        // 🔴 Los campos REALES del uAPI (verificados con el pedido 8919c3ff-…, 30-ago).
+        // Antes decían `scheduled_order` + `estimated_ready_for_pickup_at`, que son de la API
+        // CLÁSICA y en el uAPI NO EXISTEN: el test pasaba sobre un payload que Uber nunca
+        // manda, mientras un pedido programado real entraba como normal y su comanda salía a
+        // la cocina un día antes.
+        status: 'SCHEDULED',
+        scheduled_order_target_delivery_time_range: { start_time: '2026-08-21T02:00:00Z', end_time: '2026-08-21T02:30:00Z' },
       }
       const idP = `ev-prog2-${Date.now()}`
       const ing = await processUberEvent(await nuevoEvento(idP, avisoTipo(idP, 'orders.scheduled.notification', programado.id)), {
@@ -496,8 +506,13 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       const programado = {
         ...pedidoReal,
         id: `prog3-${Date.now()}`,
-        scheduled_order: true,
-        estimated_ready_for_pickup_at: '2026-08-21T02:00:00Z',
+        // 🔴 Los campos REALES del uAPI (verificados con el pedido 8919c3ff-…, 30-ago).
+        // Antes decían `scheduled_order` + `estimated_ready_for_pickup_at`, que son de la API
+        // CLÁSICA y en el uAPI NO EXISTEN: el test pasaba sobre un payload que Uber nunca
+        // manda, mientras un pedido programado real entraba como normal y su comanda salía a
+        // la cocina un día antes.
+        status: 'SCHEDULED',
+        scheduled_order_target_delivery_time_range: { start_time: '2026-08-21T02:00:00Z', end_time: '2026-08-21T02:30:00Z' },
       }
       const idP = `ev-prog3-${Date.now()}`
       const ing = await processUberEvent(await nuevoEvento(idP, avisoTipo(idP, 'orders.scheduled.notification', programado.id)), {
