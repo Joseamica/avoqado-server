@@ -184,6 +184,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         approvedById: scope.staffId,
         note,
         expectedUpdatedAt,
+        source: 'customer-mcp',
       })
       return text({ ok: true, ...r })
     },

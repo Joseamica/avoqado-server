@@ -475,14 +475,32 @@ export async function getAttendanceReport(
         staffVenueId: { in: [...new Set(conExtra.map(r => r.staffVenueId))] },
         date: { gte: startDate, lte: endDate },
       },
-      select: { staffVenueId: true, date: true, minutesApproved: true, updatedAt: true },
+      select: { staffVenueId: true, date: true, minutesApproved: true, minutesMeasured: true, sourceFingerprint: true, updatedAt: true },
     })
     const porDia = new Map(aprobadas.map(a => [`${a.staffVenueId}|${a.date}`, a]))
     for (const r of rows) {
       const a = porDia.get(`${r.staffVenueId}|${r.date}`)
-      // `?? null` y no `?? 0`: sin revisar y negado son estados distintos.
-      r.overtimeApprovedMinutes = a ? a.minutesApproved : null
       r.overtimeApprovedUpdatedAt = a ? a.updatedAt.toISOString() : null
+
+      // 🔴 El reporte tiene que enseñar lo MISMO que nómina va a pagar (hallazgo #11 de
+      // Codex). Antes se devolvía `minutesApproved` en crudo, así que la pantalla podía decir
+      // «120 autorizadas» mientras el resumen pagaba 30 — el gerente firmaba mirando un
+      // número y el empleado cobraba otro. Se aplican aquí las MISMAS dos reglas:
+      //
+      //   · si la jornada cambió (la huella no coincide), la autorización no vale;
+      //   · nunca se enseña más de lo que el reloj mide hoy.
+      if (!a) {
+        // `null` y no `0`: sin revisar y negado son estados distintos.
+        r.overtimeApprovedMinutes = null
+        continue
+      }
+      const huellaCoincide =
+        a.sourceFingerprint != null && r.overtimeFingerprint != null && a.sourceFingerprint === r.overtimeFingerprint
+      r.overtimeApprovedMinutes = huellaCoincide
+        ? Math.min(Math.max(0, a.minutesApproved), r.overtimeMinutes)
+        : // La jornada cambió: la firma vieja no dice nada de lo que hay hoy, así que el día
+          // vuelve a «sin revisar» — que es lo que nómina también hace.
+          null
     }
   }
 

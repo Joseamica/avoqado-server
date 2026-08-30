@@ -37,6 +37,15 @@ export interface ApproveOvertimeInput {
    * Para la PRIMERA autorización del día no hace falta: no hay nada que pisar.
    */
   expectedUpdatedAt?: string
+  /**
+   * Por dónde entró la autorización. `'customer-mcp'` cuando la firma un agente.
+   *
+   * 🔴 Se marca en el ASIENTO QUE YA EXISTE, no en uno nuevo (hallazgo #12 de Codex): llamar
+   * a `auditMcpWrite` además del `logAction` del servicio duplicaría el evento funcional, y
+   * quien audite vería dos autorizaciones donde hubo una. Lo que faltaba era saber por qué
+   * canal entró, no un segundo registro.
+   */
+  source?: 'customer-mcp'
 }
 
 export interface OvertimeApprovalResult {
@@ -49,7 +58,7 @@ export interface OvertimeApprovalResult {
 const FECHA = /^\d{4}-\d{2}-\d{2}$/
 
 export async function approveOvertime(input: ApproveOvertimeInput): Promise<OvertimeApprovalResult> {
-  const { venueId, staffVenueId, date, minutesApproved, approvedById, note, expectedUpdatedAt } = input
+  const { venueId, staffVenueId, date, minutesApproved, approvedById, note, expectedUpdatedAt, source } = input
 
   // Validar ANTES de tocar la base ni recalcular la rejilla: una fecha absurda no debe costar
   // una consulta (misma regla que el reporte de puntualidad).
@@ -169,6 +178,9 @@ export async function approveOvertime(input: ApproveOvertimeInput): Promise<Over
         minutesApproved,
         minutesMeasured,
         note: note ?? null,
+        // Sólo cuando entró por el MCP: en el camino normal la ausencia del campo ya dice
+        // que lo firmó una persona desde el dashboard.
+        ...(source ? { source } : {}),
       },
     }),
   ).catch(() => {

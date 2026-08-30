@@ -140,6 +140,24 @@ describe('approveOvertime', () => {
     expect(create).not.toHaveBeenCalled()
   })
 
+  it('🔴 …y la CONSULTA acota por venueId, no sólo por el id de la membresía', async () => {
+    // Codex (P2 #15): la prueba de arriba simula `findFirst → null` y pasa aunque alguien
+    // QUITE el filtro de tenant — el mock devuelve null pase lo que pase. Lo que de verdad
+    // protege es la FORMA de la consulta, así que es lo que hay que fijar. Sin el `venueId`,
+    // un negocio podría autorizarle horas a un empleado de otro.
+    midio(120)
+    await approveOvertime({
+      venueId: VENUE,
+      staffVenueId: MEMBRESIA,
+      date: DIA,
+      minutesApproved: 60,
+      approvedById: GERENTE,
+    })
+    expect(findMembership).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: MEMBRESIA, venueId: VENUE }) }),
+    )
+  })
+
   it('un día SIN horas extra no se puede autorizar', async () => {
     midio(0)
     await expect(

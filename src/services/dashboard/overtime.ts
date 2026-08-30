@@ -116,6 +116,23 @@ export function minutosExtraDelDia({ turno, intervalos, descansos, timezone }: M
   // Los descansos se acotan a la misma ventana [fin del turno, última salida real].
   const hasta = DateTime.fromMillis(ultimoFin, { zone: timezone })
   const enDescanso = minutosDeDescansoEnLaVentana(descansos, salidaEsperada, hasta, timezone)
+  // 🔴 REDONDEO — política DECLARADA (hallazgo #10 de Codex, 29-ago-2026).
+  //
+  // Se redondea POR DÍA, al minuto más cercano. Codex propuso conservar segundos y redondear
+  // una sola vez en la frontera de nómina, porque redondear a diario puede mover el cruce de
+  // las 540 semanales. Es cierto, y aun así se elige declarar la política:
+  //
+  //   · La autorización es POR DÍA. Un gerente firma «tantos minutos del martes», no una
+  //     fracción de un acumulado. Guardar segundos obligaría a enseñar y aprobar cantidades
+  //     que nadie teclea.
+  //   · El reparto doble/triple se calcula sobre lo AUTORIZADO, que ya son minutos enteros
+  //     escritos por una persona. El redondeo de lo MEDIDO sólo afecta al tope que se enseña
+  //     y a la infracción del art. 66, cuyos umbrales son de 3 y 9 HORAS.
+  //   · Un reloj checador no tiene precisión de segundo que merezca la pena arrastrar.
+  //
+  // La consecuencia se acepta y está fijada en `overtime.redondeo.test.ts`: 29 segundos son
+  // 0 minutos y 31 son 1. Si algún día se quiere granularidad de 5 o 15 minutos —lo que hacen
+  // muchos sistemas de nómina— se cambia AQUÍ, en un solo sitio.
   return Math.max(0, Math.round(brutos - enDescanso))
 }
 

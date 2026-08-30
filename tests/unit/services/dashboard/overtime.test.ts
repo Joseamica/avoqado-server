@@ -68,14 +68,30 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
   it('🔴 llegar temprano NO es hora extra — sólo cuenta lo de DESPUÉS de la salida', () => {
     // Decisión declarada: si contara la llegada temprana, los 20 min de café de cada mañana
     // se volverían ~1.7 h semanales al DOBLE que nadie pidió.
+    //
+    // 🔴 La entrada es a las 07:00, DOS HORAS antes del turno. La versión anterior de esta
+    // prueba entraba a las 09:00 en punto (Codex, P2 #15): era indistinguible de una llegada
+    // puntual, así que no probaba nada sobre llegar temprano.
     expect(
       minutosExtraDelDia({
         turno: turnoDiurno,
-        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '17:00') }],
+        intervalos: [{ entrada: enMexico('2026-08-24', '07:00'), salida: enMexico('2026-08-24', '17:00') }],
         descansos: [],
         timezone: TZ,
       }),
     ).toBe(0)
+  })
+
+  it('🔴 …y llegar temprano NO suma a lo que sí se quedó de más', () => {
+    // Entra 2 h antes y sale 1 h después: la extra es 1 h, no 3.
+    expect(
+      minutosExtraDelDia({
+        turno: turnoDiurno,
+        intervalos: [{ entrada: enMexico('2026-08-24', '07:00'), salida: enMexico('2026-08-24', '18:00') }],
+        descansos: [],
+        timezone: TZ,
+      }),
+    ).toBe(60)
   })
 
   it('sin cuadrante NO se juzga: 0, nunca un número inventado', () => {

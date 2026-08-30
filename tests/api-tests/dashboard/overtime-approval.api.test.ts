@@ -264,17 +264,39 @@ describe('GET payroll-summary — la respuesta trae los campos de horas extra', 
     expect(Array.isArray(fila.overtimeDaysToReview)).toBe(true)
   })
 
-  it('leer el resumen sólo pide `attendance:read`, no `:manage`', async () => {
+  it('🔴 leer el resumen pide `attendance:read` y NO `:manage` — con un rol que SÓLO tiene read', async () => {
+    // 🔴 La versión anterior usaba un MANAGER, que tiene LOS DOS permisos (Codex, P2 #15):
+    // pasaba aunque la ruta pidiera `:manage`, así que no probaba lo que decía.
+    //
+    // Y tampoco basta con darle a un MANAGER una lista corta: los permisos personalizados se
+    // FUSIONAN con los del rol, así que seguiría teniendo `:manage`. Se parte de un CASHIER
+    // —que no tiene ninguno de los dos— y se le concede SÓLO la lectura.
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({
+      permissions: ['attendance:read', 'teams:read'],
+      deniedPermissions: null,
+    } as never)
     ;(buildAttendanceGrid as jest.Mock).mockResolvedValue({
       cells: [],
       graceMinutes: 10,
       timezone: 'America/Mexico_City',
       workedTotalsByStaff: new Map(),
     })
-    const res = await request(app)
-      .get(RESUMEN)
-      .set('Authorization', `Bearer ${makeToken('MANAGER')}`)
+    const res = await request(app).get(RESUMEN).set('Authorization', `Bearer ${makeToken('CASHIER')}`)
     expect(res.status).toBe(200)
+  })
+
+  it('🔴 …y ese mismo rol de sólo lectura NO puede autorizar', async () => {
+    // La otra mitad: si `:read` bastara para firmar, la separación no existiría.
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({
+      permissions: ['attendance:read', 'teams:read'],
+      deniedPermissions: null,
+    } as never)
+    const res = await request(app)
+      .put(RUTA)
+      .set('Authorization', `Bearer ${makeToken('CASHIER')}`)
+      .send({ date: DIA, minutesApproved: 60 })
+    expect(res.status).toBe(403)
+    expect(res.body).toHaveProperty('required', 'attendance:manage')
   })
 
   it('un cajero NO puede leer el resumen de nómina', async () => {
