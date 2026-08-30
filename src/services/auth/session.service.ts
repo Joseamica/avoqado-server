@@ -36,17 +36,25 @@ export async function createSession(input: {
  * la segunda llamada no toque nada (en vez de leer-y-luego-escribir), así que `count` puede
  * salir en 0 sin que eso sea una falla.
  *
+ * 🔴 [Auditoría 2026-08-30, P1] Devuelve CUÁNTAS filas cerró, y ese número es un RECLAMO
+ * atómico, no una estadística: `count === 1` significa «yo cerré esta sesión», `0` significa
+ * «alguien más llegó primero». Quien releva un aparato (`switchUserByPin`) lo usa para no
+ * crear una sesión nueva cuando perdió la carrera — sin eso, dos relevos simultáneos dejaban
+ * DOS sesiones válidas nacidas de un solo cambio de manos. Los demás llamadores pueden seguir
+ * ignorando el valor: para ellos el comportamiento es idéntico al de antes.
+ *
  * 🔴 [Auditoría Task 9, hallazgo importante] Acepta un `Prisma.TransactionClient` opcional
  * para que quien revoca una Session por reutilización de refresh pueda meterla en la MISMA
  * transacción que revoca la familia de grants — ver `revocarFamilia`/`rotateGrant` en
  * `refreshGrant.service.ts`. Sin `client`, usa el `prisma` de siempre: comportamiento
  * idéntico al de antes de esta tarea para cualquier otro llamador.
  */
-export async function revokeSession(sessionId: string, reason: string, client: Prisma.TransactionClient = prisma): Promise<void> {
-  await client.session.updateMany({
+export async function revokeSession(sessionId: string, reason: string, client: Prisma.TransactionClient = prisma): Promise<number> {
+  const result = await client.session.updateMany({
     where: { id: sessionId, revokedAt: null },
     data: { revokedAt: new Date(), revokedReason: reason },
   })
+  return result.count
 }
 
 /** Revoca todas las sesiones vivas de una persona (ej. tras cambiar su contraseña). Devuelve cuántas cerró. */

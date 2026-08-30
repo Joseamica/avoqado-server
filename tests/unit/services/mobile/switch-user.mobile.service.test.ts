@@ -40,6 +40,7 @@ const revokeSessionMock = sessionService.revokeSession as jest.Mock
 const VENUE = 'venue_1'
 const SESION_ACTUAL = 'sess_saliente'
 const SESION_NUEVA = 'sess_entrante'
+const APARATO = 'tablet-caja-1'
 
 function staffVenueEncontrado(over: Record<string, unknown> = {}) {
   return {
@@ -68,7 +69,12 @@ describe('switchUserByPin', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     createSessionMock.mockResolvedValue({ id: SESION_NUEVA })
-    revokeSessionMock.mockResolvedValue(undefined)
+    revokeSessionMock.mockResolvedValue(1)
+    // La sesión saliente ES el modelo de seguridad: el servicio la lee para comprobar que está
+    // viva, que es de ESTE venue y que corre en el MISMO aparato que dice el header.
+    mockPrisma.session = {
+      findUnique: jest.fn().mockResolvedValue({ id: SESION_ACTUAL, venueId: VENUE, deviceId: APARATO, revokedAt: null }),
+    }
     mockPrisma.staffVenue = { findFirst: jest.fn().mockResolvedValue(staffVenueEncontrado()) }
     mockPrisma.venueRolePermission = { findFirst: jest.fn().mockResolvedValue(null) }
     // El nombre visible del rol sale de aquí (getRoleDisplayNamesForVenues); sin este mock el
@@ -79,7 +85,7 @@ describe('switchUserByPin', () => {
   })
 
   const llamar = (over: Record<string, unknown> = {}) =>
-    switchUserByPin({ venueId: VENUE, pin: '1234', sesionActualId: SESION_ACTUAL, ...over } as any)
+    switchUserByPin({ venueId: VENUE, pin: '1234', sesionActualId: SESION_ACTUAL, deviceId: APARATO, ...over } as any)
 
   it('🔑 devuelve LA MISMA FORMA que el login — es un logout/login con PIN, y el cliente reusa su mismo camino', async () => {
     const r: any = await llamar()
@@ -179,5 +185,102 @@ describe('switchUserByPin', () => {
         data: expect.objectContaining({ sesionSaliente: SESION_ACTUAL }),
       }),
     )
+  })
+})
+
+/**
+ * Hallazgos de la auditoría de Codex del 2026-08-30 sobre este mismo diff (6 P1).
+ *
+ * Los cuatro que tocan este servicio tienen una raíz común y vale nombrarla: yo escribí el
+ * modelo de seguridad en el docstring —«el PIN sólo se acepta ENCIMA de una sesión viva de ESTE
+ * aparato»— y después NO lo hice cumplir en el código. El `sid` se exigía, pero la sesión que
+ * nombra nunca se leía; el `X-Device-Id` se guardaba sin compararlo con nada. Una comprobación
+ * que vive sólo en un comentario no es una comprobación.
+ */
+describe('switchUserByPin — cierres de la auditoría (2026-08-30)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    createSessionMock.mockResolvedValue({ id: SESION_NUEVA })
+    revokeSessionMock.mockResolvedValue(1)
+    mockPrisma.session = {
+      findUnique: jest.fn().mockResolvedValue({ id: SESION_ACTUAL, venueId: VENUE, deviceId: APARATO, revokedAt: null }),
+    }
+    mockPrisma.staffVenue = { findFirst: jest.fn().mockResolvedValue(staffVenueEncontrado()) }
+    mockPrisma.venueRolePermission = { findFirst: jest.fn().mockResolvedValue(null) }
+    mockPrisma.venueRoleConfig = { findMany: jest.fn().mockResolvedValue([]) }
+    mockPrisma.activityLog = { create: jest.fn().mockResolvedValue({}) }
+    mockPrisma.$transaction = jest.fn(async (fn: any) => (typeof fn === 'function' ? fn(mockPrisma) : Promise.all(fn)))
+  })
+
+  const llamar = (over: Record<string, unknown> = {}) =>
+    switchUserByPin({ venueId: VENUE, pin: '1234', sesionActualId: SESION_ACTUAL, deviceId: APARATO, ...over } as any)
+
+  it('🔴 [P1] dos relevos a la vez: el que PIERDE el reclamo no crea sesión', async () => {
+    // El orden original era crear-y-luego-revocar, sin mirar el resultado. Dos peticiones
+    // concurrentes pasaban ambas la autenticación, ambas creaban su sesión y ambas revocaban
+    // la misma saliente: quedaban DOS sesiones válidas nacidas de un solo relevo, es decir dos
+    // personas cobrando con identidades distintas desde una tablet que sólo cambió de manos una
+    // vez. `revokeSession` es ahora el reclamo atómico (`updateMany` con `revokedAt: null`) y
+    // quien recibe 0 filas es quien llegó segundo.
+    revokeSessionMock.mockResolvedValue(0)
+
+    await expect(llamar()).rejects.toThrow()
+    expect(createSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 [P1] un PIN equivocado NO revoca la sesión de quien estaba operando', async () => {
+    // La contracara del arreglo de arriba, y la razón de que el reclamo vaya DESPUÉS de validar
+    // el PIN y no antes: revocar primero convertiría cada dedazo del pinpad en un cierre de
+    // sesión, y el cajero tendría que buscar su contraseña a media fila.
+    mockPrisma.staffVenue.findFirst.mockResolvedValue(null)
+
+    await expect(llamar()).rejects.toThrow()
+    expect(revokeSessionMock).not.toHaveBeenCalled()
+    expect(createSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 [P1] una sesión SIN aparato (la del dashboard web) no puede relevar', async () => {
+    // Éste es el hueco que más lejos llegaba: la ruta sólo exige token válido + membresía del
+    // venue, así que una sesión del dashboard —que nunca manda `X-Device-Id`— podía inventarse
+    // el header y acuñar una sesión de POS por PIN. Exigir que la saliente TENGA aparato cierra
+    // la puerta por construcción, sin listas de qué carril puede y qué carril no.
+    mockPrisma.session.findUnique.mockResolvedValue({ id: SESION_ACTUAL, venueId: VENUE, deviceId: null, revokedAt: null })
+
+    // Y el mensaje NO es «PIN incorrecto»: quien teclea bien y lee eso lo repite convencido de
+    // que la máquina se equivoca. Se le dice el camino de salida — entrar con su contraseña.
+    await expect(llamar()).rejects.toThrow(/contraseña/i)
+    expect(createSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 [P1] el aparato del header tiene que ser EL MISMO de la sesión saliente', async () => {
+    // Sin esto el `X-Device-Id` era decoración: se heredaba a la sesión entrante sin comprobar
+    // nada, así que la tablet A podía declararse tablet B — y entonces «sacar la tablet B» desde
+    // el dashboard mataba una sesión que estaba corriendo en otro mostrador.
+    await expect(llamar({ deviceId: 'otra-tablet' })).rejects.toThrow()
+    expect(createSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la sesión saliente tiene que ser de ESTE venue, y estar viva', async () => {
+    mockPrisma.session.findUnique.mockResolvedValue({ id: SESION_ACTUAL, venueId: 'otro_venue', deviceId: APARATO, revokedAt: null })
+    await expect(llamar()).rejects.toThrow()
+
+    mockPrisma.session.findUnique.mockResolvedValue({ id: SESION_ACTUAL, venueId: VENUE, deviceId: APARATO, revokedAt: new Date() })
+    await expect(llamar()).rejects.toThrow()
+
+    mockPrisma.session.findUnique.mockResolvedValue(null)
+    await expect(llamar()).rejects.toThrow()
+
+    expect(createSessionMock).not.toHaveBeenCalled()
+  })
+
+  it.each(['SUSPENDED', 'ADMIN_SUSPENDED', 'CLOSED'])('🔴 [P1] un venue %s no puede acuñar tokens nuevos por PIN', async estado => {
+    // Yo leía `venue.status` en el `select` y no lo comparaba con nada. El login móvil sí lo
+    // aplica (`pickOperationalVenueForLogin`), así que un local cortado por falta de pago no
+    // puede entrar por la puerta principal — pero sí por ésta, que es la misma puerta con otra
+    // llave. Se reusa `OPERATIONAL_VENUE_STATUSES`, no una segunda lista que pueda divergir.
+    mockPrisma.staffVenue.findFirst.mockResolvedValue(staffVenueEncontrado({ venue: { ...staffVenueEncontrado().venue, status: estado } }))
+
+    await expect(llamar()).rejects.toThrow()
+    expect(createSessionMock).not.toHaveBeenCalled()
   })
 })

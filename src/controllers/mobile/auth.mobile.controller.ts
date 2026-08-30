@@ -160,7 +160,10 @@ export const passkeyVerify = async (req: Request, res: Response, next: NextFunct
       authenticatorAttachment: credential.authenticatorAttachment,
     }
 
-    const result = await authMobileService.verifyPasskeyAssertion(authCredential, challengeKey, rememberMe === true)
+    // El aparato viaja igual que en el login por contraseña: sin él, la sesión biométrica nace sin
+    // `deviceId` y «sacar esta tablet» desde el dashboard no la alcanza nunca.
+    const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : undefined
+    const result = await authMobileService.verifyPasskeyAssertion(authCredential, challengeKey, rememberMe === true, deviceId)
 
     // Set cookies (for web clients that might use these endpoints)
     const accessTokenMaxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000

@@ -13,6 +13,8 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from './venueRoleConfig.dashboard.service'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
+import { issueGrant } from '@/services/auth/refreshGrant.service'
+import { refreshGrantExpiry } from '@/services/mobile/auth.mobile.service'
 import { cerrarSesionesNuevasPorCambioDeContrasena } from '@/utils/passwordChangeGuard'
 import { createSession } from '@/services/auth/session.service'
 // 🔐 Master TOTP Login imports
@@ -457,6 +459,12 @@ export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
     sid: session.id,
   })
 
+  // 🔴 [Auditoría 2026-08-30, P2] Sin este grant el refresh token queda HUÉRFANO: lleva `sid`,
+  // así que `rotateGrant` lo trata como parte de una familia, no encuentra su fila y devuelve
+  // REUTILIZADO — que no sólo rechaza el refresco, además REVOCA la sesión. Un token que se
+  // suicida en su primer uso. Misma línea, mismo motivo, que en los dos logins móviles.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry(rememberMe))
+
   // 5. Actualizar último login y resetear intentos fallidos
   await prisma.staff.update({
     where: { id: staff.id },
@@ -660,6 +668,12 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
 
   const accessToken = jwtService.generateAccessToken(staffId, targetOrgId, targetVenueId, roleInNewVenue, undefined, { sid: session.id })
   const refreshToken = jwtService.generateRefreshToken(staffId, targetOrgId, undefined, targetVenueId, { sid: session.id })
+
+  // 🔴 [Auditoría 2026-08-30, P2] Sin este grant el refresh token queda HUÉRFANO: lleva `sid`,
+  // así que `rotateGrant` lo trata como parte de una familia, no encuentra su fila y devuelve
+  // REUTILIZADO — que no sólo rechaza el refresco, además REVOCA la sesión. Un token que se
+  // suicida en su primer uso. Misma línea, mismo motivo, que en los dos logins móviles.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry())
 
   return { accessToken, refreshToken }
 }

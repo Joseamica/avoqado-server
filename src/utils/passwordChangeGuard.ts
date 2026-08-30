@@ -192,9 +192,24 @@ export async function revokeAllSessions(staffId: string): Promise<Date> {
  * habria un ciclo de imports (decision de la Task 4).
  */
 export async function cerrarSesionesNuevasPorCambioDeContrasena(staffId: string): Promise<void> {
+  return cerrarSesionesDeStaff(staffId, 'password_changed')
+}
+
+/**
+ * El mismo cierre, con el MOTIVO como parámetro.
+ *
+ * 🔴 [Auditoría 2026-08-30, P1] Nació al arreglar el logout del dashboard, que necesitaba
+ * exactamente esta secuencia —leer las vivas, revocarlas, invalidar caché, cortar sockets— pero
+ * con otro motivo. Copiarla habría dejado dos versiones del mismo procedimiento delicado, y la
+ * copia es justo donde después se olvida uno de los cuatro pasos.
+ *
+ * `revokedReason` es lo que alguien lee cuando audita por qué se cayó una sesión: escribir
+ * «password_changed» en un cierre de sesión voluntario sería una bitácora que miente.
+ */
+export async function cerrarSesionesDeStaff(staffId: string, motivo: string): Promise<void> {
   try {
     const vivas = await prisma.session.findMany({ where: { staffId, revokedAt: null }, select: { id: true } })
-    await revokeAllSessionsForStaff(staffId, 'password_changed')
+    await revokeAllSessionsForStaff(staffId, motivo)
     await Promise.all(vivas.map(s => invalidateSession(s.id)))
     // Sesiones revocables (Parte A, Task 11): además de invalidar la caché, cerrar los
     // sockets que ya estaban abiertos con esas Session — si no, quien tenía el socket

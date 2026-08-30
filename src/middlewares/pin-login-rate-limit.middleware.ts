@@ -212,21 +212,33 @@ const overrideVenueRateLimiter: RateLimitRequestHandler = rateLimit({
 export const pinOverrideRateLimiter = [overrideIpRateLimiter, overrideVenueRateLimiter]
 
 /**
- * Cambiar de usuario por PIN — CUBETA PROPIA, y contada por APARATO.
+ * Cambiar de usuario por PIN — CUBETA PROPIA, contada por SESIÓN.
  *
- * Dos diferencias deliberadas con las otras dos cubetas de esta casa:
+ * 🔴 [Auditoría 2026-08-30, P1] La primera versión contaba por `X-Device-Id`, y eso era contar
+ * con la regla que escribe el atacante: el header lo pone el cliente, así que bastaba cambiarlo
+ * en cada intento para estrenar cubeta y saltarse el tope de 10. Quedaba sólo el techo por venue
+ * (20 cada 15 min = 1,920 al día), suficiente para recorrer un PIN de cuatro dígitos en pocos
+ * días y salir con los permisos de un OWNER. **Una llave de rate limit no puede ser un dato que
+ * el cliente elige.**
  *
- * 1. 🔴 **La llave primaria es el APARATO (`X-Device-Id`), no la IP.** Todas las tablets de un
- *    local salen por una sola IP (NAT), así que contar por IP castiga al negocio entero por los
- *    dedos de una persona: en un local con cinco tablets, alguien tecleando mal su PIN dejaría a
- *    las otras cuatro sin poder cambiar de usuario. Contando por aparato, el bloqueo cae donde
- *    está el problema. Si el aparato no manda el header (app vieja), se cae a la IP: mejor
- *    contar de más que no contar.
- * 2. **Presupuesto separado** del login de TPV, del checador y del override, por lo mismo que
- *    documenta el bloque de arriba: un cambio de turno no puede dejar al local sin autorizar, ni
- *    una tarde de autorizaciones sin poder cambiar de usuario.
+ * Ahora la llave primaria es el `sid` de la sesión que pide el relevo. Es infalsificable —viaja
+ * firmado dentro del JWT— y estrenar uno cuesta un login con CONTRASEÑA, que es justo lo que
+ * quien tiene la tablet robada no tiene. El tope pasa a ser 10 intentos por sesión, de verdad.
+ *
+ * Y conserva la propiedad por la que se eligió el aparato en vez de la IP: dos tablets del mismo
+ * local (misma IP por NAT) tienen sesiones distintas, así que siguen teniendo cubetas distintas y
+ * los dedos de una persona no dejan al negocio entero sin poder cambiar de usuario.
+ *
+ * Los respaldos (header, luego IP) sólo alcanzan a peticiones SIN sesión — que el servicio
+ * rechaza de todos modos, porque sin sesión viva no hay relevo. Se conservan para que un cliente
+ * viejo cuente de más y nunca de menos.
+ *
+ * **Presupuesto separado** del login de TPV, del checador y del override: un cambio de turno no
+ * puede dejar al local sin autorizar, ni una tarde de autorizaciones sin poder cambiar de usuario.
  */
-function llaveDeAparato(req: Request): string {
+function llaveDeRelevo(req: Request): string {
+  const sid = (req as unknown as { authContext?: { sid?: unknown } }).authContext?.sid
+  if (typeof sid === 'string' && sid.length > 0 && sid.length <= 128) return `pin-switch:sid:${sid}`
   const deviceId = req.get('x-device-id')
   if (deviceId && deviceId.length <= 128) return `pin-switch:device:${deviceId}`
   return `pin-switch:ip:${req.ip || req.socket.remoteAddress || 'unknown'}`
@@ -237,7 +249,7 @@ const switchUserDeviceRateLimiter: RateLimitRequestHandler = rateLimit({
   max: RATE_LIMIT_CONFIG.IP.max,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: llaveDeAparato,
+  keyGenerator: llaveDeRelevo,
   handler: (req: Request, res: Response) => {
     logger.warn('🚨 Rate limit de cambio de usuario excedido (por aparato)', {
       deviceId: req.get('x-device-id') || 'sin-header',
@@ -275,4 +287,4 @@ const switchUserVenueRateLimiter: RateLimitRequestHandler = rateLimit({
 })
 
 export const pinSwitchUserRateLimiter = [switchUserDeviceRateLimiter, switchUserVenueRateLimiter]
-export { llaveDeAparato as __llaveDeAparatoParaPruebas }
+export { llaveDeRelevo as __llaveDeRelevoParaPruebas }

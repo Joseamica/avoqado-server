@@ -14,7 +14,13 @@
 import { StaffRole } from '@prisma/client'
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
-jest.mock('@/utils/passwordChangeGuard', () => ({ revokeAllSessions: jest.fn().mockResolvedValue(new Date()) }))
+jest.mock('@/utils/passwordChangeGuard', () => ({
+  revokeAllSessions: jest.fn().mockResolvedValue(new Date()),
+  // 🔴 Sin esta línea el mock devuelve `undefined` para el export nuevo y el controlador truena
+  // con un TypeError que el catch se traga: la prueba falla diciendo «allDevices: false», que no
+  // menciona por ningún lado lo que en realidad faltaba. Es la trampa del mock con lista fija.
+  cerrarSesionesDeStaff: jest.fn().mockResolvedValue(undefined),
+}))
 
 import jwt from 'jsonwebtoken'
 import { generateAccessToken } from '@/jwt.service'

@@ -31,7 +31,8 @@ import { AuthMethod } from '@prisma/client'
 
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { AuthenticationError } from '../../errors/AppError'
+import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
+import { OPERATIONAL_VENUE_STATUSES, venueStatusMessage } from '../../lib/venueStatus.constants'
 import { createSession, revokeSession } from '@/services/auth/session.service'
 import { invalidateSession } from '@/services/auth/sessionCache'
 import socketManager from '@/communication/sockets/managers/socketManager'
@@ -73,6 +74,48 @@ export async function switchUserByPin(params: SwitchUserParams) {
     throw new AuthenticationError(ERROR_GENERICO)
   }
 
+  // 🔴 [Auditoría 2026-08-30, P1] Y no basta con que el `sid` exista: hay que MIRAR la sesión que
+  // nombra. Antes se exigía el claim y nunca se leía la fila, así que la comprobación vivía sólo
+  // en el comentario de arriba. Tres cosas se validan aquí, y ninguna es opcional:
+  //
+  //   · viva y de ESTE venue — un `sid` de otro local no releva nada aquí;
+  //   · CON aparato registrado — es lo que cierra la puerta grande: la ruta sólo pide token
+  //     válido + membresía, así que una sesión del dashboard web (que jamás manda `X-Device-Id`)
+  //     podía inventarse el header y acuñarse una sesión de POS por PIN. Exigir que la SALIENTE
+  //     tenga aparato lo hace imposible por construcción, sin listar qué carril puede y cuál no;
+  //   · el MISMO aparato que dice el header — si no, la tablet A se declara tablet B y «sacar la
+  //     tablet B» desde el dashboard mata una sesión que corre en otro mostrador.
+  const aparato = deviceId?.trim() || null
+  const saliente = await prisma.session.findUnique({
+    where: { id: sesionActualId },
+    select: { id: true, venueId: true, deviceId: true, revokedAt: true },
+  })
+  if (!saliente || saliente.revokedAt !== null || saliente.venueId !== venueId) {
+    logger.warn(`🔐 [SWITCH-USER] Relevo rechazado: sesión saliente inválida | venue=${venueId}`)
+    throw new AuthenticationError(ERROR_GENERICO)
+  }
+
+  // Una sesión SIN aparato no puede relevar, pero eso no es un PIN equivocado y decírselo así
+  // sería cruel: la persona teclea bien, ve «PIN incorrecto», y lo repite convencida de que la
+  // máquina se equivoca. Le pasa a la sesión del dashboard web (que nunca manda el header) y a
+  // cualquiera nacida antes de que su app estampara el aparato. El camino de salida —volver a
+  // entrar con contraseña en este aparato— sí se le dice, que es la regla de la casa: lo que no
+  // se puede hacer se VE y se EXPLICA.
+  if (!saliente.deviceId) {
+    logger.warn(`🔐 [SWITCH-USER] Relevo rechazado: la sesión saliente no tiene aparato | venue=${venueId}`)
+    throw new ForbiddenError(
+      'Vuelve a iniciar sesión con tu contraseña en este aparato para poder cambiar de usuario.',
+      'SESSION_WITHOUT_DEVICE',
+    )
+  }
+
+  // Un aparato que NO coincide sí es sospechoso —alguien inventando el header— y ahí el mensaje
+  // vuelve a ser el genérico: no se le confirma a nadie qué parte adivinó bien.
+  if (saliente.deviceId !== aparato) {
+    logger.warn(`🔐 [SWITCH-USER] Relevo rechazado: el aparato no coincide con el de la sesión | venue=${venueId}`)
+    throw new AuthenticationError(ERROR_GENERICO)
+  }
+
   // Mismo patrón que el checador (`identifyByPin`): acotado a ESTE venue, con el acceso y la
   // persona activos. Comprobar `staff.active` aquí no es adorno — `validateStaffVenue()` no lo
   // hace, y sin él alguien dado de baja sigue entrando mientras su StaffVenue siga activo.
@@ -102,6 +145,20 @@ export async function switchUserByPin(params: SwitchUserParams) {
     throw new AuthenticationError(ERROR_GENERICO)
   }
 
+  // 🔴 [Auditoría 2026-08-30, P1] `venue.status` se leía en el `select` y no se comparaba con
+  // nada. El login móvil sí lo aplica (`pickOperationalVenueForLogin`), así que un local cortado
+  // por falta de pago no puede entrar por la puerta principal — pero sí por ésta, que es la misma
+  // puerta con otra llave. Se reusa `OPERATIONAL_VENUE_STATUSES`: una segunda lista aquí se
+  // separaría de aquélla el día que alguien agregue un estado, y nadie se enteraría.
+  //
+  // El mensaje NO es el genérico del PIN a propósito: quien está tecleando ya está autenticado en
+  // este venue, así que su estado no es un secreto que proteger — y la regla de la casa es que lo
+  // apagado se VE y se EXPLICA, nunca un rechazo mudo que parece un PIN mal tecleado.
+  if (!OPERATIONAL_VENUE_STATUSES.includes(staffVenue.venue.status)) {
+    logger.warn(`🔐 [SWITCH-USER] Venue no operativo (${staffVenue.venue.status}) | venue=${venueId}`)
+    throw new ForbiddenError(venueStatusMessage(staffVenue.venue.status), 'VENUE_NOT_OPERATIONAL')
+  }
+
   // Permisos EFECTIVOS de quien entra: conjunto asignado si lo tiene, si no el rol con las
   // personalizaciones del venue. Es el mismo resolutor del login, para que la app no pueda
   // acabar con un conjunto distinto según por dónde entró.
@@ -111,6 +168,27 @@ export async function switchUserByPin(params: SwitchUserParams) {
   })
   const permissions = resolveStaffVenuePermissions(staffVenue, customPerms as never)
 
+  // 🔴 [Auditoría 2026-08-30, P1] RECLAMAR el relevo antes de crear nada. El orden anterior era
+  // crear-y-luego-revocar sin mirar el resultado: dos peticiones simultáneas pasaban ambas la
+  // autenticación, ambas creaban su sesión y ambas revocaban la misma saliente, y quedaban DOS
+  // sesiones válidas de un solo cambio de manos — dos personas cobrando con identidades distintas
+  // desde una tablet que sólo cambió de manos una vez. `revokeSession` es un `updateMany` con
+  // `revokedAt: null` en el `where`, o sea un compare-and-swap: exactamente uno se lleva la fila.
+  // Mismo patrón que el canje de premios de sellos, por la misma razón (dos cajeros, un premio).
+  //
+  // 🔑 Y va DESPUÉS de validar el PIN, no antes: reclamar primero convertiría cada dedazo del
+  // pinpad en un cierre de sesión, y el cajero acabaría buscando su contraseña a media fila.
+  //
+  // ⚠️ Coste declarado de este orden: si `createSession` falla justo después del reclamo, la
+  // saliente queda cerrada y no nace la entrante — hay que volver a entrar con contraseña. Es la
+  // mitad correcta del dilema: una sesión huérfana se recupera con un login, dos sesiones válidas
+  // a la vez no se recuperan de nada.
+  const reclamada = await revokeSession(sesionActualId, 'switch_user')
+  if (reclamada === 0) {
+    logger.warn(`🔐 [SWITCH-USER] Relevo perdido: otra petición ya tomó esta sesión | venue=${venueId}`)
+    throw new AuthenticationError(ERROR_GENERICO)
+  }
+
   // La sesión entrante cuelga de la saliente (`parentSessionId`): así la bitácora puede
   // reconstruir la cadena de relevos de un aparato durante un turno.
   const session = await createSession({
@@ -118,13 +196,8 @@ export async function switchUserByPin(params: SwitchUserParams) {
     venueId,
     authMethod: AuthMethod.PIN,
     parentSessionId: sesionActualId,
-    deviceId,
+    deviceId: aparato,
   })
-
-  // 🔴 Revocar la saliente es lo que hace que esto sea un relevo y no una segunda llave: sin
-  // esto, el token del anterior sigue vivo y quien lo tenga guardado puede seguir operando con
-  // SUS permisos aunque en la pantalla ya esté otra persona.
-  await revokeSession(sesionActualId, 'switch_user')
 
   // 🔴 Invalidar la caché NO es opcional, y esto se encontró EN VIVO: revocar escribe en la base,
   // pero el middleware pregunta a una caché de 60 s (`isSessionAliveCached`). Sin esta línea el

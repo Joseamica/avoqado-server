@@ -95,6 +95,16 @@ jest.mock('@/services/auth/session.service', () => ({
   createSession: jest.fn().mockResolvedValue({ id: 'sess_google_test' }),
 }))
 
+// Y por la MISMA razon, un piso mas abajo: al cerrar el P2 de la auditoria del 2026-08-30, este
+// carril tambien emite su `RefreshGrant` — sin el, el refresh token lleva `sid` pero no tiene
+// familia, y `rotateGrant` lo lee como reutilizado y REVOCA la sesion en su primer uso. El mock
+// de prisma de arriba enumera sus modelos a mano y `refreshGrant` no esta, asi que se mockea el
+// servicio, igual que la linea de arriba. Es la trampa del mock con lista fija: el error que sale
+// (`Cannot read properties of undefined`) no menciona por ningun lado lo que se agrego.
+jest.mock('@/services/auth/refreshGrant.service', () => ({
+  issueGrant: jest.fn().mockResolvedValue(undefined),
+}))
+
 const logAction = jest.fn()
 jest.mock('../../../src/services/dashboard/activity-log.service', () => ({ logAction }))
 

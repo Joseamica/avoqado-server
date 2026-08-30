@@ -122,7 +122,12 @@ export async function generatePasskeyChallenge() {
  * @param rememberMe - Whether to extend token expiration
  * @returns Login result with tokens and user data
  */
-export async function verifyPasskeyAssertion(credential: AuthenticationResponseJSON, challengeKey?: string, rememberMe?: boolean) {
+export async function verifyPasskeyAssertion(
+  credential: AuthenticationResponseJSON,
+  challengeKey?: string,
+  rememberMe?: boolean,
+  deviceId?: string,
+) {
   logger.info(`🔐 [PASSKEY] Verifying assertion for credential: ${credential.id.substring(0, 20)}...`)
 
   // 1. Find the stored challenge
@@ -263,6 +268,11 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
     staffId: staff.id,
     venueId: selectedVenue.venueId,
     authMethod: AuthMethod.BIOMETRIC,
+    // 🔴 [Auditoría 2026-08-30, P2] Faltaba, y el hueco era silencioso: la tablet SÍ aparece en el
+    // registro de terminales, pero «sacar aparato» busca sesiones por `deviceId` y cerraba CERO.
+    // Es decir, el dueño tocaba el botón, el dashboard le decía que sí, y la sesión biométrica de
+    // la tablet perdida seguía cobrando. Peor que no tener el botón.
+    deviceId,
   })
 
   // 7. Generate tokens (derive orgId from venue)
