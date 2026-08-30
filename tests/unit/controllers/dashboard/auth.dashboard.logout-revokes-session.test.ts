@@ -35,12 +35,15 @@ import socketManager from '@/communication/sockets/managers/socketManager'
 import { cerrarSesionesDeStaff } from '@/utils/passwordChangeGuard'
 import { dashboardLogoutController } from '@/controllers/dashboard/auth.dashboard.controller'
 
+// Devuelve el objeto TIPADO, no `never`: las pruebas de abajo leen `res.status` para comprobar
+// que se sale con 200, y sobre un `never` eso no compila. El casteo va en el sitio de la llamada,
+// que es el único lugar donde hace falta fingir que esto es un `Response` de Express.
 const fakeResponse = () => {
-  const r: Record<string, unknown> = {}
+  const r: Record<string, jest.Mock> = {}
   r.clearCookie = jest.fn().mockReturnValue(r)
   r.status = jest.fn().mockReturnValue(r)
   r.json = jest.fn().mockReturnValue(r)
-  return r as never
+  return r
 }
 
 const pedir = (token: string, body: Record<string, unknown> = {}) =>
@@ -54,7 +57,7 @@ beforeEach(() => {
 it('🔴 [P1] cerrar sesión REVOCA la Session del token — antes seguía viva hasta 24 h', async () => {
   const token = generateAccessToken('staff-1', 'org-1', 'venue-1', StaffRole.ADMIN, undefined, { sid: 'sess_web' })
 
-  await dashboardLogoutController(pedir(token), fakeResponse())
+  await dashboardLogoutController(pedir(token), fakeResponse() as never)
 
   expect(revokeSession).toHaveBeenCalledWith('sess_web', expect.stringContaining('logout'))
 })
@@ -64,7 +67,7 @@ it('🔴 invalida la caché y cierra el socket — revocar sin esto la deja viva
   // base, pero el middleware pregunta a una caché de 60 s, y el socket ya abierto vive aparte.
   const token = generateAccessToken('staff-1', 'org-1', 'venue-1', StaffRole.ADMIN, undefined, { sid: 'sess_web' })
 
-  await dashboardLogoutController(pedir(token), fakeResponse())
+  await dashboardLogoutController(pedir(token), fakeResponse() as never)
 
   expect(invalidateSession).toHaveBeenCalledWith('sess_web')
   expect(socketManager.disconnectBySession).toHaveBeenCalledWith('sess_web')
@@ -76,7 +79,7 @@ it('«en todos mis dispositivos» cierra también las filas Session, no sólo la
   // acabas de expulsar sigue recibiendo los eventos del negocio en tiempo real.
   const token = generateAccessToken('staff-1', 'org-1', 'venue-1', StaffRole.ADMIN, undefined, { sid: 'sess_web' })
 
-  await dashboardLogoutController(pedir(token, { allDevices: true }), fakeResponse())
+  await dashboardLogoutController(pedir(token, { allDevices: true }), fakeResponse() as never)
 
   expect(cerrarSesionesDeStaff).toHaveBeenCalledWith('staff-1', expect.stringContaining('logout'))
 })
@@ -87,7 +90,7 @@ it('un token viejo SIN sid cierra sesión igual — nadie se queda encerrado por
   const legacy = generateAccessToken('staff-2', 'org-1', 'venue-1', StaffRole.ADMIN)
   const res = fakeResponse()
 
-  await dashboardLogoutController(pedir(legacy), res)
+  await dashboardLogoutController(pedir(legacy), res as never)
 
   expect(revokeSession).not.toHaveBeenCalled()
   expect(res.status).toHaveBeenCalledWith(200)
@@ -98,7 +101,7 @@ it('🔴 si la revocación truena, la persona SALE igual — el botón de salir 
   const token = generateAccessToken('staff-1', 'org-1', 'venue-1', StaffRole.ADMIN, undefined, { sid: 'sess_web' })
   const res = fakeResponse()
 
-  await dashboardLogoutController(pedir(token), res)
+  await dashboardLogoutController(pedir(token), res as never)
 
   expect(res.status).toHaveBeenCalledWith(200)
 })
