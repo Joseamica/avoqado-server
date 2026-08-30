@@ -153,15 +153,28 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     throw new Error(`Moneda no soportada en el pedido ${d.id}: "${moneda}". Sólo MXN.`)
   }
 
-  // ── Sólo el reparto que ya verificamos con un pedido real ──────────────────────────
-  // DELIVERY_BY_UBER: Uber cobra en su app y liquida todo — nada queda por cobrar en
-  // persona. Cualquier otro `fulfillment_type` (BYOC/pickup) puede traer efectivo contra
-  // entrega, y adivinar cómo se reparte ese efectivo entre la venta del comercio y lo que
-  // se cobra EN NOMBRE de Uber sub- o sobre-reportaría la venta. Misma política que la API
-  // clásica (Hallazgo 4): RECHAZAR en vez de adivinar, hasta tener un pedido real de ese
-  // tipo (la tienda de prueba 2 ya es BYOC — al ejercitarla se cablea con datos verdaderos).
+  // ── Los repartos verificados con un pedido REAL ────────────────────────────────────
+  //
+  //   DELIVERY_BY_UBER     — reparte Uber. Cobra en su app, liquida todo. La propina es del
+  //                          REPARTIDOR y no llega (medido: `tips` ausente).
+  //   DELIVERY_BY_MERCHANT — reparte el NEGOCIO (lo que Uber llama BYOC). Verificado con el
+  //                          pedido a4623ab7-… (30-ago) en la tienda de pruebas 2:
+  //                            · el envío es $0.00 — lo pone el negocio, no Uber
+  //                            · la PROPINA sí llega y es del NEGOCIO ($15.23; la app dice
+  //                              "se envía al restaurante 1 hora después de la entrega")
+  //                            · NO hay efectivo contra entrega: el cliente pagó con tarjeta
+  //                              en la app y el único campo con "due" es
+  //                              `marketplace_fee_due_to_uber` — lo que le debemos a Uber
+  //                            · order_total ($160.23) = artículos ($145) + propina ($15.23)
+  //                          El reparto de abajo ya lo maneja sin cambios: la propina se lee
+  //                          defensivamente desde siempre y aquí simplemente aparece.
+  //
+  // 🔴 Cualquier OTRO tipo se sigue rechazando. Y para BYOC hay una guarda extra abajo:
+  // este tipo es el que PUEDE traer efectivo contra entrega en otros mercados, y ese caso
+  // nunca lo hemos visto. Si el dinero no cuadra exactamente, se rechaza en vez de suponer
+  // que la diferencia es un cargo del comercio — suponerlo sub-reportaría la venta.
   const fulfillment = typeof d.fulfillment_type === 'string' ? d.fulfillment_type : 'DESCONOCIDO'
-  if (fulfillment !== 'DELIVERY_BY_UBER') {
+  if (fulfillment !== 'DELIVERY_BY_UBER' && fulfillment !== 'DELIVERY_BY_MERCHANT') {
     throw new Error(
       `Pedido de Uber ${d.id} con fulfillment_type="${fulfillment}": ese tipo de entrega aún no está verificado con un ` +
         `pedido real (reparto del efectivo/propina desconocido). Verifica manualmente antes de reintentar.`,
@@ -369,6 +382,26 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
   // Los cargos del comercio se miden contra el precio YA descontado: sumarle el descuento de
   // vuelta convertiría la promoción en un cargo inventado.
   const cargosComercio = Prisma.Decimal.max(new Prisma.Decimal(0), total.plus(descuento).minus(subTotal).minus(propina))
+
+  // 🔴 GUARDA DEL BYOC: en este reparto el negocio entrega, y es el escenario donde en otros
+  // mercados aparece el efectivo contra entrega — un caso que NO hemos visto en un pedido
+  // real. `cashDueSale`/`cashDueTip` se escriben en cero más abajo; si de verdad hubiera
+  // efectivo, ese cero registraría como liquidado por la plataforma dinero que el repartidor
+  // trae en la mano, y el arqueo del negocio saldría corto sin que nada falle.
+  //
+  // No se puede detectar un campo que no conocemos, así que se comprueba la ARITMÉTICA: en
+  // el pedido real todo cuadra al centavo (145.00 + 15.23 = 160.23). Si un día no cuadra,
+  // significa que hay dinero en el mensaje que no estamos leyendo, y ahí se para.
+  if (fulfillment === 'DELIVERY_BY_MERCHANT') {
+    const reconstruido = subTotal.plus(propina).plus(cargosComercio).minus(descuento)
+    if (!reconstruido.equals(total)) {
+      throw new Error(
+        `Pedido BYOC de Uber ${d.id}: el dinero no cuadra — artículos ${aPesos(subTotal)} + propina ${aPesos(propina)} + ` +
+          `cargos ${aPesos(cargosComercio)} − promoción ${aPesos(descuento)} = ${aPesos(reconstruido)}, pero order_total dice ` +
+          `${aPesos(total)}. Hay dinero en el mensaje que no estamos leyendo (¿efectivo contra entrega?). No se ingiere.`,
+      )
+    }
+  }
 
   return {
     externalId: d.id,

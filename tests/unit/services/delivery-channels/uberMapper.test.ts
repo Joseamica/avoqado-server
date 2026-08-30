@@ -140,10 +140,10 @@ describe('uber.mapper (uAPI) — contra el pedido real', () => {
 
   // ── Rechazar en vez de adivinar (la política que protege el dinero) ────────────────
 
-  it('🔴 RECHAZA un fulfillment_type distinto de DELIVERY_BY_UBER — BYOC/pickup sin pedido real que los verifique', () => {
+  it('🔴 RECHAZA un fulfillment_type que no hemos verificado con un pedido real', () => {
     const p = pedidoReal()
-    p.order.fulfillment_type = 'BYOC'
-    expect(() => mapUberOrder(p)).toThrow(/fulfillment_type="BYOC"/)
+    p.order.fulfillment_type = 'PICKUP'
+    expect(() => mapUberOrder(p)).toThrow(/fulfillment_type="PICKUP"/)
   })
 
   it('🔴 dos IMPORTES para el mismo cart_item_id RECHAZAN — no se adivina cómo se reparten', () => {
@@ -521,5 +521,61 @@ describe('🔴 pedido PROGRAMADO — cableado con el payload real', () => {
     const r = mapUberOrder(programado())
     const suma = r.items.reduce((a, i) => a + Number(i.total), 0)
     expect(suma.toFixed(2)).toBe(Number(r.payment.saleAmount).toFixed(2))
+  })
+})
+
+describe('🔴 BYOC — reparte el NEGOCIO, no Uber', () => {
+  // Pedido real de la tienda de pruebas 2 (a4623ab7-…, 30-ago). Uber lo llama
+  // `DELIVERY_BY_MERCHANT`; en su app se lee "Entregado por el personal del negocio".
+  //
+  // Se rechazaba a propósito por no haber visto uno: podía traer efectivo contra entrega, y
+  // adivinar cómo se reparte ese efectivo sub-reportaría la venta. Ya medido:
+  //   · envío $0.00 — lo pone el negocio
+  //   · la PROPINA llega y es del NEGOCIO ($15.23) — en DELIVERY_BY_UBER ni aparece,
+  //     porque allá es del repartidor de Uber
+  //   · NO hay efectivo: pagó con tarjeta en la app; el único "due" del mensaje es
+  //     `marketplace_fee_due_to_uber`, que es lo que le debemos a Uber
+  //   · order_total 160.23 = artículos 145.00 + propina 15.23, al centavo
+  const BYOC = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-byoc-uapi.json')
+  const byoc = () => JSON.parse(fs.readFileSync(BYOC, 'utf8'))
+
+  it('ya NO se rechaza: se ingiere como cualquier otra venta', () => {
+    expect(() => mapUberOrder(byoc())).not.toThrow()
+    expect(mapUberOrder(byoc()).payment.saleAmount).toBe('145.00')
+  })
+
+  it('🔴 la PROPINA es del negocio y se registra — aquí sí llega', () => {
+    const r = mapUberOrder(byoc())
+    expect(r.payment.tipAmount).toBe('15.23')
+    expect(r.payment.externallyPaidTip).toBe('15.23')
+  })
+
+  it('🔴 NO hay efectivo pendiente: el cliente pagó en la app', () => {
+    const r = mapUberOrder(byoc())
+    expect(r.payment.cashDueSale).toBe('0.00')
+    expect(r.payment.cashDueTip).toBe('0.00')
+  })
+
+  it('el dinero cuadra al centavo contra order_total', () => {
+    const r = mapUberOrder(byoc())
+    const liquidado = Number(r.payment.externallyPaidSale) + Number(r.payment.externallyPaidTip)
+    expect(liquidado.toFixed(2)).toBe('160.23')
+  })
+
+  it('🔴 si Uber cobró MENOS que artículos + propina, RECHAZA — esa diferencia sería EFECTIVO', () => {
+    // El caso que la guarda protege, y es el escenario real del efectivo contra entrega: si
+    // parte se paga en la puerta, `order_total` (lo que Uber cobra en la app) queda POR
+    // DEBAJO de artículos + propina, y la diferencia es dinero que trae el repartidor en la
+    // mano. Sin la guarda se registraría como liquidado por la plataforma y el arqueo del
+    // negocio saldría corto, sin que nada fallara.
+    const p = byoc()
+    p.order.payment.payment_detail.order_total.gross.amount_e5 -= 5_000_000 // $50 quedarían en efectivo
+    expect(() => mapUberOrder(p)).toThrow(/el dinero no cuadra/)
+  })
+
+  it('…y un excedente legítimo NO se rechaza: es un cargo del comercio, que ya sabemos leer', () => {
+    const p = byoc()
+    p.order.payment.payment_detail.order_total.gross.amount_e5 += 5_000_000
+    expect(mapUberOrder(p).payment.merchantFees).toBe('50.00')
   })
 })
