@@ -430,11 +430,12 @@ async function sendBadReviewNotificationEmail(data: BadReviewEmailData): Promise
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>Calificación baja en ${data.venueName}</title>
         </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
-          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
             <!-- Header with warning style -->
-            <div style="background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%); padding: 40px 30px; text-align: center;">
-              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">⚠️ Calificación Baja Recibida</h1>
+            <div style="text-align: left; padding: 0 0 20px;">
+              <img src="https://avoqado.io/isotipo.svg" width="32" height="32" alt="Avoqado" style="display: block; margin-bottom: 24px;">
+              <h1 style="color: #000000; margin: 0; font-size: 24px; font-weight: 400;">Calificación Baja Recibida</h1>
               <p style="color: #fee2e2; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
             </div>
 
@@ -457,13 +458,13 @@ async function sendBadReviewNotificationEmail(data: BadReviewEmailData): Promise
               <!-- CTA Button -->
               <div style="text-align: center; margin: 40px 0;">
                 <a href="${data.actionUrl}"
-                   style="background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
-                          color: white;
-                          padding: 16px 40px;
+                   style="background: #000000;
+                          color: #ffffff;
+                          padding: 12px 24px;
                           text-decoration: none;
-                          border-radius: 30px;
-                          font-weight: bold;
-                          font-size: 16px;
+                          border-radius: 6px;
+                          font-weight: 500;
+                          font-size: 14px;
                           display: inline-block;
                           box-shadow: 0 4px 15px rgba(220, 38, 38, 0.4);">
                   👀 Ver Review y Responder

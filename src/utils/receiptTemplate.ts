@@ -174,10 +174,10 @@ export function generateReceiptHTML(data: ReceiptData): string {
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #0a0a0a;
+            background: #ffffff;
             min-height: 100vh;
             padding: 20px;
-            color: #fafafa;
+            color: #000000;
             line-height: 1.5;
         }
 
@@ -188,8 +188,8 @@ export function generateReceiptHTML(data: ReceiptData): string {
 
         /* Header Card */
         .header-card {
-            background: linear-gradient(to bottom right, #18181b, #09090b);
-            border: 1px solid #27272a;
+            background: #ffffff;
+            border: 1px solid #e8e8e8;
             border-radius: 16px;
             padding: 32px;
             text-align: center;
@@ -202,7 +202,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
             position: absolute;
             top: 16px;
             right: 16px;
-            background: #22c55e20;
+            background: #15803d20;
             color: #4ade80;
             font-size: 12px;
             font-weight: 500;
@@ -223,7 +223,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
             height: 80px;
             border-radius: 50%;
             margin: 0 auto 16px;
-            background: #f87171;
+            background: #b91c1c;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -243,11 +243,11 @@ export function generateReceiptHTML(data: ReceiptData): string {
             font-size: 28px;
             font-weight: 600;
             margin-bottom: 12px;
-            color: #fafafa;
+            color: #000000;
         }
 
         .venue-info {
-            color: #a1a1aa;
+            color: #666666;
             font-size: 14px;
             display: flex;
             flex-direction: column;
@@ -263,8 +263,8 @@ export function generateReceiptHTML(data: ReceiptData): string {
 
         /* Details Card */
         .details-card {
-            background: #18181b;
-            border: 1px solid #27272a;
+            background: #ffffff;
+            border: 1px solid #e8e8e8;
             border-radius: 16px;
             overflow: hidden;
         }
@@ -279,7 +279,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
             grid-template-columns: 1fr 1fr;
             gap: 16px;
             padding: 16px;
-            background: #27272a50;
+            background: #e8e8e850;
             border-radius: 12px;
             margin-bottom: 24px;
         }
@@ -307,23 +307,23 @@ export function generateReceiptHTML(data: ReceiptData): string {
             flex-shrink: 0;
         }
 
-        .metadata-icon.receipt { background: #3b82f620; }
-        .metadata-icon.user { background: #3b82f620; }
-        .metadata-icon.calendar { background: #22c55e20; }
-        .metadata-icon.clock { background: #a855f720; }
+        .metadata-icon.receipt { background: #00000020; }
+        .metadata-icon.user { background: #00000020; }
+        .metadata-icon.calendar { background: #15803d20; }
+        .metadata-icon.clock { background: #00000020; }
 
         .metadata-label {
             font-size: 10px;
             text-transform: uppercase;
             letter-spacing: 0.05em;
-            color: #71717a;
+            color: #888888;
             margin-bottom: 2px;
         }
 
         .metadata-value {
             font-size: 14px;
             font-weight: 500;
-            color: #fafafa;
+            color: #000000;
         }
 
         .metadata-value.mono {
@@ -342,11 +342,11 @@ export function generateReceiptHTML(data: ReceiptData): string {
             display: flex;
             align-items: center;
             gap: 8px;
-            color: #fafafa;
+            color: #000000;
         }
 
         .section-title .icon {
-            color: #f59e0b;
+            color: #b45309;
         }
 
         .items-list {
@@ -357,8 +357,8 @@ export function generateReceiptHTML(data: ReceiptData): string {
         }
 
         .item-card {
-            background: #0a0a0a;
-            border: 1px solid #27272a50;
+            background: #ffffff;
+            border: 1px solid #e8e8e850;
             border-radius: 12px;
             padding: 16px;
         }
@@ -372,24 +372,24 @@ export function generateReceiptHTML(data: ReceiptData): string {
 
         .item-name {
             font-weight: 500;
-            color: #fafafa;
+            color: #000000;
         }
 
         .item-price {
             font-weight: 700;
             font-size: 18px;
-            color: #fafafa;
+            color: #000000;
         }
 
         .item-unit-price {
             font-size: 12px;
-            color: #71717a;
+            color: #888888;
         }
 
         .item-quantity {
             display: inline-block;
-            background: #27272a;
-            color: #a1a1aa;
+            background: #e8e8e8;
+            color: #666666;
             font-size: 12px;
             padding: 2px 8px;
             border-radius: 9999px;
@@ -399,21 +399,21 @@ export function generateReceiptHTML(data: ReceiptData): string {
         .item-modifiers {
             margin-top: 8px;
             padding-left: 12px;
-            border-left: 2px solid #27272a;
+            border-left: 2px solid #e8e8e8;
         }
 
         .modifier-row {
             display: flex;
             justify-content: space-between;
             font-size: 14px;
-            color: #a1a1aa;
+            color: #666666;
             padding: 2px 0;
         }
 
         /* Separator */
         .separator {
             height: 1px;
-            background: #27272a;
+            background: #e8e8e8;
             margin: 24px 0;
         }
 
@@ -431,20 +431,20 @@ export function generateReceiptHTML(data: ReceiptData): string {
         }
 
         .total-row .label {
-            color: #a1a1aa;
+            color: #666666;
         }
 
         .total-row .value {
             font-weight: 500;
-            color: #fafafa;
+            color: #000000;
         }
 
         .total-row.tip .value {
-            color: #22c55e;
+            color: #15803d;
         }
 
         .total-row.final {
-            background: linear-gradient(to right, #3b82f620, #3b82f610);
+            background: #000000;
             padding: 16px;
             border-radius: 12px;
             font-size: 20px;
@@ -453,12 +453,12 @@ export function generateReceiptHTML(data: ReceiptData): string {
         }
 
         .total-row.final .value {
-            color: #3b82f6;
+            color: #000000;
         }
 
         /* Payment Method */
         .payment-section {
-            background: #27272a50;
+            background: #e8e8e850;
             border-radius: 12px;
             padding: 16px;
             margin-top: 24px;
@@ -474,7 +474,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
         .payment-icon {
             width: 40px;
             height: 40px;
-            background: #22c55e20;
+            background: #15803d20;
             border-radius: 10px;
             display: flex;
             align-items: center;
@@ -484,25 +484,25 @@ export function generateReceiptHTML(data: ReceiptData): string {
 
         .payment-method-name {
             font-weight: 600;
-            color: #fafafa;
+            color: #000000;
         }
 
         .payment-status {
             font-size: 14px;
-            color: #22c55e;
+            color: #15803d;
         }
 
         /* Footer */
         .footer {
             text-align: center;
             padding: 24px;
-            border-top: 1px solid #27272a;
+            border-top: 1px solid #e8e8e8;
             margin-top: 24px;
         }
 
         .thank-you {
             font-size: 16px;
-            color: #a1a1aa;
+            color: #666666;
             margin-bottom: 16px;
         }
 
@@ -543,19 +543,19 @@ export function generateReceiptHTML(data: ReceiptData): string {
         }
 
         .btn-review {
-            background: #3b82f6;
+            background: #000000;
             color: white;
         }
 
         .btn-whatsapp {
-            background: #22c55e;
+            background: #15803d;
             color: white;
         }
 
         .btn-share {
-            background: #27272a;
-            color: #fafafa;
-            border: 1px solid #3f3f46;
+            background: #e8e8e8;
+            color: #000000;
+            border: 1px solid #d4d4d4;
         }
 
         /* Modal */
@@ -571,8 +571,8 @@ export function generateReceiptHTML(data: ReceiptData): string {
         }
 
         .modal-content {
-            background: #18181b;
-            border: 1px solid #27272a;
+            background: #ffffff;
+            border: 1px solid #e8e8e8;
             margin: 5% auto;
             padding: 24px;
             border-radius: 16px;
@@ -585,7 +585,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
             font-size: 20px;
             font-weight: 600;
             margin-bottom: 20px;
-            color: #fafafa;
+            color: #000000;
         }
 
         .close {
@@ -594,11 +594,11 @@ export function generateReceiptHTML(data: ReceiptData): string {
             top: 16px;
             font-size: 24px;
             cursor: pointer;
-            color: #71717a;
+            color: #888888;
         }
 
         .close:hover {
-            color: #fafafa;
+            color: #000000;
         }
 
         .form-group {
@@ -610,24 +610,24 @@ export function generateReceiptHTML(data: ReceiptData): string {
             margin-bottom: 6px;
             font-weight: 500;
             font-size: 14px;
-            color: #a1a1aa;
+            color: #666666;
         }
 
         .form-group input,
         .form-group textarea {
             width: 100%;
             padding: 12px;
-            border: 1px solid #3f3f46;
+            border: 1px solid #d4d4d4;
             border-radius: 8px;
             font-size: 14px;
-            background: #0a0a0a;
-            color: #fafafa;
+            background: #ffffff;
+            color: #000000;
         }
 
         .form-group input:focus,
         .form-group textarea:focus {
             outline: none;
-            border-color: #3b82f6;
+            border-color: #000000;
         }
 
         .form-group textarea {
@@ -643,20 +643,20 @@ export function generateReceiptHTML(data: ReceiptData): string {
 
         .star {
             font-size: 28px;
-            color: #3f3f46;
+            color: #d4d4d4;
             cursor: pointer;
             transition: color 0.15s;
         }
 
         .star.active,
         .star:hover {
-            color: #fbbf24;
+            color: #b45309;
         }
 
         .submit-btn {
             width: 100%;
             padding: 12px;
-            background: #3b82f6;
+            background: #000000;
             color: white;
             border: none;
             border-radius: 8px;
@@ -677,12 +677,12 @@ export function generateReceiptHTML(data: ReceiptData): string {
         }
 
         .review-success h3 {
-            color: #22c55e;
+            color: #15803d;
             margin-bottom: 8px;
         }
 
         .review-success p {
-            color: #a1a1aa;
+            color: #666666;
         }
 
         @media (max-width: 500px) {
@@ -1026,7 +1026,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
 
         function highlightStars(container, rating) {
             container.querySelectorAll('.star').forEach((star, index) => {
-                star.style.color = index < rating ? '#fbbf24' : '#3f3f46';
+                star.style.color = index < rating ? '#b45309' : '#d4d4d4';
             });
         }
 
