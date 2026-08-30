@@ -254,6 +254,12 @@ const prismaMock: any = {
   transactionCost: createMockModel(),
   // Time entry models
   timeEntry: createMockModel(),
+  // Horas extra (29-ago): el resumen de nómina consulta las autorizaciones para saber qué
+  // entra al reparto doble/triple. Sin esta entrada, cualquier test que llegue a
+  // getPayrollSummary revienta con "Cannot read properties of undefined (reading 'findMany')"
+  // — la misma clase que session y venueFeature de arriba: este mock es una lista FIJA, así
+  // que un modelo nuevo hay que declararlo aquí a mano.
+  overtimeApproval: createMockModel(),
   timeEntryBreak: createMockModel(),
   // Field-promoter geolocation ("cambaceo" tracking)
   promoterLocationPing: createMockModel(),

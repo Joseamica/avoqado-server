@@ -2,6 +2,7 @@ import * as workShiftService from '../../services/dashboard/workShift.service'
 import { NextFunction, Request, Response } from 'express'
 import * as attendanceService from '../../services/dashboard/attendance.dashboard.service'
 import * as attendancePayrollService from '../../services/dashboard/attendancePayroll.service'
+import * as overtimeApprovalService from '../../services/dashboard/overtimeApproval.service'
 import * as workScheduleService from '../../services/dashboard/workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
 
@@ -68,6 +69,32 @@ export async function getPayrollSummary(req: Request, res: Response, next: NextF
       req.query.startDate as string,
       req.query.endDate as string,
     )
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * PUT /venues/:venueId/team/:staffVenueId/overtime-approval — autorizar horas extra de un día.
+ *
+ * Quién autoriza sale de `authContext`, NUNCA del cuerpo: si viniera del cuerpo, cualquiera
+ * podría firmar la autorización con el nombre de otro.
+ */
+export async function approveOvertime(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, userId } = (req as any).authContext
+    const result = await overtimeApprovalService.approveOvertime({
+      venueId: req.params.venueId,
+      staffVenueId: req.params.staffVenueId,
+      date: req.body.date,
+      minutesApproved: req.body.minutesApproved,
+      approvedById: userId,
+      note: req.body.note,
+    })
+    // `venueId` del token y de la ruta deben ser el mismo negocio; el middleware de permiso ya
+    // lo resolvió, y el servicio vuelve a acotar la membresía por venue.
+    void venueId
     res.status(200).json(result)
   } catch (error) {
     next(error)

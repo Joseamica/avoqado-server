@@ -363,6 +363,7 @@ model Venue {
   floorElements         FloorElement[]
   shifts                Shift[]
   timeEntries           TimeEntry[]
+  overtimeApprovals     OvertimeApproval[]
   promoterLocationPings PromoterLocationPing[]
   orders                Order[]
   payments              Payment[]
@@ -1007,6 +1008,7 @@ model Staff {
 
   // Time tracking
   timeEntries TimeEntry[]
+  overtimeApprovalsGiven OvertimeApproval[] @relation("OvertimeApprovedBy")
 
   // Field-promoter geolocation ("cambaceo" tracking)
   promoterLocationPings PromoterLocationPing[]
@@ -1247,6 +1249,7 @@ model StaffVenue {
   /// Cuadrante LABORAL (jornada). Distinto de `schedule`, que es disponibilidad para citas.
   workSchedule           StaffWorkSchedule?
   workScheduleExceptions StaffWorkScheduleException[]
+  overtimeApprovals      OvertimeApproval[]
   workShiftAssignments   WorkShiftAssignment[]
 }
 
@@ -3301,6 +3304,34 @@ model WorkShiftAssignment {
 }
 
 /// Excepción al cuadrante: un día libre, o un día con horario distinto.
+model OvertimeApproval {
+  id           String     @id @default(cuid())
+  staffVenueId String
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  venueId      String
+  venue        Venue      @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  /// 'YYYY-MM-DD' en fecha del NEGOCIO — el día del TURNO, no el del reloj de la checada.
+  date String
+  /// Minutos AUTORIZADOS. Puede ser menos que lo medido: el gerente autoriza 1 h de las 2 que
+  /// se quedó. Cero = revisado y NO autorizado (distinto de "sin revisar", que es no tener fila).
+  minutesApproved Int
+  /// Lo que el reloj medía CUANDO se autorizó.
+  /// 🔴 Es lo que impide un agujero de dinero: sin este retrato, editar la salida después de
+  /// autorizar convertiría en autorizadas unas horas que nadie miró. Si deja de coincidir con lo
+  /// medido hoy, la fila se marca para revisar de nuevo.
+  minutesMeasured Int
+  approvedById    String
+  approvedBy      Staff    @relation("OvertimeApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime @default(now())
+  note            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  /// Una autorización por persona y día: volver a autorizar CORRIGE, no acumula.
+  @@unique([staffVenueId, date])
+  @@index([venueId, date])
+}
+
 model StaffWorkScheduleException {
   id           String     @id @default(cuid())
   staffVenueId String

@@ -270,6 +270,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   StaffDocument: 'Staff, Auth, Permissions & Time',
   StaffWorkSchedule: 'Staff, Auth, Permissions & Time',
   StaffWorkScheduleException: 'Staff, Auth, Permissions & Time',
+  OvertimeApproval: 'Staff, Auth, Permissions & Time',
   WorkShiftTemplate: 'Staff, Auth, Permissions & Time',
   WorkShiftAssignment: 'Staff, Auth, Permissions & Time',
 

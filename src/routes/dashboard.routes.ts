@@ -116,6 +116,7 @@ import {
   VenueIdOnlySchema,
   VenueTimeEntriesQuerySchema,
   AttendanceReportSchema,
+  ApproveOvertimeSchema,
   PayrollSummarySchema,
   WorkScheduleParamsSchema,
   ReplaceWorkScheduleSchema,
@@ -7831,6 +7832,17 @@ router.get(
   checkPermission('attendance:read'),
   validateRequest(PayrollSummarySchema),
   attendanceController.getPayrollSummary,
+)
+
+// Autorizar las horas extra de un día (decisión del founder, 29-ago-2026: se autorizan).
+// 🔴 `attendance:manage`, NO `:read`: leer el reporte y firmar lo que se paga son cosas
+// distintas. Y `attendance:manage` nunca lo tienen los roles de piso.
+router.put(
+  '/venues/:venueId/team/:staffVenueId/overtime-approval',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(ApproveOvertimeSchema),
+  attendanceController.approveOvertime,
 )
 
 router.get(

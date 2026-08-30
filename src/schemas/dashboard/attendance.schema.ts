@@ -53,6 +53,20 @@ export const PayrollSummarySchema = z.object({
   query: z.object({ startDate: isoDate, endDate: isoDate }),
 })
 
+export const ApproveOvertimeSchema = z.object({
+  params: z.object({ venueId: z.string().cuid(), staffVenueId: z.string().cuid() }),
+  body: z.object({
+    date: isoDate,
+    // Entero y no negativo. El tope contra lo MEDIDO no vive aquí sino en el servicio: es una
+    // regla de negocio que necesita recalcular la rejilla, y Zod sólo valida forma.
+    minutesApproved: z
+      .number({ invalid_type_error: 'Los minutos autorizados deben ser un número' })
+      .int('Los minutos autorizados deben ser un número entero')
+      .min(0, 'Los minutos autorizados no pueden ser negativos'),
+    note: z.string().max(500, 'La nota no puede pasar de 500 caracteres').optional(),
+  }),
+})
+
 export const WorkScheduleParamsSchema = z.object({
   params: z.object({ venueId: z.string().cuid(), staffVenueId: z.string().cuid() }),
 })
