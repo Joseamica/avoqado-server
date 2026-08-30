@@ -30,7 +30,11 @@ describe('hashToken', () => {
 describe('rotateGrant', () => {
   it('consume el grant y crea el sucesor en UNA sola transaccion', async () => {
     tx.refreshGrant.findUnique.mockResolvedValue({
-      id: 'g1', sessionId: 's1', familyId: 'f1', consumedAt: null, revokedAt: null,
+      id: 'g1',
+      sessionId: 's1',
+      familyId: 'f1',
+      consumedAt: null,
+      revokedAt: null,
       expiresAt: new Date(Date.now() + 86_400_000),
     })
     tx.refreshGrant.updateMany.mockResolvedValue({ count: 1 })
@@ -48,7 +52,11 @@ describe('rotateGrant', () => {
 
   it('el consumo es CONDICIONAL: el where exige consumedAt null', async () => {
     tx.refreshGrant.findUnique.mockResolvedValue({
-      id: 'g1', sessionId: 's1', familyId: 'f1', consumedAt: null, revokedAt: null,
+      id: 'g1',
+      sessionId: 's1',
+      familyId: 'f1',
+      consumedAt: null,
+      revokedAt: null,
       expiresAt: new Date(Date.now() + 86_400_000),
     })
     tx.refreshGrant.updateMany.mockResolvedValue({ count: 1 })
@@ -65,20 +73,28 @@ describe('rotateGrant', () => {
 
   it('dos refresh concurrentes: solo UNO consume (el segundo ve count 0)', async () => {
     tx.refreshGrant.findUnique.mockResolvedValue({
-      id: 'g1', sessionId: 's1', familyId: 'f1', consumedAt: null, revokedAt: null,
+      id: 'g1',
+      sessionId: 's1',
+      familyId: 'f1',
+      consumedAt: null,
+      revokedAt: null,
       expiresAt: new Date(Date.now() + 86_400_000),
     })
-    tx.refreshGrant.updateMany.mockResolvedValue({ count: 0 })   // otro gano la carrera
+    tx.refreshGrant.updateMany.mockResolvedValue({ count: 0 }) // otro gano la carrera
 
     const r = await rotateGrant('tok-viejo', 'tok-nuevo', new Date(Date.now() + 86_400_000))
 
     expect(r).toEqual({ reutilizado: true })
-    expect(tx.refreshGrant.create).not.toHaveBeenCalled()   // no se acuna sucesor
+    expect(tx.refreshGrant.create).not.toHaveBeenCalled() // no se acuna sucesor
   })
 
   it('un grant ya consumido se reporta como reutilizado', async () => {
     tx.refreshGrant.findUnique.mockResolvedValue({
-      id: 'g1', sessionId: 's1', familyId: 'f1', consumedAt: new Date(), revokedAt: null,
+      id: 'g1',
+      sessionId: 's1',
+      familyId: 'f1',
+      consumedAt: new Date(),
+      revokedAt: null,
       expiresAt: new Date(Date.now() + 86_400_000),
     })
     await expect(rotateGrant('tok-viejo', 'tok-nuevo', new Date())).resolves.toEqual({ reutilizado: true })
@@ -91,7 +107,11 @@ describe('rotateGrant', () => {
 
   it('un grant vencido NO rota', async () => {
     tx.refreshGrant.findUnique.mockResolvedValue({
-      id: 'g1', sessionId: 's1', familyId: 'f1', consumedAt: null, revokedAt: null,
+      id: 'g1',
+      sessionId: 's1',
+      familyId: 'f1',
+      consumedAt: null,
+      revokedAt: null,
       expiresAt: new Date(Date.now() - 1000),
     })
     await expect(rotateGrant('tok-viejo', 'tok-nuevo', new Date())).resolves.toEqual({ reutilizado: true })

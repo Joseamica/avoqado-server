@@ -70,10 +70,7 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
     }
     if (scope.isSuperAdmin) return scope.activeOrg
     for (const access of scope.perVenueAccess.values()) {
-      if (
-        access.organizationId === scope.activeOrg &&
-        (access.role === StaffRole.OWNER || access.role === StaffRole.MANAGER)
-      ) {
+      if (access.organizationId === scope.activeOrg && (access.role === StaffRole.OWNER || access.role === StaffRole.MANAGER)) {
         return scope.activeOrg
       }
     }

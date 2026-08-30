@@ -39,13 +39,16 @@ export const openSession = async (req: Request, res: Response, next: NextFunctio
       return res.status(400).json({ success: false, message: 'startingAmount es requerido' })
     }
 
-    const session = await cashDrawerService.openSession({
-      venueId,
-      staffId,
-      staffName: staffName || 'Staff',
-      startingAmount: Number(startingAmount),
-      deviceName,
-    }, (req as any).puedeVerEsperado === true)
+    const session = await cashDrawerService.openSession(
+      {
+        venueId,
+        staffId,
+        staffName: staffName || 'Staff',
+        startingAmount: Number(startingAmount),
+        deviceName,
+      },
+      (req as any).puedeVerEsperado === true,
+    )
 
     return res.status(201).json({ success: true, data: session })
   } catch (error) {

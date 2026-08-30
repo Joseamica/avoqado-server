@@ -143,8 +143,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         })
       }
 
-      const venue =
-        startDate || endDate ? await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }) : null
+      const venue = startDate || endDate ? await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }) : null
       const timezone = venue?.timezone || 'America/Mexico_City'
       const from = startDate ? DateTime.fromISO(startDate, { zone: timezone }).startOf('day').toJSDate() : undefined
       const to = endDate ? DateTime.fromISO(endDate, { zone: timezone }).endOf('day').toJSDate() : undefined

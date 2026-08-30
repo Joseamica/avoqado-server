@@ -20,7 +20,10 @@ import prisma from '../src/utils/prismaClient'
 
 const arg = (name: string): string | undefined => process.argv.find(a => a.startsWith(`--${name}=`))?.split('=')[1]
 const argAll = (name: string): string[] =>
-  process.argv.filter(a => a.startsWith(`--${name}=`)).map(a => a.split('=')[1]).filter(Boolean)
+  process.argv
+    .filter(a => a.startsWith(`--${name}=`))
+    .map(a => a.split('=')[1])
+    .filter(Boolean)
 
 const VALID_EXACT = ['--apply']
 const VALID_PREFIX = ['--org-id=', '--staff-id=', '--actor-staff-id=', '--expect-changes=']
@@ -79,7 +82,12 @@ async function main() {
     if (items.length) {
       const estados = [...new Set(items.map(i => `${i.status}/${i.custodyState}`))].join(', ')
       console.log(`   estados actuales: ${estados}`)
-      console.log(`   ejemplos: ${items.slice(0, 3).map(i => i.serialNumber).join(', ')}${items.length > 3 ? ' …' : ''}`)
+      console.log(
+        `   ejemplos: ${items
+          .slice(0, 3)
+          .map(i => i.serialNumber)
+          .join(', ')}${items.length > 3 ? ' …' : ''}`,
+      )
     }
     total += items.length
   }

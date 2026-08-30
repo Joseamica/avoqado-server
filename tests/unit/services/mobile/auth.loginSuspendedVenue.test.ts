@@ -84,9 +84,7 @@ describe('pickOperationalVenueForLogin', () => {
   it('does not put a specific reason on several shops with different states', () => {
     // Saying "cerrado permanentemente" to someone whose other shop is only
     // paused for a week would be a lie that costs a support call.
-    expect(() => pickOperationalVenueForLogin([venue('a', 'CLOSED'), venue('b', 'SUSPENDED')])).toThrow(
-      /ninguno de tus establecimientos/i,
-    )
+    expect(() => pickOperationalVenueForLogin([venue('a', 'CLOSED'), venue('b', 'SUSPENDED')])).toThrow(/ninguno de tus establecimientos/i)
   })
 
   it('stops someone with no shops at all', () => {
