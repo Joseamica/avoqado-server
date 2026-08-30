@@ -118,7 +118,7 @@ export class AttendanceLateAlertJob {
               venueId: venue.id,
               type: NotificationType.ATTENDANCE_LATE,
               title: `${persona.nombre} no ha checado`,
-              message: `Su entrada era a las ${persona.esperada} y lleva ${persona.minutosTarde} minutos de retraso.`,
+              message: `Entraba a las ${persona.esperada}. Van ${persona.minutosTarde} minutos de retraso y no ha checado.`,
               actionLabel: 'Ver asistencia',
               entityType: 'AttendanceLateAlert',
               entityId: llave,
@@ -172,7 +172,9 @@ export class AttendanceLateAlertJob {
 
         const titulo =
           personas.length === 1 ? `${personas[0].nombre} no ha checado` : `${personas.length} personas no han checado`
-        const cuerpo = personas.map(p => `${p.nombre} — entraba a las ${p.esperada}, lleva ${p.minutosTarde} min`).join('\n')
+        // 🔴 "lleva 40 min" se leía como "lleva 40 min AQUÍ" (lo señaló el founder, 29-ago).
+        // Se nombra lo que son esos minutos: retraso.
+        const cuerpo = personas.map(p => `${p.nombre} — entraba a las ${p.esperada} · ${p.minutosTarde} min de retraso`).join('\n')
 
         await sendNotificationEmail(staff.email, titulo, titulo, cuerpo, undefined, 'Ver asistencia')
       } catch (e) {

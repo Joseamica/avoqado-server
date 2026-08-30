@@ -174,8 +174,18 @@ export interface PersonaTarde {
 export async function quienVaTarde(venueId: string, now: Date): Promise<{ venueId: string; ahora: string; tarde: PersonaTarde[] }> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { timezone: true, settings: { select: { attendanceGraceMinutes: true, rotatingShiftsEnabled: true } } },
+    select: {
+      timezone: true,
+      settings: { select: { attendanceEnabled: true, attendanceGraceMinutes: true, rotatingShiftsEnabled: true } },
+    },
   })
+
+  // 🔴 Con el checador APAGADO nadie puede checar, así que declarar tarde a todo el personal es
+  // absurdo — y esta funcion la consume tambien la herramienta `who_is_late_now` del MCP, que NO
+  // pasa por el filtro del job (P2 #4 de Codex). El job ya filtraba; el MCP no.
+  if (venue?.settings?.attendanceEnabled === false) {
+    return { venueId, ahora: DateTime.now().toISO() ?? '', tarde: [] }
+  }
   // 🔴 Una zona nula o inválida NO cae a México en silencio (P2 #3 de Codex): un venue de
   // Tijuana o Cancún recibiría avisos corridos una o dos horas, y una zona basura produce un
   // DateTime inválido que deja el venue sin evaluar cada diez minutos sin que nadie lo sepa.
