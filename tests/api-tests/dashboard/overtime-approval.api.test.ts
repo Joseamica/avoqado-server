@@ -86,7 +86,10 @@ beforeEach(() => {
   prismaMock.venue.findUnique.mockResolvedValue(null)
   prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
   prismaMock.overtimeApproval.findMany.mockResolvedValue([])
-  prismaMock.overtimeApproval.upsert.mockResolvedValue({ id: 'ap1' })
+  // Sin autorización previa: el camino de CREAR. Corregir una existente exige la revisión
+  // que se vio, y eso lo cubre `overtimeApproval.concurrencia.test.ts`.
+  prismaMock.overtimeApproval.findUnique.mockResolvedValue(null)
+  prismaMock.overtimeApproval.create.mockImplementation(({ data }: any) => Promise.resolve({ id: 'ap1', ...data }))
   midio(120)
 })
 
@@ -112,7 +115,7 @@ describe('PUT overtime-approval — la capa HTTP de verdad', () => {
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('required', 'attendance:manage')
       // Y no llegó a escribir nada.
-      expect(prismaMock.overtimeApproval.upsert).not.toHaveBeenCalled()
+      expect(prismaMock.overtimeApproval.create).not.toHaveBeenCalled()
     })
   })
 
@@ -122,7 +125,7 @@ describe('PUT overtime-approval — la capa HTTP de verdad', () => {
       .set('Authorization', `Bearer ${makeToken('OWNER', otherVenueId)}`)
       .send({ date: DIA, minutesApproved: 60 })
     expect(res.status).toBe(403)
-    expect(prismaMock.overtimeApproval.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.overtimeApproval.create).not.toHaveBeenCalled()
   })
 
   describe('roles que SÍ pueden', () => {
@@ -175,7 +178,7 @@ describe('PUT overtime-approval — la capa HTTP de verdad', () => {
       const res = await request(app).put(RUTA).set('Authorization', `Bearer ${comoGerente()}`).send({ date: DIA, minutesApproved: 999 })
       expect(res.status).toBe(400)
       expect(JSON.stringify(res.body)).toMatch(/no puedes autorizar más/i)
-      expect(prismaMock.overtimeApproval.upsert).not.toHaveBeenCalled()
+      expect(prismaMock.overtimeApproval.create).not.toHaveBeenCalled()
     })
 
     it('un día sin horas extra rebota con 400', async () => {
@@ -197,8 +200,8 @@ describe('PUT overtime-approval — la capa HTTP de verdad', () => {
       const res = await request(app).put(RUTA).set('Authorization', `Bearer ${comoGerente()}`).send({ date: DIA, minutesApproved: 50 })
       expect(res.status).toBe(200)
       expect(res.body.minutesMeasured).toBe(77)
-      expect(prismaMock.overtimeApproval.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({ create: expect.objectContaining({ minutesMeasured: 77 }) }),
+      expect(prismaMock.overtimeApproval.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ minutesMeasured: 77 }) }),
       )
     })
 
@@ -245,7 +248,9 @@ describe('GET payroll-summary — la respuesta trae los campos de horas extra', 
       workedTotalsByStaff: new Map([['s1', { totalHours: 10, breakMinutes: 0 }]]),
     })
 
-    const res = await request(app).get(RESUMEN).set('Authorization', `Bearer ${makeToken('MANAGER')}`)
+    const res = await request(app)
+      .get(RESUMEN)
+      .set('Authorization', `Bearer ${makeToken('MANAGER')}`)
     expect(res.status).toBe(200)
     const fila = res.body.rows[0]
     expect(fila).toMatchObject({
@@ -266,12 +271,16 @@ describe('GET payroll-summary — la respuesta trae los campos de horas extra', 
       timezone: 'America/Mexico_City',
       workedTotalsByStaff: new Map(),
     })
-    const res = await request(app).get(RESUMEN).set('Authorization', `Bearer ${makeToken('MANAGER')}`)
+    const res = await request(app)
+      .get(RESUMEN)
+      .set('Authorization', `Bearer ${makeToken('MANAGER')}`)
     expect(res.status).toBe(200)
   })
 
   it('un cajero NO puede leer el resumen de nómina', async () => {
-    const res = await request(app).get(RESUMEN).set('Authorization', `Bearer ${makeToken('CASHIER')}`)
+    const res = await request(app)
+      .get(RESUMEN)
+      .set('Authorization', `Bearer ${makeToken('CASHIER')}`)
     expect(res.status).toBe(403)
   })
 })

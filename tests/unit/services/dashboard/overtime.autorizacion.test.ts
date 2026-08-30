@@ -14,12 +14,18 @@ import { resumirAutorizacion, type DiaAutorizado } from '@/services/dashboard/ov
 
 /** Un día sin revisar: se midió algo y nadie lo ha mirado. */
 function sinRevisar(date: string, medidos: number): DiaAutorizado {
-  return { date, medidos, autorizados: null, medidosAlAutorizar: null }
+  return { date, medidos, autorizados: null, medidosAlAutorizar: null, huellaActual: 'h', huellaAlAutorizar: null }
 }
 
-/** Un día ya revisado. */
+/**
+ * Un día ya revisado, con la jornada SIN cambios.
+ *
+ * 🔴 Las huellas coinciden a propósito: lo que cambia cuando la jornada se toca vive en
+ * `overtime.huellaInvalida.test.ts`. Aquí se prueba la aritmética de los buckets, y meterle
+ * huellas distintas convertiría cada caso en «pendiente» y no se probaría nada.
+ */
 function revisado(date: string, medidos: number, autorizados: number, alAutorizar = medidos): DiaAutorizado {
-  return { date, medidos, autorizados, medidosAlAutorizar: alAutorizar }
+  return { date, medidos, autorizados, medidosAlAutorizar: alAutorizar, huellaActual: 'h', huellaAlAutorizar: 'h' }
 }
 
 describe('resumirAutorizacion', () => {
@@ -117,10 +123,7 @@ describe('resumirAutorizacion', () => {
   })
 
   it('los días por revisar salen ordenados', () => {
-    const r = resumirAutorizacion([
-      revisado('2026-08-26', 240, 120, 120),
-      revisado('2026-08-24', 240, 120, 120),
-    ])
+    const r = resumirAutorizacion([revisado('2026-08-26', 240, 120, 120), revisado('2026-08-24', 240, 120, 120)])
     expect(r.diasPorRevisar).toEqual(['2026-08-24', '2026-08-26'])
   })
 })

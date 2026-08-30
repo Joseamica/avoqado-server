@@ -64,6 +64,9 @@ export const ApproveOvertimeSchema = z.object({
       .int('Los minutos autorizados deben ser un número entero')
       .min(0, 'Los minutos autorizados no pueden ser negativos'),
     note: z.string().max(500, 'La nota no puede pasar de 500 caracteres').optional(),
+    // 🔴 La revisión de la autorización que se tenía ENFRENTE. Obligatoria para CORREGIR
+    // una que ya existe: sin ella, dos gerentes se pisan y gana el último (hallazgo #3).
+    expectedUpdatedAt: z.string().datetime({ message: 'La revisión debe ser una fecha ISO' }).optional(),
   }),
 })
 

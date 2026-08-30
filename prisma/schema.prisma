@@ -3320,6 +3320,12 @@ model OvertimeApproval {
   /// autorizar convertiría en autorizadas unas horas que nadie miró. Si deja de coincidir con lo
   /// medido hoy, la fila se marca para revisar de nuevo.
   minutesMeasured Int
+  /// Huella de la JORNADA que produjo esos minutos: tramos trabajados, descansos y cuadrante.
+  /// 🔴 Versionar sólo el NÚMERO deja un hueco: si una corrección baja el extra a cero y otra
+  /// posterior vuelve a producir el mismo total con checadas DISTINTAS, la autorización vieja
+  /// revivía sin que nadie la mirara (hallazgo #4 de Codex). Null en las filas anteriores a
+  /// este campo: se tratan como "hay que revisar".
+  sourceFingerprint String?
   approvedById    String
   approvedBy      Staff    @relation("OvertimeApprovedBy", fields: [approvedById], references: [id])
   approvedAt      DateTime @default(now())

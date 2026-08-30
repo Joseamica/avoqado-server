@@ -13,11 +13,15 @@ import 'dotenv/config'
 import { DateTime } from 'luxon'
 
 import prisma from '../src/utils/prismaClient'
+import { exigirBaseLocal } from './_solo-base-local'
 import { getPayrollSummary } from '../src/services/dashboard/attendancePayroll.service'
+import { approveOvertime } from '../src/services/dashboard/overtimeApproval.service'
 
 const VENUE = 'cmpe64yq2001f9k92m0lbhmf4' // Restaurante El Atole, America/Mexico_City
 const STAFF = 'cmpe64zia001y9k92i4aaw1f4' // Ana Martínez
 const MEMBRESIA = 'cmpe6503z006b9k92mz22fyvs'
+/** Quien firma la autorización: nadie puede autorizar sus PROPIAS horas. */
+const AUTORIZA = 'cmpe64ykh00199k92lgo67j5y'
 
 const TZ = 'America/Mexico_City'
 const sembradas: string[] = []
@@ -49,6 +53,10 @@ function hm(min: number) {
 }
 
 async function main() {
+  // 🔴 Este script BORRA autorizaciones y SOBRESCRIBE cuadrantes. Contra una base que no
+  // sea la local, eso destruye datos reales (hallazgo #9 de Codex, 29-ago-2026).
+  exigirBaseLocal()
+
   // Lunes 2026-08-24 … domingo 2026-08-30, una semana natural completa.
   const LUNES = '2026-08-24'
   const DOMINGO = '2026-08-30'
@@ -76,10 +84,28 @@ async function main() {
   await checada('2026-08-26', '09:00', '20:00', [['18:00', '18:30']]) // 2h30
   await checada('2026-08-27', '09:00', '20:00') // 3 h
 
+  // 🔴 Desde que las horas extra se AUTORIZAN, medirlas no basta para que se repartan en
+  // doble y triple: sin autorización todo queda PENDIENTE. Este script se escribió antes de
+  // esa decisión y salía en rojo contra código correcto (WARN del /full-testing del 29-ago).
+  // Ahora autoriza lo medido para poder comprobar el reparto.
+  const medidos = (await getPayrollSummary(VENUE, LUNES, DOMINGO)).rows.find(r => r.staffVenueId === MEMBRESIA)
+  console.log('\n══════ HORAS EXTRA — medido contra la base ══════')
+  console.log(`  sin autorizar  ${hm(medidos?.overtimePendingMinutes ?? 0)} pendientes, 0 dobles, 0 triples`)
+
+  for (const [d, min] of [
+    [LUNES, 180],
+    ['2026-08-25', 180],
+    ['2026-08-26', 150],
+    ['2026-08-27', 180],
+  ] as Array<[string, number]>) {
+    // 🔴 Quien autoriza NO puede ser el dueño de las horas (separación de funciones): se usa
+    // otra persona del mismo negocio.
+    await approveOvertime({ venueId: VENUE, staffVenueId: MEMBRESIA, date: d, minutesApproved: min, approvedById: AUTORIZA })
+  }
+
   const { rows } = await getPayrollSummary(VENUE, LUNES, DOMINGO)
   const ana = rows.find(r => r.staffVenueId === MEMBRESIA)
 
-  console.log('\n══════ HORAS EXTRA — medido contra la base ══════')
   if (!ana) {
     console.log('🔴 no salió Ana en el resumen')
   } else {
@@ -106,6 +132,8 @@ async function main() {
   }
 
   // ── limpieza ────────────────────────────────────────────────────────────────────────
+  await prisma.overtimeApproval.deleteMany({ where: { staffVenueId: MEMBRESIA } })
+  await prisma.activityLog.deleteMany({ where: { action: 'OVERTIME_APPROVED', venueId: VENUE } })
   await prisma.timeEntry.deleteMany({ where: { id: { in: sembradas } } }) // los breaks caen por cascade
   if (cuadranteAntes) {
     await prisma.staffWorkSchedule.update({

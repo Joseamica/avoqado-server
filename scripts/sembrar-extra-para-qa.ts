@@ -16,6 +16,7 @@ import 'dotenv/config'
 import { DateTime } from 'luxon'
 
 import prisma from '../src/utils/prismaClient'
+import { exigirBaseLocal } from './_solo-base-local'
 
 const VENUE = 'cmpe64yq2001f9k92m0lbhmf4' // Restaurante El Atole
 const TZ = 'America/Mexico_City'
@@ -32,6 +33,10 @@ async function limpiar() {
 }
 
 async function main() {
+  // 🔴 Este script BORRA autorizaciones y SOBRESCRIBE cuadrantes. Contra una base que no
+  // sea la local, eso destruye datos reales (hallazgo #9 de Codex, 29-ago-2026).
+  exigirBaseLocal()
+
   if (process.argv.includes('--limpiar')) {
     await limpiar()
     return

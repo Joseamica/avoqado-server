@@ -1,5 +1,7 @@
 import { buildAttendanceGrid } from './attendance.dashboard.service'
 import prisma from '../../utils/prismaClient'
+import { DateTime } from 'luxon'
+
 import { agruparPorSemana, diasAutorizadosParaReparto, resumirAutorizacion, type DiaAutorizado, type SemanaDeExtra } from './overtime'
 
 /**
@@ -60,6 +62,26 @@ export async function getPayrollSummary(
   endDate: string,
 ): Promise<{ rows: PayrollSummaryRow[]; timezone: string; startDate: string; endDate: string }> {
   const { cells, timezone, workedTotalsByStaff } = await buildAttendanceGrid(venueId, startDate, endDate)
+
+  // 🔴 Si el rango empieza a media semana, los días de esa semana que quedan FUERA ya
+  // consumieron parte del umbral de 9 h. Sin ellos, las horas del rango se pagarían al doble
+  // cuando algunas iban al TRIPLE (hallazgo #2 de Codex, 29-ago-2026). Se consulta desde el
+  // LUNES de la primera semana; esos días sólo mueven el umbral y nunca se re-reportan.
+  const lunesDeLaPrimeraSemana = DateTime.fromISO(startDate, { zone: 'utc' }).startOf('week').toISODate()!
+  const rangoEmpiezaAMediaSemana = lunesDeLaPrimeraSemana < startDate
+  const celdasPrevias = rangoEmpiezaAMediaSemana
+    ? (
+        await buildAttendanceGrid(
+          venueId,
+          lunesDeLaPrimeraSemana,
+          DateTime.fromISO(startDate, { zone: 'utc' }).minus({ days: 1 }).toISODate()!,
+        )
+      ).cells
+    : []
+
+  // Lo previo, por persona: medido para la infracción, y autorizado para el reparto.
+  const previoMedido = new Map<string, Record<string, number>>()
+  const previoAutorizado = new Map<string, Record<string, number>>()
 
   const byMembership = new Map<string, PayrollSummaryRow>()
   // Los días con extra se juntan por PERSONA y se reparten al final: el umbral doble/triple
@@ -137,21 +159,53 @@ export async function getPayrollSummary(
     }
   }
 
+  // Los días PREVIOS con extra, por persona. Se necesitan sus autorizaciones también: al
+  // umbral sólo cuentan las horas que de verdad se van a pagar.
+  const previasConExtra = celdasPrevias.filter(c => c.overtimeMinutes > 0)
+  for (const c of previasConExtra) {
+    const medido = previoMedido.get(c.staffVenueId) ?? {}
+    medido[c.date] = c.overtimeMinutes
+    previoMedido.set(c.staffVenueId, medido)
+  }
+  if (previasConExtra.length > 0) {
+    const autorizadasPrevias = await prisma.overtimeApproval.findMany({
+      where: {
+        staffVenueId: { in: [...new Set(previasConExtra.map(c => c.staffVenueId))] },
+        date: { gte: lunesDeLaPrimeraSemana, lt: startDate },
+      },
+      select: { staffVenueId: true, date: true, minutesApproved: true, minutesMeasured: true },
+    })
+    const porDia = new Map(autorizadasPrevias.map(a => [`${a.staffVenueId}|${a.date}`, a]))
+    for (const c of previasConExtra) {
+      const a = porDia.get(`${c.staffVenueId}|${c.date}`)
+      if (!a) continue // sin revisar: no se paga, así que no consume umbral
+      const autorizado = Math.min(Math.max(0, a.minutesApproved), c.overtimeMinutes)
+      if (autorizado <= 0) continue
+      const mapa = previoAutorizado.get(c.staffVenueId) ?? {}
+      mapa[c.date] = autorizado
+      previoAutorizado.set(c.staffVenueId, mapa)
+    }
+  }
+
   // Las autorizaciones del periodo. Una consulta para todas las personas: pedirlas por
   // renglón haría una por empleado.
   const autorizaciones = extraPorMembresia.size
     ? await prisma.overtimeApproval.findMany({
         where: { staffVenueId: { in: [...extraPorMembresia.keys()] }, date: { gte: startDate, lte: endDate } },
-        select: { staffVenueId: true, date: true, minutesApproved: true, minutesMeasured: true },
+        select: { staffVenueId: true, date: true, minutesApproved: true, minutesMeasured: true, sourceFingerprint: true },
       })
     : []
-  const porPersonaYDia = new Map<string, { minutesApproved: number; minutesMeasured: number }>()
+  const porPersonaYDia = new Map<string, { minutesApproved: number; minutesMeasured: number; sourceFingerprint: string | null }>()
   for (const a of autorizaciones) {
     porPersonaYDia.set(`${a.staffVenueId}|${a.date}`, {
       minutesApproved: a.minutesApproved,
       minutesMeasured: a.minutesMeasured,
+      sourceFingerprint: a.sourceFingerprint,
     })
   }
+  // La huella de la jornada TAL COMO ESTÁ HOY, por celda.
+  const huellaDeHoy = new Map<string, string | null>()
+  for (const c of cells) huellaDeHoy.set(`${c.staffVenueId}|${c.date}`, c.overtimeFingerprint)
 
   for (const [staffVenueId, dias] of extraPorMembresia) {
     const row = byMembership.get(staffVenueId)
@@ -166,6 +220,8 @@ export async function getPayrollSummary(
         // que impide que no pagar se vuelva invisible.
         autorizados: a ? a.minutesApproved : null,
         medidosAlAutorizar: a ? a.minutesMeasured : null,
+        huellaActual: huellaDeHoy.get(`${staffVenueId}|${d.date}`) ?? null,
+        huellaAlAutorizar: a ? a.sourceFingerprint : null,
       }
     })
 
@@ -177,7 +233,11 @@ export async function getPayrollSummary(
     row.overtimeDaysToReview = resumen.diasPorRevisar
 
     // 🔴 El reparto doble/triple va sobre lo AUTORIZADO: es lo que se paga.
-    const semanas = agruparPorSemana(diasAutorizadosParaReparto(conAutorizacion), { startDate, endDate })
+    const semanas = agruparPorSemana(
+      diasAutorizadosParaReparto(conAutorizacion),
+      { startDate, endDate },
+      previoAutorizado.get(staffVenueId) ?? {},
+    )
     row.overtimeWeeks = semanas
     row.overtimeDoubleMinutes = semanas.reduce((t, w) => t + w.minutosDobles, 0)
     row.overtimeTripleMinutes = semanas.reduce((t, w) => t + w.minutosTriples, 0)
@@ -185,7 +245,7 @@ export async function getPayrollSummary(
     // 🔴 …pero la INFRACCIÓN del art. 66 se juzga sobre lo MEDIDO. Si alguien trabajó 4 h
     // extra en un día, la ley se rompió aunque el gerente sólo autorice una: no autorizar no
     // deshace lo que ya pasó.
-    const semanasMedidas = agruparPorSemana(dias, { startDate, endDate })
+    const semanasMedidas = agruparPorSemana(dias, { startDate, endDate }, previoMedido.get(staffVenueId) ?? {})
     row.hasOvertimeViolation = semanasMedidas.some(w => w.diasSobreTopeDiario.length > 0 || w.excedeDiasPermitidos)
   }
 

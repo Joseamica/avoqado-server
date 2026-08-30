@@ -32,13 +32,24 @@ function celda(over: Partial<any> = {}): any {
     earlyLeaveMinutes: 0,
     absenceType: null,
     overtimeMinutes: 0,
+    // 🔴 La huella coincide con la de `autorizacion()` a propósito: aquí se prueba la
+    // aritmética de los buckets y el reparto. Que una jornada CAMBIADA invalide la
+    // autorización vive en `overtime.huellaInvalida.test.ts`; si las huellas no cuadraran,
+    // todos estos casos caerían a «pendiente» y no se probaría nada.
+    overtimeFingerprint: 'h',
     ...over,
   }
 }
 
 /** Una autorización ya guardada. `medidosAlAutorizar` por default = lo autorizado. */
 function autorizacion(date: string, minutesApproved: number, minutesMeasured?: number, staffVenueId = 'sv1') {
-  return { staffVenueId, date, minutesApproved, minutesMeasured: minutesMeasured ?? minutesApproved }
+  return {
+    staffVenueId,
+    date,
+    minutesApproved,
+    minutesMeasured: minutesMeasured ?? minutesApproved,
+    sourceFingerprint: 'h', // la misma jornada que la celda: sin cambios
+  }
 }
 
 function conCeldas(cells: any[], autorizadas: any[] = []) {
@@ -55,10 +66,7 @@ beforeEach(() => jest.clearAllMocks())
 
 describe('getPayrollSummary — horas extra medidas', () => {
   it('suma los minutos extra del periodo aunque nadie los haya autorizado', async () => {
-    conCeldas([
-      celda({ date: '2026-08-24', overtimeMinutes: 60 }),
-      celda({ date: '2026-08-25', overtimeMinutes: 30 }),
-    ])
+    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 60 }), celda({ date: '2026-08-25', overtimeMinutes: 30 })])
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
     expect(rows[0].overtimeMinutes).toBe(90)
   })
@@ -108,10 +116,7 @@ describe('getPayrollSummary — reparto sobre lo AUTORIZADO', () => {
 
   it('🔴 dos semanas NO se mezclan: cada una tiene su propio umbral de 9 h', async () => {
     conCeldas(
-      [
-        celda({ date: '2026-08-30', overtimeMinutes: 480 }),
-        celda({ date: '2026-08-31', overtimeMinutes: 480 }),
-      ],
+      [celda({ date: '2026-08-30', overtimeMinutes: 480 }), celda({ date: '2026-08-31', overtimeMinutes: 480 })],
       [autorizacion('2026-08-30', 480), autorizacion('2026-08-31', 480)],
     )
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-09-06')
@@ -170,18 +175,13 @@ describe('infracciones del art. 66 — sobre lo MEDIDO, no sobre lo autorizado',
   })
 
   it('señala hacer extra más de 3 veces en la semana, sin autorizaciones de por medio', async () => {
-    conCeldas(
-      ['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27'].map(d => celda({ date: d, overtimeMinutes: 30 })),
-    )
+    conCeldas(['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27'].map(d => celda({ date: d, overtimeMinutes: 30 })))
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
     expect(rows[0].hasOvertimeViolation).toBe(true)
   })
 
   it('una semana dentro de la ley no se marca', async () => {
-    conCeldas([
-      celda({ date: '2026-08-24', overtimeMinutes: 120 }),
-      celda({ date: '2026-08-25', overtimeMinutes: 120 }),
-    ])
+    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 120 }), celda({ date: '2026-08-25', overtimeMinutes: 120 })])
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
     expect(rows[0].hasOvertimeViolation).toBe(false)
   })

@@ -91,6 +91,7 @@ export async function approveOvertime(req: Request, res: Response, next: NextFun
       minutesApproved: req.body.minutesApproved,
       approvedById: userId,
       note: req.body.note,
+      expectedUpdatedAt: req.body.expectedUpdatedAt,
     })
     // `venueId` del token y de la ruta deben ser el mismo negocio; el middleware de permiso ya
     // lo resolvió, y el servicio vuelve a acotar la membresía por venue.

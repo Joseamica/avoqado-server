@@ -36,7 +36,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
     expect(
       minutosExtraDelDia({
         turno: turnoDiurno,
-        clockOutTime: enMexico('2026-08-24', '19:00'),
+        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '19:00') }],
         descansos: [],
         timezone: TZ,
       }),
@@ -47,7 +47,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
     expect(
       minutosExtraDelDia({
         turno: turnoDiurno,
-        clockOutTime: enMexico('2026-08-24', '17:00'),
+        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '17:00') }],
         descansos: [],
         timezone: TZ,
       }),
@@ -58,7 +58,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
     expect(
       minutosExtraDelDia({
         turno: turnoDiurno,
-        clockOutTime: enMexico('2026-08-24', '15:30'),
+        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '15:30') }],
         descansos: [],
         timezone: TZ,
       }),
@@ -71,7 +71,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
     expect(
       minutosExtraDelDia({
         turno: turnoDiurno,
-        clockOutTime: enMexico('2026-08-24', '17:00'),
+        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '17:00') }],
         descansos: [],
         timezone: TZ,
       }),
@@ -82,7 +82,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
     expect(
       minutosExtraDelDia({
         turno: { date: '2026-08-24', expectedStart: null, expectedEnd: null },
-        clockOutTime: enMexico('2026-08-24', '23:00'),
+        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '23:00') }],
         descansos: [],
         timezone: TZ,
       }),
@@ -91,20 +91,23 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
 
   it('sin salida (sigue adentro) da 0 — no se puede saber cuánto se quedó', () => {
     expect(
-      minutosExtraDelDia({ turno: turnoDiurno, clockOutTime: null, descansos: [], timezone: TZ }),
+      minutosExtraDelDia({
+        turno: turnoDiurno,
+        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: null }],
+        descansos: [],
+        timezone: TZ,
+      }),
     ).toBe(0)
   })
 
   describe('descansos', () => {
     it('🔴 un descanso DENTRO de la hora extra se descuenta', () => {
-      const descansos: DescansoDelDia[] = [
-        { startTime: enMexico('2026-08-24', '17:30'), endTime: enMexico('2026-08-24', '18:00') },
-      ]
+      const descansos: DescansoDelDia[] = [{ startTime: enMexico('2026-08-24', '17:30'), endTime: enMexico('2026-08-24', '18:00') }]
       // 17:00 → 19:00 son 120, menos 30 de descanso = 90.
       expect(
         minutosExtraDelDia({
           turno: turnoDiurno,
-          clockOutTime: enMexico('2026-08-24', '19:00'),
+          intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '19:00') }],
           descansos,
           timezone: TZ,
         }),
@@ -112,13 +115,11 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
     })
 
     it('un descanso DENTRO de la jornada ordinaria NO toca la hora extra', () => {
-      const descansos: DescansoDelDia[] = [
-        { startTime: enMexico('2026-08-24', '14:00'), endTime: enMexico('2026-08-24', '15:00') },
-      ]
+      const descansos: DescansoDelDia[] = [{ startTime: enMexico('2026-08-24', '14:00'), endTime: enMexico('2026-08-24', '15:00') }]
       expect(
         minutosExtraDelDia({
           turno: turnoDiurno,
-          clockOutTime: enMexico('2026-08-24', '19:00'),
+          intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '19:00') }],
           descansos,
           timezone: TZ,
         }),
@@ -126,14 +127,12 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
     })
 
     it('un descanso a caballo sólo descuenta la parte que cae en la hora extra', () => {
-      const descansos: DescansoDelDia[] = [
-        { startTime: enMexico('2026-08-24', '16:45'), endTime: enMexico('2026-08-24', '17:15') },
-      ]
+      const descansos: DescansoDelDia[] = [{ startTime: enMexico('2026-08-24', '16:45'), endTime: enMexico('2026-08-24', '17:15') }]
       // Sólo los 15 min posteriores a las 17:00 son hora extra descontable.
       expect(
         minutosExtraDelDia({
           turno: turnoDiurno,
-          clockOutTime: enMexico('2026-08-24', '19:00'),
+          intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '19:00') }],
           descansos,
           timezone: TZ,
         }),
@@ -146,7 +145,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
       expect(
         minutosExtraDelDia({
           turno: turnoDiurno,
-          clockOutTime: enMexico('2026-08-24', '19:00'),
+          intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '19:00') }],
           descansos,
           timezone: TZ,
         }),
@@ -161,7 +160,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
       expect(
         minutosExtraDelDia({
           turno: turnoDiurno,
-          clockOutTime: enMexico('2026-08-24', '19:00'),
+          intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: enMexico('2026-08-24', '19:00') }],
           descansos,
           timezone: TZ,
         }),
@@ -177,7 +176,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
       expect(
         minutosExtraDelDia({
           turno: nocturno,
-          clockOutTime: enMexico('2026-08-25', '07:30'),
+          intervalos: [{ entrada: enMexico('2026-08-24', '22:00'), salida: enMexico('2026-08-25', '07:30') }],
           descansos: [],
           timezone: TZ,
         }),
@@ -188,7 +187,7 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
       expect(
         minutosExtraDelDia({
           turno: nocturno,
-          clockOutTime: enMexico('2026-08-25', '06:00'),
+          intervalos: [{ entrada: enMexico('2026-08-24', '22:00'), salida: enMexico('2026-08-25', '06:00') }],
           descansos: [],
           timezone: TZ,
         }),
@@ -199,9 +198,21 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
   it('la zona horaria manda: el mismo instante da distinto en México y en Madrid', () => {
     const turno = { date: '2026-08-24', expectedStart: '09:00', expectedEnd: '17:00' }
     const salida = enMexico('2026-08-24', '19:00') // 2026-08-25 01:00 en Madrid
-    expect(minutosExtraDelDia({ turno, clockOutTime: salida, descansos: [], timezone: TZ })).toBe(120)
     expect(
-      minutosExtraDelDia({ turno, clockOutTime: salida, descansos: [], timezone: 'Europe/Madrid' }),
+      minutosExtraDelDia({
+        turno,
+        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: salida }],
+        descansos: [],
+        timezone: TZ,
+      }),
+    ).toBe(120)
+    expect(
+      minutosExtraDelDia({
+        turno,
+        intervalos: [{ entrada: enMexico('2026-08-24', '09:00'), salida: salida }],
+        descansos: [],
+        timezone: 'Europe/Madrid',
+      }),
     ).not.toBe(120)
   })
 })

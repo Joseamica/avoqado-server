@@ -13,7 +13,7 @@
  *     parcial, y es el caso normal («se quedó 2 h, le apruebo 1»).
  *  3. **La membresía tiene que ser de ESTE negocio.** El `staffVenueId` llega del cliente.
  */
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { buildAttendanceGrid } from './attendance.dashboard.service'
@@ -28,6 +28,15 @@ export interface ApproveOvertimeInput {
   /** Quién autoriza — sale de `authContext.userId`, nunca del cuerpo. */
   approvedById: string
   note?: string
+  /**
+   * La revisión (`updatedAt`) de la autorización que quien firma tenía ENFRENTE.
+   *
+   * 🔴 Obligatoria para CORREGIR una autorización que ya existe. Sin ella, dos gerentes que
+   * miran los mismos minutos pendientes escriben los dos con éxito y gana el último, sin que
+   * el primero se entere de que su pantalla estaba vieja (hallazgo #3 de Codex, 29-ago-2026).
+   * Para la PRIMERA autorización del día no hace falta: no hay nada que pisar.
+   */
+  expectedUpdatedAt?: string
 }
 
 export interface OvertimeApprovalResult {
@@ -40,7 +49,7 @@ export interface OvertimeApprovalResult {
 const FECHA = /^\d{4}-\d{2}-\d{2}$/
 
 export async function approveOvertime(input: ApproveOvertimeInput): Promise<OvertimeApprovalResult> {
-  const { venueId, staffVenueId, date, minutesApproved, approvedById, note } = input
+  const { venueId, staffVenueId, date, minutesApproved, approvedById, note, expectedUpdatedAt } = input
 
   // Validar ANTES de tocar la base ni recalcular la rejilla: una fecha absurda no debe costar
   // una consulta (misma regla que el reporte de puntualidad).
@@ -59,11 +68,24 @@ export async function approveOvertime(input: ApproveOvertimeInput): Promise<Over
   })
   if (!membership) throw new NotFoundError('Persona no encontrada en este negocio')
 
+  // 🔴 SEPARACIÓN DE FUNCIONES: nadie firma sus propias horas extra (founder, 30-ago-2026,
+  // cerrando la pregunta que dejó abierta la auditoría de Codex). Un gerente que se autoriza
+  // a sí mismo vacía de sentido la autorización — si puedes aprobarte, no controla nada.
+  // Es por PERSONA, no por rol: un ADMIN tampoco puede autorizarse. Las suyas las firma otro.
+  //
+  // Va ANTES de recalcular la rejilla: rechazar no debe costar la consulta cara.
+  if (membership.staffId === approvedById) {
+    throw new ForbiddenError('No puedes autorizar tus propias horas extra: tiene que firmarlas otra persona')
+  }
+
   // 🔴 Lo medido lo calcula el SERVIDOR, con la misma rejilla que alimenta el reporte y la
   // nómina. Nunca llega del cliente.
   const { cells } = await buildAttendanceGrid(venueId, date, date)
   const celda = cells.find(c => c.staffVenueId === staffVenueId && c.date === date)
   const minutesMeasured = celda?.overtimeMinutes ?? 0
+  // La huella de la jornada que se está firmando: si mañana las checadas cambian, esta
+  // autorización deja de valer aunque el total coincida (hallazgo #4 de Codex).
+  const sourceFingerprint = celda?.overtimeFingerprint ?? null
 
   if (minutesMeasured <= 0) {
     throw new BadRequestError('Ese día no hay horas extra que autorizar')
@@ -72,29 +94,60 @@ export async function approveOvertime(input: ApproveOvertimeInput): Promise<Over
     throw new BadRequestError(`No puedes autorizar más de lo trabajado: se midieron ${minutesMeasured} minutos`)
   }
 
+  const ahora = new Date()
   const fila = {
     staffVenueId,
     venueId,
     date,
     minutesApproved,
     minutesMeasured,
+    sourceFingerprint,
     approvedById,
-    approvedAt: new Date(),
+    approvedAt: ahora,
     note: note ?? null,
   }
 
-  // Una autorización por persona y día: volver a autorizar CORRIGE, no acumula.
-  await prisma.overtimeApproval.upsert({
+  // 🔴 Una autorización por persona y día: volver a autorizar CORRIGE, no acumula. Pero
+  // corregir NO puede ser «el último gana»: quien corrige tiene que haber mirado lo que había.
+  const existente = await prisma.overtimeApproval.findUnique({
     where: { staffVenueId_date: { staffVenueId, date } },
-    create: fila,
-    update: {
-      minutesApproved,
-      minutesMeasured,
-      approvedById,
-      approvedAt: fila.approvedAt,
-      note: fila.note,
-    },
+    select: { updatedAt: true },
   })
+
+  if (!existente) {
+    try {
+      await prisma.overtimeApproval.create({ data: fila })
+    } catch (e) {
+      // La carrera real: dos gerentes leen `null` a la vez y los dos intentan crear. El
+      // `@@unique` rebota al segundo, y ese rebote NO se reintenta en silencio — reintentar
+      // sería volver a «el último gana», que es justo lo que se quiere evitar.
+      if ((e as { code?: string }).code === 'P2002') {
+        throw new ConflictError('Alguien más autorizó ese día mientras tanto. Vuelve a mirar antes de firmar.')
+      }
+      throw e
+    }
+  } else {
+    if (!expectedUpdatedAt) {
+      throw new ConflictError(
+        'Ese día ya tiene una autorización. Vuelve a cargar la pantalla para ver la decisión actual antes de cambiarla.',
+      )
+    }
+    // Se compara ANTES de escribir: una revisión que ya se sabe vieja no merece un viaje a la
+    // base, y el mensaje llega más rápido. El CAS de abajo sigue siendo el que cierra la
+    // carrera —esto sólo atrapa el caso obvio.
+    if (existente.updatedAt.getTime() !== new Date(expectedUpdatedAt).getTime()) {
+      throw new ConflictError('La autorización cambió mientras la revisabas. Vuelve a cargarla y decide sobre lo actual.')
+    }
+    // El CAS: se actualiza SÓLO si la revisión sigue siendo la que se vio. Si otro gerente
+    // escribió en medio, `count` es 0 — y cero filas afectadas no es un éxito silencioso.
+    const r = await prisma.overtimeApproval.updateMany({
+      where: { staffVenueId, date, updatedAt: new Date(expectedUpdatedAt) },
+      data: { minutesApproved, minutesMeasured, sourceFingerprint, approvedById, approvedAt: ahora, note: fila.note },
+    })
+    if (r.count === 0) {
+      throw new ConflictError('La autorización cambió mientras la revisabas. Vuelve a cargarla y decide sobre lo actual.')
+    }
+  }
 
   // Fuera de cualquier transacción y sin encadenar el await al resultado: si la bitácora
   // truena, la autorización no puede caerse con ella (regla del repo).

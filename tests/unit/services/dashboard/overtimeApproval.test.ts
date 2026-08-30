@@ -19,7 +19,8 @@ jest.mock('@/services/dashboard/attendance.dashboard.service', () => ({
 
 const gridMock = buildAttendanceGrid as jest.MockedFunction<typeof buildAttendanceGrid>
 const findMembership = prisma.staffVenue.findFirst as jest.Mock
-const upsert = prisma.overtimeApproval.upsert as jest.Mock
+const create = prisma.overtimeApproval.create as jest.Mock
+const findApproval = prisma.overtimeApproval.findUnique as jest.Mock
 
 const VENUE = 'v1'
 const MEMBRESIA = 'sv1'
@@ -39,7 +40,9 @@ function midio(minutos: number, date = DIA, staffVenueId = MEMBRESIA) {
 beforeEach(() => {
   jest.clearAllMocks()
   findMembership.mockResolvedValue({ id: MEMBRESIA, venueId: VENUE, staffId: 's1' })
-  upsert.mockImplementation(({ create }: any) => Promise.resolve({ id: 'ap1', ...create }))
+  // Sin autorización previa: el camino de CREAR, que es el que estas pruebas ejercitan.
+  findApproval.mockResolvedValue(null)
+  create.mockImplementation(({ data }: any) => Promise.resolve({ id: 'ap1', ...data }))
 })
 
 describe('approveOvertime', () => {
@@ -67,9 +70,7 @@ describe('approveOvertime', () => {
       // Aunque alguien mandara `minutesMeasured: 480` en el cuerpo, no existe como parámetro:
       // la firma no lo acepta. Esta prueba fija que la fila guarde lo que midió el servidor.
     })
-    expect(upsert).toHaveBeenCalledWith(
-      expect.objectContaining({ create: expect.objectContaining({ minutesMeasured: 60 }) }),
-    )
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ minutesMeasured: 60 }) }))
   })
 
   it('🔴 no se puede autorizar MÁS de lo medido', async () => {
@@ -83,7 +84,7 @@ describe('approveOvertime', () => {
         approvedById: GERENTE,
       }),
     ).rejects.toThrow(/no puedes autorizar más/i)
-    expect(upsert).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
   })
 
   it('autorizar EXACTAMENTE lo medido sí se puede', async () => {
@@ -136,7 +137,7 @@ describe('approveOvertime', () => {
         approvedById: GERENTE,
       }),
     ).rejects.toThrow(/no encontrad/i)
-    expect(upsert).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
   })
 
   it('un día SIN horas extra no se puede autorizar', async () => {
@@ -165,7 +166,9 @@ describe('approveOvertime', () => {
     expect(gridMock).not.toHaveBeenCalled()
   })
 
-  it('🔴 volver a autorizar CORRIGE, no acumula (upsert por persona y día)', async () => {
+  it('🔴 la primera autorización del día se CREA con su llave de persona y día', async () => {
+    // Corregir una que YA existe exige la revisión que se vio, y eso vive en
+    // `overtimeApproval.concurrencia.test.ts`: aquí sólo se fija el alta.
     midio(120)
     await approveOvertime({
       venueId: VENUE,
@@ -174,10 +177,9 @@ describe('approveOvertime', () => {
       minutesApproved: 90,
       approvedById: GERENTE,
     })
-    expect(upsert).toHaveBeenCalledWith(
+    expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { staffVenueId_date: { staffVenueId: MEMBRESIA, date: DIA } },
-        update: expect.objectContaining({ minutesApproved: 90, minutesMeasured: 120 }),
+        data: expect.objectContaining({ staffVenueId: MEMBRESIA, date: DIA, minutesApproved: 90, minutesMeasured: 120 }),
       }),
     )
   })

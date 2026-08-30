@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { inviteTeamMember, updateTeamMember } from '@/services/dashboard/team.dashboard.service'
@@ -132,12 +133,23 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       date: z.string().describe('Day of the SHIFT, YYYY-MM-DD (venue-local)'),
       minutesApproved: z.number().int().min(0).describe('Minutes to authorize. 0 = reviewed and denied'),
       note: z.string().max(500).optional().describe('Why (optional) — kept in the audit trail'),
+      expectedUpdatedAt: z
+        .string()
+        .optional()
+        .describe(
+          'REQUIRED to change a day that is already authorized: the updatedAt you saw (from attendance_payroll_summary). Without it the change is refused, so two people cannot silently overwrite each other',
+        ),
       confirm: z.boolean().optional().describe('Set true to actually write; without it you get a preview'),
     },
-    async ({ venueId, staffVenueId, date, minutesApproved, note, confirm }) => {
+    async ({ venueId, staffVenueId, date, minutesApproved, note, confirm, expectedUpdatedAt }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       // Firmar lo que se paga NO es leer un reporte: `:manage`, que los roles de piso no tienen.
       guard.requirePermission('attendance:manage', venueId)
+      // 🔴 Y el scope OAuth de ESCRITURA, sin depender del interruptor de despliegue. El guard
+      // general es observar-y-permitir a propósito (para no romper conexiones al desplegar),
+      // pero un token de sólo lectura que firma nómina es un agujero, no un riesgo de rollout.
+      // Hallazgo #6 de la auditoría de Codex (29-ago-2026).
+      requireWriteScopeAlways(scope, 'attendance:manage')
 
       const { approveOvertime } = await import('../../services/dashboard/overtimeApproval.service')
 
@@ -171,6 +183,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         minutesApproved,
         approvedById: scope.staffId,
         note,
+        expectedUpdatedAt,
       })
       return text({ ok: true, ...r })
     },

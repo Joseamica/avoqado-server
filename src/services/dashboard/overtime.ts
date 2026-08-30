@@ -21,6 +21,8 @@
  * en dobles y triples, igual que el resumen de nómina de la fase 3 entrega números y no
  * dinero. El salario por hora vive en el sistema de nómina del negocio, no aquí.
  */
+import { createHash } from 'crypto'
+
 import { DateTime } from 'luxon'
 
 /** Art. 66: 3 horas diarias. Es la LEY, no un ajuste del negocio. */
@@ -44,9 +46,24 @@ export interface DescansoDelDia {
   endTime: Date | null
 }
 
+/**
+ * Un tramo REALMENTE trabajado: de una entrada a su salida.
+ *
+ * 🔴 Son los tramos, no «la última salida». Alguien que sale a las 17:00, se va a su casa y
+ * vuelve a las 18:00 trabajó una hora extra, no dos — y el hueco entre dos checadas NO es un
+ * `TimeEntryBreak`, así que nadie lo descontaba (hallazgo #1 de Codex, 29-ago-2026, el más
+ * caro de los nueve).
+ */
+export interface IntervaloTrabajado {
+  entrada: Date
+  /** `null` = sigue adentro. No aporta: no se paga lo que no se puede probar. */
+  salida: Date | null
+}
+
 export interface MinutosExtraInput {
   turno: TurnoDelDia
-  clockOutTime: Date | null
+  /** Los tramos trabajados de ESE día del turno, en cualquier orden. */
+  intervalos: IntervaloTrabajado[]
   descansos: DescansoDelDia[]
   /** Zona del NEGOCIO. Sin default a propósito: olvidarla debe romper la llamada, no producir números corridos. */
   timezone: string
@@ -61,21 +78,44 @@ export interface MinutosExtraInput {
  * DOBLE que nadie pidió. La hora extra es la que el negocio pide, y eso se ve al final del
  * turno. (Si algún día se quiere lo contrario, es un ajuste por venue — no un cambio aquí.)
  */
-export function minutosExtraDelDia({ turno, clockOutTime, descansos, timezone }: MinutosExtraInput): number {
+export function minutosExtraDelDia({ turno, intervalos, descansos, timezone }: MinutosExtraInput): number {
   // Sin cuadrante no se juzga — la misma regla que el reporte de puntualidad. Un negocio que
   // aún no armó horarios no puede empezar a deber horas extra.
   if (!turno.expectedStart || !turno.expectedEnd) return 0
-  // Sigue adentro: no se sabe cuánto se quedó, y suponerlo sería inventar dinero.
-  if (!clockOutTime) return 0
 
   const salidaEsperada = instanteDeSalidaEsperada(turno, timezone)
   if (!salidaEsperada) return 0
+  const desde = salidaEsperada.toMillis()
 
-  const salidaReal = DateTime.fromJSDate(clockOutTime, { zone: timezone })
-  const brutos = salidaReal.diff(salidaEsperada, 'minutes').minutes
+  // 🔴 Lo trabajado DESPUÉS del fin del turno, tramo por tramo y unidos. Antes se restaba
+  // «última salida − fin del turno», que regalaba el hueco entre dos checadas.
+  const trabajados: Array<[number, number]> = []
+  let ultimoFin = desde
+  for (const i of intervalos) {
+    if (!i.salida) continue // sigue adentro: no se puede probar
+    const a = DateTime.fromJSDate(i.entrada, { zone: timezone })
+    const b = DateTime.fromJSDate(i.salida, { zone: timezone })
+    if (!a.isValid || !b.isValid) continue
+    // Una checada MALFORMADA (salida antes de la entrada) se ignora. Pasa de verdad: un script
+    // dejó una así en la base durante el /full-testing y la rejilla la usó sin quejarse.
+    //
+    // ⚠️ Honestidad: esta línea es REDUNDANTE — el `fin > inicio` de abajo ya la descarta en
+    // todos los casos, y quitarla no rompe ninguna prueba (comprobado saboteándola). Se queda
+    // porque nombra la intención donde se lee, no porque sea la que protege.
+    if (b.toMillis() <= a.toMillis()) continue
+    const inicio = Math.max(a.toMillis(), desde)
+    const fin = b.toMillis()
+    if (fin > inicio) {
+      trabajados.push([inicio, fin])
+      if (fin > ultimoFin) ultimoFin = fin
+    }
+  }
+  const brutos = minutosDeLaUnion(trabajados)
   if (!(brutos > 0)) return 0
 
-  const enDescanso = minutosDeDescansoEnLaVentana(descansos, salidaEsperada, salidaReal, timezone)
+  // Los descansos se acotan a la misma ventana [fin del turno, última salida real].
+  const hasta = DateTime.fromMillis(ultimoFin, { zone: timezone })
+  const enDescanso = minutosDeDescansoEnLaVentana(descansos, salidaEsperada, hasta, timezone)
   return Math.max(0, Math.round(brutos - enDescanso))
 }
 
@@ -109,6 +149,24 @@ function instanteDeSalidaEsperada(turno: TurnoDelDia, timezone: string): DateTim
   const [h, m] = turno.expectedEnd!.split(':').map(Number)
   if (!Number.isFinite(h) || !Number.isFinite(m)) return null
 
+  // 🔴 HORARIO DE VERANO — política DECLARADA (hallazgo #8 de Codex, 29-ago-2026).
+  //
+  // En la noche en que el reloj se atrasa, una hora local ocurre DOS veces. Luxon resuelve la
+  // ambigüedad quedándose con la PRIMERA (el offset anterior), y eso es justo lo que aquí se
+  // quiere: es la ocurrencia que hace que el turno dure lo que dice el cuadrante. Un 22:00–01:30
+  // dura 3 h 30 m contractuales; la segunda 01:30 daría 4 h 30 m de reloj y regalaría una hora
+  // de extra que nadie pidió. Quien se queda hasta la segunda sí cobra esos 60 min, porque la
+  // comparación es contra un INSTANTE, no contra la hora de pared.
+  //
+  // Cuando el reloj se adelanta, la hora de pared no existió y Luxon normaliza hacia delante:
+  // se acepta, porque el turno terminó cuando el reloj saltó.
+  //
+  // No se reimplementa la elección: sería duplicar un comportamiento correcto de la librería.
+  // Lo que sí hay es `overtime.horarioDeVerano.test.ts`, que la FIJA — comprobado forzando la
+  // otra ocurrencia: dos pruebas fallan. Si una versión de Luxon cambiara el default, se ve.
+  //
+  // ⚠️ México dejó el horario de verano en 2022, pero Baja California lo conserva por su
+  // frontera con California: Tijuana y Mexicali tienen estas noches dos veces al año.
   const salida = dia.set({ hour: h, minute: m, second: 0, millisecond: 0 })
   return salida.isValid ? salida : null
 }
@@ -122,19 +180,49 @@ function instanteDeSalidaEsperada(turno: TurnoDelDia, timezone: string): DateTim
  * mejor que se note bajando la extra que que se pague en silencio.
  */
 function minutosDeDescansoEnLaVentana(descansos: DescansoDelDia[], desde: DateTime, hasta: DateTime, timezone: string): number {
-  let total = 0
+  // 🔴 Se recortan a la ventana y después se UNEN. Sumar cada descanso por su lado descuenta
+  // dos veces el tiempo compartido y paga de MENOS — hallazgo #7 de la auditoría de Codex
+  // (29-ago-2026), reproducido: dos descansos anidados de 60 y 30 min sobre 2 h de extra
+  // dejaban 30 min en vez de 60. Es la dirección que nadie reclama, porque el empleado no
+  // sabe que le faltan.
+  //
+  // Un descanso enteramente dentro de la jornada ordinaria da intersección vacía y desaparece
+  // aquí, que es lo que debe pasar.
+  const tramos: Array<[number, number]> = []
   for (const d of descansos) {
     const inicio = DateTime.fromJSDate(d.startTime, { zone: timezone })
     const fin = d.endTime ? DateTime.fromJSDate(d.endTime, { zone: timezone }) : hasta
     if (!inicio.isValid || !fin.isValid) continue
-
-    // Intersección con [desde, hasta]. Un descanso enteramente dentro de la jornada
-    // ordinaria da intersección vacía y no toca nada.
-    const desdeMs = Math.max(inicio.toMillis(), desde.toMillis())
-    const hastaMs = Math.min(fin.toMillis(), hasta.toMillis())
-    if (hastaMs > desdeMs) total += (hastaMs - desdeMs) / 60000
+    const a = Math.max(inicio.toMillis(), desde.toMillis())
+    const b = Math.min(fin.toMillis(), hasta.toMillis())
+    if (b > a) tramos.push([a, b])
   }
-  return total
+  return minutosDeLaUnion(tramos)
+}
+
+/**
+ * Suma la UNIÓN de una lista de tramos `[inicio, fin]` en milisegundos, devuelta en minutos.
+ *
+ * Ordena por inicio y fusiona lo que se toca o se solapa. Es la pieza que impide contar dos
+ * veces el mismo minuto.
+ */
+export function minutosDeLaUnion(tramos: Array<[number, number]>): number {
+  if (tramos.length === 0) return 0
+  const ordenados = [...tramos].sort((x, y) => x[0] - y[0])
+  let total = 0
+  let [inicio, fin] = ordenados[0]
+  for (let i = 1; i < ordenados.length; i++) {
+    const [a, b] = ordenados[i]
+    if (a <= fin) {
+      if (b > fin) fin = b
+    } else {
+      total += fin - inicio
+      inicio = a
+      fin = b
+    }
+  }
+  total += fin - inicio
+  return total / 60000
 }
 
 /** Un día del periodo con sus minutos extra ya calculados. */
@@ -178,7 +266,23 @@ export interface SemanaDeExtra {
  * horas que empujan la tarifa al triple. Marcarlo es preferible a entregar un número que se ve
  * exacto y no lo es.
  */
-export function agruparPorSemana(dias: DiaConExtra[], rango: { startDate: string; endDate: string }): SemanaDeExtra[] {
+export function agruparPorSemana(
+  dias: DiaConExtra[],
+  rango: { startDate: string; endDate: string },
+  /**
+   * Minutos ya acumulados en las MISMAS semanas, en días que quedan FUERA del rango pedido
+   * (`{ 'YYYY-MM-DD': minutos }`).
+   *
+   * 🔴 Sin esto, pedir sólo el domingo de una semana cuyo lunes ya llevaba 8 h autorizadas
+   * pagaba las 3 h del domingo al DOBLE, cuando legalmente 1 h iba al doble y 2 h al TRIPLE
+   * (hallazgo #2 de Codex, 29-ago-2026). El campo `parcial` avisaba del riesgo y el dinero
+   * salía mal igual: avisar no es resolver.
+   *
+   * Los días previos SÓLO mueven el umbral; nunca se re-reportan en los totales, que siguen
+   * siendo los atribuibles al rango pedido.
+   */
+  acumuladoPrevio: Record<string, number> = {},
+): SemanaDeExtra[] {
   const porSemana = new Map<string, DiaConExtra[]>()
 
   for (const dia of dias) {
@@ -192,6 +296,18 @@ export function agruparPorSemana(dias: DiaConExtra[], rango: { startDate: string
     else porSemana.set(lunes, [dia])
   }
 
+  // Los días de FUERA del rango se agrupan igual, pero sólo para mover el umbral.
+  const previoPorSemana = new Map<string, DiaConExtra[]>()
+  for (const [date, minutos] of Object.entries(acumuladoPrevio)) {
+    if (!(minutos > 0)) continue
+    const d = DateTime.fromISO(date, { zone: 'utc' })
+    if (!d.isValid) continue
+    const lunes = d.startOf('week').toISODate()!
+    const lista = previoPorSemana.get(lunes)
+    if (lista) lista.push({ date, minutos })
+    else previoPorSemana.set(lunes, [{ date, minutos }])
+  }
+
   const desdeRango = DateTime.fromISO(rango.startDate, { zone: 'utc' })
   const hastaRango = DateTime.fromISO(rango.endDate, { zone: 'utc' })
 
@@ -201,7 +317,16 @@ export function agruparPorSemana(dias: DiaConExtra[], rango: { startDate: string
       const lunes = DateTime.fromISO(weekStart, { zone: 'utc' })
       const domingo = lunes.plus({ days: 6 })
       const minutosTotal = deLaSemana.reduce((s, d) => s + d.minutos, 0)
-      const { minutosDobles, minutosTriples } = repartirDobleYTriple(minutosTotal)
+      const previos = previoPorSemana.get(weekStart) ?? []
+      const minutosPrevios = previos.reduce((s, d) => s + d.minutos, 0)
+
+      // El reparto se calcula sobre el acumulado COMPLETO de la semana y luego se le resta la
+      // parte de los días de fuera: así el umbral de 9 h cae donde la ley lo pone, pero lo
+      // devuelto sigue siendo lo atribuible al rango pedido.
+      const conPrevios = repartirDobleYTriple(minutosPrevios + minutosTotal)
+      const soloPrevios = repartirDobleYTriple(minutosPrevios)
+      const minutosDobles = conPrevios.minutosDobles - soloPrevios.minutosDobles
+      const minutosTriples = conPrevios.minutosTriples - soloPrevios.minutosTriples
 
       return {
         weekStart,
@@ -209,12 +334,14 @@ export function agruparPorSemana(dias: DiaConExtra[], rango: { startDate: string
         minutosTotal,
         minutosDobles,
         minutosTriples,
-        diasSobreTopeDiario: deLaSemana
+        // La INFRACCIÓN del art. 66 mira la semana entera, días de fuera incluidos: la ley se
+        // rompió aunque el rango consultado no los enseñe.
+        diasSobreTopeDiario: [...previos, ...deLaSemana]
           .filter(d => d.minutos > TOPE_DIARIO_MINUTOS)
           .map(d => d.date)
           .sort(),
-        diasConExtra: deLaSemana.length,
-        excedeDiasPermitidos: deLaSemana.length > 3,
+        diasConExtra: previos.length + deLaSemana.length,
+        excedeDiasPermitidos: previos.length + deLaSemana.length > 3,
         parcial: !desdeRango.isValid || !hastaRango.isValid || desdeRango > lunes || hastaRango < domingo,
       }
     })
@@ -237,6 +364,15 @@ export interface DiaAutorizado {
   autorizados: number | null
   /** Lo que se medía cuando se autorizó. Si ya no coincide, la checada cambió después. */
   medidosAlAutorizar: number | null
+  /**
+   * Huella de la jornada TAL COMO ESTÁ HOY. `null` si no se pudo calcular.
+   *
+   * 🔴 Versionar el total no basta: el mismo número puede venir de checadas distintas, y la
+   * autorización vieja revivía sin que nadie la mirara (hallazgo #4 de Codex).
+   */
+  huellaActual?: string | null
+  /** Huella de la jornada que se firmó. `null` en filas anteriores a este campo. */
+  huellaAlAutorizar?: string | null
 }
 
 export interface ResumenDeAutorizacion {
@@ -281,6 +417,17 @@ export function resumirAutorizacion(dias: DiaAutorizado[]): ResumenDeAutorizacio
       continue
     }
 
+    // 🔴 Si la JORNADA cambió, la autorización no vale aunque el total coincida: quien firmó
+    // no vio estas checadas. Y una fila SIN huella (anterior a la columna) se trata igual —
+    // el lado seguro es volver a pedirla, no pagarla a ciegas.
+    const huellasCoinciden =
+      dia.huellaAlAutorizar != null && dia.huellaActual != null && dia.huellaAlAutorizar === dia.huellaActual
+    if (!huellasCoinciden) {
+      minutosPendientes += medidos
+      porRevisar.push(dia.date)
+      continue
+    }
+
     // Nunca se paga más de lo que el reloj marca hoy.
     const autorizados = Math.min(Math.max(0, dia.autorizados), medidos)
     minutosAutorizados += autorizados
@@ -290,11 +437,20 @@ export function resumirAutorizacion(dias: DiaAutorizado[]): ResumenDeAutorizacio
 
     const resto = medidos - autorizados
     if (resto <= 0) continue
-    // Si la checada creció después de autorizar, lo NUEVO está sin revisar; si no, es que se
-    // revisó y se negó.
-    const creció = dia.medidosAlAutorizar !== null && medidos > dia.medidosAlAutorizar
-    if (creció) minutosPendientes += resto
-    else minutosNegados += resto
+
+    // 🔴 Cuando la checada CRECE después de autorizar, el resto se parte en DOS: lo que ya se
+    // revisó y se negó sigue negado, y sólo el crecimiento sobre el retrato está sin revisar.
+    // Antes se mandaba el resto ENTERO a pendiente: con 60 medidos → 30 autorizados (⇒ 30
+    // negados), subir a 120 devolvía 30 autorizados y 90 pendientes, y la decisión de negar
+    // esos 30 se evaporaba como si nadie los hubiera mirado (hallazgo #5 de Codex, 29-ago).
+    const retrato = dia.medidosAlAutorizar
+    if (retrato !== null && medidos > retrato) {
+      const negadoEntonces = Math.max(0, Math.min(retrato, medidos) - autorizados)
+      minutosNegados += negadoEntonces
+      minutosPendientes += resto - negadoEntonces
+    } else {
+      minutosNegados += resto
+    }
   }
 
   return {
@@ -320,4 +476,37 @@ export function diasAutorizadosParaReparto(dias: DiaAutorizado[]): DiaConExtra[]
     if (minutos > 0) salida.push({ date: dia.date, minutos })
   }
   return salida
+}
+
+// ─── La huella de la jornada (hallazgo #4 de Codex) ───────────────────────────────────────
+
+/**
+ * Identifica la JORNADA que produjo unos minutos extra: los tramos trabajados, los descansos
+ * y el cuadrante de ese día.
+ *
+ * 🔴 Existe porque versionar el NÚMERO no basta. Una autorización se daba por vigente cuando
+ * `minutesMeasured` volvía a coincidir, y eso deja un hueco: se autorizan 60 min, una
+ * corrección los baja a 0, y una corrección posterior vuelve a producir 60 min con checadas
+ * COMPLETAMENTE distintas. La autorización vieja revivía sin que nadie la mirara.
+ *
+ * No es criptografía: es un identificador estable y corto para saber si lo que hay hoy es lo
+ * mismo que alguien firmó. Se ordena antes de mezclar para que el orden en que Prisma
+ * devuelva las filas no cambie la huella.
+ */
+export function huellaDeLaJornada(input: {
+  turno: TurnoDelDia
+  intervalos: IntervaloTrabajado[]
+  descansos: DescansoDelDia[]
+}): string {
+  const tramos = input.intervalos
+    .map(i => `${i.entrada.getTime()}-${i.salida ? i.salida.getTime() : 'abierto'}`)
+    .sort()
+  const pausas = input.descansos
+    .map(d => `${d.startTime.getTime()}-${d.endTime ? d.endTime.getTime() : 'abierto'}`)
+    .sort()
+  // El cuadrante entra porque mover la hora de salida cambia cuántos minutos son extra: la
+  // decisión firmada deja de aplicar aunque las checadas no se hayan tocado.
+  const cuadrante = `${input.turno.date}|${input.turno.expectedStart ?? '-'}|${input.turno.expectedEnd ?? '-'}`
+
+  return createHash('sha256').update(`${cuadrante}#${tramos.join(',')}#${pausas.join(',')}`).digest('hex').slice(0, 32)
 }

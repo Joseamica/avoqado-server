@@ -13,6 +13,7 @@ import { DateTime } from 'luxon'
 import { getPayrollSummary } from '../src/services/dashboard/attendancePayroll.service'
 import { approveOvertime } from '../src/services/dashboard/overtimeApproval.service'
 import prisma from '../src/utils/prismaClient'
+import { exigirBaseLocal } from './_solo-base-local'
 
 const VENUE = 'cmpe64yq2001f9k92m0lbhmf4' // Restaurante El Atole, America/Mexico_City
 const STAFF = 'cmpe64zia001y9k92i4aaw1f4' // Ana Martínez
@@ -48,6 +49,10 @@ async function anaDelPeriodo() {
 }
 
 async function main() {
+  // 🔴 Este script BORRA autorizaciones y SOBRESCRIBE cuadrantes. Contra una base que no
+  // sea la local, eso destruye datos reales (hallazgo #9 de Codex, 29-ago-2026).
+  exigirBaseLocal()
+
   const cuadranteAntes = await prisma.staffWorkSchedule.findUnique({
     where: { staffVenueId: MEMBRESIA },
     select: { weekly: true },
