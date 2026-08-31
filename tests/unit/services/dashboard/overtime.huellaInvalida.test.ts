@@ -63,12 +63,17 @@ describe('la huella invalida una autorización que ya no corresponde', () => {
     expect(r.diasPorRevisar).toEqual([])
   })
 
-  it('regresión: sin huellas en juego, todo se comporta como antes', () => {
+  it('regresión: con la jornada intacta, lo autorizado se paga y el resto queda NEGADO', () => {
+    // 🔴 Antes este caso pasaba `medidosAlAutorizar: 60` contra `medidos: 120` con la MISMA
+    // huella, y esperaba que 60 minutos quedaran «pendientes». Ese estado es imposible: si la
+    // huella coincide, la jornada es la misma y lo medido no pudo cambiar. Lo que se prueba
+    // ahora es lo que sí ocurre — el resto lo negó quien firmó esta misma jornada.
     const r = resumirAutorizacion([
-      { date: '2026-08-24', medidos: 120, autorizados: 30, medidosAlAutorizar: 60, huellaActual: 'h', huellaAlAutorizar: 'h' },
+      { date: '2026-08-24', medidos: 120, autorizados: 30, medidosAlAutorizar: 120, huellaActual: 'h', huellaAlAutorizar: 'h' },
     ])
     expect(r.minutosAutorizados).toBe(30)
-    expect(r.minutosNegados).toBe(30)
-    expect(r.minutosPendientes).toBe(60)
+    expect(r.minutosNegados).toBe(90)
+    expect(r.minutosPendientes).toBe(0)
+    expect(r.diasPorRevisar).toEqual([])
   })
 })

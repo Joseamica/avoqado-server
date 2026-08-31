@@ -41,7 +41,7 @@ function celda(over: Partial<any> = {}): any {
   }
 }
 
-/** Una autorización ya guardada. `medidosAlAutorizar` por default = lo autorizado. */
+/** Una autorización ya guardada sobre la MISMA jornada que la celda (huella `h`). */
 function autorizacion(date: string, minutesApproved: number, minutesMeasured?: number, staffVenueId = 'sv1') {
   return {
     staffVenueId,
@@ -50,6 +50,15 @@ function autorizacion(date: string, minutesApproved: number, minutesMeasured?: n
     minutesMeasured: minutesMeasured ?? minutesApproved,
     sourceFingerprint: 'h', // la misma jornada que la celda: sin cambios
   }
+}
+
+/**
+ * Una autorización firmada sobre una jornada que YA NO EXISTE — alguien editó la checada
+ * después. Es la única forma en que lo medido puede diferir de lo firmado: cualquier cambio
+ * de tramos, descansos, cuadrante o zona mueve la huella.
+ */
+function autorizacionSobreJornadaVieja(date: string, minutesApproved: number, minutesMeasured: number, staffVenueId = 'sv1') {
+  return { staffVenueId, date, minutesApproved, minutesMeasured, sourceFingerprint: 'jornada-vieja' }
 }
 
 function conCeldas(cells: any[], autorizadas: any[] = []) {
@@ -150,18 +159,33 @@ describe('getPayrollSummary — reparto sobre lo AUTORIZADO', () => {
 })
 
 describe('la checada cambió después de autorizar', () => {
-  it('🔴 el excedente NO hereda la autorización: editar una salida no se autoriza a sí mismo', async () => {
-    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 240 })], [autorizacion('2026-08-24', 120, 120)])
+  it('🔴 editar la salida INVALIDA la firma entera: nada se hereda y nada se paga', async () => {
+    // Firmaron 120 sobre 120 medidos; después alguien editó la salida y hoy son 240. Quien
+    // firmó no vio ESTA jornada, así que su decisión no vale ni para los 120 originales.
+    conCeldas(
+      [celda({ date: '2026-08-24', overtimeMinutes: 240 })],
+      [autorizacionSobreJornadaVieja('2026-08-24', 120, 120)],
+    )
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    expect(rows[0].overtimeApprovedMinutes).toBe(120)
-    expect(rows[0].overtimePendingMinutes).toBe(120)
+    expect(rows[0].overtimeApprovedMinutes).toBe(0)
+    expect(rows[0].overtimePendingMinutes).toBe(240)
     expect(rows[0].overtimeDaysToReview).toEqual(['2026-08-24'])
+    // 🔴 Y lo que de verdad cuesta dinero: no puede pagarse lo que se declara no autorizado.
+    expect(rows[0].overtimeDoubleMinutes).toBe(0)
+    expect(rows[0].overtimeTripleMinutes).toBe(0)
   })
 
-  it('si ahora se mide MENOS, no se paga más de lo trabajado', async () => {
-    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 60 })], [autorizacion('2026-08-24', 240, 240)])
+  it('si ahora se mide MENOS, tampoco se paga: la jornada cambió y se vuelve a revisar', async () => {
+    // Firmaron 240; luego la salida se corrigió a 60. Ni 240 (sería pagar aire) ni 60 (nadie
+    // firmó esa hora): 60 pendientes, cero pagados.
+    conCeldas(
+      [celda({ date: '2026-08-24', overtimeMinutes: 60 })],
+      [autorizacionSobreJornadaVieja('2026-08-24', 240, 240)],
+    )
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    expect(rows[0].overtimeApprovedMinutes).toBe(60)
+    expect(rows[0].overtimeApprovedMinutes).toBe(0)
+    expect(rows[0].overtimePendingMinutes).toBe(60)
+    expect(rows[0].overtimeDoubleMinutes).toBe(0)
     expect(rows[0].overtimeDaysToReview).toEqual(['2026-08-24'])
   })
 })

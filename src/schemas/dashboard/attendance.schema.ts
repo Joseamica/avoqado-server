@@ -67,6 +67,12 @@ export const ApproveOvertimeSchema = z.object({
     // 🔴 La revisión de la autorización que se tenía ENFRENTE. Obligatoria para CORREGIR
     // una que ya existe: sin ella, dos gerentes se pisan y gana el último (hallazgo #3).
     expectedUpdatedAt: z.string().datetime({ message: 'La revisión debe ser una fecha ISO' }).optional(),
+    // La jornada que el gerente tenía enfrente. Sin ella la firma se estampa sobre lo que
+    // haya al llegar, que puede no ser lo que revisó.
+    expectedSourceFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{32}$/, 'La huella de la jornada no tiene el formato esperado')
+      .optional(),
   }),
 })
 

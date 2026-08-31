@@ -17,7 +17,14 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { getCurrentlyClockedInStaff, getTimeEntries } from '../tpv/time-entry.tpv.service'
 import { evaluateAttendance, type AttendanceStatus } from './attendanceEvaluator'
-import { type DescansoDelDia, huellaDeLaJornada, type IntervaloTrabajado, minutosExtraDelDia } from './overtime'
+import {
+  type DescansoDelDia,
+  estadoDeAutorizacion,
+  huellaDeLaJornada,
+  type IntervaloTrabajado,
+  minutosAutorizadosEfectivos,
+  minutosExtraDelDia,
+} from './overtime'
 import { type ExpectedDay, resolveExpectedDay, type WeeklyWorkSchedule, type WorkScheduleException } from './workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
 
@@ -375,15 +382,40 @@ export async function buildAttendanceGrid(
         // si no, el hueco entre «salí a las 17:00» y «volví a las 18:00» se paga como
         // trabajado (hallazgo #1 de Codex, el más caro de los nueve).
         const intervalos: IntervaloTrabajado[] = [{ entrada: picked.clockInTime, salida: picked.clockOutTime }]
+        const tomarContinuacion = (sib: DayEntry) => {
+          consumed.add(sib)
+          clockOutTime = sib.clockOutTime ?? clockOutTime
+          intervalos.push({ entrada: sib.clockInTime, salida: sib.clockOutTime })
+          // Los descansos de la continuación son suyos igual: uno tomado después de
+          // reingresar cae dentro de la misma jornada y no puede pagarse como hora extra.
+          breaks.push(...sib.breaks)
+        }
+
         if (pickedDate === date) {
           for (const sib of byStaffAndDay.get(`${membership.staffId}|${pickedDate}`) ?? []) {
             if (sib === picked || consumed.has(sib) || sib.localTime <= picked.localTime) continue
-            consumed.add(sib)
-            clockOutTime = sib.clockOutTime ?? clockOutTime
-            intervalos.push({ entrada: sib.clockInTime, salida: sib.clockOutTime })
-            // Los descansos de la continuación son suyos igual: uno tomado después de
-            // reingresar cae dentro de la misma jornada y no puede pagarse como hora extra.
-            breaks.push(...sib.breaks)
+            tomarContinuacion(sib)
+          }
+        }
+
+        // 🔴 TURNO NOCTURNO: la continuación cae en el cubo del día SIGUIENTE, así que la
+        // búsqueda por `pickedDate` no la veía nunca. Con 22:00→06:00, alguien que sale a las
+        // 02:00 y vuelve a checar a las 02:30 hasta las 07:30 perdía sus 90 minutos de extra:
+        // ese segundo tramo vive en el 25, no en el 24 (2ª auditoría de Codex, 30-ago, P1 #4).
+        //
+        // El tope es el MISMO que usa `pickEntryForDay` para no robarle su checada al turno
+        // del día siguiente: sólo cuenta lo que empieza ANTES de la hora de salida.
+        // ⚠️ Consecuencia declarada: un reingreso que empieza DESPUÉS del fin del turno no se
+        // le atribuye. Es el lado conservador —se paga de menos antes que quitarle su jornada
+        // a otro día—, y a esa distancia la pertenencia es genuinamente ambigua.
+        const overnight = !!expected.start && !!expected.end && expected.end <= expected.start
+        if (overnight) {
+          const nextDate = DateTime.fromISO(date, { zone: timezone }).plus({ days: 1 }).toISODate()!
+          for (const sib of byStaffAndDay.get(`${membership.staffId}|${nextDate}`) ?? []) {
+            if (sib === picked || consumed.has(sib)) continue
+            if (sib.clockInTime.getTime() <= picked.clockInTime.getTime()) continue
+            if (sib.localTime >= expected.end!) continue
+            tomarContinuacion(sib)
           }
         }
         actual = { clockInTime: picked.clockInTime, clockOutTime, breaks, intervalos }
@@ -419,7 +451,7 @@ export async function buildAttendanceGrid(
       // sirve de nada y cuesta un hash por celda.
       const overtimeFingerprint =
         overtimeMinutes > 0
-          ? huellaDeLaJornada({ turno: turnoDelDia, intervalos: actual?.intervalos ?? [], descansos: actual?.breaks ?? [] })
+          ? huellaDeLaJornada({ turno: turnoDelDia, intervalos: actual?.intervalos ?? [], descansos: actual?.breaks ?? [], timezone })
           : null
 
       rows.push({
@@ -494,13 +526,24 @@ export async function getAttendanceReport(
         r.overtimeApprovedMinutes = null
         continue
       }
-      const huellaCoincide =
-        a.sourceFingerprint != null && r.overtimeFingerprint != null && a.sourceFingerprint === r.overtimeFingerprint
-      r.overtimeApprovedMinutes = huellaCoincide
-        ? Math.min(Math.max(0, a.minutesApproved), r.overtimeMinutes)
-        : // La jornada cambió: la firma vieja no dice nada de lo que hay hoy, así que el día
-          // vuelve a «sin revisar» — que es lo que nómina también hace.
-          null
+      // 🔴 Y se decide con la MISMA función que usan el resumen y el reparto doble/triple, no
+      // con una copia de la regla. Ésta era la TERCERA copia: cuando el reparto se quedó sin
+      // la comprobación de huella, una fila llegó a decir «0 autorizados / 120 pendientes» y
+      // pagar 120 al doble a la vez (2ª auditoría de Codex, 30-ago-2026, P1 #1).
+      const dia = {
+        date: r.date,
+        medidos: r.overtimeMinutes,
+        autorizados: a.minutesApproved,
+        medidosAlAutorizar: a.minutesMeasured,
+        huellaActual: r.overtimeFingerprint,
+        huellaAlAutorizar: a.sourceFingerprint,
+      }
+      r.overtimeApprovedMinutes =
+        estadoDeAutorizacion(dia) === 'VIGENTE'
+          ? minutosAutorizadosEfectivos(dia)
+          : // La jornada cambió: la firma vieja no dice nada de lo que hay hoy, así que el día
+            // vuelve a «sin revisar» — que es lo que nómina también hace.
+            null
     }
   }
 

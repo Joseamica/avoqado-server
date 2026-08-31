@@ -2,7 +2,14 @@ import { buildAttendanceGrid } from './attendance.dashboard.service'
 import prisma from '../../utils/prismaClient'
 import { DateTime } from 'luxon'
 
-import { agruparPorSemana, diasAutorizadosParaReparto, resumirAutorizacion, type DiaAutorizado, type SemanaDeExtra } from './overtime'
+import {
+  agruparPorSemana,
+  diasAutorizadosParaReparto,
+  minutosAutorizadosEfectivos,
+  resumirAutorizacion,
+  type DiaAutorizado,
+  type SemanaDeExtra,
+} from './overtime'
 
 /**
  * Fase 3 del checador — el puente a nómina.
@@ -173,13 +180,25 @@ export async function getPayrollSummary(
         staffVenueId: { in: [...new Set(previasConExtra.map(c => c.staffVenueId))] },
         date: { gte: lunesDeLaPrimeraSemana, lt: startDate },
       },
-      select: { staffVenueId: true, date: true, minutesApproved: true, minutesMeasured: true },
+      // 🔴 La HUELLA va en el select. Sin ella, una autorización previa cuya jornada ya cambió
+      // seguía consumiendo el umbral semanal de 9 h y empujaba las horas de ESTA semana a
+      // pago TRIPLE — dinero de más, por una firma que el propio sistema declara inválida
+      // dos pantallas más allá (2ª auditoría de Codex, 30-ago-2026, P1 #1).
+      select: { staffVenueId: true, date: true, minutesApproved: true, minutesMeasured: true, sourceFingerprint: true },
     })
     const porDia = new Map(autorizadasPrevias.map(a => [`${a.staffVenueId}|${a.date}`, a]))
     for (const c of previasConExtra) {
       const a = porDia.get(`${c.staffVenueId}|${c.date}`)
       if (!a) continue // sin revisar: no se paga, así que no consume umbral
-      const autorizado = Math.min(Math.max(0, a.minutesApproved), c.overtimeMinutes)
+      // La MISMA función que decide lo que se paga: lo que no se paga no puede consumir umbral.
+      const autorizado = minutosAutorizadosEfectivos({
+        date: c.date,
+        medidos: c.overtimeMinutes,
+        autorizados: a.minutesApproved,
+        medidosAlAutorizar: a.minutesMeasured,
+        huellaActual: c.overtimeFingerprint,
+        huellaAlAutorizar: a.sourceFingerprint,
+      })
       if (autorizado <= 0) continue
       const mapa = previoAutorizado.get(c.staffVenueId) ?? {}
       mapa[c.date] = autorizado

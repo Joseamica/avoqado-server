@@ -416,6 +416,44 @@ export interface ResumenDeAutorizacion {
  *
  * En las dos, el día queda marcado en `diasPorRevisar` para que alguien lo mire de nuevo.
  */
+/**
+ * En qué situación está la firma de un día. Tres estados, y sólo tres.
+ *
+ * 🔑 `INVALIDADA` cubre TODO cambio de la jornada, porque la huella cubre todo lo que mueve el
+ * número: tramos, descansos, cuadrante y zona. Por eso ya **no** existe aritmética de «deriva»
+ * (comparar lo medido hoy contra el retrato al firmar): con la huella igual son forzosamente
+ * iguales, y con la huella distinta la firma entera deja de valer. Esa aritmética era código
+ * muerto y su prueba fabricaba un estado imposible —misma huella, distinto medido— que no puede
+ * salir de ninguna edición real (2ª auditoría de Codex, 30-ago-2026, P1 #2).
+ */
+export type EstadoDeAutorizacion = 'SIN_REVISAR' | 'VIGENTE' | 'INVALIDADA'
+
+export function estadoDeAutorizacion(dia: DiaAutorizado): EstadoDeAutorizacion {
+  if (dia.autorizados === null) return 'SIN_REVISAR'
+  // Una fila SIN huella (anterior a la columna) se trata como invalidada: el lado seguro es
+  // volver a pedir la firma, no pagar a ciegas.
+  const huellasCoinciden =
+    dia.huellaAlAutorizar != null && dia.huellaActual != null && dia.huellaAlAutorizar === dia.huellaActual
+  return huellasCoinciden ? 'VIGENTE' : 'INVALIDADA'
+}
+
+/**
+ * Los minutos de un día que de verdad se pagan. **La única función que decide eso.**
+ *
+ * 🔴 Existe porque la regla vivía DUPLICADA y las dos copias se desincronizaron: el resumen
+ * invalidaba por huella y el reparto doble/triple no, así que una misma fila de nómina podía
+ * afirmar a la vez «0 autorizados, 120 pendientes» y **pagar 120 al doble** (2ª auditoría de
+ * Codex, 30-ago-2026, P1 #1 — reproducido antes de arreglarlo).
+ *
+ * Dos condiciones, y las dos tienen que cumplirse:
+ *   · la jornada es la MISMA que se firmó (huellas no nulas e iguales);
+ *   · nunca más de lo que el reloj mide hoy.
+ */
+export function minutosAutorizadosEfectivos(dia: DiaAutorizado): number {
+  if (estadoDeAutorizacion(dia) !== 'VIGENTE') return 0
+  return Math.min(Math.max(0, dia.autorizados ?? 0), Math.max(0, dia.medidos))
+}
+
 export function resumirAutorizacion(dias: DiaAutorizado[]): ResumenDeAutorizacion {
   let minutosMedidos = 0
   let minutosAutorizados = 0
@@ -428,46 +466,31 @@ export function resumirAutorizacion(dias: DiaAutorizado[]): ResumenDeAutorizacio
     minutosMedidos += medidos
     if (medidos === 0) continue
 
-    if (dia.autorizados === null) {
+    const estado = estadoDeAutorizacion(dia)
+
+    if (estado === 'SIN_REVISAR') {
       // Nadie lo ha mirado.
       minutosPendientes += medidos
       continue
     }
 
-    // 🔴 Si la JORNADA cambió, la autorización no vale aunque el total coincida: quien firmó
-    // no vio estas checadas. Y una fila SIN huella (anterior a la columna) se trata igual —
-    // el lado seguro es volver a pedirla, no pagarla a ciegas.
-    const huellasCoinciden =
-      dia.huellaAlAutorizar != null && dia.huellaActual != null && dia.huellaAlAutorizar === dia.huellaActual
-    if (!huellasCoinciden) {
+    if (estado === 'INVALIDADA') {
+      // 🔴 La jornada cambió: quien firmó no vio ESTAS checadas, así que su decisión no vale
+      // aunque el total coincida. Todo vuelve a pendiente y el día se reporta para revisión —
+      // nunca se descarta en silencio.
       minutosPendientes += medidos
       porRevisar.push(dia.date)
       continue
     }
 
-    // Nunca se paga más de lo que el reloj marca hoy.
-    const autorizados = Math.min(Math.max(0, dia.autorizados), medidos)
+    // VIGENTE: la MISMA función que alimenta el reparto doble/triple. Si divergieran, la fila
+    // podría decir «0 autorizados» y pagar al doble a la vez.
+    const autorizados = minutosAutorizadosEfectivos(dia)
     minutosAutorizados += autorizados
 
-    const cambio = dia.medidosAlAutorizar !== null && dia.medidosAlAutorizar !== medidos
-    if (cambio) porRevisar.push(dia.date)
-
-    const resto = medidos - autorizados
-    if (resto <= 0) continue
-
-    // 🔴 Cuando la checada CRECE después de autorizar, el resto se parte en DOS: lo que ya se
-    // revisó y se negó sigue negado, y sólo el crecimiento sobre el retrato está sin revisar.
-    // Antes se mandaba el resto ENTERO a pendiente: con 60 medidos → 30 autorizados (⇒ 30
-    // negados), subir a 120 devolvía 30 autorizados y 90 pendientes, y la decisión de negar
-    // esos 30 se evaporaba como si nadie los hubiera mirado (hallazgo #5 de Codex, 29-ago).
-    const retrato = dia.medidosAlAutorizar
-    if (retrato !== null && medidos > retrato) {
-      const negadoEntonces = Math.max(0, Math.min(retrato, medidos) - autorizados)
-      minutosNegados += negadoEntonces
-      minutosPendientes += resto - negadoEntonces
-    } else {
-      minutosNegados += resto
-    }
+    // El resto lo negó quien firmó ESTA misma jornada — no hace falta compararlo contra ningún
+    // retrato, porque la huella ya garantiza que la jornada no se movió.
+    minutosNegados += medidos - autorizados
   }
 
   return {
@@ -488,8 +511,9 @@ export function resumirAutorizacion(dias: DiaAutorizado[]): ResumenDeAutorizacio
 export function diasAutorizadosParaReparto(dias: DiaAutorizado[]): DiaConExtra[] {
   const salida: DiaConExtra[] = []
   for (const dia of dias) {
-    if (dia.autorizados === null) continue
-    const minutos = Math.min(Math.max(0, dia.autorizados), Math.max(0, dia.medidos))
+    // 🔴 La MISMA función que usa el resumen. Tenía su propia copia de la regla y no
+    // comprobaba la huella: por eso se podía decir «0 autorizados» y pagar 120 al doble.
+    const minutos = minutosAutorizadosEfectivos(dia)
     if (minutos > 0) salida.push({ date: dia.date, minutos })
   }
   return salida
@@ -514,6 +538,7 @@ export function huellaDeLaJornada(input: {
   turno: TurnoDelDia
   intervalos: IntervaloTrabajado[]
   descansos: DescansoDelDia[]
+  timezone: string
 }): string {
   const tramos = input.intervalos
     .map(i => `${i.entrada.getTime()}-${i.salida ? i.salida.getTime() : 'abierto'}`)
@@ -524,6 +549,13 @@ export function huellaDeLaJornada(input: {
   // El cuadrante entra porque mover la hora de salida cambia cuántos minutos son extra: la
   // decisión firmada deja de aplicar aunque las checadas no se hayan tocado.
   const cuadrante = `${input.turno.date}|${input.turno.expectedStart ?? '-'}|${input.turno.expectedEnd ?? '-'}`
+  // 🔴 La ZONA va dentro: el cuadrante se escribe en hora del negocio y las checadas en UTC,
+  // así que mover el venue de zona cambia cuántos minutos son extra **sin tocar un solo dato**.
+  // Sin ella la huella seguía coincidiendo y la firma vieja se daba por válida sobre un número
+  // nuevo (2ª auditoría de Codex, 30-ago-2026, P1 #5).
 
-  return createHash('sha256').update(`${cuadrante}#${tramos.join(',')}#${pausas.join(',')}`).digest('hex').slice(0, 32)
+  return createHash('sha256')
+    .update(`${input.timezone}#${cuadrante}#${tramos.join(',')}#${pausas.join(',')}`)
+    .digest('hex')
+    .slice(0, 32)
 }

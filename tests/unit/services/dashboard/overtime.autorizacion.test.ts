@@ -28,6 +28,17 @@ function revisado(date: string, medidos: number, autorizados: number, alAutoriza
   return { date, medidos, autorizados, medidosAlAutorizar: alAutorizar, huellaActual: 'h', huellaAlAutorizar: 'h' }
 }
 
+/**
+ * Un día ya revisado **cuya jornada se editó después**. Es el ÚNICO modo en que lo medido
+ * puede diferir de lo que se firmó: tocar checadas, descansos, cuadrante o zona cambia la
+ * huella. Antes estos casos se escribían con la misma huella y distinto medido — un estado
+ * que ninguna edición real produce, y por eso las pruebas «pasaban» comprobando aritmética
+ * que nunca se ejecuta (2ª auditoría de Codex, 30-ago-2026, P1 #2).
+ */
+function editadoDespues(date: string, medidosAhora: number, autorizados: number, alAutorizar: number): DiaAutorizado {
+  return { date, medidos: medidosAhora, autorizados, medidosAlAutorizar: alAutorizar, huellaActual: 'nueva', huellaAlAutorizar: 'vieja' }
+}
+
 describe('resumirAutorizacion', () => {
   it('lo autorizado y lo medido se reportan por separado', () => {
     const r = resumirAutorizacion([revisado('2026-08-24', 120, 120)])
@@ -79,25 +90,32 @@ describe('resumirAutorizacion', () => {
   })
 
   describe('🔴 la checada cambió DESPUÉS de autorizar', () => {
-    it('si ahora se midió MÁS, el excedente queda PENDIENTE — no autorizado de rebote', () => {
+    it('si ahora se midió MÁS, NADA se hereda: la firma entera deja de valer', () => {
       // Autorizaron 2 h sobre 2 h medidas; luego alguien editó la salida y hoy son 4 h.
-      // Las 2 h nuevas nadie las miró: no pueden colarse como autorizadas.
-      const r = resumirAutorizacion([revisado('2026-08-24', 240, 120, 120)])
-      expect(r.minutosAutorizados).toBe(120)
-      expect(r.minutosPendientes).toBe(120)
+      // Quien firmó no vio ESTA jornada, así que su decisión no vale para ninguna parte:
+      // las 4 h vuelven a pendiente y el día se reporta.
+      const r = resumirAutorizacion([editadoDespues('2026-08-24', 240, 120, 120)])
+      expect(r.minutosAutorizados).toBe(0)
+      expect(r.minutosPendientes).toBe(240)
+      expect(r.minutosNegados).toBe(0)
       expect(r.diasPorRevisar).toEqual(['2026-08-24'])
     })
 
-    it('si ahora se midió MENOS, no se paga más de lo trabajado', () => {
-      // Autorizaron 4 h; luego la salida se corrigió a 1 h. Pagar 4 sería pagar aire.
-      const r = resumirAutorizacion([revisado('2026-08-24', 60, 240, 240)])
-      expect(r.minutosAutorizados).toBe(60)
+    it('si ahora se midió MENOS, tampoco se paga: se vuelve a revisar', () => {
+      // Autorizaron 4 h; luego la salida se corrigió a 1 h. Ni 4 (sería pagar aire) ni 1
+      // (nadie firmó ESA hora): 1 h pendiente.
+      const r = resumirAutorizacion([editadoDespues('2026-08-24', 60, 240, 240)])
+      expect(r.minutosAutorizados).toBe(0)
+      expect(r.minutosPendientes).toBe(60)
       expect(r.diasPorRevisar).toEqual(['2026-08-24'])
     })
 
-    it('sin cambio no se marca nada por revisar', () => {
+    it('sin cambio no se marca nada por revisar, y lo no autorizado queda NEGADO', () => {
       const r = resumirAutorizacion([revisado('2026-08-24', 120, 60, 120)])
       expect(r.diasPorRevisar).toEqual([])
+      expect(r.minutosAutorizados).toBe(60)
+      expect(r.minutosNegados).toBe(60)
+      expect(r.minutosPendientes).toBe(0)
     })
   })
 
@@ -123,7 +141,7 @@ describe('resumirAutorizacion', () => {
   })
 
   it('los días por revisar salen ordenados', () => {
-    const r = resumirAutorizacion([revisado('2026-08-26', 240, 120, 120), revisado('2026-08-24', 240, 120, 120)])
+    const r = resumirAutorizacion([editadoDespues('2026-08-26', 240, 120, 120), editadoDespues('2026-08-24', 240, 120, 120)])
     expect(r.diasPorRevisar).toEqual(['2026-08-24', '2026-08-26'])
   })
 })

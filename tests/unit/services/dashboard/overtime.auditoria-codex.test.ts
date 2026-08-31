@@ -7,7 +7,14 @@
  * NO se me ocurrió: dos descansos que se solapan, una decisión previa de negar, un rango que
  * empieza a media semana.
  */
-import { minutosExtraDelDia, resumirAutorizacion, agruparPorSemana, type DescansoDelDia } from '@/services/dashboard/overtime'
+import {
+  agruparPorSemana,
+  diasAutorizadosParaReparto,
+  huellaDeLaJornada,
+  minutosExtraDelDia,
+  resumirAutorizacion,
+  type DescansoDelDia,
+} from '@/services/dashboard/overtime'
 
 const TZ = 'America/Mexico_City'
 const enMexico = (f: string, h: string) => new Date(`${f}T${h}:00.000-06:00`)
@@ -77,49 +84,74 @@ describe('P1 #7 · descansos que se SOLAPAN no se descuentan dos veces', () => {
   })
 })
 
-describe('P1 #5 · la decisión de NEGAR sobrevive al crecer lo medido', () => {
-  // 🔴 Antes: se midieron 60, autorizas 30 (⇒ 30 negados); la checada sube a 120 y los 30
-  // negados VOLVÍAN a «pendiente», como si nadie los hubiera mirado.
-  it('conserva lo negado y sólo lo NUEVO queda pendiente', () => {
-    const r = resumirAutorizacion([{ date: '2026-08-24', medidos: 120, autorizados: 30, medidosAlAutorizar: 60, huellaActual: 'h', huellaAlAutorizar: 'h' }])
-    expect(r.minutosAutorizados).toBe(30)
-    expect(r.minutosNegados).toBe(30) // lo revisado y no autorizado, intacto
-    expect(r.minutosPendientes).toBe(60) // sólo el crecimiento sobre el retrato
+describe('P1 #5 → superado por la huella · toda edición invalida la firma ENTERA', () => {
+  // 🔴 Este bloque probaba una aritmética que ya no existe: partir el resto en «lo que se
+  // negó» y «lo que creció». Se escribía con la MISMA huella y distinto medido — un estado
+  // que ninguna edición real produce, así que la rama nunca corría en producción y la prueba
+  // pasaba por el motivo equivocado (2ª auditoría de Codex, 30-ago-2026, P1 #2).
+  //
+  // Lo que de verdad protege el dinero es más simple: si la jornada cambió, la firma no vale
+  // para NADA. Lo que sigue lo demuestra en vez de suponerlo.
+
+  const turno = { date: '2026-08-24', expectedStart: '09:00', expectedEnd: '18:00' }
+  const tz = 'America/Mexico_City'
+  const iso = (s: string) => new Date(s)
+
+  it('🔑 editar la SALIDA cambia la huella — por eso no hace falta comparar minutos', () => {
+    const antes = huellaDeLaJornada({
+      turno,
+      intervalos: [{ entrada: iso('2026-08-24T15:00:00Z'), salida: iso('2026-08-25T02:00:00Z') }],
+      descansos: [],
+      timezone: tz,
+    })
+    const despues = huellaDeLaJornada({
+      turno,
+      intervalos: [{ entrada: iso('2026-08-24T15:00:00Z'), salida: iso('2026-08-25T04:00:00Z') }],
+      descansos: [],
+      timezone: tz,
+    })
+    expect(antes).not.toBe(despues)
+  })
+
+  it('🔴 y editarla NO deja nada heredado: todo vuelve a pendiente', () => {
+    // 60 medidos → 30 autorizados (⇒ 30 negados); la checada sube a 120 con jornada nueva.
+    const r = resumirAutorizacion([
+      { date: '2026-08-24', medidos: 120, autorizados: 30, medidosAlAutorizar: 60, huellaActual: 'nueva', huellaAlAutorizar: 'vieja' },
+    ])
+    expect(r.minutosAutorizados).toBe(0)
+    expect(r.minutosNegados).toBe(0)
+    expect(r.minutosPendientes).toBe(120)
     expect(r.diasPorRevisar).toEqual(['2026-08-24'])
   })
 
-  it('sin crecimiento, todo lo no autorizado sigue siendo negado', () => {
-    const r = resumirAutorizacion([{ date: '2026-08-24', medidos: 120, autorizados: 30, medidosAlAutorizar: 120, huellaActual: 'h', huellaAlAutorizar: 'h' }])
-    expect(r.minutosNegados).toBe(90)
-    expect(r.minutosPendientes).toBe(0)
+  it('🔴 lo que se PAGA coincide con lo que el resumen dice — no pueden contradecirse', () => {
+    // El defecto que introdujo el arreglo anterior: el resumen invalidaba por huella y el
+    // reparto doble/triple no, así que una fila decía «0 autorizados» y pagaba 120 al doble.
+    const dias = [
+      { date: '2026-08-24', medidos: 120, autorizados: 120, medidosAlAutorizar: 120, huellaActual: 'nueva', huellaAlAutorizar: 'vieja' },
+    ]
+    const resumen = resumirAutorizacion(dias)
+    const semanas = agruparPorSemana(diasAutorizadosParaReparto(dias), { startDate: '2026-08-24', endDate: '2026-08-30' })
+    const pagados = semanas.reduce((t, s) => t + s.minutosDobles + s.minutosTriples, 0)
+    expect(resumen.minutosAutorizados).toBe(0)
+    expect(pagados).toBe(0)
   })
 
-  it('crecimiento con autorización TOTAL previa: nada negado, todo lo nuevo pendiente', () => {
-    const r = resumirAutorizacion([{ date: '2026-08-24', medidos: 120, autorizados: 60, medidosAlAutorizar: 60, huellaActual: 'h', huellaAlAutorizar: 'h' }])
-    expect(r.minutosNegados).toBe(0)
-    expect(r.minutosPendientes).toBe(60)
-  })
-
-  it('si ahora se mide MENOS, no se paga más de lo trabajado y no se inventa negado', () => {
-    const r = resumirAutorizacion([{ date: '2026-08-24', medidos: 60, autorizados: 240, medidosAlAutorizar: 240, huellaActual: 'h', huellaAlAutorizar: 'h' }])
-    expect(r.minutosAutorizados).toBe(60)
-    expect(r.minutosNegados).toBe(0)
-    expect(r.minutosPendientes).toBe(0)
-  })
-
-  it('los tres buckets siempre suman lo medido', () => {
+  it('con la jornada intacta, lo no autorizado sí queda NEGADO y los buckets suman', () => {
     for (const caso of [
-      { medidos: 120, autorizados: 30, medidosAlAutorizar: 60 },
-      { medidos: 120, autorizados: 30, medidosAlAutorizar: 120 },
-      { medidos: 200, autorizados: 100, medidosAlAutorizar: 150 },
-      { medidos: 90, autorizados: 0, medidosAlAutorizar: 90 },
+      { medidos: 120, autorizados: 30 },
+      { medidos: 200, autorizados: 100 },
+      { medidos: 90, autorizados: 0 },
     ]) {
-      const r = resumirAutorizacion([{ date: '2026-08-24', ...caso, huellaActual: 'h', huellaAlAutorizar: 'h' }])
+      const r = resumirAutorizacion([
+        { date: '2026-08-24', ...caso, medidosAlAutorizar: caso.medidos, huellaActual: 'h', huellaAlAutorizar: 'h' },
+      ])
+      expect(r.minutosAutorizados).toBe(caso.autorizados)
+      expect(r.minutosNegados).toBe(caso.medidos - caso.autorizados)
       expect(r.minutosAutorizados + r.minutosNegados + r.minutosPendientes).toBe(caso.medidos)
     }
   })
 })
-
 describe('P1 #2 · un rango a media semana NO reinicia el umbral de 9 h', () => {
   // 🔴 Antes: pedir sólo el domingo con 8 h ya trabajadas el lunes pagaba las 3 h del domingo
   // al DOBLE, cuando legalmente 1 h iba al doble y 2 h al TRIPLE. El campo `parcial` avisaba

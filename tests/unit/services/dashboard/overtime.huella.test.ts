@@ -13,8 +13,10 @@ import { huellaDeLaJornada, type DescansoDelDia, type IntervaloTrabajado } from 
 const t = (h: string) => new Date(`2026-08-24T${h}:00.000-06:00`)
 const TURNO = { date: '2026-08-24', expectedStart: '09:00', expectedEnd: '17:00' }
 
-const jornada = (intervalos: IntervaloTrabajado[], descansos: DescansoDelDia[] = [], turno = TURNO) =>
-  huellaDeLaJornada({ turno, intervalos, descansos })
+const TZ = 'America/Mexico_City'
+
+const jornada = (intervalos: IntervaloTrabajado[], descansos: DescansoDelDia[] = [], turno = TURNO, timezone = TZ) =>
+  huellaDeLaJornada({ turno, intervalos, descansos, timezone })
 
 describe('huellaDeLaJornada', () => {
   it('la misma jornada da la misma huella', () => {
@@ -89,5 +91,21 @@ describe('huellaDeLaJornada', () => {
 
   it('la huella es corta: se guarda en cada fila, no se lee a ojo', () => {
     expect(jornada([{ entrada: t('09:00'), salida: t('19:00') }]).length).toBeLessThanOrEqual(32)
+  })
+
+  it('🔴 CAMBIAR LA ZONA del negocio cambia la huella — mueve el dinero sin tocar un dato', () => {
+    // El cuadrante se escribe en hora del NEGOCIO y las checadas se guardan en UTC, así que
+    // mover el venue de zona cambia cuántos minutos caen después del fin del turno. Sin la
+    // zona dentro del hash, la huella seguía coincidiendo y una firma vieja se daba por buena
+    // sobre un número nuevo (2ª auditoría de Codex, 30-ago-2026, P1 #5).
+    const intervalos = [{ entrada: t('09:00'), salida: t('19:00') }]
+    const mexico = jornada(intervalos, [], TURNO, 'America/Mexico_City')
+    const tijuana = jornada(intervalos, [], TURNO, 'America/Tijuana')
+    expect(mexico).not.toBe(tijuana)
+  })
+
+  it('la misma zona sigue dando la misma huella', () => {
+    const intervalos = [{ entrada: t('09:00'), salida: t('19:00') }]
+    expect(jornada(intervalos, [], TURNO, 'America/Tijuana')).toBe(jornada(intervalos, [], TURNO, 'America/Tijuana'))
   })
 })

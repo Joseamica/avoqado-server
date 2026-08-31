@@ -17,6 +17,21 @@ const HOSTS_LOCALES = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0'])
 /** Fragmentos que delatan un entorno remoto aunque el host pareciera local. */
 const SEÑALES_REMOTAS = ['render.com', 'fly.dev', 'neon.tech', 'supabase', 'rds.amazonaws', 'azure', 'digitalocean']
 
+/**
+ * 🔴 Un host local NO prueba que la base sea local: `-L 5433:prod:5432` deja producción
+ * escuchando en `localhost` (2ª auditoría de Codex, 30-ago-2026, P1 #6). Dos cortes más:
+ *
+ *  · el PUERTO tiene que ser el de Postgres. Un túnel se abre casi siempre en otro puerto
+ *    para no chocar con el Postgres que ya corre en el 5432;
+ *  · el NOMBRE de la base tiene que ser uno conocido de desarrollo.
+ *
+ * ⚠️ Lo que sigue SIN cubrir, dicho explícitamente: alguien que tunelice producción al
+ * 5432 **y** la llame `av-db-25` pasa el corte. Eso ya es apuntarse a los pies a propósito;
+ * lo que se cierra aquí es el accidente.
+ */
+const PUERTOS_LOCALES = new Set(['5432', ''])
+const BASES_LOCALES = new Set(['av-db-25', 'avoqado', 'avoqado_dev', 'postgres'])
+
 export interface ResultadoDelCorte {
   ok: boolean
   motivo?: string
@@ -43,6 +58,19 @@ export function esBaseLocal(databaseUrl: string | undefined): ResultadoDelCorte 
   if (remota) return { ok: false, motivo: `La URL apunta a un proveedor remoto (${remota})`, host, base }
 
   if (!HOSTS_LOCALES.has(host)) return { ok: false, motivo: `El host "${host}" no es local`, host, base }
+
+  if (!PUERTOS_LOCALES.has(url.port)) {
+    return {
+      ok: false,
+      motivo: `El puerto ${url.port} no es el de Postgres — un host local en otro puerto suele ser un túnel SSH a un servidor remoto`,
+      host,
+      base,
+    }
+  }
+
+  if (!BASES_LOCALES.has(base) && !/[-_]test$/.test(base)) {
+    return { ok: false, motivo: `La base "${base}" no está en la lista de bases de desarrollo`, host, base }
+  }
 
   return { ok: true, host, base }
 }

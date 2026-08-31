@@ -38,6 +38,11 @@ export interface ApproveOvertimeInput {
    */
   expectedUpdatedAt?: string
   /**
+   * La huella de la jornada que el gerente TENÍA ENFRENTE al firmar. Si al llegar aquí las
+   * checadas ya son otras, la firma se rechaza en vez de estamparse sobre lo nuevo.
+   */
+  expectedSourceFingerprint?: string
+  /**
    * Por dónde entró la autorización. `'customer-mcp'` cuando la firma un agente.
    *
    * 🔴 Se marca en el ASIENTO QUE YA EXISTE, no en uno nuevo (hallazgo #12 de Codex): llamar
@@ -59,6 +64,7 @@ const FECHA = /^\d{4}-\d{2}-\d{2}$/
 
 export async function approveOvertime(input: ApproveOvertimeInput): Promise<OvertimeApprovalResult> {
   const { venueId, staffVenueId, date, minutesApproved, approvedById, note, expectedUpdatedAt, source } = input
+  const { expectedSourceFingerprint } = input
 
   // Validar ANTES de tocar la base ni recalcular la rejilla: una fecha absurda no debe costar
   // una consulta (misma regla que el reporte de puntualidad).
@@ -95,6 +101,16 @@ export async function approveOvertime(input: ApproveOvertimeInput): Promise<Over
   // La huella de la jornada que se está firmando: si mañana las checadas cambian, esta
   // autorización deja de valer aunque el total coincida (hallazgo #4 de Codex).
   const sourceFingerprint = celda?.overtimeFingerprint ?? null
+
+  // 🔴 Se firma la jornada que el gerente VIO, no la que haya en este instante. Sin esto, un
+  // cambio de checada entre que abre el panel y toca «Autorizar» quedaba firmado con la huella
+  // NUEVA: la autorización nacía «vigente» sobre unas horas que nadie revisó — justo lo que la
+  // huella existía para impedir (2ª auditoría de Codex, 30-ago-2026, P1 #3).
+  if (expectedSourceFingerprint && expectedSourceFingerprint !== sourceFingerprint) {
+    throw new ConflictError(
+      'Las checadas de ese día cambiaron mientras lo revisabas. Vuelve a cargar para ver las horas actuales antes de autorizar.',
+    )
+  }
 
   if (minutesMeasured <= 0) {
     throw new BadRequestError('Ese día no hay horas extra que autorizar')

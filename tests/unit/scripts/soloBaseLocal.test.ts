@@ -12,9 +12,38 @@ describe('esBaseLocal', () => {
     it.each([
       'postgresql://postgres:x@localhost:5432/av-db-25',
       'postgresql://postgres:x@127.0.0.1:5432/av-db-25',
-      'postgres://u:p@localhost:5432/otra?schema=public',
+      'postgresql://postgres:x@localhost:5432/av-db-25-test',
+      'postgres://u:p@localhost:5432/av-db-25?schema=public',
     ])('%s', url => {
       expect(esBaseLocal(url).ok).toBe(true)
+    })
+  })
+
+  /**
+   * 🔴 Un host local NO prueba que la base sea local: `ssh -L 5433:prod:5432` deja producción
+   * escuchando en `localhost` (2ª auditoría de Codex, 30-ago-2026, P1 #6). Por eso además del
+   * host se comprueban el PUERTO y el NOMBRE.
+   *
+   * ⚠️ El precio, declarado: una base local con nombre no listado deja de pasar. Es
+   * deliberado y coherente con la asimetría que este módulo declara en su cabecera — quien
+   * usa otro nombre pierde un minuto añadiéndolo a `BASES_LOCALES`; dejar pasar producción
+   * pierde datos de nómina.
+   */
+  describe('🔴 un host local NO basta: túnel SSH', () => {
+    it('corta un puerto que no es el de Postgres', () => {
+      const r = esBaseLocal('postgresql://u:p@localhost:5433/avoqado_prod')
+      expect(r.ok).toBe(false)
+      expect(r.motivo).toMatch(/túnel|puerto/i)
+    })
+
+    it('corta un nombre de base desconocido aunque el puerto sea el bueno', () => {
+      const r = esBaseLocal('postgresql://u:p@localhost:5432/avoqado_prod')
+      expect(r.ok).toBe(false)
+      expect(r.motivo).toMatch(/no está en la lista|desarrollo/i)
+    })
+
+    it('el motivo dice QUÉ base rechazó, para poder añadirla si es legítima', () => {
+      expect(esBaseLocal('postgresql://u:p@localhost:5432/mi_base').motivo).toContain('mi_base')
     })
   })
 
