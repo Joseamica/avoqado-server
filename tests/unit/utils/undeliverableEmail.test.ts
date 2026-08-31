@@ -226,3 +226,33 @@ describe('partitionRecipients / filterDeliverableRecipients', () => {
     expect(logger.warn).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * 🔴 Resend rechaza el envío COMPLETO con 422 si la dirección trae un carácter no-ASCII, y su
+ * mensaje («Invalid `to` field») no dice a QUIÉN no le llegó. Encontrado el 2026-08-31 mientras
+ * se capturaban las pantallas de la guía de asistencia: el aviso de retardo fallaba en silencio.
+ *
+ * En México se produce por accidente con facilidad — deriva un usuario de «Lucía» o «Ríos» y la
+ * tilde acaba dentro del correo.
+ */
+describe('NON_ASCII — una tilde dentro de la dirección la vuelve indefendible', () => {
+  it.each([
+    'lucía@avoqado.io',
+    'paola.ríos@gmail.com',
+    'jose@piñata.com',
+    'muñoz@hotmail.com',
+  ])('%s se clasifica como NON_ASCII', email => {
+    expect(classifyUndeliverable(email)).toBe('NON_ASCII')
+  })
+
+  it('🔴 y por tanto NO se intenta enviar: se salta con su motivo, no con un 422 del proveedor', () => {
+    expect(isDeliverableRecipient('lucía@avoqado.io', 'test')).toBe(false)
+  })
+
+  it('regresión: un correo normal con los mismos dominios SIGUE pasando', () => {
+    expect(classifyUndeliverable('lucia@gmail.com')).toBeNull()
+    expect(classifyUndeliverable('paola.rios@gmail.com')).toBeNull()
+    expect(isDeliverableRecipient('jose@hotmail.com', 'test')).toBe(true)
+  })
+})
+
