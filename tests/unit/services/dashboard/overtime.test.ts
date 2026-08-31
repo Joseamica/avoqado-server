@@ -10,17 +10,11 @@
  *   art. 67 — las primeras 9 h extraordinarias de la SEMANA se pagan al doble.
  *   art. 68 — lo que exceda ese máximo, al triple.
  *
- * 🔴 El umbral que decide doble/triple es el ACUMULADO SEMANAL, no el tope diario
- * (verificado en vivo el 29-ago). Alguien que hace 4 h un lunes viola el tope diario pero
- * esas 4 h siguen siendo DOBLES si la semana aún no llega a 9.
+ * 🔴 Aquí ya no se prueba ninguna tarifa ni ningún tope legal: se retiraron del módulo el
+ * 31-ago-2026 (decisión del founder — la ley la cumple el patrón, no el software). Lo que
+ * se guarda es la MEDICIÓN: cuántos minutos se trabajaron después de la hora de salida.
  */
-import {
-  minutosExtraDelDia,
-  repartirDobleYTriple,
-  TOPE_DIARIO_MINUTOS,
-  TOPE_SEMANAL_MINUTOS,
-  type DescansoDelDia,
-} from '@/services/dashboard/overtime'
+import { minutosExtraDelDia, type DescansoDelDia } from '@/services/dashboard/overtime'
 
 const TZ = 'America/Mexico_City'
 

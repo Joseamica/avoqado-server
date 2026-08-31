@@ -95,11 +95,10 @@ async function main() {
   comprobar('medidos', ana.overtimeMinutes, 720)
   comprobar('pendientes', ana.overtimePendingMinutes, 720)
   comprobar('autorizados', ana.overtimeApprovedMinutes, 0)
-  comprobar('dobles', ana.overtimeDoubleMinutes, 0)
-  comprobar('triples', ana.overtimeTripleMinutes, 0)
-  comprobar('infracción art. 66 (4 días)', ana.hasOvertimeViolation, true)
+  // Sin autorizar, el desglose semanal viene VACÍO: sólo lo firmado sale hacia la nómina.
+  comprobar('semanas con minutos', ana.overtimeWeeks.length, 0)
 
-  console.log('\n2 · Autorizo los 4 días completos → 9 h dobles + 3 h triples')
+  console.log('\n2 · Autorizo los 4 días completos → 12 h agrupadas en su semana')
   for (const d of DIAS) {
     await approveOvertime({
       venueId: VENUE,
@@ -112,8 +111,10 @@ async function main() {
   ana = await anaDelPeriodo()
   comprobar('autorizados', ana.overtimeApprovedMinutes, 720)
   comprobar('pendientes', ana.overtimePendingMinutes, 0)
-  comprobar('dobles', ana.overtimeDoubleMinutes, 540)
-  comprobar('triples', ana.overtimeTripleMinutes, 180)
+  // 🔴 Ya NO se comprueban dobles ni triples: Avoqado dejó de repartir por tarifa el
+  // 31-ago-2026 (decisión del founder). Lo que se entrega —y lo que hay que cuidar— son los
+  // minutos AUTORIZADOS agrupados por semana; la tarifa la pone el sistema de nómina.
+  comprobar('minutos de la semana', ana.overtimeWeeks.reduce((t, w) => t + w.minutosTotal, 0), 720)
 
   console.log('\n3 · Corrijo un día a la mitad → el total baja y nada se duplica')
   await approveOvertime({

@@ -126,13 +126,13 @@ describe('P1 #5 → superado por la huella · toda edición invalida la firma EN
 
   it('🔴 lo que se PAGA coincide con lo que el resumen dice — no pueden contradecirse', () => {
     // El defecto que introdujo el arreglo anterior: el resumen invalidaba por huella y el
-    // reparto doble/triple no, así que una fila decía «0 autorizados» y pagaba 120 al doble.
+    // desglose semanal no, así que una fila decía «0 autorizados» y mandaba 120 al pago.
     const dias = [
       { date: '2026-08-24', medidos: 120, autorizados: 120, medidosAlAutorizar: 120, huellaActual: 'nueva', huellaAlAutorizar: 'vieja' },
     ]
     const resumen = resumirAutorizacion(dias)
     const semanas = agruparPorSemana(diasAutorizadosParaReparto(dias), { startDate: '2026-08-24', endDate: '2026-08-30' })
-    const pagados = semanas.reduce((t, s) => t + s.minutosDobles + s.minutosTriples, 0)
+    const pagados = semanas.reduce((t, s) => t + s.minutosTotal, 0)
     expect(resumen.minutosAutorizados).toBe(0)
     expect(pagados).toBe(0)
   })

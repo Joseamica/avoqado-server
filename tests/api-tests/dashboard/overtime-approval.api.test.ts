@@ -257,8 +257,6 @@ describe('GET payroll-summary — la respuesta trae los campos de horas extra', 
       overtimeMinutes: 120,
       overtimeApprovedMinutes: 0,
       overtimePendingMinutes: 120,
-      overtimeDoubleMinutes: 0,
-      overtimeTripleMinutes: 0,
     })
     expect(Array.isArray(fila.overtimeWeeks)).toBe(true)
     expect(Array.isArray(fila.overtimeDaysToReview)).toBe(true)
