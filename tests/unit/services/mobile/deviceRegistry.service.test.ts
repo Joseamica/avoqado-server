@@ -98,6 +98,40 @@ describe('deviceRegistry.service', () => {
         lastStaffId: STAFF,
       })
       expect(data.firstSeenAt).toBeInstanceOf(Date)
+      expect(data).not.toHaveProperty('activatedAt')
+      expect(data).not.toHaveProperty('activationCode')
+      expect(data).not.toHaveProperty('activationCodeExpiry')
+    })
+
+    it('dos primeras altas simultáneas producen una fila y ambas obtienen la terminal ganadora', async () => {
+      const persistedRows: Array<{ id: string; name: string; venueId: string; deviceUid: string }> = []
+
+      prismaMock.terminal.findFirst.mockImplementation(async ({ where }: any) => {
+        return persistedRows.find(row => row.venueId === where.venueId && row.deviceUid === where.deviceUid) ?? null
+      })
+      prismaMock.terminal.count.mockResolvedValue(0)
+      prismaMock.terminal.create.mockImplementation(async ({ data }: any) => {
+        if (persistedRows.some(row => row.venueId === data.venueId && row.deviceUid === data.deviceUid)) {
+          throw Object.assign(new Error('unique'), { code: 'P2002' })
+        }
+
+        const row = { id: 'term_winner', name: data.name, venueId: data.venueId, deviceUid: data.deviceUid }
+        persistedRows.push(row)
+        return row
+      })
+
+      const [first, second] = await Promise.all([
+        registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity }),
+        registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity }),
+      ])
+
+      expect(persistedRows).toHaveLength(1)
+      expect([first, second]).toEqual(
+        expect.arrayContaining([
+          { terminalId: 'term_winner', created: true, name: 'iPhone 15 Pro' },
+          { terminalId: 'term_winner', created: false, name: 'iPhone 15 Pro' },
+        ]),
+      )
     })
 
     it('mapea la plataforma al TerminalType correcto', async () => {
@@ -200,6 +234,21 @@ describe('deviceRegistry.service', () => {
       expect(data).not.toHaveProperty('formFactor')
     })
 
+    it('una terminal RETIRED existente nunca se reactiva por heartbeat', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue({ id: 'term_retired', name: 'Caja retirada', status: TerminalStatus.RETIRED })
+      prismaMock.terminal.update.mockResolvedValue({})
+
+      const result = await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity })
+
+      expect(result).toEqual({ terminalId: 'term_retired', created: false, name: 'Caja retirada' })
+      expect(prismaMock.terminal.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'term_retired' },
+          data: expect.not.objectContaining({ status: expect.anything() }),
+        }),
+      )
+    })
+
     it('NO audita el refresco — sería inundar la bitácora con heartbeats', async () => {
       prismaMock.terminal.findFirst.mockResolvedValue({ id: 'term_1', name: 'x' })
       prismaMock.terminal.update.mockResolvedValue({})
@@ -275,12 +324,20 @@ describe('deviceRegistry.service', () => {
       await expect(registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity })).resolves.toBeNull()
     })
 
-    it('devuelve null sin lanzar si dos requests concurrentes chocan en el índice único', async () => {
-      prismaMock.terminal.findFirst.mockResolvedValue(null)
+    it('el perdedor P2002 relee y devuelve la fila ganadora sin lanzar', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'term_winner', name: 'iPhone 15 Pro' })
       prismaMock.terminal.count.mockResolvedValue(0)
       prismaMock.terminal.create.mockRejectedValue(Object.assign(new Error('unique'), { code: 'P2002' }))
 
-      await expect(registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity })).resolves.toBeNull()
+      await expect(registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity })).resolves.toEqual({
+        terminalId: 'term_winner',
+        created: false,
+        name: 'iPhone 15 Pro',
+      })
+      expect(prismaMock.terminal.findFirst).toHaveBeenLastCalledWith({
+        where: { venueId: VENUE, deviceUid: iphoneIdentity.deviceUid },
+        select: { id: true, name: true },
+      })
     })
 
     it('sin deviceUid no hace nada y no toca la base', async () => {

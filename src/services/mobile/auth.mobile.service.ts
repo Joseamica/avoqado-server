@@ -44,8 +44,13 @@ import {
 const REFRESH_TOKEN_TTL_SECONDS = 604_800
 const REFRESH_TOKEN_TTL_SECONDS_REMEMBER_ME = 7_776_000
 
-/** Fecha de vencimiento para sellar `RefreshGrant.expiresAt` al emitir (login) o rotar (refresh) un grant. */
-function refreshGrantExpiry(rememberMe?: boolean): Date {
+/**
+ * Fecha de vencimiento para sellar `RefreshGrant.expiresAt` al emitir (login) o rotar (refresh) un grant.
+ *
+ * Exportada para que `switch-user.mobile.service.ts` selle con LA MISMA regla: duplicar el TTL
+ * daría dos vencimientos distintos para el mismo tipo de token según por dónde entró la persona.
+ */
+export function refreshGrantExpiry(rememberMe?: boolean): Date {
   const ttlSeconds = rememberMe ? REFRESH_TOKEN_TTL_SECONDS_REMEMBER_ME : REFRESH_TOKEN_TTL_SECONDS
   return new Date(Date.now() + ttlSeconds * 1000)
 }
@@ -117,7 +122,12 @@ export async function generatePasskeyChallenge() {
  * @param rememberMe - Whether to extend token expiration
  * @returns Login result with tokens and user data
  */
-export async function verifyPasskeyAssertion(credential: AuthenticationResponseJSON, challengeKey?: string, rememberMe?: boolean) {
+export async function verifyPasskeyAssertion(
+  credential: AuthenticationResponseJSON,
+  challengeKey?: string,
+  rememberMe?: boolean,
+  deviceId?: string,
+) {
   logger.info(`🔐 [PASSKEY] Verifying assertion for credential: ${credential.id.substring(0, 20)}...`)
 
   // 1. Find the stored challenge
@@ -258,6 +268,11 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
     staffId: staff.id,
     venueId: selectedVenue.venueId,
     authMethod: AuthMethod.BIOMETRIC,
+    // 🔴 [Auditoría 2026-08-30, P2] Faltaba, y el hueco era silencioso: la tablet SÍ aparece en el
+    // registro de terminales, pero «sacar aparato» busca sesiones por `deviceId` y cerraba CERO.
+    // Es decir, el dueño tocaba el botón, el dashboard le decía que sí, y la sesión biométrica de
+    // la tablet perdida seguía cobrando. Peor que no tener el botón.
+    deviceId,
   })
 
   // 7. Generate tokens (derive orgId from venue)
@@ -546,7 +561,7 @@ export async function deletePasskey(staffId: string, passkeyId: string) {
  * @param rememberMe - Whether to extend token expiration (30 days vs 24 hours)
  * @returns Login result with tokens and user data
  */
-export async function loginWithEmail(email: string, password: string, rememberMe?: boolean) {
+export async function loginWithEmail(email: string, password: string, rememberMe?: boolean, deviceId?: string) {
   logger.info(`🔐 [MOBILE AUTH] Login attempt for: ${email}`)
 
   // 1. Find staff with all active venues
@@ -640,6 +655,9 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     staffId: staff.id,
     venueId: selectedVenue.venueId,
     authMethod: AuthMethod.PASSWORD,
+    // El aparato donde nació la sesión. Es lo que permite «sacar esta tablet» sin echar a la
+    // persona de su teléfono: se revoca por aparato, no por persona.
+    deviceId,
   })
 
   // 6. Generate tokens (derive orgId from venue)

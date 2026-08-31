@@ -205,7 +205,9 @@ describe('Login Scenarios', () => {
       await loginStaff({ email: 'test@test.com', password: validPassword })
 
       // Should use first venue's data for token
-      expect(mockJwtService.generateAccessToken).toHaveBeenCalledWith('staff-1', 'org-1', 'venue-1', StaffRole.ADMIN, undefined)
+      expect(mockJwtService.generateAccessToken).toHaveBeenCalledWith('staff-1', 'org-1', 'venue-1', StaffRole.ADMIN, undefined, {
+        sid: expect.any(String),
+      })
     })
   })
 
@@ -253,7 +255,9 @@ describe('Login Scenarios', () => {
         venueId: 'venue-2',
       })
 
-      expect(mockJwtService.generateAccessToken).toHaveBeenCalledWith('staff-1', 'org-1', 'venue-2', StaffRole.CASHIER, undefined)
+      expect(mockJwtService.generateAccessToken).toHaveBeenCalledWith('staff-1', 'org-1', 'venue-2', StaffRole.CASHIER, undefined, {
+        sid: expect.any(String),
+      })
     })
 
     it('should reject login to venue user does not have access to', async () => {
@@ -533,7 +537,9 @@ describe('Login Scenarios', () => {
       expect(mockPrisma.invitation?.findMany).not.toHaveBeenCalled()
 
       // Should use real venue ID
-      expect(mockJwtService.generateAccessToken).toHaveBeenCalledWith('staff-1', 'org-1', 'venue-1', StaffRole.ADMIN, undefined)
+      expect(mockJwtService.generateAccessToken).toHaveBeenCalledWith('staff-1', 'org-1', 'venue-1', StaffRole.ADMIN, undefined, {
+        sid: expect.any(String),
+      })
     })
   })
 
@@ -782,7 +788,9 @@ describe('Login Scenarios', () => {
       })
 
       // Should use org-2's ID for the token
-      expect(mockJwtService.generateAccessToken).toHaveBeenCalledWith('staff-1', 'org-2', 'venue-org2', StaffRole.MANAGER, undefined)
+      expect(mockJwtService.generateAccessToken).toHaveBeenCalledWith('staff-1', 'org-2', 'venue-org2', StaffRole.MANAGER, undefined, {
+        sid: expect.any(String),
+      })
     })
   })
 

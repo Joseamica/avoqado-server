@@ -1,6 +1,6 @@
 // services/tpv/tpv-health.service.ts
 
-import { TerminalStatus, TpvCommandType } from '@prisma/client'
+import { TerminalStatus, TerminalType, TpvCommandType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
@@ -375,6 +375,11 @@ export class TpvHealthService {
             in: [TerminalStatus.ACTIVE], // Only mark ACTIVE terminals as offline, preserve MAINTENANCE state
           },
           activatedAt: null, // Only mark as INACTIVE if never activated (e.g. before initial setup)
+          // POS_* status is lifecycle state, not a liveness signal. These devices
+          // self-register without activation and must stay ACTIVE when offline.
+          type: {
+            notIn: [TerminalType.POS_ANDROID, TerminalType.POS_IOS, TerminalType.POS_DESKTOP],
+          },
         },
         data: {
           status: TerminalStatus.INACTIVE,

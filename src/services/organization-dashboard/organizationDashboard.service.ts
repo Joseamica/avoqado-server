@@ -3835,6 +3835,10 @@ class OrganizationDashboardService {
         activatedAt: (t as any).activatedAt ?? null,
         activationCode: (t as any).activationCode ?? null,
         activationCodeExpiry: (t as any).activationCodeExpiry ?? null,
+        // El identificador que el propio aparato reporta (`X-Device-Id`), no el serial impreso.
+        // Es lo que ata una terminal a sus SESIONES, y por tanto lo que permite «sacar esta
+        // tablet»: una PAX se identifica por serial, pero una tablet Android sólo por esto.
+        deviceUid: (t as any).deviceUid ?? null,
         venue: t.venue,
         migration: computeTerminalMigration(latestMigrationByTerminal.get(t.id), (t as any).lastActivationStatusCheckAt ?? null),
       })),

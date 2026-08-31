@@ -9,6 +9,7 @@ import { getAngelPayUserAccountForTerminal, getAngelPayUserAccountsForTerminal }
 import { VenuePlanInfo, getVenuePlanInfo } from '@/services/access/basePlan.service'
 import { isCashReconciliationEnabled } from '@/services/access/cashReconciliationAccess.service'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
+import { orderAngelPayAccountsForTerminal, orderMerchantsBySlot } from '@/services/tpv/angelpayPrimaryAccount'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
@@ -286,6 +287,14 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
 
     let merchantAccounts: any[]
 
+    // The slot list the merchants came from, in the OPERATOR'S order. `findMany`
+    // with `id IN (...)` returns rows in whatever order Postgres likes, and on a
+    // NEXGO that order decides which AngelPay login the terminal authenticates
+    // with (see `orderMerchantsBySlot`). Restored below for NEXGO only: on
+    // PAX/Blumon every merchant carries its own credentials, the order is
+    // cosmetic, and that contract is left byte-for-byte as it was.
+    let merchantSlotOrder: string[] = []
+
     if (terminal.assignedMerchantIds.length > 0) {
       // Terminal has explicit assignments — use them (managed by wizard reconciliation)
       merchantAccounts = await prisma.merchantAccount.findMany({
@@ -295,6 +304,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         },
         select: merchantSelect,
       })
+      merchantSlotOrder = terminal.assignedMerchantIds
     } else {
       // No explicit assignments — fall back to venue/org inheritance
       const effective = await getEffectivePaymentConfig(terminal.venueId)
@@ -309,6 +319,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
                 select: merchantSelect,
               })
             : []
+        merchantSlotOrder = accountIds
 
         logger.info('[Terminal Config] Used inheritance fallback for merchant accounts', {
           terminalId: terminal.id,
@@ -338,6 +349,10 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     // Filter merchants[] to only providers compatible with terminal.brand. Even if
     // validation points #1–#3 were bypassed by legacy/imported data, the TPV must
     // never receive a merchant assignment its hardware cannot route.
+    if (terminal.brand === 'NEXGO' && merchantSlotOrder.length > 0) {
+      merchantAccounts = orderMerchantsBySlot(merchantAccounts, merchantSlotOrder)
+    }
+
     const compatibleMerchants = merchantAccounts.filter((ma: any) =>
       isProviderCompatibleWithBrand(ma.provider?.code || 'BLUMON', terminal.brand),
     )
@@ -511,10 +526,33 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
             })
           }
         }
-        // Single-account backward-compat field: first ACTIVE wins. Falls back to
-        // the legacy single-account helper only if the multi-account list is
-        // empty AND the legacy helper finds a row (shouldn't happen — the
-        // multi-account helper supersedes — but keeps the contract stable).
+        // 🔴 The primary credential must follow THIS TERMINAL'S assigned
+        // merchant — not the venue's oldest AngelPay account.
+        //
+        // `getAngelPayUserAccountsForTerminal` returns every ACTIVE account of
+        // the venue ordered by createdAt asc, and we used to hand index 0 over
+        // as `angelpayAuth`. In a venue with a single AngelPay login that is
+        // always right. With TWO logins it silently hands the terminal the
+        // WRONG identity: the SDK authenticates as account A, exposes only
+        // account A's merchants, and the terminal's assigned merchant (owned by
+        // account B) never intersects it — so `AngelPayConfigValidator` hard-
+        // blocks EVERY charge with "Sin merchants válidos compartidos".
+        // Measured in prod 2026-08-29 on AVQD-N860W173080 (venue Alberto
+        // Dominguez) and on both of Amaena's NEXGO terminals, where the same
+        // mismatch instead let charges land on the WRONG merchant.
+        //
+        // This only REORDERS — every account stays in `angelpayAccounts`, so
+        // `switchAccount()` can still reach any of them. Venues with one
+        // account (all but two in prod) reorder a single-element list and are
+        // bit-for-bit unaffected, as are terminals whose assigned merchant
+        // carries no `angelpayUserAccountId` (legacy rows).
+        angelpayAccounts = orderAngelPayAccountsForTerminal(angelpayAccounts, transformedMerchants)
+
+        // Single-account backward-compat field: the terminal's own account
+        // leads the list (see above), so index 0 is the right primary. Falls
+        // back to the legacy single-account helper only if the multi-account
+        // list is empty AND the legacy helper finds a row (shouldn't happen —
+        // the multi-account helper supersedes — but keeps the contract stable).
         if (angelpayAccounts.length > 0) {
           angelpayAuth = angelpayAccounts[0]
           logger.info('[Terminal Config] Attached angelpayAuth payload(s)', {

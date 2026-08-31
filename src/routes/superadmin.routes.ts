@@ -40,6 +40,7 @@ import reportsRoutes from './superadmin/reports.routes'
 import deliveryActivationRoutes from './superadmin/deliveryActivation.routes'
 import masterCatalogRoutes from './superadmin/masterCatalog.routes'
 import announcementRoutes from './superadmin/announcement.routes'
+import systemConfigRoutes from './superadmin/systemConfig.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
@@ -70,6 +71,8 @@ router.use('/trainings', trainingRoutes)
 router.use('/activity-log', activityLogRoutes)
 router.use('/dashboard', dashboardRoutes)
 router.use('/system-logs', systemLogsRoutes)
+// Estado de la configuración crítica de ESTE servidor. Hereda token + rol SUPERADMIN del padre.
+router.use('/system', systemConfigRoutes)
 router.use('/partner-keys', partnerKeyRoutes)
 router.use('/aggregators', aggregatorRoutes)
 router.use('/balance-providers', balanceProviderRoutes)

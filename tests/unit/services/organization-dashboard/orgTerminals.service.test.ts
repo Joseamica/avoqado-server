@@ -1,4 +1,5 @@
 import { prismaMock } from '@tests/__helpers__/setup'
+import { DeviceFormFactor, Prisma, TerminalType } from '@prisma/client'
 
 // Mock superadmin terminal service
 jest.mock('@/services/dashboard/terminals.superadmin.service', () => ({
@@ -36,11 +37,41 @@ import {
 } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import { ForbiddenError, NotFoundError } from '@/errors/AppError'
+import { getTerminalsData, getTpvById } from '@/services/dashboard/tpv.dashboard.service'
+import { registerTerminalTools } from '@/mcp/tools/terminals'
+
+const NOW = new Date('2026-08-30T12:00:00.000Z')
 
 const orgId = 'org-1'
 const terminalId = 'term-1'
 const staffId = 'staff-1'
 const venueId = 'v1'
+
+function projectPrismaSelect(row: Record<string, any>, select: Record<string, any>): Record<string, any> {
+  return Object.fromEntries(
+    Object.entries(select).map(([key, selection]) => {
+      if (selection === true) return [key, row[key]]
+      if (selection && typeof selection === 'object' && selection.select) {
+        return [key, row[key] == null ? row[key] : projectPrismaSelect(row[key], selection.select)]
+      }
+      return [key, row[key]]
+    }),
+  )
+}
+
+function captureListDevicesHandler() {
+  let handler: ((input: Record<string, unknown>) => Promise<any>) | undefined
+  const server = {
+    tool: (name: string, _description: string, _schema: unknown, candidate: typeof handler) => {
+      if (name === 'list_devices') handler = candidate
+    },
+  }
+
+  registerTerminalTools(server as any, { allowedVenueIds: [venueId], staffId } as any)
+
+  if (!handler) throw new Error('list_devices handler was not registered')
+  return handler
+}
 
 const mockTerminal = {
   id: terminalId,
@@ -60,6 +91,9 @@ const mockTerminalForeign = {
 }
 
 describe('OrgTerminals Service', () => {
+  afterEach(() => {
+    jest.useRealTimers()
+  })
   // ==========================================
   // ORG SCOPING VALIDATION
   // ==========================================
@@ -89,6 +123,216 @@ describe('OrgTerminals Service', () => {
 
       expect(result).toBeDefined()
       expect(result!.id).toBe(terminalId)
+    })
+
+    it('projects capabilities and durable display state only after preserving org isolation', async () => {
+      jest.useFakeTimers().setSystemTime(NOW)
+      const orgScoped = {
+        ...mockTerminal,
+        type: 'POS_ANDROID',
+        customerDisplayPresent: true,
+        customerDisplayInvertible: true,
+        displayModeProtocolVersion: 1,
+        capabilitiesObservedAt: new Date('2026-08-30T11:00:00.000Z'),
+        customerDisplayInverted: true,
+        customerDisplayRequest: { requestId: 'request-1', desiredInverted: false },
+        customerDisplayRequestVersion: 3,
+        healthMetrics: [{ healthScore: 90 }],
+      }
+      prismaMock.terminal.findUnique.mockResolvedValueOnce(orgScoped).mockResolvedValueOnce(orgScoped)
+
+      const result = await getTerminalForOrg(orgId, terminalId)
+
+      expect(prismaMock.terminal.findUnique).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ where: { id: terminalId }, include: expect.any(Object) }),
+      )
+      expect(result).toEqual(
+        expect.objectContaining({
+          customerDisplayInverted: true,
+          customerDisplayRequest: { requestId: 'request-1', desiredInverted: false },
+          customerDisplayRequestVersion: 3,
+          healthMetrics: [{ healthScore: 90 }],
+          capabilities: expect.objectContaining({
+            requiresActivation: false,
+            customerDisplay: {
+              presence: 'SUPPORTED',
+              invertibility: 'SUPPORTED',
+              canRequestInversion: true,
+              observedAt: '2026-08-30T11:00:00.000Z',
+              stale: false,
+            },
+          }),
+        }),
+      )
+    })
+  })
+
+  describe('four-surface capability parity', () => {
+    const observedAt = new Date('2026-08-30T11:00:00.000Z')
+    const staleObservedAt = new Date('2026-08-23T11:59:59.999Z')
+    const unsupportedDisplay = {
+      presence: 'UNSUPPORTED',
+      invertibility: 'UNSUPPORTED',
+      canRequestInversion: false,
+      observedAt: null,
+      stale: false,
+    }
+
+    const cases = [
+      {
+        name: 'fresh invertible POS Android protocol v1',
+        facts: {
+          type: TerminalType.POS_ANDROID,
+          customerDisplayPresent: true,
+          customerDisplayInvertible: true,
+          displayModeProtocolVersion: 1,
+          capabilitiesObservedAt: observedAt,
+        },
+        requiresActivation: false,
+        expectedDisplay: {
+          presence: 'SUPPORTED',
+          invertibility: 'SUPPORTED',
+          canRequestInversion: true,
+          observedAt: observedAt.toISOString(),
+          stale: false,
+        },
+      },
+      {
+        name: 'stale POS Android facts',
+        facts: {
+          type: TerminalType.POS_ANDROID,
+          customerDisplayPresent: true,
+          customerDisplayInvertible: true,
+          displayModeProtocolVersion: 1,
+          capabilitiesObservedAt: staleObservedAt,
+        },
+        requiresActivation: false,
+        expectedDisplay: {
+          presence: 'UNKNOWN',
+          invertibility: 'UNKNOWN',
+          canRequestInversion: false,
+          observedAt: staleObservedAt.toISOString(),
+          stale: true,
+        },
+      },
+      {
+        name: 'fresh nullable POS Android facts',
+        facts: {
+          type: TerminalType.POS_ANDROID,
+          customerDisplayPresent: null,
+          customerDisplayInvertible: null,
+          displayModeProtocolVersion: 1,
+          capabilitiesObservedAt: observedAt,
+        },
+        requiresActivation: false,
+        expectedDisplay: {
+          presence: 'UNKNOWN',
+          invertibility: 'UNKNOWN',
+          canRequestInversion: false,
+          observedAt: observedAt.toISOString(),
+          stale: false,
+        },
+      },
+      {
+        name: 'TPV Android',
+        facts: {
+          type: TerminalType.TPV_ANDROID,
+          customerDisplayPresent: null,
+          customerDisplayInvertible: null,
+          displayModeProtocolVersion: null,
+          capabilitiesObservedAt: null,
+        },
+        requiresActivation: true,
+        expectedDisplay: unsupportedDisplay,
+      },
+      {
+        name: 'receipt printer',
+        facts: {
+          type: TerminalType.PRINTER_RECEIPT,
+          customerDisplayPresent: null,
+          customerDisplayInvertible: null,
+          displayModeProtocolVersion: null,
+          capabilitiesObservedAt: null,
+        },
+        requiresActivation: false,
+        expectedDisplay: unsupportedDisplay,
+      },
+    ]
+
+    it.each(cases)('deep-compares the same $name capabilities across all four surfaces', async testCase => {
+      jest.useFakeTimers().setSystemTime(NOW)
+      const request = { requestId: 'request-parity', desiredInverted: false, status: 'PENDING' }
+      const row = {
+        id: terminalId,
+        venueId,
+        name: 'Parity device',
+        status: 'ACTIVE',
+        brand: 'TEST',
+        model: 'MODEL-1',
+        modelIdentifier: null,
+        formFactor: DeviceFormFactor.COUNTERTOP_POS,
+        osVersion: '13',
+        version: '3.2.0',
+        serialNumber: 'PARITY-1',
+        deviceUid: 'authorized-device-uid',
+        selfRegistered: true,
+        firstSeenAt: new Date('2026-08-01T12:00:00.000Z'),
+        lastHeartbeat: new Date('2026-08-30T11:59:00.000Z'),
+        lastStaffId: null,
+        customerDisplayInverted: true,
+        customerDisplayRequest: request,
+        customerDisplayRequestVersion: 9,
+        venue: { id: venueId, name: 'Store A', slug: 'store-a', organizationId: orgId },
+        healthMetrics: [{ healthScore: 90 }],
+        ...testCase.facts,
+      }
+
+      prismaMock.$transaction.mockResolvedValueOnce([[row], 1])
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+      prismaMock.payment.groupBy.mockResolvedValue([])
+      const venueList = await getTerminalsData(venueId, 1, 20, {})
+
+      prismaMock.terminal.findFirst.mockResolvedValue(row)
+      const venueDetail = await getTpvById(venueId, terminalId)
+
+      prismaMock.terminal.findUnique.mockResolvedValueOnce(row).mockResolvedValueOnce(row)
+      const organizationDetail = await getTerminalForOrg(orgId, terminalId)
+
+      prismaMock.terminal.findMany.mockImplementationOnce(async (query: Prisma.TerminalFindManyArgs) => [
+        projectPrismaSelect(row, query.select ?? {}),
+      ])
+      const mcpResponse = await captureListDevicesHandler()({ venueId })
+      const mcpDevice = JSON.parse(mcpResponse.content[0].text).devices[0]
+      const venueListDevice = venueList.data[0]
+
+      expect(venueListDevice).toHaveProperty('capabilities')
+      if (!('capabilities' in venueListDevice)) throw new Error('Expected venue list projection to include capabilities')
+
+      const capabilities = [
+        venueListDevice.capabilities,
+        venueDetail.capabilities,
+        organizationDetail!.capabilities,
+        mcpDevice.capabilities,
+      ]
+      for (const projected of capabilities.slice(1)) expect(projected).toEqual(capabilities[0])
+      expect(capabilities[0]).toEqual(
+        expect.objectContaining({
+          requiresActivation: testCase.requiresActivation,
+          customerDisplay: testCase.expectedDisplay,
+        }),
+      )
+
+      const mcpSelect = prismaMock.terminal.findMany.mock.calls.at(-1)![0].select
+      expect(mcpSelect).toEqual(
+        expect.objectContaining({
+          type: true,
+          customerDisplayPresent: true,
+          customerDisplayInvertible: true,
+          displayModeProtocolVersion: true,
+          capabilitiesObservedAt: true,
+        }),
+      )
     })
   })
 

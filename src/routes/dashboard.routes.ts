@@ -77,6 +77,7 @@ import * as testingController from '../controllers/dashboard/testing.dashboard.c
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
 import * as terminalOrderController from '../controllers/dashboard/terminalOrder.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
@@ -209,6 +210,7 @@ import {
   DuplicatePermissionSetSchema,
 } from '../schemas/dashboard/permissionSet.schema'
 import { UpdateVenueSettingsSchema, UpdateTpvSettingsSchema } from '../schemas/dashboard/venueSettings.schema'
+import { cancelDisplayModeRequestSchema, createDisplayModeRequestSchema } from '../schemas/dashboard/displayModeRequest.schema'
 import {
   GetModifierUsageStatsSchema,
   GetModifiersLowStockSchema,
@@ -4416,6 +4418,43 @@ router.use('/cash-out', authenticateTokenMiddleware, cashOutRoutes)
  */
 router.get('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTerminals)
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/{deviceId}/sessions:
+ *   delete:
+ *     tags: [Dashboard - Terminals]
+ *     summary: Sacar un aparato — cierra las sesiones abiertas en él
+ *     description: |
+ *       Cierra TODAS las sesiones vivas de ese aparato en ese negocio. El caso real es una tablet
+ *       perdida o robada: quien la tenga deja de poder operar al instante.
+ *
+ *       No es lo mismo que «cerrar sesión en todos mis dispositivos», que es por PERSONA y la
+ *       sacaría también de su propio teléfono. Aquí se cierra por APARATO.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: deviceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: El `deviceUid` del aparato (el mismo del registro de aparatos).
+ *     responses:
+ *       200: { description: Sesiones cerradas; devuelve cuántas }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.delete(
+  '/venues/:venueId/tpvs/:deviceId/sessions',
+  authenticateTokenMiddleware,
+  // Mismo permiso que ya gobierna administrar terminales: sacar un aparato es gestionarlo, y
+  // crear un permiso nuevo para esto obligaría a repartirlo en cinco sitios para que fuera
+  // otorgable — coste sin ganancia, porque quien administra terminales es justo quien debe poder.
+  checkPermission('tpv:update'),
+  tpvController.revokeDeviceSessions,
+)
+
 // Create TPV (terminal)
 router.post('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:create'), tpvController.createTpv)
 
@@ -4455,6 +4494,24 @@ router.post('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermissio
  *         description: Forbidden
  */
 router.get('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTpvById)
+
+// Intención tipada para invertir la pantalla física de un POS Android. El permiso
+// autoriza al actor; el controlador valida por separado el soporte técnico observado.
+router.post(
+  '/venues/:venueId/terminals/:terminalId/display-mode-request',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  validateRequest(createDisplayModeRequestSchema),
+  displayModeRequestController.createRequest,
+)
+
+router.delete(
+  '/venues/:venueId/terminals/:terminalId/display-mode-request/:requestId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  validateRequest(cancelDisplayModeRequestSchema),
+  displayModeRequestController.cancelRequest,
+)
 
 /**
  * @openapi

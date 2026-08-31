@@ -162,24 +162,22 @@ describe('abrir la caja respeta el permiso, no lo ignora', () => {
   it('🔴 con permiso, la respuesta de abrir SÍ trae el esperado', async () => {
     armarSesionAbierta()
     ;(prismaMock as any).cashDrawerSession.findFirst = jest.fn().mockResolvedValue(null) // no hay caja abierta
-    ;(prismaMock as any).cashDrawerSession.create = jest
-      .fn()
-      .mockResolvedValue({
-        id: SESSION,
-        venueId: VENUE,
-        status: 'OPEN',
-        startingAmount: 1000,
-        openedAt: ABIERTA_A_LAS,
-        openedByStaffId: CAJERO,
-        openedByName: 'Cajero',
-        closedAt: null,
-        closedByStaffId: null,
-        closedByName: null,
-        actualAmount: null,
-        overShort: null,
-        closingNote: null,
-        events: [],
-      })
+    ;(prismaMock as any).cashDrawerSession.create = jest.fn().mockResolvedValue({
+      id: SESSION,
+      venueId: VENUE,
+      status: 'OPEN',
+      startingAmount: 1000,
+      openedAt: ABIERTA_A_LAS,
+      openedByStaffId: CAJERO,
+      openedByName: 'Cajero',
+      closedAt: null,
+      closedByStaffId: null,
+      closedByName: null,
+      actualAmount: null,
+      overShort: null,
+      closingNote: null,
+      events: [],
+    })
 
     const r: any = await openSession({ venueId: VENUE, staffId: CAJERO, staffName: 'Cajero', startingAmount: 1000 } as never, true)
     expect(r.expectedAmount).toBeDefined()
@@ -188,24 +186,22 @@ describe('abrir la caja respeta el permiso, no lo ignora', () => {
   it('sin permiso, la respuesta de abrir NO lo trae', async () => {
     armarSesionAbierta()
     ;(prismaMock as any).cashDrawerSession.findFirst = jest.fn().mockResolvedValue(null) // no hay caja abierta
-    ;(prismaMock as any).cashDrawerSession.create = jest
-      .fn()
-      .mockResolvedValue({
-        id: SESSION,
-        venueId: VENUE,
-        status: 'OPEN',
-        startingAmount: 1000,
-        openedAt: ABIERTA_A_LAS,
-        openedByStaffId: CAJERO,
-        openedByName: 'Cajero',
-        closedAt: null,
-        closedByStaffId: null,
-        closedByName: null,
-        actualAmount: null,
-        overShort: null,
-        closingNote: null,
-        events: [],
-      })
+    ;(prismaMock as any).cashDrawerSession.create = jest.fn().mockResolvedValue({
+      id: SESSION,
+      venueId: VENUE,
+      status: 'OPEN',
+      startingAmount: 1000,
+      openedAt: ABIERTA_A_LAS,
+      openedByStaffId: CAJERO,
+      openedByName: 'Cajero',
+      closedAt: null,
+      closedByStaffId: null,
+      closedByName: null,
+      actualAmount: null,
+      overShort: null,
+      closingNote: null,
+      events: [],
+    })
 
     const r: any = await openSession({ venueId: VENUE, staffId: CAJERO, staffName: 'Cajero', startingAmount: 1000 } as never)
     expect(r.expectedAmount).toBeUndefined()

@@ -74,7 +74,7 @@ const staffAwareConfig = (pacingMaxPerSlot: number | null = null) => ({
 
 function primeStaffAwareAvailability(
   overrides: {
-    products?: Array<{ id: string; duration: number | null; durationMinutes: number | null }>
+    products?: Array<{ id: string; duration: number | null; durationMinutes: number | null; bufferAfterMin?: number | null }>
     existingReservations?: any[]
     staffConflicts?: any[]
     classConflicts?: any[]

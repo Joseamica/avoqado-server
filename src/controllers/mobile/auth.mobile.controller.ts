@@ -35,7 +35,13 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
       })
     }
 
-    const result = await authMobileService.loginWithEmail(email, password, rememberMe === true)
+    // El aparato: el MISMO `X-Device-Id` que el registro de aparatos usa desde julio, no una
+    // identidad nueva. Es lo que después permite «sacar esta tablet» desde el dashboard sin
+    // cerrarle la sesión a esa persona en su teléfono. Una app vieja que no lo mande deja la
+    // sesión sin aparato, y eso está bien: se guarda null y sigue funcionando como hoy.
+    const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : undefined
+
+    const result = await authMobileService.loginWithEmail(email, password, rememberMe === true, deviceId)
 
     // Return tokens in body for mobile apps
     res.status(200).json({
@@ -154,7 +160,10 @@ export const passkeyVerify = async (req: Request, res: Response, next: NextFunct
       authenticatorAttachment: credential.authenticatorAttachment,
     }
 
-    const result = await authMobileService.verifyPasskeyAssertion(authCredential, challengeKey, rememberMe === true)
+    // El aparato viaja igual que en el login por contraseña: sin él, la sesión biométrica nace sin
+    // `deviceId` y «sacar esta tablet» desde el dashboard no la alcanza nunca.
+    const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : undefined
+    const result = await authMobileService.verifyPasskeyAssertion(authCredential, challengeKey, rememberMe === true, deviceId)
 
     // Set cookies (for web clients that might use these endpoints)
     const accessTokenMaxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000

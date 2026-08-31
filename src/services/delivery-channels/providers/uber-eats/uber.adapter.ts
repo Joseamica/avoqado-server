@@ -39,6 +39,13 @@ export interface UberEventIdentity {
   resourceRef: string | null
 }
 
+/**
+ * Cuánto dura una pausa. El uAPI EXIGE una hora de fin (`is_offline_until`), así que no hay
+ * "pausado hasta que yo diga": hay que elegir un plazo. Una hora es lo que la clásica usaba
+ * como `pause_duration`, y es reversible en cualquier momento con `setStoreStatus(false)`.
+ */
+const PAUSA_MS = 60 * 60_000
+
 export const uberAdapter = {
   provider: DeliveryProvider.UBER_EATS,
 
@@ -160,11 +167,28 @@ export const uberAdapter = {
   async setStoreStatus(paused: boolean, storeId: string, motivo?: string): Promise<UberActionResult> {
     const r = await uberApi({
       method: 'POST',
-      // ⚠️ `store` en SINGULAR. La documentación de Uber lo publica en plural y ese da 404 —
-      // verificado el 2026-08-17 contra la API real. No lo "corrijas" a `stores`.
-      path: `/v1/eats/store/${encodeURIComponent(storeId)}/status`,
+      // uAPI. La validación de producción de Uber (caso 59683742) rastrea esta ruta, no la
+      // clásica `/v1/eats/store/{id}/status`. Verificado contra la API real el 28-ago:
+      // devuelve 200 con `{status, previous_status}`.
+      // ⚠️ `store` en SINGULAR, igual que la clásica: el plural da 404.
+      path: `/v1/delivery/store/${encodeURIComponent(storeId)}/update-store-status`,
       storeId,
-      body: paused ? { status: 'PAUSED', reason: motivo ?? 'Pausado desde el punto de venta', pause_duration: 3600 } : { status: 'ONLINE' },
+      // 🔴 EL CUERPO TAMBIÉN CAMBIÓ, no sólo la ruta (verificado contra la API real el
+      // 28-ago). En la clásica se mandaba `{status:'PAUSED', reason, pause_duration}`. En el
+      // uAPI `PAUSED` NO EXISTE —"unknown enum value string:PAUSED"— y lo que hay es
+      // `OFFLINE` con un `is_offline_until` OBLIGATORIO en ISO:
+      //   400 → "is_offline_until timestamp is needed when setting store offline"
+      // Migrar sólo la ruta habría dejado al negocio SIN PODER PAUSAR, que es exactamente el
+      // fallo que el comentario de arriba describe como el peor de esta integración: los
+      // pedidos siguen entrando, hay que rechazarlos uno por uno, y cada rechazo cuenta
+      // contra la tasa de inyección que Uber exige para no revocar el acceso.
+      body: paused
+        ? {
+            status: 'OFFLINE',
+            is_offline_until: new Date(Date.now() + PAUSA_MS).toISOString(),
+            reason: motivo ?? 'Pausado desde el punto de venta',
+          }
+        : { status: 'ONLINE' },
     })
     const ok = r.status < 400
     if (!ok)
@@ -175,9 +199,14 @@ export const uberAdapter = {
 
   /** ¿Está la tienda recibiendo pedidos ahora mismo, según el proveedor? */
   async getStoreStatus(storeId: string): Promise<{ ok: boolean; status: number; estado?: string; motivo?: string; raw: string }> {
-    const r = await uberApi({ method: 'GET', path: `/v1/eats/store/${encodeURIComponent(storeId)}/status`, storeId })
-    const j = r.json as { status?: string; offlineReason?: string } | undefined
-    return { ok: r.status < 400, status: r.status, estado: j?.status, motivo: j?.offlineReason, raw: r.text }
+    const r = await uberApi({ method: 'GET', path: `/v1/delivery/store/${encodeURIComponent(storeId)}/status`, storeId })
+    // 🔴 El uAPI devuelve `offline_reason` en SNAKE_CASE; la clásica lo mandaba en
+    // `offlineReason` (camelCase). Verificado contra la API real el 28-ago:
+    //   {"status":"OFFLINE","offline_reason":"OUT_OF_MENU_HOURS","integrator_store_id":"…"}
+    // Se leen las DOS porque la diferencia no falla: deja el motivo en `undefined` y la
+    // pantalla dice "pausada" sin poder decir por qué — justo cuando alguien lo necesita.
+    const j = r.json as { status?: string; offline_reason?: string; offlineReason?: string } | undefined
+    return { ok: r.status < 400, status: r.status, estado: j?.status, motivo: j?.offline_reason ?? j?.offlineReason, raw: r.text }
   },
 
   /**

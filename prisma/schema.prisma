@@ -4756,11 +4756,22 @@ model Terminal {
   canDeliverAreaTickets  Boolean           @default(false)
   defaultWorkspace       TerminalWorkspace @default(STANDARD_POS)
 
+  /// Capacidades observadas del display del cliente. Son null hasta que el
+  /// dispositivo anuncie soporte; capabilitiesObservedAt permite invalidar
+  /// observaciones viejas sin inventar capacidades por tipo de hardware.
+  customerDisplayPresent     Boolean?
+  customerDisplayInvertible  Boolean?
+  displayModeProtocolVersion Int?
+  capabilitiesObservedAt     DateTime?
+
   /// Mostrador invertido: el cliente ve la pantalla grande y el cajero trabaja
   /// en la chica. Es por DISPOSITIVO (así está armado ESE mostrador), no por
   /// venue. El POS aplica su valor local y sincroniza con este; el dashboard lo
   /// puede cambiar en remoto.
-  customerDisplayInverted Boolean @default(false)
+  customerDisplayInverted         Boolean  @default(false)
+  customerDisplayRequest          Json?
+  customerDisplayRequestVersion   Int      @default(0)
+  customerDisplayRequestExpiresAt DateTime?
 
   scaleProfileId String?
   scaleProfile   ScaleProfile? @relation(fields: [scaleProfileId], references: [id], onDelete: SetNull)
@@ -4836,6 +4847,7 @@ model Terminal {
   @@index([venueId, formFactor]) // filtro por tipo de aparato en el dashboard
   @@index([fulfillmentAreaId]) // terminales de un área
   @@index([scaleProfileId])
+  @@index([customerDisplayRequestExpiresAt])
 }
 
 // ==========================================

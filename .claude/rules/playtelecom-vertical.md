@@ -115,6 +115,26 @@ el cliente se comprueba contando eventos en la base, nunca de memoria ni de una 
 | Dar de baja a quien ya no trabaja              | `baja-personal-bait.ts`                       | 🔴 sin autoservicio                                                                                                              |
 | Mover una terminal de tienda                   | `mover-terminal-bait.ts` + borrado de fábrica | 🔴 sin autoservicio                                                                                                              |
 | Reasignar ventas de cubre descanso a su tienda | script + Excel que él manda                   | 🟢 **pantalla aprobada** por Isaac y por el founder (2026-08-25), gratis detrás del módulo `SERIALIZED_INVENTORY`; sin construir |
+| Dar por perdidas las SIMs de quien se fue      | `marcar-sims-perdidas-bait.ts` contra prod    | 🔴 sin autoservicio — y es el que BLOQUEA la baja (ver abajo)                                                                    |
+
+### 🔴 El aviso de la baja denuncia un problema que el cliente no puede resolver (2026-08-28)
+
+El caso que lo destapó: Isaac pidió dar de baja a dos personas y **la guarda de custodia lo impidió** porque traían 141 SIMs. El dashboard
+ya le AVISA (`getDeactivationImpact` pinta "tiene N SIMs en custodia" al abrir el diálogo de baja) — pero ahí se acaba: **no hay ninguna
+acción en el dashboard que marque una SIM como perdida.** Le decimos qué le falta y no le damos con qué.
+
+Verificado en el código, y el hueco es doble:
+
+- **En el dashboard, cero.** `markAsDamaged` no tiene ruta HTTP: el único camino es la tool `mark_serialized_item` del MCP. La UI sólo
+  FILTRA por `DAMAGED`; el `CollectSimDialog` con motivo `DAMAGED_SIM` es otra cosa (recolectar del promotor, no dar por perdida).
+- 🔴 **Y la tool del MCP tampoco sirve para PlayTelecom**, aunque parezca que sí: `markAsDamaged(venueId, serialNumber)` busca por la llave
+  compuesta `venueId_serialNumber`, y **las SIMs de PT son de nivel ORGANIZACIÓN** (`venueId = null`) — nunca las encuentra. Por eso hubo
+  que escribir un script que localiza cada artículo **por su id**. Cualquier pantalla que se construya para esto tiene que resolver el
+  artículo a nivel organización, no por venue.
+
+**Regla que sale de aquí, y aplica fuera de PT:** un aviso que reporta un bloqueo **sin ofrecer la salida** deja el trabajo a medias — es la
+misma familia que "apagado se ve y se explica" de `feature-gating.md`. Si construyes la advertencia, construye la acción, o declara
+explícitamente por qué no.
 
 **La llave que vuelve barato todo esto ya existe:** `Staff.employeeCode` guarda el número de empleado de Bait, que Isaac confirmó como "el
 nuevo dato pivote para unir fuentes de información", y el ID de tienda vive en `Venue.name` entre paréntesis. Cualquier pantalla de carga

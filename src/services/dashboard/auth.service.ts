@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
 import { AuthenticationError, ForbiddenError, BadRequestError } from '../../errors/AppError'
 import { LoginDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schemas/dashboard/auth.schema'
-import { StaffRole, InvitationStatus } from '@prisma/client'
+import { StaffRole, InvitationStatus, AuthMethod } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import { getEffectiveRolePermissions } from '../../lib/permissions'
 import emailService from '../email.service'
@@ -13,7 +13,10 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from './venueRoleConfig.dashboard.service'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
+import { issueGrant } from '@/services/auth/refreshGrant.service'
+import { refreshGrantExpiry } from '@/services/mobile/auth.mobile.service'
 import { cerrarSesionesNuevasPorCambioDeContrasena } from '@/utils/passwordChangeGuard'
+import { createSession } from '@/services/auth/session.service'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
@@ -434,9 +437,33 @@ export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
 
   // 4. Generar tokens con el venue seleccionado (derive orgId from venue)
   const selectedVenueOrgId = selectedVenue.venue.organizationId ?? staff.organizations[0]?.organizationId
-  const accessToken = jwtService.generateAccessToken(staff.id, selectedVenueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
+  // Parte A (sesiones revocables): la Session nace ANTES que los tokens, porque su id
+  // viaja como `sid` dentro de ambos. Sin ella el acceso web no se puede cancelar: el
+  // middleware sólo sabe revocar un token que trae `sid`.
+  //
+  // 🔴 Sin `pos: true` a propósito. Ese flag baja el access a 10 minutos porque el POS
+  // tiene carril de refresco; el dashboard NO refresca (ante un 401 manda al login), así
+  // que marcarlo echaría al dueño de su panel cada 10 minutos.
+  const session = await createSession({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    authMethod: AuthMethod.PASSWORD,
+  })
 
-  const refreshToken = jwtService.generateRefreshToken(staff.id, selectedVenueOrgId, rememberMe)
+  const accessToken = jwtService.generateAccessToken(staff.id, selectedVenueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe, {
+    sid: session.id,
+  })
+
+  // `venueId` (4º) iba vacío hasta ahora; hay que rellenarlo para poder llegar a `opts` (5º).
+  const refreshToken = jwtService.generateRefreshToken(staff.id, selectedVenueOrgId, rememberMe, selectedVenue.venueId, {
+    sid: session.id,
+  })
+
+  // 🔴 [Auditoría 2026-08-30, P2] Sin este grant el refresh token queda HUÉRFANO: lleva `sid`,
+  // así que `rotateGrant` lo trata como parte de una familia, no encuentra su fila y devuelve
+  // REUTILIZADO — que no sólo rechaza el refresco, además REVOCA la sesión. Un token que se
+  // suicida en su primer uso. Misma línea, mismo motivo, que en los dos logins móviles.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry(rememberMe))
 
   // 5. Actualizar último login y resetear intentos fallidos
   await prisma.staff.update({
@@ -627,8 +654,26 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
 
   // 2. Generar un nuevo set de tokens (derive orgId from target venue)
   const targetOrgId = targetVenue.organizationId
-  const accessToken = jwtService.generateAccessToken(staffId, targetOrgId, targetVenueId, roleInNewVenue)
-  const refreshToken = jwtService.generateRefreshToken(staffId, targetOrgId)
+  // Parte A: cambiar de sucursal emite tokens NUEVOS, así que necesita su propia Session
+  // — si no, el token del venue destino vuelve a ser uno que nadie puede cancelar.
+  //
+  // 🔴 `undefined` explícito en el 5º (rememberMe) para poder llegar al 6º (opts). Aquí
+  // sólo se pasaban 4 argumentos, y `opts` en la posición de `rememberMe` no lo cacha
+  // ningún tipo: los dos son opcionales.
+  const session = await createSession({
+    staffId,
+    venueId: targetVenueId,
+    authMethod: AuthMethod.PASSWORD,
+  })
+
+  const accessToken = jwtService.generateAccessToken(staffId, targetOrgId, targetVenueId, roleInNewVenue, undefined, { sid: session.id })
+  const refreshToken = jwtService.generateRefreshToken(staffId, targetOrgId, undefined, targetVenueId, { sid: session.id })
+
+  // 🔴 [Auditoría 2026-08-30, P2] Sin este grant el refresh token queda HUÉRFANO: lleva `sid`,
+  // así que `rotateGrant` lo trata como parte de una familia, no encuentra su fila y devuelve
+  // REUTILIZADO — que no sólo rechaza el refresco, además REVOCA la sesión. Un token que se
+  // suicida en su primer uso. Misma línea, mismo motivo, que en los dos logins móviles.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry())
 
   return { accessToken, refreshToken }
 }
