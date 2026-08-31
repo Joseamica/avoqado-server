@@ -349,14 +349,17 @@ export async function buildAttendanceGrid(
 
     for (const date of days) {
       if (date < joinedIso || (leftIso && date > leftIso)) continue
-      const assignment = rotating
-        ? ((
-            (membership as any).workShiftAssignments as
-              | Array<{ date: string; startTime: string; endTime: string; status: string }>
-              | undefined
-          )?.find(a => a.date === date) ?? null)
-        : null
-      const expected = resolveExpectedDay(weekly, exceptions, date, assignment)
+      const turnoDe = (dia: string) => {
+        const asignacion = rotating
+          ? ((
+              (membership as any).workShiftAssignments as
+                | Array<{ date: string; startTime: string; endTime: string; status: string }>
+                | undefined
+            )?.find(a => a.date === dia) ?? null)
+          : null
+        return resolveExpectedDay(weekly, exceptions, dia, asignacion)
+      }
+      const expected = turnoDe(date)
       const picked = pickEntryForDay(membership.staffId, date, expected)
       let actual: {
         clockInTime: Date
@@ -411,10 +414,26 @@ export async function buildAttendanceGrid(
         const overnight = !!expected.start && !!expected.end && expected.end <= expected.start
         if (overnight) {
           const nextDate = DateTime.fromISO(date, { zone: timezone }).plus({ days: 1 }).toISODate()!
+          // 🔴 El día siguiente puede tener SU PROPIO turno de madrugada, y entonces esa checada
+          // es suya, no una continuación de anoche. Sin esto, un nocturno 22:00–06:00 se comía
+          // la jornada completa de un turno 05:00–13:00: reclamaba 7 h de extra que no trabajó
+          // ESE día y dejaba al siguiente en falta (3ª auditoría de Codex, 31-ago-2026, P1 #3).
+          //
+          // El límite es el MISMO que usa `pickEntryForDay` para decidir si una checada de la
+          // tarde abre un nocturno: dos horas antes de la entrada. Reusarlo mantiene una sola
+          // definición de «esta checada pertenece a este turno».
+          const turnoSiguiente = turnoDe(nextDate)
+          const abreElSiguiente =
+            !turnoSiguiente.isDayOff && turnoSiguiente.start
+              ? overnightSameDayThreshold(turnoSiguiente.start)
+              : null
+
           for (const sib of byStaffAndDay.get(`${membership.staffId}|${nextDate}`) ?? []) {
             if (sib === picked || consumed.has(sib)) continue
             if (sib.clockInTime.getTime() <= picked.clockInTime.getTime()) continue
             if (sib.localTime >= expected.end!) continue
+            // Cae dentro de la ventana de entrada del turno de MAÑANA ⇒ es de él.
+            if (abreElSiguiente !== null && sib.localTime >= abreElSiguiente) continue
             tomarContinuacion(sib)
           }
         }

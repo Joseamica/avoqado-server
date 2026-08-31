@@ -25,10 +25,44 @@ import { createHash } from 'crypto'
 
 import { DateTime } from 'luxon'
 
-/** Art. 66: 3 horas diarias. Es la LEY, no un ajuste del negocio. */
-export const TOPE_DIARIO_MINUTOS = 180
+/**
+ * Art. 66 vigente (reforma publicada en el DOF el 1-MAY-2026): **4 horas al día, 4 días a la
+ * semana**. Es la LEY, no un ajuste del negocio.
+ *
+ * 🔴 Antes decía 3 y 3, que es la ley ANTERIOR. Se escribió así el 29-ago-2026 de memoria en
+ * vez de buscarla — y la reforma cae justo en el corte de conocimiento del modelo que la
+ * escribió, así que "recordaba" el texto viejo con total confianza. Lo cazó la 3ª auditoría de
+ * Codex. **Una regla legal se busca, nunca se recuerda.**
+ */
+export const TOPE_DIARIO_MINUTOS = 240
+export const TOPE_DIAS_CON_EXTRA = 4
 
-/** Art. 66/67: 9 horas semanales. Hasta aquí es doble; de aquí en adelante, triple. */
+/**
+ * El tope SEMANAL de horas extra, que la reforma sube por años (cuarto transitorio):
+ * 9 h en 2026-27, 10 en 2028, 11 en 2029 y 12 desde 2030.
+ *
+ * 🔑 Y esto NO es sólo un límite: es el corte del dinero. El art. 68 vigente paga al **200 %**
+ * lo que «supere lo establecido en el artículo 66», así que la frontera doble→triple ES este
+ * número. Congelarlo en 540 haría pagar al triple, desde 2028, una hora que la ley manda pagar
+ * al doble.
+ *
+ * ⚠️ Una semana que cruza el 31 de diciembre se rige por el año de su LUNES, declarado aquí
+ * porque la ley no lo resuelve: es la interpretación conservadora —la semana es la unidad que
+ * el art. 66 acota, y se le aplica el tope vigente cuando empezó—. Si laboral dice otra cosa,
+ * se cambia AQUÍ y en ningún otro sitio.
+ */
+export function topeSemanalMinutos(lunesDeLaSemana: string): number {
+  const anio = Number(lunesDeLaSemana.slice(0, 4))
+  if (!Number.isFinite(anio) || anio <= 2027) return 540
+  if (anio === 2028) return 600
+  if (anio === 2029) return 660
+  return 720
+}
+
+/**
+ * @deprecated Usa {@link topeSemanalMinutos}: desde 2028 el tope deja de ser fijo. Se conserva
+ * el nombre porque es el valor de 2026-27 y hay llamadas antiguas que aún lo leen.
+ */
 export const TOPE_SEMANAL_MINUTOS = 540
 
 /** El turno que le tocaba ese día, tal como lo resuelve la rejilla de asistencia. */
@@ -142,9 +176,16 @@ export function minutosExtraDelDia({ turno, intervalos, descansos, timezone }: M
  * Se recibe el total YA acumulado de la semana: quien llama es responsable de agrupar por
  * semana, porque el umbral es semanal y no diario.
  */
-export function repartirDobleYTriple(minutosTotales: number): { minutosDobles: number; minutosTriples: number } {
+export function repartirDobleYTriple(
+  minutosTotales: number,
+  /**
+   * El tope de ESA semana. Se pasa en vez de leerse de una constante porque desde 2028 depende
+   * del año — ver {@link topeSemanalMinutos}. Por defecto, el de 2026-27.
+   */
+  topeSemanal: number = TOPE_SEMANAL_MINUTOS,
+): { minutosDobles: number; minutosTriples: number } {
   if (!(minutosTotales > 0)) return { minutosDobles: 0, minutosTriples: 0 }
-  const dobles = Math.min(minutosTotales, TOPE_SEMANAL_MINUTOS)
+  const dobles = Math.min(minutosTotales, Math.max(0, topeSemanal))
   return { minutosDobles: dobles, minutosTriples: minutosTotales - dobles }
 }
 
@@ -340,8 +381,11 @@ export function agruparPorSemana(
       // El reparto se calcula sobre el acumulado COMPLETO de la semana y luego se le resta la
       // parte de los días de fuera: así el umbral de 9 h cae donde la ley lo pone, pero lo
       // devuelto sigue siendo lo atribuible al rango pedido.
-      const conPrevios = repartirDobleYTriple(minutosPrevios + minutosTotal)
-      const soloPrevios = repartirDobleYTriple(minutosPrevios)
+      // 🔴 El tope es el de ESTA semana, no una constante: desde 2028 sube por año y con él
+      // se mueve la frontera doble→triple (art. 68 sobre el art. 66 vigente).
+      const topeDeLaSemana = topeSemanalMinutos(weekStart)
+      const conPrevios = repartirDobleYTriple(minutosPrevios + minutosTotal, topeDeLaSemana)
+      const soloPrevios = repartirDobleYTriple(minutosPrevios, topeDeLaSemana)
       const minutosDobles = conPrevios.minutosDobles - soloPrevios.minutosDobles
       const minutosTriples = conPrevios.minutosTriples - soloPrevios.minutosTriples
 
@@ -358,7 +402,7 @@ export function agruparPorSemana(
           .map(d => d.date)
           .sort(),
         diasConExtra: previos.length + deLaSemana.length,
-        excedeDiasPermitidos: previos.length + deLaSemana.length > 3,
+        excedeDiasPermitidos: previos.length + deLaSemana.length > TOPE_DIAS_CON_EXTRA,
         parcial: !desdeRango.isValid || !hastaRango.isValid || desdeRango > lunes || hastaRango < domingo,
       }
     })

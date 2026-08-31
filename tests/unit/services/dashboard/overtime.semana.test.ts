@@ -48,33 +48,36 @@ describe('agruparPorSemana', () => {
   })
 
   describe('infracciones del art. 66 — se señalan, NO cambian la tarifa', () => {
-    it('un día de más de 3 h queda marcado', () => {
-      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 240 }], SEMANA_COMPLETA)
+    // 🔴 Reforma del 1-MAY-2026: el art. 66 pasó de 3 h/3 días a 4 h/4 días. Las versiones
+    // anteriores de estas pruebas eran CORRECTAS con la ley de entonces.
+    it('un día de más de 4 h queda marcado', () => {
+      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 300 }], SEMANA_COMPLETA)
       expect(semanas[0].diasSobreTopeDiario).toEqual(['2026-08-24'])
     })
 
-    it('🔴 pero esas 4 h siguen siendo DOBLES si la semana no llegó a 9', () => {
-      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 240 }], SEMANA_COMPLETA)
-      expect(semanas[0].minutosDobles).toBe(240)
+    it('🔴 pero esas 5 h siguen siendo DOBLES si la semana no llegó a 9', () => {
+      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 300 }], SEMANA_COMPLETA)
+      expect(semanas[0].minutosDobles).toBe(300)
       expect(semanas[0].minutosTriples).toBe(0)
     })
 
-    it('exactamente 3 h no es infracción', () => {
-      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 180 }], SEMANA_COMPLETA)
+    it('exactamente 4 h no es infracción', () => {
+      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 240 }], SEMANA_COMPLETA)
       expect(semanas[0].diasSobreTopeDiario).toEqual([])
     })
 
-    it('hacer extra más de 3 veces en la semana queda marcado', () => {
+    it('hacer extra más de 4 veces en la semana queda marcado', () => {
       const semanas = agruparPorSemana(
         [
           { date: '2026-08-24', minutos: 30 },
           { date: '2026-08-25', minutos: 30 },
           { date: '2026-08-26', minutos: 30 },
           { date: '2026-08-27', minutos: 30 },
+          { date: '2026-08-28', minutos: 30 },
         ],
         SEMANA_COMPLETA,
       )
-      expect(semanas[0].diasConExtra).toBe(4)
+      expect(semanas[0].diasConExtra).toBe(5)
       expect(semanas[0].excedeDiasPermitidos).toBe(true)
     })
 

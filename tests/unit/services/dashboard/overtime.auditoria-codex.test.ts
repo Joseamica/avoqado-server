@@ -211,9 +211,11 @@ describe('P1 #2 · un rango a media semana NO reinicia el umbral de 9 h', () => 
     const semanas = agruparPorSemana(
       [{ date: '2026-08-30', minutos: 30 }],
       { startDate: '2026-08-30', endDate: '2026-08-30' },
-      { '2026-08-24': 30, '2026-08-25': 30, '2026-08-26': 30 }, // ya 3 días con extra
+      // 🔴 Reforma del 1-MAY-2026: hacen falta 4 días previos, no 3, para que el quinto
+      // rompa el art. 66.
+      { '2026-08-24': 30, '2026-08-25': 30, '2026-08-26': 30, '2026-08-27': 30 },
     )
-    expect(semanas[0].diasConExtra).toBe(4)
+    expect(semanas[0].diasConExtra).toBe(5)
     expect(semanas[0].excedeDiasPermitidos).toBe(true)
   })
 })

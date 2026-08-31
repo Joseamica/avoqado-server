@@ -263,8 +263,10 @@ describe('repartirDobleYTriple — art. 67 y 68', () => {
 })
 
 describe('los topes del art. 66 son constantes de la LEY, no configurables', () => {
-  it('3 horas al día', () => {
-    expect(TOPE_DIARIO_MINUTOS).toBe(180)
+  // 🔴 Reforma del 1-MAY-2026: pasó de 3 h a 4 h diarias. El detalle, con la progresión
+  // semanal por año, vive en `overtime.reformaLFT2026.test.ts`.
+  it('4 horas al día', () => {
+    expect(TOPE_DIARIO_MINUTOS).toBe(240)
   })
 
   it('9 horas a la semana', () => {

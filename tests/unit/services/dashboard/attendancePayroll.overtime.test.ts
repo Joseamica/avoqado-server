@@ -191,17 +191,35 @@ describe('la checada cambió después de autorizar', () => {
 })
 
 describe('infracciones del art. 66 — sobre lo MEDIDO, no sobre lo autorizado', () => {
-  it('🔴 trabajar 4 h en un día es infracción aunque sólo se autorice una', async () => {
+  // 🔴 Actualizado a la reforma del 1-MAY-2026: el art. 66 pasó de 3 h/3 días a 4 h/4 días.
+  // La versión anterior de esta prueba era CORRECTA con la ley de entonces.
+  it('🔴 trabajar 5 h en un día es infracción aunque sólo se autorice una', async () => {
     // No autorizar no deshace lo que ya pasó: la ley se rompió al trabajarlas.
-    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 240 })], [autorizacion('2026-08-24', 60, 240)])
+    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 300 })], [autorizacion('2026-08-24', 60, 300)])
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
     expect(rows[0].hasOvertimeViolation).toBe(true)
   })
 
-  it('señala hacer extra más de 3 veces en la semana, sin autorizaciones de por medio', async () => {
-    conCeldas(['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27'].map(d => celda({ date: d, overtimeMinutes: 30 })))
+  it('4 h en un día ya NO son infracción: la reforma las permite', async () => {
+    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 240 })], [autorizacion('2026-08-24', 60, 240)])
+    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
+    expect(rows[0].hasOvertimeViolation).toBe(false)
+  })
+
+  it('señala hacer extra más de 4 veces en la semana, sin autorizaciones de por medio', async () => {
+    conCeldas(
+      ['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27', '2026-08-28'].map(d =>
+        celda({ date: d, overtimeMinutes: 30 }),
+      ),
+    )
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
     expect(rows[0].hasOvertimeViolation).toBe(true)
+  })
+
+  it('cuatro días con extra caben dentro de la ley', async () => {
+    conCeldas(['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27'].map(d => celda({ date: d, overtimeMinutes: 30 })))
+    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
+    expect(rows[0].hasOvertimeViolation).toBe(false)
   })
 
   it('una semana dentro de la ley no se marca', async () => {
