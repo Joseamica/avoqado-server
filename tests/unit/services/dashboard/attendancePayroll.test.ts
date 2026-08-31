@@ -137,9 +137,7 @@ describe('getPayrollSummary', () => {
 
   it('atribuye a la última fecha del periodo las horas de una entrada nocturna posterior a medianoche', async () => {
     const overnight = { enabled: true, ranges: [{ open: '22:00', close: '06:00' }] }
-    db.staffVenue.findMany.mockResolvedValue([
-      membership({ workSchedule: { weekly: { ...weekly, friday: overnight } } }),
-    ])
+    db.staffVenue.findMany.mockResolvedValue([membership({ workSchedule: { weekly: { ...weekly, friday: overnight } } })])
     const afterMidnight = {
       ...entry('2026-08-22T06:30:00.000Z'), // sáb 00:30 local; pertenece al turno del viernes 21
       totalHours: 8,

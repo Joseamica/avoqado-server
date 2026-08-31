@@ -145,7 +145,6 @@ export function evaluarAvisoEnVivo(input: EvaluarAvisoInput): EvaluacionDeAviso 
   return { aviso: 'RETARDO', minutosTarde }
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Quién va tarde AHORA — la parte que toca la base
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,7 +239,12 @@ export async function quienVaTarde(venueId: string, now: Date): Promise<{ venueI
   for (const persona of personas) {
     for (const dia of dias) {
       const asignacion = (persona as any).workShiftAssignments?.find((a: any) => a.date === dia) ?? null
-      const esperado = resolveExpectedDay(persona.workSchedule?.weekly as any, persona.workScheduleExceptions as any, dia, asignacion as any)
+      const esperado = resolveExpectedDay(
+        persona.workSchedule?.weekly as any,
+        persona.workScheduleExceptions as any,
+        dia,
+        asignacion as any,
+      )
 
       const veredicto = evaluarAvisoEnVivo({
         expectedStart: esperado.start,

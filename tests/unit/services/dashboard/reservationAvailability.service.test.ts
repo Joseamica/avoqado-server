@@ -175,9 +175,7 @@ describe('Reservation Availability Service', () => {
     })
 
     it('blocks an earlier slot when its own post-service buffer reaches a later reservation', async () => {
-      prismaMock.product.findMany.mockResolvedValue([
-        { id: 'product-1', duration: 60, durationMinutes: null, bufferAfterMin: 30 },
-      ] as any)
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'product-1', duration: 60, durationMinutes: null, bufferAfterMin: 30 }] as any)
       prismaMock.product.findFirst.mockResolvedValue({ eventCapacity: null, type: 'APPOINTMENTS_SERVICE' } as any)
       prismaMock.reservation.findMany.mockResolvedValue([
         createMockReservation({
@@ -722,10 +720,7 @@ describe('Reservation Availability Service', () => {
           ],
         })
 
-        const result = await getSlots(
-          { productId: 'product-1', productIds: ['product-1'], staffId: 'staff-a' },
-          staffAwareConfig(null),
-        )
+        const result = await getSlots({ productId: 'product-1', productIds: ['product-1'], staffId: 'staff-a' }, staffAwareConfig(null))
 
         expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeUndefined()
       })

@@ -40,7 +40,12 @@ describe('candado de sesión al sumar al cajón (P1 venta tardía)', () => {
     jest.clearAllMocks()
     updateMany = jest.fn().mockResolvedValue({ count: 1 })
     createMany = jest.fn().mockResolvedValue({ count: 1 })
-    ;(prismaMock as any).cashDrawerSession = { update: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue({ id: 's-1' }), updateMany, findUnique: jest.fn().mockResolvedValue(null) }
+    ;(prismaMock as any).cashDrawerSession = {
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue({ id: 's-1' }),
+      updateMany,
+      findUnique: jest.fn().mockResolvedValue(null),
+    }
     ;(prismaMock as any).cashDrawerEvent = { createMany }
     ;(prismaMock as any).$transaction = jest.fn((fn: any) => fn(prismaMock))
   })

@@ -421,7 +421,14 @@ async function createEventUnderSessionLock(
     if (!requireOpen && result.count > 0) {
       const session = await tx.cashDrawerSession.findUnique({
         where: { id: sessionId },
-        select: { venueId: true, status: true, actualAmount: true, overShort: true, startingAmount: true, events: { select: { type: true, amount: true } } },
+        select: {
+          venueId: true,
+          status: true,
+          actualAmount: true,
+          overShort: true,
+          startingAmount: true,
+          events: { select: { type: true, amount: true } },
+        },
       })
       if (session && session.status === 'CLOSED' && session.actualAmount !== null) {
         const { calculateExpectedAmount } = await import('../mobile/cash-drawer.mobile.service')
@@ -437,7 +444,15 @@ async function createEventUnderSessionLock(
           action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
           entity: 'CashDrawerSession',
           entityId: sessionId,
-          data: { cause: data.type, localId: data.localId ?? null, amount: Number(data.amount), overShortBefore: session.overShort != null ? Number(session.overShort) : null, overShortAfter: overShort, expectedAfter: expected, source: 'RECONCILER' },
+          data: {
+            cause: data.type,
+            localId: data.localId ?? null,
+            amount: Number(data.amount),
+            overShortBefore: session.overShort != null ? Number(session.overShort) : null,
+            overShortAfter: overShort,
+            expectedAfter: expected,
+            source: 'RECONCILER',
+          },
         })
       }
     }

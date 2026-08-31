@@ -151,7 +151,6 @@ describe('el cierre lee el fondo de su columna', () => {
     expect(firmado.length).toBeGreaterThan(0)
     expect(Number(firmado[0])).toBeCloseTo(0, 2)
   })
-
 })
 describe('abrir la caja respeta el permiso, no lo ignora', () => {
   // 🔴 Encontrado por /full-testing contra el servidor real: la respuesta de ABRIR omitía el
@@ -165,7 +164,22 @@ describe('abrir la caja respeta el permiso, no lo ignora', () => {
     ;(prismaMock as any).cashDrawerSession.findFirst = jest.fn().mockResolvedValue(null) // no hay caja abierta
     ;(prismaMock as any).cashDrawerSession.create = jest
       .fn()
-      .mockResolvedValue({ id: SESSION, venueId: VENUE, status: 'OPEN', startingAmount: 1000, openedAt: ABIERTA_A_LAS, openedByStaffId: CAJERO, openedByName: 'Cajero', closedAt: null, closedByStaffId: null, closedByName: null, actualAmount: null, overShort: null, closingNote: null, events: [] })
+      .mockResolvedValue({
+        id: SESSION,
+        venueId: VENUE,
+        status: 'OPEN',
+        startingAmount: 1000,
+        openedAt: ABIERTA_A_LAS,
+        openedByStaffId: CAJERO,
+        openedByName: 'Cajero',
+        closedAt: null,
+        closedByStaffId: null,
+        closedByName: null,
+        actualAmount: null,
+        overShort: null,
+        closingNote: null,
+        events: [],
+      })
 
     const r: any = await openSession({ venueId: VENUE, staffId: CAJERO, staffName: 'Cajero', startingAmount: 1000 } as never, true)
     expect(r.expectedAmount).toBeDefined()
@@ -176,7 +190,22 @@ describe('abrir la caja respeta el permiso, no lo ignora', () => {
     ;(prismaMock as any).cashDrawerSession.findFirst = jest.fn().mockResolvedValue(null) // no hay caja abierta
     ;(prismaMock as any).cashDrawerSession.create = jest
       .fn()
-      .mockResolvedValue({ id: SESSION, venueId: VENUE, status: 'OPEN', startingAmount: 1000, openedAt: ABIERTA_A_LAS, openedByStaffId: CAJERO, openedByName: 'Cajero', closedAt: null, closedByStaffId: null, closedByName: null, actualAmount: null, overShort: null, closingNote: null, events: [] })
+      .mockResolvedValue({
+        id: SESSION,
+        venueId: VENUE,
+        status: 'OPEN',
+        startingAmount: 1000,
+        openedAt: ABIERTA_A_LAS,
+        openedByStaffId: CAJERO,
+        openedByName: 'Cajero',
+        closedAt: null,
+        closedByStaffId: null,
+        closedByName: null,
+        actualAmount: null,
+        overShort: null,
+        closingNote: null,
+        events: [],
+      })
 
     const r: any = await openSession({ venueId: VENUE, staffId: CAJERO, staffName: 'Cajero', startingAmount: 1000 } as never)
     expect(r.expectedAmount).toBeUndefined()

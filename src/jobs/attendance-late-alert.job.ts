@@ -170,8 +170,7 @@ export class AttendanceLateAlertJob {
         const staff = await prisma.staff.findUnique({ where: { id: recipientId }, select: { email: true } })
         if (!staff?.email) continue
 
-        const titulo =
-          personas.length === 1 ? `${personas[0].nombre} no ha checado` : `${personas.length} personas no han checado`
+        const titulo = personas.length === 1 ? `${personas[0].nombre} no ha checado` : `${personas.length} personas no han checado`
         // 🔴 "lleva 40 min" se leía como "lleva 40 min AQUÍ" (lo señaló el founder, 29-ago).
         // Se nombra lo que son esos minutos: retraso.
         const cuerpo = personas.map(p => `${p.nombre} — entraba a las ${p.esperada} · ${p.minutosTarde} min de retraso`).join('\n')

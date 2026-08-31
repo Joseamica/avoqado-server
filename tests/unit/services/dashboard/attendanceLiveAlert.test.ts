@@ -162,7 +162,6 @@ describe('evaluarAvisoEnVivo', () => {
   })
 })
 
-
 /**
  * 🔴 A QUÉ TURNO PERTENECE UNA CHECADA.
  *

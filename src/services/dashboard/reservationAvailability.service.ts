@@ -335,9 +335,7 @@ export async function getAvailableSlots(
           where: {
             OR: [
               { venueId, startsAt: { lt: dayBlockedEnd }, endsAt: { gt: dayStart } },
-              ...(options.staffId
-                ? [{ staffId: options.staffId, startsAt: { lt: dayBlockedEnd }, endsAt: { gt: dayStart } }]
-                : []),
+              ...(options.staffId ? [{ staffId: options.staffId, startsAt: { lt: dayBlockedEnd }, endsAt: { gt: dayStart } }] : []),
             ],
           },
           select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
@@ -398,9 +396,7 @@ export async function getAvailableSlots(
     // El `?? endsAt` es la red: una fila sin el dato sigue bloqueando al menos
     // su horario de servicio. Desaparecer del cálculo sería peor que no tener
     // buffer — dejaría vendible un horario realmente ocupado.
-    const overlapping = existingReservations.filter(
-      r => r.startsAt < slotBlockedEnd && (r.blockedEndsAt ?? r.endsAt) > slotStart,
-    )
+    const overlapping = existingReservations.filter(r => r.startsAt < slotBlockedEnd && (r.blockedEndsAt ?? r.endsAt) > slotStart)
     const overlappingHolds = activeHolds.filter(
       hold => isLiveSlotHold(hold, checkedAt) && hold.startsAt < slotBlockedEnd && hold.endsAt > slotStart,
     )
