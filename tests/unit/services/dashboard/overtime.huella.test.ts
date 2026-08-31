@@ -37,15 +37,11 @@ describe('huellaDeLaJornada', () => {
   })
 
   it('cambiar la hora de salida cambia la huella', () => {
-    expect(jornada([{ entrada: t('09:00'), salida: t('19:00') }])).not.toBe(
-      jornada([{ entrada: t('09:00'), salida: t('19:01') }]),
-    )
+    expect(jornada([{ entrada: t('09:00'), salida: t('19:00') }])).not.toBe(jornada([{ entrada: t('09:00'), salida: t('19:01') }]))
   })
 
   it('cambiar la hora de ENTRADA también', () => {
-    expect(jornada([{ entrada: t('09:00'), salida: t('19:00') }])).not.toBe(
-      jornada([{ entrada: t('08:00'), salida: t('19:00') }]),
-    )
+    expect(jornada([{ entrada: t('09:00'), salida: t('19:00') }])).not.toBe(jornada([{ entrada: t('08:00'), salida: t('19:00') }]))
   })
 
   it('🔴 añadir un descanso cambia la huella aunque el total de extra no cambie', () => {
@@ -79,9 +75,7 @@ describe('huellaDeLaJornada', () => {
   })
 
   it('un tramo ABIERTO se distingue de uno cerrado', () => {
-    expect(jornada([{ entrada: t('09:00'), salida: null }])).not.toBe(
-      jornada([{ entrada: t('09:00'), salida: t('19:00') }]),
-    )
+    expect(jornada([{ entrada: t('09:00'), salida: null }])).not.toBe(jornada([{ entrada: t('09:00'), salida: t('19:00') }]))
   })
 
   it('una jornada sin nada da una huella estable, no vacía', () => {

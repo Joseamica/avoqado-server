@@ -236,12 +236,7 @@ describe('partitionRecipients / filterDeliverableRecipients', () => {
  * tilde acaba dentro del correo.
  */
 describe('NON_ASCII — una tilde dentro de la dirección la vuelve indefendible', () => {
-  it.each([
-    'lucía@avoqado.io',
-    'paola.ríos@gmail.com',
-    'jose@piñata.com',
-    'muñoz@hotmail.com',
-  ])('%s se clasifica como NON_ASCII', email => {
+  it.each(['lucía@avoqado.io', 'paola.ríos@gmail.com', 'jose@piñata.com', 'muñoz@hotmail.com'])('%s se clasifica como NON_ASCII', email => {
     expect(classifyUndeliverable(email)).toBe('NON_ASCII')
   })
 
@@ -255,4 +250,3 @@ describe('NON_ASCII — una tilde dentro de la dirección la vuelve indefendible
     expect(isDeliverableRecipient('jose@hotmail.com', 'test')).toBe(true)
   })
 })
-

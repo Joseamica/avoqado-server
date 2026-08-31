@@ -93,11 +93,7 @@ describe('🔴 los scripts que escriben lo USAN — prueba estática', () => {
   const path = require('path')
   const DIR = path.join(__dirname, '../../../scripts')
 
-  it.each([
-    'probar-horas-extra.ts',
-    'probar-autorizar-extra.ts',
-    'sembrar-extra-para-qa.ts',
-  ])('%s llama a exigirBaseLocal', archivo => {
+  it.each(['probar-horas-extra.ts', 'probar-autorizar-extra.ts', 'sembrar-extra-para-qa.ts'])('%s llama a exigirBaseLocal', archivo => {
     const fuente = fs.readFileSync(path.join(DIR, archivo), 'utf8')
     expect(fuente).toContain('exigirBaseLocal')
   })

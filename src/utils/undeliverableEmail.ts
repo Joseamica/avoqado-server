@@ -52,13 +52,7 @@
 
 import logger from '../config/logger'
 
-export type UndeliverableReason =
-  | 'RESERVED_TLD'
-  | 'RESERVED_DOMAIN'
-  | 'PLACEHOLDER_DOMAIN'
-  | 'SEED_ACCOUNT'
-  | 'NON_ASCII'
-  | 'MALFORMED'
+export type UndeliverableReason = 'RESERVED_TLD' | 'RESERVED_DOMAIN' | 'PLACEHOLDER_DOMAIN' | 'SEED_ACCOUNT' | 'NON_ASCII' | 'MALFORMED'
 
 /** Special-use TLDs that can never resolve on the public internet. */
 const RESERVED_TLDS = new Set(['test', 'invalid', 'example', 'localhost', 'local'])

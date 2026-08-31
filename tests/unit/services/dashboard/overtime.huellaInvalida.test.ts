@@ -48,9 +48,7 @@ describe('la huella invalida una autorización que ya no corresponde', () => {
 
   it('🔴 la huella manda por encima del total: coincidir en minutos NO basta', () => {
     // Se autorizaron 120 sobre 120 medidos; hoy siguen siendo 120 pero de otra jornada.
-    const r = resumirAutorizacion([
-      base({ medidos: 120, autorizados: 120, medidosAlAutorizar: 120, huellaActual: 'nueva' }),
-    ])
+    const r = resumirAutorizacion([base({ medidos: 120, autorizados: 120, medidosAlAutorizar: 120, huellaActual: 'nueva' })])
     expect(r.minutosAutorizados).toBe(0)
   })
 

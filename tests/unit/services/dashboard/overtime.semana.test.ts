@@ -45,7 +45,6 @@ describe('agruparPorSemana', () => {
     expect(semanas[0].weekEnd).toBe('2026-08-30')
   })
 
-
   it('🔴 una semana que el rango no cubre entera se marca PARCIAL', () => {
     // Pedir del miércoles al viernes no puede afirmar el reparto doble/triple de esa semana:
     // el lunes y el martes quedaron fuera y pudieron traer horas.

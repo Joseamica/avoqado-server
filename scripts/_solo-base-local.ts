@@ -98,9 +98,7 @@ export async function esClusterAutorizado(prisma: {
 }): Promise<ResultadoDelCorte> {
   let filas: Array<Record<string, unknown>>
   try {
-    filas = await prisma.$queryRawUnsafe(
-      'SELECT system_identifier::text AS id, current_database() AS base FROM pg_control_system()',
-    )
+    filas = await prisma.$queryRawUnsafe('SELECT system_identifier::text AS id, current_database() AS base FROM pg_control_system()')
   } catch (e) {
     // Si no se puede preguntar, no se puede afirmar que sea local.
     return { ok: false, motivo: `No pude identificar el clúster: ${(e as Error).message}` }

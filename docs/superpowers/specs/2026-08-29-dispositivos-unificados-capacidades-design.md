@@ -1,7 +1,7 @@
 # Dispositivos unificados: una identidad, capacidades reales y acciones honestas
 
-**Fecha:** 2026-08-29 · **Estado:** implementación aditiva completa en working tree y revisada; sin deploy, migración aplicada ni
-cutoff legado; QA físico y ventana real de siete días pendientes
+**Fecha:** 2026-08-29 · **Estado:** implementación aditiva completa en working tree y revisada; sin deploy, migración aplicada ni cutoff
+legado; QA físico y ventana real de siete días pendientes
 
 **Repos y superficies involucradas:**
 
@@ -24,8 +24,8 @@ cutoff legado; QA físico y ventana real de siete días pendientes
   implementados y revisados. Lint/typecheck y pruebas propias pasan; no hubo deploy ni QA manual con fixtures reales.
 - TPV/iOS: no recibieron cambios de producto. iOS compiló en simulador; la regresión TPV no alcanzó sus asserts por un fallo ajeno al
   configurar `:commonlib` en un checkout que se movía concurrentemente.
-- Phase D: la instrumentación y el reporte read-only reproducible ya existen. El gate de siete días, el 422 del PUT legado y
-  cualquier retiro de compatibilidad permanecen expresamente pendientes.
+- Phase D: la instrumentación y el reporte read-only reproducible ya existen. El gate de siete días, el 422 del PUT legado y cualquier
+  retiro de compatibilidad permanecen expresamente pendientes.
 
 Por lo anterior, este documento no declara el rollout como **Implemented** ni listo para producción.
 

@@ -87,9 +87,10 @@ export function parseStructure(workbook: XLSX.WorkBook): StructureRow[] {
   if (headerIndex === -1) throw new Error(`No encontré el encabezado (se esperaban las columnas: ${COLUMNS.join(', ')})`)
 
   const header = (grid[headerIndex] ?? []).map(key)
-  const columns = Object.fromEntries(
-    (Object.keys(ALIASES) as Campo[]).map(campo => [campo, columnIndex(header, campo)]),
-  ) as Record<Campo, number>
+  const columns = Object.fromEntries((Object.keys(ALIASES) as Campo[]).map(campo => [campo, columnIndex(header, campo)])) as Record<
+    Campo,
+    number
+  >
 
   // 🔴 En la versión de agosto la tienda también se llama "Nombre", así que
   // `indexOf` devolvería la columna de la PERSONA y cada promotor se llamaría como

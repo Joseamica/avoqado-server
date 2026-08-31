@@ -240,9 +240,6 @@ describe('la atribución no depende del RANGO que se pida', () => {
     const solo = await buildAttendanceGrid(V, DIA, DIA)
     conTurnoRotativoElJueves()
     const ambos = await buildAttendanceGrid(V, DIA, SIGUIENTE)
-    expect(solo.cells.find(c => c.date === DIA)!.overtimeMinutes).toBe(
-      ambos.cells.find(c => c.date === DIA)!.overtimeMinutes,
-    )
+    expect(solo.cells.find(c => c.date === DIA)!.overtimeMinutes).toBe(ambos.cells.find(c => c.date === DIA)!.overtimeMinutes)
   })
 })
-

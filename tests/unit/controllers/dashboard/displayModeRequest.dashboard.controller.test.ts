@@ -227,10 +227,7 @@ describe('typed dashboard display-mode routes', () => {
   })
 
   it('rejects unknown DELETE body keys before cancellation service work', async () => {
-    const response = await request(makeApp())
-      .delete(`${ENDPOINT}/${REQUEST_ID}`)
-      .set(authHeaders())
-      .send({ desiredInverted: true })
+    const response = await request(makeApp()).delete(`${ENDPOINT}/${REQUEST_ID}`).set(authHeaders()).send({ desiredInverted: true })
 
     expect(response.status).toBe(400)
     expect(cancelDisplayModeRequestMock).not.toHaveBeenCalled()

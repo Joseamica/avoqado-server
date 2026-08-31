@@ -99,9 +99,9 @@ describe('corregir una autorización existente', () => {
 
   it('🔴 con una revisión VIEJA se rechaza: tu pantalla ya no es la verdad', async () => {
     findApproval.mockResolvedValue(EXISTENTE)
-    await expect(
-      autorizar({ expectedUpdatedAt: new Date('2026-08-30T09:00:00.000Z').toISOString() }),
-    ).rejects.toThrow(/cambi[oó]|conflicto|vuelve a/i)
+    await expect(autorizar({ expectedUpdatedAt: new Date('2026-08-30T09:00:00.000Z').toISOString() })).rejects.toThrow(
+      /cambi[oó]|conflicto|vuelve a/i,
+    )
     expect(updateMany).not.toHaveBeenCalled()
   })
 
@@ -110,9 +110,7 @@ describe('corregir una autorización existente', () => {
     // `updateMany` condicionado por `updatedAt` afecta 0 filas y eso NO es un éxito.
     findApproval.mockResolvedValue(EXISTENTE)
     updateMany.mockResolvedValue({ count: 0 })
-    await expect(autorizar({ expectedUpdatedAt: EXISTENTE.updatedAt.toISOString() })).rejects.toThrow(
-      /cambi[oó]|conflicto|vuelve a/i,
-    )
+    await expect(autorizar({ expectedUpdatedAt: EXISTENTE.updatedAt.toISOString() })).rejects.toThrow(/cambi[oó]|conflicto|vuelve a/i)
   })
 
   it('el error dice QUÉ hacer, no un código', async () => {

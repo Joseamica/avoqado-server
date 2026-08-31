@@ -20,8 +20,7 @@ import { minutosExtraDelDia } from '@/services/dashboard/overtime'
 
 const TZ = 'America/Mexico_City'
 const TURNO = { date: '2026-08-24', expectedStart: '09:00', expectedEnd: '17:00' }
-const salidaCon = (segundosDeMas: number) =>
-  new Date(new Date('2026-08-24T17:00:00.000-06:00').getTime() + segundosDeMas * 1000)
+const salidaCon = (segundosDeMas: number) => new Date(new Date('2026-08-24T17:00:00.000-06:00').getTime() + segundosDeMas * 1000)
 
 const extra = (segundos: number) =>
   minutosExtraDelDia({
@@ -60,9 +59,7 @@ describe('el redondeo es POR DÍA y al minuto más cercano — política declara
         turno: TURNO,
         intervalos: [{ entrada: new Date('2026-08-24T09:00:00.000-06:00'), salida: salidaCon(600) }],
         // Un descanso más largo que la propia hora extra (dato malformado).
-        descansos: [
-          { startTime: new Date('2026-08-24T17:00:00.000-06:00'), endTime: new Date('2026-08-24T19:00:00.000-06:00') },
-        ],
+        descansos: [{ startTime: new Date('2026-08-24T17:00:00.000-06:00'), endTime: new Date('2026-08-24T19:00:00.000-06:00') }],
         timezone: TZ,
       }),
     ).toBe(0)

@@ -802,9 +802,7 @@ export async function updateMerchantAccount(id: string, data: UpdateMerchantAcco
     })
   } catch (error: any) {
     if (error?.code === 'P2002') {
-      throw new ConflictError(
-        `Ya existe una cuenta de este proveedor con el ID de comercio "${data.externalMerchantId}"`,
-      )
+      throw new ConflictError(`Ya existe una cuenta de este proveedor con el ID de comercio "${data.externalMerchantId}"`)
     }
     throw error
   }
