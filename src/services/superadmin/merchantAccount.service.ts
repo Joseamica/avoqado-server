@@ -430,6 +430,13 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
     where: { id },
     include: {
       provider: true,
+      // Espeja el include de `getMerchantAccounts` (lista): sin esto el DETALLE
+      // omitía la cuenta AngelPay vinculada, así que el editor del merchant no
+      // podía mostrar de qué login (correo) cuelga. Nunca trae el PIN — ése
+      // sólo sale por su endpoint dedicado, que además deja rastro.
+      angelpayUserAccount: {
+        select: { id: true, email: true, status: true, environment: true, venueId: true },
+      },
       costStructures: {
         where: { active: true },
         orderBy: { effectiveFrom: 'desc' },

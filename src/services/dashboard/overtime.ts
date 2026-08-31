@@ -26,44 +26,26 @@ import { createHash } from 'crypto'
 import { DateTime } from 'luxon'
 
 /**
- * Art. 66 vigente (reforma publicada en el DOF el 1-MAY-2026): **4 horas al día, 4 días a la
- * semana**. Es la LEY, no un ajuste del negocio.
+ * 🔴 AQUÍ YA NO VIVE NINGUNA REGLA LEGAL, y es a propósito.
  *
- * 🔴 Antes decía 3 y 3, que es la ley ANTERIOR. Se escribió así el 29-ago-2026 de memoria en
- * vez de buscarla — y la reforma cae justo en el corte de conocimiento del modelo que la
- * escribió, así que "recordaba" el texto viejo con total confianza. Lo cazó la 3ª auditoría de
- * Codex. **Una regla legal se busca, nunca se recuerda.**
- */
-export const TOPE_DIARIO_MINUTOS = 240
-export const TOPE_DIAS_CON_EXTRA = 4
-
-/**
- * El tope SEMANAL de horas extra, que la reforma sube por años (cuarto transitorio):
- * 9 h en 2026-27, 10 en 2028, 11 en 2029 y 12 desde 2030.
+ * Hasta el 31-ago-2026 este módulo repartía las horas en doble y triple (art. 67-68) y
+ * dictaminaba si la semana rompía el art. 66. Se retiró por decisión del founder, con el
+ * argumento que lo cierra: **la ley la cumple el patrón, no el software.**
  *
- * 🔑 Y esto NO es sólo un límite: es el corte del dinero. El art. 68 vigente paga al **200 %**
- * lo que «supere lo establecido en el artículo 66», así que la frontera doble→triple ES este
- * número. Congelarlo en 540 haría pagar al triple, desde 2028, una hora que la ley manda pagar
- * al doble.
+ * El dato que lo respalda: cinco auditorías seguidas encontraron defectos en este módulo, y en
+ * la última **3 de 6 estaban justo en la parte legal** — el tope semanal en rangos parciales,
+ * aplicar la reforma de mayo a reportes anteriores a ella, y la semana que cruza el 1-ene-2028,
+ * que ni el código ni una auditoría pueden resolver porque requiere criterio de un abogado
+ * laboral. Los tres límites del art. 66 cambiaron el 1-may-2026 y siguen cambiando cada año
+ * hasta 2030.
  *
- * ⚠️ Una semana que cruza el 31 de diciembre se rige por el año de su LUNES, declarado aquí
- * porque la ley no lo resuelve: es la interpretación conservadora —la semana es la unidad que
- * el art. 66 acota, y se le aplica el tope vigente cuando empezó—. Si laboral dice otra cosa,
- * se cambia AQUÍ y en ningún otro sitio.
+ * Equivocarse aquí no sólo da un número malo: le da al dueño una **tranquilidad falsa** sobre su
+ * cumplimiento, que es peor que no decirle nada.
+ *
+ * Lo que este módulo sí hace, y hace bien: **medir** los minutos extra de cada día y agruparlos
+ * por semana. La tarifa y el veredicto los pone el sistema de nómina del negocio, que ya aplica
+ * la ley y se actualiza cuando cambia.
  */
-export function topeSemanalMinutos(lunesDeLaSemana: string): number {
-  const anio = Number(lunesDeLaSemana.slice(0, 4))
-  if (!Number.isFinite(anio) || anio <= 2027) return 540
-  if (anio === 2028) return 600
-  if (anio === 2029) return 660
-  return 720
-}
-
-/**
- * @deprecated Usa {@link topeSemanalMinutos}: desde 2028 el tope deja de ser fijo. Se conserva
- * el nombre porque es el valor de 2026-27 y hay llamadas antiguas que aún lo leen.
- */
-export const TOPE_SEMANAL_MINUTOS = 540
 
 /** El turno que le tocaba ese día, tal como lo resuelve la rejilla de asistencia. */
 export interface TurnoDelDia {
@@ -168,25 +150,6 @@ export function minutosExtraDelDia({ turno, intervalos, descansos, timezone }: M
   // 0 minutos y 31 son 1. Si algún día se quiere granularidad de 5 o 15 minutos —lo que hacen
   // muchos sistemas de nómina— se cambia AQUÍ, en un solo sitio.
   return Math.max(0, Math.round(brutos - enDescanso))
-}
-
-/**
- * Reparte un total semanal entre dobles y triples (art. 67 y 68).
- *
- * Se recibe el total YA acumulado de la semana: quien llama es responsable de agrupar por
- * semana, porque el umbral es semanal y no diario.
- */
-export function repartirDobleYTriple(
-  minutosTotales: number,
-  /**
-   * El tope de ESA semana. Se pasa en vez de leerse de una constante porque desde 2028 depende
-   * del año — ver {@link topeSemanalMinutos}. Por defecto, el de 2026-27.
-   */
-  topeSemanal: number = TOPE_SEMANAL_MINUTOS,
-): { minutosDobles: number; minutosTriples: number } {
-  if (!(minutosTotales > 0)) return { minutosDobles: 0, minutosTriples: 0 }
-  const dobles = Math.min(minutosTotales, Math.max(0, topeSemanal))
-  return { minutosDobles: dobles, minutosTriples: minutosTotales - dobles }
 }
 
 /**
@@ -295,28 +258,15 @@ export interface SemanaDeExtra {
   weekStart: string
   /** Domingo de la semana, día civil. */
   weekEnd: string
+  /** Los minutos extra de esa semana. Sin tarifa: la pone quien calcula la nómina. */
   minutosTotal: number
-  minutosDobles: number
-  minutosTriples: number
-  /** Días de esa semana que pasaron de 3 h (art. 66). Es infracción; no cambia la tarifa. */
-  diasSobreTopeDiario: string[]
-  /** Cuántos días de la semana tuvieron algo de extra. */
-  diasConExtra: number
-  /** Más de CUATRO días con extra en la semana (art. 66 tras la reforma de mayo de 2026). */
-  excedeDiasPermitidos: boolean
   /**
-   * 🔴 La semana pasó del tope del art. 66 (9 h en 2026-27, y subiendo por año). Sin esto, una
-   * semana de 14 h pagaba 300 minutos al TRIPLE y a la vez declaraba «sin infracción»: el tope
-   * semanal sólo se usaba para repartir el pago, nunca para juzgar (4ª auditoría de Codex,
-   * 31-ago-2026, P1 #2).
-   */
-  excedeTopeSemanal: boolean
-  /**
-   * El rango consultado no cubre la semana entera, así que el reparto doble/triple de ESTA
-   * semana no es afirmable: los días de fuera pudieron traer horas que mueven el umbral.
+   * 🔴 El rango consultado no cubre la semana entera, así que este total todavía puede crecer.
+   * Viaja siempre, porque callarlo invitaría a tratarlo como definitivo.
    */
   parcial: boolean
 }
+
 
 /**
  * Agrupa los días por semana natural (lunes a domingo) y aplica el art. 67/68 sobre el total
@@ -334,19 +284,6 @@ export interface SemanaDeExtra {
 export function agruparPorSemana(
   dias: DiaConExtra[],
   rango: { startDate: string; endDate: string },
-  /**
-   * Minutos ya acumulados en las MISMAS semanas, en días que quedan FUERA del rango pedido
-   * (`{ 'YYYY-MM-DD': minutos }`).
-   *
-   * 🔴 Sin esto, pedir sólo el domingo de una semana cuyo lunes ya llevaba 8 h autorizadas
-   * pagaba las 3 h del domingo al DOBLE, cuando legalmente 1 h iba al doble y 2 h al TRIPLE
-   * (hallazgo #2 de Codex, 29-ago-2026). El campo `parcial` avisaba del riesgo y el dinero
-   * salía mal igual: avisar no es resolver.
-   *
-   * Los días previos SÓLO mueven el umbral; nunca se re-reportan en los totales, que siguen
-   * siendo los atribuibles al rango pedido.
-   */
-  acumuladoPrevio: Record<string, number> = {},
 ): SemanaDeExtra[] {
   const porSemana = new Map<string, DiaConExtra[]>()
 
@@ -361,18 +298,6 @@ export function agruparPorSemana(
     else porSemana.set(lunes, [dia])
   }
 
-  // Los días de FUERA del rango se agrupan igual, pero sólo para mover el umbral.
-  const previoPorSemana = new Map<string, DiaConExtra[]>()
-  for (const [date, minutos] of Object.entries(acumuladoPrevio)) {
-    if (!(minutos > 0)) continue
-    const d = DateTime.fromISO(date, { zone: 'utc' })
-    if (!d.isValid) continue
-    const lunes = d.startOf('week').toISODate()!
-    const lista = previoPorSemana.get(lunes)
-    if (lista) lista.push({ date, minutos })
-    else previoPorSemana.set(lunes, [{ date, minutos }])
-  }
-
   const desdeRango = DateTime.fromISO(rango.startDate, { zone: 'utc' })
   const hastaRango = DateTime.fromISO(rango.endDate, { zone: 'utc' })
 
@@ -382,37 +307,11 @@ export function agruparPorSemana(
       const lunes = DateTime.fromISO(weekStart, { zone: 'utc' })
       const domingo = lunes.plus({ days: 6 })
       const minutosTotal = deLaSemana.reduce((s, d) => s + d.minutos, 0)
-      const previos = previoPorSemana.get(weekStart) ?? []
-      const minutosPrevios = previos.reduce((s, d) => s + d.minutos, 0)
-
-      // El reparto se calcula sobre el acumulado COMPLETO de la semana y luego se le resta la
-      // parte de los días de fuera: así el umbral de 9 h cae donde la ley lo pone, pero lo
-      // devuelto sigue siendo lo atribuible al rango pedido.
-      // 🔴 El tope es el de ESTA semana, no una constante: desde 2028 sube por año y con él
-      // se mueve la frontera doble→triple (art. 68 sobre el art. 66 vigente).
-      const topeDeLaSemana = topeSemanalMinutos(weekStart)
-      const conPrevios = repartirDobleYTriple(minutosPrevios + minutosTotal, topeDeLaSemana)
-      const soloPrevios = repartirDobleYTriple(minutosPrevios, topeDeLaSemana)
-      const minutosDobles = conPrevios.minutosDobles - soloPrevios.minutosDobles
-      const minutosTriples = conPrevios.minutosTriples - soloPrevios.minutosTriples
-
       return {
         weekStart,
         weekEnd: domingo.toISODate()!,
+        // Sólo lo atribuible al rango pedido; si la semana no cabe entera, lo dice `parcial`.
         minutosTotal,
-        minutosDobles,
-        minutosTriples,
-        // La INFRACCIÓN del art. 66 mira la semana entera, días de fuera incluidos: la ley se
-        // rompió aunque el rango consultado no los enseñe.
-        diasSobreTopeDiario: [...previos, ...deLaSemana]
-          .filter(d => d.minutos > TOPE_DIARIO_MINUTOS)
-          .map(d => d.date)
-          .sort(),
-        diasConExtra: previos.length + deLaSemana.length,
-        excedeDiasPermitidos: previos.length + deLaSemana.length > TOPE_DIAS_CON_EXTRA,
-        // Sobre el total de la semana ENTERA, días de fuera del rango incluidos: la ley se
-        // rompió aunque la consulta no los enseñe.
-        excedeTopeSemanal: minutosPrevios + minutosTotal > topeDeLaSemana,
         parcial: !desdeRango.isValid || !hastaRango.isValid || desdeRango > lunes || hastaRango < domingo,
       }
     })

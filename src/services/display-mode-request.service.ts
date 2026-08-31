@@ -77,7 +77,7 @@ export function parseDisplayModeRequest(value: unknown): DisplayModeRequestRecor
 }
 
 interface TransitionAudit {
-  action: 'DISPLAY_MODE_REQUESTED' | 'DISPLAY_MODE_RESOLVED' | 'DISPLAY_MODE_EXPIRED'
+  action: 'DISPLAY_MODE_REQUESTED' | 'DISPLAY_MODE_RESOLVED' | 'DISPLAY_MODE_EXPIRED' | 'DISPLAY_MODE_REQUEST_CORRUPT_RETIRED'
   data: Prisma.InputJsonObject
 }
 
@@ -301,6 +301,51 @@ export function decideExpireDisplayModeRequest(input: { current: DisplayModeRequ
     nextExpiresAt: null,
     audit: { action: 'DISPLAY_MODE_EXPIRED', data: resolvedAuditData(nextRequest, input.now) },
   }
+}
+
+type CorruptIndexedExpiryReasonCode = 'INVALID_REQUEST_JSON' | 'EXPIRY_MIRROR_DIVERGED'
+
+function retireCorruptIndexedExpiry(
+  reasonCode: CorruptIndexedExpiryReasonCode,
+  preservedResolvedRequest: DisplayModeRequestRecord | null = null,
+): DisplayModeWriteTransition {
+  return {
+    kind: 'WRITE',
+    nextRequest: preservedResolvedRequest,
+    nextExpiresAt: null,
+    audit: {
+      action: 'DISPLAY_MODE_REQUEST_CORRUPT_RETIRED',
+      data: { reasonCode },
+    },
+  }
+}
+
+/**
+ * Classifies only rows that remain in the indexed expiry queue. Corrupt work is
+ * retired through the same audited version CAS as normal expiry, so a valid
+ * concurrent replacement is reread before anything can be cleared.
+ */
+function decideIndexedExpiryTransition(input: {
+  snapshot: DisplayModeTerminalSnapshot
+  current: DisplayModeRequestRecord | null
+  now: Date
+}): DisplayModeTransition {
+  const mirror = input.snapshot.customerDisplayRequestExpiresAt
+  if (mirror == null) return decideExpireDisplayModeRequest({ current: input.current, now: input.now })
+
+  if (!input.current) {
+    return retireCorruptIndexedExpiry('INVALID_REQUEST_JSON')
+  }
+
+  const mirrorTime = mirror instanceof Date ? mirror.getTime() : Number.NaN
+  const embeddedExpiryTime = new Date(input.current.expiresAt).getTime()
+  const mirrorDiverged = Number.isNaN(mirrorTime) || mirrorTime !== embeddedExpiryTime || input.current.status !== 'PENDING'
+
+  if (mirrorDiverged) {
+    return retireCorruptIndexedExpiry('EXPIRY_MIRROR_DIVERGED', input.current.status === 'PENDING' ? null : input.current)
+  }
+
+  return decideExpireDisplayModeRequest({ current: input.current, now: input.now })
 }
 
 const DISPLAY_MODE_TERMINAL_SELECT = {
@@ -605,7 +650,7 @@ export async function expireDisplayModeRequest(input: {
   return runAuditedCasTransition({
     venueId,
     terminalId,
-    decide: (_snapshot, current) => decideExpireDisplayModeRequest({ current, now }),
+    decide: (snapshot, current) => decideIndexedExpiryTransition({ snapshot, current, now }),
   })
 }
 

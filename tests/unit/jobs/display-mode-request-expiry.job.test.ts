@@ -141,6 +141,26 @@ describe('display-mode-request-expiry.job', () => {
     )
   })
 
+  it('clears one hundred corrupt oldest rows so a later valid expiry is selected on the next bounded pass', async () => {
+    let remaining = [
+      ...Array.from({ length: 100 }, (_, index) => ({ id: `corrupt-${String(index).padStart(3, '0')}`, venueId: 'venue-1' })),
+      { id: 'valid-later', venueId: 'venue-1' },
+    ]
+    const findMany = jest.fn(async () => remaining.slice(0, 100))
+    const expireRequest = jest.fn(async ({ terminalId }: { terminalId: string }) => {
+      remaining = remaining.filter(candidate => candidate.id !== terminalId)
+      return { mutated: true }
+    })
+    const h = harness({ findMany, expireRequest })
+
+    await expect(h.job.checkNow()).resolves.toEqual({ scanned: 100, expired: 100, noop: 0, errors: 0 })
+    await expect(h.job.checkNow()).resolves.toEqual({ scanned: 1, expired: 1, noop: 0, errors: 0 })
+
+    expect(expireRequest).toHaveBeenCalledTimes(101)
+    expect(expireRequest).toHaveBeenLastCalledWith({ venueId: 'venue-1', terminalId: 'valid-later', now: NOW })
+    expect(remaining).toEqual([])
+  })
+
   it('starts, stops, and exposes a manual check surface', async () => {
     const h = harness({ candidates: [] })
 

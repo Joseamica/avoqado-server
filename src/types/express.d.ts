@@ -2,6 +2,7 @@
 import { AuthContext } from '../security'
 import { SDKContext } from '../middlewares/sdk-auth.middleware'
 import { ResolvedUserRole } from '../middlewares/checkPermission.middleware'
+import type { BoundTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
 
 declare global {
   namespace Express {
@@ -18,6 +19,8 @@ declare global {
        * (validateVenueAccess → checkPermission → checkTableOwnership).
        */
       __avqRoleCache?: Map<string, ResolvedUserRole>
+      /** Canonical target resolved before venue permission checks on command routes. */
+      tpvCommandTarget?: BoundTpvCommandTarget
       partnerContext?: {
         partnerId: string
         partnerName: string

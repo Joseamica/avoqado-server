@@ -47,6 +47,9 @@ router.post(
 router.post('/venues/:venueId/angelpay-reserve-slot', angelpayController.reserveAngelPaySlotController)
 
 // Id-scoped — operator acts on an existing account row
+// Lectura EXPLÍCITA del PIN (el resto de las respuestas lo borra). Queda en
+// ActivityLog como `ANGELPAY_ACCOUNT_PIN_VIEWED`.
+router.get('/angelpay-accounts/:id/pin', angelpayController.getAngelPayUserAccountPinController)
 router.patch('/angelpay-accounts/:id/credentials', angelpayController.updateAngelPayUserAccountCredentialsController)
 router.patch('/angelpay-accounts/:id/pin', angelpayController.setAngelPayUserAccountPinController)
 router.patch('/angelpay-accounts/:id/status', angelpayController.updateAngelPayUserAccountStatusController)

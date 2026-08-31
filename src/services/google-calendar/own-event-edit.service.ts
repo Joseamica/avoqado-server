@@ -233,7 +233,7 @@ function parseEventBoundary(boundary: calendar_v3.Schema$EventDateTime | undefin
  *
  * Nunca lanza: se llama con `void` desde fuera de la transacción.
  */
-async function notifyVenueOfCalendarEdit(args: { venueId: string; startsAt: Date; endsAt: Date }): Promise<void> {
+export async function notifyVenueOfCalendarEdit(args: { venueId: string; startsAt: Date; endsAt: Date }): Promise<void> {
   try {
     const { sendNotification } = await import('@/services/dashboard/notification.service')
     const prismaClient = (await import('@/utils/prismaClient')).default
@@ -245,17 +245,26 @@ async function notifyVenueOfCalendarEdit(args: { venueId: string; startsAt: Date
     if (recipients.length === 0) return
 
     for (const recipient of recipients) {
-      await sendNotification({
-        recipientId: recipient.staffId,
-        venueId: args.venueId,
-        type: 'CALENDAR_EVENT_EDITED',
-        title: 'Ajustaste una cita desde Google Calendar',
-        message:
-          'Movimos ese horario a "ocupado" para que nadie reserve encima. Ojo: el ajuste NO reprogramó al cliente — su cita en Avoqado sigue igual. ' +
-          'Si querías cambiarle la hora, hazlo desde Avoqado; si sólo querías tapar ese rato, crea un evento NUEVO en Google.',
-        entityType: 'ExternalBusyBlock',
-        priority: 'MEDIUM',
-      } as never)
+      // try/catch POR destinatario: que el fallo de uno no deje sin aviso a los demás.
+      try {
+        await sendNotification({
+          recipientId: recipient.staffId,
+          venueId: args.venueId,
+          type: 'CALENDAR_EVENT_EDITED',
+          title: 'Ajustaste una cita desde Google Calendar',
+          message:
+            'Movimos ese horario a "ocupado" para que nadie reserve encima. Ojo: el ajuste NO reprogramó al cliente — su cita en Avoqado sigue igual. ' +
+            'Si querías cambiarle la hora, hazlo desde Avoqado; si sólo querías tapar ese rato, crea un evento NUEVO en Google.',
+          entityType: 'ExternalBusyBlock',
+          priority: 'NORMAL',
+        })
+      } catch (err) {
+        logger.warn('gcal: aviso de edición en Google falló para un destinatario', {
+          venueId: args.venueId,
+          staffId: recipient.staffId,
+          err,
+        })
+      }
     }
   } catch (err) {
     logger.warn('gcal: no se pudo avisar al venue de su edición en Google', { venueId: args.venueId, err })

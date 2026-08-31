@@ -50,17 +50,27 @@ export interface PayrollSummaryRow {
   overtimeDeniedMinutes: number
   /** Días donde la checada cambió DESPUÉS de autorizar: hay que volver a mirarlos. */
   overtimeDaysToReview: string[]
-  /** De lo AUTORIZADO, lo que se paga al DOBLE (art. 67): las primeras 9 h de cada semana. */
-  overtimeDoubleMinutes: number
-  /** De lo AUTORIZADO, lo que se paga al TRIPLE (art. 68): lo que excede 9 h en una semana. */
-  overtimeTripleMinutes: number
-  /** El desglose semana por semana de lo AUTORIZADO, que es donde vive el umbral. */
-  overtimeWeeks: SemanaDeExtra[]
   /**
-   * Alguna semana rompe el art. 66 (más de 3 h en un día, o extra en más de 3 días).
-   * Es una infracción que el dueño debe VER; no cambia lo que se paga.
+   * Los minutos AUTORIZADOS repartidos por semana — la materia prima para que el sistema de
+   * nómina aplique la tarifa que corresponda.
+   *
+   * 🔴 Decisión del founder (31-ago-2026): **Avoqado mide y autoriza; NO dictamina la ley.**
+   * Antes esto traía además el reparto doble/triple (art. 67-68) y una bandera de infracción
+   * del art. 66. Se retiraron los dos.
+   *
+   * El porqué, con datos: cinco auditorías seguidas encontraron defectos, y en la última
+   * **3 de 6 estaban en esa parte legal** — el tope semanal en rangos parciales, aplicar la
+   * reforma de mayo a reportes anteriores, y la semana que cruza el 1-ene-2028, que ni el
+   * código ni una auditoría pueden resolver porque necesita criterio de un abogado laboral.
+   * Los tres límites del art. 66 cambiaron en mayo de 2026 y siguen cambiando cada año hasta
+   * 2030.
+   *
+   * 🔑 Y el argumento de fondo, del founder: **la ley la cumple el patrón, no el software.**
+   * Equivocarnos aquí no sólo da un número malo: le da al dueño una tranquilidad falsa sobre
+   * su cumplimiento. El sistema de nómina del negocio ya aplica la ley y se actualiza cuando
+   * cambia; Avoqado le entrega los minutos, que es lo que sí sabe medir bien.
    */
-  hasOvertimeViolation: boolean
+  overtimeWeeks: Array<{ weekStart: string; weekEnd: string; minutosTotal: number; parcial: boolean }>
 }
 
 export async function getPayrollSummary(
@@ -74,21 +84,6 @@ export async function getPayrollSummary(
   // consumieron parte del umbral de 9 h. Sin ellos, las horas del rango se pagarían al doble
   // cuando algunas iban al TRIPLE (hallazgo #2 de Codex, 29-ago-2026). Se consulta desde el
   // LUNES de la primera semana; esos días sólo mueven el umbral y nunca se re-reportan.
-  const lunesDeLaPrimeraSemana = DateTime.fromISO(startDate, { zone: 'utc' }).startOf('week').toISODate()!
-  const rangoEmpiezaAMediaSemana = lunesDeLaPrimeraSemana < startDate
-  const celdasPrevias = rangoEmpiezaAMediaSemana
-    ? (
-        await buildAttendanceGrid(
-          venueId,
-          lunesDeLaPrimeraSemana,
-          DateTime.fromISO(startDate, { zone: 'utc' }).minus({ days: 1 }).toISODate()!,
-        )
-      ).cells
-    : []
-
-  // Lo previo, por persona: medido para la infracción, y autorizado para el reparto.
-  const previoMedido = new Map<string, Record<string, number>>()
-  const previoAutorizado = new Map<string, Record<string, number>>()
 
   const byMembership = new Map<string, PayrollSummaryRow>()
   // Los días con extra se juntan por PERSONA y se reparten al final: el umbral doble/triple
@@ -118,10 +113,7 @@ export async function getPayrollSummary(
         overtimePendingMinutes: 0,
         overtimeDeniedMinutes: 0,
         overtimeDaysToReview: [],
-        overtimeDoubleMinutes: 0,
-        overtimeTripleMinutes: 0,
         overtimeWeeks: [],
-        hasOvertimeViolation: false,
       }
       byMembership.set(cell.staffVenueId, row)
     }
@@ -163,46 +155,6 @@ export async function getPayrollSummary(
       case 'NO_SCHEDULE':
       default:
         break
-    }
-  }
-
-  // Los días PREVIOS con extra, por persona. Se necesitan sus autorizaciones también: al
-  // umbral sólo cuentan las horas que de verdad se van a pagar.
-  const previasConExtra = celdasPrevias.filter(c => c.overtimeMinutes > 0)
-  for (const c of previasConExtra) {
-    const medido = previoMedido.get(c.staffVenueId) ?? {}
-    medido[c.date] = c.overtimeMinutes
-    previoMedido.set(c.staffVenueId, medido)
-  }
-  if (previasConExtra.length > 0) {
-    const autorizadasPrevias = await prisma.overtimeApproval.findMany({
-      where: {
-        staffVenueId: { in: [...new Set(previasConExtra.map(c => c.staffVenueId))] },
-        date: { gte: lunesDeLaPrimeraSemana, lt: startDate },
-      },
-      // 🔴 La HUELLA va en el select. Sin ella, una autorización previa cuya jornada ya cambió
-      // seguía consumiendo el umbral semanal de 9 h y empujaba las horas de ESTA semana a
-      // pago TRIPLE — dinero de más, por una firma que el propio sistema declara inválida
-      // dos pantallas más allá (2ª auditoría de Codex, 30-ago-2026, P1 #1).
-      select: { staffVenueId: true, date: true, minutesApproved: true, minutesMeasured: true, sourceFingerprint: true },
-    })
-    const porDia = new Map(autorizadasPrevias.map(a => [`${a.staffVenueId}|${a.date}`, a]))
-    for (const c of previasConExtra) {
-      const a = porDia.get(`${c.staffVenueId}|${c.date}`)
-      if (!a) continue // sin revisar: no se paga, así que no consume umbral
-      // La MISMA función que decide lo que se paga: lo que no se paga no puede consumir umbral.
-      const autorizado = minutosAutorizadosEfectivos({
-        date: c.date,
-        medidos: c.overtimeMinutes,
-        autorizados: a.minutesApproved,
-        medidosAlAutorizar: a.minutesMeasured,
-        huellaActual: c.overtimeFingerprint,
-        huellaAlAutorizar: a.sourceFingerprint,
-      })
-      if (autorizado <= 0) continue
-      const mapa = previoAutorizado.get(c.staffVenueId) ?? {}
-      mapa[c.date] = autorizado
-      previoAutorizado.set(c.staffVenueId, mapa)
     }
   }
 
@@ -251,23 +203,12 @@ export async function getPayrollSummary(
     row.overtimeDeniedMinutes = resumen.minutosNegados
     row.overtimeDaysToReview = resumen.diasPorRevisar
 
-    // 🔴 El reparto doble/triple va sobre lo AUTORIZADO: es lo que se paga.
-    const semanas = agruparPorSemana(
-      diasAutorizadosParaReparto(conAutorizacion),
-      { startDate, endDate },
-      previoAutorizado.get(staffVenueId) ?? {},
-    )
-    row.overtimeWeeks = semanas
-    row.overtimeDoubleMinutes = semanas.reduce((t, w) => t + w.minutosDobles, 0)
-    row.overtimeTripleMinutes = semanas.reduce((t, w) => t + w.minutosTriples, 0)
-
-    // 🔴 …pero la INFRACCIÓN del art. 66 se juzga sobre lo MEDIDO. Si alguien trabajó 4 h
-    // extra en un día, la ley se rompió aunque el gerente sólo autorice una: no autorizar no
-    // deshace lo que ya pasó.
-    const semanasMedidas = agruparPorSemana(dias, { startDate, endDate }, previoMedido.get(staffVenueId) ?? {})
-    row.hasOvertimeViolation = semanasMedidas.some(
-      w => w.diasSobreTopeDiario.length > 0 || w.excedeDiasPermitidos || w.excedeTopeSemanal,
-    )
+    // Los minutos AUTORIZADOS repartidos por semana. Sin tarifas y sin veredictos: es el dato
+    // que el sistema de nómina necesita para aplicar la ley que corresponda ese año.
+    //
+    // 🔴 `parcial` viaja porque importa: significa que el rango consultado no cubre la semana
+    // entera, así que ese total todavía puede crecer. Callarlo invitaría a tratarlo como final.
+    row.overtimeWeeks = agruparPorSemana(diasAutorizadosParaReparto(conAutorizacion), { startDate, endDate }).map(w => ({ weekStart: w.weekStart, weekEnd: w.weekEnd, minutosTotal: w.minutosTotal, parcial: w.parcial }))
   }
 
   const rows = [...byMembership.values()].sort((a, b) => a.name.localeCompare(b.name))

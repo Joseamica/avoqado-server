@@ -10,7 +10,15 @@
  * editado ocupa MÁS de lo que la reserva ya bloquea. Un evento acortado o
  * contenido no genera nada — la reserva sigue mandando.
  */
-import { resolveOwnEventEdit } from '../../../../src/services/google-calendar/own-event-edit.service'
+import { NotificationPriority } from '@prisma/client'
+
+import { notifyVenueOfCalendarEdit, resolveOwnEventEdit } from '../../../../src/services/google-calendar/own-event-edit.service'
+import { sendNotification } from '../../../../src/services/dashboard/notification.service'
+import prisma from '../../../../src/utils/prismaClient'
+
+jest.mock('../../../../src/services/dashboard/notification.service', () => ({
+  sendNotification: jest.fn(),
+}))
 
 const TZ = 'America/Mexico_City'
 
@@ -89,5 +97,59 @@ describe('resolveOwnEventEdit', () => {
       calendarTimeZone: TZ,
     })
     expect(result.kind).toBe('unchanged')
+  })
+})
+
+/**
+ * El aviso a los dueños — el defecto que Amaena disparó en prod (31-ago-2026):
+ * `priority: 'MEDIUM'` no existe en `NotificationPriority` y el `} as never`
+ * silenciaba al compilador; además el try/catch envolvía el bucle completo,
+ * así que el primer destinatario fallido dejaba sin aviso a TODOS (Amaena
+ * tiene 2 OWNER y ninguno recibió nada). Cero avisos entregados en toda la
+ * historia de la función.
+ */
+describe('notifyVenueOfCalendarEdit', () => {
+  const args = {
+    venueId: 'venue-1',
+    startsAt: new Date('2026-08-21T22:00:00.000Z'),
+    endsAt: new Date('2026-08-21T23:00:00.000Z'),
+  }
+  const sendNotificationMock = sendNotification as jest.Mock
+  const findManyMock = prisma.staffVenue.findMany as jest.Mock
+
+  beforeEach(() => {
+    findManyMock.mockResolvedValue([{ staffId: 'owner-1' }, { staffId: 'admin-1' }])
+    sendNotificationMock.mockResolvedValue({})
+  })
+
+  it('avisa a cada OWNER/ADMIN, y la prioridad EXISTE en el catálogo NotificationPriority', async () => {
+    await notifyVenueOfCalendarEdit(args)
+
+    expect(sendNotificationMock).toHaveBeenCalledTimes(2)
+    const recipients = sendNotificationMock.mock.calls.map(([payload]) => payload.recipientId)
+    expect(recipients).toEqual(['owner-1', 'admin-1'])
+    for (const [payload] of sendNotificationMock.mock.calls) {
+      // La defensa real es el tipo (sin `as never`); esto guarda que nadie lo reintroduzca.
+      expect(Object.values(NotificationPriority)).toContain(payload.priority)
+      expect(payload.type).toBe('CALENDAR_EVENT_EDITED')
+    }
+  })
+
+  it('un destinatario que falla NO deja sin aviso a los demás', async () => {
+    sendNotificationMock.mockRejectedValueOnce(new Error('primer destinatario truena'))
+
+    await notifyVenueOfCalendarEdit(args)
+
+    expect(sendNotificationMock).toHaveBeenCalledTimes(2)
+    expect(sendNotificationMock.mock.calls[1][0].recipientId).toBe('admin-1')
+  })
+
+  // REGRESIÓN: el contrato del docstring — se dispara con `void` fuera de la
+  // transacción, así que un fallo aquí jamás puede propagar.
+  it('nunca lanza aunque la consulta de destinatarios muera', async () => {
+    findManyMock.mockRejectedValue(new Error('db caída'))
+
+    await expect(notifyVenueOfCalendarEdit(args)).resolves.toBeUndefined()
+    expect(sendNotificationMock).not.toHaveBeenCalled()
   })
 })

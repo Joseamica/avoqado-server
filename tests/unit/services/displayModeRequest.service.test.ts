@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import {
   DISPLAY_MODE_REQUEST_TTL_MS,
@@ -687,6 +688,143 @@ describe('display-mode request state machine', () => {
       expect(prismaMock.activityLog.create).toHaveBeenLastCalledWith({
         data: expect.objectContaining({ staffId: null, action: 'DISPLAY_MODE_EXPIRED' }),
       })
+    })
+
+    it('retires malformed indexed expiry work atomically without leaking raw payload or changing physical state', async () => {
+      const rawSecret = 'raw-request-secret-that-must-not-be-audited'
+      prismaMock.terminal.findFirst.mockResolvedValue(
+        terminalSnapshot({
+          customerDisplayRequest: { requestId: rawSecret, arbitrary: rawSecret },
+          customerDisplayRequestVersion: 7,
+          customerDisplayRequestExpiresAt: NOW,
+          customerDisplayInverted: true,
+        }),
+      )
+
+      const result = await expireDisplayModeRequest({ venueId: 'venue-1', terminalId: 'terminal-1', now: NOW })
+
+      expect(result).toEqual({ mutated: true, version: 8, request: null, customerDisplayInverted: true })
+      expect(prismaMock.terminal.updateMany).toHaveBeenCalledWith({
+        where: { id: 'terminal-1', venueId: 'venue-1', customerDisplayRequestVersion: 7 },
+        data: {
+          customerDisplayRequestVersion: { increment: 1 },
+          customerDisplayRequest: Prisma.DbNull,
+          customerDisplayRequestExpiresAt: null,
+        },
+      })
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+        data: {
+          staffId: null,
+          venueId: 'venue-1',
+          action: 'DISPLAY_MODE_REQUEST_CORRUPT_RETIRED',
+          entity: 'Terminal',
+          entityId: 'terminal-1',
+          data: { reasonCode: 'INVALID_REQUEST_JSON' },
+          ipAddress: null,
+          userAgent: null,
+        },
+      })
+      expect(JSON.stringify(prismaMock.activityLog.create.mock.calls)).not.toContain(rawSecret)
+    })
+
+    it('retires a divergent indexed expiry mirror with a stable bounded audit reason', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue(
+        terminalSnapshot({
+          customerDisplayRequest: request({ expiresAt: '2026-08-30T12:30:00.000Z' }),
+          customerDisplayRequestVersion: 2,
+          customerDisplayRequestExpiresAt: NOW,
+          customerDisplayInverted: false,
+        }),
+      )
+
+      await expect(expireDisplayModeRequest({ venueId: 'venue-1', terminalId: 'terminal-1', now: NOW })).resolves.toMatchObject({
+        mutated: true,
+        version: 3,
+        request: null,
+        customerDisplayInverted: false,
+      })
+
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'DISPLAY_MODE_REQUEST_CORRUPT_RETIRED',
+          venueId: 'venue-1',
+          entityId: 'terminal-1',
+          data: { reasonCode: 'EXPIRY_MIRROR_DIVERGED' },
+        }),
+      })
+    })
+
+    it('rereads after corrupt-work CAS loss and never clears a concurrent valid replacement', async () => {
+      const replacement = request({
+        requestId: 'replacement-request',
+        expiresAt: '2026-08-30T12:30:00.000Z',
+      })
+      prismaMock.terminal.findFirst
+        .mockResolvedValueOnce(
+          terminalSnapshot({
+            customerDisplayRequest: { malformed: true },
+            customerDisplayRequestVersion: 3,
+            customerDisplayRequestExpiresAt: NOW,
+          }),
+        )
+        .mockResolvedValueOnce(
+          terminalSnapshot({
+            customerDisplayRequest: replacement,
+            customerDisplayRequestVersion: 4,
+            customerDisplayRequestExpiresAt: new Date(replacement.expiresAt),
+          }),
+        )
+      prismaMock.terminal.updateMany.mockResolvedValueOnce({ count: 0 })
+
+      await expect(expireDisplayModeRequest({ venueId: 'venue-1', terminalId: 'terminal-1', now: NOW })).resolves.toEqual({
+        mutated: false,
+        version: 4,
+        request: replacement,
+        customerDisplayInverted: false,
+        disposition: 'NOT_DUE',
+      })
+
+      expect(prismaMock.terminal.findFirst).toHaveBeenCalledTimes(2)
+      expect(prismaMock.terminal.updateMany).toHaveBeenCalledTimes(1)
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    })
+
+    it('rolls back corrupt retirement when its atomic audit insert fails', async () => {
+      const corrupt = { malformed: 'payload-must-survive-rollback' }
+      let committedRequest: unknown = corrupt
+      const tx = {
+        terminal: {
+          updateMany: jest.fn(async ({ data }: { data: { customerDisplayRequest: unknown } }) => {
+            committedRequest = data.customerDisplayRequest
+            return { count: 1 }
+          }),
+        },
+        activityLog: { create: jest.fn().mockRejectedValue(new Error('corrupt audit unavailable')) },
+      }
+      prismaMock.terminal.findFirst.mockResolvedValue(
+        terminalSnapshot({
+          customerDisplayRequest: corrupt,
+          customerDisplayRequestVersion: 9,
+          customerDisplayRequestExpiresAt: NOW,
+        }),
+      )
+      prismaMock.$transaction.mockImplementation(async (callback: (client: typeof tx) => unknown) => {
+        const before = committedRequest
+        try {
+          return await callback(tx)
+        } catch (error) {
+          committedRequest = before
+          throw error
+        }
+      })
+
+      await expect(expireDisplayModeRequest({ venueId: 'venue-1', terminalId: 'terminal-1', now: NOW })).rejects.toThrow(
+        'corrupt audit unavailable',
+      )
+
+      expect(tx.terminal.updateMany).toHaveBeenCalledTimes(1)
+      expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
+      expect(committedRequest).toBe(corrupt)
     })
 
     it('validates identifiers and ACK physical/result combinations before any database read', async () => {

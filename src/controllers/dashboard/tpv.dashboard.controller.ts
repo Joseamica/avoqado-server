@@ -3,7 +3,7 @@ import { GetTerminalsQuery, UpdateTpvBody, CreateTpvBody } from '../../schemas/d
 import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.service'
 import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
 import { generateActivationCode as generateActivationCodeService } from '../../services/dashboard/terminal-activation.service'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { revokeSessionsForDevice } from '@/services/auth/session.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -161,12 +161,14 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
  * Controlador para enviar comando a TPV
  */
 export async function sendTpvCommand(
-  req: Request<{ terminalId: string }, {}, { command: string; payload?: any }>,
+  req: Request<{ venueId?: string; terminalId: string }, {}, { command: string; payload?: any }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { terminalId } = req.params
+    const target = req.tpvCommandTarget
+    if (!target) throw new NotFoundError('Terminal no encontrada')
+    const terminalId = target.id
     const { command, payload } = req.body
     const requestedBy = (req as any).authContext?.userId || 'system'
     const staff =
@@ -181,25 +183,25 @@ export async function sendTpvCommand(
     // Validate command logic
     if (command === 'EXIT_MAINTENANCE') {
       // Check if terminal is actually in maintenance mode
-      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId)
+      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId, target.venueId)
       if (terminalHealth.status !== 'MAINTENANCE') {
         throw new BadRequestError(`Terminal ${terminalId} is not in maintenance mode (current status: ${terminalHealth.status})`)
       }
     } else if (command === 'MAINTENANCE_MODE') {
       // Check if terminal is already in maintenance mode
-      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId)
+      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId, target.venueId)
       if (terminalHealth.status === 'MAINTENANCE') {
         throw new BadRequestError(`Terminal ${terminalId} is already in maintenance mode`)
       }
     } else if (command === 'REACTIVATE') {
       // Check if terminal is actually inactive
-      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId)
+      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId, target.venueId)
       if (terminalHealth.status !== 'INACTIVE') {
         throw new BadRequestError(`Terminal ${terminalId} is not inactive (current status: ${terminalHealth.status})`)
       }
     }
 
-    await tpvHealthService.sendCommand(terminalId, {
+    await tpvHealthService.sendCommand(target, {
       type: command as any,
       payload,
       requestedBy,
@@ -209,8 +211,8 @@ export async function sendTpvCommand(
     // Update terminal state in database based on command type
     // This ensures the dashboard shows the correct state immediately
     if (command === 'LOCK') {
-      await prisma.terminal.update({
-        where: { id: terminalId },
+      const updated = await prisma.terminal.updateMany({
+        where: { id: terminalId, venueId: target.venueId },
         data: {
           isLocked: true,
           lockedAt: new Date(),
@@ -218,9 +220,10 @@ export async function sendTpvCommand(
           lockReason: payload?.reason || null,
         },
       })
+      if (updated.count !== 1) throw new NotFoundError('Terminal no encontrada')
     } else if (command === 'UNLOCK') {
-      await prisma.terminal.update({
-        where: { id: terminalId },
+      const updated = await prisma.terminal.updateMany({
+        where: { id: terminalId, venueId: target.venueId },
         data: {
           isLocked: false,
           lockedAt: null,
@@ -228,6 +231,7 @@ export async function sendTpvCommand(
           lockReason: null,
         },
       })
+      if (updated.count !== 1) throw new NotFoundError('Terminal no encontrada')
     }
 
     res.status(200).json({
