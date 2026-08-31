@@ -252,6 +252,10 @@ export async function executeSeatReconciliation(venueId: string): Promise<number
     // Mark these rows as "the seat cap turned this off" so a later RE-UPGRADE to Pro/Premium
     // can auto-reactivate EXACTLY them (reactivateSeatCapDeactivated) — never people who were
     // fired/quit (those rows keep deactivatedBySeatCap=false).
+    // DELIBERATE: pin is KEPT here (every baja path clears it instead) — these people
+    // didn't leave; on re-upgrade they come back and must keep their TPV PIN. If the
+    // venue reassigns the PIN meanwhile, the grant path frees it from this inactive row.
+    // (Allowlisted in tests/unit/services/staffvenue-baja-libera-pin.test.ts.)
     data: { active: false, endDate: new Date(), deactivatedBySeatCap: true },
   })
 

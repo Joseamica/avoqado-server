@@ -1089,12 +1089,14 @@ export async function removeTeamMember(venueId: string, teamMemberId: string): P
     }
   }
 
-  // Soft delete by setting endDate and deactivating
+  // Soft delete by setting endDate and deactivating. pin: null — the PIN goes back
+  // to the venue; a retained PIN blocks reuse via @@unique([venueId, pin]).
   await prisma.staffVenue.update({
     where: { id: teamMemberId },
     data: {
       active: false,
       endDate: new Date(),
+      pin: null,
     },
   })
 

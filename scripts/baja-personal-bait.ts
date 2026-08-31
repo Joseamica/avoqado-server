@@ -211,9 +211,11 @@ async function main() {
     await prisma.$transaction(async tx => {
       await tx.staff.update({ where: { id: c.id }, data: { active: false } })
       if (tiendasActivas.length) {
+        // pin: null — el PIN se devuelve a la tienda al dar de baja; retenerlo bloquea
+        // reasignarlo (el @@unique([venueId, pin]) cuenta también filas inactivas).
         await tx.staffVenue.updateMany({
           where: { staffId: c.id, active: true },
-          data: { active: false, endDate: new Date() },
+          data: { active: false, endDate: new Date(), pin: null },
         })
       }
       await tx.activityLog.create({

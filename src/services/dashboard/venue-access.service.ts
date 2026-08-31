@@ -44,20 +44,28 @@ export async function grantVenueAccessBatch(venueId: string, grants: VenueAccess
     throw new BadRequestError('Dos personas tienen el mismo PIN. Cada PIN debe ser distinto.')
   }
 
+  // A grant may free a PIN still held by a DEACTIVATED row (bajas keep their row and,
+  // historically, their PIN — the DB unique (venueId, pin) counts them). Track who got
+  // freed so the audit trail says it explicitly.
+  const freedPinByStaffId = new Map<string, string>()
   await prisma.$transaction(async tx => {
     for (const g of grants) {
-      await upsertVenueAssignment(tx, g.staffId, venueId, g.role, g.pin)
+      const result = await upsertVenueAssignment(tx, g.staffId, venueId, g.role, g.pin)
+      if (result?.freedPin) {
+        freedPinByStaffId.set(g.staffId, result.freedPin.staffId)
+      }
     }
   })
 
   for (const g of grants) {
+    const freedPinFromStaffId = freedPinByStaffId.get(g.staffId)
     await logAction({
       staffId: actor.staffId ?? null,
       venueId,
       action: 'STAFF_VENUE_ACCESS_GRANTED',
       entity: 'StaffVenue',
       entityId: g.staffId,
-      data: { grantedStaffId: g.staffId, role: g.role, viaPin: !!g.pin },
+      data: { grantedStaffId: g.staffId, role: g.role, viaPin: !!g.pin, ...(freedPinFromStaffId ? { freedPinFromStaffId } : {}) },
       ipAddress: actor.ipAddress,
       userAgent: actor.userAgent,
     })

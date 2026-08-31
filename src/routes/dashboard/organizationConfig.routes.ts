@@ -774,11 +774,12 @@ router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: 
       })
     }
 
-    // Remove (deactivate) venue assignments
+    // Remove (deactivate) venue assignments. pin: null frees the PIN for reuse —
+    // the @@unique([venueId, pin]) counts inactive rows too.
     for (const removeVenueId of toRemove) {
       await prisma.staffVenue.update({
         where: { staffId_venueId: { staffId, venueId: removeVenueId } },
-        data: { active: false },
+        data: { active: false, pin: null },
       })
 
       const venueName = orgVenues.find(v => v.id === removeVenueId)?.name || removeVenueId

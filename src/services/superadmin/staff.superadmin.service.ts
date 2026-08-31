@@ -221,7 +221,9 @@ export async function createStaff(data: CreateStaffData, performedBy?: string) {
       throw new BadRequestError('La sucursal no pertenece a la organización seleccionada')
     }
 
-    // 4. If pin, check uniqueness within venue
+    // 4. If pin, check uniqueness within venue (active holders → 409; a DEACTIVATED
+    // holder is freed inside the creation tx below — the DB unique (venueId, pin)
+    // counts inactive rows too, and leaving one would P2002 the create into a 500)
     if (pin) {
       const existingPin = await prisma.staffVenue.findFirst({
         where: { venueId, pin, active: true },
@@ -266,6 +268,10 @@ export async function createStaff(data: CreateStaffData, performedBy?: string) {
 
     // Optionally create StaffVenue
     if (venueId && venueRole) {
+      if (pin) {
+        // Free the PIN if a deactivated row still holds it (the unique counts inactive rows).
+        await tx.staffVenue.updateMany({ where: { venueId, pin, active: false }, data: { pin: null } })
+      }
       await tx.staffVenue.create({
         data: {
           staffId: newStaff.id,
@@ -416,9 +422,11 @@ export async function removeFromOrganization(staffId: string, organizationId: st
     const venueIds = orgVenues.map(v => v.id)
 
     if (venueIds.length > 0) {
+      // pin: null — the PIN goes back to the venue on deactivation; a retained PIN
+      // blocks reuse forever via the @@unique([venueId, pin]) that counts inactive rows.
       await tx.staffVenue.updateMany({
         where: { staffId, venueId: { in: venueIds }, active: true },
-        data: { active: false, endDate: new Date() },
+        data: { active: false, endDate: new Date(), pin: null },
       })
     }
   })
@@ -441,6 +449,11 @@ export async function removeFromOrganization(staffId: string, organizationId: st
 // ASSIGN TO VENUE (upsert)
 // ===========================================
 
+export interface UpsertVenueAssignmentResult {
+  /** Set when the PIN was held by a DEACTIVATED row and got freed to make room. */
+  freedPin: { staffVenueId: string; staffId: string } | null
+}
+
 /**
  * Core venue-assignment upsert — tx-aware so a batch can run it inside one transaction.
  * Validates: staff exists, venue exists, staff ∈ venue's org, PIN unique within venue.
@@ -452,7 +465,7 @@ export async function upsertVenueAssignment(
   venueId: string,
   role: StaffRole,
   pin?: string,
-): Promise<void> {
+): Promise<UpsertVenueAssignmentResult> {
   // Validate staff exists
   const staff = await client.staff.findUnique({ where: { id: staffId }, select: { id: true } })
   if (!staff) {
@@ -476,18 +489,29 @@ export async function upsertVenueAssignment(
     throw new BadRequestError('El usuario no pertenece a la organización de esta sucursal. Asígnelo primero a la organización.')
   }
 
-  // Check PIN uniqueness if provided
+  // Check PIN uniqueness if provided. The DB constraint is @@unique([venueId, pin])
+  // with NO active condition, so this check must look at ALL rows — filtering by
+  // active:true here let a deactivated row's retained PIN slip past validation and
+  // blow up the upsert with P2002 (opaque 500 in the org migration wizard).
+  let freedPin: UpsertVenueAssignmentResult['freedPin'] = null
   if (pin) {
-    const existingPin = await client.staffVenue.findFirst({
+    const pinHolder = await client.staffVenue.findFirst({
       where: {
         venueId,
         pin,
-        active: true,
         staffId: { not: staffId }, // Exclude self for upsert case
       },
+      select: { id: true, staffId: true, active: true },
     })
-    if (existingPin) {
+    if (pinHolder?.active) {
       throw new ConflictError('Este PIN ya está en uso en esta sucursal')
+    }
+    if (pinHolder) {
+      // A deactivated person still holds this PIN (bajas keep the row). Their PIN
+      // has no function anymore — free it so the venue can reuse it. Same client/tx
+      // as the upsert, so a failure rolls back both.
+      await client.staffVenue.update({ where: { id: pinHolder.id }, data: { pin: null } })
+      freedPin = { staffVenueId: pinHolder.id, staffId: pinHolder.staffId }
     }
   }
 
@@ -509,13 +533,15 @@ export async function upsertVenueAssignment(
       active: true,
     },
   })
+
+  return { freedPin }
 }
 
 export async function assignToVenue(staffId: string, venueId: string, role: StaffRole, pin?: string, performedBy?: string) {
   // Delegates the validation + upsert to the tx-aware helper (passing the global
   // prisma client; PrismaClient is assignable to Prisma.TransactionClient), then
   // returns the hydrated staff for the existing superadmin assign route.
-  await upsertVenueAssignment(prisma, staffId, venueId, role, pin)
+  const { freedPin } = await upsertVenueAssignment(prisma, staffId, venueId, role, pin)
 
   logger.info(`[STAFF-SUPERADMIN] Assigned staff to venue`, { staffId, venueId, role })
 
@@ -525,7 +551,7 @@ export async function assignToVenue(staffId: string, venueId: string, role: Staf
     action: 'STAFF_ROLE_ASSIGNED',
     entity: 'Staff',
     entityId: staffId,
-    data: { venueId, role },
+    data: { venueId, role, ...(freedPin ? { freedPinFromStaffId: freedPin.staffId } : {}) },
   })
 
   return getStaffById(staffId)
@@ -600,7 +626,7 @@ export async function removeFromVenue(staffId: string, venueId: string, performe
 
   await prisma.staffVenue.update({
     where: { staffId_venueId: { staffId, venueId } },
-    data: { active: false, endDate: new Date() },
+    data: { active: false, endDate: new Date(), pin: null },
   })
 
   logger.info(`[STAFF-SUPERADMIN] Removed staff from venue`, { staffId, venueId })
