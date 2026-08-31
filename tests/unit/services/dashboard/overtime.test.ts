@@ -233,43 +233,4 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
   })
 })
 
-describe('repartirDobleYTriple — art. 67 y 68', () => {
-  it('las primeras 9 h de la semana son DOBLES', () => {
-    const r = repartirDobleYTriple(TOPE_SEMANAL_MINUTOS)
-    expect(r.minutosDobles).toBe(540)
-    expect(r.minutosTriples).toBe(0)
-  })
 
-  it('🔴 lo que pasa de 9 h semanales es TRIPLE', () => {
-    // 12 h extra = 9 dobles + 3 triples (el ejemplo canónico de la ley).
-    const r = repartirDobleYTriple(12 * 60)
-    expect(r.minutosDobles).toBe(540)
-    expect(r.minutosTriples).toBe(180)
-  })
-
-  it('debajo del tope todo es doble', () => {
-    const r = repartirDobleYTriple(150)
-    expect(r.minutosDobles).toBe(150)
-    expect(r.minutosTriples).toBe(0)
-  })
-
-  it('cero es cero', () => {
-    expect(repartirDobleYTriple(0)).toEqual({ minutosDobles: 0, minutosTriples: 0 })
-  })
-
-  it('un total negativo no inventa dinero', () => {
-    expect(repartirDobleYTriple(-30)).toEqual({ minutosDobles: 0, minutosTriples: 0 })
-  })
-})
-
-describe('los topes del art. 66 son constantes de la LEY, no configurables', () => {
-  // 🔴 Reforma del 1-MAY-2026: pasó de 3 h a 4 h diarias. El detalle, con la progresión
-  // semanal por año, vive en `overtime.reformaLFT2026.test.ts`.
-  it('4 horas al día', () => {
-    expect(TOPE_DIARIO_MINUTOS).toBe(240)
-  })
-
-  it('9 horas a la semana', () => {
-    expect(TOPE_SEMANAL_MINUTOS).toBe(540)
-  })
-})

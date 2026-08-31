@@ -24,7 +24,7 @@ cutoff legado; QA físico y ventana real de siete días pendientes
   implementados y revisados. Lint/typecheck y pruebas propias pasan; no hubo deploy ni QA manual con fixtures reales.
 - TPV/iOS: no recibieron cambios de producto. iOS compiló en simulador; la regresión TPV no alcanzó sus asserts por un fallo ajeno al
   configurar `:commonlib` en un checkout que se movía concurrentemente.
-- Phase D: la instrumentación ya existe y el reporte read-only se prepara por separado. El gate de siete días, el 422 del PUT legado y
+- Phase D: la instrumentación y el reporte read-only reproducible ya existen. El gate de siete días, el 422 del PUT legado y
   cualquier retiro de compatibilidad permanecen expresamente pendientes.
 
 Por lo anterior, este documento no declara el rollout como **Implemented** ni listo para producción.

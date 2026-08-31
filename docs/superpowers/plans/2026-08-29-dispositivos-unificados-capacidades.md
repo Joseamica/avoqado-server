@@ -7,8 +7,8 @@
 | A · Tasks 0–10 server | Implementación y revisiones completas en working tree; pruebas enfocadas, typecheck y verificación amplia documentadas en `.superpowers/sdd/2026-08-29-dispositivos-unificados-capacidades/` | Aplicar migración, deploy, API smoke y remediation `--apply` no autorizados |
 | B · Tasks 11–15 Android | Implementación revisada; regresión exacta 134/134 y `assembleDebug` aprobados | APK/hardware D3, T3 Pro, phone, offline y latencia p95 pendientes |
 | C · Tasks 16–20 dashboard | `/devices`, DTOs, intención durable y acciones por capacidad revisadas; lint y `tsc -b` coinciden local/Alien | Deploy y QA manual pendientes; suite amplia tiene un único fallo de empaquetado cross-repo cuyo archivo pasa 5/5 en el workspace real |
-| D · Task 21 | Instrumentación implementada; reporte read-only en preparación | Ventana desplegada de siete días y cutoff 422 no iniciados |
-| Task 22 | Sin rename accidental de modelos/endpoints; iOS build exit 0; materiales comerciales ya usan Dispositivos/alta automática y no requieren cambio | TPV test bloqueado antes de asserts por configuración Gradle ajena; login/venue switch y auditoría final pendientes |
+| D · Task 21 | Instrumentación y reporte read-only reproducible implementados, paginados, sanitizados y revisados | Ventana desplegada de siete días y cutoff 422 no iniciados |
+| Task 22 | Sin rename accidental de modelos/endpoints; iOS build exit 0; materiales comerciales ya usan Dispositivos/alta automática; auditoría final P0/P1/P2 corregida y re-revisada | TPV test bloqueado antes de asserts por configuración Gradle ajena; login/venue switch y gates operacionales pendientes |
 
 No se ejecutaron commits, staging, branches, worktrees, pushes, deploys, migraciones ni acciones de hardware. Los checkboxes de rollout que
 dependen de infraestructura real se conservan abiertos deliberadamente; la bitácora `progress.md` y los reportes por task contienen los

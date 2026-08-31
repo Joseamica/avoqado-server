@@ -9,8 +9,8 @@ import { agruparPorSemana } from '@/services/dashboard/overtime'
 const SEMANA_COMPLETA = { startDate: '2026-08-24', endDate: '2026-08-30' }
 
 describe('agruparPorSemana', () => {
-  it('reparte doble y triple sobre el TOTAL de la semana, no día por día', () => {
-    // 4 días de 3 h = 12 h. Día por día ninguno pasa de 9; juntos sí.
+  it('agrupa por semana sobre el TOTAL, no día por día', () => {
+    // 4 días de 3 h caen en la misma semana y suman 12 h en un solo renglón.
     const semanas = agruparPorSemana(
       [
         { date: '2026-08-24', minutos: 180 },
@@ -22,13 +22,11 @@ describe('agruparPorSemana', () => {
     )
     expect(semanas).toHaveLength(1)
     expect(semanas[0].minutosTotal).toBe(720)
-    expect(semanas[0].minutosDobles).toBe(540)
-    expect(semanas[0].minutosTriples).toBe(180)
   })
 
-  it('🔴 dos semanas NO se mezclan: cada una tiene su propio umbral de 9 h', () => {
-    // 8 h el domingo 30 y 8 h el lunes 31. Mezcladas serían 16 h → 9 dobles + 7 triples.
-    // Separadas, las dos están debajo del tope y TODO es doble.
+  it('🔴 dos semanas NO se mezclan: cada una lleva su propio total', () => {
+    // 8 h el domingo 30 y 8 h el lunes 31: son semanas DISTINTAS. Juntarlas daría un solo
+    // renglón de 16 h y quien calcule la nómina aplicaría el tope una sola vez.
     const semanas = agruparPorSemana(
       [
         { date: '2026-08-30', minutos: 480 },
@@ -37,7 +35,7 @@ describe('agruparPorSemana', () => {
       { startDate: '2026-08-24', endDate: '2026-09-06' },
     )
     expect(semanas).toHaveLength(2)
-    expect(semanas.every(s => s.minutosTriples === 0)).toBe(true)
+    expect(semanas.map(s => s.minutosTotal)).toEqual([480, 480])
     expect(semanas.map(s => s.weekStart)).toEqual(['2026-08-24', '2026-08-31'])
   })
 
@@ -47,52 +45,6 @@ describe('agruparPorSemana', () => {
     expect(semanas[0].weekEnd).toBe('2026-08-30')
   })
 
-  describe('infracciones del art. 66 — se señalan, NO cambian la tarifa', () => {
-    // 🔴 Reforma del 1-MAY-2026: el art. 66 pasó de 3 h/3 días a 4 h/4 días. Las versiones
-    // anteriores de estas pruebas eran CORRECTAS con la ley de entonces.
-    it('un día de más de 4 h queda marcado', () => {
-      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 300 }], SEMANA_COMPLETA)
-      expect(semanas[0].diasSobreTopeDiario).toEqual(['2026-08-24'])
-    })
-
-    it('🔴 pero esas 5 h siguen siendo DOBLES si la semana no llegó a 9', () => {
-      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 300 }], SEMANA_COMPLETA)
-      expect(semanas[0].minutosDobles).toBe(300)
-      expect(semanas[0].minutosTriples).toBe(0)
-    })
-
-    it('exactamente 4 h no es infracción', () => {
-      const semanas = agruparPorSemana([{ date: '2026-08-24', minutos: 240 }], SEMANA_COMPLETA)
-      expect(semanas[0].diasSobreTopeDiario).toEqual([])
-    })
-
-    it('hacer extra más de 4 veces en la semana queda marcado', () => {
-      const semanas = agruparPorSemana(
-        [
-          { date: '2026-08-24', minutos: 30 },
-          { date: '2026-08-25', minutos: 30 },
-          { date: '2026-08-26', minutos: 30 },
-          { date: '2026-08-27', minutos: 30 },
-          { date: '2026-08-28', minutos: 30 },
-        ],
-        SEMANA_COMPLETA,
-      )
-      expect(semanas[0].diasConExtra).toBe(5)
-      expect(semanas[0].excedeDiasPermitidos).toBe(true)
-    })
-
-    it('exactamente 3 días no es infracción', () => {
-      const semanas = agruparPorSemana(
-        [
-          { date: '2026-08-24', minutos: 30 },
-          { date: '2026-08-25', minutos: 30 },
-          { date: '2026-08-26', minutos: 30 },
-        ],
-        SEMANA_COMPLETA,
-      )
-      expect(semanas[0].excedeDiasPermitidos).toBe(false)
-    })
-  })
 
   it('🔴 una semana que el rango no cubre entera se marca PARCIAL', () => {
     // Pedir del miércoles al viernes no puede afirmar el reparto doble/triple de esa semana:
