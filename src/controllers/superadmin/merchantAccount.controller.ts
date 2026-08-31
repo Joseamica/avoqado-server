@@ -238,7 +238,34 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       // string | null → re-bind or detach the merchant's AngelPay account.
       // undefined leaves the field unchanged.
       angelpayUserAccountId,
+      // Provider-specific + bank columns (editable post-alta, 2026-08-31).
+      // `undefined` leaves them unchanged; `null` clears them.
+      blumonSerialNumber,
+      blumonPosId,
+      blumonEnvironment,
+      blumonMerchantId,
+      angelpayAffiliation,
+      angelpayMerchantName,
+      clabeNumber,
+      bankName,
+      accountHolder,
     } = req.body
+
+    // Only the two fields with a real domain are validated; everything else is
+    // free text the provider owns. Keep this additive — the legacy dashboard
+    // calls the same endpoint and must not start failing on bodies it already sends.
+    const editableSchema = z.object({
+      blumonEnvironment: z.enum(['SANDBOX', 'PRODUCTION']).nullish(),
+      clabeNumber: z
+        .string()
+        .regex(/^\d{18}$/, 'El CLABE debe tener exactamente 18 dígitos')
+        .nullish()
+        .or(z.literal('')),
+    })
+    const parsed = editableSchema.safeParse({ blumonEnvironment, clabeNumber })
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.issues[0]?.message ?? 'Datos inválidos')
+    }
 
     const account = await merchantAccountService.updateMerchantAccount(id, {
       externalMerchantId,
@@ -249,6 +276,16 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       credentials,
       providerConfig,
       angelpayUserAccountId,
+      blumonSerialNumber,
+      blumonPosId,
+      blumonEnvironment,
+      blumonMerchantId,
+      angelpayAffiliation,
+      angelpayMerchantName,
+      // '' from an emptied input means "clear it", not "set empty string".
+      clabeNumber: clabeNumber === '' ? null : clabeNumber,
+      bankName,
+      accountHolder,
     })
 
     logger.info('Merchant account updated via API', {
