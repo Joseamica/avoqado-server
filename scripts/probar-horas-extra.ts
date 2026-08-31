@@ -121,18 +121,13 @@ async function main() {
     console.log(`  pendientes     ${hm(ana.overtimePendingMinutes)}`)
     console.log(`  semanas        ${ana.overtimeWeeks.length}`)
     for (const w of ana.overtimeWeeks) {
-      console.log(
-        `    ${w.weekStart}→${w.weekEnd}  ${hm(w.minutosTotal)}  ` +
-          `${hm(w.minutosTotal)}  parcial=${w.parcial}`,
-      )
+      console.log(`    ${w.weekStart}→${w.weekEnd}  ${hm(w.minutosTotal)}  ` + `${hm(w.minutosTotal)}  parcial=${w.parcial}`)
     }
 
     // 🔴 El veredicto se juzga sobre lo que Avoqado sí afirma: cuánto MIDIÓ el reloj y que la
     // semana lo recoja entero. El reparto por tarifa se retiró el 31-ago-2026 — comprobarlo
     // aquí sería fijar una regla legal que este sistema ya no aplica.
-    const ok =
-      ana.overtimeMinutes === esperado &&
-      ana.overtimeWeeks.reduce((t, w) => t + w.minutosTotal, 0) === ana.overtimeApprovedMinutes
+    const ok = ana.overtimeMinutes === esperado && ana.overtimeWeeks.reduce((t, w) => t + w.minutosTotal, 0) === ana.overtimeApprovedMinutes
     console.log(`\n  ${ok ? '🟢 CUADRA' : '🔴 NO CUADRA'}`)
     if (!ok) process.exitCode = 1
   }

@@ -253,7 +253,6 @@ export interface SemanaDeExtra {
   parcial: boolean
 }
 
-
 /**
  * Agrupa los días por semana natural (lunes a domingo) y suma los minutos de CADA semana.
  *
@@ -268,10 +267,7 @@ export interface SemanaDeExtra {
  * 🔴 Y una semana que el rango no cubre entera sale marcada `parcial`: su total todavía puede
  * crecer. Marcarlo es preferible a entregar un número que se ve final y no lo es.
  */
-export function agruparPorSemana(
-  dias: DiaConExtra[],
-  rango: { startDate: string; endDate: string },
-): SemanaDeExtra[] {
+export function agruparPorSemana(dias: DiaConExtra[], rango: { startDate: string; endDate: string }): SemanaDeExtra[] {
   const porSemana = new Map<string, DiaConExtra[]>()
 
   for (const dia of dias) {
@@ -372,8 +368,7 @@ export function estadoDeAutorizacion(dia: DiaAutorizado): EstadoDeAutorizacion {
   if (dia.autorizados === null) return 'SIN_REVISAR'
   // Una fila SIN huella (anterior a la columna) se trata como invalidada: el lado seguro es
   // volver a pedir la firma, no pagar a ciegas.
-  const huellasCoinciden =
-    dia.huellaAlAutorizar != null && dia.huellaActual != null && dia.huellaAlAutorizar === dia.huellaActual
+  const huellasCoinciden = dia.huellaAlAutorizar != null && dia.huellaActual != null && dia.huellaAlAutorizar === dia.huellaActual
   return huellasCoinciden ? 'VIGENTE' : 'INVALIDADA'
 }
 
@@ -480,12 +475,8 @@ export function huellaDeLaJornada(input: {
   descansos: DescansoDelDia[]
   timezone: string
 }): string {
-  const tramos = input.intervalos
-    .map(i => `${i.entrada.getTime()}-${i.salida ? i.salida.getTime() : 'abierto'}`)
-    .sort()
-  const pausas = input.descansos
-    .map(d => `${d.startTime.getTime()}-${d.endTime ? d.endTime.getTime() : 'abierto'}`)
-    .sort()
+  const tramos = input.intervalos.map(i => `${i.entrada.getTime()}-${i.salida ? i.salida.getTime() : 'abierto'}`).sort()
+  const pausas = input.descansos.map(d => `${d.startTime.getTime()}-${d.endTime ? d.endTime.getTime() : 'abierto'}`).sort()
   // El cuadrante entra porque mover la hora de salida cambia cuántos minutos son extra: la
   // decisión firmada deja de aplicar aunque las checadas no se hayan tocado.
   const cuadrante = `${input.turno.date}|${input.turno.expectedStart ?? '-'}|${input.turno.expectedEnd ?? '-'}`

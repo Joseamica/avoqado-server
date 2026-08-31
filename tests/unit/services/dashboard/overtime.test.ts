@@ -226,5 +226,3 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
     ).not.toBe(120)
   })
 })
-
-

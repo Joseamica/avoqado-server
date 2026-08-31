@@ -114,7 +114,11 @@ async function main() {
   // 🔴 Ya NO se comprueban dobles ni triples: Avoqado dejó de repartir por tarifa el
   // 31-ago-2026 (decisión del founder). Lo que se entrega —y lo que hay que cuidar— son los
   // minutos AUTORIZADOS agrupados por semana; la tarifa la pone el sistema de nómina.
-  comprobar('minutos de la semana', ana.overtimeWeeks.reduce((t, w) => t + w.minutosTotal, 0), 720)
+  comprobar(
+    'minutos de la semana',
+    ana.overtimeWeeks.reduce((t, w) => t + w.minutosTotal, 0),
+    720,
+  )
 
   console.log('\n3 · Corrijo un día a la mitad → el total baja y nada se duplica')
   await approveOvertime({

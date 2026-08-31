@@ -279,7 +279,9 @@ describe('GET payroll-summary — la respuesta trae los campos de horas extra', 
       timezone: 'America/Mexico_City',
       workedTotalsByStaff: new Map(),
     })
-    const res = await request(app).get(RESUMEN).set('Authorization', `Bearer ${makeToken('CASHIER')}`)
+    const res = await request(app)
+      .get(RESUMEN)
+      .set('Authorization', `Bearer ${makeToken('CASHIER')}`)
     expect(res.status).toBe(200)
   })
 

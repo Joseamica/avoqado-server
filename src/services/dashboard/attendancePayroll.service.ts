@@ -208,7 +208,12 @@ export async function getPayrollSummary(
     //
     // 🔴 `parcial` viaja porque importa: significa que el rango consultado no cubre la semana
     // entera, así que ese total todavía puede crecer. Callarlo invitaría a tratarlo como final.
-    row.overtimeWeeks = agruparPorSemana(diasAutorizadosParaReparto(conAutorizacion), { startDate, endDate }).map(w => ({ weekStart: w.weekStart, weekEnd: w.weekEnd, minutosTotal: w.minutosTotal, parcial: w.parcial }))
+    row.overtimeWeeks = agruparPorSemana(diasAutorizadosParaReparto(conAutorizacion), { startDate, endDate }).map(w => ({
+      weekStart: w.weekStart,
+      weekEnd: w.weekEnd,
+      minutosTotal: w.minutosTotal,
+      parcial: w.parcial,
+    }))
   }
 
   const rows = [...byMembership.values()].sort((a, b) => a.name.localeCompare(b.name))

@@ -442,10 +442,7 @@ export async function buildAttendanceGrid(
           // tarde abre un nocturno: dos horas antes de la entrada. Reusarlo mantiene una sola
           // definición de «esta checada pertenece a este turno».
           const turnoSiguiente = turnoDe(nextDate)
-          const abreElSiguiente =
-            !turnoSiguiente.isDayOff && turnoSiguiente.start
-              ? overnightSameDayThreshold(turnoSiguiente.start)
-              : null
+          const abreElSiguiente = !turnoSiguiente.isDayOff && turnoSiguiente.start ? overnightSameDayThreshold(turnoSiguiente.start) : null
 
           for (const sib of byStaffAndDay.get(`${membership.staffId}|${nextDate}`) ?? []) {
             if (sib === picked || consumed.has(sib)) continue
