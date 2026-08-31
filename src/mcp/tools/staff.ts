@@ -188,7 +188,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
           expectedUpdatedAt: celda.overtimeApprovedUpdatedAt,
           message:
             `Vas a autorizar ${minutesApproved} de los ${celda.overtimeMinutes} minutos extra que ` +
-            `${celda.name} trabajó el ${date}. Eso es lo que entrará al pago doble/triple. ` +
+            `${celda.name} trabajó el ${date}. Eso es lo que saldrá hacia la nómina. ` +
             `Confirma con confirm:true y devuelve el expectedSourceFingerprint de esta respuesta ` +
             `(y el expectedUpdatedAt si el día ya estaba autorizado).`,
         })

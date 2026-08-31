@@ -40,9 +40,9 @@ export interface PayrollSummaryRow {
   absences: Record<string, number>
   hoursWorked: number
   breakMinutes: number
-  /** Minutos extra MEDIDOS por el reloj (art. 66-68 LFT). Llegar temprano no cuenta — ver `overtime.ts`. */
+  /** Minutos extra MEDIDOS por el reloj. Llegar temprano no cuenta — ver `overtime.ts`. */
   overtimeMinutes: number
-  /** De lo medido, lo que alguien AUTORIZÓ. Es lo único que se reparte en doble y triple. */
+  /** De lo medido, lo que alguien AUTORIZÓ. Es lo único que sale hacia la nómina. */
   overtimeApprovedMinutes: number
   /** Medido en días que NADIE ha revisado. Es lo que el negocio tiene pendiente de mirar. */
   overtimePendingMinutes: number

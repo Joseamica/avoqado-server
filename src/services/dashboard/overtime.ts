@@ -1,25 +1,12 @@
 /**
- * Horas extra — la aritmética de los artículos 66, 67 y 68 de la LFT.
+ * Horas extra — MEDIR los minutos y agruparlos por semana. Nada más.
  *
  * PURA a propósito: sin base de datos, sin reloj propio, sin efectos. Es lo que permite
  * ejercitar un turno nocturno, un descanso a caballo o una semana de 12 horas sin sembrar
  * nada — y es la regla del repo para toda pieza que se quiera probar de verdad.
  *
- * Las tres reglas de la ley:
- *
- *   art. 66 — el tiempo extra no puede exceder de 3 h diarias ni presentarse más de 3 veces
- *             por semana. De ahí el tope de 9 h semanales.
- *   art. 67 — las primeras 9 h extraordinarias de la SEMANA se pagan al doble.
- *   art. 68 — el tiempo que exceda ese máximo, al triple.
- *
- * 🔴 Lo que decide doble contra triple es el ACUMULADO SEMANAL, no el tope diario
- * (verificado en vivo el 29-ago-2026). Quien hace 4 h un lunes viola el tope del art. 66,
- * pero esas 4 h siguen siendo DOBLES si la semana todavía no llega a 9. El tope diario se
- * reporta como infracción; no cambia la tarifa.
- *
- * 🔴 Y lo que NO calcula, declarado: aquí no se convierte a pesos. Salen MINUTOS repartidos
- * en dobles y triples, igual que el resumen de nómina de la fase 3 entrega números y no
- * dinero. El salario por hora vive en el sistema de nómina del negocio, no aquí.
+ * 🔴 Lo que NO calcula, y es la decisión de fondo: ni pesos ni tarifas. No reparte en doble y
+ * triple, y no dictamina si una semana rompió la ley. Ver el bloque de abajo.
  */
 import { createHash } from 'crypto'
 
@@ -43,8 +30,8 @@ import { DateTime } from 'luxon'
  * cumplimiento, que es peor que no decirle nada.
  *
  * Lo que este módulo sí hace, y hace bien: **medir** los minutos extra de cada día y agruparlos
- * por semana. La tarifa y el veredicto los pone el sistema de nómina del negocio, que ya aplica
- * la ley y se actualiza cuando cambia.
+ * por semana —que es como los pide una nómina—. La tarifa y el veredicto los pone el sistema de
+ * nómina del negocio, que ya aplica la ley y se actualiza cuando cambia.
  */
 
 /** El turno que le tocaba ese día, tal como lo resuelve la rejilla de asistencia. */
@@ -141,9 +128,8 @@ export function minutosExtraDelDia({ turno, intervalos, descansos, timezone }: M
   //   · La autorización es POR DÍA. Un gerente firma «tantos minutos del martes», no una
   //     fracción de un acumulado. Guardar segundos obligaría a enseñar y aprobar cantidades
   //     que nadie teclea.
-  //   · El reparto doble/triple se calcula sobre lo AUTORIZADO, que ya son minutos enteros
-  //     escritos por una persona. El redondeo de lo MEDIDO sólo afecta al tope que se enseña
-  //     y a la infracción del art. 66, cuyos umbrales son de 3 y 9 HORAS.
+  //   · Lo que sale de aquí son minutos AUTORIZADOS, que ya son enteros escritos por una
+  //     persona. El redondeo de lo MEDIDO sólo mueve el número que se enseña.
   //   · Un reloj checador no tiene precisión de segundo que merezca la pena arrastrar.
   //
   // La consecuencia se acepta y está fijada en `overtime.redondeo.test.ts`: 29 segundos son
@@ -269,17 +255,18 @@ export interface SemanaDeExtra {
 
 
 /**
- * Agrupa los días por semana natural (lunes a domingo) y aplica el art. 67/68 sobre el total
- * de CADA semana.
+ * Agrupa los días por semana natural (lunes a domingo) y suma los minutos de CADA semana.
  *
- * 🔴 Agrupar bien es la mitad del cálculo. Dos semanas mezcladas inventan triples que no
- * existen —8 h el domingo más 8 h el lunes parecerían 16 h de una sola semana—; una semana
- * partida en dos los esconde.
+ * 🔴 Por qué SEMANAS y no un total suelto: es la unidad en la que una nómina calcula el tiempo
+ * extraordinario. Entregar un montón de minutos sin decir de qué semana son obliga a quien
+ * paga a reconstruirlo, y ahí es donde se equivoca.
  *
- * 🔴 Y una semana que el rango no cubre entera sale marcada `parcial`. Pedir "del miércoles al
- * viernes" no permite afirmar el reparto: el lunes y el martes quedaron fuera y pudieron traer
- * horas que empujan la tarifa al triple. Marcarlo es preferible a entregar un número que se ve
- * exacto y no lo es.
+ * 🔴 Agrupar bien sigue importando aunque aquí ya no se reparta nada: 8 h el domingo más 8 h el
+ * lunes son DOS semanas de 8, no una de 16. Mezclarlas o partirlas le daría a la nómina una
+ * base falsa.
+ *
+ * 🔴 Y una semana que el rango no cubre entera sale marcada `parcial`: su total todavía puede
+ * crecer. Marcarlo es preferible a entregar un número que se ve final y no lo es.
  */
 export function agruparPorSemana(
   dias: DiaConExtra[],
@@ -320,7 +307,7 @@ export function agruparPorSemana(
 // ─── Autorización (decisión del founder, 29-ago-2026: «autorizarse») ──────────────────────
 //
 // Lo MEDIDO se guarda siempre: es lo que marcó el reloj y nadie lo puede borrar. Lo AUTORIZADO
-// es lo que entra al reparto doble/triple, porque es lo que se paga.
+// es lo único que sale hacia la nómina, porque es lo que se paga.
 //
 // 🔴 El riesgo de exigir autorización es que no pagar se vuelva INVISIBLE. Por eso lo pendiente
 // se reporta aparte y bien visible, en vez de quedar en cero y desaparecer.
@@ -394,8 +381,8 @@ export function estadoDeAutorizacion(dia: DiaAutorizado): EstadoDeAutorizacion {
  * Los minutos de un día que de verdad se pagan. **La única función que decide eso.**
  *
  * 🔴 Existe porque la regla vivía DUPLICADA y las dos copias se desincronizaron: el resumen
- * invalidaba por huella y el reparto doble/triple no, así que una misma fila de nómina podía
- * afirmar a la vez «0 autorizados, 120 pendientes» y **pagar 120 al doble** (2ª auditoría de
+ * invalidaba por huella y el desglose semanal no, así que una misma fila de nómina podía
+ * afirmar a la vez «0 autorizados, 120 pendientes» y **mandar 120 al pago** (2ª auditoría de
  * Codex, 30-ago-2026, P1 #1 — reproducido antes de arreglarlo).
  *
  * Dos condiciones, y las dos tienen que cumplirse:
@@ -436,8 +423,8 @@ export function resumirAutorizacion(dias: DiaAutorizado[]): ResumenDeAutorizacio
       continue
     }
 
-    // VIGENTE: la MISMA función que alimenta el reparto doble/triple. Si divergieran, la fila
-    // podría decir «0 autorizados» y pagar al doble a la vez.
+    // VIGENTE: la MISMA función que alimenta el desglose semanal. Si divergieran, la fila
+    // podría decir «0 autorizados» y mandar esos minutos al pago a la vez.
     const autorizados = minutosAutorizadosEfectivos(dia)
     minutosAutorizados += autorizados
 
@@ -456,16 +443,16 @@ export function resumirAutorizacion(dias: DiaAutorizado[]): ResumenDeAutorizacio
 }
 
 /**
- * Los días que entran al reparto doble/triple: SÓLO lo autorizado.
+ * Los días que entran al desglose semanal: SÓLO lo autorizado.
  *
  * Se separa de `resumirAutorizacion` porque `agruparPorSemana` necesita los días uno por uno
- * (el umbral de 9 h es semanal) y el resumen ya viene sumado.
+ * para saber a qué semana pertenece cada uno, y el resumen ya viene sumado.
  */
 export function diasAutorizadosParaReparto(dias: DiaAutorizado[]): DiaConExtra[] {
   const salida: DiaConExtra[] = []
   for (const dia of dias) {
     // 🔴 La MISMA función que usa el resumen. Tenía su propia copia de la regla y no
-    // comprobaba la huella: por eso se podía decir «0 autorizados» y pagar 120 al doble.
+    // comprobaba la huella: por eso se podía decir «0 autorizados» y mandar 120 al pago.
     const minutos = minutosAutorizadosEfectivos(dia)
     if (minutos > 0) salida.push({ date: dia.date, minutos })
   }

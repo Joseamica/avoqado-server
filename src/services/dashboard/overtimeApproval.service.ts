@@ -3,7 +3,7 @@
  *
  * Decisión del founder (29-ago-2026): las horas extra NO se pagan por el solo hecho de que el
  * reloj las midiera. Alguien con `attendance:manage` las autoriza, y sólo lo autorizado entra
- * al reparto doble/triple del art. 67 y 68.
+ * al desglose semanal que se le entrega a la nómina.
  *
  * 🔴 Tres cosas sostienen esto, y cada una tiene su prueba:
  *

@@ -564,10 +564,10 @@ export async function getAttendanceReport(
         r.overtimeApprovedMinutes = null
         continue
       }
-      // 🔴 Y se decide con la MISMA función que usan el resumen y el reparto doble/triple, no
+      // 🔴 Y se decide con la MISMA función que usan el resumen y el desglose semanal, no
       // con una copia de la regla. Ésta era la TERCERA copia: cuando el reparto se quedó sin
       // la comprobación de huella, una fila llegó a decir «0 autorizados / 120 pendientes» y
-      // pagar 120 al doble a la vez (2ª auditoría de Codex, 30-ago-2026, P1 #1).
+      // mandar 120 al pago a la vez (2ª auditoría de Codex, 30-ago-2026, P1 #1).
       const dia = {
         date: r.date,
         medidos: r.overtimeMinutes,
