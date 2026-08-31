@@ -76,6 +76,69 @@ export function esBaseLocal(databaseUrl: string | undefined): ResultadoDelCorte 
 }
 
 /**
+ * Le pregunta al SERVIDOR dónde está, en vez de creerle a la URL.
+ *
+ * 🔴 Por qué hace falta, y por qué la comprobación de arriba no basta (3ª auditoría de Codex,
+ * 31-ago-2026, P1 #4): host, puerto y nombre salen todos de la MISMA cadena, y esa cadena la
+ * escribe quien abre el túnel. `ssh -L 5432:produccion:5432` deja producción respondiendo en
+ * `localhost:5432`, y si además la base se llama `av-db-25` la URL pasa entera. La URL del
+ * cliente nunca puede probar dónde termina el socket.
+ *
+ * `inet_server_addr()` es evidencia INDEPENDIENTE: la devuelve el propio servidor y dice en qué
+ * dirección está escuchando ÉL. Un Postgres de verdad local contesta `NULL` (socket unix) o una
+ * de loopback; uno alcanzado por túnel contesta su propia IP, que no es ninguna de las dos.
+ *
+ * ⚠️ Sobre-atrapar es seguro: lo peor que pasa es que alguien con un Postgres en Docker tenga
+ * que añadir su red aquí. Sub-atrapar borra datos de nómina.
+ */
+export async function esServidorLocal(prisma: {
+  $queryRawUnsafe: (sql: string) => Promise<Array<Record<string, unknown>>>
+}): Promise<ResultadoDelCorte> {
+  let filas: Array<Record<string, unknown>>
+  try {
+    filas = await prisma.$queryRawUnsafe(
+      "SELECT host(coalesce(inet_server_addr(), '127.0.0.1'::inet)) AS dir, current_database() AS base",
+    )
+  } catch (e) {
+    // Si no se puede preguntar, no se puede afirmar que sea local.
+    return { ok: false, motivo: `No pude preguntarle al servidor dónde está: ${(e as Error).message}` }
+  }
+
+  const dir = String(filas?.[0]?.dir ?? '')
+  const base = String(filas?.[0]?.base ?? '')
+  if (!dir) return { ok: false, motivo: 'El servidor no reportó su dirección' }
+
+  const esLoopback = dir === '127.0.0.1' || dir === '::1' || dir.startsWith('127.')
+  if (!esLoopback) {
+    return {
+      ok: false,
+      motivo: `El servidor de Postgres está escuchando en ${dir}, no en loopback — la URL dice «localhost» pero el socket termina en otra máquina (¿un túnel?)`,
+      host: dir,
+      base,
+    }
+  }
+
+  return { ok: true, host: dir, base }
+}
+
+/**
+ * El corte COMPLETO: la URL primero (barato, no abre conexión) y después el servidor.
+ *
+ * Se llama con `await` desde el `main()` de cada script, ANTES de escribir o borrar nada.
+ */
+export async function exigirBaseLocalDeVerdad(prisma: {
+  $queryRawUnsafe: (sql: string) => Promise<Array<Record<string, unknown>>>
+}): Promise<void> {
+  exigirBaseLocal()
+  const r = await esServidorLocal(prisma)
+  if (r.ok) return
+  console.error('\n🔴 ABORTADO: la URL parecía local, pero el servidor no lo es.')
+  console.error(`   ${r.motivo}`)
+  console.error('   Un túnel SSH deja una base REMOTA respondiendo en localhost.\n')
+  process.exit(1)
+}
+
+/**
  * Corta el proceso si la base no es local. Se llama ANTES de sembrar o borrar nada.
  *
  * Sale con código 1 y un mensaje que dice qué pasó, en vez de lanzar: estos son scripts de

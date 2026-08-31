@@ -5,7 +5,7 @@
  * dejar pasar producción cuesta autorizaciones de nómina y cuadrantes de empleados. Por eso
  * todas las pruebas de abajo empujan hacia el MISMO lado: ante la duda, corta.
  */
-import { esBaseLocal } from '../../../scripts/_solo-base-local'
+import { esBaseLocal, esServidorLocal } from '../../../scripts/_solo-base-local'
 
 describe('esBaseLocal', () => {
   describe('deja pasar lo local', () => {
@@ -102,3 +102,36 @@ describe('🔴 los scripts que escriben lo USAN — prueba estática', () => {
     expect(fuente).toContain('exigirBaseLocal')
   })
 })
+
+/**
+ * 🔴 La URL no prueba dónde termina el socket (3ª auditoría de Codex, 31-ago-2026, P1 #4).
+ * `ssh -L 5432:produccion:5432` deja producción respondiendo en `localhost:5432`, y si la base
+ * se llama como una de desarrollo la URL pasa entera. Por eso se le pregunta al SERVIDOR.
+ */
+describe('esServidorLocal · evidencia independiente de la URL', () => {
+  const conDireccion = (dir: string | null) => ({
+    $queryRawUnsafe: jest.fn().mockResolvedValue([{ dir, base: 'av-db-25' }]),
+  })
+
+  it.each(['127.0.0.1', '::1', '127.0.1.1'])('%s es local', async dir => {
+    expect((await esServidorLocal(conDireccion(dir) as any)).ok).toBe(true)
+  })
+
+  it('🔴 una IP que no es loopback delata un túnel', async () => {
+    const r = await esServidorLocal(conDireccion('10.4.2.19') as any)
+    expect(r.ok).toBe(false)
+    expect(r.motivo).toMatch(/túnel|no en loopback|otra máquina/i)
+  })
+
+  it('🔴 y el motivo dice la dirección real, para poder investigarla', async () => {
+    expect((await esServidorLocal(conDireccion('34.72.1.5') as any)).motivo).toContain('34.72.1.5')
+  })
+
+  it('si no se puede preguntar, CORTA — no se puede afirmar que sea local', async () => {
+    const roto = { $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('sin conexión')) }
+    const r = await esServidorLocal(roto as any)
+    expect(r.ok).toBe(false)
+    expect(r.motivo).toMatch(/no pude preguntarle/i)
+  })
+})
+

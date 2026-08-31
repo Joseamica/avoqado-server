@@ -88,9 +88,22 @@ describe('la firma vale sobre la jornada que se revisó', () => {
     expect(create.mock.calls[0][0].data).toMatchObject({ sourceFingerprint: HUELLA_ACTUAL })
   })
 
-  it('sin mandar la huella vista, se acepta — el campo es opcional (MCP, scripts)', async () => {
-    // ⚠️ Declarado: quien no manda la huella renuncia a esta protección. El dashboard SÍ la
-    // manda; se deja opcional para no romper a los clientes que ya llaman este endpoint.
-    await expect(autorizar(undefined)).resolves.toMatchObject({ minutesApproved: 120 })
+  /**
+   * 🔴 CORREGIDO tras la 3ª auditoría de Codex (31-ago-2026, P1 #2). Antes esta prueba
+   * afirmaba que omitir la huella «se acepta porque el campo es opcional», y con eso el
+   * agujero quedaba convertido en comportamiento esperado: cualquier cliente que no la
+   * mandara —el MCP, un script, curl— firmaba sobre la jornada que hubiera en ese instante.
+   *
+   * Ahora la exige el SERVICIO, no sólo Zod: es donde está la rejilla y donde se sabe si el
+   * día tiene huella. Un cliente viejo recibe un error que dice qué hacer, no una protección
+   * silenciosamente renunciada.
+   */
+  it('🔴 omitir la huella NO se acepta: se rechaza diciendo qué falta', async () => {
+    await expect(autorizar(undefined)).rejects.toThrow(/vuelve a consultar|huella|revisa/i)
+  })
+
+  it('🔴 y tampoco escribe nada', async () => {
+    await expect(autorizar(undefined)).rejects.toThrow()
+    expect(create).not.toHaveBeenCalled()
   })
 })

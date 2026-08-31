@@ -126,7 +126,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'approve_overtime',
-    'Authorize the overtime worked by ONE person on ONE day, so it can be paid. Mexican labour law (LFT art. 66-68) — the founder decided overtime is NOT paid just because the clock measured it: someone authorizes it, and only the authorized minutes enter the double/triple split. You may authorize LESS than measured (partial: "she stayed 2 h, I approve 1 h") but NEVER more — the server recomputes what the clock actually measured and rejects anything above it. Authorizing 0 means reviewed and DENIED, which is different from not reviewed (no record) — unreviewed overtime shows up as PENDING in attendance_payroll_summary so unpaid hours can never be invisible. Re-authorizing the same day CORRECTS the previous decision, it does not add to it. Two-step: the first call returns a preview, and only a second call with confirm:true writes.',
+    'Authorize the overtime worked by ONE person on ONE day, so it can be paid. Mexican labour law (LFT art. 66-68) — the founder decided overtime is NOT paid just because the clock measured it: someone authorizes it, and only the authorized minutes enter the double/triple split. You may authorize LESS than measured (partial: "she stayed 2 h, I approve 1 h") but NEVER more — the server recomputes what the clock actually measured and rejects anything above it. Authorizing 0 means reviewed and DENIED, which is different from not reviewed (no record) — unreviewed overtime shows up as PENDING in attendance_payroll_summary so unpaid hours can never be invisible. Re-authorizing the same day CORRECTS the previous decision, it does not add to it. Two-step: the first call returns a preview WITH an expectedSourceFingerprint, and the second call must send that value back together with confirm:true — that is what guarantees you are signing the workday you actually reviewed and not whatever the punches say by then.',
     {
       venueId: z.string().describe('Venue where the person works (must be in your scope)'),
       staffVenueId: z.string().describe('Membership id of the person (staffVenueId from attendance_payroll_summary), NOT the staffId'),
@@ -139,9 +139,15 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         .describe(
           'REQUIRED to change a day that is already authorized: the updatedAt you saw (from attendance_payroll_summary). Without it the change is refused, so two people cannot silently overwrite each other',
         ),
+      expectedSourceFingerprint: z
+        .string()
+        .optional()
+        .describe(
+          'REQUIRED to write: the `expectedSourceFingerprint` the PREVIEW returned. It identifies the exact workday you reviewed (punches, breaks, schedule, timezone). If the punches changed since the preview, the write is refused instead of signing hours nobody looked at — run the preview again and use the new value.',
+        ),
       confirm: z.boolean().optional().describe('Set true to actually write; without it you get a preview'),
     },
-    async ({ venueId, staffVenueId, date, minutesApproved, note, confirm, expectedUpdatedAt }) => {
+    async ({ venueId, staffVenueId, date, minutesApproved, note, confirm, expectedUpdatedAt, expectedSourceFingerprint }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       // Firmar lo que se paga NO es leer un reporte: `:manage`, que los roles de piso no tienen.
       guard.requirePermission('attendance:manage', venueId)
@@ -160,6 +166,10 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         const { cells } = await buildAttendanceGrid(venueId, date, date)
         const celda = cells.find(c => c.staffVenueId === staffVenueId && c.date === date)
         if (!celda) return text({ ok: false, error: 'No encontré a esa persona ese día en este negocio.' })
+        // 🔴 La vista previa DEVUELVE la huella de la jornada que acaba de enseñar, y la
+        // confirmación tiene que devolvérnosla. Sin este ida y vuelta, entre la previa y el
+        // confirm alguien puede cambiar las checadas y el segundo paso firmaría una jornada
+        // que nadie miró (3ª auditoría de Codex, 31-ago-2026, P1 #2).
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -169,10 +179,13 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
             minutosMedidos: celda.overtimeMinutes,
             minutosAAutorizar: minutesApproved,
           },
+          expectedSourceFingerprint: celda.overtimeFingerprint,
+          expectedUpdatedAt: celda.overtimeApprovedUpdatedAt,
           message:
             `Vas a autorizar ${minutesApproved} de los ${celda.overtimeMinutes} minutos extra que ` +
             `${celda.name} trabajó el ${date}. Eso es lo que entrará al pago doble/triple. ` +
-            `Confirma con confirm:true.`,
+            `Confirma con confirm:true y devuelve el expectedSourceFingerprint de esta respuesta ` +
+            `(y el expectedUpdatedAt si el día ya estaba autorizado).`,
         })
       }
 
@@ -184,6 +197,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         approvedById: scope.staffId,
         note,
         expectedUpdatedAt,
+        expectedSourceFingerprint,
         source: 'customer-mcp',
       })
       return text({ ok: true, ...r })
