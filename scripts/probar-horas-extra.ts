@@ -113,8 +113,7 @@ async function main() {
   if (!ana) {
     console.log('🔴 no salió Ana en el resumen')
   } else {
-    const SABOTAJE: number = ana.campoQueNoExiste
-const esperado = 180 + 180 + 150 + 180 // 690 min = 11 h 30 m
+    const esperado = 180 + 180 + 150 + 180 // 690 min = 11 h 30 m
     console.log(`  total          ${hm(ana.overtimeMinutes)}   (esperado ${hm(esperado)})`)
     // Avoqado ya no reparte en doble y triple ni dictamina el art. 66 (31-ago-2026): entrega
     // los minutos agrupados por semana y la nómina del negocio aplica la ley.
