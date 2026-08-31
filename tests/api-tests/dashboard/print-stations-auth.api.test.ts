@@ -27,12 +27,16 @@ jest.mock('../../../src/config/session', () => {
 })
 jest.mock('../../../src/config/swagger', () => ({ __esModule: true, setupSwaggerUI: jest.fn() }))
 
-import request from 'supertest'
 import jwt from 'jsonwebtoken'
+import { api, startApiServer } from '@tests/__helpers__/apiServer'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 const app = require('../../../src/app').default
+
+// 🔴 UN servidor para todo el archivo. Con `api()` supertest levantaba uno por cada
+// una de las 61 peticiones, y con la máquina cargada alguna moría con `connect ETIMEDOUT`.
+startApiServer(() => app)
 
 const DASH = '/api/v1/dashboard'
 const MOBILE = '/api/v1/mobile'
@@ -89,13 +93,13 @@ beforeEach(() => {
 describe('PRINT_STATIONS routes — authentication & authorization (HTTP layer)', () => {
   describe('401 Unauthorized when the token is missing/invalid', () => {
     it.each(allRoutes)('%s %s → 401 without Authorization header', async (method, path) => {
-      const res = await request(app)[method](path)
+      const res = await api()[method](path)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
 
     it.each(allRoutes)('%s %s → 401 with a malformed Bearer token', async (method, path) => {
-      const res = await request(app)[method](path).set('Authorization', 'Bearer not.a.jwt')
+      const res = await api()[method](path).set('Authorization', 'Bearer not.a.jwt')
       expect(res.status).toBe(401)
     })
   })
@@ -103,7 +107,7 @@ describe('PRINT_STATIONS routes — authentication & authorization (HTTP layer)'
   describe('403 Forbidden on cross-venue access (tenant isolation)', () => {
     it.each(allRoutes)('%s %s → 403 when the token belongs to another venue', async (method, path) => {
       const crossVenueToken = makeToken('OWNER', otherVenueId)
-      const res = await request(app)[method](path).set('Authorization', `Bearer ${crossVenueToken}`)
+      const res = await api()[method](path).set('Authorization', `Bearer ${crossVenueToken}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('message', 'No access to this venue')
     })
@@ -112,7 +116,7 @@ describe('PRINT_STATIONS routes — authentication & authorization (HTTP layer)'
   describe('403 Forbidden when the role lacks the printers permission (WAITER)', () => {
     it.each(dashRoutes)('%s %s → 403 with WAITER (lacks %s)', async (method, path, requiredPerm) => {
       const waiterToken = makeToken('WAITER')
-      const res = await request(app)[method](path).set('Authorization', `Bearer ${waiterToken}`)
+      const res = await api()[method](path).set('Authorization', `Bearer ${waiterToken}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
       expect(res.body).toHaveProperty('required', requiredPerm)
