@@ -77,6 +77,7 @@ import * as testingController from '../controllers/dashboard/testing.dashboard.c
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
 import * as terminalOrderController from '../controllers/dashboard/terminalOrder.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
@@ -208,6 +209,7 @@ import {
   DuplicatePermissionSetSchema,
 } from '../schemas/dashboard/permissionSet.schema'
 import { UpdateVenueSettingsSchema, UpdateTpvSettingsSchema } from '../schemas/dashboard/venueSettings.schema'
+import { cancelDisplayModeRequestSchema, createDisplayModeRequestSchema } from '../schemas/dashboard/displayModeRequest.schema'
 import {
   GetModifierUsageStatsSchema,
   GetModifiersLowStockSchema,
@@ -4491,6 +4493,24 @@ router.post('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermissio
  *         description: Forbidden
  */
 router.get('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTpvById)
+
+// Intención tipada para invertir la pantalla física de un POS Android. El permiso
+// autoriza al actor; el controlador valida por separado el soporte técnico observado.
+router.post(
+  '/venues/:venueId/terminals/:terminalId/display-mode-request',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  validateRequest(createDisplayModeRequestSchema),
+  displayModeRequestController.createRequest,
+)
+
+router.delete(
+  '/venues/:venueId/terminals/:terminalId/display-mode-request/:requestId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  validateRequest(cancelDisplayModeRequestSchema),
+  displayModeRequestController.cancelRequest,
+)
 
 /**
  * @openapi

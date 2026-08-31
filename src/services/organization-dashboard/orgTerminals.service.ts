@@ -12,6 +12,7 @@ import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { logAction } from '../dashboard/activity-log.service'
 import type { TerminalActor } from '../dashboard/terminals.superadmin.service'
 import { migratePreflight, migrateExecute, migrateStatus, migrateCancel } from '../dashboard/terminal-migration.service'
+import { toDeviceManagementDto } from '../device-capabilities.service'
 
 // Allowed commands at org level
 const ORG_ALLOWED_COMMANDS = [
@@ -99,7 +100,7 @@ export async function getTerminalForOrg(orgId: string, terminalId: string) {
     },
   })
 
-  return fullTerminal
+  return fullTerminal ? toDeviceManagementDto(fullTerminal) : fullTerminal
 }
 
 /**

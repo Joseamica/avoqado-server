@@ -3,6 +3,7 @@
  * offsets together makes accidental pool stampedes visible in code review.
  */
 export const DATABASE_JOB_SCHEDULES = {
+  displayModeRequestExpiry: '4 * * * * *',
   terminalPaymentWatchdog: '8,38 * * * * *',
   blumonWebhookReconciliation: '11,41 * * * * *',
   tpvHealthMonitor: '14 */2 * * * *',

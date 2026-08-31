@@ -37,6 +37,7 @@ import { deliverySnoozeResumeJob } from './jobs/delivery-snooze-resume.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
+import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -140,6 +141,7 @@ const gracefulShutdown = async (signal: string) => {
       tpvHealthMonitorJob.stop()
 
       // Stop terminal-payment watchdog
+      displayModeRequestExpiryJob.stop()
       terminalPaymentWatchdogJob.stop()
 
       // WHY: Publication delivery and expired attempts have independent
@@ -448,6 +450,7 @@ const startApplication = async (retries = 3) => {
       tpvHealthMonitorJob.start()
 
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
+      displayModeRequestExpiryJob.start()
       terminalPaymentWatchdogJob.start()
 
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only

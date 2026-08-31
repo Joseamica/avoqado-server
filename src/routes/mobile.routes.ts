@@ -34,6 +34,8 @@ import * as upsellMobileController from '../controllers/mobile/upsell.mobile.con
 import { recordUpsellImpressionSchema, convertUpsellImpressionSchema } from '../schemas/dashboard/upsell.schema'
 import { updateDisplayModeSchema } from '../schemas/mobile/tpvSettings.mobile.schema'
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
+import { reportDeviceCapabilitiesSchema } from '../schemas/mobile/deviceCapabilities.mobile.schema'
+import * as deviceCapabilitiesMobileController from '../controllers/mobile/deviceCapabilities.mobile.controller'
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
@@ -1941,6 +1943,25 @@ router.get(
   authenticateTokenMiddleware,
   requireVenueMembership,
   tpvSettingsMobileController.getVenueTpvSettings,
+)
+
+// Hechos técnicos observados por el POS Android. El dispositivo se identifica por
+// X-Device-ID; no requiere activación y no acepta un terminalId elegido por el body.
+router.put(
+  '/venues/:venueId/device-capabilities',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(reportDeviceCapabilitiesSchema),
+  deviceCapabilitiesMobileController.reportDeviceCapabilities,
+)
+
+// Entrega v1 ligera: el terminalId viene del vínculo exacto del propio X-Device-ID.
+// No se mezcla con /settings y una lectura nunca expira ni muta la intención.
+router.get(
+  '/venues/:venueId/display-mode-request',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  tpvSettingsMobileController.getDisplayModeRequest,
 )
 
 // Mostrador invertido (customer-display grande/chico) — por DISPOSITIVO. El POS

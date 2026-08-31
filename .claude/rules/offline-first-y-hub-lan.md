@@ -2,10 +2,9 @@
 
 Aplica a **avoqado-android, avoqado-ios y avoqado-server a la vez**. Los tres comparten un contrato; romper uno rompe los otros en silencio.
 
-
-🔴 **Y el criterio de aceptación, que aplica a TODO el workspace y no sólo a este subsistema:**
-`.claude/rules/todo-funciona-sin-red.md` en el root — las cuatro preguntas que se responden antes de
-dar por terminado cualquier cosa que toque un aparato, y cómo se prueba apagando la red de verdad.
+🔴 **Y el criterio de aceptación, que aplica a TODO el workspace y no sólo a este subsistema:** `.claude/rules/todo-funciona-sin-red.md` en
+el root — las cuatro preguntas que se responden antes de dar por terminado cualquier cosa que toque un aparato, y cómo se prueba apagando la
+red de verdad.
 
 ---
 

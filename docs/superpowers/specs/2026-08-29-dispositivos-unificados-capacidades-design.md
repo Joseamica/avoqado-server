@@ -1,17 +1,18 @@
 # Dispositivos unificados: una identidad, capacidades reales y acciones honestas
 
-**Fecha:** 2026-08-29 · **Estado:** diseño y plan escritos; inversión remota ratificada por producto; auditoría Claude Opus 5 Max incorporada
+**Fecha:** 2026-08-29 · **Estado:** diseño y plan escritos; inversión remota ratificada por producto; auditoría Claude Opus 5 Max
+incorporada
 
 **Repos y superficies involucradas:**
 
-| Alias | Ruta / superficie | Papel en el cambio inicial |
-| --- | --- | --- |
-| `server` | `avoqado-server/` | Fuente de verdad de identidad, capacidades efectivas y validación de acciones |
-| `dashboard` | `avoqado-web-dashboard/` | Renombre visible a Dispositivos y controles condicionados por capacidad + permiso |
-| `android` | `avoqado-android/` | Reporta presencia/invertibilidad reales y ejecuta solicitudes remotas de inversión de pantalla |
-| `tpv` | `avoqado-tpv/` | Sin cambio inicial; el server deriva sus comandos existentes por el tipo de app |
-| `ios` | `avoqado-ios/` | Sin cambio inicial; conserva el auto-registro y no anuncia capacidades que aún no implementa |
-| `customer MCP` | `server/src/mcp/` | `list_devices` expone el mismo contrato efectivo que el dashboard |
+| Alias          | Ruta / superficie        | Papel en el cambio inicial                                                                     |
+| -------------- | ------------------------ | ---------------------------------------------------------------------------------------------- |
+| `server`       | `avoqado-server/`        | Fuente de verdad de identidad, capacidades efectivas y validación de acciones                  |
+| `dashboard`    | `avoqado-web-dashboard/` | Renombre visible a Dispositivos y controles condicionados por capacidad + permiso              |
+| `android`      | `avoqado-android/`       | Reporta presencia/invertibilidad reales y ejecuta solicitudes remotas de inversión de pantalla |
+| `tpv`          | `avoqado-tpv/`           | Sin cambio inicial; el server deriva sus comandos existentes por el tipo de app                |
+| `ios`          | `avoqado-ios/`           | Sin cambio inicial; conserva el auto-registro y no anuncia capacidades que aún no implementa   |
+| `customer MCP` | `server/src/mcp/`        | `list_devices` expone el mismo contrato efectivo que el dashboard                              |
 
 Rutas sin alias en este documento son relativas a `server/`.
 
@@ -33,8 +34,8 @@ nada. Así una Sunmi con segunda pantalla muestra **Invertir pantalla**, un tel�
 remotos, y un POS Android no enseña **Reiniciar** mientras no exista un consumidor real de esos comandos en `avoqado-android`.
 
 **Invertir pantalla es una acción remota real, no una preferencia decorativa:** el dashboard crea una solicitud dirigida a ese dispositivo,
-Android la adopta cuando sincroniza y confirma el resultado. La UI distingue `pendiente`, `aplicada` y `rechazada`; nunca afirma que el
-modo cambió sólo porque el server aceptó el click.
+Android la adopta cuando sincroniza y confirma el resultado. La UI distingue `pendiente`, `aplicada` y `rechazada`; nunca afirma que el modo
+cambió sólo porque el server aceptó el click.
 
 ## Lo que no se va a hacer
 
@@ -63,7 +64,8 @@ modo cambió sólo porque el server aceptó el click.
 - `activatedAt`: activación de una TPV provisionada, no prueba de que cualquier dispositivo esté listo.
 
 `src/services/mobile/deviceRegistry.service.ts` crea un `POS_ANDROID`/`POS_IOS`/`POS_DESKTOP` automáticamente en el primer request
-autenticado con headers `X-Device-*`. La fila nace `ACTIVE` y `selfRegistered=true`; no pide activación. Ese flujo es correcto y se conserva.
+autenticado con headers `X-Device-*`. La fila nace `ACTIVE` y `selfRegistered=true`; no pide activación. Ese flujo es correcto y se
+conserva.
 
 ### El problema está en las acciones, no en la identidad
 
@@ -122,12 +124,12 @@ y abriría un cambio masivo sin valor para el usuario.
 
 ## Alternativas evaluadas
 
-| Alternativa | Ventaja | Costo/riesgo | Veredicto |
-| --- | --- | --- | --- |
-| Crear un modelo `Device` y migrar `Terminal` | Nombre técnico limpio desde el inicio | Duplica o mueve relaciones de órdenes, pagos, salud, comandos y merchants; exige backfill y coordinación cross-repo | Descartada |
-| Mantener Terminales y abrir otra sección Dispositivos | Cambio inicial pequeño | Un mismo aparato puede aparecer dos veces y cada pantalla acaba con reglas/acciones distintas | Descartada |
-| Renombrar DB, API, permisos y UI a `Device` en una sola entrega | Consistencia nominal total | Rompe contratos, overrides de permisos, bookmarks y clientes con versiones desfasadas; rollback difícil | Descartada |
-| Renombrar sólo el producto y añadir capacidades sobre `Terminal` | Resuelve la confusión visible y técnica con cambios aditivos | Conviven nombres legacy internos durante un tiempo | **Elegida** |
+| Alternativa                                                      | Ventaja                                                      | Costo/riesgo                                                                                                        | Veredicto   |
+| ---------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ----------- |
+| Crear un modelo `Device` y migrar `Terminal`                     | Nombre técnico limpio desde el inicio                        | Duplica o mueve relaciones de órdenes, pagos, salud, comandos y merchants; exige backfill y coordinación cross-repo | Descartada  |
+| Mantener Terminales y abrir otra sección Dispositivos            | Cambio inicial pequeño                                       | Un mismo aparato puede aparecer dos veces y cada pantalla acaba con reglas/acciones distintas                       | Descartada  |
+| Renombrar DB, API, permisos y UI a `Device` en una sola entrega  | Consistencia nominal total                                   | Rompe contratos, overrides de permisos, bookmarks y clientes con versiones desfasadas; rollback difícil             | Descartada  |
+| Renombrar sólo el producto y añadir capacidades sobre `Terminal` | Resuelve la confusión visible y técnica con cambios aditivos | Conviven nombres legacy internos durante un tiempo                                                                  | **Elegida** |
 
 La convivencia interna es deliberada, no deuda accidental: se podrá retirar cada alias cuando las métricas demuestren que ya no tiene
 consumidores. El usuario obtiene el concepto correcto sin pagar el riesgo de un big bang.
@@ -136,25 +138,25 @@ consumidores. El usuario obtiene el concepto correcto sin pagar el riesgo de un 
 
 ## Decisiones del diseño
 
-| # | Decisión | Elección |
-| --- | --- | --- |
-| D1 | Fuente de verdad de identidad | Una sola fila `Terminal` por aparato/venue; no hay modelo `Device` nuevo |
-| D2 | Nombre visible | **Dispositivos** en dashboard, navegación, títulos y copy |
-| D3 | Nombre técnico | `Terminal`, `/tpv`, `/terminals` y `tpv:*` permanecen inicialmente por compatibilidad |
-| D4 | Alta de POS | Auto-registro actual; sin creación manual ni activación |
-| D5 | Alta de TPV de cobro | Conserva compra/provisionamiento + activación existentes |
-| D6 | Capacidad | Contrato efectivo calculado por server; no una lista confiada ciegamente al cliente |
-| D7 | Hechos de hardware | El cliente reporta sólo hechos que el server no puede saber: display de cliente presente, display invertible y versión del protocolo de intención |
-| D8 | Autorización | Una acción requiere **capacidad AND permiso**; ninguna sustituye a la otra |
-| D9 | Seguridad | El backend rechaza acciones no soportadas aunque se invoque la API directamente |
-| D10 | Desconocido | `UNKNOWN` no equivale a `UNSUPPORTED`; se muestra el estado, pero no se ofrece una acción que podría mentir |
-| D11 | Comandos POS | No se construye el catálogo genérico de reinicio/lock/mantenimiento en Android/iOS; la intención tipada de display es la única excepción inicial |
-| D12 | Tier | Funcionalidad base desde FREE; no es `Feature`, `Module` ni upsell. **Ratificada por producto** |
-| D13 | Activación de producto | Sin switch de venue porque no existen dos clientes que necesiten registros opuestos. **Ratificada por producto** |
-| D14 | Estado e intención de inversión | `customerDisplayInverted` representa el último estado aplicado; una solicitud remota vive aparte y no se considera aplicada hasta el ACK del aparato |
-| D15 | Retiro | Un POS no se borra por tener `activatedAt=null`; el retiro futuro es `status=RETIRED`, nunca eliminación histórica |
-| D16 | Autoridad del display | Un cambio local puede reportar estado; un cambio remoto usa `requestId` y compare-and-set para evitar ping-pong, ACK viejo y éxito optimista. Si el operador cambia localmente después de que Android journalizó la intención, el cambio físico local gana y la intención se rechaza con `LOCAL_OVERRIDE` |
-| D17 | Inversión remota | El botón del dashboard debe cambiar físicamente la pantalla de la D3; no es sólo diagnóstico ni una preferencia informativa. **Ratificada por producto 2026-08-30** |
+| #   | Decisión                        | Elección                                                                                                                                                                                                                                                                                                  |
+| --- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | Fuente de verdad de identidad   | Una sola fila `Terminal` por aparato/venue; no hay modelo `Device` nuevo                                                                                                                                                                                                                                  |
+| D2  | Nombre visible                  | **Dispositivos** en dashboard, navegación, títulos y copy                                                                                                                                                                                                                                                 |
+| D3  | Nombre técnico                  | `Terminal`, `/tpv`, `/terminals` y `tpv:*` permanecen inicialmente por compatibilidad                                                                                                                                                                                                                     |
+| D4  | Alta de POS                     | Auto-registro actual; sin creación manual ni activación                                                                                                                                                                                                                                                   |
+| D5  | Alta de TPV de cobro            | Conserva compra/provisionamiento + activación existentes                                                                                                                                                                                                                                                  |
+| D6  | Capacidad                       | Contrato efectivo calculado por server; no una lista confiada ciegamente al cliente                                                                                                                                                                                                                       |
+| D7  | Hechos de hardware              | El cliente reporta sólo hechos que el server no puede saber: display de cliente presente, display invertible y versión del protocolo de intención                                                                                                                                                         |
+| D8  | Autorización                    | Una acción requiere **capacidad AND permiso**; ninguna sustituye a la otra                                                                                                                                                                                                                                |
+| D9  | Seguridad                       | El backend rechaza acciones no soportadas aunque se invoque la API directamente                                                                                                                                                                                                                           |
+| D10 | Desconocido                     | `UNKNOWN` no equivale a `UNSUPPORTED`; se muestra el estado, pero no se ofrece una acción que podría mentir                                                                                                                                                                                               |
+| D11 | Comandos POS                    | No se construye el catálogo genérico de reinicio/lock/mantenimiento en Android/iOS; la intención tipada de display es la única excepción inicial                                                                                                                                                          |
+| D12 | Tier                            | Funcionalidad base desde FREE; no es `Feature`, `Module` ni upsell. **Ratificada por producto**                                                                                                                                                                                                           |
+| D13 | Activación de producto          | Sin switch de venue porque no existen dos clientes que necesiten registros opuestos. **Ratificada por producto**                                                                                                                                                                                          |
+| D14 | Estado e intención de inversión | `customerDisplayInverted` representa el último estado aplicado; una solicitud remota vive aparte y no se considera aplicada hasta el ACK del aparato                                                                                                                                                      |
+| D15 | Retiro                          | Un POS no se borra por tener `activatedAt=null`; el retiro futuro es `status=RETIRED`, nunca eliminación histórica                                                                                                                                                                                        |
+| D16 | Autoridad del display           | Un cambio local puede reportar estado; un cambio remoto usa `requestId` y compare-and-set para evitar ping-pong, ACK viejo y éxito optimista. Si el operador cambia localmente después de que Android journalizó la intención, el cambio físico local gana y la intención se rechaza con `LOCAL_OVERRIDE` |
+| D17 | Inversión remota                | El botón del dashboard debe cambiar físicamente la pantalla de la D3; no es sólo diagnóstico ni una preferencia informativa. **Ratificada por producto 2026-08-30**                                                                                                                                       |
 
 D12 no elimina permisos. "Es core" contesta si el venue puede usarlo; `tpv:read`, `tpv:update`, `tpv:command` y equivalentes siguen
 contestando quién puede verlo o administrarlo.
@@ -176,17 +178,17 @@ Terminal (identidad persistida)
 Acción visible/ejecutable = capability(device) AND permission(staff)
 ```
 
-| Término | Significado |
-| --- | --- |
-| `type` | Familia funcional. Nunca se deduce desde el tamaño de pantalla |
-| `formFactor` | Forma física. No concede acciones |
-| `customerDisplayPresent` | La app encontró una salida válida para mostrar contenido al cliente, física o virtual del fabricante |
-| `customerDisplayInvertible` | La app puede intercambiar de forma segura las superficies de cajero y cliente; implica más que presencia |
+| Término                      | Significado                                                                                                                             |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                       | Familia funcional. Nunca se deduce desde el tamaño de pantalla                                                                          |
+| `formFactor`                 | Forma física. No concede acciones                                                                                                       |
+| `customerDisplayPresent`     | La app encontró una salida válida para mostrar contenido al cliente, física o virtual del fabricante                                    |
+| `customerDisplayInvertible`  | La app puede intercambiar de forma segura las superficies de cajero y cliente; implica más que presencia                                |
 | `displayModeProtocolVersion` | Versión del protocolo de solicitud/ACK que implementa el cliente; no es la versión general de la app ni la versión CAS de una solicitud |
-| `customerDisplayRequest` | Estado server-owned de la última intención remota; no es una capacidad anunciada por el cliente |
-| `capabilities` | DTO calculado y autoritativo que consumen dashboard y MCP |
-| `supportedRemoteCommands` | Subconjunto de `TpvCommandType` que la app de ese dispositivo sí consume |
-| `UNKNOWN` | Cliente viejo o dispositivo que aún no reportó; no es una afirmación de soporte ni de ausencia |
+| `customerDisplayRequest`     | Estado server-owned de la última intención remota; no es una capacidad anunciada por el cliente                                         |
+| `capabilities`               | DTO calculado y autoritativo que consumen dashboard y MCP                                                                               |
+| `supportedRemoteCommands`    | Subconjunto de `TpvCommandType` que la app de ese dispositivo sí consume                                                                |
+| `UNKNOWN`                    | Cliente viejo o dispositivo que aún no reportó; no es una afirmación de soporte ni de ausencia                                          |
 
 ---
 
@@ -216,8 +218,8 @@ model Terminal {
 ```
 
 Los `Boolean?` conservan los tres estados necesarios: `true`, `false` y no reportado. `capabilitiesObservedAt` lo escribe el server, no el
-reloj del aparato. `displayModeProtocolVersion=1` afirma que el cliente sabe recibir una solicitud, aplicar el modo y acusar su resultado; no
-concede otras acciones remotas.
+reloj del aparato. `displayModeProtocolVersion=1` afirma que el cliente sabe recibir una solicitud, aplicar el modo y acusar su resultado;
+no concede otras acciones remotas.
 
 `customerDisplayRequest` sí es JSON porque representa un único agregado server-owned que cambia como máquina de estados y no se usa para
 descubrir capacidades. Todo acceso pasa por un servicio y schemas estrictos:
@@ -249,10 +251,10 @@ Reglas de persistencia:
 3. Un reporte reemplaza los tres hechos observados de manera atómica. La ausencia de reporte nunca escribe `false`.
 4. Una solicitud nueva reemplaza a la anterior en la columna y registra `SUPERSEDED` para la anterior en `ActivityLog`; no hay dos deseos
    simultáneos compitiendo por el mismo dispositivo.
-5. Todas las transiciones usan compare-and-set concreto sobre `customerDisplayRequestVersion`: leen la versión, ejecutan `updateMany`
-   con `where: { id, customerDisplayRequestVersion: expected }`, reemplazan el JSON y hacen `increment: 1`. `count=0` obliga a recargar y
-   revalidar; no basta un read/write dentro de una transacción `READ COMMITTED`. El CAS exitoso y su `ActivityLog` sí se escriben juntos
-   en `prisma.$transaction`.
+5. Todas las transiciones usan compare-and-set concreto sobre `customerDisplayRequestVersion`: leen la versión, ejecutan `updateMany` con
+   `where: { id, customerDisplayRequestVersion: expected }`, reemplazan el JSON y hacen `increment: 1`. `count=0` obliga a recargar y
+   revalidar; no basta un read/write dentro de una transacción `READ COMMITTED`. El CAS exitoso y su `ActivityLog` sí se escriben juntos en
+   `prisma.$transaction`.
 6. Un ACK sólo resuelve la solicitud cuyo `requestId` sigue vigente. Un ACK viejo recibe `409 DEVICE_REQUEST_SUPERSEDED` y no borra ni
    resuelve una solicitud más nueva; si informa que ya aplicó, sí actualiza el estado físico observado y deja intacto el deseo vigente.
 7. `APPLIED` actualiza `customerDisplayInverted` con el valor realmente aplicado. `REJECTED` conserva el último estado aplicado.
@@ -261,26 +263,26 @@ Reglas de persistencia:
    - si el cambio local ya estaba dirty **antes** de recibir/journalizar una solicitud remota nueva, la solicitud más nueva lo supera;
    - si el operador cambia localmente **después** de que la solicitud quedó journalizada/in-flight, el cambio físico local gana, Android
      conserva el dirty, acusa `REJECTED/LOCAL_OVERRIDE` con el valor físico actual y sólo lo marca sincronizado cuando el ACK termina.
-   Android distingue ambos casos con una generación local monotónica persistida: el journal captura `localGenerationAtJournal` y la
-   compara dentro de la misma sección sincronizada antes de aplicar/ACK; no usa timestamps de dos relojes distintos.
+     Android distingue ambos casos con una generación local monotónica persistida: el journal captura `localGenerationAtJournal` y la
+     compara dentro de la misma sección sincronizada antes de aplicar/ACK; no usa timestamps de dos relojes distintos.
 9. Toda solicitud vence a los **15 minutos**. `customerDisplayRequestExpiresAt` refleja el mismo valor del JSON y ambos cambian en el mismo
    CAS; permite barrer `PENDING` de forma indexada y marcar `EXPIRED`. Android no **empieza** a aplicar un payload vencido. Si aplicó antes
    de vencer pero su ACK llega tarde, el server actualiza el estado real como `APPLIED/ACK_AFTER_EXPIRY`.
 10. El JSON nunca lo escribe directamente el cliente ni concede pagos, permisos, activación o comandos.
 11. No hay backfill para las columnas nuevas: filas existentes empiezan con capacidad `UNKNOWN`, solicitud `null` y versión `0`. La
-   corrección independiente de estados `INACTIVE` contaminados por el job de salud sí es obligatoria y se especifica más adelante.
+    corrección independiente de estados `INACTIVE` contaminados por el job de salud sí es obligatoria y se especifica más adelante.
 12. La migración Prisma y la regeneración de `docs/SCHEMA_MAP.md` viajan con el cambio de schema.
 
-| Estado vigente | Evento | Resultado |
-| --- | --- | --- |
-| vacío o estado final | nueva solicitud | `PENDING`; incrementa versión |
-| `PENDING` | solicitud nueva | nueva `PENDING`; la anterior queda `SUPERSEDED` en ActivityLog |
-| `PENDING` | ACK válido | `APPLIED` o `REJECTED` |
-| `PENDING` | cambio local posterior a journal | `REJECTED+LOCAL_OVERRIDE`; actualiza estado real al valor físico local |
-| `PENDING` | cancelar / TTL / retirar | `CANCELLED` / `EXPIRED` / `CANCELLED+DEVICE_RETIRED` |
-| `CANCELLED` | ACK que demuestra aplicación previa | `APPLIED+CANCEL_TOO_LATE`; actualiza estado real |
-| `EXPIRED` | ACK de aplicación iniciada antes del TTL | `APPLIED+ACK_AFTER_EXPIRY`; actualiza estado real |
-| requestId anterior | ACK tardío | actualiza sólo el estado físico reportado; no toca el request vigente y devuelve `409` |
+| Estado vigente       | Evento                                   | Resultado                                                                              |
+| -------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------- |
+| vacío o estado final | nueva solicitud                          | `PENDING`; incrementa versión                                                          |
+| `PENDING`            | solicitud nueva                          | nueva `PENDING`; la anterior queda `SUPERSEDED` en ActivityLog                         |
+| `PENDING`            | ACK válido                               | `APPLIED` o `REJECTED`                                                                 |
+| `PENDING`            | cambio local posterior a journal         | `REJECTED+LOCAL_OVERRIDE`; actualiza estado real al valor físico local                 |
+| `PENDING`            | cancelar / TTL / retirar                 | `CANCELLED` / `EXPIRED` / `CANCELLED+DEVICE_RETIRED`                                   |
+| `CANCELLED`          | ACK que demuestra aplicación previa      | `APPLIED+CANCEL_TOO_LATE`; actualiza estado real                                       |
+| `EXPIRED`            | ACK de aplicación iniciada antes del TTL | `APPLIED+ACK_AFTER_EXPIRY`; actualiza estado real                                      |
+| requestId anterior   | ACK tardío                               | actualiza sólo el estado físico reportado; no toca el request vigente y devuelve `409` |
 
 No se reutilizan `systemInfo` ni `config`: el primero es telemetría general y el segundo preferencias. Tampoco se reutiliza
 `TpvCommandQueue`: Android no consume esa cola hoy y convertir una acción acotada en un framework genérico ampliaría el rollout sin valor.
@@ -315,18 +317,20 @@ hardware es invertible y la observación está vigente. La ruta exige además `t
 
 ### Matriz inicial
 
-| `TerminalType` | Activación | Config. cobro | Solicitudes de pago a terminal | Display cliente / inversión | Comandos remotos |
-| --- | --- | --- | --- | --- | --- |
-| `TPV_ANDROID` | Sí | Sí | Sí | `UNSUPPORTED` en esta experiencia | Allowlist del executor real de `avoqado-tpv` |
-| `TPV_IOS` | Sí | Sí por contrato provisionado; verificar filas reales antes del plan | No hasta comprobar consumidor | `UNSUPPORTED` | Ninguno hasta que exista consumidor probado |
-| `POS_ANDROID` | No | No | No por defecto | Presencia e inversión reportadas por separado | Sólo intención tipada de display en v1 |
-| `POS_IOS` | No | No | No | `UNSUPPORTED` en v1 | Ninguno en v1 |
-| `POS_DESKTOP` | No | No | No | `UNSUPPORTED` en v1 | Ninguno en v1 |
-| `KDS` | No | No | No | `UNSUPPORTED` | Ninguno en v1 |
-| `PRINTER_*` legacy | No | No | No | `UNSUPPORTED` | Ninguno |
+| `TerminalType`     | Activación | Config. cobro                                                       | Solicitudes de pago a terminal | Display cliente / inversión                   | Comandos remotos                             |
+| ------------------ | ---------- | ------------------------------------------------------------------- | ------------------------------ | --------------------------------------------- | -------------------------------------------- |
+| `TPV_ANDROID`      | Sí         | Sí                                                                  | Sí                             | `UNSUPPORTED` en esta experiencia             | Allowlist del executor real de `avoqado-tpv` |
+| `TPV_IOS`          | Sí         | Sí por contrato provisionado; verificar filas reales antes del plan | No hasta comprobar consumidor  | `UNSUPPORTED`                                 | Ninguno hasta que exista consumidor probado  |
+| `POS_ANDROID`      | No         | No                                                                  | No por defecto                 | Presencia e inversión reportadas por separado | Sólo intención tipada de display en v1       |
+| `POS_IOS`          | No         | No                                                                  | No                             | `UNSUPPORTED` en v1                           | Ninguno en v1                                |
+| `POS_DESKTOP`      | No         | No                                                                  | No                             | `UNSUPPORTED` en v1                           | Ninguno en v1                                |
+| `KDS`              | No         | No                                                                  | No                             | `UNSUPPORTED`                                 | Ninguno en v1                                |
+| `PRINTER_*` legacy | No         | No                                                                  | No                             | `UNSUPPORTED`                                 | Ninguno                                      |
 
 La allowlist de `TPV_ANDROID` se mantiene junto al resolver y se prueba contra el enum/modelo que consume `avoqado-tpv`. No se usa
 `type.startsWith('TPV_')` para conceder comandos: `TPV_IOS` existe en el enum, pero no hay evidencia de un cliente que ejecute la cola.
+`POS_IOS` puede originar una solicitud de pago/refund dirigida a otra TPV; la columna “Solicitudes de pago a terminal” describe qué aparato
+las **acepta/ejecuta**, no quién puede solicitarlas. Ese flujo iOS → server → TPV Android permanece intacto.
 
 ### Reglas de resolución
 
@@ -335,8 +339,8 @@ La allowlist de `TPV_ANDROID` se mantiene junto al resolver y se prueba contra e
 - `customerDisplayPresent=true` puede coexistir con `customerDisplayInvertible=false`, como en el display virtual de una Sunmi T3 Pro.
 - Marca/modelo ayudan a nombrar y diagnosticar, nunca a conceder `canRequestInversion`.
 - `formFactor=COUNTERTOP_POS` no implica pantalla secundaria.
-- `displayModeProtocolVersion===1` es obligatorio para una intención remota; un APK que sólo sabe publicar su estado no la recibe. V1
-  valida exactamente `1`; una versión futura exige negociación explícita y no se activa por un `>=` accidental.
+- `displayModeProtocolVersion===1` es obligatorio para una intención remota; un APK que sólo sabe publicar su estado no la recibe. V1 valida
+  exactamente `1`; una versión futura exige negociación explícita y no se activa por un `>=` accidental.
 - Una observación tiene vigencia de **7 días**. Android la refresca al menos cada 24 horas mientras tenga sesión y conexión. Si expira,
   presencia/invertibilidad pasan a `UNKNOWN` para acciones, aunque el detalle conserva el último valor y su fecha como diagnóstico.
 - `customerDisplayInverted=true` no demuestra capacidad: sólo registra el último estado que el dispositivo confirmó como aplicado.
@@ -380,8 +384,8 @@ El endpoint:
 9. si no consigue establecer la identidad por un error transitorio, devuelve un código retryable y Android conserva el `pending`; nunca
    convierte el fallo de telemetría en fallo de login o venta.
 
-Un token de venue A no puede reportar sobre un dispositivo de venue B. Tampoco se acepta `supportedRemoteCommands` desde el body: un
-cliente modificado no puede autoconcederse acciones peligrosas.
+Un token de venue A no puede reportar sobre un dispositivo de venue B. Tampoco se acepta `supportedRemoteCommands` desde el body: un cliente
+modificado no puede autoconcederse acciones peligrosas.
 
 ### Fuente local de verdad
 
@@ -390,8 +394,8 @@ Android no contará displays a ciegas. Reutiliza `resolveDisplayRoles` y `choose
 - `present = customerDisplayId != null`: existe una superficie válida para presentar contenido, incluida la virtual OEM de T3 Pro.
 - `invertible = roles.invertible`: la superficie elegida es física/no-default y puede intercambiarse con la de cajero.
 
-No se usa `Build.MANUFACTURER == SUNMI` ni `displays.size > 0`. Casos mínimos: D3 `true/true`, T3 Pro `true/false`, teléfono
-`false/false`, display virtual remoto `false/false`.
+No se usa `Build.MANUFACTURER == SUNMI` ni `displays.size > 0`. Casos mínimos: D3 `true/true`, T3 Pro `true/false`, teléfono `false/false`,
+display virtual remoto `false/false`.
 
 `CustomerDisplayState` se extiende como única fuente observable del snapshot combinado. `CustomerDisplayManager.refresh()` publica el
 snapshot sólo después de observar los roles reales; el coordinator lo consume y no crea un segundo `MutableStateFlow` ni reporta
@@ -435,8 +439,8 @@ La intención de inversión sí es una mutación solicitada por una persona y ti
 1. El dashboard crea `PENDING` y muestra **Solicitud pendiente**. Si Android está offline, el server conserva una sola intención vigente.
 2. Android obtiene la intención en su GET de settings. Antes de aplicarla comprueba que el `requestId` no fue visto, que el display sigue
    presente/invertible y que el deseo difiere o necesita confirmación.
-3. Android persiste localmente el `requestId` y resultado antes del ACK. Si muere después de aplicar, al reiniciar reenvía el mismo ACK;
-   no vuelve a alternar el modo por tratar la orden como `toggle`.
+3. Android persiste localmente el `requestId` y resultado antes del ACK. Si muere después de aplicar, al reiniciar reenvía el mismo ACK; no
+   vuelve a alternar el modo por tratar la orden como `toggle`.
 4. El contrato siempre envía un **valor deseado** (`desiredInverted`), nunca “invierte lo que haya”, por lo que repetirlo es idempotente.
 5. Si el hardware ya no es invertible, Android responde `REJECTED/DISPLAY_NOT_INVERTIBLE`, reporta las capacidades actuales y conserva el
    último estado aplicado.
@@ -459,8 +463,8 @@ Ocultar un botón no basta. Todas las entradas que terminan en una acción usan 
 
 ### Comandos remotos
 
-La creación de cola ya está centralizada en `command-queue.service.ts` y ya llama `validateCommandForTerminal`; no se crea otro pipeline.
-Se extiende ese validador para recibir/selectar `type` y `supportedRemoteCommands`, de modo que cubra dashboard venue, dashboard org,
+La creación de cola ya está centralizada en `command-queue.service.ts` y ya llama `validateCommandForTerminal`; no se crea otro pipeline. Se
+extiende ese validador para recibir/selectar `type` y `supportedRemoteCommands`, de modo que cubra dashboard venue, dashboard org,
 superadmin, rutas legacy y futuros callers.
 
 - Comando soportado: conserva el flujo actual de cola, heartbeat y ACK.
@@ -504,11 +508,10 @@ PATCH /api/v1/mobile/venues/:venueId/terminals/:terminalId/display-mode
 }
 ```
 
-La solicitud de dashboard verifica tenant, `tpv:update`, observación vigente,
-`capabilities.customerDisplay.canRequestInversion=true` y `displayModeProtocolVersion===1`. Escribe `PENDING` y responde `202`; no cambia el
-estado aplicado. `UNSUPPORTED` devuelve `422 DEVICE_ACTION_UNSUPPORTED`; `UNKNOWN` o stale devuelve
-`422 DEVICE_CAPABILITY_UNKNOWN` con una explicación accionable. La respuesta incluye `expiresAt`; a los 15 minutos un job CAS la marca
-`EXPIRED` y nunca se vuelve a entregar.
+La solicitud de dashboard verifica tenant, `tpv:update`, observación vigente, `capabilities.customerDisplay.canRequestInversion=true` y
+`displayModeProtocolVersion===1`. Escribe `PENDING` y responde `202`; no cambia el estado aplicado. `UNSUPPORTED` devuelve
+`422 DEVICE_ACTION_UNSUPPORTED`; `UNKNOWN` o stale devuelve `422 DEVICE_CAPABILITY_UNKNOWN` con una explicación accionable. La respuesta
+incluye `expiresAt`; a los 15 minutos un job CAS la marca `EXPIRED` y nunca se vuelve a entregar.
 
 **Cancelar solicitud pendiente es best-effort:** exige el mismo tenant/permiso y CAS sobre un request todavía `PENDING`, pero no revierte
 algo que el aparato ya alcanzó a aplicar. Si llega después un ACK `APPLIED`, el server actualiza el estado real y cambia el resultado a
@@ -521,10 +524,10 @@ APKs viejos sigan publicando su estado antes de haber enviado el nuevo reporte. 
 
 - Con `requestId`: resuelve por compare-and-set la intención vigente como `APPLIED` o `REJECTED` y registra el ACK con actor dispositivo.
 - Sin `requestId`: registra un cambio local del modo y conserva cualquier intención remota pendiente; no genera un falso ACK.
-- Con `requestId` y `REJECTED/LOCAL_OVERRIDE`: resuelve la intención y registra el valor físico elegido localmente después de que el
-  request ya estaba in-flight.
-- Con `requestId` viejo: registra el estado físico realmente reportado, preserva el request nuevo, devuelve
-  `409 DEVICE_REQUEST_SUPERSEDED` y obliga a consultar el deseo vigente.
+- Con `requestId` y `REJECTED/LOCAL_OVERRIDE`: resuelve la intención y registra el valor físico elegido localmente después de que el request
+  ya estaba in-flight.
+- Con `requestId` viejo: registra el estado físico realmente reportado, preserva el request nuevo, devuelve `409 DEVICE_REQUEST_SUPERSEDED`
+  y obliga a consultar el deseo vigente.
 - Repetir el mismo ACK ya resuelto es idempotente y devuelve el mismo resultado.
 
 La entrega usa únicamente el GET móvil ligero, resuelto desde `X-Device-ID` + venue autenticado. Su respuesta devuelve siempre el
@@ -545,8 +548,9 @@ La entrega usa únicamente el GET móvil ligero, resuelto desde `X-Device-ID` + 
 }
 ```
 
-Una solicitud resuelta/cancelada/expirada no se vuelve a entregar. Desconectar una pantalla no fuerza `customerDisplayInverted=false`: reporta
-`present/invertible` actuales, y si había una solicitud pendiente Android la rechaza explícitamente en lugar de fingir que fue aplicada.
+Una solicitud resuelta/cancelada/expirada no se vuelve a entregar. Desconectar una pantalla no fuerza `customerDisplayInverted=false`:
+reporta `present/invertible` actuales, y si había una solicitud pendiente Android la rechaza explícitamente en lugar de fingir que fue
+aplicada.
 
 ### Cadencia y latencia de entrega
 
@@ -620,10 +624,10 @@ POS Android ni aumenta la latencia del camino crítico de pagos.
 
 Se agregan rutas de producto nuevas sin mover los endpoints:
 
-| Canónica | Compatibilidad |
-| --- | --- |
-| `/devices` | `/tpv` redirige preservando query string |
-| `/devices/:deviceId` | `/tpv/:tpvId` redirige al mismo id |
+| Canónica              | Compatibilidad                                  |
+| --------------------- | ----------------------------------------------- |
+| `/devices`            | `/tpv` redirige preservando query string        |
+| `/devices/:deviceId`  | `/tpv/:tpvId` redirige al mismo id              |
 | `/devices/orders/:id` | `/tpv/orders/:id` permanece como alias/redirect |
 
 Las rutas de `orders` se declaran antes que `:deviceId`, como ya ocurre con `tpv`, para que `orders` no se capture como un id. Los
@@ -670,8 +674,8 @@ const visible = hasPermission(requiredPermission) && deviceSupports(action, capa
 - Activación sólo aparece para el lifecycle provisionado.
 - `OrgTerminalDrawer` usa exactamente el mismo helper y no mantiene una segunda matriz local.
 
-La ausencia por incompatibilidad técnica no necesita un teaser de paywall. En el detalle sí se explica el estado (por ejemplo, "Este POS
-no admite comandos remotos desde Avoqado"), para que no parezca un problema de permisos.
+La ausencia por incompatibilidad técnica no necesita un teaser de paywall. En el detalle sí se explica el estado (por ejemplo, "Este POS no
+admite comandos remotos desde Avoqado"), para que no parezca un problema de permisos.
 
 La inversión no usa optimismo visual:
 
@@ -726,7 +730,8 @@ auditoría `npm run audit:permissions`. No forma parte de este cambio.
 - persistir el último snapshot/pending;
 - reportarlo al endpoint en arranque, reconexión y cambios de display;
 - adoptar una intención remota por valor deseado, persistir `requestId` y confirmar `APPLIED/REJECTED` de forma idempotente;
-- cambiar `DisplayModeSync` para que una intención vigente sea autoridad remota explícita, sin convertir el GET normal en “server siempre gana”;
+- cambiar `DisplayModeSync` para que una intención vigente sea autoridad remota explícita, sin convertir el GET normal en “server siempre
+  gana”;
 - actualizar el comentario y el test P1 que aún afirman “un valor por negocio”, cubriendo por separado diferencia libre vs intención tipada;
 - no cambiar login, auto-registro, activación ni flujo de venta;
 - no implementar la cola genérica de reinicio/lock/mantenimiento.
@@ -776,19 +781,19 @@ relevante, se registra el resultado y no se toca el repo comercial —especialme
 - Clientes viejos ignoran `capabilities` y continúan auto-registrándose.
 - La ruta móvil de estado no exige haber reportado capacidad, así que un APK existente no se rompe durante el rollout server-first.
 - TPVs viejas conservan comandos porque su capacidad se deriva del tipo, no de un reporte nuevo.
-- Android se despliega y se verifica antes de que el dashboard pueda crear intenciones; `displayModeProtocolVersion` evita enviar una a un APK
-  que sólo publica estado.
+- Android se despliega y se verifica antes de que el dashboard pueda crear intenciones; `displayModeProtocolVersion` evita enviar una a un
+  APK que sólo publica estado.
 - El server inicial conserva exactamente la semántica del PUT general que consume el dashboard viejo. No se retira el campo en el paso 1.
 - Tras desplegar dashboard, se instrumenta el uso del campo legacy. Sólo después de siete días y cero llamadas se cambia a
   `422 LEGACY_DISPLAY_MODE_ENDPOINT`; así una pestaña JS cacheada recibe error explícito y nunca un `200` no-op.
 - El renombre visible sale al final; para entonces la lógica ya está correcta bajo ambos nombres.
-- No hace falta feature flag: el rollout se controla por compatibilidad del contrato y orden de deploy, no por una bifurcación permanente
-  de producto.
+- No hace falta feature flag: el rollout se controla por compatibilidad del contrato y orden de deploy, no por una bifurcación permanente de
+  producto.
 
 ### Rollback
 
-- Revertir dashboard devuelve el copy/rutas viejas e impide crear nuevas solicitudes; el server sigue bloqueando comandos imposibles y
-  las solicitudes pendientes existentes siguen siendo consumibles o cancelables por endpoint.
+- Revertir dashboard devuelve el copy/rutas viejas e impide crear nuevas solicitudes; el server sigue bloqueando comandos imposibles y las
+  solicitudes pendientes existentes siguen siendo consumibles o cancelables por endpoint.
 - Revertir Android deja la última observación hasta que venza; no la convierte en `false`. Antes del rollback se cancelan solicitudes
   pendientes si esa versión dejará de consumirlas.
 - Revertir el uso del DTO no exige revertir la migración: los campos nullable/JSON pueden permanecer sin lectores.
@@ -799,25 +804,25 @@ relevante, se registra el resultado y no se toca el repo comercial —especialme
 
 ## Errores y estados de UI
 
-| Situación | Server | Dashboard |
-| --- | --- | --- |
-| POS Android viejo, sin reporte | presencia/inversión `UNKNOWN` | "Capacidad sin confirmar"; sin toggle |
-| Reporte con más de 7 días | capacidad efectiva `UNKNOWN`, conserva diagnóstico | "Observación vencida; abre el POS con conexión"; sin toggle |
-| Android simple `false/false` | presencia e inversión `UNSUPPORTED` | "Sin pantalla secundaria"; sin toggle |
-| T3 Pro `true/false` | display presente, inversión `UNSUPPORTED` | Customer display visible; sin acción de invertir |
-| D3 físico `true/true`, intent v1 | `canRequestInversion=true` | Muestra acción si además tiene `tpv:update` |
-| Dashboard solicita inversión | `202`, request `PENDING`; actual sin cambio | "Solicitud pendiente", no “Aplicado” |
-| Android confirma | request `APPLIED`; actual cambia | Toggle confirmado y hora de ACK |
-| Hardware cambia antes de aplicar | request `REJECTED`; actual sin cambio | Explicación específica y capacidad refrescada |
-| Aparato no vuelve en 15 minutos | request `EXPIRED`; no se entrega | “La solicitud venció”; permite enviar otra |
-| Cancelación llegó después de aplicar | actual cambia; `APPLIED/CANCEL_TOO_LATE` | Explica que cancelar no revirtió y ofrece solicitud contraria |
-| ACK de solicitud superada | `409 DEVICE_REQUEST_SUPERSEDED` | Mantiene el deseo vigente; Android resincroniza |
-| Intento directo de invertir sin soporte | `422 DEVICE_ACTION_UNSUPPORTED` | Mensaje específico, nunca éxito optimista |
-| Intento de comando en POS | No crea cola; `422 DEVICE_ACTION_UNSUPPORTED` | Acción ausente; si había UI vieja, muestra explicación |
-| TPV soportada desconectada | Cola normal existente | "Se enviará al conectarse" |
-| Bulk mezcla TPV y POS | Encola TPV, reporta POS en `skipped[]` | Resumen parcial explícito |
-| Display se desconecta estando invertido | Conserva último estado aplicado, reporta `present/invertible` | Control oculto; explica última observación |
-| Reporte falla por red | No afecta request de negocio | POS sigue; reintento silencioso del snapshot |
+| Situación                               | Server                                                        | Dashboard                                                     |
+| --------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------- |
+| POS Android viejo, sin reporte          | presencia/inversión `UNKNOWN`                                 | "Capacidad sin confirmar"; sin toggle                         |
+| Reporte con más de 7 días               | capacidad efectiva `UNKNOWN`, conserva diagnóstico            | "Observación vencida; abre el POS con conexión"; sin toggle   |
+| Android simple `false/false`            | presencia e inversión `UNSUPPORTED`                           | "Sin pantalla secundaria"; sin toggle                         |
+| T3 Pro `true/false`                     | display presente, inversión `UNSUPPORTED`                     | Customer display visible; sin acción de invertir              |
+| D3 físico `true/true`, intent v1        | `canRequestInversion=true`                                    | Muestra acción si además tiene `tpv:update`                   |
+| Dashboard solicita inversión            | `202`, request `PENDING`; actual sin cambio                   | "Solicitud pendiente", no “Aplicado”                          |
+| Android confirma                        | request `APPLIED`; actual cambia                              | Toggle confirmado y hora de ACK                               |
+| Hardware cambia antes de aplicar        | request `REJECTED`; actual sin cambio                         | Explicación específica y capacidad refrescada                 |
+| Aparato no vuelve en 15 minutos         | request `EXPIRED`; no se entrega                              | “La solicitud venció”; permite enviar otra                    |
+| Cancelación llegó después de aplicar    | actual cambia; `APPLIED/CANCEL_TOO_LATE`                      | Explica que cancelar no revirtió y ofrece solicitud contraria |
+| ACK de solicitud superada               | `409 DEVICE_REQUEST_SUPERSEDED`                               | Mantiene el deseo vigente; Android resincroniza               |
+| Intento directo de invertir sin soporte | `422 DEVICE_ACTION_UNSUPPORTED`                               | Mensaje específico, nunca éxito optimista                     |
+| Intento de comando en POS               | No crea cola; `422 DEVICE_ACTION_UNSUPPORTED`                 | Acción ausente; si había UI vieja, muestra explicación        |
+| TPV soportada desconectada              | Cola normal existente                                         | "Se enviará al conectarse"                                    |
+| Bulk mezcla TPV y POS                   | Encola TPV, reporta POS en `skipped[]`                        | Resumen parcial explícito                                     |
+| Display se desconecta estando invertido | Conserva último estado aplicado, reporta `present/invertible` | Control oculto; explica última observación                    |
+| Reporte falla por red                   | No afecta request de negocio                                  | POS sigue; reintento silencioso del snapshot                  |
 
 ---
 
@@ -835,8 +840,8 @@ relevante, se registra el resultado y no se toca el repo comercial —especialme
   del cajero.
 - Crear/superar/cancelar una solicitud y su resolución se audita; el historial no depende de conservar para siempre el JSON de la última
   solicitud en `Terminal`.
-- El `PUT` dashboard legacy registra `LEGACY_DISPLAY_MODE_UPDATE_USED` desde la primera fase aditiva, sin alterar su respuesta y sin PII.
-  Un reporte read-only agrega `DISPLAY_MODE_REQUESTED`, `DISPLAY_MODE_RESOLVED`, `DISPLAY_MODE_EXPIRED` y ese evento legacy para calcular
+- El `PUT` dashboard legacy registra `LEGACY_DISPLAY_MODE_UPDATE_USED` desde la primera fase aditiva, sin alterar su respuesta y sin PII. Un
+  reporte read-only agrega `DISPLAY_MODE_REQUESTED`, `DISPLAY_MODE_RESOLVED`, `DISPLAY_MODE_EXPIRED` y ese evento legacy para calcular
   cobertura, tasa de ACK, p95 y tendencia de expirados antes del cutoff.
 - Los mensajes de error al usuario están en español y no exponen Prisma, nombres de tablas ni detalles internos en el MCP.
 
@@ -918,7 +923,8 @@ relevante, se registra el resultado y no se toca el repo comercial —especialme
 11. Retirar/reinstalar: no entrega una intención a otra fila/deviceUid.
 12. PAX/NexGo: reinicio, mantenimiento y lock siguen visibles/ejecutables con ACK esperado.
 13. POS Android y iOS: reinicio/lock/mantenimiento no aparecen ni se encolan.
-14. APK Android anterior: sigue entrando, publicando su estado legacy y operando; queda sin intención remota hasta actualizar, sin activación.
+14. APK Android anterior: sigue entrando, publicando su estado legacy y operando; queda sin intención remota hasta actualizar, sin
+    activación.
 
 Las verificaciones pesadas se ejecutan mediante `./scripts/avq-verify.sh` según las reglas del workspace. La prueba offline y de pantalla
 doble no se declara aprobada sólo con unit tests: requiere hardware real.
@@ -936,8 +942,8 @@ El cambio se considera terminado cuando:
 5. el server impide encolar comandos para clientes que no los consumen;
 6. sólo un Android con presencia, invertibilidad, `displayModeProtocolVersion===1` y observación vigente obtiene `canRequestInversion=true`;
 7. un display presente pero no invertible puede mostrar contenido de cliente sin recibir la acción de invertir;
-8. dashboard crea una intención pendiente y sólo el ACK del aparato cambia el estado aplicado; con app foreground/red sana se inicia en
-   p95 ≤20 segundos;
+8. dashboard crea una intención pendiente y sólo el ACK del aparato cambia el estado aplicado; con app foreground/red sana se inicia en p95
+   ≤20 segundos;
 9. request/ACK son idempotentes, sobreviven offline dentro de su TTL, expiran a los 15 minutos y un ACK viejo no pisa un deseo nuevo;
 10. marca/modelo/form factor nunca sustituyen la observación de display;
 11. clientes viejos siguen funcionando y `UNKNOWN` no se convierte en activación pendiente;

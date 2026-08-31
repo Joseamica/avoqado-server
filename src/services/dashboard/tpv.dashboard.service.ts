@@ -5,6 +5,7 @@ import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../
 import { venueStartOfDay } from '../../utils/datetime'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
 import prisma from '../../utils/prismaClient'
+import { ACTIVATABLE_TERMINAL_TYPES, type DeviceManagementDto, toDeviceManagementDto } from '../device-capabilities.service'
 import emailService from '../email.service'
 import { logAction } from './activity-log.service'
 
@@ -91,10 +92,16 @@ export async function getTerminalsData(
     whereClause.selfRegistered = filters.origins[0] === 'selfRegistered'
   }
 
-  // Activation filter (activated = activatedAt not null; notActivated = activatedAt null)
-  // If both options selected → treat as "all" (no filter)
+  // Activation only exists for explicitly provisioned TPV types. Apply this in
+  // Prisma before pagination so self-registered POS devices never look pending.
+  // If both options are selected, preserve the existing "all devices" behavior.
   if (filters.activations && filters.activations.length === 1) {
     const onlyOption = filters.activations[0]
+    const requestedTypes =
+      filters.types && filters.types.length > 0 ? filters.types : filters.type ? [filters.type] : [...ACTIVATABLE_TERMINAL_TYPES]
+    whereClause.type = {
+      in: requestedTypes.filter(type => (ACTIVATABLE_TERMINAL_TYPES as readonly TerminalType[]).includes(type)),
+    }
     if (onlyOption === 'activated') whereClause.activatedAt = { not: null }
     if (onlyOption === 'notActivated') whereClause.activatedAt = null
   }
@@ -177,10 +184,16 @@ export async function getTerminalsData(
     ]),
   )
 
-  const terminalsWithStats = terminals.map(t => ({
-    ...t,
-    ...(statsMap.get(t.id) || { todayPaymentCount: 0, todayPaymentTotal: 0, todayPaymentSubtotal: 0, todayTipTotal: 0 }),
-  }))
+  const projectionNow = new Date()
+  const terminalsWithStats = terminals.map(t =>
+    toDeviceManagementDto(
+      {
+        ...t,
+        ...(statsMap.get(t.id) || { todayPaymentCount: 0, todayPaymentTotal: 0, todayPaymentSubtotal: 0, todayTipTotal: 0 }),
+      },
+      { now: projectionNow },
+    ),
+  )
 
   // 6. Estructurar y devolver la respuesta final
   return {
@@ -200,7 +213,7 @@ export async function getTerminalsData(
  * @param tpvId - El ID de la terminal.
  * @returns La terminal encontrada.
  */
-export async function getTpvById(venueId: string, tpvId: string): Promise<Terminal> {
+export async function getTpvById(venueId: string, tpvId: string): Promise<DeviceManagementDto<Terminal>> {
   // 1. Validar parámetros de entrada
   if (!venueId) {
     throw new NotFoundError('El ID del Venue es requerido.')
@@ -222,7 +235,7 @@ export async function getTpvById(venueId: string, tpvId: string): Promise<Termin
     throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
   }
 
-  return terminal
+  return toDeviceManagementDto(terminal)
 }
 
 /**

@@ -8,6 +8,19 @@ import prisma from '../../utils/prismaClient'
 import { revokeSessionsForDevice } from '@/services/auth/session.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
+const LEGACY_CLIENT_METADATA_MAX_LENGTH = 128
+
+function sanitizeLegacyClientMetadata(value: unknown): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (typeof raw !== 'string') return undefined
+  const normalized = raw
+    // eslint-disable-next-line no-control-regex -- strips control chars from client-supplied metadata on purpose
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return normalized ? normalized.slice(0, LEGACY_CLIENT_METADATA_MAX_LENGTH) : undefined
+}
+
 /**
  * Controlador para manejar la solicitud GET de terminales.
  */
@@ -87,6 +100,22 @@ export async function updateTpv(
     const updateData = req.body
 
     const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData)
+
+    if (Object.prototype.hasOwnProperty.call(updateData, 'customerDisplayInverted')) {
+      const appVersion = sanitizeLegacyClientMetadata(req.headers['x-app-version'])
+      const userAgent = appVersion ? undefined : sanitizeLegacyClientMetadata(req.headers['user-agent'])
+      void logAction({
+        action: 'LEGACY_DISPLAY_MODE_UPDATE_USED',
+        entity: 'Terminal',
+        entityId: tpvId,
+        staffId: req.authContext?.userId ?? null,
+        venueId,
+        data: {
+          ...(appVersion ? { appVersion } : {}),
+          ...(userAgent ? { userAgent } : {}),
+        },
+      })
+    }
 
     res.status(200).json(updatedTpv)
   } catch (error) {
