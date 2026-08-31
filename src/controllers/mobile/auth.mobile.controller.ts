@@ -50,6 +50,7 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
       user: result.staff,
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
+      selectedVenueId: result.selectedVenueId,
     })
   } catch (error) {
     logControllerError('mobile login', error)

@@ -741,6 +741,9 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     accessToken,
     refreshToken,
     staff: sanitizedStaff,
+    // La sucursal a la que quedó atada la sesión — la MISMA variable que ya eligió el
+    // token, nunca recalculada. Aditivo: `staff.venues[]` sigue completo, sin filtrar.
+    selectedVenueId: selectedVenue.venueId,
   }
 }
 
