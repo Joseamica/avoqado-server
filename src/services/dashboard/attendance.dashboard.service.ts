@@ -225,6 +225,16 @@ export async function buildAttendanceGrid(
   const rangeStart = start.startOf('day').toJSDate()
   const rangeEnd = end.endOf('day').toJSDate()
 
+  /**
+   * 🔴 Un día MÁS que el rango pedido, sólo para CONSULTAR — nunca para producir celdas.
+   *
+   * La atribución de un turno nocturno necesita saber qué le tocaba al día siguiente, y si ese
+   * día caía fuera del rango la consulta no lo traía: la misma semana daba números distintos
+   * según el rango. Domingo→domingo inventaba 420 minutos de extra que domingo→lunes
+   * clasificaba correctamente (4ª auditoría de Codex, 31-ago-2026, P1 #1).
+   */
+  const diaSiguienteAlRango = end.plus({ days: 1 }).toISODate()!
+
   // Quien estuvo en el equipo en ALGÚN momento del rango, aunque hoy ya no esté: dar de baja
   // pone `active=false, endDate=hoy`, y su historia no debe desaparecer del reporte de la
   // quincena. Y quien entró el día 20 no puede tener faltas del 1 al 19 (Codex P2-4).
@@ -241,8 +251,15 @@ export async function buildAttendanceGrid(
       endDate: true,
       staff: { select: { firstName: true, lastName: true } },
       workSchedule: { select: { weekly: true } },
+      // 🔴 Hasta `endDate + 1`, NO hasta `endDate`. La atribución de un turno nocturno
+      // necesita saber qué le tocaba al día SIGUIENTE para no robarle su jornada, y si ese
+      // día cae fuera del rango la consulta no lo traía: la misma semana daba resultados
+      // distintos según el rango que pidieras — domingo→domingo inventaba 420 minutos que
+      // domingo→lunes clasificaba bien (4ª auditoría de Codex, 31-ago-2026, P1 #1).
+      //
+      // Las CELDAS siguen acotadas al rango original; esto sólo amplía lo que se consulta.
       workScheduleExceptions: {
-        where: { startDate: { lte: endDate }, endDate: { gte: startDate } },
+        where: { startDate: { lte: diaSiguienteAlRango }, endDate: { gte: startDate } },
         // Orden fijo: el desempate final vive en `resolveExpectedDay`, pero la entrada no debe
         // depender del plan de Postgres (Codex P2-6).
         orderBy: [{ startDate: 'asc' }, { createdAt: 'asc' }],
@@ -251,7 +268,9 @@ export async function buildAttendanceGrid(
       // Turnos rotativos: sólo cuentan las PUBLICADAS, y sólo si el venue los prendió.
       workShiftAssignments: rotating
         ? {
-            where: { date: { gte: startDate, lte: endDate }, status: 'PUBLISHED' },
+            // Igual que las excepciones: un día más, para poder preguntar por el turno del
+            // día siguiente sin depender de dónde termine el rango consultado.
+            where: { date: { gte: startDate, lte: diaSiguienteAlRango }, status: 'PUBLISHED' },
             select: { date: true, startTime: true, endTime: true, status: true },
           }
         : false,

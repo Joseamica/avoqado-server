@@ -124,3 +124,48 @@ describe('reforma LFT 2026 · qué se marca como infracción', () => {
     expect(s.diasSobreTopeDiario).toEqual(['2026-08-24'])
   })
 })
+
+/**
+ * 🔴 P1 #2 de la 4ª auditoría de Codex: el tope SEMANAL es el límite legal, y sólo se usaba
+ * para repartir el pago — nunca para juzgar. Una semana de 14 horas pagaba 300 minutos al
+ * TRIPLE y a la vez declaraba «sin infracción», porque ninguno de sus días pasaba de 4 h y
+ * eran sólo cuatro días.
+ */
+describe('reforma LFT 2026 · pasarse del tope SEMANAL también es infracción', () => {
+  const semana = (lunes: string, dias: Array<[string, number]>) =>
+    agruparPorSemana(
+      dias.map(([date, minutos]) => ({ date, minutos })),
+      { startDate: lunes, endDate: dias[dias.length - 1][0] },
+    )[0]
+
+  it('🔴 14 h en cuatro días legales SIGUEN siendo infracción: pasan el tope de 9 h', () => {
+    const s = semana('2026-08-24', [
+      ['2026-08-24', 240],
+      ['2026-08-25', 240],
+      ['2026-08-26', 180],
+      ['2026-08-27', 180],
+    ])
+    expect(s.minutosTriples).toBe(300)
+    expect(s.diasSobreTopeDiario).toEqual([]) // ningún día pasa de 4 h
+    expect(s.excedeDiasPermitidos).toBe(false) // son cuatro días, permitidos
+    expect(s.excedeTopeSemanal).toBe(true) // …y aun así la semana rompe la ley
+  })
+
+  it('exactamente 9 h no lo son', () => {
+    const s = semana('2026-08-24', [['2026-08-24', 240], ['2026-08-25', 240], ['2026-08-26', 60]])
+    expect(s.minutosTotal).toBe(540)
+    expect(s.excedeTopeSemanal).toBe(false)
+  })
+
+  it('🔴 y el tope que se juzga es el del AÑO: 10 h en 2028 ya no son infracción', () => {
+    const s = semana('2028-01-03', [['2028-01-03', 240], ['2028-01-04', 240], ['2028-01-05', 120]])
+    expect(s.minutosTotal).toBe(600)
+    expect(s.excedeTopeSemanal).toBe(false)
+  })
+
+  it('pero 11 h en 2028 sí', () => {
+    const s = semana('2028-01-03', [['2028-01-03', 240], ['2028-01-04', 240], ['2028-01-05', 180]])
+    expect(s.excedeTopeSemanal).toBe(true)
+  })
+})
+

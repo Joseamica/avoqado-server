@@ -76,53 +76,70 @@ export function esBaseLocal(databaseUrl: string | undefined): ResultadoDelCorte 
 }
 
 /**
- * Le pregunta al SERVIDOR dónde está, en vez de creerle a la URL.
+ * Comprueba que el clúster de Postgres sea EXACTAMENTE el que esta máquina reconoce como suyo.
  *
- * 🔴 Por qué hace falta, y por qué la comprobación de arriba no basta (3ª auditoría de Codex,
- * 31-ago-2026, P1 #4): host, puerto y nombre salen todos de la MISMA cadena, y esa cadena la
- * escribe quien abre el túnel. `ssh -L 5432:produccion:5432` deja producción respondiendo en
- * `localhost:5432`, y si además la base se llama `av-db-25` la URL pasa entera. La URL del
- * cliente nunca puede probar dónde termina el socket.
+ * 🔴 Por qué no vale mirar la red, que fue mi primer intento y NO funcionaba: con
+ * `ssh -L 5432:localhost:5432 produccion`, OpenSSH abre la conexión de destino **desde la
+ * máquina remota**, así que el Postgres de producción la acepta sobre SU PROPIO loopback y
+ * `inet_server_addr()` contesta `127.0.0.1`. La guarda pasaba feliz. Fabriqué una protección
+ * que no protegía, que es peor que no tener ninguna (4ª auditoría de Codex, 31-ago-2026, P1 #3).
  *
- * `inet_server_addr()` es evidencia INDEPENDIENTE: la devuelve el propio servidor y dice en qué
- * dirección está escuchando ÉL. Un Postgres de verdad local contesta `NULL` (socket unix) o una
- * de loopback; uno alcanzado por túnel contesta su propia IP, que no es ninguna de las dos.
+ * Host, puerto, nombre y dirección son todos propiedades RELATIVAS a la conexión, y quien abre
+ * el túnel las controla. Lo único que no puede falsificar es la identidad del clúster:
+ * `pg_control_system().system_identifier` es un número que Postgres genera en el `initdb` y que
+ * es distinto en cada instalación.
  *
- * ⚠️ Sobre-atrapar es seguro: lo peor que pasa es que alguien con un Postgres en Docker tenga
- * que añadir su red aquí. Sub-atrapar borra datos de nómina.
+ * El desarrollador lo autoriza UNA vez, a mano, en `AVQ_LOCAL_DB_ID` — ese paso humano es lo
+ * que lo vuelve evidencia fuera de banda. Sin la variable no se adivina: se corta y se imprime
+ * el identificador para que pueda copiarlo tras comprobar él mismo dónde está apuntando.
  */
-export async function esServidorLocal(prisma: {
+export async function esClusterAutorizado(prisma: {
   $queryRawUnsafe: (sql: string) => Promise<Array<Record<string, unknown>>>
 }): Promise<ResultadoDelCorte> {
   let filas: Array<Record<string, unknown>>
   try {
     filas = await prisma.$queryRawUnsafe(
-      "SELECT host(coalesce(inet_server_addr(), '127.0.0.1'::inet)) AS dir, current_database() AS base",
+      'SELECT system_identifier::text AS id, current_database() AS base FROM pg_control_system()',
     )
   } catch (e) {
     // Si no se puede preguntar, no se puede afirmar que sea local.
-    return { ok: false, motivo: `No pude preguntarle al servidor dónde está: ${(e as Error).message}` }
+    return { ok: false, motivo: `No pude identificar el clúster: ${(e as Error).message}` }
   }
 
-  const dir = String(filas?.[0]?.dir ?? '')
+  const id = String(filas?.[0]?.id ?? '')
   const base = String(filas?.[0]?.base ?? '')
-  if (!dir) return { ok: false, motivo: 'El servidor no reportó su dirección' }
+  if (!id) return { ok: false, motivo: 'El servidor no reportó su identificador de clúster' }
 
-  const esLoopback = dir === '127.0.0.1' || dir === '::1' || dir.startsWith('127.')
-  if (!esLoopback) {
+  const autorizados = (process.env.AVQ_LOCAL_DB_ID ?? '')
+    .split(',')
+    .map(x => x.trim())
+    .filter(Boolean)
+
+  if (autorizados.length === 0) {
     return {
       ok: false,
-      motivo: `El servidor de Postgres está escuchando en ${dir}, no en loopback — la URL dice «localhost» pero el socket termina en otra máquina (¿un túnel?)`,
-      host: dir,
       base,
+      motivo:
+        `No hay ningún clúster autorizado. Comprueba TÚ que esta base sea la local y, si lo es, ` +
+        `exporta AVQ_LOCAL_DB_ID=${id} (el identificador del clúster al que estás conectado ahora). ` +
+        `No se adivina a propósito: un túnel SSH hace que producción se vea idéntica a localhost.`,
     }
   }
 
-  return { ok: true, host: dir, base }
+  if (!autorizados.includes(id)) {
+    return {
+      ok: false,
+      base,
+      motivo: `El clúster ${id} no está en AVQ_LOCAL_DB_ID. Si de verdad es tu base local, añádelo; si no, acabas de evitar un desastre.`,
+    }
+  }
+
+  return { ok: true, base }
 }
 
 /**
- * El corte COMPLETO: la URL primero (barato, no abre conexión) y después el servidor.
+ * El corte COMPLETO: la URL primero (barato, no abre conexión) y después la identidad del
+ * clúster, que es lo único que un túnel no puede falsificar.
  *
  * Se llama con `await` desde el `main()` de cada script, ANTES de escribir o borrar nada.
  */
@@ -130,11 +147,11 @@ export async function exigirBaseLocalDeVerdad(prisma: {
   $queryRawUnsafe: (sql: string) => Promise<Array<Record<string, unknown>>>
 }): Promise<void> {
   exigirBaseLocal()
-  const r = await esServidorLocal(prisma)
+  const r = await esClusterAutorizado(prisma)
   if (r.ok) return
-  console.error('\n🔴 ABORTADO: la URL parecía local, pero el servidor no lo es.')
+  console.error('\n🔴 ABORTADO: la URL parecía local, pero no puedo probar que la base lo sea.')
   console.error(`   ${r.motivo}`)
-  console.error('   Un túnel SSH deja una base REMOTA respondiendo en localhost.\n')
+  console.error('   Host, puerto y nombre los escribe quien abre el túnel; el identificador del clúster, no.\n')
   process.exit(1)
 }
 

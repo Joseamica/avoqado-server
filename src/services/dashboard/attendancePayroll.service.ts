@@ -265,7 +265,9 @@ export async function getPayrollSummary(
     // extra en un día, la ley se rompió aunque el gerente sólo autorice una: no autorizar no
     // deshace lo que ya pasó.
     const semanasMedidas = agruparPorSemana(dias, { startDate, endDate }, previoMedido.get(staffVenueId) ?? {})
-    row.hasOvertimeViolation = semanasMedidas.some(w => w.diasSobreTopeDiario.length > 0 || w.excedeDiasPermitidos)
+    row.hasOvertimeViolation = semanasMedidas.some(
+      w => w.diasSobreTopeDiario.length > 0 || w.excedeDiasPermitidos || w.excedeTopeSemanal,
+    )
   }
 
   const rows = [...byMembership.values()].sort((a, b) => a.name.localeCompare(b.name))

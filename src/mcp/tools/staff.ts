@@ -162,9 +162,14 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       // Confirmación de dos pasos: esto decide cuánto se le paga a una persona, y lo dispara un
       // modelo interpretando una petición vaga. La vista previa enseña el ANTES y el DESPUÉS.
       if (!confirm) {
-        const { buildAttendanceGrid } = await import('../../services/dashboard/attendance.dashboard.service')
-        const { cells } = await buildAttendanceGrid(venueId, date, date)
-        const celda = cells.find(c => c.staffVenueId === staffVenueId && c.date === date)
+        // 🔴 `getAttendanceReport`, NO `buildAttendanceGrid`: la rejilla cruda nace siempre con
+        // `overtimeApprovedUpdatedAt` en null —lo rellena el reporte al cruzar con las
+        // autorizaciones guardadas—, así que la vista previa devolvía null y CUALQUIER
+        // corrección por MCP recibía conflicto para siempre (4ª auditoría de Codex,
+        // 31-ago-2026, P1 #4). La primera autorización funcionaba; cambiarla, nunca.
+        const { getAttendanceReport } = await import('../../services/dashboard/attendance.dashboard.service')
+        const { rows } = await getAttendanceReport(venueId, date, date)
+        const celda = rows.find(c => c.staffVenueId === staffVenueId && c.date === date)
         if (!celda) return text({ ok: false, error: 'No encontré a esa persona ese día en este negocio.' })
         // 🔴 La vista previa DEVUELVE la huella de la jornada que acaba de enseñar, y la
         // confirmación tiene que devolvérnosla. Sin este ida y vuelta, entre la previa y el

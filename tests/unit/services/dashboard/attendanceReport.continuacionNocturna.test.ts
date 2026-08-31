@@ -190,3 +190,59 @@ describe('el nocturno NO le roba el turno al día siguiente', () => {
   })
 })
 
+/**
+ * 🔴 P1 #1 de la 4ª auditoría de Codex: la atribución NO puede depender del rango consultado.
+ *
+ * El arreglo anterior preguntaba por el turno del día siguiente, pero la consulta sólo cargaba
+ * cuadrantes y asignaciones hasta `endDate`. Con un turno ROTATIVO publicado el día siguiente,
+ * pedir «sólo el miércoles» no lo traía y el miércoles se comía la jornada del jueves — mientras
+ * que pedir «miércoles a jueves» la clasificaba bien. La misma semana, dos números distintos.
+ */
+describe('la atribución no depende del RANGO que se pida', () => {
+  const rotativoDeMadrugada = [{ date: SIGUIENTE, startTime: '05:00', endTime: '13:00', status: 'PUBLISHED' }]
+
+  function conTurnoRotativoElJueves() {
+    db.venue.findUnique.mockResolvedValue({
+      timezone: 'America/Mexico_City',
+      settings: { attendanceGraceMinutes: 10, rotatingShiftsEnabled: true },
+    })
+    db.staffVenue.findMany.mockResolvedValue([{ ...membership, workShiftAssignments: rotativoDeMadrugada }])
+    db.timeEntry.findMany.mockResolvedValue([
+      checada(mx(DIA, '22'), mx(SIGUIENTE, '02')),
+      checada(mx(SIGUIENTE, '05'), mx(SIGUIENTE, '13')),
+    ])
+  }
+
+  /**
+   * 🔴 Esta prueba mira la FORMA DE LA CONSULTA, no el resultado, y no es por comodidad: el
+   * mock de Prisma devuelve un valor fijo IGNORANDO el `where`, así que una prueba sobre los
+   * minutos pasa igual con la consulta rota. Se comprobó saboteándola — volver la ventana a
+   * `endDate` no hacía fallar nada. Lo único que de verdad guarda el arreglo es exigir que se
+   * consulte un día más.
+   */
+  it('🔴 los cuadrantes se consultan hasta el día SIGUIENTE al rango, no hasta el último', async () => {
+    conTurnoRotativoElJueves()
+    await buildAttendanceGrid(V, DIA, DIA)
+
+    const select = db.staffVenue.findMany.mock.calls[0][0].select
+    expect(select.workScheduleExceptions.where.startDate.lte).toBe(SIGUIENTE)
+    expect(select.workShiftAssignments.where.date.lte).toBe(SIGUIENTE)
+  })
+
+  it('y las CELDAS siguen acotadas al rango pedido — el día extra sólo se consulta', async () => {
+    conTurnoRotativoElJueves()
+    const { cells } = await buildAttendanceGrid(V, DIA, DIA)
+    expect(cells.every(c => c.date === DIA)).toBe(true)
+  })
+
+  it('el resultado es el mismo se pida el rango que se pida', async () => {
+    conTurnoRotativoElJueves()
+    const solo = await buildAttendanceGrid(V, DIA, DIA)
+    conTurnoRotativoElJueves()
+    const ambos = await buildAttendanceGrid(V, DIA, SIGUIENTE)
+    expect(solo.cells.find(c => c.date === DIA)!.overtimeMinutes).toBe(
+      ambos.cells.find(c => c.date === DIA)!.overtimeMinutes,
+    )
+  })
+})
+

@@ -302,8 +302,15 @@ export interface SemanaDeExtra {
   diasSobreTopeDiario: string[]
   /** Cuántos días de la semana tuvieron algo de extra. */
   diasConExtra: number
-  /** Más de 3 días con extra en la semana (art. 66). */
+  /** Más de CUATRO días con extra en la semana (art. 66 tras la reforma de mayo de 2026). */
   excedeDiasPermitidos: boolean
+  /**
+   * 🔴 La semana pasó del tope del art. 66 (9 h en 2026-27, y subiendo por año). Sin esto, una
+   * semana de 14 h pagaba 300 minutos al TRIPLE y a la vez declaraba «sin infracción»: el tope
+   * semanal sólo se usaba para repartir el pago, nunca para juzgar (4ª auditoría de Codex,
+   * 31-ago-2026, P1 #2).
+   */
+  excedeTopeSemanal: boolean
   /**
    * El rango consultado no cubre la semana entera, así que el reparto doble/triple de ESTA
    * semana no es afirmable: los días de fuera pudieron traer horas que mueven el umbral.
@@ -403,6 +410,9 @@ export function agruparPorSemana(
           .sort(),
         diasConExtra: previos.length + deLaSemana.length,
         excedeDiasPermitidos: previos.length + deLaSemana.length > TOPE_DIAS_CON_EXTRA,
+        // Sobre el total de la semana ENTERA, días de fuera del rango incluidos: la ley se
+        // rompió aunque la consulta no los enseñe.
+        excedeTopeSemanal: minutosPrevios + minutosTotal > topeDeLaSemana,
         parcial: !desdeRango.isValid || !hastaRango.isValid || desdeRango > lunes || hastaRango < domingo,
       }
     })
