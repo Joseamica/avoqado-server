@@ -10,17 +10,11 @@
  *   art. 67 — las primeras 9 h extraordinarias de la SEMANA se pagan al doble.
  *   art. 68 — lo que exceda ese máximo, al triple.
  *
- * 🔴 El umbral que decide doble/triple es el ACUMULADO SEMANAL, no el tope diario
- * (verificado en vivo el 29-ago). Alguien que hace 4 h un lunes viola el tope diario pero
- * esas 4 h siguen siendo DOBLES si la semana aún no llega a 9.
+ * 🔴 Aquí ya no se prueba ninguna tarifa ni ningún tope legal: se retiraron del módulo el
+ * 31-ago-2026 (decisión del founder — la ley la cumple el patrón, no el software). Lo que
+ * se guarda es la MEDICIÓN: cuántos minutos se trabajaron después de la hora de salida.
  */
-import {
-  minutosExtraDelDia,
-  repartirDobleYTriple,
-  TOPE_DIARIO_MINUTOS,
-  TOPE_SEMANAL_MINUTOS,
-  type DescansoDelDia,
-} from '@/services/dashboard/overtime'
+import { minutosExtraDelDia, type DescansoDelDia } from '@/services/dashboard/overtime'
 
 const TZ = 'America/Mexico_City'
 
@@ -230,44 +224,5 @@ describe('minutosExtraDelDia — lo que se quedó DESPUÉS de su hora de salida'
         timezone: 'Europe/Madrid',
       }),
     ).not.toBe(120)
-  })
-})
-
-describe('repartirDobleYTriple — art. 67 y 68', () => {
-  it('las primeras 9 h de la semana son DOBLES', () => {
-    const r = repartirDobleYTriple(TOPE_SEMANAL_MINUTOS)
-    expect(r.minutosDobles).toBe(540)
-    expect(r.minutosTriples).toBe(0)
-  })
-
-  it('🔴 lo que pasa de 9 h semanales es TRIPLE', () => {
-    // 12 h extra = 9 dobles + 3 triples (el ejemplo canónico de la ley).
-    const r = repartirDobleYTriple(12 * 60)
-    expect(r.minutosDobles).toBe(540)
-    expect(r.minutosTriples).toBe(180)
-  })
-
-  it('debajo del tope todo es doble', () => {
-    const r = repartirDobleYTriple(150)
-    expect(r.minutosDobles).toBe(150)
-    expect(r.minutosTriples).toBe(0)
-  })
-
-  it('cero es cero', () => {
-    expect(repartirDobleYTriple(0)).toEqual({ minutosDobles: 0, minutosTriples: 0 })
-  })
-
-  it('un total negativo no inventa dinero', () => {
-    expect(repartirDobleYTriple(-30)).toEqual({ minutosDobles: 0, minutosTriples: 0 })
-  })
-})
-
-describe('los topes del art. 66 son constantes de la LEY, no configurables', () => {
-  it('3 horas al día', () => {
-    expect(TOPE_DIARIO_MINUTOS).toBe(180)
-  })
-
-  it('9 horas a la semana', () => {
-    expect(TOPE_SEMANAL_MINUTOS).toBe(540)
   })
 })

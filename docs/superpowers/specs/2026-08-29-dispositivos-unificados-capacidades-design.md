@@ -1,7 +1,7 @@
 # Dispositivos unificados: una identidad, capacidades reales y acciones honestas
 
-**Fecha:** 2026-08-29 · **Estado:** diseño y plan escritos; inversión remota ratificada por producto; auditoría Claude Opus 5 Max
-incorporada
+**Fecha:** 2026-08-29 · **Estado:** implementación aditiva completa en working tree y revisada; sin deploy, migración aplicada ni cutoff
+legado; QA físico y ventana real de siete días pendientes
 
 **Repos y superficies involucradas:**
 
@@ -13,6 +13,21 @@ incorporada
 | `tpv`          | `avoqado-tpv/`           | Sin cambio inicial; el server deriva sus comandos existentes por el tipo de app                |
 | `ios`          | `avoqado-ios/`           | Sin cambio inicial; conserva el auto-registro y no anuncia capacidades que aún no implementa   |
 | `customer MCP` | `server/src/mcp/`        | `list_devices` expone el mismo contrato efectivo que el dashboard                              |
+
+### Estado de implementación al 2026-08-31
+
+- Server: matriz de capacidades, persistencia aditiva, auto-registro POS sin activación, intención/ACK durable, expiry, proyecciones y
+  guardas de comandos/MCP implementados y revisados. La migración existe pero no se aplicó; no hubo deploy ni smoke contra API desplegada.
+- Android: reporte de hechos de display, journal, polling/aplicación/ACK y protección de override local implementados y revisados. Unit
+  regression y `assembleDebug` pasaron; instalación de APK y matriz D3/T3 Pro/teléfono/offline siguen pendientes.
+- Dashboard: `/devices` canónico con aliases `/tpv`, copy Dispositivos, intención durable y acciones filtradas por capacidad + permiso
+  implementados y revisados. Lint/typecheck y pruebas propias pasan; no hubo deploy ni QA manual con fixtures reales.
+- TPV/iOS: no recibieron cambios de producto. iOS compiló en simulador; la regresión TPV no alcanzó sus asserts por un fallo ajeno al
+  configurar `:commonlib` en un checkout que se movía concurrentemente.
+- Phase D: la instrumentación y el reporte read-only reproducible ya existen. El gate de siete días, el 422 del PUT legado y cualquier
+  retiro de compatibilidad permanecen expresamente pendientes.
+
+Por lo anterior, este documento no declara el rollout como **Implemented** ni listo para producción.
 
 Rutas sin alias en este documento son relativas a `server/`.
 

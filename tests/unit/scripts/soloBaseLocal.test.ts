@@ -5,7 +5,7 @@
  * dejar pasar producción cuesta autorizaciones de nómina y cuadrantes de empleados. Por eso
  * todas las pruebas de abajo empujan hacia el MISMO lado: ante la duda, corta.
  */
-import { esBaseLocal } from '../../../scripts/_solo-base-local'
+import { esBaseLocal, esClusterAutorizado } from '../../../scripts/_solo-base-local'
 
 describe('esBaseLocal', () => {
   describe('deja pasar lo local', () => {
@@ -93,12 +93,59 @@ describe('🔴 los scripts que escriben lo USAN — prueba estática', () => {
   const path = require('path')
   const DIR = path.join(__dirname, '../../../scripts')
 
-  it.each([
-    'probar-horas-extra.ts',
-    'probar-autorizar-extra.ts',
-    'sembrar-extra-para-qa.ts',
-  ])('%s llama a exigirBaseLocal', archivo => {
+  it.each(['probar-horas-extra.ts', 'probar-autorizar-extra.ts', 'sembrar-extra-para-qa.ts'])('%s llama a exigirBaseLocal', archivo => {
     const fuente = fs.readFileSync(path.join(DIR, archivo), 'utf8')
     expect(fuente).toContain('exigirBaseLocal')
+  })
+})
+
+/**
+ * 🔴 La URL no prueba dónde termina el socket (3ª auditoría de Codex, 31-ago-2026, P1 #4).
+ * `ssh -L 5432:produccion:5432` deja producción respondiendo en `localhost:5432`, y si la base
+ * se llama como una de desarrollo la URL pasa entera. Por eso se le pregunta al SERVIDOR.
+ */
+describe('esClusterAutorizado · lo único que un túnel no puede falsificar', () => {
+  const conId = (id: string) => ({
+    $queryRawUnsafe: jest.fn().mockResolvedValue([{ id, base: 'av-db-25' }]),
+  })
+  const original = process.env.AVQ_LOCAL_DB_ID
+  afterEach(() => {
+    if (original === undefined) delete process.env.AVQ_LOCAL_DB_ID
+    else process.env.AVQ_LOCAL_DB_ID = original
+  })
+
+  /**
+   * 🔴 Mi primer intento miraba `inet_server_addr()` y NO servía: con
+   * `ssh -L 5432:localhost:5432 produccion`, OpenSSH abre la conexión desde la máquina remota,
+   * así que el Postgres de producción la acepta sobre SU PROPIO loopback y contesta
+   * `127.0.0.1`. La prueba de entonces modelaba el túnel como si reportara `10.x` — un caso que
+   * casi nunca ocurre — y por eso pasaba (4ª auditoría de Codex, 31-ago-2026, P1 #3).
+   */
+  it('🔴 el clúster de producción alcanzado por túnel NO está autorizado', () => {
+    process.env.AVQ_LOCAL_DB_ID = '7142610626013088922'
+    return expect(esClusterAutorizado(conId('9988776655443322110') as any)).resolves.toMatchObject({ ok: false })
+  })
+
+  it('el clúster autorizado pasa', async () => {
+    process.env.AVQ_LOCAL_DB_ID = '7142610626013088922'
+    expect((await esClusterAutorizado(conId('7142610626013088922') as any)).ok).toBe(true)
+  })
+
+  it('🔴 sin autorizar NADA corta, y dice el identificador para poder autorizarlo a mano', async () => {
+    delete process.env.AVQ_LOCAL_DB_ID
+    const r = await esClusterAutorizado(conId('7142610626013088922') as any)
+    expect(r.ok).toBe(false)
+    expect(r.motivo).toContain('7142610626013088922')
+  })
+
+  it('acepta varios separados por coma, para quien tiene más de una base local', async () => {
+    process.env.AVQ_LOCAL_DB_ID = '111, 7142610626013088922 ,222'
+    expect((await esClusterAutorizado(conId('7142610626013088922') as any)).ok).toBe(true)
+  })
+
+  it('si no se puede preguntar, CORTA', async () => {
+    process.env.AVQ_LOCAL_DB_ID = '111'
+    const roto = { $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('sin conexión')) }
+    expect((await esClusterAutorizado(roto as any)).ok).toBe(false)
   })
 })

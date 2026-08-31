@@ -109,7 +109,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'attendance_payroll_summary',
-    "Fase 3 del checador — payroll bridge for ONE venue: per-person period numbers a payroll needs (scheduled/worked days, late days + minutes, absences BY TYPE — vacation, paid/unpaid leave, sick leave, justified — and worked hours). ALSO returns OVERTIME per Mexican labour law (LFT art. 66-68). Overtime is AUTHORIZED, not automatic: overtimeMinutes is what the clock MEASURED, and it splits into overtimeApprovedMinutes (someone signed off), overtimePendingMinutes (nobody has reviewed it yet — chase these, unpaid hours must never be invisible) and overtimeDeniedMinutes (reviewed and refused). ONLY the approved minutes are paid, so overtimeDoubleMinutes (first 9 h of EACH week, art. 67) and overtimeTripleMinutes (the excess, art. 68) are computed on the APPROVED total, and overtimeWeeks is its week-by-week breakdown. hasOvertimeViolation is computed on what was MEASURED instead, because breaking the art. 66 caps (over 3 h in one day, or overtime on more than 3 days) already happened whether or not it got authorized. overtimeDaysToReview lists days whose clock-out changed AFTER being authorized. Overtime counts ONLY time worked AFTER the scheduled end, minus breaks taken in that window — arriving early is not overtime. A week the requested range does not fully cover is flagged `parcial`: its double/triple split is not final. Returns MINUTES, never pesos — the hourly wage lives in the venue's payroll system. Use approve_overtime to authorize. Same permission as the dashboard payroll view.",
+    "Fase 3 del checador — payroll bridge for ONE venue: per-person period numbers a payroll needs (scheduled/worked days, late days + minutes, absences BY TYPE — vacation, paid/unpaid leave, sick leave, justified — and worked hours). ALSO returns OVERTIME. Overtime is AUTHORIZED, not automatic: overtimeMinutes is what the clock MEASURED, and it splits into overtimeApprovedMinutes (someone signed off), overtimePendingMinutes (nobody has reviewed it yet — chase these, unpaid hours must never be invisible) and overtimeDeniedMinutes (reviewed and refused). overtimeWeeks breaks the APPROVED minutes down week by week; a week the requested range does not fully cover is flagged `parcial`, meaning its total can still grow. overtimeDaysToReview lists days whose clock-out changed AFTER being authorized. Overtime counts ONLY time worked AFTER the scheduled end, minus breaks taken in that window — arriving early is not overtime. 🔴 Avoqado does NOT apply Mexican labour law to these numbers: it does not split them into double/triple pay rates and it does not judge whether the art. 66 caps were exceeded. Those limits changed on 1-May-2026 and keep changing yearly until 2030, and getting them wrong would give the owner false comfort about compliance. Report the MINUTES and say plainly that the rate and any legal assessment belong to the venue's payroll system or its accountant. Never state or imply that a week is or is not legally compliant. Use approve_overtime to authorize. Same permission as the dashboard payroll view.",
     {
       venueId: z.string().describe('Venue whose payroll summary to read (must be in your scope)'),
       startDate: z.string().describe('Period start, YYYY-MM-DD (venue-local)'),
@@ -126,7 +126,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'approve_overtime',
-    'Authorize the overtime worked by ONE person on ONE day, so it can be paid. Mexican labour law (LFT art. 66-68) — the founder decided overtime is NOT paid just because the clock measured it: someone authorizes it, and only the authorized minutes enter the double/triple split. You may authorize LESS than measured (partial: "she stayed 2 h, I approve 1 h") but NEVER more — the server recomputes what the clock actually measured and rejects anything above it. Authorizing 0 means reviewed and DENIED, which is different from not reviewed (no record) — unreviewed overtime shows up as PENDING in attendance_payroll_summary so unpaid hours can never be invisible. Re-authorizing the same day CORRECTS the previous decision, it does not add to it. Two-step: the first call returns a preview, and only a second call with confirm:true writes.',
+    'Authorize the overtime worked by ONE person on ONE day, so it can be paid. The founder decided overtime is NOT paid just because the clock measured it: someone authorizes it, and only the authorized minutes count as payable. You may authorize LESS than measured (partial: "she stayed 2 h, I approve 1 h") but NEVER more — the server recomputes what the clock actually measured and rejects anything above it. Authorizing 0 means reviewed and DENIED, which is different from not reviewed (no record) — unreviewed overtime shows up as PENDING in attendance_payroll_summary so unpaid hours can never be invisible. Re-authorizing the same day CORRECTS the previous decision, it does not add to it. Two-step: the first call returns a preview WITH an expectedSourceFingerprint, and the second call must send that value back together with confirm:true — that is what guarantees you are signing the workday you actually reviewed and not whatever the punches say by then.',
     {
       venueId: z.string().describe('Venue where the person works (must be in your scope)'),
       staffVenueId: z.string().describe('Membership id of the person (staffVenueId from attendance_payroll_summary), NOT the staffId'),
@@ -139,9 +139,15 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         .describe(
           'REQUIRED to change a day that is already authorized: the updatedAt you saw (from attendance_payroll_summary). Without it the change is refused, so two people cannot silently overwrite each other',
         ),
+      expectedSourceFingerprint: z
+        .string()
+        .optional()
+        .describe(
+          'REQUIRED to write: the `expectedSourceFingerprint` the PREVIEW returned. It identifies the exact workday you reviewed (punches, breaks, schedule, timezone). If the punches changed since the preview, the write is refused instead of signing hours nobody looked at — run the preview again and use the new value.',
+        ),
       confirm: z.boolean().optional().describe('Set true to actually write; without it you get a preview'),
     },
-    async ({ venueId, staffVenueId, date, minutesApproved, note, confirm, expectedUpdatedAt }) => {
+    async ({ venueId, staffVenueId, date, minutesApproved, note, confirm, expectedUpdatedAt, expectedSourceFingerprint }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       // Firmar lo que se paga NO es leer un reporte: `:manage`, que los roles de piso no tienen.
       guard.requirePermission('attendance:manage', venueId)
@@ -156,10 +162,19 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       // Confirmación de dos pasos: esto decide cuánto se le paga a una persona, y lo dispara un
       // modelo interpretando una petición vaga. La vista previa enseña el ANTES y el DESPUÉS.
       if (!confirm) {
-        const { buildAttendanceGrid } = await import('../../services/dashboard/attendance.dashboard.service')
-        const { cells } = await buildAttendanceGrid(venueId, date, date)
-        const celda = cells.find(c => c.staffVenueId === staffVenueId && c.date === date)
+        // 🔴 `getAttendanceReport`, NO `buildAttendanceGrid`: la rejilla cruda nace siempre con
+        // `overtimeApprovedUpdatedAt` en null —lo rellena el reporte al cruzar con las
+        // autorizaciones guardadas—, así que la vista previa devolvía null y CUALQUIER
+        // corrección por MCP recibía conflicto para siempre (4ª auditoría de Codex,
+        // 31-ago-2026, P1 #4). La primera autorización funcionaba; cambiarla, nunca.
+        const { getAttendanceReport } = await import('../../services/dashboard/attendance.dashboard.service')
+        const { rows } = await getAttendanceReport(venueId, date, date)
+        const celda = rows.find(c => c.staffVenueId === staffVenueId && c.date === date)
         if (!celda) return text({ ok: false, error: 'No encontré a esa persona ese día en este negocio.' })
+        // 🔴 La vista previa DEVUELVE la huella de la jornada que acaba de enseñar, y la
+        // confirmación tiene que devolvérnosla. Sin este ida y vuelta, entre la previa y el
+        // confirm alguien puede cambiar las checadas y el segundo paso firmaría una jornada
+        // que nadie miró (3ª auditoría de Codex, 31-ago-2026, P1 #2).
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -169,10 +184,13 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
             minutosMedidos: celda.overtimeMinutes,
             minutosAAutorizar: minutesApproved,
           },
+          expectedSourceFingerprint: celda.overtimeFingerprint,
+          expectedUpdatedAt: celda.overtimeApprovedUpdatedAt,
           message:
             `Vas a autorizar ${minutesApproved} de los ${celda.overtimeMinutes} minutos extra que ` +
-            `${celda.name} trabajó el ${date}. Eso es lo que entrará al pago doble/triple. ` +
-            `Confirma con confirm:true.`,
+            `${celda.name} trabajó el ${date}. Eso es lo que saldrá hacia la nómina. ` +
+            `Confirma con confirm:true y devuelve el expectedSourceFingerprint de esta respuesta ` +
+            `(y el expectedUpdatedAt si el día ya estaba autorizado).`,
         })
       }
 
@@ -184,6 +202,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         approvedById: scope.staffId,
         note,
         expectedUpdatedAt,
+        expectedSourceFingerprint,
         source: 'customer-mcp',
       })
       return text({ ok: true, ...r })

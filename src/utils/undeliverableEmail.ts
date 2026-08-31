@@ -33,6 +33,12 @@
  *                     repeated as its own domain — `admin@admin.com`,
  *                     `waiter2@waiter2.com`. These belong to third parties, so
  *                     beyond bouncing they leak venue data to strangers.
+ *   NON_ASCII         Any non-ASCII character in the address. Resend rejects the
+ *                     whole send with 422 `validation_error` ("The email address
+ *                     contains non-ASCII characters"), so it is provably
+ *                     undeliverable — and in Mexico it is easy to produce by
+ *                     accident: derive a login from "Lucía" or "Ríos" and the
+ *                     accent lands in the address.
  *   MALFORMED         Not a syntactically usable address at all.
  *
  * WHAT IT DELIBERATELY DOES NOT BLOCK
@@ -46,7 +52,7 @@
 
 import logger from '../config/logger'
 
-export type UndeliverableReason = 'RESERVED_TLD' | 'RESERVED_DOMAIN' | 'PLACEHOLDER_DOMAIN' | 'SEED_ACCOUNT' | 'MALFORMED'
+export type UndeliverableReason = 'RESERVED_TLD' | 'RESERVED_DOMAIN' | 'PLACEHOLDER_DOMAIN' | 'SEED_ACCOUNT' | 'NON_ASCII' | 'MALFORMED'
 
 /** Special-use TLDs that can never resolve on the public internet. */
 const RESERVED_TLDS = new Set(['test', 'invalid', 'example', 'localhost', 'local'])
@@ -120,6 +126,16 @@ export function classifyUndeliverable(email: string): UndeliverableReason | null
   if (labels[0] === localPart && ROLE_NAMES.has(localPart.replace(/\d+$/, ''))) {
     return 'SEED_ACCOUNT'
   }
+
+  // 🔴 Resend rechaza el envío COMPLETO con 422 («Invalid `to` field … non-ASCII») y su
+  // mensaje no dice a QUIÉN no le llegó. Encontrado el 2026-08-31 capturando la guía de
+  // asistencia: el aviso de retardo fallaba en silencio.
+  //
+  // Va AL FINAL a propósito: un placeholder que Avoqado mismo acuña a partir de un nombre
+  // con ñ (`tpv-doña-simona-…@internal.avoqado.io`) también es no-ASCII, pero el motivo
+  // ÚTIL para quien lee el log es que es un placeholder. Lo específico gana.
+  // eslint-disable-next-line no-control-regex
+  if (/[^\x00-\x7F]/.test(address)) return 'NON_ASCII'
 
   return null
 }

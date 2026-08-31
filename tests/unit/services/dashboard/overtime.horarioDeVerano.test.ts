@@ -105,9 +105,7 @@ describe('regresión: una noche normal no cambia', () => {
     expect(
       minutosExtraDelDia({
         turno: { date: '2026-08-24', expectedStart: '09:00', expectedEnd: '17:00' },
-        intervalos: [
-          { entrada: new Date('2026-08-24T16:00:00.000Z'), salida: new Date('2026-08-25T02:00:00.000Z') },
-        ],
+        intervalos: [{ entrada: new Date('2026-08-24T16:00:00.000Z'), salida: new Date('2026-08-25T02:00:00.000Z') }],
         descansos: [],
         timezone: TIJUANA,
       }),

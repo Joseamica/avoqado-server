@@ -25,6 +25,7 @@ import { AngelPayAccountStatus, type AngelPayUserAccount } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import logger from '../../config/logger'
+import { decryptCredentials } from './merchantAccount.service'
 
 const PIN_REGEX = /^\d{6}$/
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -398,6 +399,37 @@ export async function getAngelPayUserAccountForMerchantAccount(merchantAccountId
  * exists before issuing the update (so we can return 404 instead of a generic
  * Prisma error).
  */
+/**
+ * Lee el PIN de una cuenta AngelPay. **Es la ÚNICA vía por la que el PIN sale
+ * del backend**: todas las respuestas normales lo borran (`sanitize()` en el
+ * controller), a propósito, para que no viaje en listados ni en el detalle de
+ * un merchant. Aquí se pide explícitamente, y el controller lo registra.
+ *
+ * `pin` en claro es la fuente de verdad; se cae al `pinEncrypted` legacy para
+ * las filas anteriores al cambio a texto plano — mismo patrón que el TPV en
+ * `terminal.tpv.controller.ts`. `null` = la cuenta todavía no tiene PIN
+ * (status PENDING_PIN), que NO es un error.
+ */
+export async function getAngelPayUserAccountPin(id: string): Promise<string | null> {
+  const account = await prisma.angelPayUserAccount.findUnique({
+    where: { id },
+    select: { pin: true, pinEncrypted: true },
+  })
+  if (!account) {
+    throw new NotFoundError('AngelPay account not found')
+  }
+  if (account.pin) return account.pin
+  if (!account.pinEncrypted) return null
+  try {
+    return decryptCredentials(account.pinEncrypted) as string
+  } catch (error) {
+    // Un PIN legacy ilegible no puede pasar por "esta cuenta no tiene PIN":
+    // eso mandaría al operador a teclear uno nuevo y a romper la sesión viva.
+    logger.error('Failed to decrypt legacy AngelPay PIN', { accountId: id, error })
+    throw new BadRequestError('El PIN guardado de esta cuenta no se pudo leer (formato antiguo ilegible)')
+  }
+}
+
 export async function getAngelPayUserAccountById(id: string): Promise<AngelPayUserAccount | null> {
   return prisma.angelPayUserAccount.findUnique({
     where: { id },

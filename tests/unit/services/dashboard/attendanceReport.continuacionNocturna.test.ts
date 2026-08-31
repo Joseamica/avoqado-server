@@ -140,3 +140,106 @@ describe('la continuación de la MADRUGADA cuenta para el turno nocturno de ayer
     expect((await celdaDelMiercoles()).overtimeMinutes).toBe(60)
   })
 })
+
+/**
+ * 🔴 P1 #3 de la 3ª auditoría de Codex: el tope «empieza antes del fin del turno» NO alcanza
+ * para decidir pertenencia. Si el día SIGUIENTE tiene su propio turno de madrugada, el
+ * nocturno de ayer se comía su jornada entera.
+ *
+ * Reproducido antes de arreglarlo: el lunes reclamaba 420 minutos de extra que eran del martes,
+ * y el martes se quedaba sin checada — o sea, como falta.
+ */
+describe('el nocturno NO le roba el turno al día siguiente', () => {
+  const madrugada = { enabled: true, ranges: [{ open: '05:00', close: '13:00' }] }
+
+  /** Lunes nocturno 22:00–06:00; martes con turno propio 05:00–13:00. */
+  function conMartesQueMadruga() {
+    db.staffVenue.findMany.mockResolvedValue([
+      {
+        ...membership,
+        workSchedule: {
+          weekly: { ...semanaNocturna, thursday: madrugada },
+        },
+      },
+    ])
+    db.timeEntry.findMany.mockResolvedValue([
+      checada(mx(DIA, '22'), mx(SIGUIENTE, '02')),
+      checada(mx(SIGUIENTE, '05'), mx(SIGUIENTE, '13')),
+    ])
+  }
+
+  it('🔴 el miércoles no reclama las horas del jueves', async () => {
+    conMartesQueMadruga()
+    expect((await celdaDelMiercoles()).overtimeMinutes).toBe(0)
+  })
+
+  it('🔴 y el jueves conserva su propia checada', async () => {
+    conMartesQueMadruga()
+    const { cells } = await buildAttendanceGrid(V, DIA, SIGUIENTE)
+    const jueves = cells.find(c => c.date === SIGUIENTE)!
+    expect(jueves.clockInTime).toEqual(mx(SIGUIENTE, '05'))
+  })
+
+  it('regresión: si el día siguiente NO trabaja, la continuación sí se recoge', async () => {
+    // Es el caso que el arreglo anterior resolvió y que no se puede perder.
+    db.timeEntry.findMany.mockResolvedValue([
+      checada(mx(DIA, '22'), mx(SIGUIENTE, '02')),
+      checada(mx(SIGUIENTE, '02', '30'), mx(SIGUIENTE, '07', '30')),
+    ])
+    expect((await celdaDelMiercoles()).overtimeMinutes).toBe(90)
+  })
+})
+
+/**
+ * 🔴 P1 #1 de la 4ª auditoría de Codex: la atribución NO puede depender del rango consultado.
+ *
+ * El arreglo anterior preguntaba por el turno del día siguiente, pero la consulta sólo cargaba
+ * cuadrantes y asignaciones hasta `endDate`. Con un turno ROTATIVO publicado el día siguiente,
+ * pedir «sólo el miércoles» no lo traía y el miércoles se comía la jornada del jueves — mientras
+ * que pedir «miércoles a jueves» la clasificaba bien. La misma semana, dos números distintos.
+ */
+describe('la atribución no depende del RANGO que se pida', () => {
+  const rotativoDeMadrugada = [{ date: SIGUIENTE, startTime: '05:00', endTime: '13:00', status: 'PUBLISHED' }]
+
+  function conTurnoRotativoElJueves() {
+    db.venue.findUnique.mockResolvedValue({
+      timezone: 'America/Mexico_City',
+      settings: { attendanceGraceMinutes: 10, rotatingShiftsEnabled: true },
+    })
+    db.staffVenue.findMany.mockResolvedValue([{ ...membership, workShiftAssignments: rotativoDeMadrugada }])
+    db.timeEntry.findMany.mockResolvedValue([
+      checada(mx(DIA, '22'), mx(SIGUIENTE, '02')),
+      checada(mx(SIGUIENTE, '05'), mx(SIGUIENTE, '13')),
+    ])
+  }
+
+  /**
+   * 🔴 Esta prueba mira la FORMA DE LA CONSULTA, no el resultado, y no es por comodidad: el
+   * mock de Prisma devuelve un valor fijo IGNORANDO el `where`, así que una prueba sobre los
+   * minutos pasa igual con la consulta rota. Se comprobó saboteándola — volver la ventana a
+   * `endDate` no hacía fallar nada. Lo único que de verdad guarda el arreglo es exigir que se
+   * consulte un día más.
+   */
+  it('🔴 los cuadrantes se consultan hasta el día SIGUIENTE al rango, no hasta el último', async () => {
+    conTurnoRotativoElJueves()
+    await buildAttendanceGrid(V, DIA, DIA)
+
+    const select = db.staffVenue.findMany.mock.calls[0][0].select
+    expect(select.workScheduleExceptions.where.startDate.lte).toBe(SIGUIENTE)
+    expect(select.workShiftAssignments.where.date.lte).toBe(SIGUIENTE)
+  })
+
+  it('y las CELDAS siguen acotadas al rango pedido — el día extra sólo se consulta', async () => {
+    conTurnoRotativoElJueves()
+    const { cells } = await buildAttendanceGrid(V, DIA, DIA)
+    expect(cells.every(c => c.date === DIA)).toBe(true)
+  })
+
+  it('el resultado es el mismo se pida el rango que se pida', async () => {
+    conTurnoRotativoElJueves()
+    const solo = await buildAttendanceGrid(V, DIA, DIA)
+    conTurnoRotativoElJueves()
+    const ambos = await buildAttendanceGrid(V, DIA, SIGUIENTE)
+    expect(solo.cells.find(c => c.date === DIA)!.overtimeMinutes).toBe(ambos.cells.find(c => c.date === DIA)!.overtimeMinutes)
+  })
+})

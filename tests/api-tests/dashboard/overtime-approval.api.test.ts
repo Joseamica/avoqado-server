@@ -257,8 +257,6 @@ describe('GET payroll-summary — la respuesta trae los campos de horas extra', 
       overtimeMinutes: 120,
       overtimeApprovedMinutes: 0,
       overtimePendingMinutes: 120,
-      overtimeDoubleMinutes: 0,
-      overtimeTripleMinutes: 0,
     })
     expect(Array.isArray(fila.overtimeWeeks)).toBe(true)
     expect(Array.isArray(fila.overtimeDaysToReview)).toBe(true)
@@ -281,7 +279,9 @@ describe('GET payroll-summary — la respuesta trae los campos de horas extra', 
       timezone: 'America/Mexico_City',
       workedTotalsByStaff: new Map(),
     })
-    const res = await request(app).get(RESUMEN).set('Authorization', `Bearer ${makeToken('CASHIER')}`)
+    const res = await request(app)
+      .get(RESUMEN)
+      .set('Authorization', `Bearer ${makeToken('CASHIER')}`)
     expect(res.status).toBe(200)
   })
 

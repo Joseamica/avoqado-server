@@ -80,13 +80,11 @@ describe('getPayrollSummary — horas extra medidas', () => {
     expect(rows[0].overtimeMinutes).toBe(90)
   })
 
-  it('🔴 sin autorizar NO se reparte en doble ni triple — queda PENDIENTE', async () => {
+  it('🔴 sin autorizar, todo queda PENDIENTE y no entra a ninguna semana pagable', async () => {
     conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 120 })])
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
     expect(rows[0].overtimePendingMinutes).toBe(120)
     expect(rows[0].overtimeApprovedMinutes).toBe(0)
-    expect(rows[0].overtimeDoubleMinutes).toBe(0)
-    expect(rows[0].overtimeTripleMinutes).toBe(0)
   })
 
   it('🔴 …pero lo medido sigue visible: no pagar no puede ser invisible', async () => {
@@ -96,118 +94,26 @@ describe('getPayrollSummary — horas extra medidas', () => {
   })
 })
 
-describe('getPayrollSummary — reparto sobre lo AUTORIZADO', () => {
-  it('una semana de 12 h autorizadas da 9 dobles y 3 triples', async () => {
-    const dias = ['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27']
-    conCeldas(
-      dias.map(d => celda({ date: d, overtimeMinutes: 180 })),
-      dias.map(d => autorizacion(d, 180)),
-    )
-    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    expect(rows[0].overtimeApprovedMinutes).toBe(720)
-    expect(rows[0].overtimeDoubleMinutes).toBe(540)
-    expect(rows[0].overtimeTripleMinutes).toBe(180)
-  })
-
-  it('🔴 autorizar de MENOS puede sacar las horas del triple', async () => {
-    // Se midieron 12 h pero sólo se autorizaron 6: nada llega al umbral de las 9.
-    const dias = ['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27']
-    conCeldas(
-      dias.map(d => celda({ date: d, overtimeMinutes: 180 })),
-      dias.map(d => autorizacion(d, 90, 180)),
-    )
-    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    expect(rows[0].overtimeApprovedMinutes).toBe(360)
-    expect(rows[0].overtimeDoubleMinutes).toBe(360)
-    expect(rows[0].overtimeTripleMinutes).toBe(0)
-    expect(rows[0].overtimeDeniedMinutes).toBe(360)
-  })
-
-  it('🔴 dos semanas NO se mezclan: cada una tiene su propio umbral de 9 h', async () => {
-    conCeldas(
-      [celda({ date: '2026-08-30', overtimeMinutes: 480 }), celda({ date: '2026-08-31', overtimeMinutes: 480 })],
-      [autorizacion('2026-08-30', 480), autorizacion('2026-08-31', 480)],
-    )
-    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-09-06')
-    expect(rows[0].overtimeApprovedMinutes).toBe(960)
-    expect(rows[0].overtimeTripleMinutes).toBe(0)
-  })
-
-  it('un día NEGADO (autorizado en cero) no entra al reparto ni queda pendiente', async () => {
-    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 120 })], [autorizacion('2026-08-24', 0, 120)])
-    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    expect(rows[0].overtimeApprovedMinutes).toBe(0)
-    expect(rows[0].overtimeDeniedMinutes).toBe(120)
-    expect(rows[0].overtimePendingMinutes).toBe(0)
-  })
-
-  it('cada persona lleva su propio acumulado semanal', async () => {
-    conCeldas(
-      [
-        celda({ date: '2026-08-24', overtimeMinutes: 600 }),
-        celda({ staffId: 's2', staffVenueId: 'sv2', name: 'Beto Ruiz', date: '2026-08-24', overtimeMinutes: 60 }),
-      ],
-      [autorizacion('2026-08-24', 600), autorizacion('2026-08-24', 60, 60, 'sv2')],
-    )
-    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    const ana = rows.find(r => r.staffVenueId === 'sv1')!
-    const beto = rows.find(r => r.staffVenueId === 'sv2')!
-    // Si se mezclaran, Beto heredaría triples que no hizo.
-    expect(ana.overtimeTripleMinutes).toBe(60)
-    expect(beto.overtimeTripleMinutes).toBe(0)
-  })
-})
-
 describe('la checada cambió después de autorizar', () => {
   it('🔴 editar la salida INVALIDA la firma entera: nada se hereda y nada se paga', async () => {
     // Firmaron 120 sobre 120 medidos; después alguien editó la salida y hoy son 240. Quien
     // firmó no vio ESTA jornada, así que su decisión no vale ni para los 120 originales.
-    conCeldas(
-      [celda({ date: '2026-08-24', overtimeMinutes: 240 })],
-      [autorizacionSobreJornadaVieja('2026-08-24', 120, 120)],
-    )
+    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 240 })], [autorizacionSobreJornadaVieja('2026-08-24', 120, 120)])
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
     expect(rows[0].overtimeApprovedMinutes).toBe(0)
     expect(rows[0].overtimePendingMinutes).toBe(240)
     expect(rows[0].overtimeDaysToReview).toEqual(['2026-08-24'])
     // 🔴 Y lo que de verdad cuesta dinero: no puede pagarse lo que se declara no autorizado.
-    expect(rows[0].overtimeDoubleMinutes).toBe(0)
-    expect(rows[0].overtimeTripleMinutes).toBe(0)
   })
 
   it('si ahora se mide MENOS, tampoco se paga: la jornada cambió y se vuelve a revisar', async () => {
     // Firmaron 240; luego la salida se corrigió a 60. Ni 240 (sería pagar aire) ni 60 (nadie
     // firmó esa hora): 60 pendientes, cero pagados.
-    conCeldas(
-      [celda({ date: '2026-08-24', overtimeMinutes: 60 })],
-      [autorizacionSobreJornadaVieja('2026-08-24', 240, 240)],
-    )
+    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 60 })], [autorizacionSobreJornadaVieja('2026-08-24', 240, 240)])
     const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
     expect(rows[0].overtimeApprovedMinutes).toBe(0)
     expect(rows[0].overtimePendingMinutes).toBe(60)
-    expect(rows[0].overtimeDoubleMinutes).toBe(0)
     expect(rows[0].overtimeDaysToReview).toEqual(['2026-08-24'])
-  })
-})
-
-describe('infracciones del art. 66 — sobre lo MEDIDO, no sobre lo autorizado', () => {
-  it('🔴 trabajar 4 h en un día es infracción aunque sólo se autorice una', async () => {
-    // No autorizar no deshace lo que ya pasó: la ley se rompió al trabajarlas.
-    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 240 })], [autorizacion('2026-08-24', 60, 240)])
-    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    expect(rows[0].hasOvertimeViolation).toBe(true)
-  })
-
-  it('señala hacer extra más de 3 veces en la semana, sin autorizaciones de por medio', async () => {
-    conCeldas(['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27'].map(d => celda({ date: d, overtimeMinutes: 30 })))
-    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    expect(rows[0].hasOvertimeViolation).toBe(true)
-  })
-
-  it('una semana dentro de la ley no se marca', async () => {
-    conCeldas([celda({ date: '2026-08-24', overtimeMinutes: 120 }), celda({ date: '2026-08-25', overtimeMinutes: 120 })])
-    const { rows } = await getPayrollSummary('v1', '2026-08-24', '2026-08-30')
-    expect(rows[0].hasOvertimeViolation).toBe(false)
   })
 })
 

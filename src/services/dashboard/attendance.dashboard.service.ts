@@ -225,6 +225,16 @@ export async function buildAttendanceGrid(
   const rangeStart = start.startOf('day').toJSDate()
   const rangeEnd = end.endOf('day').toJSDate()
 
+  /**
+   * 🔴 Un día MÁS que el rango pedido, sólo para CONSULTAR — nunca para producir celdas.
+   *
+   * La atribución de un turno nocturno necesita saber qué le tocaba al día siguiente, y si ese
+   * día caía fuera del rango la consulta no lo traía: la misma semana daba números distintos
+   * según el rango. Domingo→domingo inventaba 420 minutos de extra que domingo→lunes
+   * clasificaba correctamente (4ª auditoría de Codex, 31-ago-2026, P1 #1).
+   */
+  const diaSiguienteAlRango = end.plus({ days: 1 }).toISODate()!
+
   // Quien estuvo en el equipo en ALGÚN momento del rango, aunque hoy ya no esté: dar de baja
   // pone `active=false, endDate=hoy`, y su historia no debe desaparecer del reporte de la
   // quincena. Y quien entró el día 20 no puede tener faltas del 1 al 19 (Codex P2-4).
@@ -241,8 +251,15 @@ export async function buildAttendanceGrid(
       endDate: true,
       staff: { select: { firstName: true, lastName: true } },
       workSchedule: { select: { weekly: true } },
+      // 🔴 Hasta `endDate + 1`, NO hasta `endDate`. La atribución de un turno nocturno
+      // necesita saber qué le tocaba al día SIGUIENTE para no robarle su jornada, y si ese
+      // día cae fuera del rango la consulta no lo traía: la misma semana daba resultados
+      // distintos según el rango que pidieras — domingo→domingo inventaba 420 minutos que
+      // domingo→lunes clasificaba bien (4ª auditoría de Codex, 31-ago-2026, P1 #1).
+      //
+      // Las CELDAS siguen acotadas al rango original; esto sólo amplía lo que se consulta.
       workScheduleExceptions: {
-        where: { startDate: { lte: endDate }, endDate: { gte: startDate } },
+        where: { startDate: { lte: diaSiguienteAlRango }, endDate: { gte: startDate } },
         // Orden fijo: el desempate final vive en `resolveExpectedDay`, pero la entrada no debe
         // depender del plan de Postgres (Codex P2-6).
         orderBy: [{ startDate: 'asc' }, { createdAt: 'asc' }],
@@ -251,7 +268,9 @@ export async function buildAttendanceGrid(
       // Turnos rotativos: sólo cuentan las PUBLICADAS, y sólo si el venue los prendió.
       workShiftAssignments: rotating
         ? {
-            where: { date: { gte: startDate, lte: endDate }, status: 'PUBLISHED' },
+            // Igual que las excepciones: un día más, para poder preguntar por el turno del
+            // día siguiente sin depender de dónde termine el rango consultado.
+            where: { date: { gte: startDate, lte: diaSiguienteAlRango }, status: 'PUBLISHED' },
             select: { date: true, startTime: true, endTime: true, status: true },
           }
         : false,
@@ -349,14 +368,17 @@ export async function buildAttendanceGrid(
 
     for (const date of days) {
       if (date < joinedIso || (leftIso && date > leftIso)) continue
-      const assignment = rotating
-        ? ((
-            (membership as any).workShiftAssignments as
-              | Array<{ date: string; startTime: string; endTime: string; status: string }>
-              | undefined
-          )?.find(a => a.date === date) ?? null)
-        : null
-      const expected = resolveExpectedDay(weekly, exceptions, date, assignment)
+      const turnoDe = (dia: string) => {
+        const asignacion = rotating
+          ? ((
+              (membership as any).workShiftAssignments as
+                | Array<{ date: string; startTime: string; endTime: string; status: string }>
+                | undefined
+            )?.find(a => a.date === dia) ?? null)
+          : null
+        return resolveExpectedDay(weekly, exceptions, dia, asignacion)
+      }
+      const expected = turnoDe(date)
       const picked = pickEntryForDay(membership.staffId, date, expected)
       let actual: {
         clockInTime: Date
@@ -411,10 +433,23 @@ export async function buildAttendanceGrid(
         const overnight = !!expected.start && !!expected.end && expected.end <= expected.start
         if (overnight) {
           const nextDate = DateTime.fromISO(date, { zone: timezone }).plus({ days: 1 }).toISODate()!
+          // 🔴 El día siguiente puede tener SU PROPIO turno de madrugada, y entonces esa checada
+          // es suya, no una continuación de anoche. Sin esto, un nocturno 22:00–06:00 se comía
+          // la jornada completa de un turno 05:00–13:00: reclamaba 7 h de extra que no trabajó
+          // ESE día y dejaba al siguiente en falta (3ª auditoría de Codex, 31-ago-2026, P1 #3).
+          //
+          // El límite es el MISMO que usa `pickEntryForDay` para decidir si una checada de la
+          // tarde abre un nocturno: dos horas antes de la entrada. Reusarlo mantiene una sola
+          // definición de «esta checada pertenece a este turno».
+          const turnoSiguiente = turnoDe(nextDate)
+          const abreElSiguiente = !turnoSiguiente.isDayOff && turnoSiguiente.start ? overnightSameDayThreshold(turnoSiguiente.start) : null
+
           for (const sib of byStaffAndDay.get(`${membership.staffId}|${nextDate}`) ?? []) {
             if (sib === picked || consumed.has(sib)) continue
             if (sib.clockInTime.getTime() <= picked.clockInTime.getTime()) continue
             if (sib.localTime >= expected.end!) continue
+            // Cae dentro de la ventana de entrada del turno de MAÑANA ⇒ es de él.
+            if (abreElSiguiente !== null && sib.localTime >= abreElSiguiente) continue
             tomarContinuacion(sib)
           }
         }
@@ -526,10 +561,10 @@ export async function getAttendanceReport(
         r.overtimeApprovedMinutes = null
         continue
       }
-      // 🔴 Y se decide con la MISMA función que usan el resumen y el reparto doble/triple, no
+      // 🔴 Y se decide con la MISMA función que usan el resumen y el desglose semanal, no
       // con una copia de la regla. Ésta era la TERCERA copia: cuando el reparto se quedó sin
       // la comprobación de huella, una fila llegó a decir «0 autorizados / 120 pendientes» y
-      // pagar 120 al doble a la vez (2ª auditoría de Codex, 30-ago-2026, P1 #1).
+      // mandar 120 al pago a la vez (2ª auditoría de Codex, 30-ago-2026, P1 #1).
       const dia = {
         date: r.date,
         medidos: r.overtimeMinutes,

@@ -223,6 +223,20 @@ interface UpdateMerchantAccountData {
     [key: string]: any
   }
   providerConfig?: any
+  // Blumon-specific columns. Editable post-alta so ops can fix a wrong serial /
+  // posId / environment without a DB console. `null` clears the column,
+  // `undefined` leaves it untouched (same discrimination as the bank fields).
+  blumonSerialNumber?: string | null
+  blumonPosId?: string | null
+  blumonEnvironment?: string | null
+  blumonMerchantId?: string | null
+  // AngelPay display caches (source of truth stays AngelPay's backend).
+  angelpayAffiliation?: string | null
+  angelpayMerchantName?: string | null
+  // Bank account fields
+  clabeNumber?: string | null
+  bankName?: string | null
+  accountHolder?: string | null
   /**
    * Re-bind (or unbind) this merchant from an AngelPayUserAccount.
    * - string    → attach to that login
@@ -416,6 +430,13 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
     where: { id },
     include: {
       provider: true,
+      // Espeja el include de `getMerchantAccounts` (lista): sin esto el DETALLE
+      // omitía la cuenta AngelPay vinculada, así que el editor del merchant no
+      // podía mostrar de qué login (correo) cuelga. Nunca trae el PIN — ése
+      // sólo sale por su endpoint dedicado, que además deja rastro.
+      angelpayUserAccount: {
+        select: { id: true, email: true, status: true, environment: true, venueId: true },
+      },
       costStructures: {
         where: { active: true },
         orderBy: { effectiveFrom: 'desc' },
@@ -744,6 +765,22 @@ export async function updateMerchantAccount(id: string, data: UpdateMerchantAcco
   if (data.displayOrder !== undefined) updateData.displayOrder = data.displayOrder
   if (data.credentials) updateData.credentialsEncrypted = updatedCredentials
   if (data.providerConfig !== undefined) updateData.providerConfig = data.providerConfig
+  // Provider-specific + bank columns: `undefined` = leave alone, `null` = clear.
+  // Listing them explicitly (instead of a spread) keeps an unexpected body key
+  // from ever reaching `prisma.update`.
+  for (const key of [
+    'blumonSerialNumber',
+    'blumonPosId',
+    'blumonEnvironment',
+    'blumonMerchantId',
+    'angelpayAffiliation',
+    'angelpayMerchantName',
+    'clabeNumber',
+    'bankName',
+    'accountHolder',
+  ] as const) {
+    if (data[key] !== undefined) updateData[key] = data[key]
+  }
   // `angelpayUserAccountId` accepts null (detach) — discriminate explicitly
   // so an absent key doesn't accidentally clear the relation. The column has
   // `onDelete: SetNull` in Prisma so null is a valid assignment.
@@ -751,13 +788,24 @@ export async function updateMerchantAccount(id: string, data: UpdateMerchantAcco
     updateData.angelpayUserAccountId = data.angelpayUserAccountId
   }
 
-  const account = await prisma.merchantAccount.update({
-    where: { id },
-    data: updateData,
-    include: {
-      provider: true,
-    },
-  })
+  // Changing `externalMerchantId` can collide with the composite unique
+  // (providerId, externalMerchantId, angelpayUserAccountId). Prisma's P2002
+  // would otherwise surface as an opaque 500; ops needs to read "ya existe".
+  let account
+  try {
+    account = await prisma.merchantAccount.update({
+      where: { id },
+      data: updateData,
+      include: {
+        provider: true,
+      },
+    })
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      throw new ConflictError(`Ya existe una cuenta de este proveedor con el ID de comercio "${data.externalMerchantId}"`)
+    }
+    throw error
+  }
 
   logger.info('Merchant account updated', {
     accountId: id,

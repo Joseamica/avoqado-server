@@ -3,7 +3,7 @@
  *
  * Decisión del founder (29-ago-2026): las horas extra NO se pagan por el solo hecho de que el
  * reloj las midiera. Alguien con `attendance:manage` las autoriza, y sólo lo autorizado entra
- * al reparto doble/triple del art. 67 y 68.
+ * al desglose semanal que se le entrega a la nómina.
  *
  * 🔴 Tres cosas sostienen esto, y cada una tiene su prueba:
  *
@@ -106,6 +106,19 @@ export async function approveOvertime(input: ApproveOvertimeInput): Promise<Over
   // cambio de checada entre que abre el panel y toca «Autorizar» quedaba firmado con la huella
   // NUEVA: la autorización nacía «vigente» sobre unas horas que nadie revisó — justo lo que la
   // huella existía para impedir (2ª auditoría de Codex, 30-ago-2026, P1 #3).
+  // 🔴 La huella es OBLIGATORIA cuando el día tiene una, y se exige AQUÍ y no sólo en Zod:
+  // éste es el único punto que ve la rejilla y sabe si existe. Dejarla opcional convertía el
+  // agujero en comportamiento esperado — el MCP, un script o un curl firmaban sobre la jornada
+  // que hubiera en ese instante (3ª auditoría de Codex, 31-ago-2026, P1 #2).
+  //
+  // El mensaje dice QUÉ hacer: un cliente viejo tiene que volver a consultar, no quedarse sin
+  // la protección en silencio.
+  if (sourceFingerprint && !expectedSourceFingerprint) {
+    throw new ConflictError(
+      'Para autorizar hace falta la huella de la jornada que estás viendo. Vuelve a consultar el reporte y manda `expectedSourceFingerprint` junto con los minutos.',
+    )
+  }
+
   if (expectedSourceFingerprint && expectedSourceFingerprint !== sourceFingerprint) {
     throw new ConflictError(
       'Las checadas de ese día cambiaron mientras lo revisabas. Vuelve a cargar para ver las horas actuales antes de autorizar.',

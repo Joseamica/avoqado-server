@@ -176,3 +176,63 @@ describe('cleanupAllLiveDemos — cascade-tolerant session delete', () => {
     expect(prismaMock.liveDemoSession.deleteMany).toHaveBeenCalledWith({ where: { id: 'lds-1' } })
   })
 })
+
+/**
+ * 🔴 Los productos se borran AL FINAL, después de todo lo que los referencia.
+ *
+ * Siete claves foráneas con RESTRICT / NO ACTION cuelgan de `Product`
+ * (CreditPackItem, CreditItemBalance, PromotionOption, PurchaseOrderItem y las tres de
+ * catálogo), y basta UNA para tumbar la transacción entera. Pasó en vivo: el job falló cada
+ * hora durante días con `CreditPackItem_productId_fkey` y **ninguna demo se limpió** — cada
+ * pasada reportaba «Cleaned 0 sessions» junto a un error que nadie leía.
+ *
+ * Esta prueba fija el ORDEN, no la existencia de las llamadas: quitar cualquiera de los
+ * borradores previos, o moverlo después de los productos, la hace fallar.
+ */
+describe('deleteVenueData — nada que apunte a un producto sobrevive a su borrado', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  /** Los modelos que BLOQUEAN `product.deleteMany` si quedan filas. */
+  const BLOQUEADORES = [
+    'creditTransaction',
+    'creditItemBalance',
+    'creditPackPurchase',
+    'creditPack',
+    'orderPromotion',
+    'promotion',
+    'purchaseOrder',
+    'catalogPublicationFieldDecision',
+    'catalogPublicationLine',
+    'catalogVenueOverride',
+    'catalogVenueBinding',
+    'catalogBindingLine',
+  ] as const
+
+  it.each(BLOQUEADORES)('borra %s ANTES que los productos', async modelo => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+
+    await cleanupExpiredLiveDemos()
+
+    const bloqueador = prismaMock[modelo].deleteMany
+    expect(bloqueador).toHaveBeenCalled()
+    // `invocationCallOrder` es un contador global de jest: comparar los dos primeros ticks
+    // demuestra el orden real, no que ambas llamadas existan.
+    expect(bloqueador.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.product.deleteMany.mock.invocationCallOrder[0])
+  })
+
+  it('🔴 el saldo de crédito se busca por las DOS vías: su producto y su paquete', () => {
+    // Alcanzarlo sólo por una deja filas vivas que vuelven a bloquear el borrado.
+    // (Se comprueba sobre el argumento, porque el mock no evalúa el `where`.)
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+
+    return cleanupExpiredLiveDemos().then(() => {
+      const where = prismaMock.creditItemBalance.deleteMany.mock.calls[0][0].where
+      expect(where.OR).toHaveLength(2)
+      expect(JSON.stringify(where.OR)).toContain('venueId')
+    })
+  })
+})

@@ -126,13 +126,13 @@ describe('P1 #5 → superado por la huella · toda edición invalida la firma EN
 
   it('🔴 lo que se PAGA coincide con lo que el resumen dice — no pueden contradecirse', () => {
     // El defecto que introdujo el arreglo anterior: el resumen invalidaba por huella y el
-    // reparto doble/triple no, así que una fila decía «0 autorizados» y pagaba 120 al doble.
+    // desglose semanal no, así que una fila decía «0 autorizados» y mandaba 120 al pago.
     const dias = [
       { date: '2026-08-24', medidos: 120, autorizados: 120, medidosAlAutorizar: 120, huellaActual: 'nueva', huellaAlAutorizar: 'vieja' },
     ]
     const resumen = resumirAutorizacion(dias)
     const semanas = agruparPorSemana(diasAutorizadosParaReparto(dias), { startDate: '2026-08-24', endDate: '2026-08-30' })
-    const pagados = semanas.reduce((t, s) => t + s.minutosDobles + s.minutosTriples, 0)
+    const pagados = semanas.reduce((t, s) => t + s.minutosTotal, 0)
     expect(resumen.minutosAutorizados).toBe(0)
     expect(pagados).toBe(0)
   })
@@ -150,70 +150,5 @@ describe('P1 #5 → superado por la huella · toda edición invalida la firma EN
       expect(r.minutosNegados).toBe(caso.medidos - caso.autorizados)
       expect(r.minutosAutorizados + r.minutosNegados + r.minutosPendientes).toBe(caso.medidos)
     }
-  })
-})
-describe('P1 #2 · un rango a media semana NO reinicia el umbral de 9 h', () => {
-  // 🔴 Antes: pedir sólo el domingo con 8 h ya trabajadas el lunes pagaba las 3 h del domingo
-  // al DOBLE, cuando legalmente 1 h iba al doble y 2 h al TRIPLE. El campo `parcial` avisaba
-  // del riesgo y aun así el dinero salía mal: avisar no es resolver.
-  it('el acumulado previo de la semana empuja al triple', () => {
-    const semanas = agruparPorSemana(
-      [{ date: '2026-08-30', minutos: 180 }], // domingo
-      { startDate: '2026-08-30', endDate: '2026-08-30' },
-      // Lo ya acumulado en esa semana ANTES del rango pedido.
-      { '2026-08-24': 480 },
-    )
-    expect(semanas[0].minutosDobles).toBe(60)
-    expect(semanas[0].minutosTriples).toBe(120)
-  })
-
-  it('sin acumulado previo el reparto no cambia', () => {
-    const semanas = agruparPorSemana([{ date: '2026-08-30', minutos: 180 }], {
-      startDate: '2026-08-24',
-      endDate: '2026-08-30',
-    })
-    expect(semanas[0].minutosDobles).toBe(180)
-    expect(semanas[0].minutosTriples).toBe(0)
-  })
-
-  it('🔴 sólo devuelve lo atribuible al RANGO, no el acumulado ajeno', () => {
-    const semanas = agruparPorSemana(
-      [{ date: '2026-08-30', minutos: 180 }],
-      { startDate: '2026-08-30', endDate: '2026-08-30' },
-      { '2026-08-24': 480 },
-    )
-    // 60 + 120 = 180, los del domingo. Los 480 del lunes NO se re-reportan.
-    expect(semanas[0].minutosDobles + semanas[0].minutosTriples).toBe(180)
-    expect(semanas[0].minutosTotal).toBe(180)
-  })
-
-  it('un acumulado previo que YA pasó las 9 h manda todo al triple', () => {
-    const semanas = agruparPorSemana(
-      [{ date: '2026-08-30', minutos: 60 }],
-      { startDate: '2026-08-30', endDate: '2026-08-30' },
-      { '2026-08-24': 600 },
-    )
-    expect(semanas[0].minutosDobles).toBe(0)
-    expect(semanas[0].minutosTriples).toBe(60)
-  })
-
-  it('el acumulado previo de OTRA semana no contamina', () => {
-    const semanas = agruparPorSemana(
-      [{ date: '2026-08-31', minutos: 180 }], // lunes, semana NUEVA
-      { startDate: '2026-08-31', endDate: '2026-08-31' },
-      { '2026-08-24': 480 }, // acumulado de la semana ANTERIOR
-    )
-    expect(semanas[0].minutosDobles).toBe(180)
-    expect(semanas[0].minutosTriples).toBe(0)
-  })
-
-  it('la infracción del art. 66 también cuenta los días previos', () => {
-    const semanas = agruparPorSemana(
-      [{ date: '2026-08-30', minutos: 30 }],
-      { startDate: '2026-08-30', endDate: '2026-08-30' },
-      { '2026-08-24': 30, '2026-08-25': 30, '2026-08-26': 30 }, // ya 3 días con extra
-    )
-    expect(semanas[0].diasConExtra).toBe(4)
-    expect(semanas[0].excedeDiasPermitidos).toBe(true)
   })
 })

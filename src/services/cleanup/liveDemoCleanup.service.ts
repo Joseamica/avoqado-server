@@ -279,6 +279,43 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<void> {
   await tx.rawMaterial.deleteMany({ where: { venueId } })
   await tx.inventory.deleteMany({ where: { venueId } })
 
+  // 4.5 TODO lo que apunta a un producto y BLOQUEA su borrado.
+  //
+  // 🔴 Siete claves foráneas con RESTRICT / NO ACTION cuelgan de `Product`, y basta UNA para
+  // tumbar la transacción entera — con ella, la limpieza de demos no borraba NADA. El job
+  // llevaba días fallando cada hora con `CreditPackItem_productId_fkey` y las sesiones
+  // caducadas se acumulaban en silencio («Cleaned 0 sessions» en cada pasada).
+  //
+  // 🔑 Se enumeraron las SIETE contra la base antes de tocar nada. Arreglar sólo la que salía
+  // en el error habría movido el fallo a la siguiente, y el job habría seguido sin limpiar.
+  // Donde el schema ya CASCADEA (CreditPack→Item, Promotion→Group→Option, PurchaseOrder→Item)
+  // se borra sólo el padre; lo demás va explícito, de la hoja a la raíz.
+
+  // Créditos. `CreditTransaction` referencia el saldo y la compra, así que abre la fila.
+  await tx.creditTransaction.deleteMany({ where: { venueId } })
+  await tx.creditItemBalance.deleteMany({
+    // Por las DOS vías: el saldo puede alcanzarse por su producto o por su paquete, y usar
+    // una sola dejaría filas que vuelven a bloquear.
+    where: { OR: [{ product: { venueId } }, { creditPackItem: { creditPack: { venueId } } }] },
+  })
+  await tx.creditPackPurchase.deleteMany({ where: { venueId } })
+  await tx.creditPack.deleteMany({ where: { venueId } }) // cascada → CreditPackItem
+
+  // Promociones. Borrar la promoción arrastra sus grupos y opciones por cascada; lo que la
+  // bloquea a ella es `OrderPromotion`, que ya cayó con las órdenes del paso 1.
+  await tx.orderPromotion.deleteMany({ where: { promotion: { venueId } } })
+  await tx.promotion.deleteMany({ where: { venueId } })
+
+  // Órdenes de compra (cascada → PurchaseOrderItem).
+  await tx.purchaseOrder.deleteMany({ where: { venueId } })
+
+  // Catálogo central: de la hoja a la raíz, porque las líneas apuntan al binding.
+  await tx.catalogPublicationFieldDecision.deleteMany({ where: { line: { venueId } } })
+  await tx.catalogPublicationLine.deleteMany({ where: { venueId } })
+  await tx.catalogVenueOverride.deleteMany({ where: { venueId } })
+  await tx.catalogVenueBinding.deleteMany({ where: { venueId } })
+  await tx.catalogBindingLine.deleteMany({ where: { venueId } })
+
   // 5. Products
   await tx.product.deleteMany({ where: { venueId } })
 

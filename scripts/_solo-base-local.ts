@@ -76,6 +76,84 @@ export function esBaseLocal(databaseUrl: string | undefined): ResultadoDelCorte 
 }
 
 /**
+ * Comprueba que el clúster de Postgres sea EXACTAMENTE el que esta máquina reconoce como suyo.
+ *
+ * 🔴 Por qué no vale mirar la red, que fue mi primer intento y NO funcionaba: con
+ * `ssh -L 5432:localhost:5432 produccion`, OpenSSH abre la conexión de destino **desde la
+ * máquina remota**, así que el Postgres de producción la acepta sobre SU PROPIO loopback y
+ * `inet_server_addr()` contesta `127.0.0.1`. La guarda pasaba feliz. Fabriqué una protección
+ * que no protegía, que es peor que no tener ninguna (4ª auditoría de Codex, 31-ago-2026, P1 #3).
+ *
+ * Host, puerto, nombre y dirección son todos propiedades RELATIVAS a la conexión, y quien abre
+ * el túnel las controla. Lo único que no puede falsificar es la identidad del clúster:
+ * `pg_control_system().system_identifier` es un número que Postgres genera en el `initdb` y que
+ * es distinto en cada instalación.
+ *
+ * El desarrollador lo autoriza UNA vez, a mano, en `AVQ_LOCAL_DB_ID` — ese paso humano es lo
+ * que lo vuelve evidencia fuera de banda. Sin la variable no se adivina: se corta y se imprime
+ * el identificador para que pueda copiarlo tras comprobar él mismo dónde está apuntando.
+ */
+export async function esClusterAutorizado(prisma: {
+  $queryRawUnsafe: (sql: string) => Promise<Array<Record<string, unknown>>>
+}): Promise<ResultadoDelCorte> {
+  let filas: Array<Record<string, unknown>>
+  try {
+    filas = await prisma.$queryRawUnsafe('SELECT system_identifier::text AS id, current_database() AS base FROM pg_control_system()')
+  } catch (e) {
+    // Si no se puede preguntar, no se puede afirmar que sea local.
+    return { ok: false, motivo: `No pude identificar el clúster: ${(e as Error).message}` }
+  }
+
+  const id = String(filas?.[0]?.id ?? '')
+  const base = String(filas?.[0]?.base ?? '')
+  if (!id) return { ok: false, motivo: 'El servidor no reportó su identificador de clúster' }
+
+  const autorizados = (process.env.AVQ_LOCAL_DB_ID ?? '')
+    .split(',')
+    .map(x => x.trim())
+    .filter(Boolean)
+
+  if (autorizados.length === 0) {
+    return {
+      ok: false,
+      base,
+      motivo:
+        `No hay ningún clúster autorizado. Comprueba TÚ que esta base sea la local y, si lo es, ` +
+        `exporta AVQ_LOCAL_DB_ID=${id} (el identificador del clúster al que estás conectado ahora). ` +
+        `No se adivina a propósito: un túnel SSH hace que producción se vea idéntica a localhost.`,
+    }
+  }
+
+  if (!autorizados.includes(id)) {
+    return {
+      ok: false,
+      base,
+      motivo: `El clúster ${id} no está en AVQ_LOCAL_DB_ID. Si de verdad es tu base local, añádelo; si no, acabas de evitar un desastre.`,
+    }
+  }
+
+  return { ok: true, base }
+}
+
+/**
+ * El corte COMPLETO: la URL primero (barato, no abre conexión) y después la identidad del
+ * clúster, que es lo único que un túnel no puede falsificar.
+ *
+ * Se llama con `await` desde el `main()` de cada script, ANTES de escribir o borrar nada.
+ */
+export async function exigirBaseLocalDeVerdad(prisma: {
+  $queryRawUnsafe: (sql: string) => Promise<Array<Record<string, unknown>>>
+}): Promise<void> {
+  exigirBaseLocal()
+  const r = await esClusterAutorizado(prisma)
+  if (r.ok) return
+  console.error('\n🔴 ABORTADO: la URL parecía local, pero no puedo probar que la base lo sea.')
+  console.error(`   ${r.motivo}`)
+  console.error('   Host, puerto y nombre los escribe quien abre el túnel; el identificador del clúster, no.\n')
+  process.exit(1)
+}
+
+/**
  * Corta el proceso si la base no es local. Se llama ANTES de sembrar o borrar nada.
  *
  * Sale con código 1 y un mensaje que dice qué pasó, en vez de lanzar: estos son scripts de

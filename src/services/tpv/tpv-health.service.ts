@@ -8,6 +8,7 @@ import { looksLikeAndroidIdFallback } from '../../utils/terminalSerial'
 import { broadcastTpvStatusUpdate, broadcastTpvCommandStatusChanged } from '../../communication/sockets'
 // import { tpvCommandExecutionService } from './command-execution.service'
 import { tpvCommandQueueService } from './command-queue.service'
+import type { BoundTpvCommandTarget } from '../../middlewares/bindTpvCommandTarget.middleware'
 
 /**
  * Map of command types to terminal status changes
@@ -281,30 +282,9 @@ export class TpvHealthService {
    * - Socket connection dropped temporarily
    * - Network is unstable
    */
-  async sendCommand(terminalId: string, command: TpvCommand): Promise<void> {
+  async sendCommand(terminal: BoundTpvCommandTarget, command: TpvCommand): Promise<void> {
+    const terminalId = terminal.id
     try {
-      // Try to find terminal by ID first, then by serialNumber (for Android devices using device serial)
-      // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
-      let terminal = await prisma.terminal.findUnique({
-        where: { id: terminalId },
-      })
-
-      // If not found by ID, try to find by serialNumber (case-insensitive)
-      if (!terminal) {
-        terminal = await prisma.terminal.findFirst({
-          where: {
-            serialNumber: {
-              equals: terminalId,
-              mode: 'insensitive', // Case-insensitive matching
-            },
-          },
-        })
-      }
-
-      if (!terminal) {
-        throw new NotFoundError(`Terminal with ID or serial number ${terminalId} not found`)
-      }
-
       // Map command.type string to TpvCommandType enum
       const commandType = command.type as TpvCommandType
 

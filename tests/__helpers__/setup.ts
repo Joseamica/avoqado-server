@@ -324,6 +324,13 @@ const prismaMock: any = {
   creditPackPurchase: createMockModel(),
   creditItemBalance: createMockModel(),
   creditTransaction: createMockModel(),
+  // Catálogo central. 🔴 Faltaban, y el mock tiene LISTA FIJA: en cuanto la limpieza de demos
+  // empezó a borrarlos, sus pruebas tronaban con «Cannot read properties of undefined».
+  catalogVenueBinding: createMockModel(),
+  catalogBindingLine: createMockModel(),
+  catalogVenueOverride: createMockModel(),
+  catalogPublicationLine: createMockModel(),
+  catalogPublicationFieldDecision: createMockModel(),
   // Money reconciliation (Fase 0.B: fulfillment fail-closed registra anomalías)
   moneyAnomaly: createMockModel(),
   // Stripe webhook idempotency claims (Connect + platform)

@@ -77,6 +77,7 @@ import * as testingController from '../controllers/dashboard/testing.dashboard.c
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import { bindTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
 import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
 import * as terminalOrderController from '../controllers/dashboard/terminalOrder.controller'
@@ -5130,7 +5131,13 @@ router.get('/tpv/:tpvId/merchants', authenticateTokenMiddleware, checkPermission
  *       404:
  *         description: Terminal not found or offline
  */
-router.post('/tpv/:terminalId/command', authenticateTokenMiddleware, checkPermission('tpv:command'), tpvController.sendTpvCommand)
+router.post(
+  '/tpv/:terminalId/command',
+  authenticateTokenMiddleware,
+  bindTpvCommandTarget,
+  checkPermission('tpv:command'),
+  tpvController.sendTpvCommand,
+)
 
 /**
  * @openapi
@@ -5227,8 +5234,9 @@ router.get('/venues/:venueId/tpv/:tpvId/health', authenticateTokenMiddleware, ch
  *         description: Terminal not found or offline
  */
 router.post(
-  '/venues/:venueId/tpv/:tpvId/command',
+  '/venues/:venueId/tpv/:terminalId/command',
   authenticateTokenMiddleware,
+  bindTpvCommandTarget,
   checkPermission('tpv:command'),
   tpvController.sendTpvCommand,
 )

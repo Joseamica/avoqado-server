@@ -13,7 +13,7 @@ import { DateTime } from 'luxon'
 import { getPayrollSummary } from '../src/services/dashboard/attendancePayroll.service'
 import { approveOvertime } from '../src/services/dashboard/overtimeApproval.service'
 import prisma from '../src/utils/prismaClient'
-import { exigirBaseLocal } from './_solo-base-local'
+import { exigirBaseLocal, exigirBaseLocalDeVerdad } from './_solo-base-local'
 
 const VENUE = 'cmpe64yq2001f9k92m0lbhmf4' // Restaurante El Atole, America/Mexico_City
 const STAFF = 'cmpe64zia001y9k92i4aaw1f4' // Ana Martínez
@@ -49,6 +49,10 @@ async function anaDelPeriodo() {
 }
 
 async function main() {
+  // 🔴 La URL no prueba dónde termina el socket: un túnel SSH deja producción en
+  // localhost. Esto le pregunta al SERVIDOR (3ª auditoría de Codex, P1 #4).
+  await exigirBaseLocalDeVerdad(prisma)
+
   // 🔴 Este script BORRA autorizaciones y SOBRESCRIBE cuadrantes. Contra una base que no
   // sea la local, eso destruye datos reales (hallazgo #9 de Codex, 29-ago-2026).
   exigirBaseLocal()
@@ -91,11 +95,10 @@ async function main() {
   comprobar('medidos', ana.overtimeMinutes, 720)
   comprobar('pendientes', ana.overtimePendingMinutes, 720)
   comprobar('autorizados', ana.overtimeApprovedMinutes, 0)
-  comprobar('dobles', ana.overtimeDoubleMinutes, 0)
-  comprobar('triples', ana.overtimeTripleMinutes, 0)
-  comprobar('infracción art. 66 (4 días)', ana.hasOvertimeViolation, true)
+  // Sin autorizar, el desglose semanal viene VACÍO: sólo lo firmado sale hacia la nómina.
+  comprobar('semanas con minutos', ana.overtimeWeeks.length, 0)
 
-  console.log('\n2 · Autorizo los 4 días completos → 9 h dobles + 3 h triples')
+  console.log('\n2 · Autorizo los 4 días completos → 12 h agrupadas en su semana')
   for (const d of DIAS) {
     await approveOvertime({
       venueId: VENUE,
@@ -108,8 +111,14 @@ async function main() {
   ana = await anaDelPeriodo()
   comprobar('autorizados', ana.overtimeApprovedMinutes, 720)
   comprobar('pendientes', ana.overtimePendingMinutes, 0)
-  comprobar('dobles', ana.overtimeDoubleMinutes, 540)
-  comprobar('triples', ana.overtimeTripleMinutes, 180)
+  // 🔴 Ya NO se comprueban dobles ni triples: Avoqado dejó de repartir por tarifa el
+  // 31-ago-2026 (decisión del founder). Lo que se entrega —y lo que hay que cuidar— son los
+  // minutos AUTORIZADOS agrupados por semana; la tarifa la pone el sistema de nómina.
+  comprobar(
+    'minutos de la semana',
+    ana.overtimeWeeks.reduce((t, w) => t + w.minutosTotal, 0),
+    720,
+  )
 
   console.log('\n3 · Corrijo un día a la mitad → el total baja y nada se duplica')
   await approveOvertime({

@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { BadRequestError, IncompatibleDeviceError, NotFoundError, TerminalBrandChangeBlocked } from '../../errors/AppError'
+import { BadRequestError, ConflictError, IncompatibleDeviceError, NotFoundError, TerminalBrandChangeBlocked } from '../../errors/AppError'
 import { generateActivationCode as generateActivationCodeUtil } from './terminal-activation.service'
 import { notifyAffectedTerminals } from '../superadmin/merchantAccount.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
@@ -762,6 +762,12 @@ export async function deleteTerminal(terminalId: string, actor?: TerminalActor) 
 
   if (!terminal) {
     throw new NotFoundError('Terminal not found')
+  }
+
+  const isPosDevice =
+    terminal.selfRegistered || terminal.type === 'POS_ANDROID' || terminal.type === 'POS_IOS' || terminal.type === 'POS_DESKTOP'
+  if (isPosDevice) {
+    throw new ConflictError('Los dispositivos POS auto-registrados deben ser retirados, no eliminados.', 'POS_DEVICE_MUST_BE_RETIRED')
   }
 
   // Prevent deletion of ACTIVE terminals (must be retired first)

@@ -175,9 +175,7 @@ describe('runPosTerminalStatusRemediation — apply implementation', () => {
       count: args.where.venueId === undefined || args.where.venueId === currentVenueId ? 1 : 0,
     }))
     const createActivityLog = jest.fn(async () => ({ id: 'audit-1' }))
-    const transaction = jest.fn(async (callback: any) =>
-      callback({ terminal: { updateMany }, activityLog: { create: createActivityLog } }),
-    )
+    const transaction = jest.fn(async (callback: any) => callback({ terminal: { updateMany }, activityLog: { create: createActivityLog } }))
     const db = {
       terminal: { findMany: jest.fn(async () => [selectedCandidate]) },
       $transaction: transaction,

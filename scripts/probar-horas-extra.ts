@@ -13,7 +13,7 @@ import 'dotenv/config'
 import { DateTime } from 'luxon'
 
 import prisma from '../src/utils/prismaClient'
-import { exigirBaseLocal } from './_solo-base-local'
+import { exigirBaseLocal, exigirBaseLocalDeVerdad } from './_solo-base-local'
 import { getPayrollSummary } from '../src/services/dashboard/attendancePayroll.service'
 import { approveOvertime } from '../src/services/dashboard/overtimeApproval.service'
 
@@ -53,6 +53,10 @@ function hm(min: number) {
 }
 
 async function main() {
+  // 🔴 La URL no prueba dónde termina el socket: un túnel SSH deja producción en
+  // localhost. Esto le pregunta al SERVIDOR (3ª auditoría de Codex, P1 #4).
+  await exigirBaseLocalDeVerdad(prisma)
+
   // 🔴 Este script BORRA autorizaciones y SOBRESCRIBE cuadrantes. Contra una base que no
   // sea la local, eso destruye datos reales (hallazgo #9 de Codex, 29-ago-2026).
   exigirBaseLocal()
@@ -111,22 +115,19 @@ async function main() {
   } else {
     const esperado = 180 + 180 + 150 + 180 // 690 min = 11 h 30 m
     console.log(`  total          ${hm(ana.overtimeMinutes)}   (esperado ${hm(esperado)})`)
-    console.log(`  dobles         ${hm(ana.overtimeDoubleMinutes)}   (esperado 9h 0m — tope del art. 67)`)
-    console.log(`  triples        ${hm(ana.overtimeTripleMinutes)}   (esperado 2h 30m — art. 68)`)
-    console.log(`  infracción     ${ana.hasOvertimeViolation}  (esperado true: extra en 4 días)`)
+    // Avoqado ya no reparte en doble y triple ni dictamina el art. 66 (31-ago-2026): entrega
+    // los minutos agrupados por semana y la nómina del negocio aplica la ley.
+    console.log(`  autorizados    ${hm(ana.overtimeApprovedMinutes)}`)
+    console.log(`  pendientes     ${hm(ana.overtimePendingMinutes)}`)
     console.log(`  semanas        ${ana.overtimeWeeks.length}`)
     for (const w of ana.overtimeWeeks) {
-      console.log(
-        `    ${w.weekStart}→${w.weekEnd}  ${hm(w.minutosTotal)}  ` +
-          `${w.diasConExtra} días  parcial=${w.parcial}  sobreTope=${JSON.stringify(w.diasSobreTopeDiario)}`,
-      )
+      console.log(`    ${w.weekStart}→${w.weekEnd}  ${hm(w.minutosTotal)}  ` + `${hm(w.minutosTotal)}  parcial=${w.parcial}`)
     }
 
-    const ok =
-      ana.overtimeMinutes === esperado &&
-      ana.overtimeDoubleMinutes === 540 &&
-      ana.overtimeTripleMinutes === esperado - 540 &&
-      ana.hasOvertimeViolation === true
+    // 🔴 El veredicto se juzga sobre lo que Avoqado sí afirma: cuánto MIDIÓ el reloj y que la
+    // semana lo recoja entero. El reparto por tarifa se retiró el 31-ago-2026 — comprobarlo
+    // aquí sería fijar una regla legal que este sistema ya no aplica.
+    const ok = ana.overtimeMinutes === esperado && ana.overtimeWeeks.reduce((t, w) => t + w.minutosTotal, 0) === ana.overtimeApprovedMinutes
     console.log(`\n  ${ok ? '🟢 CUADRA' : '🔴 NO CUADRA'}`)
     if (!ok) process.exitCode = 1
   }

@@ -24,6 +24,7 @@ import { NextFunction, Request, Response } from 'express'
 import { TerminalStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
+import { logAction } from '../../services/dashboard/activity-log.service'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import {
   createAngelPayUserAccount,
@@ -37,6 +38,7 @@ import {
   softDeleteAngelPayUserAccount,
   suspendAngelPayUserAccount,
   updateAngelPayUserAccountCredentials,
+  getAngelPayUserAccountPin,
 } from '../../services/superadmin/angelpayUserAccount.service'
 import {
   approveDiscoveredAngelPayMerchant,
@@ -168,6 +170,50 @@ export async function setAngelPayUserAccountPinController(req: Request, res: Res
       success: true,
       data: sanitize(account),
     })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/**
+ * GET /api/v1/superadmin/angelpay-accounts/:id/pin
+ *
+ * Devuelve `{ pin: string | null }`. Es una EXCEPCIÓN deliberada al
+ * `sanitize()` de este archivo: el resto de las respuestas nunca lleva el PIN,
+ * y aquí se pide a propósito para que el superadmin pueda leerlo desde el
+ * editor del merchant en vez de ir a la base. Por eso la lectura se registra
+ * en `ActivityLog` — mismo criterio que `getMerchantAccountCredentials`.
+ *
+ * `pin: null` significa que la cuenta todavía no tiene PIN (PENDING_PIN); no
+ * es un error.
+ */
+export async function getAngelPayUserAccountPinController(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params
+    if (!id) {
+      throw new BadRequestError('id is required')
+    }
+
+    const pin = await getAngelPayUserAccountPin(id)
+
+    logger.warn('AngelPay account PIN revealed', {
+      event: 'angelpay.account.pin_revealed',
+      accountId: id,
+      requestedBy: (req as any).user?.uid,
+    })
+
+    await logAction({
+      staffId: (req as any).user?.uid,
+      action: 'ANGELPAY_ACCOUNT_PIN_VIEWED',
+      entity: 'AngelPayUserAccount',
+      entityId: id,
+      // Nunca el PIN en la bitácora: sólo que alguien lo miró.
+      data: { hasPin: pin !== null },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
+
+    res.json({ success: true, data: { pin } })
   } catch (err) {
     next(err)
   }

@@ -21,6 +21,7 @@ import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { api, startApiServer } from '@tests/__helpers__/apiServer'
 import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 let app: Express
@@ -67,6 +68,11 @@ beforeAll(async () => {
   const mod = await import('@/app')
   app = mod.default
 })
+
+// 🔴 UN servidor para todo el archivo. Con `api()` supertest levantaba uno por cada una
+// de las 159 peticiones de aquí; ese churn es lo que produce los `connect ETIMEDOUT` cuando la
+// suite corre entera con la máquina cargada. Va DESPUÉS del beforeAll que crea la app.
+startApiServer(() => app)
 
 /**
  * Generate JWT token with specified role.
@@ -122,7 +128,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
 
   describe('GET /credit-packs', () => {
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).get(BASE)
+      const res = await api().get(BASE)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -130,7 +136,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -138,14 +144,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -153,14 +159,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(Array.isArray(res.body)).toBe(true)
     })
@@ -168,7 +174,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('ADMIN')
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(Array.isArray(res.body)).toBe(true)
     })
@@ -180,7 +186,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(Array.isArray(res.body)).toBe(true)
     })
@@ -188,7 +194,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .get(BASE)
         .set('Cookie', [`accessToken=${token}`])
       expect(res.status).toBe(200)
@@ -206,7 +212,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     }
 
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).post(BASE).send(validBody)
+      const res = await api().post(BASE).send(validBody)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -214,7 +220,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:create permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -222,7 +228,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when WAITER role has no creditPacks:create permission', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -230,7 +236,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when VIEWER role has no creditPacks:create permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -238,7 +244,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when CASHIER role has no creditPacks:create permission', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -246,7 +252,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 201 when OWNER role has creditPacks:create via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('OWNER')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(201)
       expect(res.body).toHaveProperty('id', 'pack-new')
     })
@@ -254,7 +260,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 201 when ADMIN role has creditPacks:create via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('ADMIN')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(201)
       expect(res.body).toHaveProperty('id', 'pack-new')
     })
@@ -265,7 +271,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // it — non-wildcard roles evaluate in merge mode, defaults + custom).
       clearCustomPermissions()
       const token = makeToken('MANAGER')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(201)
       expect(res.body).toHaveProperty('id', 'pack-new')
     })
@@ -275,7 +281,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // only creditPacks:read (merge mode) must NOT allow create.
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -283,7 +289,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('ADMIN')
-      const res = await request(app)
+      const res = await api()
         .post(BASE)
         .set('Cookie', [`accessToken=${token}`])
         .send(validBody)
@@ -294,7 +300,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when name is missing', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(BASE)
         .set('Authorization', `Bearer ${token}`)
         .send({ price: 100, items: [{ productId: 'prod-1', quantity: 1 }] })
@@ -306,7 +312,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when items array is empty', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('OWNER')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send({ name: 'Pack', price: 100, items: [] })
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send({ name: 'Pack', price: 100, items: [] })
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
       expect(res.body.message).toMatch(/item/i)
@@ -315,7 +321,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when price is negative', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(BASE)
         .set('Authorization', `Bearer ${token}`)
         .send({ name: 'Pack', price: -10, items: [{ productId: 'prod-1', quantity: 1 }] })
@@ -327,7 +333,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when items have invalid quantity (0)', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(BASE)
         .set('Authorization', `Bearer ${token}`)
         .send({ name: 'Pack', price: 100, items: [{ productId: 'prod-1', quantity: 0 }] })
@@ -339,7 +345,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when items have invalid quantity (negative)', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(BASE)
         .set('Authorization', `Bearer ${token}`)
         .send({ name: 'Pack', price: 100, items: [{ productId: 'prod-1', quantity: -3 }] })
@@ -351,7 +357,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when price is zero', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(BASE)
         .set('Authorization', `Bearer ${token}`)
         .send({ name: 'Pack', price: 0, items: [{ productId: 'prod-1', quantity: 1 }] })
@@ -362,7 +368,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when body is empty', async () => {
       mockCustomPermissions(['creditPacks:create'])
       const token = makeToken('OWNER')
-      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send({})
+      const res = await api().post(BASE).set('Authorization', `Bearer ${token}`).send({})
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
     })
@@ -372,7 +378,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
 
   describe('GET /credit-packs/:packId', () => {
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).get(`${BASE}/${PACK_ID}`)
+      const res = await api().get(`${BASE}/${PACK_ID}`)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -380,7 +386,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -388,14 +394,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -403,14 +409,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('id', 'pack-1')
     })
@@ -418,7 +424,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('ADMIN')
-      const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('id', 'pack-1')
     })
@@ -428,7 +434,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('id', 'pack-1')
     })
@@ -436,7 +442,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .get(`${BASE}/${PACK_ID}`)
         .set('Cookie', [`accessToken=${token}`])
       expect(res.status).toBe(200)
@@ -449,7 +455,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     const validUpdateBody = { name: 'Pack Actualizado' }
 
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).send(validUpdateBody)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -457,7 +463,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -465,7 +471,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when WAITER role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -473,7 +479,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when VIEWER role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -481,7 +487,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when CASHIER role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -489,7 +495,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when OWNER role has creditPacks:update via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('id', 'pack-1')
     })
@@ -497,7 +503,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:update via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('ADMIN')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('id', 'pack-1')
     })
@@ -507,7 +513,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // means a custom grant can only add, never remove, so updates succeed.
       clearCustomPermissions()
       const token = makeToken('MANAGER')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('id', 'pack-1')
     })
@@ -517,7 +523,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // NOT allow update.
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -525,7 +531,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .patch(`${BASE}/${PACK_ID}`)
         .set('Cookie', [`accessToken=${token}`])
         .send(validUpdateBody)
@@ -536,7 +542,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when price is negative', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ price: -5 })
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ price: -5 })
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
       expect(res.body.message).toMatch(/precio|mayor/i)
@@ -545,7 +551,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when items array is empty on update', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ items: [] })
+      const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ items: [] })
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
       expect(res.body.message).toMatch(/item/i)
@@ -554,7 +560,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when items have quantity 0 on update', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .patch(`${BASE}/${PACK_ID}`)
         .set('Authorization', `Bearer ${token}`)
         .send({ items: [{ productId: 'prod-1', quantity: 0 }] })
@@ -567,7 +573,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
 
   describe('DELETE /credit-packs/:packId', () => {
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -575,7 +581,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:delete permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -583,7 +589,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when WAITER role has no creditPacks:delete permission', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -591,7 +597,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when VIEWER role has no creditPacks:delete permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -599,7 +605,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when CASHIER role has no creditPacks:delete permission', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -607,14 +613,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 204 when OWNER role has creditPacks:delete via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:delete'])
       const token = makeToken('OWNER')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(204)
     })
 
     it('should return 204 when ADMIN role has creditPacks:delete via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:delete'])
       const token = makeToken('ADMIN')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(204)
     })
 
@@ -622,7 +628,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // MANAGER holds creditPacks:* by default since 328ad01e.
       clearCustomPermissions()
       const token = makeToken('MANAGER')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(204)
     })
 
@@ -631,7 +637,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // NOT allow delete.
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -639,7 +645,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:delete'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .delete(`${BASE}/${PACK_ID}`)
         .set('Cookie', [`accessToken=${token}`])
       expect(res.status).toBe(204)
@@ -650,7 +656,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
 
   describe('GET /credit-packs/purchases', () => {
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).get(`${BASE}/purchases`)
+      const res = await api().get(`${BASE}/purchases`)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -658,7 +664,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -666,14 +672,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -681,14 +687,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('purchases')
       expect(res.body).toHaveProperty('total', 0)
@@ -697,7 +703,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('ADMIN')
-      const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('purchases')
     })
@@ -707,7 +713,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('purchases')
     })
@@ -715,7 +721,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .get(`${BASE}/purchases`)
         .set('Cookie', [`accessToken=${token}`])
       expect(res.status).toBe(200)
@@ -726,7 +732,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
 
   describe('GET /credit-packs/purchases/:customerId', () => {
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`)
+      const res = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -734,7 +740,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -742,14 +748,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -757,14 +763,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('purchases')
       expect(res.body).toHaveProperty('total', 0)
@@ -773,7 +779,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('ADMIN')
-      const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('purchases')
     })
@@ -783,7 +789,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('purchases')
     })
@@ -791,7 +797,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .get(`${BASE}/purchases/${CUSTOMER_ID}`)
         .set('Cookie', [`accessToken=${token}`])
       expect(res.status).toBe(200)
@@ -802,7 +808,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
 
   describe('GET /credit-packs/transactions', () => {
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).get(`${BASE}/transactions`)
+      const res = await api().get(`${BASE}/transactions`)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -810,7 +816,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -818,14 +824,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW WAITER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:read permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -833,14 +839,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW CASHIER by default — el mostrador necesita ver los paquetes (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('transactions')
       expect(res.body).toHaveProperty('total', 0)
@@ -849,7 +855,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('ADMIN')
-      const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('transactions')
     })
@@ -859,7 +865,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('transactions')
     })
@@ -867,7 +873,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .get(`${BASE}/transactions`)
         .set('Cookie', [`accessToken=${token}`])
       expect(res.status).toBe(200)
@@ -880,7 +886,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     const redeemBody = { reason: 'Manual redemption' }
 
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).send(redeemBody)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -888,7 +894,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -896,14 +902,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW WAITER by default — canjear la clase ya pagada es operar, no administrar (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(200)
     })
 
     it('should return 403 when VIEWER role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -911,14 +917,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should ALLOW CASHIER by default — canjear la clase ya pagada es operar, no administrar (founder 2026-08-16)', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(200)
     })
 
     it('should return 200 when OWNER role has creditPacks:update via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('type', 'REDEEM')
     })
@@ -926,7 +932,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:update via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('ADMIN')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('type', 'REDEEM')
     })
@@ -935,7 +941,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // MANAGER holds creditPacks:* by default since 328ad01e.
       clearCustomPermissions()
       const token = makeToken('MANAGER')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('type', 'REDEEM')
     })
@@ -946,7 +952,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // `creditPacks:redeem` por default (merge mode: el custom suma, nunca resta).
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('KITCHEN')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -954,7 +960,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(`${BASE}/balances/${BALANCE_ID}/redeem`)
         .set('Cookie', [`accessToken=${token}`])
         .send(redeemBody)
@@ -964,7 +970,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 with empty body (reason is optional for redeem)', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('type', 'REDEEM')
     })
@@ -976,7 +982,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     const validAdjustBody = { quantity: 3, reason: 'Manual adjustment' }
 
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/adjust`).send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).send(validAdjustBody)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -984,10 +990,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send(validAdjustBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -995,10 +998,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when WAITER role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send(validAdjustBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1006,10 +1006,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when VIEWER role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send(validAdjustBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1017,10 +1014,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when CASHIER role has no creditPacks:update permission', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send(validAdjustBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1028,10 +1022,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when OWNER role has creditPacks:update via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send(validAdjustBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('type', 'ADJUST')
     })
@@ -1039,10 +1030,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:update via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('ADMIN')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send(validAdjustBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('type', 'ADJUST')
     })
@@ -1051,10 +1039,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // MANAGER holds creditPacks:* by default since 328ad01e.
       clearCustomPermissions()
       const token = makeToken('MANAGER')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send(validAdjustBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('type', 'ADJUST')
     })
@@ -1064,10 +1049,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // NOT allow adjust (requires creditPacks:update).
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validAdjustBody)
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send(validAdjustBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1075,7 +1057,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
         .set('Cookie', [`accessToken=${token}`])
         .send(validAdjustBody)
@@ -1086,7 +1068,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when quantity is 0', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
         .set('Authorization', `Bearer ${token}`)
         .send({ quantity: 0, reason: 'Test' })
@@ -1098,10 +1080,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when reason is missing', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
-        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
-        .set('Authorization', `Bearer ${token}`)
-        .send({ quantity: 5 })
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send({ quantity: 5 })
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
       expect(res.body.message).toMatch(/razon|requerida|required/i)
@@ -1110,7 +1089,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when reason is empty string', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
         .set('Authorization', `Bearer ${token}`)
         .send({ quantity: 2, reason: '' })
@@ -1121,7 +1100,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when body is empty', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send({})
+      const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send({})
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
     })
@@ -1129,7 +1108,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should accept negative quantity (for balance decrease)', async () => {
       mockCustomPermissions(['creditPacks:update'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
         .set('Authorization', `Bearer ${token}`)
         .send({ quantity: -2, reason: 'Correction' })
@@ -1144,7 +1123,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     const validRefundBody = { reason: 'Customer requested refund' }
 
     it('should return 401 when no token is provided', async () => {
-      const res = await request(app).post(`${BASE}/purchases/${PURCHASE_ID}/refund`).send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).send(validRefundBody)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
@@ -1152,10 +1131,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when KITCHEN role has no creditPacks:delete permission', async () => {
       clearCustomPermissions()
       const token = makeToken('KITCHEN')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send(validRefundBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1163,10 +1139,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when WAITER role has no creditPacks:delete permission', async () => {
       clearCustomPermissions()
       const token = makeToken('WAITER')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send(validRefundBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1174,10 +1147,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when VIEWER role has no creditPacks:delete permission', async () => {
       clearCustomPermissions()
       const token = makeToken('VIEWER')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send(validRefundBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1185,10 +1155,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 403 when CASHIER role has no creditPacks:delete permission', async () => {
       clearCustomPermissions()
       const token = makeToken('CASHIER')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send(validRefundBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1196,10 +1163,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when OWNER role has creditPacks:delete via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:delete'])
       const token = makeToken('OWNER')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send(validRefundBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('refunded', true)
     })
@@ -1207,10 +1171,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 200 when ADMIN role has creditPacks:delete via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:delete'])
       const token = makeToken('ADMIN')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send(validRefundBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('refunded', true)
     })
@@ -1219,10 +1180,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // MANAGER holds creditPacks:* by default since 328ad01e.
       clearCustomPermissions()
       const token = makeToken('MANAGER')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send(validRefundBody)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('refunded', true)
     })
@@ -1232,10 +1190,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       // NOT allow refund (requires creditPacks:delete).
       mockCustomPermissions(['creditPacks:read'])
       const token = makeToken('CASHIER')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send(validRefundBody)
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send(validRefundBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
     })
@@ -1243,7 +1198,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should work with cookie-based accessToken', async () => {
       mockCustomPermissions(['creditPacks:delete'])
       const token = makeToken('OWNER')
-      const res = await request(app)
+      const res = await api()
         .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
         .set('Cookie', [`accessToken=${token}`])
         .send(validRefundBody)
@@ -1254,7 +1209,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when reason is missing', async () => {
       mockCustomPermissions(['creditPacks:delete'])
       const token = makeToken('OWNER')
-      const res = await request(app).post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send({})
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send({})
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
       expect(res.body.message).toMatch(/razon|requerida|required/i)
@@ -1263,10 +1218,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
     it('should return 400 when reason is empty string', async () => {
       mockCustomPermissions(['creditPacks:delete'])
       const token = makeToken('OWNER')
-      const res = await request(app)
-        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
-        .set('Authorization', `Bearer ${token}`)
-        .send({ reason: '' })
+      const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send({ reason: '' })
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
     })
@@ -1276,7 +1228,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
 
   describe('Route mounting and malformed tokens', () => {
     it('should return 401 for malformed JWT token', async () => {
-      const res = await request(app).get(BASE).set('Authorization', 'Bearer invalid.token.here')
+      const res = await api().get(BASE).set('Authorization', 'Bearer invalid.token.here')
       expect(res.status).toBe(401)
       expect(res.body).toMatchObject({ error: 'Unauthorized', message: 'Invalid token' })
     })
@@ -1286,11 +1238,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       const token = makeToken('OWNER')
 
       // Verify correct path works
-      const validRes = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const validRes = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(validRes.status).toBe(200)
 
       // Verify incorrect path returns 404
-      const invalidRes = await request(app).get('/api/v1/wrong/path/credit-packs').set('Authorization', `Bearer ${token}`)
+      const invalidRes = await api().get('/api/v1/wrong/path/credit-packs').set('Authorization', `Bearer ${token}`)
       expect(invalidRes.status).toBe(404)
     })
 
@@ -1305,13 +1257,13 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
         },
         process.env.ACCESS_TOKEN_SECRET || TEST_SECRET,
       )
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${expiredToken}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${expiredToken}`)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
 
     it('should return 401 when no Authorization header or cookie is set', async () => {
-      const res = await request(app).get(BASE)
+      const res = await api().get(BASE)
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
       expect(res.body).toHaveProperty('message', 'No authentication token provided')
@@ -1326,7 +1278,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-superadmin' })
       clearCustomPermissions()
       const token = makeToken('SUPERADMIN')
-      const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+      const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
     })
 
@@ -1334,7 +1286,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-superadmin' })
       clearCustomPermissions()
       const token = makeToken('SUPERADMIN')
-      const res = await request(app)
+      const res = await api()
         .post(BASE)
         .set('Authorization', `Bearer ${token}`)
         .send({
@@ -1349,7 +1301,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-superadmin' })
       clearCustomPermissions()
       const token = makeToken('SUPERADMIN')
-      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(204)
     })
   })
@@ -1367,14 +1319,14 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       it(`should deny ${role} access to GET /credit-packs without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+        const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
         expect(res.status).toBe(403)
       })
 
       it(`should deny ${role} access to POST /credit-packs without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app)
+        const res = await api()
           .post(BASE)
           .set('Authorization', `Bearer ${token}`)
           .send({
@@ -1388,42 +1340,42 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       it(`should deny ${role} access to PATCH /credit-packs/:packId without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ name: 'Updated' })
+        const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ name: 'Updated' })
         expect(res.status).toBe(403)
       })
 
       it(`should deny ${role} access to DELETE /credit-packs/:packId without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+        const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
         expect(res.status).toBe(403)
       })
 
       it(`should deny ${role} access to GET /credit-packs/purchases without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+        const res = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
         expect(res.status).toBe(403)
       })
 
       it(`should deny ${role} access to GET /credit-packs/transactions without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+        const res = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
         expect(res.status).toBe(403)
       })
 
       it(`should deny ${role} access to POST /balances/:balanceId/redeem without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
+        const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
         expect(res.status).toBe(403)
       })
 
       it(`should deny ${role} access to POST /balances/:balanceId/adjust without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app)
+        const res = await api()
           .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
           .set('Authorization', `Bearer ${token}`)
           .send({ quantity: 1, reason: 'test' })
@@ -1433,7 +1385,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       it(`should deny ${role} access to POST /purchases/:purchaseId/refund without custom permissions`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app)
+        const res = await api()
           .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
           .set('Authorization', `Bearer ${token}`)
           .send({ reason: 'test' })
@@ -1443,7 +1395,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       it(`should allow ${role} access to GET /credit-packs WITH creditPacks:read custom permission`, async () => {
         mockCustomPermissions(['creditPacks:read'])
         const token = makeToken(role)
-        const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+        const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
         expect(res.status).toBe(200)
       })
     })
@@ -1456,21 +1408,21 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       it(`should ALLOW ${role} to GET /credit-packs by default (ver qué paquetes vende)`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+        const res = await api().get(BASE).set('Authorization', `Bearer ${token}`)
         expect(res.status).toBe(200)
       })
 
       it(`should ALLOW ${role} to POST /balances/:balanceId/redeem by default (canjear la clase ya pagada)`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
+        const res = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
         expect(res.status).toBe(200)
       })
 
       it(`🔴 should DENY ${role} POST /credit-packs — crear un paquete es CATÁLOGO`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app)
+        const res = await api()
           .post(BASE)
           .set('Authorization', `Bearer ${token}`)
           .send({ name: 'Test', price: 100, items: [{ productId: 'p1', quantity: 1 }] })
@@ -1480,21 +1432,21 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       it(`🔴 should DENY ${role} PATCH /credit-packs/:packId — editar precio/sesiones es CATÁLOGO`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ name: 'Updated' })
+        const res = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ name: 'Updated' })
         expect(res.status).toBe(403)
       })
 
       it(`🔴 should DENY ${role} DELETE /credit-packs/:packId`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+        const res = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
         expect(res.status).toBe(403)
       })
 
       it(`🔴 should DENY ${role} POST /balances/:balanceId/adjust — corregir un saldo a mano es administrar`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app)
+        const res = await api()
           .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
           .set('Authorization', `Bearer ${token}`)
           .send({ quantity: 1, reason: 'test' })
@@ -1504,7 +1456,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       it(`🔴 should DENY ${role} POST /purchases/:purchaseId/refund — devolver dinero se queda en MANAGER+`, async () => {
         clearCustomPermissions()
         const token = makeToken(role)
-        const res = await request(app)
+        const res = await api()
           .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
           .set('Authorization', `Bearer ${token}`)
           .send({ reason: 'test' })
@@ -1520,11 +1472,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
         const token = makeToken(role)
 
         // GET list
-        const listRes = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
+        const listRes = await api().get(BASE).set('Authorization', `Bearer ${token}`)
         expect(listRes.status).toBe(200)
 
         // POST create
-        const createRes = await request(app)
+        const createRes = await api()
           .post(BASE)
           .set('Authorization', `Bearer ${token}`)
           .send({
@@ -1535,45 +1487,42 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
         expect(createRes.status).toBe(201)
 
         // GET by id
-        const getRes = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+        const getRes = await api().get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
         expect(getRes.status).toBe(200)
 
         // PATCH update
-        const updateRes = await request(app)
-          .patch(`${BASE}/${PACK_ID}`)
-          .set('Authorization', `Bearer ${token}`)
-          .send({ name: 'Updated Pack' })
+        const updateRes = await api().patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send({ name: 'Updated Pack' })
         expect(updateRes.status).toBe(200)
 
         // DELETE
-        const deleteRes = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+        const deleteRes = await api().delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
         expect(deleteRes.status).toBe(204)
 
         // GET purchases
-        const purchasesRes = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
+        const purchasesRes = await api().get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
         expect(purchasesRes.status).toBe(200)
 
         // GET customer purchases
-        const custPurchasesRes = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
+        const custPurchasesRes = await api().get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
         expect(custPurchasesRes.status).toBe(200)
 
         // GET transactions
-        const txnRes = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
+        const txnRes = await api().get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
         expect(txnRes.status).toBe(200)
 
         // POST redeem
-        const redeemRes = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
+        const redeemRes = await api().post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send({})
         expect(redeemRes.status).toBe(200)
 
         // POST adjust
-        const adjustRes = await request(app)
+        const adjustRes = await api()
           .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
           .set('Authorization', `Bearer ${token}`)
           .send({ quantity: 1, reason: 'test' })
         expect(adjustRes.status).toBe(200)
 
         // POST refund
-        const refundRes = await request(app)
+        const refundRes = await api()
           .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
           .set('Authorization', `Bearer ${token}`)
           .send({ reason: 'test refund' })
