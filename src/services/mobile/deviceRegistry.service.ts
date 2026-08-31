@@ -96,11 +96,13 @@ export async function resolveDeviceName(client: Prisma.TransactionClient | typeo
 }
 
 /**
- * Registra o refresca un dispositivo. Idempotente por `[venueId, deviceUid]`.
+ * Asegura o refresca un dispositivo. Idempotente por `[venueId, deviceUid]`.
  *
- * Devuelve `null` si algo falló — el llamador NUNCA debe tratar eso como error fatal.
+ * La ruta explícita de reporte de capacidades necesita conocer la terminal concreta;
+ * por eso, si pierde una carrera `P2002`, relee la fila que ganó en vez de asumir que
+ * ya no importa. Devuelve `null` si ni siquiera puede establecer esa identidad.
  */
-export async function registerDeviceSeen(params: {
+export async function ensureDeviceTerminal(params: {
   venueId: string
   staffId: string
   identity: DeviceIdentity
@@ -219,10 +221,21 @@ export async function registerDeviceSeen(params: {
   } catch (error: any) {
     // Carrera: dos requests del mismo dispositivo nuevo llegando a la vez. El
     // @@unique([venueId, deviceUid]) deja pasar uno; el otro cae aquí. No es un
-    // problema — el renglón quedó creado por el que ganó.
+    // problema — releemos el renglón creado por el que ganó. PostgreSQL espera a que
+    // termine el INSERT rival antes de resolver la violación unique, así que la fila
+    // ya es visible cuando llegamos aquí.
     if (error?.code === 'P2002') {
       logger.debug(`[DEVICE REGISTRY] Alta concurrente resuelta por el índice único | venue=${venueId}`)
-      return null
+      try {
+        const winner = await prisma.terminal.findFirst({
+          where: { venueId, deviceUid: identity.deviceUid },
+          select: { id: true, name: true },
+        })
+        return winner ? { terminalId: winner.id, created: false, name: winner.name } : null
+      } catch (rereadError) {
+        logger.error(`[DEVICE REGISTRY] No se pudo releer la terminal ganadora (no bloqueante) | venue=${venueId}`, rereadError)
+        return null
+      }
     }
 
     // Cualquier otra cosa: se registra y se sigue. Este código jamás puede tumbar
@@ -230,4 +243,17 @@ export async function registerDeviceSeen(params: {
     logger.error(`[DEVICE REGISTRY] Falló el registro de dispositivo (no bloqueante) | venue=${venueId}`, error)
     return null
   }
+}
+
+/**
+ * Contrato pasivo usado por el finish hook. Se mantiene como wrapper explícito para
+ * dejar claro que login, cobros y cualquier request ordinario siguen degradando a
+ * `null`: nunca convierten un problema de telemetría en un error HTTP.
+ */
+export async function registerDeviceSeen(params: {
+  venueId: string
+  staffId: string
+  identity: DeviceIdentity
+}): Promise<RegisterDeviceResult | null> {
+  return ensureDeviceTerminal(params)
 }

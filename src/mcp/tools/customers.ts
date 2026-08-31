@@ -5,7 +5,10 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
+import { planGateMessage } from '../planGate'
 import { createCustomer, decideCustomerApprovalFromDashboard } from '@/services/dashboard/customer.dashboard.service'
+
+const RESERVATIONS_GATE = ['RESERVATIONS', 'Las reservaciones'] as const
 
 /** Pure: merge tag changes onto a customer's current tags — add, remove, dedupe (case-insensitive, keeps first-seen casing & order). */
 export function applyTagChanges(current: string[], add: string[] = [], remove: string[] = []): string[] {
@@ -344,6 +347,8 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, limit }) => {
       const where = guard.venueFilter(venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       guard.requirePermission('customers:approve', venueId)
 
       const take = limit ?? 20
@@ -383,6 +388,8 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, customerId, decision, reason, confirm }) => {
       const where = guard.venueFilter(venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       guard.requirePermission('customers:approve', venueId)
 
       // El cliente se resuelve DENTRO del venue: un id de otro negocio simplemente no existe

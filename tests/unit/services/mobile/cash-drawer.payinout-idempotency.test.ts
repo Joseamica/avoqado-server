@@ -86,6 +86,8 @@ const insertar = (data: any): FilaCajon => {
 
 const montarBaseDeDatos = () => {
   ;(prismaMock as any).cashDrawerSession = {
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    update: jest.fn().mockResolvedValue({}),
     findFirst: jest.fn(async ({ where }: any) => {
       const venueId = where.venueId
       if (!SESION_DE[venueId]) return null
@@ -138,7 +140,7 @@ const montarBaseDeDatos = () => {
 
 /** El arqueo tal como lo ve el cajero, en CENTAVOS. */
 const arqueoEnCentavos = async (venueId = VENUE) => {
-  const session = await getCurrentSession(venueId)
+  const session = await getCurrentSession(venueId, true)
   return Math.round((session as any).expectedAmount * 100)
 }
 

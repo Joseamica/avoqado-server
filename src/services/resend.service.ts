@@ -307,12 +307,13 @@ export async function sendKycSubmissionNotification(data: KycNotificationData): 
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>Nueva solicitud KYC - ${data.venueName}</title>
         </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
-          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
             <!-- Header -->
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
-              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">🆕 Nueva Solicitud KYC</h1>
-              <p style="color: #e8f4f8; margin: 10px 0 0 0; font-size: 16px;">Requiere revisión de Superadmin</p>
+            <div style="text-align: left; padding: 0 0 20px;">
+              <img src="https://avoqado.io/isotipo.svg" width="32" height="32" alt="Avoqado" style="display: block; margin-bottom: 24px;">
+              <h1 style="color: #000000; margin: 0; font-size: 24px; font-weight: 400;">🆕 Nueva Solicitud KYC</h1>
+              <p style="color: #666666; margin: 8px 0 0 0; font-size: 14px;">Requiere revisión de Superadmin</p>
             </div>
 
             <!-- Content -->
@@ -349,13 +350,13 @@ export async function sendKycSubmissionNotification(data: KycNotificationData): 
               <!-- CTA Button -->
               <div style="text-align: center; margin: 40px 0;">
                 <a href="${fullActionUrl}"
-                   style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                          color: white;
-                          padding: 16px 40px;
+                   style="background: #000000;
+                          color: #ffffff;
+                          padding: 12px 24px;
                           text-decoration: none;
-                          border-radius: 30px;
-                          font-weight: bold;
-                          font-size: 16px;
+                          border-radius: 6px;
+                          font-weight: 500;
+                          font-size: 14px;
                           display: inline-block;
                           box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
                           transition: all 0.3s ease;">
@@ -944,6 +945,13 @@ export async function sendNotificationEmail(
   }
 
   try {
+    // 🔴 Sistema de correo de la casa: FONDO BLANCO, texto negro, CTA NEGRO, isotipo, sin
+    // degradados ni tarjetas con sombra. Fuente de verdad: `.claude/rules/email-templates.md`
+    // y `docs/guides/EMAIL_STANDARDS.md`; referencia canónica `sendLowStockDigestEmail`.
+    //
+    // Esta plantilla era una de las LEGACY con degradado morado que la regla marcaba para
+    // migrar — el founder la vio en su bandeja el 29-ago y la señaló. Es la genérica, así que
+    // migrarla arregla de una vez todos los avisos que pasan por aquí.
     const html = `
       <!DOCTYPE html>
       <html>
@@ -952,44 +960,36 @@ export async function sendNotificationEmail(
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>${title}</title>
         </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
-          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
-              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">${title}</h1>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+            <img src="https://avoqado.io/isotipo.svg" width="32" height="32" alt="Avoqado" style="display: block; margin-bottom: 28px;">
+
+            <h1 style="margin: 0 0 20px; font-size: 24px; font-weight: 400; color: #000000;">${title}</h1>
+
+            <p style="font-size: 15px; line-height: 1.7; margin: 0 0 28px; color: #000000; white-space: pre-line;">${message}</p>
+
+            ${
+              actionUrl
+                ? `
+            <div style="margin: 0 0 32px;">
+              <a href="${actionUrl}"
+                 style="background: #000000;
+                        color: #ffffff;
+                        padding: 12px 24px;
+                        text-decoration: none;
+                        border-radius: 6px;
+                        font-weight: 500;
+                        font-size: 14px;
+                        display: inline-block;">${actionLabel || 'Ver más'}</a>
             </div>
+            `
+                : ''
+            }
 
-            <div style="padding: 40px 30px;">
-              <p style="font-size: 16px; margin-bottom: 25px; color: #555; white-space: pre-line;">
-                ${message}
-              </p>
+            <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 32px 0 20px;">
 
-              ${
-                actionUrl
-                  ? `
-              <div style="text-align: center; margin: 40px 0;">
-                <a href="${actionUrl}"
-                   style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                          color: white;
-                          padding: 16px 40px;
-                          text-decoration: none;
-                          border-radius: 30px;
-                          font-weight: bold;
-                          font-size: 16px;
-                          display: inline-block;
-                          box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);">
-                  ${actionLabel || 'Ver más'}
-                </a>
-              </div>
-              `
-                  : ''
-              }
-
-              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
-
-              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
-                Este correo fue enviado por Avoqado
-              </p>
-            </div>
+            <img src="https://avoqado.io/isotipo.svg" width="24" height="24" alt="Avoqado" style="display: block; margin-bottom: 12px; opacity: 0.5;">
+            <p style="font-size: 12px; color: #666666; margin: 0;">Servicios Tecnologicos Avo S.A. de C.V.</p>
           </div>
         </body>
       </html>
@@ -1082,7 +1082,7 @@ export async function sendKycDocumentsToBlumon(data: KycDocumentsToBlumonData): 
     const blumonExcelHtml = data.blumonExcelUrl
       ? `
               <!-- Blumon Excel Section -->
-              <div style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); border-radius: 10px; padding: 25px; margin-bottom: 30px; text-align: center;">
+              <div style="background: #fafafa; border-radius: 10px; padding: 25px; margin-bottom: 30px; text-align: center;">
                 <h2 style="color: white; font-size: 18px; margin: 0 0 15px 0;">
                   📊 Layout Comercio Blumon (Generado Automáticamente)
                 </h2>
@@ -1130,11 +1130,12 @@ Descargar: ${data.blumonExcelUrl}
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>Nueva Alta de Comercio - ${data.venueName}</title>
         </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
-          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
             <!-- Header -->
-            <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 40px 30px; text-align: center;">
-              <h1 style="color: white; margin: 0; font-size: 24px; font-weight: bold;">📋 Nueva Alta de Comercio</h1>
+            <div style="text-align: left; padding: 0 0 20px;">
+              <img src="https://avoqado.io/isotipo.svg" width="32" height="32" alt="Avoqado" style="display: block; margin-bottom: 24px;">
+              <h1 style="color: white; margin: 0; font-size: 24px; font-weight: bold;">Nueva Alta de Comercio</h1>
               <p style="color: #a0aec0; margin: 10px 0 0 0; font-size: 16px;">${data.venueName} • ${entityTypeDisplay}</p>
             </div>
 

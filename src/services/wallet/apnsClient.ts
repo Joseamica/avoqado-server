@@ -76,6 +76,10 @@ export async function sendSilentPush(deviceToken: string): Promise<PushResult> {
       let status = 0
       req.on('response', headers => {
         status = Number(headers[constants.HTTP2_HEADER_STATUS] ?? 0)
+        // APNS devuelve un JSON con la razón cuando rechaza el push. En un
+        // ClientHttp2Stream, `end` no llega mientras el readable quede pausado;
+        // drenarlo evita dejar esta promesa viva para siempre en respuestas 4xx.
+        req.resume()
       })
       req.on('error', error => {
         logger.warn('Falló el aviso a un aparato', { error: (error as Error).message })

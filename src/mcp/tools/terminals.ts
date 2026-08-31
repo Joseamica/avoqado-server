@@ -1,12 +1,13 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { DeviceFormFactor, TerminalPaymentRequestStatus, TerminalStatus } from '@prisma/client'
+import { DeviceFormFactor, TerminalPaymentRequestStatus, TerminalStatus, TerminalType } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { resolveTerminalRefundTarget } from '@/services/tpv/terminalRefundTarget'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
+import { assertDeviceActionSupported, DEVICE_CAPABILITY_SELECT, toDeviceManagementDto } from '@/services/device-capabilities.service'
 
 /**
  * Un dispositivo cuenta como "en línea" si reportó en los últimos 5 minutos. Mismo
@@ -128,7 +129,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         select: {
           id: true,
           name: true,
-          type: true,
+          ...DEVICE_CAPABILITY_SELECT,
           status: true,
           brand: true,
           model: true,
@@ -155,30 +156,39 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         : []
       const staffById = new Map(staff.map(s => [s.id, [s.firstName, s.lastName].filter(Boolean).join(' ').trim()]))
 
-      const devices = rows.map(r => ({
-        id: r.id,
-        venue: r.venue?.name,
-        name: r.name,
-        kind: r.formFactor ?? DeviceFormFactor.UNKNOWN,
-        type: r.type,
-        brand: r.brand,
-        model: r.model,
-        modelIdentifier: r.modelIdentifier,
-        osVersion: r.osVersion,
-        appVersion: r.version,
-        // `serialNumber` sólo existe donde el hardware lo expone (Sunmi, PAX). Un iPhone
-        // nunca lo da — por eso Square marca su equivalente como "where available".
-        serialNumber: r.serialNumber,
-        // true = apareció solo al hacer login; false = lo dio de alta un admin.
-        selfRegistered: r.selfRegistered,
-        online: Boolean(r.lastHeartbeat && r.lastHeartbeat >= onlineSince),
-        status: r.status,
-        lastSeenAt: r.lastHeartbeat?.toISOString() ?? null,
-        firstSeenAt: r.firstSeenAt?.toISOString() ?? null,
-        lastUsedBy: r.lastStaffId ? (staffById.get(r.lastStaffId) ?? null) : null,
-        // Misma identidad que usa el POS para su outbox offline y el hub LAN.
-        deviceUid: r.deviceUid,
-      }))
+      const projectionNow = new Date()
+      const devices = rows.map(row => {
+        const r = toDeviceManagementDto(row, { now: projectionNow })
+
+        return {
+          id: r.id,
+          venue: r.venue?.name,
+          name: r.name,
+          kind: r.formFactor ?? DeviceFormFactor.UNKNOWN,
+          type: r.type,
+          brand: r.brand,
+          model: r.model,
+          modelIdentifier: r.modelIdentifier,
+          osVersion: r.osVersion,
+          appVersion: r.version,
+          // `serialNumber` sólo existe donde el hardware lo expone (Sunmi, PAX). Un iPhone
+          // nunca lo da — por eso Square marca su equivalente como "where available".
+          serialNumber: r.serialNumber,
+          // true = apareció solo al hacer login; false = lo dio de alta un admin.
+          selfRegistered: r.selfRegistered,
+          online: Boolean(r.lastHeartbeat && r.lastHeartbeat >= onlineSince),
+          status: r.status,
+          lastSeenAt: r.lastHeartbeat?.toISOString() ?? null,
+          firstSeenAt: r.firstSeenAt?.toISOString() ?? null,
+          lastUsedBy: r.lastStaffId ? (staffById.get(r.lastStaffId) ?? null) : null,
+          customerDisplayInverted: r.customerDisplayInverted,
+          customerDisplayRequest: r.customerDisplayRequest,
+          customerDisplayRequestVersion: r.customerDisplayRequestVersion,
+          capabilities: r.capabilities,
+          // Misma identidad que usa el POS para su outbox offline y el hub LAN.
+          deviceUid: r.deviceUid,
+        }
+      })
 
       const byKind: Record<string, number> = {}
       for (const d of devices) byKind[d.kind] = (byKind[d.kind] ?? 0) + 1
@@ -270,6 +280,46 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         venueId,
       )
       if (!target.eligible) return text({ ok: false, reason: target.reason, error: target.message })
+
+      const targetIdentity = terminalId.trim()
+      const targetDevice = await prisma.terminal.findFirst({
+        where: {
+          ...base,
+          OR: [
+            { id: targetIdentity },
+            { serialNumber: { equals: targetIdentity, mode: 'insensitive' } },
+            ...(!targetIdentity.toUpperCase().startsWith('AVQD-')
+              ? [
+                  {
+                    type: TerminalType.TPV_ANDROID,
+                    serialNumber: { equals: `AVQD-${targetIdentity}`, mode: 'insensitive' as const },
+                  },
+                ]
+              : []),
+          ],
+        },
+        select: {
+          id: true,
+          serialNumber: true,
+          type: true,
+          customerDisplayPresent: true,
+          customerDisplayInvertible: true,
+          displayModeProtocolVersion: true,
+          capabilitiesObservedAt: true,
+        },
+      })
+      if (!targetDevice) {
+        return text({ ok: false, code: 'DEVICE_NOT_FOUND', error: 'No encontré ese dispositivo en tu local.' })
+      }
+
+      try {
+        assertDeviceActionSupported(targetDevice, { kind: 'TERMINAL_PAYMENT_REQUEST' })
+      } catch (error) {
+        if (error instanceof Error && 'code' in error && (error as Error & { code?: string }).code === 'DEVICE_ACTION_UNSUPPORTED') {
+          return text({ ok: false, code: 'DEVICE_ACTION_UNSUPPORTED', error: error.message })
+        }
+        throw error
+      }
 
       if (!confirm) {
         return text({

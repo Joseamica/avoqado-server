@@ -19,6 +19,10 @@ process.env.COOKIE_SECRET = 'test-cookie-secret'
 process.env.OTP_PEPPER = 'test-otp-pepper-secret-1234567890'
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test'
 process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
+// Parte A (sesiones revocables) — Task 9: cifra el sucesor del refresh token durante la
+// ventana de retransmisión de 60 s (successorCrypto.ts). Debe ser hex de 32 bytes (64
+// chars) para pasar el validador de env.ts, igual que GOOGLE_CALENDAR_TOKEN_KEY abajo.
+process.env.SESSION_SUCCESSOR_ENC_KEY = process.env.SESSION_SUCCESSOR_ENC_KEY || 'b'.repeat(64)
 // Stripe key must be set before any service module imports — TokenBudgetService
 // instantiates its Stripe client in the constructor (singleton), and tests rely
 // on jest.mock('stripe') hooking that constructor. Without this, CI (which has
@@ -94,6 +98,19 @@ const prismaMock: any = {
   notificationPreference: createMockModel(),
   notificationTemplate: createMockModel(),
   staffVenue: createMockModel(),
+  // Parte A (sesiones revocables) — Task 6: el login móvil (password y passkey) ahora
+  // crea una Session ANTES de emitir tokens. Sin esta entrada, cualquier test que ejercite
+  // loginWithEmail/verifyPasskeyAssertion sin conocer la Session revienta con "Cannot read
+  // properties of undefined (reading 'create')" — misma clase de bug que venueFeature.findMany
+  // más abajo. staffPasskey es lo que verifyPasskeyAssertion consulta para resolver la credencial.
+  session: createMockModel(),
+  // Parte A (sesiones revocables) — Task 10: el login (password y passkey) ahora emite el
+  // PRIMER RefreshGrant justo después de crear la Session (issueGrant → prisma.refreshGrant
+  // .create). Sin esta entrada, cualquier test que ejercite loginWithEmail/
+  // verifyPasskeyAssertion sin conocer los grants revienta con "Cannot read properties of
+  // undefined (reading 'create')" — misma clase de bug que session arriba.
+  refreshGrant: createMockModel(),
+  staffPasskey: createMockModel(),
   chatTrainingData: createMockModel(),
   chatFeedback: createMockModel(),
   learnedPatterns: createMockModel(),
@@ -113,6 +130,12 @@ const prismaMock: any = {
   terminalPaymentRequest: createMockModel(),
   paymentAllocation: createMockModel(),
   shift: createMockModel(),
+  // El cajón físico: `getShiftById` lo consulta desde `resolveShiftCashDrawer`
+  // (unificación de caja, fase 5). Este mock ENUMERA los modelos, así que un modelo
+  // nuevo no falla donde se agregó — falla en cualquier suite vecina que llame al
+  // servicio, con un `Cannot read properties of undefined`.
+  cashDrawerSession: createMockModel(),
+  cashDrawerEvent: createMockModel(),
   product: createMockModel(),
   menu: createMockModel(),
   menuCategory: createMockModel(),
@@ -231,6 +254,12 @@ const prismaMock: any = {
   transactionCost: createMockModel(),
   // Time entry models
   timeEntry: createMockModel(),
+  // Horas extra (29-ago): el resumen de nómina consulta las autorizaciones para saber qué
+  // entra al reparto doble/triple. Sin esta entrada, cualquier test que llegue a
+  // getPayrollSummary revienta con "Cannot read properties of undefined (reading 'findMany')"
+  // — la misma clase que session y venueFeature de arriba: este mock es una lista FIJA, así
+  // que un modelo nuevo hay que declararlo aquí a mano.
+  overtimeApproval: createMockModel(),
   timeEntryBreak: createMockModel(),
   // Field-promoter geolocation ("cambaceo" tracking)
   promoterLocationPing: createMockModel(),
@@ -372,6 +401,15 @@ prismaMock.venueFeature.findMany.mockResolvedValue([])
 // above. Default to null (= no VenueSettings row → design defaults TAB/SIDE_PANEL); tests
 // that exercise the promotions block override with their own mockResolvedValue/mockRejectedValue.
 prismaMock.venueSettings.findUnique.mockResolvedValue(null)
+// Parte A (sesiones revocables) — Task 6: loginWithEmail/verifyPasskeyAssertion now call
+// createSession(...) → prisma.session.create(...) BEFORE minting tokens (they need the row's
+// `id` for the `sid` claim). Default so pre-existing mobile-auth tests that don't know about
+// sessions yet (auth.permisosDeLaApp.test.ts, auth.loginSuspendedVenue.test.ts) keep passing;
+// tests exercising the Session itself override with their own mockResolvedValue.
+prismaMock.session.create.mockResolvedValue({ id: 'session-mock-default' })
+// Parte A (sesiones revocables) — Task 10: idem, para el primer RefreshGrant que el login
+// emite justo después (issueGrant). Mismo motivo que el default de session.create arriba.
+prismaMock.refreshGrant.create.mockResolvedValue({ id: 'refresh-grant-mock-default' })
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

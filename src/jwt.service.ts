@@ -34,6 +34,10 @@ export interface AccessTokenPayload extends jwt.JwtPayload {
    * When present, the session is an impersonation session and must be treated as read-only.
    */
   act?: ImpersonationActClaim
+  /** Session.id. Ausente en tokens legacy emitidos antes del rollout. */
+  sid?: string
+  /** Versión del formato de token. 1 = con sid. Ausente = legacy. */
+  v?: number
 }
 
 /**
@@ -45,6 +49,10 @@ export interface RefreshTokenPayload extends jwt.JwtPayload {
   venueId?: string // Venue en el que estaba la sesión. Opcional: los tokens
   // emitidos antes de este campo no lo traen y caen al primer venue del staff.
   tokenId: string // ID único para el token de refresco
+  /** Session.id. Ausente en tokens legacy emitidos antes del rollout. */
+  sid?: string
+  /** Versión del formato de token. 1 = con sid. Ausente = legacy. */
+  v?: number
 }
 
 // --- Token Generation Functions ---
@@ -55,7 +63,14 @@ export interface RefreshTokenPayload extends jwt.JwtPayload {
  * @param organizationId - ID de la Organización (from venue or StaffOrganization)
  * @param venueId - ID del Venue para la sesión actual
  * @param role - Rol del Staff en el Venue actual
- * @param rememberMe - Si true, extiende la duración del token a 30 días
+ * @param rememberMe - Si true, extiende la duración del token a 30 días. Un `opts.pos`
+ *   verdadero lo ignora: el POS nunca emite un access de larga duración.
+ * @param opts - `sid` (Session.id) agrega el claim de sesión revocable; `pos: true`
+ *   acorta el access a 600 s (10 min) SIN IMPORTAR `rememberMe` — Task 12: sin DPoP, un
+ *   access token copiado sirve desde cualquier aparato mientras viva, así que el POS
+ *   nunca emite uno de larga duración. `pos` le gana a `rememberMe` a propósito.
+ *   Opcional: un llamador que no lo pasa sigue emitiendo un token legacy sin `sid`/`v`,
+ *   con la duración de siempre.
  * @returns El token de acceso firmado.
  */
 export function generateAccessToken(
@@ -64,6 +79,7 @@ export function generateAccessToken(
   venueId: string,
   role: StaffRole,
   rememberMe?: boolean,
+  opts?: { sid?: string; pos?: boolean },
 ): string {
   const payload: Omit<AccessTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
@@ -75,12 +91,16 @@ export function generateAccessToken(
     // - Session invalidation on password change
     // - Revoking compromised tokens
     jti: crypto.randomUUID(),
+    ...(opts?.sid ? { sid: opts.sid, v: 1 } : {}),
   }
   // Explicitly type the secret and options
   const secret: Secret = ACCESS_TOKEN_SECRET!
+  // Task 12: POS gana sobre rememberMe (no existe un "recuérdame" de 30 días en el POS) y
+  // sobre la duración normal — 600s es la mitigación a que este servidor no usa DPoP.
+  const expiresIn = opts?.pos ? 600 : rememberMe ? 2592000 : 86400
   const options: SignOptions = {
-    // rememberMe: 30 days (2592000 seconds), normal: 24 hours (86400 seconds)
-    expiresIn: rememberMe ? 2592000 : 86400,
+    // rememberMe: 30 days (2592000 seconds), normal: 24 hours (86400 seconds), POS: 10 min (600 seconds)
+    expiresIn,
     algorithm: 'HS256', // SECURITY: Explicitly specify algorithm
   }
   return jwt.sign(payload, secret, options)
@@ -136,9 +156,17 @@ export function generateImpersonationAccessToken(
  * @param staffId - ID del Staff (Staff.id)
  * @param organizationId - (Opcional) ID de la Organización
  * @param rememberMe - Si true, extiende la duración del token a 90 días
+ * @param opts - `sid` (Session.id) agrega el claim de sesión revocable. Opcional:
+ *   un llamador que no lo pasa sigue emitiendo un token legacy sin `sid`/`v`.
  * @returns El token de refresco firmado.
  */
-export function generateRefreshToken(staffId: string, organizationId?: string, rememberMe?: boolean, venueId?: string): string {
+export function generateRefreshToken(
+  staffId: string,
+  organizationId?: string,
+  rememberMe?: boolean,
+  venueId?: string,
+  opts?: { sid?: string },
+): string {
   const payload: Omit<RefreshTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
     tokenId: crypto.randomBytes(16).toString('hex'), // Genera un ID único para el token
@@ -149,6 +177,10 @@ export function generateRefreshToken(staffId: string, organizationId?: string, r
   // El venue viaja en el refresh para que renovar la sesión no la mude de local.
   if (venueId) {
     payload.venueId = venueId
+  }
+  if (opts?.sid) {
+    payload.sid = opts.sid
+    payload.v = 1
   }
   // Explicitly type the secret and options
   const secret: Secret = REFRESH_TOKEN_SECRET!

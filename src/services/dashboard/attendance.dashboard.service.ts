@@ -17,6 +17,14 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { getCurrentlyClockedInStaff, getTimeEntries } from '../tpv/time-entry.tpv.service'
 import { evaluateAttendance, type AttendanceStatus } from './attendanceEvaluator'
+import {
+  type DescansoDelDia,
+  estadoDeAutorizacion,
+  huellaDeLaJornada,
+  type IntervaloTrabajado,
+  minutosAutorizadosEfectivos,
+  minutosExtraDelDia,
+} from './overtime'
 import { type ExpectedDay, resolveExpectedDay, type WeeklyWorkSchedule, type WorkScheduleException } from './workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
 
@@ -122,10 +130,51 @@ export interface AttendanceReportRow {
   status: AttendanceStatus
   lateMinutes: number
   earlyLeaveMinutes: number
+  /**
+   * Minutos trabajados DESPUÉS de la hora de salida del cuadrante, ya sin los descansos que
+   * caen en esa ventana. Llegar temprano no cuenta — ver `overtime.ts`.
+   *
+   * Vive en el RENGLÓN y no sólo en la celda porque autorizar horas extra es por DÍA: la
+   * pantalla necesita el desglose diario, no el total del periodo.
+   */
+  overtimeMinutes: number
+  /**
+   * Minutos ya autorizados de ese día. `null` = NADIE lo ha revisado, que no es lo mismo que
+   * 0 = revisado y negado. Sin esta distinción la pantalla no puede decirle al gerente qué le
+   * falta por mirar.
+   */
+  overtimeApprovedMinutes: number | null
+  /**
+   * La revisión de esa autorización, para poder CORREGIRLA sin pisar a nadie.
+   *
+   * 🔴 Sin esto la exigencia de mandar `expectedUpdatedAt` sería inaplicable: quien corrige
+   * no tendría de dónde sacarla. `null` cuando no hay autorización todavía.
+   */
+  overtimeApprovedUpdatedAt: string | null
+  /**
+   * Huella de la jornada que produjo esos minutos. Es lo que permite invalidar una
+   * autorización cuando las checadas cambiaron aunque el total coincida (hallazgo #4).
+   */
+  overtimeFingerprint: string | null
 }
 
 /** Tope inclusivo del reporte de puntualidad, en días. */
 export const MAX_REPORT_DAYS = 92
+
+/**
+ * Desde qué hora del MISMO día cuenta una checada para un turno que cruza la medianoche: dos horas
+ * antes de la entrada, con tope en las 12:00 (para un 22:00–06:00 sigue siendo 12:00; para un
+ * 10:00–06:00 es 08:00 — antes se ignoraba la entrada puntual de las 10:00, Codex P2). Misma regla en
+ * comisiones.
+ */
+export function overnightSameDayThreshold(start: string): string {
+  const [h, m] = start.split(':').map(Number)
+  const minutes = Math.max(0, h * 60 + m - 120)
+  const hh = String(Math.floor(minutes / 60)).padStart(2, '0')
+  const mm = String(minutes % 60).padStart(2, '0')
+  const t = `${hh}:${mm}`
+  return t < '12:00' ? t : '12:00'
+}
 
 /**
  * Una celda por persona-día de TODO el rango, sin esconder nada: la rejilla es la única
@@ -137,19 +186,31 @@ export interface AttendanceGridCell extends AttendanceReportRow {
   absenceType: string | null
 }
 
+export interface AttendanceWorkedTotals {
+  totalHours: number
+  breakMinutes: number
+}
+
 export async function buildAttendanceGrid(
   venueId: string,
   startDate: string,
   endDate: string,
-): Promise<{ cells: AttendanceGridCell[]; graceMinutes: number; timezone: string }> {
+): Promise<{
+  cells: AttendanceGridCell[]
+  graceMinutes: number
+  timezone: string
+  /** Sólo las checadas que la rejilla atribuyó a un día del periodo. */
+  workedTotalsByStaff: Map<string, AttendanceWorkedTotals>
+}> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { timezone: true, settings: { select: { attendanceGraceMinutes: true } } },
+    select: { timezone: true, settings: { select: { attendanceGraceMinutes: true, rotatingShiftsEnabled: true } } },
   })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
 
   const timezone = venue.timezone || 'America/Mexico_City'
   const graceMinutes = venue.settings?.attendanceGraceMinutes ?? 10
+  const rotating = venue.settings?.rotatingShiftsEnabled === true
 
   // Validar ANTES de consultar: un rango absurdo (0001-01-01..9999-12-31) no debe costar ni
   // una consulta, y menos traerse toda la historia del venue (auditoría Codex fase 2, P2-2).
@@ -187,6 +248,13 @@ export async function buildAttendanceGrid(
         orderBy: [{ startDate: 'asc' }, { createdAt: 'asc' }],
         select: { startDate: true, endDate: true, kind: true, startTime: true, endTime: true, type: true },
       },
+      // Turnos rotativos: sólo cuentan las PUBLICADAS, y sólo si el venue los prendió.
+      workShiftAssignments: rotating
+        ? {
+            where: { date: { gte: startDate, lte: endDate }, status: 'PUBLISHED' },
+            select: { date: true, startTime: true, endTime: true, status: true },
+          }
+        : false,
     },
   })
 
@@ -194,16 +262,32 @@ export async function buildAttendanceGrid(
   // una consulta por celda de la tabla.
   // El tope superior se asoma hasta el MEDIODÍA siguiente al rango: la llegada de las 00:05
   // del día rangeEnd+1 pertenece al turno nocturno que empezó el último día del rango.
-  const entriesUntil = end.plus({ days: 1 }).startOf('day').plus({ hours: 12 }).toJSDate()
+  // Hasta el FIN del día siguiente: un turno nocturno puede terminar después del mediodía (Codex P2).
+  const entriesUntil = end.plus({ days: 1 }).endOf('day').toJSDate()
   const entries = await prisma.timeEntry.findMany({
     where: { venueId, clockInTime: { gte: rangeStart, lte: entriesUntil } },
-    select: { staffId: true, clockInTime: true, clockOutTime: true, validationStatus: true },
+    select: {
+      staffId: true,
+      clockInTime: true,
+      clockOutTime: true,
+      validationStatus: true,
+      totalHours: true,
+      breakMinutes: true,
+      // Los INTERVALOS, no el total: un descanso dentro de la hora extra se descuenta, y uno
+      // dentro de la jornada ordinaria no. Con el agregado esa distinción no se puede hacer.
+      breaks: { select: { startTime: true, endTime: true } },
+    },
     orderBy: { clockInTime: 'asc' },
   })
 
   interface DayEntry {
+    staffId: string
     clockInTime: Date
     clockOutTime: Date | null
+    totalHours: number
+    breakMinutes: number
+    /** Intervalos de descanso de ESA checada, para descontar los que caen en la hora extra. */
+    breaks: DescansoDelDia[]
     /** 'HH:mm' local del negocio, para decidir a qué turno pertenece. */
     localTime: string
   }
@@ -215,7 +299,15 @@ export async function buildAttendanceGrid(
     const local = DateTime.fromJSDate(entry.clockInTime).setZone(timezone)
     const key = `${entry.staffId}|${local.toISODate()}`
     if (!byStaffAndDay.has(key)) byStaffAndDay.set(key, [])
-    byStaffAndDay.get(key)!.push({ clockInTime: entry.clockInTime, clockOutTime: entry.clockOutTime, localTime: local.toFormat('HH:mm') })
+    byStaffAndDay.get(key)!.push({
+      staffId: entry.staffId,
+      clockInTime: entry.clockInTime,
+      clockOutTime: entry.clockOutTime,
+      totalHours: Number(entry.totalHours ?? 0),
+      breakMinutes: entry.breakMinutes ?? 0,
+      breaks: entry.breaks ?? [],
+      localTime: local.toFormat('HH:mm'),
+    })
   }
 
   /**
@@ -231,7 +323,7 @@ export async function buildAttendanceGrid(
     const overnight = !!expected.start && !!expected.end && expected.end <= expected.start
     const dayList = byStaffAndDay.get(`${staffId}|${date}`) ?? []
     if (!overnight) return dayList.find(e => !consumed.has(e)) ?? null
-    const evening = dayList.find(e => !consumed.has(e) && e.localTime >= '12:00')
+    const evening = dayList.find(e => !consumed.has(e) && e.localTime >= overnightSameDayThreshold(expected.start!))
     if (evening) return evening
     const nextDate = DateTime.fromISO(date, { zone: timezone }).plus({ days: 1 }).toISODate()!
     const nextList = byStaffAndDay.get(`${staffId}|${nextDate}`) ?? []
@@ -257,9 +349,22 @@ export async function buildAttendanceGrid(
 
     for (const date of days) {
       if (date < joinedIso || (leftIso && date > leftIso)) continue
-      const expected = resolveExpectedDay(weekly, exceptions, date)
+      const assignment = rotating
+        ? ((
+            (membership as any).workShiftAssignments as
+              | Array<{ date: string; startTime: string; endTime: string; status: string }>
+              | undefined
+          )?.find(a => a.date === date) ?? null)
+        : null
+      const expected = resolveExpectedDay(weekly, exceptions, date, assignment)
       const picked = pickEntryForDay(membership.staffId, date, expected)
-      let actual: { clockInTime: Date; clockOutTime: Date | null } | null = null
+      let actual: {
+        clockInTime: Date
+        clockOutTime: Date | null
+        breaks: DescansoDelDia[]
+        /** Los tramos REALES trabajados ese día: sin ellos, el hueco entre dos checadas se paga. */
+        intervalos: IntervaloTrabajado[]
+      } | null = null
       if (picked) {
         consumed.add(picked)
         // La PRIMERA entrada manda como llegada; la salida es la ÚLTIMA registrada de ese
@@ -270,14 +375,50 @@ export async function buildAttendanceGrid(
         // que es de su propio turno.
         const pickedDate = DateTime.fromJSDate(picked.clockInTime).setZone(timezone).toISODate()
         let clockOutTime = picked.clockOutTime
+        const breaks: DescansoDelDia[] = [...picked.breaks]
+        // 🔴 Cada checada aporta su tramo. `clockInTime`/`clockOutTime` siguen siendo la
+        // PRIMERA entrada y la ÚLTIMA salida —eso es lo que el reporte enseña y lo que el
+        // evaluador de retardos necesita—, pero la hora extra se calcula sobre los tramos:
+        // si no, el hueco entre «salí a las 17:00» y «volví a las 18:00» se paga como
+        // trabajado (hallazgo #1 de Codex, el más caro de los nueve).
+        const intervalos: IntervaloTrabajado[] = [{ entrada: picked.clockInTime, salida: picked.clockOutTime }]
+        const tomarContinuacion = (sib: DayEntry) => {
+          consumed.add(sib)
+          clockOutTime = sib.clockOutTime ?? clockOutTime
+          intervalos.push({ entrada: sib.clockInTime, salida: sib.clockOutTime })
+          // Los descansos de la continuación son suyos igual: uno tomado después de
+          // reingresar cae dentro de la misma jornada y no puede pagarse como hora extra.
+          breaks.push(...sib.breaks)
+        }
+
         if (pickedDate === date) {
           for (const sib of byStaffAndDay.get(`${membership.staffId}|${pickedDate}`) ?? []) {
             if (sib === picked || consumed.has(sib) || sib.localTime <= picked.localTime) continue
-            consumed.add(sib)
-            clockOutTime = sib.clockOutTime ?? clockOutTime
+            tomarContinuacion(sib)
           }
         }
-        actual = { clockInTime: picked.clockInTime, clockOutTime }
+
+        // 🔴 TURNO NOCTURNO: la continuación cae en el cubo del día SIGUIENTE, así que la
+        // búsqueda por `pickedDate` no la veía nunca. Con 22:00→06:00, alguien que sale a las
+        // 02:00 y vuelve a checar a las 02:30 hasta las 07:30 perdía sus 90 minutos de extra:
+        // ese segundo tramo vive en el 25, no en el 24 (2ª auditoría de Codex, 30-ago, P1 #4).
+        //
+        // El tope es el MISMO que usa `pickEntryForDay` para no robarle su checada al turno
+        // del día siguiente: sólo cuenta lo que empieza ANTES de la hora de salida.
+        // ⚠️ Consecuencia declarada: un reingreso que empieza DESPUÉS del fin del turno no se
+        // le atribuye. Es el lado conservador —se paga de menos antes que quitarle su jornada
+        // a otro día—, y a esa distancia la pertenencia es genuinamente ambigua.
+        const overnight = !!expected.start && !!expected.end && expected.end <= expected.start
+        if (overnight) {
+          const nextDate = DateTime.fromISO(date, { zone: timezone }).plus({ days: 1 }).toISODate()!
+          for (const sib of byStaffAndDay.get(`${membership.staffId}|${nextDate}`) ?? []) {
+            if (sib === picked || consumed.has(sib)) continue
+            if (sib.clockInTime.getTime() <= picked.clockInTime.getTime()) continue
+            if (sib.localTime >= expected.end!) continue
+            tomarContinuacion(sib)
+          }
+        }
+        actual = { clockInTime: picked.clockInTime, clockOutTime, breaks, intervalos }
       }
 
       // Sin checada en un día que no ha terminado (hoy o futuro): pendiente, no falta.
@@ -296,7 +437,30 @@ export async function buildAttendanceGrid(
               isDayOff: expected.isDayOff,
             })
 
+      // Hora extra del día: sale de la MISMA celda que el retardo, así que el reporte y la
+      // nómina no pueden divergir — es la lección que ya costó cara entre el reporte y las
+      // comisiones con los turnos nocturnos.
+      const turnoDelDia = { date, expectedStart: expected.start, expectedEnd: expected.end }
+      const overtimeMinutes = minutosExtraDelDia({
+        turno: turnoDelDia,
+        intervalos: actual?.intervalos ?? [],
+        descansos: actual?.breaks ?? [],
+        timezone,
+      })
+      // La huella se calcula sólo cuando hay algo que autorizar: para un día sin extra no
+      // sirve de nada y cuesta un hash por celda.
+      const overtimeFingerprint =
+        overtimeMinutes > 0
+          ? huellaDeLaJornada({ turno: turnoDelDia, intervalos: actual?.intervalos ?? [], descansos: actual?.breaks ?? [], timezone })
+          : null
+
       rows.push({
+        overtimeMinutes,
+        overtimeFingerprint,
+        // La rejilla no consulta autorizaciones: quien las necesita (reporte y nómina) las
+        // pide agrupadas, en UNA consulta, en vez de una por celda.
+        overtimeApprovedMinutes: null,
+        overtimeApprovedUpdatedAt: null,
         absenceType: expected.isDayOff ? (expected.absenceType ?? null) : null,
         staffId: membership.staffId,
         staffVenueId: membership.id,
@@ -312,7 +476,15 @@ export async function buildAttendanceGrid(
   }
 
   rows.sort((a, b) => (a.date === b.date ? a.name.localeCompare(b.name) : b.date.localeCompare(a.date)))
-  return { cells: rows, graceMinutes, timezone }
+  const workedTotalsByStaff = new Map<string, AttendanceWorkedTotals>()
+  for (const entry of consumed) {
+    const current = workedTotalsByStaff.get(entry.staffId) ?? { totalHours: 0, breakMinutes: 0 }
+    current.totalHours += entry.totalHours
+    current.breakMinutes += entry.breakMinutes
+    workedTotalsByStaff.set(entry.staffId, current)
+  }
+
+  return { cells: rows, graceMinutes, timezone, workedTotalsByStaff }
 }
 
 export async function getAttendanceReport(
@@ -323,6 +495,57 @@ export async function getAttendanceReport(
   const { cells, graceMinutes, timezone } = await buildAttendanceGrid(venueId, startDate, endDate)
   // Los días sin nada que contar no llegan a la pantalla: descanso sin novedad y gente
   // sin cuadrante que tampoco marcó. Llenar la tabla de filas vacías la vuelve ilegible.
+  // (Un día con horas extra SIEMPRE tiene checada, así que este filtro nunca lo esconde.)
   const rows = cells.filter(c => !((c.status === 'DAY_OFF' || c.status === 'NO_SCHEDULE' || c.status === 'PENDING') && !c.clockInTime))
+
+  // Qué horas extra ya se autorizaron. Sólo se pregunta si hay algo que autorizar: una
+  // consulta de más en un reporte que no la necesita es una consulta de más en cada carga.
+  const conExtra = rows.filter(r => r.overtimeMinutes > 0)
+  if (conExtra.length > 0) {
+    const aprobadas = await prisma.overtimeApproval.findMany({
+      where: {
+        staffVenueId: { in: [...new Set(conExtra.map(r => r.staffVenueId))] },
+        date: { gte: startDate, lte: endDate },
+      },
+      select: { staffVenueId: true, date: true, minutesApproved: true, minutesMeasured: true, sourceFingerprint: true, updatedAt: true },
+    })
+    const porDia = new Map(aprobadas.map(a => [`${a.staffVenueId}|${a.date}`, a]))
+    for (const r of rows) {
+      const a = porDia.get(`${r.staffVenueId}|${r.date}`)
+      r.overtimeApprovedUpdatedAt = a ? a.updatedAt.toISOString() : null
+
+      // 🔴 El reporte tiene que enseñar lo MISMO que nómina va a pagar (hallazgo #11 de
+      // Codex). Antes se devolvía `minutesApproved` en crudo, así que la pantalla podía decir
+      // «120 autorizadas» mientras el resumen pagaba 30 — el gerente firmaba mirando un
+      // número y el empleado cobraba otro. Se aplican aquí las MISMAS dos reglas:
+      //
+      //   · si la jornada cambió (la huella no coincide), la autorización no vale;
+      //   · nunca se enseña más de lo que el reloj mide hoy.
+      if (!a) {
+        // `null` y no `0`: sin revisar y negado son estados distintos.
+        r.overtimeApprovedMinutes = null
+        continue
+      }
+      // 🔴 Y se decide con la MISMA función que usan el resumen y el reparto doble/triple, no
+      // con una copia de la regla. Ésta era la TERCERA copia: cuando el reparto se quedó sin
+      // la comprobación de huella, una fila llegó a decir «0 autorizados / 120 pendientes» y
+      // pagar 120 al doble a la vez (2ª auditoría de Codex, 30-ago-2026, P1 #1).
+      const dia = {
+        date: r.date,
+        medidos: r.overtimeMinutes,
+        autorizados: a.minutesApproved,
+        medidosAlAutorizar: a.minutesMeasured,
+        huellaActual: r.overtimeFingerprint,
+        huellaAlAutorizar: a.sourceFingerprint,
+      }
+      r.overtimeApprovedMinutes =
+        estadoDeAutorizacion(dia) === 'VIGENTE'
+          ? minutosAutorizadosEfectivos(dia)
+          : // La jornada cambió: la firma vieja no dice nada de lo que hay hoy, así que el día
+            // vuelve a «sin revisar» — que es lo que nómina también hace.
+            null
+    }
+  }
+
   return { rows, graceMinutes, timezone }
 }

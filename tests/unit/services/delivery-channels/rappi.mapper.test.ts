@@ -235,3 +235,55 @@ describe('tiempoDeCoccion', () => {
     expect(tiempoDeCoccion({})).toBe(15)
   })
 })
+
+// ── La invariante que ata la ORDEN con el REPORTE ─────────────────────────────────────
+describe('🔴 el REPORTE no puede contradecir a la orden', () => {
+  // `lineRevenue.ts` (dashboard) calcula el ingreso de UNA línea con esta MISMA fórmula,
+  // en SQL: unitPrice × cantidad + Σ(modificador.price × modificador.quantity). NO
+  // multiplica los modificadores por la cantidad del producto padre. Si el mapeo no
+  // respeta eso, `item.total` (lo que se cobra) y el reporte dicen números distintos:
+  // el dueño ve uno y el banco otro. Es el mismo agujero que Uber cerró el 27-ago.
+  const lineGross = (it: { unitPrice: string; quantity: number; modifiers?: Array<{ price: string; quantity: number }> }) =>
+    Number(it.unitPrice) * it.quantity + (it.modifiers ?? []).reduce((a, m) => a + Number(m.price) * m.quantity, 0)
+
+  /** Ensalada de $100 con "Queso burrata" de $30. Las dos cantidades se pasan aparte. */
+  const pedido = (cantidad: number, cantidadDelExtra: number, total: number) => ({
+    order_detail: {
+      order_id: '392625',
+      totals: { total_products_with_discount: total, other_totals: { tip: 0 } },
+      items: [
+        {
+          sku: '1234',
+          id: '2089918083',
+          name: 'Ensalada',
+          price: 100,
+          quantity: cantidad,
+          subitems: [{ sku: '11', id: '10005260', name: 'Queso burrata', price: 30, quantity: cantidadDelExtra }],
+        },
+      ],
+    },
+    store: { internal_id: '30000011', external_id: '123445' },
+  })
+
+  it.each([
+    ['2 ensaladas, 1 burrata en cada una', 2, 1, 260],
+    ['1 ensalada con 2 burratas', 1, 2, 160],
+    ['3 ensaladas con 2 burratas cada una', 3, 2, 480],
+    ['1 ensalada, 1 burrata (el caso que ya cuadraba)', 1, 1, 130],
+  ])('%s: lineGross == item.total == saleAmount', (_caso, cantidad, cantidadDelExtra, total) => {
+    const o = normalizeRappiOrder(pedido(cantidad, cantidadDelExtra, total))
+    const renglon = o.items[0]
+
+    expect(lineGross(renglon).toFixed(2)).toBe(Number(renglon.total).toFixed(2))
+    expect(Number(renglon.total).toFixed(2)).toBe(Number(o.payment.saleAmount).toFixed(2))
+  })
+
+  // El contrato está escrito en `core/types.ts`: «`price` — ya multiplicado por la cantidad
+  // del padre», `quantity` = la cantidad PROPIA del extra. Repartirlo al revés daría el
+  // mismo producto pero rompería la comanda: el KDS imprime "2x Queso burrata" leyendo
+  // `quantity`, y en una línea de 2 ensaladas con una burrata cada una eso es mentira.
+  it('🔴 reparte precio y cantidad como manda el contrato: precio × cantidad del padre, cantidad PROPIA', () => {
+    const o = normalizeRappiOrder(pedido(2, 1, 260))
+    expect(o.items[0].modifiers).toEqual([{ externalId: '11', name: 'Queso burrata', quantity: 1, price: '60.00' }])
+  })
+})

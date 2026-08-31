@@ -3,6 +3,7 @@
  * offsets together makes accidental pool stampedes visible in code review.
  */
 export const DATABASE_JOB_SCHEDULES = {
+  displayModeRequestExpiry: '4 * * * * *',
   terminalPaymentWatchdog: '8,38 * * * * *',
   blumonWebhookReconciliation: '11,41 * * * * *',
   tpvHealthMonitor: '14 */2 * * * *',
@@ -13,10 +14,15 @@ export const DATABASE_JOB_SCHEDULES = {
   catalogPublicationWatchdog: '32 * * * * *',
   shiftCloseWatchdog: '35 * * * * *',
   inventoryPostingSweeper: '44 */2 * * * *',
+  // Fase 3 de la unificación de caja: repone ventas en efectivo sin evento en el cajón.
+  // Segundo :02, cada 5 min — hueco libre antes del watchdog de pagos (:08).
+  cashDrawerReconciler: '2 */5 * * * *',
   // Fase 1: avisos de aprobación de clientes. Segundo 20/50, hueco libre entre el monitor
   // de POS (:17) y el sweeper de gcal (:23) — el escalonado es lo que evita la estampida.
   customerApprovalOutbox: '20,50 * * * * *',
   // Anuncios de plataforma programados. Cada 5 min en el segundo 47 — hueco libre entre
   // el sweeper de inventario (:44) y el de gcal (:53).
   publishScheduledAnnouncements: '47 */5 * * * *',
+  // Entrega de anuncios encolados. Cada 30 s en los segundos 6 y 36, huecos libres.
+  announcementOutbox: '6,36 * * * * *',
 } as const

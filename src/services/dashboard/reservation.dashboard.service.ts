@@ -563,7 +563,7 @@ export async function createReservation(
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-        AND "startsAt" < ${finalEndsAt}
+        AND "startsAt" < ${blockedEndsAt}
         AND "blockedEndsAt" > ${data.startsAt}
         AND "tableId" = ${data.tableId}
         FOR UPDATE NOWAIT
@@ -579,7 +579,7 @@ export async function createReservation(
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-        AND "startsAt" < ${finalEndsAt}
+        AND "startsAt" < ${blockedEndsAt}
         AND "blockedEndsAt" > ${data.startsAt}
         AND "assignedStaffId" = ${effectiveAssignedStaffId}
         FOR UPDATE NOWAIT
@@ -599,7 +599,7 @@ export async function createReservation(
           FROM "Reservation"
           WHERE "venueId" = ${venueId}
             AND "productId" = ${leadProductId}
-            AND "startsAt" < ${finalEndsAt}
+            AND "startsAt" < ${blockedEndsAt}
             AND "blockedEndsAt" > ${data.startsAt}
             AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           FOR UPDATE
@@ -1540,6 +1540,21 @@ export async function updateReservation(
       reservation.startsAt.getTime() !== newStartsAt.getTime() ||
       reservation.endsAt.getTime() !== newEndsAt.getTime() ||
       reservation.duration !== finalDuration
+    // Ambos lados de la comparación usan su bloque real [startsAt, blockedEndsAt).
+    // Si esta reserva empieza antes que otra, su buffer también debe impedir el
+    // solapamiento; comparar sólo `newEndsAt` hacía depender el resultado del
+    // orden en que se creaban las dos citas.
+    const windowMoved = data.startsAt !== undefined || data.endsAt !== undefined || useLockedDuration || data.productId !== undefined
+    const newBlockedEndsAt = windowMoved
+      ? applyBufferToEndsAt(
+          newEndsAt,
+          await resolveBufferAfterMin(tx, {
+            venueId,
+            productIds: reservationBookedProductIds({ productId: newProductId, productIds: newProductIds }),
+          }),
+        )
+      : undefined
+    const effectiveBlockedEndsAt = newBlockedEndsAt ?? reservation.blockedEndsAt ?? newEndsAt
     const staffChanged = reservation.assignedStaffId !== newStaffId
     const checkedAt = new Date()
     let overCapacity = false
@@ -1620,7 +1635,7 @@ export async function updateReservation(
           AND "tableId" = ${newTableId}
           AND id <> ${reservationId}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-          AND "startsAt" < ${newEndsAt}
+          AND "startsAt" < ${effectiveBlockedEndsAt}
           AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
@@ -1637,7 +1652,7 @@ export async function updateReservation(
           AND "assignedStaffId" = ${newStaffId}
           AND id <> ${reservationId}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-          AND "startsAt" < ${newEndsAt}
+          AND "startsAt" < ${effectiveBlockedEndsAt}
           AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
@@ -1656,7 +1671,7 @@ export async function updateReservation(
         WHERE "venueId" = ${venueId}
           AND "productId" = ${newProductId}
           AND id <> ${reservationId}
-          AND "startsAt" < ${newEndsAt}
+          AND "startsAt" < ${effectiveBlockedEndsAt}
           AND "blockedEndsAt" > ${newStartsAt}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         FOR UPDATE
@@ -1678,11 +1693,6 @@ export async function updateReservation(
     // cambien: si `endsAt` se mueve y `blockedEndsAt` se queda con el valor
     // viejo, la cita bloquea el horario anterior y libera el nuevo — un hueco
     // silencioso que TypeScript no puede detectar en un update parcial.
-    const windowMoved = data.startsAt !== undefined || data.endsAt !== undefined || useLockedDuration || data.productId !== undefined
-    const newBlockedEndsAt = windowMoved
-      ? applyBufferToEndsAt(newEndsAt, await resolveBufferAfterMin(tx, { venueId, productIds: newProductIds }))
-      : undefined
-
     const updated = await tx.reservation.update({
       where: { id: reservationId },
       data: {
@@ -1964,6 +1974,14 @@ async function rescheduleAppointmentWithHold(args: {
       }
     }
 
+    // La reserva que se mueve también aporta su buffer a la comparación.
+    // Calcúlalo antes del lock de conflicto para que reservar A→B o B→A dé
+    // exactamente el mismo resultado.
+    const rescheduledBlockedEndsAt = applyBufferToEndsAt(
+      lockedHold.endsAt,
+      await resolveBufferAfterMin(tx, { venueId, productIds: reservationBookedProductIds(reservation) }),
+    )
+
     if (reservation.tableId) {
       const tableConflicts = await tx.$queryRaw<{ id: string; confirmationCode: string }[]>`
         SELECT id, "confirmationCode"
@@ -1972,7 +1990,7 @@ async function rescheduleAppointmentWithHold(args: {
           AND "tableId" = ${reservation.tableId}
           AND id <> ${reservation.id}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-          AND "startsAt" < ${lockedHold.endsAt}
+          AND "startsAt" < ${rescheduledBlockedEndsAt}
           AND "blockedEndsAt" > ${newStartsAt}
         FOR UPDATE NOWAIT
       `
@@ -1980,12 +1998,6 @@ async function rescheduleAppointmentWithHold(args: {
         throw new ConflictError(`Mesa tiene conflicto con reservacion ${tableConflicts[0].confirmationCode}`)
       }
     }
-
-    // La ventana se movió ⇒ el bloque de agenda se recalcula con ella.
-    const rescheduledBlockedEndsAt = applyBufferToEndsAt(
-      lockedHold.endsAt,
-      await resolveBufferAfterMin(tx, { venueId, productIds: reservationBookedProductIds(reservation) }),
-    )
 
     const updated = await tx.reservation.update({
       where: { id: reservation.id },

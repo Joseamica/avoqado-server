@@ -16,7 +16,16 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 import { recalculateOrderTotals } from '@/services/mobile/comp-item.mobile.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
-const ORDEN = { id: 'o1', venueId: 'v1', total: 250, subtotal: 250, discountAmount: 0, paymentStatus: 'PENDING', paidAmount: 0 }
+const ORDEN = {
+  id: 'o1',
+  venueId: 'v1',
+  customerId: 'c1',
+  total: 250,
+  subtotal: 250,
+  discountAmount: 0,
+  paymentStatus: 'PENDING',
+  paidAmount: 0,
+}
 
 const PREMIO_MONTO = {
   id: 'rw1',
@@ -147,6 +156,17 @@ describe('redeemStampReward', () => {
       prismaMock.stampReward.findFirst.mockResolvedValue(null)
 
       await expect(redeemStampReward('v1', 'o1', 'ajeno')).rejects.toThrow(/premio/i)
+    })
+
+    it('🔴 un premio de OTRO cliente no se puede quemar en esta cuenta', async () => {
+      prismaMock.order.findFirst.mockResolvedValue({ ...ORDEN, customerId: 'cliente-de-la-cuenta' } as any)
+      prismaMock.stampReward.findFirst.mockImplementation((async (args: any) => {
+        if (args.where.customerId === 'cliente-de-la-cuenta') return null
+        return { ...PREMIO_MONTO, customerId: 'cliente-del-premio' }
+      }) as any)
+
+      await expect(redeemStampReward('v1', 'o1', 'rw1')).rejects.toThrow(/premio/i)
+      expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
     })
 
     it('un premio ya canjeado se rechaza sin llegar a la transacción', async () => {

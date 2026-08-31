@@ -41,7 +41,11 @@ const pagoEnEfectivo = (over: Record<string, unknown> = {}) => ({
 describe('postCashSaleToDrawer — la venta en efectivo SUMA al cajón', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue({ id: 'session-1' }) }
+    ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue({ id: 'session-1' }),
+    }
     ;(prismaMock as any).cashDrawerEvent = { createMany: jest.fn().mockResolvedValue({ count: 1 }) }
   })
 

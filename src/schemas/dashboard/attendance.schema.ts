@@ -53,6 +53,29 @@ export const PayrollSummarySchema = z.object({
   query: z.object({ startDate: isoDate, endDate: isoDate }),
 })
 
+export const ApproveOvertimeSchema = z.object({
+  params: z.object({ venueId: z.string().cuid(), staffVenueId: z.string().cuid() }),
+  body: z.object({
+    date: isoDate,
+    // Entero y no negativo. El tope contra lo MEDIDO no vive aquí sino en el servicio: es una
+    // regla de negocio que necesita recalcular la rejilla, y Zod sólo valida forma.
+    minutesApproved: z
+      .number({ invalid_type_error: 'Los minutos autorizados deben ser un número' })
+      .int('Los minutos autorizados deben ser un número entero')
+      .min(0, 'Los minutos autorizados no pueden ser negativos'),
+    note: z.string().max(500, 'La nota no puede pasar de 500 caracteres').optional(),
+    // 🔴 La revisión de la autorización que se tenía ENFRENTE. Obligatoria para CORREGIR
+    // una que ya existe: sin ella, dos gerentes se pisan y gana el último (hallazgo #3).
+    expectedUpdatedAt: z.string().datetime({ message: 'La revisión debe ser una fecha ISO' }).optional(),
+    // La jornada que el gerente tenía enfrente. Sin ella la firma se estampa sobre lo que
+    // haya al llegar, que puede no ser lo que revisó.
+    expectedSourceFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{32}$/, 'La huella de la jornada no tiene el formato esperado')
+      .optional(),
+  }),
+})
+
 export const WorkScheduleParamsSchema = z.object({
   params: z.object({ venueId: z.string().cuid(), staffVenueId: z.string().cuid() }),
 })
@@ -111,5 +134,50 @@ export const ReplaceWorkScheduleSchema = z.object({
       )
       .max(200)
       .default([]),
+  }),
+})
+
+// ─── Turnos rotativos (fase 1 "como Sesame") ────────────────────────────────────────────
+const shiftHhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Hora inválida (HH:mm)')
+const shiftIsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (YYYY-MM-DD)')
+const templateBody = z.object({
+  name: z.string().trim().min(1).max(40),
+  abbreviation: z.string().trim().min(1).max(4),
+  color: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/)
+    .optional(),
+  startTime: shiftHhmm,
+  endTime: shiftHhmm,
+  sortOrder: z.number().int().min(0).max(999).optional(),
+})
+export const WorkShiftTemplatesQuerySchema = z.object({
+  params: z.object({ venueId: z.string().cuid() }),
+  query: z.object({ includeInactive: z.enum(['true', 'false']).optional() }).optional(),
+})
+export const CreateWorkShiftTemplateSchema = z.object({ params: z.object({ venueId: z.string().cuid() }), body: templateBody })
+export const UpdateWorkShiftTemplateSchema = z.object({
+  params: z.object({ venueId: z.string().cuid(), templateId: z.string().cuid() }),
+  body: templateBody.partial().extend({ active: z.boolean().optional() }),
+})
+export const WorkShiftAssignmentsQuerySchema = z.object({
+  params: z.object({ venueId: z.string().cuid() }),
+  query: z.object({ from: shiftIsoDate, to: shiftIsoDate }),
+})
+export const ReplaceWorkShiftAssignmentsSchema = z.object({
+  params: z.object({ venueId: z.string().cuid() }),
+  body: z.object({
+    from: shiftIsoDate,
+    to: shiftIsoDate,
+    items: z.array(z.object({ staffVenueId: z.string().cuid(), date: shiftIsoDate, templateId: z.string().cuid().nullable() })).max(600),
+  }),
+})
+export const PublishWorkShiftAssignmentsSchema = z.object({
+  params: z.object({ venueId: z.string().cuid() }),
+  body: z.object({
+    from: shiftIsoDate,
+    to: shiftIsoDate,
+    /** Revisión de cada borrador que el gerente tiene enfrente (CAS todo-o-nada; 409 si alguno cambió). */
+    drafts: z.array(z.object({ id: z.string().cuid(), updatedAt: z.string().datetime() })).max(600),
   }),
 })

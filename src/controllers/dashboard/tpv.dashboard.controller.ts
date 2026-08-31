@@ -5,6 +5,21 @@ import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.s
 import { generateActivationCode as generateActivationCodeService } from '../../services/dashboard/terminal-activation.service'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { revokeSessionsForDevice } from '@/services/auth/session.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+
+const LEGACY_CLIENT_METADATA_MAX_LENGTH = 128
+
+function sanitizeLegacyClientMetadata(value: unknown): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (typeof raw !== 'string') return undefined
+  const normalized = raw
+    // eslint-disable-next-line no-control-regex -- strips control chars from client-supplied metadata on purpose
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return normalized ? normalized.slice(0, LEGACY_CLIENT_METADATA_MAX_LENGTH) : undefined
+}
 
 /**
  * Controlador para manejar la solicitud GET de terminales.
@@ -85,6 +100,22 @@ export async function updateTpv(
     const updateData = req.body
 
     const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData)
+
+    if (Object.prototype.hasOwnProperty.call(updateData, 'customerDisplayInverted')) {
+      const appVersion = sanitizeLegacyClientMetadata(req.headers['x-app-version'])
+      const userAgent = appVersion ? undefined : sanitizeLegacyClientMetadata(req.headers['user-agent'])
+      void logAction({
+        action: 'LEGACY_DISPLAY_MODE_UPDATE_USED',
+        entity: 'Terminal',
+        entityId: tpvId,
+        staffId: req.authContext?.userId ?? null,
+        venueId,
+        data: {
+          ...(appVersion ? { appVersion } : {}),
+          ...(userAgent ? { userAgent } : {}),
+        },
+      })
+    }
 
     res.status(200).json(updatedTpv)
   } catch (error) {
@@ -394,6 +425,43 @@ export async function getTerminalMerchants(req: Request<{ tpvId: string }>, res:
     const merchants = await tpvDashboardService.getTerminalMerchants(tpvId)
 
     res.status(200).json({ data: merchants })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Sacar un aparato: cierra las sesiones abiertas en él.
+ *
+ * El caso real es una tablet perdida o robada, o la que se llevó alguien que ya no trabaja ahí.
+ * Cerrar por PERSONA no sirve para eso: la sacaría también de su propio teléfono.
+ *
+ * @permission tpv:update (MANAGER+)
+ */
+export async function revokeDeviceSessions(
+  req: Request<{ venueId: string; deviceId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, deviceId } = req.params
+    const actor = (req as any).authContext?.userId ?? null
+
+    const closed = await revokeSessionsForDevice({ venueId, deviceId, reason: 'device_removed_from_dashboard' })
+
+    // Sacar un aparato es exactamente lo que un dueño audita después ("¿quién echó esta tablet
+    // el martes?"). Fire-and-forget, fuera de cualquier transacción, como manda la regla: que la
+    // bitácora falle no puede impedir que alguien saque una tablet robada.
+    void logAction({
+      action: 'DEVICE_SESSIONS_REVOKED',
+      entity: 'Session',
+      entityId: deviceId,
+      staffId: actor,
+      venueId,
+      data: { deviceId, closed },
+    })
+
+    res.status(200).json({ data: { deviceId, closed } })
   } catch (error) {
     next(error)
   }

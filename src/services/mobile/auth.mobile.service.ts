@@ -8,12 +8,17 @@
  * - Passkey (WebAuthn) authentication for passwordless login
  */
 
+import { AuthMethod, type VenueStatus, type Session } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import crypto from 'crypto'
 import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import * as jwtService from '../../jwt.service'
+import { createSession } from '@/services/auth/session.service'
+import { issueGrant, rotateGrant } from '@/services/auth/refreshGrant.service'
 import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
+import { OPERATIONAL_VENUE_STATUSES, venueStatusMessage } from '../../lib/venueStatus.constants'
+import { mensajeDeCorte, motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
 import { getRoleDisplayNamesForVenues } from '../dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../dashboard/activity-log.service'
 import logger from '@/config/logger'
@@ -26,6 +31,29 @@ import {
   type AuthenticatorTransportFuture,
   type RegistrationResponseJSON,
 } from '@simplewebauthn/server'
+
+// ============================================================================
+// REFRESH GRANTS (Parte A — sesiones revocables, Task 10)
+// ============================================================================
+
+// Misma regla de duración que `jwtService.generateRefreshToken` (7 días normal, 90 días
+// con "recordarme"). Se duplica aquí a propósito en vez de decodificar el token recién
+// firmado: en los tests unitarios `generateRefreshToken` suele venir mockeado a un string
+// fijo que NO es un JWT real, y verificarlo de vuelta reventaría esos tests con un error de
+// formato. Si esa duración cambia en jwt.service.ts, cambia también aquí.
+const REFRESH_TOKEN_TTL_SECONDS = 604_800
+const REFRESH_TOKEN_TTL_SECONDS_REMEMBER_ME = 7_776_000
+
+/**
+ * Fecha de vencimiento para sellar `RefreshGrant.expiresAt` al emitir (login) o rotar (refresh) un grant.
+ *
+ * Exportada para que `switch-user.mobile.service.ts` selle con LA MISMA regla: duplicar el TTL
+ * daría dos vencimientos distintos para el mismo tipo de token según por dónde entró la persona.
+ */
+export function refreshGrantExpiry(rememberMe?: boolean): Date {
+  const ttlSeconds = rememberMe ? REFRESH_TOKEN_TTL_SECONDS_REMEMBER_ME : REFRESH_TOKEN_TTL_SECONDS
+  return new Date(Date.now() + ttlSeconds * 1000)
+}
 
 // ============================================================================
 // PASSKEY (WebAuthn) AUTHENTICATION
@@ -94,7 +122,12 @@ export async function generatePasskeyChallenge() {
  * @param rememberMe - Whether to extend token expiration
  * @returns Login result with tokens and user data
  */
-export async function verifyPasskeyAssertion(credential: AuthenticationResponseJSON, challengeKey?: string, rememberMe?: boolean) {
+export async function verifyPasskeyAssertion(
+  credential: AuthenticationResponseJSON,
+  challengeKey?: string,
+  rememberMe?: boolean,
+  deviceId?: string,
+) {
   logger.info(`🔐 [PASSKEY] Verifying assertion for credential: ${credential.id.substring(0, 20)}...`)
 
   // 1. Find the stored challenge
@@ -227,16 +260,35 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
   }
 
   // 6. Check venue access
-  if (staff.venues.length === 0) {
-    throw new ForbiddenError('No tienes acceso a ningún establecimiento')
-  }
+  const selectedVenue = pickOperationalVenueForLogin(staff.venues)
 
-  const selectedVenue = staff.venues[0]
+  // 6.1. Crear la Session ANTES de los tokens — su id viaja como `sid` en ambos. El passkey
+  // es biometría/PIN del dispositivo, no una contraseña: authMethod queda BIOMETRIC.
+  const session = await createSession({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    authMethod: AuthMethod.BIOMETRIC,
+    // 🔴 [Auditoría 2026-08-30, P2] Faltaba, y el hueco era silencioso: la tablet SÍ aparece en el
+    // registro de terminales, pero «sacar aparato» busca sesiones por `deviceId` y cerraba CERO.
+    // Es decir, el dueño tocaba el botón, el dashboard le decía que sí, y la sesión biométrica de
+    // la tablet perdida seguía cobrando. Peor que no tener el botón.
+    deviceId,
+  })
 
   // 7. Generate tokens (derive orgId from venue)
   const venueOrgId = selectedVenue.venue.organizationId
-  const accessToken = jwtService.generateAccessToken(staff.id, venueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
-  const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe, selectedVenue.venueId)
+  // Task 12: mismo criterio que el login por contraseña — este servicio sólo lo usan
+  // avoqado-android/avoqado-ios (el POS).
+  const accessToken = jwtService.generateAccessToken(staff.id, venueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe, {
+    sid: session.id,
+    pos: true,
+  })
+  const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe, selectedVenue.venueId, { sid: session.id })
+
+  // 7.1. Task 10: emitir el PRIMER RefreshGrant de la sesión — sin esto no hay nada que
+  // `rotateGrant` pueda rotar en el primer refresco, y ese refresco fallaría como
+  // "reutilizado" para toda sesión nacida de un passkey. Una familia nueva por sesión.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry(rememberMe))
 
   // 8. Update last login
   await prisma.staff.update({
@@ -509,7 +561,7 @@ export async function deletePasskey(staffId: string, passkeyId: string) {
  * @param rememberMe - Whether to extend token expiration (30 days vs 24 hours)
  * @returns Login result with tokens and user data
  */
-export async function loginWithEmail(email: string, password: string, rememberMe?: boolean) {
+export async function loginWithEmail(email: string, password: string, rememberMe?: boolean, deviceId?: string) {
   logger.info(`🔐 [MOBILE AUTH] Login attempt for: ${email}`)
 
   // 1. Find staff with all active venues
@@ -595,16 +647,34 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   }
 
   // 5. Check venue access
-  if (staff.venues.length === 0) {
-    throw new ForbiddenError('No tienes acceso a ningún establecimiento', 'NO_VENUE_ACCESS')
-  }
+  const selectedVenue = pickOperationalVenueForLogin(staff.venues, 'NO_VENUE_ACCESS')
 
-  const selectedVenue = staff.venues[0]
+  // 5.1. Crear la Session ANTES de los tokens — su id viaja como `sid` en ambos, que es lo
+  // que hace que revocarla (cerrar sesión desde otro lado) signifique algo de verdad.
+  const session = await createSession({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    authMethod: AuthMethod.PASSWORD,
+    // El aparato donde nació la sesión. Es lo que permite «sacar esta tablet» sin echar a la
+    // persona de su teléfono: se revoca por aparato, no por persona.
+    deviceId,
+  })
 
   // 6. Generate tokens (derive orgId from venue)
   const emailLoginOrgId = selectedVenue.venue.organizationId
-  const accessToken = jwtService.generateAccessToken(staff.id, emailLoginOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
-  const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe, selectedVenue.venueId)
+  // Task 12: este login sólo lo usan avoqado-android/avoqado-ios (el POS) — `pos: true`
+  // acorta el access a 600s, ganándole a `rememberMe`. Ver el porqué en jwt.service.ts.
+  const accessToken = jwtService.generateAccessToken(staff.id, emailLoginOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe, {
+    sid: session.id,
+    pos: true,
+  })
+  const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe, selectedVenue.venueId, { sid: session.id })
+
+  // 6.1. Task 10: emitir el PRIMER RefreshGrant de la sesión — sin esto no hay nada que
+  // `rotateGrant` pueda rotar en el primer refresco, y ese refresco fallaría como
+  // "reutilizado" para toda sesión nacida de un login por contraseña. Una familia nueva
+  // por sesión.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry(rememberMe))
 
   // 7. Update last login and reset failed attempts
   await prisma.staff.update({
@@ -674,6 +744,43 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   }
 }
 
+/**
+ * The venue a mobile login lands on — never a suspended or closed one.
+ *
+ * The PAX has blocked this since day one and the dashboard simply does not list
+ * a non-operational venue; mobile was the rail nobody applied it to, so a shop
+ * cut off for non-payment kept handing out fresh 24h sessions.
+ *
+ * 🔴 It FILTERS, it does not slam the door. Someone with three shops and one
+ * suspended keeps working in the other two, exactly like the dashboard. Only
+ * when nothing of theirs is operational does the login stop — and then it says
+ * WHICH state it is, because the rule in this repo is that switched-off has to
+ * be visible and explained, never a bare "no puedes entrar".
+ *
+ * The specific reason is given only for a SINGLE venue. With several, naming
+ * one state would lie about the others ("cerrado permanentemente" to someone
+ * whose other shop is merely paused for a week).
+ *
+ * `noAccessCode` keeps each rail's existing error code untouched: the email
+ * login has always answered `NO_VENUE_ACCESS` and the passkey one nothing, and
+ * an error code is part of the contract the apps in the field already read.
+ */
+export function pickOperationalVenueForLogin<T extends { venue: { status: VenueStatus } }>(venues: T[], noAccessCode?: string): T {
+  if (venues.length === 0) {
+    throw new ForbiddenError('No tienes acceso a ningún establecimiento', noAccessCode)
+  }
+
+  const operational = venues.filter(sv => OPERATIONAL_VENUE_STATUSES.includes(sv.venue.status))
+  if (operational.length > 0) return operational[0]
+
+  throw new ForbiddenError(
+    venues.length === 1
+      ? venueStatusMessage(venues[0].venue.status)
+      : 'Ninguno de tus establecimientos está disponible en este momento. Contacta a soporte.',
+    'VENUE_NOT_OPERATIONAL',
+  )
+}
+
 // ============================================================================
 // TOKEN REFRESH
 // ============================================================================
@@ -698,6 +805,44 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   } catch {
     logger.warn('🔐 [MOBILE AUTH] Invalid refresh token')
     throw new AuthenticationError('Token de refresco inválido o expirado')
+  }
+
+  // SECURITY: a refresh token older than the last password change is dead.
+  //
+  // Without this the middleware guard is decorative: the fired manager's access
+  // token gets killed, the app refreshes on its own, and out comes a new one
+  // with a fresh `iat` that sails straight past the guard — for up to 90 days,
+  // the life of a "remember me" refresh token. A session has to die on BOTH
+  // rails or it doesn't die at all. Same check the TPV rail already does.
+  const motivoDelCorte = await motivoDeSesionInvalidada(payload.sub, payload.iat)
+  if (motivoDelCorte) {
+    logger.warn('🔐 [MOBILE AUTH] Refresh rejected: token predates the session cutoff', { motivo: motivoDelCorte })
+    throw new AuthenticationError(mensajeDeCorte(motivoDelCorte))
+  }
+
+  // 1.1. Task 10: la Session del token — SÓLO si el token trae `sid`. Uno LEGACY (emitido
+  // antes de esta sesión revocable) no tiene sesión ni grant que rotar y sigue el camino
+  // de siempre, sin tocar nada de lo de abajo.
+  let session: Session | null = null
+  if (payload.sid) {
+    session = await prisma.session.findUnique({ where: { id: payload.sid } })
+
+    // Una sesión inexistente (borrada) o ya revocada no puede seguir renovando tokens —
+    // hoy sólo pasa vía `rotateGrant` (que ya lo cacha por el lado del grant), pero es la
+    // misma garantía al nivel de la Session, para cuando exista otra vía de revocación.
+    if (!session || session.revokedAt) {
+      logger.warn('🔐 [MOBILE AUTH] Refresh rejected: session missing or revoked')
+      throw new AuthenticationError('Tu sesión ya no es válida. Vuelve a iniciar sesión.')
+    }
+
+    // 🔴 Ruling Task 10 (desviación deliberada del spec, que pedía rechazar `requestedVenueId`
+    // SIEMPRE): sólo una sesión por PIN queda anclada a su sucursal — es el hueco real que
+    // encontró Codex, una sesión PIN escapándose a otro local sin contraseña. PASSWORD/
+    // BIOMETRIC conservan el comportamiento de hoy (auth.mobile.controller.ts:64-66). Hoy es
+    // inerte: la Parte C (cambio de usuario por PIN) todavía no existe.
+    if (session.authMethod === AuthMethod.PIN && requestedVenueId && requestedVenueId !== session.venueId) {
+      throw new ForbiddenError('Para cambiar de sucursal necesitas iniciar sesión con tu contraseña.')
+    }
   }
 
   // 2. Find the staff
@@ -751,13 +896,58 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   if (requestedVenueId && !requested) {
     throw new ForbiddenError('No tienes acceso a este establecimiento')
   }
-  const carried = payload.venueId ? staff.venues.find(v => v.venueId === payload.venueId) : undefined
-  const selectedVenue = requested ?? carried ?? staff.venues[0]
 
-  // 4. Generate new tokens (derive orgId from venue)
+  // SECURITY: a suspended or closed venue cannot keep minting sessions.
+  //
+  // `venue.status` was already being read here and then ignored, so a venue cut
+  // off for non-payment — or closed for good — went on renewing its staff's
+  // tokens forever. The TPV rail has blocked this since day one; this is the
+  // mobile half of the same rule.
+  const operationalVenues = staff.venues.filter(sv => OPERATIONAL_VENUE_STATUSES.includes(sv.venue.status))
+
+  if (requested && !OPERATIONAL_VENUE_STATUSES.includes(requested.venue.status)) {
+    throw new ForbiddenError('Este establecimiento no está operativo')
+  }
+  if (operationalVenues.length === 0) {
+    throw new ForbiddenError('Ninguno de tus establecimientos está operativo')
+  }
+
+  const carried = payload.venueId ? operationalVenues.find(v => v.venueId === payload.venueId) : undefined
+  const selectedVenue = requested ?? carried ?? operationalVenues[0]
+
+  // 4. Generate new tokens (derive orgId from venue) — conserva `sid` cuando el token
+  // viejo tenía sesión; un legacy sin `session` sigue emitiendo tokens sin `sid`, tal
+  // cual como hoy.
   const refreshOrgId = selectedVenue.venue.organizationId
-  const newAccessToken = jwtService.generateAccessToken(staff.id, refreshOrgId, selectedVenue.venueId, selectedVenue.role)
-  const newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId, undefined, selectedVenue.venueId)
+  const sidOpts = session ? { sid: session.id } : undefined
+  // Task 12: este endpoint (`POST /mobile/auth/refresh`) sólo lo llaman avoqado-android/
+  // avoqado-ios — nunca el dashboard ni la TPV, que refrescan por su propio carril — así
+  // que el access que sale de aquí es tan POS como el que salió del login. Sin re-marcar
+  // `pos: true` en CADA refresco, el primer ciclo (~10 min después de entrar) devolvería
+  // un access de 24h y el acortamiento sólo protegería los primeros 10 minutos de la
+  // sesión, no la sesión completa. `pos` NO se mete en el refresh token (sidOpts se queda
+  // igual abajo) — no tiene consumidor ahí, sólo `generateAccessToken` lee `opts.pos`.
+  const newAccessToken = jwtService.generateAccessToken(staff.id, refreshOrgId, selectedVenue.venueId, selectedVenue.role, undefined, {
+    ...sidOpts,
+    pos: true,
+  })
+  let newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId, undefined, selectedVenue.venueId, sidOpts)
+
+  // 4.1. Task 10: rotar el grant de verdad — `issueGrant`/`rotateGrant` (Tasks 8 y 9) no
+  // tenían ningún llamador hasta aquí. Un refresh token reutilizado (robado y reproducido
+  // después de que el legítimo ya rotó) se rechaza; uno legítimo consume su grant viejo y
+  // el sucesor (que puede ser el mismo token de arriba, o uno anterior si esto es una
+  // retransmisión — Task 9) es el que se devuelve.
+  if (session) {
+    // Igual que hoy: un refresco NUNCA extiende a 90 días — sólo el login con
+    // "recordarme" lo hace. Por eso aquí siempre es la duración corta (7 días).
+    const resultado = await rotateGrant(refreshToken, newRefreshToken, refreshGrantExpiry())
+    if ('reutilizado' in resultado) {
+      logger.warn('🔐 [MOBILE AUTH] Refresh rejected: grant reuse detected', { sessionId: session.id })
+      throw new AuthenticationError('Tu sesión ya no es válida. Vuelve a iniciar sesión.')
+    }
+    newRefreshToken = resultado.sucesor
+  }
 
   logger.info(`🔐 [MOBILE AUTH] Token refreshed for: ${staff.email}`)
 

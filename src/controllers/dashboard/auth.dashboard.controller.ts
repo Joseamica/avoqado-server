@@ -11,6 +11,10 @@ import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/perm
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { verifyAccessToken } from '../../jwt.service'
+import { mensajeDeCorte, motivoDeSesionInvalidada, revokeAllSessions, cerrarSesionesDeStaff } from '../../utils/passwordChangeGuard'
+import { revokeSession } from '@/services/auth/session.service'
+import { invalidateSession } from '@/services/auth/sessionCache'
+import socketManager from '@/communication/sockets/managers/socketManager'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 
@@ -108,6 +112,24 @@ export const getAuthStatus = async (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!) as any
 
+    // 🔴 Esta ruta NO lleva `authenticateTokenMiddleware` a proposito ("controller
+    // handles token presence internally for flexibility"), asi que el corte de
+    // sesion hay que aplicarlo AQUI o no se aplica: sin esto, tras "cerrar sesion
+    // en todos mis dispositivos" —o tras un cambio de contrasena— los endpoints de
+    // datos contestaban 401 y esta ruta seguia diciendo `authenticated: true`, y el
+    // otro navegador o tablet se seguia pintando con sesion viva. Encontrado en la
+    // pasada en vivo de /full-testing, no por una prueba.
+    const motivoDelCorte = await motivoDeSesionInvalidada(decoded.sub, decoded.iat)
+    if (motivoDelCorte) {
+      logger.info('[AUTH] 📊 Session cut off - returning unauthenticated', { motivo: motivoDelCorte })
+      res.clearCookie('accessToken')
+      return res.status(200).json({
+        authenticated: false,
+        user: null,
+        message: mensajeDeCorte(motivoDelCorte),
+      })
+    }
+
     // Buscar staff con venues y organization (World-Class Pattern: Need org to detect OWNER during onboarding)
     const staff = await prisma.staff.findUnique({
       where: { id: decoded.sub },
@@ -188,6 +210,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                     enableShifts: true,
                     hiddenSidebarItems: true,
                     attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
+                    rotatingShiftsEnabled: true,
                     attendanceGraceMinutes: true,
                   },
                 },
@@ -240,6 +263,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 enableShifts: true,
                 hiddenSidebarItems: true,
                 attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
+                rotatingShiftsEnabled: true,
                 attendanceGraceMinutes: true,
               },
             },
@@ -337,6 +361,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         enableShifts: boolean
         hiddenSidebarItems: string[]
         attendanceEnabled?: boolean
+        rotatingShiftsEnabled?: boolean
         attendanceGraceMinutes?: number
       } | null
       // PIN for TPV access (user's own PIN, venue-specific)
@@ -462,6 +487,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
               enableShifts: true,
               hiddenSidebarItems: true,
               attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
+              rotatingShiftsEnabled: true,
               attendanceGraceMinutes: true,
             },
           },
@@ -580,6 +606,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 enableShifts: true,
                 hiddenSidebarItems: true,
                 attendanceEnabled: true, // el sidebar y la pantalla de asistencia lo necesitan para VER que está apagado
+                rotatingShiftsEnabled: true,
                 attendanceGraceMinutes: true,
               },
             },
@@ -839,19 +866,91 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     // "Error al cerrar sesión", so without this guard a stumble while writing the audit
     // entry would leave someone unable to sign out. The audit trail is best-effort;
     // signing out is not.
+    // "Cerrar sesión en TODOS mis dispositivos" travels as a flag on the sign-out
+    // the client already calls, which is where Square puts it too: signing out
+    // offers "this session" or "all sessions", and "all" reaches the Dashboard,
+    // the POS and the KDS alike. It is answered honestly below — `allDevices`
+    // in the response is what ACTUALLY happened, never what was requested.
+    const wantsAllDevices = req.body?.allDevices === true
+    let revokedEverywhere = false
+
     try {
       const authHeader = req.headers?.authorization
       const logoutToken = req.cookies?.accessToken ?? (authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined)
       if (logoutToken) {
         const payload = verifyAccessToken(logoutToken)
         if (payload?.sub) {
+          // 🔴 `payload` comes from verifyAccessToken — the SIGNATURE, never
+          // `jwt.decode`. This route deliberately carries no auth middleware, so
+          // a decoded-not-verified `sub` would let anyone post a forged cookie
+          // and kill every session of any staff id they can guess: a one-request
+          // lockout of the owner, from an endpoint that asks for no credentials.
+          // 🔴 [Auditoría 2026-08-30, P1] Revocar LA sesión de este token. Al darle sesiones
+          // revocables al dashboard le puse el claim `sid` al login y no toqué el logout: quedó
+          // la maquinaria de revocar con el botón desconectado, así que «cerrar sesión» sólo
+          // borraba la cookie y el token seguía valiendo hasta 24 h (30 días con «recuérdame»).
+          // Una copia guardada —laptop compartida, token pegado en un ticket de soporte— seguía
+          // dentro después de que el dueño creyera haber salido.
+          //
+          // Los tres pasos van juntos siempre, por lo que ya se midió en vivo en el relevo por
+          // PIN: revocar escribe en la base, pero el middleware pregunta a una caché de 60 s y el
+          // socket abierto vive aparte. Best-effort con su propio try: salir NO puede fallar
+          // porque Postgres tropiece — lo peor que pasa entonces es que el token muera por
+          // vencimiento, que es exactamente donde estábamos antes de este arreglo.
+          if (payload.sid) {
+            try {
+              await revokeSession(payload.sid, 'logout')
+              await invalidateSession(payload.sid)
+              socketManager.disconnectBySession(payload.sid)
+            } catch (revokeError) {
+              logger.error('[AUTH] 🚪 No se pudo revocar la sesión de este token al cerrar sesión', revokeError)
+            }
+          }
+
+          if (wantsAllDevices) {
+            try {
+              // 🔴 El ORDEN importa y lo destapó un test: el corte principal es este
+              // `revokeAllSessions` (`Staff.sessionsRevokedAt`), que es lo que de verdad mata el
+              // acceso HTTP. En cuanto ocurre, la respuesta y la bitácora ya pueden afirmarlo.
+              // La limpieza de abajo es defensa en profundidad y NO puede desmentirlo: ponerla
+              // antes hacía que un tropiezo suyo contestara «allDevices: false» y se comiera el
+              // renglón de auditoría de un corte que SÍ había pasado — mentirle al dueño sobre
+              // si echó a los demás es peor que no cerrar un socket.
+              await revokeAllSessions(payload.sub)
+              revokedEverywhere = true
+              void logAction({
+                staffId: payload.sub,
+                venueId: payload.venueId ?? null,
+                action: 'STAFF_SESSIONS_REVOKED',
+                entity: 'Staff',
+                entityId: payload.sub,
+                data: { source: 'dashboard', reason: 'logout_all_devices' },
+                ipAddress: req.ip,
+                userAgent: req.get?.('user-agent'),
+              })
+            } catch (revokeError) {
+              // Signing out of THIS device must never be blocked by a failure to
+              // reach the others; the response just won't claim it happened.
+              logger.error('[AUTH] 🚪 Failed to revoke the sessions on the other devices', revokeError)
+            }
+
+            // Defensa en profundidad, con su PROPIO try: el corte de arriba mata el acceso HTTP,
+            // pero la revalidación de sockets consulta las filas `Session` — sin cerrarlas, la
+            // pantalla que acabas de expulsar sigue recibiendo los eventos del negocio en vivo.
+            try {
+              await cerrarSesionesDeStaff(payload.sub, 'logout_all_devices')
+            } catch (sessionError) {
+              logger.error('[AUTH] 🚪 No se pudieron cerrar las filas Session al salir de todos los aparatos', sessionError)
+            }
+          }
+
           void logAction({
             staffId: payload.sub,
             venueId: payload.venueId ?? null,
             action: 'STAFF_LOGOUT',
             entity: 'Staff',
             entityId: payload.sub,
-            data: { source: 'dashboard' },
+            data: { source: 'dashboard', allDevices: revokedEverywhere },
             ipAddress: req.ip,
             userAgent: req.get?.('user-agent'),
           })
@@ -894,7 +993,10 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     logger.info('[AUTH] 🚪 Logout complete - sending response')
     res.status(200).json({
       success: true,
-      message: 'Logout exitoso',
+      message: revokedEverywhere ? 'Cerramos tu sesión en todos tus dispositivos' : 'Logout exitoso',
+      // What ACTUALLY happened, so the UI never promises the other devices are
+      // out when the write failed or the token could not be verified.
+      allDevices: revokedEverywhere,
     })
   } catch (error) {
     logger.error('[AUTH] 🚪 Logout error:', error)

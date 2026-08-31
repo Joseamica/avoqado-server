@@ -54,6 +54,9 @@ export interface UberMenuPayload {
     image_url?: string
     price_info: { price: number }
     tax_info: Record<string, never>
+    /** Los grupos de opciones que ESTE artículo ofrece. Sin esto los grupos existen en el
+     *  menú pero ningún producto los muestra: el cliente no puede pedir queso extra. */
+    modifier_group_ids?: { ids: string[] }
   }>
   modifier_groups: Array<{
     id: string
@@ -137,7 +140,20 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
   const categorias: UberMenuPayload['categories'] = []
   const items: UberMenuPayload['items'] = []
   const grupos: UberMenuPayload['modifier_groups'] = []
+  // 🔴 DOS espacios de nombres, porque hay DOS arreglos en el payload de Uber (corregido
+  // tras la 2ª pasada de Codex, que cazó el error de la 1ª):
+  //   · `items[]`      → productos Y opciones comparten arreglo, así que comparten set.
+  //                      Separarlos dejaba pasar dos `items[].id` iguales y Uber rechaza
+  //                      el menú COMPLETO — el negocio se queda sin catálogo.
+  //   · `modifier_groups[]` → arreglo aparte, set aparte. Con el set compartido, un SKU que
+  //                      por casualidad valiera `grp-<id>` hacía que el grupo se omitiera
+  //                      como "duplicado" y el artículo quedaba apuntando a un grupo que
+  //                      nunca se publica: referencia colgante, mismo rechazo.
   const vistos = new Set<string>()
+  const gruposVistos = new Set<string>()
+  /** Sólo los ids de PRODUCTO, para poder distinguir un duplicado legítimo (el mismo
+   *  producto en dos categorías) de una colisión producto↔opción, que sí es un error. */
+  const productosVistos = new Set<string>()
 
   for (const cat of snapshot.categories) {
     // Una categoría sin productos hace que Uber muestre una sección vacía en la app.
@@ -154,6 +170,16 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
       // rechace el menú entero por id repetido — se publica una vez y se referencia dos.
       if (vistos.has(p.plu)) continue
       vistos.add(p.plu)
+      productosVistos.add(p.plu)
+
+      // 🔴 El ENLACE del producto a sus grupos. Se calcula ANTES de publicar el artículo
+      // porque va DENTRO de él: sin `modifier_group_ids` los grupos viajan al menú pero
+      // ningún producto los ofrece — medido en la tienda sandbox el 27-ago, donde los 3
+      // grupos con sus 9 opciones estaban publicados y `items con modifier_group_ids` era 0.
+      // El cliente veía la hamburguesa sin poder elegir nada.
+      // Se filtra con el MISMO criterio que abajo (grupo sin opciones se omite), o el
+      // artículo apuntaría a un grupo que nunca se publica y Uber rechaza el menú entero.
+      const idsDeGrupos = p.modifierGroups.filter(g => g.modifiers.length > 0).map(g => `grp-${g.id}`)
 
       items.push({
         id: p.plu,
@@ -173,6 +199,7 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
         ...(p.imageUrl ? { image_url: p.imageUrl } : {}),
         price_info: { price: precioPublicado(p.plu, p.price, opts.precios) },
         tax_info: {},
+        ...(idsDeGrupos.length > 0 ? { modifier_group_ids: { ids: idsDeGrupos } } : {}),
       })
 
       for (const g of p.modifierGroups) {
@@ -186,8 +213,8 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
         if (g.modifiers.length === 0) continue
 
         const gid = `grp-${g.id}`
-        if (vistos.has(gid)) continue
-        vistos.add(gid)
+        if (gruposVistos.has(gid)) continue
+        gruposVistos.add(gid)
 
         grupos.push({
           id: gid,
@@ -206,6 +233,18 @@ export function mapSnapshotToUberMenu(snapshot: MenuSnapshot, opts: UberMenuOpti
         // Un modificador ES un item en el modelo de Uber: sin esto, el grupo apunta a ids
         // inexistentes y el menú se rechaza completo.
         for (const m of g.modifiers) {
+          // 🔴 Una opción cuyo PLU choca con el SKU de un producto NO se salta en silencio
+          // (Codex, 3ª pasada): "el primero gana" publicaría el nombre y el precio de uno
+          // bajo el id del otro — el cliente vería un extra vendido como producto, al precio
+          // equivocado. Se aborta la publicación con los dos ids en el mensaje; el menú
+          // anterior sigue vivo en Uber mientras alguien renombra uno de los dos.
+          if (productosVistos.has(m.plu)) {
+            throw new Error(
+              `El menú de Uber no se puede publicar: el modificador "${m.name}" usa el id "${m.plu}", que ya lo ocupa ` +
+                `un PRODUCTO. Uber los guarda en la misma lista, así que uno pisaría al otro y se vendería al precio ` +
+                `equivocado. Cambia el SKU de uno de los dos.`,
+            )
+          }
           if (vistos.has(m.plu)) continue
           vistos.add(m.plu)
           items.push({

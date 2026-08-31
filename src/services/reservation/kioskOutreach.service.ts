@@ -19,6 +19,7 @@
  * noche el aviso sigue en la fila, y `dedupeKey` impide que a alguien le llegue dos veces.
  */
 
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import emailService from '@/services/email.service'
@@ -27,6 +28,8 @@ import emailService from '@/services/email.service'
 export const LOW_CREDITS_THRESHOLD = 2
 /** Y una semana antes de que venza el paquete. */
 export const EXPIRING_WITHIN_DAYS = 7
+/** Después de seis fallos queda FAILED para revisión manual, sin un loop infinito. */
+export const MAX_OUTREACH_ATTEMPTS = 6
 
 /** `evento:cliente:fecha` — el barrido de la misma noche no vuelve a encolar. */
 function dedupeKey(event: string, customerId: string, now: Date): string {
@@ -123,25 +126,39 @@ export async function enqueueNightlyOutreach(args: { now: Date; venueId?: string
 
 /** Reclama y entrega lo pendiente. Lease para que dos procesos no manden lo mismo. */
 export async function sweepOnce(args: { now: Date; batchSize?: number }): Promise<{ sent: number; failed: number }> {
-  const batchSize = args.batchSize ?? 50
+  const batchSize = Math.max(1, Math.min(args.batchSize ?? 50, 100))
   const leaseUntil = new Date(args.now.getTime() + 5 * 60_000)
+  const nowSql = Prisma.sql`${args.now.toISOString()}::timestamp`
+  const leaseSql = Prisma.sql`${leaseUntil.toISOString()}::timestamp`
 
-  const candidates = await prisma.kioskOutreachOutbox.findMany({
-    where: { status: 'PENDING', OR: [{ leasedUntil: null }, { leasedUntil: { lt: args.now } }] },
-    take: batchSize,
-    select: { id: true },
-  })
+  // Selección + claim forman UNA sentencia. El findMany seguido de updateMany anterior
+  // permitía que dos procesos vieran el mismo PENDING antes de que cualquiera pusiera el
+  // lease. FAILED también vuelve a entrar mientras conserve intentos disponibles.
+  const candidates = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    WITH candidates AS (
+      SELECT o.id
+      FROM "KioskOutreachOutbox" AS o
+      WHERE o.status IN ('PENDING', 'FAILED')
+        AND o.attempts < ${MAX_OUTREACH_ATTEMPTS}
+        AND (o."leasedUntil" IS NULL OR o."leasedUntil" <= ${nowSql})
+      ORDER BY o."createdAt" ASC
+      LIMIT ${batchSize}
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE "KioskOutreachOutbox" AS o
+    SET "leasedUntil" = ${leaseSql}, attempts = o.attempts + 1, "updatedAt" = CURRENT_TIMESTAMP
+    FROM candidates
+    WHERE o.id = candidates.id
+    RETURNING o.id
+  `)
   if (candidates.length === 0) return { sent: 0, failed: 0 }
 
-  await prisma.kioskOutreachOutbox.updateMany({
-    where: { id: { in: candidates.map(c => c.id) }, status: 'PENDING' },
-    data: { leasedUntil: leaseUntil, attempts: { increment: 1 } },
-  })
-
   const rows = await prisma.kioskOutreachOutbox.findMany({
-    where: { id: { in: candidates.map(c => c.id) } },
+    where: { id: { in: candidates.map(c => c.id) }, leasedUntil: leaseUntil },
     select: {
       id: true,
+      dedupeKey: true,
+      attempts: true,
       event: true,
       paymentLinkUrl: true,
       payload: true,
@@ -154,18 +171,19 @@ export async function sweepOnce(args: { now: Date; batchSize?: number }): Promis
   let failed = 0
 
   for (const row of rows) {
+    const casWhere = { id: row.id, attempts: row.attempts, leasedUntil: leaseUntil }
     // Se revisa OTRA VEZ al entregar: entre el barrido y el envío pudo darse de baja,
     // y la baja tiene que ganar siempre.
     if (!row.customer?.marketingConsent) {
-      await prisma.kioskOutreachOutbox.update({
-        where: { id: row.id },
+      await prisma.kioskOutreachOutbox.updateMany({
+        where: casWhere,
         data: { status: 'SKIPPED', leasedUntil: null, lastError: 'MARKETING_CONSENT_REVOKED' },
       })
       continue
     }
     if (!row.customer.email) {
-      await prisma.kioskOutreachOutbox.update({
-        where: { id: row.id },
+      await prisma.kioskOutreachOutbox.updateMany({
+        where: casWhere,
         data: { status: 'SKIPPED', leasedUntil: null, lastError: 'NO_CHANNEL' },
       })
       continue
@@ -175,21 +193,30 @@ export async function sweepOnce(args: { now: Date; batchSize?: number }): Promis
     const isExpiring = row.event === 'PACK_EXPIRING'
     const subject = isExpiring ? `${packName} está por vencer` : `Te quedan pocas clases de ${packName}`
 
-    const ok = await emailService.sendEmail({
-      to: row.customer.email,
-      subject,
-      html:
-        `<p>Hola ${row.customer.firstName ?? ''},</p>` +
-        `<p>${isExpiring ? `${packName} vence pronto.` : `Ya casi terminas ${packName}.`} ` +
-        `Puedes renovarlo cuando quieras:</p>` +
-        `<p><a href="${row.paymentLinkUrl}">Renovar en ${row.venue?.name ?? 'el estudio'}</a></p>`,
-    })
+    let ok = false
+    let lastError = 'SEND_FAILED'
+    try {
+      ok = await emailService.sendEmail({
+        to: row.customer.email,
+        subject,
+        html:
+          `<p>Hola ${row.customer.firstName ?? ''},</p>` +
+          `<p>${isExpiring ? `${packName} vence pronto.` : `Ya casi terminas ${packName}.`} ` +
+          `Puedes renovarlo cuando quieras:</p>` +
+          `<p><a href="${row.paymentLinkUrl}">Renovar en ${row.venue?.name ?? 'el estudio'}</a></p>`,
+        // Resend deduplica esta llave incluso si el proceso muere después de que el
+        // proveedor aceptó el correo pero antes de persistir SENT.
+        idempotencyKey: row.dedupeKey,
+      })
+    } catch (error) {
+      lastError = (error as Error).message.slice(0, 1_000) || 'SEND_FAILED'
+    }
 
-    await prisma.kioskOutreachOutbox.update({
-      where: { id: row.id },
+    await prisma.kioskOutreachOutbox.updateMany({
+      where: casWhere,
       data: ok
-        ? { status: 'SENT', sentAt: args.now, leasedUntil: null }
-        : { status: 'FAILED', leasedUntil: null, lastError: 'SEND_FAILED' },
+        ? { status: 'SENT', sentAt: args.now, leasedUntil: null, lastError: null }
+        : { status: 'FAILED', leasedUntil: null, lastError },
     })
     if (ok) sent++
     else failed++

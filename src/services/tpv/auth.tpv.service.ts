@@ -3,12 +3,12 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { generateAccessToken, generateRefreshToken, verifyToken, StaffRole } from '../../security'
 import { v4 as uuidv4 } from 'uuid'
-import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
+import { OPERATIONAL_VENUE_STATUSES, venueStatusMessage } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
 import { getRoleDisplayName, DEFAULT_ROLE_DISPLAY_NAMES } from '../dashboard/venueRoleConfig.dashboard.service'
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
-import { sesionInvalidadaPorCambioDeContrasena } from '@/utils/passwordChangeGuard'
+import { mensajeDeCorte, motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
 
 const TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30 // 30 days
 
@@ -82,12 +82,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
 
   // ✅ Check venue status AFTER finding staff (so we can give specific error)
   if (!OPERATIONAL_VENUE_STATUSES.includes(staffVenue.venue.status as any)) {
-    const statusMessages: Record<string, string> = {
-      SUSPENDED: 'Este establecimiento está suspendido temporalmente. Contacta al administrador para más información.',
-      ADMIN_SUSPENDED: 'Este establecimiento ha sido suspendido por el administrador. Contacta a soporte para más información.',
-      CLOSED: 'Este establecimiento ha sido cerrado permanentemente.',
-    }
-    const message = statusMessages[staffVenue.venue.status] || 'Este establecimiento no está operacional.'
+    const message = venueStatusMessage(staffVenue.venue.status)
     logger.warn(`Login blocked: venue ${venueId} is ${staffVenue.venue.status}`)
     throw new UnauthorizedError(message)
   }
@@ -257,8 +252,9 @@ export async function refreshAccessToken(refreshToken: string) {
   // gerente echado, su app pide un refresh, y sale con uno nuevo y un `iat`
   // fresco que ya pasa el guard. La sesion habria que cerrarla por los DOS
   // lados o no se cierra por ninguno.
-  if (await sesionInvalidadaPorCambioDeContrasena(userId, (decoded as any).iat)) {
-    throw new UnauthorizedError('Tu contraseña cambió. Vuelve a iniciar sesión.')
+  const motivoDelCorte = await motivoDeSesionInvalidada(userId, (decoded as any).iat)
+  if (motivoDelCorte) {
+    throw new UnauthorizedError(mensajeDeCorte(motivoDelCorte))
   }
 
   // Verify user still exists and is active

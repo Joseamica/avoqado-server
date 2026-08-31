@@ -21,7 +21,11 @@ describe('refund.dashboard.service', () => {
     // El prismaMock compartido no declara los modelos del cajón. Se agregan aquí
     // (mismo patrón que `refund.mobile.service.test.ts`) para no tocar un helper
     // que otras sesiones editan.
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(null) }
+    ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue(null),
+    }
     ;(prismaMock as any).cashDrawerEvent = { createMany: jest.fn().mockResolvedValue({ count: 1 }) }
   })
 

@@ -147,10 +147,20 @@ export async function createOrderFromReservation(
       totalTax = totalTax.add(modTax)
       modLines.push({
         name: m.name ?? '',
-        // OrderItemModifier.quantity stays per-unit; the OrderItem.quantity
-        // below (= seatCount) is what multiplies it across the bill.
+        // `quantity` se queda PER-UNIT porque hay dos lectores que lo exigen: el analytics
+        // de inventario multiplica el mismo por la cantidad del renglon
+        // (`modifierInventoryAnalytics.service.ts`: `orderItemQty * modifierQty`), y el KDS
+        // imprime "Nx <nombre>" — en 3 manicures con un esmalte cada una, "3x Esmalte" le
+        // mentiria a quien prepara.
         quantity: m.quantity,
-        price: new Prisma.Decimal(m.price),
+        // 🔴 …y por eso el seatCount viaja en el PRECIO. El reporte de ingresos
+        // (`lineRevenue.ts`) suma `unitPrice x quantity + Sum(price x quantity)` y NO
+        // multiplica los modificadores por la cantidad del renglon. Sin el seatCount aqui,
+        // 3 manicures con esmalte se COBRAN en $450 y se REPORTAN en $350: el duenio ve un
+        // numero y el banco otro. Es el mismo contrato que ya cumple el otro escritor de
+        // esta tabla, los canales de delivery (`core/types.ts`: «`price` ya viene
+        // multiplicado por la cantidad del padre»).
+        price: new Prisma.Decimal(m.price).mul(seatCount),
         modifierId: m.modifierId,
       })
     }

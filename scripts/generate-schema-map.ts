@@ -172,6 +172,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   McpToolCall: 'Staff, Auth, Permissions & Time',
   StaffPasskey: 'Staff, Auth, Permissions & Time',
   user_sessions: 'Staff, Auth, Permissions & Time',
+  Session: 'Staff, Auth, Permissions & Time',
+  RefreshGrant: 'Staff, Auth, Permissions & Time',
   PermissionSet: 'Staff, Auth, Permissions & Time',
   VenueRoleConfig: 'Staff, Auth, Permissions & Time',
   VenueRolePermission: 'Staff, Auth, Permissions & Time',
@@ -268,6 +270,9 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   StaffDocument: 'Staff, Auth, Permissions & Time',
   StaffWorkSchedule: 'Staff, Auth, Permissions & Time',
   StaffWorkScheduleException: 'Staff, Auth, Permissions & Time',
+  OvertimeApproval: 'Staff, Auth, Permissions & Time',
+  WorkShiftTemplate: 'Staff, Auth, Permissions & Time',
+  WorkShiftAssignment: 'Staff, Auth, Permissions & Time',
 
   // 8. Serialized Inventory
   SerializedItem: 'Serialized Inventory',

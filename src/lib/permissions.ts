@@ -196,6 +196,11 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'tpv-shifts:create', // puente: quien crea turnos también los abre en la terminal
   ],
   'shifts:update': ['shifts:read', 'shifts:update', 'teams:read'],
+  // Conteo CIEGO del cajón (Codex 27-ago): ver el "efectivo esperado" del cajón físico durante el día.
+  // NO se puede colgar de `shifts:close` porque el alias bidireccional con `tpv-shifts:close` se lo
+  // regala a CASHIER/WAITER. Permiso propio, sin dependencias, MANAGER+ de fábrica (patrón Toast:
+  // "Cash Drawers (Blind)" vs "Full").
+  'cash-drawer:view-expected': ['cash-drawer:view-expected'],
   'shifts:close': [
     'shifts:read',
     'shifts:close',
@@ -921,6 +926,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * MANAGER: Operational management
    */
   [StaffRole.MANAGER]: [
+    'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
@@ -1083,6 +1089,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * ADMIN: Full venue management (excluding system-level permissions)
    */
   [StaffRole.ADMIN]: [
+    'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
@@ -1217,6 +1224,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * OWNER: Full organization access (excluding system-level permissions)
    */
   [StaffRole.OWNER]: [
+    'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
@@ -1834,6 +1842,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
+  // Cajón físico (Android/iOS): ver el esperado durante el día = conteo NO ciego (Toast: Full vs Blind).
+  'cash-drawer': ['cash-drawer:view-expected'],
   tpv: [
     'tpv:read',
     'tpv:create',

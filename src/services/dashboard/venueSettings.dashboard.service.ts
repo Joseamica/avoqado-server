@@ -185,6 +185,8 @@ export async function updateVenueSettings(
     // el dashboard enseñaba el valor pedido, no el guardado (auditoría Codex fase 2, P2-1).
     ...(typeof updates.attendanceEnabled === 'boolean' && { attendanceEnabled: updates.attendanceEnabled }),
     ...(typeof updates.attendanceGraceMinutes === 'number' && { attendanceGraceMinutes: updates.attendanceGraceMinutes }),
+    ...(typeof updates.attendanceLateAlertEnabled === 'boolean' && { attendanceLateAlertEnabled: updates.attendanceLateAlertEnabled }),
+    ...(typeof updates.rotatingShiftsEnabled === 'boolean' && { rotatingShiftsEnabled: updates.rotatingShiftsEnabled }),
   }
 
   const hasCashReconciliationUpdate = Object.prototype.hasOwnProperty.call(updates, 'cashReconciliationEnabled')

@@ -5,8 +5,10 @@
  * `authenticateTokenMiddleware` + `authorizeRole([StaffRole.SUPERADMIN])`.
  * 🔴 NO repetir el guardia aquí ni en la subruta.
  */
+import { uploadAnnouncementImage } from '@/services/announcements/announcementImage.service'
 import { Request, Response, NextFunction } from 'express'
 import { z } from 'zod'
+import { BadRequestError } from '@/errors/AppError'
 import { NotificationPriority, StaffRole, PlanTier } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { countAudience } from '../../services/announcements/audience.service'
@@ -66,8 +68,45 @@ const announcementSchema = filtrosSchema.extend({
   actionUrl: z.string().optional(),
   contentBlocks: z.array(bloque).optional(),
   showAsBanner: z.boolean().default(false),
+  showAsModal: z.boolean().default(false),
   expiresAt: z.coerce.date().optional(),
 })
+
+/**
+ * Traduce un error de validación a algo que se pueda leer.
+ *
+ * 🔴 Sin esto el compositor mostraba el JSON crudo de Zod con un 500 —
+ * `[{"code":"too_small","path":["contentBlocks",0,"text"]}]` — que no le dice a nadie qué
+ * arreglar. Y el status era 500 (falla del servidor) cuando en realidad faltaba un dato
+ * del formulario, que es 400. Lo encontró el founder el 2026-08-27 subiendo una foto.
+ */
+function errorDeValidacion(error: unknown): BadRequestError | null {
+  if (!(error instanceof z.ZodError)) return null
+
+  const CAMPOS: Record<string, string> = {
+    text: 'el texto',
+    alt: 'la descripción de la foto',
+    label: 'la etiqueta',
+    value: 'el valor',
+    url: 'la dirección de la imagen',
+    items: 'los puntos',
+    title: 'el título',
+    body: 'el texto del aviso',
+  }
+
+  const detalles = error.issues.map(issue => {
+    const ruta = issue.path
+    // Los errores de bloques se dicen por su número, que es lo que la persona ve.
+    if (ruta[0] === 'contentBlocks' && typeof ruta[1] === 'number') {
+      const campo = CAMPOS[String(ruta[2])] ?? String(ruta[2])
+      return `Al bloque ${Number(ruta[1]) + 1} le falta ${campo}`
+    }
+    const campo = CAMPOS[String(ruta[0])] ?? String(ruta[0])
+    return `Revisa ${campo}`
+  })
+
+  return new BadRequestError(detalles.join('. '))
+}
 
 export const list = async (_req: Request, res: Response, next: NextFunction) => {
   try {
@@ -86,16 +125,17 @@ export const create = async (req: Request, res: Response, next: NextFunction) =>
     const announcement = await createAnnouncement(input, userId, nombre)
     res.status(201).json({ success: true, data: { announcement } })
   } catch (error) {
-    next(error)
+    next(errorDeValidacion(error) ?? error)
   }
 }
 
 export const update = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const { userId } = (req as any).authContext
     const input = announcementSchema.partial().parse(req.body)
-    res.json({ success: true, data: { announcement: await updateAnnouncement(req.params.id, input) } })
+    res.json({ success: true, data: { announcement: await updateAnnouncement(req.params.id, input, userId) } })
   } catch (error) {
-    next(error)
+    next(errorDeValidacion(error) ?? error)
   }
 }
 
@@ -110,12 +150,13 @@ export const previewAudience = async (req: Request, res: Response, next: NextFun
 
 export const publish = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const { userId } = (req as any).authContext
     const { scheduledFor } = z.object({ scheduledFor: z.coerce.date().optional() }).parse(req.body ?? {})
     if (scheduledFor) {
-      const announcement = await scheduleAnnouncement(req.params.id, scheduledFor)
+      const announcement = await scheduleAnnouncement(req.params.id, scheduledFor, userId)
       return res.json({ success: true, data: { announcement, scheduled: true } })
     }
-    res.json({ success: true, data: await publishAnnouncement(req.params.id) })
+    res.json({ success: true, data: await publishAnnouncement(req.params.id, userId) })
   } catch (error) {
     next(error)
   }
@@ -123,7 +164,8 @@ export const publish = async (req: Request, res: Response, next: NextFunction) =
 
 export const archive = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    res.json({ success: true, data: { announcement: await archiveAnnouncement(req.params.id) } })
+    const { userId } = (req as any).authContext
+    res.json({ success: true, data: { announcement: await archiveAnnouncement(req.params.id, userId) } })
   } catch (error) {
     next(error)
   }
@@ -141,6 +183,26 @@ export const capabilities = async (_req: Request, res: Response, next: NextFunct
 export const metrics = async (req: Request, res: Response, next: NextFunction) => {
   try {
     res.json({ success: true, data: await getAnnouncementMetrics(req.params.id) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Sube una foto para usarla en un bloque del anuncio.
+ *
+ * Devuelve la URL pública, que el compositor pega en el bloque. Las fotos de un anuncio
+ * NO son datos personales: las ve cualquier negocio que lo reciba.
+ */
+export const uploadImage = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const file = (req as any).file
+    if (!file) {
+      res.status(400).json({ success: false, message: 'No llegó ninguna imagen' })
+      return
+    }
+    const url = await uploadAnnouncementImage(file.buffer, file.mimetype, file.originalname)
+    res.json({ success: true, data: { url } })
   } catch (error) {
     next(error)
   }

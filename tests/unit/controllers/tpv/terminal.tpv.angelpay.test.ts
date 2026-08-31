@@ -351,4 +351,293 @@ describe('GET /tpv/terminals/:serialNumber/config — Task 13 (AngelPay)', () =>
     expect(mockedGetAngelPayAccount).not.toHaveBeenCalled()
     expect(mockedDecrypt).not.toHaveBeenCalled()
   })
+  // ----------------------------------------------------------------
+  // 5. Multi-account venue: angelpayAuth must follow the terminal's
+  //    ASSIGNED merchant, not the venue's oldest account.
+  //
+  //    Real incident (2026-08-29, terminal AVQD-N860W173080): the venue had
+  //    two AngelPay accounts. The terminal was assigned ONLY the merchant of
+  //    the newer account, but the config handed it the OLDER account's
+  //    credentials. The SDK then authenticated as the wrong account, its
+  //    merchant list never intersected the assigned merchant, and the TPV
+  //    hard-blocked every charge ("Sin merchants válidos compartidos").
+  // ----------------------------------------------------------------
+  describe('multi-account venue — credential follows the assigned merchant', () => {
+    const OLD_ACCOUNT = {
+      id: 'apa-old',
+      venueId: 'venue-1',
+      email: 'old@venue.com',
+      pin: '111111',
+      pinEncrypted: null,
+      environment: 'PROD',
+      status: 'ACTIVE',
+    }
+    const NEW_ACCOUNT = {
+      id: 'apa-new',
+      venueId: 'venue-1',
+      email: 'new@venue.com',
+      pin: '222222',
+      pinEncrypted: null,
+      environment: 'PROD',
+      status: 'ACTIVE',
+    }
+
+    function angelpayMerchant(id: string, externalMerchantId: string, accountId: string | null) {
+      return {
+        id,
+        displayName: `Merchant ${id}`,
+        active: true,
+        blumonSerialNumber: null,
+        blumonPosId: null,
+        blumonEnvironment: null,
+        blumonMerchantId: null,
+        credentialsEncrypted: { encrypted: 'x', iv: 'y' },
+        providerConfig: null,
+        externalMerchantId,
+        angelpayAffiliation: `AFFIL-${id}`,
+        angelpayMerchantName: `Name ${id}`,
+        angelpayUserAccountId: accountId,
+        provider: { code: 'ANGELPAY' },
+      }
+    }
+
+    function blumonMerchant(id: string) {
+      return {
+        id,
+        displayName: `Blumon ${id}`,
+        active: true,
+        blumonSerialNumber: `SN-${id}`,
+        blumonPosId: '376',
+        blumonEnvironment: 'PROD',
+        blumonMerchantId: `MID-${id}`,
+        credentialsEncrypted: { encrypted: 'x', iv: 'y' },
+        providerConfig: null,
+        externalMerchantId: `EXT-${id}`,
+        angelpayAffiliation: null,
+        angelpayMerchantName: null,
+        angelpayUserAccountId: null,
+        provider: { code: 'BLUMON' },
+      }
+    }
+
+    function mockNexgoTerminal(assignedMerchantIds: string[]) {
+      mockedPrisma.terminal.findFirst.mockResolvedValue({
+        id: 'term-1',
+        serialNumber: 'SN-NEXGO-1',
+        brand: 'NEXGO',
+        model: 'N86',
+        status: 'ACTIVE',
+        venueId: 'venue-1',
+        assignedMerchantIds,
+        config: {},
+        venue: { id: 'venue-1', name: 'V', type: 'CLINIC', timezone: 'America/Mexico_City' },
+      })
+    }
+
+    beforeEach(() => {
+      mockedIsCompat.mockReturnValue(true)
+      // Service returns accounts oldest-first (createdAt asc) — the order the
+      // controller must NOT blindly trust when picking the primary credential.
+      mockedGetAngelPayAccounts.mockResolvedValue([OLD_ACCOUNT, NEW_ACCOUNT])
+    })
+
+    it("hands the assigned merchant's account as angelpayAuth, not the oldest one", async () => {
+      mockNexgoTerminal(['ma-new'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([angelpayMerchant('ma-new', '1272', NEW_ACCOUNT.id)])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__status).toBe(200)
+      expect(res.__body.data.angelpayAuth.accountId).toBe(NEW_ACCOUNT.id)
+      expect(res.__body.data.angelpayAuth.email).toBe(NEW_ACCOUNT.email)
+      // The list still carries EVERY account so switchAccount() keeps working.
+      expect(res.__body.data.angelpayAccounts.map((a: any) => a.accountId)).toEqual(
+        expect.arrayContaining([OLD_ACCOUNT.id, NEW_ACCOUNT.id]),
+      )
+      // ...and the assigned account leads it, since clients read index 0.
+      expect(res.__body.data.angelpayAccounts[0].accountId).toBe(NEW_ACCOUNT.id)
+    })
+
+    it('keeps the oldest account when the assigned merchant belongs to it', async () => {
+      mockNexgoTerminal(['ma-old'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([angelpayMerchant('ma-old', '974', OLD_ACCOUNT.id)])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.angelpayAuth.accountId).toBe(OLD_ACCOUNT.id)
+      expect(res.__body.data.angelpayAccounts[0].accountId).toBe(OLD_ACCOUNT.id)
+    })
+
+    it('falls back to the existing order when no assigned merchant names an account', async () => {
+      // Legacy/un-backfilled merchant: angelpayUserAccountId is null. Nothing
+      // to key on, so the previous behavior (oldest first) must be preserved.
+      mockNexgoTerminal(['ma-legacy'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([angelpayMerchant('ma-legacy', '555', null)])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.angelpayAuth.accountId).toBe(OLD_ACCOUNT.id)
+      expect(res.__body.data.angelpayAccounts[0].accountId).toBe(OLD_ACCOUNT.id)
+    })
+
+    it('ignores a merchant whose account is not among the venue ACTIVE accounts', async () => {
+      // Assigned merchant points at an account that is INACTIVE/deleted, so it
+      // never made it into the payload list. Must not blank out angelpayAuth.
+      mockNexgoTerminal(['ma-orphan'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([angelpayMerchant('ma-orphan', '999', 'apa-gone')])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.angelpayAuth.accountId).toBe(OLD_ACCOUNT.id)
+      expect(res.__body.data.angelpayAccounts).toHaveLength(2)
+    })
+
+    it('honors the ORDER of assignedMerchantIds, not the order the DB returns', async () => {
+      // A venue's payment slots are shared across providers and terminals: a
+      // Blumon/PAX merchant can hold slot 1, so an AngelPay merchant lands on
+      // slot 3 — and a terminal can carry TWO AngelPay merchants owned by two
+      // different logins (Amaena in prod). `merchantAccount.findMany({ id: { in
+      // } })` has no ORDER BY, so Postgres may hand them back in any order:
+      // picking "the first AngelPay merchant" off that list would make the
+      // charging credential non-deterministic. The operator's intent lives in
+      // the ORDER of assignedMerchantIds, so that is what must win.
+      mockNexgoTerminal(['ma-new', 'ma-old'])
+      // DB returns them REVERSED on purpose.
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([
+        angelpayMerchant('ma-old', '974', OLD_ACCOUNT.id),
+        angelpayMerchant('ma-new', '1272', NEW_ACCOUNT.id),
+      ])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.angelpayAuth.accountId).toBe(NEW_ACCOUNT.id)
+      expect(res.__body.data.merchantAccounts.map((m: any) => m.id)).toEqual(['ma-new', 'ma-old'])
+    })
+
+    it('slot 1 Blumon (PAX) + slot 3 AngelPay: the AngelPay login follows slot 3', async () => {
+      // A venue's slots are shared across providers. A Blumon/PAX merchant can
+      // sit in slot 1 and the terminal's AngelPay merchant in slot 3. The
+      // compat filter drops Blumon for NEXGO; the credential must follow the
+      // AngelPay merchant that survives, wherever it sits.
+      mockNexgoTerminal(['ma-blumon', 'ma-old', 'ma-new'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([
+        angelpayMerchant('ma-new', '1272', NEW_ACCOUNT.id),
+        blumonMerchant('ma-blumon'),
+        angelpayMerchant('ma-old', '974', OLD_ACCOUNT.id),
+      ])
+      mockedIsCompat.mockImplementation((providerCode: string) => providerCode === 'ANGELPAY')
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.merchantAccounts.map((m: any) => m.id)).toEqual(['ma-old', 'ma-new'])
+      // First AngelPay merchant in slot order is ma-old → OLD leads.
+      expect(res.__body.data.angelpayAuth.accountId).toBe(OLD_ACCOUNT.id)
+    })
+
+    it('legacy merchant (no account) FIRST + related merchant second: keeps the previous credential', async () => {
+      // The operator put the legacy merchant in slot 1. We cannot tell which
+      // login owns it, so we must not let slot 2's login override slot 1 —
+      // that would silently change the credential the terminal had until now.
+      mockNexgoTerminal(['ma-legacy', 'ma-new'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([
+        angelpayMerchant('ma-new', '1272', NEW_ACCOUNT.id),
+        angelpayMerchant('ma-legacy', '555', null),
+      ])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.angelpayAuth.accountId).toBe(OLD_ACCOUNT.id)
+      expect(res.__body.data.angelpayAccounts[0].accountId).toBe(OLD_ACCOUNT.id)
+    })
+
+    it('orphan merchant (unknown account) FIRST + valid merchant second: keeps the previous credential', async () => {
+      mockNexgoTerminal(['ma-orphan', 'ma-new'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([
+        angelpayMerchant('ma-new', '1272', NEW_ACCOUNT.id),
+        angelpayMerchant('ma-orphan', '999', 'apa-gone'),
+      ])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.angelpayAuth.accountId).toBe(OLD_ACCOUNT.id)
+    })
+
+    it('no assignedMerchantIds: the effective-config slot order decides, not the DB order', async () => {
+      const { getEffectivePaymentConfig } = jest.requireMock('@/services/organization-payment-config.service')
+      mockNexgoTerminal([])
+      ;(getEffectivePaymentConfig as jest.Mock).mockResolvedValueOnce({
+        source: 'venue',
+        config: { primaryAccount: { id: 'ma-new' }, secondaryAccount: { id: 'ma-old' }, tertiaryAccount: null },
+      })
+      // DB returns them REVERSED on purpose.
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([
+        angelpayMerchant('ma-old', '974', OLD_ACCOUNT.id),
+        angelpayMerchant('ma-new', '1272', NEW_ACCOUNT.id),
+      ])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.merchantAccounts.map((m: any) => m.id)).toEqual(['ma-new', 'ma-old'])
+      expect(res.__body.data.angelpayAuth.accountId).toBe(NEW_ACCOUNT.id)
+    })
+
+    it('PAX terminal: merchantAccounts order is left exactly as the DB returned it', async () => {
+      // On PAX/Blumon every merchant carries its own credentials — order is
+      // cosmetic and that contract must not move as a side effect of this fix.
+      mockedPrisma.terminal.findFirst.mockResolvedValue({
+        id: 'term-pax',
+        serialNumber: 'SN-PAX-1',
+        brand: 'PAX',
+        model: 'A910S',
+        status: 'ACTIVE',
+        venueId: 'venue-1',
+        assignedMerchantIds: ['ma-b2', 'ma-b1'],
+        config: {},
+        venue: { id: 'venue-1', name: 'V', type: 'CLINIC', timezone: 'America/Mexico_City' },
+      })
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([blumonMerchant('ma-b1'), blumonMerchant('ma-b2')])
+      mockedGetAngelPayAccounts.mockResolvedValue([])
+      mockedGetAngelPayAccount.mockResolvedValue(null)
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-PAX-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.merchantAccounts.map((m: any) => m.id)).toEqual(['ma-b1', 'ma-b2'])
+      expect(res.__body.data.angelpayAuth).toBeNull()
+      expect(res.__body.data.angelpayAccounts).toBeUndefined()
+    })
+
+    it('ACTIVE account without pin/pinEncrypted never leads, even if it owns the assigned merchant', async () => {
+      const NO_PIN = { ...NEW_ACCOUNT, id: 'apa-nopin', email: 'nopin@venue.com', pin: null, pinEncrypted: null }
+      mockedGetAngelPayAccounts.mockResolvedValue([OLD_ACCOUNT, NO_PIN])
+      mockNexgoTerminal(['ma-nopin'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([angelpayMerchant('ma-nopin', '777', NO_PIN.id)])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      // The no-pin account is not in the payload at all, so nothing to key on → previous order.
+      expect(res.__body.data.angelpayAccounts.map((a: any) => a.accountId)).toEqual([OLD_ACCOUNT.id])
+      expect(res.__body.data.angelpayAuth.accountId).toBe(OLD_ACCOUNT.id)
+    })
+
+    it('does not drop any account from the payload when reordering', async () => {
+      mockNexgoTerminal(['ma-new'])
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([angelpayMerchant('ma-new', '1272', NEW_ACCOUNT.id)])
+
+      const res = makeRes()
+      await getTerminalConfig({ params: { serialNumber: 'SN-NEXGO-1' } } as unknown as Request, res, jest.fn() as unknown as NextFunction)
+
+      expect(res.__body.data.angelpayAccounts).toHaveLength(2)
+    })
+  })
 })

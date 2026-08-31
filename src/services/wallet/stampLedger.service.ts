@@ -318,26 +318,70 @@ export async function reverseStampForOrder(
 
   const cantidad = otorgado.quantity ?? 1
 
-  await prisma.$transaction(async tx => {
-    await tx.stampEvent.create({
-      data: {
-        stampCardId: otorgado.stampCardId,
-        venueId,
-        orderId,
-        type: StampEventType.REVERSAL,
-        // Negativo: el libro se lee sumando, así que el asiento contrario resta.
-        quantity: -cantidad,
-        createdById: options.staffVenueId,
-      },
-    })
+  try {
+    await prisma.$transaction(async tx => {
+      const card = await tx.stampCard.findUnique({
+        where: { id: otorgado.stampCardId },
+        select: { id: true, venueId: true, customerId: true, cycle: true, stampsEarned: true, completedAt: true },
+      })
+      if (!card) return
 
-    // El contador vive en la MISMA transacción que su asiento. Si se separan, un
-    // fallo a medias deja al cliente viendo un avance que el libro no respalda.
-    await tx.stampCard.update({
-      where: { id: otorgado.stampCardId },
-      data: { stampsEarned: { decrement: cantidad } },
+      let targetCardId = card.id
+      let reopenCompletedCard = false
+
+      if (card.completedAt) {
+        const current = await tx.stampCard.findFirst({
+          where: { venueId, customerId: card.customerId, completedAt: null, id: { not: card.id } },
+          orderBy: { cycle: 'desc' },
+          select: { id: true, stampsEarned: true, completedAt: true },
+        })
+
+        // Purchases made after completing the old card already replace the refunded
+        // stamp. Consume that newer progress first, preserving the legitimately earned
+        // reward and avoiding two simultaneously-open cards.
+        if (current && current.stampsEarned >= cantidad) {
+          targetCardId = current.id
+        } else {
+          const cancelled = await tx.stampReward.updateMany({
+            where: { stampCardId: card.id, status: StampRewardStatus.PENDING },
+            data: { status: StampRewardStatus.CANCELLED },
+          })
+          reopenCompletedCard = cancelled.count > 0
+          if (reopenCompletedCard && current?.stampsEarned === 0) {
+            await tx.stampCard.delete({ where: { id: current.id } })
+          }
+        }
+      }
+
+      await tx.stampEvent.create({
+        data: {
+          stampCardId: targetCardId,
+          venueId,
+          orderId,
+          type: StampEventType.REVERSAL,
+          // Negativo: el libro se lee sumando, así que el asiento contrario resta.
+          quantity: -cantidad,
+          createdById: options.staffVenueId,
+        },
+      })
+
+      // El contador vive en la MISMA transacción que su asiento. Si se separan, un
+      // fallo a medias deja al cliente viendo un avance que el libro no respalda.
+      await tx.stampCard.update({
+        where: { id: targetCardId },
+        data: {
+          stampsEarned: { decrement: cantidad },
+          ...(reopenCompletedCard ? { completedAt: null } : {}),
+        },
+      })
     })
-  })
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      logger.info('Reversa de sello duplicada evitada por el índice único', { venueId, orderId })
+      return { reversed: false, stampCardId: otorgado.stampCardId }
+    }
+    throw error
+  }
 
   // 🔴 Quitar un sello SÍ se registra; otorgarlo NO.
   //

@@ -1,241 +1,581 @@
 /**
- * Traductor de Uber → contrato interno, probado contra un PEDIDO REAL.
+ * El traductor uAPI, contra el PEDIDO REAL del sandbox (`pedido-real-uapi.json`, bajado el
+ * 27-ago con `?expand=carts,payment`).
  *
- * El fixture `pedido-real-delivery-by-uber.json` salió de un pedido de verdad hecho el
- * 2026-08-20 contra la tienda de prueba "Avoqado Sandbox 1". No está inventado: corrigió
- * tres suposiciones que traía la spec y que habrían roto este mapper en producción.
+ * Hereda TODAS las lecciones de dinero de la API clásica — Decimal nunca float, "corrupto"
+ * distinto de "ausente", reparto que cuadra al centavo, y rechazar en vez de adivinar — y
+ * les suma la nueva frontera: `amount_e5`, donde 100000 = $1.00 y equivocar la división
+ * multiplica cada venta por mil.
  */
-import fixture from '../../../fixtures/delivery/uber/pedido-real-delivery-by-uber.json'
+import fs from 'fs'
+import path from 'path'
+
 import { mapUberOrder } from '@/services/delivery-channels/providers/uber-eats/uber.mapper'
 
-describe('uber.mapper — contra el pedido real', () => {
+const FIXTURE = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-real-uapi.json')
+const pedidoReal = () => JSON.parse(fs.readFileSync(FIXTURE, 'utf8'))
+
+/** Un money e5 del uAPI. */
+const e5 = (amount_e5: number) => ({ amount_e5, currency_code: 'MXN' })
+
+describe('uber.mapper (uAPI) — contra el pedido real', () => {
   it('traduce el pedido completo', () => {
-    const o = mapUberOrder(fixture)
-
-    expect(o.externalId).toBe('dbe79abc-5a6a-4b3d-85fb-cb7b15e77645')
-    expect(o.displayId).toBe('77645')
-    expect(o.items).toHaveLength(1)
-    expect(o.placedAt.toISOString()).toBe('2026-08-20T20:05:55.000Z') // -06:00 → UTC
+    const r = mapUberOrder(pedidoReal())
+    expect(r.externalId).toBe('00012fba-ad21-4d73-a233-44522fbef5a9')
+    expect(r.displayId).toBe('EF5A9')
+    expect(r.items).toHaveLength(1)
+    expect(r.items[0].name).toBe('Best Burger')
   })
 
-  it('🔴 `title` es un STRING plano en el pedido, no `title.translations.en`', () => {
-    // La spec decía translations. Eso es del MENÚ; el PEDIDO manda texto plano.
-    expect(mapUberOrder(fixture).items[0].name).toBe('Best Burger')
+  it('🔴 e5 → PESOS: 100000 es $1.00, no $1,000 ni $100', () => {
+    const r = mapUberOrder(pedidoReal())
+    expect(r.payment.saleAmount).toBe('1.00')
+    expect(r.payment.externallyPaidSale).toBe('1.00')
+    expect(r.items[0].unitPrice).toBe('1.00')
+    expect(r.items[0].total).toBe('1.00')
   })
 
-  it('🔴 `quantity` es un entero, no un objeto con `.amount`', () => {
-    expect(mapUberOrder(fixture).items[0].quantity).toBe(1)
+  it('🔴 `quantity` es un OBJETO {amount} — al revés que la API clásica', () => {
+    const r = mapUberOrder(pedidoReal())
+    expect(r.items[0].quantity).toBe(1)
   })
 
-  it('🔴 convierte centavos a PESOS: 100 → "1.00"', () => {
-    const item = mapUberOrder(fixture).items[0]
-    expect(item.unitPrice).toBe('1.00')
-    expect(item.total).toBe('1.00')
+  it('✓ la nota del cliente SÍ llega en el uAPI y viaja al contrato — es lo que la cocina lee', () => {
+    const r = mapUberOrder(pedidoReal())
+    expect(r.items[0].notes).toBe('Sin cebolla, por favor')
   })
 
   it('el id del item viaja como externalData: es lo que Avoqado publicó en el menú', () => {
-    const item = mapUberOrder(fixture).items[0]
-    expect(item.externalId).toBe('external_item_1')
-    expect(item.externalData).toBe('external_item_1')
-  })
-
-  it('🔴 `selected_modifier_groups: null` no revienta ni inventa modificadores', () => {
-    expect(mapUberOrder(fixture).items[0].modifiers).toEqual([])
+    const r = mapUberOrder(pedidoReal())
+    expect(r.items[0].externalId).toBe('external_item_1')
+    expect(r.items[0].externalData).toBe('external_item_1')
   })
 
   it('🔴 cuando reparte Uber NO hay propina: el reparto la deja en cero', () => {
-    // Verificado con el pedido real: `payment.charges` sólo trae total y sub_total.
-    const p = mapUberOrder(fixture).payment
-    expect(p.tipAmount).toBe('0.00')
-    expect(p.externallyPaidTip).toBe('0.00')
-    expect(p.cashDueTip).toBe('0.00')
+    const r = mapUberOrder(pedidoReal())
+    expect(r.payment.tipAmount).toBe('0.00')
+    expect(r.payment.externallyPaidTip).toBe('0.00')
   })
 
   it('🔴 lo paga la plataforma: nada queda por cobrar en efectivo', () => {
-    const p = mapUberOrder(fixture).payment
-    expect(p.saleAmount).toBe('1.00')
-    expect(p.externallyPaidSale).toBe('1.00')
-    expect(p.cashDueSale).toBe('0.00')
-    expect(p.currency).toBe('MXN')
+    const r = mapUberOrder(pedidoReal())
+    expect(r.payment.cashDueSale).toBe('0.00')
+    expect(r.payment.cashDueTip).toBe('0.00')
   })
 
   it('el reparto cuadra al centavo, que es lo que la ingesta exige', () => {
-    const p = mapUberOrder(fixture).payment
-    const venta = Number(p.saleAmount) + Number(p.merchantFees)
-    expect(venta.toFixed(2)).toBe((Number(p.externallyPaidSale) + Number(p.cashDueSale)).toFixed(2))
+    const r = mapUberOrder(pedidoReal())
+    const suma = Number(r.payment.saleAmount) + Number(r.payment.merchantFees)
+    expect(suma.toFixed(2)).toBe(Number(r.payment.externallyPaidSale).toFixed(2))
   })
 
   it('conserva el cliente y el JSON crudo para auditoría', () => {
-    const o = mapUberOrder(fixture)
-    expect(o.customer?.name).toContain('Avoqado')
-    expect(o.customer?.phone).toBe('+52 33 1930 9789')
-    expect(o.raw).toBe(fixture)
+    const raw = pedidoReal()
+    const r = mapUberOrder(raw)
+    expect(r.customer?.name).toBe('Avoqado S.')
+    expect(r.customer?.phone).toContain('+52')
+    expect(r.raw).toBe(raw)
+  })
+
+  it('acepta el pedido SIN el sobre {order} — por si un webhook lo trae embebido', () => {
+    const r = mapUberOrder(pedidoReal().order)
+    expect(r.externalId).toBe('00012fba-ad21-4d73-a233-44522fbef5a9')
   })
 
   it('🔴 RECHAZA un pedido sin id: mejor fallar visible que ingerir basura', () => {
-    expect(() => mapUberOrder({ ...fixture, id: undefined })).toThrow(/id/i)
+    expect(() => mapUberOrder({ order: {} })).toThrow(/no trae `id`/)
   })
 
   it('🔴 RECHAZA una moneda que no sea MXN', () => {
-    const otra = JSON.parse(JSON.stringify(fixture))
-    otra.payment.charges.total.currency_code = 'USD'
-    expect(() => mapUberOrder(otra)).toThrow(/MXN|moneda/i)
+    const p = pedidoReal()
+    p.order.payment.payment_detail.currency_code = 'USD'
+    expect(() => mapUberOrder(p)).toThrow(/Sólo MXN/)
   })
 
   it('un cargo extra del comercio entra como merchantFees y sigue cuadrando', () => {
-    const conCargo = JSON.parse(JSON.stringify(fixture))
-    conCargo.payment.charges.total.amount = 150 // total > sub_total ⇒ 0.50 de cargos
-    const p = mapUberOrder(conCargo).payment
-    expect(p.saleAmount).toBe('1.00')
-    expect(p.merchantFees).toBe('0.50')
-    expect(p.externallyPaidSale).toBe('1.50')
+    const p = pedidoReal()
+    // order_total sube $10.00 por encima de los artículos → cargos del comercio.
+    p.order.payment.payment_detail.order_total.gross = e5(1_100_000)
+    const r = mapUberOrder(p)
+    expect(r.payment.saleAmount).toBe('1.00')
+    expect(r.payment.merchantFees).toBe('10.00')
+    expect(r.payment.externallyPaidSale).toBe('11.00')
   })
 
-  // ============================================================
-  // HALLAZGO 1 (auditoría externa, 2026-08-20): el mapper hacía la aritmética interna con
-  // `number` (Number(), restas, multiplicaciones) antes de producir el string decimal —
-  // viola `.claude/rules/critical-warnings.md` ("Money = Decimal, Never Float") y permite
-  // redondeos silenciosos del estilo `0.1 + 0.2 !== 0.3`.
-  // ============================================================
-  describe('dinero: Decimal, nunca float (Hallazgo 1)', () => {
-    it('🔴 valor extremo: unitario × cantidadPadre en `number` pierde 1 centavo al cruzar Number.MAX_SAFE_INTEGER; con Decimal no', () => {
-      // Caso deliberadamente extremo (nadie vende una hamburguesa en $90 billones de pesos) —
-      // existe para forzar la frontera exacta donde `number` deja de ser exacto (2^53) y
-      // probar que Decimal no hereda el error. En `number`: 3002399751580331 × 3 =
-      // 9007199254740992 (equivocado por 1 centavo). En Decimal: 9007199254740993 (exacto).
-      // Verificado con Prisma.Decimal directo antes de escribir este test.
-      const conModificadorExtremo = JSON.parse(JSON.stringify(fixture))
-      conModificadorExtremo.cart.items[0].quantity = 3
-      conModificadorExtremo.cart.items[0].selected_modifier_groups = [
-        {
-          selected_items: [
-            {
-              id: 'mod-extremo',
-              title: 'Modificador extremo',
-              quantity: 1,
-              price: { unit_price: { amount: 3002399751580331 } },
-            },
-          ],
-        },
-      ]
-      const modifier = mapUberOrder(conModificadorExtremo).items[0].modifiers?.[0]
-      expect(modifier?.price).toBe('90071992547409.93')
-    })
-  })
-
-  // ============================================================
-  // HALLAZGO 3 (auditoría externa, 2026-08-20): `montoDe` no distinguía "el cargo no existe"
-  // (legítimamente ausente, p.ej. `charges.tip` sin propina) de "el cargo existe pero
-  // `.amount` no es un número" (payload corrupto) — ambos colapsaban a $0 en silencio. Un
-  // `charges.total.amount` corrupto producía un pedido de $0 que el núcleo marca PAID y
-  // descuenta inventario de comida jamás cobrada.
-  // ============================================================
-  describe('dinero: "no existe" vs. "corrupto" en charges.total.amount (Hallazgo 3)', () => {
-    it('🔴 RECHAZA si charges.total.amount existe pero NO es un número (string) — antes se volvía $0 en silencio', () => {
-      const corrupto = JSON.parse(JSON.stringify(fixture))
-      corrupto.payment.charges.total.amount = 'gratis'
-      expect(() => mapUberOrder(corrupto)).toThrow(/corrupto/i)
-    })
-
-    it('🔴 RECHAZA si charges.total.amount es un objeto en vez de un número', () => {
-      const corrupto = JSON.parse(JSON.stringify(fixture))
-      corrupto.payment.charges.total.amount = { no: 'es un número' }
-      expect(() => mapUberOrder(corrupto)).toThrow(/corrupto/i)
-    })
-
-    it('🔴 RECHAZA si charges.total.amount es NaN', () => {
-      const corrupto = JSON.parse(JSON.stringify(fixture))
-      corrupto.payment.charges.total.amount = NaN
-      expect(() => mapUberOrder(corrupto)).toThrow(/corrupto/i)
-    })
-
-    it('🔴 RECHAZA si charges.sub_total.amount es un booleano', () => {
-      const corrupto = JSON.parse(JSON.stringify(fixture))
-      corrupto.payment.charges.sub_total.amount = true
-      expect(() => mapUberOrder(corrupto)).toThrow(/corrupto/i)
-    })
-
-    it('regresión: el cargo entero AUSENTE (p.ej. sin propina) sigue siendo legítimo, no rechaza', () => {
-      // `charges.tip` no existe del todo en el pedido real: no es corrupción, es que no hubo
-      // propina. Esto ya funcionaba antes del fix y debe seguir funcionando igual.
-      expect(mapUberOrder(fixture).payment.tipAmount).toBe('0.00')
-    })
-  })
-
-  // ============================================================
-  // HALLAZGO 4 (auditoría externa, 2026-08-20): el mapper fijaba cashDueSale/cashDueTip en
-  // '0.00' SIEMPRE — válido sólo para pedidos que Uber liquida 100% en su app. Un pedido BYOC
-  // (`type: DELIVERY_BY_RESTAURANT`) con efectivo contra entrega (`cash_amount_due`) quedaría
-  // falsamente marcado PAID: Payment externo creado, inventario descontado, sin que el cobro
-  // real haya ocurrido nunca.
+  // ── Promociones ───────────────────────────────────────────────────────────────────
   //
-  // NO tenemos un pedido BYOC real para verificar el reparto exacto de `cash_amount_due`
-  // entre "efectivo que se queda el comercio" y "efectivo que el comercio cobra EN NOMBRE de
-  // Uber" (documentado como riesgo abierto en
-  // docs/superpowers/specs/2026-08-17-delivery-uber-eats-ANEXO-investigacion.md §5.1, campo
-  // `cashPassThroughToPlatform` — el contrato NormalizedDeliveryPayment todavía no lo tiene).
-  // Mientras tanto: RECHAZA en vez de adivinar ese reparto.
-  // ============================================================
-  describe('dinero: BYOC / cash_amount_due se rechaza, nunca se adivina (Hallazgo 4)', () => {
-    it('🔴 RECHAZA un pedido con cash_amount_due > 0 — antes se ingería como si Uber lo hubiera liquidado todo', () => {
-      const byoc = JSON.parse(JSON.stringify(fixture))
-      byoc.type = 'DELIVERY_BY_RESTAURANT'
-      byoc.payment.charges.cash_amount_due = { amount: 100, currency_code: 'MXN', formatted_amount: 'MX$1.00' }
-      expect(() => mapUberOrder(byoc)).toThrow(/cash_amount_due/i)
-    })
+  // 🔴 Uber manda TRES cifras en el mismo mensaje: lo que valen los artículos
+  // (`item_charges`), lo que valió la promoción (`promotions.total`) y lo que el cliente
+  // pagó (`order_total`). El mapper sólo leía la primera y la tercera, y la resta —que sale
+  // NEGATIVA cuando hay promoción, justo la señal de que algo no cuadra— se aplastaba a cero
+  // con `max(0, …)`. Resultado: el pedido se registraba como si el cliente hubiera pagado el
+  // precio de lista, y el reporte de ventas del negocio quedaba inflado contra su depósito.
+  //
+  // Se registra como lo hace el mercado (Square: ventas brutas SIN ajustar, descuentos como
+  // deducción visible, netas = la resta; Fudo tiene «Descuentos ($)» como línea propia):
+  // `saleAmount` sigue siendo el BRUTO —así los renglones siguen cuadrando al centavo— y el
+  // descuento viaja aparte. Lo que la plataforma liquida sí baja.
+  //
+  // Los montos de Uber son `gross`, o sea CON IVA incluido, que es como se maneja el precio
+  // en México: el descuento se aplica sobre el precio con impuesto, no sobre una base sin él.
+  it('🔴 una promoción se registra como DESCUENTO, no desaparece', () => {
+    const p = pedidoReal()
+    // Artículos $1.00; promoción de $0.20; el cliente paga $0.80.
+    p.order.payment.payment_detail.promotions.total.gross = e5(20_000)
+    p.order.payment.payment_detail.order_total.gross = e5(80_000)
 
-    it('🔴 RECHAZA cash_amount_due > 0 aunque `type` no sea DELIVERY_BY_RESTAURANT (combinación no documentada)', () => {
-      const raro = JSON.parse(JSON.stringify(fixture)) // type sigue siendo DELIVERY_BY_UBER
-      raro.payment.charges.cash_amount_due = { amount: 50 }
-      expect(() => mapUberOrder(raro)).toThrow(/cash_amount_due/i)
-    })
+    const r = mapUberOrder(p)
 
-    it('acepta cash_amount_due presente pero en CERO — nada que repartir, sigue pagado por la plataforma', () => {
-      const sinAmbiguedad = JSON.parse(JSON.stringify(fixture))
-      sinAmbiguedad.type = 'DELIVERY_BY_RESTAURANT'
-      sinAmbiguedad.payment.charges.cash_amount_due = { amount: 0 }
-      const p = mapUberOrder(sinAmbiguedad).payment
-      expect(p.cashDueSale).toBe('0.00')
-      expect(p.cashDueTip).toBe('0.00')
-    })
-
-    it('regresión: el pedido real (DELIVERY_BY_UBER, sin cash_amount_due) no lo toca este hallazgo', () => {
-      const p = mapUberOrder(fixture).payment
-      expect(p.cashDueSale).toBe('0.00')
-      expect(p.cashDueTip).toBe('0.00')
-    })
-  })
-  it('🔴 sin `total` ni `sub_total`: RECHAZA en vez de crear una venta de $0', () => {
-    // El hueco que quedaba: `montoDe` devolvía 0 ante un cargo ausente, así que un pedido
-    // sin bloque de cobros producía una venta de cero pesos, ingerida como legítima y
-    // pagada. Para un PEDIDO esos dos campos no son opcionales — que falten es corrupción,
-    // no gratuidad. (`tip` y `cash_amount_due` sí faltan de verdad: el pedido real no los
-    // trae, y por eso ésos siguen resolviendo a 0.)
-    const sinCobros = { ...fixture, payment: { charges: {} } }
-    expect(() => mapUberOrder(sinCobros)).toThrow(/total/i)
+    expect(r.payment.saleAmount).toBe('1.00') // bruto: cuadra con los renglones
+    expect(r.payment.discountAmount).toBe('0.20') // la promoción, visible
+    expect(r.payment.externallyPaidSale).toBe('0.80') // lo que Uber liquida
   })
 
-  it('🔴 con `sub_total` pero sin `total`: tampoco adivina', () => {
-    // Peor que el anterior porque parece sano: la venta entraría al subtotal y los cargos
-    // que el comercio SÍ cobró se perderían en silencio.
-    const sinTotal = { ...fixture, payment: { charges: { sub_total: { amount: 100, currency_code: 'MXN' } } } }
-    expect(() => mapUberOrder(sinTotal)).toThrow(/total/i)
+  it('sin promoción nada cambia (el caso de siempre)', () => {
+    const r = mapUberOrder(pedidoReal())
+    expect(r.payment.saleAmount).toBe('1.00')
+    expect(r.payment.discountAmount).toBe('0.00')
+    expect(r.payment.externallyPaidSale).toBe('1.00')
   })
-  it('🔴 la nota del cliente viaja al contrato: es lo que la cocina lee', () => {
-    // "sin cebolla" no es un adorno: sin ella la comanda sale mal y el cliente devuelve el
-    // plato. Es el único dato del pedido que no se puede reconstruir de ningún otro lado.
-    const conNota = {
-      ...fixture,
-      cart: { ...fixture.cart, items: [{ ...fixture.cart.items[0], special_instructions: '  Sin cebolla, por favor  ' }] },
+
+  // ── Rechazar en vez de adivinar (la política que protege el dinero) ────────────────
+
+  it('🔴 RECHAZA un fulfillment_type que no hemos verificado con un pedido real', () => {
+    const p = pedidoReal()
+    p.order.fulfillment_type = 'PICKUP'
+    expect(() => mapUberOrder(p)).toThrow(/fulfillment_type="PICKUP"/)
+  })
+
+  it('🔴 dos IMPORTES para el mismo cart_item_id RECHAZAN — no se adivina cómo se reparten', () => {
+    // Se probó a sumarlos (para soportar un hipotético ITEM + DISCOUNT) y salía peor: el
+    // neto bajaba `item.total` pero NO `unitPrice` ni `discountAmount`, así que el dashboard
+    // reportaba el precio COMPLETO sobre una venta descontada. Y era código para un payload
+    // que nunca hemos visto: cero ids repetidos en los 3 pedidos reales del sandbox.
+    const p = pedidoReal()
+    p.order.payment.payment_detail.item_charges.price_breakdown.push({
+      cart_item_id: 'd4a07394-19a7-4a4b-870c-9c00d15cda97',
+      price_type: 'DISCOUNT',
+      total: { gross: e5(-20_000) },
+    })
+    expect(() => mapUberOrder(p)).toThrow(/DOS importes para el mismo cart_item_id/)
+  })
+
+  it('…pero una segunda entrada en CERO no tumba la venta: no aporta dinero', () => {
+    const p = pedidoReal()
+    p.order.payment.payment_detail.item_charges.price_breakdown.push({
+      cart_item_id: 'd4a07394-19a7-4a4b-870c-9c00d15cda97',
+      price_type: 'CUSTOMIZATION',
+      total: { gross: e5(0) },
+    })
+    expect(mapUberOrder(p).items[0].total).toBe('1.00')
+  })
+
+  it('🔴 RECHAZA un item que no aparece en el price_breakdown — sin precio no hay venta que ingerir', () => {
+    const p = pedidoReal()
+    p.order.payment.payment_detail.item_charges.price_breakdown = []
+    expect(() => mapUberOrder(p)).toThrow(/no aparece en price_breakdown/)
+  })
+
+  describe('dinero: "no existe" vs. "corrupto" en amount_e5', () => {
+    it('🔴 RECHAZA si order_total.gross.amount_e5 es un string — antes (clásico) esto se volvía $0 en silencio', () => {
+      const p = pedidoReal()
+      p.order.payment.payment_detail.order_total.gross.amount_e5 = '100000'
+      expect(() => mapUberOrder(p)).toThrow(/corrupto/)
+    })
+
+    it('🔴 RECHAZA si amount_e5 es NaN', () => {
+      const p = pedidoReal()
+      p.order.payment.payment_detail.order_total.gross.amount_e5 = NaN
+      expect(() => mapUberOrder(p)).toThrow(/corrupto/)
+    })
+
+    it('🔴 sin order_total: RECHAZA en vez de crear una venta de $0', () => {
+      const p = pedidoReal()
+      delete p.order.payment.payment_detail.order_total
+      expect(() => mapUberOrder(p)).toThrow(/no trae "payment_detail.order_total.gross"/)
+    })
+
+    it('🔴 sin item_charges.total: tampoco adivina', () => {
+      const p = pedidoReal()
+      delete p.order.payment.payment_detail.item_charges.total
+      expect(() => mapUberOrder(p)).toThrow(/no trae "payment_detail.item_charges.total.gross"/)
+    })
+
+    it('regresión: la propina AUSENTE sigue siendo legítima (pedido que reparte Uber), no rechaza', () => {
+      const r = mapUberOrder(pedidoReal())
+      expect(r.payment.tipAmount).toBe('0.00')
+    })
+
+    it('la propina PRESENTE se lee y se reparte', () => {
+      const p = pedidoReal()
+      p.order.payment.payment_detail.tips = { total: { gross: e5(500_000) } }
+      const r = mapUberOrder(p)
+      expect(r.payment.tipAmount).toBe('5.00')
+      expect(r.payment.externallyPaidTip).toBe('5.00')
+      // La propina NO infla los cargos del comercio.
+      expect(r.payment.merchantFees).toBe('0.00')
+    })
+  })
+
+  describe('dinero: Decimal, nunca float', () => {
+    it('🔴 valor extremo por encima de Number.MAX_SAFE_INTEGER no pierde centavos', () => {
+      const p = pedidoReal()
+      // 9007199254740993 es 2^53 + 1: en `number` colapsa a ...992 y pierde 1 centavo-e5.
+      // El lint avisa justamente de esa pérdida — que es LO QUE ESTA PRUEBA DEMUESTRA que
+      // Decimal evita. Silenciarlo aquí es correcto; silenciarlo en código de producción no.
+      /* eslint-disable no-loss-of-precision */
+      // El breakdown y el total deben moverse JUNTOS para que el pedido siga cuadrando.
+      p.order.payment.payment_detail.order_total.gross = e5(9007199254740993)
+      p.order.payment.payment_detail.item_charges.total.gross = e5(9007199254740993)
+      p.order.payment.payment_detail.item_charges.price_breakdown[0].total.gross = e5(9007199254740993)
+      /* eslint-enable no-loss-of-precision */
+      const r = mapUberOrder(p)
+      expect(r.payment.saleAmount).toBe('90071992547.41')
+      expect(r.payment.saleAmount).toBe(r.payment.externallyPaidSale)
+    })
+  })
+
+  it('🔴 RECHAZA un item sin título legible', () => {
+    const p = pedidoReal()
+    p.order.carts[0].items[0].title = null
+    expect(() => mapUberOrder(p)).toThrow(/sin título legible/)
+  })
+
+  it('un pedido con VARIOS carritos (group order) junta los items de todos', () => {
+    const p = pedidoReal()
+    const item2 = JSON.parse(JSON.stringify(p.order.carts[0].items[0]))
+    item2.cart_item_id = 'segunda-linea'
+    item2.id = 'external_item_2'
+    p.order.carts.push({ items: [item2] })
+    p.order.payment.payment_detail.item_charges.price_breakdown.push({
+      cart_item_id: 'segunda-linea',
+      price_type: 'ITEM',
+      total: { gross: e5(200_000) },
+      unit: { gross: e5(200_000) },
+    })
+    // 🔴 Los totales suben CON las líneas. Antes se dejaban en $1.00 con $3.00 de artículos:
+    // el test pasaba sobre una venta que la ingesta habría rechazado por descuadre, así que
+    // no probaba nada de lo que dice probar (Codex, 2ª pasada).
+    p.order.payment.payment_detail.item_charges.total.gross = e5(300_000)
+    p.order.payment.payment_detail.order_total.gross = e5(300_000)
+
+    const r = mapUberOrder(p)
+    expect(r.items).toHaveLength(2)
+    expect(r.items[1].total).toBe('2.00')
+    // …y el pedido CUADRA, que es la única forma de que la ingesta lo acepte.
+    const suma = r.items.reduce((a, i) => a + Number(i.total), 0)
+    expect(suma.toFixed(2)).toBe(Number(r.payment.saleAmount).toFixed(2))
+  })
+})
+
+describe('uber.mapper (uAPI) — pedido REAL con modificadores', () => {
+  // Pedido real del sandbox (27-ago): Hamburguesa Doble $169 + Mediano $15 + Ranch $10.
+  // 🔴 ANTES de esto el pedido se RECHAZABA ENTERO con `price_type="CUSTOMIZATION"` — o sea
+  // que en producción cualquier cliente que pidiera queso extra dejaba al restaurante sin
+  // la venta. Se reprodujo en vivo antes de arreglarlo.
+  const CON_MODS = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-con-modificadores-uapi.json')
+  const conMods = () => JSON.parse(fs.readFileSync(CON_MODS, 'utf8'))
+
+  it('🔴 NO rechaza el pedido: acepta ITEM, OPTION y CUSTOMIZATION', () => {
+    expect(() => mapUberOrder(conMods())).not.toThrow()
+  })
+
+  it('🔴 los extras llegan como modificadores REALES, con su precio', () => {
+    const r = mapUberOrder(conMods())
+    const mods = r.items[0].modifiers ?? []
+    expect(mods.map(m => m.name).sort()).toEqual(['Mediano', 'Ranch'])
+    expect(mods.find(m => m.name === 'Mediano')!.price).toBe('15.00')
+    expect(mods.find(m => m.name === 'Ranch')!.price).toBe('10.00')
+    // El id que Avoqado publicó para esa opción. ⚠️ Hoy la ingesta NO lo resuelve contra
+    // el catálogo (guarda `modifierId: null`): viaja para que la comanda y una futura
+    // resolución lo tengan, no porque ya se use.
+    expect(mods.find(m => m.name === 'Ranch')!.externalId).toBe('MOD-cmpe6531700y99k92gskezs5q')
+  })
+
+  it('🔴 EL DINERO CUADRA: la línea suma base + extras, y el total del pedido no se mueve', () => {
+    const r = mapUberOrder(conMods())
+    // 169 base + 15 + 10 = 194, que es exactamente `item_charges.total.gross` del pedido real.
+    expect(r.items[0].total).toBe('194.00')
+    expect(r.items[0].unitPrice).toBe('169.00')
+    expect(r.payment.saleAmount).toBe('194.00')
+    // Y la suma de las líneas NO puede exceder lo que Uber dice que se cobró por artículos.
+    const suma = (r.items ?? []).reduce((a, i) => a + Number(i.total), 0)
+    expect(suma).toBeCloseTo(Number(r.payment.saleAmount), 2)
+  })
+
+  it('🔴 un tipo NUEVO con dinero que no aterriza en ninguna línea SÍ rechaza', () => {
+    // Lo que importa no es el nombre del tipo, es que quede dinero sin colocar: eso es
+    // exactamente lo que haría que la comanda cobrara distinto de lo que Uber cobró.
+    const p = conMods()
+    const o = p.order ?? p
+    o.payment.payment_detail.item_charges.price_breakdown.push({
+      cart_item_id: 'huerfano-que-no-existe-en-el-carrito',
+      price_type: 'ALGO_NUEVO',
+      total: { gross: { amount_e5: 5_000_000, currency_code: 'MXN' } },
+    })
+    expect(() => mapUberOrder(p)).toThrow(/no corresponde a ningún artículo ni a ningún extra/)
+  })
+
+  it('🔴 …pero un tipo NUEVO en $0.00 NO tumba el pedido: no mueve un centavo', () => {
+    // La versión anterior rechazaba por el NOMBRE y perdía la venta ENTERA — con el pedido
+    // ya aceptado en Uber, o sea el cliente cobrado y la cocina sin comanda.
+    const p = conMods()
+    const o = p.order ?? p
+    o.payment.payment_detail.item_charges.price_breakdown.push({
+      cart_item_id: 'contenedor-nuevo-sin-dinero',
+      price_type: 'ALGO_NUEVO',
+      total: { gross: { amount_e5: 0, currency_code: 'MXN' } },
+    })
+    const r = mapUberOrder(p)
+    expect(r.items[0].total).toBe('194.00')
+  })
+
+  // 🔴 EL CASO QUE MI PRIMERA VERSION FALLO. Pedido real: 2 hamburguesas, cada una con
+  // Mediano (+$15) y Ranch (+$10). Uber cobra $388 = (169 + 15 + 10) x 2.
+  // El breakdown MIENTE si se lee ingenuo: la entrada ITEM ya viene multiplicada
+  // (total $338 = 169x2) pero las entradas OPTION vienen POR UNIDAD ($15 y $10), aunque
+  // el cliente pague dos de cada una. Sumar los extras una sola vez daba $363 y el guard
+  // de dinero rechazaba el pedido entero: venta perdida, igual que antes del arreglo.
+  const CANT2 = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-cantidad2-con-modificadores-uapi.json')
+  const cantidad2 = () => JSON.parse(fs.readFileSync(CANT2, 'utf8'))
+
+  it('🔴 cantidad 2 con extras: la linea cuadra contra item_charges ($388, no $363)', () => {
+    const r = mapUberOrder(cantidad2())
+    expect(r.items[0].quantity).toBe(2)
+    expect(r.items[0].unitPrice).toBe('169.00')
+    expect(r.items[0].total).toBe('388.00')
+    expect(r.payment.saleAmount).toBe('388.00')
+    const suma = r.items.reduce((a, i) => a + Number(i.total), 0)
+    expect(suma).toBeCloseTo(Number(r.payment.saleAmount), 2)
+  })
+
+  it('🔴 el precio del modificador es POR UNIDAD del padre — la convencion del repo (ver Rappi)', () => {
+    // Si aqui se guardara el precio ya multiplicado (30 y 20), la linea saldria bien pero
+    // el renglon del modificador mentiria en la comanda y en cualquier reporte que lo sume.
+    // 2 hamburguesas ⇒ el precio del extra ya viene multiplicado por 2, que es lo que el
+    // núcleo declara y lo que hace que el reporte cuadre con la orden.
+    const mods = mapUberOrder(cantidad2()).items[0].modifiers ?? []
+    expect(mods.find(m => m.name === 'Mediano')!.price).toBe('30.00')
+    expect(mods.find(m => m.name === 'Ranch')!.price).toBe('20.00')
+  })
+})
+
+describe('uber.mapper (uAPI) — bordes del dinero de los extras', () => {
+  const CANT2 = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-cantidad2-con-modificadores-uapi.json')
+  const base = () => JSON.parse(fs.readFileSync(CANT2, 'utf8'))
+  const bdDe = (p: any) => p.order.payment.payment_detail.item_charges.price_breakdown
+  const ranchDe = (p: any) => bdDe(p).find((e: any) => e.total.gross.amount_e5 === 1_000_000)
+  const fijarTotales = (p: any, e5v: number) => {
+    p.order.payment.payment_detail.item_charges.total.gross.amount_e5 = e5v
+    p.order.payment.payment_detail.order_total.gross.amount_e5 = e5v
+  }
+
+  it('🔴 un extra con CANTIDAD PROPIA >1 no se cuenta dos veces', () => {
+    // 2 aderezos en cada una de 2 hamburguesas: (169 + 15 + 20) x 2 = 408.
+    // `price` debe quedar UNITARIO ($10) para que `price x quantity` dé los $20 que aporta,
+    // y no $40 — que es el doble conteo que señaló Codex.
+    const p = base()
+    const ranch = ranchDe(p)
+    ranch.quantity = { amount: 2, unit: 'PIECE' }
+    ranch.total.gross.amount_e5 = 2_000_000
+    p.order.carts[0].items[0].selected_modifier_groups[1].selected_items[0].quantity = { amount: 2, unit: 'PIECE' }
+    fijarTotales(p, 40_800_000)
+
+    const r = mapUberOrder(p)
+    expect(r.items[0].total).toBe('408.00')
+    expect(r.items[0].total).toBe(r.payment.saleAmount)
+    const m = (r.items[0].modifiers ?? []).find(x => x.name === 'Ranch')!
+    // Contrato del núcleo: precio = unitario × cantidad del producto ($10 × 2 hamburguesas),
+    // cantidad = las que pidió de ese extra por hamburguesa (2 aderezos).
+    expect(m.price).toBe('20.00')
+    expect(m.quantity).toBe(2)
+    expect((Number(m.price) * m.quantity).toFixed(2)).toBe('40.00')
+  })
+
+  it('sin `unit` en el breakdown, el unitario se deriva de total ÷ cantidad', () => {
+    const p = base()
+    delete ranchDe(p).unit
+    const r = mapUberOrder(p)
+    expect((r.items[0].modifiers ?? []).find(x => x.name === 'Ranch')!.price).toBe('20.00')
+    expect(r.items[0].total).toBe('388.00')
+  })
+
+  it('🔴 un extra GRATIS (sin entrada en el breakdown) NO tumba el pedido y sigue en la comanda', () => {
+    // El cliente pidió el aderezo y la cocina tiene que verlo, aunque no cueste.
+    const p = base()
+    p.order.payment.payment_detail.item_charges.price_breakdown = bdDe(p).filter((e: any) => e.total.gross.amount_e5 !== 1_000_000)
+    fijarTotales(p, 36_800_000)
+
+    const r = mapUberOrder(p)
+    expect(r.items[0].total).toBe('368.00')
+    expect(r.items[0].total).toBe(r.payment.saleAmount)
+    expect((r.items[0].modifiers ?? []).find(x => x.name === 'Ranch')!.price).toBe('0.00')
+  })
+
+  it('🔴 un extra CON precio que no aterriza en ninguna línea RECHAZA — ese dinero descuadraría', () => {
+    const p = base()
+    p.order.carts[0].items[0].selected_modifier_groups[1].selected_items[0].cart_item_id = 'no-existe-en-breakdown'
+    expect(() => mapUberOrder(p)).toThrow(/no corresponde a ningún artículo ni a ningún extra/)
+  })
+})
+
+describe('🔴 el REPORTE no puede contradecir a la orden', () => {
+  // `lineRevenue.ts` (dashboard) calcula el ingreso de una línea con esta MISMA fórmula,
+  // en SQL: unitPrice × cantidad + Σ(modificador.price × modificador.quantity). Si no
+  // coincide con `item.total`, el dueño ve un número y el banco otro. Se descubrió porque
+  // Codex leyó `lineGrossSql` y detectó que reportaría $363 sobre una venta de $388.
+  const lineGross = (it: { unitPrice: string; quantity: number; modifiers?: Array<{ price: string; quantity: number }> }) =>
+    Number(it.unitPrice) * it.quantity + (it.modifiers ?? []).reduce((a, m) => a + Number(m.price) * m.quantity, 0)
+
+  const FIXTURES = ['pedido-real-uapi', 'pedido-con-modificadores-uapi', 'pedido-cantidad2-con-modificadores-uapi']
+
+  it.each(FIXTURES)('%s: lineGross == item.total == saleAmount', nombre => {
+    const p = JSON.parse(fs.readFileSync(path.join(__dirname, `../../../fixtures/delivery/uber/${nombre}.json`), 'utf8'))
+    const r = mapUberOrder(p)
+    let suma = 0
+    for (const it of r.items) {
+      expect(lineGross(it).toFixed(2)).toBe(Number(it.total).toFixed(2))
+      suma += Number(it.total)
     }
-    expect(mapUberOrder(conNota).items[0].notes).toBe('Sin cebolla, por favor') // recortada
+    expect(suma.toFixed(2)).toBe(Number(r.payment.saleAmount).toFixed(2))
+  })
+})
+
+describe('uber.mapper (uAPI) — cantidades imposibles', () => {
+  const conCantidad = (v: unknown) => {
+    const p = pedidoReal()
+    p.order.carts[0].items[0].quantity = { amount: v, unit: 'PIECE' }
+    return p
+  }
+
+  it.each([0, -1, 0.5])('🔴 RECHAZA quantity=%s en vez de convertirla en 1 a la callada', v => {
+    expect(() => mapUberOrder(conCantidad(v))).toThrow(/no es un entero positivo/)
   })
 
-  it('una nota vacía o mal formada no rompe el pedido: queda en null', () => {
-    // Un pedido perdido por una nota con basura sería el peor intercambio posible.
-    for (const basura of ['   ', 42, null, { texto: 'x' }]) {
-      const raro = { ...fixture, cart: { ...fixture.cart, items: [{ ...fixture.cart.items[0], special_instructions: basura }] } }
-      expect(mapUberOrder(raro).items[0].notes).toBeNull()
-    }
+  it('sin `quantity` sigue asumiendo 1 — eso sí es legítimo', () => {
+    const p = pedidoReal()
+    delete p.order.carts[0].items[0].quantity
+    expect(mapUberOrder(p).items[0].quantity).toBe(1)
+  })
+})
+
+describe('uber.mapper (uAPI) — cantidad IMPOSIBLE en un modificador', () => {
+  const CANT2 = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-cantidad2-con-modificadores-uapi.json')
+  const conCantidadMod = (v: unknown) => {
+    const p = JSON.parse(fs.readFileSync(CANT2, 'utf8'))
+    p.order.carts[0].items[0].selected_modifier_groups[1].selected_items[0].quantity = { amount: v, unit: 'PIECE' }
+    return p
+  }
+
+  it.each([0, -2, 1.5])('🔴 RECHAZA quantity=%s del modificador en vez de volverla 1', v => {
+    expect(() => mapUberOrder(conCantidadMod(v))).toThrow(/modificador .* no es un entero positivo/)
+  })
+})
+
+describe('🔴 pedido PROGRAMADO — cableado con el payload real', () => {
+  // Pedido real del sandbox (8919c3ff-…, 30-ago), agendado para el día siguiente.
+  //
+  // 🔴 EL DEFECTO QUE ESTO ARREGLA, medido en vivo: el puente anterior leía los nombres de la
+  // API CLÁSICA (`scheduled_order` + `estimated_ready_for_pickup_at`), que en el uAPI NO
+  // EXISTEN. El pedido entró con `scheduledFor: null` y su comanda salió a la cocina el
+  // MISMO DÍA — comida preparada con un día de anticipación, y el cliente esperándola al
+  // otro. Ningún test lo vio porque nunca habíamos tenido un pedido programado real.
+  const PROG = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-programado-uapi.json')
+  const programado = () => JSON.parse(fs.readFileSync(PROG, 'utf8'))
+
+  it('lee la hora del INICIO de la ventana de entrega', () => {
+    const r = mapUberOrder(programado())
+    expect(r.scheduledFor).toBeInstanceOf(Date)
+    // La ventana real del pedido: 2026-08-31 00:00 a 00:30, hora de México (-06:00).
+    expect(r.scheduledFor!.toISOString()).toBe('2026-08-31T06:00:00.000Z')
+  })
+
+  it('🔴 un pedido NORMAL no se vuelve programado — si no, la cocina no lo vería', () => {
+    const p = programado()
+    p.order.status = 'ACTIVE'
+    expect(mapUberOrder(p).scheduledFor).toBeNull()
+  })
+
+  it('🔴 exige `status: SCHEDULED`, no basta con que traiga una ventana de entrega', () => {
+    // Sin esta condición, cualquier estimación de entrega convertiría un pedido que el
+    // cliente espera YA en uno agendado, y la comanda no saldría hasta esa hora.
+    const p = programado()
+    delete p.order.status
+    expect(mapUberOrder(p).scheduledFor).toBeNull()
+  })
+
+  it.each(['mañana como a las 8', '', 'ayer', '31/08/2026', 12345])(
+    '🔴 una ventana ilegible (%s) NO se convierte en una fecha inventada',
+    valor => {
+      // Lo destapó esta misma prueba: `new Date('mañana como a las 8')` NO da Invalid Date,
+      // da 2001-08-01 — el parser de JS arma una fecha con lo que encuentra. Una fecha
+      // VÁLIDA y equivocada es peor que un error: el pedido se liberaría a una hora
+      // inventada, en el pasado, o sea directo a la cocina.
+      const p = programado()
+      p.order.scheduled_order_target_delivery_time_range.start_time = valor
+      expect(mapUberOrder(p).scheduledFor).toBeNull()
+    },
+  )
+
+  it('el dinero del pedido programado se traduce igual que cualquier otro', () => {
+    const r = mapUberOrder(programado())
+    const suma = r.items.reduce((a, i) => a + Number(i.total), 0)
+    expect(suma.toFixed(2)).toBe(Number(r.payment.saleAmount).toFixed(2))
+  })
+})
+
+describe('🔴 BYOC — reparte el NEGOCIO, no Uber', () => {
+  // Pedido real de la tienda de pruebas 2 (a4623ab7-…, 30-ago). Uber lo llama
+  // `DELIVERY_BY_MERCHANT`; en su app se lee "Entregado por el personal del negocio".
+  //
+  // Se rechazaba a propósito por no haber visto uno: podía traer efectivo contra entrega, y
+  // adivinar cómo se reparte ese efectivo sub-reportaría la venta. Ya medido:
+  //   · envío $0.00 — lo pone el negocio
+  //   · la PROPINA llega y es del NEGOCIO ($15.23) — en DELIVERY_BY_UBER ni aparece,
+  //     porque allá es del repartidor de Uber
+  //   · NO hay efectivo: pagó con tarjeta en la app; el único "due" del mensaje es
+  //     `marketplace_fee_due_to_uber`, que es lo que le debemos a Uber
+  //   · order_total 160.23 = artículos 145.00 + propina 15.23, al centavo
+  const BYOC = path.join(__dirname, '../../../fixtures/delivery/uber/pedido-byoc-uapi.json')
+  const byoc = () => JSON.parse(fs.readFileSync(BYOC, 'utf8'))
+
+  it('ya NO se rechaza: se ingiere como cualquier otra venta', () => {
+    expect(() => mapUberOrder(byoc())).not.toThrow()
+    expect(mapUberOrder(byoc()).payment.saleAmount).toBe('145.00')
+  })
+
+  it('🔴 la PROPINA es del negocio y se registra — aquí sí llega', () => {
+    const r = mapUberOrder(byoc())
+    expect(r.payment.tipAmount).toBe('15.23')
+    expect(r.payment.externallyPaidTip).toBe('15.23')
+  })
+
+  it('🔴 NO hay efectivo pendiente: el cliente pagó en la app', () => {
+    const r = mapUberOrder(byoc())
+    expect(r.payment.cashDueSale).toBe('0.00')
+    expect(r.payment.cashDueTip).toBe('0.00')
+  })
+
+  it('el dinero cuadra al centavo contra order_total', () => {
+    const r = mapUberOrder(byoc())
+    const liquidado = Number(r.payment.externallyPaidSale) + Number(r.payment.externallyPaidTip)
+    expect(liquidado.toFixed(2)).toBe('160.23')
+  })
+
+  it('🔴 si Uber cobró MENOS que artículos + propina, RECHAZA — esa diferencia sería EFECTIVO', () => {
+    // El caso que la guarda protege, y es el escenario real del efectivo contra entrega: si
+    // parte se paga en la puerta, `order_total` (lo que Uber cobra en la app) queda POR
+    // DEBAJO de artículos + propina, y la diferencia es dinero que trae el repartidor en la
+    // mano. Sin la guarda se registraría como liquidado por la plataforma y el arqueo del
+    // negocio saldría corto, sin que nada fallara.
+    const p = byoc()
+    p.order.payment.payment_detail.order_total.gross.amount_e5 -= 5_000_000 // $50 quedarían en efectivo
+    expect(() => mapUberOrder(p)).toThrow(/el dinero no cuadra/)
+  })
+
+  it('…y un excedente legítimo NO se rechaza: es un cargo del comercio, que ya sabemos leer', () => {
+    const p = byoc()
+    p.order.payment.payment_detail.order_total.gross.amount_e5 += 5_000_000
+    expect(mapUberOrder(p).payment.merchantFees).toBe('50.00')
   })
 })

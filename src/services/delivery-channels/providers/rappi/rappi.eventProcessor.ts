@@ -224,7 +224,19 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   if (evento.channelLink.orderAcceptanceMode === 'AUTO') {
     const detail = (evento.payload as RappiOrderPayload).order_detail ?? {}
     const storeId = identidad.storeId ?? evento.channelLink.externalLocationId
-    const r = await aceptar(normalizado.externalId, storeId, tiempoDeCoccion(detail))
+    let r
+    try {
+      r = await aceptar(normalizado.externalId, storeId, tiempoDeCoccion(detail))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT: ${msg.slice(0, 400)}`)
+      logger.error('🚨 [Rappi] aceptar el pedido lanzó — queda FAILED para reconciliar', {
+        eventRowId,
+        orderId: normalizado.externalId,
+        error: msg,
+      })
+      return { outcome: 'FAILED', accepted: false, error: msg }
+    }
     if (!r.ok) {
       await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT_${r.status}: ${r.raw.slice(0, 300)}`)
       logger.error('🚨 [Rappi] no se pudo ACEPTAR el pedido — el reloj lo va a cancelar', {

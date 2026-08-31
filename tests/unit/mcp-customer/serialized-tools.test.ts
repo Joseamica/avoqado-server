@@ -4,6 +4,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 const mockIsEnabled = jest.fn()
 const mockGetOrgStock = jest.fn()
 const mockListOrgItems = jest.fn()
+const mockGetInventoryByResponsible = jest.fn()
 
 jest.mock('@/services/modules/module.service', () => ({
   moduleService: { isModuleEnabled: (...a: unknown[]) => mockIsEnabled(...(a as [])) },
@@ -15,11 +16,15 @@ jest.mock('@/services/serialized-inventory/serializedInventory.service', () => (
     listOrgItems: (...a: unknown[]) => mockListOrgItems(...(a as [])),
   },
 }))
+jest.mock('@/services/organization-dashboard/orgInventoryByResponsible.service', () => ({
+  orgInventoryByResponsibleService: { getInventoryByResponsible: (...a: unknown[]) => mockGetInventoryByResponsible(...(a as [])) },
+}))
 jest.mock('@/services/serialized-inventory/custody.service', () => ({ simCustodyService: {} }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { itemCategory: { findMany: jest.fn() } } }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: () => ({ venueId: { in: ['v1'] } }), requirePermission: jest.fn() }),
+  ScopeError: class extends Error {},
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
@@ -27,7 +32,7 @@ const scope = {
   staffId: 's1',
   activeOrg: 'o1',
   allowedVenueIds: ['v1'],
-  perVenueAccess: new Map([['v1', { organizationId: 'o1' }]]),
+  perVenueAccess: new Map([['v1', { organizationId: 'o1', role: 'WAITER' }]]),
 } as unknown as McpScope
 const call = (n: string, a: Record<string, unknown>) => handlers.get(n)!(a, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
@@ -65,5 +70,15 @@ describe('list_serialized_items', () => {
     const out = parse(await call('list_serialized_items', { venueId: 'v1', status: 'AVAILABLE' }))
     expect(out.total).toBe(1)
     expect(mockListOrgItems).toHaveBeenCalledWith(expect.objectContaining({ orgId: 'o1', allowedVenueIds: ['v1'], status: 'AVAILABLE' }))
+  })
+})
+
+describe('inventory_by_responsible', () => {
+  it('rechaza a un WAITER aunque el módulo esté activo en su venue', async () => {
+    mockIsEnabled.mockResolvedValue(true)
+    mockGetInventoryByResponsible.mockResolvedValue({ total: 0, cities: [], unassigned: [] })
+
+    await expect(call('inventory_by_responsible', {})).rejects.toThrow(/access|acceso|permission/i)
+    expect(mockGetInventoryByResponsible).not.toHaveBeenCalled()
   })
 })

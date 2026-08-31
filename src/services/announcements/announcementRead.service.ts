@@ -61,44 +61,80 @@ export async function recordCta(announcementId: string, staffId: string, venueId
 }
 
 /**
- * El banner del Home.
+ * Cierra la ventana que interrumpe. A partir de aquí el anuncio vive sólo en la campana.
  *
- * 🔴 Devuelve UNO solo: gana la prioridad más alta y, a igualdad, el publicado más
- * reciente. Apilar banners convierte el Home en un tablero de avisos y deja de leerse
- * ninguno. Los demás siguen visibles en la campana.
+ * Es una marca PROPIA a propósito: `Notification.isRead` no sirve para esto porque la
+ * campana lo enciende sola al abrirse.
  */
-/**
- * El banner del Home.
- *
- * 🔴 Se consulta AL REVÉS de como estaba: primero los banners activos (son pocos por
- * naturaleza y hay índice `[status, showAsBanner]`), y después si a esta persona le
- * tocaron. La versión anterior tomaba los 50 avisos más recientes de la persona y LUEGO
- * filtraba por banner: cincuenta avisos normales nuevos escondían indefinidamente un
- * banner vigente (hallazgo P1 de la segunda auditoría).
- *
- * Devuelve UNO solo: gana la prioridad más alta y, a igualdad, el publicado más reciente.
- * Apilar banners convierte el Home en un tablero de avisos y deja de leerse ninguno.
- */
-export async function getActiveBanner(staffId: string) {
+export async function recordDismiss(announcementId: string, staffId: string, venueId?: string) {
+  if (!(await puedeLeer(announcementId, staffId))) {
+    throw new ForbiddenError('Este anuncio no está disponible')
+  }
   const ahora = new Date()
-  const banners = await prisma.platformAnnouncement.findMany({
+  await prisma.platformAnnouncementClick.upsert({
+    where: { announcementId_staffId: { announcementId, staffId } },
+    create: { announcementId, staffId, venueId, dismissedAt: ahora },
+    update: { dismissedAt: ahora },
+  })
+}
+
+/**
+ * Lo que el inicio del dashboard necesita de una sola llamada: el banner y la ventana.
+ *
+ * Son dos cosas distintas del MISMO anuncio o de anuncios distintos:
+ *  - `banner`: la tira en el Home. Discreto, convive con el trabajo.
+ *  - `modal`: la ventana que interrumpe. 🔴 Sólo mientras su aviso siga SIN LEER — al
+ *    cerrarla se marca leído, así que interrumpe una vez y después vive en la campana.
+ *    Es exactamente lo que pidió el founder, y lo que evita que la gente aprenda a
+ *    cerrar ventanas sin leerlas.
+ *
+ * Los dos pasan por el acuse de recibo: sin él no se enseña nada.
+ */
+export async function getActiveForHome(staffId: string) {
+  const ahora = new Date()
+  const activos = await prisma.platformAnnouncement.findMany({
     where: {
       status: PlatformAnnouncementStatus.PUBLISHED,
-      showAsBanner: true,
       OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
+      AND: [{ OR: [{ showAsBanner: true }, { showAsModal: true }] }],
     },
     orderBy: [{ priority: 'desc' }, { publishedAt: 'desc' }],
     take: 20,
   })
-  if (banners.length === 0) return null
+  if (activos.length === 0) return { banner: null, modal: null }
 
   const acuses = await prisma.platformAnnouncementDelivery.findMany({
-    where: { staffId, announcementId: { in: banners.map(b => b.id) } },
+    where: { staffId, announcementId: { in: activos.map(a => a.id) } },
     select: { announcementId: true },
   })
+  if (acuses.length === 0) return { banner: null, modal: null }
   const recibidos = new Set(acuses.map(a => a.announcementId))
 
-  return banners.find(b => recibidos.has(b.id)) ?? null
+  const mios = activos.filter(a => recibidos.has(a.id))
+  if (mios.length === 0) return { banner: null, modal: null }
+
+  // 🔴 Lo que apaga la ventana es haberla CERRADO, no que el aviso esté leído.
+  //
+  // La versión anterior usaba `Notification.isRead` y estaba mal: la campana del
+  // dashboard marca TODO como leído nada más ABRIRLA ("Mark all as read when opening the
+  // dropdown"), así que asomarse al buzón apagaba una ventana que la persona nunca vio.
+  // Lo encontró el founder probándolo el 2026-08-27.
+  const cerrados = await prisma.platformAnnouncementClick.findMany({
+    where: {
+      staffId,
+      announcementId: { in: mios.map(a => a.id) },
+      dismissedAt: { not: null },
+    },
+    select: { announcementId: true },
+  })
+  const yaCerrado = new Set(cerrados.map(c => c.announcementId))
+
+  return {
+    // 🔴 LOS DOS respetan el cierre. La primera versión sólo filtraba la ventana, así que
+    // cerrabas el banner con la X, recargabas y volvía a salir.
+    banner: mios.find(a => a.showAsBanner && !yaCerrado.has(a.id)) ?? null,
+    modal: mios.find(a => a.showAsModal && !yaCerrado.has(a.id)) ?? null,
+  }
 }
 
 /**
@@ -161,15 +197,42 @@ export async function listAnnouncementsForStaff(staffId: string, opts: { limit: 
  * no significa que alguien haya abierto el anuncio.
  */
 export async function getAnnouncementMetrics(announcementId: string) {
-  const [reached, read, opened, cta] = await Promise.all([
-    // El alcance sale de los ACUSES, que sólo escribe el publisher: una Notification
-    // fabricada por un usuario ya no puede inflar el número que ve el superadmin.
-    prisma.platformAnnouncementDelivery.count({ where: { announcementId } }),
-    prisma.notification.count({
-      where: { entityType: ENTITY, entityId: announcementId, type: NotificationType.ANNOUNCEMENT, isRead: true },
+  const [entregas, enviadas, avisos, aperturas, ctas] = await Promise.all([
+    // 🔴 Se cuentan NEGOCIOS y PERSONAS distintos, no entregas: alguien dueño de 12
+    // sucursales genera 12 entregas él solo, y ese número exagera el alcance real. Mismo
+    // criterio que la lista y que el conteo en vivo del compositor.
+    prisma.platformAnnouncementDelivery.groupBy({
+      by: ['staffId', 'venueId'],
+      where: { announcementId },
+    }),
+    prisma.platformAnnouncementDelivery.groupBy({
+      by: ['staffId'],
+      where: { announcementId, status: 'SENT' },
+    }),
+    prisma.platformAnnouncementDelivery.findMany({
+      where: { announcementId, notificationId: { not: null } },
+      select: { notificationId: true },
     }),
     prisma.platformAnnouncementClick.count({ where: { announcementId } }),
     prisma.platformAnnouncementClick.count({ where: { announcementId, ctaAt: { not: null } } }),
   ])
-  return { reached, read, opened, cta }
+
+  const leidos = await prisma.notification.count({
+    where: {
+      entityType: ENTITY,
+      entityId: announcementId,
+      type: NotificationType.ANNOUNCEMENT,
+      isRead: true,
+      id: { in: avisos.map(a => a.notificationId as string) },
+    },
+  })
+
+  return {
+    reachedVenues: new Set(entregas.map(e => e.venueId)).size,
+    reachedPeople: new Set(entregas.map(e => e.staffId)).size,
+    delivered: enviadas.length,
+    read: leidos,
+    opened: aperturas,
+    cta: ctas,
+  }
 }

@@ -10,6 +10,7 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { Decimal } from '@prisma/client/runtime/library'
+import { Prisma } from '@prisma/client'
 
 /**
  * Largo máximo de la llave de idempotencia que un cliente puede mandar.
@@ -56,7 +57,7 @@ function normalizeLocalId(raw: unknown, campo = 'localId'): string | null {
 /**
  * Get the current open cash drawer session for a venue, including all events.
  */
-export async function getCurrentSession(venueId: string) {
+export async function getCurrentSession(venueId: string, incluirEsperado = false) {
   const session = await prisma.cashDrawerSession.findFirst({
     where: { venueId, status: 'OPEN' },
     include: {
@@ -70,7 +71,7 @@ export async function getCurrentSession(venueId: string) {
     return null
   }
 
-  return formatSession(session)
+  return formatSession(session, incluirEsperado)
 }
 
 // ============================================================================
@@ -88,8 +89,33 @@ interface OpenSessionParams {
 /**
  * Open a new cash drawer session. Only one session can be open per venue at a time.
  */
-export async function openSession(params: OpenSessionParams) {
-  const { venueId, staffId, staffName, startingAmount, deviceName } = params
+/**
+ * Las apps mandan `staffName` opcional y el controlador rellenaba 'Staff' cuando faltaba — así el
+ * dashboard («Caja física») decía "Abierta por Staff" (visto en /full-testing 27-ago). Si viene un
+ * nombre real se respeta; si no, se resuelve del `Staff` y sólo en último caso queda 'Staff'.
+ */
+async function resolveMobileStaffName(staffId: string | null | undefined, provided?: string | null): Promise<string> {
+  const given = (provided || '').trim()
+  if (given && given !== 'Staff') return given
+  if (!staffId) return given || 'Staff'
+  try {
+    const staff = await prisma.staff.findUnique({ where: { id: staffId }, select: { firstName: true, lastName: true } })
+    const name = [staff?.firstName, staff?.lastName].filter(Boolean).join(' ').trim()
+    return name || given || 'Staff'
+  } catch {
+    return given || 'Staff'
+  }
+}
+
+/**
+ * @param incluirEsperado ¿el llamante tiene `cash-drawer:view-expected`? Al abrir, el esperado
+ * ES el fondo que la persona acaba de teclear, así que ocultarlo no protege nada — pero sin el
+ * flag el mismo usuario lo veía en `current` y no aquí, y un contrato que responde distinto
+ * según el endpoint es el tipo de incoherencia que después nadie sabe explicar.
+ */
+export async function openSession(params: OpenSessionParams, incluirEsperado = false) {
+  const { venueId, staffId, startingAmount, deviceName } = params
+  const staffName = await resolveMobileStaffName(staffId, params.staffName)
 
   if (startingAmount < 0) {
     throw new BadRequestError('El monto inicial no puede ser negativo')
@@ -106,31 +132,43 @@ export async function openSession(params: OpenSessionParams) {
 
   const amountDecimal = dollarsToDecimal(startingAmount)
 
-  const session = await prisma.cashDrawerSession.create({
-    data: {
-      venueId,
-      openedByStaffId: staffId,
-      openedByName: staffName,
-      startingAmount: amountDecimal,
-      deviceName: deviceName || null,
-      status: 'OPEN',
-      events: {
-        create: {
-          venueId,
-          type: 'OPEN',
-          amount: amountDecimal,
-          staffId,
-          staffName,
-          note: `Caja abierta con $${amountDecimal}`,
+  // Fase 4: el check de arriba es la respuesta amable del caso normal, pero NO evita la
+  // carrera (dos requests pasan el findFirst antes de que ninguno cree). Lo que la evita es el
+  // índice único parcial `CashDrawerSession(venueId) WHERE status='OPEN'` (migración
+  // 20260827_cash_drawer_one_open_per_venue). Aquí sólo se traduce ese choque al MISMO
+  // ConflictError que las apps ya conocen, en vez de dejar escapar un P2002 como 500.
+  const session = await prisma.cashDrawerSession
+    .create({
+      data: {
+        venueId,
+        openedByStaffId: staffId,
+        openedByName: staffName,
+        startingAmount: amountDecimal,
+        deviceName: deviceName || null,
+        status: 'OPEN',
+        events: {
+          create: {
+            venueId,
+            type: 'OPEN',
+            amount: amountDecimal,
+            staffId,
+            staffName,
+            note: `Caja abierta con $${amountDecimal}`,
+          },
         },
       },
-    },
-    include: {
-      events: {
-        orderBy: { createdAt: 'desc' },
+      include: {
+        events: {
+          orderBy: { createdAt: 'desc' },
+        },
       },
-    },
-  })
+    })
+    .catch((error: unknown) => {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictError('Ya existe una caja abierta. Cierra la caja actual antes de abrir una nueva.')
+      }
+      throw error
+    })
 
   logAction({
     staffId,
@@ -141,7 +179,7 @@ export async function openSession(params: OpenSessionParams) {
     data: { startingAmount: Number(amountDecimal), deviceName, source: 'MOBILE' },
   })
 
-  return formatSession(session)
+  return formatSession(session, incluirEsperado)
 }
 
 // ============================================================================
@@ -154,6 +192,12 @@ interface PayInOutParams {
   staffName: string
   amount: number // dollars (e.g. 20.00 = $20.00)
   note?: string
+  /**
+   * Caja a la que pertenece el movimiento (cola offline, Codex 3ª auditoría). Sin él se usa la abierta.
+   * Si ESA caja ya cerró, el movimiento se acepta igual sobre ella —el dinero sí salió del cajón— con
+   * recálculo del overShort y bitácora `CASH_DRAWER_ADJUSTED_AFTER_CLOSE`; nunca se carga a otra caja.
+   */
+  sessionId?: string | null
   /**
    * 🔴 LLAVE DE IDEMPOTENCIA DEL POS. OPCIONAL y ADITIVA (contrato /mobile: una app ya
    * distribuida que no la mande se comporta EXACTAMENTE como hoy).
@@ -197,7 +241,8 @@ export interface DrawerEventResult {
  * Si pudiera, la idempotencia se convertiría en una puerta para mover dinero sin dejar rastro.
  */
 async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayInOutParams): Promise<DrawerEventResult> {
-  const { venueId, staffId, staffName, amount, note } = params
+  const { venueId, staffId, amount, note } = params
+  const staffName = await resolveMobileStaffName(staffId, params.staffName)
 
   if (amount <= 0) {
     throw new BadRequestError('El monto debe ser mayor a 0')
@@ -205,8 +250,10 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
 
   // Se valida ANTES de tocar la base: una llave basura no puede llegar al índice único.
   const localId = normalizeLocalId(params.localId)
-
-  const session = await getOpenSession(venueId)
+  const session = params.sessionId
+    ? await prisma.cashDrawerSession.findFirst({ where: { id: params.sessionId, venueId }, select: { id: true, status: true } })
+    : await getOpenSession(venueId)
+  if (!session) throw new NotFoundError('Esa caja no existe en este negocio')
   const amountDecimal = dollarsToDecimal(amount)
 
   const row = {
@@ -221,6 +268,7 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   }
 
   const action = type === 'PAY_IN' ? 'CASH_DRAWER_PAY_IN' : 'CASH_DRAWER_PAY_OUT'
+
   const auditar = (entityId: string) =>
     logAction({
       staffId,
@@ -234,13 +282,73 @@ async function recordManualDrawerEvent(type: 'PAY_IN' | 'PAY_OUT', params: PayIn
   // Sin llave: EXACTAMENTE el `create` de siempre. Las apps ya distribuidas no cambian de
   // camino ni de comportamiento — simplemente no ganan la protección (Postgres permite
   // varios NULL en un índice único, así que aquí no hay nada que deduplicar).
+
+  // 🔴 Caja YA CERRADA (llega tarde desde la cola de un aparato): el dinero sí salió/entró del cajón,
+  // así que el movimiento se acepta SOBRE ESA caja, bajo candado, con recálculo del overShort firmado y
+  // bitácora con los valores anterior/nuevo. Cargarlo a la caja abierta de hoy sería atribuirlo mal;
+  // rechazarlo, perderlo.
+  if ((session as { status?: string }).status === 'CLOSED') {
+    const result = await prisma.$transaction(async tx => {
+      await tx.cashDrawerSession.updateMany({ where: { id: session.id }, data: { updatedAt: new Date() } })
+      const inserted = localId
+        ? await tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+        : { count: (await tx.cashDrawerEvent.create({ data: row })) ? 1 : 0 }
+      const stored = localId
+        ? await tx.cashDrawerEvent.findFirst({ where: { venueId, localId } })
+        : await tx.cashDrawerEvent.findFirst({ where: { sessionId: session.id, type }, orderBy: { createdAt: 'desc' } })
+      if (!stored) throw new InternalServerError('No se pudo confirmar el movimiento de caja')
+      if (inserted.count > 0) {
+        const full = await tx.cashDrawerSession.findUnique({
+          where: { id: session.id },
+          select: { actualAmount: true, overShort: true, startingAmount: true, events: { select: { type: true, amount: true } } },
+        })
+        if (full && full.actualAmount !== null) {
+          const expected = calculateExpectedAmount({ startingAmount: full.startingAmount, events: full.events })
+          const overShort = Number(full.actualAmount) - expected
+          await tx.cashDrawerSession.update({ where: { id: session.id }, data: { overShort: new Decimal(overShort.toFixed(2)) } })
+          logAction({
+            staffId,
+            venueId,
+            action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
+            entity: 'CashDrawerSession',
+            entityId: session.id,
+            data: {
+              cause: type,
+              eventId: stored.id,
+              amount: Number(amountDecimal),
+              overShortBefore: full.overShort != null ? Number(full.overShort) : null,
+              overShortAfter: overShort,
+              expectedAfter: expected,
+              source: 'MOBILE_OFFLINE_REPLAY',
+            },
+          })
+        }
+      }
+      return { stored, created: inserted.count > 0 }
+    })
+    if (result.created) auditar(result.stored.id)
+    return { event: formatEvent(result.stored), created: result.created }
+  }
+  // 🔴 P1 (Codex, 2ª auditoría): el movimiento MANUAL se colaba en una caja que el cierre acababa de
+  // firmar. Mismo candado que la venta: dentro de la transacción se TOCA la fila con status='OPEN'
+  // (UPDATE = candado de fila); si el cierre ya la marcó CLOSED, al re-evaluar no hay fila y el
+  // movimiento se rechaza con el mismo "no hay caja abierta" que las apps ya conocen.
+  const lockOrThrow = async (tx: Prisma.TransactionClient) => {
+    const lock = await tx.cashDrawerSession.updateMany({ where: { id: session.id, status: 'OPEN' }, data: { updatedAt: new Date() } })
+    if (!lock || lock.count === 0) throw new NotFoundError('No hay una caja abierta')
+  }
   if (!localId) {
-    const event = await prisma.cashDrawerEvent.create({ data: row })
+    const event = await prisma.$transaction(async tx => {
+      await lockOrThrow(tx)
+      return tx.cashDrawerEvent.create({ data: row })
+    })
     auditar(event.id)
     return { event: formatEvent(event), created: true }
   }
-
-  const result = await prisma.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+  const result = await prisma.$transaction(async tx => {
+    await lockOrThrow(tx)
+    return tx.cashDrawerEvent.createMany({ data: [row], skipDuplicates: true })
+  })
   const stored = await prisma.cashDrawerEvent.findFirst({ where: { venueId, localId } })
 
   if (!stored) {
@@ -294,6 +402,8 @@ export async function payOut(params: PayInOutParams): Promise<DrawerEventResult>
 // ============================================================================
 
 interface CloseSessionParams {
+  /** Id de la caja que el aparato cerró (cola offline). Si ya no es la abierta, 404 en vez de cerrar otra. */
+  sessionId?: string | null
   venueId: string
   staffId: string
   staffName: string
@@ -306,7 +416,8 @@ interface CloseSessionParams {
  * Calculates expected amount from events and determines over/short.
  */
 export async function closeSession(params: CloseSessionParams) {
-  const { venueId, staffId, staffName, actualAmount, note } = params
+  const { venueId, staffId, actualAmount, note } = params
+  const staffName = await resolveMobileStaffName(staffId, params.staffName)
 
   if (actualAmount < 0) {
     throw new BadRequestError('El monto no puede ser negativo')
@@ -314,46 +425,66 @@ export async function closeSession(params: CloseSessionParams) {
 
   const session = await prisma.cashDrawerSession.findFirst({
     where: { venueId, status: 'OPEN' },
-    include: {
-      events: true,
-    },
+    // 🔴 `startingAmount` viene de SU COLUMNA. Derivarlo del primer evento `OPEN` hacía que
+    // el fondo de caja dependiera de una fila que el propio cliente podía insertar por
+    // `/sync`, y que además ordenaba por una fecha suya: un `OPEN` de $0 antedatado borraba
+    // el fondo real del esperado y le inventaba al cajero un sobrante del tamaño del fondo.
+    // Es la misma columna que leen el dashboard, el turno de la PAX y `cashDrawerPosting`,
+    // así que los cuatro dicen por fin el mismo número.
+    select: { id: true, startingAmount: true },
   })
-
   if (!session) {
     throw new NotFoundError('No hay una caja abierta')
   }
-
-  // Calculate expected amount from events
-  const expectedAmount = calculateExpectedAmount(session)
+  // 🔴 P1 (Codex, 2ª auditoría): un cierre ENCOLADO en el aparato (sin red) llega tarde. Si trae el
+  // id de SU caja y la caja abierta ahora es OTRA, no se cierra la ajena con el conteo de la vieja:
+  // se contesta el mismo 404, que el aparato entiende como "esa ya no está abierta".
+  if (params.sessionId && params.sessionId !== session.id) {
+    throw new NotFoundError('No hay una caja abierta')
+  }
   const actualDecimal = dollarsToDecimal(actualAmount)
-  const overShort = Number(actualDecimal) - expectedAmount
 
-  const closedSession = await prisma.cashDrawerSession.update({
-    where: { id: session.id },
-    data: {
-      status: 'CLOSED',
-      closedByStaffId: staffId,
-      closedByName: staffName,
-      closedAt: new Date(),
-      actualAmount: actualDecimal,
-      overShort: new Decimal(overShort.toFixed(2)),
-      closingNote: note || null,
-      events: {
-        create: {
-          venueId,
-          type: 'CLOSE',
-          amount: actualDecimal,
-          staffId,
-          staffName,
-          note: note || null,
-        },
+  // Fase 4: el cierre es UNA transacción con CAS. Antes era leer → calcular → actualizar en
+  // tres pasos sueltos: una venta que entrara entre "leer" y "escribir" dejaba el `overShort`
+  // obsoleto, y dos cierres simultáneos se pisaban y creaban dos eventos CLOSE. Ahora:
+  //   · los eventos se leen DENTRO de la tx (lo que ella ve es lo que se firma);
+  //   · el `updateMany where status='OPEN'` es el candado: quien pierde la carrera no
+  //     actualiza nada y recibe el mismo "no hay caja abierta" que ya conocen las apps;
+  //   · el CLOSE se crea sólo si el CAS ganó.
+  const { closedSession, expectedAmount, overShort } = await prisma.$transaction(async tx => {
+    // 🔴 P1 (Codex 27-ago): el CAS va PRIMERO. El UPDATE toma el candado de la fila; un cobro que
+    // quiera sumar al cajón (createEventUnderSessionLock, con `status='OPEN'`) se queda esperando
+    // y al re-evaluar ya no encuentra la caja abierta. Sólo entonces se leen los eventos: lo que
+    // se lee bajo el candado es exactamente lo que se firma.
+    const closedAt = new Date()
+    const won = await tx.cashDrawerSession.updateMany({
+      where: { id: session.id, venueId, status: 'OPEN' },
+      data: {
+        status: 'CLOSED',
+        closedByStaffId: staffId,
+        closedByName: staffName,
+        closedAt,
+        actualAmount: actualDecimal,
+        closingNote: note || null,
       },
-    },
-    include: {
-      events: {
-        orderBy: { createdAt: 'desc' },
-      },
-    },
+    })
+    if (won.count !== 1) {
+      throw new NotFoundError('No hay una caja abierta')
+    }
+    const events = await tx.cashDrawerEvent.findMany({ where: { sessionId: session.id }, orderBy: { createdAt: 'asc' } })
+    const startingAmount = session.startingAmount
+    const expected = calculateExpectedAmount({ startingAmount, events })
+    const diff = Number(actualDecimal) - expected
+    await tx.cashDrawerSession.update({ where: { id: session.id }, data: { overShort: new Decimal(diff.toFixed(2)) } })
+    await tx.cashDrawerEvent.create({
+      data: { sessionId: session.id, venueId, type: 'CLOSE', amount: actualDecimal, staffId, staffName, note: note || null },
+    })
+    const closed = await tx.cashDrawerSession.findUnique({
+      where: { id: session.id },
+      include: { events: { orderBy: { createdAt: 'desc' } } },
+    })
+    if (!closed) throw new NotFoundError('No hay una caja abierta')
+    return { closedSession: closed, expectedAmount: expected, overShort: diff }
   })
 
   logAction({
@@ -401,7 +532,7 @@ export async function getHistory(venueId: string, page: number = 1, pageSize: nu
   ])
 
   return {
-    sessions: sessions.map(formatSession),
+    sessions: sessions.map(s => formatSession(s)),
     pagination: {
       page,
       pageSize,
@@ -494,7 +625,13 @@ interface SyncEvent {
  * Bulk sync events from mobile (for offline-first support).
  * Creates multiple events in a single transaction.
  */
-export async function syncEvents(venueId: string, events: SyncEvent[]) {
+/**
+ * `appVersion` (header `x-app-version`) sólo alimenta la MÉTRICA de compatibilidad: cuántos
+ * `CASH_SALE` empujan todavía las apps viejas y desde qué versión. Es lo que permite retirar el
+ * descarte de abajo por DATO (N días con `droppedCashSales = 0`) y no por "ya están todos
+ * actualizados" — decisión del founder (27-ago): nada de gates manuales, nada de código muerto.
+ */
+export async function syncEvents(venueId: string, events: SyncEvent[], appVersion?: string | null, actorStaffId?: string | null) {
   const session = await getOpenSession(venueId)
 
   if (!events || events.length === 0) {
@@ -525,8 +662,24 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
   // escribe en la columna indexada. Validar sólo `pay-in`/`pay-out` dejaría el hueco
   // abierto por donde entra el lote. Se valida lo que de verdad vamos a insertar (los
   // `CASH_SALE` se descartan más abajo, así que su llave nunca toca el índice).
+  // 🔴 LISTA BLANCA de tipos, no lista negra. Un POS sin internet sólo puede haber hecho
+  // ingresos y retiros: abrir y cerrar la caja son operaciones del servidor, con su propia
+  // ruta y su propio candado. Descartar sólo `CASH_SALE` dejaba pasar `OPEN` y `CLOSE`, que
+  // son valores válidos del enum de Prisma — y un `OPEN` inyectado se convertía en el fondo
+  // de caja del cierre, así que uno de $0 antedatado borraba el fondo real del arqueo firmado.
+  const TIPOS_DEL_CLIENTE = new Set(['PAY_IN', 'PAY_OUT'])
+  const droppedInvalidTypes = events.filter(e => e.type !== 'CASH_SALE' && !TIPOS_DEL_CLIENTE.has(e.type)).length
+  if (droppedInvalidTypes > 0) {
+    logger.warn('💵 [CASH-DRAWER] /sync descartó eventos de un tipo que el cliente no puede empujar', {
+      venueId,
+      sessionId: session.id,
+      droppedInvalidTypes,
+      tipos: [...new Set(events.filter(e => !TIPOS_DEL_CLIENTE.has(e.type) && e.type !== 'CASH_SALE').map(e => e.type))],
+    })
+  }
+
   const acceptedEvents = events
-    .filter(event => event.type !== 'CASH_SALE')
+    .filter(event => TIPOS_DEL_CLIENTE.has(event.type))
     .map(event => ({ ...event, localId: normalizeLocalId(event.localId, 'events[].localId') }))
 
   if (droppedCashSales > 0) {
@@ -543,18 +696,48 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
     return { syncedCount: 0, events: [] }
   }
 
-  const toRow = (event: SyncEvent) => ({
+  // 🔴 La FECHA la acota el servidor. El cliente la manda porque el movimiento ocurrió sin
+  // red y su hora real importa, pero no puede caer FUERA de la vida de la caja: una fecha
+  // anterior a la apertura le ganaba el `orderBy createdAt asc` a los eventos legítimos, y
+  // una futura desordena el corte. Se recorta al rango [apertura, ahora] en vez de
+  // rechazarse, para no perder un movimiento real por un reloj mal puesto en el aparato.
+  const ahora = new Date()
+  const aperturaMs = new Date(session.openedAt).getTime()
+  const acotarFecha = (valor?: string | Date | null): Date => {
+    if (!valor) return ahora
+    const t = new Date(valor).getTime()
+    if (Number.isNaN(t)) return ahora
+    return new Date(Math.min(Math.max(t, aperturaMs), ahora.getTime()))
+  }
+
+  const toRow = (event: SyncEvent, autor: { staffId: string; staffName: string }) => ({
     sessionId: session.id,
     venueId,
     type: event.type,
     amount: dollarsToDecimal(event.amount),
     note: event.note || null,
-    staffId: event.staffId,
-    staffName: event.staffName,
+    staffId: autor.staffId,
+    staffName: autor.staffName,
     orderId: event.orderId || null,
     localId: event.localId || null,
-    createdAt: event.createdAt ? new Date(event.createdAt) : new Date(),
+    createdAt: acotarFecha(event.createdAt),
   })
+
+  // 🔴 El AUTOR se comprueba contra el venue. El POS es compartido y el movimiento pudo
+  // hacerlo alguien distinto de quien sincroniza, así que el `staffId` del cuerpo se
+  // respeta —pero sólo si esa persona de verdad trabaja aquí—. Un id ajeno o inventado cae
+  // al del token: antes, cualquiera con `payments:create` podía colgarle un retiro a un
+  // compañero, o a alguien de otro negocio.
+  const idsDelCuerpo = [...new Set(acceptedEvents.map(e => e.staffId).filter(Boolean))] as string[]
+  const validos = new Set<string>()
+  for (const id of idsDelCuerpo) {
+    const pertenece = await prisma.staffVenue.findFirst({ where: { staffId: id, venueId }, select: { id: true } })
+    if (pertenece) validos.add(id)
+  }
+  const autorDe = (event: SyncEvent) =>
+    event.staffId && validos.has(event.staffId)
+      ? { staffId: event.staffId, staffName: event.staffName }
+      : { staffId: (actorStaffId ?? event.staffId) as string, staffName: event.staffName }
 
   // 🔴 `createMany` + `skipDuplicates` en vez de un `create` por evento — SOLO
   // para los eventos que traen `localId`.
@@ -583,10 +766,22 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
   // o entra el lote completo, o el reintento parte de cero.
   const { insertedCount, unkeyedRows } = await prisma.$transaction(
     async tx => {
+      // 🔴 CANDADO, dentro de la transacción y ANTES de insertar. `syncEvents` era el único
+      // escritor de `CashDrawerEvent` que no tocaba la fila de la sesión: leía "está abierta"
+      // fuera de la transacción y luego insertaba, así que un lote podía aterrizar en una caja
+      // que otro aparato acababa de cerrar y firmar — y nada recalculaba su diferencia. Mismo
+      // UPDATE condicional que usan la venta (`createEventUnderSessionLock`) y el movimiento
+      // manual (`lockOrThrow`), y el mismo error que las apps ya saben interpretar.
+      const lock = await tx.cashDrawerSession.updateMany({
+        where: { id: session.id, status: 'OPEN' },
+        data: { updatedAt: new Date() },
+      })
+      if (!lock || lock.count === 0) throw new NotFoundError('No hay una caja abierta')
+
       let inserted = 0
       if (keyed.length > 0) {
         const result = await tx.cashDrawerEvent.createMany({
-          data: keyed.map(toRow),
+          data: keyed.map(e => toRow(e, autorDe(e))),
           skipDuplicates: true,
         })
         inserted += result.count
@@ -594,7 +789,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
 
       const createdUnkeyed = [] as Awaited<ReturnType<typeof prisma.cashDrawerEvent.create>>[]
       for (const event of unkeyed) {
-        createdUnkeyed.push(await tx.cashDrawerEvent.create({ data: toRow(event) }))
+        createdUnkeyed.push(await tx.cashDrawerEvent.create({ data: toRow(event, autorDe(event)) }))
       }
       inserted += createdUnkeyed.length
 
@@ -613,7 +808,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
     action: 'CASH_DRAWER_SYNC',
     entity: 'CashDrawerSession',
     entityId: session.id,
-    data: { eventCount: insertedCount, receivedCount: events.length, source: 'MOBILE' },
+    data: { eventCount: insertedCount, receivedCount: events.length, droppedCashSales, appVersion: appVersion ?? null, source: 'MOBILE' },
   })
 
   // `createMany` no devuelve las filas: las del lote con llave se releen por su
@@ -662,7 +857,12 @@ async function getOpenSession(venueId: string) {
  *     no vuelve a entrar por el enganche de ventas.
  *   · `PAY_IN` — entradas a mano; siguen siendo del cliente.
  */
-function calculateExpectedAmount(session: any): number {
+/**
+ * Exportada para que el dashboard (`cashDrawer.dashboard.service`) muestre EXACTAMENTE el
+ * mismo esperado que vio el cajero al cerrar. Dos fórmulas = dos verdades para el mismo
+ * dinero, que es justo lo que la unificación de caja está quitando.
+ */
+export function calculateExpectedAmount(session: any): number {
   let expected = Number(session.startingAmount)
 
   for (const event of session.events) {
@@ -685,8 +885,23 @@ function dollarsToDecimal(dollars: number): Decimal {
   return new Decimal(Number(dollars).toFixed(2))
 }
 
-function formatSession(session: any) {
+/**
+ * @param incluirEsperado ¿el llamante tiene `cash-drawer:view-expected`? Con `false` (el
+ * default) NO se sirve `expectedAmount` mientras la caja está ABIERTA — el conteo ciego
+ * dejaría de serlo si el número viaja en la respuesta que el propio cajero puede pedir.
+ *
+ * 🔴 `startingAmount` y `events` SÍ se siguen mandando siempre: el POS los necesita para
+ * calcular su esperado EN EL APARATO, que es lo que le permite cerrar sin internet. Por eso
+ * aquí el conteo ciego lo aplica el cliente (ya lo hace, tras `cash-drawer:view-expected`) y
+ * el servidor sólo deja de servirlo hecho. Ningún cliente lee este campo hoy —Android e iOS
+ * lo calculan— así que omitirlo no cambia nada en los aparatos ya instalados.
+ *
+ * Una sesión CERRADA lo revela siempre: ese es el resultado que el cajero debe ver al
+ * confirmar su conteo, y por eso el cierre no necesita tratarse aparte.
+ */
+function formatSession(session: any, incluirEsperado = false) {
   const expectedAmount = calculateExpectedAmount(session)
+  const revelar = incluirEsperado || session.status !== 'OPEN'
 
   return {
     id: session.id,
@@ -701,7 +916,7 @@ function formatSession(session: any) {
     closedByName: session.closedByName,
     closedAt: session.closedAt ? session.closedAt.toISOString() : null,
     actualAmount: session.actualAmount ? toDollars(session.actualAmount) : null,
-    expectedAmount: Number(expectedAmount.toFixed(2)),
+    ...(revelar ? { expectedAmount: Number(expectedAmount.toFixed(2)) } : {}),
     overShort: session.overShort ? toDollars(session.overShort) : null,
     closingNote: session.closingNote,
     events: session.events ? session.events.map(formatEvent) : [],

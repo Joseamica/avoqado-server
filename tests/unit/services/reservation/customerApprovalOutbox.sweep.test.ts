@@ -119,6 +119,14 @@ describe('deliverClaimed — entrega, supresión y fallo', () => {
     expect(r.sent).toBe(1)
   })
 
+  it('entrega al cliente la razón persistida en el payload del rechazo', async () => {
+    await deliverClaimed([claimed({ outbox: outboxRow({ event: 'REJECTED_CUSTOMER', payload: { reason: 'No es socia' } }) })] as any, {
+      now: NOW,
+    })
+
+    expect(SEND).toHaveBeenCalledWith('REJECTED_CUSTOMER', 'ana@test.com', expect.objectContaining({ reason: 'No es socia' }))
+  })
+
   it('🔴 el ack es un CAS sobre el lease: si otro worker se quedó la fila, no se pisa su resultado', async () => {
     await deliverClaimed([claimed()] as any, { now: NOW })
 

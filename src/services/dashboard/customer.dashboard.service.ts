@@ -14,6 +14,7 @@ import { CustomerApprovalStatus, PaymentStatus } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
+import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -737,7 +738,7 @@ export async function settleCustomerBalance(
   // Payment ($600) pero se le respondía al cajero "3 order(s) totaling 900" y se
   // escribía un ActivityLog con 900 — la bitácora contando el dinero DOS veces,
   // justo el registro del que dependemos para investigar un incidente.
-  const settled: Array<{ orderId: string; amount: number }> = []
+  const settled: Array<{ orderId: string; amount: number; paymentId?: string }> = []
   await prisma.$transaction(async tx => {
     for (const oc of pendingOrders) {
       const remainingBalance = Number(oc.order.remainingBalance)
@@ -758,13 +759,15 @@ export async function settleCustomerBalance(
       settled.push({ orderId: oc.order.id, amount: remainingBalance })
 
       // Create a payment record to track the settlement
-      await tx.payment.create({
+      const settlementPayment = await tx.payment.create({
         data: {
           venueId,
           orderId: oc.order.id,
           amount: remainingBalance,
           tipAmount: 0,
           method: 'CASH', // Default to cash for manual settlements
+          // 🔴 Decisión del founder (27-ago): este efectivo SÍ entró al cajón (fase 2).
+          fundsFlow: 'CASH_DRAWER',
           status: 'COMPLETED',
           feePercentage: 0,
           feeAmount: 0,
@@ -773,6 +776,8 @@ export async function settleCustomerBalance(
           processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
         },
       })
+
+      settled[settled.length - 1].paymentId = settlementPayment.id
 
       const itemsParaPosting = await tx.orderItem.findMany({
         where: { orderId: oc.order.id },
@@ -787,6 +792,32 @@ export async function settleCustomerBalance(
       if (posting?.id) postingIds.push(posting.id)
     }
   })
+
+  // Fase 2 de la unificación de caja: cada liquidación en efectivo sube el cajón. Después del
+  // commit y fail-open, igual que el vale de inventario de abajo.
+  for (const s of settled) {
+    if (!s.paymentId) continue
+    try {
+      await postCashSaleToDrawer({
+        venueId,
+        paymentId: s.paymentId,
+        orderId: s.orderId,
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        amount: s.amount,
+        tipAmount: 0,
+        method: 'CASH',
+        fundsFlow: 'CASH_DRAWER',
+        staffId: null,
+      })
+    } catch (err) {
+      logger.error('[CASH-DRAWER] Falló registrar la liquidación del cliente en el cajón (la liquidación NO se afecta)', {
+        customerId,
+        orderId: s.orderId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   // Aplicar los vales ya commiteados. Un fallo aquí NO afecta la liquidación:
   // el posting queda pendiente y el sweeper lo reintenta.

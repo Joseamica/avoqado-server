@@ -1,6 +1,8 @@
+import * as workShiftService from '../../services/dashboard/workShift.service'
 import { NextFunction, Request, Response } from 'express'
 import * as attendanceService from '../../services/dashboard/attendance.dashboard.service'
 import * as attendancePayrollService from '../../services/dashboard/attendancePayroll.service'
+import * as overtimeApprovalService from '../../services/dashboard/overtimeApproval.service'
 import * as workScheduleService from '../../services/dashboard/workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
 
@@ -73,6 +75,34 @@ export async function getPayrollSummary(req: Request, res: Response, next: NextF
   }
 }
 
+/**
+ * PUT /venues/:venueId/team/:staffVenueId/overtime-approval — autorizar horas extra de un día.
+ *
+ * Quién autoriza sale de `authContext`, NUNCA del cuerpo: si viniera del cuerpo, cualquiera
+ * podría firmar la autorización con el nombre de otro.
+ */
+export async function approveOvertime(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, userId } = (req as any).authContext
+    const result = await overtimeApprovalService.approveOvertime({
+      venueId: req.params.venueId,
+      staffVenueId: req.params.staffVenueId,
+      date: req.body.date,
+      minutesApproved: req.body.minutesApproved,
+      approvedById: userId,
+      note: req.body.note,
+      expectedUpdatedAt: req.body.expectedUpdatedAt,
+      expectedSourceFingerprint: req.body.expectedSourceFingerprint,
+    })
+    // `venueId` del token y de la ruta deben ser el mismo negocio; el middleware de permiso ya
+    // lo resolvió, y el servicio vuelve a acotar la membresía por venue.
+    void venueId
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
 /** GET /venues/:venueId/team/:staffVenueId/work-schedule — el cuadrante de una persona. */
 export async function getWorkSchedule(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -95,5 +125,59 @@ export async function replaceWorkSchedule(req: Request, res: Response, next: Nex
     res.status(200).json(result)
   } catch (error) {
     next(error)
+  }
+}
+
+// ─── Turnos rotativos (fase 1 "como Sesame") ────────────────────────────────────────────
+export const listWorkShiftTemplates = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const includeInactive = String((req.query as any)?.includeInactive) === 'true'
+    res.json({ success: true, data: await workShiftService.listTemplates(req.params.venueId, includeInactive) })
+  } catch (e) {
+    next(e)
+  }
+}
+export const createWorkShiftTemplate = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const t = await workShiftService.createTemplate(req.params.venueId, req.body, req.authContext?.userId || '')
+    res.status(201).json({ success: true, data: t })
+  } catch (e) {
+    next(e)
+  }
+}
+export const updateWorkShiftTemplate = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const t = await workShiftService.updateTemplate(req.params.venueId, req.params.templateId, req.body, req.authContext?.userId || '')
+    res.json({ success: true, data: t })
+  } catch (e) {
+    next(e)
+  }
+}
+export const getWorkShiftAssignments = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { from, to } = req.query as { from: string; to: string }
+    res.json({ success: true, data: await workShiftService.getAssignments(req.params.venueId, from, to) })
+  } catch (e) {
+    next(e)
+  }
+}
+export const replaceWorkShiftAssignments = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({
+      success: true,
+      data: await workShiftService.replaceAssignments(req.params.venueId, req.body, req.authContext?.userId || ''),
+    })
+  } catch (e) {
+    next(e)
+  }
+}
+export const publishWorkShiftAssignments = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({
+      success: true,
+      data: await workShiftService.publishAssignments(req.params.venueId, req.body, req.authContext?.userId || ''),
+    })
+  } catch (e) {
+    next(e)
   }
 }

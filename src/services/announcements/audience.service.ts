@@ -26,7 +26,22 @@ function buildWhere(f: AudienceFilters): Prisma.StaffVenueWhereInput {
   const venue: Prisma.VenueWhereInput = {}
 
   if (f.targetVenueIds.length > 0) venue.id = { in: f.targetVenueIds }
-  if (f.targetPlanTiers.length > 0) venue.planTier = { in: f.targetPlanTiers }
+
+  if (f.targetPlanTiers.length > 0) {
+    // 🔴 Un venue SIN plan (`planTier` NULL) cuenta como GRATIS. Decisión del founder
+    // (2026-08-27) tras un caso real: publicó filtrando por GRATIS y no le llegó a 11 de
+    // sus 14 negocios activos, porque tienen el plan vacío en la base. El dashboard les
+    // pinta la etiqueta "Free", así que desde afuera la diferencia es invisible — y
+    // filtrar dejaba fuera al 79% sin avisar.
+    //
+    // Sólo aplica cuando GRATIS está en el filtro: pedir PRO o PREMIUM no debe arrastrar
+    // a los que no tienen plan asignado.
+    venue.planTier = { in: f.targetPlanTiers }
+    if (f.targetPlanTiers.includes(PlanTier.GRATIS)) {
+      delete venue.planTier
+      venue.OR = [{ planTier: { in: f.targetPlanTiers } }, { planTier: null }]
+    }
+  }
   if (f.targetCategories.length > 0) {
     const tipos = (Object.keys(venueTypeToCategory) as VenueType[]).filter(t => f.targetCategories.includes(venueTypeToCategory[t]))
     venue.type = { in: tipos }

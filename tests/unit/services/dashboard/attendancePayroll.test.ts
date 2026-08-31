@@ -37,6 +37,8 @@ const entry = (iso: string, out?: string) => ({
   clockInTime: new Date(iso),
   clockOutTime: out ? new Date(out) : null,
   validationStatus: null,
+  totalHours: 8.5,
+  breakMinutes: 30,
 })
 
 beforeEach(() => {
@@ -64,8 +66,6 @@ describe('getPayrollSummary', () => {
       entry('2026-08-19T15:05:00.000Z'), // mié 09:05 dentro de tolerancia
       // jue = vacación · vie = sin checada → FALTA
     ])
-    db.timeEntry.groupBy.mockResolvedValue([{ staffId: 'staff-1', _sum: { totalHours: 25.5, breakMinutes: 90 } }])
-
     const { rows } = await run()
     expect(rows).toHaveLength(1)
     expect(rows[0]).toEqual(
@@ -125,14 +125,33 @@ describe('getPayrollSummary', () => {
   })
 
   it('las horas EXCLUYEN checadas rechazadas por el gerente', async () => {
-    await run()
-    const where = db.timeEntry.groupBy.mock.calls[0][0].where
-    expect(JSON.stringify(where)).toMatch(/REJECTED/)
+    db.timeEntry.findMany.mockResolvedValue([{ ...entry('2026-08-17T15:00:00.000Z'), validationStatus: 'REJECTED' }])
+
+    const { rows } = await run()
+
+    expect(rows[0].hoursWorked).toBe(0)
+    expect(db.timeEntry.findMany.mock.calls[0][0].select).toEqual(
+      expect.objectContaining({ validationStatus: true, totalHours: true, breakMinutes: true }),
+    )
+  })
+
+  it('atribuye a la última fecha del periodo las horas de una entrada nocturna posterior a medianoche', async () => {
+    const overnight = { enabled: true, ranges: [{ open: '22:00', close: '06:00' }] }
+    db.staffVenue.findMany.mockResolvedValue([membership({ workSchedule: { weekly: { ...weekly, friday: overnight } } })])
+    const afterMidnight = {
+      ...entry('2026-08-22T06:30:00.000Z'), // sáb 00:30 local; pertenece al turno del viernes 21
+      totalHours: 8,
+      breakMinutes: 45,
+    }
+    db.timeEntry.findMany.mockResolvedValue([afterMidnight])
+    const { rows } = await getPayrollSummary('venue-1', '2026-08-21', '2026-08-21')
+
+    expect(rows[0]).toEqual(expect.objectContaining({ workedDays: 1, hoursWorked: 8, breakMinutes: 45 }))
   })
 
   it('sin cuadrante: nada exigible, nada de faltas — pero las horas trabajadas SÍ se reportan', async () => {
     db.staffVenue.findMany.mockResolvedValue([membership({ workSchedule: null })])
-    db.timeEntry.groupBy.mockResolvedValue([{ staffId: 'staff-1', _sum: { totalHours: 12, breakMinutes: 0 } }])
+    db.timeEntry.findMany.mockResolvedValue([{ ...entry('2026-08-17T15:00:00.000Z'), totalHours: 12, breakMinutes: 0 }])
     const { rows } = await run()
     expect(rows[0]).toEqual(expect.objectContaining({ scheduledDays: 0, absentDays: 0, hoursWorked: 12 }))
   })

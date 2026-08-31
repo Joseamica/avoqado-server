@@ -10,6 +10,7 @@ import { canVenueChargeOnline } from '../../services/payments/ecommerceCapabilit
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { fromZonedTime } from 'date-fns-tz'
+import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { normalizeBookedProductIds, reservationBookedProductIds } from '../../services/reservation/resolveAppointmentWindow'
 
 // ==========================================
@@ -22,6 +23,28 @@ function resolveVenueId(req: Request): string {
     throw new BadRequestError('Venue ID requerido en la ruta')
   }
   return venueId
+}
+
+/**
+ * Un `YYYY-MM-DD` que Zod coerciona llega aqui como MEDIANOCHE UTC. Si se pasa tal cual a la
+ * consulta, pedir un solo dia (`dateFrom === dateTo`) produce una ventana de CERO milisegundos
+ * y todo sale en 0 — fue el bug de las tarjetas de Reservaciones (27-ago-2026). Un dia civil
+ * pelon pertenece a la zona del NEGOCIO, asi que se expande a [00:00, 23:59:59.999] de ESA zona.
+ *
+ * 🔴 Un INSTANTE explicito (trae hora) se respeta tal cual: quien pidio un momento exacto no
+ * quiere el dia entero.
+ */
+const esDiaCivil = (d: Date) => d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0
+
+async function venueTimezoneOf(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  return venue?.timezone ?? DEFAULT_TIMEZONE
+}
+
+function expandirDiaCivil(fecha: Date, tz: string, borde: 'inicio' | 'fin'): Date {
+  if (!esDiaCivil(fecha)) return fecha
+  const dia = fecha.toISOString().slice(0, 10)
+  return fromZonedTime(`${dia}T${borde === 'inicio' ? '00:00:00.000' : '23:59:59.999'}`, tz)
 }
 
 /**
@@ -41,6 +64,12 @@ export async function getReservations(req: Request, res: Response, next: NextFun
       if (list.length > 0) {
         filters.channel = list
       }
+    }
+
+    if (filters.dateFrom || filters.dateTo) {
+      const tz = await venueTimezoneOf(venueId)
+      if (filters.dateFrom) filters.dateFrom = expandirDiaCivil(new Date(filters.dateFrom), tz, 'inicio')
+      if (filters.dateTo) filters.dateTo = expandirDiaCivil(new Date(filters.dateTo), tz, 'fin')
     }
 
     const result = await reservationService.getReservations(venueId, filters, page, pageSize)
@@ -83,7 +112,11 @@ export async function getStats(req: Request, res: Response, next: NextFunction) 
     const venueId = resolveVenueId(req)
     const { dateFrom, dateTo } = req.query as any
 
-    const stats = await reservationService.getReservationStats(venueId, new Date(dateFrom), new Date(dateTo))
+    const tz = await venueTimezoneOf(venueId)
+    const desde = expandirDiaCivil(new Date(dateFrom), tz, 'inicio')
+    const hasta = expandirDiaCivil(new Date(dateTo), tz, 'fin')
+
+    const stats = await reservationService.getReservationStats(venueId, desde, hasta)
     res.json(stats)
   } catch (error) {
     next(error)
@@ -98,15 +131,9 @@ export async function getCalendar(req: Request, res: Response, next: NextFunctio
     const venueId = resolveVenueId(req)
     const { dateFrom, dateTo, groupBy } = req.query as any
 
-    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-    const tz = venue?.timezone ?? 'America/Mexico_City'
-
-    // dateFrom/dateTo are Date objects (Zod coerced from YYYY-MM-DD query strings, UTC midnight)
-    // Extract YYYY-MM-DD and re-interpret as venue-local boundaries
-    const fromISO = (dateFrom as Date).toISOString().slice(0, 10)
-    const toISO = (dateTo as Date).toISOString().slice(0, 10)
-    const from = fromZonedTime(`${fromISO}T00:00:00`, tz)
-    const to = fromZonedTime(`${toISO}T23:59:59.999`, tz)
+    const tz = await venueTimezoneOf(venueId)
+    const from = expandirDiaCivil(new Date(dateFrom), tz, 'inicio')
+    const to = expandirDiaCivil(new Date(dateTo), tz, 'fin')
 
     const result = await reservationService.getReservationsCalendar(venueId, from, to, groupBy)
     res.json(result)

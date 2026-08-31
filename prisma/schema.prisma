@@ -363,6 +363,7 @@ model Venue {
   floorElements         FloorElement[]
   shifts                Shift[]
   timeEntries           TimeEntry[]
+  overtimeApprovals     OvertimeApproval[]
   promoterLocationPings PromoterLocationPing[]
   orders                Order[]
   payments              Payment[]
@@ -849,6 +850,17 @@ model VenueSettings {
   /// 🔴 Independiente de `enableShifts` (caja). Rieles distintos.
   attendanceEnabled       Boolean @default(true)
   attendanceGraceMinutes  Int     @default(10)
+  /// Aviso EN VIVO cuando alguien no ha checado y ya pasó su hora + la tolerancia: llega al
+  /// dashboard Y por correo a OWNER/ADMIN/MANAGER. **Apagado de fábrica**: manda correos, y un
+  /// negocio no puede empezar a recibirlos por una actualización que no pidió. Sin este
+  /// interruptor el único apagador sería un UPDATE en Postgres — el anti-patrón que la regla de
+  /// activación del workspace prohíbe explícitamente.
+  attendanceLateAlertEnabled Boolean @default(false)
+  /// Turnos ROTATIVOS de trabajo (referente Sesame: "Abre / Inter / Cierre" que rotan). Apagado de
+  /// fábrica y explícito por venue: crear una plantilla puede ser prueba y no debe cambiar en silencio
+  /// la fuente de retardos y comisiones (Codex, 27-ago). Prendido, una asignación PUBLICADA gana sobre
+  /// la jornada fija; apagado, las asignaciones se ignoran. El ICP (jornada fija) nunca lo ve.
+  rotatingShiftsEnabled   Boolean @default(false)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
   autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
   maxShiftDurationEnabled Boolean @default(false) // Enable max shift duration enforcement
@@ -985,6 +997,9 @@ model Staff {
   /// Acuses de recibo de anuncios de plataforma (ver PlatformAnnouncementDelivery).
   platformAnnouncementDeliveries PlatformAnnouncementDelivery[]
 
+  /// Sesiones autenticadas revocables (JWT `sid`). Ver modelo `Session`.
+  sessions Session[]
+
   // AI Training
   chatTrainingData   ChatTrainingData[]  @relation("UserChatTraining")
   chatConversations  ChatConversation[]  @relation("UserChatConversations")
@@ -993,6 +1008,7 @@ model Staff {
 
   // Time tracking
   timeEntries TimeEntry[]
+  overtimeApprovalsGiven OvertimeApproval[] @relation("OvertimeApprovedBy")
 
   // Field-promoter geolocation ("cambaceo" tracking)
   promoterLocationPings PromoterLocationPing[]
@@ -1061,6 +1077,12 @@ model Staff {
   resetTokenExpiry  DateTime?
   resetTokenUsedAt  DateTime?
   lastPasswordReset DateTime?
+  /// Cutoff for "log me out of every device". Same mechanism as
+  /// `lastPasswordReset` — `passwordChangeGuard` refuses any token whose `iat`
+  /// predates the LATER of the two — but with a second trigger: the person (or
+  /// a lost device) rather than a password change. Null for everyone who has
+  /// never pressed the button.
+  sessionsRevokedAt DateTime?
 
   // ✅ PlayTelecom / White-Label Dashboard relations
   cashDeposits     CashDeposit[]
@@ -1227,6 +1249,8 @@ model StaffVenue {
   /// Cuadrante LABORAL (jornada). Distinto de `schedule`, que es disponibilidad para citas.
   workSchedule           StaffWorkSchedule?
   workScheduleExceptions StaffWorkScheduleException[]
+  overtimeApprovals      OvertimeApproval[]
+  workShiftAssignments   WorkShiftAssignment[]
 }
 
 // ==========================================
@@ -3230,7 +3254,90 @@ model StaffWorkSchedule {
   @@index([venueId])
 }
 
+/// Turno de TRABAJO (plantilla): "Abre 08–16", "Inter 09–17", "Cierre 11–19". Sesame los llama
+/// Turnos y CONVIVEN con la jornada fija (StaffWorkSchedule): cada negocio usa lo que le sirve. Se
+/// prende por venue (VenueSettings.rotatingShiftsEnabled). Fase 1 del checador "como Sesame".
+model WorkShiftTemplate {
+  id           String   @id @default(cuid())
+  venueId      String
+  name         String
+  abbreviation String
+  color        String   @default("#7ADD2C")
+  /// 'HH:mm' en hora del negocio. endTime <= startTime = cruza la medianoche.
+  startTime    String
+  endTime      String
+  active       Boolean  @default(true)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignments WorkShiftAssignment[]
+
+  @@index([venueId])
+}
+
+/// Asignación persona × día de un turno de trabajo. Guarda COPIA de las horas: cambiar la plantilla
+/// "Abre" mañana no reescribe semanas ya publicadas (Codex). Tabla propia y NO
+/// StaffWorkScheduleException: el endpoint del cuadrante borra y recrea todas las excepciones de la
+/// persona en cada guardado — reusarlo destruiría el cuadrante al editar un horario.
+model WorkShiftAssignment {
+  id           String     @id @default(cuid())
+  venueId      String
+  staffVenueId String
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  /// 'YYYY-MM-DD' en fecha del negocio.
+  date         String
+  templateId   String?
+  template     WorkShiftTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateName String
+  startTime    String
+  endTime      String
+  /// DRAFT = se está armando · PUBLISHED = cuenta para asistencia y comisiones.
+  status       String     @default("DRAFT")
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  /// Una fila PUBLISHED y otra DRAFT pueden convivir en la misma celda: editar en borrador NO despublica
+  /// el horario vigente (Codex, 2ª auditoría). Un DRAFT con templateId null = "vaciar al publicar".
+  @@unique([staffVenueId, date, status])
+  @@index([venueId, date])
+}
+
 /// Excepción al cuadrante: un día libre, o un día con horario distinto.
+model OvertimeApproval {
+  id           String     @id @default(cuid())
+  staffVenueId String
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  venueId      String
+  venue        Venue      @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  /// 'YYYY-MM-DD' en fecha del NEGOCIO — el día del TURNO, no el del reloj de la checada.
+  date String
+  /// Minutos AUTORIZADOS. Puede ser menos que lo medido: el gerente autoriza 1 h de las 2 que
+  /// se quedó. Cero = revisado y NO autorizado (distinto de "sin revisar", que es no tener fila).
+  minutesApproved Int
+  /// Lo que el reloj medía CUANDO se autorizó.
+  /// 🔴 Es lo que impide un agujero de dinero: sin este retrato, editar la salida después de
+  /// autorizar convertiría en autorizadas unas horas que nadie miró. Si deja de coincidir con lo
+  /// medido hoy, la fila se marca para revisar de nuevo.
+  minutesMeasured Int
+  /// Huella de la JORNADA que produjo esos minutos: tramos trabajados, descansos y cuadrante.
+  /// 🔴 Versionar sólo el NÚMERO deja un hueco: si una corrección baja el extra a cero y otra
+  /// posterior vuelve a producir el mismo total con checadas DISTINTAS, la autorización vieja
+  /// revivía sin que nadie la mirara (hallazgo #4 de Codex). Null en las filas anteriores a
+  /// este campo: se tratan como "hay que revisar".
+  sourceFingerprint String?
+  approvedById    String
+  approvedBy      Staff    @relation("OvertimeApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime @default(now())
+  note            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  /// Una autorización por persona y día: volver a autorizar CORRIGE, no acumula.
+  @@unique([staffVenueId, date])
+  @@index([venueId, date])
+}
+
 model StaffWorkScheduleException {
   id           String     @id @default(cuid())
   staffVenueId String
@@ -4649,11 +4756,22 @@ model Terminal {
   canDeliverAreaTickets  Boolean           @default(false)
   defaultWorkspace       TerminalWorkspace @default(STANDARD_POS)
 
+  /// Capacidades observadas del display del cliente. Son null hasta que el
+  /// dispositivo anuncie soporte; capabilitiesObservedAt permite invalidar
+  /// observaciones viejas sin inventar capacidades por tipo de hardware.
+  customerDisplayPresent     Boolean?
+  customerDisplayInvertible  Boolean?
+  displayModeProtocolVersion Int?
+  capabilitiesObservedAt     DateTime?
+
   /// Mostrador invertido: el cliente ve la pantalla grande y el cajero trabaja
   /// en la chica. Es por DISPOSITIVO (así está armado ESE mostrador), no por
   /// venue. El POS aplica su valor local y sincroniza con este; el dashboard lo
   /// puede cambiar en remoto.
-  customerDisplayInverted Boolean @default(false)
+  customerDisplayInverted         Boolean  @default(false)
+  customerDisplayRequest          Json?
+  customerDisplayRequestVersion   Int      @default(0)
+  customerDisplayRequestExpiresAt DateTime?
 
   scaleProfileId String?
   scaleProfile   ScaleProfile? @relation(fields: [scaleProfileId], references: [id], onDelete: SetNull)
@@ -4729,6 +4847,7 @@ model Terminal {
   @@index([venueId, formFactor]) // filtro por tipo de aparato en el dashboard
   @@index([fulfillmentAreaId]) // terminales de un área
   @@index([scaleProfileId])
+  @@index([customerDisplayRequestExpiresAt])
 }
 
 // ==========================================
@@ -7049,6 +7168,7 @@ enum StampRewardStatus {
   PENDING
   REDEEMED
   EXPIRED
+  CANCELLED
 }
 
 /// Una cartilla de sellos de un cliente en un negocio ("junta 7 y el 8 va gratis").
@@ -8903,6 +9023,9 @@ enum NotificationType {
 
   // Staff notifications
   SHIFT_REMINDER
+  /// Alguien no ha checado y ya pasó su hora de entrada más la tolerancia.
+  /// Se emite EN VIVO, mientras todavía se puede hacer algo — no es el reporte del día.
+  ATTENDANCE_LATE
   SHIFT_ENDED
   NEW_STAFF_JOINED
 
@@ -16763,6 +16886,15 @@ model PlatformAnnouncement {
   // Dónde se ve, además del buzón
   showAsBanner Boolean @default(false)
 
+  /// Interrumpe con una ventana la próxima vez que la persona entre. Se cierra UNA vez
+  /// (al cerrarla su aviso queda leído) y después vive sólo en la campana.
+  ///
+  /// 🔴 Es por anuncio, no global (decisión del founder, 2026-08-27): si todos los
+  /// anuncios interrumpen, la gente aprende a cerrarlos sin leer y se pierde justo el
+  /// canal que se está construyendo. Se reserva para lo que no se puede perder — un
+  /// cambio de precios, una fecha límite.
+  showAsModal Boolean @default(false)
+
   // Vigencia
   status       PlatformAnnouncementStatus @default(DRAFT)
   publishedAt  DateTime?
@@ -16802,6 +16934,12 @@ model PlatformAnnouncementClick {
   openedAt DateTime  @default(now()) // abrió el detalle
   ctaAt    DateTime? // tocó el botón principal
 
+  /// Cerró la ventana que interrumpe. 🔴 Es la ÚNICA señal que la apaga, y existe porque
+  /// `Notification.isRead` NO sirve: la campana del dashboard marca TODO como leído nada
+  /// más abrirla, así que asomarse al buzón apagaba una ventana que la persona nunca vio.
+  /// Lo encontró el founder el 2026-08-27 probándolo.
+  dismissedAt DateTime?
+
   @@unique([announcementId, staffId])
   @@index([announcementId])
   @@index([staffId])
@@ -16830,12 +16968,38 @@ model PlatformAnnouncementDelivery {
   staff          Staff                @relation(fields: [staffId], references: [id], onDelete: Cascade)
   venueId        String // por qué negocio le llegó
 
-  deliveredAt DateTime @default(now())
+  /// Estado de la ENTREGA del aviso al buzón. La fila nace PENDING al publicar y un job
+  /// la convierte en la `Notification`. Mismo patrón que `CustomerApprovalDelivery`.
+  status        PlatformAnnouncementDeliveryStatus @default(PENDING)
+  attempts      Int                                @default(0)
+  nextAttemptAt DateTime                           @default(now())
+  leaseUntil    DateTime?
+  lastError     String?                            @db.Text
+
+  /// La Notification que se creó para esta entrega (rastro, y evita recrearla).
+  notificationId String?
+
+  deliveredAt DateTime? // cuándo llegó al buzón de verdad
+
+  createdAt DateTime @default(now())
+  // `@default(now())` no es cosmético: Render aplica las migraciones en el BUILD, con el
+  // servidor VIEJO todavía sirviendo tráfico, y su cliente Prisma no conoce esta columna.
+  // Sin default en la base, sus INSERT de entregas violarían el NOT NULL hasta que el
+  // servidor nuevo tome el relevo. Declararlo aquí mantiene el schema y la DB en sintonía.
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([announcementId, staffId, venueId])
   @@index([staffId, announcementId])
   @@index([announcementId])
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseUntil])
   @@map("platform_announcement_deliveries")
+}
+
+enum PlatformAnnouncementDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
 }
 
 enum PlatformAnnouncementStatus {
@@ -16843,4 +17007,62 @@ enum PlatformAnnouncementStatus {
   SCHEDULED
   PUBLISHED
   ARCHIVED
+}
+
+// ==========================================
+// SESIONES REVOCABLES (Parte A del plan de sesiones)
+// ==========================================
+//
+// El JWT hoy es autónomo: nadie puede invalidarlo, así que "cerrar sesión" no hace nada
+// del lado del servidor. `Session.id` es el claim `sid` dentro del JWT — el resto del plan
+// (revocación, refresh rotation, dispositivos) se construye sobre estos dos modelos.
+
+enum AuthMethod {
+  PASSWORD
+  PIN
+  BIOMETRIC
+}
+
+/// Una sesión autenticada — el `sid` que el JWT lleva adentro. Revocarla es lo que hace que
+/// "cerrar sesión" signifique algo: un token cuyo `sid` apunta a una Session con `revokedAt`
+/// puesto deja de ser válido, aunque su firma y expiración sigan intactas.
+model Session {
+  id              String         @id @default(cuid())
+  staffId         String
+  staff           Staff          @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId         String
+  deviceId        String?
+  authMethod      AuthMethod
+  parentSessionId String?
+  createdAt       DateTime       @default(now())
+  lastSeenAt      DateTime       @default(now())
+  revokedAt       DateTime?
+  revokedReason   String?
+  refreshGrants   RefreshGrant[]
+
+  @@index([staffId, revokedAt])
+  @@index([deviceId, revokedAt])
+  @@index([venueId, revokedAt])
+}
+
+/// Un refresh token emitido para una Session, con rotación y familia (reuse detection).
+/// `tokenHash` guarda SHA-256 del refresh token — nunca el token en claro.
+model RefreshGrant {
+  id        String  @id @default(cuid())
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  familyId  String
+  tokenHash String  @unique
+
+  /// Refresh sucesor CIFRADO (AEAD), sólo durante la ventana de retransmisión de 60 s.
+  /// 🔴 La llave vive FUERA de Postgres (SESSION_SUCCESSOR_ENC_KEY). Se borra físicamente al vencer.
+  successorEnc          String?
+  successorEncExpiresAt DateTime?
+  consumedAt            DateTime?
+  rotatedToId           String?
+  expiresAt             DateTime
+  revokedAt             DateTime?
+
+  @@index([familyId, revokedAt])
+  @@index([successorEncExpiresAt])
 }

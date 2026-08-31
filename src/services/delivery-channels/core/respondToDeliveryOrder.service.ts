@@ -28,7 +28,7 @@ import { cancelDeliveryOrder } from './cancelDeliveryOrder.service'
 export type MotivoRechazo = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
 export interface RespuestaPedido {
-  outcome: 'ACCEPTED' | 'DENIED' | 'CANCELLED' | 'ALREADY_DONE' | 'NOT_A_DELIVERY_ORDER' | 'FAILED'
+  outcome: 'ACCEPTED' | 'DENIED' | 'CANCELLED' | 'READY' | 'ALREADY_DONE' | 'NOT_A_DELIVERY_ORDER' | 'FAILED'
   error?: string
 }
 
@@ -52,6 +52,34 @@ async function contexto(venueId: string, orderId: string) {
   if (!link) return null
 
   return { order, provider, externalOrderId, storeId: link.externalLocationId, adapter: adapterFor(provider) }
+}
+
+/**
+ * "La comida ya está lista." Avisa al marketplace para que mande (o apure) al repartidor.
+ *
+ * 🔴 Lo llama el flujo del KDS en CADA comanda que se marca lista — de mesa, mostrador o
+ * delivery—, así que una venta que no es de marketplace es un NO-OP silencioso, jamás un
+ * error: si esto lanzara, marcar lista una hamburguesa de mesa fallaría.
+ *
+ * La validación de producción de Uber (caso 59605086) exige ver esta llamada funcionando
+ * ("Order: Mark Order as Ready"). El gesto humano ya existía; esto sólo lo conecta.
+ */
+export async function markDeliveryOrderReady(venueId: string, orderId: string): Promise<RespuestaPedido> {
+  const ctx = await contexto(venueId, orderId)
+  if (!ctx) return { outcome: 'NOT_A_DELIVERY_ORDER' }
+  if (typeof ctx.adapter.markOrderReady !== 'function') return { outcome: 'NOT_A_DELIVERY_ORDER' }
+
+  const r = await ctx.adapter.markOrderReady(ctx.externalOrderId, ctx.storeId)
+  if (!r.ok) {
+    logger.warn('El marketplace rechazó el "listo" del pedido', {
+      orderId,
+      externalOrderId: ctx.externalOrderId,
+      status: r.status,
+      cuerpo: r.raw.slice(0, 200),
+    })
+    return { outcome: 'FAILED', error: r.raw.slice(0, 200) }
+  }
+  return { outcome: 'READY' }
 }
 
 /** "Sí lo preparo." Para venues en modo MANUAL, donde nadie acepta por ellos. */

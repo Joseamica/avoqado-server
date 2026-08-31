@@ -14,7 +14,7 @@ import * as cashDrawerService from '../../services/mobile/cash-drawer.mobile.ser
 export const getCurrent = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const session = await cashDrawerService.getCurrentSession(venueId)
+    const session = await cashDrawerService.getCurrentSession(venueId, (req as any).puedeVerEsperado === true)
 
     return res.json({
       success: true,
@@ -39,13 +39,16 @@ export const openSession = async (req: Request, res: Response, next: NextFunctio
       return res.status(400).json({ success: false, message: 'startingAmount es requerido' })
     }
 
-    const session = await cashDrawerService.openSession({
-      venueId,
-      staffId,
-      staffName: staffName || 'Staff',
-      startingAmount: Number(startingAmount),
-      deviceName,
-    })
+    const session = await cashDrawerService.openSession(
+      {
+        venueId,
+        staffId,
+        staffName: staffName || 'Staff',
+        startingAmount: Number(startingAmount),
+        deviceName,
+      },
+      (req as any).puedeVerEsperado === true,
+    )
 
     return res.status(201).json({ success: true, data: session })
   } catch (error) {
@@ -97,6 +100,7 @@ export const payIn = async (req: Request, res: Response, next: NextFunction) => 
       amount: Number(amount),
       note,
       localId,
+      sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event })
@@ -126,6 +130,7 @@ export const payOut = async (req: Request, res: Response, next: NextFunction) =>
       amount: Number(amount),
       note,
       localId,
+      sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : null,
     })
 
     return res.status(idempotentStatus(created)).json({ success: true, data: event })
@@ -142,7 +147,7 @@ export const closeSession = async (req: Request, res: Response, next: NextFuncti
   try {
     const { venueId } = req.params
     const staffId = req.authContext?.userId || ''
-    const { actualAmount, note, staffName } = req.body
+    const { actualAmount, note, staffName, sessionId } = req.body
 
     if (actualAmount === undefined || actualAmount === null) {
       return res.status(400).json({ success: false, message: 'actualAmount es requerido' })
@@ -154,6 +159,7 @@ export const closeSession = async (req: Request, res: Response, next: NextFuncti
       staffName: staffName || 'Staff',
       actualAmount: Number(actualAmount),
       note,
+      sessionId: typeof sessionId === 'string' ? sessionId : null,
     })
 
     return res.json({ success: true, data: session })
@@ -217,7 +223,10 @@ export const syncEvents = async (req: Request, res: Response, next: NextFunction
       return res.status(400).json({ success: false, message: 'events array es requerido' })
     }
 
-    const result = await cashDrawerService.syncEvents(venueId, events)
+    const appVersion = (req.headers['x-app-version'] as string | undefined) ?? null
+    // El autor autenticado: `/sync` ya no se cree a ciegas el `staffId` del cuerpo.
+    const actorStaffId = (req as any).authContext?.userId ?? null
+    const result = await cashDrawerService.syncEvents(venueId, events, appVersion, actorStaffId)
 
     return res.json({ success: true, ...result })
   } catch (error) {

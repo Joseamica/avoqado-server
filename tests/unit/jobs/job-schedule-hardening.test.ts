@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { CronTime } from 'cron'
 import logger from '@/config/logger'
 
@@ -33,6 +35,8 @@ import { BlumonWebhookReconciliationJob } from '@/jobs/blumon-webhook-reconcilia
 import { GcalInboxSweeperJob } from '@/jobs/gcal-inbox-sweeper.job'
 import { GcalOutboxSweeperJob } from '@/jobs/gcal-outbox-sweeper.job'
 import { TpvHealthMonitorJob } from '@/jobs/tpv-health-monitor.job'
+import { DisplayModeRequestExpiryJob } from '@/jobs/display-mode-request-expiry.job'
+import { DATABASE_JOB_SCHEDULES } from '@/jobs/jobSchedules'
 import { startPosConnectionMonitor } from '@/jobs/monitorPosConnections'
 
 const EXPECTED_SCHEDULES = {
@@ -42,6 +46,7 @@ const EXPECTED_SCHEDULES = {
   posConnectionMonitor: '17 1-59/5 * * * *',
   gcalInboxSweeper: '23,53 * * * * *',
   gcalOutboxSweeper: '26,56 * * * * *',
+  displayModeRequestExpiry: '4 * * * * *',
 } as const
 
 type JobName = keyof typeof EXPECTED_SCHEDULES
@@ -71,6 +76,7 @@ function readRegisteredSchedules(): Record<JobName, string> {
     posConnectionMonitor: registeredPosSchedule().pattern,
     gcalInboxSweeper: cronSource(new GcalInboxSweeperJob()),
     gcalOutboxSweeper: cronSource(new GcalOutboxSweeperJob()),
+    displayModeRequestExpiry: cronSource(new DisplayModeRequestExpiryJob()),
   }
 }
 
@@ -112,6 +118,7 @@ describe('database cron schedule hardening', () => {
     ['tpvHealthMonitor', () => cronSource(new TpvHealthMonitorJob())],
     ['gcalInboxSweeper', () => cronSource(new GcalInboxSweeperJob())],
     ['gcalOutboxSweeper', () => cronSource(new GcalOutboxSweeperJob())],
+    ['displayModeRequestExpiry', () => cronSource(new DisplayModeRequestExpiryJob())],
   ] as const)('%s registers its agreed second offset', (name, getPattern) => {
     expect(getPattern()).toBe(EXPECTED_SCHEDULES[name])
   })
@@ -138,7 +145,7 @@ describe('database cron schedule hardening', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('POS connection monitor'))
   })
 
-  it('keeps each cadence and gives the six database jobs unique start instants over ten minutes', () => {
+  it('keeps each cadence and gives the seven registered database jobs unique start instants over ten minutes', () => {
     const schedules = readRegisteredSchedules()
     const start = new Date('2026-08-07T12:00:00.000Z')
     const end = new Date('2026-08-07T12:10:00.000Z')
@@ -149,6 +156,7 @@ describe('database cron schedule hardening', () => {
       posConnectionMonitor: 2,
       gcalInboxSweeper: 20,
       gcalOutboxSweeper: 20,
+      displayModeRequestExpiry: 10,
     }
 
     const startsByInstant = new Map<number, JobName[]>()
@@ -167,6 +175,36 @@ describe('database cron schedule hardening', () => {
       .map(([at, names]) => ({ at: new Date(at).toISOString(), names }))
 
     expect(collisions).toEqual([])
+  })
+
+  it('keeps display-mode expiry from colliding with every declared database job schedule', () => {
+    const start = new Date('2026-08-07T12:00:00.000Z')
+    const end = new Date('2026-08-07T12:10:00.000Z')
+    const displayStarts = new Set(expandSchedule(DATABASE_JOB_SCHEDULES.displayModeRequestExpiry, start, end).map(date => date.getTime()))
+    const collisions = Object.entries(DATABASE_JOB_SCHEDULES)
+      .filter(([name]) => name !== 'displayModeRequestExpiry')
+      .flatMap(([name, pattern]) =>
+        expandSchedule(pattern, start, end)
+          .filter(date => displayStarts.has(date.getTime()))
+          .map(date => ({ name, at: date.toISOString() })),
+      )
+
+    expect(collisions).toEqual([])
+  })
+
+  it('registers display-mode expiry through the shared contextual scheduler', () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), 'src/jobs/display-mode-request-expiry.job.ts'), 'utf8')
+
+    expect(source).toMatch(/scheduleJob\(\s*['"]display-mode-request-expiry['"]/)
+    expect(source).not.toMatch(/new CronJob\(|setInterval\(/)
+  })
+
+  it('starts and stops the display-mode expiry singleton with the server lifecycle', () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), 'src/server.ts'), 'utf8')
+
+    expect(source).toContain("import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'")
+    expect(source.match(/displayModeRequestExpiryJob\.start\(\)/g)).toHaveLength(1)
+    expect(source.match(/displayModeRequestExpiryJob\.stop\(\)/g)).toHaveLength(1)
   })
 })
 

@@ -175,6 +175,41 @@ describe('ingestDeliveryOrder', () => {
     )
   })
 
+  it('usa externalData como SKU local y conserva externalId como id del proveedor', async () => {
+    const rappiLink = { ...link, provider: 'RAPPI' }
+    const normalized = makeNormalized({
+      externalId: 'RAPPI-ORDER-1',
+      items: [
+        {
+          externalId: 'rappi-item-729970',
+          externalData: 'SKU-AVOQADO-0007',
+          name: 'Producto 8',
+          quantity: 2,
+          unitPrice: '45.00',
+          total: '90.00',
+          modifiers: [],
+        },
+      ],
+    })
+    ;(prisma.product.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.product.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args.where?.venueId_sku?.sku === 'SKU-AVOQADO-0007' ? { id: 'prod-rappi' } : null,
+    )
+
+    await ingestDeliveryOrder(normalized, rappiLink)
+
+    expect(prisma.orderItem.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          productId: 'prod-rappi',
+          productSku: 'SKU-AVOQADO-0007',
+          externalId: 'RAPPI:RAPPI-ORDER-1-rappi-item-729970-0',
+        }),
+      }),
+    )
+    expect(prisma.product.create).not.toHaveBeenCalled()
+  })
+
   it('unitPrice/total de la línea pasan TAL CUAL del contrato normalizado, sin recomputar (el mapper ya hizo la cuenta)', async () => {
     // total (110) deliberadamente distinto de unitPrice×quantity (90) — si el servicio
     // recomputara localmente en vez de confiar en el mapper, este test lo detectaría.
@@ -763,5 +798,73 @@ describe('ingestDeliveryOrder', () => {
 
       expect(prisma.orderItem.create).toHaveBeenCalled()
     })
+  })
+
+  // ── Reingesta de un pedido CANCELADO ────────────────────────────────────────────────
+  //
+  // 🔴 La guarda de la comanda pasó de `isNew` a `!comandaYaExiste` para reponer la comanda
+  // de un pedido que sí sigue vivo (webhooks at-least-once). Pero cancelar BORRA las filas de
+  // KDS, así que en la reingesta de un pedido ya cancelado `comandaYaExiste` vuelve a ser
+  // false y se imprimía una comanda NUEVA: la cocina prepara comida que nadie va a recoger, y
+  // el ticket ya no sale del tablero por ninguna vía de cancelación (el upsert conserva
+  // `status: CANCELLED`). Falta la tercera pregunta: ¿el pedido sigue vivo?
+  it('🔴 NO imprime comanda al reingerir un pedido CANCELADO', async () => {
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue({ ...existingOrderRow, status: 'CANCELLED' })
+    ;(prisma.order.upsert as jest.Mock).mockResolvedValue({ ...existingOrderRow, status: 'CANCELLED' })
+    ;(prisma.kdsOrder.count as jest.Mock).mockResolvedValue(0) // cancelar borró las filas de KDS
+
+    const r: any = await ingestDeliveryOrder(makeNormalized() as never, link as never)
+
+    expect(prisma.kdsOrder.create).not.toHaveBeenCalled()
+    expect(r.kitchenTicketCreated).toBe(false)
+  })
+
+  // El processor de Uber decide si CANCELAR el pedido a partir de esto. Antes miraba
+  // `created` ("la orden no existía"), que es otra pregunta: en cualquier reproceso valía
+  // false y desarmaba la red de seguridad de las notas de alergia. Lo que necesita saber es
+  // si HAY comanda, ahora, la haya creado esta pasada o una anterior.
+  it('🔴 informa si HAY comanda (no si la orden era nueva)', async () => {
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(existingOrderRow)
+    ;(prisma.order.upsert as jest.Mock).mockResolvedValue(existingOrderRow)
+    ;(prisma.kdsOrder.count as jest.Mock).mockResolvedValue(1) // ya existe de una pasada previa
+
+    const r: any = await ingestDeliveryOrder(makeNormalized() as never, link as never)
+
+    expect(r.hayComanda).toBe(true) // aunque `created` sea false y no se creara ahora
+    expect(prisma.kdsOrder.create).not.toHaveBeenCalled()
+  })
+
+  // ── Promociones ─────────────────────────────────────────────────────────────────────
+  //
+  // 🔴 Como en cualquier POS: la venta guarda el BRUTO y el descuento va en su propio campo
+  // (`Order.discountAmount`, que ya existía y esta ingesta no llenaba). Square define las
+  // ventas brutas SIN ajustar por descuentos y las netas como la resta; Fudo lleva
+  // «Descuentos ($)» como línea propia del reporte. Así el dueño ve cuánto le costaron sus
+  // promociones, en vez de encontrarse una venta más chica sin explicación.
+  //
+  // México: los montos vienen con IVA incluido, así que el descuento se resta sobre el precio
+  // con impuesto — no se reconstruye una base sin él.
+  it('🔴 guarda la promoción como descuento y baja el total', async () => {
+    const conPromo = makeNormalized({
+      payment: makePayment({
+        saleAmount: '90.00', // bruto: cuadra con los renglones
+        discountAmount: '20.00',
+        externallyPaidSale: '70.00', // lo que la plataforma liquida
+      }),
+    })
+
+    await ingestDeliveryOrder(conPromo as never, link as never)
+
+    const creado = (prisma.order.upsert as jest.Mock).mock.calls[0][0].create
+    expect(String(creado.subtotal)).toBe('90') // el bruto no se toca
+    expect(String(creado.discountAmount)).toBe('20') // visible, en su campo
+    expect(String(creado.total)).toBe('70') // 90 − 20: lo que se cobró
+  })
+
+  it('sin promoción el total no cambia (el caso de siempre)', async () => {
+    await ingestDeliveryOrder(makeNormalized() as never, link as never)
+    const creado = (prisma.order.upsert as jest.Mock).mock.calls[0][0].create
+    expect(String(creado.discountAmount)).toBe('0')
+    expect(String(creado.total)).toBe('90')
   })
 })

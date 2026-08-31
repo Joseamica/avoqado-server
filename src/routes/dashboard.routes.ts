@@ -4,6 +4,7 @@ import multer from 'multer'
 import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { requireVenueRole } from '../middlewares/requireVenueRole.middleware'
 import { authorizeRole } from '../middlewares/authorizeRole.middleware'
@@ -70,11 +71,13 @@ import {
 import * as promotionDashboardController from '../controllers/dashboard/promotion.dashboard.controller'
 import * as couponController from '../controllers/dashboard/coupon.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
+import * as cashDrawerController from '../controllers/dashboard/cashDrawer.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
 import * as terminalOrderController from '../controllers/dashboard/terminalOrder.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
@@ -114,9 +117,16 @@ import {
   VenueIdOnlySchema,
   VenueTimeEntriesQuerySchema,
   AttendanceReportSchema,
+  ApproveOvertimeSchema,
   PayrollSummarySchema,
   WorkScheduleParamsSchema,
   ReplaceWorkScheduleSchema,
+  WorkShiftTemplatesQuerySchema,
+  CreateWorkShiftTemplateSchema,
+  UpdateWorkShiftTemplateSchema,
+  WorkShiftAssignmentsQuerySchema,
+  ReplaceWorkShiftAssignmentsSchema,
+  PublishWorkShiftAssignmentsSchema,
 } from '../schemas/dashboard/attendance.schema'
 import { AddStaffDocumentSchema, StaffDocumentIdParamsSchema, StaffDocumentsParamsSchema } from '../schemas/dashboard/staffDocument.schema'
 import {
@@ -200,6 +210,7 @@ import {
   DuplicatePermissionSetSchema,
 } from '../schemas/dashboard/permissionSet.schema'
 import { UpdateVenueSettingsSchema, UpdateTpvSettingsSchema } from '../schemas/dashboard/venueSettings.schema'
+import { cancelDisplayModeRequestSchema, createDisplayModeRequestSchema } from '../schemas/dashboard/displayModeRequest.schema'
 import {
   GetModifierUsageStatsSchema,
   GetModifiersLowStockSchema,
@@ -4407,6 +4418,43 @@ router.use('/cash-out', authenticateTokenMiddleware, cashOutRoutes)
  */
 router.get('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTerminals)
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/{deviceId}/sessions:
+ *   delete:
+ *     tags: [Dashboard - Terminals]
+ *     summary: Sacar un aparato — cierra las sesiones abiertas en él
+ *     description: |
+ *       Cierra TODAS las sesiones vivas de ese aparato en ese negocio. El caso real es una tablet
+ *       perdida o robada: quien la tenga deja de poder operar al instante.
+ *
+ *       No es lo mismo que «cerrar sesión en todos mis dispositivos», que es por PERSONA y la
+ *       sacaría también de su propio teléfono. Aquí se cierra por APARATO.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: deviceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: El `deviceUid` del aparato (el mismo del registro de aparatos).
+ *     responses:
+ *       200: { description: Sesiones cerradas; devuelve cuántas }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.delete(
+  '/venues/:venueId/tpvs/:deviceId/sessions',
+  authenticateTokenMiddleware,
+  // Mismo permiso que ya gobierna administrar terminales: sacar un aparato es gestionarlo, y
+  // crear un permiso nuevo para esto obligaría a repartirlo en cinco sitios para que fuera
+  // otorgable — coste sin ganancia, porque quien administra terminales es justo quien debe poder.
+  checkPermission('tpv:update'),
+  tpvController.revokeDeviceSessions,
+)
+
 // Create TPV (terminal)
 router.post('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:create'), tpvController.createTpv)
 
@@ -4446,6 +4494,24 @@ router.post('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermissio
  *         description: Forbidden
  */
 router.get('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTpvById)
+
+// Intención tipada para invertir la pantalla física de un POS Android. El permiso
+// autoriza al actor; el controlador valida por separado el soporte técnico observado.
+router.post(
+  '/venues/:venueId/terminals/:terminalId/display-mode-request',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  validateRequest(createDisplayModeRequestSchema),
+  displayModeRequestController.createRequest,
+)
+
+router.delete(
+  '/venues/:venueId/terminals/:terminalId/display-mode-request/:requestId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  validateRequest(cancelDisplayModeRequestSchema),
+  displayModeRequestController.cancelRequest,
+)
 
 /**
  * @openapi
@@ -7825,6 +7891,17 @@ router.get(
   attendanceController.getPayrollSummary,
 )
 
+// Autorizar las horas extra de un día (decisión del founder, 29-ago-2026: se autorizan).
+// 🔴 `attendance:manage`, NO `:read`: leer el reporte y firmar lo que se paga son cosas
+// distintas. Y `attendance:manage` nunca lo tienen los roles de piso.
+router.put(
+  '/venues/:venueId/team/:staffVenueId/overtime-approval',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(ApproveOvertimeSchema),
+  attendanceController.approveOvertime,
+)
+
 router.get(
   '/venues/:venueId/team/:staffVenueId/work-schedule',
   authenticateTokenMiddleware,
@@ -7839,6 +7916,212 @@ router.put(
   checkPermission('attendance:manage'),
   validateRequest(ReplaceWorkScheduleSchema),
   attendanceController.replaceWorkSchedule,
+)
+
+/**
+ * @openapi
+ * components:
+ *   parameters:
+ *     WorkShiftVenueId:
+ *       in: path
+ *       name: venueId
+ *       required: true
+ *       schema: { type: string }
+ *     WorkShiftTemplateId:
+ *       in: path
+ *       name: templateId
+ *       required: true
+ *       schema: { type: string }
+ *   schemas:
+ *     WorkShiftTemplateInput:
+ *       type: object
+ *       required: [name, abbreviation, startTime, endTime]
+ *       properties:
+ *         name: { type: string, maxLength: 40 }
+ *         abbreviation: { type: string, maxLength: 4 }
+ *         color: { type: string, example: '#7ADD2C' }
+ *         startTime: { type: string, example: '08:00' }
+ *         endTime: { type: string, example: '16:00', description: 'endTime <= startTime = cruza la medianoche' }
+ *         sortOrder: { type: integer }
+ *     WorkShiftAssignment:
+ *       type: object
+ *       properties:
+ *         id: { type: string }
+ *         staffVenueId: { type: string }
+ *         date: { type: string, example: '2026-08-24' }
+ *         templateId: { type: string, nullable: true, description: 'null en un DRAFT = vaciar la celda al publicar' }
+ *         templateName: { type: string }
+ *         startTime: { type: string }
+ *         endTime: { type: string }
+ *         status: { type: string, enum: [DRAFT, PUBLISHED] }
+ *         updatedAt: { type: string, format: date-time, description: 'revisión; se manda de vuelta al publicar' }
+ * /api/v1/dashboard/venues/{venueId}/work-shifts/templates:
+ *   get:
+ *     summary: Plantillas de turno de trabajo (rotativos) del venue
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *       - in: query
+ *         name: includeInactive
+ *         schema: { type: string, enum: ['true', 'false'] }
+ *     responses:
+ *       200: { description: Lista de plantillas }
+ *   post:
+ *     summary: Crear plantilla de turno (attendance:manage)
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/WorkShiftTemplateInput' }
+ *     responses:
+ *       201: { description: Plantilla creada }
+ * /api/v1/dashboard/venues/{venueId}/work-shifts/templates/{templateId}:
+ *   put:
+ *     summary: Editar o dar de baja (active=false) una plantilla (attendance:manage)
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *       - $ref: '#/components/parameters/WorkShiftTemplateId'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             allOf:
+ *               - $ref: '#/components/schemas/WorkShiftTemplateInput'
+ *               - type: object
+ *                 properties:
+ *                   active: { type: boolean }
+ *     responses:
+ *       200: { description: Plantilla actualizada }
+ *       404: { description: La plantilla no es de este venue }
+ * /api/v1/dashboard/venues/{venueId}/work-shifts/assignments:
+ *   get:
+ *     summary: Asignaciones persona×día en un rango (máx. 31 días), PUBLISHED y DRAFT
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema: { type: string, example: '2026-08-24' }
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema: { type: string, example: '2026-08-30' }
+ *     responses:
+ *       200:
+ *         description: Lista de asignaciones
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/WorkShiftAssignment' }
+ *   put:
+ *     summary: Guardar celdas como BORRADOR (fila aparte; no despublica). templateId null = vaciar al publicar (attendance:manage)
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [from, to, items]
+ *             properties:
+ *               from: { type: string, example: '2026-08-24' }
+ *               to: { type: string, example: '2026-08-30' }
+ *               items:
+ *                 type: array
+ *                 maxItems: 600
+ *                 items:
+ *                   type: object
+ *                   required: [staffVenueId, date, templateId]
+ *                   properties:
+ *                     staffVenueId: { type: string }
+ *                     date: { type: string, example: '2026-08-25' }
+ *                     templateId: { type: string, nullable: true }
+ *     responses:
+ *       200: { description: Asignaciones del rango tras guardar }
+ *       400: { description: Fecha fuera del rango, inexistente, empleado o plantilla de otro venue }
+ * /api/v1/dashboard/venues/{venueId}/work-shifts/assignments/publish:
+ *   post:
+ *     summary: Publicar los borradores REVISADOS con su revisión — todo o nada (attendance:manage)
+ *     tags: [Attendance]
+ *     parameters:
+ *       - $ref: '#/components/parameters/WorkShiftVenueId'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [from, to, drafts]
+ *             properties:
+ *               from: { type: string }
+ *               to: { type: string }
+ *               drafts:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [id, updatedAt]
+ *                   properties:
+ *                     id: { type: string }
+ *                     updatedAt: { type: string, format: date-time }
+ *     responses:
+ *       200: { description: '{ published, cleared, skipped }' }
+ *       409: { description: 'WORK_SHIFT_DRAFT_CONFLICT — alguien cambió un borrador; details.conflicts trae las celdas' }
+ */
+// Turnos ROTATIVOS de trabajo (fase 1 "como Sesame"). Mismos permisos que el cuadrante:
+// leer `attendance:read`, escribir `attendance:manage`. El interruptor vive en VenueSettings.
+router.get(
+  '/venues/:venueId/work-shifts/templates',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:read'),
+  validateRequest(WorkShiftTemplatesQuerySchema),
+  attendanceController.listWorkShiftTemplates,
+)
+router.post(
+  '/venues/:venueId/work-shifts/templates',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(CreateWorkShiftTemplateSchema),
+  attendanceController.createWorkShiftTemplate,
+)
+router.put(
+  '/venues/:venueId/work-shifts/templates/:templateId',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(UpdateWorkShiftTemplateSchema),
+  attendanceController.updateWorkShiftTemplate,
+)
+router.get(
+  '/venues/:venueId/work-shifts/assignments',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:read'),
+  validateRequest(WorkShiftAssignmentsQuerySchema),
+  attendanceController.getWorkShiftAssignments,
+)
+router.put(
+  '/venues/:venueId/work-shifts/assignments',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(ReplaceWorkShiftAssignmentsSchema),
+  attendanceController.replaceWorkShiftAssignments,
+)
+router.post(
+  '/venues/:venueId/work-shifts/assignments/publish',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(PublishWorkShiftAssignmentsSchema),
+  attendanceController.publishWorkShiftAssignments,
 )
 
 // ==========================================
@@ -7962,7 +8245,36 @@ router.get('/venues/:venueId/shifts/summary', authenticateTokenMiddleware, check
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
-router.get('/venues/:venueId/shifts/:shiftId', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShift)
+router.get(
+  '/venues/:venueId/shifts/:shiftId',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:read'),
+  // El detalle del turno adjunta el arqueo del cajón: mismo conteo ciego que su endpoint.
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
+  shiftController.getShift,
+)
+
+// ── Cajón físico (CashDrawerSession) — SÓLO LECTURA ─────────────────────────────────────
+// Fase 1 de la unificación de caja (auditoría 27-ago). El cajón lo escriben Android y la TPV
+// (`cashDrawerPosting`) y hasta hoy sólo tenía rutas /mobile: el dueño no podía ver el
+// arqueo desde ningún lado. Mismo permiso que el arqueo de la PAX: es el mismo dato.
+// `marcarPermiso` NO bloquea: sólo etiqueta si el llamante puede ver el efectivo esperado
+// (`cash-drawer:view-expected`, MANAGER+). Entrar sigue siendo `shifts:read`; lo que cambia
+// es que un cajero recibe la caja SIN el esperado ni sus sumandos mientras esté abierta.
+router.get(
+  '/venues/:venueId/cash-drawer/status',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:read'),
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
+  cashDrawerController.getDrawerStatus,
+)
+router.get(
+  '/venues/:venueId/cash-drawer/sessions',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:read'),
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
+  cashDrawerController.getDrawerSessions,
+)
 
 /**
  * @openapi
@@ -8041,10 +8353,11 @@ router.get('/notifications', authenticateTokenMiddleware, notificationController
 
 // ===== Anuncios de plataforma (aditivo: el buzon de /notifications NO se toca) =====
 // 🔴 /banner va ANTES de /:id — si no, Express lee "banner" como un id.
-router.get('/announcements/banner', authenticateTokenMiddleware, announcementReadController.banner)
+router.get('/announcements/home', authenticateTokenMiddleware, announcementReadController.home)
 router.get('/announcements/:id', authenticateTokenMiddleware, announcementReadController.getDetail)
 router.post('/announcements/:id/open', authenticateTokenMiddleware, announcementReadController.open)
 router.post('/announcements/:id/cta', authenticateTokenMiddleware, announcementReadController.cta)
+router.post('/announcements/:id/dismiss', authenticateTokenMiddleware, announcementReadController.dismiss)
 
 /**
  * @openapi
@@ -8112,6 +8425,8 @@ router.patch('/notifications/mark-all-read', authenticateTokenMiddleware, notifi
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
+// 🔴 ANTES que `/:id`, si no Express toma la ruta sin id como si fuera un id.
+router.delete('/notifications', authenticateTokenMiddleware, notificationController.deleteAllNotifications)
 router.delete('/notifications/:id', authenticateTokenMiddleware, notificationController.deleteNotification)
 
 /**

@@ -45,7 +45,7 @@ import { NextFunction, Request, Response } from 'express'
 import { DeviceFormFactor } from '@prisma/client'
 
 import logger from '../config/logger'
-import { DevicePlatformHeader, registerDeviceSeen } from '../services/mobile/deviceRegistry.service'
+import { registerDeviceSeen, type DeviceIdentity, type DevicePlatformHeader } from '../services/mobile/deviceRegistry.service'
 
 /** Ventana del debounce. Un dispositivo se escribe a lo más una vez por ventana. */
 const SEEN_TTL_MS = 60_000
@@ -121,16 +121,39 @@ function parsePlatform(value: string | undefined): DevicePlatformHeader | undefi
 }
 
 /**
+ * Fuente única para normalizar los headers de identidad. La usa tanto el hook
+ * pasivo como el PUT explícito de capacidades, para que un mismo request nunca se
+ * vincule a dos deviceUid distintos por diferencias de trim/case/límites.
+ */
+export function readDeviceIdentityFromRequest(req: Request): DeviceIdentity | null {
+  const deviceUid = readHeader(req, 'x-device-id', MAX_UID_LEN)
+  const platform = parsePlatform(readHeader(req, 'x-device-platform'))
+  if (!deviceUid || !platform) return null
+
+  return {
+    deviceUid,
+    platform,
+    manufacturer: readHeader(req, 'x-device-manufacturer'),
+    modelIdentifier: readHeader(req, 'x-device-model'),
+    formFactor: parseFormFactor(readHeader(req, 'x-device-form-factor')),
+    osVersion: readHeader(req, 'x-device-os-version'),
+    appVersion: readHeader(req, 'x-app-version'),
+    serialNumber: readHeader(req, 'x-device-serial'),
+  }
+}
+
+/**
  * Hace el registro. Se llama cuando la respuesta ya se envió.
  * Nunca lanza: cualquier error se traga y se registra.
  */
-function registerFromRequest(req: Request): void {
+function registerFromRequest(req: Request, res: Response): void {
   try {
-    const deviceUid = readHeader(req, 'x-device-id', MAX_UID_LEN)
-    if (!deviceUid) return // apps viejas que aún no mandan el header: sin cambios
+    // El PUT explícito ya aseguró la terminal y escribió el mismo heartbeat dentro
+    // del request. Repetirlo en finish sería una segunda carrera/escritura sin valor.
+    if (res.locals?.deviceRegistrationHandled === true) return
 
-    const platform = parsePlatform(readHeader(req, 'x-device-platform'))
-    if (!platform) return // sin plataforma no sabemos qué tipo de terminal es
+    const identity = readDeviceIdentityFromRequest(req)
+    if (!identity) return // apps viejas o identidad incompleta: sin cambios
 
     // `authContext` lo pobló la ruta que autenticó. En endpoints públicos (login) no
     // existe todavía; el dispositivo se registra en el primer request autenticado, que
@@ -143,23 +166,14 @@ function registerFromRequest(req: Request): void {
     // El debounce se evalúa AQUÍ y no al entrar: si marcáramos la ventana antes de
     // saber si hay authContext, un endpoint público quemaría el turno del dispositivo
     // y retrasaría su registro real hasta 60s.
-    if (!shouldWrite(`${venueId}:${deviceUid}`, Date.now())) return
+    if (!shouldWrite(`${venueId}:${identity.deviceUid}`, Date.now())) return
 
     // `registerDeviceSeen` está escrito para no lanzar nunca, pero el .catch queda como
     // cinturón: una promesa rechazada sin manejar tumbaría el proceso en Node.
     void registerDeviceSeen({
       venueId,
       staffId,
-      identity: {
-        deviceUid,
-        platform,
-        manufacturer: readHeader(req, 'x-device-manufacturer'),
-        modelIdentifier: readHeader(req, 'x-device-model'),
-        formFactor: parseFormFactor(readHeader(req, 'x-device-form-factor')),
-        osVersion: readHeader(req, 'x-device-os-version'),
-        appVersion: readHeader(req, 'x-app-version'),
-        serialNumber: readHeader(req, 'x-device-serial'),
-      },
+      identity,
     }).catch(error => {
       logger.error('[DEVICE REGISTRY] Error no esperado en registro de dispositivo (no bloqueante)', error)
     })
@@ -174,7 +188,7 @@ function registerFromRequest(req: Request): void {
  */
 export function registerDeviceMiddleware(req: Request, res: Response, next: NextFunction): void {
   try {
-    res.on('finish', () => registerFromRequest(req))
+    res.on('finish', () => registerFromRequest(req, res))
   } catch (error) {
     logger.error('[DEVICE REGISTRY] No se pudo enganchar el registro de dispositivo (no bloqueante)', error)
   }

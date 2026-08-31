@@ -125,7 +125,11 @@ function arqueoEnCentavos(rows: ClientRow[], startingCents: number): number {
 describe('contrato `localId` del cajón — el servidor manda la llave que ya tiene guardada', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(SESSION_ROW) }
+    ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue(SESSION_ROW),
+    }
   })
 
   // --------------------------------------------------------------------------
@@ -133,7 +137,7 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
   // --------------------------------------------------------------------------
 
   it('🔴 cada evento de la sesión viaja con su `localId` guardado', async () => {
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
 
     const porId = Object.fromEntries((session!.events as any[]).map(e => [e.id, e]))
     expect(porId['srv-ev-payin'].localId).toBe('local-ev-payin')
@@ -142,7 +146,7 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
   })
 
   it('un evento sin `localId` responde null, no rompe ni omite el campo', async () => {
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
 
     const open = (session!.events as any[]).find(e => e.id === 'srv-ev-open')
     expect(open).toHaveProperty('localId')
@@ -171,7 +175,7 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
     // Lo que el aparato ya tenía en Room antes de actualizar la app.
     const room: ClientRow[] = [{ id: 'local-ev-payin', type: 'PAY_IN', amountCents: 10000 }]
 
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
     const fusionado = mergeServerSession(room, session!.events as any)
 
     expect(arqueoEnCentavos(fusionado, 100000)).toBe(CENTS_CORRECTO)
@@ -182,7 +186,7 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
   it('🔴 SIN la llave (contrato viejo) la MISMA fusión da 533000: +$100 inventados y permanentes', async () => {
     const room: ClientRow[] = [{ id: 'local-ev-payin', type: 'PAY_IN', amountCents: 10000 }]
 
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
     // Ablación: el payload del servidor ANTES de este cambio — mismos eventos, sin `localId`.
     const contratoViejo = (session!.events as any[]).map(({ localId: _omitido, ...resto }) => resto)
     const fusionado = mergeServerSession(room, contratoViejo)
@@ -194,7 +198,7 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
   it('🔴 con un PAY_OUT heredado el error va al otro lado: faltante inventado de $70', async () => {
     const room: ClientRow[] = [{ id: 'local-ev-payout', type: 'PAY_OUT', amountCents: 7000 }]
 
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
     const conLlave = mergeServerSession(room, session!.events as any)
     const sinLlave = mergeServerSession(
       room,
@@ -222,7 +226,7 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
   // --------------------------------------------------------------------------
 
   it('el payload conserva EXACTAMENTE los campos que ya tenía (una app vieja lee igual)', async () => {
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
     const evento = (session!.events as any[]).find(e => e.id === 'srv-ev-payin')
 
     expect(Object.keys(evento).sort()).toEqual(
@@ -242,9 +246,13 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
   })
 
   it('el `expectedAmount` que calcula el servidor no cambió: 5230.00', async () => {
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
 
-    expect(session!.expectedAmount).toBe(5230)
-    expect(Math.round(session!.expectedAmount * 100)).toBe(CENTS_CORRECTO)
+    // `expectedAmount` es opcional desde el conteo ciego (se omite a quien no tiene
+    // `cash-drawer:view-expected`). Aquí se pide con permiso, así que viene — pero se lee sin
+    // `!` para que la prueba siga fallando, y no reventando, si algún día dejara de venir.
+    const esperado = session?.expectedAmount ?? 0
+    expect(esperado).toBe(5230)
+    expect(Math.round(esperado * 100)).toBe(CENTS_CORRECTO)
   })
 })

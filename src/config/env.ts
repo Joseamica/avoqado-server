@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import dotenv from 'dotenv'
 import logger from './logger'
+import { revisarConfiguracionCritica } from './configCheck'
 import { dropEmptyValues } from './envHelpers'
 
 // Load .env file FIRST (before any validation)
@@ -39,6 +40,24 @@ const envSchema = z.object({
   COOKIE_SECRET: z.string().min(16, 'COOKIE_SECRET must be at least 16 characters'),
   JWT_SECRET: z.string().optional(), // Legacy alias for ACCESS_TOKEN_SECRET
   OTP_PEPPER: z.string().min(16), // Server secret peppering WhatsApp/email login OTP hashes
+
+  // Sesiones revocables — Parte A, Task 9: llave AES-256-GCM (hex de 32 bytes) que cifra
+  // el sucesor del refresh token durante la ventana de retransmisión de 60 s
+  // (`RefreshGrant.successorEnc`). Vive FUERA de Postgres a propósito — ver
+  // `src/services/auth/successorCrypto.ts`. OPCIONAL: si falta, ningún entorno se cae al
+  // arrancar; simplemente no se guarda sucesor cifrado y un reintento de refresh se trata
+  // como reutilización real (el comportamiento de hoy, sin esta tarea).
+  // 🔴 [Auditoria Task 9, hallazgo critico] `.length(64, ...)` solo contaba caracteres — un
+  // valor de 64 chars con una letra fuera de [0-9a-f] pasaba Zod, el servidor arrancaba
+  // normal, y `Buffer.from(hex, 'hex')` trunca en el primer byte invalido produciendo una
+  // llave de longitud arbitraria: `crypto.createCipheriv` lanza SIN captura en cada rotacion
+  // de refresh de TODA la plataforma, no solo en la retransmision. El `.regex` cierra eso en
+  // el arranque, donde Zod ya prometia validar el formato pero no lo hacia.
+  SESSION_SUCCESSOR_ENC_KEY: z
+    .string()
+    .length(64, 'SESSION_SUCCESSOR_ENC_KEY debe ser hex de 32 bytes (64 chars)')
+    .regex(/^[0-9a-f]{64}$/i, 'SESSION_SUCCESSOR_ENC_KEY debe ser hex de 32 bytes (64 chars)')
+    .optional(),
 
   // ─────────────────────────────────────────────────────────────────────────
   // INFRASTRUCTURE
@@ -297,31 +316,39 @@ if (!parsed.success) {
 export const env = parsed.data
 
 /**
- * Guardia de ambiente de la integración bancaria (mueve DINERO REAL).
+ * Guardia de la llave que cifra el sucesor del refresh token (Parte A, sesiones revocables).
  *
- * Cambiar el default ya cubre el caso "borraron la variable". Falta el otro: que alguien la
- * ponga EXPLÍCITAMENTE a un host que no debe atender producción. Sin esto no hay señal:
- * contra el entorno dev del proveedor las llamadas "funcionan" (responden 200) pero contra
- * datos que no son los del cliente; contra un dominio retirado fallan sin respuesta.
+ * La variable es OPCIONAL a propósito —tumbar toda la API porque falta la config de UNA pieza
+ * es desproporcionado— pero `opcional` se volvió `silenciosa`: el /full-testing del 2026-08-28
+ * encontró que nunca se había puesto, así que la ventana de retransmisión de 60 s NO EXISTÍA y
+ * cualquier reintento del refresco se leía como robo y REVOCABA la sesión. En un POS con
+ * internet malo eso deja al cajero fuera a media venta, que es justo lo que esa pieza existía
+ * para evitar. El código hacía lo diseñado; nadie se enteraba porque nada lo decía.
  *
- * Es `logger.error`, NO `process.exit`: apagar TODA la API (pagos, POS, órdenes) por la
- * config de una sola feature es desproporcionado. Un error de arranque sí entra a la alerta
- * de Better Stack, que es justo lo que faltaba — el fallo del 2026-08-02/03 fue silencioso.
+ * Mismo patrón y mismo razonamiento que el guardia de `EXTERNAL_BANK_API_BASE` de abajo:
+ * `logger.error` y NO `process.exit`, porque un error de arranque sí entra a la alerta de
+ * Better Stack — que es exactamente lo que faltaba. En desarrollo no se avisa: un dev local no
+ * despliega nada, y un error rojo que sale siempre se aprende a ignorar.
  */
-const EXTERNAL_BANK_UNSAFE_PROD_HOSTS: Record<string, string> = {
-  'qpaydev.xyz': 'entorno DEV del proveedor — no son datos reales del cliente',
-  'moneygiver.xyz': 'dominio RETIRADO — redirige 301 a un host que ya no existe en DNS (2026-07)',
-}
-
-if (env.NODE_ENV === 'production') {
-  const host = new URL(env.EXTERNAL_BANK_API_BASE).hostname
-  const match = Object.keys(EXTERNAL_BANK_UNSAFE_PROD_HOSTS).find(d => host === d || host.endsWith(`.${d}`))
-  if (match) {
-    logger.error(
-      `🔴 EXTERNAL_BANK_API_BASE apunta a "${host}" en PRODUCCIÓN: ${EXTERNAL_BANK_UNSAFE_PROD_HOSTS[match]}. ` +
-        `Conectar banco / saldos / SPEI van a fallar o a operar contra el ambiente equivocado.`,
-    )
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// Revisión de la configuración crítica al arrancar.
+//
+// 🔴 La lógica NO vive aquí: vive en `config/configCheck.ts`, y este bloque sólo la GRITA. El
+// endpoint `GET /api/v1/superadmin/system/config-check` llama a la MISMA función, de modo que lo
+// que dice el arranque y lo que contesta el endpoint no pueden divergir. Si cada uno recolectara
+// por su cuenta acabarían diciendo cosas distintas — es exactamente lo que ya pasó entre el
+// reporte de asistencia y las comisiones con los turnos nocturnos.
+//
+// Es `logger.error` y NO `process.exit`: apagar TODA la API (pagos, POS, órdenes) porque falte la
+// config de una pieza es desproporcionado, y un error de arranque sí entra a la alerta de Better
+// Stack — que es justo lo que faltaba cuando esto era silencio.
+//
+// ⚠️ Y la razón por la que el arranque NO basta, que es lo que motivó el endpoint: en Render las
+// primeras líneas pueden no alcanzar el drenaje de logs, y una variable guardada en el panel sólo
+// entra en vigor cuando el proceso REINICIA. Así que «no veo el error» no prueba que esté bien.
+const revision = revisarConfiguracionCritica(env)
+for (const r of revision.revisiones) {
+  if (!r.ok) logger.error(`🔴 ${r.clave}: ${r.detalle}`)
 }
 
 // Named exports for backward compatibility

@@ -37,6 +37,7 @@ import { deliverySnoozeResumeJob } from './jobs/delivery-snooze-resume.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
+import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -44,6 +45,7 @@ import { reservationAutoNoShowJob } from './jobs/reservation-auto-no-show.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 import { cashOutSettlementJob } from './jobs/cash-out-settlement.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
+import { attendanceLateAlertJob } from './jobs/attendance-late-alert.job'
 import { monthlyOverageBillingJob } from './jobs/monthly-overage-billing.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
@@ -55,6 +57,7 @@ import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
 import { gcalOutboxSweeperJob } from './jobs/gcal-outbox-sweeper.job'
 import { customerApprovalOutboxJob } from './jobs/customer-approval-outbox.job'
 import { publishScheduledAnnouncementsJob } from './jobs/publishScheduledAnnouncements.job'
+import { announcementOutboxJob } from './jobs/announcementOutbox.job'
 import { kioskOutreachJob } from './jobs/kiosk-outreach.job'
 import { gcalChannelRenewalJob } from './jobs/gcal-channel-renewal.job'
 import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
@@ -68,6 +71,7 @@ import { catalogPublicationWatchdogJob } from './jobs/catalog-publication-watchd
 import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
 import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
+import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -138,6 +142,7 @@ const gracefulShutdown = async (signal: string) => {
       tpvHealthMonitorJob.stop()
 
       // Stop terminal-payment watchdog
+      displayModeRequestExpiryJob.stop()
       terminalPaymentWatchdogJob.stop()
 
       // WHY: Publication delivery and expired attempts have independent
@@ -147,6 +152,7 @@ const gracefulShutdown = async (signal: string) => {
       shiftCloseWatchdogJob.stop()
       cashDrawerAutoCloseJob.stop()
       inventoryPostingSweeperJob.stop()
+      cashDrawerReconcilerJob.stop()
 
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
@@ -211,6 +217,7 @@ const gracefulShutdown = async (signal: string) => {
       // Stop auto clock-out job
       logger.info('Stopping auto clock-out job...')
       autoClockOutJob.stop()
+      attendanceLateAlertJob.stop()
 
       // Stop nightly sales summary job
       logger.info('Stopping nightly sales summary job...')
@@ -242,6 +249,7 @@ const gracefulShutdown = async (signal: string) => {
       kioskOutreachJob.stop()
       // Anuncios de plataforma programados
       publishScheduledAnnouncementsJob.stop()
+      announcementOutboxJob.stop()
 
       // Stop Mercado Pago marketplace jobs
       mercadoPagoTokenRefreshJob.stop()
@@ -444,6 +452,7 @@ const startApplication = async (retries = 3) => {
       tpvHealthMonitorJob.start()
 
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
+      displayModeRequestExpiryJob.start()
       terminalPaymentWatchdogJob.start()
 
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
@@ -459,6 +468,7 @@ const startApplication = async (retries = 3) => {
       // El outbox de deducciones de inventario recupera lo que un crash dejó
       // PENDING/APPLYING — sin este job el posting durable es solo un registro.
       inventoryPostingSweeperJob.start()
+      cashDrawerReconcilerJob.start()
 
       // Start subscription cancellation job
       subscriptionCancellationJob.start()
@@ -502,6 +512,7 @@ const startApplication = async (retries = 3) => {
 
       // Start auto clock-out job (every 15 minutes for HR automation)
       autoClockOutJob.start()
+      attendanceLateAlertJob.start()
 
       // Bill chatbot token overage at period rollover (daily at 3:17 AM Mexico City)
       monthlyOverageBillingJob.start()
@@ -541,6 +552,8 @@ const startApplication = async (retries = 3) => {
       kioskOutreachJob.start()
       // Publica los anuncios de plataforma cuya hora programada ya llegó (cada 5 min)
       publishScheduledAnnouncementsJob.start()
+      // Entrega los anuncios encolados (cada 30 s)
+      announcementOutboxJob.start()
       // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
       gcalChannelRenewalJob.start()
       // Horizon refresh: re-sync events newly inside the booking window (daily 04:00)

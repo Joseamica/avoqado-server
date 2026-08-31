@@ -16,16 +16,57 @@
  *   4. Existing fields (terminals/settings/activeTerminalId) are never removed (old apps).
  */
 
-import type { NextFunction, Request, Response } from 'express'
+import express, { type NextFunction, type Request, type Response } from 'express'
+import request from 'supertest'
 
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
-import { getVenueTpvSettings } from '@/controllers/mobile/tpvSettings.mobile.controller'
 import { getTpvSettings } from '@/services/dashboard/tpv.dashboard.service'
+
+const acknowledgeDisplayModeRequestMock = jest.fn()
+const updateLocalDisplayModeMock = jest.fn()
 
 jest.mock('@/services/dashboard/tpv.dashboard.service', () => ({
   getTpvSettings: jest.fn(),
 }))
+
+jest.mock('@/services/display-mode-request.service', () => {
+  const actual = jest.requireActual('@/services/display-mode-request.service')
+  return {
+    ...actual,
+    acknowledgeDisplayModeRequest: (...args: unknown[]) => acknowledgeDisplayModeRequestMock(...args),
+    updateLocalDisplayMode: (...args: unknown[]) => updateLocalDisplayModeMock(...args),
+  }
+})
+
+jest.mock('@/middlewares/authenticateToken.middleware', () => ({
+  authenticateTokenMiddleware: (req: Request, res: Response, next: NextFunction) => {
+    const raw = req.headers['x-test-auth-context']
+    const value = Array.isArray(raw) ? raw[0] : raw
+    if (!value) {
+      res.status(401).json({ message: 'No autorizado' })
+      return
+    }
+    ;(req as any).authContext = JSON.parse(value)
+    next()
+  },
+}))
+
+jest.mock('@/middlewares/validateVenueAccess.middleware', () => ({
+  validateVenueAccess: (_req: Request, _res: Response, next: NextFunction) => next(),
+  requireVenueMembership: (req: Request, res: Response, next: NextFunction) => {
+    const allowedVenueIds: string[] = (req as any).authContext?.allowedVenueIds ?? []
+    if (!allowedVenueIds.includes(req.params.venueId)) {
+      res.status(403).json({ message: 'No tienes acceso a este establecimiento' })
+      return
+    }
+    next()
+  },
+}))
+
+import { getVenueTpvSettings, getDisplayModeRequest, updateDisplayMode } from '@/controllers/mobile/tpvSettings.mobile.controller'
+import { DisplayModeRequestError } from '@/services/display-mode-request.service'
+import mobileRoutes from '@/routes/mobile.routes'
 
 const venueId = 'venue-123'
 const mockedGetTpvSettings = getTpvSettings as jest.MockedFunction<typeof getTpvSettings>
@@ -236,5 +277,226 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
     expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-legacy')
     expect(res.__json.data.activeTerminalId).toBe('terminal-legacy')
     expect(res.__json.data.deviceTerminal).toBeNull()
+  })
+})
+
+describe('mobile display-mode delivery and compatible ACK', () => {
+  const terminalId = 'terminal-display-1'
+  const deviceUid = 'device-display-1'
+  const requestedAt = new Date(Date.now() - 60_000).toISOString()
+  const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
+  const pendingRequest = {
+    requestId: 'request-display-1',
+    desiredInverted: true,
+    status: 'PENDING',
+    requestedAt,
+    requestedBy: 'staff-1',
+    expiresAt,
+  }
+
+  function routeAuthHeaders(allowedVenueIds: string[] = [venueId]): Record<string, string> {
+    return {
+      'x-test-auth-context': JSON.stringify({ userId: 'staff-1', venueId, allowedVenueIds }),
+      'x-device-id': `  ${deviceUid}  `,
+    }
+  }
+
+  function makeRouteApp() {
+    const app = express()
+    app.use(express.json())
+    app.use('/api/v1/mobile', mobileRoutes)
+    app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
+      res.status(error.statusCode ?? 500).json({
+        message: error.message,
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.details !== undefined ? { details: error.details } : {}),
+      })
+    })
+    return app
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.terminal.findFirst.mockResolvedValue({
+      id: terminalId,
+      customerDisplayRequest: pendingRequest,
+      customerDisplayRequestExpiresAt: new Date(expiresAt),
+    })
+    updateLocalDisplayModeMock.mockResolvedValue({
+      mutated: true,
+      version: 0,
+      request: null,
+      customerDisplayInverted: true,
+      previousCustomerDisplayInverted: false,
+    })
+    acknowledgeDisplayModeRequestMock.mockResolvedValue({
+      mutated: true,
+      version: 1,
+      request: { ...pendingRequest, status: 'APPLIED', resolvedAt: new Date().toISOString() },
+      customerDisplayInverted: true,
+    })
+  })
+
+  it('GET binds only by normalized X-Device-ID + venue + POS_ANDROID and returns the server terminal id', async () => {
+    const response = await request(makeRouteApp()).get(`/api/v1/mobile/venues/${venueId}/display-mode-request`).set(routeAuthHeaders())
+
+    expect(response.status).toBe(200)
+    expect(prismaMock.terminal.findFirst).toHaveBeenCalledWith({
+      where: { venueId, deviceUid, type: 'POS_ANDROID' },
+      select: {
+        id: true,
+        customerDisplayRequest: true,
+        customerDisplayRequestExpiresAt: true,
+      },
+    })
+    expect(response.body).toEqual({
+      data: {
+        terminalId,
+        request: {
+          requestId: pendingRequest.requestId,
+          desiredInverted: true,
+          requestedAt,
+          expiresAt,
+        },
+      },
+    })
+  })
+
+  it.each([
+    { customerDisplayRequest: null, customerDisplayRequestExpiresAt: null },
+    {
+      customerDisplayRequest: { ...pendingRequest, status: 'APPLIED' },
+      customerDisplayRequestExpiresAt: new Date(expiresAt),
+    },
+    {
+      customerDisplayRequest: { ...pendingRequest, expiresAt: new Date(Date.now() - 1_000).toISOString() },
+      customerDisplayRequestExpiresAt: new Date(Date.now() - 1_000),
+    },
+  ])('GET returns request:null without mutating non-deliverable state %#', async stored => {
+    prismaMock.terminal.findFirst.mockResolvedValue({ id: terminalId, ...stored })
+
+    const response = await request(makeRouteApp()).get(`/api/v1/mobile/venues/${venueId}/display-mode-request`).set(routeAuthHeaders())
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ data: { terminalId, request: null } })
+    expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+    expect(prismaMock.terminal.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('GET rejects missing device identity and another venue before reading requests', async () => {
+    const missingDevice = await request(makeRouteApp())
+      .get(`/api/v1/mobile/venues/${venueId}/display-mode-request`)
+      .set({ 'x-test-auth-context': routeAuthHeaders()['x-test-auth-context'] })
+    expect(missingDevice.status).toBe(400)
+    expect(missingDevice.body).toMatchObject({ code: 'DEVICE_ID_REQUIRED' })
+
+    const wrongVenue = await request(makeRouteApp())
+      .get(`/api/v1/mobile/venues/${venueId}/display-mode-request`)
+      .set(routeAuthHeaders(['venue-elsewhere']))
+    expect(wrongVenue.status).toBe(403)
+    expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('GET returns a stable 404 when no POS Android matches the exact device binding', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue(null)
+
+    const response = await request(makeRouteApp()).get(`/api/v1/mobile/venues/${venueId}/display-mode-request`).set(routeAuthHeaders())
+
+    expect(response.status).toBe(404)
+    expect(response.body).toMatchObject({ code: 'DEVICE_NOT_FOUND' })
+  })
+
+  it('preserves the legacy PATCH body/status/response and performs the exact technical binding inside the service', async () => {
+    const response = await request(makeRouteApp())
+      .patch(`/api/v1/mobile/venues/${venueId}/terminals/${terminalId}/display-mode`)
+      .set(routeAuthHeaders())
+      .send({ customerDisplayInverted: true })
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ success: true, data: { id: terminalId, customerDisplayInverted: true } })
+    expect(updateLocalDisplayModeMock).toHaveBeenCalledWith({
+      venueId,
+      terminalId,
+      confirmedInverted: true,
+      binding: { deviceUid, type: 'POS_ANDROID' },
+    })
+    expect(acknowledgeDisplayModeRequestMock).not.toHaveBeenCalled()
+  })
+
+  it('accepts an APPLIED v1 ACK without capability gating and uses server-bound route identity', async () => {
+    const response = await request(makeRouteApp())
+      .patch(`/api/v1/mobile/venues/${venueId}/terminals/${terminalId}/display-mode`)
+      .set(routeAuthHeaders())
+      .send({ customerDisplayInverted: true, requestId: pendingRequest.requestId, outcome: 'APPLIED' })
+
+    expect(response.status).toBe(200)
+    expect(acknowledgeDisplayModeRequestMock).toHaveBeenCalledWith({
+      venueId,
+      terminalId,
+      requestId: pendingRequest.requestId,
+      outcome: 'APPLIED',
+      confirmedInverted: true,
+      binding: { deviceUid, type: 'POS_ANDROID' },
+    })
+    expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('accepts coherent REJECTED/LOCAL_OVERRIDE and rejects malformed or extra ACK fields', async () => {
+    const accepted = await request(makeRouteApp())
+      .patch(`/api/v1/mobile/venues/${venueId}/terminals/${terminalId}/display-mode`)
+      .set(routeAuthHeaders())
+      .send({
+        customerDisplayInverted: false,
+        requestId: pendingRequest.requestId,
+        outcome: 'REJECTED',
+        resultCode: 'LOCAL_OVERRIDE',
+      })
+    expect(accepted.status).toBe(200)
+    expect(acknowledgeDisplayModeRequestMock).toHaveBeenCalledWith({
+      venueId,
+      terminalId,
+      requestId: pendingRequest.requestId,
+      outcome: 'REJECTED',
+      resultCode: 'LOCAL_OVERRIDE',
+      confirmedInverted: false,
+      binding: { deviceUid, type: 'POS_ANDROID' },
+    })
+
+    const missingResult = await request(makeRouteApp())
+      .patch(`/api/v1/mobile/venues/${venueId}/terminals/${terminalId}/display-mode`)
+      .set(routeAuthHeaders())
+      .send({ customerDisplayInverted: false, requestId: pendingRequest.requestId, outcome: 'REJECTED' })
+    expect(missingResult.status).toBe(400)
+
+    const extra = await request(makeRouteApp())
+      .patch(`/api/v1/mobile/venues/${venueId}/terminals/${terminalId}/display-mode`)
+      .set(routeAuthHeaders())
+      .send({ customerDisplayInverted: true, unexpected: true })
+    expect(extra.status).toBe(400)
+  })
+
+  it('maps a binding loss to stable 403 and a superseded ACK to stable 409', async () => {
+    updateLocalDisplayModeMock.mockRejectedValueOnce(
+      Object.assign(new Error('El dispositivo no corresponde a esta terminal.'), {
+        statusCode: 403,
+        code: 'DEVICE_BINDING_MISMATCH',
+      }),
+    )
+    const mismatch = await request(makeRouteApp())
+      .patch(`/api/v1/mobile/venues/${venueId}/terminals/${terminalId}/display-mode`)
+      .set(routeAuthHeaders())
+      .send({ customerDisplayInverted: true })
+    expect(mismatch.status).toBe(403)
+    expect(mismatch.body).toMatchObject({ code: 'DEVICE_BINDING_MISMATCH' })
+
+    acknowledgeDisplayModeRequestMock.mockRejectedValueOnce(
+      new DisplayModeRequestError('DEVICE_REQUEST_SUPERSEDED', 'La solicitud cambió; el valor físico sí fue registrado.'),
+    )
+    const superseded = await request(makeRouteApp())
+      .patch(`/api/v1/mobile/venues/${venueId}/terminals/${terminalId}/display-mode`)
+      .set(routeAuthHeaders())
+      .send({ customerDisplayInverted: true, requestId: pendingRequest.requestId, outcome: 'APPLIED' })
+    expect(superseded.status).toBe(409)
+    expect(superseded.body).toMatchObject({ code: 'DEVICE_REQUEST_SUPERSEDED' })
   })
 })

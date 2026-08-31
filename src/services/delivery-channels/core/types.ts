@@ -56,6 +56,19 @@ export interface NormalizedDeliveryPayment {
   saleAmount: string
   /** cargos cobrados al cliente que se pagan AL COMERCIO (bolsa, envío propio…) */
   merchantFees: string
+  /**
+   * Promociones y descuentos aplicados al pedido, IVA incluido (México: el precio en pantalla
+   * ya lo lleva, así que el descuento se aplica sobre el precio con impuesto).
+   *
+   * Se guarda APARTE de `saleAmount` a propósito, como hace el mercado: Square define las
+   * ventas brutas SIN ajustar por descuentos y las netas como la resta, y Fudo tiene
+   * «Descuentos ($)» como línea propia del reporte. Así el negocio ve cuánto le costaron sus
+   * promociones en vez de encontrarse una venta más chica sin explicación — y de paso
+   * `saleAmount` sigue cuadrando al centavo contra la suma de los renglones.
+   *
+   * Opcional: los canales que aún no lo informan siguen funcionando igual (se lee como 0).
+   */
+  discountAmount?: string
   tipAmount: string
   /** parte de (saleAmount + merchantFees) que la plataforma liquida al comercio */
   externallyPaidSale: string
@@ -216,6 +229,20 @@ export interface DirectDeliveryAdapter {
    *  · cancelar = deshacerlo DESPUÉS. Cuesta más caro: el cliente ya está esperando su comida.
    */
   cancelOrder?(orderId: string, storeId: string, reason?: DenyReason): Promise<ActionResult>
+
+  /**
+   * "La comida ya está lista": avisa al proveedor que puede mandar (o apurar) al repartidor.
+   * Capacidad que la validación de producción de Uber exige ver funcionando (caso 59605086,
+   * "Order: Mark Order as Ready"). La dispara el KDS al marcar listo — sin botón nuevo.
+   */
+  markOrderReady?(orderId: string, storeId: string): Promise<ActionResult>
+
+  /**
+   * "No tengo estos artículos" DESPUÉS de aceptar: el proveedor avisa al cliente en su app
+   * para que decida (cancelar o modificar) en vez de recibir una bolsa incompleta.
+   * `cartItemIds` son ids de LÍNEA del pedido del proveedor, no de nuestro menú.
+   */
+  resolveFulfillmentIssues?(orderId: string, storeId: string, cartItemIds: string[]): Promise<ActionResult>
   markReady?(orderId: string, storeId: string): Promise<ActionResult>
 
   publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown; precios?: unknown }): Promise<ActionResult>

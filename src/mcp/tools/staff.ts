@@ -3,11 +3,13 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { inviteTeamMember, updateTeamMember } from '@/services/dashboard/team.dashboard.service'
 import { ROLE_HIERARCHY } from '@/lib/permissions'
 import { StaffRole } from '@prisma/client'
+import { DateTime } from 'luxon'
 
 // SUPERADMIN deliberately excluded — an agent must never be able to grant it.
 const INVITE_ROLE_MAP: Record<string, StaffRole> = {
@@ -23,6 +25,38 @@ const INVITE_ROLE_MAP: Record<string, StaffRole> = {
 
 export function registerStaffTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'who_is_late_now',
+    'Who SHOULD already be at work RIGHT NOW and has not clocked in yet, for ONE venue. Answers "\u00bfya llegaron todos?", "\u00bfqui\u00e9n falta?", "\u00bfqui\u00e9n falta por llegar?" while the day is still happening \u2014 the attendance report answers the same question AFTER the fact. Uses the venue schedule (fixed roster, rotating shifts and exceptions) plus the venue tolerance in minutes; someone without a schedule is never judged, and a day off is never judged. Read-only.',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('attendance:read', venueId)
+      const { quienVaTarde } = await import('../../services/dashboard/attendanceLiveAlert')
+      return text(await quienVaTarde(venueId, new Date()))
+    },
+  )
+
+  server.tool(
+    'work_shifts',
+    'Rotating WORK shifts (fase 1 "como Sesame"): the venue\'s shift templates (e.g. Abre 08–16, Cierre 11–19) and the person×day assignments for a date range (max 31 days), with DRAFT/PUBLISHED status. Only PUBLISHED assignments count for attendance and commissions, and only when the venue enabled rotating shifts. Read-only. Pass venueId, from and to (YYYY-MM-DD).',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+      from: z.string().describe('Start date YYYY-MM-DD'),
+      to: z.string().describe('End date YYYY-MM-DD (max 31 days)'),
+    },
+    async ({ venueId, from, to }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('attendance:read', venueId)
+      const { listTemplates, getAssignments } = await import('../../services/dashboard/workShift.service')
+      const settings = await prisma.venueSettings.findUnique({ where: { venueId }, select: { rotatingShiftsEnabled: true } })
+      const [templates, assignments] = await Promise.all([listTemplates(venueId, true), getAssignments(venueId, from, to)])
+      return text({ venueId, rotatingShiftsEnabled: settings?.rotatingShiftsEnabled ?? false, templates, assignments })
+    },
+  )
 
   server.tool(
     'list_staff',
@@ -75,7 +109,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'attendance_payroll_summary',
-    'Fase 3 del checador — payroll bridge for ONE venue: per-person period numbers a payroll needs (scheduled/worked days, late days + minutes, absences BY TYPE — vacation, paid/unpaid leave, sick leave, justified — and worked hours). Same permission as the dashboard payroll view.',
+    "Fase 3 del checador — payroll bridge for ONE venue: per-person period numbers a payroll needs (scheduled/worked days, late days + minutes, absences BY TYPE — vacation, paid/unpaid leave, sick leave, justified — and worked hours). ALSO returns OVERTIME per Mexican labour law (LFT art. 66-68). Overtime is AUTHORIZED, not automatic: overtimeMinutes is what the clock MEASURED, and it splits into overtimeApprovedMinutes (someone signed off), overtimePendingMinutes (nobody has reviewed it yet — chase these, unpaid hours must never be invisible) and overtimeDeniedMinutes (reviewed and refused). ONLY the approved minutes are paid, so overtimeDoubleMinutes (first 9 h of EACH week, art. 67) and overtimeTripleMinutes (the excess, art. 68) are computed on the APPROVED total, and overtimeWeeks is its week-by-week breakdown. hasOvertimeViolation is computed on what was MEASURED instead, because breaking the art. 66 caps (over 3 h in one day, or overtime on more than 3 days) already happened whether or not it got authorized. overtimeDaysToReview lists days whose clock-out changed AFTER being authorized. Overtime counts ONLY time worked AFTER the scheduled end, minus breaks taken in that window — arriving early is not overtime. A week the requested range does not fully cover is flagged `parcial`: its double/triple split is not final. Returns MINUTES, never pesos — the hourly wage lives in the venue's payroll system. Use approve_overtime to authorize. Same permission as the dashboard payroll view.",
     {
       venueId: z.string().describe('Venue whose payroll summary to read (must be in your scope)'),
       startDate: z.string().describe('Period start, YYYY-MM-DD (venue-local)'),
@@ -87,6 +121,72 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       const { getPayrollSummary } = await import('../../services/dashboard/attendancePayroll.service')
       const summary = await getPayrollSummary(venueId, startDate, endDate)
       return text(summary)
+    },
+  )
+
+  server.tool(
+    'approve_overtime',
+    'Authorize the overtime worked by ONE person on ONE day, so it can be paid. Mexican labour law (LFT art. 66-68) — the founder decided overtime is NOT paid just because the clock measured it: someone authorizes it, and only the authorized minutes enter the double/triple split. You may authorize LESS than measured (partial: "she stayed 2 h, I approve 1 h") but NEVER more — the server recomputes what the clock actually measured and rejects anything above it. Authorizing 0 means reviewed and DENIED, which is different from not reviewed (no record) — unreviewed overtime shows up as PENDING in attendance_payroll_summary so unpaid hours can never be invisible. Re-authorizing the same day CORRECTS the previous decision, it does not add to it. Two-step: the first call returns a preview, and only a second call with confirm:true writes.',
+    {
+      venueId: z.string().describe('Venue where the person works (must be in your scope)'),
+      staffVenueId: z.string().describe('Membership id of the person (staffVenueId from attendance_payroll_summary), NOT the staffId'),
+      date: z.string().describe('Day of the SHIFT, YYYY-MM-DD (venue-local)'),
+      minutesApproved: z.number().int().min(0).describe('Minutes to authorize. 0 = reviewed and denied'),
+      note: z.string().max(500).optional().describe('Why (optional) — kept in the audit trail'),
+      expectedUpdatedAt: z
+        .string()
+        .optional()
+        .describe(
+          'REQUIRED to change a day that is already authorized: the updatedAt you saw (from attendance_payroll_summary). Without it the change is refused, so two people cannot silently overwrite each other',
+        ),
+      confirm: z.boolean().optional().describe('Set true to actually write; without it you get a preview'),
+    },
+    async ({ venueId, staffVenueId, date, minutesApproved, note, confirm, expectedUpdatedAt }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // Firmar lo que se paga NO es leer un reporte: `:manage`, que los roles de piso no tienen.
+      guard.requirePermission('attendance:manage', venueId)
+      // 🔴 Y el scope OAuth de ESCRITURA, sin depender del interruptor de despliegue. El guard
+      // general es observar-y-permitir a propósito (para no romper conexiones al desplegar),
+      // pero un token de sólo lectura que firma nómina es un agujero, no un riesgo de rollout.
+      // Hallazgo #6 de la auditoría de Codex (29-ago-2026).
+      requireWriteScopeAlways(scope, 'attendance:manage')
+
+      const { approveOvertime } = await import('../../services/dashboard/overtimeApproval.service')
+
+      // Confirmación de dos pasos: esto decide cuánto se le paga a una persona, y lo dispara un
+      // modelo interpretando una petición vaga. La vista previa enseña el ANTES y el DESPUÉS.
+      if (!confirm) {
+        const { buildAttendanceGrid } = await import('../../services/dashboard/attendance.dashboard.service')
+        const { cells } = await buildAttendanceGrid(venueId, date, date)
+        const celda = cells.find(c => c.staffVenueId === staffVenueId && c.date === date)
+        if (!celda) return text({ ok: false, error: 'No encontré a esa persona ese día en este negocio.' })
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            persona: celda.name,
+            dia: date,
+            minutosMedidos: celda.overtimeMinutes,
+            minutosAAutorizar: minutesApproved,
+          },
+          message:
+            `Vas a autorizar ${minutesApproved} de los ${celda.overtimeMinutes} minutos extra que ` +
+            `${celda.name} trabajó el ${date}. Eso es lo que entrará al pago doble/triple. ` +
+            `Confirma con confirm:true.`,
+        })
+      }
+
+      const r = await approveOvertime({
+        venueId,
+        staffVenueId,
+        date,
+        minutesApproved,
+        approvedById: scope.staffId,
+        note,
+        expectedUpdatedAt,
+        source: 'customer-mcp',
+      })
+      return text({ ok: true, ...r })
     },
   )
 
@@ -124,8 +224,10 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         })
       }
 
-      const from = startDate ? new Date(`${startDate}T00:00:00.000Z`) : undefined
-      const to = endDate ? new Date(`${endDate}T23:59:59.999Z`) : undefined
+      const venue = startDate || endDate ? await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }) : null
+      const timezone = venue?.timezone || 'America/Mexico_City'
+      const from = startDate ? DateTime.fromISO(startDate, { zone: timezone }).startOf('day').toJSDate() : undefined
+      const to = endDate ? DateTime.fromISO(endDate, { zone: timezone }).endOf('day').toJSDate() : undefined
 
       const rows = await prisma.timeEntry.findMany({
         where: {

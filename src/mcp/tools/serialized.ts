@@ -63,6 +63,20 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
     throw new ScopeError('Missing permission sim-custody:approve-registration in this organization')
   }
 
+  /** Mirrors organizationStockControl.routes.ts: OWNER/MANAGER (or platform SUPERADMIN) may read the org-wide custody table. */
+  function requireOrgInventoryReader(): string {
+    if (!scope.activeOrg) {
+      throw new ScopeError('No hay una organización activa en esta conexión — reconéctate eligiendo una organización.')
+    }
+    if (scope.isSuperAdmin) return scope.activeOrg
+    for (const access of scope.perVenueAccess.values()) {
+      if (access.organizationId === scope.activeOrg && (access.role === StaffRole.OWNER || access.role === StaffRole.MANAGER)) {
+        return scope.activeOrg
+      }
+    }
+    throw new ScopeError('No tienes acceso al inventario de la organización')
+  }
+
   server.tool(
     'serialized_inventory',
     'Inventory of serialized items (SIMs, barcoded units, certificates) across your venues, counted by status: AVAILABLE, SOLD, RETURNED, DAMAGED. Pass venueId to focus one venue. (Org-level items not tied to a venue are not counted here.)',
@@ -808,11 +822,11 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
       categoryId: z.string().optional().describe('Sólo un tipo de artículo'),
     },
     async ({ receivingVenueId, categoryId }) => {
+      const orgId = requireOrgInventoryReader()
       const access = await requireOrgSerializedAccess()
       if ('moduleOff' in access) {
         return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
       }
-      const orgId = access.orgId
 
       const data = await orgInventoryByResponsibleService.getInventoryByResponsible(orgId, {
         receivingVenueId: receivingVenueId ?? null,

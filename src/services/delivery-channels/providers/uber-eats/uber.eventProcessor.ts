@@ -15,7 +15,7 @@
  * el evento queda FAILED para reconciliar con el comercio; al revés, un pedido perfectamente
  * ingerido se cancela solo y el cliente se queda sin comida.
  */
-import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, OrderAcceptanceMode } from '@prisma/client'
+import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, OrderAcceptanceMode, OrderStatus } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -264,7 +264,7 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
 
     // 4. Convertirlo en venta.
     const normalizado = uberAdapter.normalizeOrder(crudo)
-    const { order, kitchenTicketCreated } = await ingestDeliveryOrder(normalizado, link)
+    const { order, created, kitchenTicketCreated, hayComanda } = await ingestDeliveryOrder(normalizado, link)
 
     // 🔴 REQUISITO DE UBER, y además es seguridad de una persona: la integración debe
     // RECHAZAR el pedido cuando no puede transmitir alergias o instrucciones especiales
@@ -276,7 +276,23 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     // SIN enterarse de la alergia — y nadie nota que faltó nada. Cancelar es peor servicio y
     // muchísimo mejor que eso.
     const traeInstrucciones = normalizado.items.some(i => typeof i.notes === 'string' && i.notes.trim().length > 0)
-    if (traeInstrucciones && !kitchenTicketCreated && !normalizado.scheduledFor) {
+    // 🔴 La pregunta correcta es "¿HAY comanda?", no "¿era nueva la orden?".
+    //
+    // Aquí estuvo `created` y su motivo era bueno: los webhooks de Uber son at-least-once, y
+    // en un evento DUPLICADO la ingesta reusa la venta sin recrear la comanda
+    // (`kitchenTicketCreated=false`), así que sin ese término cada reintento cancelaba en Uber
+    // un pedido perfectamente bueno que la cocina ya estaba preparando.
+    //
+    // Pero `created` responde otra cosa —"la orden no existía"— y en CUALQUIER reproceso vale
+    // false, así que desarmaba la red de seguridad justo cuando sí hacía falta: si la comanda
+    // vuelve a fallar en el reintento, el pedido se quedaba vivo en Uber con su nota de
+    // alergia sin llegar a la cocina, y el evento se cerraba como PROCESSED.
+    //
+    // `hayComanda` cubre los dos casos con una sola pregunta: el duplicado la encuentra (no
+    // cancela) y el reintento sin comanda no (cancela, que es para lo que se escribió).
+    // `pedidoVivo` evita cancelar lo ya cancelado: ahí no hay nada que rescatar.
+    const pedidoVivo = order.status !== OrderStatus.CANCELLED
+    if (traeInstrucciones && !hayComanda && pedidoVivo && !normalizado.scheduledFor) {
       logger.error('🚨 [Uber] el pedido trae INSTRUCCIONES y no llegaron a la cocina — se CANCELA', {
         eventRowId,
         orderId: order.id,

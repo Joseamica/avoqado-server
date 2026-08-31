@@ -15,6 +15,14 @@ export class RoomManagerService {
   private socketsByOrder: Map<string, Set<string>> = new Map()
   private socketsByRole: Map<StaffRole, Set<string>> = new Map()
   private socketsByUser: Map<string, Set<string>> = new Map()
+  /**
+   * Sesiones revocables (Parte A, Task 11) — registro LOCAL por `Session.id` (claim `sid`).
+   * Correcto y suficiente con una sola instancia (`.claude/rules/una-sola-instancia.md`):
+   * todo socket vivo de esa sesión está en ESTE proceso. Ausente para sockets con token
+   * legacy (sin `sid`) — nunca se registran aquí, así que nunca los toca
+   * `disconnectBySession`.
+   */
+  private socketsBySession: Map<string, Set<string>> = new Map()
 
   /**
    * Register a socket connection
@@ -28,7 +36,7 @@ export class RoomManagerService {
       return
     }
 
-    const { socketId, userId, venueId, role } = socket.authContext
+    const { socketId, userId, venueId, role, sessionId } = socket.authContext
 
     // Store socket reference
     this.connectedSockets.set(socketId, socket)
@@ -41,6 +49,11 @@ export class RoomManagerService {
 
     // Add to user room
     this.addToUserRoom(userId, socketId)
+
+    // Add to session room (sesiones revocables, Task 11) — sólo si el token traía `sid`
+    if (sessionId) {
+      this.addToSessionRoom(sessionId, socketId)
+    }
 
     logger.info('Socket registered successfully', {
       socketId,
@@ -64,13 +77,16 @@ export class RoomManagerService {
       return
     }
 
-    const { userId, venueId, role } = socket.authContext
+    const { userId, venueId, role, sessionId } = socket.authContext
 
     // Remove from all collections
     this.connectedSockets.delete(socketId)
     this.removeFromVenueRoom(venueId, socketId)
     this.removeFromRoleRoom(role, socketId)
     this.removeFromUserRoom(userId, socketId)
+    if (sessionId) {
+      this.removeFromSessionRoom(sessionId, socketId)
+    }
 
     // Remove from all table rooms
     this.removeFromAllTableRooms(socketId)
@@ -252,6 +268,17 @@ export class RoomManagerService {
   }
 
   /**
+   * Sockets abiertos con una `Session.id` (claim `sid`) dada — sesiones revocables,
+   * Task 11. Usado por `SocketManager.disconnectBySession` para cerrarlos al revocar.
+   */
+  public getSessionSockets(sessionId: string): AuthenticatedSocket[] {
+    const socketIds = this.socketsBySession.get(sessionId) || new Set()
+    return Array.from(socketIds)
+      .map(id => this.connectedSockets.get(id))
+      .filter((socket): socket is AuthenticatedSocket => socket !== undefined)
+  }
+
+  /**
    * Filter sockets by broadcast options
    */
   public filterSocketsByOptions(sockets: AuthenticatedSocket[], options: BroadcastOptions = {}): AuthenticatedSocket[] {
@@ -406,6 +433,23 @@ export class RoomManagerService {
       userSet.delete(socketId)
       if (userSet.size === 0) {
         this.socketsByUser.delete(userId)
+      }
+    }
+  }
+
+  private addToSessionRoom(sessionId: string, socketId: string): void {
+    if (!this.socketsBySession.has(sessionId)) {
+      this.socketsBySession.set(sessionId, new Set())
+    }
+    this.socketsBySession.get(sessionId)!.add(socketId)
+  }
+
+  private removeFromSessionRoom(sessionId: string, socketId: string): void {
+    const sessionSet = this.socketsBySession.get(sessionId)
+    if (sessionSet) {
+      sessionSet.delete(socketId)
+      if (sessionSet.size === 0) {
+        this.socketsBySession.delete(sessionId)
       }
     }
   }

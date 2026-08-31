@@ -9,18 +9,38 @@
  *   GET /dashboard/tpv/:tpvId/settings
  */
 
+import { TerminalType } from '@prisma/client'
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
+import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.service'
 import { TpvSettings, getTpvSettings } from '../../services/dashboard/tpv.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
+import type { UpdateDisplayModeInput } from '../../schemas/mobile/tpvSettings.mobile.schema'
+import {
+  DisplayModeRequestError,
+  acknowledgeDisplayModeRequest,
+  parseDisplayModeRequest,
+  updateLocalDisplayMode,
+} from '../../services/display-mode-request.service'
 
 function requestDeviceUid(req: Request): string | null {
   const raw = req.headers?.['x-device-id']
   const value = Array.isArray(raw) ? raw[0] : raw
   const trimmed = typeof value === 'string' ? value.trim().slice(0, 64) : ''
   return trimmed || null
+}
+
+function requireRequestDeviceUid(req: Request): string {
+  const deviceUid = requestDeviceUid(req)
+  if (!deviceUid) throw new BadRequestError('X-Device-ID es requerido', 'DEVICE_ID_REQUIRED')
+  return deviceUid
+}
+
+function mapDisplayModeRequestError(error: unknown): unknown {
+  if (!(error instanceof DisplayModeRequestError)) return error
+  return new AppError(error.message, error.statusCode, true, error.code)
 }
 
 /**
@@ -161,6 +181,47 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
 }
 
 /**
+ * Entrega ligera de la intención vigente al POS Android que hizo la solicitud.
+ * No expira ni resuelve nada durante la lectura.
+ * @route GET /api/v1/mobile/venues/:venueId/display-mode-request
+ */
+export const getDisplayModeRequest = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const deviceUid = requireRequestDeviceUid(req)
+    const terminal = await prisma.terminal.findFirst({
+      where: { venueId, deviceUid, type: TerminalType.POS_ANDROID },
+      select: {
+        id: true,
+        customerDisplayRequest: true,
+        customerDisplayRequestExpiresAt: true,
+      },
+    })
+    if (!terminal) throw new NotFoundError('Dispositivo POS Android no encontrado.', 'DEVICE_NOT_FOUND')
+
+    const stored = parseDisplayModeRequest(terminal.customerDisplayRequest)
+    const now = Date.now()
+    const deliverable = stored?.status === 'PENDING' && new Date(stored.expiresAt).getTime() > now ? stored : null
+
+    res.status(200).json({
+      data: {
+        terminalId: terminal.id,
+        request: deliverable
+          ? {
+              requestId: deliverable.requestId,
+              desiredInverted: deliverable.desiredInverted,
+              requestedAt: deliverable.requestedAt,
+              expiresAt: deliverable.expiresAt,
+            }
+          : null,
+      },
+    })
+  } catch (error) {
+    next(mapDisplayModeRequestError(error))
+  }
+}
+
+/**
  * Set (or clear) whether THIS terminal has an inverted customer display —
  * the customer sees the big screen and the cashier works the small one.
  * Per-DEVICE (how that counter is physically wired), not per-venue. The POS
@@ -171,40 +232,54 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
 export const updateDisplayMode = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, terminalId } = req.params
-    const { customerDisplayInverted } = req.body as { customerDisplayInverted: boolean }
+    const deviceUid = requireRequestDeviceUid(req)
+    const body = req.body as UpdateDisplayModeInput
+    const binding = { deviceUid, type: TerminalType.POS_ANDROID } as const
 
-    // Verify the terminal belongs to THIS venue before writing — otherwise a
-    // valid token for venue A could reconfigure venue B's counter.
-    const terminal = await prisma.terminal.findFirst({
-      where: { id: terminalId, venueId },
-      select: { id: true, customerDisplayInverted: true },
-    })
+    if ('requestId' in body) {
+      const result = await acknowledgeDisplayModeRequest({
+        venueId,
+        terminalId,
+        requestId: body.requestId,
+        outcome: body.outcome,
+        ...('resultCode' in body ? { resultCode: body.resultCode } : {}),
+        confirmedInverted: body.customerDisplayInverted,
+        binding,
+      })
 
-    if (!terminal) {
-      return res.status(404).json({
-        success: false,
-        message: 'La terminal no pertenece a este establecimiento',
+      return res.json({
+        success: true,
+        data: { id: terminalId, customerDisplayInverted: result.customerDisplayInverted },
       })
     }
 
-    const updated = await prisma.terminal.update({
-      where: { id: terminalId },
-      data: { customerDisplayInverted },
-      select: { id: true, customerDisplayInverted: true },
+    const result = await updateLocalDisplayMode({
+      venueId,
+      terminalId,
+      confirmedInverted: body.customerDisplayInverted,
+      binding,
     })
 
-    await logAction({
+    // Compatibilidad del body legacy: conserva la bitácora del actor autenticado.
+    // Las transiciones con requestId ya quedan auditadas atómicamente en Task 4.
+    void logAction({
       staffId: req.authContext?.userId ?? null,
       venueId,
       action: 'TERMINAL_DISPLAY_MODE_UPDATED',
       entity: 'Terminal',
-      entityId: updated.id,
-      data: { from: terminal.customerDisplayInverted, to: updated.customerDisplayInverted },
+      entityId: terminalId,
+      data: {
+        from: result.previousCustomerDisplayInverted,
+        to: result.customerDisplayInverted,
+      },
     })
 
-    return res.json({ success: true, data: updated })
+    return res.json({
+      success: true,
+      data: { id: terminalId, customerDisplayInverted: result.customerDisplayInverted },
+    })
   } catch (error) {
     logger.error('Error updating terminal display mode', { error })
-    next(error)
+    next(mapDisplayModeRequestError(error))
   }
 }

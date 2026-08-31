@@ -9,6 +9,7 @@ import { parseDeliverectOrder } from '../services/delivery-channels/providers/de
 import { ingestDeliveryOrder } from '../services/delivery-channels/core/deliveryOrderIngestion.service'
 import { markEventResult } from '../services/delivery-channels/core/deliveryWebhookEvent.service'
 import { processUberEvent } from '../services/delivery-channels/providers/uber-eats/uber.eventProcessor'
+import { processRappiEvent } from '../services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { scheduleJob } from '../observability/jobContext'
 
 /**
@@ -67,7 +68,7 @@ export class DeliveryWebhookReconciliationJob {
    * `reprocesarSegunProveedor` — pasarle a uno el traductor de otro revienta el payload y
    * mata un pedido real. Al integrar Rappi/DiDi se amplía aquí Y allá, nunca sólo aquí.
    */
-  private static readonly RECONCILABLE_PROVIDERS = [DeliveryProvider.DELIVERECT, DeliveryProvider.UBER_EATS]
+  private static readonly RECONCILABLE_PROVIDERS = [DeliveryProvider.DELIVERECT, DeliveryProvider.UBER_EATS, DeliveryProvider.RAPPI]
 
   /**
    * Errores TERMINALES: reintentarlos no puede cambiar el resultado, así que la fila se
@@ -95,6 +96,9 @@ export class DeliveryWebhookReconciliationJob {
   /** Backoff cap in minutes for `nextAttemptAt` scheduling (exponential: 2^attemptCount, capped here). */
   private readonly BACKOFF_CAP_MINUTES = 60
 
+  /** Candado en memoria: una sola pasada a la vez (ver `runOnce`). */
+  private enCurso = false
+
   start(): void {
     if (this.job) return
     this.job = scheduleJob(
@@ -121,6 +125,18 @@ export class DeliveryWebhookReconciliationJob {
    * the next tick, same as `blumon-webhook-reconciliation.job.ts`).
    */
   async runOnce(): Promise<{ reprocessed: number; orphaned: number }> {
+    // 🔴 UNA pasada a la vez. El cron dispara cada 2 minutos con `void this.runOnce()`, sin
+    // esperar a que la anterior termine: una pasada lenta (lote grande, Uber respondiendo
+    // despacio) se encima con la siguiente, las dos seleccionan el MISMO evento FAILED y las
+    // dos lo reprocesan. Eso puede crear DOS comandas del mismo pedido —`KdsOrder.orderId`
+    // no es único— y la cocina prepara la comida dos veces (hallazgo de Codex, 2ª pasada;
+    // medido: el webhook NO participa de esta carrera porque su índice único descarta el
+    // duplicado en el ingreso, y los eventos RECEIVED sólo entran al job tras 10 minutos).
+    if (this.enCurso) {
+      logger.warn('🛵 [Delivery recon] La pasada anterior sigue corriendo — se salta este tick')
+      return { reprocessed: 0, orphaned: 0 }
+    }
+    this.enCurso = true
     const startedAt = Date.now()
     try {
       const { reprocessed, orphanedImmediate } = await this.reprocessStuckEvents()
@@ -136,6 +152,10 @@ export class DeliveryWebhookReconciliationJob {
         stack: err instanceof Error ? err.stack : undefined,
       })
       return { reprocessed: 0, orphaned: 0 }
+    } finally {
+      // En `finally`: si la pasada revienta, el flag DEBE soltarse o el job queda muerto
+      // para siempre y nadie rescata un solo pedido.
+      this.enCurso = false
     }
   }
 
@@ -283,6 +303,23 @@ export class DeliveryWebhookReconciliationJob {
     event: { id: string; provider: DeliveryProvider; payload: unknown; externalEventId: string; venueId: string | null },
     channelLink: Parameters<typeof ingestDeliveryOrder>[1],
   ): Promise<boolean> {
+    if (event.provider === DeliveryProvider.RAPPI) {
+      const r = await processRappiEvent(event.id)
+      if (
+        r.outcome === 'PROCESSED' ||
+        r.outcome === 'ALREADY_DONE' ||
+        r.outcome === 'NOT_AN_ORDER' ||
+        r.outcome === 'CANCELLED' ||
+        r.outcome === 'SCHEDULED_NOTED' ||
+        r.outcome === 'MENU_VERDICT' ||
+        r.outcome === 'STORE_STATE'
+      ) {
+        return true
+      }
+      if (r.outcome === 'ORPHANED') return false
+      throw new Error(r.error ?? 'Rappi: fallo desconocido al reprocesar')
+    }
+
     if (event.provider === DeliveryProvider.UBER_EATS) {
       // El procesador de Uber hace el camino completo (traer, aceptar, ingerir, marcar) y
       // NO lanza: reporta el desenlace. Traducirlo es lo que decide reintento vs. rendición.

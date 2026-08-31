@@ -28,6 +28,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { broadcastTpvCommandStatusChanged, broadcastTpvCommandQueued, broadcastTpvStatusUpdate } from '../../communication/sockets'
+import { assertDeviceActionSupported } from '../device-capabilities.service'
 
 /**
  * Command configuration per type
@@ -286,10 +287,15 @@ export class TpvCommandQueueService {
         id: true,
         name: true,
         serialNumber: true,
+        type: true,
         status: true,
         lastHeartbeat: true,
         isLocked: true,
         venueId: true,
+        customerDisplayPresent: true,
+        customerDisplayInvertible: true,
+        displayModeProtocolVersion: true,
+        capabilitiesObservedAt: true,
         venue: {
           select: { name: true },
         },
@@ -303,6 +309,8 @@ export class TpvCommandQueueService {
     if (terminal.venueId !== venueId) {
       throw new BadRequestError('Terminal does not belong to this venue')
     }
+
+    assertDeviceActionSupported(terminal, { kind: 'REMOTE_COMMAND', commandType })
 
     // Validate command against terminal state
     await this.validateCommandForTerminal(commandType, terminal)

@@ -34,6 +34,8 @@ import * as upsellMobileController from '../controllers/mobile/upsell.mobile.con
 import { recordUpsellImpressionSchema, convertUpsellImpressionSchema } from '../schemas/dashboard/upsell.schema'
 import { updateDisplayModeSchema } from '../schemas/mobile/tpvSettings.mobile.schema'
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
+import { reportDeviceCapabilitiesSchema } from '../schemas/mobile/deviceCapabilities.mobile.schema'
+import * as deviceCapabilitiesMobileController from '../controllers/mobile/deviceCapabilities.mobile.controller'
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
@@ -54,15 +56,18 @@ import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mo
 import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
 import * as areaTicketExternalMobileController from '../controllers/mobile/areaTicketExternal.mobile.controller'
 import * as permissionOverrideMobileController from '../controllers/mobile/permission-override.mobile.controller'
+import * as switchUserMobileController from '../controllers/mobile/switch-user.mobile.controller'
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
+import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateVenueAccess, requireVenueMembership } from '../middlewares/validateVenueAccess.middleware'
-import { pinLoginRateLimiter, pinOverrideRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
+import { pinLoginRateLimiter, pinOverrideRateLimiter, pinSwitchUserRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -1048,6 +1053,55 @@ router.post(
   permissionOverrideMobileController.createOverride,
 )
 
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/auth/switch-user:
+ *   post:
+ *     tags: [Mobile Auth]
+ *     summary: Cambiar de usuario con PIN, sin cerrar sesión
+ *     description: |
+ *       Releva a quien está operando el aparato. Devuelve la MISMA forma que el login
+ *       (`accessToken`, `refreshToken`, `staff`) para que la app reuse su camino de guardado y
+ *       refresque la UI con los permisos de quien entra.
+ *
+ *       Requiere una sesión VIVA en el aparato: el PIN nunca abre una tablet donde nadie inició
+ *       sesión con contraseña. La sesión saliente queda revocada.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-Id
+ *         schema: { type: string }
+ *         description: Identificador del aparato. Es la llave del limitador de intentos.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [pin]
+ *             properties:
+ *               pin: { type: string, example: "1234", description: "4 a 10 dígitos" }
+ *     responses:
+ *       200: { description: Usuario cambiado; tokens y permisos nuevos }
+ *       401: { description: PIN incorrecto, o no hay sesión viva en el aparato }
+ *       429: { description: Demasiados intentos desde este aparato }
+ */
+router.post(
+  '/venues/:venueId/auth/switch-user',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  // 🔴 Cubeta PROPIA y contada por APARATO (no por IP): las tablets de un local comparten IP por
+  // NAT, así que contar por IP dejaría a todo el negocio sin cambiar de usuario por los dedos de
+  // una sola persona. Misma lección que ya documentó el override al compartir cubeta con el reloj.
+  pinSwitchUserRateLimiter,
+  validateRequest(switchUserSchema),
+  switchUserMobileController.switchUser,
+)
+
 // ============================================================================
 // TIME CLOCK (Reloj Checador)
 // PIN-based identification - no JWT required
@@ -1891,6 +1945,25 @@ router.get(
   tpvSettingsMobileController.getVenueTpvSettings,
 )
 
+// Hechos técnicos observados por el POS Android. El dispositivo se identifica por
+// X-Device-ID; no requiere activación y no acepta un terminalId elegido por el body.
+router.put(
+  '/venues/:venueId/device-capabilities',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(reportDeviceCapabilitiesSchema),
+  deviceCapabilitiesMobileController.reportDeviceCapabilities,
+)
+
+// Entrega v1 ligera: el terminalId viene del vínculo exacto del propio X-Device-ID.
+// No se mezcla con /settings y una lectura nunca expira ni muta la intención.
+router.get(
+  '/venues/:venueId/display-mode-request',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  tpvSettingsMobileController.getDisplayModeRequest,
+)
+
 // Mostrador invertido (customer-display grande/chico) — por DISPOSITIVO. El POS
 // aplica su valor local y sincroniza con este; el dashboard lo puede cambiar remoto.
 router.patch(
@@ -1908,9 +1981,12 @@ router.patch(
 router.get('/notifications', authenticateTokenMiddleware, notificationMobileController.getUserNotifications)
 
 // ===== Anuncios de plataforma (aditivo: el buzon de /notifications NO se toca) =====
+// 🔴 `/home` va ANTES que `/:id`, si no Express toma "home" como un id.
+router.get('/announcements/home', authenticateTokenMiddleware, announcementReadController.home)
 router.get('/announcements/:id', authenticateTokenMiddleware, announcementReadController.getDetail)
 router.post('/announcements/:id/open', authenticateTokenMiddleware, announcementReadController.open)
 router.post('/announcements/:id/cta', authenticateTokenMiddleware, announcementReadController.cta)
+router.post('/announcements/:id/dismiss', authenticateTokenMiddleware, announcementReadController.dismiss)
 
 router.get('/notifications/unread-count', authenticateTokenMiddleware, notificationMobileController.getUnreadCount)
 router.patch('/notifications/:notificationId/read', authenticateTokenMiddleware, notificationMobileController.markAsRead)
@@ -2187,6 +2263,11 @@ router.get(
   '/venues/:venueId/cash-drawer/current',
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
+  // No bloquea: sólo marca si puede ver el efectivo esperado. Sin el permiso, la respuesta
+  // llega sin ese campo mientras la caja esté abierta (conteo ciego). El POS no lo lee —lo
+  // calcula con `startingAmount` y los eventos, que sí siguen viajando—, así que ninguna app
+  // instalada cambia de comportamiento.
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   cashDrawerMobileController.getCurrent,
 )
 
@@ -2199,6 +2280,8 @@ router.post(
   '/venues/:venueId/cash-drawer/open',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  // Mismo criterio que `current`: quien puede ver el esperado lo recibe también al abrir.
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   cashDrawerMobileController.openSession,
 )
 

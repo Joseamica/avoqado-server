@@ -1,12 +1,16 @@
 import { OAuth2Client } from 'google-auth-library'
+import { issueGrant } from '@/services/auth/refreshGrant.service'
+import { refreshGrantExpiry } from '@/services/mobile/auth.mobile.service'
+import crypto from 'crypto'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
+import { StaffRole, OrgRole, InvitationStatus, AuthMethod } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId } from '../staffOrganization.service'
 import { assertCanAddSeatsBulk } from '../access/seatCap.service'
 import { logAction } from './activity-log.service'
+import { createSession } from '@/services/auth/session.service'
 
 // Validate Google OAuth configuration
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
@@ -475,9 +479,35 @@ export async function loginWithGoogle(
 
   // Generate tokens (derive orgId from venue)
   const googleOrgId = selectedVenue.venue.organizationId
-  const accessToken = jwtService.generateAccessToken(staff.id, googleOrgId, selectedVenue.venueId, selectedVenue.role)
 
-  const refreshToken = jwtService.generateRefreshToken(staff.id, googleOrgId)
+  // Parte A (sesiones revocables): igual que el login por contraseña — la Session nace
+  // antes que los tokens y su id viaja como `sid`. Entrar con Google no puede ser la
+  // puerta que se queda sin poder cancelarse.
+  //
+  // 🔴 `undefined` explícito en el 5º (rememberMe) para alcanzar el 6º (opts); y sin
+  // `pos: true`, que es del POS y no del panel web.
+  const session = await createSession({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    // ⚠️ [Auditoría 2026-08-30, P2 — DECLARADO, no arreglado] Entrar con Google NO es entrar con
+    // contraseña, y `Session.authMethod` es justo el campo que alguien lee en una revisión de
+    // seguridad. El enum `AuthMethod` sólo tiene PASSWORD/PIN/BIOMETRIC: corregirlo pide agregar
+    // un valor al enum con su migración, y eso no entra en el mismo cambio que cierra huecos de
+    // autenticación. Queda anotado aquí para que el siguiente no lo lea como intencional.
+    authMethod: AuthMethod.PASSWORD,
+  })
+
+  const accessToken = jwtService.generateAccessToken(staff.id, googleOrgId, selectedVenue.venueId, selectedVenue.role, undefined, {
+    sid: session.id,
+  })
+
+  const refreshToken = jwtService.generateRefreshToken(staff.id, googleOrgId, undefined, selectedVenue.venueId, { sid: session.id })
+
+  // 🔴 [Auditoría 2026-08-30, P2] Sin este grant el refresh token queda HUÉRFANO: lleva `sid`,
+  // así que `rotateGrant` lo trata como parte de una familia, no encuentra su fila y devuelve
+  // REUTILIZADO — que no sólo rechaza el refresco, además REVOCA la sesión. Un token que se
+  // suicida en su primer uso. Misma línea, mismo motivo, que en los dos logins móviles.
+  await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry())
 
   // Access log. `loginWithGoogleOneTap` delegates here, so this single row covers both SSO
   // paths. The method is recorded separately because in a security review signing in with a

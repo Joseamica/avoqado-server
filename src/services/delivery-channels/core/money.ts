@@ -33,6 +33,7 @@ export function assertDeliveryMoneyInvariants(p: NormalizedDeliveryPayment, item
   const campos: Array<[string, string]> = [
     ['saleAmount', p.saleAmount],
     ['merchantFees', p.merchantFees],
+    ['discountAmount', p.discountAmount ?? '0.00'],
     ['tipAmount', p.tipAmount],
     ['externallyPaidSale', p.externallyPaidSale],
     ['externallyPaidTip', p.externallyPaidTip],
@@ -49,13 +50,21 @@ export function assertDeliveryMoneyInvariants(p: NormalizedDeliveryPayment, item
     if (d.isNegative()) throw new DeliveryMoneyMismatchError(`El monto "${nombre}" es negativo: ${valor}`)
   }
 
-  const ventaTotal = q(D(p.saleAmount).plus(D(p.merchantFees)))
+  // El descuento RESTA de lo que se cobra: bruto + cargos − descuento = lo que entra, ya sea
+  // liquidado por la plataforma o cobrado en efectivo. Sin este término, una promoción hacía
+  // que la venta declarada y el dinero recibido dejaran de cuadrar — y como el mapper la
+  // aplastaba a cero, el invariante no lo notaba.
+  const descuento = q(D(p.discountAmount ?? '0.00'))
+  const ventaTotal = q(D(p.saleAmount).plus(D(p.merchantFees)).minus(descuento))
   const ventaSplit = q(D(p.externallyPaidSale).plus(D(p.cashDueSale)))
   if (!ventaTotal.equals(ventaSplit)) {
     throw new DeliveryMoneyMismatchError(
-      `La venta no cuadra: saleAmount + merchantFees = ${ventaTotal.toFixed(2)}, ` +
+      `La venta no cuadra: saleAmount + merchantFees − discountAmount = ${ventaTotal.toFixed(2)}, ` +
         `pero externallyPaidSale + cashDueSale = ${ventaSplit.toFixed(2)}.`,
     )
+  }
+  if (descuento.greaterThan(q(D(p.saleAmount).plus(D(p.merchantFees))))) {
+    throw new DeliveryMoneyMismatchError(`El descuento (${descuento.toFixed(2)}) excede la venta: no se ingiere para no invertir el signo.`)
   }
 
   const propina = q(D(p.tipAmount))

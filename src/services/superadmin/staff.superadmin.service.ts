@@ -6,6 +6,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { deleteOrRetainStaffWithH1Provenance } from './staffDeletion.service'
+import { cerrarSesionesNuevasPorCambioDeContrasena } from '@/utils/passwordChangeGuard'
 
 // ===========================================
 // TYPES
@@ -655,8 +656,21 @@ export async function resetPassword(staffId: string, newPassword: string, perfor
   const hashed = await bcrypt.hash(newPassword, 10)
   await prisma.staff.update({
     where: { id: staffId },
-    data: { password: hashed },
+    data: {
+      password: hashed,
+      // 🔴 The stamp — not the new hash — is what expels the open sessions
+      // (see passwordChangeGuard: it compares the token's `iat` against this).
+      // Without it, THIS path — the one support uses when an account is reported
+      // compromised — was the only reset that left every stolen session alive,
+      // for up to 90 days on a "remember me" refresh token.
+      lastPasswordReset: new Date(),
+    },
   })
+
+  // 🔴 Same reset, second lever: close the new `Session` rows (T1-T6) too, so a
+  // token carrying `sid` dies the same way as one that doesn't. Best-effort —
+  // see `cerrarSesionesNuevasPorCambioDeContrasena`.
+  await cerrarSesionesNuevasPorCambioDeContrasena(staffId)
 
   logger.info(`[STAFF-SUPERADMIN] Password reset for staff`, { staffId, email: staff.email })
 

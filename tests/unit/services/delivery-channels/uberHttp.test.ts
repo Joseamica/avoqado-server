@@ -217,6 +217,11 @@ describe('uber.http', () => {
       expect(orderIdFromResourceHref('https://test-api.uber.com/v2/eats/order/abc-123')).toBe('abc-123')
     })
 
+    it('🔴 acepta también la familia uAPI (/v1/delivery/order/…) — las tiendas v1.0.0 apuntan ahí; perderla mataría el pedido en silencio tras el ACK', () => {
+      expect(orderIdFromResourceHref('https://test-api.uber.com/v1/delivery/order/abc-123')).toBe('abc-123')
+      expect(orderIdFromResourceHref('https://api.uber.com/v1/delivery/order/xyz-789?expand=carts')).toBe('xyz-789')
+    })
+
     it('extrae el id de un href de producción', () => {
       expect(orderIdFromResourceHref('https://api.uber.com/v2/eats/order/xyz-789')).toBe('xyz-789')
     })
@@ -243,5 +248,22 @@ describe('uber.http', () => {
       expect(orderIdFromResourceHref('https://test-api.uber.com/v2/eats/order/')).toBeNull()
       expect(orderIdFromResourceHref('https://test-api.uber.com/v2/eats/order/%20%20')).toBeNull()
     })
+  })
+})
+
+describe('🔴 toda llamada a Uber lleva timeout', () => {
+  // Sin él, una llamada colgada congela a quien la esperaba. El caso concreto: el job de
+  // reconciliación tiene un candado de "una pasada a la vez"; una llamada que nunca responde
+  // deja ese candado puesto PARA SIEMPRE y el job deja de rescatar pedidos, sin un solo
+  // error en el log. `fetch` de Node espera indefinidamente (Codex, 4ª pasada).
+  it('uberRequest manda un AbortSignal', async () => {
+    const espia = jest.fn().mockResolvedValue({ status: 200, text: async () => '{}' })
+    await uberRequest(
+      { environment: 'SANDBOX', token: 't', writableStores: new Set(), fetchImpl: espia as unknown as typeof fetch },
+      { method: 'GET', path: '/v1/delivery/stores' },
+    )
+    const opciones = espia.mock.calls[0][1]
+    expect(opciones.signal).toBeDefined()
+    expect(typeof opciones.signal.aborted).toBe('boolean')
   })
 })

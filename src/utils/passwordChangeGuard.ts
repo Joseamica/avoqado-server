@@ -1,6 +1,13 @@
 /**
  * Echar de las sesiones abiertas a quien ya no debe estar.
  *
+ * DOS DISPARADORES, UN SOLO CORTE. El corte nacio con uno solo —cambiar la
+ * contrasena— y hoy tiene dos: tambien lo mueve la propia persona con "cerrar
+ * sesion en todos mis dispositivos" (`sessionsRevokedAt`), que es el caso de la
+ * tablet olvidada en un taxi: hasta ahora el dueno tenia que cambiarse la
+ * contrasena para salir de un aparato que ya no tiene. Se compara contra el MAS
+ * RECIENTE de los dos; el resto del mecanismo no cambia.
+ *
  * PROBLEMA: cambiar la contrasena no cerraba ninguna sesion. El caso caro no es
  * el prospecto nuevo — es el dueno que corre a un gerente, le cambia la
  * contrasena creyendo que lo dejo fuera, y el gerente sigue entrando desde su
@@ -19,6 +26,10 @@
  * consulta a la base a CADA request autenticado del dashboard y de las TPV.
  */
 import prisma from './prismaClient'
+import logger from '../config/logger'
+import { revokeAllSessionsForStaff } from '../services/auth/session.service'
+import { invalidateSession } from '../services/auth/sessionCache'
+import socketManager from '../communication/sockets/managers/socketManager'
 
 /**
  * Margen para relojes desfasados entre procesos. Sin el, alguien que cambia su
@@ -31,11 +42,11 @@ const MARGEN_RELOJ_MS = 5_000
 const TTL_MS = 30_000
 
 /**
- * Decision pura: ¿este token nacio antes del ultimo cambio de contrasena?
+ * Decision pura: ¿este token nacio antes del corte?
  *
  * Ante la duda NUNCA echa a nadie. Un token sin `iat`, o una cuenta que jamas
- * ha cambiado su contrasena (la enorme mayoria hoy), pasan. Equivocarse hacia
- * el otro lado significaria sacar a todos los clientes al mismo tiempo.
+ * ha movido su corte (la enorme mayoria hoy), pasan. Equivocarse hacia el otro
+ * lado significaria sacar a todos los clientes al mismo tiempo.
  */
 export function tokenEmitidoAntesDelCambio(iatSegundos: number | undefined, cambio: Date | null | undefined): boolean {
   if (!cambio) return false
@@ -43,24 +54,55 @@ export function tokenEmitidoAntesDelCambio(iatSegundos: number | undefined, camb
   return iatSegundos * 1000 < cambio.getTime() - MARGEN_RELOJ_MS
 }
 
-const cache = new Map<string, { cambio: Date | null; expira: number }>()
+/**
+ * Por que se corto la sesion. Importa porque es lo que se le dice a la persona:
+ * ensenarle "tu contrasena cambio" a quien acaba de tocar "cerrar mis sesiones"
+ * lo manda a recuperar una contrasena que nadie toco.
+ */
+export type MotivoDeCorte = 'PASSWORD_CHANGED' | 'SESSIONS_REVOKED'
+
+/** El mensaje que ven las tres rieles, para que no se separen. */
+export function mensajeDeCorte(motivo: MotivoDeCorte): string {
+  return motivo === 'SESSIONS_REVOKED'
+    ? 'Cerraste la sesión en todos tus dispositivos. Vuelve a iniciar sesión.'
+    : 'Tu contraseña cambió. Vuelve a iniciar sesión.'
+}
+
+const cache = new Map<string, { corte: Corte | null; expira: number }>()
+
+interface Corte {
+  fecha: Date
+  motivo: MotivoDeCorte
+}
+
+/** El corte es el MAS RECIENTE de los dos disparadores; null si ninguno se ha usado. */
+function corteEfectivo(reset: Date | null | undefined, revocacion: Date | null | undefined): Corte | null {
+  if (!reset && !revocacion) return null
+  if (!reset) return { fecha: revocacion!, motivo: 'SESSIONS_REVOKED' }
+  if (!revocacion) return { fecha: reset, motivo: 'PASSWORD_CHANGED' }
+  // Empate: gana el cambio de contrasena. Es el mensaje mas util de los dos —
+  // dice que la contrasena vieja ya no sirve.
+  return reset.getTime() >= revocacion.getTime()
+    ? { fecha: reset, motivo: 'PASSWORD_CHANGED' }
+    : { fecha: revocacion, motivo: 'SESSIONS_REVOKED' }
+}
 
 /** Solo para tests: deja la cache como recien arrancada. */
 export function _limpiarCacheDeCambiosDeContrasena(): void {
   cache.clear()
 }
 
-async function ultimoCambio(staffId: string): Promise<Date | null> {
+async function ultimoCambio(staffId: string): Promise<Corte | null> {
   const ahora = Date.now()
   const enCache = cache.get(staffId)
-  if (enCache && enCache.expira > ahora) return enCache.cambio
+  if (enCache && enCache.expira > ahora) return enCache.corte
 
   const staff = await prisma.staff.findUnique({
     where: { id: staffId },
-    select: { lastPasswordReset: true },
+    select: { lastPasswordReset: true, sessionsRevokedAt: true },
   })
-  const cambio = staff?.lastPasswordReset ?? null
-  cache.set(staffId, { cambio, expira: ahora + TTL_MS })
+  const corte = corteEfectivo(staff?.lastPasswordReset, staff?.sessionsRevokedAt)
+  cache.set(staffId, { corte, expira: ahora + TTL_MS })
 
   // La cache crece con los usuarios activos, no sin limite; aun asi se poda
   // cuando se pasa de un tamano razonable para un proceso.
@@ -69,7 +111,26 @@ async function ultimoCambio(staffId: string): Promise<Date | null> {
       if (v.expira <= ahora) cache.delete(k)
     }
   }
-  return cambio
+  return corte
+}
+
+/**
+ * Como `sesionInvalidadaPorCambioDeContrasena`, pero dice POR QUE — para que el
+ * mensaje que ve la persona sea el que de verdad le paso.
+ */
+export async function motivoDeSesionInvalidada(
+  staffId: string | undefined,
+  iatSegundos: number | undefined,
+): Promise<MotivoDeCorte | null> {
+  if (!staffId || typeof iatSegundos !== 'number') return null
+  try {
+    const corte = await ultimoCambio(staffId)
+    return corte && tokenEmitidoAntesDelCambio(iatSegundos, corte.fecha) ? corte.motivo : null
+  } catch {
+    // Igual que abajo: la base caida NUNCA puede convertirse en un cierre de
+    // sesion masivo de todos los clientes.
+    return null
+  }
 }
 
 /**
@@ -82,10 +143,81 @@ export async function sesionInvalidadaPorCambioDeContrasena(
   staffId: string | undefined,
   iatSegundos: number | undefined,
 ): Promise<boolean> {
-  if (!staffId || typeof iatSegundos !== 'number') return false
+  return (await motivoDeSesionInvalidada(staffId, iatSegundos)) !== null
+}
+
+/**
+ * "Cerrar sesion en todos mis dispositivos": mueve el corte de esta persona a
+ * AHORA, asi que todo token vivo suyo —dashboard, TPV, Android, iOS— muere en
+ * la siguiente peticion.
+ *
+ * 🔴 Mata TAMBIEN la sesion desde la que se pidio, a proposito. Es lo que hace
+ * Square (al cerrar sesion te deja elegir "esta" o "todas", y "todas" incluye
+ * el dashboard, el POS y el KDS) y es lo unico honesto: si el motivo es que la
+ * cuenta pudo quedar expuesta, dejar viva una sesion —justo la que un intruso
+ * podria estar usando para pedirlo— seria dejar el hueco abierto.
+ *
+ * 🔴 Vive AQUI, junto a la cache, y no en un servicio: sin borrar la entrada
+ * cacheada el corte nuevo tarda hasta `TTL_MS` en verse, y la persona que
+ * acaba de tocar el boton es justo la que tiene su entrada recien calentada.
+ * Serian 30 segundos mas de vida para la tablet que se quiere apagar.
+ */
+export async function revokeAllSessions(staffId: string): Promise<Date> {
+  const ahora = new Date()
+  await prisma.staff.update({ where: { id: staffId }, data: { sessionsRevokedAt: ahora } })
+  cache.delete(staffId)
+  return ahora
+}
+
+/**
+ * Cuando se cambia la contrasena, tambien hay que cerrar las `Session` NUEVAS
+ * (T1-T6) — si no, el corte de arriba (basado en `lastPasswordReset`) y las
+ * Session dejan de decir lo mismo. Un token que trae `sid` (los que emite el
+ * login movil desde la Task 6) YA muere en el refresco por el `iat` viejo,
+ * pero la fila `Session` que ese `sid` senala se quedaria con
+ * `revokedAt: null`, y `isSessionAliveCached` seguiria sirviendo "viva" en
+ * OTRA instancia hasta por el TTL de la cache (ver `sessionCache.ts`).
+ *
+ * Best-effort a proposito: el corte de `lastPasswordReset` YA protege en cada
+ * request, sincrónicamente — esto es defensa en profundidad para las Session
+ * con `sid`. Un tropiezo aqui (Postgres o Redis caidos) NUNCA puede bloquear
+ * el cambio de contrasena en si, que es la operacion que de verdad importa.
+ *
+ * 🔴 Primero se leen las Session vivas, LUEGO se revocan (`revokeAllSessionsForStaff`,
+ * que ya commitea su propio UPDATE atomico), y SOLO DESPUES se invalida cada
+ * una en la cache — invalidar antes del commit dejaria una ventana donde una
+ * lectura concurrente repuebla "viva" justo antes de que la base la marque
+ * revocada. Vive AQUI y no dentro de `session.service` porque `sessionCache`
+ * ya importa `session.service`: si `session.service` importara la cache
+ * habria un ciclo de imports (decision de la Task 4).
+ */
+export async function cerrarSesionesNuevasPorCambioDeContrasena(staffId: string): Promise<void> {
+  return cerrarSesionesDeStaff(staffId, 'password_changed')
+}
+
+/**
+ * El mismo cierre, con el MOTIVO como parámetro.
+ *
+ * 🔴 [Auditoría 2026-08-30, P1] Nació al arreglar el logout del dashboard, que necesitaba
+ * exactamente esta secuencia —leer las vivas, revocarlas, invalidar caché, cortar sockets— pero
+ * con otro motivo. Copiarla habría dejado dos versiones del mismo procedimiento delicado, y la
+ * copia es justo donde después se olvida uno de los cuatro pasos.
+ *
+ * `revokedReason` es lo que alguien lee cuando audita por qué se cayó una sesión: escribir
+ * «password_changed» en un cierre de sesión voluntario sería una bitácora que miente.
+ */
+export async function cerrarSesionesDeStaff(staffId: string, motivo: string): Promise<void> {
   try {
-    return tokenEmitidoAntesDelCambio(iatSegundos, await ultimoCambio(staffId))
-  } catch {
-    return false
+    const vivas = await prisma.session.findMany({ where: { staffId, revokedAt: null }, select: { id: true } })
+    await revokeAllSessionsForStaff(staffId, motivo)
+    await Promise.all(vivas.map(s => invalidateSession(s.id)))
+    // Sesiones revocables (Parte A, Task 11): además de invalidar la caché, cerrar los
+    // sockets que ya estaban abiertos con esas Session — si no, quien tenía el socket
+    // abierto sigue recibiendo eventos en tiempo real con una sesión que ya no vive, hasta
+    // que algo más lo desconecte. Nunca truena (best-effort por diseño, ver su docstring);
+    // el try/catch de esta función es sólo la red de seguridad de las líneas de arriba.
+    vivas.forEach(s => socketManager.disconnectBySession(s.id))
+  } catch (err) {
+    logger.warn('[AUTH] No se pudieron cerrar las Session nuevas tras el cambio de contrasena', { staffId, err })
   }
 }

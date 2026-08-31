@@ -33,6 +33,10 @@ process.env.REFRESH_TOKEN_SECRET = 'test-refresh-token-secret'
 process.env.SESSION_SECRET = 'test-session-secret'
 process.env.COOKIE_SECRET = 'test-cookie-secret'
 process.env.OTP_PEPPER = 'test-otp-pepper-secret'
+// Parte A (sesiones revocables): sin esta llave la ventana de retransmisión de 60 s queda
+// APAGADA y la integración probaría el modo degradado en vez del real — un reintento del
+// refresco se leería como robo. Hex de 32 bytes, igual que en el setup de unit.
+process.env.SESSION_SUCCESSOR_ENC_KEY = process.env.SESSION_SUCCESSOR_ENC_KEY || 'b'.repeat(64)
 // Some app-level integration suites import module-load singletons. A dummy key
 // lets those deterministic paths initialize without authorizing a real request.
 process.env.OPENAI_API_KEY = 'sk-test-dummy-for-jest'

@@ -101,12 +101,25 @@ export class ConnectionController {
       }
 
       // Manually authenticate using the middleware logic
+      //
+      // 🔴 `{ ...socket }` only copies OWN enumerable properties — `Socket extends
+      // EventEmitter`, so `.on`/`.disconnect`/`.emit` live on the prototype and a plain
+      // spread silently drops them (`mockSocket.on` ends up `undefined`). Nothing used to
+      // call them on `mockSocket`, so the gap was invisible; sesiones revocables (Task 11)
+      // made `socketAuthenticationMiddleware` register a `disconnect` cleanup listener and
+      // schedule `socket.disconnect()` for when the token expires, and BOTH need to reach
+      // the REAL socket — a throwaway plain object can't emit or be disconnected. Delegating
+      // them explicitly is also the semantically correct behavior, not just a patch: the
+      // manually re-authenticated connection is this same real socket, so it must get the
+      // same exp-based protection as one authenticated at handshake.
       const mockSocket = {
         ...socket,
         handshake: {
           ...socket.handshake,
           auth: { token: payload.token },
         },
+        on: socket.on.bind(socket),
+        disconnect: socket.disconnect.bind(socket),
       } as unknown as AuthenticatedSocket
 
       socketAuthenticationMiddleware(mockSocket, (error?: Error) => {

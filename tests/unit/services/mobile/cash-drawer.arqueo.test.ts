@@ -43,6 +43,8 @@ describe('arqueo del cajón — la venta suma, el reembolso resta una sola vez',
 
   it('🔴 el esperado SUMA las ventas en efectivo: $100 inicial + $250 vendidos = $350', async () => {
     ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue({
         id: 'session-1',
         venueId: VENUE,
@@ -56,13 +58,15 @@ describe('arqueo del cajón — la venta suma, el reembolso resta una sola vez',
       }),
     }
 
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
 
     expect(session?.expectedAmount).toBe(350)
   })
 
   it('🔴 el reembolso sigue restando UNA vez (su PAY_OUT), no dos', async () => {
     ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue({
         id: 'session-1',
         venueId: VENUE,
@@ -77,7 +81,7 @@ describe('arqueo del cajón — la venta suma, el reembolso resta una sola vez',
       }),
     }
 
-    const session = await getCurrentSession(VENUE)
+    const session = await getCurrentSession(VENUE, true)
 
     expect(session?.expectedAmount).toBe(320)
   })
@@ -88,7 +92,11 @@ describe('syncEvents — el servidor es dueño del CASH_SALE (no hay doble conte
 
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(sesion) }
+    ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue(sesion),
+    }
     ;(prismaMock as any).cashDrawerEvent = {
       createMany: jest.fn().mockResolvedValue({ count: 1 }),
       findMany: jest.fn().mockResolvedValue([]),

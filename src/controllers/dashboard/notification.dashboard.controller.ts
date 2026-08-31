@@ -188,6 +188,12 @@ export const markAllAsRead = asyncHandler(async (req: AuthenticatedRequest, res:
  * Delete notification
  * DELETE /api/v1/dashboard/notifications/:id
  */
+export const deleteAllNotifications = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.authContext!.userId
+  const resultado = await notificationService.deleteAllNotifications(userId)
+  res.json({ success: true, data: resultado })
+})
+
 export const deleteNotification = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const notificationId = req.params.id
   const userId = req.authContext?.userId

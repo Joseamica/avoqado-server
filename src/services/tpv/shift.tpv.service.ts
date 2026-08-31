@@ -1,3 +1,4 @@
+import { resolveShiftCashDrawer } from '../dashboard/shift.dashboard.service'
 import { Prisma, Shift, ShiftStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
@@ -941,6 +942,24 @@ export interface CashReconciliationResult {
   outcome: CashReconciliationOutcome
   countedCash?: string
   cashDifference?: string
+  /**
+   * Fase 5 de la unificación de caja: el arqueo del CAJÓN físico que cubrió este turno
+   * (Android + TPV al cobrar). Campo NUEVO y OPCIONAL: sólo viaja cuando hay una caja que
+   * cubre el turno; una PAX vieja lo ignora. La PAX nueva lo muestra junto a su propia
+   * conciliación para que el cajero vea las DOS verdades — y si no coinciden, se note.
+   */
+  cashDrawer?: {
+    sessionId: string
+    status: string
+    deviceName: string | null
+    openedAt: string
+    closedAt: string | null
+    /** Ausente si quien cierra no tiene `cash-drawer:view-expected` y el cajón sigue abierto. */
+    expectedAmount?: number
+    counted: boolean
+    actualAmount: number | null
+    overShort: number | null
+  }
 }
 
 export interface ShiftCloseRequestContext {
@@ -1646,6 +1665,43 @@ async function closeShiftUsingRequest(
     }
     if (outcome === 'APPLIED' && cashDifference) {
       reconciliation.cashDifference = moneyString(cashDifference)
+    }
+    // Fase 5: la PAX LEE el cajón. Se adjunta el arqueo de la caja física que cubrió el
+    // turno (campo opcional; se omite si no hay caja). Es informativo — nunca puede hacer
+    // fallar un cierre que ya está commiteado, por eso el try/catch.
+    try {
+      // P2 (Codex): el turno YA está cerrado y commiteado; la PAX espera 12 s. Una consulta lenta no
+      // puede convertir un cierre exitoso en un NetworkError: si tarda más de 1.5 s, va sin el campo.
+      const drawer = await Promise.race([
+        resolveShiftCashDrawer(venueId, updatedShift.startTime, updatedShift.endTime ?? new Date()),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 1500).unref?.()),
+      ])
+      // 🔴 Con el conteo ciego, `expectedAmount` puede venir ausente (cajón todavía ABIERTO y
+      // quien cierra sin `cash-drawer:view-expected`). En ese caso NO se adjunta el bloque:
+      // `CashDrawerSummaryDto.expectedAmount` es un `Double` NO nullable en la PAX y Gson
+      // rellena un primitivo ausente con 0.0, así que la terminal imprimiría "Esperado en el
+      // cajón: $0.00" — una cifra de dinero FALSA. El objeto entero sí es opcional allá
+      // (`cashDrawer: CashDrawerSummaryDto? = null`) y la pantalla ya sabe no pintar la
+      // sección, que es exactamente lo que debe pasar cuando no se puede mostrar el número.
+      if (drawer && drawer.expectedAmount !== undefined) {
+        reconciliation.cashDrawer = {
+          sessionId: drawer.sessionId,
+          // P1 (Codex 27-ago): la PAX debe poder decir DE QUÉ caja es el número — aparato y horario.
+          status: drawer.status,
+          deviceName: drawer.deviceName,
+          openedAt: drawer.openedAt,
+          closedAt: drawer.closedAt,
+          expectedAmount: drawer.expectedAmount,
+          counted: drawer.counted,
+          actualAmount: drawer.actualAmount,
+          overShort: drawer.overShort,
+        }
+      }
+    } catch (err) {
+      logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al cierre del turno', {
+        shiftId: updatedShift.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
 
     return { shift: updatedShift, reconciliation }

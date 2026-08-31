@@ -64,10 +64,18 @@ function spanDays(exception: WorkScheduleException): number {
  * MÁS CORTA: unas vacaciones de una semana con un día suelto para cubrir un turno tienen
  * que resolverse a favor del día suelto, que es la instrucción más reciente y más precisa.
  */
+/** Asignación de turno rotativo para un día (fase 1 "como Sesame"). Sólo cuenta si está PUBLICADA. */
+export interface ShiftAssignmentForDay {
+  startTime: string
+  endTime: string
+  status?: string
+}
+
 export function resolveExpectedDay(
   weekly: WeeklyWorkSchedule | null | undefined,
   exceptions: WorkScheduleException[],
   dateIso: string,
+  assignment?: ShiftAssignmentForDay | null,
 ): ExpectedDay {
   // Desempate determinista (Codex P2-6): misma duración → gana OFF sobre HOURS (descansar es
   // la instrucción más conservadora: no genera una falta), y luego la que empieza más tarde
@@ -86,6 +94,12 @@ export function resolveExpectedDay(
       return { start: winner.startTime, end: winner.endTime, isDayOff: false }
     }
     // HOURS sin horas es un dato incompleto: se ignora y se cae al cuadrante.
+  }
+
+  // Turnos rotativos: la asignación PUBLICADA va entre la excepción y la jornada fija. Un borrador
+  // no cuenta — publicar es la instrucción; armar la semana es trabajo en curso.
+  if (assignment && (assignment.status ?? 'PUBLISHED') === 'PUBLISHED' && assignment.startTime && assignment.endTime) {
+    return { start: assignment.startTime, end: assignment.endTime, isDayOff: false }
   }
 
   if (!weekly) return NOTHING_EXPECTED

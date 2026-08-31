@@ -44,7 +44,12 @@ describe('rutas de asistencia — candados', () => {
     expect(find('get', path)?.permission).toBe('attendance:read')
   })
 
-  it.each([['put', '/venues/:venueId/team/:staffVenueId/work-schedule']])('%s %s exige attendance:manage', (method, path) => {
+  it.each([
+    ['put', '/venues/:venueId/team/:staffVenueId/work-schedule'],
+    // 🔴 Autorizar horas extra es FIRMAR lo que se paga, no leer un reporte: exige `:manage`,
+    // que los roles de piso nunca tienen. Con `:read` un cajero se autorizaría sus propias horas.
+    ['put', '/venues/:venueId/team/:staffVenueId/overtime-approval'],
+  ])('%s %s exige attendance:manage', (method, path) => {
     expect(find(method, path)?.permission).toBe('attendance:manage')
   })
 

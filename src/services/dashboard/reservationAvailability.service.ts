@@ -9,7 +9,9 @@ import {
   isLiveSlotHold,
 } from './appointmentStaffAssignment.service'
 import {
+  applyBufferToEndsAt,
   resolveAppointmentBaseDurationIfAllAppointments,
+  resolveBufferAfterMin,
   resolveCanonicalAppointmentDuration,
 } from '../reservation/resolveAppointmentWindow'
 
@@ -149,6 +151,7 @@ export async function getAvailableSlots(
   ]
   let canonicalProductIds = requestedProductIds
   let defaultDuration: number
+  let canonicalBufferAfterMin: number | undefined
 
   if (options.fixedDurationMin !== undefined) {
     if (!Number.isInteger(options.fixedDurationMin) || options.fixedDurationMin < 1 || options.fixedDurationMin > 1440) {
@@ -162,6 +165,7 @@ export async function getAvailableSlots(
       settings: normalizedSettings,
     })
     canonicalProductIds = canonical.productIds
+    canonicalBufferAfterMin = canonical.bufferAfterMin
     const advisoryDuration = options.duration ?? canonical.canonicalBaseDurationMin
     if (
       !Number.isInteger(advisoryDuration) ||
@@ -187,6 +191,8 @@ export async function getAvailableSlots(
     })
     defaultDuration = canonicalBaseMin === null ? requested : Math.max(requested, canonicalBaseMin)
   }
+  const requestedBufferAfterMin =
+    canonicalBufferAfterMin ?? (await resolveBufferAfterMin(prisma, { venueId, productIds: canonicalProductIds }))
   const onlineCapacityPercent = moduleConfig?.scheduling?.onlineCapacityPercent ?? 100
   const pacingMax = moduleConfig?.scheduling?.pacingMaxPerSlot ?? null
 
@@ -227,13 +233,14 @@ export async function getAvailableSlots(
   // Use the full operating hours range for the reservation query
   const dayStart = slotStarts[0]
   const dayEnd = new Date(slotStarts[slotStarts.length - 1].getTime() + defaultDuration * 60000)
+  const dayBlockedEnd = applyBufferToEndsAt(dayEnd, requestedBufferAfterMin)
 
   // Get existing reservations for the date range
   const existingReservations = await prisma.reservation.findMany({
     where: {
       venueId,
       status: { in: ACTIVE_STATUSES },
-      startsAt: { lt: dayEnd },
+      startsAt: { lt: dayBlockedEnd },
       // El BLOQUE de agenda, no el fin del servicio: una cita que terminó antes
       // del inicio del día pero cuyo tiempo de limpieza entra en él sigue
       // ocupando. Con buffer 0 `blockedEndsAt` === `endsAt`, así que este filtro
@@ -304,7 +311,7 @@ export async function getAvailableSlots(
             venueId,
             classSessionId: null,
             expiresAt: { gt: checkedAt },
-            startsAt: { lt: dayEnd },
+            startsAt: { lt: dayBlockedEnd },
             endsAt: { gt: dayStart },
           },
           select: {
@@ -327,8 +334,8 @@ export async function getAvailableSlots(
       : await prisma.externalBusyBlock.findMany({
           where: {
             OR: [
-              { venueId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } },
-              ...(options.staffId ? [{ staffId: options.staffId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } }] : []),
+              { venueId, startsAt: { lt: dayBlockedEnd }, endsAt: { gt: dayStart } },
+              ...(options.staffId ? [{ staffId: options.staffId, startsAt: { lt: dayBlockedEnd }, endsAt: { gt: dayStart } }] : []),
             ],
           },
           select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
@@ -336,7 +343,7 @@ export async function getAvailableSlots(
 
   const windows = slotStarts.map(startsAt => ({
     startsAt,
-    endsAt: new Date(startsAt.getTime() + defaultDuration * 60000),
+    endsAt: applyBufferToEndsAt(new Date(startsAt.getTime() + defaultDuration * 60000), requestedBufferAfterMin),
   }))
   const eligibleStaffByWindow = staffAware
     ? await findEligibleStaffForDayWindows(prisma, {
@@ -379,6 +386,7 @@ export async function getAvailableSlots(
 
   for (const [slotIndex, slotStart] of slotStarts.entries()) {
     const slotEnd = new Date(slotStart.getTime() + defaultDuration * 60000)
+    const slotBlockedEnd = applyBufferToEndsAt(slotEnd, requestedBufferAfterMin)
 
     if (legacyStaffAvailabilityByWindow && !legacyStaffAvailabilityByWindow[slotIndex]) continue
 
@@ -388,9 +396,9 @@ export async function getAvailableSlots(
     // El `?? endsAt` es la red: una fila sin el dato sigue bloqueando al menos
     // su horario de servicio. Desaparecer del cálculo sería peor que no tener
     // buffer — dejaría vendible un horario realmente ocupado.
-    const overlapping = existingReservations.filter(r => r.startsAt < slotEnd && (r.blockedEndsAt ?? r.endsAt) > slotStart)
+    const overlapping = existingReservations.filter(r => r.startsAt < slotBlockedEnd && (r.blockedEndsAt ?? r.endsAt) > slotStart)
     const overlappingHolds = activeHolds.filter(
-      hold => isLiveSlotHold(hold, checkedAt) && hold.startsAt < slotEnd && hold.endsAt > slotStart,
+      hold => isLiveSlotHold(hold, checkedAt) && hold.startsAt < slotBlockedEnd && hold.endsAt > slotStart,
     )
     const overlappingAppointments = overlapping.filter(reservation => reservation.product?.type === 'APPOINTMENTS_SERVICE')
 
@@ -399,7 +407,7 @@ export async function getAvailableSlots(
     // member is unavailable for the entire window). Staff-personal blocks are
     // only considered when the caller asked for a specific staff member;
     // venue-master blocks always apply.
-    const overlappingExternal = externalBlocks.some(b => b.startsAt < slotEnd && b.endsAt > slotStart)
+    const overlappingExternal = externalBlocks.some(b => b.startsAt < slotBlockedEnd && b.endsAt > slotStart)
     if (overlappingExternal) {
       continue
     }
