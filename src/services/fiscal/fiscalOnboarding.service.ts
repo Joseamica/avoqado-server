@@ -43,8 +43,11 @@ export interface EmisorOnboardingDeps {
 // ─── Service functions ────────────────────────────────────────────────────────
 
 /**
- * Provision a FiscalEmisor: create the facturapi organization, set its legal info,
- * then store the providerOrgId + encrypted live key in our DB.
+ * Provision a FiscalEmisor: create the facturapi organization, store the
+ * providerOrgId + encrypted live key in our DB IMMEDIATELY, then set the org's
+ * legal info. Persisting first makes the call resumable: a legal-info failure
+ * can't orphan the org, and a retry (providerOrgId already set) skips the
+ * create and only re-runs the legal update on the same org.
  *
  * After this call the emisor's csdStatus remains NONE — the CSD upload step
  * (uploadEmisorCsd) is what advances it to ACTIVE.
@@ -61,26 +64,34 @@ export async function provisionEmisor(
     throw new Error(`Emisor ${params.emisorId} not found`) // tenant guard → 404
   }
 
-  // Create the org in facturapi using the account-level key.
-  const org = await deps.accountProvider.createOrganization({
-    legalName: emisor.legalName,
-    email: 'facturacion@avoqado.io',
-  })
+  let provisioned = emisor
+  if (!emisor.providerOrgId) {
+    // Create the org in facturapi using the account-level key.
+    const org = await deps.accountProvider.createOrganization({
+      legalName: emisor.legalName,
+      email: 'facturacion@avoqado.io',
+    })
+
+    // Persist providerOrgId + ENCRYPTED live key BEFORE any further provider call:
+    // if updateOrgLegal fails, the org id survives and the retry reuses the SAME
+    // org instead of orphaning one per attempt (prod, 2026-09-01). The plaintext
+    // liveKey is never stored.
+    provisioned = await deps.updateEmisor(emisor.id, {
+      providerOrgId: org.providerOrgId,
+      providerKeyEnc: deps.encryptKey(org.liveKey),
+      // csdStatus stays NONE — CSD upload is the next step
+    })
+  }
 
   // Set the org's legal information (required before it can issue CFDIs).
   await deps.accountProvider.updateOrgLegal({
-    providerOrgId: org.providerOrgId,
+    providerOrgId: provisioned.providerOrgId,
     legalName: emisor.legalName,
     taxSystem: emisor.regimenFiscal,
     zip: emisor.lugarExpedicion,
   })
 
-  // Persist providerOrgId + ENCRYPTED live key only. The plaintext liveKey is never stored.
-  return deps.updateEmisor(emisor.id, {
-    providerOrgId: org.providerOrgId,
-    providerKeyEnc: deps.encryptKey(org.liveKey),
-    // csdStatus stays NONE — CSD upload is the next step
-  })
+  return provisioned
 }
 
 /**

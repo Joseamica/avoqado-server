@@ -52,7 +52,12 @@ export class FacturapiProvider implements FiscalProvider {
    * SDK method confirmed: organizations.updateLegal(id, data) — see node_modules/facturapi/dist/resources/organizations.d.ts
    */
   async updateOrgLegal(params: UpdateOrgLegalParams): Promise<void> {
+    // OrganizationLegalInput requires FOUR fields: name (nombre comercial),
+    // legal_name, tax_system, address — omitting name rejects the whole call
+    // with 'El campo "name" es requerido.' We don't track a separate commercial
+    // name, so the razón social doubles as it.
     await this.client.organizations.updateLegal(params.providerOrgId, {
+      name: params.legalName,
       legal_name: params.legalName,
       tax_system: params.taxSystem,
       address: { zip: params.zip },

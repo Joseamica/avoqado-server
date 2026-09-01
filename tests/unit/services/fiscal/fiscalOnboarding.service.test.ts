@@ -54,6 +54,31 @@ describe('provisionEmisor', () => {
     expect(upd).not.toHaveProperty('liveKey')
   })
 
+  it('persists providerOrgId + encrypted key BEFORE updateOrgLegal — a legal-info failure cannot orphan the org', async () => {
+    // Real prod failure (2026-09-01): updateOrgLegal rejected, the org id was thrown
+    // away, and every retry created ANOTHER orphaned org in the facturapi account.
+    const d = deps({
+      accountProvider: {
+        createOrganization: jest.fn().mockResolvedValue({ providerOrgId: 'org1', liveKey: 'sk_live_x', testKey: 'sk_test_x' }),
+        updateOrgLegal: jest.fn().mockRejectedValue(new Error('El campo "name" es requerido.')),
+        uploadCsd: jest.fn(),
+      } as any,
+    })
+    await expect(provisionEmisor({ emisorId: 'e1', expectedVenueId: 'v1' }, d)).rejects.toThrow(/name/)
+    const upd = (d.updateEmisor as jest.Mock).mock.calls[0][1]
+    expect(upd.providerOrgId).toBe('org1')
+    expect(upd.providerKeyEnc).toBe('ENC')
+  })
+
+  it('retry with an existing providerOrgId reuses the org: no new createOrganization, legal update on the SAME org', async () => {
+    const d = deps({ findEmisor: jest.fn().mockResolvedValue({ ...emisor, providerOrgId: 'org-existing' }) })
+    const r = await provisionEmisor({ emisorId: 'e1', expectedVenueId: 'v1' }, d)
+
+    expect(d.accountProvider.createOrganization).not.toHaveBeenCalled()
+    expect(d.accountProvider.updateOrgLegal).toHaveBeenCalledWith(expect.objectContaining({ providerOrgId: 'org-existing' }))
+    expect(r.providerOrgId).toBe('org-existing')
+  })
+
   it('tenant guard: throws when emisor belongs to another venue', async () => {
     const d = deps({ findEmisor: jest.fn().mockResolvedValue({ ...emisor, venueId: 'OTHER' }) })
     await expect(provisionEmisor({ emisorId: 'e1', expectedVenueId: 'v1' }, d)).rejects.toThrow(/not found/)
