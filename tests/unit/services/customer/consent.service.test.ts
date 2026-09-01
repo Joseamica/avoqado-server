@@ -58,6 +58,16 @@ describe('grantMarketingConsent', () => {
     makeTxDefault = makeTx({ $queryRaw: jest.fn().mockResolvedValue([]) }) // el SELECT ... FOR UPDATE filtra por venueId y no encuentra
     await expect(grantMarketingConsent({ venueId: 'venueB', customerId: 'cust1', channel: 'FORM_STAFF' })).rejects.toThrow()
   })
+
+  it('la consulta del customer filtra por venueId (forma de la consulta, no sólo el resultado del mock)', async () => {
+    await grantMarketingConsent({ venueId: 'venueA', customerId: 'cust1', channel: 'FORM_STAFF' })
+    const [strings, ...values] = makeTxDefault.$queryRaw.mock.calls[0]
+    const sql = strings.join('?')
+    expect(sql).toMatch(/"venueId"\s*=/)
+    expect(sql).toMatch(/FOR UPDATE/)
+    expect(values).toContain('venueA')
+    expect(values).toContain('cust1')
+  })
 })
 
 describe('revokeMarketingConsent', () => {
