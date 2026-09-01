@@ -1,5 +1,5 @@
 import prisma from '@/utils/prismaClient'
-import type { EmailSuppressionReason } from '@prisma/client'
+import type { EmailSuppressionReason, Prisma } from '@prisma/client'
 
 /**
  * Supresión GLOBAL de correo — Fase 1A del carril de campañas.
@@ -34,6 +34,28 @@ export async function isSuppressed(email: string): Promise<boolean> {
   const normalized = normalizeEmail(email)
   const suppression = await prisma.emailSuppression.findUnique({ where: { email: normalized } })
   return suppression !== null
+}
+
+/**
+ * Versión en LOTE de `isSuppressed`, para el encolado de una campaña (Fase 1A, Task 5):
+ * consultar uno por uno a la audiencia completa de un negocio sería N idas y vueltas a la
+ * base por cada envío. Recibe el `tx` de la transacción de encolado — la supresión se
+ * consulta DENTRO de la misma transacción que crea las deliveries, para que la foto sea
+ * consistente con el resto del encolado.
+ *
+ * Devuelve el conjunto de emails NORMALIZADOS que están suprimidos — el llamador compara
+ * normalizando también su lado (`normalizeEmail`), nunca el email crudo del `Customer`.
+ * Con una lista vacía no toca la base: encolar una campaña con audiencia vacía no debe
+ * costar una consulta.
+ */
+export async function filtrarSuprimidos(tx: Prisma.TransactionClient, emails: string[]): Promise<Set<string>> {
+  if (emails.length === 0) return new Set()
+  const normalizados = emails.map(normalizeEmail)
+  const suprimidos = await tx.emailSuppression.findMany({
+    where: { email: { in: normalizados } },
+    select: { email: true },
+  })
+  return new Set(suprimidos.map(s => s.email))
 }
 
 /**
