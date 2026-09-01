@@ -46,6 +46,13 @@ describe('grantMarketingConsent', () => {
     expect(makeTxDefault.customer.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'cust1' }, data: { marketingConsent: true } }),
     )
+    // Hallazgo #5 de la ronda final: `noticeVersionId: 'not1'` sólo prueba lo que el mock
+    // DEVUELVE — un mock que devuelve esa fila pase lo que se le pida sigue verde aunque se
+    // quite el `where`. Se afirma la FORMA de la consulta que resuelve el aviso: debe filtrar
+    // por el venueId del PARÁMETRO, no traer el aviso de cualquier otro venue.
+    expect(makeTxDefault.privacyNoticeVersion.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ venueId: 'venueA' }) }),
+    )
     // dentro del tx: evidencia legal atómica — el payload completo, no sólo "se llamó"
     expect(makeTxDefault.activityLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -105,6 +112,9 @@ describe('revokeMarketingConsent', () => {
       expect.objectContaining({ data: expect.objectContaining({ action: 'REVOKED', noticeVersionId: null }) }),
     )
     expect(makeTxDefault.customer.update).toHaveBeenCalledWith(expect.objectContaining({ data: { marketingConsent: false } }))
+    // Minor de T3: revocar no consulta el aviso de privacidad en absoluto (`action === 'GRANTED'`
+    // guarda esa rama) — se afirma explícitamente para que quede fijado, no sólo implícito.
+    expect(makeTxDefault.privacyNoticeVersion.findFirst).not.toHaveBeenCalled()
     expect(makeTxDefault.activityLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
