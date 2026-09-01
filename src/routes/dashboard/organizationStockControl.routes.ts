@@ -6,11 +6,11 @@
  *
  * Access control:
  * - Authenticated user (authenticateTokenMiddleware)
- * - /overview: OWNER + MANAGER (Supervisor) + SUPERADMIN — Supervisors need to
+ * - Read endpoints: OWNER + MANAGER (Supervisor) + SUPERADMIN — Supervisors need to
  *   read the same data to drive their own Custodia de SIMs tab at the venue
  *   dashboard (Asana confirmed: "Supervisor puede ver SIMs de otros Supervisores").
  * - /export.xlsx: OWNER + SUPERADMIN — exporting full inventory stays admin-only.
- * - Org has at least one venue with WHITE_LABEL_DASHBOARD enabled (checked in controller).
+ * - Org has SERIALIZED_INVENTORY enabled at organization or venue level (checked in controller).
  */
 import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
@@ -18,6 +18,10 @@ import prisma from '../../utils/prismaClient'
 import { StaffRole } from '@prisma/client'
 import {
   getOrgStockOverview,
+  getOrgStockSummary,
+  getOrgStockItems,
+  getOrgStockBulkGroups,
+  getOrgStockCustody,
   exportOrgStockExcel,
   getOrgInventoryByResponsible,
 } from '../../controllers/dashboard/organizationStockControl.controller'
@@ -65,6 +69,10 @@ const requireOrgOwner = requireOrgRole([StaffRole.OWNER], 'Solo los propietarios
 const requireOrgStockReader = requireOrgRole([StaffRole.OWNER, StaffRole.MANAGER], 'No tienes acceso al inventario de la organización')
 
 router.get('/stock-control/overview', authenticateTokenMiddleware, requireOrgStockReader, getOrgStockOverview)
+router.get('/stock-control/summary', authenticateTokenMiddleware, requireOrgStockReader, getOrgStockSummary)
+router.get('/stock-control/items', authenticateTokenMiddleware, requireOrgStockReader, getOrgStockItems)
+router.get('/stock-control/custody', authenticateTokenMiddleware, requireOrgStockReader, getOrgStockCustody)
+router.get('/stock-control/bulk-groups', authenticateTokenMiddleware, requireOrgStockReader, getOrgStockBulkGroups)
 router.get('/stock-control/export.xlsx', authenticateTokenMiddleware, requireOrgOwner, exportOrgStockExcel)
 
 // Tabla Ciudad › Supervisor › Promotor. Mismo gate de lectura que /overview:

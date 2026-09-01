@@ -118,7 +118,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/mobile/sync.mobile.service.ts': 1,
   'src/services/mobile/transaction.mobile.service.ts': 1,
   'src/services/onboarding/demoCleanup.service.ts': 1,
-  'src/services/organization-dashboard/orgInventoryByResponsible.service.ts': 1,
   'src/services/organization-dashboard/orgStockControl.service.ts': 1,
   'src/services/organization-dashboard/organizationDashboard.service.ts': 15,
   'src/services/promoters/promoters.service.ts': 3,
