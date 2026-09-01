@@ -1,6 +1,11 @@
 // tests/unit/services/fiscal/fiscalOnboarding.service.test.ts
 
-import { provisionEmisor, uploadEmisorCsd, EmisorOnboardingDeps } from '../../../../src/services/fiscal/fiscalOnboarding.service'
+import {
+  provisionEmisor,
+  uploadEmisorCsd,
+  getEmisorProviderStatus,
+  EmisorOnboardingDeps,
+} from '../../../../src/services/fiscal/fiscalOnboarding.service'
 
 const emisor = {
   id: 'e1',
@@ -19,6 +24,7 @@ function deps(over: Partial<EmisorOnboardingDeps> = {}): EmisorOnboardingDeps {
       createOrganization: jest.fn().mockResolvedValue({ providerOrgId: 'org1', liveKey: 'sk_live_x', testKey: 'sk_test_x' }),
       updateOrgLegal: jest.fn().mockResolvedValue(undefined),
       uploadCsd: jest.fn().mockResolvedValue({ csdExpiresAt: new Date('2030-01-01') }),
+      getOrganizationStatus: jest.fn().mockResolvedValue({ isProductionReady: false, pendingSteps: ['manifiesto'] }),
     } as any,
     updateEmisor: jest.fn().mockImplementation(async (_id, data) => ({ ...emisor, ...data })),
     encryptKey: jest.fn().mockReturnValue('ENC'),
