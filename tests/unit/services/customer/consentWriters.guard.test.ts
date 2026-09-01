@@ -59,6 +59,48 @@ const ARCHIVOS_EXCLUIDOS = (relPath: string): string | null => {
  */
 const LINEAS_DE_LECTURA_ANIDADA = [/^\s*customer:\s*\{\s*marketingConsent:\s*true\s*\},?\s*$/]
 
+/**
+ * La heurística vive en UNA sola función, usada tanto por el barrido real como por el
+ * sabotaje de abajo — dos copias de la misma regla es exactamente cómo este guard se coló la
+ * primera vez (ver Fix round 1 abajo): la prueba de sabotaje comprobaba una heurística más
+ * vieja y más floja que la que de verdad corría en el barrido, así que "pasaba" sin probar
+ * nada real. Con una sola función, cualquier endurecimiento futuro se prueba automáticamente
+ * en ambos lados.
+ *
+ * escritura = "marketingConsent:" seguido de un valor (true/false/identificador) — no una
+ * lectura ni la declaración de un tipo.
+ */
+function esLineaViolatoria(linea: string): boolean {
+  if (!/marketingConsent\s*:\s*(true|false|[a-zA-Z])/.test(linea)) return false
+
+  // `campo: z.boolean()...` es una declaración de esquema Zod (el valor arranca con el
+  // builder `z.`), no una asignación — aparece también FUERA de src/schemas/ (p. ej. el
+  // shape de entrada de una tool del MCP en src/mcp/tools/).
+  if (/marketingConsent\s*:\s*z\./.test(linea)) return false
+  if (LINEAS_DE_LECTURA_ANIDADA.some(re => re.test(linea))) return false
+
+  // 🔴 Fix round 1 (revisor, verificado EN VIVO 2026-09-01): `consent.service.ts:65` —
+  // `await tx.customer.update({ where: { id: p.customerId }, data: { marketingConsent:
+  // action === 'GRANTED' } })` — es EXACTAMENTE la forma compacta de una línea. La primera
+  // versión de esta prueba excluía cualquier línea que contuviera "where" en CUALQUIER
+  // parte, así que copiar ese mismo estilo a un archivo nuevo se colaba sin ser detectado
+  // (el revisor lo inyectó y dio 0 violaciones, verde). La justificación de esa versión —
+  // "el estilo real del repo nunca compacta así" — era FALSA: el propio escritor legítimo
+  // lo hace, y es justo el patrón más a mano para copiar.
+  //
+  // Arreglo: si la línea trae un `data:` y `marketingConsent` aparece DESPUÉS de ese `data:`
+  // (gobernado por él), es violación SIEMPRE — sin importar que "where"/"select" también
+  // vivan antes en la misma línea física. Sólo cuando NO hay `data:` gobernando el campo en
+  // esa línea se aplica el filtro grueso original (para no atrapar el `select:` de la línea
+  // 166 de kioskOutreach.service.ts, que trae "marketingConsent: true" pero ningún "data:").
+  const idxData = linea.lastIndexOf('data:')
+  const idxConsent = linea.indexOf('marketingConsent')
+  const dataGobiernaElCampo = idxData !== -1 && idxConsent > idxData
+  if (!dataGobiernaElCampo && /select|where|expect|\/\//.test(linea)) return false
+
+  return true
+}
+
 describe('marketingConsent sólo se ESCRIBE en consent.service.ts', () => {
   it('ningún otro archivo de src/ asigna marketingConsent directamente', () => {
     const raiz = path.join(__dirname, '../../../../src')
@@ -70,41 +112,34 @@ describe('marketingConsent sólo se ESCRIBE en consent.service.ts', () => {
 
       const src = fs.readFileSync(f, 'utf8')
       for (const [i, linea] of src.split('\n').entries()) {
-        // escritura = "marketingConsent:" dentro de un data:{...} — heurística: la línea
-        // asigna un valor (true/false/identificador), no lee ni declara un tipo.
-        // ⚠️ Límite conocido y ACEPTADO (verificado a propósito en la Task 8): esto es por
-        // LÍNEA — un `prisma.customer.update({ where: {...}, data: { marketingConsent: true
-        // } })` escrito en una sola línea física se salvaría porque "where" aparece en esa
-        // misma línea aunque no gobierne el `data:`. El estilo real del repo siempre parte
-        // `data: {...}` en su propio bloque (visto en consent.service.ts y en todo el resto
-        // del barrido), así que no se endureció más — pero un escritor que se escriba
-        // deliberadamente compacto en una sola línea puede colarse.
-        if (!/marketingConsent\s*:\s*(true|false|[a-zA-Z])/.test(linea)) continue
-        if (/select|where|expect|\/\//.test(linea)) continue
-        // `campo: z.boolean()...` es una declaración de esquema Zod (el valor arranca con el
-        // builder `z.`), no una asignación — aparece también FUERA de src/schemas/ (p. ej. el
-        // shape de entrada de una tool del MCP en src/mcp/tools/).
-        if (/marketingConsent\s*:\s*z\./.test(linea)) continue
-        if (LINEAS_DE_LECTURA_ANIDADA.some(re => re.test(linea))) continue
-
-        violaciones.push(`${relPath}:${i + 1}`)
+        if (esLineaViolatoria(linea)) violaciones.push(`${relPath}:${i + 1}`)
       }
     }
 
     expect(violaciones).toEqual([])
   })
 
-  it('el guard SÍ falla si alguien agrega un escritor directo (sabotaje intencional)', () => {
-    // No se sabotea el árbol real: se ejercita la misma heurística de línea que usa la prueba
-    // de arriba, sobre un snippet que reproduce el escritor prohibido más obvio
-    // (`prisma.customer.update({ data: { marketingConsent: true } })` fuera de consent.service).
-    const lineaProhibida = '      data: { marketingConsent: true },'
-    const esViolacion =
-      /marketingConsent\s*:\s*(true|false|[a-zA-Z])/.test(lineaProhibida) &&
-      !/select|where|expect|\/\//.test(lineaProhibida) &&
-      !/marketingConsent\s*:\s*z\./.test(lineaProhibida) &&
-      !LINEAS_DE_LECTURA_ANIDADA.some(re => re.test(lineaProhibida))
+  it('el guard SÍ falla ante el escritor multi-línea más obvio (sabotaje intencional)', () => {
+    // No se sabotea el árbol real: se ejercita la MISMA heurística que usa la prueba de
+    // arriba, sobre un snippet que reproduce el escritor prohibido —
+    // `prisma.customer.update({ data: { marketingConsent: true } })` fuera de consent.service,
+    // formateado tal como el repo escribe TODA su Prisma multi-línea.
+    expect(esLineaViolatoria('      marketingConsent: true,')).toBe(true)
+  })
 
-    expect(esViolacion).toBe(true)
+  it('el guard SÍ falla ante la forma COMPACTA de una línea (el hallazgo del revisor)', () => {
+    // La forma exacta de consent.service.ts:65, copiada a un archivo hipotético que NO está
+    // excluido — "where" y "data:" en la MISMA línea física. Antes del Fix round 1 esto NO
+    // se detectaba.
+    const lineaCompacta =
+      "      await tx.customer.update({ where: { id: p.customerId }, data: { marketingConsent: action === 'GRANTED' } })"
+    expect(esLineaViolatoria(lineaCompacta)).toBe(true)
+  })
+
+  it('NO marca como violación un filtro de lectura real (where multi-línea, select)', () => {
+    // Las dos formas de lectura real que SÍ existen hoy en el árbol — deben seguir pasando
+    // limpias con la heurística endurecida, o el barrido empezaría a acusar código honesto.
+    expect(esLineaViolatoria('      customer: { marketingConsent: true },')).toBe(false) // kioskOutreach.service.ts:71 (where arriba)
+    expect(esLineaViolatoria('select: { email: true, firstName: true, marketingConsent: true } },')).toBe(false) // select en la misma línea
   })
 })
