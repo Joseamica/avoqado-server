@@ -22,6 +22,15 @@ import type {
 const BULK_WINDOW_MS = 2 * 60 * 1000
 const DAY_MS = 24 * 60 * 60 * 1000
 
+/**
+ * Tope duro de `items` del overview LEGACY (`/stock-control/overview`). El query-guard
+ * lo cazó en producción el 2026-09-01: 20,288 SIMs de PlayTelecom con 6 relaciones,
+ * 92 veces en 6 h, y disparó «Server congelado ≥3 s». El dashboard ya usa los endpoints
+ * paginados; este sólo lo llaman pestañas viejas sin recargar — y mientras existan, no
+ * pueden tumbar el server. Los totales siguen saliendo de SQL sobre TODA la organización.
+ */
+export const LEGACY_OVERVIEW_ITEMS_CAP = 500
+
 function numeric(value: unknown): number {
   if (typeof value === 'bigint') return Number(value)
   return Number(value ?? 0)
@@ -613,7 +622,7 @@ export class OrgStockControlService {
    * Fetches serialized items for an organization, optionally filtered by createdAt range.
    * Uses organizationId scope (bulk uploads are stored at org level with null venueId).
    */
-  async fetchSerializedItems(orgId: string, options: OrgStockOverviewOptions) {
+  async fetchSerializedItems(orgId: string, options: OrgStockOverviewOptions, take: number = LEGACY_OVERVIEW_ITEMS_CAP) {
     const { dateFrom, dateTo } = options
     const dateFilter =
       dateFrom || dateTo
@@ -643,6 +652,7 @@ export class OrgStockControlService {
         assignedPromoter: { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
       },
       orderBy: { createdAt: 'desc' },
+      take,
     })
   }
 
@@ -843,8 +853,18 @@ export class OrgStockControlService {
     }
   }
 
+  /**
+   * LEGACY. Conserva la forma de la respuesta para pestañas viejas, pero ya no
+   * materializa la organización entera: `items`/`bulkGroups` salen de los
+   * LEGACY_OVERVIEW_ITEMS_CAP más recientes y `summary`/agregados de `getOrgSummary`
+   * (SQL sobre todas las SIMs) — así un cliente viejo ve totales correctos aunque su
+   * tabla sea parcial. Guardia: orgStockControl.overviewAcotado.service.test.ts
+   */
   async getOrgOverview(orgId: string, options: OrgStockOverviewOptions): Promise<OrgStockOverview> {
-    const items = await this.fetchSerializedItems(orgId, options)
+    const [items, summaryData] = await Promise.all([
+      this.fetchSerializedItems(orgId, options, LEGACY_OVERVIEW_ITEMS_CAP),
+      this.getOrgSummary(orgId, options),
+    ])
 
     // Resolve staff names + employeeCodes in a batch (just for createdBy —
     // supervisor/promoter come back via Prisma `include`).
@@ -865,16 +885,13 @@ export class OrgStockControlService {
     const serializedItems: OrgStockOverviewItem[] = items.map(item => this.serializeItem(item, staffMap, employeeCodeMap))
 
     const bulkGroups = this.groupByBulkUpload(items, staffMap, employeeCodeMap)
-    const aggregatesBySucursal = this.aggregateBySucursal(items)
-    const aggregatesByCategoria = this.aggregateByCategoria(items)
-    const summary = this.computeSummary(items, bulkGroups, options)
 
     return {
-      summary,
+      summary: summaryData.summary,
       items: serializedItems,
       bulkGroups,
-      aggregatesBySucursal,
-      aggregatesByCategoria,
+      aggregatesBySucursal: summaryData.aggregatesBySucursal,
+      aggregatesByCategoria: summaryData.aggregatesByCategoria,
     }
   }
 }
