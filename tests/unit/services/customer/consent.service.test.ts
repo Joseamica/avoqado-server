@@ -3,12 +3,15 @@ jest.mock('@/config/logger', () => ({
   default: { error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() },
 }))
 
-import { grantMarketingConsent, revokeMarketingConsent } from '@/services/customer/consent.service'
+import { grantMarketingConsent, revokeMarketingConsent, getCurrentPrivacyNotice } from '@/services/customer/consent.service'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { $transaction: jest.fn() },
+  default: {
+    $transaction: jest.fn(),
+    privacyNoticeVersion: { findFirst: jest.fn().mockResolvedValue(null) },
+  },
 }))
 
 // tx falso que registra todas las llamadas — la FORMA de las consultas es lo que se prueba
@@ -79,6 +82,18 @@ describe('grantMarketingConsent', () => {
     expect(sql).toMatch(/FOR UPDATE/)
     expect(values).toContain('venueA')
     expect(values).toContain('cust1')
+  })
+})
+
+describe('getCurrentPrivacyNotice', () => {
+  it('el select incluye `content` (T10: el editor del dashboard precarga el texto, no sólo metadatos)', async () => {
+    await getCurrentPrivacyNotice('venueA')
+    expect(prisma.privacyNoticeVersion.findFirst as jest.Mock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { venueId: 'venueA' },
+        select: expect.objectContaining({ content: true, id: true, contentHash: true, language: true, createdAt: true }),
+      }),
+    )
   })
 })
 

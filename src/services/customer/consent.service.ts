@@ -11,11 +11,16 @@ interface ConsentParams {
   userAgent?: string
 }
 
+/**
+ * `content` va en el select a propósito (T10): es contenido del PROPIO negocio (no dato
+ * personal de un tercero) y la ruta que lo expone exige `marketing:read` — el editor del
+ * dashboard necesita el texto completo para precargarlo, no sólo sus metadatos.
+ */
 export async function getCurrentPrivacyNotice(venueId: string) {
   return prisma.privacyNoticeVersion.findFirst({
     where: { venueId },
     orderBy: { createdAt: 'desc' },
-    select: { id: true, contentHash: true, language: true, createdAt: true },
+    select: { id: true, content: true, contentHash: true, language: true, createdAt: true },
   })
 }
 
