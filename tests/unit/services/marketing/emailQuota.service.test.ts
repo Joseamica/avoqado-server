@@ -3,8 +3,9 @@
  * 🔴 DINERO/CUOTA. Este ledger es lo único que impide que un negocio mande más correos
  * de campaña de los que su plan permite. Tiene que ser correcto bajo CONCURRENCIA: dos
  * encolados simultáneos no pueden pasar el chequeo por separado — por eso la mitad de
- * estas pruebas fija la FORMA del `updateMany` (un solo UPDATE condicional), no sólo el
- * resultado que el mock decide devolver.
+ * estas pruebas fija la FORMA de las llamadas a Prisma (un solo UPDATE condicional,
+ * createMany+skipDuplicates para la creación), no sólo el resultado que el mock decide
+ * devolver.
  */
 import { Prisma } from '@prisma/client'
 import { periodoDeEnvio, reservarCuota, devolverCuota } from '@/services/marketing/emailQuota.service'
@@ -13,11 +14,17 @@ import { BadRequestError } from '@/errors/AppError'
 function crearTxMock() {
   return {
     emailQuotaLedger: {
+      // 🔴 Fix loop 1 / Hallazgo 1: el `upsert` se sustituyó por `createMany` +
+      // `skipDuplicates` (el `upsert` de Prisma NO es atómico bajo concurrencia — hace
+      // SELECT y luego INSERT/UPDATE). Se conserva `upsert` en el mock, jamás usado por
+      // el servicio ya arreglado, para que el sabotaje (volver a `upsert`) no truene con
+      // un TypeError y en cambio haga fallar limpio la prueba de FORMA.
       upsert: jest.fn(),
+      createMany: jest.fn(),
       updateMany: jest.fn(),
     },
   } as unknown as Prisma.TransactionClient & {
-    emailQuotaLedger: { upsert: jest.Mock; updateMany: jest.Mock }
+    emailQuotaLedger: { upsert: jest.Mock; createMany: jest.Mock; updateMany: jest.Mock }
   }
 }
 
@@ -31,6 +38,21 @@ describe('periodoDeEnvio', () => {
     // 12:00 UTC − 6h = 06:00 local del 1-sep: ya cruzó la medianoche mexicana.
     expect(periodoDeEnvio(new Date('2026-09-01T12:00:00.000Z'), 'America/Mexico_City')).toBe('2026-09')
   })
+
+  // 🔴 Fix loop 1 / Hallazgo 3: una zona nula o inválida NO cae a nada en silencio
+  // (`'Invalid DateTime'` guardado como `period` sería una fila de cuota basura) —
+  // REVIENTA, como manda la regla del workspace ya aplicada en la alerta de asistencia.
+  describe('zona inválida — REVIENTA, nunca cae a nada en silencio', () => {
+    it.each(['Not/AZone', ''])('🔴 zona "%s" lanza con la zona en el mensaje', zona => {
+      expect(() => periodoDeEnvio(new Date('2026-09-01T04:00:00.000Z'), zona)).toThrow(
+        `Zona horaria inválida para calcular el período de envío: "${zona}"`,
+      )
+    })
+
+    it('regresión: America/Mexico_City sigue dando el período correcto', () => {
+      expect(periodoDeEnvio(new Date('2026-09-01T04:00:00.000Z'), 'America/Mexico_City')).toBe('2026-08')
+    })
+  })
 })
 
 describe('reservarCuota', () => {
@@ -38,21 +60,28 @@ describe('reservarCuota', () => {
 
   beforeEach(() => {
     tx = crearTxMock()
-    tx.emailQuotaLedger.upsert.mockResolvedValue({ id: 'l1', venueId: 'v1', period: '2026-09', reserved: 0 })
+    tx.emailQuotaLedger.createMany.mockResolvedValue({ count: 1 })
   })
 
-  it('crea la fila EN CERO sólo si no existe (upsert no pisa un contador vivo)', async () => {
+  // 🔴 Fix loop 1 / Hallazgo 1: dos `$transaction` concurrentes haciendo `upsert` sobre
+  // un (venueId, period) que NO existía — uno pasa, el otro revienta con P2002. Dentro
+  // de una transacción de Postgres esa violación de unique ABORTA la transacción
+  // entera, así que ni siquiera vale atrapar el P2002 con try/catch (el `updateMany`
+  // siguiente fallaría con 25P02). `createMany({ skipDuplicates: true })` emite
+  // `INSERT … ON CONFLICT DO NOTHING` y nunca lanza — mismo patrón que
+  // `referralQualification.service.ts:229-245`.
+  it('🔴 crea la fila EN CERO por createMany+skipDuplicates — el upsert de Prisma NO es atómico bajo concurrencia', async () => {
     tx.emailQuotaLedger.updateMany.mockResolvedValue({ count: 1 })
 
     await reservarCuota(tx, { venueId: 'v1', period: '2026-09', cantidad: 3, topeMensual: 500 })
 
-    expect(tx.emailQuotaLedger.upsert).toHaveBeenCalledWith(
+    expect(tx.emailQuotaLedger.createMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { venueId_period: { venueId: 'v1', period: '2026-09' } },
-        create: { venueId: 'v1', period: '2026-09', reserved: 0 },
-        update: {},
+        skipDuplicates: true,
+        data: [expect.objectContaining({ venueId: 'v1', period: '2026-09', reserved: 0 })],
       }),
     )
+    expect(tx.emailQuotaLedger.upsert).not.toHaveBeenCalled()
   })
 
   it('🔴 la atomicidad ES un solo updateMany condicional — fija la FORMA del where', async () => {
@@ -69,19 +98,61 @@ describe('reservarCuota', () => {
     )
   })
 
-  it('🔴 count 0 (tope excedido) lanza BadRequestError en español que dice el tope', async () => {
+  it('🔴 count 0 (tope excedido) lanza BadRequestError en español que dice el tope y lo pedido', async () => {
     tx.emailQuotaLedger.updateMany.mockResolvedValue({ count: 0 })
 
     const promesa = reservarCuota(tx, { venueId: 'v1', period: '2026-09', cantidad: 10, topeMensual: 500 })
 
     await expect(promesa).rejects.toBeInstanceOf(BadRequestError)
     await expect(promesa).rejects.toThrow(/500/)
+    await expect(promesa).rejects.toThrow(/10/)
   })
 
   it('count 1 (cupo disponible) resuelve sin lanzar', async () => {
     tx.emailQuotaLedger.updateMany.mockResolvedValue({ count: 1 })
 
     await expect(reservarCuota(tx, { venueId: 'v1', period: '2026-09', cantidad: 1, topeMensual: 500 })).resolves.toBeUndefined()
+  })
+
+  // 🔴 Fix loop 1 / Hallazgo 2: `cantidad: -1000000` hacía que el `lte` pasara SIEMPRE
+  // (un `reserved <= topeMensual - (-1000000)` es un número enorme) y el `increment`
+  // negativo dejaba `reserved` muy negativo — cuota infinita regalada. Se valida ANTES
+  // de tocar la base: ninguna de las dos llamadas a Prisma debe ocurrir.
+  describe('validación de cantidad — nunca toca la base', () => {
+    it.each([
+      ['negativa', -1000000],
+      ['cero', 0],
+      ['no entera', 2.5],
+    ])('🔴 cantidad %s lanza BadRequestError y NO llama a createMany ni updateMany', async (_desc, cantidad) => {
+      await expect(reservarCuota(tx, { venueId: 'v1', period: '2026-09', cantidad, topeMensual: 500 })).rejects.toBeInstanceOf(
+        BadRequestError,
+      )
+      expect(tx.emailQuotaLedger.createMany).not.toHaveBeenCalled()
+      expect(tx.emailQuotaLedger.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('validación de topeMensual — nunca toca la base', () => {
+    it.each([
+      ['negativo', -1],
+      ['no entero', 2.5],
+    ])('🔴 topeMensual %s lanza BadRequestError y NO llama a createMany ni updateMany', async (_desc, topeMensual) => {
+      await expect(reservarCuota(tx, { venueId: 'v1', period: '2026-09', cantidad: 1, topeMensual })).rejects.toBeInstanceOf(
+        BadRequestError,
+      )
+      expect(tx.emailQuotaLedger.createMany).not.toHaveBeenCalled()
+      expect(tx.emailQuotaLedger.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('topeMensual = 0 es legítimo (rechaza TODO el envío) — no lo bloquea la validación, lo bloquea el tope', async () => {
+      tx.emailQuotaLedger.updateMany.mockResolvedValue({ count: 0 })
+
+      const promesa = reservarCuota(tx, { venueId: 'v1', period: '2026-09', cantidad: 1, topeMensual: 0 })
+
+      await expect(promesa).rejects.toThrow(/tope de 0/)
+      // Sí llegó a tocar la base — la validación de forma no lo cortó antes de tiempo.
+      expect(tx.emailQuotaLedger.createMany).toHaveBeenCalled()
+    })
   })
 })
 
@@ -138,5 +209,20 @@ describe('devolverCuota', () => {
     // ni bajar de 0 — el guard `gte 5` ya no encuentra fila (reserved quedó en 0).
     await expect(devolverCuota(tx, { venueId: 'v1', period: '2026-09', cantidad: 5 })).resolves.toBeUndefined()
     expect(estado.reserved).toBe(0)
+  })
+
+  // 🔴 Fix loop 1 / Hallazgo 2: `devolverCuota(cantidad: -5)` INCREMENTA en vez de
+  // devolver (`decrement: -5` === `increment: 5`). Se valida ANTES de tocar la base.
+  describe('validación de cantidad — nunca toca la base', () => {
+    it.each([
+      ['negativa', -5],
+      ['cero', 0],
+      ['no entera', 2.5],
+    ])('🔴 cantidad %s lanza BadRequestError y NO llama a updateMany', async (_desc, cantidad) => {
+      const tx = crearTxMock()
+
+      await expect(devolverCuota(tx, { venueId: 'v1', period: '2026-09', cantidad })).rejects.toBeInstanceOf(BadRequestError)
+      expect(tx.emailQuotaLedger.updateMany).not.toHaveBeenCalled()
+    })
   })
 })

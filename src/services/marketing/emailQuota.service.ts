@@ -23,7 +23,17 @@ import { BadRequestError } from '@/errors/AppError'
  * que sí es.
  */
 export function periodoDeEnvio(fecha: Date, venueTimeZone: string): string {
-  return DateTime.fromJSDate(fecha, { zone: venueTimeZone }).toFormat('yyyy-MM')
+  const dt = DateTime.fromJSDate(fecha, { zone: venueTimeZone })
+  // 🔴 Fix loop 1 / Hallazgo 3: una zona nula o inválida no da un error de Luxon —
+  // produce silenciosamente la CADENA `'Invalid DateTime'`. `reservarCuota` la
+  // guardaría tal cual como `period`, una fila de cuota basura. Regla del workspace
+  // (ya aplicada en la alerta de asistencia): una zona mal configurada REVIENTA, nunca
+  // cae a nada en silencio. Es un `Error` normal, no `BadRequestError`: no es una
+  // entrada del usuario, es un dato del VENUE mal configurado.
+  if (!dt.isValid) {
+    throw new Error(`Zona horaria inválida para calcular el período de envío: "${venueTimeZone}"`)
+  }
+  return dt.toFormat('yyyy-MM')
 }
 
 export interface ReservarCuotaParams {
@@ -37,25 +47,47 @@ export interface ReservarCuotaParams {
  * Reserva `cantidad` correos contra la cuota de `venueId` en `period`. Lanza
  * `BadRequestError` si excede `topeMensual`.
  *
- * 🔴 La atomicidad ES este único `updateMany` condicional. Leer `reserved`, compararlo
- * contra el tope en JS y sólo entonces escribir permitiría que dos encolados
- * concurrentes VIERAN el mismo valor viejo y los DOS pasaran el chequeo por
- * separado — exactamente lo que la reserva existe para impedir. El `WHERE` con el
+ * 🔴 La atomicidad DEL CONTADOR es este único `updateMany` condicional. Leer
+ * `reserved`, compararlo contra el tope en JS y sólo entonces escribir permitiría que
+ * dos encolados concurrentes VIERAN el mismo valor viejo y los DOS pasaran el chequeo
+ * por separado — exactamente lo que la reserva existe para impedir. El `WHERE` con el
  * tope YA restado (`reserved <= topeMensual - cantidad`) es lo que hace que sólo uno
  * de los dos pase cuando el margen no alcanza para ambos: Postgres evalúa esa
  * condición contra el valor QUE HAY en ese instante, no contra el que alguien leyó
  * antes.
+ *
+ * La CREACIÓN idempotente de la fila es un mecanismo aparte: `createMany({
+ * skipDuplicates: true })`, que emite `INSERT … ON CONFLICT DO NOTHING` (Fix loop 1 /
+ * Hallazgo 1). El `upsert` de Prisma NO es atómico bajo concurrencia — hace un SELECT
+ * y luego un INSERT/UPDATE — así que dos `$transaction` concurrentes reservando la
+ * PRIMERA cuota del mes de un venue (fila que todavía no existe) hacen que uno pase y
+ * el otro reviente con `P2002`. 🔴 NO se atrapa ese `P2002` con try/catch: dentro de
+ * una transacción de Postgres una violación de unique ABORTA la transacción entera, y
+ * el `updateMany` siguiente fallaría con `25P02` (transacción ya abortada). Mismo
+ * patrón que `referralQualification.service.ts:229-245`.
  */
 export async function reservarCuota(
   tx: Prisma.TransactionClient,
   { venueId, period, cantidad, topeMensual }: ReservarCuotaParams,
 ): Promise<void> {
-  // El upsert SÓLO crea la fila en cero si no existe todavía para este venue+período
-  // — el `update` va vacío a propósito, para no pisar un contador que ya esté vivo.
-  await tx.emailQuotaLedger.upsert({
-    where: { venueId_period: { venueId, period } },
-    create: { venueId, period, reserved: 0 },
-    update: {},
+  // 🔴 Fix loop 1 / Hallazgo 2: sin esto, `cantidad: -1000000` hace que el `lte` de
+  // abajo pase SIEMPRE (comparar contra un tope gigante) y el `increment` negativo
+  // deja `reserved` muy negativo — cuota infinita regalada. Se valida ANTES de tocar
+  // la base. `cantidad = 0` también se rechaza aquí: reservar 0 es un no-op que
+  // esconde un llamador con la audiencia vacía, y ESE debe cortar antes de llegar a
+  // reservar, no aquí.
+  if (!Number.isInteger(cantidad) || cantidad <= 0) {
+    throw new BadRequestError('La cantidad de correos a reservar debe ser un entero positivo.')
+  }
+  // `topeMensual = 0` SÍ es legítimo (un plan que rechaza todo el envío) — sólo se
+  // rechazan valores negativos o no enteros.
+  if (!Number.isInteger(topeMensual) || topeMensual < 0) {
+    throw new BadRequestError('El tope mensual de correos debe ser un entero mayor o igual a cero.')
+  }
+
+  await tx.emailQuotaLedger.createMany({
+    data: [{ venueId, period, reserved: 0 }],
+    skipDuplicates: true,
   })
 
   const reservado = await tx.emailQuotaLedger.updateMany({
@@ -64,7 +96,7 @@ export async function reservarCuota(
   })
 
   if (reservado.count === 0) {
-    throw new BadRequestError(`Se alcanzó el tope de ${topeMensual} correos de campaña para este período.`)
+    throw new BadRequestError(`Se alcanzó el tope de ${topeMensual} correos de campaña para este período (se pedían ${cantidad}).`)
   }
 }
 
@@ -91,6 +123,13 @@ export interface DevolverCuotaParams {
  * `reservarCuota` evita con su `updateMany` condicional.
  */
 export async function devolverCuota(tx: Prisma.TransactionClient, { venueId, period, cantidad }: DevolverCuotaParams): Promise<void> {
+  // 🔴 Fix loop 1 / Hallazgo 2: sin esto, `devolverCuota(cantidad: -5)` INCREMENTA en
+  // vez de devolver (`decrement: -5` es matemáticamente `increment: 5`). Se valida
+  // ANTES de tocar la base.
+  if (!Number.isInteger(cantidad) || cantidad <= 0) {
+    throw new BadRequestError('La cantidad de correos a devolver debe ser un entero positivo.')
+  }
+
   await tx.emailQuotaLedger.updateMany({
     where: { venueId, period, reserved: { gte: cantidad } },
     data: { reserved: { decrement: cantidad } },
