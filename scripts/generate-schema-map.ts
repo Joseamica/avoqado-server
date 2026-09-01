@@ -539,6 +539,10 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   ConsumerAuthAccount: 'Customers, Consumers & Reviews',
   OtpChallenge: 'Customers, Consumers & Reviews',
   Review: 'Customers, Consumers & Reviews',
+  // Fase 0 — consentimiento y captura de datos para campañas de correo
+  ConsentEvent: 'Customers, Consumers & Reviews',
+  PrivacyNoticeVersion: 'Customers, Consumers & Reviews',
+  CustomerCaptureToken: 'Customers, Consumers & Reviews',
 
   // 21. System: Audit, Webhooks & Platform
   ActivityLog: 'System: Audit, Webhooks & Platform',

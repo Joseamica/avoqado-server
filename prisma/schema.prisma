@@ -632,6 +632,9 @@ model Venue {
   kioskCheckInAttempts   KioskCheckInAttempt[]
   kioskOutreachOutbox    KioskOutreachOutbox[]
 
+  // Fase 0 — versiones de aviso de privacidad
+  privacyNoticeVersions PrivacyNoticeVersion[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -6814,6 +6817,10 @@ model Customer {
   approvalOutbox      CustomerApprovalOutbox[]
   kioskOutreachOutbox KioskOutreachOutbox[]
 
+  // Fase 0 — consentimiento y captura de datos
+  consentEvents ConsentEvent[]
+  captureTokens CustomerCaptureToken[]
+
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
   @@unique([venueId, referralCode])
@@ -6823,6 +6830,69 @@ model Customer {
   @@index([referredByCustomerId])
   /// Fase 1: la bandeja "En espera de aprobación" del dashboard, ordenada por antigüedad.
   @@index([venueId, approvalStatus, approvalRequestedAt])
+}
+
+enum ConsentAction {
+  GRANTED
+  REVOKED
+}
+
+enum ConsentChannel {
+  FORM_STAFF
+  SELF_SERVE
+  ONE_CLICK_UNSUBSCRIBE
+}
+
+/// Ledger append-only del consentimiento de marketing. Customer.marketingConsent es
+/// CACHE derivado del último evento; nadie escribe el cache sin escribir aquí.
+model ConsentEvent {
+  id              String                @id @default(cuid())
+  customerId      String
+  customer        Customer              @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  venueId         String
+  /// Monotónica por customer (orden total; se escribe bajo lock de la fila del customer)
+  seq             Int
+  action          ConsentAction
+  channel         ConsentChannel
+  actorStaffId    String?
+  /// Obligatoria al OTORGAR (qué aviso vio el titular); opcional al revocar
+  noticeVersionId String?
+  noticeVersion   PrivacyNoticeVersion? @relation(fields: [noticeVersionId], references: [id], onDelete: Restrict)
+  ip              String?
+  userAgent       String?
+  createdAt       DateTime              @default(now())
+
+  @@unique([customerId, seq])
+  @@index([venueId, createdAt])
+}
+
+/// Versión INMUTABLE del aviso de privacidad de UN negocio. Nunca se edita: se crea otra.
+model PrivacyNoticeVersion {
+  id            String         @id @default(cuid())
+  venueId       String
+  venue         Venue          @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  content       String         @db.Text
+  contentHash   String
+  language      String         @default("es")
+  createdAt     DateTime       @default(now())
+  consentEvents ConsentEvent[]
+
+  @@index([venueId, createdAt])
+}
+
+/// Token de captura self-serve (cumpleaños): un solo uso, expira, hash persistido.
+model CustomerCaptureToken {
+  id         String    @id @default(cuid())
+  tokenHash  String    @unique
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  venueId    String
+  purpose    String // 'BIRTHDATE_CAPTURE'
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([customerId])
 }
 
 model Consumer {
