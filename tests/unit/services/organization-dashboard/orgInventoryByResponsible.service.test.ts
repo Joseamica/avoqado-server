@@ -157,6 +157,95 @@ describe('buildInventoryByResponsible', () => {
     })
   })
 
+  /**
+   * 🔴 El caso que reportó Isaac por WhatsApp el 31-ago-2026, con captura:
+   * "Juan Nájera aparece que tiene 2 vendedores" cuando su archivo le da 11.
+   *
+   * Causa: la tabla colocaba a cada promotor bajo el supervisor MAYORITARIO de sus
+   * SIMs. Yolanda cambió de equipo —hoy trabaja en una tienda de Juan— pero las 61
+   * SIMs que ya traía encima siguen grabadas a nombre de Hugo, que es quien se las
+   * entregó. La estructura del equipo dice una cosa y el inventario viejo dice otra,
+   * y ganaba el inventario viejo.
+   *
+   * El propio comentario de `resolveSupervisorId` ya decía que el supervisor "se
+   * deduce del promotor, no del campo de cada SIM" — el código hacía lo contrario.
+   */
+  describe('🔴 el supervisor sale de la ESTRUCTURA, no del inventario viejo', () => {
+    const HUGO = staff({ id: 'hugo', name: 'Hugo González', venues: [] })
+    const JUAN = staff({ id: 'juan', name: 'Juan Nájera', venues: [] })
+    const YOLANDA = staff({
+      id: 'yolanda',
+      name: 'Yolanda González',
+      venues: [{ venueId: TIENDA_SLP, city: 'San Luis Potosí', startDate: new Date('2026-06-01') }],
+    })
+
+    it('cuelga al promotor de su tienda actual aunque TODAS sus SIMs digan otro supervisor', () => {
+      const result = buildInventoryByResponsible({
+        items: [
+          item({ assignedPromoterId: 'yolanda', assignedSupervisorId: 'hugo' }),
+          item({ assignedPromoterId: 'yolanda', assignedSupervisorId: 'hugo' }),
+          item({ assignedPromoterId: 'yolanda', assignedSupervisorId: 'hugo' }),
+        ],
+        staff: [YOLANDA, HUGO, JUAN],
+        venueSupervisors: { [TIENDA_SLP]: 'juan' },
+      })
+
+      const sup = result.cities[0].supervisors
+      expect(sup).toHaveLength(1)
+      expect(sup[0].supervisorName).toBe('Juan Nájera')
+      expect(sup[0].promoters[0].promoterName).toBe('Yolanda González')
+      // Sus SIMs viajan CON ella: el conteo del supervisor nuevo tiene que cuadrar.
+      expect(sup[0].promoters[0].assigned).toBe(3)
+      expect(sup[0].assigned).toBe(3)
+    })
+
+    it('sin estructura para esa tienda, cae al supervisor de sus SIMs y no se pierde', () => {
+      // Es el respaldo para una tienda sin supervisor asignado: peor sería dejar
+      // al promotor colgando de nadie.
+      const result = buildInventoryByResponsible({
+        items: [item({ assignedPromoterId: 'yolanda', assignedSupervisorId: 'hugo' })],
+        staff: [YOLANDA, HUGO, JUAN],
+        venueSupervisors: {},
+      })
+
+      expect(result.cities[0].supervisors[0].supervisorName).toBe('Hugo González')
+    })
+
+    it('sin estructura Y sin supervisor en las SIMs, sigue visible en su propio grupo', () => {
+      const result = buildInventoryByResponsible({
+        items: [item({ assignedPromoterId: 'yolanda', assignedSupervisorId: null })],
+        staff: [YOLANDA, HUGO, JUAN],
+      })
+
+      expect(result.cities[0].supervisors[0].supervisorId).toBeNull()
+      expect(result.total.assigned).toBe(1)
+    })
+
+    it('dos promotores de la MISMA tienda caen bajo el mismo supervisor, aunque sus SIMs difieran', () => {
+      // Esto es lo que hacía que Juan apareciera con 2 de sus 11: cada promotor
+      // se iba con el supervisor que dijeran SUS SIMs, partiendo al equipo.
+      const otra = staff({
+        id: 'kasandra',
+        name: 'Kasandra Aguilera',
+        venues: [{ venueId: TIENDA_SLP, city: 'San Luis Potosí', startDate: new Date('2026-06-01') }],
+      })
+
+      const result = buildInventoryByResponsible({
+        items: [
+          item({ assignedPromoterId: 'yolanda', assignedSupervisorId: 'hugo' }),
+          item({ assignedPromoterId: 'kasandra', assignedSupervisorId: null }),
+        ],
+        staff: [YOLANDA, otra, HUGO, JUAN],
+        venueSupervisors: { [TIENDA_SLP]: 'juan' },
+      })
+
+      const sup = result.cities[0].supervisors
+      expect(sup).toHaveLength(1)
+      expect(sup[0].supervisorName).toBe('Juan Nájera')
+      expect(sup[0].promoters.map(p => p.promoterName).sort()).toEqual(['Kasandra Aguilera', 'Yolanda González'])
+    })
+  })
+
   describe('promotor con dos sucursales', () => {
     it('usa la asignación MÁS RECIENTE (caso Tirza Juárez → Querétaro)', () => {
       const tirza = staff({

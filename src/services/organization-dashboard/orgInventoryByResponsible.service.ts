@@ -219,16 +219,32 @@ function resolveCity(staff: StaffInput | undefined): string | null {
 /**
  * El supervisor se deduce del promotor, no del campo de cada SIM.
  *
- * Casi la mitad del inventario en mano no trae `assignedSupervisorId` (756 de
- * 1,628 medidos el 25-ago-2026), así que agrupar por el campo del ítem partiría
- * a un mismo promotor en varios renglones y dejaría el nivel Supervisor hueco.
- * Isaac lo pidió explícitamente así: los SIMs de un promotor caen bajo su
- * supervisor "para que cuadre bottom-up, de promotor hasta nivel país".
+ * 🔴 Manda la ESTRUCTURA DEL EQUIPO —el supervisor de la sucursal donde el
+ * promotor trabaja hoy— y no `assignedSupervisorId`, que es un dato histórico:
+ * queda grabado en cada SIM el día que se entrega y no se mueve nunca. Cuando
+ * alguien cambia de equipo, su inventario viejo se queda con el jefe anterior y
+ * la tabla lo colgaba de ahí.
  *
- * Gana el supervisor mayoritario entre sus ítems; el id desempata para que el
- * resultado sea estable entre corridas.
+ * Lo reportó Isaac el 31-ago-2026 con captura: "Juan Nájera aparece que tiene 2
+ * vendedores" cuando su archivo le da 11. Yolanda salía bajo Hugo porque sus 61
+ * SIMs sin vender siguen a nombre de Hugo, aunque ella ya trabaje con Juan; y
+ * el equipo de Juan quedaba partido entre tres supervisores.
+ *
+ * El respaldo por SIMs se conserva SÓLO para la sucursal que todavía no tiene
+ * supervisor asignado: ahí el dato viejo es la única pista, y es mejor que dejar
+ * al promotor colgando de nadie. Casi la mitad del inventario en mano tampoco
+ * trae `assignedSupervisorId` (756 de 1,628 medidos el 25-ago-2026), así que sin
+ * ese respaldo el nivel Supervisor quedaría hueco. Entre varios gana el
+ * mayoritario, con el id de desempate para que el resultado sea estable.
  */
-function resolveSupervisorId(items: InventoryItemInput[]): string | null {
+function resolveSupervisorId(
+  staffRecord: StaffInput | undefined,
+  items: InventoryItemInput[],
+  venueSupervisors: Record<string, string> | undefined,
+): string | null {
+  const porEstructura = venueSupervisors?.[mostRecentVenueId(staffRecord) ?? '']
+  if (porEstructura) return porEstructura
+
   const tally = new Map<string, number>()
   for (const item of items) {
     if (!item.assignedSupervisorId) continue
@@ -248,8 +264,8 @@ function resolveSupervisorId(items: InventoryItemInput[]): string | null {
 }
 
 /** La sucursal de la asignación más reciente — mismo desempate que `resolveCity`. */
-function mostRecentVenueId(staff: StaffInput): string | null {
-  if (staff.venues.length === 0) return null
+function mostRecentVenueId(staff: StaffInput | undefined): string | null {
+  if (!staff || staff.venues.length === 0) return null
   return staff.venues.reduce((best, v) => (v.startDate.getTime() > best.startDate.getTime() ? v : best)).venueId
 }
 
@@ -297,7 +313,7 @@ export function buildInventoryByResponsible(input: BuildInventoryByResponsibleIn
       continue
     }
 
-    const supervisorId = resolveSupervisorId(promoterItems)
+    const supervisorId = resolveSupervisorId(staffRecord, promoterItems, venueSupervisors)
     const supervisorName = supervisorId ? (staffById.get(supervisorId)?.name ?? NO_SUPERVISOR_LABEL) : NO_SUPERVISOR_LABEL
 
     const supervisors = cityMap.get(city) ?? (new Map() as SupervisorMap)
