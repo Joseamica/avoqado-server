@@ -575,7 +575,13 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   })
 
   // Also fetch orphan payments (shiftId = null) — venues without shifts module
-  // These payments exist but aren't associated with any shift
+  // These payments exist but aren't associated with any shift.
+  // 🔴 SIN fechas del cliente, esta rama se acota a las últimas 24 h. Sin esa ventana
+  // materializaba TODOS los huérfanos históricos en el hilo único — Testarudo tiene
+  // 32,646 (pagos importados de otro POS, sin turno): la misma clase de bomba que
+  // tumbó producción el 2026-09-01 con el detalle del venue. La pantalla de turnos de
+  // la PAX habla del día en curso; con fechas explícitas, la ventana del cliente manda.
+  // Guardia: tests/unit/services/tpv/shiftsSummary.huerfanosAcotados.test.ts
   const orphanPaymentWhere: any = {
     venueId,
     shiftId: null,
@@ -588,7 +594,7 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
             ...(parsedEndTime ? { lte: parsedEndTime } : {}),
           },
         }
-      : {}),
+      : { createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
   }
 
   const orphanPayments = await prisma.payment.findMany({
