@@ -635,6 +635,10 @@ model Venue {
   // Fase 0 — versiones de aviso de privacidad
   privacyNoticeVersions PrivacyNoticeVersion[]
 
+  // Fase 1 — campañas de correo a clientes
+  customerCampaigns  CustomerCampaign[]
+  emailQuotaLedgers  EmailQuotaLedger[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -6821,6 +6825,9 @@ model Customer {
   consentEvents ConsentEvent[]
   captureTokens CustomerCaptureToken[]
 
+  // Fase 1 — campañas de correo
+  campaignDeliveries CustomerCampaignDelivery[]
+
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
   @@unique([venueId, referralCode])
@@ -6893,6 +6900,133 @@ model CustomerCaptureToken {
   createdAt  DateTime  @default(now())
 
   @@index([customerId])
+}
+
+enum CustomerCampaignStatus {
+  DRAFT
+  SCHEDULED
+  ENQUEUED
+  SENDING
+  SENT
+  CANCELLED
+  BLOCKED
+  EXPIRED
+}
+
+enum CustomerCampaignDeliveryStatus {
+  PENDING
+  SENDING
+  SENT
+  RETRYING
+  DEAD
+  SKIPPED
+  UNKNOWN
+}
+
+enum CustomerCampaignAudience {
+  ALL_CONSENTED
+  GROUP
+  TAGS
+}
+
+enum EmailSuppressionReason {
+  HARD_BOUNCE
+  COMPLAINT
+}
+
+/// Campaña PUNTUAL de un negocio a sus clientes. El cumpleaños automático NO vive aquí
+/// (es BirthdayAutomation, fase 2): una puntual existe cuando el dueño la escribe.
+model CustomerCampaign {
+  id               String                     @id @default(cuid())
+  venueId          String
+  venue            Venue                      @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  name             String
+  status           CustomerCampaignStatus     @default(DRAFT)
+  subject          String
+  htmlBody         String                     @db.Text
+  textBody         String                     @db.Text
+  /// Plantilla del beneficio; los CÓDIGOS concretos nacen por delivery (fase 1B)
+  couponTemplateId String?
+  audience         CustomerCampaignAudience   @default(ALL_CONSENTED)
+  customerGroupId  String?
+  tags             String[]
+  scheduledFor     DateTime?
+  /// Tope de atraso: pasado esto NO se encola tarde (una promo navideña el 3-ene daña)
+  sendNoLaterThan  DateTime?
+  /// Dominios de los enlaces del cuerpo, registrados al publicar (vista y suspensión superadmin)
+  linkDomains      String[]
+  /// CACHE reconstruible desde las deliveries: la fuente canónica son ellas
+  totalRecipients  Int                        @default(0)
+  sentCount        Int                        @default(0)
+  failedCount      Int                        @default(0)
+  skippedCount     Int                        @default(0)
+  createdByStaffId String?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  deliveries       CustomerCampaignDelivery[]
+
+  @@index([venueId, status])
+  @@index([status, scheduledFor])
+}
+
+/// Cola de envío Y acuse en la misma fila (patrón outbox del kiosco, endurecido).
+model CustomerCampaignDelivery {
+  id            String                      @id @default(cuid())
+  /// XOR con automationId (fase 2): exactamente uno, garantizado por CHECK en la base
+  campaignId    String?
+  campaign      CustomerCampaign?           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  automationId  String?
+  customerId    String
+  customer      Customer                    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  venueId       String
+  /// puntual: campaignId + ":" + customerId · cumpleaños (fase 2): "birthday:" + automationId + ":" + customerId + ":" + anniversaryYear
+  dedupeKey     String                      @unique
+  status        CustomerCampaignDeliveryStatus @default(PENDING)
+  /// 🔴 Se escribe UNA sola vez, al reclamar, ANTES de tocar la red: ancla inmutable de la
+  /// vigencia del cupón y de la cuota. Un retry JAMÁS la mueve.
+  sendAttemptAt DateTime?
+  attempts      Int                    @default(0)
+  nextAttemptAt DateTime?
+  leaseUntil    DateTime?
+  resendId      String?
+  openedAt      DateTime?
+  clickedAt     DateTime?
+  lastError     String?                @db.Text
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([resendId])
+  @@index([campaignId, status])
+  @@index([venueId, status])
+}
+
+/// 🔴 GLOBAL por email normalizado: la reputación del subdominio es compartida, así que un
+/// rebote duro visto desde el venue A también protege al venue B. La baja VOLUNTARIA no vive
+/// aquí (es ConsentEvent, por venue).
+model EmailSuppression {
+  id          String                 @id @default(cuid())
+  email       String                 @unique
+  reason      EmailSuppressionReason
+  firstSeenAt DateTime               @default(now())
+  lastSeenAt  DateTime               @default(now())
+  occurrences Int                    @default(1)
+
+  @@index([reason])
+}
+
+/// Reserva atómica de cuota por (venue, período de ENVÍO). La reserva ocurre al ENCOLAR.
+model EmailQuotaLedger {
+  id        String   @id @default(cuid())
+  venueId   String
+  venue     Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  /// Período civil del ENVÍO en la zona del venue, formato YYYY-MM
+  period    String
+  reserved  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, period])
 }
 
 model Consumer {
