@@ -154,6 +154,24 @@ describe('reservarCuota', () => {
       expect(tx.emailQuotaLedger.createMany).toHaveBeenCalled()
     })
   })
+
+  // `period` es una cadena libre en la firma: el ledger no puede saber si el llamador pasó
+  // por `periodoDeEnvio` o pegó lo que fuera. Un período con otra forma no rompe la
+  // concurrencia — crea un cubo HUÉRFANO que ningún reporte mensual va a reconocer, y se
+  // descubre meses después contra datos reales. Se valida en la frontera, como `cantidad`.
+  describe('validación de period — nunca toca la base', () => {
+    it.each([
+      ['mes sin cero', '2026-9'],
+      ['mes 13', '2026-13'],
+      ['la cadena que Luxon devuelve sin isValid', 'Invalid DateTime'],
+      ['con día', '2026-09-01'],
+      ['vacío', ''],
+    ])('🔴 period "%s" (%s) lanza BadRequestError y NO llama a createMany ni updateMany', async (_desc, period) => {
+      await expect(reservarCuota(tx, { venueId: 'v1', period, cantidad: 1, topeMensual: 500 })).rejects.toBeInstanceOf(BadRequestError)
+      expect(tx.emailQuotaLedger.createMany).not.toHaveBeenCalled()
+      expect(tx.emailQuotaLedger.updateMany).not.toHaveBeenCalled()
+    })
+  })
 })
 
 describe('devolverCuota', () => {
@@ -222,6 +240,18 @@ describe('devolverCuota', () => {
       const tx = crearTxMock()
 
       await expect(devolverCuota(tx, { venueId: 'v1', period: '2026-09', cantidad })).rejects.toBeInstanceOf(BadRequestError)
+      expect(tx.emailQuotaLedger.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('validación de period — nunca toca la base', () => {
+    it.each([
+      ['mes 13', '2026-13'],
+      ['la cadena que Luxon devuelve sin isValid', 'Invalid DateTime'],
+    ])('🔴 period "%s" (%s) lanza BadRequestError y NO llama a updateMany', async (_desc, period) => {
+      const tx = crearTxMock()
+
+      await expect(devolverCuota(tx, { venueId: 'v1', period, cantidad: 1 })).rejects.toBeInstanceOf(BadRequestError)
       expect(tx.emailQuotaLedger.updateMany).not.toHaveBeenCalled()
     })
   })

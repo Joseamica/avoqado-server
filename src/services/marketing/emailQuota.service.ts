@@ -36,6 +36,21 @@ export function periodoDeEnvio(fecha: Date, venueTimeZone: string): string {
   return dt.toFormat('yyyy-MM')
 }
 
+/**
+ * `period` es una cadena libre en la firma de `reservarCuota`/`devolverCuota`: el ledger no
+ * puede saber si el llamador pasó por `periodoDeEnvio` o pegó lo que fuera. Un período con
+ * otra forma NO rompe la concurrencia — crea un cubo HUÉRFANO (`(venueId, "2026-9")`) que
+ * ningún reporte mensual va a reconocer, y se descubre meses después contra datos reales.
+ * Se valida en la frontera, igual que `cantidad`.
+ */
+const PERIODO_RE = /^\d{4}-(0[1-9]|1[0-2])$/
+
+function exigirPeriodoValido(period: string): void {
+  if (!PERIODO_RE.test(period)) {
+    throw new BadRequestError(`El período de cuota debe tener la forma YYYY-MM; se recibió "${period}".`)
+  }
+}
+
 export interface ReservarCuotaParams {
   venueId: string
   period: string
@@ -84,6 +99,7 @@ export async function reservarCuota(
   if (!Number.isInteger(topeMensual) || topeMensual < 0) {
     throw new BadRequestError('El tope mensual de correos debe ser un entero mayor o igual a cero.')
   }
+  exigirPeriodoValido(period)
 
   await tx.emailQuotaLedger.createMany({
     data: [{ venueId, period, reserved: 0 }],
@@ -129,6 +145,7 @@ export async function devolverCuota(tx: Prisma.TransactionClient, { venueId, per
   if (!Number.isInteger(cantidad) || cantidad <= 0) {
     throw new BadRequestError('La cantidad de correos a devolver debe ser un entero positivo.')
   }
+  exigirPeriodoValido(period)
 
   await tx.emailQuotaLedger.updateMany({
     where: { venueId, period, reserved: { gte: cantidad } },
