@@ -1497,6 +1497,14 @@ async function seedCustomerGroups(venueId: string) {
 /**
  * Seeds sample customers for a venue
  * Creates diverse customers with different attributes
+ *
+ * 🔴 `marketingConsent` se escribe DIRECTO aquí, a propósito — es la ÚNICA excepción declarada
+ * al guard de `tests/unit/services/customer/consentWriters.guard.test.ts`. Estos clientes son
+ * SINTÉTICOS (`*.demo.com`), para que un prospecto explore el producto; no son personas que
+ * puedan otorgar consentimiento real. Enrutarlos por `grantMarketingConsent` exigiría un
+ * `PrivacyNoticeVersion` para cada venue demo (revienta con `BadRequestError` si no existe) y
+ * escribiría `ConsentEvent`/`ActivityLog` reales para un consentimiento que nadie dio —
+ * contaminando el ledger legal. Ver Task 8 (campañas de correo, Fase 0).
  */
 async function seedCustomers(venueId: string, customerGroups: Array<{ id: string; name: string }>) {
   const vipGroup = customerGroups.find(g => g.name === 'VIP')
