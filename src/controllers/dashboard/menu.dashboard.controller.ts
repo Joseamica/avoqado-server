@@ -17,17 +17,16 @@ import {
   UpdateModifierDto,
   AssignModifierGroupToProductDto,
 } from '../../schemas/dashboard/menu.schema'
-import { NotFoundError } from '../../errors/AppError'
 import { resolveLegacyCatalogActor } from '../../services/master-catalog/catalogGovernance.service'
 
-// Helper to check venue access against authContext
+// Helper to check venue access against authContext.
+// 🔴 Usa el chequeo BARATO (select { id }), nunca getVenueById: cargar el venue completo
+// con sus relaciones sólo para verificar existencia fue la causa del incidente del
+// 2026-09-01 (los 29 handlers de este archivo lo pagaban en cada petición).
 async function checkVenueAccess(orgIdFromAuth: string, venueIdFromParams: string, userRole: string): Promise<void> {
   // SUPERADMIN can access any venue (skip org check)
   const skipOrgCheck = userRole === 'SUPERADMIN'
-  const venue = await venueService.getVenueById(orgIdFromAuth, venueIdFromParams, { skipOrgCheck })
-  if (!venue) {
-    throw new NotFoundError(`Venue with ID ${venueIdFromParams} not found or not accessible by your organization.`)
-  }
+  await venueService.assertVenueAccessible(orgIdFromAuth, venueIdFromParams, { skipOrgCheck })
 }
 
 export async function getMenusHandler(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
