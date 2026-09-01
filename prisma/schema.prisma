@@ -14447,6 +14447,10 @@ enum PrinterConnectionType {
   BLUETOOTH
   USB_SPOOLER
   TERMINAL_INTERNAL
+
+  /// La impresora integrada del propio POS (Sunmi): la comanda sale en el aparato que
+  /// cobró. Sin dirección — no hay IP que teclear, y por eso funciona también sin red.
+  POS_INTERNAL
 }
 
 /// The single per-venue LAN print broker (the "gateway"). Exactly one active row

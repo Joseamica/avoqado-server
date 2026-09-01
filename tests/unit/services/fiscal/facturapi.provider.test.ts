@@ -7,6 +7,7 @@ const mockOrgRenewLiveApiKey = jest.fn()
 const mockOrgGetTestApiKey = jest.fn()
 const mockOrgUploadCertificate = jest.fn()
 const mockOrgUpdateLegal = jest.fn()
+const mockOrgRetrieve = jest.fn()
 const mockInvoicesDownloadXml = jest.fn()
 const mockInvoicesDownloadPdf = jest.fn()
 
@@ -26,6 +27,7 @@ jest.mock('facturapi', () => {
       getTestApiKey: mockOrgGetTestApiKey,
       uploadCertificate: mockOrgUploadCertificate,
       updateLegal: mockOrgUpdateLegal,
+      retrieve: mockOrgRetrieve,
     },
   }))
 })
@@ -304,6 +306,28 @@ describe('FacturapiProvider', () => {
       tax_system: '601',
       address: { zip: '64000' },
     })
+  })
+
+  it('getOrganizationStatus maps is_production_ready + pending_steps types', async () => {
+    mockOrgRetrieve.mockResolvedValue({
+      id: 'org1',
+      is_production_ready: false,
+      pending_steps: [
+        { type: 'certificate', description: 'Sube tus certificados' },
+        { type: 'manifiesto', description: 'Firma la carta manifiesto' },
+      ],
+    })
+    const provider = new FacturapiProvider('sk_test_x')
+    const r = await provider.getOrganizationStatus('org1')
+    expect(mockOrgRetrieve).toHaveBeenCalledWith('org1')
+    expect(r).toEqual({ isProductionReady: false, pendingSteps: ['certificate', 'manifiesto'] })
+  })
+
+  it('getOrganizationStatus tolerates a missing pending_steps array (org lista)', async () => {
+    mockOrgRetrieve.mockResolvedValue({ id: 'org1', is_production_ready: true })
+    const provider = new FacturapiProvider('sk_test_x')
+    const r = await provider.getOrganizationStatus('org1')
+    expect(r).toEqual({ isProductionReady: true, pendingSteps: [] })
   })
 
   it('throws a clear error when the SDK rejects (PAC/SAT error)', async () => {
