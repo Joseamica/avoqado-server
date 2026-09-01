@@ -28,6 +28,22 @@ interface EmailOptions {
 }
 
 /**
+ * Opciones exclusivas de `sendEmailWithResult` — `sendEmail` NO las conoce ni las acepta.
+ *
+ * - `from`: el carril de campañas manda por el subdominio de marketing
+ *   (`buildMarketingFrom`), no por el `FROM_EMAIL` transaccional que usa todo lo demás. Si se
+ *   omite, el comportamiento es idéntico al de antes de esta tarea: se manda con
+ *   `FROM_EMAIL`.
+ * - `tags`: pares que Resend adjunta al envío. El carril de campañas manda el `deliveryId`
+ *   como tag de correlación, para ubicar la entrega exacta desde un webhook de Resend sin
+ *   depender sólo del `resendId`.
+ */
+export interface EmailOptionsWithSender extends EmailOptions {
+  from?: string
+  tags?: Array<{ name: string; value: string }>
+}
+
+/**
  * Resultado de `sendEmailWithResult` (hermano de `sendEmail` que devuelve detalle en vez de
  * un booleano). El carril de campañas de correo necesita `resendId` para conciliar los
  * webhooks de apertura/click y `transient` para decidir si vale la pena reintentar.
@@ -401,12 +417,18 @@ class EmailService {
    * fallo es TRANSITORIO (vale la pena reintentar con backoff) o TERMINAL (reintentarlo es
    * inútil — el correo nunca va a salir sin que alguien corrija el problema).
    */
-  async sendEmailWithResult(options: EmailOptions): Promise<EmailSendResult> {
+  async sendEmailWithResult(options: EmailOptionsWithSender): Promise<EmailSendResult> {
     if (!resend || !this.isAvailable) {
       logger.warn('📧 Email service not available. Skipping email send.')
-      // Config ausente/errónea (falta RESEND_API_KEY) no se arregla sola con el tiempo — un
-      // reintento inmediato es tan inútil como el primer intento.
-      return { ok: false, transient: false, errorCode: 'EMAIL_SERVICE_UNAVAILABLE' }
+      // 🔴 transient:true — el motor de campañas reintenta de forma DURABLE en Postgres con
+      // backoff de hasta 24h, y sobrevive a un redeploy. "No se arregla sola con el tiempo"
+      // es cierto DENTRO de este proceso, pero falso a la escala en la que este resultado se
+      // usa: si falta RESEND_API_KEY (secreto rotado, .env incompleto) y alguien lo corrige
+      // dos minutos después, marcar esto terminal mandaría esas entregas a DEAD para siempre
+      // por una falla que ya no existe. El destinatario NO entregable de abajo SÍ es terminal
+      // a propósito — ese problema es del destinatario, no del sistema, y no lo arregla nadie
+      // con el tiempo.
+      return { ok: false, transient: true, errorCode: 'EMAIL_SERVICE_UNAVAILABLE' }
     }
 
     // Mismo filtro que `sendEmail`. Ver src/utils/undeliverableEmail.ts.
@@ -415,14 +437,17 @@ class EmailService {
     }
 
     try {
-      // Mismo payload que `sendEmail` — ver ahí el porqué de cada pieza.
+      // Mismo payload que `sendEmail` — ver ahí el porqué de cada pieza. `from` y `tags` son
+      // exclusivos de este método (ver `EmailOptionsWithSender`): sin ellos, el comportamiento
+      // es idéntico a antes (FROM transaccional, sin tags).
       const emailPayload: Parameters<typeof resend.emails.send>[0] = {
-        from: FROM_EMAIL,
+        from: options.from || FROM_EMAIL,
         to: options.to,
         subject: options.subject,
         html: options.html || undefined,
         text: options.text || 'Please view this email in an HTML-compatible email client.',
         ...(options.headers && { headers: options.headers }),
+        ...(options.tags?.length && { tags: options.tags }),
         ...(options.attachments?.length && {
           attachments: options.attachments.map(a => ({
             filename: a.filename,

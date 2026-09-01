@@ -117,4 +117,56 @@ describe('emailService.sendEmailWithResult', () => {
     expect(result.ok).toBe(false)
     expect(result.transient).toBe(true)
   })
+
+  // 🔴 Fix round 1 — el revisor marcó esto [Important]: el motor de campañas reintenta de
+  // forma DURABLE en Postgres con backoff de hasta 24h y sobrevive a un redeploy. Si falta
+  // RESEND_API_KEY (secreto rotado, .env incompleto) y alguien lo corrige dos minutos después,
+  // con transient:false la tarea 7 ya habría mandado esas entregas a DEAD para siempre. Este
+  // test PIN la clasificación para que un refactor futuro no la voltee sin que nada falle.
+  it('🔴 transient:true cuando el servicio no está disponible (config, no destinatario) — reintentable', async () => {
+    await jest.isolateModulesAsync(async () => {
+      const previousKey = process.env.RESEND_API_KEY
+      delete process.env.RESEND_API_KEY
+
+      try {
+        const freshModule = await import('@/services/email.service')
+        const freshEmailService = freshModule.default
+
+        const result = await freshEmailService.sendEmailWithResult(payload)
+
+        expect(result).toEqual({ ok: false, transient: true, errorCode: 'EMAIL_SERVICE_UNAVAILABLE' })
+      } finally {
+        process.env.RESEND_API_KEY = previousKey
+      }
+    })
+  })
+
+  // Ruling de interfaz — `from`/`tags` son exclusivos de `sendEmailWithResult`: T7 los usa para
+  // mandar por `buildMarketingFrom` y para correlacionar el `deliveryId` con los webhooks de
+  // Resend. Ambos se pasan al payload SÓLO si vienen.
+  it('manda con el `from` y los `tags` dados, cuando vienen', async () => {
+    sendMock.mockResolvedValueOnce({ data: { id: 'resend-con-tags' }, error: null })
+
+    await emailService.sendEmailWithResult({
+      ...payload,
+      from: '"Café Testarudo via Avoqado" <promos@promos.avoqado.io>',
+      tags: [{ name: 'deliveryId', value: 'delivery-123' }],
+    })
+
+    expect(sendMock).toHaveBeenCalledTimes(1)
+    const sentPayload = sendMock.mock.calls[0][0]
+    expect(sentPayload.from).toBe('"Café Testarudo via Avoqado" <promos@promos.avoqado.io>')
+    expect(sentPayload.tags).toEqual([{ name: 'deliveryId', value: 'delivery-123' }])
+  })
+
+  it('regresión: sin `from`/`tags`, manda con el FROM transaccional y sin tags', async () => {
+    sendMock.mockResolvedValueOnce({ data: { id: 'resend-sin-tags' }, error: null })
+
+    await emailService.sendEmailWithResult(payload)
+
+    expect(sendMock).toHaveBeenCalledTimes(1)
+    const sentPayload = sendMock.mock.calls[0][0]
+    expect(sentPayload.from).toBe('Avoqado <noreply@avoqado.io>')
+    expect(sentPayload.tags).toBeUndefined()
+  })
 })
