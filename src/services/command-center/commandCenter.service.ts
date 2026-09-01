@@ -6,6 +6,7 @@
 import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay, venueStartOfMonth, venueStartOfDayOffset, DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { toZonedTime } from 'date-fns-tz'
+import { utcTs } from '../../utils/sqlDates'
 
 /**
  * Get the timezone configured for a venue, falling back to Mexico City.
@@ -594,8 +595,8 @@ class CommandCenterService {
           LEFT JOIN "OrderItem" oi ON oi."orderId" = o.id
           WHERE o."venueId" = ${venueId}
             AND o.status = 'COMPLETED'
-            AND o."createdAt" >= ${currentPeriodStart}
-            AND o."createdAt" <= ${currentPeriodEnd}
+            AND o."createdAt" >= ${utcTs(currentPeriodStart)}
+            AND o."createdAt" <= ${utcTs(currentPeriodEnd)}
           GROUP BY o.id, DATE(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timezone}), o.total
         ) sub
         GROUP BY sub.date_key

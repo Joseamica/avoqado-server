@@ -88,10 +88,15 @@ describe('weekly-trends: venta real, no aleatoria', () => {
     await getChartData(VENUE, 'weekly-trends', { fromDate: FROM, toDate: TO })
 
     const { text, binds } = lastQuery()
-    // El instante guardado es UTC: primero se declara ('UTC') y luego se convierte
-    // a la zona del venue (el bind). Una sola aplicación usaría la zona de la
-    // SESIÓN de Postgres y correría la venta nocturna al día siguiente.
-    expect(text).toContain(`AT TIME ZONE 'UTC'`)
+    // 🔴 Se fija el ORDEN de la composición, no su mera presencia: primero se
+    // declara que el valor guardado es UTC, y sólo entonces se convierte a la zona
+    // del venue. La composición INVERTIDA —(col AT TIME ZONE tz) AT TIME ZONE 'UTC'—
+    // contiene exactamente los mismos dos fragmentos y produce el corrimiento de 6
+    // horas que este archivo existe para prevenir; una aserción que sólo comprobara
+    // que ambos aparecen pasaría con el defecto puesto.
+    expect(text).toMatch(/AT TIME ZONE 'UTC'\)\s*AT TIME ZONE \?/)
+    expect(text).not.toMatch(/AT TIME ZONE \?\)\s*AT TIME ZONE 'UTC'/)
+    // La zona viaja como BIND, nunca interpolada en el texto (no es inyectable).
     expect(binds).toContain(TZ)
     // El caso con datos reales (04:30Z = ayer 22:30 local) vive en integración.
   })

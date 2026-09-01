@@ -27,6 +27,7 @@
 
 import { Prisma, TransactionCardType } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
+import { localInstantRaw, localWallClockRaw, utcTs, utcTsParam } from '@/utils/sqlDates'
 
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
@@ -440,8 +441,8 @@ export async function computeMerchantAccountBreakdown(
       FROM "Payment" p
       LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
       WHERE p."venueId" = ${venueId}
-        AND p."createdAt" >= ${startDate}
-        AND p."createdAt" <= ${endDate}
+        AND p."createdAt" >= ${utcTs(startDate)}
+        AND p."createdAt" <= ${utcTs(endDate)}
         AND p.status = 'COMPLETED'
         AND p."merchantAccountId" IS NOT NULL
       GROUP BY p."merchantAccountId"
@@ -907,8 +908,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     FROM "TransactionCost" tc
     JOIN "Payment" p ON p.id = tc."paymentId"
     WHERE p."venueId" = $1
-      AND p."createdAt" >= $2
-      AND p."createdAt" <= $3
+      AND p."createdAt" >= ${utcTsParam(2)}
+      AND p."createdAt" <= ${utcTsParam(3)}
       ${platformFeesMerchantClause}
       ${platformFeesSqlClause}
   `
@@ -1147,8 +1148,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         FROM "TransactionCost" tc
         JOIN "Payment" p ON p.id = tc."paymentId"
         WHERE p."venueId" = ${venueId}
-          AND p."createdAt" >= ${parsedStartDate}
-          AND p."createdAt" <= ${parsedEndDate}
+          AND p."createdAt" >= ${utcTs(parsedStartDate)}
+          AND p."createdAt" <= ${utcTs(parsedEndDate)}
           AND p."status" = 'COMPLETED'
           ${merchantAccountId ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId}` : Prisma.empty}
       `,
@@ -1508,31 +1509,38 @@ async function calculateTimePeriodMetrics(
   let groupByExpression: string
   let orderByExpression: string
 
+  // Venue wall clock of the UTC column. A single `AT TIME ZONE tz` read the stored UTC value
+  // as if it were local time: a 20:00 sale was bucketed on the next day, at hour 02. Kept
+  // unqualified on purpose — the platform-fees query rewrites `"createdAt"` to `p."createdAt"`.
+  const wall = localWallClockRaw(safeTz, '"createdAt"')
+
+  // Time-based periods are returned as the INSTANT the bucket starts (midnight / hour on the
+  // venue clock): formatPeriod/formatPeriodLabel and the dashboard format them in the venue zone.
   switch (reportType) {
     case 'hours':
-      groupByExpression = `DATE_TRUNC('hour', "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('hour', ${wall})`)
       orderByExpression = 'period'
       break
     case 'days':
-      groupByExpression = `DATE_TRUNC('day', "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('day', ${wall})`)
       orderByExpression = 'period'
       break
     case 'weeks':
-      groupByExpression = `DATE_TRUNC('week', "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('week', ${wall})`)
       orderByExpression = 'period'
       break
     case 'months':
-      groupByExpression = `DATE_TRUNC('month', "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('month', ${wall})`)
       orderByExpression = 'period'
       break
     case 'hourlySum':
       // Group by hour of day (0-23)
-      groupByExpression = `EXTRACT(HOUR FROM "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = `EXTRACT(HOUR FROM ${wall})`
       orderByExpression = 'period'
       break
     case 'dailySum':
       // Group by day of week (0=Sunday, 6=Saturday)
-      groupByExpression = `EXTRACT(DOW FROM "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = `EXTRACT(DOW FROM ${wall})`
       orderByExpression = 'period'
       break
     default:

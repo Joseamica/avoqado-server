@@ -303,25 +303,32 @@ export async function getLegacyPeriodMetrics(
   }
   const tz = sanitizeTimezone(timezone)
 
+  // Same bucket arithmetic as the native sales-summary (sqlDates.ts), so the epoch keys keep
+  // matching 1:1: the venue wall clock of the UTC column (double AT TIME ZONE), and for the
+  // time-based periods the INSTANT the bucket starts on the venue clock. Written inline because
+  // this bridge is temporary and runs against the legacy database, not through Prisma.
+  const wall = `((p."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE '${tz}')`
+  const instantOf = (truncUnit: string) => `(DATE_TRUNC('${truncUnit}', ${wall}) AT TIME ZONE '${tz}')`
+
   let periodExpr: string
   switch (reportType) {
     case 'hours':
-      periodExpr = `(EXTRACT(EPOCH FROM DATE_TRUNC('hour',  p."createdAt" AT TIME ZONE '${tz}')) * 1000)::bigint`
+      periodExpr = `(EXTRACT(EPOCH FROM ${instantOf('hour')}) * 1000)::bigint`
       break
     case 'days':
-      periodExpr = `(EXTRACT(EPOCH FROM DATE_TRUNC('day',   p."createdAt" AT TIME ZONE '${tz}')) * 1000)::bigint`
+      periodExpr = `(EXTRACT(EPOCH FROM ${instantOf('day')}) * 1000)::bigint`
       break
     case 'weeks':
-      periodExpr = `(EXTRACT(EPOCH FROM DATE_TRUNC('week',  p."createdAt" AT TIME ZONE '${tz}')) * 1000)::bigint`
+      periodExpr = `(EXTRACT(EPOCH FROM ${instantOf('week')}) * 1000)::bigint`
       break
     case 'months':
-      periodExpr = `(EXTRACT(EPOCH FROM DATE_TRUNC('month', p."createdAt" AT TIME ZONE '${tz}')) * 1000)::bigint`
+      periodExpr = `(EXTRACT(EPOCH FROM ${instantOf('month')}) * 1000)::bigint`
       break
     case 'hourlySum':
-      periodExpr = `EXTRACT(HOUR FROM p."createdAt" AT TIME ZONE '${tz}')::int`
+      periodExpr = `EXTRACT(HOUR FROM ${wall})::int`
       break
     case 'dailySum':
-      periodExpr = `EXTRACT(DOW FROM p."createdAt" AT TIME ZONE '${tz}')::int`
+      periodExpr = `EXTRACT(DOW FROM ${wall})::int`
       break
     default:
       return []
@@ -347,7 +354,10 @@ export async function getLegacyPeriodMetrics(
     GROUP BY ${periodExpr}
   `
   try {
-    const res = await legacyPool.query(sql, [LEGACY_MINDFORM_VENUE_ID, new Date(startDate), new Date(endDate)])
+    // The range travels as UTC ISO text, not as Date: `pg` serialises a Date in the HOST's local
+    // offset, and Postgres drops the offset when it casts the text to the `timestamp` column —
+    // correct on a UTC host, six hours off on a Mexico City one. The `Z` text is host-independent.
+    const res = await legacyPool.query(sql, [LEGACY_MINDFORM_VENUE_ID, new Date(startDate).toISOString(), new Date(endDate).toISOString()])
     return res.rows.map((r: any) => ({
       periodKey: String(Number(r.period)),
       amount: Number(r.amount_centavos) / 100,

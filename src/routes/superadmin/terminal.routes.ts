@@ -1,7 +1,13 @@
 import { Router } from 'express'
 import * as terminalController from '../../controllers/dashboard/terminals.superadmin.controller'
 import * as migrationController from '../../controllers/dashboard/terminal-migration.controller'
-import { migratePreflightSchema, migrateExecuteSchema, migrateStatusSchema, migrateCancelSchema } from './terminal-migration.schemas'
+import {
+  migratePreflightSchema,
+  migrateExecuteSchema,
+  migrateStatusSchema,
+  migrateCancelSchema,
+  migrateDiscardSchema,
+} from './terminal-migration.schemas'
 import { validateRequest } from '../../middlewares/validation'
 import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
 import { z } from 'zod'
@@ -153,6 +159,13 @@ router.get('/:terminalId/migrate-status', validateRequest(migrateStatusSchema), 
  * @access  Superadmin only
  */
 router.post('/:terminalId/migrate-cancel', validateRequest(migrateCancelSchema), migrationController.cancel)
+
+/**
+ * @route   POST /api/v1/dashboard/superadmin/terminals/:terminalId/migrate-discard
+ * @desc    Discard a pending wipe the device received but never executed (silent ≥ 24 h), so the terminal can be migrated again
+ * @access  Superadmin only
+ */
+router.post('/:terminalId/migrate-discard', validateRequest(migrateDiscardSchema), migrationController.discard)
 
 /**
  * @route   DELETE /api/v1/dashboard/superadmin/terminals/:terminalId

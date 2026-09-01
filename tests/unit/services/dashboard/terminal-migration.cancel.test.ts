@@ -9,7 +9,7 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     tpvCommandQueue: { findFirst: jest.fn() },
-    terminal: { update: jest.fn() },
+    terminal: { update: jest.fn(), findUnique: jest.fn() },
     venuePaymentConfig: { deleteMany: jest.fn() },
   },
 }))
@@ -21,7 +21,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 
 const m = prisma as unknown as {
   tpvCommandQueue: { findFirst: jest.Mock }
-  terminal: { update: jest.Mock }
+  terminal: { update: jest.Mock; findUnique: jest.Mock }
   venuePaymentConfig: { deleteMany: jest.Mock }
 }
 const mockedCancelCommand = tpvCommandQueueService.cancelCommand as jest.Mock
@@ -94,7 +94,11 @@ describe('migrateCancel', () => {
     expect(m.terminal.update).not.toHaveBeenCalled()
   })
 
-  it('throws when the command payload has no migration info (older command, cannot auto-revert)', async () => {
+  // Asana 1218069201250971 (2026-09-01): a MANUAL wipe (queued from the superadmin, no
+  // `migration` payload) also blocks the wizard. Before, this path threw "cannot revert"
+  // and left the operator with no way out. There is nothing to revert — the terminal never
+  // moved — so cancelling is just dropping the queued command.
+  it('cancels a MANUAL wipe (no migration payload) by dropping the command, without touching the venue', async () => {
     m.tpvCommandQueue.findFirst.mockResolvedValue({
       id: 'cmd-1',
       terminalId: 'term-1',
@@ -102,12 +106,14 @@ describe('migrateCancel', () => {
       status: 'QUEUED',
       payload: {}, // no .migration
     })
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-current' })
 
-    await expect(migrateCancel('term-1', { staffId: 'admin-1' })).rejects.toThrow(BadRequestError)
-    await expect(migrateCancel('term-1', { staffId: 'admin-1' })).rejects.toThrow('revertir')
-    // nothing mutated when we can't determine the revert target
-    expect(mockedCancelCommand).not.toHaveBeenCalled()
+    const r = await migrateCancel('term-1', { staffId: 'admin-1' })
+
+    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.any(String))
+    // nothing to revert: the terminal stays exactly where it is
     expect(m.terminal.update).not.toHaveBeenCalled()
+    expect(r).toEqual({ cancelled: true, restoredVenueId: 'venue-current' })
   })
 })
 

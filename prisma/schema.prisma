@@ -3989,6 +3989,8 @@ model OrderItemModifier {
 
   quantity Int     @default(1)
   price    Decimal @db.Decimal(10, 2)
+
+  @@index([orderItemId])
 }
 
 // Order Action Audit Trail

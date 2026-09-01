@@ -61,7 +61,10 @@ beforeAll(async () => {
     select: { id: true },
   })
   const mk = (sku: string, name: string, price: number, type: 'FOOD' | 'BEVERAGE') =>
-    prisma.product.create({ data: { venueId, sku: `${sku}-${suffix}`, name: `${name} ${suffix}`, categoryId: category.id, price, type }, select: { id: true } })
+    prisma.product.create({
+      data: { venueId, sku: `${sku}-${suffix}`, name: `${name} ${suffix}`, categoryId: category.id, price, type },
+      select: { id: true },
+    })
   const tacos = await mk('TACOS', 'Tacos al Pastor', 89, 'FOOD')
   const cerveza = await mk('CERV', 'Cerveza', 45, 'BEVERAGE')
   const burger = await mk('BURG', 'Hamburguesa Doble', 169, 'FOOD')
@@ -101,14 +104,52 @@ beforeAll(async () => {
       paymentStatus: 'PAID',
       items: {
         create: [
-          { productId: tacos.id, productName: 'Tacos al Pastor', categoryName: 'Tacos', quantity: 1, unitPrice: 89, discountAmount: 11.71, taxAmount: 0, total: 77.29 },
-          { productId: cerveza.id, productName: 'Cerveza', categoryName: 'Bebidas', quantity: 2, unitPrice: 45, discountAmount: 0, taxAmount: 0, total: 90 },
+          {
+            productId: tacos.id,
+            productName: 'Tacos al Pastor',
+            categoryName: 'Tacos',
+            quantity: 1,
+            unitPrice: 89,
+            discountAmount: 11.71,
+            taxAmount: 0,
+            total: 77.29,
+          },
+          {
+            productId: cerveza.id,
+            productName: 'Cerveza',
+            categoryName: 'Bebidas',
+            quantity: 2,
+            unitPrice: 45,
+            discountAmount: 0,
+            taxAmount: 0,
+            total: 90,
+          },
         ],
       },
       payments: {
         create: [
-          { venueId, amount: 100, tipAmount: 10, method: 'CASH', status: 'COMPLETED', createdAt: DAY, feePercentage: 0, feeAmount: 0, netAmount: 100 },
-          { venueId, amount: 50, tipAmount: 0, method: 'CASH', status: 'FAILED', createdAt: DAY, feePercentage: 0, feeAmount: 0, netAmount: 50 },
+          {
+            venueId,
+            amount: 100,
+            tipAmount: 10,
+            method: 'CASH',
+            status: 'COMPLETED',
+            createdAt: DAY,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 100,
+          },
+          {
+            venueId,
+            amount: 50,
+            tipAmount: 0,
+            method: 'CASH',
+            status: 'FAILED',
+            createdAt: DAY,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 50,
+          },
         ],
       },
     },
@@ -161,7 +202,21 @@ beforeAll(async () => {
           },
         ],
       },
-      payments: { create: [{ venueId, amount: 50, tipAmount: 0, method: 'CREDIT_CARD', status: 'COMPLETED', createdAt: DAY, feePercentage: 0, feeAmount: 0, netAmount: 50 }] },
+      payments: {
+        create: [
+          {
+            venueId,
+            amount: 50,
+            tipAmount: 0,
+            method: 'CREDIT_CARD',
+            status: 'COMPLETED',
+            createdAt: DAY,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 50,
+          },
+        ],
+      },
     },
   })
 
@@ -180,8 +235,24 @@ beforeAll(async () => {
       total: 200,
       status: 'COMPLETED',
       paymentStatus: 'PAID',
-      items: { create: [{ productId: sincat.id, productName: 'Suelto', quantity: 1, unitPrice: 30, discountAmount: 0, taxAmount: 0, total: 30 }] },
-      payments: { create: [{ venueId, amount: 200, tipAmount: 0, method: 'CASH', status: 'COMPLETED', createdAt: NOCTURNA, feePercentage: 0, feeAmount: 0, netAmount: 200 }] },
+      items: {
+        create: [{ productId: sincat.id, productName: 'Suelto', quantity: 1, unitPrice: 30, discountAmount: 0, taxAmount: 0, total: 30 }],
+      },
+      payments: {
+        create: [
+          {
+            venueId,
+            amount: 200,
+            tipAmount: 0,
+            method: 'CASH',
+            status: 'COMPLETED',
+            createdAt: NOCTURNA,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 200,
+          },
+        ],
+      },
     },
   })
 
@@ -217,7 +288,20 @@ beforeAll(async () => {
       total: 9999,
       status: 'CANCELLED',
       paymentStatus: 'PENDING',
-      items: { create: [{ productId: tacos.id, productName: 'Tacos al Pastor', categoryName: 'Tacos', quantity: 5, unitPrice: 89, discountAmount: 0, taxAmount: 0, total: 445 }] },
+      items: {
+        create: [
+          {
+            productId: tacos.id,
+            productName: 'Tacos al Pastor',
+            categoryName: 'Tacos',
+            quantity: 5,
+            unitPrice: 89,
+            discountAmount: 0,
+            taxAmount: 0,
+            total: 445,
+          },
+        ],
+      },
     },
   })
   await prisma.order.create({
@@ -232,7 +316,20 @@ beforeAll(async () => {
       total: 135,
       status: 'PENDING',
       paymentStatus: 'PENDING',
-      items: { create: [{ productId: cerveza.id, productName: 'Cerveza', categoryName: 'Bebidas', quantity: 3, unitPrice: 45, discountAmount: 0, taxAmount: 0, total: 135 }] },
+      items: {
+        create: [
+          {
+            productId: cerveza.id,
+            productName: 'Cerveza',
+            categoryName: 'Bebidas',
+            quantity: 3,
+            unitPrice: 45,
+            discountAmount: 0,
+            taxAmount: 0,
+            total: 135,
+          },
+        ],
+      },
     },
   })
 
@@ -334,7 +431,11 @@ describe('product-profitability — lineRevenueSql da los mismos números que li
 // ===========================================================================
 describe('timezone bucketing — la venta nocturna pertenece al día local, no al UTC', () => {
   it('weekly-trends: la nocturna suma al Martes y la CANCELLED no suma a nada', async () => {
-    const data = (await getChartData(venueId, 'weekly-trends', FILTERS)) as Array<{ day: string; currentWeek: number; previousWeek: number }>
+    const data = (await getChartData(venueId, 'weekly-trends', FILTERS)) as Array<{
+      day: string
+      currentWeek: number
+      previousWeek: number
+    }>
 
     const martes = data.find(d => d.day === 'Martes')!
     const miercoles = data.find(d => d.day === 'Miércoles')!
@@ -360,7 +461,9 @@ describe('timezone bucketing — la venta nocturna pertenece al día local, no a
   })
 
   it('sales-heatmap: celda martes(1) × 22h con la venta nocturna', async () => {
-    const { heatmap } = (await getChartData(venueId, 'sales-heatmap', FILTERS)) as { heatmap: Array<{ day: number; hour: number; value: number }> }
+    const { heatmap } = (await getChartData(venueId, 'sales-heatmap', FILTERS)) as {
+      heatmap: Array<{ day: number; hour: number; value: number }>
+    }
 
     expect(heatmap).toHaveLength(168) // rejilla completa 7 × 24, como siempre
     const celda = heatmap.find(c => c.day === 1 && c.hour === 22)!
@@ -426,7 +529,12 @@ describe('agregaciones restantes — mismos números que la versión Node', () =
   })
 
   it('category-mix: una línea sin categoryName cae en "Sin categoría" y los porcentajes suman 100', async () => {
-    const data = (await getChartData(venueId, 'category-mix', FILTERS)) as Array<{ category: string; revenue: number; quantity: number; percentage: number }>
+    const data = (await getChartData(venueId, 'category-mix', FILTERS)) as Array<{
+      category: string
+      revenue: number
+      quantity: number
+      percentage: number
+    }>
 
     const sinCat = data.find(d => d.category === 'Sin categoría')!
     expect(round2(sinCat.revenue)).toBe(30)

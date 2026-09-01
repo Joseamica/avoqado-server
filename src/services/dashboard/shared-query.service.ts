@@ -51,6 +51,7 @@ import * as paymentDashboardService from './payment.dashboard.service'
 import * as paymentLinkService from './paymentLink.service'
 import * as reservationService from './reservation.dashboard.service'
 import * as teamDashboardService from './team.dashboard.service'
+import { localWallClockRaw, utcTs } from '../../utils/sqlDates'
 
 /**
  * Date range specification - supports both predefined periods and custom ranges
@@ -922,11 +923,10 @@ export class SharedQueryService {
 
     const safeTz = sanitizeTimezone(venueTimezone)
 
-    // SQL for grouping by date or hour
-    const dateGroupSql =
-      granularity === 'hour'
-        ? `TO_CHAR("createdAt" AT TIME ZONE '${safeTz}', 'HH24:00')`
-        : `TO_CHAR("createdAt" AT TIME ZONE '${safeTz}', 'YYYY-MM-DD')`
+    // SQL for grouping by date or hour, on the venue wall clock (double AT TIME ZONE: with a
+    // single one the stored UTC value was read as local time and 20:00 sales moved a day).
+    const wall = localWallClockRaw(safeTz, '"createdAt"')
+    const dateGroupSql = granularity === 'hour' ? `TO_CHAR(${wall}, 'HH24:00')` : `TO_CHAR(${wall}, 'YYYY-MM-DD')`
 
     const dataPoints = await prisma.$queryRaw<
       Array<{
@@ -941,8 +941,8 @@ export class SharedQueryService {
         COUNT(DISTINCT "orderId")::bigint as "orderCount"
       FROM "Payment"
       WHERE "venueId" = ${venueId}
-        AND "createdAt" >= ${from}
-        AND "createdAt" <= ${to}
+        AND "createdAt" >= ${utcTs(from)}
+        AND "createdAt" <= ${utcTs(to)}
         AND "status" = 'COMPLETED'
       GROUP BY ${Prisma.raw(dateGroupSql)}
       ORDER BY date ASC
@@ -1022,8 +1022,8 @@ export class SharedQueryService {
       INNER JOIN "Order" o ON oi."orderId" = o."id"
       LEFT JOIN "MenuCategory" c ON p."categoryId" = c."id"
       WHERE o."venueId"::text = ${venueId}
-        AND o."createdAt" >= ${from}::timestamp
-        AND o."createdAt" <= ${to}::timestamp
+        AND o."createdAt" >= ${utcTs(from)}
+        AND o."createdAt" <= ${utcTs(to)}
       GROUP BY p."id", p."name", c."name"
       ORDER BY "revenue" DESC
       LIMIT ${limit}
@@ -1115,8 +1115,8 @@ export class SharedQueryService {
       INNER JOIN "Order" o ON oi."orderId" = o."id"
       LEFT JOIN "Product" p ON oi."productId" = p."id"
       WHERE o."venueId"::text = ${venueId}
-        AND o."createdAt" >= ${from}::timestamp
-        AND o."createdAt" <= ${to}::timestamp
+        AND o."createdAt" >= ${utcTs(from)}
+        AND o."createdAt" <= ${utcTs(to)}
         AND (${Prisma.join(productFilters, ' OR ')})
       GROUP BY COALESCE(oi."productName", p."name", 'Producto sin nombre')
       ORDER BY "revenue" DESC
@@ -1210,8 +1210,8 @@ export class SharedQueryService {
       INNER JOIN "Order" o ON oi."orderId" = o."id"
       LEFT JOIN "Product" p ON oi."productId" = p."id"
       WHERE o."venueId"::text = ${venueId}
-        AND o."createdAt" >= ${from}::timestamp
-        AND o."createdAt" <= ${to}::timestamp
+        AND o."createdAt" >= ${utcTs(from)}
+        AND o."createdAt" <= ${utcTs(to)}
         AND (${Prisma.join(productNameFilters, ' OR ')})
         ${weekendFilter}
         ${nightFilter}
@@ -1353,12 +1353,12 @@ export class SharedQueryService {
         FROM "Staff" s
         INNER JOIN "StaffVenue" sv ON s."id" = sv."staffId" AND sv."venueId" = ${venueId}
         LEFT JOIN "Order" o ON (o."servedById" = s."id" OR o."createdById" = s."id")
-          AND o."createdAt" >= ${from}
-          AND o."createdAt" <= ${to}
+          AND o."createdAt" >= ${utcTs(from)}
+          AND o."createdAt" <= ${utcTs(to)}
         LEFT JOIN "Payment" p ON p."orderId" = o."id" AND p."status" = 'COMPLETED'
         LEFT JOIN "Shift" sh ON sh."staffId" = s."id"
-          AND sh."startTime" >= ${from}
-          AND sh."startTime" <= ${to}
+          AND sh."startTime" >= ${utcTs(from)}
+          AND sh."startTime" <= ${utcTs(to)}
         WHERE sv."venueId" = ${venueId}
         GROUP BY s."id", s."firstName", s."lastName", sv."role"
         HAVING COUNT(DISTINCT o."id") > 0
@@ -1865,8 +1865,8 @@ export class SharedQueryService {
       INNER JOIN "Order" o ON oi."orderId" = o."id"
       LEFT JOIN "Recipe" r ON r."productId" = p."id"
       WHERE o."venueId"::text = ${venueId}
-        AND o."createdAt" >= ${from}::timestamp
-        AND o."createdAt" <= ${to}::timestamp
+        AND o."createdAt" >= ${utcTs(from)}
+        AND o."createdAt" <= ${utcTs(to)}
       GROUP BY p."id", p."name"
       ORDER BY (SUM(${Prisma.raw(lineRevenueSql())}) - COALESCE(SUM(oi."quantity" * r."totalCost"), 0)) DESC
       LIMIT ${limit}

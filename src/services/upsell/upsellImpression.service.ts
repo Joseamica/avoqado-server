@@ -22,6 +22,7 @@
 import { Prisma, UpsellSurface } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { utcTs } from '../../utils/sqlDates'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Grupo de control (holdout)
@@ -234,8 +235,8 @@ export async function getPerformance(venueId: string, from: Date, to: Date): Pro
              (SELECT COUNT(*) FROM "UpsellAcceptance" a WHERE a."impressionId" = i.id) AS acc_count
       FROM "UpsellImpression" i
       WHERE i."venueId" = ${venueId}
-        AND i."shownAt" >= ${from}
-        AND i."shownAt" <= ${to}
+        AND i."shownAt" >= ${utcTs(from)}
+        AND i."shownAt" <= ${utcTs(to)}
     )
     SELECT
       CASE WHEN imp."surface" = 'HOLDOUT' THEN 'HOLDOUT' ELSE 'SHOWN' END AS surface,

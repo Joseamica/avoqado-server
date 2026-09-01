@@ -32,6 +32,7 @@ import {
   orgMigrateExecuteSchema,
   orgMigrateStatusSchema,
   orgMigrateCancelSchema,
+  orgMigrateDiscardSchema,
 } from '../../schemas/dashboard/orgTerminals.schema'
 import prisma from '../../utils/prismaClient'
 
@@ -754,10 +755,10 @@ router.put(
   checkOrgAccess,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { zoneId } = req.params
+      const { orgId, zoneId } = req.params
       const { name, slug } = req.body
 
-      const zone = await organizationDashboardService.updateZone(zoneId, { name, slug })
+      const zone = await organizationDashboardService.updateZone(orgId, zoneId, { name, slug })
       res.json({ success: true, data: zone })
     } catch (error) {
       next(error)
@@ -774,8 +775,8 @@ router.delete(
   checkOrgAccess,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { zoneId } = req.params
-      await organizationDashboardService.deleteZone(zoneId)
+      const { orgId, zoneId } = req.params
+      await organizationDashboardService.deleteZone(orgId, zoneId)
       res.json({ success: true })
     } catch (error) {
       next(error)
@@ -1339,6 +1340,43 @@ router.post(
         success: true,
         data,
         message: 'Migración cancelada',
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-discard
+ * Discards a pending factory reset the device received but never executed, so the
+ * terminal can be migrated again. Only after the device has been silent for 24 h since
+ * the wipe was queued (founder decision 2026-09-01, Asana 1218069201250971); a wipe the
+ * device has not received yet must be cancelled instead (migrate-cancel).
+ */
+router.post(
+  '/:orgId/terminals/:terminalId/migrate-discard',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(orgMigrateDiscardSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const authContext = (req as any).authContext
+
+      const actor = {
+        staffId: authContext.userId,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? undefined,
+      }
+
+      const data = await orgTerminalsService.migrateDiscardForOrg(orgId, terminalId, actor)
+
+      res.json({
+        success: true,
+        data,
+        message: 'Borrado pendiente descartado',
       })
     } catch (error) {
       next(error)

@@ -276,7 +276,15 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
   // lineRevenue.ts). Antes este reporte materializaba todas las órdenes con
   // items+product+modifiers para hacer la misma cuenta en Node.
   const rows = await prisma.$queryRaw<
-    Array<{ id: string; name: string; type: string; price: Prisma.Decimal; quantity: number; totalRevenue: Prisma.Decimal; totalCost: Prisma.Decimal }>
+    Array<{
+      id: string
+      name: string
+      type: string
+      price: Prisma.Decimal
+      quantity: number
+      totalRevenue: Prisma.Decimal
+      totalCost: Prisma.Decimal
+    }>
   >`
     SELECT p."id", p."name", p."type"::text AS "type", p."price",
            SUM(oi."quantity")::int AS "quantity",
@@ -967,7 +975,12 @@ async function getDiscountAnalysisData(venueId: string, fromDate: Date, toDate: 
   // "continue" de siempre: el OR de la subconsulta casa el descuento CRUDO de la
   // línea, y una línea cuyo regalo ya vive en Order.discountAmount no aporta nada.
   const [row] = await prisma.$queryRaw<
-    Array<{ ordersWithDiscount: number; orderLevelDiscount: Prisma.Decimal; itemLevelDiscount: Prisma.Decimal; totalRevenue: Prisma.Decimal }>
+    Array<{
+      ordersWithDiscount: number
+      orderLevelDiscount: Prisma.Decimal
+      itemLevelDiscount: Prisma.Decimal
+      totalRevenue: Prisma.Decimal
+    }>
   >`
     SELECT COUNT(*)::int AS "ordersWithDiscount",
            COALESCE(SUM(t."od"), 0) AS "orderLevelDiscount",
@@ -1057,7 +1070,14 @@ async function getReservationOverviewData(venueId: string, fromDate: Date, toDat
 
 async function getStaffRankingData(venueId: string, fromDate: Date, toDate: Date) {
   const rows = await prisma.$queryRaw<
-    Array<{ staffId: string; firstName: string | null; lastName: string | null; revenue: Prisma.Decimal; orders: number; tips: Prisma.Decimal }>
+    Array<{
+      staffId: string
+      firstName: string | null
+      lastName: string | null
+      revenue: Prisma.Decimal
+      orders: number
+      tips: Prisma.Decimal
+    }>
   >`
     SELECT o."createdById" AS "staffId", s."firstName" AS "firstName", s."lastName" AS "lastName",
            SUM(o."total") AS "revenue", COUNT(*)::int AS "orders", SUM(COALESCE(o."tipAmount", 0)) AS "tips"

@@ -5,10 +5,19 @@
  *
  * IMPORTANT: All date calculations use venue timezone (America/Mexico_City by default)
  * to ensure "today", "this week", "this month" match the business's operating timezone.
+ *
+ * Límite conocido (decisión del founder, 2026-09-01): las funciones de ORGANIZACIÓN usan
+ * UNA zona por llamada (`timezone`, default DEFAULT_TIMEZONE), no la de cada venue: la
+ * organización no tiene zona propia y "hoy" es un solo corte para todas sus tiendas. Es
+ * exacto mientras todas las tiendas de la org compartan zona (hoy, todas). Con tiendas en
+ * zonas distintas (Tijuana, Cancún) el "hoy" de esa tienda queda corrido 1 h. Los heatmaps
+ * sí agrupan por `v."timezone"` de cada tienda. Si algún día hace falta, el arreglo es
+ * "hoy" por tienda en TODAS las funciones de org, no sólo en algunas.
  */
 import { Prisma, StaffRole } from '@prisma/client'
-import { eachDayOfInterval, endOfDay, format, startOfDay } from 'date-fns'
-import { fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { endOfDay, endOfMonth, format, startOfDay, subDays } from 'date-fns'
+import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { localWallClock, utcTs } from '../../utils/sqlDates'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { ROLE_HIERARCHY } from '../../lib/permissions'
 import {
@@ -208,6 +217,97 @@ function compareVersions(a: string, b: string): number {
   return 0
 }
 
+// ── Reescritura 2026-09-01 (fase 3 de la migración Node→SQL) ──────────────────
+// Las agregaciones de este servicio materializaban en Node TODAS las órdenes, pagos o
+// checadas de la organización en el rango (PlayTelecom: ~40 tiendas) sólo para contar,
+// sumar o agrupar. Ahora agrega Postgres y Node da formato. Reglas de estas consultas,
+// verificadas contra findMany en el borde exacto (la sesión de Postgres corre en
+// America/Mexico_City y las columnas guardan UTC real):
+//  · un bind de fecha se compara SIEMPRE con `utcTs(d)`: un `${d}` pelón corre 6 horas;
+//  · el día del venue es ((col AT TIME ZONE 'UTC') AT TIME ZONE tz), nunca una sola vez;
+//  · divisiones, redondeos y desempates se quedan en Node, idénticos a los de antes.
+
+/** Tabla física de `TimeEntry` (`@@map("time_entries")`). */
+const TIME_ENTRIES = Prisma.raw('"time_entries"')
+
+/** `col >= from` y, si hay tope, `col <= to` — con los binds correctos para columnas UTC. */
+const rangeSql = (col: Prisma.Sql, from: Date, to?: Date): Prisma.Sql =>
+  to ? Prisma.sql`${col} >= ${utcTs(from)} AND ${col} <= ${utcTs(to)}` : Prisma.sql`${col} >= ${utcTs(from)}`
+
+/** Subconsulta con los ids de TODOS los venues de la org (sin filtrar por status): acota una consulta al tenant en el propio SQL. */
+const orgVenueIdsSql = (orgId: string): Prisma.Sql => Prisma.sql`SELECT ov."id" FROM "Venue" ov WHERE ov."organizationId" = ${orgId}`
+
+/** Día civil del venue (YYYY-MM-DD) de una columna UTC, con la zona de la fila `Venue` (alias `v`). */
+const venueLocalDay = (col: Prisma.Sql): Prisma.Sql =>
+  Prisma.sql`to_char((${col} AT TIME ZONE 'UTC') AT TIME ZONE COALESCE(NULLIF(v."timezone", ''), ${DEFAULT_TIMEZONE}), 'YYYY-MM-DD')`
+
+/**
+ * Personas distintas con checada en la ventana, por tienda. Sustituye a los
+ * `timeEntry.findMany({ distinct })`: Prisma resuelve `distinct` en memoria del
+ * cliente, así que traía todas las checadas del rango sólo para contar personas.
+ */
+/**
+ * Días civiles del rango [from, to] como 'YYYY-MM-DD', iterados en UTC y anclados a mediodía:
+ * nunca pasan por la zona del host. (`eachDayOfInterval({ start: new Date('YYYY-MM-DD') })`
+ * daba el rango correcto en un host UTC y corrido un día en un host en México.)
+ */
+function calendarDayStrings(fromStr: string, toStr: string): string[] {
+  const out: string[] = []
+  const end = new Date(`${toStr}T12:00:00Z`)
+  for (const cur = new Date(`${fromStr}T12:00:00Z`); cur <= end; cur.setUTCDate(cur.getUTCDate() + 1)) {
+    out.push(cur.toISOString().slice(0, 10))
+  }
+  return out
+}
+
+async function activeStaffByVenue(venueIds: string[], from: Date, to?: Date): Promise<Map<string, number>> {
+  if (venueIds.length === 0) return new Map()
+  const rows = await prisma.$queryRaw<Array<{ venueId: string; n: number }>>`
+    SELECT te."venueId", COUNT(DISTINCT te."staffId")::int AS "n"
+    FROM ${TIME_ENTRIES} te
+    WHERE te."venueId" IN (${Prisma.join(venueIds)}) AND ${rangeSql(Prisma.raw('te."clockInTime"'), from, to)}
+    GROUP BY te."venueId"
+  `
+  return new Map(rows.map(r => [r.venueId, r.n]))
+}
+
+/** Personas distintas con checada en la ventana en cualquiera de las tiendas (en dos tiendas cuenta una vez). */
+async function activeStaffCount(venueIds: string[], from: Date, to?: Date): Promise<number> {
+  if (venueIds.length === 0) return 0
+  const [row] = await prisma.$queryRaw<Array<{ n: number }>>`
+    SELECT COUNT(DISTINCT te."staffId")::int AS "n"
+    FROM ${TIME_ENTRIES} te
+    WHERE te."venueId" IN (${Prisma.join(venueIds)}) AND ${rangeSql(Prisma.raw('te."clockInTime"'), from, to)}
+  `
+  return row?.n ?? 0
+}
+
+/**
+ * Efectivo cobrado DURANTE cada checada del rango: los pagos CASH completados de esa
+ * persona en esa tienda con `createdAt` en [clockIn, clockOut], inclusivo — una checada
+ * abierta llega hasta el fin del rango. Antes se traían todos los pagos en efectivo del
+ * rango y se cruzaban en Node checada por checada.
+ */
+async function cashSalesPerTimeEntry(venueIds: string[], from: Date, to: Date): Promise<Map<string, number>> {
+  if (venueIds.length === 0) return new Map()
+  const rows = await prisma.$queryRaw<Array<{ timeEntryId: string; cash: Prisma.Decimal | null }>>`
+    SELECT te."id" AS "timeEntryId", SUM(p."amount") AS "cash"
+    FROM ${TIME_ENTRIES} te
+    JOIN "Payment" p
+      ON p."processedById" = te."staffId"
+     AND p."venueId" = te."venueId"
+     AND p."createdAt" >= te."clockInTime"
+     AND (te."clockOutTime" IS NULL OR p."createdAt" <= te."clockOutTime")
+    WHERE te."venueId" IN (${Prisma.join(venueIds)})
+      AND ${rangeSql(Prisma.raw('te."clockInTime"'), from, to)}
+      AND ${rangeSql(Prisma.raw('p."createdAt"'), from, to)}
+      AND p."status" = 'COMPLETED'
+      AND p."method" = 'CASH'
+    GROUP BY te."id"
+  `
+  return new Map(rows.map(r => [r.timeEntryId, Number(r.cash) || 0]))
+}
+
 class OrganizationDashboardService {
   /**
    * Get vision global summary for an organization (aggregate KPIs)
@@ -276,17 +376,27 @@ class OrganizationDashboardService {
       }
     }
 
-    // Aggregate sales from completed orders
+    // Aggregate sales from completed orders — sumas y categorías en Postgres (antes se
+    // materializaban todas las órdenes del rango con sus items para reducirlas en Node).
     const rangeFilter = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
-    const [todayOrders, weekOrders, monthOrders] = await Promise.all([
-      prisma.order.findMany({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: rangeFilter,
-        },
-        select: { total: true, items: true },
-      }),
+    const orderScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND ${rangeSql(Prisma.raw('o."createdAt"'), todayStart, rangeEnd)}`
+    const [todayTotals, categoryRows, weekOrders, monthOrders] = await Promise.all([
+      prisma.$queryRaw<Array<{ sales: Prisma.Decimal | null; orders: number }>>`
+        SELECT SUM(o."total") AS "sales", COUNT(*)::int AS "orders"
+        FROM "Order" o
+        WHERE ${orderScope}
+      `,
+      // Una fila por categoría. Productos normales: `categoryName` desnormalizado; SIMs:
+      // `categoryName` nulo y el `productName` ES la categoría. Vacío cae al siguiente, como el `||`.
+      prisma.$queryRaw<Array<{ name: string; units: number; sales: Prisma.Decimal | null }>>`
+        SELECT COALESCE(NULLIF(oi."categoryName", ''), NULLIF(oi."productName", ''), 'Sin categoría') AS "name",
+               SUM(oi."quantity")::int AS "units", SUM(oi."total") AS "sales"
+        FROM "OrderItem" oi
+        JOIN "Order" o ON o."id" = oi."orderId"
+        WHERE ${orderScope}
+        GROUP BY 1
+        ORDER BY SUM(oi."quantity") DESC, 1
+      `,
       prisma.order.aggregate({
         where: {
           venueId: { in: venueIds },
@@ -305,9 +415,10 @@ class OrganizationDashboardService {
       }),
     ])
 
-    const todaySales = todayOrders.reduce((sum, o) => sum + Number(o.total || 0), 0)
-    const unitsSold = todayOrders.reduce((sum, o) => sum + (o.items?.reduce((s: number, i: any) => s + (i.quantity || 0), 0) || 0), 0)
-    const avgTicket = todayOrders.length > 0 ? todaySales / todayOrders.length : 0
+    const todaySales = Number(todayTotals[0]?.sales) || 0
+    const todayOrderCount = todayTotals[0]?.orders ?? 0
+    const unitsSold = categoryRows.reduce((sum, c) => sum + c.units, 0)
+    const avgTicket = todayOrderCount > 0 ? todaySales / todayOrderCount : 0
 
     // Sum CASH payments only (money physically in the field)
     const cashPaymentsResult = await prisma.payment.aggregate({
@@ -321,16 +432,9 @@ class OrganizationDashboardService {
     })
     const todayCashSales = Number(cashPaymentsResult._sum?.amount) || 0
 
-    // Count promoters (active check-ins in range using TimeEntry)
+    // Count promoters (distinct staff with a check-in in range — counted in Postgres)
     const [activePromoters, totalPromoters] = await Promise.all([
-      prisma.timeEntry.findMany({
-        where: {
-          venueId: { in: venueIds },
-          clockInTime: rangeFilter,
-        },
-        distinct: ['staffId'],
-        select: { staffId: true },
-      }),
+      activeStaffCount(venueIds, todayStart, rangeEnd),
       prisma.staffVenue.count({
         where: {
           venueId: { in: venueIds },
@@ -361,28 +465,16 @@ class OrganizationDashboardService {
     })
     const approvedDeposits = Number(approvedDepositsResult._sum?.amount) || 0
 
-    // Aggregate sales by category from order items
-    // For regular products: use denormalized categoryName
-    // For serialized inventory (SIMs): categoryName is null, productName IS the category
-    const categoryStats = new Map<string, { id: string; name: string; sales: number; units: number }>()
-    for (const order of todayOrders) {
-      for (const item of order.items) {
-        const catName = item.categoryName || item.productName || 'Sin categoría'
-        const existing = categoryStats.get(catName) || { id: catName, name: catName, sales: 0, units: 0 }
-        existing.units += item.quantity
-        existing.sales += Number(item.total || 0)
-        categoryStats.set(catName, existing)
-      }
-    }
-    const totalCategoryUnits = Array.from(categoryStats.values()).reduce((sum, cat) => sum + cat.units, 0)
-    const categoryBreakdown: OrgCategoryBreakdown[] = Array.from(categoryStats.values())
-      .sort((a, b) => b.units - a.units)
-      .slice(0, 5)
-      .map(cat => ({
-        ...cat,
-        sales: Math.round(cat.sales * 100) / 100,
-        percentage: totalCategoryUnits > 0 ? Math.round((cat.units / totalCategoryUnits) * 100) : 0,
-      }))
+    // Top 5 categorías por unidades (ya vienen ordenadas de Postgres; el porcentaje es
+    // sobre TODAS las unidades del rango, no sólo las cinco mostradas — como siempre).
+    const totalCategoryUnits = unitsSold
+    const categoryBreakdown: OrgCategoryBreakdown[] = categoryRows.slice(0, 5).map(cat => ({
+      id: cat.name,
+      name: cat.name,
+      sales: Math.round((Number(cat.sales) || 0) * 100) / 100,
+      units: cat.units,
+      percentage: totalCategoryUnits > 0 ? Math.round((cat.units / totalCategoryUnits) * 100) : 0,
+    }))
 
     return {
       todaySales: Math.round(todaySales * 100) / 100,
@@ -391,7 +483,7 @@ class OrganizationDashboardService {
       monthSales: Math.round((Number(monthOrders._sum?.total) || 0) * 100) / 100,
       unitsSold,
       avgTicket: Math.round(avgTicket * 100) / 100,
-      activePromoters: activePromoters.length,
+      activePromoters,
       totalPromoters,
       activeStores: storesWithSales.length,
       totalStores: allVenuesCount,
@@ -543,8 +635,8 @@ class OrganizationDashboardService {
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${todayStart}
-              AND o."createdAt" <= ${rangeEnd}
+              AND o."createdAt" >= ${utcTs(todayStart)}
+              AND o."createdAt" <= ${utcTs(rangeEnd)}
             GROUP BY o."venueId"
           `
         : prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
@@ -553,7 +645,7 @@ class OrganizationDashboardService {
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${todayStart}
+              AND o."createdAt" >= ${utcTs(todayStart)}
             GROUP BY o."venueId"
           `,
       // 3. Week sales per venue
@@ -574,12 +666,8 @@ class OrganizationDashboardService {
         where: { venueId: { in: venueIds }, active: true, role: { in: ['CASHIER', 'WAITER'] } },
         _count: true,
       }),
-      // 6. Active promoters per venue (distinct staffId entries)
-      prisma.timeEntry.findMany({
-        where: { venueId: { in: venueIds }, clockInTime: todayCreatedAtWhere },
-        distinct: ['staffId', 'venueId'] as any,
-        select: { staffId: true, venueId: true },
-      }),
+      // 6. Active promoters per venue (distinct staff with a check-in — counted in Postgres)
+      activeStaffByVenue(venueIds, todayStart, rangeEnd),
       // 7. Month sales per venue (conditional — only if MONTHLY AMOUNT goals exist)
       needsMonthSales
         ? prisma.order.groupBy({
@@ -596,7 +684,7 @@ class OrganizationDashboardService {
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${weekStart}
+              AND o."createdAt" >= ${utcTs(weekStart)}
             GROUP BY o."venueId"
           `
         : Promise.resolve([] as any[]),
@@ -608,7 +696,7 @@ class OrganizationDashboardService {
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${monthStart}
+              AND o."createdAt" >= ${utcTs(monthStart)}
             GROUP BY o."venueId"
           `
         : Promise.resolve([] as any[]),
@@ -624,11 +712,7 @@ class OrganizationDashboardService {
     const weekUnitsMap = new Map((weekUnitsByVenue as any[]).map(r => [r.venueId, Number(r.units)]))
     const monthUnitsMap = new Map((monthUnitsByVenue as any[]).map(r => [r.venueId, Number(r.units)]))
 
-    // Count distinct active promoters per venue
-    const activePromotersMap = new Map<string, number>()
-    for (const entry of activePromoterEntries) {
-      activePromotersMap.set(entry.venueId, (activePromotersMap.get(entry.venueId) || 0) + 1)
-    }
+    const activePromotersMap = activePromoterEntries
 
     // Map venues to results — no DB calls in this loop
     const results: OrgStorePerformance[] = venues.map(venue => {
@@ -769,10 +853,14 @@ class OrganizationDashboardService {
               clockInLatitude: { not: null },
               clockInLongitude: { not: null },
             },
-            include: {
-              staff: {
-                select: { firstName: true, lastName: true },
-              },
+            // Select quirúrgico: sólo lo que usa el cálculo de distancia (antes: la
+            // checada entera, con fotos y notas, por cada check-in del día).
+            select: {
+              id: true,
+              venueId: true,
+              clockInLatitude: true,
+              clockInLongitude: true,
+              staff: { select: { firstName: true, lastName: true } },
             },
           })
         : Promise.resolve([] as any[]),
@@ -937,11 +1025,14 @@ class OrganizationDashboardService {
     }
 
     // Get stores managed by this manager (ADMIN or MANAGER role)
+    // Sólo las tiendas de ESTA org: un gerente que también gestiona tiendas en otra org no las
+    // trae al dashboard de ésta (IDOR cross-tenant, 2026-09-01).
     const managedStores = await prisma.staffVenue.findMany({
       where: {
         staffId: managerId,
         role: { in: ['ADMIN', 'MANAGER'] },
         active: true,
+        venue: { organizationId: orgId },
       },
       include: {
         venue: {
@@ -974,11 +1065,7 @@ class OrganizationDashboardService {
         where: { venueId: { in: allVenueIds }, active: true, role: { in: ['CASHIER', 'WAITER'] } },
         _count: true,
       }),
-      prisma.timeEntry.findMany({
-        where: { venueId: { in: allVenueIds }, clockInTime: { gte: todayStart } },
-        distinct: ['staffId', 'venueId'],
-        select: { staffId: true, venueId: true },
-      }),
+      activeStaffByVenue(allVenueIds, todayStart),
       prisma.performanceGoal.findMany({
         where: { staffId: managerId, venueId: { in: allVenueIds }, month: monthStart },
       }),
@@ -989,11 +1076,7 @@ class OrganizationDashboardService {
     const promoterMap = new Map(promotersByVenue.map(p => [p.venueId, p._count]))
     const goalMap = new Map(goals.map(g => [g.venueId, g]))
 
-    // Count distinct active staff per venue
-    const activeByVenue = new Map<string, number>()
-    for (const entry of activeEntries) {
-      activeByVenue.set(entry.venueId, (activeByVenue.get(entry.venueId) || 0) + 1)
-    }
+    const activeByVenue = activeEntries
 
     const stores = managedStores.map(sv => {
       const todaySales = todayMap.get(sv.venueId) || 0
@@ -1153,10 +1236,12 @@ class OrganizationDashboardService {
 
   /**
    * Get online staff (promoters with active TimeEntry today)
+   *
+   * "Hoy" es el día civil del venue (medianoche en `timezone`), no el del host: en
+   * producción (UTC) la medianoche del host son las 18:00 de AYER en México.
    */
-  async getOnlineStaff(orgId: string): Promise<OrgOnlineStaff> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+  async getOnlineStaff(orgId: string, timezone: string = DEFAULT_TIMEZONE): Promise<OrgOnlineStaff> {
+    const todayStart = venueStartOfDay(timezone)
 
     // Get all venues in organization
     const venues = await prisma.venue.findMany({
@@ -1182,20 +1267,15 @@ class OrganizationDashboardService {
         clockInTime: { gte: todayStart },
         clockOutTime: null, // Only entries that haven't clocked out
       },
-      include: {
-        staff: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-        venue: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
+      // Select quirúrgico: "quién está dentro" sólo necesita esto (antes: la checada
+      // entera, con fotos, GPS y notas, por cada persona en línea).
+      select: {
+        staffId: true,
+        venueId: true,
+        clockInTime: true,
+        jobRole: true,
+        staff: { select: { firstName: true, lastName: true } },
+        venue: { select: { name: true } },
       },
       orderBy: {
         clockInTime: 'desc',
@@ -1794,9 +1874,12 @@ class OrganizationDashboardService {
   }
 
   /**
-   * Get list of managers in organization
+   * Get list of managers in organization ("ventas de hoy" = día civil del venue)
    */
-  async getOrgManagers(orgId: string): Promise<
+  async getOrgManagers(
+    orgId: string,
+    timezone: string = DEFAULT_TIMEZONE,
+  ): Promise<
     Array<{
       id: string
       name: string
@@ -1806,8 +1889,7 @@ class OrganizationDashboardService {
       todaySales: number
     }>
   > {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    const todayStart = venueStartOfDay(timezone)
 
     // Get all staff with ADMIN or MANAGER role in any venue
     const managers = await prisma.staffVenue.findMany({
@@ -1891,17 +1973,19 @@ class OrganizationDashboardService {
   }
 
   /**
-   * Get top promoter by sales count (completed orders today)
+   * Get top promoter by sales count (completed orders today, día civil del venue)
    */
-  async getTopPromoter(orgId: string): Promise<{
+  async getTopPromoter(
+    orgId: string,
+    timezone: string = DEFAULT_TIMEZONE,
+  ): Promise<{
     staffId: string
     staffName: string
     venueId: string
     venueName: string
     salesCount: number
   } | null> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    const todayStart = venueStartOfDay(timezone)
 
     // Get all venues in organization
     const venues = await prisma.venue.findMany({
@@ -1913,72 +1997,60 @@ class OrganizationDashboardService {
 
     const venueIds = venues.map(v => v.id)
 
-    // Get all completed orders today with staff info
-    const orders = await prisma.order.findMany({
-      where: {
-        venueId: { in: venueIds },
-        status: 'COMPLETED',
-        createdAt: { gte: todayStart },
-        createdById: { not: null },
-      },
-      select: {
-        createdById: true,
-        venueId: true,
-        createdBy: {
-          select: {
-            firstName: true,
-            lastName: true,
-          },
-        },
-        venue: {
-          select: {
-            name: true,
-          },
-        },
-      },
-    })
-
-    if (orders.length === 0) return null
-
-    // Group by staff and count sales
-    const staffSalesMap = new Map<
-      string,
-      {
+    // Ventas de hoy por vendedor, contadas en Postgres (antes: todas las órdenes de hoy
+    // de la org con su vendedor y su tienda materializadas para contarlas en Node). La
+    // tienda es la de su PRIMERA venta de hoy y el empate lo gana quien empezó a vender
+    // primero — antes lo decidía el orden en que la base devolviera las filas.
+    const todayScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND o."createdAt" >= ${utcTs(todayStart)} AND o."createdById" IS NOT NULL`
+    const rows = await prisma.$queryRaw<
+      Array<{
         staffId: string
-        staffName: string
-        venueId: string
-        venueName: string
         salesCount: number
-      }
-    >()
+        firstName: string | null
+        lastName: string | null
+        venueId: string
+        venueName: string | null
+      }>
+    >`
+      WITH ranked AS (
+        SELECT o."createdById" AS "staffId", COUNT(*)::int AS "salesCount", MIN(o."createdAt") AS "firstAt"
+        FROM "Order" o
+        WHERE ${todayScope}
+        GROUP BY o."createdById"
+        ORDER BY COUNT(*) DESC, MIN(o."createdAt") ASC, o."createdById" ASC
+        LIMIT 1
+      )
+      SELECT r."staffId", r."salesCount", s."firstName", s."lastName", first_sale."venueId", v."name" AS "venueName"
+      FROM ranked r
+      LEFT JOIN "Staff" s ON s."id" = r."staffId"
+      JOIN LATERAL (
+        SELECT o."venueId"
+        FROM "Order" o
+        WHERE ${todayScope} AND o."createdById" = r."staffId"
+        ORDER BY o."createdAt" ASC, o."id" ASC
+        LIMIT 1
+      ) first_sale ON TRUE
+      LEFT JOIN "Venue" v ON v."id" = first_sale."venueId"
+    `
+    const top = rows[0]
+    if (!top) return null
 
-    for (const order of orders) {
-      if (!order.createdById) continue
-
-      const existing = staffSalesMap.get(order.createdById)
-      if (existing) {
-        existing.salesCount++
-      } else {
-        staffSalesMap.set(order.createdById, {
-          staffId: order.createdById,
-          staffName: `${order.createdBy?.firstName || ''} ${order.createdBy?.lastName || ''}`.trim(),
-          venueId: order.venueId,
-          venueName: order.venue?.name || '',
-          salesCount: 1,
-        })
-      }
+    return {
+      staffId: top.staffId,
+      staffName: `${top.firstName || ''} ${top.lastName || ''}`.trim(),
+      venueId: top.venueId,
+      venueName: top.venueName || '',
+      salesCount: top.salesCount,
     }
-
-    // Find top promoter
-    const topPromoter = Array.from(staffSalesMap.values()).sort((a, b) => b.salesCount - a.salesCount)[0]
-
-    return topPromoter || null
   }
 
   /**
-   * Get worst attendance (store with lowest percentage of active staff today)
+   * Get worst attendance (store with lowest percentage of active staff today, día civil del venue)
    */
-  async getWorstAttendance(orgId: string): Promise<{
+  async getWorstAttendance(
+    orgId: string,
+    timezone: string = DEFAULT_TIMEZONE,
+  ): Promise<{
     venueId: string
     venueName: string
     totalStaff: number
@@ -1986,8 +2058,7 @@ class OrganizationDashboardService {
     absences: number
     attendanceRate: number
   } | null> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    const todayStart = venueStartOfDay(timezone)
 
     // Get all venues in organization
     const venues = await prisma.venue.findMany({
@@ -2206,22 +2277,8 @@ class OrganizationDashboardService {
       _sum: { amount: true },
     })
 
-    // Get individual CASH payments for per-time-entry breakdown
-    const cashPayments = await prisma.payment.findMany({
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: dayStart, lte: dayEnd },
-        status: 'COMPLETED',
-        processedById: { not: null },
-        method: 'CASH',
-      },
-      select: {
-        processedById: true,
-        venueId: true,
-        amount: true,
-        createdAt: true,
-      },
-    })
+    // Efectivo por checada (ventana [clockIn, clockOut] inclusiva), agregado en Postgres.
+    const cashByEntry = await cashSalesPerTimeEntry(venueIds, dayStart, dayEnd)
 
     // Key: staffId:venueId -> sales amount
     const salesByStaffVenue: Record<string, number> = {}
@@ -2285,13 +2342,9 @@ class OrganizationDashboardService {
       const deadlineMin = expH * 60 + expM + aSetting.latenessThresholdMinutes
 
       // Transform all time entries for this staff member
-      const staffCashPayments = cashPayments.filter(p => p.processedById === sv.staffId && p.venueId === sv.venueId)
       const allTimeEntries = staffTimeEntries.map(te => {
-        // Calculate cash sales for this specific time entry (clockIn → clockOut)
-        const teStartMs = te.clockInTime.getTime()
-        const teEndMs = te.clockOutTime ? te.clockOutTime.getTime() : Infinity
-        const matchingPayments = staffCashPayments.filter(p => p.createdAt.getTime() >= teStartMs && p.createdAt.getTime() <= teEndMs)
-        const teCashSales = matchingPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+        // Cash sales for this specific time entry (clockIn → clockOut), from Postgres
+        const teCashSales = cashByEntry.get(te.id) ?? 0
 
         // Lateness: convert clockIn to venue timezone and compare
         const localClockIn = toZonedTime(te.clockInTime, venueTz)
@@ -2376,44 +2429,40 @@ class OrganizationDashboardService {
   /**
    * Get sales trend for a staff member (last 7 days)
    */
-  async getStaffSalesTrend(orgId: string, staffId: string) {
-    const today = new Date()
-    const sevenDaysAgo = new Date(today)
-    sevenDaysAgo.setDate(today.getDate() - 7)
-    sevenDaysAgo.setHours(0, 0, 0, 0)
+  async getStaffSalesTrend(orgId: string, staffId: string, timezone: string = DEFAULT_TIMEZONE) {
+    await this.assertStaffInOrg(orgId, staffId)
+    // Ventana y día de la semana en la zona del VENUE (decisión de producto 2026-09-01).
+    // Antes era la del host, que en producción es UTC: una venta de las 20:00 de México
+    // caía en el día siguiente y la ventana arrancaba a las 18:00 de la víspera.
+    const sevenDaysAgo = venueStartOfDayOffset(timezone, -7)
+    const todayVenue = toZonedTime(new Date(), timezone)
 
-    // Get all orders created by this staff member in the last 7 days
-    const orders = await prisma.order.findMany({
-      where: {
-        createdById: staffId,
-        createdAt: { gte: sevenDaysAgo },
-        status: 'COMPLETED',
-      },
-      select: {
-        createdAt: true,
-        total: true,
-      },
-    })
+    // Ventas de los últimos 7 días agrupadas por día de la semana (del venue) en Postgres.
+    const rows = await prisma.$queryRaw<Array<{ dow: number; sales: Prisma.Decimal | null }>>`
+      SELECT EXTRACT(DOW FROM ${localWallClock(timezone, Prisma.raw('o."createdAt"'))})::int AS "dow", SUM(o."total") AS "sales"
+      FROM "Order" o
+      WHERE o."venueId" IN (${orgVenueIdsSql(orgId)})
+        AND o."createdById" = ${staffId} AND o."status" = 'COMPLETED' AND o."createdAt" >= ${utcTs(sevenDaysAgo)}
+      GROUP BY 1
+    `
 
     // Group by day
     const salesByDay: Record<string, number> = {}
     const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
 
-    // Initialize last 7 days
+    // Initialize last 7 days (día de la semana del venue)
     for (let i = 6; i >= 0; i--) {
-      const date = new Date(today)
-      date.setDate(today.getDate() - i)
-      const dayName = dayNames[date.getDay()]
+      const dayName = dayNames[subDays(todayVenue, i).getDay()]
       salesByDay[dayName] = 0
     }
 
-    // Aggregate sales
-    orders.forEach(order => {
-      const dayName = dayNames[order.createdAt.getDay()]
+    // Aggregate sales (DOW de Postgres: 0 = domingo … 6 = sábado, igual que getDay())
+    for (const row of rows) {
+      const dayName = dayNames[row.dow]
       if (salesByDay[dayName] !== undefined) {
-        salesByDay[dayName] += Number(order.total)
+        salesByDay[dayName] += Number(row.sales) || 0
       }
-    })
+    }
 
     const salesData = Object.entries(salesByDay).map(([day, sales]) => ({
       day,
@@ -2427,51 +2476,31 @@ class OrganizationDashboardService {
    * Get sales mix by category for a staff member
    */
   async getStaffSalesMix(orgId: string, staffId: string) {
-    // Get orders with items created by this staff member
-    const orders = await prisma.order.findMany({
-      where: {
-        createdById: staffId,
-        status: 'COMPLETED',
-      },
-      include: {
-        items: {
-          include: {
-            product: {
-              select: {
-                category: {
-                  select: {
-                    name: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    })
+    await this.assertStaffInOrg(orgId, staffId)
+    // Importe por categoría de catálogo, agregado en Postgres (antes: TODO el historial
+    // de órdenes del vendedor con items, producto y categoría materializado en Node —
+    // sin rango de fechas, el peor de los quince). Sin producto o sin nombre → «Sin categoría».
+    const rows = await prisma.$queryRaw<Array<{ category: string; amount: Prisma.Decimal | null }>>`
+      SELECT COALESCE(NULLIF(mc."name", ''), 'Sin categoría') AS "category", SUM(oi."total") AS "amount"
+      FROM "OrderItem" oi
+      JOIN "Order" o ON o."id" = oi."orderId"
+      LEFT JOIN "Product" p ON p."id" = oi."productId" AND p."venueId" IN (${orgVenueIdsSql(orgId)})
+      LEFT JOIN "MenuCategory" mc ON mc."id" = p."categoryId" AND mc."venueId" IN (${orgVenueIdsSql(orgId)})
+      WHERE o."venueId" IN (${orgVenueIdsSql(orgId)}) AND o."createdById" = ${staffId} AND o."status" = 'COMPLETED'
+      GROUP BY 1
+      ORDER BY SUM(oi."total") DESC, 1
+    `
+    const categoryTotals = rows.map(r => ({ category: r.category, amount: Number(r.amount) || 0 }))
+    const totalSales = categoryTotals.reduce((sum, c) => sum + c.amount, 0)
 
-    // Aggregate by category
-    const categoryTotals: Record<string, number> = {}
-    let totalSales = 0
-
-    orders.forEach(order => {
-      order.items.forEach(item => {
-        const categoryName = item.product?.category?.name || 'Sin categoría'
-        const itemTotal = Number(item.total)
-        categoryTotals[categoryName] = (categoryTotals[categoryName] || 0) + itemTotal
-        totalSales += itemTotal
-      })
-    })
-
-    // Convert to percentages
-    const salesMix = Object.entries(categoryTotals)
-      .map(([category, amount]) => ({
+    // Convert to percentages — top 4 categories; el porcentaje es sobre el total de todas
+    const salesMix = categoryTotals
+      .map(({ category, amount }) => ({
         category,
         percentage: totalSales > 0 ? Math.round((amount / totalSales) * 100) : 0,
         amount,
       }))
-      .sort((a, b) => b.amount - a.amount)
-      .slice(0, 4) // Top 4 categories
+      .slice(0, 4)
 
     return { salesMix }
   }
@@ -2479,15 +2508,22 @@ class OrganizationDashboardService {
   /**
    * Get attendance calendar for current month
    */
-  async getStaffAttendanceCalendar(orgId: string, staffId: string) {
+  async getStaffAttendanceCalendar(orgId: string, staffId: string, timezone: string = DEFAULT_TIMEZONE) {
+    await this.assertStaffInOrg(orgId, staffId)
+    // Mes, "hoy" y el día de cada checada en la zona del VENUE. Antes: medianoche del host
+    // (UTC en producción, 6 h corrida) y el día de la checada por su fecha UTC, así que
+    // una entrada a las 19:00 de México se pintaba en el día siguiente.
     const now = new Date()
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999)
+    const nowVenue = toZonedTime(now, timezone)
+    const monthStart = venueStartOfMonth(timezone)
+    const monthEnd = fromZonedTime(endOfMonth(nowVenue), timezone)
+    const monthPrefix = formatInTimeZone(now, timezone, 'yyyy-MM')
 
     // Get all TimeEntry for this month with full details for dialog
     const timeEntries = await prisma.timeEntry.findMany({
       where: {
         staffId,
+        venue: { organizationId: orgId },
         clockInTime: {
           gte: monthStart,
           lte: monthEnd,
@@ -2521,22 +2557,24 @@ class OrganizationDashboardService {
       status: entry.status,
     }))
 
-    // Create calendar array with attendance info
-    const daysInMonth = monthEnd.getDate()
+    // Create calendar array with attendance info (días civiles del venue)
+    const daysInMonth = endOfMonth(nowVenue).getDate()
+    const todayNumber = nowVenue.getDate()
+    const entriesByVenueDay = new Map<string, typeof transformedEntries>()
+    for (const entry of transformedEntries) {
+      const key = formatInTimeZone(entry.clockInTime, timezone, 'yyyy-MM-dd')
+      entriesByVenueDay.set(key, [...(entriesByVenueDay.get(key) ?? []), entry])
+    }
     const calendar = Array.from({ length: daysInMonth }, (_, idx) => {
       const dayNumber = idx + 1
-      const date = new Date(now.getFullYear(), now.getMonth(), dayNumber)
-      const dateString = date.toISOString().split('T')[0]
+      const dateString = `${monthPrefix}-${String(dayNumber).padStart(2, '0')}`
 
       // Get all TimeEntry for this specific day
-      const dayTimeEntries = transformedEntries.filter(entry => {
-        const entryDate = entry.clockInTime.toISOString().split('T')[0]
-        return entryDate === dateString
-      })
+      const dayTimeEntries = entriesByVenueDay.get(dateString) ?? []
 
       const hasAttendance = dayTimeEntries.length > 0
-      const isToday = dayNumber === now.getDate()
-      const isFutureDay = date > now
+      const isToday = dayNumber === todayNumber
+      const isFutureDay = dayNumber > todayNumber
 
       return {
         day: dayNumber,
@@ -2558,6 +2596,32 @@ class OrganizationDashboardService {
         present: presentDays,
         absent: absentDays,
       },
+    }
+  }
+
+  /**
+   * Candado de tenant de los endpoints por empleado del dashboard de organización. Lanza 404
+   * si el empleado no tiene StaffVenue ACTIVO en un venue de la org ni StaffOrganization con
+   * ella: checkOrgAccess sólo valida que QUIEN PREGUNTA sea de la org, no que el staffId de la
+   * URL lo sea, y con eso un OWNER de la org A leía ventas, mezcla y checadas de un empleado
+   * de la org B (IDOR cross-tenant, 2026-09-01). Las consultas que siguen se acotan ADEMÁS a
+   * los venues de la org dentro del propio SQL (`orgVenueIdsSql`) o por la relación
+   * `venue.organizationId`, para que la defensa no dependa sólo de este chequeo ni de una
+   * foto de ids tomada antes de consultar.
+   */
+  private async assertStaffInOrg(orgId: string, staffId: string): Promise<void> {
+    const member = await prisma.staff.findFirst({
+      where: {
+        id: staffId,
+        OR: [
+          { venues: { some: { active: true, venue: { organizationId: orgId } } } },
+          { organizations: { some: { organizationId: orgId } } },
+        ],
+      },
+      select: { id: true },
+    })
+    if (!member) {
+      throw new NotFoundError('El empleado no pertenece a esta organización')
     }
   }
 
@@ -2707,7 +2771,8 @@ class OrganizationDashboardService {
     return zone
   }
 
-  async updateZone(zoneId: string, data: { name?: string; slug?: string }) {
+  async updateZone(orgId: string, zoneId: string, data: { name?: string; slug?: string }) {
+    await this.assertZoneInOrg(orgId, zoneId)
     const zone = await prisma.zone.update({
       where: { id: zoneId },
       data,
@@ -2723,10 +2788,11 @@ class OrganizationDashboardService {
     return zone
   }
 
-  async deleteZone(zoneId: string) {
+  async deleteZone(orgId: string, zoneId: string) {
+    await this.assertZoneInOrg(orgId, zoneId)
     // Set null on venues referencing this zone, then delete
     await prisma.venue.updateMany({
-      where: { zoneId },
+      where: { zoneId, organizationId: orgId },
       data: { zoneId: null },
     })
     const zone = await prisma.zone.delete({ where: { id: zoneId } })
@@ -2740,16 +2806,32 @@ class OrganizationDashboardService {
     return zone
   }
 
+  /**
+   * Candado de tenant de las zonas: la ruta sólo valida que QUIEN PREGUNTA sea de la org y el
+   * zoneId de la URL entraba tal cual — cualquier miembro de una org renombraba o borraba zonas
+   * de OTRA org (IDOR cross-tenant, 2026-09-01). 404 para no confirmar la existencia del id.
+   */
+  private async assertZoneInOrg(orgId: string, zoneId: string): Promise<void> {
+    const zone = await prisma.zone.findFirst({ where: { id: zoneId, organizationId: orgId }, select: { id: true } })
+    if (!zone) {
+      throw new NotFoundError('La zona no pertenece a esta organización')
+    }
+  }
+
   // ==========================================
   // CLOSING REPORT
   // ==========================================
 
   async getClosingReportData(orgId: string, dateStr?: string, venueId?: string) {
     const timezone = 'America/Mexico_City'
-    // DB stores local time — use venue helpers
+    // Un `YYYY-MM-DD` es un día civil del venue y se abre en su zona. Antes pasaba por
+    // `new Date('YYYY-MM-DD')` = medianoche UTC = 18:00 del día ANTERIOR en México, y el
+    // reporte del día D salía con las ventas del D−1 (verificado con datos reales el
+    // 2026-09-01). Un instante ISO completo conserva lo de siempre: el día del venue que lo contiene.
+    const isBareDay = !!dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
     const targetDate = dateStr ? new Date(dateStr) : new Date()
-    const startOfDayDb = venueStartOfDay(timezone, targetDate)
-    const endOfDayDb = venueEndOfDay(timezone, targetDate)
+    const startOfDayDb = isBareDay ? fromZonedTime(`${dateStr}T00:00:00.000`, timezone) : venueStartOfDay(timezone, targetDate)
+    const endOfDayDb = isBareDay ? fromZonedTime(`${dateStr}T23:59:59.999`, timezone) : venueEndOfDay(timezone, targetDate)
 
     const startUtc = startOfDayDb
     const endUtc = endOfDayDb
@@ -2763,7 +2845,12 @@ class OrganizationDashboardService {
         createdAt: { gte: startUtc, lte: endUtc },
         status: 'COMPLETED',
       },
-      include: {
+      // Select quirúrgico: la fila del reporte usa fecha, etiquetas, tienda, promotor,
+      // pagos e items — no la orden entera (antes: todas las columnas de cada orden del día).
+      select: {
+        id: true,
+        createdAt: true,
+        tags: true,
         venue: { select: { name: true, city: true, state: true } },
         createdBy: { select: { firstName: true, lastName: true } },
         payments: {
@@ -3053,37 +3140,33 @@ class OrganizationDashboardService {
     const rangeStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
     const rangeEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
 
-    // Fetch all time entries in range
-    const timeEntries = await prisma.timeEntry.findMany({
-      where: {
-        staffId: { in: staffIds },
-        venueId: { in: venueIds },
-        clockInTime: { gte: rangeStart, lte: rangeEnd },
-      },
-      select: {
-        staffId: true,
-        venueId: true,
-        clockInTime: true,
-        clockOutTime: true,
-      },
-    })
+    // Una fila por persona × tienda × día del venue con la checada MÁS TEMPRANA de ese
+    // día, resuelta en Postgres (antes: todas las checadas del rango materializadas, y
+    // "la primera" era la primera que devolviera la base, sin orden garantizado).
+    const firstEntries = await prisma.$queryRaw<
+      Array<{ staffId: string; venueId: string; localDate: string; clockInTime: Date; clockOutTime: Date | null }>
+    >`
+      SELECT DISTINCT ON (x."staffId", x."venueId", x."localDate")
+             x."staffId", x."venueId", x."localDate", x."clockInTime", x."clockOutTime"
+      FROM (
+        SELECT te."id", te."staffId", te."venueId", te."clockInTime", te."clockOutTime",
+               ${venueLocalDay(Prisma.raw('te."clockInTime"'))} AS "localDate"
+        FROM ${TIME_ENTRIES} te
+        JOIN "Venue" v ON v."id" = te."venueId"
+        WHERE te."staffId" IN (${Prisma.join(staffIds)})
+          AND te."venueId" IN (${Prisma.join(venueIds)})
+          AND ${rangeSql(Prisma.raw('te."clockInTime"'), rangeStart, rangeEnd)}
+      ) x
+      ORDER BY x."staffId", x."venueId", x."localDate", x."clockInTime" ASC, x."id" ASC
+    `
 
-    // Enumerate all days in the range
-    const allDays = eachDayOfInterval({ start, end })
-    const dayStrings = allDays.map(d => format(d, 'yyyy-MM-dd'))
+    // Enumerate all days in the range (cadenas civiles: no pasan por la zona del host)
+    const dayStrings = calendarDayStrings(startDateStr, endDateStr)
 
     // Index time entries by staffId:venueId:date
     const entryIndex = new Map<string, { clockInTime: Date; clockOutTime: Date | null }>()
-    for (const te of timeEntries) {
-      // Get the venue timezone for proper day assignment
-      const sv = staffVenues.find(s => s.staffId === te.staffId && s.venueId === te.venueId)
-      const tz = sv?.venueTimezone || DEFAULT_TIMEZONE
-      const localDate = format(toZonedTime(te.clockInTime, tz), 'yyyy-MM-dd')
-      const key = `${te.staffId}:${te.venueId}:${localDate}`
-      // Keep the earliest entry per day
-      if (!entryIndex.has(key)) {
-        entryIndex.set(key, { clockInTime: te.clockInTime, clockOutTime: te.clockOutTime })
-      }
+    for (const te of firstEntries) {
+      entryIndex.set(`${te.staffId}:${te.venueId}:${te.localDate}`, { clockInTime: te.clockInTime, clockOutTime: te.clockOutTime })
     }
 
     // Today in venue timezone (to detect future days)
@@ -3186,39 +3269,30 @@ class OrganizationDashboardService {
     const rangeStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
     const rangeEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
 
-    // Fetch completed payments
-    const payments = await prisma.payment.findMany({
-      where: {
-        processedById: { in: staffIds, not: null },
-        venueId: { in: venueIds },
-        status: 'COMPLETED',
-        createdAt: { gte: rangeStart, lte: rangeEnd },
-      },
-      select: {
-        processedById: true,
-        venueId: true,
-        amount: true,
-        createdAt: true,
-      },
-    })
+    // Conteo e importe por vendedor × tienda × día del venue, agregados en Postgres
+    // (antes: todos los pagos del rango materializados para sumarlos en Node).
+    const salesRows = await prisma.$queryRaw<
+      Array<{ staffId: string; venueId: string; localDate: string; count: number; amount: Prisma.Decimal | null }>
+    >`
+      SELECT p."processedById" AS "staffId", p."venueId",
+             ${venueLocalDay(Prisma.raw('p."createdAt"'))} AS "localDate",
+             COUNT(*)::int AS "count", SUM(p."amount") AS "amount"
+      FROM "Payment" p
+      JOIN "Venue" v ON v."id" = p."venueId"
+      WHERE p."processedById" IN (${Prisma.join(staffIds)})
+        AND p."venueId" IN (${Prisma.join(venueIds)})
+        AND p."status" = 'COMPLETED'
+        AND ${rangeSql(Prisma.raw('p."createdAt"'), rangeStart, rangeEnd)}
+      GROUP BY 1, 2, 3
+    `
 
-    // Enumerate days
-    const allDays = eachDayOfInterval({ start, end })
-    const dayStrings = allDays.map(d => format(d, 'yyyy-MM-dd'))
+    // Enumerate days (cadenas civiles: no pasan por la zona del host)
+    const dayStrings = calendarDayStrings(startDateStr, endDateStr)
 
-    // Index payments by staffId:venueId:date
+    // Index sales by staffId:venueId:date
     const salesIndex = new Map<string, { count: number; amount: number }>()
-    for (const p of payments) {
-      if (!p.processedById) continue
-      // Find the venue timezone
-      const sv = staffVenues.find(s => s.staffId === p.processedById && s.venueId === p.venueId)
-      const tz = sv?.venueTimezone || DEFAULT_TIMEZONE
-      const localDate = format(toZonedTime(p.createdAt, tz), 'yyyy-MM-dd')
-      const key = `${p.processedById}:${p.venueId}:${localDate}`
-      const existing = salesIndex.get(key) || { count: 0, amount: 0 }
-      existing.count++
-      existing.amount += Number(p.amount) || 0
-      salesIndex.set(key, existing)
+    for (const r of salesRows) {
+      salesIndex.set(`${r.staffId}:${r.venueId}:${r.localDate}`, { count: r.count, amount: Number(r.amount) || 0 })
     }
 
     // Build staff rows

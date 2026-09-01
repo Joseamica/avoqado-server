@@ -87,12 +87,25 @@ function updatePayload(tx: { $queryRaw: jest.Mock }, callIndex = 0) {
   return {
     custodyState,
     assignedSupervisorId,
-    assignedSupervisorAt,
+    assignedSupervisorAt: unwrapDateBind(assignedSupervisorAt),
     assignedPromoterId,
-    assignedPromoterAt,
-    promoterAcceptedAt,
-    promoterRejectedAt,
+    assignedPromoterAt: unwrapDateBind(assignedPromoterAt),
+    promoterAcceptedAt: unwrapDateBind(promoterAcceptedAt),
+    promoterRejectedAt: unwrapDateBind(promoterRejectedAt),
   }
+}
+
+/**
+ * The date columns are bound through `utcTsOrNull` (src/utils/sqlDates.ts): a Prisma.sql
+ * fragment carrying the Date, or the literal `NULL::timestamp`. Unwrap it so the assertions
+ * keep reading the value the service decided to write.
+ */
+function unwrapDateBind(bind: unknown): unknown {
+  if (bind && typeof bind === 'object' && 'strings' in bind && 'values' in bind) {
+    const fragment = bind as { strings: string[]; values: unknown[] }
+    return fragment.strings.join('').trim() === 'NULL::timestamp' ? null : fragment.values[0]
+  }
+  return bind
 }
 
 describe('SimCustodyService — reassignPromoter', () => {
