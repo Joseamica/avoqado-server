@@ -36,8 +36,6 @@ describe('getAvailableBalance — venueFixedFee + uncosted', () => {
           transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-01T00:00:00.000Z'), netSettlementAmount: null },
         },
       ])
-      // Cash payments (second call)
-      .mockResolvedValueOnce([])
 
     const summary = await getAvailableBalance(VENUE)
 
@@ -68,7 +66,6 @@ describe('getAvailableBalance — venueFixedFee + uncosted', () => {
           transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-01T00:00:00.000Z'), netSettlementAmount: 96 },
         },
       ])
-      .mockResolvedValueOnce([])
 
     const summary = await getAvailableBalance(VENUE)
 
@@ -94,7 +91,9 @@ describe('getAvailableBalance — venueFixedFee + uncosted', () => {
           transaction: null,
         },
       ])
-      .mockResolvedValueOnce([{ amount: 30, tipAmount: 0 }])
+
+    // El efectivo se agrega ahora en Postgres ($queryRaw devuelve la suma).
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([{ total: 30 }])
 
     const summary = await getAvailableBalance(VENUE)
 
@@ -132,7 +131,6 @@ describe('getAvailableBalance — estimatedNextSettlement recomputes live (match
           transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-01T00:00:00Z'), netSettlementAmount: 1.9 },
         },
       ])
-      .mockResolvedValueOnce([])
     ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([
       {
         merchantAccountId: 'm1',
@@ -165,7 +163,6 @@ describe('getAvailableBalance — estimatedNextSettlement recomputes live (match
           transaction: { status: 'SETTLED', estimatedSettlementDate: new Date('2026-07-01T00:00:00Z'), netSettlementAmount: 1.9 },
         },
       ])
-      .mockResolvedValueOnce([])
     ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([
       {
         merchantAccountId: 'm1',
@@ -214,7 +211,6 @@ describe('getAvailableBalance — estimatedNextSettlement recomputes live (match
           transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-04T02:00:00Z'), netSettlementAmount: 56 },
         },
       ])
-      .mockResolvedValueOnce([])
     ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([]) // no config → honest fallback for both
 
     const summary = await getAvailableBalance(VENUE)
@@ -235,7 +231,6 @@ describe('getAvailableBalance — estimatedNextSettlement recomputes live (match
           transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-05T00:00:00Z'), netSettlementAmount: 48 },
         },
       ])
-      .mockResolvedValueOnce([])
     ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([])
 
     const summary = await getAvailableBalance(VENUE)

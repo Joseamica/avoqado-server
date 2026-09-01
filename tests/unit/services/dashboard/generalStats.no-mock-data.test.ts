@@ -10,15 +10,20 @@
  * La prueba de fuego de que ya no se fabrica nada es el DETERMINISMO: con la misma
  * entrada, dos llamadas consecutivas deben devolver exactamente lo mismo. Si alguien
  * vuelve a meter aleatoriedad, este test truena.
+ *
+ * 2026-09-01: la agregación por día de la semana se movió a Postgres (GROUP BY
+ * sobre ISODOW en la zona del venue) tras el incidente del event loop. Aquí se
+ * prueba la capa de FORMA que quedó en Node (el arreglo de 7 días, la variación
+ * porcentual) y la forma de la consulta (el timezone del venue viaja como bind,
+ * los estados descartados van en el WHERE). El bucketing REAL por zona horaria
+ * ya no es simulable con un mock — vive contra Postgres de verdad en
+ * tests/integration/dashboard/generalStats-sql-aggregation.integration.test.ts.
  */
-import { OrderStatus } from '@prisma/client'
-
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     venue: { findUnique: jest.fn() },
-    order: { findMany: jest.fn() },
-    kdsOrder: { findMany: jest.fn() },
+    $queryRaw: jest.fn(),
   },
 }))
 
@@ -32,17 +37,45 @@ const TZ = 'America/Mexico_City'
 const FROM = '2026-06-01'
 const TO = '2026-06-07'
 
+// Aplana el tagged template que recibió el mock de $queryRaw: los fragmentos
+// anidados (Prisma.sql / Prisma.raw) se expanden y los binds reales se juntan.
+function flattenSql(strings: ReadonlyArray<string>, values: unknown[]): { text: string; binds: unknown[] } {
+  let text = ''
+  const binds: unknown[] = []
+  for (let i = 0; i < strings.length; i++) {
+    text += strings[i]
+    if (i < values.length) {
+      const v = values[i] as { strings?: ReadonlyArray<string>; values?: unknown[] } | unknown
+      if (v && typeof v === 'object' && Array.isArray((v as any).strings)) {
+        const inner = flattenSql((v as any).strings, (v as any).values ?? [])
+        text += inner.text
+        binds.push(...inner.binds)
+      } else {
+        text += '?'
+        binds.push(v)
+      }
+    }
+  }
+  return { text, binds }
+}
+
+function lastQuery() {
+  const calls = (prisma.$queryRaw as jest.Mock).mock.calls
+  const [strings, ...values] = calls[calls.length - 1]
+  return flattenSql(strings, values)
+}
+
 beforeEach(() => {
   jest.clearAllMocks()
   ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ id: VENUE, timezone: TZ })
+  ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
 })
 
 describe('weekly-trends: venta real, no aleatoria', () => {
   it('es DETERMINISTA — dos llamadas con la misma entrada dan el mismo resultado', async () => {
-    ;(prisma.order.findMany as jest.Mock).mockResolvedValue([
-      // Lunes 1-jun 14:00 local = 20:00 UTC
-      { total: 100, createdAt: new Date('2026-06-01T20:00:00Z') },
-      { total: 50, createdAt: new Date('2026-06-01T20:30:00Z') },
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+      // Postgres ya agregó: lunes con 150 de venta en el periodo actual.
+      { idx: 1, current: 150, previous: 0 },
     ])
 
     const a = await getChartData(VENUE, 'weekly-trends', { fromDate: FROM, toDate: TO })
@@ -51,30 +84,28 @@ describe('weekly-trends: venta real, no aleatoria', () => {
     expect(a).toEqual(b)
   })
 
-  it('suma la venta en el día correcto de la semana EN LA ZONA DEL VENUE', async () => {
-    // 2026-06-02T04:00:00Z = lunes 1-jun 22:00 en México. Agrupar en UTC lo pondría
-    // en martes: es exactamente el bug que se busca prevenir (prod corre en UTC).
-    ;(prisma.order.findMany as jest.Mock).mockResolvedValue([{ total: 250, createdAt: new Date('2026-06-02T04:00:00Z') }])
-
-    const data = (await getChartData(VENUE, 'weekly-trends', { fromDate: FROM, toDate: TO })) as Array<{
-      day: string
-      currentWeek: number
-    }>
-
-    expect(data.find(d => d.day === 'Lunes')?.currentWeek).toBe(250)
-    expect(data.find(d => d.day === 'Martes')?.currentWeek).toBe(0)
-  })
-
-  it('excluye órdenes canceladas, pendientes y borradas', async () => {
+  it('agrupa EN LA ZONA DEL VENUE: el timezone viaja como bind y el bucket es doble AT TIME ZONE', async () => {
     await getChartData(VENUE, 'weekly-trends', { fromDate: FROM, toDate: TO })
 
-    const where = (prisma.order.findMany as jest.Mock).mock.calls[0][0].where
-    expect(where.status.notIn).toEqual(expect.arrayContaining([OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED]))
-    expect(where.venueId).toBe(VENUE)
+    const { text, binds } = lastQuery()
+    // El instante guardado es UTC: primero se declara ('UTC') y luego se convierte
+    // a la zona del venue (el bind). Una sola aplicación usaría la zona de la
+    // SESIÓN de Postgres y correría la venta nocturna al día siguiente.
+    expect(text).toContain(`AT TIME ZONE 'UTC'`)
+    expect(binds).toContain(TZ)
+    // El caso con datos reales (04:30Z = ayer 22:30 local) vive en integración.
+  })
+
+  it('excluye órdenes canceladas, pendientes y borradas, acotado al venue', async () => {
+    await getChartData(VENUE, 'weekly-trends', { fromDate: FROM, toDate: TO })
+
+    const { text, binds } = lastQuery()
+    expect(text).toContain(`NOT IN ('PENDING','CANCELLED','DELETED')`)
+    expect(binds).toContain(VENUE)
   })
 
   it('devuelve 0% de variación cuando no hay periodo anterior, en vez de un número inventado', async () => {
-    ;(prisma.order.findMany as jest.Mock).mockResolvedValue([{ total: 900, createdAt: new Date('2026-06-01T20:00:00Z') }])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ idx: 1, current: 900, previous: 0 }])
 
     const data = (await getChartData(VENUE, 'weekly-trends', { fromDate: FROM, toDate: TO })) as Array<{
       day: string
@@ -88,10 +119,7 @@ describe('weekly-trends: venta real, no aleatoria', () => {
   })
 
   it('calcula la variación real contra el periodo inmediato anterior', async () => {
-    ;(prisma.order.findMany as jest.Mock).mockResolvedValue([
-      { total: 150, createdAt: new Date('2026-06-01T20:00:00Z') }, // periodo actual, lunes
-      { total: 100, createdAt: new Date('2026-05-25T20:00:00Z') }, // periodo anterior, lunes
-    ])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ idx: 1, current: 150, previous: 100 }])
 
     const data = (await getChartData(VENUE, 'weekly-trends', { fromDate: FROM, toDate: TO })) as Array<{
       day: string
@@ -107,7 +135,7 @@ describe('weekly-trends: venta real, no aleatoria', () => {
   })
 
   it('conserva los siete días de la semana en la respuesta (contrato con el dashboard)', async () => {
-    ;(prisma.order.findMany as jest.Mock).mockResolvedValue([])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
 
     const data = (await getChartData(VENUE, 'weekly-trends', { fromDate: FROM, toDate: TO })) as Array<{ day: string }>
 

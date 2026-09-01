@@ -3,12 +3,52 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
 import { SharedQueryService } from './shared-query.service'
-import { isItemLevelDiscount, lineRevenue } from './lineRevenue'
+import { isItemLevelDiscountSql, lineRevenueSql } from './lineRevenue'
 import { parseDateRange, DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { utcTs } from '../../utils/sqlDates'
 import { DateTime } from 'luxon'
 // ⚠️ TECH DEBT — delete when MindForm migrates to native QR module.
 // See: src/services/legacy/mergedPayments.service.ts for full context.
 import { fetchPaymentsForAnalytics } from '../legacy/mergedPayments.service'
+
+/**
+ * ── Reescritura 2026-09-01 (incidente del event loop) ────────────────────────
+ *
+ * Las agregaciones de este archivo materializaban TODAS las filas del rango en
+ * Node (un rango de un año son decenas de miles de órdenes por petición) solo
+ * para reducirlas a un puñado de buckets con forEach+Map. En una instancia de
+ * una vCPU eso congela el event loop y Render reemplaza la instancia. Ahora
+ * agrega Postgres (GROUP BY) y Node únicamente da formato al resultado ya
+ * agregado. Las divisiones, redondeos y formateos se quedan en Node a
+ * propósito: son los mismos de antes, así que los números no se mueven.
+ *
+ * Dos reglas de estas consultas, verificadas contra findMany en el borde exacto
+ * (la sesión de Postgres corre en America/Mexico_City y las columnas guardan
+ * UTC real en `timestamp without time zone`):
+ *
+ *  · Un bind `Date` llega como timestamptz. Contra `createdAt` se compara
+ *    SIEMPRE con `(${d} AT TIME ZONE 'UTC')` — un `::timestamp` pelón convierte
+ *    con la zona de la SESIÓN y corre el filtro 6 horas.
+ *  · El bucket local replica a Luxon: ((col AT TIME ZONE 'UTC') AT TIME ZONE tz).
+ */
+
+/** El mismo filtro de estados que usaba el findMany: fuera borradores, canceladas y borradas. */
+const ORDER_NOT_DISCARDED = Prisma.raw(`o."status" NOT IN ('PENDING','CANCELLED','DELETED')`)
+
+/** venue + estados válidos + rango — el WHERE que comparten casi todas las agregaciones. */
+const orderScope = (venueId: string, fromDate: Date, toDate: Date) =>
+  Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)}`
+
+/** El instante en la zona del venue — réplica SQL de `DateTime.fromJSDate(x, { zone: 'utc' }).setZone(tz)`. */
+const localTs = (tz: string, col: Prisma.Sql = Prisma.raw('o."createdAt"')) => Prisma.sql`((${col} AT TIME ZONE 'UTC') AT TIME ZONE ${tz})`
+
+const localDay = (tz: string, col?: Prisma.Sql) => Prisma.sql`to_char(${localTs(tz, col)}, 'YYYY-MM-DD')`
+const localHour = (tz: string) => Prisma.sql`EXTRACT(HOUR FROM ${localTs(tz)})::int`
+// ISODOW: 1=lunes … 7=domingo — el mismo convenio que `DateTime.weekday` de Luxon.
+const localIsoDow = (tz: string) => Prisma.sql`EXTRACT(ISODOW FROM ${localTs(tz)})::int`
+
+const formatShortDate = (isoDate: string, tz: string) =>
+  DateTime.fromISO(isoDate, { zone: tz }).toLocaleString({ month: 'short', day: 'numeric' }, { locale: 'es' })
 
 export async function getGeneralStatsData(venueId: string, filters: GeneralStatsQuery = {}): Promise<GeneralStatsResponse> {
   // Validate venue exists
@@ -23,16 +63,11 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   // Set default date range (last 7 days) if not provided
   const { from: fromDate, to: toDate } = parseDateRange(filters.fromDate, filters.toDate, 7)
 
-  // Build where clause for date filtering
-  const dateFilter = {
-    createdAt: {
-      gte: fromDate,
-      lte: toDate,
-    },
-  }
-
-  // Fetch only valid payments: COMPLETED status, non-cancelled orders
-  // Filters applied at database level to avoid loading unnecessary data
+  // Fetch only valid payments: COMPLETED status, non-cancelled orders.
+  // ⚠️ Este endpoint DEVUELVE las filas al dashboard (contrato de la API), así que
+  // no es agregable sin tocar al cliente. El `select` acota la memoria por fila a
+  // los 5 campos que la transformación usa; el runtime `[query-guard]` denuncia
+  // cuando el rango pedido devuelve un resultado gigante.
   const validPayments = await prisma.payment.findMany({
     where: {
       venueId,
@@ -45,63 +80,40 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
         status: { not: OrderStatus.CANCELLED },
       },
     },
+    select: {
+      id: true,
+      amount: true,
+      method: true,
+      createdAt: true,
+      tipAmount: true,
+    },
     orderBy: {
       createdAt: 'desc',
     },
   })
 
-  // Fetch reviews data
+  // Fetch reviews data — también contrato: el dashboard recibe la lista.
   const reviews = await prisma.review.findMany({
     where: {
       venueId,
-      ...dateFilter,
+      createdAt: {
+        gte: fromDate,
+        lte: toDate,
+      },
+    },
+    select: {
+      id: true,
+      overallRating: true,
+      createdAt: true,
     },
     orderBy: {
       createdAt: 'desc',
     },
   })
 
-  // Fetch products data from orders (exclude PENDING - draft/cart orders)
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      ...dateFilter,
-    },
-    include: {
-      items: {
-        include: {
-          product: true,
-        },
-      },
-    },
-  })
-
-  // Process products data
-  const productsMap = new Map<string, any>()
-
-  orders.forEach(order => {
-    order.items.forEach(item => {
-      if (item.product) {
-        const productKey = `${item.product.id}-${item.product.name}`
-        const existing = productsMap.get(productKey)
-
-        if (existing) {
-          existing.quantity += item.quantity
-        } else {
-          productsMap.set(productKey, {
-            id: item.product.id,
-            name: item.product.name,
-            type: item.product.type || ProductType.OTHER,
-            quantity: item.quantity,
-            price: Number(item.product.price),
-          })
-        }
-      }
-    })
-  })
-
-  const products = Array.from(productsMap.values())
+  // Productos vendidos: agregado en Postgres (antes: TODAS las órdenes del rango
+  // con items+product materializadas en Node para sumar cantidades).
+  const products = await aggregateProductQuantities(venueId, fromDate, toDate)
 
   // Generate extra metrics
   const extraMetrics = await generateExtraMetrics(venueId, fromDate, toDate, venue.timezone)
@@ -141,6 +153,33 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   }
 }
 
+/**
+ * Cantidad vendida por producto en el rango — compartido por el resumen general y
+ * la gráfica de más vendidos. INNER JOIN a Product: una línea cuyo producto fue
+ * borrado no aparecía antes (`if (item.product)`) y sigue sin aparecer.
+ * `name`/`type`/`price` son los del catálogo ACTUAL, como siempre fue.
+ */
+async function aggregateProductQuantities(venueId: string, fromDate: Date, toDate: Date) {
+  const rows = await prisma.$queryRaw<Array<{ id: string; name: string; type: string; quantity: number; price: Prisma.Decimal }>>`
+    SELECT p."id", p."name", p."type"::text AS "type",
+           SUM(oi."quantity")::int AS "quantity", p."price"
+    FROM "OrderItem" oi
+    JOIN "Order" o ON o."id" = oi."orderId"
+    JOIN "Product" p ON p."id" = oi."productId"
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY p."id", p."name", p."type", p."price"
+    ORDER BY SUM(oi."quantity") DESC, p."id"
+  `
+
+  return rows.map(r => ({
+    id: r.id,
+    name: r.name,
+    type: r.type || ProductType.OTHER,
+    quantity: r.quantity,
+    price: Number(r.price),
+  }))
+}
+
 async function generateExtraMetrics(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   // Fetch table performance data
   const tablePerformance = await generateTablePerformance(venueId, fromDate, toDate)
@@ -170,52 +209,36 @@ async function generateExtraMetrics(venueId: string, fromDate: Date, toDate: Dat
 }
 
 async function generateTablePerformance(venueId: string, fromDate: Date, toDate: Date) {
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-    include: {
-      table: true,
-    },
-  })
+  // Antes: todas las órdenes del rango con su mesa, reducidas en Node. El GROUP BY
+  // devuelve una fila por mesa; las órdenes sin mesa quedan fuera (INNER JOIN),
+  // igual que el `if (order.table)` de siempre.
+  const rows = await prisma.$queryRaw<Array<{ tableId: string; tableNumber: string; totalSales: Prisma.Decimal; orderCount: number }>>`
+    SELECT t."id" AS "tableId", t."number" AS "tableNumber",
+           SUM(o."total") AS "totalSales", COUNT(*)::int AS "orderCount"
+    FROM "Order" o
+    JOIN "Table" t ON t."id" = o."tableId"
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY t."id", t."number"
+    ORDER BY SUM(o."total") DESC, t."id"
+  `
 
-  const tableStatsMap = new Map<string, any>()
-
-  orders.forEach(order => {
-    if (order.table) {
-      const tableKey = `${order.table.id}-${order.table.number}`
-      const existing = tableStatsMap.get(tableKey)
-
-      if (existing) {
-        existing.totalSales += Number(order.total)
-        existing.orderCount += 1
-      } else {
-        tableStatsMap.set(tableKey, {
-          tableId: order.table.id,
-          tableNumber: parseInt(order.table.number),
-          totalSales: Number(order.total),
-          orderCount: 1,
-          avgTicket: 0,
-          turnoverRate: 0,
-          occupancyRate: 0,
-        })
-      }
+  return rows.map(row => {
+    const totalSales = Number(row.totalSales)
+    const orderCount = row.orderCount
+    return {
+      tableId: row.tableId,
+      // `Table.number` es texto libre: parseInt conserva el comportamiento de
+      // siempre (un número no numérico produce NaN → null en el JSON).
+      tableNumber: parseInt(row.tableNumber),
+      totalSales,
+      orderCount,
+      avgTicket: orderCount > 0 ? totalSales / orderCount : 0,
+      turnoverRate: orderCount * 0.8, // Mock calculation
+      occupancyRate: Math.min(orderCount * 10, 100), // Mock calculation
+      rotationRate: orderCount * 0.5 || 0, // Mock calculation for rotation rate
+      totalRevenue: totalSales || 0, // Ensure totalRevenue is available
     }
   })
-
-  return Array.from(tableStatsMap.values()).map(table => ({
-    ...table,
-    avgTicket: table.orderCount > 0 ? table.totalSales / table.orderCount : 0,
-    turnoverRate: table.orderCount * 0.8, // Mock calculation
-    occupancyRate: Math.min(table.orderCount * 10, 100), // Mock calculation
-    rotationRate: table.orderCount * 0.5 || 0, // Mock calculation for rotation rate
-    totalRevenue: table.totalSales || 0, // Ensure totalRevenue is available
-  }))
 }
 
 /**
@@ -248,64 +271,41 @@ async function generateStaffPerformance(venueId: string, fromDate: Date, toDate:
 }
 
 async function generateProductProfitability(venueId: string, fromDate: Date, toDate: Date) {
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-    include: {
-      items: {
-        // `modifiers` is REQUIRED by lineRevenue — without it the modifier
-        // revenue ($33,811 across the DB) silently disappears from this report.
-        include: {
-          product: true,
-          modifiers: true,
-        },
-      },
-    },
-  })
+  // `lineRevenueSql` es el gemelo SQL de `lineRevenue` (una sola definición de lo
+  // que ganó una línea: precio × unidades − descuento + modifiers; ver
+  // lineRevenue.ts). Antes este reporte materializaba todas las órdenes con
+  // items+product+modifiers para hacer la misma cuenta en Node.
+  const rows = await prisma.$queryRaw<
+    Array<{ id: string; name: string; type: string; price: Prisma.Decimal; quantity: number; totalRevenue: Prisma.Decimal; totalCost: Prisma.Decimal }>
+  >`
+    SELECT p."id", p."name", p."type"::text AS "type", p."price",
+           SUM(oi."quantity")::int AS "quantity",
+           SUM(${Prisma.raw(lineRevenueSql('oi'))}) AS "totalRevenue",
+           SUM(oi."unitPrice" * 0.3 * oi."quantity") AS "totalCost"
+    FROM "OrderItem" oi
+    JOIN "Order" o ON o."id" = oi."orderId"
+    JOIN "Product" p ON p."id" = oi."productId"
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY p."id", p."name", p."type", p."price"
+    ORDER BY SUM(${Prisma.raw(lineRevenueSql('oi'))}) DESC, p."id"
+  `
 
-  const productStatsMap = new Map<string, any>()
-
-  orders.forEach(order => {
-    order.items.forEach(item => {
-      if (item.product) {
-        const productKey = item.product.id
-        const existing = productStatsMap.get(productKey)
-
-        const itemRevenue = lineRevenue(item) // net of the line's own discount
-        const estimatedCost = Number(item.unitPrice) * 0.3 // Mock 30% cost ratio
-
-        if (existing) {
-          existing.quantity += item.quantity
-          existing.totalRevenue += itemRevenue
-          existing.totalCost += estimatedCost * item.quantity
-        } else {
-          productStatsMap.set(productKey, {
-            name: item.product.name,
-            type: item.product.type || ProductType.OTHER,
-            price: Number(item.product.price),
-            quantity: item.quantity,
-            totalRevenue: itemRevenue,
-            totalCost: estimatedCost * item.quantity,
-          })
-        }
-      }
-    })
-  })
-
-  return Array.from(productStatsMap.values()).map(product => {
-    const margin = product.totalRevenue - product.totalCost
-    const marginPercentage = product.totalRevenue > 0 ? (margin / product.totalRevenue) * 100 : 0
+  return rows.map(row => {
+    const totalRevenue = Number(row.totalRevenue)
+    const totalCost = Number(row.totalCost) // Mock 30% cost ratio, como siempre
+    const quantity = row.quantity
+    const margin = totalRevenue - totalCost
+    const marginPercentage = totalRevenue > 0 ? (margin / totalRevenue) * 100 : 0
 
     return {
-      ...product,
-      cost: product.quantity > 0 ? product.totalCost / product.quantity : 0,
-      margin: product.quantity > 0 ? margin / product.quantity : 0,
+      name: row.name,
+      type: row.type || ProductType.OTHER,
+      price: Number(row.price),
+      quantity,
+      totalRevenue,
+      totalCost,
+      cost: quantity > 0 ? totalCost / quantity : 0,
+      margin: quantity > 0 ? margin / quantity : 0,
       marginPercentage: marginPercentage || 0, // Ensure never undefined
     }
   })
@@ -313,38 +313,19 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
 
 async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   const tz = timezone || DEFAULT_TIMEZONE
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-  })
+  // La hora se determina en la zona del venue (antes lo hacía Luxon fila por fila).
+  const rows = await prisma.$queryRaw<Array<{ hour: number; sales: Prisma.Decimal; transactions: number }>>`
+    SELECT ${localHour(tz)} AS "hour", SUM(o."total") AS "sales", COUNT(*)::int AS "transactions"
+    FROM "Order" o
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY 1
+    ORDER BY 1
+  `
 
-  const hourlyData = new Map<number, { sales: number; transactions: number }>()
-
-  orders.forEach(order => {
-    const hour = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).hour
-    const existing = hourlyData.get(hour)
-
-    if (existing) {
-      existing.sales += Number(order.total)
-      existing.transactions += 1
-    } else {
-      hourlyData.set(hour, {
-        sales: Number(order.total),
-        transactions: 1,
-      })
-    }
-  })
-
-  return Array.from(hourlyData.entries()).map(([hour, data]) => ({
-    hour,
-    sales: data.sales,
-    transactions: data.transactions,
+  return rows.map(row => ({
+    hour: row.hour,
+    sales: Number(row.sales),
+    transactions: row.transactions,
   }))
 }
 
@@ -370,19 +351,24 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
 // La forma de la respuesta se CONSERVA (nunca se quita un campo de una API); `overall`
 // es aditivo y los clientes viejos simplemente lo ignoran.
 async function generatePrepTimesByCategory(venueId: string, fromDate: Date, toDate: Date) {
-  const comandas = await prisma.kdsOrder.findMany({
-    where: {
-      venueId,
-      startedAt: { not: null },
-      completedAt: { not: null },
-      createdAt: { gte: fromDate, lte: toDate },
-    },
-    select: { startedAt: true, completedAt: true },
-  })
+  // Suma y conteo en Postgres; la división y el redondeo a un decimal quedan en
+  // Node, idénticos a los de siempre. El filtro (m > 0 && m < 24h) descarta
+  // comandas que quedaron abiertas, como antes.
+  const [row] = await prisma.$queryRaw<Array<{ n: number; suma: Prisma.Decimal | null }>>`
+    SELECT COUNT(*)::int AS "n", SUM(s."minutos") AS "suma"
+    FROM (
+      SELECT EXTRACT(EPOCH FROM (k."completedAt" - k."startedAt")) / 60.0 AS "minutos"
+      FROM "KdsOrder" k
+      WHERE k."venueId" = ${venueId}
+        AND k."startedAt" IS NOT NULL
+        AND k."completedAt" IS NOT NULL
+        AND k."createdAt" >= ${utcTs(fromDate)} AND k."createdAt" <= ${utcTs(toDate)}
+    ) s
+    WHERE s."minutos" > 0 AND s."minutos" < ${24 * 60}
+  `
 
-  const minutos = comandas.map(c => (c.completedAt!.getTime() - c.startedAt!.getTime()) / 60000).filter(m => m > 0 && m < 24 * 60) // descarta comandas que quedaron abiertas
-
-  const promedioGlobal = minutos.length ? Math.round((minutos.reduce((a, b) => a + b, 0) / minutos.length) * 10) / 10 : 0
+  const medicion = row?.n ?? 0
+  const promedioGlobal = medicion ? Math.round((Number(row.suma) / medicion) * 10) / 10 : 0
 
   return {
     entradas: { avg: 0, target: 10 },
@@ -392,7 +378,7 @@ async function generatePrepTimesByCategory(venueId: string, fromDate: Date, toDa
     // Lo único que hoy SÍ se mide: la comanda completa, de que entra a cocina a que
     // sale. `medicion` dice sobre cuántas comandas se calculó, para que un promedio
     // sacado de tres tickets no se lea igual que uno sacado de mil.
-    overall: { avg: promedioGlobal, target: null, medicion: minutos.length },
+    overall: { avg: promedioGlobal, target: null, medicion },
   }
 }
 
@@ -416,26 +402,29 @@ async function generateWeeklyTrendsData(venueId: string, fromDate: Date, toDate:
   const prevFrom = new Date(fromDate.getTime() - desfaseMs)
   const prevTo = new Date(toDate.getTime() - desfaseMs)
 
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      OR: [{ createdAt: { gte: fromDate, lte: toDate } }, { createdAt: { gte: prevFrom, lte: prevTo } }],
-    },
-    select: { total: true, createdAt: true },
-  })
+  // Una orden en el instante exacto donde ambos rangos se tocan cuenta como ACTUAL
+  // (el CASE del periodo anterior exige NO estar en el actual), igual que siempre.
+  const rows = await prisma.$queryRaw<Array<{ idx: number; current: Prisma.Decimal; previous: Prisma.Decimal }>>`
+    SELECT ${localIsoDow(tz)} AS "idx",
+           SUM(CASE WHEN o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} THEN o."total" ELSE 0 END) AS "current",
+           SUM(CASE WHEN o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} THEN 0 ELSE o."total" END) AS "previous"
+    FROM "Order" o
+    WHERE o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED}
+      AND (
+        (o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)})
+        OR (o."createdAt" >= ${utcTs(prevFrom)} AND o."createdAt" <= ${utcTs(prevTo)})
+      )
+    GROUP BY 1
+  `
 
-  // Luxon: weekday 1 = lunes … 7 = domingo, que es el orden del arreglo.
   // Se acumula en Decimal, no en float: es dinero, y este total se compara contra
-  // reportes que sí son Decimal. Sumar decenas de miles de `Number` deriva centavos.
+  // reportes que sí son Decimal.
   const current = Array.from({ length: 7 }, () => new Prisma.Decimal(0))
   const previous = Array.from({ length: 7 }, () => new Prisma.Decimal(0))
 
-  for (const order of orders) {
-    const idx = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).weekday - 1
-    const esActual = order.createdAt >= fromDate && order.createdAt <= toDate
-    const bucket = esActual ? current : previous
-    bucket[idx] = bucket[idx].add(order.total)
+  for (const row of rows) {
+    current[row.idx - 1] = new Prisma.Decimal(row.current)
+    previous[row.idx - 1] = new Prisma.Decimal(row.previous)
   }
 
   return weekdays.map((day, i) => {
@@ -485,14 +474,6 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
   // Set default date range (last 7 days) if not provided
   const { from: fromDate, to: toDate } = parseDateRange(filters.fromDate, filters.toDate, 7)
 
-  // Build where clause for date filtering
-  const dateFilter = {
-    createdAt: {
-      gte: fromDate,
-      lte: toDate,
-    },
-  }
-
   // Fetch only valid payments: COMPLETED status, non-cancelled orders, and
   // exclude refund payments (type=REFUND). Refund Payments also carry
   // status=COMPLETED but they're corrections, not sales — including them here
@@ -512,7 +493,10 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
   const reviews = await prisma.review.findMany({
     where: {
       venueId,
-      ...dateFilter,
+      createdAt: {
+        gte: fromDate,
+        lte: toDate,
+      },
     },
     select: {
       id: true,
@@ -574,7 +558,7 @@ export async function getChartData(venueId: string, chartType: string, filters: 
 
   switch (chartType) {
     case 'best-selling-products':
-      return await getBestSellingProductsData(venueId, dateFilter)
+      return await getBestSellingProductsData(venueId, fromDate, toDate)
 
     case 'tips-over-time':
       return await getTipsOverTimeData(venueId, dateFilter)
@@ -608,22 +592,22 @@ export async function getChartData(venueId: string, chartType: string, filters: 
       return await getSalesByWeekdayData(venueId, fromDate, toDate, venue.timezone)
 
     case 'category-mix':
-      return await getCategoryMixData(venueId, dateFilter)
+      return await getCategoryMixData(venueId, fromDate, toDate)
 
     case 'channel-mix':
-      return await getChannelMixData(venueId, dateFilter)
+      return await getChannelMixData(venueId, fromDate, toDate)
 
     case 'sales-heatmap':
       return await getSalesHeatmapData(venueId, fromDate, toDate, venue.timezone)
 
     case 'discount-analysis':
-      return await getDiscountAnalysisData(venueId, dateFilter)
+      return await getDiscountAnalysisData(venueId, fromDate, toDate)
 
     case 'reservation-overview':
       return await getReservationOverviewData(venueId, fromDate, toDate, venue.timezone)
 
     case 'staff-ranking':
-      return await getStaffRankingData(venueId, dateFilter)
+      return await getStaffRankingData(venueId, fromDate, toDate)
 
     default:
       throw new NotFoundError(`Chart type '${chartType}' not found`)
@@ -681,46 +665,8 @@ export async function getExtendedMetrics(venueId: string, metricType: string, fi
 }
 
 // Helper functions for chart data
-async function getBestSellingProductsData(venueId: string, dateFilter: any) {
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      ...dateFilter,
-    },
-    include: {
-      items: {
-        include: {
-          product: true,
-        },
-      },
-    },
-  })
-
-  const productsMap = new Map<string, any>()
-
-  orders.forEach(order => {
-    order.items.forEach(item => {
-      if (item.product) {
-        const productKey = `${item.product.id}-${item.product.name}`
-        const existing = productsMap.get(productKey)
-
-        if (existing) {
-          existing.quantity += item.quantity
-        } else {
-          productsMap.set(productKey, {
-            id: item.product.id,
-            name: item.product.name,
-            type: item.product.type || ProductType.OTHER,
-            quantity: item.quantity,
-            price: Number(item.product.price),
-          })
-        }
-      }
-    })
-  })
-
-  const products = Array.from(productsMap.values())
+async function getBestSellingProductsData(venueId: string, fromDate: Date, toDate: Date) {
+  const products = await aggregateProductQuantities(venueId, fromDate, toDate)
   return { products }
 }
 
@@ -776,200 +722,125 @@ function generatePaymentMethodsData(payments: any[]) {
 // Strategic Analytics Chart Data Functions
 async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   const tz = timezone || DEFAULT_TIMEZONE
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-    include: {
-      payments: {
-        where: { status: TransactionStatus.COMPLETED },
-        select: { amount: true },
-      },
-    },
-  })
+  // El ingreso del día = pagos COMPLETED de las órdenes CREADAS ese día local
+  // (el pago cuenta con su orden aunque haya entrado después del rango, igual que
+  // siempre). LEFT JOIN: un día cuyas órdenes no tienen pagos existe con 0.
+  const rows = await prisma.$queryRaw<Array<{ date: string; revenue: Prisma.Decimal }>>`
+    SELECT ${localDay(tz)} AS "date", COALESCE(SUM(p."amount"), 0) AS "revenue"
+    FROM "Order" o
+    LEFT JOIN "Payment" p ON p."orderId" = o."id" AND p."status" = 'COMPLETED'
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY 1
+    ORDER BY 1
+  `
 
-  const revenueByDate = new Map<string, number>()
-
-  orders.forEach(order => {
-    const dateStr = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).toISODate()!
-    const revenue = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
-    revenueByDate.set(dateStr, (revenueByDate.get(dateStr) || 0) + revenue)
-  })
-
-  const revenue = Array.from(revenueByDate.entries())
-    .map(([date, amount]) => ({
-      date,
-      revenue: amount,
-      formattedDate: DateTime.fromISO(date, { zone: tz }).toLocaleString({ month: 'short', day: 'numeric' }, { locale: 'es' }),
-    }))
-    .sort((a, b) => a.date.localeCompare(b.date))
+  const revenue = rows.map(row => ({
+    date: row.date,
+    revenue: Number(row.revenue),
+    formattedDate: formatShortDate(row.date, tz),
+  }))
 
   return { revenue }
 }
 
 async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   const tz = timezone || DEFAULT_TIMEZONE
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-    include: {
-      payments: {
-        where: { status: TransactionStatus.COMPLETED },
-        select: { amount: true },
-      },
-    },
-  })
+  // Ticket promedio por día local, contando SOLO órdenes con cobro (revenue > 0),
+  // como siempre. La división total/count se queda en Node, idéntica.
+  const rows = await prisma.$queryRaw<Array<{ date: string; total: Prisma.Decimal; count: number }>>`
+    SELECT t."date", SUM(t."rev") AS "total", COUNT(*)::int AS "count"
+    FROM (
+      SELECT ${localDay(tz)} AS "date",
+             (SELECT COALESCE(SUM(p."amount"), 0) FROM "Payment" p WHERE p."orderId" = o."id" AND p."status" = 'COMPLETED') AS "rev"
+      FROM "Order" o
+      WHERE ${orderScope(venueId, fromDate, toDate)}
+    ) t
+    WHERE t."rev" > 0
+    GROUP BY t."date"
+    ORDER BY t."date"
+  `
 
-  const aovByDate = new Map<string, { total: number; count: number }>()
-
-  orders.forEach(order => {
-    const dateStr = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).toISODate()!
-    const revenue = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
-
-    if (revenue > 0) {
-      const existing = aovByDate.get(dateStr) || { total: 0, count: 0 }
-      existing.total += revenue
-      existing.count += 1
-      aovByDate.set(dateStr, existing)
-    }
-  })
-
-  const aov = Array.from(aovByDate.entries())
-    .map(([date, data]) => ({
-      date,
-      aov: data.count > 0 ? data.total / data.count : 0,
-      orderCount: data.count,
-      formattedDate: DateTime.fromISO(date, { zone: tz }).toLocaleString({ month: 'short', day: 'numeric' }, { locale: 'es' }),
-    }))
-    .sort((a, b) => a.date.localeCompare(b.date))
+  const aov = rows.map(row => ({
+    date: row.date,
+    aov: row.count > 0 ? Number(row.total) / row.count : 0,
+    orderCount: row.count,
+    formattedDate: formatShortDate(row.date, tz),
+  }))
 
   return { aov }
 }
 
 async function getOrderFrequencyData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   const tz = timezone || DEFAULT_TIMEZONE
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-  })
+  const rows = await prisma.$queryRaw<Array<{ hourNum: number; orders: number }>>`
+    SELECT ${localHour(tz)} AS "hourNum", COUNT(*)::int AS "orders"
+    FROM "Order" o
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY 1
+    ORDER BY 1
+  `
 
-  const frequencyByHour = new Map<number, number>()
-
-  orders.forEach(order => {
-    const hour = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).hour
-    frequencyByHour.set(hour, (frequencyByHour.get(hour) || 0) + 1)
-  })
-
-  const frequency = Array.from(frequencyByHour.entries())
-    .map(([hour, count]) => ({
-      hour: `${hour}:00`,
-      orders: count,
-      hourNum: hour,
-    }))
-    .sort((a, b) => a.hourNum - b.hourNum)
+  const frequency = rows.map(row => ({
+    hour: `${row.hourNum}:00`,
+    orders: row.orders,
+    hourNum: row.hourNum,
+  }))
 
   return { frequency }
 }
 
 async function getCustomerSatisfactionData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   const tz = timezone || DEFAULT_TIMEZONE
-  const reviews = await prisma.review.findMany({
-    where: {
-      venueId,
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-  })
+  // SUM y COUNT exactos (enteros) en Postgres; la división y el `.toFixed(1)` —que
+  // devuelve STRING, contrato de siempre— se quedan en Node.
+  const rows = await prisma.$queryRaw<Array<{ date: string; totalRating: number; count: number }>>`
+    SELECT ${localDay(tz, Prisma.raw('r."createdAt"'))} AS "date",
+           SUM(r."overallRating")::int AS "totalRating", COUNT(*)::int AS "count"
+    FROM "Review" r
+    WHERE r."venueId" = ${venueId}
+      AND r."createdAt" >= ${utcTs(fromDate)} AND r."createdAt" <= ${utcTs(toDate)}
+    GROUP BY 1
+    ORDER BY 1
+  `
 
-  const satisfactionByDate = new Map<string, { totalRating: number; count: number }>()
-
-  reviews.forEach(review => {
-    const dateStr = DateTime.fromJSDate(review.createdAt, { zone: 'utc' }).setZone(tz).toISODate()!
-    const existing = satisfactionByDate.get(dateStr) || { totalRating: 0, count: 0 }
-    existing.totalRating += review.overallRating
-    existing.count += 1
-    satisfactionByDate.set(dateStr, existing)
-  })
-
-  const satisfaction = Array.from(satisfactionByDate.entries())
-    .map(([date, data]) => ({
-      date,
-      rating: data.count > 0 ? (data.totalRating / data.count).toFixed(1) : 0,
-      reviewCount: data.count,
-      formattedDate: DateTime.fromISO(date, { zone: tz }).toLocaleString({ month: 'short', day: 'numeric' }, { locale: 'es' }),
-    }))
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+  const satisfaction = rows.map(row => ({
+    date: row.date,
+    rating: row.count > 0 ? (row.totalRating / row.count).toFixed(1) : 0,
+    reviewCount: row.count,
+    formattedDate: formatShortDate(row.date, tz),
+  }))
 
   return { satisfaction }
 }
 
 async function getKitchenPerformanceData(venueId: string, fromDate: Date, toDate: Date) {
-  // Mock kitchen performance data based on product categories
-  // In a real implementation, you would track order preparation times
-  const products = await prisma.product.findMany({
-    where: {
-      venueId,
-    },
-    include: {
-      orderItems: {
-        where: {
-          order: {
-            venueId,
-            createdAt: {
-              gte: fromDate,
-              lte: toDate,
-            },
-          },
-        },
-      },
-    },
-  })
+  // Cuenta líneas vendidas por TIPO de producto. ⚠️ Sin filtro de status de la
+  // orden: el include original tampoco lo tenía, y cambiarlo aquí movería el
+  // conteo. El tiempo de preparación por categoría no se mide hoy (`KdsOrderItem`
+  // no tiene liga a `Product`); devolvía una constante más `Math.random()` y se
+  // dejó en 0.
+  const rows = await prisma.$queryRaw<Array<{ category: string; orders: number }>>`
+    SELECT p."type"::text AS "category", COUNT(*)::int AS "orders"
+    FROM "OrderItem" oi
+    JOIN "Product" p ON p."id" = oi."productId"
+    JOIN "Order" o ON o."id" = oi."orderId"
+    WHERE p."venueId" = ${venueId}
+      AND o."venueId" = ${venueId}
+      AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)}
+    GROUP BY 1
+    ORDER BY 1
+  `
 
-  const performanceByCategory = new Map<string, { orders: number; avgPrepTime: number }>()
-
-  products.forEach(product => {
-    const category = product.type || ProductType.OTHER
-    const orderCount = product.orderItems.length
-
-    if (orderCount > 0) {
-      const existing = performanceByCategory.get(category) || { orders: 0, avgPrepTime: 0 }
-      existing.orders += orderCount
-      // El tiempo de preparación por categoría no se mide hoy: `KdsOrderItem` no tiene
-      // liga a `Product`, así que no se puede saber el tipo de una línea de comanda.
-      // Devolvía una constante por categoría más `Math.random()`. Se deja en 0.
-      existing.avgPrepTime = 0
-      performanceByCategory.set(category, existing)
-    }
-  })
-
-  const kitchen = Array.from(performanceByCategory.entries()).map(([category, data]) => {
+  const kitchen = rows.map(row => {
+    const category = row.category || ProductType.OTHER
     const categoryName = category === ProductType.FOOD ? 'Comida' : category === ProductType.BEVERAGE ? 'Bebidas' : 'Otros'
     const target = category === ProductType.FOOD ? 15 : category === ProductType.BEVERAGE ? 5 : 10
 
     return {
       category: categoryName,
-      prepTime: data.avgPrepTime,
+      prepTime: 0,
       target,
-      orders: data.orders,
+      orders: row.orders,
     }
   })
 
@@ -982,26 +853,18 @@ async function getKitchenPerformanceData(venueId: string, fromDate: Date, toDate
 
 async function getSalesByWeekdayData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   const tz = timezone || DEFAULT_TIMEZONE
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: { gte: fromDate, lte: toDate },
-    },
-    select: { createdAt: true, total: true },
-  })
+  const rows = await prisma.$queryRaw<Array<{ weekday: number; sales: Prisma.Decimal; transactions: number }>>`
+    SELECT ${localIsoDow(tz)} AS "weekday", SUM(o."total") AS "sales", COUNT(*)::int AS "transactions"
+    FROM "Order" o
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY 1
+  `
 
   const weekdayNames = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
   const weekdayData = new Map<number, { sales: number; transactions: number }>()
-
-  orders.forEach(order => {
-    // Luxon weekday: 1=Monday...7=Sunday
-    const weekday = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).weekday
-    const existing = weekdayData.get(weekday) || { sales: 0, transactions: 0 }
-    existing.sales += Number(order.total)
-    existing.transactions += 1
-    weekdayData.set(weekday, existing)
-  })
+  for (const row of rows) {
+    weekdayData.set(row.weekday, { sales: Number(row.sales), transactions: row.transactions })
+  }
 
   return weekdayNames.map((name, i) => {
     const data = weekdayData.get(i + 1) || { sales: 0, transactions: 0 }
@@ -1009,93 +872,66 @@ async function getSalesByWeekdayData(venueId: string, fromDate: Date, toDate: Da
   })
 }
 
-async function getCategoryMixData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
-  const orderItems = await prisma.orderItem.findMany({
-    where: {
-      order: {
-        venueId,
-        status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-        ...dateFilter,
-      },
-    },
-    select: { categoryName: true, total: true, quantity: true },
-  })
+async function getCategoryMixData(venueId: string, fromDate: Date, toDate: Date) {
+  // `categoryName` es texto denormalizado en la línea: NULLIF replica el `|| 'Sin
+  // categoría'` de siempre también para la cadena vacía.
+  const rows = await prisma.$queryRaw<Array<{ category: string; revenue: Prisma.Decimal; quantity: number }>>`
+    SELECT COALESCE(NULLIF(oi."categoryName", ''), 'Sin categoría') AS "category",
+           SUM(COALESCE(oi."total", 0)) AS "revenue", SUM(oi."quantity")::int AS "quantity"
+    FROM "OrderItem" oi
+    JOIN "Order" o ON o."id" = oi."orderId"
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY 1
+    ORDER BY 2 DESC, 1
+  `
 
-  const categoryMap = new Map<string, { revenue: number; quantity: number }>()
+  const categories = rows.map(row => ({ category: row.category, revenue: Number(row.revenue), quantity: row.quantity }))
+  const totalRevenue = categories.reduce((sum, c) => sum + c.revenue, 0)
 
-  orderItems.forEach(item => {
-    const category = item.categoryName || 'Sin categoría'
-    const existing = categoryMap.get(category) || { revenue: 0, quantity: 0 }
-    existing.revenue += Number(item.total || 0)
-    existing.quantity += item.quantity
-    categoryMap.set(category, existing)
-  })
-
-  const totalRevenue = Array.from(categoryMap.values()).reduce((sum, d) => sum + d.revenue, 0)
-
-  return Array.from(categoryMap.entries())
-    .map(([category, data]) => ({
-      category,
-      revenue: data.revenue,
-      quantity: data.quantity,
-      percentage: totalRevenue > 0 ? (data.revenue / totalRevenue) * 100 : 0,
-    }))
-    .sort((a, b) => b.revenue - a.revenue)
+  return categories.map(c => ({
+    category: c.category,
+    revenue: c.revenue,
+    quantity: c.quantity,
+    percentage: totalRevenue > 0 ? (c.revenue / totalRevenue) * 100 : 0,
+  }))
 }
 
-async function getChannelMixData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      ...dateFilter,
-    },
-    select: { type: true, total: true },
-  })
+async function getChannelMixData(venueId: string, fromDate: Date, toDate: Date) {
+  const rows = await prisma.$queryRaw<Array<{ channel: string; revenue: Prisma.Decimal; count: number }>>`
+    SELECT o."type"::text AS "channel", SUM(o."total") AS "revenue", COUNT(*)::int AS "count"
+    FROM "Order" o
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY 1
+    ORDER BY 2 DESC, 1
+  `
 
-  const channelMap = new Map<string, { revenue: number; count: number }>()
+  const channels = rows.map(row => ({ channel: row.channel || 'DINE_IN', revenue: Number(row.revenue), count: row.count }))
+  const totalRevenue = channels.reduce((sum, c) => sum + c.revenue, 0)
 
-  orders.forEach(order => {
-    const channel = order.type || 'DINE_IN'
-    const existing = channelMap.get(channel) || { revenue: 0, count: 0 }
-    existing.revenue += Number(order.total)
-    existing.count += 1
-    channelMap.set(channel, existing)
-  })
-
-  const totalRevenue = Array.from(channelMap.values()).reduce((sum, d) => sum + d.revenue, 0)
-
-  return Array.from(channelMap.entries())
-    .map(([channel, data]) => ({
-      channel,
-      revenue: data.revenue,
-      count: data.count,
-      percentage: totalRevenue > 0 ? (data.revenue / totalRevenue) * 100 : 0,
-    }))
-    .sort((a, b) => b.revenue - a.revenue)
+  return channels.map(c => ({
+    channel: c.channel,
+    revenue: c.revenue,
+    count: c.count,
+    percentage: totalRevenue > 0 ? (c.revenue / totalRevenue) * 100 : 0,
+  }))
 }
 
 async function getSalesHeatmapData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   const tz = timezone || DEFAULT_TIMEZONE
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      createdAt: { gte: fromDate, lte: toDate },
-    },
-    select: { createdAt: true, total: true },
-  })
+  // Rejilla weekday (0=lunes … 6=domingo) × hora, en la zona del venue.
+  const rows = await prisma.$queryRaw<Array<{ day: number; hour: number; value: Prisma.Decimal }>>`
+    SELECT (${localIsoDow(tz)} - 1) AS "day", ${localHour(tz)} AS "hour", SUM(o."total") AS "value"
+    FROM "Order" o
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+    GROUP BY 1, 2
+  `
 
-  // Build heatmap: weekday (0-6) x hour (0-23)
-  const heatmap: Array<{ day: number; hour: number; value: number }> = []
   const grid = new Map<string, number>()
+  for (const row of rows) {
+    grid.set(`${row.day}-${row.hour}`, Number(row.value))
+  }
 
-  orders.forEach(order => {
-    const dt = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz)
-    const key = `${dt.weekday - 1}-${dt.hour}` // 0=Mon, 6=Sun
-    grid.set(key, (grid.get(key) || 0) + Number(order.total))
-  })
-
+  const heatmap: Array<{ day: number; hour: number; value: number }> = []
   for (let day = 0; day < 7; day++) {
     for (let hour = 0; hour < 24; hour++) {
       heatmap.push({ day, hour, value: grid.get(`${day}-${hour}`) || 0 })
@@ -1120,54 +956,47 @@ async function getSalesHeatmapData(venueId: string, fromDate: Date, toDate: Date
  * breakdown is new.
  *
  * A line only counts as item-level when its own total is already net of the
- * discount (`isItemLevelDiscount`). "Cobrar" cortesías leave the line GROSS and
- * book the giveaway on `Order.discountAmount` instead — counting both sides
- * would double them. Same trap `salesGiveaways.ts` documents for Sales Summary.
+ * discount (`isItemLevelDiscountSql`, el gemelo SQL de `isItemLevelDiscount`).
+ * "Cobrar" cortesías leave the line GROSS and book the giveaway on
+ * `Order.discountAmount` instead — counting both sides would double them. Same
+ * trap `salesGiveaways.ts` documents for Sales Summary.
  */
-async function getDiscountAnalysisData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
-  const statusFilter = { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] }
-
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: statusFilter,
-      ...dateFilter,
-      OR: [{ discountAmount: { gt: 0 } }, { items: { some: { discountAmount: { gt: 0 } } } }],
-    },
-    select: {
-      total: true,
-      discountAmount: true,
-      subtotal: true,
-      // `weightQuantity` matters: isItemLevelDiscount compares `total` against
-      // price × UNITS, and a weighted line's units are its kilos, not `quantity`.
-      items: { select: { quantity: true, unitPrice: true, discountAmount: true, total: true, weightQuantity: true } },
-    },
-  })
+async function getDiscountAnalysisData(venueId: string, fromDate: Date, toDate: Date) {
+  // Una fila por orden con descuento contable (subconsulta), reducida a totales en
+  // el SELECT exterior. El filtro exterior (od > 0 OR idisc > 0) replica el
+  // "continue" de siempre: el OR de la subconsulta casa el descuento CRUDO de la
+  // línea, y una línea cuyo regalo ya vive en Order.discountAmount no aporta nada.
+  const [row] = await prisma.$queryRaw<
+    Array<{ ordersWithDiscount: number; orderLevelDiscount: Prisma.Decimal; itemLevelDiscount: Prisma.Decimal; totalRevenue: Prisma.Decimal }>
+  >`
+    SELECT COUNT(*)::int AS "ordersWithDiscount",
+           COALESCE(SUM(t."od"), 0) AS "orderLevelDiscount",
+           COALESCE(SUM(t."idisc"), 0) AS "itemLevelDiscount",
+           COALESCE(SUM(t."total"), 0) AS "totalRevenue"
+    FROM (
+      SELECT o."total" AS "total",
+             o."discountAmount" AS "od",
+             COALESCE((SELECT SUM(oi."discountAmount") FROM "OrderItem" oi
+                       WHERE oi."orderId" = o."id" AND ${Prisma.raw(isItemLevelDiscountSql('oi'))}), 0) AS "idisc"
+      FROM "Order" o
+      WHERE ${orderScope(venueId, fromDate, toDate)}
+        AND (o."discountAmount" > 0 OR EXISTS (SELECT 1 FROM "OrderItem" oi2 WHERE oi2."orderId" = o."id" AND oi2."discountAmount" > 0))
+    ) t
+    WHERE t."od" > 0 OR t."idisc" > 0
+  `
 
   const totalOrders = await prisma.order.count({
-    where: { venueId, status: statusFilter, ...dateFilter },
+    where: {
+      venueId,
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      createdAt: { gte: fromDate, lte: toDate },
+    },
   })
 
-  let orderLevelDiscount = 0
-  let itemLevelDiscount = 0
-  let totalRevenue = 0
-  let ordersWithDiscount = 0
-
-  for (const order of orders) {
-    const orderDiscount = Number(order.discountAmount || 0)
-    const itemDiscount = order.items.reduce((sum, item) => (isItemLevelDiscount(item) ? sum + Number(item.discountAmount || 0) : sum), 0)
-
-    // The `OR` above matches on the RAW line discount; a line whose giveaway is
-    // already inside Order.discountAmount contributes nothing, so an order can
-    // reach here with no countable discount at all.
-    if (orderDiscount <= 0 && itemDiscount <= 0) continue
-
-    ordersWithDiscount += 1
-    orderLevelDiscount += orderDiscount
-    itemLevelDiscount += itemDiscount
-    totalRevenue += Number(order.total)
-  }
-
+  const ordersWithDiscount = row?.ordersWithDiscount ?? 0
+  const orderLevelDiscount = Number(row?.orderLevelDiscount ?? 0)
+  const itemLevelDiscount = Number(row?.itemLevelDiscount ?? 0)
+  const totalRevenue = Number(row?.totalRevenue ?? 0)
   const totalDiscount = orderLevelDiscount + itemLevelDiscount
 
   return {
@@ -1197,71 +1026,58 @@ async function getReservationOverviewData(venueId: string, fromDate: Date, toDat
     return { reservations: [], summary: { total: 0, confirmed: 0, cancelled: 0, noShow: 0 } }
   }
 
-  const reservations = await prisma.reservation.findMany({
-    where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
-    select: { createdAt: true, status: true, partySize: true },
-  })
+  const rows = await prisma.$queryRaw<Array<{ date: string; total: number; confirmed: number; cancelled: number; noShow: number }>>`
+    SELECT ${localDay(tz, Prisma.raw('r."createdAt"'))} AS "date",
+           COUNT(*)::int AS "total",
+           (COUNT(*) FILTER (WHERE r."status" IN ('CONFIRMED', 'COMPLETED')))::int AS "confirmed",
+           (COUNT(*) FILTER (WHERE r."status" = 'CANCELLED'))::int AS "cancelled",
+           (COUNT(*) FILTER (WHERE r."status" = 'NO_SHOW'))::int AS "noShow"
+    FROM "Reservation" r
+    WHERE r."venueId" = ${venueId}
+      AND r."createdAt" >= ${utcTs(fromDate)} AND r."createdAt" <= ${utcTs(toDate)}
+    GROUP BY 1
+    ORDER BY 1
+  `
 
-  const byDate = new Map<string, { total: number; confirmed: number; cancelled: number }>()
-
-  reservations.forEach(r => {
-    const dateStr = DateTime.fromJSDate(r.createdAt, { zone: 'utc' }).setZone(tz).toISODate()!
-    const existing = byDate.get(dateStr) || { total: 0, confirmed: 0, cancelled: 0 }
-    existing.total += 1
-    if (r.status === 'CONFIRMED' || r.status === 'COMPLETED') existing.confirmed += 1
-    if (r.status === 'CANCELLED') existing.cancelled += 1
-    byDate.set(dateStr, existing)
-  })
+  // El resumen sale de los mismos buckets; el arreglo por fecha conserva su forma
+  // de siempre (sin noShow por día — agregarlo cambiaría el contrato sin motivo).
+  const summary = { total: 0, confirmed: 0, cancelled: 0, noShow: 0 }
+  for (const row of rows) {
+    summary.total += row.total
+    summary.confirmed += row.confirmed
+    summary.cancelled += row.cancelled
+    summary.noShow += row.noShow
+  }
 
   return {
-    reservations: Array.from(byDate.entries())
-      .map(([date, data]) => ({ date, ...data }))
-      .sort((a, b) => a.date.localeCompare(b.date)),
-    summary: {
-      total: reservations.length,
-      confirmed: reservations.filter(r => r.status === 'CONFIRMED' || r.status === 'COMPLETED').length,
-      cancelled: reservations.filter(r => r.status === 'CANCELLED').length,
-      noShow: reservations.filter(r => r.status === 'NO_SHOW').length,
-    },
+    reservations: rows.map(row => ({ date: row.date, total: row.total, confirmed: row.confirmed, cancelled: row.cancelled })),
+    summary,
   }
 }
 
-async function getStaffRankingData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      ...dateFilter,
-      createdById: { not: null },
-    },
-    select: {
-      total: true,
-      tipAmount: true,
-      createdById: true,
-      createdBy: { select: { firstName: true, lastName: true } },
-    },
-  })
+async function getStaffRankingData(venueId: string, fromDate: Date, toDate: Date) {
+  const rows = await prisma.$queryRaw<
+    Array<{ staffId: string; firstName: string | null; lastName: string | null; revenue: Prisma.Decimal; orders: number; tips: Prisma.Decimal }>
+  >`
+    SELECT o."createdById" AS "staffId", s."firstName" AS "firstName", s."lastName" AS "lastName",
+           SUM(o."total") AS "revenue", COUNT(*)::int AS "orders", SUM(COALESCE(o."tipAmount", 0)) AS "tips"
+    FROM "Order" o
+    LEFT JOIN "Staff" s ON s."id" = o."createdById"
+    WHERE ${orderScope(venueId, fromDate, toDate)}
+      AND o."createdById" IS NOT NULL
+    GROUP BY o."createdById", s."firstName", s."lastName"
+    ORDER BY SUM(o."total") DESC, o."createdById"
+  `
 
-  const staffMap = new Map<string, { name: string; revenue: number; orders: number; tips: number }>()
-
-  orders.forEach(order => {
-    const staffId = order.createdById!
-    const existing = staffMap.get(staffId) || {
-      name: `${order.createdBy?.firstName || ''} ${order.createdBy?.lastName || ''}`.trim() || 'Sin nombre',
-      revenue: 0,
-      orders: 0,
-      tips: 0,
+  return rows.map(row => {
+    const revenue = Number(row.revenue)
+    const orders = row.orders
+    return {
+      name: `${row.firstName || ''} ${row.lastName || ''}`.trim() || 'Sin nombre',
+      revenue,
+      orders,
+      tips: Number(row.tips),
+      averageTicket: orders > 0 ? revenue / orders : 0,
     }
-    existing.revenue += Number(order.total)
-    existing.orders += 1
-    existing.tips += Number(order.tipAmount || 0)
-    staffMap.set(staffId, existing)
   })
-
-  return Array.from(staffMap.values())
-    .map(s => ({
-      ...s,
-      averageTicket: s.orders > 0 ? s.revenue / s.orders : 0,
-    }))
-    .sort((a, b) => b.revenue - a.revenue)
 }

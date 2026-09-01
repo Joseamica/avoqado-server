@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { TransactionCardType, SettlementStatus, SimulationType, PaymentMethod } from '@prisma/client'
+import { Prisma, TransactionCardType, SettlementStatus, SimulationType, PaymentMethod } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 import { calculateSettlementDate, findActiveSettlementConfig } from '../payments/settlementCalculation.service'
@@ -8,8 +8,9 @@ import { addDays } from 'date-fns'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import { projectPaymentSettlement, type ActiveConfig } from './settlementCalendar.dashboard.service'
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { utcTs } from '../../utils/sqlDates'
 import { getLastCloseoutDate } from './cashCloseout.dashboard.service'
-import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
+import { paymentIsAvoqadoSettled, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 
 // Extended card type that includes CASH (for frontend compatibility)
 // CASH is not in Prisma enum but we treat it as a synthetic type
@@ -115,6 +116,13 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   // El filtro por `paymentIsAvoqadoSettled` va DESPUÉS del query a propósito: un
   // `not:` de Prisma sobre un enum nullable deja fuera los NULL (todo lo histórico),
   // que es justo lo que NO queremos cambiar. Ver `shared/tenderSemantics.ts`.
+  // ⚠️ Este findMany NO se convirtió a GROUP BY a propósito (2026-09-01): cada pago
+  // pendiente pasa por `projectPaymentSettlement`, el motor de liquidación vivo
+  // (config vigente por fecha, cutoff con timezone, días hábiles). Replicarlo en SQL
+  // sería mantener el motor del dinero en DOS lenguajes. Lo que sí se recortó es el
+  // ANCHO de cada fila: de todas las columnas + transaction completa a los campos que
+  // el cálculo usa. Los rangos que devuelvan resultados gigantes los denuncia el
+  // [query-guard] de runtime.
   const cardPaymentsRaw = await prisma.payment.findMany({
     where: {
       venueId,
@@ -124,8 +132,19 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
       },
       ...dateFilter,
     },
-    include: {
-      transaction: true,
+    select: {
+      amount: true,
+      tipAmount: true,
+      createdAt: true,
+      merchantAccountId: true,
+      ...TENDER_SEMANTICS_SELECT,
+      transaction: {
+        select: {
+          status: true,
+          estimatedSettlementDate: true,
+          netSettlementAmount: true,
+        },
+      },
       transactionCost: {
         select: {
           venueChargeAmount: true,
@@ -167,25 +186,25 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
       })
     : []
 
-  // Get CASH payments separately (instant settlement, 0 fees)
-  // Only show cash collected SINCE the last closeout (corte de caja)
-  // Both REGULAR and REFUND payments carry status=COMPLETED; refunds have
-  // negative amount AND (since 2026-04-19) negative tipAmount so summing
-  // signed values across both fields yields the correct net cash balance.
+  // Get CASH payments (instant settlement, 0 fees) — agregado en Postgres: la única
+  // lectura era la suma. Both REGULAR and REFUND payments carry status=COMPLETED;
+  // refunds have negative amount AND (since 2026-04-19) negative tipAmount so
+  // summing signed values across both fields yields the correct net cash balance.
+  //
+  // ⚠️ Réplica deliberada del where original: `{ createdAt: { gt: lastCloseout },
+  // ...dateFilter }` — el spread PISABA el `gt`, así que con rango explícito el
+  // corte de caja NO acota (y sin rango, sí). Cambiarlo movería el número.
   const lastCloseout = await getLastCloseoutDate(venueId)
-  const cashPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      method: PaymentMethod.CASH,
-      createdAt: { gt: lastCloseout }, // Only cash since last closeout
-      ...dateFilter,
-    },
-    select: {
-      amount: true,
-      tipAmount: true,
-    },
-  })
+  const cashCreatedAt = dateRange
+    ? Prisma.sql`p."createdAt" >= ${utcTs(dateRange.from)} AND p."createdAt" <= ${utcTs(dateRange.to)}`
+    : Prisma.sql`p."createdAt" > ${utcTs(lastCloseout)}`
+  const cashRows =
+    ((await prisma.$queryRaw<Array<{ total: Prisma.Decimal | null }>>`
+    SELECT SUM(p."amount" + COALESCE(p."tipAmount", 0)) AS "total"
+    FROM "Payment" p
+    WHERE p."venueId" = ${venueId} AND p."status" = 'COMPLETED' AND p."method" = 'CASH'
+      AND ${cashCreatedAt}
+  `) as Array<{ total: Prisma.Decimal | null }>) ?? []
 
   // Calculate totals
   const now = new Date()
@@ -270,7 +289,7 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   }
 
   // Add CASH payments (instant settlement, 0 fees, 100% available)
-  const cashTotal = cashPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount ?? 0), 0)
+  const cashTotal = Number(cashRows[0]?.total ?? 0)
   totalSales += cashTotal
   // Cash has 0 fees, so no totalFees increment
   availableNow += cashTotal // Cash is immediately available
@@ -345,55 +364,81 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     }
   }
 
-  // Get card payments with transaction costs
-  const cardPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      transactionCost: {
-        isNot: null, // Must have transaction cost
-      },
-      ...dateFilter,
-    },
-    include: {
-      transaction: true,
-      transactionCost: {
-        select: {
-          transactionType: true,
-          venueChargeAmount: true,
-          venueFixedFee: true,
-          merchantAccountId: true,
-        },
-      },
-    },
-  })
+  // Agregado en Postgres (2026-09-01, incidente del event loop): antes se
+  // materializaba cada pago del rango con su transaction completa solo para sumar
+  // por tipo de tarjeta. Toda la lógica de este reporte es de columnas ALMACENADAS
+  // (a diferencia de getAvailableBalance, que recomputa con el motor vivo), así
+  // que la reducción entera baja a SQL:
+  //  · settled/pending replica hasSettlementLanded: SETTLED explícito, o fecha
+  //    estimada ya pasada.
+  //  · COALESCE(netSettlementAmount, neto calculado) replica el `|| netAmount`
+  //    de siempre (un Decimal 0 almacenado se respeta; solo NULL cae al cálculo).
+  //  · El neto calculado = (monto + propina) − (cargo porcentual + fijo), la misma
+  //    fórmula del settlement engine y del Sales Summary.
+  const now = new Date()
+  const cardDateCond = dateRange
+    ? Prisma.sql` AND p."createdAt" >= ${utcTs(dateRange.from)} AND p."createdAt" <= ${utcTs(dateRange.to)}`
+    : Prisma.empty
+  const cardRows = await prisma.$queryRaw<
+    Array<{
+      cardType: TransactionCardType
+      baseSales: Prisma.Decimal
+      tips: Prisma.Decimal
+      fees: Prisma.Decimal
+      settledAmount: Prisma.Decimal
+      pendingAmount: Prisma.Decimal
+      transactionCount: number
+      firstMerchantAccountId: string | null
+    }>
+  >`
+    SELECT tc."transactionType"::text AS "cardType",
+           SUM(p."amount") AS "baseSales",
+           SUM(COALESCE(p."tipAmount", 0)) AS "tips",
+           SUM(tc."venueChargeAmount" + tc."venueFixedFee") AS "fees",
+           COALESCE(SUM(CASE
+             WHEN t."paymentId" IS NOT NULL
+                  AND (t."status" = 'SETTLED' OR (t."estimatedSettlementDate" IS NOT NULL AND t."estimatedSettlementDate" <= ${utcTs(now)}))
+             THEN COALESCE(t."netSettlementAmount",
+                           (p."amount" + COALESCE(p."tipAmount", 0)) - (tc."venueChargeAmount" + tc."venueFixedFee"))
+             ELSE 0 END), 0) AS "settledAmount",
+           COALESCE(SUM(CASE
+             WHEN t."paymentId" IS NULL
+             THEN (p."amount" + COALESCE(p."tipAmount", 0)) - (tc."venueChargeAmount" + tc."venueFixedFee")
+             WHEN NOT (t."status" = 'SETTLED' OR (t."estimatedSettlementDate" IS NOT NULL AND t."estimatedSettlementDate" <= ${utcTs(now)}))
+             THEN COALESCE(t."netSettlementAmount",
+                           (p."amount" + COALESCE(p."tipAmount", 0)) - (tc."venueChargeAmount" + tc."venueFixedFee"))
+             ELSE 0 END), 0) AS "pendingAmount",
+           COUNT(*)::int AS "transactionCount",
+           (ARRAY_AGG(tc."merchantAccountId" ORDER BY p."createdAt", p."id"))[1] AS "firstMerchantAccountId"
+    FROM "Payment" p
+    JOIN "TransactionCost" tc ON tc."paymentId" = p."id"
+    LEFT JOIN "VenueTransaction" t ON t."paymentId" = p."id"
+    WHERE p."venueId" = ${venueId} AND p."status" = 'COMPLETED'${cardDateCond}
+    GROUP BY tc."transactionType"
+    ORDER BY tc."transactionType"
+  `
 
-  // Get CASH payments separately (no transaction cost)
-  // Only show cash collected SINCE the last closeout (corte de caja)
-  // Include tipAmount so tip-split refunds (2026-04-19) net out correctly.
+  // CASH separately (no transaction cost) — same deliberate replica as
+  // getAvailableBalance: an explicit dateRange REPLACES the closeout cutoff
+  // (the original spread overwrote `gt: lastCloseout`).
   const lastCloseoutForCash = await getLastCloseoutDate(venueId)
-  const cashPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      method: PaymentMethod.CASH,
-      createdAt: { gt: lastCloseoutForCash }, // Only cash since last closeout
-      ...dateFilter,
-    },
-    select: {
-      id: true,
-      amount: true,
-      tipAmount: true,
-      createdAt: true,
-    },
-  })
+  const cashCond = dateRange
+    ? Prisma.sql`p."createdAt" >= ${utcTs(dateRange.from)} AND p."createdAt" <= ${utcTs(dateRange.to)}`
+    : Prisma.sql`p."createdAt" > ${utcTs(lastCloseoutForCash)}`
+  const cashAgg = await prisma.$queryRaw<Array<{ baseSales: Prisma.Decimal | null; tips: Prisma.Decimal | null; n: number }>>`
+    SELECT SUM(p."amount") AS "baseSales", SUM(COALESCE(p."tipAmount", 0)) AS "tips", COUNT(*)::int AS "n"
+    FROM "Payment" p
+    WHERE p."venueId" = ${venueId} AND p."status" = 'COMPLETED' AND p."method" = 'CASH' AND ${cashCond}
+  `
 
   // Look up active SettlementConfiguration per (merchantAccountId, cardType)
   // so the UI can show the configured rule (e.g. "1 día háb.") instead of
   // averaging calendar-day deltas across historical payments — which was
   // misleading (mixed timezone shifts, weekend gaps, label said "días háb."
-  // but the math was on calendar days).
-  const merchantAccountIds = Array.from(new Set(cardPayments.map(p => p.transactionCost?.merchantAccountId).filter(Boolean) as string[]))
+  // but the math was on calendar days). The merchant per card type is the one
+  // on the group's OLDEST payment (deterministic; before, it was whichever row
+  // the DB returned first).
+  const merchantAccountIds = Array.from(new Set(cardRows.map(r => r.firstMerchantAccountId).filter(Boolean) as string[]))
   const activeConfigs = merchantAccountIds.length
     ? await prisma.settlementConfiguration.findMany({
         where: {
@@ -408,7 +453,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     configuredDays.set(`${cfg.merchantAccountId}::${cfg.cardType}`, cfg.settlementDays)
   }
 
-  // Group card payments by card type
+  // Ensamblar en el mismo shape de siempre (cash al final, como synthetic type)
   const byCardType = new Map<
     ExtendedCardType,
     {
@@ -423,63 +468,26 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     }
   >()
 
-  const now = new Date()
-  for (const payment of cardPayments) {
-    if (!payment.transactionCost) continue
-
-    const cardType = payment.transactionCost.transactionType
-    // The customer charged amount + tip on the card; the commission was charged
-    // on amount+tip too. Dropping the tip understated the net the venue receives.
-    const baseAmount = Number(payment.amount)
-    const tip = Number(payment.tipAmount ?? 0)
-    const amount = baseAmount + tip
-    // Venue fee = percentage charge + per-transaction fixed fee (matches the
-    // settlement engine's net and the Sales Summary breakdown).
-    const fees = Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
-    const netAmount = amount - fees
-
-    // Get or initialize card type entry
-    if (!byCardType.has(cardType)) {
-      byCardType.set(cardType, {
-        baseSales: 0,
-        tips: 0,
-        totalSales: 0,
-        fees: 0,
-        pendingAmount: 0,
-        settledAmount: 0,
-        transactionCount: 0,
-        settlementDays: configuredDays.get(`${payment.transactionCost.merchantAccountId}::${cardType}`) ?? null,
-      })
-    }
-
-    const entry = byCardType.get(cardType)!
-    entry.baseSales += baseAmount
-    entry.tips += tip
-    entry.totalSales += amount
-    entry.fees += fees
-    entry.transactionCount += 1
-
-    // Settlement status — automatic by date (see hasSettlementLanded); does not
-    // depend on the manual "confirmar liquidación" step.
-    if (payment.transaction) {
-      const net = Number(payment.transaction.netSettlementAmount || netAmount)
-      if (hasSettlementLanded(payment.transaction.status, payment.transaction.estimatedSettlementDate, now)) {
-        entry.settledAmount += net
-      } else {
-        entry.pendingAmount += net
-      }
-      // settlementDays now comes from the active SettlementConfiguration
-      // (set when the entry was created above), not from a calendar-day average
-      // of historical estimatedSettlementDate values.
-    } else {
-      entry.pendingAmount += netAmount
-    }
+  for (const row of cardRows) {
+    const baseSales = Number(row.baseSales)
+    const tips = Number(row.tips)
+    byCardType.set(row.cardType, {
+      baseSales,
+      tips,
+      totalSales: baseSales + tips,
+      fees: Number(row.fees),
+      pendingAmount: Number(row.pendingAmount),
+      settledAmount: Number(row.settledAmount),
+      transactionCount: row.transactionCount,
+      settlementDays: row.firstMerchantAccountId ? (configuredDays.get(`${row.firstMerchantAccountId}::${row.cardType}`) ?? null) : null,
+    })
   }
 
   // Add CASH payments as synthetic card type (instant settlement, 0 fees)
-  if (cashPayments.length > 0) {
-    const cashBase = cashPayments.reduce((sum, p) => sum + Number(p.amount), 0)
-    const cashTips = cashPayments.reduce((sum, p) => sum + Number(p.tipAmount ?? 0), 0)
+  const cashCount = cashAgg[0]?.n ?? 0
+  if (cashCount > 0) {
+    const cashBase = Number(cashAgg[0]?.baseSales ?? 0)
+    const cashTips = Number(cashAgg[0]?.tips ?? 0)
     const cashTotalSales = cashBase + cashTips
     byCardType.set('CASH', {
       baseSales: cashBase,
@@ -488,7 +496,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
       fees: 0, // Cash has no processing fees
       pendingAmount: 0, // Cash is never pending
       settledAmount: cashTotalSales, // Cash is always immediately settled
-      transactionCount: cashPayments.length,
+      transactionCount: cashCount,
       settlementDays: 0, // Instant settlement
     })
   }
@@ -535,6 +543,12 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
   // so we can split a transaction-day into per-card-type rows: payments on the
   // same day with different card types settle on different dates, and showing
   // a single Fecha de Liquidación per day misled users.
+  //
+  // ⚠️ NO convertido a GROUP BY (2026-09-01): cada grupo recomputa su fecha de
+  // liquidación con el motor vivo (`projectPaymentSettlement`) sobre el primer
+  // pago proyectable — duplicar ese motor en SQL es más peligroso que
+  // materializar. El select acota el ancho por fila; el [query-guard] de runtime
+  // denuncia los rangos gigantes.
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
@@ -544,8 +558,18 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
         lte: dateRange.to,
       },
     },
-    include: {
-      transaction: true,
+    select: {
+      amount: true,
+      tipAmount: true,
+      createdAt: true,
+      merchantAccountId: true,
+      method: true,
+      transaction: {
+        select: {
+          status: true,
+          estimatedSettlementDate: true,
+        },
+      },
       transactionCost: {
         select: {
           venueChargeAmount: true,
@@ -813,62 +837,62 @@ export async function getSettlementCalendar(
   })
   const venueTimezone = venueRecord?.timezone || DEFAULT_TIMEZONE
 
-  // Get card payments with transactions that have settlement dates in range
-  const cardPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      method: {
-        not: PaymentMethod.CASH,
-      },
-      transaction: {
-        estimatedSettlementDate: {
-          gte: dateRange.from,
-          lte: dateRange.to,
-        },
-      },
-    },
-    include: {
-      transaction: true,
-      transactionCost: {
-        select: {
-          transactionType: true,
-        },
-      },
-    },
-    orderBy: {
-      transaction: {
-        estimatedSettlementDate: 'asc',
-      },
-    },
-  })
+  // Agregado en Postgres (2026-09-01): este calendario agrupa por la fecha de
+  // liquidación ALMACENADA a propósito (no recomputa con el motor vivo), así que
+  // la reducción baja completa a SQL: una fila por (día local de liquidación ×
+  // tipo de tarjeta) para tarjetas, y una por día local para efectivo. Node solo
+  // arma el anidado por fecha, igual que siempre.
+  const cardGroups = await prisma.$queryRaw<
+    Array<{
+      dateKey: string
+      cardType: string
+      minSettlement: Date
+      net: Prisma.Decimal
+      n: number
+      anySettled: boolean
+      firstStatus: SettlementStatus
+    }>
+  >`
+    SELECT to_char((t."estimatedSettlementDate" AT TIME ZONE 'UTC') AT TIME ZONE ${venueTimezone}, 'YYYY-MM-DD') AS "dateKey",
+           COALESCE(tc."transactionType"::text, 'OTHER') AS "cardType",
+           MIN(t."estimatedSettlementDate") AS "minSettlement",
+           SUM(COALESCE(t."netSettlementAmount", 0)) AS "net",
+           COUNT(*)::int AS "n",
+           BOOL_OR(t."status" = 'SETTLED') AS "anySettled",
+           (ARRAY_AGG(t."status"::text ORDER BY t."estimatedSettlementDate", p."id"))[1] AS "firstStatus"
+    FROM "Payment" p
+    JOIN "VenueTransaction" t ON t."paymentId" = p."id"
+    LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p."id"
+    WHERE p."venueId" = ${venueId}
+      AND p."status" = 'COMPLETED'
+      AND p."method" <> 'CASH'
+      AND t."estimatedSettlementDate" >= ${utcTs(dateRange.from)}
+      AND t."estimatedSettlementDate" <= ${utcTs(dateRange.to)}
+    GROUP BY 1, 2
+    ORDER BY MIN(t."estimatedSettlementDate"), 2
+  `
 
-  // Get CASH payments in date range (instant settlement on transaction date)
-  // Only show cash collected SINCE the last closeout (corte de caja)
-  // Include tipAmount so tip-split refunds (2026-04-19) net out correctly.
+  // CASH in range (instant settlement on transaction date), since last closeout.
   const lastCloseoutForCalendar = await getLastCloseoutDate(venueId)
-  const cashPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      method: PaymentMethod.CASH,
-      createdAt: {
-        gt: lastCloseoutForCalendar, // Only cash since last closeout
-        gte: dateRange.from,
-        lte: dateRange.to,
-      },
-    },
-    select: {
-      amount: true,
-      tipAmount: true,
-      createdAt: true,
-    },
-    orderBy: {
-      createdAt: 'asc',
-    },
-  })
+  const cashGroups = await prisma.$queryRaw<Array<{ dateKey: string; firstCreated: Date; net: Prisma.Decimal; n: number }>>`
+    SELECT to_char((p."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE ${venueTimezone}, 'YYYY-MM-DD') AS "dateKey",
+           MIN(p."createdAt") AS "firstCreated",
+           SUM(p."amount" + COALESCE(p."tipAmount", 0)) AS "net",
+           COUNT(*)::int AS "n"
+    FROM "Payment" p
+    WHERE p."venueId" = ${venueId}
+      AND p."status" = 'COMPLETED'
+      AND p."method" = 'CASH'
+      AND p."createdAt" > ${utcTs(lastCloseoutForCalendar)}
+      AND p."createdAt" >= ${utcTs(dateRange.from)}
+      AND p."createdAt" <= ${utcTs(dateRange.to)}
+    GROUP BY 1
+    ORDER BY MIN(p."createdAt")
+  `
 
-  // Group by settlement date
+  // Group by settlement date — mismo armado de siempre: la fecha del entry es la
+  // del primer pago visto (con las filas en orden ascendente = la mínima del día)
+  // y el status del día se vuelve SETTLED si CUALQUIER transacción lo está.
   const calendarMap = new Map<
     string,
     {
@@ -886,59 +910,33 @@ export async function getSettlementCalendar(
     }
   >()
 
-  // Process card payments
-  for (const payment of cardPayments) {
-    if (!payment.transaction?.estimatedSettlementDate) continue
-
-    const settlementDate = payment.transaction.estimatedSettlementDate
-    // Group by venue-local date so the UI label matches the bucket. Using
-    // toISOString() splits at UTC midnight, which can put two different
-    // UTC days under the same local date in the frontend.
-    const dateKey = formatInTimeZone(settlementDate, venueTimezone, 'yyyy-MM-dd')
-    const netAmount = Number(payment.transaction.netSettlementAmount || 0)
-    const cardType = payment.transactionCost?.transactionType || TransactionCardType.OTHER
-
-    if (!calendarMap.has(dateKey)) {
-      calendarMap.set(dateKey, {
-        settlementDate,
+  for (const group of cardGroups) {
+    if (!calendarMap.has(group.dateKey)) {
+      calendarMap.set(group.dateKey, {
+        settlementDate: group.minSettlement,
         totalNetAmount: 0,
         transactionCount: 0,
-        status: payment.transaction.status,
+        status: group.firstStatus,
         byCardType: new Map(),
       })
     }
 
-    const entry = calendarMap.get(dateKey)!
-    entry.totalNetAmount += netAmount
-    entry.transactionCount += 1
-
-    // Update by card type
-    if (!entry.byCardType.has(cardType)) {
-      entry.byCardType.set(cardType, {
-        netAmount: 0,
-        transactionCount: 0,
-      })
-    }
-
-    const cardTypeEntry = entry.byCardType.get(cardType)!
-    cardTypeEntry.netAmount += netAmount
-    cardTypeEntry.transactionCount += 1
-
-    // Update status: if any transaction is settled, mark day as settled
-    if (payment.transaction.status === SettlementStatus.SETTLED) {
+    const entry = calendarMap.get(group.dateKey)!
+    entry.totalNetAmount += Number(group.net)
+    entry.transactionCount += group.n
+    entry.byCardType.set(group.cardType as ExtendedCardType, {
+      netAmount: Number(group.net),
+      transactionCount: group.n,
+    })
+    if (group.anySettled) {
       entry.status = SettlementStatus.SETTLED
     }
   }
 
-  // Process CASH payments (instant settlement - show on transaction date)
-  for (const payment of cashPayments) {
-    const settlementDate = payment.createdAt
-    const dateKey = formatInTimeZone(settlementDate, venueTimezone, 'yyyy-MM-dd')
-    const netAmount = Number(payment.amount) + Number(payment.tipAmount ?? 0) // Cash has no fees; include tip portion
-
-    if (!calendarMap.has(dateKey)) {
-      calendarMap.set(dateKey, {
-        settlementDate,
+  for (const group of cashGroups) {
+    if (!calendarMap.has(group.dateKey)) {
+      calendarMap.set(group.dateKey, {
+        settlementDate: group.firstCreated,
         totalNetAmount: 0,
         transactionCount: 0,
         status: SettlementStatus.SETTLED, // Cash is always settled
@@ -946,21 +944,13 @@ export async function getSettlementCalendar(
       })
     }
 
-    const entry = calendarMap.get(dateKey)!
-    entry.totalNetAmount += netAmount
-    entry.transactionCount += 1
-
-    // Add to CASH card type
-    if (!entry.byCardType.has('CASH')) {
-      entry.byCardType.set('CASH', {
-        netAmount: 0,
-        transactionCount: 0,
-      })
-    }
-
-    const cashEntry = entry.byCardType.get('CASH')!
-    cashEntry.netAmount += netAmount
-    cashEntry.transactionCount += 1
+    const entry = calendarMap.get(group.dateKey)!
+    entry.totalNetAmount += Number(group.net)
+    entry.transactionCount += group.n
+    entry.byCardType.set('CASH', {
+      netAmount: Number(group.net),
+      transactionCount: group.n,
+    })
   }
 
   // Convert map to array
@@ -1001,23 +991,24 @@ export async function projectHistoricalBalance(
   const thirtyDaysAgo = new Date()
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
 
-  const historicalPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      createdAt: {
-        gte: thirtyDaysAgo,
-      },
-    },
-    select: {
-      amount: true,
-      createdAt: true,
-    },
-  })
+  // Agregado en Postgres (2026-09-01): solo se necesitaba la suma por día. El
+  // bucket es el día UTC A PROPÓSITO — el código de siempre agrupaba con
+  // `toISOString().split('T')[0]`, y la columna guarda UTC real, así que el
+  // to_char directo (sin AT TIME ZONE) reproduce exactamente esos buckets.
+  const dailyRows = await prisma.$queryRaw<Array<{ day: string; total: Prisma.Decimal; n: number }>>`
+    SELECT to_char(p."createdAt", 'YYYY-MM-DD') AS "day",
+           SUM(p."amount") AS "total",
+           COUNT(*)::int AS "n"
+    FROM "Payment" p
+    WHERE p."venueId" = ${venueId} AND p."status" = 'COMPLETED' AND p."createdAt" >= ${utcTs(thirtyDaysAgo)}
+    GROUP BY 1
+  `
 
   // Calculate average daily revenue
-  const totalRevenue = historicalPayments.reduce((sum, p) => sum + Number(p.amount), 0)
-  const projectedDailyRevenue = historicalPayments.length > 0 ? totalRevenue / 30 : 0
+  const totalByDay = new Map(dailyRows.map(r => [r.day, Number(r.total)]))
+  const totalRevenue = dailyRows.reduce((sum, r) => sum + Number(r.total), 0)
+  const paymentCount = dailyRows.reduce((sum, r) => sum + r.n, 0)
+  const projectedDailyRevenue = paymentCount > 0 ? totalRevenue / 30 : 0
 
   // Project future settlements (simplified - assumes average settlement time)
   const projectedDailySettlements: { date: Date; amount: number }[] = []
@@ -1027,14 +1018,8 @@ export async function projectHistoricalBalance(
     const settlementDate = addDays(new Date(), i)
     const transactionDate = addDays(settlementDate, -avgSettlementDays)
 
-    // Check if we have historical data for this transaction date
-    const historicalAmount = historicalPayments
-      .filter(p => {
-        const pDate = p.createdAt.toISOString().split('T')[0]
-        const tDate = transactionDate.toISOString().split('T')[0]
-        return pDate === tDate
-      })
-      .reduce((sum, p) => sum + Number(p.amount), 0)
+    // Check if we have historical data for this transaction date (UTC day)
+    const historicalAmount = totalByDay.get(transactionDate.toISOString().split('T')[0]) ?? 0
 
     if (historicalAmount > 0) {
       projectedDailySettlements.push({

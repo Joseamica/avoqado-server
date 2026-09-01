@@ -66,7 +66,11 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/attendance.dashboard.service.ts': 2,
   'src/services/dashboard/attendanceLiveAlert.ts': 1,
   'src/services/dashboard/autoReorder.service.ts': 2,
-  'src/services/dashboard/availableBalance.dashboard.service.ts': 8,
+  // 2026-09-01: 8 → 2. Calendar, byCardType, projection y los cash se agregaron en
+  // Postgres (golden al centavo). Los 2 que quedan pasan cada pago pendiente por el
+  // motor de liquidación vivo (projectPaymentSettlement) — duplicar ese motor en SQL
+  // sería mantener la lógica del dinero en dos lenguajes; llevan select quirúrgico.
+  'src/services/dashboard/availableBalance.dashboard.service.ts': 2,
   'src/services/dashboard/bankReconciliation.service.ts': 1,
   'src/services/dashboard/cash-out/cash-out.ledger.service.ts': 2,
   'src/services/dashboard/cashCloseout.dashboard.service.ts': 1,
@@ -74,7 +78,11 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/commission/commission-utils.ts': 1,
   'src/services/dashboard/cost-management.service.ts': 1,
   'src/services/dashboard/customer.dashboard.service.ts': 1,
-  'src/services/dashboard/generalStats.dashboard.service.ts': 19,
+  // 2026-09-01: 19 → 3. Las 16 agregaciones se reescribieron a GROUP BY en
+  // Postgres (golden snapshots al centavo + integración con base real). Los 3
+  // que quedan devuelven las FILAS al dashboard (contrato de la API, con select
+  // acotado): quitarlos exige paginar también el cliente — trabajo aparte.
+  'src/services/dashboard/generalStats.dashboard.service.ts': 3,
   'src/services/dashboard/inventoryRestock.service.ts': 1,
   'src/services/dashboard/itemCategory.dashboard.service.ts': 1,
   'src/services/dashboard/order.dashboard.service.ts': 2,
