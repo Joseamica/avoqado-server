@@ -202,13 +202,13 @@ router.post('/org-bulk-upload', whiteLabelStockWrite, async (req: Request, res: 
 /**
  * GET /dashboard/stock/movements
  * Returns: Recent stock movements (registrations, sales)
- * Query: limit (default 20), dateFrom?, dateTo? (ISO strings)
+ * Query: limit (default 20, max 100), page (default 1), dateFrom?, dateTo? (ISO strings)
  */
 router.get('/movements', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     // Use target venueId from URL params
     const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const { limit = '20', dateFrom, dateTo, responsibleStaffId } = req.query
+    const { limit = '20', page = '1', dateFrom, dateTo, responsibleStaffId } = req.query
 
     // Parse optional ISO dates defensively — invalid strings fall back to
     // "no filter" rather than throwing, so a TPV sending garbage doesn't 500.
@@ -217,16 +217,21 @@ router.get('/movements', whiteLabelStockAccess, async (req: Request, res: Respon
     const safeFrom = parsedFrom && !isNaN(parsedFrom.getTime()) ? parsedFrom : undefined
     const safeTo = parsedTo && !isNaN(parsedTo.getTime()) ? parsedTo : undefined
 
-    const movements = await stockDashboardService.getRecentMovements(venueId, parseInt(limit as string, 10), {
+    const result = await stockDashboardService.getRecentMovementsPage(venueId, parseInt(limit as string, 10), {
       dateFrom: safeFrom,
       dateTo: safeTo,
       responsibleStaffId: typeof responsibleStaffId === 'string' ? responsibleStaffId : undefined,
+      page: parseInt(page as string, 10),
     })
 
     res.json({
       success: true,
       data: {
-        movements,
+        movements: result.movements,
+        pagination: {
+          page: Number.isFinite(parseInt(page as string, 10)) ? Math.max(1, parseInt(page as string, 10)) : 1,
+          hasMore: result.hasMore,
+        },
       },
     })
   } catch (error) {
