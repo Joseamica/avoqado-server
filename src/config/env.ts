@@ -98,6 +98,12 @@ const envSchema = z.object({
   // envío masivo daña la reputación de @promos, nunca la de las transaccionales. El SERVICIO
   // (marketingSender.ts) es el único que la lee; el llamador nunca construye el remitente.
   MARKETING_FROM_EMAIL: z.string().default('promos@promos.avoqado.io'),
+  // Tope mensual de correos de campaña por venue (spec §cuota: default 2,000). Hoy es GLOBAL
+  // para todos los venues; el ajuste por venue «sólo superadmin» llega en la Fase 1C. Lo lee
+  // `campaignEnqueue.service.ts` y se lo pasa a `reservarCuota`, que rechaza un tope que no
+  // sea entero ≥ 0 — por eso el default vive AQUÍ y no como `??` en el llamador: sin esta
+  // línea `env.MARKETING_MONTHLY_QUOTA` es `undefined` y NINGÚN encolado pasa la reserva.
+  MARKETING_MONTHLY_QUOTA: z.coerce.number().int().min(0).default(2000),
   ORDER_NOTIFICATIONS_EMAIL: z.string().email().optional(),
   // Recipient for the weekly "new activated/paid venues" report (see
   // jobs/weekly-new-customers-report.job.ts). Unset = job logs a warning and
