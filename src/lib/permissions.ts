@@ -773,6 +773,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // recepcionista llena nombre y teléfono con el cliente enfrente y truena al guardar.
     // Editar y borrar el directorio SE QUEDA en MANAGER+.
     'customers:create',
+    // Fase 0 (campañas de correo): quien da de alta al cliente es quien captura el
+    // consentimiento de marketing en el mismo formulario — sin esto el checkbox no
+    // puede saber si el negocio ya tiene aviso de privacidad. Editar/mandar campañas
+    // sigue en ADMIN+ (`marketing:manage`/`:send`).
+    'marketing:read',
     'loyalty:read', // Phase 1b: Loyalty System
     'referral:read', // Referral Program: read-only access
     'teams:read',
@@ -828,6 +833,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Alta de cliente en el cobro (founder, 2026-08-16). Sin esto la venta queda anónima:
     // sin historial, sin lealtad y sin a quién facturar. Editar/borrar se queda en MANAGER+.
     'customers:create',
+    // Fase 0 (campañas de correo): quien da de alta al cliente es quien captura el
+    // consentimiento de marketing en el mismo formulario — sin esto el checkbox no
+    // puede saber si el negocio ya tiene aviso de privacidad. Editar/mandar campañas
+    // sigue en ADMIN+ (`marketing:manage`/`:send`).
+    'marketing:read',
     'loyalty:read', // Phase 1b: Loyalty System
     'discounts:read', // Phase 2: Can view discounts
     'upsells:read', // Upsell: el POS necesita leer las sugerencias
@@ -897,6 +907,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Alta de cliente en el cobro (founder, 2026-08-16). Sin esto la venta queda anónima:
     // sin historial, sin lealtad y sin a quién facturar. Editar/borrar se queda en MANAGER+.
     'customers:create',
+    // Fase 0 (campañas de correo): quien da de alta al cliente es quien captura el
+    // consentimiento de marketing en el mismo formulario — sin esto el checkbox no
+    // puede saber si el negocio ya tiene aviso de privacidad. Editar/mandar campañas
+    // sigue en ADMIN+ (`marketing:manage`/`:send`).
+    'marketing:read',
     'loyalty:read', // Phase 1b: Loyalty System
     'discounts:read', // Phase 2: Can view discounts
     'upsells:read', // Upsell: el POS necesita leer las sugerencias
