@@ -1422,6 +1422,10 @@ model VenueRoleConfig {
   color       String? // Optional hex color for UI badges (e.g., "#7C3AED")
   isActive    Boolean   @default(true) // Can hide unused roles
   sortOrder   Int       @default(0) // Custom ordering in UI
+  /// ¿Este rol aparece en el selector de "Vendedor" del POS? Default TRUE
+  /// (todos salen, como siempre) — el venue lo APAGA para roles que no venden
+  /// (p.ej. un VIEWER renombrado a "Investor"). Founder 2026-09-01.
+  showAsSeller Boolean  @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

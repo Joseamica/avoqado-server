@@ -34,6 +34,8 @@ const RoleConfigItemSchema = z.object({
     .optional(),
   isActive: z.boolean().optional(),
   sortOrder: z.number().int().min(0).max(100).optional(),
+  /** ¿Aparece en el selector de "Vendedor" del POS? Ausente = no se toca. */
+  showAsSeller: z.boolean().optional(),
 })
 
 /**
@@ -78,6 +80,8 @@ export interface RoleConfigResponse {
   color: string | null
   isActive: boolean
   sortOrder: number
+  /** ¿Aparece en el selector de "Vendedor" del POS? Default true. */
+  showAsSeller: boolean
 }
 
 /**

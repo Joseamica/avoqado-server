@@ -11728,6 +11728,7 @@ router.get(
  *                     color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
  *                     isActive: { type: boolean }
  *                     sortOrder: { type: integer, minimum: 0, maximum: 100 }
+ *                     showAsSeller: { type: boolean, description: "¿Este rol aparece como vendedor en el POS? Default true" }
  *     responses:
  *       200:
  *         description: Role configs updated successfully
