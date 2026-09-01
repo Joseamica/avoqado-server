@@ -6711,7 +6711,7 @@ model Customer {
 
   firstName String?
   lastName  String?
-  birthDate DateTime?
+  birthDate DateTime? @db.Date
   gender    String?
 
   // Auth
