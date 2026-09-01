@@ -21,6 +21,7 @@ jest.mock('@/utils/prismaClient', () => ({
     shift: { findMany: jest.fn() },
     payment: { findMany: jest.fn() },
     order: { count: jest.fn() },
+    review: { count: jest.fn() },
   },
 }))
 
@@ -28,6 +29,7 @@ const m = prisma as unknown as {
   shift: { findMany: jest.Mock }
   payment: { findMany: jest.Mock }
   order: { count: jest.Mock }
+  review: { count: jest.Mock }
 }
 
 beforeEach(() => {
@@ -35,6 +37,7 @@ beforeEach(() => {
   m.shift.findMany.mockResolvedValue([])
   m.payment.findMany.mockResolvedValue([])
   m.order.count.mockResolvedValue(0)
+  m.review.count.mockResolvedValue(0)
 })
 
 const ventanaDeHuerfanos = () => {
@@ -78,5 +81,52 @@ describe('getShiftsSummary — pagos huérfanos acotados', () => {
 
     const whereShifts = m.shift.findMany.mock.calls[0][0].where
     expect(whereShifts.OR).toEqual(expect.arrayContaining([{ endTime: null }]))
+  })
+})
+
+/**
+ * P2 de la auditoría de Codex (2026-09-01): acotar SOLO los pagos huérfanos dejaba un
+ * resumen con ventanas incompatibles — ventas de 24 h junto a conteos de órdenes y
+ * reseñas de TODA la historia, y un dateRange null/null que no declaraba nada. La regla:
+ * hay UNA ventana efectiva (la del cliente, o las últimas 24 h) y los tres conteos y el
+ * dateRange la comparten.
+ */
+describe('getShiftsSummary — UNA ventana efectiva para todo el resumen', () => {
+  const DIA_MS = 24 * 60 * 60 * 1000
+
+  it('sin fechas, el conteo de órdenes huérfanas usa la MISMA ventana de 24 h', async () => {
+    const antes = Date.now()
+    await getShiftsSummary('venue-1', {})
+
+    const whereOrdenes = m.order.count.mock.calls[0][0].where
+    expect(whereOrdenes.createdAt?.gte).toBeInstanceOf(Date)
+    const gte = (whereOrdenes.createdAt.gte as Date).getTime()
+    expect(gte).toBeGreaterThanOrEqual(antes - DIA_MS - 5000)
+    expect(gte).toBeLessThanOrEqual(Date.now() - DIA_MS + 5000)
+  })
+
+  it('sin fechas, el conteo de reseñas usa la MISMA ventana de 24 h', async () => {
+    const antes = Date.now()
+    await getShiftsSummary('venue-1', {})
+
+    const whereResenas = m.review.count.mock.calls[0][0].where
+    expect(whereResenas.createdAt?.gte).toBeInstanceOf(Date)
+    const gte = (whereResenas.createdAt.gte as Date).getTime()
+    expect(gte).toBeGreaterThanOrEqual(antes - DIA_MS - 5000)
+    expect(gte).toBeLessThanOrEqual(Date.now() - DIA_MS + 5000)
+  })
+
+  it('sin fechas, dateRange DECLARA la ventana efectiva en vez de null/null', async () => {
+    const res = await getShiftsSummary('venue-1', {})
+
+    expect(res.dateRange.startTime).toBeInstanceOf(Date)
+  })
+
+  it('con fechas del cliente, órdenes y reseñas usan la ventana del cliente (sin cambios)', async () => {
+    await getShiftsSummary('venue-1', { startTime: '2026-08-30T00:00:00.000Z', endTime: '2026-08-30T23:59:59.000Z' })
+
+    expect(m.order.count.mock.calls[0][0].where.createdAt.gte).toEqual(new Date('2026-08-30T00:00:00.000Z'))
+    expect(m.review.count.mock.calls[0][0].where.createdAt.gte).toEqual(new Date('2026-08-30T00:00:00.000Z'))
+    expect(m.review.count.mock.calls[0][0].where.createdAt.lte).toEqual(new Date('2026-08-30T23:59:59.000Z'))
   })
 })

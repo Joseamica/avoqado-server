@@ -490,6 +490,14 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     }
   }
 
+  // P2 de la auditoría de Codex (2026-09-01): el resumen usa UNA ventana efectiva.
+  // Con fechas del cliente, la del cliente; sin fechas, las últimas 24 h. La comparten
+  // los pagos huérfanos, el conteo de órdenes huérfanas, el de reseñas y el dateRange
+  // de la respuesta — antes cada uno cortaba distinto (ventas de 24 h junto a conteos
+  // históricos, con dateRange null/null: inservible para conciliar).
+  const effectiveStartTime: Date = parsedStartTime ?? new Date(Date.now() - 24 * 60 * 60 * 1000)
+  const effectiveEndTime: Date | null = parsedEndTime ?? null
+
   // Build the base query filters for shifts
   const whereClause: any = {
     venueId: venueId,
@@ -587,14 +595,10 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     shiftId: null,
     status: 'COMPLETED',
     ...(staffId ? { processedById: staffId } : {}),
-    ...(parsedStartTime || parsedEndTime
-      ? {
-          createdAt: {
-            ...(parsedStartTime ? { gte: parsedStartTime } : {}),
-            ...(parsedEndTime ? { lte: parsedEndTime } : {}),
-          },
-        }
-      : { createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
+    createdAt: {
+      gte: effectiveStartTime,
+      ...(effectiveEndTime ? { lte: effectiveEndTime } : {}),
+    },
   }
 
   const orphanPayments = await prisma.payment.findMany({
@@ -622,14 +626,12 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
       venueId,
       shiftId: null,
       status: 'COMPLETED',
-      ...(parsedStartTime || parsedEndTime
-        ? {
-            createdAt: {
-              ...(parsedStartTime ? { gte: parsedStartTime } : {}),
-              ...(parsedEndTime ? { lte: parsedEndTime } : {}),
-            },
-          }
-        : {}),
+      // Misma ventana efectiva que los pagos huérfanos — sin ella, el resumen mezclaba
+      // ventas de 24 h con un conteo de órdenes de TODA la historia (32k en Testarudo).
+      createdAt: {
+        gte: effectiveStartTime,
+        ...(effectiveEndTime ? { lte: effectiveEndTime } : {}),
+      },
     },
   })
 
@@ -770,16 +772,11 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   try {
     const reviewWhereClause: any = {
       venueId,
-    }
-
-    if (startTime) {
-      reviewWhereClause.createdAt = { gte: new Date(startTime) }
-    }
-    if (endTime) {
-      reviewWhereClause.createdAt = {
-        ...reviewWhereClause.createdAt,
-        lte: new Date(endTime),
-      }
+      // Misma ventana efectiva que el resto del resumen (P2 de la auditoría).
+      createdAt: {
+        gte: effectiveStartTime,
+        ...(effectiveEndTime ? { lte: effectiveEndTime } : {}),
+      },
     }
 
     totalRatings = await prisma.review.count({
@@ -814,9 +811,11 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   const salesTrend = generateSalesTrend(allPayments, parsedStartTime, parsedEndTime)
 
   return {
+    // La ventana EFECTIVA, nunca null/null: si el cliente no mandó fechas, aquí se
+    // declara el default de 24 h con el que se calculó todo lo de arriba.
     dateRange: {
-      startTime: startTime ? new Date(startTime) : null,
-      endTime: endTime ? new Date(endTime) : null,
+      startTime: effectiveStartTime,
+      endTime: effectiveEndTime,
     },
     summary: {
       totalSales: totalSales,
