@@ -323,3 +323,210 @@ describe('projectHistoricalBalance — suma por día UTC en Postgres', () => {
     expect(round2(totalProyectado)).toBe(round2(300 * 0.965 + 30 * 0.965))
   })
 })
+
+// ===========================================================================
+// Two merchants + a stored zero net. Fixture of its own (a second venue in the
+// same org) so the numbers pinned above do not move.
+// ===========================================================================
+describe('getBalanceByCardType with two merchants and a stored netSettlementAmount of 0', () => {
+  const DAY_PLUS_1H = new Date(DAY.getTime() + 60 * 60 * 1000)
+  let venueBId: string
+  let slowMerchantId: string
+  let fastMerchantId: string
+
+  beforeAll(async () => {
+    const venue = await prisma.venue.create({
+      data: { organizationId: orgId, name: `ab-2m-${suffix}`, slug: `ab-2m-${suffix}`, timezone: 'America/Mexico_City' },
+      select: { id: true },
+    })
+    venueBId = venue.id
+
+    const mkMerchant = (tag: string) =>
+      prisma.merchantAccount.create({
+        data: { providerId, externalMerchantId: `ext-${tag}-${suffix}`, credentialsEncrypted: {} },
+        select: { id: true },
+      })
+    slowMerchantId = (await mkMerchant('slow')).id
+    fastMerchantId = (await mkMerchant('fast')).id
+    const creditConfig = (merchantAccountId: string, settlementDays: number) =>
+      prisma.settlementConfiguration.create({
+        data: {
+          merchantAccountId,
+          cardType: 'CREDIT',
+          settlementDays,
+          settlementDayType: 'BUSINESS_DAYS',
+          cutoffTime: '23:00',
+          cutoffTimezone: 'America/Mexico_City',
+          effectiveFrom: new Date('2024-01-01T00:00:00.000Z'),
+          effectiveTo: null,
+        },
+      })
+    await creditConfig(slowMerchantId, 3)
+    await creditConfig(fastMerchantId, 1)
+
+    const order = await prisma.order.create({
+      data: {
+        venueId: venueBId,
+        orderNumber: `AB2M-${suffix}`,
+        createdAt: DAY,
+        subtotal: 350,
+        taxAmount: 0,
+        total: 350,
+        status: 'COMPLETED',
+        paymentStatus: 'PAID',
+      },
+      select: { id: true },
+    })
+    const payment = (data: { amount: number; method: 'CREDIT_CARD' | 'DEBIT_CARD'; createdAt: Date; merchantAccountId: string }) =>
+      prisma.payment.create({
+        data: {
+          venueId: venueBId,
+          orderId: order.id,
+          status: 'COMPLETED',
+          tipAmount: 0,
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: 0,
+          ...data,
+        },
+        select: { id: true },
+      })
+    const cost = (
+      paymentId: string,
+      merchantAccountId: string,
+      transactionType: 'CREDIT' | 'DEBIT',
+      venueChargeAmount: number,
+      amount: number,
+    ) =>
+      prisma.transactionCost.create({
+        data: {
+          paymentId,
+          merchantAccountId,
+          transactionType,
+          amount,
+          providerRate: 0,
+          providerCostAmount: 0,
+          venueRate: 0,
+          venueChargeAmount,
+          venueFixedFee: 0,
+          grossProfit: 0,
+          profitMargin: 0,
+        },
+      })
+
+    // 1. The NEWER credit payment — and its VenueTransaction — are inserted FIRST, so
+    //    the physical row order favours the wrong merchant if the SQL ever loses its
+    //    `ORDER BY p."createdAt"` (verified: without it, this fixture publishes 1).
+    //    Fast merchant (1 business day), computed net 192, still pending by its stored
+    //    date (2099) with no stored net.
+    const newer = await payment({ amount: 200, method: 'CREDIT_CARD', createdAt: DAY_PLUS_1H, merchantAccountId: fastMerchantId })
+    await cost(newer.id, fastMerchantId, 'CREDIT', 8, 200)
+    await prisma.venueTransaction.create({
+      data: {
+        venueId: venueBId,
+        paymentId: newer.id,
+        type: 'PAYMENT',
+        grossAmount: 200,
+        feeAmount: 8,
+        netAmount: 192,
+        status: 'PENDING',
+        estimatedSettlementDate: new Date('2099-01-03T23:00:00.000Z'),
+        netSettlementAmount: null,
+      },
+    })
+
+    // 2. The OLDER credit payment: slow merchant (3 business days), computed net 97,
+    //    landed by date, and a STORED netSettlementAmount of 0 — the value COALESCE
+    //    must keep instead of falling back to the computed 97.
+    const older = await payment({ amount: 100, method: 'CREDIT_CARD', createdAt: DAY, merchantAccountId: slowMerchantId })
+    await cost(older.id, slowMerchantId, 'CREDIT', 3, 100)
+    await prisma.venueTransaction.create({
+      data: {
+        venueId: venueBId,
+        paymentId: older.id,
+        type: 'PAYMENT',
+        grossAmount: 100,
+        feeAmount: 3,
+        netAmount: 97,
+        status: 'PENDING',
+        estimatedSettlementDate: new Date('2025-03-14T18:00:00.000Z'),
+        netSettlementAmount: 0,
+      },
+    })
+
+    // 3. A DEBIT payment SETTLED explicitly with a stored 0: exercises the Node branch
+    //    `netSettlementAmount || netAmount` of getAvailableBalance, where a Decimal 0
+    //    is truthy and therefore wins over the computed 49.
+    const debit = await payment({ amount: 50, method: 'DEBIT_CARD', createdAt: DAY, merchantAccountId: fastMerchantId })
+    await cost(debit.id, fastMerchantId, 'DEBIT', 1, 50)
+    await prisma.venueTransaction.create({
+      data: {
+        venueId: venueBId,
+        paymentId: debit.id,
+        type: 'PAYMENT',
+        grossAmount: 50,
+        feeAmount: 1,
+        netAmount: 49,
+        status: 'SETTLED',
+        estimatedSettlementDate: null,
+        netSettlementAmount: 0,
+      },
+    })
+  })
+
+  afterAll(async () => {
+    await prisma.transactionCost.deleteMany({ where: { payment: { venueId: venueBId } } })
+    await prisma.venueTransaction.deleteMany({ where: { venueId: venueBId } })
+    await prisma.payment.deleteMany({ where: { venueId: venueBId } })
+    await prisma.order.deleteMany({ where: { venueId: venueBId } })
+    await prisma.settlementConfiguration.deleteMany({ where: { merchantAccountId: { in: [slowMerchantId, fastMerchantId] } } })
+    await prisma.merchantAccount.deleteMany({ where: { id: { in: [slowMerchantId, fastMerchantId] } } })
+    await prisma.venue.deleteMany({ where: { id: venueBId } })
+  })
+
+  it('publishes the settlementDays of the merchant on the OLDEST payment, not of the first row inserted', async () => {
+    const breakdown = await getBalanceByCardType(venueBId, RANGO)
+    const credit = breakdown.find(b => b.cardType === 'CREDIT')!
+
+    expect(credit.transactionCount).toBe(2)
+    // Slow merchant = 3 business days. The fast merchant (1 day) owns the newer
+    // payment, which was inserted first: reading "whichever row comes first" would
+    // publish 1.
+    expect(credit.settlementDays).toBe(3)
+  })
+
+  it('keeps a stored netSettlementAmount of 0 instead of falling back to the computed net (SQL COALESCE)', async () => {
+    const breakdown = await getBalanceByCardType(venueBId, RANGO)
+    const credit = breakdown.find(b => b.cardType === 'CREDIT')!
+
+    expect(round2(credit.baseSales)).toBe(300)
+    expect(round2(credit.fees)).toBe(11) // 8 + 3
+    expect(round2(credit.netAmount)).toBe(289)
+    // The older payment landed (2025-03-14 is in the past) with a stored 0: a NULL
+    // would fall back to 97, a 0 must stay 0.
+    expect(round2(credit.settledAmount)).toBe(0)
+    // The newer payment is still pending (2099) with a NULL stored net: COALESCE falls
+    // back to its computed 192. NULL falls back, 0 does not — that is the contract.
+    expect(round2(credit.pendingAmount)).toBe(192)
+
+    const debit = breakdown.find(b => b.cardType === 'DEBIT')!
+    expect(round2(debit.settledAmount)).toBe(0) // SETTLED with a stored 0, not the computed 49
+    expect(round2(debit.pendingAmount)).toBe(0)
+    expect(debit.settlementDays).toBeNull() // the fast merchant has no DEBIT rule
+  })
+
+  it('getAvailableBalance keeps the stored 0 on a SETTLED transaction (a Decimal 0 is truthy in the `||` fallback)', async () => {
+    const summary = await getAvailableBalance(venueBId, RANGO)
+
+    expect(round2(summary.totalSales)).toBe(350) // 200 + 100 + 50
+    expect(round2(summary.totalFees)).toBe(12) // 8 + 3 + 1
+    expect(summary.uncostedCount).toBe(0)
+    // availableNow = older credit (PENDING → recomputed by the live engine: 3 business
+    // days from Tue 11-mar-2025 = Fri 14-mar, landed, net 97) + newer credit (PENDING
+    // → the engine ignores the stored 2099 date: 1 business day = Wed 12-mar-2025,
+    // landed, net 192) + DEBIT SETTLED with a stored 0 (0, not 49). A falsy-zero
+    // fallback would publish 338.
+    expect(round2(summary.availableNow)).toBe(289)
+    expect(round2(summary.pendingSettlement)).toBe(0)
+  })
+})
