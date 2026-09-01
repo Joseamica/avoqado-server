@@ -43,7 +43,19 @@ describe('grantMarketingConsent', () => {
     expect(makeTxDefault.customer.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'cust1' }, data: { marketingConsent: true } }),
     )
-    expect(makeTxDefault.activityLog.create).toHaveBeenCalled() // dentro del tx: evidencia legal atómica
+    // dentro del tx: evidencia legal atómica — el payload completo, no sólo "se llamó"
+    expect(makeTxDefault.activityLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'MARKETING_CONSENT_GRANTED',
+          entity: 'Customer',
+          entityId: 'cust1',
+          staffId: 'staff1',
+          venueId: 'venueA',
+          data: expect.objectContaining({ channel: 'FORM_STAFF', seq: 3 }),
+        }),
+      }),
+    )
   })
 
   it('rechaza si el venue NO tiene aviso de privacidad', async () => {
@@ -78,5 +90,14 @@ describe('revokeMarketingConsent', () => {
       expect.objectContaining({ data: expect.objectContaining({ action: 'REVOKED', noticeVersionId: null }) }),
     )
     expect(makeTxDefault.customer.update).toHaveBeenCalledWith(expect.objectContaining({ data: { marketingConsent: false } }))
+    expect(makeTxDefault.activityLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'MARKETING_CONSENT_REVOKED',
+          venueId: 'venueA',
+          entityId: 'cust1',
+        }),
+      }),
+    )
   })
 })
