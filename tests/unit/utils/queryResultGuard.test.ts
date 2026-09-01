@@ -10,7 +10,7 @@
  * el umbral, lo DENUNCIA en el log con modelo y tamaño (el contexto de ejecución ya
  * estampa entrypoint y venue). No bloquea nunca: observabilidad, no comportamiento.
  */
-import { evaluarResultadoGigante, UMBRAL_FILAS_DEFAULT } from '@/utils/queryResultGuard'
+import { evaluarResultadoGigante, extensionResultadoGigante, UMBRAL_FILAS_DEFAULT } from '@/utils/queryResultGuard'
 
 describe('evaluarResultadoGigante', () => {
   it('no denuncia un resultado chico', () => {
@@ -38,5 +38,46 @@ describe('evaluarResultadoGigante', () => {
 
   it('el default del umbral es 2000', () => {
     expect(UMBRAL_FILAS_DEFAULT).toBe(2000)
+  })
+})
+
+/**
+ * P3 de la auditoría de Codex (2026-09-01): la promesa "el $extends nunca rompe una
+ * consulta" estaba probada sólo en la función pura. Estas pruebas ejecutan el WRAPPER
+ * real de la extensión: misma referencia de resultado, error de Prisma propagado
+ * intacto, y un logger que truena absorbido sin tocar el resultado.
+ */
+describe('extensionResultadoGigante — el wrapper de verdad', () => {
+  const wrapper = extensionResultadoGigante.query.$allModels.findMany
+
+  it('devuelve LA MISMA referencia que la consulta (jamás copia ni recorta)', async () => {
+    const filas = Array.from({ length: 3 }, (_, i) => ({ id: i }))
+    const res = await wrapper({ model: 'Order', args: {}, query: async () => filas })
+    expect(res).toBe(filas)
+  })
+
+  it('un error de la consulta se propaga INTACTO (la guardia no lo traga)', async () => {
+    const boom = new Error('P2024 pool timeout')
+    await expect(wrapper({ model: 'Order', args: {}, query: async () => Promise.reject(boom) })).rejects.toBe(boom)
+  })
+
+  it('si el logger truena, el resultado llega igual (observabilidad jamás rompe la consulta)', async () => {
+    const logger = (jest.requireMock('@/config/logger') as { default: { warn: jest.Mock } }).default
+    logger.warn.mockImplementationOnce(() => {
+      throw new Error('winston murió')
+    })
+    const filas = Array.from({ length: 5000 }, (_, i) => ({ id: i }))
+    const res = await wrapper({ model: 'Payment', args: {}, query: async () => filas })
+    expect(res).toBe(filas)
+  })
+
+  it('denuncia con el modelo, el tamaño y el take cuando cruza el umbral', async () => {
+    const logger = (jest.requireMock('@/config/logger') as { default: { warn: jest.Mock } }).default
+    const filas = Array.from({ length: 2500 }, (_, i) => ({ id: i }))
+    await wrapper({ model: 'Payment', args: { take: 5000 }, query: async () => filas })
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[query-guard] findMany gigante',
+      expect.objectContaining({ model: 'Payment', rows: 2500, take: 5000 }),
+    )
   })
 })
