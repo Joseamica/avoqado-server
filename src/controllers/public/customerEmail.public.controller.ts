@@ -136,6 +136,17 @@ export const postBirthdateCapture = asyncHandler(async (req: Request, res: Respo
     return res.status(400).type('html').send(INVALID_DATE_PAGE)
   }
 
+  // El regex sólo comprueba FORMATO ('2026-13-45' pasa). `new Date(...)` con un mes/día
+  // fuera de rango no truena: hace rollover en silencio ('2026-02-30' → 2026-03-02) o, si
+  // el rollover tampoco cuadra, produce Invalid Date. Comparar el ISO reconstruido contra
+  // el string de entrada detecta las dos cosas — y se hace ANTES de consumir el token: como
+  // todavía no hay emisor de tokens, quemarlo en una fecha imposible le cuesta al cliente su
+  // ÚNICO uso para siempre, sin haber guardado nada.
+  const parsedDate = new Date(`${raw}T00:00:00.000Z`)
+  if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== raw) {
+    return res.status(400).type('html').send(INVALID_DATE_PAGE)
+  }
+
   // Consumo ATÓMICO: count 0 significa que ya se usó (o nunca existió) — replay.
   const consumed = await prisma.customerCaptureToken.updateMany({
     where: { tokenHash: data.tokenHash, consumedAt: null },
@@ -145,12 +156,11 @@ export const postBirthdateCapture = asyncHandler(async (req: Request, res: Respo
     return res.status(400).type('html').send(INVALID_CAPTURE_PAGE)
   }
 
-  // Fecha civil, jamás parseo pelón: `new Date('YYYY-MM-DD')` puede correr un día según el
-  // reloj del runtime. Escribe SÓLO si birthDate sigue null — nunca sobrescribe lo que el
-  // cliente ya nos dijo, aunque el token ya haya quedado consumido arriba.
+  // Escribe SÓLO si birthDate sigue null — nunca sobrescribe lo que el cliente ya nos dijo,
+  // aunque el token ya haya quedado consumido arriba.
   const written = await prisma.customer.updateMany({
     where: { id: data.customerId, venueId: data.venueId, birthDate: null },
-    data: { birthDate: new Date(`${raw}T00:00:00.000Z`) },
+    data: { birthDate: parsedDate },
   })
   if (written.count === 0) {
     return res.status(409).type('html').send(ALREADY_REGISTERED_PAGE)

@@ -169,6 +169,67 @@ describe('POST /customers/birthdate — consumo atómico y no-sobrescribir', () 
     expect(mockTokenUpdateMany).not.toHaveBeenCalled()
     expect(mockCustomerUpdateMany).not.toHaveBeenCalled()
   })
+
+  // Hallazgo #3 de la ronda final: el regex sólo comprueba el FORMATO — un calendario
+  // imposible ('2026-13-45') o un rollover silencioso ('2026-02-30' → marzo-2) pasaba el
+  // regex, quemaba el token, y luego reventaba en Prisma con Invalid Date. El fix compara
+  // el ISO reconstruido contra el string de entrada ANTES de tocar el token.
+  it('(g) mes/día fuera de calendario ("2026-13-45") ⇒ 400 y el token NO se consume', async () => {
+    mockVerifyCapture.mockReturnValue(CAPTURE_DATA)
+    const req: any = {
+      query: { token: 'good' },
+      originalUrl: '/api/v1/public/customers/birthdate?token=good',
+      body: { birthdate: '2026-13-45' },
+    }
+    const res = mockRes()
+
+    await postBirthdateCapture(req, res, jest.fn())
+    await flush()
+
+    expect(res.statusCode).toBe(400)
+    expect(mockTokenUpdateMany).not.toHaveBeenCalled()
+    expect(mockCustomerUpdateMany).not.toHaveBeenCalled()
+  })
+
+  it('(h) fecha con rollover silencioso ("2026-02-30" → marzo) ⇒ 400 y el token NO se consume', async () => {
+    mockVerifyCapture.mockReturnValue(CAPTURE_DATA)
+    const req: any = {
+      query: { token: 'good' },
+      originalUrl: '/api/v1/public/customers/birthdate?token=good',
+      body: { birthdate: '2026-02-30' },
+    }
+    const res = mockRes()
+
+    await postBirthdateCapture(req, res, jest.fn())
+    await flush()
+
+    expect(res.statusCode).toBe(400)
+    expect(mockTokenUpdateMany).not.toHaveBeenCalled()
+    expect(mockCustomerUpdateMany).not.toHaveBeenCalled()
+  })
+
+  it('(i) fecha real ("1990-05-10") sigue funcionando: consume el token y escribe birthDate', async () => {
+    mockVerifyCapture.mockReturnValue(CAPTURE_DATA)
+    mockTokenUpdateMany.mockResolvedValue({ count: 1 })
+    mockCustomerUpdateMany.mockResolvedValue({ count: 1 })
+    const req: any = {
+      query: { token: 'good' },
+      originalUrl: '/api/v1/public/customers/birthdate?token=good',
+      body: { birthdate: '1990-05-10' },
+    }
+    const res = mockRes()
+
+    await postBirthdateCapture(req, res, jest.fn())
+    await flush()
+
+    expect(res.statusCode).toBe(200)
+    expect(mockTokenUpdateMany).toHaveBeenCalled()
+    expect(mockCustomerUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ birthDate: new Date('1990-05-10T00:00:00.000Z') }),
+      }),
+    )
+  })
 })
 
 describe('GET /customers/birthdate — sólo muestra el formulario con token vigente', () => {
