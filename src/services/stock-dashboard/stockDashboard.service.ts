@@ -472,9 +472,26 @@ class StockDashboardService {
   async getRecentMovements(
     venueId: string,
     limit: number = 20,
-    options: { dateFrom?: Date; dateTo?: Date; responsibleStaffId?: string } = {},
-  ): Promise<
-    Array<{
+    options: { dateFrom?: Date; dateTo?: Date; responsibleStaffId?: string; page?: number } = {},
+  ) {
+    const safeLimit = Math.min(100, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 20))
+    return (await this.buildRecentMovementsPage(venueId, safeLimit, options)).movements.slice(0, safeLimit)
+  }
+
+  async getRecentMovementsPage(
+    venueId: string,
+    limit: number = 20,
+    options: { dateFrom?: Date; dateTo?: Date; responsibleStaffId?: string; page?: number } = {},
+  ) {
+    return this.buildRecentMovementsPage(venueId, limit, options)
+  }
+
+  private async buildRecentMovementsPage(
+    venueId: string,
+    limit: number = 20,
+    options: { dateFrom?: Date; dateTo?: Date; responsibleStaffId?: string; page?: number } = {},
+  ): Promise<{
+    movements: Array<{
       id: string
       serialNumber: string
       categoryName: string
@@ -489,7 +506,10 @@ class StockDashboardService {
       soldAtVenueName?: string | null
       responsible: StockMovementResponsible
     }>
-  > {
+    hasMore: boolean
+  }> {
+    const safeLimit = Math.min(100, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 20))
+    const page = Math.max(1, Number.isFinite(options.page) ? Math.floor(options.page!) : 1)
     const { itemWhere } = await this.getItemScope(venueId)
     const { dateFrom, dateTo, responsibleStaffId } = options
 
@@ -514,7 +534,7 @@ class StockDashboardService {
         where: { staffId: responsibleStaffId, venueId },
         select: { role: true },
       })
-      if (!staffVenue) return []
+      if (!staffVenue) return { movements: [], hasMore: false }
 
       switch (staffVenue.role) {
         case 'WAITER':
@@ -536,7 +556,7 @@ class StockDashboardService {
     const where = filters.length === 1 ? { ...itemWhere } : { AND: filters }
 
     // Get recent items — includes org-level items
-    const recentItems = await prisma.serializedItem.findMany({
+    const recentItemsWithLookahead = await prisma.serializedItem.findMany({
       where,
       include: {
         category: true,
@@ -554,9 +574,12 @@ class StockDashboardService {
           },
         },
       },
-      orderBy: { createdAt: 'desc' },
-      take: limit * 4, // Get enough to group bulk uploads and still have events
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: (page - 1) * safeLimit,
+      take: safeLimit + 1,
     })
+    const hasMore = recentItemsWithLookahead.length > safeLimit
+    const recentItems = recentItemsWithLookahead.slice(0, safeLimit)
 
     // Resolve staff names
     const staffIdSet = new Set<string>()
@@ -699,8 +722,14 @@ class StockDashboardService {
         })
       : movements
 
-    // Sort by timestamp descending and limit
-    return windowed.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()).slice(0, limit)
+    // A single item can emit both REGISTERED and SOLD. Return every event from
+    // this bounded item page so pagination never makes the second event
+    // unreachable. The legacy non-paginated method above still honors its
+    // historical event-count limit for MCP/older callers.
+    return {
+      movements: windowed.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()),
+      hasMore,
+    }
   }
 
   async getStockResponsibles(venueId: string): Promise<{
