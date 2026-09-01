@@ -93,6 +93,11 @@ const envSchema = z.object({
   // Resend (Email)
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
+  // Carril de campañas de correo a clientes (Fase 1A): dirección FIJA del subdominio de
+  // marketing. Vive separada de OTP/recibos (EMAIL_FROM) a propósito — un venue que abusa del
+  // envío masivo daña la reputación de @promos, nunca la de las transaccionales. El SERVICIO
+  // (marketingSender.ts) es el único que la lee; el llamador nunca construye el remitente.
+  MARKETING_FROM_EMAIL: z.string().default('promos@promos.avoqado.io'),
   ORDER_NOTIFICATIONS_EMAIL: z.string().email().optional(),
   // Recipient for the weekly "new activated/paid venues" report (see
   // jobs/weekly-new-customers-report.job.ts). Unset = job logs a warning and
