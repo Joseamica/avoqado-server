@@ -672,6 +672,17 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'cfdi:configure': ['cfdi:configure', 'cfdi:view'],
   'cfdi:issue': ['cfdi:issue', 'cfdi:view'],
+
+  // ===========================
+  // Campañas de correo — Fase 0 (aviso de privacidad + consentimiento). `send` nace
+  // ya aunque su ruta llega hasta la Fase 1 del spec — el editor de roles/el espejo del
+  // dashboard tienen que poder mostrarlo desde ahora. 🔴 `send` NO implica `manage` ni
+  // viceversa: mandar una campaña no debe conceder editar el aviso de privacidad, y
+  // editarlo no debe conceder disparar correos.
+  // ===========================
+  'marketing:read': ['marketing:read'],
+  'marketing:manage': ['marketing:manage', 'marketing:read'],
+  'marketing:send': ['marketing:send', 'marketing:read'],
 }
 
 /**
@@ -1003,6 +1014,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'inventory-transfers:receive',
     'reviews:read',
     'reviews:respond',
+    'marketing:read', // Fase 0: ver el aviso de privacidad — editarlo/mandar campañas es ADMIN+
     'teams:read',
     'teams:create',
     'teams:update',
@@ -1126,6 +1138,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'marketing:*', // Fase 0: aviso de privacidad + (Fase 1) campañas de correo
     // Referral Program (full management except no SUPERADMIN-only powers)
     'referral:read',
     'referral:configure',
@@ -1265,6 +1278,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'marketing:*', // Fase 0: aviso de privacidad + (Fase 1) campañas de correo
     // Referral Program (full management)
     'referral:read',
     'referral:configure',
@@ -1869,6 +1883,9 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'inventory-transfers:receive',
   ],
   reviews: ['reviews:read', 'reviews:respond'],
+  // Fase 0 (aviso de privacidad + consentimiento). `send` nace ya para el editor de roles
+  // aunque su ruta llega hasta la Fase 1 del spec de campañas de correo.
+  marketing: ['marketing:read', 'marketing:manage', 'marketing:send'],
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
   'staff-documents': ['staff-documents:read', 'staff-documents:write'],
   attendance: ['attendance:read', 'attendance:manage'],
