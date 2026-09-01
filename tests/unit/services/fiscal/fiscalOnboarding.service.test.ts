@@ -98,6 +98,30 @@ describe('provisionEmisor', () => {
   })
 })
 
+// ─── getEmisorProviderStatus ─────────────────────────────────────────────────
+
+describe('getEmisorProviderStatus', () => {
+  it('unprovisioned emisor: reports provisioned=false WITHOUT calling the provider', async () => {
+    const d = deps({ findEmisor: jest.fn().mockResolvedValue({ ...emisor, providerOrgId: null }) })
+    const r = await getEmisorProviderStatus({ emisorId: 'e1', expectedVenueId: 'v1' }, d)
+    expect(r).toEqual({ provisioned: false, isProductionReady: false, pendingSteps: [] })
+    expect((d.accountProvider as any).getOrganizationStatus).not.toHaveBeenCalled()
+  })
+
+  it('provisioned emisor: asks the PAC for the org status and returns it', async () => {
+    const d = deps({ findEmisor: jest.fn().mockResolvedValue({ ...emisor, providerOrgId: 'org1' }) })
+    const r = await getEmisorProviderStatus({ emisorId: 'e1', expectedVenueId: 'v1' }, d)
+    expect((d.accountProvider as any).getOrganizationStatus).toHaveBeenCalledWith('org1')
+    expect(r).toEqual({ provisioned: true, isProductionReady: false, pendingSteps: ['manifiesto'] })
+  })
+
+  it('tenant guard: throws not found when the emisor belongs to another venue', async () => {
+    const d = deps({ findEmisor: jest.fn().mockResolvedValue({ ...emisor, providerOrgId: 'org1', venueId: 'OTHER' }) })
+    await expect(getEmisorProviderStatus({ emisorId: 'e1', expectedVenueId: 'v1' }, d)).rejects.toThrow(/not found/)
+    expect((d.accountProvider as any).getOrganizationStatus).not.toHaveBeenCalled()
+  })
+})
+
 // ─── uploadEmisorCsd ─────────────────────────────────────────────────────────
 
 describe('uploadEmisorCsd', () => {
