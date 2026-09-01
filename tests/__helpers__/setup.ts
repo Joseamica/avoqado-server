@@ -90,6 +90,7 @@ const createMockModel = () => ({
 })
 
 const prismaMock: any = {
+  $queryRaw: jest.fn(),
   staff: createMockModel(),
   venue: createMockModel(),
   venueRolePermission: createMockModel(),
