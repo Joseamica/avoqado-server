@@ -12,8 +12,7 @@ import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboa
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
 import { PhaseTimer } from '@/utils/phaseTimer'
-import { earnPoints } from '../dashboard/loyalty.dashboard.service'
-import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
+import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
@@ -1179,105 +1178,19 @@ async function updateOrderTotalsForStandalonePayment(
     // ✅ WORLD-CLASS PATTERN: Multiple customers per order (visit tracking + loyalty)
     const orderTotal = parseFloat(updatedOrder.total.toString())
 
-    // 🔧 FIX: LoyaltyTransaction.createdById expects StaffVenue ID (not Staff ID)
-    // Look up StaffVenue ID from Staff ID for proper foreign key reference
-    let staffVenueId: string | undefined = undefined
-    if (staffId) {
-      const staffVenue = await prisma.staffVenue.findFirst({
-        where: {
-          staffId: staffId,
-          venueId: updatedOrder.venueId,
-        },
-        select: { id: true },
-      })
-      staffVenueId = staffVenue?.id
-    }
-
-    // Get ALL customers associated with this order (multi-customer support)
-    const orderCustomers = await prisma.orderCustomer.findMany({
-      where: { orderId },
-      include: {
-        customer: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-      orderBy: { addedAt: 'asc' },
+    // La regla vive en `awardLoyaltyForPaidOrder`, COMPARTIDA con el cobro en
+    // efectivo de Android/iOS (`payCashOrder`). Antes estaba copiada aquí y ese
+    // otro camino no la tenía: el mismo café daba sello con tarjeta y no en
+    // efectivo (Testarudo, 2026-09-01). Nunca lanza.
+    await awardLoyaltyForPaidOrder({
+      venueId: updatedOrder.venueId,
+      orderId,
+      orderTotal,
+      staffId,
+      legacyCustomer: order.customer
+        ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
+        : null,
     })
-
-    if (orderCustomers.length > 0) {
-      // Update metrics (totalVisits, lastVisitAt, totalSpent) for ALL customers
-      for (const oc of orderCustomers) {
-        try {
-          await updateCustomerMetrics(oc.customerId, orderTotal)
-          logger.info('📊 Customer metrics updated', {
-            orderId,
-            customerId: oc.customerId,
-            customerName: `${oc.customer.firstName || ''} ${oc.customer.lastName || ''}`.trim(),
-            isPrimary: oc.isPrimary,
-          })
-        } catch (metricsError: any) {
-          logger.error('⚠️ Failed to update customer metrics (continuing)', {
-            orderId,
-            customerId: oc.customerId,
-            error: metricsError.message,
-          })
-        }
-
-        // Award loyalty points ONLY to PRIMARY customer (first added)
-        if (oc.isPrimary) {
-          try {
-            const loyaltyResult = await earnPoints(updatedOrder.venueId, oc.customerId, orderTotal, orderId, staffVenueId)
-            logger.info('🎁 Loyalty points earned (PRIMARY customer)', {
-              orderId,
-              customerId: oc.customerId,
-              customerName: `${oc.customer.firstName || ''} ${oc.customer.lastName || ''}`.trim(),
-              orderTotal,
-              pointsEarned: loyaltyResult.pointsEarned,
-              newBalance: loyaltyResult.newBalance,
-            })
-          } catch (loyaltyError: any) {
-            logger.error('⚠️ Failed to earn loyalty points (payment still succeeded)', {
-              orderId,
-              customerId: oc.customerId,
-              error: loyaltyError.message,
-              reason: loyaltyError.message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
-            })
-          }
-        }
-      }
-    } else if (order.customerId && order.customer) {
-      // Backward compatibility: If no OrderCustomer records, use legacy single customerId
-      try {
-        await updateCustomerMetrics(order.customerId, orderTotal)
-        const loyaltyResult = await earnPoints(updatedOrder.venueId, order.customerId, orderTotal, orderId, staffVenueId)
-        logger.info('🎁 Loyalty points earned (legacy single customer)', {
-          orderId,
-          customerId: order.customerId,
-          customerName: `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim(),
-          orderTotal,
-          pointsEarned: loyaltyResult.pointsEarned,
-          newBalance: loyaltyResult.newBalance,
-        })
-      } catch (loyaltyError: any) {
-        logger.error('⚠️ Failed to earn loyalty points (payment still succeeded)', {
-          orderId,
-          customerId: order.customerId,
-          error: loyaltyError.message,
-          reason: loyaltyError.message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
-        })
-      }
-    } else {
-      logger.info('⏭️ Loyalty points skipped: Order has no customer', {
-        orderId,
-        hasCustomerId: !!order.customerId,
-        orderCustomersCount: orderCustomers.length,
-        isGuestOrder: !order.customerId && orderCustomers.length === 0,
-      })
-    }
   }
 
   // 🪑 Liberar la mesa si ésta era su última cuenta viva.

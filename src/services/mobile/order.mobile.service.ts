@@ -2184,6 +2184,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       remainingBalance: true,
       venueId: true,
       areaTicketCheckoutSession: { select: { id: true } },
+      // Lealtad: el cliente heredado es el respaldo cuando no hay OrderCustomer.
+      customerId: true,
+      customer: { select: { id: true, firstName: true, lastName: true } },
     },
   })
 
@@ -2817,6 +2820,39 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       await onOrderPaid({ orderId, venueId })
     } catch (err) {
       console.error('[referral hook] onOrderPaid failed for order', orderId, err)
+    }
+  }
+
+  // 🎁 LEALTAD (puntos y SELLOS): la misma regla que la PAX, por el mismo helper.
+  //
+  // 🔴 Este camino NUNCA la llamó. El café pagado en efectivo desde el Sunmi no
+  // daba sello ni puntos, y el MISMO café cobrado con tarjeta en la PAX sí
+  // (Testarudo, 2026-09-01). Al cliente que pagó su séptimo café en efectivo se le
+  // quedaba a deber su café gratis — y nada fallaba, así que nadie se enteraba.
+  //
+  // Base: `orderTotalCents`, que son exactamente los pesos que se acaban de
+  // escribir en `Order.total` (misma base que `updatedOrder.total` en la PAX); se
+  // regresa a pesos porque `earnPoints` y la PAX trabajan en pesos. SÓLO con la
+  // cuenta SALDADA: un abono de $1 no puede acercar a nadie al café gratis.
+  // `awardLoyaltyForPaidOrder` no lanza, pero el try/catch se queda: el cobro ya
+  // está commiteado y nada de aquí abajo puede desmentirlo.
+  if (orderFullyPaid) {
+    try {
+      const { awardLoyaltyForPaidOrder } = await import('@/services/shared/loyaltyOnPaidOrder')
+      await awardLoyaltyForPaidOrder({
+        venueId,
+        orderId,
+        orderTotal: balance.orderTotalCents / 100,
+        staffId: effectiveStaffId,
+        legacyCustomer: order.customer
+          ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
+          : null,
+      })
+    } catch (err) {
+      logger.error('[ORDER.MOBILE] Post-payment loyalty failed (payment unaffected)', {
+        orderId,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 
