@@ -571,16 +571,30 @@ describe('Customer Dashboard Service', () => {
       expect(grantConsentMock).not.toHaveBeenCalled()
     })
 
-    it('revoke que lanza ⇒ el update de los demás campos SOBREVIVE y trae el warning', async () => {
+    it('🔴 revoke que lanza ⇒ el PUT entero se RECHAZA (fail closed) y NO se escribe nada', async () => {
       const existingCustomer = createMockCustomer({ marketingConsent: true })
       prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
       prismaMock.customer.update.mockResolvedValue(createMockCustomer({ firstName: 'Sigue' }) as any)
       revokeConsentMock.mockRejectedValue(new Error('boom'))
 
-      const result = await updateCustomer('venue-123', 'customer-123', { firstName: 'Sigue', marketingConsent: false })
+      // Un opt-out es evidencia legal — perderlo en silencio (200 con warning) es peor que
+      // rechazar el PUT: el operador reintenta hasta que la revocación aterrice de verdad.
+      await expect(updateCustomer('venue-123', 'customer-123', { firstName: 'Sigue', marketingConsent: false })).rejects.toThrow('boom')
+
+      expect(prismaMock.customer.update).not.toHaveBeenCalled()
+    })
+
+    it('grant (opt-in) que lanza en update SÍ sigue fail-open: el update sobrevive con warning', async () => {
+      const existingCustomer = createMockCustomer({ marketingConsent: false })
+      prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ firstName: 'Sigue' }) as any)
+      grantConsentMock.mockRejectedValue(new Error('boom'))
+
+      const result = await updateCustomer('venue-123', 'customer-123', { firstName: 'Sigue', marketingConsent: true })
 
       expect(result.firstName).toBe('Sigue')
       expect((result as any).consentWarning).toEqual({ code: 'CONSENT_NOT_CAPTURED', reason: 'boom' })
+      expect(prismaMock.customer.update).toHaveBeenCalled()
     })
   })
 

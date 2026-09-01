@@ -554,22 +554,30 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
   // la nada. Corre ANTES del `update` principal de abajo (que ya NO manda `marketingConsent`
   // en su `data`), para que la fila que ese `update` relee refleje el estado nuevo —
   // consent.service hace su propio `tx.customer.update` de ese campo.
+  //
+  // 🔴 GRANT y REVOKE fallan DISTINTO a propósito (fix round 1, controlador): un opt-in que no
+  // aterriza degrada al default seguro (sin consentimiento) y no merece bloquear el resto del
+  // update; un opt-out (revoke) es evidencia legal de que la persona YA NO quiere marketing —
+  // perderlo en silencio es peor que rechazar el PUT entero, así que su excepción se PROPAGA
+  // (fail CLOSED) y nada se escribe (corre antes del `prisma.customer.update` de abajo).
   let consentWarning: ConsentWarning | undefined
   if (data.marketingConsent !== undefined && data.marketingConsent !== existingCustomer.marketingConsent) {
-    try {
-      if (data.marketingConsent) {
+    if (data.marketingConsent) {
+      try {
         await grantMarketingConsent({ venueId, customerId, channel: 'FORM_STAFF', actorStaffId: performedBy })
-      } else {
-        await revokeMarketingConsent({ venueId, customerId, channel: 'FORM_STAFF', actorStaffId: performedBy })
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'No se pudo actualizar el consentimiento'
+        logger.error(`[consent] No se pudo otorgar consentimiento al actualizar cliente ${customerId}`, {
+          venueId,
+          customerId,
+          error: reason,
+        })
+        consentWarning = { code: 'CONSENT_NOT_CAPTURED', reason }
       }
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : 'No se pudo actualizar el consentimiento'
-      logger.error(`[consent] No se pudo actualizar consentimiento del cliente ${customerId}`, {
-        venueId,
-        customerId,
-        error: reason,
-      })
-      consentWarning = { code: 'CONSENT_NOT_CAPTURED', reason }
+    } else {
+      // Sin try/catch: si revoca truena, el PUT entero falla y el operador reintenta hasta que
+      // la revocación aterrice de verdad — nunca un 200 que promete un opt-out que no ocurrió.
+      await revokeMarketingConsent({ venueId, customerId, channel: 'FORM_STAFF', actorStaffId: performedBy })
     }
   }
 
