@@ -141,6 +141,14 @@ describe('POST /customers/birthdate — consumo atómico y no-sobrescribir', () 
     await flush()
 
     expect(mockTokenUpdateMany).toHaveBeenCalled() // el token quedó consumido (se llamó, count:1)
+    // Aislamiento de tenant: el WHERE de la escritura debe filtrar por venueId, no sólo por id —
+    // si un edit futuro lo deja caer, esta prueba debe fallar (ver Task 3: "prueba que pasa por
+    // el motivo equivocado"). Se afirma la FORMA del where, no sólo que se llamó.
+    expect(mockCustomerUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'cust1', venueId: 'venueA', birthDate: null }),
+      }),
+    )
     expect(res.statusCode).toBe(409)
     expect(res.body).toContain('ya está registrado')
   })
