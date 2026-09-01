@@ -59,17 +59,25 @@ export async function getCustomerById(req: Request, res: Response, next: NextFun
 /**
  * POST /api/dashboard/:venueId/customers
  * Create a new customer
+ *
+ * El actor sale de `authContext.userId` (patrón de `decideCustomerApproval` abajo): el
+ * consentimiento de marketing que este endpoint pueda otorgar necesita quién lo capturó.
  */
 export async function createCustomer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
     const customerData = req.body
+    const { userId } = (req as any).authContext
 
-    const customer = await customerService.createCustomer(venueId, customerData)
+    const customer = await customerService.createCustomer(venueId, customerData, userId)
+    const { consentWarning, ...rest } = customer as typeof customer & {
+      consentWarning?: { code: string; reason: string }
+    }
 
     res.status(201).json({
       message: 'Customer created successfully',
-      customer,
+      customer: rest,
+      ...(consentWarning ? { warning: consentWarning.code, reason: consentWarning.reason } : {}),
     })
   } catch (error) {
     next(error)
@@ -79,17 +87,25 @@ export async function createCustomer(req: Request, res: Response, next: NextFunc
 /**
  * PUT /api/dashboard/:venueId/customers/:customerId
  * Update an existing customer
+ *
+ * El actor sale de `authContext.userId`, igual que en create — necesario si el update
+ * cambia `marketingConsent` (grant/revoke vía consent.service).
  */
 export async function updateCustomer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, customerId } = req.params
     const updateData = req.body
+    const { userId } = (req as any).authContext
 
-    const customer = await customerService.updateCustomer(venueId, customerId, updateData)
+    const customer = await customerService.updateCustomer(venueId, customerId, updateData, userId)
+    const { consentWarning, ...rest } = customer as typeof customer & {
+      consentWarning?: { code: string; reason: string }
+    }
 
     res.status(200).json({
       message: 'Customer updated successfully',
-      customer,
+      customer: rest,
+      ...(consentWarning ? { warning: consentWarning.code, reason: consentWarning.reason } : {}),
     })
   } catch (error) {
     next(error)

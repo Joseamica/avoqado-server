@@ -74,6 +74,21 @@ export const CustomersQuerySchema = z.object({
 // BODY SCHEMAS
 // ==========================================
 
+/**
+ * Fecha civil (cumpleaños) — NUNCA hora.
+ *
+ * 🔴 `z.coerce.date()` delegaba en el parser de `Date` de JS, que acepta cualquier cosa que
+ * V8 sepa adivinar (incl. `10/05/1990` como MM/DD, silenciosamente en la zona del HOST) y
+ * normaliza distinto según el formato de entrada. Aquí se exige `YYYY-MM-DD` (o ese mismo
+ * prefijo con hora/zona, que se recorta) y SIEMPRE se fija a medianoche UTC de ese día civil
+ * — coincide con `Customer.birthDate @db.Date` (Task 1), que no tiene hora.
+ */
+const FechaCivil = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/, 'La fecha debe tener formato YYYY-MM-DD')
+  .transform(s => new Date(`${s.slice(0, 10)}T00:00:00.000Z`))
+  .refine(d => !Number.isNaN(d.getTime()), 'Fecha inválida')
+
 export const CreateCustomerSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID'),
@@ -87,7 +102,7 @@ export const CreateCustomerSchema = z.object({
         .optional(),
       firstName: z.string().min(1, 'First name is required').max(50, 'First name too long').optional(),
       lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long').optional(),
-      birthDate: z.coerce.date().optional(),
+      birthDate: FechaCivil.optional(),
       gender: z.enum(['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY']).optional(),
       customerGroupId: z.string().cuid('Invalid customer group ID').optional(),
       notes: z.string().max(1000, 'Notes too long (max 1000 characters)').optional(),
@@ -114,7 +129,7 @@ export const UpdateCustomerSchema = z.object({
         .optional(),
       firstName: z.string().min(1, 'First name is required').max(50, 'First name too long').optional(),
       lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long').optional(),
-      birthDate: z.coerce.date().optional(),
+      birthDate: FechaCivil.optional(),
       gender: z.enum(['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY']).optional(),
       customerGroupId: z.string().cuid('Invalid customer group ID').nullable().optional(),
       notes: z.string().max(1000, 'Notes too long (max 1000 characters)').optional(),

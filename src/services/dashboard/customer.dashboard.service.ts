@@ -15,6 +15,18 @@ import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
+import { grantMarketingConsent, revokeMarketingConsent } from '@/services/customer/consent.service'
+
+/**
+ * 🔴 Forma del aviso cuando el consentimiento NO se pudo capturar/actualizar (Task 5).
+ * El cliente/orden YA se creó o actualizó — esto NUNCA revierte esa operación, sólo se
+ * adjunta a la respuesta para que el controller lo propague como
+ * `{ warning: 'CONSENT_NOT_CAPTURED', reason }`.
+ */
+interface ConsentWarning {
+  code: 'CONSENT_NOT_CAPTURED'
+  reason: string
+}
 
 // ==========================================
 // TYPES & INTERFACES
@@ -300,8 +312,11 @@ export async function getCustomerById(venueId: string, customerId: string) {
 
 /**
  * Create a new customer
+ *
+ * @param performedBy - staffId del actor (authContext.userId del controller). Opcional para no
+ *   romper a otros callers (ej. el MCP, que aún no manda actor) — patrón del repo.
  */
-export async function createCustomer(venueId: string, data: CreateCustomerRequest) {
+export async function createCustomer(venueId: string, data: CreateCustomerRequest, performedBy?: string) {
   // Validate email or phone is provided
   if (!data.email && !data.phone) {
     throw new BadRequestError('Se requiere email o teléfono')
@@ -363,7 +378,9 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
       customerGroupId: data.customerGroupId,
       notes: data.notes,
       tags: data.tags || [],
-      marketingConsent: data.marketingConsent ?? false,
+      // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — el ledger de
+      // consent.service es el ÚNICO escritor de ese campo (Task 3). El default
+      // Boolean @default(false) de Prisma basta para "sin consentimiento".
     },
     include: {
       customerGroup: true,
@@ -382,6 +399,29 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
     entityId: customer.id,
     data: { email: customer.email, phone: customer.phone },
   })
+
+  // 🔴 El consentimiento SOLO se otorga vía consent.service (ledger + cache + ActivityLog
+  // atómicos, Task 3). Corre DESPUÉS de crear: el cliente ya existe, así que un fallo aquí
+  // (ej. el venue no tiene aviso de privacidad — BadRequestError) NO revierte el create.
+  // Se reporta como warning en la respuesta; el controller lo propaga.
+  let consentWarning: ConsentWarning | undefined
+  if (data.marketingConsent === true) {
+    try {
+      await grantMarketingConsent({ venueId, customerId: customer.id, channel: 'FORM_STAFF', actorStaffId: performedBy })
+      // Refleja el estado real ya escrito por consent.service — sin esto el gancho de
+      // referidos de abajo (que lee `customer.marketingConsent`) vería `false` a pesar de
+      // que el consentimiento SÍ se otorgó, porque ya no se manda en el `create` de arriba.
+      customer.marketingConsent = true
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'No se pudo capturar el consentimiento'
+      logger.error(`[consent] No se pudo otorgar consentimiento al crear cliente ${customer.id}`, {
+        venueId,
+        customerId: customer.id,
+        error: reason,
+      })
+      consentWarning = { code: 'CONSENT_NOT_CAPTURED', reason }
+    }
+  }
 
   // REFERRAL HOOK: auto-generate referralCode if program is active
   // for this venue, then fire the welcome email (with PNG card) when
@@ -440,13 +480,16 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
     console.error('[referral hook] Failed to auto-generate referralCode for customer', customer.id, err)
   }
 
-  return customer
+  return consentWarning ? { ...customer, consentWarning } : customer
 }
 
 /**
  * Update an existing customer
+ *
+ * @param performedBy - staffId del actor (authContext.userId del controller). Opcional para no
+ *   romper a otros callers — patrón del repo.
  */
-export async function updateCustomer(venueId: string, customerId: string, data: UpdateCustomerRequest) {
+export async function updateCustomer(venueId: string, customerId: string, data: UpdateCustomerRequest, performedBy?: string) {
   // Check if customer exists and belongs to this venue
   const existingCustomer = await prisma.customer.findFirst({
     where: {
@@ -506,6 +549,30 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     }
   }
 
+  // 🔴 El consentimiento SOLO cambia si el DTO lo trae Y difiere del valor actual — así una
+  // actualización que no toca el campo (ej. sólo el nombre) no dispara un evento del ledger de
+  // la nada. Corre ANTES del `update` principal de abajo (que ya NO manda `marketingConsent`
+  // en su `data`), para que la fila que ese `update` relee refleje el estado nuevo —
+  // consent.service hace su propio `tx.customer.update` de ese campo.
+  let consentWarning: ConsentWarning | undefined
+  if (data.marketingConsent !== undefined && data.marketingConsent !== existingCustomer.marketingConsent) {
+    try {
+      if (data.marketingConsent) {
+        await grantMarketingConsent({ venueId, customerId, channel: 'FORM_STAFF', actorStaffId: performedBy })
+      } else {
+        await revokeMarketingConsent({ venueId, customerId, channel: 'FORM_STAFF', actorStaffId: performedBy })
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'No se pudo actualizar el consentimiento'
+      logger.error(`[consent] No se pudo actualizar consentimiento del cliente ${customerId}`, {
+        venueId,
+        customerId,
+        error: reason,
+      })
+      consentWarning = { code: 'CONSENT_NOT_CAPTURED', reason }
+    }
+  }
+
   const updatedCustomer = await prisma.customer.update({
     where: { id: customerId },
     data: {
@@ -518,7 +585,9 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
       customerGroupId: data.customerGroupId,
       notes: data.notes,
       tags: data.tags,
-      marketingConsent: data.marketingConsent,
+      // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — sólo consent.service lo escribe,
+      // arriba. Si el grant/revoke falló, la fila conserva el valor previo (consistente: no
+      // hubo cambio de verdad).
       active: data.active,
     },
     include: {
@@ -539,7 +608,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     data: { email: updatedCustomer.email, phone: updatedCustomer.phone },
   })
 
-  return updatedCustomer
+  return consentWarning ? { ...updatedCustomer, consentWarning } : updatedCustomer
 }
 
 /**
