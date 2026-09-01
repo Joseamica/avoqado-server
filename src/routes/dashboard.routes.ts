@@ -101,6 +101,7 @@ import {
   upsertMerchantFiscalConfigController,
   provisionEmisorController,
   uploadEmisorCsdController,
+  getEmisorProviderStatusController,
   triggerGlobalCfdiController,
   searchSatCatalogController,
 } from '../controllers/dashboard/cfdi.dashboard.controller'
@@ -3567,6 +3568,14 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   uploadEmisorCsdController,
+)
+// Read-only: onboarding status at the PAC (Carta Manifiesto pendiente, etc.)
+router.get(
+  '/venues/:venueId/fiscal/emisores/:emisorId/provider-status',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  getEmisorProviderStatusController,
 )
 
 // ---- Facturación CFDI 4.0 — Flow C: admin manual-trigger for factura global ----

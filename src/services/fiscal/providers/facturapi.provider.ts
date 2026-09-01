@@ -10,6 +10,7 @@ import {
   FiscalProvider,
   GlobalInvoiceParams,
   InvoiceSearchResult,
+  OrgStatusResult,
   PaymentComplementParams,
   PayrollReceiptParams,
   ProviderInvoiceSummary,
@@ -62,6 +63,14 @@ export class FacturapiProvider implements FiscalProvider {
       tax_system: params.taxSystem,
       address: { zip: params.zip },
     })
+  }
+
+  async getOrganizationStatus(providerOrgId: string): Promise<OrgStatusResult> {
+    const org: any = await this.client.organizations.retrieve(providerOrgId)
+    return {
+      isProductionReady: !!org.is_production_ready,
+      pendingSteps: Array.isArray(org.pending_steps) ? org.pending_steps.map((s: any) => String(s.type)) : [],
+    }
   }
 
   async uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult> {
