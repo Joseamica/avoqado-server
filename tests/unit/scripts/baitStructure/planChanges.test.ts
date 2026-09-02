@@ -241,6 +241,50 @@ describe('planChanges — Pieza 1: filas sin ID de tienda (venuesSinId)', () => 
     expect(result.changes).toContainEqual(expect.objectContaining({ kind: 'ASSIGN_PROMOTER', staffId: 'activ1', venueId: 'vact' }))
   })
 
+  /**
+   * 🔴 Isaac pidió el 1-sep-2026 separar a los tres "Cubre descanso" en una tienda por zona
+   * (SUR1 · NORTE1 · NORTE2), porque compartiendo una sola tienda es imposible que José cuelgue de
+   * Juan y los otros dos de René: una tienda tiene UN supervisor.
+   *
+   * Sin esto, `venuesSinIdKey` devuelve el literal 'CUBRE_DESCANSO' para TODAS las filas de ese
+   * puesto y los tres caen siempre en el mismo venue — la separación se deshace en la siguiente
+   * corrida del conciliador. La llave por número de empleado es lo que permite mandarlos a tiendas
+   * distintas; quien no tenga entrada propia sigue cayendo en el literal de siempre.
+   */
+  it('un CUBRE_DESCANSO con entrada propia por número de empleado va a SU tienda, no a la compartida', () => {
+    const VENUE_SUR1 = { id: 'vsur1', name: 'CUBRE DESCANSO ZONA SUR1', status: 'ACTIVE' }
+    const snapshot: ProdSnapshot = {
+      ...SNAPSHOT_SIN_ID,
+      venues: [...SNAPSHOT_SIN_ID.venues, VENUE_SUR1],
+      staff: [...SNAPSHOT_SIN_ID.staff, staff('jose1', 'José', 'Lopes')],
+    }
+    const options: PlanOptions = {
+      ...OPTIONS,
+      venuesSinId: { BSCBJOSE04: 'CUBRE DESCANSO ZONA SUR1', CUBRE_DESCANSO: 'Cubre Descanso' },
+    }
+
+    const rows = [supervisorRow('JUAN01', 'Juan Joel Nájera Ortiz'), rowSinId('BSCBJOSE04', 'José Lopes', 'CUBRE_DESCANSO', null, 'JUAN01')]
+    const result = planChanges(rows, snapshot, options)
+
+    expect(result.changes).toContainEqual(expect.objectContaining({ kind: 'ASSIGN_PROMOTER', staffId: 'jose1', venueId: 'vsur1' }))
+  })
+
+  it('un CUBRE_DESCANSO SIN entrada propia sigue cayendo en la tienda compartida (no rompe lo de hoy)', () => {
+    const snapshot: ProdSnapshot = {
+      ...SNAPSHOT_SIN_ID,
+      staff: [...SNAPSHOT_SIN_ID.staff, staff('otro1', 'Otro', 'Relevo')],
+    }
+    const options: PlanOptions = {
+      ...OPTIONS,
+      venuesSinId: { BSCBJOSE04: 'CUBRE DESCANSO ZONA SUR1', CUBRE_DESCANSO: 'Cubre Descanso' },
+    }
+
+    const rows = [supervisorRow('JUAN01', 'Juan Joel Nájera Ortiz'), rowSinId('OTRO01', 'Otro Relevo', 'CUBRE_DESCANSO', null, 'JUAN01')]
+    const result = planChanges(rows, snapshot, options)
+
+    expect(result.changes).toContainEqual(expect.objectContaining({ kind: 'ASSIGN_PROMOTER', staffId: 'otro1', venueId: 'vx' }))
+  })
+
   it('una fila sin storeId y sin entrada en el mapa se sigue ignorando: no se le asigna ningún venue ni entra a unresolved', () => {
     const filaSuelta = rowSinId('ACT01', 'Nueva Activaciones', 'PROMOTOR', 'ALGO_QUE_NO_ESTA_EN_EL_MAPA', 'JUAN01')
     const rows = [supervisorRow('JUAN01', 'Juan Joel Nájera Ortiz'), filaSuelta]

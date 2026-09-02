@@ -271,7 +271,7 @@ export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, option
     } else {
       // Filas sin ID de tienda (Cubre descanso, Activaciones): resuelven por `venuesSinId`. Sin
       // storeId y sin entrada en el mapa, se ignoran en silencio — comportamiento de hoy.
-      const key = venuesSinIdKey(row)
+      const key = venuesSinIdKey(row, options.venuesSinId)
       const mappedVenueName = key ? lookupVenuesSinId(options.venuesSinId, key) : undefined
       if (mappedVenueName === undefined) continue
       venue = venueByNormalizedName.get(norm(mappedVenueName))
@@ -464,9 +464,17 @@ export function planChanges(rows: StructureRow[], snapshot: ProdSnapshot, option
  * Llave con la que una fila SIN ID de tienda se busca en `venuesSinId`: para un promotor es su
  * nombre de tienda del Excel ("ACTIVACIONES"); para "Cubre descanso" es el literal 'CUBRE_DESCANSO'
  * (esas filas no traen nombre de tienda). Las filas de SUPERVISOR nunca resuelven por aquí.
+ *
+ * 🔴 Un "Cubre descanso" puede tener entrada PROPIA por su número de empleado, y entonces ésa gana.
+ * Es lo que permite que cada relevo viva en su propia tienda de zona: compartiendo una sola, todos
+ * cuelgan del mismo supervisor —una tienda tiene UNO— y es imposible que José reporte a Juan
+ * mientras los otros dos reportan a René (pedido de Isaac, 1-sep-2026). Sin entrada propia se cae
+ * al literal de siempre, así que un relevo nuevo sigue funcionando sin tocar el mapa.
  */
-function venuesSinIdKey(row: StructureRow): string | null {
-  if (row.puesto === 'CUBRE_DESCANSO') return 'CUBRE_DESCANSO'
+function venuesSinIdKey(row: StructureRow, venuesSinId?: Record<string, string>): string | null {
+  if (row.puesto === 'CUBRE_DESCANSO') {
+    return lookupVenuesSinId(venuesSinId, row.employeeCode) !== undefined ? row.employeeCode : 'CUBRE_DESCANSO'
+  }
   if (row.puesto === 'PROMOTOR') return row.storeName
   return null
 }
