@@ -73,7 +73,7 @@ const VENUES_SIN_ID: Record<string, string> = {
   // 🔴 Los "Cubre descanso" van por NÚMERO DE EMPLEADO, no por el literal del puesto.
   // Compartiendo una sola tienda todos colgaban del mismo supervisor —una tienda tiene UNO— y
   // era imposible cumplir lo que pidió Isaac el 1-sep-2026: José con Juan, los otros dos con
-  // René. Cada uno vive ahora en su tienda de zona (`temp-separar-cubre-descanso-zonas.ts`).
+  // René. Cada uno vive ahora en su tienda de zona (`separar-cubre-descanso-zonas.ts`).
   BSCBJOSE04: 'CUBRE DESCANSO ZONA SUR1', // José Lopes → Juan Nájera
   BESDICC9701: 'CUBRE DESCANSO ZONA NORTE1', // Carlos Vicente Díaz → René Cubos
 
