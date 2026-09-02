@@ -264,6 +264,40 @@ describe('R1 — los cinco motivos de SKIP, evaluados al borde', () => {
     expect(resultado).toBe('SKIPPED')
   })
 
+  // 🔴 Important de la revisión: el NOMBRE se comparaba con `.trim()` y el contacto NO. En JS
+  // `'   '` es verdadero, así que un correo o un teléfono de puros espacios pasaba el candado
+  // y el correo salía con la línea de contacto EN BLANCO — justo el incumplimiento que este
+  // candado existe para impedir. La asimetría es el defecto: si un campo se limpia, todos.
+  it.each([
+    ['correo de puros espacios', { email: '   ', phone: null }],
+    ['teléfono de puros espacios', { email: null, phone: '  ' }],
+    ['los dos de puros espacios', { email: ' ', phone: '\t' }],
+  ])('e) contacto con %s NO identifica al responsable ⇒ SKIPPED', async (_desc, contacto) => {
+    venueFindUniqueMock.mockResolvedValue({ ...VENUE, ...contacto })
+    findUniqueMock.mockResolvedValue(baseDelivery())
+
+    const resultado = await enviarDelivery('dlv-1', { ahora: AHORA })
+
+    expect(resultado).toBe('SKIPPED')
+    expect(sendEmailWithResultMock).not.toHaveBeenCalled()
+  })
+
+  // El mismo defecto un nivel más abajo: con el correo en blanco pero el teléfono bueno, el
+  // envío SÍ procede (bien) — y el pie elegía el contacto con `email || phone`, donde `'   '`
+  // gana por ser verdadero. El correo saldría identificando al negocio con una línea vacía:
+  // cumplir el candado y luego imprimir nada es igual de incumplido, y encima invisible.
+  it('e) con el correo en blanco y el teléfono bueno, el PIE muestra el teléfono (no una línea vacía)', async () => {
+    venueFindUniqueMock.mockResolvedValue({ ...VENUE, email: '   ', phone: '5555555555' })
+    findUniqueMock.mockResolvedValue(baseDelivery())
+    sendEmailWithResultMock.mockResolvedValue({ ok: true, resendId: 're_1', transient: false })
+
+    await enviarDelivery('dlv-1', { ahora: AHORA })
+
+    const enviado = sendEmailWithResultMock.mock.calls[0][0]
+    expect(enviado.text).toContain('5555555555')
+    expect(enviado.html).toContain('5555555555')
+  })
+
   it('e) con SÓLO teléfono (sin correo) el venue SÍ se identifica ⇒ no se salta por (e)', async () => {
     venueFindUniqueMock.mockResolvedValue({ ...VENUE, email: null, phone: '5555555555' })
     findUniqueMock.mockResolvedValue(baseDelivery())

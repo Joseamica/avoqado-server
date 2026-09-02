@@ -79,7 +79,11 @@ function buildFooter(params: { venueName: string; venueEmail: string | null; ven
   htmlFooter: string
   textFooter: string
 } {
-  const contacto = params.venueEmail || params.venuePhone || ''
+  // 🔴 Recortado, igual que el candado LFPC de arriba: `'   '` es verdadero en JS, así que sin
+  // el trim un correo en blanco le ganaba al teléfono bueno y el pie identificaba al negocio con
+  // una línea VACÍA. Pasar el candado y luego no imprimir nada es igual de incumplido, y encima
+  // invisible — el candado dice «sí hay contacto» y el lector del correo no ve ninguno.
+  const contacto = params.venueEmail?.trim() || params.venuePhone?.trim() || ''
   const nombreEscapado = escapeHtml(params.venueName)
   const contactoEscapado = escapeHtml(contacto)
 
@@ -281,7 +285,11 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
 
   // e) el negocio no se puede identificar — un correo de marketing sin nombre ni dato de
   // contacto del responsable no cumple la LFPC.
-  if (!venue || !venue.name.trim() || !(venue.email || venue.phone)) {
+  // 🔴 Los TRES campos se comparan ya recortados, y la simetría es el punto: en JS `'   '` es
+  // verdadero, así que un correo o un teléfono de puros espacios pasaría el candado y el correo
+  // saldría con la línea de contacto EN BLANCO — el incumplimiento exacto que esto impide.
+  // Recortar sólo uno de los campos es peor que no recortar ninguno: parece cubierto y no lo está.
+  if (!venue || !venue.name.trim() || !(venue.email?.trim() || venue.phone?.trim())) {
     return marcarSkipped(
       'El negocio no tiene nombre o dato de contacto configurado; un correo de marketing sin identificar al responsable no cumple la LFPC.',
     )
