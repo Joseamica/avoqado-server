@@ -127,13 +127,35 @@ export interface ReclamarLoteParams {
  *   esto la fila queda trabada en SENDING para siempre, porque nada más la mueve de ahí.
  * - En cualquier caso, `leaseUntil` nulo o vencido (la condición general de abajo).
  *
- * 🔴 Por qué el `WITH` tiene TRES pasos y no uno: Postgres **no permite combinar una cláusula
- * de bloqueo (`FOR UPDATE`) con funciones de ventana** en el mismo nivel de SELECT — el
- * `ROW_NUMBER() OVER (PARTITION BY …)` necesario para el reparto por venue no puede ir en la
- * MISMA consulta que hace el `FOR UPDATE SKIP LOCKED`. Por eso el bloqueo pasa primero
- * (`eligible`, sin función de ventana) y el `ROW_NUMBER()` se calcula DESPUÉS
- * (`ranked`), sobre filas que ya están bloqueadas — no vuelve a tocar la tabla, sólo enumera lo
- * que ya se trajo.
+ * 🔴 Fix loop 1 (2026-09-02): la primera versión ponía `FOR UPDATE SKIP LOCKED` en un scan SIN
+ * `LIMIT`, así que un worker bloqueaba TODAS las filas elegibles de TODA la tabla antes de
+ * quedarse sólo con `topeGlobal`. Reproducido en vivo por el coordinador contra Postgres local:
+ * dos sesiones en paralelo con esa forma daban `A=60 / B=0` — el segundo worker se iba VACÍO,
+ * justo lo contrario de para qué existe `SKIP LOCKED`. La regla que corrige esto: **el `LIMIT`
+ * tiene que estar DENTRO del scan que bloquea**, para que Postgres salte lo bloqueado y siga
+ * escaneando hasta juntar el límite, en vez de intentar bloquear el backlog entero primero.
+ *
+ * Como el reparto por venue necesita `ROW_NUMBER() OVER (PARTITION BY …)` y Postgres **no
+ * permite combinar una función de ventana con una cláusula de bloqueo en el mismo nivel de
+ * SELECT**, el límite POR VENUE se aplica con un `CROSS JOIN LATERAL`: un scan bloqueado POR
+ * VENUE, cada uno con su propio `ORDER BY … LIMIT lotePorVenue FOR UPDATE SKIP LOCKED` — así
+ * cada venue sólo bloquea, como mucho, `lotePorVenue` filas, nunca el backlog completo. El
+ * `ROW_NUMBER()` (para el intercalado por capas que da el fairness) se calcula DESPUÉS
+ * (`ranked`), sobre lo que el LATERAL ya trajo bloqueado — no vuelve a tocar la tabla.
+ *
+ * ⚠️ **Declarado: este diseño bloquea más de lo que actualiza.** Hasta `lotePorVenue × (venues
+ * con pendientes)` filas quedan bloqueadas por la duración de la sentencia, de las que sólo se
+ * reclaman `topeGlobal` — el resto se libera al terminar sin haberse tocado. Consecuencia
+ * medida por el coordinador bajo concurrencia: el segundo worker NO retoma las filas 61-150
+ * (las que el primero bloqueó y no usó) sino que arranca en la 151 — el `SKIP LOCKED` las
+ * salta enteras. El orden ESTRICTO de antigüedad se relaja un poco cuando hay dos workers
+ * corriendo a la vez, pero nada se pierde: esas filas saltadas siguen `PENDING`/`RETRYING` y
+ * son elegibles otra vez en el siguiente tick (o en el resto de ESTE, si el primer worker ya
+ * soltó su lock).
+ *
+ * El predicado de elegibilidad se repite en `venues` y dentro del `LATERAL` A PROPÓSITO: sin
+ * él en `venues`, un venue cuyas deliveries están todas SENT/DEAD/SKIPPED entraría al LATERAL
+ * igual, gastando un scan completo de su partición para no encontrar nada.
  */
 export async function reclamarLote({ topeGlobal, lotePorVenue, ahora }: ReclamarLoteParams): Promise<ClaimedDelivery[]> {
   if (!Number.isInteger(topeGlobal) || topeGlobal <= 0) {
@@ -149,34 +171,58 @@ export async function reclamarLote({ topeGlobal, lotePorVenue, ahora }: Reclamar
   // no estén en UTC — el mismo patrón (y la misma trampa) que `claimDeliveries` ya resolvió.
   const ahoraSql = Prisma.sql`${ahora.toISOString()}::timestamp`
   const leaseSql = Prisma.sql`${leaseUntil.toISOString()}::timestamp`
+  // Se repite el mismo fragmento en `venues` y dentro del LATERAL — Prisma.sql lo trata como
+  // una sub-plantilla reutilizable, así que sigue siendo UN solo lugar donde vive el predicado.
+  // Es una expresión booleana AUTOCONTENIDA (sus propios paréntesis por dentro y por fuera):
+  // se puede pegar directo tras un WHERE, o combinar con AND en el sitio que la usa, sin que
+  // el OR interno se filtre fuera de su grupo.
+  const elegibilidadSql = Prisma.sql`(
+    (d.status = 'PENDING' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${ahoraSql}))
+    OR (d.status = 'RETRYING' AND d."nextAttemptAt" <= ${ahoraSql})
+    OR d.status = 'SENDING'
+  )
+  AND (d."leaseUntil" IS NULL OR d."leaseUntil" <= ${ahoraSql})`
 
   const rows = await prisma.$queryRaw<RawClaimedRow[]>(Prisma.sql`
-    WITH eligible AS (
-      SELECT d.id, d."venueId", d."createdAt"
+    WITH venues AS (
+      -- Sólo los venues con AL MENOS una elegible — evita que el LATERAL de abajo escanee
+      -- por gusto la partición completa de un venue sin nada pendiente.
+      SELECT DISTINCT d."venueId"
       FROM "CustomerCampaignDelivery" AS d
-      WHERE (
-        (d.status = 'PENDING' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${ahoraSql}))
-        OR (d.status = 'RETRYING' AND d."nextAttemptAt" <= ${ahoraSql})
-        OR d.status = 'SENDING'
-      )
-      AND (d."leaseUntil" IS NULL OR d."leaseUntil" <= ${ahoraSql})
-      FOR UPDATE SKIP LOCKED
+      WHERE ${elegibilidadSql}
+    ),
+    lote AS (
+      -- 🔴 El corte por venue va DENTRO del scan bloqueado (ver la cláusula de tope justo
+      -- antes del candado, abajo): cada venue reserva COMO MUCHO su cupo, nunca el backlog
+      -- entero. Es la corrección del Fix loop 1.
+      SELECT x.id, x."venueId", x."createdAt"
+      FROM venues AS v
+      CROSS JOIN LATERAL (
+        SELECT d.id, d."venueId", d."createdAt"
+        FROM "CustomerCampaignDelivery" AS d
+        WHERE d."venueId" = v."venueId"
+          AND ${elegibilidadSql}
+        ORDER BY d."createdAt" ASC, d.id ASC
+        LIMIT ${lotePorVenue}
+        FOR UPDATE SKIP LOCKED
+      ) AS x
     ),
     ranked AS (
       -- Numera cada delivery DENTRO de su propio venue por antigüedad — el número 1 es
       -- la más vieja de ESE venue, no de todo el backlog. Es lo que separa el reparto
-      -- justo de "el que llegó primero se lleva todo el lote".
+      -- justo de "el que llegó primero se lleva todo el lote". Opera sobre el CTE "lote",
+      -- que YA está bloqueado — no vuelve a tocar la tabla real.
       SELECT id, "venueId", "createdAt",
         ROW_NUMBER() OVER (PARTITION BY "venueId" ORDER BY "createdAt" ASC, id ASC) AS rn
-      FROM eligible
+      FROM lote
     ),
     selected AS (
-      -- Tope LOCAL primero (rn <= lotePorVenue): un venue nunca contribuye más de su
-      -- cupo, sin importar cuánto backlog tenga. Después, ORDER BY rn ASC intercala por
-      -- CAPAS entre venues (rn=1 de todos antes que rn=2 de cualquiera), así que el corte
-      -- por topeGlobal cae en un límite de capa completa cuando los venues están parejos —
-      -- es lo que da 20/20/20 con 3 venues de 100 y topeGlobal 60. "venueId" ASC desempata
-      -- DENTRO de una misma capa, determinista.
+      -- Tope LOCAL primero (rn <= lotePorVenue — ya lo garantiza el LIMIT del LATERAL, se
+      -- repite aquí por defensa). ORDER BY rn ASC intercala por CAPAS entre venues (rn=1 de
+      -- todos antes que rn=2 de cualquiera), así que el corte por topeGlobal cae en un
+      -- límite de capa completa cuando los venues están parejos — es lo que da 20/20/20 con
+      -- 3 venues de 100 y topeGlobal 60. "venueId" ASC desempata DENTRO de una misma capa,
+      -- determinista.
       SELECT id
       FROM ranked
       WHERE rn <= ${lotePorVenue}

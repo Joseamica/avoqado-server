@@ -98,6 +98,29 @@ describe('campaignScheduler.service — reclamarLote (forma del SQL)', () => {
     expect(sqlTextOf()).toContain('FOR UPDATE SKIP LOCKED')
   })
 
+  /**
+   * 🔴 Fix loop 1 — el defecto que ninguna prueba anterior podía ver: el `FOR UPDATE SKIP
+   * LOCKED` estaba en un scan SIN `LIMIT`, así que bloqueaba TODAS las filas elegibles de la
+   * tabla, no sólo las `lotePorVenue` que iba a usar. Reproducido por el coordinador contra
+   * Postgres local: dos workers en paralelo daban A=60 / B=0 — el segundo se iba vacío.
+   *
+   * Una prueba que sólo busca la FRASE "FOR UPDATE SKIP LOCKED" en el texto (como las de
+   * arriba) no distingue "el LIMIT está en el mismo scan" de "el LIMIT está mucho después,
+   * en otro CTE". Por eso ésta compara POSICIONES: el LIMIT por venue tiene que aparecer
+   * ANTES que FOR UPDATE SKIP LOCKED en el texto — es la única forma de que ambos vivan en
+   * el MISMO scan bloqueado.
+   */
+  it('el LIMIT por venue va DENTRO del scan bloqueado (antes de FOR UPDATE SKIP LOCKED), vía CROSS JOIN LATERAL', async () => {
+    await reclamarLote({ topeGlobal: 60, lotePorVenue: 20, ahora: AHORA })
+    const text = sqlTextOf()
+    expect(text).toContain('CROSS JOIN LATERAL')
+    const posLimit = text.indexOf('LIMIT ')
+    const posForUpdate = text.indexOf('FOR UPDATE SKIP LOCKED')
+    expect(posLimit).toBeGreaterThanOrEqual(0)
+    expect(posForUpdate).toBeGreaterThan(0)
+    expect(posLimit).toBeLessThan(posForUpdate)
+  })
+
   it('numera por venue con ROW_NUMBER() OVER (PARTITION BY "venueId" …) — es lo que hace posible el reparto justo', async () => {
     await reclamarLote({ topeGlobal: 60, lotePorVenue: 20, ahora: AHORA })
     expect(sqlTextOf()).toContain('ROW_NUMBER() OVER (PARTITION BY "venueId"')
