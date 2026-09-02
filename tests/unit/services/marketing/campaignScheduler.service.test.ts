@@ -72,6 +72,39 @@ describe('campaignScheduler.service — repartirEquitativo (fairness, PURA)', ()
     expect(seleccionados).toHaveLength(55) // 5 + 50 < topeGlobal (60): no hay más que repartir
   })
 
+  // Minor de la revisión: los casos de arriba terminan por AGOTAMIENTO (se acabaron los
+  // candidatos), nunca porque `topeGlobal` corte a media capa con venues desiguales. Ese es
+  // el caso donde el reparto por capas se puede equivocar sin que nadie lo note: el corte
+  // cae DENTRO de una capa y hay que servir a los venues en el orden determinista, no al
+  // que casualmente venía primero en la lista de entrada.
+  it('cuando topeGlobal corta a MEDIA capa con 3 venues desiguales, sirve por capas y desempata por venueId', () => {
+    const candidatos: CandidatoReparto[] = []
+    // Se insertan a propósito en orden INVERSO al alfabético: si el reparto dependiera del
+    // orden de llegada en vez del desempate determinista, esta prueba lo caza.
+    for (let i = 0; i < 2; i += 1) candidatos.push({ id: `venue-c-${i}`, venueId: 'venue-c' })
+    for (let i = 0; i < 10; i += 1) candidatos.push({ id: `venue-b-${i}`, venueId: 'venue-b' })
+    for (let i = 0; i < 10; i += 1) candidatos.push({ id: `venue-a-${i}`, venueId: 'venue-a' })
+
+    // 7 no es múltiplo de 3: el corte cae a media capa. Capas completas: (a0,b0,c0),
+    // (a1,b1,c1) = 6; el 7º sale de la capa 2, y ahí el turno es de `venue-a` por orden.
+    const seleccionados = repartirEquitativo(candidatos, 7, 10)
+
+    expect(seleccionados).toHaveLength(7)
+    expect(seleccionados).toEqual(['venue-a-0', 'venue-b-0', 'venue-c-0', 'venue-a-1', 'venue-b-1', 'venue-c-1', 'venue-a-2'])
+  })
+
+  it('agotado un venue, las capas siguientes NO le guardan turno: el resto se reparte entre los que quedan', () => {
+    const candidatos: CandidatoReparto[] = []
+    for (let i = 0; i < 1; i += 1) candidatos.push({ id: `venue-c-${i}`, venueId: 'venue-c' })
+    for (let i = 0; i < 4; i += 1) candidatos.push({ id: `venue-a-${i}`, venueId: 'venue-a' })
+    for (let i = 0; i < 4; i += 1) candidatos.push({ id: `venue-b-${i}`, venueId: 'venue-b' })
+
+    const seleccionados = repartirEquitativo(candidatos, 7, 10)
+
+    // Capa 0: a0,b0,c0 · capa 1: a1,b1 (c ya se agotó) · capa 2: a2,b2 → 7.
+    expect(seleccionados).toEqual(['venue-a-0', 'venue-b-0', 'venue-c-0', 'venue-a-1', 'venue-b-1', 'venue-a-2', 'venue-b-2'])
+  })
+
   it('el tope LOCAL (lotePorVenue) manda aunque topeGlobal sobre cupo', () => {
     const candidatos: CandidatoReparto[] = []
     for (let i = 0; i < 100; i += 1) candidatos.push({ id: `v-${i}`, venueId: 'venue-unico' })
@@ -143,6 +176,18 @@ describe('campaignScheduler.service — reclamarLote (forma del SQL)', () => {
     expect(text).toContain("d.status = 'RETRYING'")
     expect(text).toContain("d.status = 'SENDING'")
     expect(text).toContain('d."leaseUntil" IS NULL OR d."leaseUntil" <= ')
+  })
+
+  // 🔴 Important de la revisión: `NULL <= algo` en SQL es NULL, NO es verdadero. Una fila
+  // `RETRYING` con `nextAttemptAt` nulo que no tolere el NULL queda INALCANZABLE para
+  // siempre — exactamente la clase de defecto («trabada para siempre») contra la que se
+  // escribió la rama de SENDING. Hoy nadie escribe ese estado porque el remitente es la
+  // Task 7 y todavía no existe: cerrarlo AHORA cuesta una cláusula y evita dejarle la
+  // trampa puesta a quien la construya sin este contexto.
+  it('RETRYING tolera nextAttemptAt NULO igual que PENDING (NULL <= x es NULL, no true)', async () => {
+    await reclamarLote({ topeGlobal: 60, lotePorVenue: 20, ahora: AHORA })
+    const text = sqlTextOf().replace(/\s+/g, ' ')
+    expect(text).toContain('d.status = \'RETRYING\' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ')
   })
 
   it('las columnas DateTime viajan con el cast ::timestamp (nunca un Date crudo)', async () => {

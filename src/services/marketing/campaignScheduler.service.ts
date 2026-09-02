@@ -176,9 +176,16 @@ export async function reclamarLote({ topeGlobal, lotePorVenue, ahora }: Reclamar
   // Es una expresión booleana AUTOCONTENIDA (sus propios paréntesis por dentro y por fuera):
   // se puede pegar directo tras un WHERE, o combinar con AND en el sitio que la usa, sin que
   // el OR interno se filtre fuera de su grupo.
+  //
+  // 🔴 Las DOS ramas con espera (`PENDING` y `RETRYING`) toleran `nextAttemptAt` NULO, y la
+  // simetría no es estética: en SQL `NULL <= algo` vale NULL, que NO es verdadero. Una rama
+  // sin el `IS NULL OR` deja esa fila INALCANZABLE para siempre — la misma clase de defecto
+  // («trabada para siempre») contra la que existe la rama de `SENDING` con lease vencido.
+  // `SENDING` no lleva condición de `nextAttemptAt` a propósito: ese campo sólo significa algo
+  // mientras la fila espera un backoff, y ahí el guard del lease ya hace todo el trabajo.
   const elegibilidadSql = Prisma.sql`(
     (d.status = 'PENDING' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${ahoraSql}))
-    OR (d.status = 'RETRYING' AND d."nextAttemptAt" <= ${ahoraSql})
+    OR (d.status = 'RETRYING' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${ahoraSql}))
     OR d.status = 'SENDING'
   )
   AND (d."leaseUntil" IS NULL OR d."leaseUntil" <= ${ahoraSql})`
@@ -217,7 +224,7 @@ export async function reclamarLote({ topeGlobal, lotePorVenue, ahora }: Reclamar
       FROM lote
     ),
     selected AS (
-      -- Tope LOCAL primero (rn <= lotePorVenue — ya lo garantiza el LIMIT del LATERAL, se
+      -- Tope LOCAL primero (rn <= lotePorVenue — ya lo garantiza el corte del LATERAL, se
       -- repite aquí por defensa). ORDER BY rn ASC intercala por CAPAS entre venues (rn=1 de
       -- todos antes que rn=2 de cualquiera), así que el corte por topeGlobal cae en un
       -- límite de capa completa cuando los venues están parejos — es lo que da 20/20/20 con
