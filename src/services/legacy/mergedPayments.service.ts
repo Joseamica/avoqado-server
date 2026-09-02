@@ -43,7 +43,7 @@
 import { Prisma, TransactionStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { MINDFORM_NEW_VENUE_ID, getLegacyPayments } from './qrPayments.legacy.service'
+import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage } from './qrPayments.legacy.service'
 
 export interface AnalyticsPaymentFilters {
   fromDate: Date
@@ -91,13 +91,14 @@ function analyticsWhere(venueId: string, filters: AnalyticsPaymentFilters): Pris
  * (`legacyPool.ts`) sigue perezoso y nunca abre conexión. NO mover la comprobación
  * debajo del `await getLegacyPayments`.
  */
-async function legacyAnalyticsPayments(
+async function visitLegacyAnalyticsPayments(
   venueId: string,
   filters: AnalyticsPaymentFilters,
   /** Qué cuenta `nativeCount` en el log: filas del rango, o sólo las que el agregado consideró. */
   native: { count: number; scope: 'rows' | 'by-method' | 'tips>0' },
-): Promise<AnalyticsPayment[]> {
-  if (venueId !== MINDFORM_NEW_VENUE_ID) return []
+  consume: (payment: AnalyticsPayment) => void,
+): Promise<number> {
+  if (venueId !== MINDFORM_NEW_VENUE_ID) return 0
   const { fromDate, toDate, includeRefunds = false } = filters
 
   logger.info('[MergedPayments] MindForm detected — merging legacy QR payments into analytics', {
@@ -108,42 +109,44 @@ async function legacyAnalyticsPayments(
     nativeScope: native.scope,
   })
 
-  const { rows: legacyRows } = await getLegacyPayments({
-    startDate: fromDate.toISOString(),
-    endDate: toDate.toISOString(),
+  let kept = 0
+  await forEachLegacyPaymentPage({ startDate: fromDate.toISOString(), endDate: toDate.toISOString() }, rows => {
+    for (const payment of rows) {
+      if (payment.status !== 'COMPLETED') continue
+      if (!includeRefunds && payment.type === 'REFUND') continue
+      kept += 1
+      consume({
+        id: payment.id,
+        amount: Number(payment.amount),
+        tipAmount: Number(payment.tipAmount),
+        method: payment.method,
+        type: payment.type,
+        status: payment.status,
+        createdAt: payment.createdAt,
+        processedById: null,
+        processedByName: null,
+      })
+    }
   })
-
-  // Apply the same analytics filters to legacy rows (mirrors `analyticsWhere` —
-  // status=COMPLETED + type != REFUND). The legacy mapper already sets these fields
-  // per `mapToPaymentShape` in qrPayments.legacy.service.ts.
-  const legacyFiltered = legacyRows.filter(p => {
-    if (p.status !== 'COMPLETED') return false
-    if (!includeRefunds && p.type === 'REFUND') return false
-    return true
-  })
-
-  const legacyNormalized: AnalyticsPayment[] = legacyFiltered.map(p => ({
-    id: p.id,
-    amount: Number(p.amount),
-    tipAmount: Number(p.tipAmount),
-    method: p.method,
-    type: p.type,
-    status: p.status,
-    createdAt: p.createdAt,
-    // Legacy QR payments were customer-initiated — no staff processed them.
-    processedById: null,
-    processedByName: null,
-  }))
 
   logger.info('[MergedPayments] Legacy merge complete', {
     venueId,
-    legacyRows: legacyRows.length,
-    legacyKept: legacyNormalized.length,
-    total: native.count + legacyNormalized.length,
+    legacyKept: kept,
+    total: native.count + kept,
     nativeScope: native.scope,
   })
 
-  return legacyNormalized
+  return kept
+}
+
+async function legacyAnalyticsPayments(
+  venueId: string,
+  filters: AnalyticsPaymentFilters,
+  native: { count: number; scope: 'rows' | 'by-method' | 'tips>0' },
+): Promise<AnalyticsPayment[]> {
+  const rows: AnalyticsPayment[] = []
+  await visitLegacyAnalyticsPayments(venueId, filters, native, payment => rows.push(payment))
+  return rows
 }
 
 /**
@@ -236,13 +239,13 @@ export async function aggregatePaymentsByMethod(venueId: string, filters: Analyt
     nativeCount += g._count._all
   }
 
-  for (const p of await legacyAnalyticsPayments(venueId, filters, { count: nativeCount, scope: 'by-method' })) {
+  await visitLegacyAnalyticsPayments(venueId, filters, { count: nativeCount, scope: 'by-method' }, p => {
     const e = porMetodo.get(p.method) ?? { method: p.method, amount: 0, tips: 0, count: 0 }
     e.amount += p.amount
     e.tips += p.tipAmount
     e.count += 1
     porMetodo.set(p.method, e)
-  }
+  })
 
   return [...porMetodo.values()]
 }
@@ -304,13 +307,13 @@ export async function aggregateTipsByProcessor(venueId: string, filters: Analyti
     nativeCount += g._count._all
   }
 
-  for (const p of await legacyAnalyticsPayments(venueId, filters, { count: nativeCount, scope: 'tips>0' })) {
-    if (p.tipAmount <= 0) continue
+  await visitLegacyAnalyticsPayments(venueId, filters, { count: nativeCount, scope: 'tips>0' }, p => {
+    if (p.tipAmount <= 0) return
     const e = porCajero.get(null) ?? { processedById: null, processedByName: null, tips: 0, payments: 0 }
     e.tips += p.tipAmount
     e.payments += 1
     porCajero.set(null, e)
-  }
+  })
 
   return [...porCajero.values()]
 }

@@ -10,6 +10,14 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   },
 }))
 
+// Esta suite aísla el límite venue↔organización. La autorización canónica
+// `inventory:read` tiene su propia suite de rutas y no debe convertir este test
+// en una recreación parcial de PermissionSet/StaffVenue.
+jest.mock('@/middlewares/checkPermission.middleware', () => ({
+  resolveRequestVenueId: (_req: any, authContext: any) => authContext?.venueId,
+  checkPermission: () => (_req: any, _res: any, next: any) => next(),
+}))
+
 const mockGetOrgStockSummary = jest.fn((_req: any, res: any) => res.status(200).json({ success: true }))
 
 jest.mock('@/controllers/dashboard/organizationStockControl.controller', () => ({
@@ -34,32 +42,29 @@ function makeApp() {
   return app
 }
 
-describe('organization stock-control membership gate', () => {
+describe('organization stock-control active venue boundary', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'membership-1' } as any)
+    // No es SUPERADMIN: debe probar el venue activo y después pasar por el
+    // middleware canónico `inventory:read` de la ruta.
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: ORG_ID } as any)
   })
 
-  it('requires both the venue membership and staff account to be active', async () => {
+  it('requires the active venue to belong to the requested organization', async () => {
     const response = await request(makeApp())
       .get(`/dashboard/organizations/${ORG_ID}/stock-control/summary`)
       .set('x-test-auth-context', JSON.stringify(ownerContext))
 
     expect(response.status).toBe(200)
-    expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          staffId: 'owner-1',
-          active: true,
-          staff: { active: true },
-          venue: { organizationId: ORG_ID },
-        }),
-      }),
-    )
+    expect(prismaMock.venue.findUnique).toHaveBeenCalledWith({
+      where: { id: 'venue-1' },
+      select: { organizationId: true },
+    })
   })
 
-  it('denies access when no active membership exists', async () => {
-    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+  it('denies access when the active venue belongs to another organization', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: 'org-other' } as any)
 
     const response = await request(makeApp())
       .get(`/dashboard/organizations/${ORG_ID}/stock-control/summary`)

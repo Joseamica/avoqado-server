@@ -28,11 +28,12 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
-import { PaymentFilters } from './payment.dashboard.service'
+import { normalizeNativePaymentMethods, PaymentFilters } from './payment.dashboard.service'
 import { AmountFilter, amountPredicate, andAll, decimalBind, ilikeContains, orAny, passesAmountFilter } from './listSummary.shared'
 import {
   MINDFORM_NEW_VENUE_ID,
-  getLegacyPayments,
+  getLegacyPaymentFacets,
+  forEachLegacyPaymentPage,
   shouldIncludeLegacyPayments,
   filterLegacyRowsByMethodSource,
 } from '../legacy/qrPayments.legacy.service'
@@ -85,9 +86,10 @@ export function paymentsSqlScope(venueId: string, filters?: PaymentFilters): Pri
   }
   // { method: { in } } | { method }
   if (filters.methods && filters.methods.length > 0) {
-    parts.push(Prisma.sql`${P}."method"::text IN (${Prisma.join(filters.methods as string[])})`)
+    parts.push(Prisma.sql`${P}."method"::text IN (${Prisma.join(normalizeNativePaymentMethods(filters.methods) ?? [])})`)
   } else if (filters.method) {
-    parts.push(Prisma.sql`${P}."method"::text = ${filters.method as string}`)
+    const nativeMethods = normalizeNativePaymentMethods([filters.method]) ?? []
+    parts.push(Prisma.sql`${P}."method"::text IN (${Prisma.join(nativeMethods)})`)
   }
   // { source: { in } } | { source }
   if (filters.sources && filters.sources.length > 0) {
@@ -265,12 +267,35 @@ export const sumGroupCount = (groups: PaymentSummaryGroup[]): number => groups.r
  * el listado (pre-flight por método/origen, filtro post-fetch); merchant/staff no aplican a
  * legacy (sus ids son nulos), exactamente como en `getPaymentsData`. Cualquier otro venue: [].
  */
-async function legacyRowsFor(venueId: string, filters?: PaymentFilters) {
-  if (venueId !== MINDFORM_NEW_VENUE_ID) return []
-  const legacyFilter = { methods: filters?.methods as readonly string[] | undefined, sources: filters?.sources }
-  if (!shouldIncludeLegacyPayments(legacyFilter)) return []
-  const legacy = await getLegacyPayments({ startDate: filters?.startDate, endDate: filters?.endDate, search: filters?.search })
-  return filterLegacyRowsByMethodSource(legacy.rows, legacyFilter)
+async function foldLegacyPages(
+  venueId: string,
+  filters: PaymentFilters | undefined,
+  client: PaymentClientFilters | undefined,
+  groups: PaymentSummaryGroup[],
+  filteredGroups: PaymentSummaryGroup[],
+): Promise<{ groups: PaymentSummaryGroup[]; filteredGroups: PaymentSummaryGroup[] }> {
+  if (venueId !== MINDFORM_NEW_VENUE_ID) return { groups, filteredGroups }
+  const legacyFilter = {
+    methods: filters?.methods ?? (filters?.method ? [filters.method] : undefined),
+    sources: filters?.sources ?? (filters?.source ? [filters.source] : undefined),
+  }
+  if (!shouldIncludeLegacyPayments(legacyFilter)) return { groups, filteredGroups }
+  const withClient = hasClientFilters(client)
+
+  await forEachLegacyPaymentPage(
+    { startDate: filters?.startDate, endDate: filters?.endDate, search: filters?.search, methods: legacyFilter.methods },
+    rows => {
+      const legacy = filterLegacyRowsByMethodSource(rows, legacyFilter)
+      groups = foldRowsIntoGroups(groups, legacy)
+      filteredGroups = withClient
+        ? foldRowsIntoGroups(
+            filteredGroups,
+            legacy.filter(row => paymentRowPassesClientFilters(row, client)),
+          )
+        : groups
+    },
+  )
+  return { groups, filteredGroups }
 }
 
 export async function getPaymentsSummary(
@@ -286,16 +311,7 @@ export async function getPaymentsSummary(
     withClient ? paymentsClientSqlScope(client) : Prisma.sql`TRUE`,
   )
 
-  const legacy = await legacyRowsFor(venueId, filters)
-  if (legacy.length > 0) {
-    groups = foldRowsIntoGroups(groups, legacy)
-    filteredGroups = withClient
-      ? foldRowsIntoGroups(
-          filteredGroups,
-          legacy.filter(r => paymentRowPassesClientFilters(r, client)),
-        )
-      : groups
-  }
+  ;({ groups, filteredGroups } = await foldLegacyPages(venueId, filters, client, groups, filteredGroups))
 
   return {
     groups,
@@ -365,15 +381,18 @@ export async function getPaymentFilterOptions(venueId: string): Promise<PaymentF
       : Promise.resolve([]),
   ])
 
-  // MindForm: sus filas legacy traen método CARD, origen QR_LEGACY y marcas propias que no
-  // están en Postgres; sin esto las píldoras no ofrecerían lo que el listado sí muestra.
-  const legacy = await legacyRowsFor(venueId)
+  // MindForm: las facetas salen de DISTINCT en la base legacy; nunca se materializa
+  // todo el historial sólo para poblar cinco selectores.
+  const legacy =
+    venueId === MINDFORM_NEW_VENUE_ID
+      ? await getLegacyPaymentFacets()
+      : { methods: [] as string[], sources: [] as string[], cardBrands: [] as string[] }
 
   return {
     merchantAccounts,
-    methods: uniqSorted([...(facets?.methods ?? []), ...legacy.map(r => r.method)]),
-    sources: uniqSorted([...(facets?.sources ?? []), ...legacy.map(r => r.source)]),
+    methods: uniqSorted([...(facets?.methods ?? []), ...legacy.methods]),
+    sources: uniqSorted([...(facets?.sources ?? []), ...legacy.sources]),
     waiters,
-    cardBrands: uniqSorted([...(facets?.brands ?? []), ...legacy.map(r => r.cardBrand?.toUpperCase())]),
+    cardBrands: uniqSorted([...(facets?.brands ?? []), ...legacy.cardBrands]),
   }
 }

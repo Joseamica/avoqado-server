@@ -119,6 +119,12 @@ export interface LegacyPaymentFilters {
   startDate?: string
   endDate?: string
   search?: string
+  methods?: readonly string[]
+  /** Máximo de filas devueltas; el total sigue siendo exacto. */
+  limit?: number
+  /** Cursor global del merge (id ya incluye `legacy-` cuando aplica). */
+  before?: { createdAt: string; id: string }
+  includeTotal?: boolean
 }
 
 /**
@@ -132,6 +138,43 @@ export const LEGACY_METHOD_VALUES = ['CASH', 'CARD'] as const
  * The single `source` value the legacy mapper always emits (see `mapToPaymentShape`).
  */
 export const LEGACY_SOURCE_VALUE = 'QR_LEGACY' as const
+
+export interface LegacyPaymentFacets {
+  methods: string[]
+  sources: string[]
+  cardBrands: string[]
+}
+
+/**
+ * Opciones de filtro del puente sin traer una fila por pago. El origen es una
+ * constante del mapper y Postgres sólo devuelve los DISTINCT de método/marca.
+ */
+export async function getLegacyPaymentFacets(): Promise<LegacyPaymentFacets> {
+  const empty = { methods: [], sources: [], cardBrands: [] }
+  if (!legacyPool) return empty
+
+  try {
+    const result = await legacyPool.query(
+      `SELECT
+         COALESCE(array_agg(DISTINCT CASE WHEN UPPER(COALESCE(p.method, '')) = 'CASH' THEN 'CASH' ELSE 'CARD' END), '{}') AS methods,
+         COALESCE(array_agg(DISTINCT UPPER(p."cardBrand")) FILTER (WHERE p."cardBrand" IS NOT NULL AND p."cardBrand" <> ''), '{}') AS brands
+       FROM "Payment" p
+       WHERE p."venueId" = $1 AND p.status = 'ACCEPTED'`,
+      [LEGACY_MINDFORM_VENUE_ID],
+    )
+    const row = result.rows[0]
+    return {
+      methods: row?.methods ?? [],
+      sources: [LEGACY_SOURCE_VALUE],
+      cardBrands: row?.brands ?? [],
+    }
+  } catch (err) {
+    logger.error('[LegacyQRPayments] Failed to fetch filter facets', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return empty
+  }
+}
 
 /**
  * Pre-flight check: decide whether the user's method/source filter could match
@@ -203,12 +246,12 @@ export async function getLegacyPayments(
 
     if (filters?.startDate) {
       conditions.push(`p."createdAt" >= $${paramIdx}`)
-      params.push(new Date(filters.startDate))
+      params.push(new Date(filters.startDate).toISOString())
       paramIdx++
     }
     if (filters?.endDate) {
       conditions.push(`p."createdAt" <= $${paramIdx}`)
-      params.push(new Date(filters.endDate))
+      params.push(new Date(filters.endDate).toISOString())
       paramIdx++
     }
     if (filters?.search) {
@@ -216,8 +259,24 @@ export async function getLegacyPayments(
       params.push(`%${filters.search}%`)
       paramIdx++
     }
+    if (filters?.methods && filters.methods.length > 0) {
+      const wantsCash = filters.methods.includes('CASH')
+      const wantsCard = filters.methods.includes('CARD')
+      if (!wantsCash && !wantsCard) conditions.push('FALSE')
+      else if (wantsCash && !wantsCard) conditions.push(`UPPER(COALESCE(p.method, '')) = 'CASH'`)
+      else if (wantsCard && !wantsCash) conditions.push(`UPPER(COALESCE(p.method, '')) <> 'CASH'`)
+    }
+    if (filters?.before) {
+      const beforeIso = new Date(filters.before.createdAt).toISOString()
+      conditions.push(`(p."createdAt" < $${paramIdx} OR (p."createdAt" = $${paramIdx} AND ('legacy-' || p.id) < $${paramIdx + 1}))`)
+      params.push(beforeIso, filters.before.id)
+      paramIdx += 2
+    }
 
     const where = conditions.join(' AND ')
+    const boundedLimit = filters?.limit === undefined ? undefined : Math.min(1000, Math.max(1, Math.floor(filters.limit)))
+    const dataParams = [...params]
+    const limitClause = boundedLimit === undefined ? '' : ` LIMIT $${dataParams.push(boundedLimit)}`
 
     logger.info('[LegacyQRPayments] Querying legacy DB', {
       venueId: LEGACY_MINDFORM_VENUE_ID,
@@ -243,11 +302,13 @@ export async function getLegacyPayments(
          LEFT JOIN (SELECT "paymentId", SUM(amount) AS amount FROM "Tip" GROUP BY "paymentId") t
            ON t."paymentId" = p.id
          WHERE ${where}
-         ORDER BY p."createdAt" DESC`,
-        params,
+         ORDER BY p."createdAt" DESC, p.id DESC${limitClause}`,
+        dataParams,
       ),
       // Count query uses the same alias `p` so the prefixed WHERE clause works.
-      legacyPool.query(`SELECT COUNT(*)::int AS total FROM "Payment" p WHERE ${where}`, params),
+      filters?.includeTotal === false
+        ? Promise.resolve({ rows: [] })
+        : legacyPool.query(`SELECT COUNT(*)::int AS total FROM "Payment" p WHERE ${where}`, params),
     ])
 
     const rows = dataResult.rows.map(mapToPaymentShape)
@@ -266,6 +327,26 @@ export async function getLegacyPayments(
       filters,
     })
     return { rows: [], total: 0 }
+  }
+}
+
+export type LegacyPayment = ReturnType<typeof mapToPaymentShape>
+
+/** Recorre historia legacy en ventanas fijas; el callback nunca recibe más de 500 filas. */
+export async function forEachLegacyPaymentPage(
+  filters: Omit<LegacyPaymentFilters, 'limit' | 'before' | 'includeTotal'>,
+  consume: (rows: LegacyPayment[]) => void | Promise<void>,
+): Promise<void> {
+  const pageSize = 500
+  let before: LegacyPaymentFilters['before']
+
+  for (;;) {
+    const page = await getLegacyPayments({ ...filters, limit: pageSize, before, includeTotal: false })
+    if (page.rows.length === 0) return
+    await consume(page.rows)
+    if (page.rows.length < pageSize) return
+    const last = page.rows[page.rows.length - 1]
+    before = { createdAt: last.createdAt.toISOString(), id: last.id }
   }
 }
 

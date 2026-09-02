@@ -3279,7 +3279,13 @@ export async function finalizeAreaTicketPaymentInTransaction(
         remainingBalance,
         tipAmount: totalTip,
         total,
-        ...(finalFullyPaid ? { completedAt: new Date() } : {}),
+        ...(finalFullyPaid
+          ? {
+              completedAt: new Date(),
+              loyaltyEligibleAt: new Date(),
+              loyaltyStaffId: input.staffId,
+            }
+          : {}),
         ...(!lockedOrder.servedById && input.staffId
           ? { servedById: input.staffId, createdById: lockedOrder.createdById ?? input.staffId }
           : {}),

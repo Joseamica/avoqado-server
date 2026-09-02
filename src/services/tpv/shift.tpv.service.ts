@@ -478,18 +478,6 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     }
   }
 
-  // Build payment filter for date range
-  const paymentDateFilter: any = {}
-  if (parsedStartTime || parsedEndTime) {
-    paymentDateFilter.createdAt = {}
-    if (parsedStartTime) {
-      paymentDateFilter.createdAt.gte = parsedStartTime
-    }
-    if (parsedEndTime) {
-      paymentDateFilter.createdAt.lte = parsedEndTime
-    }
-  }
-
   // Auditorías de Codex (2026-09-01, P2 y luego P1 pre-push): el resumen usa UNA ventana
   // efectiva y la fija ANTES de armar cualquier consulta. Con fechas del cliente, la del
   // cliente; sin startTime, 24 h antes del endTime (o de ahora). La comparten los TURNOS
@@ -501,6 +489,12 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   }
   const effectiveStartTime: Date = parsedStartTime
   const effectiveEndTime: Date | null = parsedEndTime ?? null
+  const paymentDateFilter = {
+    createdAt: {
+      gte: effectiveStartTime,
+      ...(effectiveEndTime ? { lte: effectiveEndTime } : {}),
+    },
+  }
 
   // Build the base query filters for shifts
   const whereClause: any = {

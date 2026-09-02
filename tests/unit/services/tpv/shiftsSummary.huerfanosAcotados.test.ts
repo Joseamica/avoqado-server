@@ -137,6 +137,8 @@ describe('getShiftsSummary — UNA ventana efectiva para todo el resumen', () =>
     const gte = (inc.payments.where.createdAt.gte as Date).getTime()
     expect(gte).toBeGreaterThanOrEqual(antes - DIA_MS - 5000)
     expect(gte).toBeLessThanOrEqual(Date.now() - DIA_MS + 5000)
+    const paymentOverlap = whereShifts.OR.find((branch: any) => branch.payments?.some)
+    expect(paymentOverlap.payments.some.createdAt.gte).toBeInstanceOf(Date)
   })
 
   it('con sólo endTime, la ventana empieza 24 h ANTES de ese endTime (nunca gte > lte)', async () => {

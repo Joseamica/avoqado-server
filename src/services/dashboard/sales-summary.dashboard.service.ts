@@ -35,7 +35,7 @@ import { foldGiveawaysIntoSummary, HIDDEN_COMP_LINE_WHERE } from '@/services/das
 import { projectPaymentSettlement } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import {
   MINDFORM_NEW_VENUE_ID,
-  getLegacyPayments,
+  forEachLegacyPaymentPage,
   getLegacyPeriodMetrics,
   type LegacyPeriodMetric,
   type LegacyPeriodReportType,
@@ -690,19 +690,26 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       }
     }
 
-    const { rows: legacyRows } = await getLegacyPayments({
-      startDate: parsedStartDate.toISOString(),
-      endDate: parsedEndDate.toISOString(),
-    })
-    const eligible = legacyRows.filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND')
-    const amount = eligible.reduce((s, p) => s + Number(p.amount), 0)
-    const tips = eligible.reduce((s, p) => s + Number(p.tipAmount), 0)
+    let amount = 0
+    let tips = 0
+    let legacyCount = 0
+    await forEachLegacyPaymentPage(
+      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
+      rows => {
+        for (const payment of rows) {
+          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+          amount += Number(payment.amount)
+          tips += Number(payment.tipAmount)
+          legacyCount += 1
+        }
+      },
+    )
     const summary: SalesSummaryMetrics = {
       ...emptySummary(),
       tips,
       totalCollected: amount + tips,
       netProfit: amount,
-      transactionCount: eligible.length,
+      transactionCount: legacyCount,
     }
 
     // For a non-summary reportType, build the time-series from legacy alone so
@@ -1029,17 +1036,19 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // MINDFORM_NEW_VENUE_ID to find every gate.
   let legacyAggregate: { amount: number; tips: number; count: number } | null = null
   if (venueId === MINDFORM_NEW_VENUE_ID) {
-    const { rows: legacyRows } = await getLegacyPayments({
-      startDate: parsedStartDate.toISOString(),
-      endDate: parsedEndDate.toISOString(),
-    })
-    const eligible = legacyRows.filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND')
-    const matching = eligible.filter(p => legacyMatchesFilter(p.method, paymentMethod, cardType))
-    legacyAggregate = {
-      amount: matching.reduce((s, p) => s + Number(p.amount), 0),
-      tips: matching.reduce((s, p) => s + Number(p.tipAmount), 0),
-      count: matching.length,
-    }
+    legacyAggregate = { amount: 0, tips: 0, count: 0 }
+    await forEachLegacyPaymentPage(
+      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
+      rows => {
+        for (const payment of rows) {
+          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+          if (!legacyMatchesFilter(payment.method, paymentMethod, cardType)) continue
+          legacyAggregate!.amount += Number(payment.amount)
+          legacyAggregate!.tips += Number(payment.tipAmount)
+          legacyAggregate!.count += 1
+        }
+      },
+    )
 
     if (legacyAggregate.count > 0) {
       // Payment-derived totals always include matching legacy volume.

@@ -32,7 +32,10 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 jest.mock('@/services/legacy/qrPayments.legacy.service', () => ({
   MINDFORM_NEW_VENUE_ID: 'cmisvi38o001fhr2828ygmxi2',
-  getLegacyPayments: (...a: unknown[]) => mockGetLegacy(...(a as [])),
+  forEachLegacyPaymentPage: async (filters: unknown, consume: (rows: unknown[]) => unknown) => {
+    const page = await mockGetLegacy(filters)
+    return consume(page.rows)
+  },
 }))
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
 

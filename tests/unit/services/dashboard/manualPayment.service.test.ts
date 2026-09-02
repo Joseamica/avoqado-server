@@ -871,8 +871,9 @@ describe('manualPayment.service', () => {
         customerId: 'customer-1',
       })
 
-      // shadowTotal = 500 + 80 - 0 + 50 = 630
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'customer-1', 630, 'shadow-with-cust', 'sv-1')
+      // La base de lealtad excluye propina: 500 + 80 - 0 = 580.
+      // La propina sí forma parte del total cobrado, pero nunca compra puntos.
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'customer-1', 580, 'shadow-with-cust', 'sv-1')
       // OrderCustomer link created as primary
       expect(orderCustomerCreate).toHaveBeenCalledWith(
         expect.objectContaining({

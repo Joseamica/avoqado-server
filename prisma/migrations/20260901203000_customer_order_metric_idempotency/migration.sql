@@ -43,7 +43,3 @@ ALTER TABLE "public"."Order"
     ADD COLUMN "loyaltyAttempts" INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN "loyaltyLastError" TEXT,
     ADD COLUMN "loyaltyStaffId" TEXT;
-
-CREATE INDEX "Order_loyalty_pending_idx"
-    ON "public"."Order"("loyaltyEligibleAt", "id")
-    WHERE "loyaltyEligibleAt" IS NOT NULL AND "loyaltyProcessedAt" IS NULL;

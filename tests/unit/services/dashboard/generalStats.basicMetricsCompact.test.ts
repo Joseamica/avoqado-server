@@ -2,9 +2,15 @@ import { getBasicMetricsData, getBasicMetricsDetailsPage } from '@/services/dash
 import { prismaMock } from '@tests/__helpers__/setup'
 
 const mockFetchPaymentsForAnalytics = jest.fn()
+const mockGetLegacyPayments = jest.fn()
+const MINDFORM_VENUE_ID = 'cmisvi38o001fhr2828ygmxi2'
 
 jest.mock('@/services/legacy/mergedPayments.service', () => ({
   fetchPaymentsForAnalytics: (...args: unknown[]) => mockFetchPaymentsForAnalytics(...args),
+}))
+jest.mock('@/services/legacy/qrPayments.legacy.service', () => ({
+  MINDFORM_NEW_VENUE_ID: 'cmisvi38o001fhr2828ygmxi2',
+  getLegacyPayments: (...args: unknown[]) => mockGetLegacyPayments(...args),
 }))
 
 const VENUE_ID = 'venue-compact'
@@ -20,6 +26,7 @@ describe('getBasicMetricsData — aggregated-v1 is bounded and legacy-compatible
     ;(prismaMock.review.findMany as jest.Mock).mockReset()
     ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ id: VENUE_ID, timezone: 'UTC' })
     mockFetchPaymentsForAnalytics.mockReset()
+    mockGetLegacyPayments.mockReset()
   })
 
   it('returns server aggregates without materializing payment or review rows', async () => {
@@ -61,7 +68,7 @@ describe('getBasicMetricsData — aggregated-v1 is bounded and legacy-compatible
     expect(mockFetchPaymentsForAnalytics).not.toHaveBeenCalled()
   })
 
-  it('keeps bounded compatibility rows when responseMode is absent', async () => {
+  it('keeps the complete minimal compatibility rows when responseMode is absent', async () => {
     ;(prismaMock.$queryRaw as jest.Mock)
       .mockResolvedValueOnce([{ method: 'Efectivo', weekday: 6, total: 25, count: 1, tips: 3, tipPercentageSum: 12 }])
       .mockResolvedValueOnce([{ total: 1, fiveStar: 1 }])
@@ -78,7 +85,8 @@ describe('getBasicMetricsData — aggregated-v1 is bounded and legacy-compatible
     expect(data.reviews).toHaveLength(1)
     expect(data).not.toHaveProperty('responseMode')
     expect(data.performanceByWeekday).toEqual([0, 0, 0, 0, 0, 0, 25])
-    expect(prismaMock.payment.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 5000 }))
+    expect(prismaMock.payment.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 1001 }))
+    expect(prismaMock.review.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 1001 }))
     expect(mockFetchPaymentsForAnalytics).not.toHaveBeenCalled()
   })
 })
@@ -88,6 +96,7 @@ describe('getBasicMetricsDetailsPage — explicit exports page through all rows'
     ;(prismaMock.payment.findMany as jest.Mock).mockReset()
     ;(prismaMock.review.findMany as jest.Mock).mockReset()
     ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ id: VENUE_ID, timezone: 'UTC' })
+    mockGetLegacyPayments.mockReset()
   })
 
   it('returns at most 500 transformed payments plus a cursor for the next page', async () => {
@@ -131,5 +140,24 @@ describe('getBasicMetricsDetailsPage — explicit exports page through all rows'
     expect(page.nextCursor).toBeNull()
     expect(page.items).toEqual([{ id: 'review-2', stars: 4, createdAt: '2026-08-02T12:00:00.000Z' }])
     expect(prismaMock.review.findMany).toHaveBeenCalledWith(expect.objectContaining({ cursor: { id: 'review-1' }, skip: 1, take: 501 }))
+  })
+
+  it('pagina las dos bases de MindForm sin materializar su historial completo', async () => {
+    ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ id: MINDFORM_VENUE_ID, timezone: 'America/Mexico_City' })
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce([
+      { id: 'native-1', amount: 10, tipAmount: 0, method: 'CASH', createdAt: new Date('2026-08-20T12:00:00Z') },
+    ])
+    mockGetLegacyPayments.mockResolvedValueOnce({
+      rows: [{ id: 'legacy-1', amount: 20, tipAmount: 1, method: 'CARD', createdAt: new Date('2026-08-19T12:00:00Z') }],
+      total: 1,
+    })
+
+    const page = await getBasicMetricsDetailsPage(MINDFORM_VENUE_ID, { ...RANGE, kind: 'payments', limit: 1 })
+
+    expect(page.items.map(item => item.id)).toEqual(['native-1'])
+    expect(page.nextCursor).toEqual(expect.stringMatching(/^mf:/))
+    expect(prismaMock.payment.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 2 }))
+    expect(mockGetLegacyPayments).toHaveBeenCalledWith(expect.objectContaining({ limit: 2 }))
+    expect(mockFetchPaymentsForAnalytics).not.toHaveBeenCalled()
   })
 })

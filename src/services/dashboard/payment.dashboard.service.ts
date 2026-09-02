@@ -16,17 +16,28 @@ import logger from '../../config/logger'
 export interface PaymentFilters {
   // Multi-select filter arrays (preferred)
   merchantAccountIds?: string[]
-  methods?: PaymentMethod[]
+  methods?: string[]
   sources?: string[]
   staffIds?: string[]
   // Single-value filters kept for backward compatibility (TPV, scripts, etc.)
   merchantAccountId?: string
-  method?: PaymentMethod
+  method?: string
   source?: string
   staffId?: string
   search?: string
   startDate?: string
   endDate?: string
+}
+
+/**
+ * `CARD` sólo existe en el puente QR legacy. Para la tabla Payment nativa equivale
+ * a las dos variantes reales; sin esta expansión, seleccionar “Tarjeta” ocultaba
+ * todos los pagos nuevos y el listado discrepaba del resumen.
+ */
+export function normalizeNativePaymentMethods(methods?: readonly string[]): string[] | undefined {
+  if (!methods) return undefined
+  const normalized = methods.flatMap(method => (method === 'CARD' ? ['CREDIT_CARD', 'DEBIT_CARD'] : [method]))
+  return Array.from(new Set(normalized))
 }
 
 export async function getPaymentsData(
@@ -52,8 +63,8 @@ export async function getPaymentsData(
   // merge its legacy payments with the new-system ones before slicing the
   // current page. Otherwise page N of the new data + all legacy gets sliced
   // wrong and later pages end up almost empty.
-  // MindForm's total volume is small (hundreds), so we fetch all rows and
-  // slice in memory.
+  // We only need the first `skip + take` rows from EACH sorted source to build
+  // the exact global page; no source can contribute more than that to the top N.
   //
   // ⚠️ This list endpoint keeps its own MindForm branch because it needs
   // relations (processedBy, order.table, merchantAccount, transactionCost) that
@@ -94,21 +105,26 @@ export async function getPaymentsData(
     // legacy DB round-trip entirely. Without this guard the legacy QR rows leak
     // into every filtered view because they ignore the filter — see Bug:
     // "filtrar Efectivo y aparecen los pagos QR".
-    const methodFilterValues = (filters?.methods as readonly string[] | undefined) ?? undefined
-    const sourceFilterValues = filters?.sources
+    const methodFilterValues = filters?.methods ?? (filters?.method ? [filters.method] : undefined)
+    const sourceFilterValues = filters?.sources ?? (filters?.source ? [filters.source] : undefined)
     const legacyFilter = { methods: methodFilterValues, sources: sourceFilterValues }
+    const requestedEnd = skip + take
 
-    const [allNewPayments, legacy] = await Promise.all([
+    const [newPaymentsWindow, newPaymentsTotal, legacy] = await Promise.all([
       prisma.payment.findMany({
         where: whereClause,
         include: sharedInclude,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: requestedEnd,
       }),
+      prisma.payment.count({ where: whereClause }),
       shouldIncludeLegacyPayments(legacyFilter)
         ? getLegacyPayments({
             startDate: filters?.startDate,
             endDate: filters?.endDate,
             search: filters?.search,
+            methods: methodFilterValues,
+            limit: requestedEnd,
           })
         : Promise.resolve({ rows: [] as Awaited<ReturnType<typeof getLegacyPayments>>['rows'], total: 0 }),
     ])
@@ -124,13 +140,13 @@ export async function getPaymentsData(
       legacyRows: legacy.rows.length,
       legacyKept: filteredLegacyRows.length,
       legacyTotal: legacy.total,
-      newRows: allNewPayments.length,
+      newRows: newPaymentsWindow.length,
     })
 
-    const merged = [...allNewPayments, ...filteredLegacyRows].sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    const merged = [...newPaymentsWindow, ...filteredLegacyRows].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() || b.id.localeCompare(a.id),
     )
-    const combinedTotal = merged.length
+    const combinedTotal = newPaymentsTotal + legacy.total
     const paginated = merged.slice(skip, skip + take)
 
     return {
@@ -220,9 +236,10 @@ export function buildPaymentsWhereClause(venueId: string, filters?: PaymentFilte
     whereClause.merchantAccountId = filters.merchantAccountId
   }
   if (filters.methods && filters.methods.length > 0) {
-    whereClause.method = { in: filters.methods }
+    whereClause.method = { in: normalizeNativePaymentMethods(filters.methods) }
   } else if (filters.method) {
-    whereClause.method = filters.method
+    const nativeMethods = normalizeNativePaymentMethods([filters.method]) ?? []
+    whereClause.method = nativeMethods.length === 1 ? nativeMethods[0] : { in: nativeMethods }
   }
   if (filters.sources && filters.sources.length > 0) {
     whereClause.source = { in: filters.sources }

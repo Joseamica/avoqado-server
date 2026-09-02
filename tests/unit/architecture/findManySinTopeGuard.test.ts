@@ -87,7 +87,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/inventoryRestock.service.ts': 1,
   'src/services/dashboard/itemCategory.dashboard.service.ts': 1,
   'src/services/dashboard/order.dashboard.service.ts': 2,
-  'src/services/dashboard/payment.dashboard.service.ts': 2,
+  // 2026-09-02: la rama MindForm dejó de materializar todo el histórico; sólo
+  // conserva el findMany paginado del listado nativo.
+  'src/services/dashboard/payment.dashboard.service.ts': 1,
   'src/services/dashboard/purchaseOrder.service.ts': 1,
   'src/services/dashboard/receipt.dashboard.service.ts': 2,
   'src/services/dashboard/refund.dashboard.service.ts': 3,

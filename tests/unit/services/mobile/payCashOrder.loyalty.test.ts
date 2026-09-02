@@ -122,6 +122,14 @@ describe('payCashOrder — lealtad al quedar pagada (paridad con la PAX)', () =>
     expect(awardMock).not.toHaveBeenCalled()
   })
 
+  it('la propina no genera puntos: la base de lealtad es sólo venta/cargos', async () => {
+    seedOrder()
+
+    await payCashOrder('venue-1', 'order-1', { amount: 9000, tip: 500, staffId: 'staff-1' })
+
+    expect(awardMock).toHaveBeenCalledWith(expect.objectContaining({ orderTotal: 90 }))
+  })
+
   it('la lealtad corre DESPUÉS de commitear el cobro, y si truena el cobro ya está registrado', async () => {
     seedOrder()
     awardMock.mockRejectedValue(new Error('loyalty down'))

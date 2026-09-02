@@ -23,6 +23,7 @@ import { StampRewardType, LoyaltyTransactionType } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import { grantStamp } from '../wallet/stampLedger.service'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -43,7 +44,9 @@ export async function getOrCreateLoyaltyConfig(venueId: string) {
         redemptionRate: 0.01, // 100 points = $1 discount (1 point = $0.01)
         minPointsRedeem: 100, // Minimum 100 points to redeem
         pointsExpireDays: 365, // Points expire after 1 year
-        active: true,
+        // Tier and activation are separate decisions. Creating/opening the
+        // settings page must never silently turn on a money-valued reward.
+        active: false,
       },
     })
   }
@@ -268,7 +271,21 @@ export async function earnPoints(
   orderId: string,
   staffId?: string,
 ): Promise<{ pointsEarned: number; newBalance: number }> {
-  const config = await getOrCreateLoyaltyConfig(venueId)
+  // Paid entitlement and venue activation are BOTH required. Automatic award
+  // paths must not create an active config merely because a payment happened.
+  if (!(await venueHasFeatureAccess(venueId, 'LOYALTY_PROGRAM'))) {
+    return { pointsEarned: 0, newBalance: 0 }
+  }
+
+  const storedConfig = await prisma.loyaltyConfig.findUnique({ where: { venueId } })
+  if (!storedConfig) {
+    return { pointsEarned: 0, newBalance: 0 }
+  }
+  const config = {
+    ...storedConfig,
+    pointsPerDollar: storedConfig.pointsPerDollar.toNumber(),
+    redemptionRate: storedConfig.redemptionRate.toNumber(),
+  }
 
   if (!config.active) {
     return { pointsEarned: 0, newBalance: 0 }

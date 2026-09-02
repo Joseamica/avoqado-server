@@ -1,5 +1,5 @@
 import { PaymentMethod, ProductType, TransactionStatus, OrderStatus, Prisma } from '@prisma/client'
-import { NotFoundError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import {
   BasicMetricsDetailsQuery,
@@ -15,7 +15,7 @@ import { DateTime } from 'luxon'
 // ⚠️ TECH DEBT — delete when MindForm migrates to native QR module.
 // See: src/services/legacy/mergedPayments.service.ts for full context.
 import { fetchPaymentsForAnalytics } from '../legacy/mergedPayments.service'
-import { MINDFORM_NEW_VENUE_ID, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
+import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
 
 /**
  * ── Reescritura 2026-09-01 (incidente del event loop) ────────────────────────
@@ -492,15 +492,14 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
   // materializaba 24,631 pagos aquí — la PRIMERA llamada del home — para que el
   // navegador los sumara. Ahora los KPIs los suma Postgres (`summary`,
   // `paymentMethodsData`, `reviewStats`) sobre TODAS las filas del rango, y las
-  // listas `payments`/`reviews` se conservan sólo por compatibilidad con pestañas
-  // viejas, ACOTADAS a BASIC_METRICS_ROWS_CAP y declaradas en `meta`.
+  // listas `payments`/`reviews` se conservan completas sólo para bundles viejos.
+  // Se leen en páginas pequeñas y con select mínimo; `aggregated-v1` no materializa
+  // ninguna fila y es el contrato que deben usar los clientes nuevos.
   //
   // Reglas de negocio idénticas a las de siempre: pagos COMPLETED, tipo != REFUND
   // (una devolución también es COMPLETED, pero es corrección, no venta), y órdenes
   // no CANCELLED. Puente legacy de MindForm: sus pagos QR viven en otra base, así
   // que se suman en Node SÓLO para ese venue (conjunto histórico finito).
-  const cap = basicMetricsRowsCap()
-
   const compactResponse = filters.responseMode === 'aggregated-v1'
   const tz = venue.timezone || DEFAULT_TIMEZONE
 
@@ -533,28 +532,8 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
       WHERE r."venueId" = ${venueId}
         AND r."createdAt" >= ${utcTs(fromDate)} AND r."createdAt" <= ${utcTs(toDate)}
     `,
-    compactResponse
-      ? Promise.resolve([])
-      : prisma.payment.findMany({
-          where: {
-            venueId,
-            status: TransactionStatus.COMPLETED,
-            type: { not: 'REFUND' },
-            createdAt: { gte: fromDate, lte: toDate },
-            order: { status: { not: 'CANCELLED' } },
-          },
-          select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-          take: cap,
-        }),
-    compactResponse
-      ? Promise.resolve([])
-      : prisma.review.findMany({
-          where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
-          select: { id: true, overallRating: true, createdAt: true },
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-          take: cap,
-        }),
+    compactResponse ? Promise.resolve([]) : fetchLegacyBasicMetricPayments(venueId, fromDate, toDate),
+    compactResponse ? Promise.resolve([]) : fetchLegacyBasicMetricReviews(venueId, fromDate, toDate),
   ])
 
   const summary = { totalAmount: 0, totalTransactions: 0, totalTips: 0, avgTipPercentage: 0 }
@@ -581,7 +560,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
     performanceByWeekday[weekday] = round2(performanceByWeekday[weekday])
   }
 
-  // Listas de compatibilidad (acotadas). Se mantiene la forma exacta de siempre.
+  // Listas de compatibilidad. Se mantiene la forma exacta de siempre.
   const transformedPayments = payments.map(payment => ({
     id: payment.id,
     amount: Number(payment.amount),
@@ -593,8 +572,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
   // Puente legacy de MindForm (ver mergedPayments.service.ts): sus pagos QR no
   // están en Postgres, así que se suman aquí con las MISMAS reglas.
   if (venueId === MINDFORM_NEW_VENUE_ID) {
-    const legacy = await fetchLegacyAnalyticsPayments(fromDate, toDate)
-    for (const p of legacy) {
+    await forEachLegacyAnalyticsPayment(fromDate, toDate, p => {
       summary.totalAmount = round2(summary.totalAmount + p.amount)
       summary.totalTips = round2(summary.totalTips + p.tipAmount)
       summary.totalTransactions += 1
@@ -604,7 +582,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
       methodCounts[label] = (methodCounts[label] ?? 0) + 1
       const weekday = DateTime.fromJSDate(p.createdAt, { zone: 'utc' }).setZone(tz).weekday % 7
       performanceByWeekday[weekday] = round2(performanceByWeekday[weekday] + p.amount)
-      if (transformedPayments.length < cap) {
+      if (!compactResponse) {
         transformedPayments.push({
           id: p.id,
           amount: p.amount,
@@ -613,7 +591,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
           tips: [{ amount: p.tipAmount }],
         })
       }
-    }
+    })
     summary.avgTipPercentage = summary.totalTransactions > 0 ? tipPercentageSum / summary.totalTransactions : 0
   }
 
@@ -646,11 +624,55 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
   }
 }
 
-/** Tope de las listas de compatibilidad de basic-metrics (ver getBasicMetricsData). */
-export const BASIC_METRICS_ROWS_CAP_DEFAULT = 5000
-function basicMetricsRowsCap(): number {
-  const crudo = Number(process.env.BASIC_METRICS_ROWS_CAP)
-  return Number.isFinite(crudo) && crudo > 0 ? Math.floor(crudo) : BASIC_METRICS_ROWS_CAP_DEFAULT
+const LEGACY_BASIC_METRICS_BATCH_SIZE = 1000
+
+/** Lee el contrato legacy completo sin permitir una consulta individual sin tope. */
+async function fetchLegacyBasicMetricPayments(venueId: string, fromDate: Date, toDate: Date) {
+  const all: Array<{ id: string; amount: Prisma.Decimal; tipAmount: Prisma.Decimal; method: PaymentMethod; createdAt: Date }> = []
+  let cursor: string | undefined
+
+  do {
+    const page = await prisma.payment.findMany({
+      where: {
+        venueId,
+        status: TransactionStatus.COMPLETED,
+        type: { not: 'REFUND' },
+        createdAt: { gte: fromDate, lte: toDate },
+        order: { status: { not: 'CANCELLED' } },
+      },
+      select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: LEGACY_BASIC_METRICS_BATCH_SIZE + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    const hasMore = page.length > LEGACY_BASIC_METRICS_BATCH_SIZE
+    const visible = page.slice(0, LEGACY_BASIC_METRICS_BATCH_SIZE)
+    all.push(...visible)
+    cursor = hasMore ? visible[visible.length - 1]?.id : undefined
+  } while (cursor)
+
+  return all
+}
+
+async function fetchLegacyBasicMetricReviews(venueId: string, fromDate: Date, toDate: Date) {
+  const all: Array<{ id: string; overallRating: number; createdAt: Date }> = []
+  let cursor: string | undefined
+
+  do {
+    const page = await prisma.review.findMany({
+      where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
+      select: { id: true, overallRating: true, createdAt: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: LEGACY_BASIC_METRICS_BATCH_SIZE + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    const hasMore = page.length > LEGACY_BASIC_METRICS_BATCH_SIZE
+    const visible = page.slice(0, LEGACY_BASIC_METRICS_BATCH_SIZE)
+    all.push(...visible)
+    cursor = hasMore ? visible[visible.length - 1]?.id : undefined
+  } while (cursor)
+
+  return all
 }
 function toNumber(value: unknown): number {
   if (typeof value === 'bigint') return Number(value)
@@ -664,17 +686,41 @@ function round2(n: number): number {
  * Pagos QR legacy de MindForm ya filtrados con las reglas de analytics (COMPLETED,
  * sin REFUND). Sólo se llama para ese venue; para los demás nunca abre el pool.
  */
-async function fetchLegacyAnalyticsPayments(fromDate: Date, toDate: Date) {
-  const { rows } = await getLegacyPayments({ startDate: fromDate.toISOString(), endDate: toDate.toISOString() })
-  return rows
-    .filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND')
-    .map(p => ({
-      id: p.id,
-      amount: Number(p.amount),
-      tipAmount: Number(p.tipAmount),
-      method: String(p.method),
-      createdAt: p.createdAt as Date,
-    }))
+async function forEachLegacyAnalyticsPayment(
+  fromDate: Date,
+  toDate: Date,
+  consume: (payment: { id: string; amount: number; tipAmount: number; method: string; createdAt: Date }) => void,
+) {
+  await forEachLegacyPaymentPage({ startDate: fromDate.toISOString(), endDate: toDate.toISOString() }, rows => {
+    for (const payment of rows) {
+      if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+      consume({
+        id: payment.id,
+        amount: Number(payment.amount),
+        tipAmount: Number(payment.tipAmount),
+        method: String(payment.method),
+        createdAt: payment.createdAt as Date,
+      })
+    }
+  })
+}
+
+type MindFormDetailsCursor = { createdAt: string; id: string }
+
+function encodeMindFormDetailsCursor(payment: { createdAt: Date; id: string }): string {
+  return `mf:${Buffer.from(JSON.stringify({ createdAt: payment.createdAt.toISOString(), id: payment.id })).toString('base64url')}`
+}
+
+function decodeMindFormDetailsCursor(cursor: string): MindFormDetailsCursor {
+  if (!cursor.startsWith('mf:')) throw new BadRequestError('Cursor de pagos inválido')
+  try {
+    const value = JSON.parse(Buffer.from(cursor.slice(3), 'base64url').toString('utf8')) as Partial<MindFormDetailsCursor>
+    const date = new Date(value.createdAt ?? '')
+    if (!value.id || Number.isNaN(date.getTime())) throw new Error('invalid cursor')
+    return { id: value.id, createdAt: date.toISOString() }
+  } catch {
+    throw new BadRequestError('Cursor de pagos inválido')
+  }
 }
 
 /**
@@ -690,21 +736,54 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
   const limit = filters.limit ?? 500
 
   if (filters.kind === 'payments') {
-    // MindForm is the only two-database exception. Its legacy history cannot
-    // participate in a Prisma cursor, so the explicit export merges/sorts it
-    // first and then slices deterministically. Other venues stay DB-paginated.
+    // MindForm is the only two-database exception. Ask EACH database for at
+    // most limit+1 rows after the same opaque timestamp/id cursor, merge those
+    // two tiny windows, and slice. The global top K can never require more than
+    // K rows from either source, so this stays exact without loading history.
     if (venueId === MINDFORM_NEW_VENUE_ID) {
-      const merged = (await fetchPaymentsForAnalytics(venueId, { fromDate, toDate })).sort(
+      const boundary = filters.cursor ? decodeMindFormDetailsCursor(filters.cursor) : undefined
+      const nativeWhere: Prisma.PaymentWhereInput = {
+        venueId,
+        status: TransactionStatus.COMPLETED,
+        type: { not: 'REFUND' },
+        createdAt: { gte: fromDate, lte: toDate },
+        order: { status: { not: 'CANCELLED' } },
+        ...(boundary
+          ? {
+              AND: [
+                {
+                  OR: [
+                    { createdAt: { lt: new Date(boundary.createdAt) } },
+                    { createdAt: new Date(boundary.createdAt), id: { lt: boundary.id } },
+                  ],
+                },
+              ],
+            }
+          : {}),
+      }
+      const [nativeRows, legacyPage] = await Promise.all([
+        prisma.payment.findMany({
+          where: nativeWhere,
+          select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: limit + 1,
+        }),
+        getLegacyPayments({
+          startDate: fromDate.toISOString(),
+          endDate: toDate.toISOString(),
+          limit: limit + 1,
+          ...(boundary ? { before: boundary } : {}),
+        }),
+      ])
+      const merged = [...nativeRows, ...legacyPage.rows].sort(
         (a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id),
       )
-      const cursorIndex = filters.cursor ? merged.findIndex(payment => payment.id === filters.cursor) : -1
-      const start = cursorIndex >= 0 ? cursorIndex + 1 : 0
-      const pageRows = merged.slice(start, start + limit + 1)
+      const pageRows = merged.slice(0, limit + 1)
       const hasMore = pageRows.length > limit
       const visible = pageRows.slice(0, limit)
       return {
         items: visible.map(payment => transformBasicMetricPayment(payment)),
-        nextCursor: hasMore ? (visible[visible.length - 1]?.id ?? null) : null,
+        nextCursor: hasMore && visible.length > 0 ? encodeMindFormDetailsCursor(visible[visible.length - 1]) : null,
       }
     }
 

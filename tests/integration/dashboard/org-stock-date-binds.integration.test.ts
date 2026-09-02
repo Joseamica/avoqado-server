@@ -95,22 +95,19 @@ describe('getOrgSummary — the 11th in venue time holds the 20:00 sale, not the
   })
 
   it('salesLast7Days puts the sale in the bucket its instant belongs to', async () => {
-    // `now` is 14:00 MX on the 12th. The service builds the seven day edges from the Node
-    // host's local midnight (a known host-tz dependency, declared in the audit) — the test
-    // mirrors that arithmetic so the assertion is about the BIND, not about the host zone.
+    // `now` is 14:00 MX on the 12th and NIGHT is 20:00 MX on the 11th: the sale
+    // belongs in yesterday (index 5), even when Node itself runs in UTC on Render.
     const now = new Date('2025-03-12T20:00:00.000Z')
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const days = Array.from({ length: 7 }, (_, i) => new Date(startOfToday.getTime() - (6 - i) * 24 * 60 * 60 * 1000))
-    let expectedIndex = 6
-    for (let i = 0; i < 6; i += 1) {
-      if (NIGHT >= days[i] && NIGHT < days[i + 1]) expectedIndex = i
+    const previousTz = process.env.TZ
+    process.env.TZ = 'UTC'
+    try {
+      const result = await orgStockControlService.getOrgSummary(orgId, { dateFrom: FROM, dateTo: TO }, now)
+      const [venue] = result.aggregatesBySucursal
+      expect(venue.sold).toBe(1)
+      expect(venue.salesLast7Days).toEqual([0, 0, 0, 0, 0, 1, 0])
+    } finally {
+      process.env.TZ = previousTz
     }
-
-    const result = await orgStockControlService.getOrgSummary(orgId, { dateFrom: FROM, dateTo: TO }, now)
-    const [venue] = result.aggregatesBySucursal
-    expect(venue.sold).toBe(1)
-    const expected = Array.from({ length: 7 }, (_, i) => (i === expectedIndex ? 1 : 0))
-    expect(venue.salesLast7Days).toEqual(expected)
   })
 })
 

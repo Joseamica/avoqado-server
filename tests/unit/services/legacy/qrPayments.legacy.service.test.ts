@@ -12,12 +12,69 @@
  *     method/source doesn't satisfy the filter.
  */
 
+const mockLegacyQuery = jest.fn()
+jest.mock('@/services/legacy/legacyPool', () => ({ legacyPool: { query: mockLegacyQuery } }))
+
 import {
   shouldIncludeLegacyPayments,
   filterLegacyRowsByMethodSource,
+  getLegacyPaymentFacets,
+  getLegacyPayments,
   LEGACY_METHOD_VALUES,
   LEGACY_SOURCE_VALUE,
 } from '@/services/legacy/qrPayments.legacy.service'
+import { normalizeNativePaymentMethods } from '@/services/dashboard/payment.dashboard.service'
+
+describe('payment dashboard — alias CARD compatible con pagos nativos', () => {
+  it('expande CARD a crédito y débito sin perder otros métodos', () => {
+    expect(normalizeNativePaymentMethods(['CARD'])).toEqual(['CREDIT_CARD', 'DEBIT_CARD'])
+    expect(normalizeNativePaymentMethods(['CASH', 'CARD', 'CREDIT_CARD'])).toEqual([
+      'CASH',
+      'CREDIT_CARD',
+      'DEBIT_CARD',
+    ])
+  })
+
+  it('conserva undefined y los métodos nativos sin alterarlos', () => {
+    expect(normalizeNativePaymentMethods(undefined)).toBeUndefined()
+    expect(normalizeNativePaymentMethods(['CASH'])).toEqual(['CASH'])
+  })
+})
+
+describe('qrPayments.legacy.service — facetas acotadas', () => {
+  it('obtiene métodos y marcas con DISTINCT sin materializar el historial', async () => {
+    mockLegacyQuery.mockResolvedValueOnce({ rows: [{ methods: ['CARD', 'CASH'], brands: ['VISA'] }] })
+
+    await expect(getLegacyPaymentFacets()).resolves.toEqual({ methods: ['CARD', 'CASH'], sources: ['QR_LEGACY'], cardBrands: ['VISA'] })
+    expect(mockLegacyQuery).toHaveBeenCalledTimes(1)
+    expect(mockLegacyQuery.mock.calls[0][0]).toContain('array_agg(DISTINCT')
+    expect(mockLegacyQuery.mock.calls[0][0]).not.toContain('ORDER BY p."createdAt"')
+  })
+})
+
+describe('qrPayments.legacy.service — páginas estables', () => {
+  it('aplica método, límite y fechas ISO dentro de SQL', async () => {
+    mockLegacyQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 12 }] })
+
+    await expect(
+      getLegacyPayments({
+        startDate: '2026-08-01T00:00:00.000Z',
+        endDate: '2026-08-31T23:59:59.999Z',
+        methods: ['CASH'],
+        limit: 25,
+      }),
+    ).resolves.toEqual({ rows: [], total: 12 })
+
+    const [dataSql, dataParams] = mockLegacyQuery.mock.calls[0]
+    expect(dataSql).toContain("UPPER(COALESCE(p.method, '')) = 'CASH'")
+    expect(dataSql).toContain('ORDER BY p."createdAt" DESC, p.id DESC LIMIT')
+    expect(dataParams.at(-1)).toBe(25)
+    expect(dataParams.slice(1, 3)).toEqual(['2026-08-01T00:00:00.000Z', '2026-08-31T23:59:59.999Z'])
+    expect(dataParams.some((value: unknown) => value instanceof Date)).toBe(false)
+  })
+})
 
 describe('qrPayments.legacy.service — shouldIncludeLegacyPayments', () => {
   it('returns true when no filter is provided (no constraint)', () => {

@@ -115,6 +115,27 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
     expect(parcial.orderPaymentStatus).toBe('PARTIAL')
   })
 
+  it('un pago externo mayor al saldo registra todo lo realmente capturado y nunca lo llama cambio', async () => {
+    seedOrder()
+
+    const result = await payCashOrder('venue-1', 'order-1', {
+      amount: 15000,
+      tip: 0,
+      method: 'CREDIT_CARD',
+      externalSource: 'Terminal externa',
+      staffId: 'staff-1',
+    })
+
+    expect(pagoRegistrado()).toMatchObject({
+      amount: 150,
+      method: 'CREDIT_CARD',
+      fundsFlow: 'EXTERNAL_RECORDED',
+    })
+    expect(result.amount).toBe(15000)
+    expect(result.changeCents).toBe(0)
+    expect(result.totalPaidCents).toBe(15000)
+  })
+
   it('la propina va aparte: no se recorta ni cuenta como cambio', async () => {
     seedOrder()
 
@@ -174,6 +195,7 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
     seedOrder()
     prismaMock.payment.findUnique.mockResolvedValue({
       id: 'payment-previo',
+      orderId: 'order-1',
       amount: new Decimal(90),
       tipAmount: new Decimal(0),
       method: 'CASH',
@@ -185,6 +207,23 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
     expect(result.paymentId).toBe('payment-previo')
     expect(result.amount).toBe(9000)
     expect(result.changeCents).toBe(6000)
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('rechaza una idempotencyKey que ya pertenece a otra orden', async () => {
+    seedOrder()
+    prismaMock.payment.findUnique.mockResolvedValue({
+      id: 'payment-de-otra-orden',
+      orderId: 'order-2',
+      amount: new Decimal(90),
+      tipAmount: new Decimal(0),
+      method: 'CASH',
+      receipts: [],
+    })
+
+    await expect(
+      payCashOrder('venue-1', 'order-1', { amount: 9000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-reusada' }),
+    ).rejects.toThrow(/idempotencyKey.*otra orden/i)
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 

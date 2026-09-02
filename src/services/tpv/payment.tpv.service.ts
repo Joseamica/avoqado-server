@@ -1154,20 +1154,19 @@ async function updateOrderTotalsForStandalonePayment(
       })
     }
 
-    // 🎟️ COUPON FINALIZATION: Mark coupons as redeemed when order is fully paid
-    // ✅ WORLD-CLASS PATTERN: Coupons are "applied" at checkout but only "redeemed" on payment (Toast, Square)
+  }
+
+  // Efectos del settlement, independientes del modo de inventario. Los vales
+  // por área ya consumieron inventario dentro de su transacción, pero también
+  // deben redimir cupones, calificar referidos y acreditar lealtad. Antes esos
+  // tres hooks vivían dentro del `!areaTicketAlreadyFinalized` y nunca corrían.
+  if (isFullyPaid && !settledBeforeThisPayment) {
     try {
       await finalizeCouponsForOrder(updatedOrder.venueId, orderId)
     } catch (couponError: any) {
-      // ⚠️ Don't fail the payment if coupon finalization fails - just log the error
-      logger.error('⚠️ Failed to finalize coupons (payment still succeeded)', {
-        orderId,
-        error: couponError.message,
-      })
-      // Continue execution - payment is still successful
+      logger.error('⚠️ Failed to finalize coupons (payment still succeeded)', { orderId, error: couponError.message })
     }
 
-    // REFERRAL HOOK: trigger referral qualification if this order has a pending referral
     try {
       const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
       await onOrderPaid({ orderId: updatedOrder.id, venueId: updatedOrder.venueId })
@@ -1175,18 +1174,10 @@ async function updateOrderTotalsForStandalonePayment(
       console.error('[referral hook] onOrderPaid failed for order', updatedOrder.id, err)
     }
 
-    // 🎁 CUSTOMER METRICS & LOYALTY POINTS: Update for ALL customers, points for PRIMARY only
-    // ✅ WORLD-CLASS PATTERN: Multiple customers per order (visit tracking + loyalty)
-    const orderTotal = parseFloat(updatedOrder.total.toString())
-
-    // La regla vive en `awardLoyaltyForPaidOrder`, COMPARTIDA con el cobro en
-    // efectivo de Android/iOS (`payCashOrder`). Antes estaba copiada aquí y ese
-    // otro camino no la tenía: el mismo café daba sello con tarjeta y no en
-    // efectivo (Testarudo, 2026-09-01). Nunca lanza.
     await awardLoyaltyForPaidOrder({
       venueId: updatedOrder.venueId,
       orderId,
-      orderTotal,
+      orderTotal: Math.max(0, newTotal - totalTip),
       staffId,
       legacyCustomer: order.customer
         ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }

@@ -1,15 +1,12 @@
 /**
  * Zod de los listados y resúmenes de /payments y /orders del dashboard (2026-09-01).
  *
- * `pageSize` NO rechaza un valor grande: lo RECORTA al tope (`LIST_PAGE_SIZE_MAX`).
- * Un 400 dejaría sin resumen a los dashboards ya desplegados que todavía mandan
- * `pageSize=10000` en la ventana entre el deploy del backend y el del dashboard; el
- * recorte se declara en `meta.pageSize` + `meta.maxPageSize`, así que nadie puede creer
- * que recibió el total. Los demás campos son cadenas opcionales (listas CSV que parsea
- * el controlador), sin formato impuesto: exactamente lo que el listado aceptaba ya.
+ * `paginated-v1` es opt-in: aplica el tope moderno de 100. Sin ese modo se conserva
+ * temporalmente el pageSize de los bundles ya publicados (hasta el techo legacy de
+ * 10,000) para que sus tarjetas no sumen un subconjunto como si fuera el total.
  */
 import { z } from 'zod'
-import { AMOUNT_OPERATORS, LIST_PAGE_SIZE_DEFAULT, LIST_PAGE_SIZE_MAX } from '../../services/dashboard/listSummary.shared'
+import { AMOUNT_OPERATORS, LEGACY_LIST_PAGE_SIZE_MAX, LIST_PAGE_SIZE_DEFAULT } from '../../services/dashboard/listSummary.shared'
 
 /** CSV, o el mismo parámetro repetido (`?methods=CASH&methods=CARD`, que Express entrega como arreglo). */
 const csv = z.union([z.string(), z.array(z.string())]).optional()
@@ -19,7 +16,8 @@ const pageSize = z.coerce
   .int()
   .min(1)
   .catch(LIST_PAGE_SIZE_DEFAULT)
-  .transform(n => Math.min(n, LIST_PAGE_SIZE_MAX))
+  .transform(n => Math.min(n, LEGACY_LIST_PAGE_SIZE_MAX))
+const responseMode = z.enum(['paginated-v1']).optional()
 
 const amountOp = z
   .enum(AMOUNT_OPERATORS as unknown as [string, ...string[]], {
@@ -61,11 +59,11 @@ const orderListFilters = {
 }
 
 export const PaymentsListQuerySchema = z.object({
-  query: z.object({ page, pageSize, ...paymentListFilters }),
+  query: z.object({ page, pageSize, responseMode, ...paymentListFilters }),
 })
 
 export const OrdersListQuerySchema = z.object({
-  query: z.object({ page, pageSize, ...orderListFilters }),
+  query: z.object({ page, pageSize, responseMode, ...orderListFilters }),
 })
 
 /** Los filtros que hoy aplica el navegador, ahora como parámetros del resumen. */

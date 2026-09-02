@@ -13,7 +13,14 @@ import {
 } from '../../services/dashboard/export.helpers'
 
 import * as paymentSummaryService from '../../services/dashboard/paymentSummary.dashboard.service'
-import { LIST_PAGE_SIZE_MAX, amountFilterFromQuery, clampPage, clampPageSize, parseCsv } from '../../services/dashboard/listSummary.shared'
+import {
+  LIST_PAGE_SIZE_MAX,
+  amountFilterFromQuery,
+  clampLegacyPageSize,
+  clampPage,
+  clampPageSize,
+  parseCsv,
+} from '../../services/dashboard/listSummary.shared'
 
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
@@ -47,17 +54,16 @@ export async function getPaymentsData(req: Request<{ venueId: string }>, res: Re
   try {
     const { venueId } = req.params
     const q = req.query as Record<string, unknown>
-    // 🔴 Tope REAL de página (2026-09-01): el dashboard pedía pageSize=10000 y el server
-    // lo servía tal cual (10,000 filas de Payment, 37 veces en 6 h en Testarudo). El Zod
-    // de la ruta ya recorta; esto es cinturón y tirantes para quien llame sin él.
     const page = clampPage(q.page)
-    const pageSize = clampPageSize(q.pageSize)
+    const boundedResponse = q.responseMode === 'paginated-v1'
+    const pageSize = boundedResponse ? clampPageSize(q.pageSize) : clampLegacyPageSize(q.pageSize)
 
     const paymentsData = await paymentDashboardService.getPaymentsData(venueId, page, pageSize, paymentFiltersFromQuery(q))
 
-    // `meta.pageSize` ya es el EFECTIVO; `maxPageSize` declara el tope para que ningún
-    // cliente crea que 100 filas son el total (regla: nunca truncar en silencio).
-    res.status(200).json({ ...paymentsData, meta: { ...paymentsData.meta, maxPageSize: LIST_PAGE_SIZE_MAX } })
+    res.status(200).json({
+      ...paymentsData,
+      meta: { ...paymentsData.meta, ...(boundedResponse ? { maxPageSize: LIST_PAGE_SIZE_MAX, responseMode: 'paginated-v1' } : {}) },
+    })
   } catch (error) {
     next(error)
   }

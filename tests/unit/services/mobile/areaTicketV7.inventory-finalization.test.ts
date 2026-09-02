@@ -397,6 +397,8 @@ describe('AreaTicket v7 inventory finalization', () => {
         remainingBalance: new Prisma.Decimal('0.00'),
         tipAmount: new Prisma.Decimal('0.00'),
         total: new Prisma.Decimal('95.00'),
+        loyaltyEligibleAt: expect.any(Date),
+        loyaltyStaffId: 'staff-paid',
       }),
     })
     expect(result).toEqual({ areaTicketOrder: true, sessionId, fullyPaid: true })

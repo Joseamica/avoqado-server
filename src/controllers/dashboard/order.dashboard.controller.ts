@@ -10,7 +10,14 @@ import {
 } from '../../services/dashboard/export.helpers'
 import logger from '../../config/logger'
 import * as orderSummaryService from '../../services/dashboard/orderSummary.dashboard.service'
-import { LIST_PAGE_SIZE_MAX, amountFilterFromQuery, clampPage, clampPageSize, parseCsv } from '../../services/dashboard/listSummary.shared'
+import {
+  LIST_PAGE_SIZE_MAX,
+  amountFilterFromQuery,
+  clampLegacyPageSize,
+  clampPage,
+  clampPageSize,
+  parseCsv,
+} from '../../services/dashboard/listSummary.shared'
 
 /** Un valor de query como cadena no vacía, o undefined. */
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
@@ -34,13 +41,16 @@ export async function getOrdersData(req: Request<{ venueId: string }>, res: Resp
   try {
     const { venueId } = req.params
     const q = req.query as Record<string, unknown>
-    // 🔴 Tope REAL de página (2026-09-01) — ver payment.dashboard.controller.ts.
     const page = clampPage(q.page)
-    const pageSize = clampPageSize(q.pageSize)
+    const boundedResponse = q.responseMode === 'paginated-v1'
+    const pageSize = boundedResponse ? clampPageSize(q.pageSize) : clampLegacyPageSize(q.pageSize)
 
     const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize, orderFiltersFromQuery(q))
 
-    res.status(200).json({ ...ordersData, meta: { ...ordersData.meta, maxPageSize: LIST_PAGE_SIZE_MAX } })
+    res.status(200).json({
+      ...ordersData,
+      meta: { ...ordersData.meta, ...(boundedResponse ? { maxPageSize: LIST_PAGE_SIZE_MAX, responseMode: 'paginated-v1' } : {}) },
+    })
   } catch (error) {
     next(error)
   }

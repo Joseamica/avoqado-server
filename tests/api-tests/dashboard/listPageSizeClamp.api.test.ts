@@ -59,15 +59,26 @@ beforeEach(() => {
   prismaMock.$queryRaw.mockResolvedValue([])
 })
 
-describe('GET /payments — el tope de página se impone y se declara', () => {
-  it('pageSize=10000 → Prisma recibe take 100 y la respuesta lo dice (meta.pageSize 100, maxPageSize 100)', async () => {
+describe('GET /payments — paginated-v1 impone el tope sin romper bundles legacy', () => {
+  it('paginated-v1: pageSize=10000 → Prisma recibe take 100 y la respuesta declara el tope', async () => {
     const res = await request(app)
-      .get(`${BASE}/payments?page=1&pageSize=10000`)
+      .get(`${BASE}/payments?page=1&pageSize=10000&responseMode=paginated-v1`)
       .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
     expect(res.status).toBe(200)
     expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(1)
     expect(prismaMock.payment.findMany.mock.calls[0][0]).toMatchObject({ take: 100, skip: 0 })
     expect(res.body.meta).toMatchObject({ pageSize: 100, maxPageSize: 100, total: 12345, pageCount: 124 })
+  })
+
+  it('legacy sin responseMode conserva el pageSize solicitado por el dashboard ya desplegado', async () => {
+    const res = await request(app)
+      .get(`${BASE}/payments?page=1&pageSize=10000`)
+      .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.payment.findMany.mock.calls[0][0]).toMatchObject({ take: 10000, skip: 0 })
+    expect(res.body.meta).toMatchObject({ pageSize: 10000, total: 12345, pageCount: 2 })
+    expect(res.body.meta).not.toHaveProperty('maxPageSize')
   })
 
   it('pageSize hostil (abc, -5) cae al default sin 400; page inválida cae a 1', async () => {
@@ -105,14 +116,25 @@ describe('GET /payments — el tope de página se impone y se declara', () => {
   })
 })
 
-describe('GET /orders — el tope de página se impone y se declara', () => {
-  it('pageSize=10000 → take 100, meta.pageSize 100, maxPageSize 100', async () => {
+describe('GET /orders — paginated-v1 impone el tope sin romper bundles legacy', () => {
+  it('paginated-v1: pageSize=10000 → take 100, meta.pageSize 100, maxPageSize 100', async () => {
     const res = await request(app)
-      .get(`${BASE}/orders?pageSize=10000`)
+      .get(`${BASE}/orders?pageSize=10000&responseMode=paginated-v1`)
       .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
     expect(res.status).toBe(200)
     expect(prismaMock.order.findMany.mock.calls[0][0]).toMatchObject({ take: 100, skip: 0 })
     expect(res.body.meta).toMatchObject({ pageSize: 100, maxPageSize: 100, total: 54321 })
+  })
+
+  it('legacy sin responseMode conserva pageSize=500', async () => {
+    const res = await request(app)
+      .get(`${BASE}/orders?pageSize=500`)
+      .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.order.findMany.mock.calls[0][0]).toMatchObject({ take: 500, skip: 0 })
+    expect(res.body.meta).toMatchObject({ pageSize: 500, total: 54321 })
+    expect(res.body.meta).not.toHaveProperty('maxPageSize')
   })
 
   it('regresión: statuses/types/tableIds llegan al where como IN', async () => {

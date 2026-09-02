@@ -41,9 +41,8 @@ export interface AwardLoyaltyForPaidOrderArgs {
   venueId: string
   orderId: string
   /**
-   * El `Order.total` tal como quedó escrito al cobrar. Es la MISMA base que usa
-   * la PAX; cambiarla en un canal y no en otro haría que el mismo café diera
-   * puntos distintos según cómo se pagó.
+   * Base de venta y cargos sin propinas. La propina pertenece al personal y no
+   * genera puntos; todos los canales deben entregar esta misma base.
    */
   orderTotal: number
   /** Staff.id de quien cobró (se traduce a StaffVenue.id aquí). */

@@ -16,12 +16,25 @@ import { Prisma } from '@prisma/client'
  */
 export const LIST_PAGE_SIZE_MAX = 100
 export const LIST_PAGE_SIZE_DEFAULT = 10
+/**
+ * Puente de compatibilidad para bundles anteriores a `paginated-v1`.
+ * El dashboard publicado pedía 10,000 pagos y 500 órdenes; reducir esos valores
+ * cambia el significado de sus tarjetas y filtros. Este techo sólo evita inputs
+ * arbitrarios mientras esos bundles rotan. Los clientes nuevos usan el tope 100.
+ */
+export const LEGACY_LIST_PAGE_SIZE_MAX = 10_000
 
 /** Un `pageSize` hostil (10000, -3, 'abc') cae al tope o al default. Nunca revienta. */
 export function clampPageSize(raw: unknown): number {
   const n = typeof raw === 'number' ? raw : parseInt(String(raw ?? ''), 10)
   if (!Number.isFinite(n) || n < 1) return LIST_PAGE_SIZE_DEFAULT
   return Math.min(Math.trunc(n), LIST_PAGE_SIZE_MAX)
+}
+
+export function clampLegacyPageSize(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : parseInt(String(raw ?? ''), 10)
+  if (!Number.isFinite(n) || n < 1) return LIST_PAGE_SIZE_DEFAULT
+  return Math.min(Math.trunc(n), LEGACY_LIST_PAGE_SIZE_MAX)
 }
 
 export function clampPage(raw: unknown): number {

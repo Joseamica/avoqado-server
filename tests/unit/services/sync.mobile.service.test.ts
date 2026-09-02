@@ -384,7 +384,7 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
   })
 
-  it('🔴 PAY_CASH propaga el saldo autoritativo al ack (el cobro parcial OFFLINE también lo necesita)', async () => {
+  it('🔴 PAY_CASH propaga importe, cambio y saldo autoritativos al ack offline', async () => {
     // El ack se arma A MANO, así que no hereda los campos nuevos de la respuesta
     // de payCashOrder. Sin esto, el contrato nuevo NO existe justo en el flujo
     // que este trabajo arregla: venta de mostrador de $100, se abona $40 sin red,
@@ -397,6 +397,10 @@ describe('sync.mobile.service processIntents', () => {
       paymentId: 'pay-parcial',
       orderNumber: 'A-5003',
       digitalReceipt: null,
+      amount: 3500,
+      tipAmount: 500,
+      changeCents: 1000,
+      method: 'CASH',
       remainingBalanceCents: 6000,
       orderPaymentStatus: 'PARTIAL',
       orderTotalCents: 10000,
@@ -407,6 +411,10 @@ describe('sync.mobile.service processIntents', () => {
       status: 'ACKED',
       result: {
         paymentId: 'pay-parcial',
+        amount: 3500,
+        tipAmount: 500,
+        changeCents: 1000,
+        method: 'CASH',
         remainingBalanceCents: 6000,
         orderPaymentStatus: 'PARTIAL',
         orderTotalCents: 10000,

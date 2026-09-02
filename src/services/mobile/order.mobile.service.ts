@@ -7,7 +7,7 @@
  * - Order Payment: Create order first, then pay via TPV
  */
 
-import { OrderSource, OrderType, Prisma } from '@prisma/client'
+import { OrderSource, OrderType, PaymentFundsFlow, PaymentMethod, Prisma } from '@prisma/client'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
@@ -28,6 +28,7 @@ import {
 } from '../shared/discount.service'
 import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
@@ -2021,14 +2022,14 @@ export interface CashPaymentResponse {
   paymentId: string
   orderId: string
   orderNumber: string
-  /** Lo REGISTRADO como pago, en centavos: como máximo el saldo de la cuenta (sin propina). */
+  /** Lo REGISTRADO como pago, en centavos. Efectivo de cajón se limita al saldo; capturas externas conservan el importe real. */
   amount: number
   tipAmount: number
-  method: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'BANK_TRANSFER' | 'OTHER'
+  method: PaymentMethod
   status: 'COMPLETED'
   /** Lo que sobró de `amount` solicitado sobre el saldo, en centavos: el cambio que debe dar el cajero. 0 si no sobró nada. */
   changeCents: number
-  changeAmount?: number // For display purposes (calculated on iOS)
+  changeAmount?: number // Alias legacy opcional; `changeCents` es el campo autoritativo.
   // Digital receipt for the mobile client's receipt QR (customer display +
   // printed receipt). Same shape the TPV order/fast endpoints return. Null only
   // if receipt generation failed (never blocks the payment). ADDITIVE — old app
@@ -2101,6 +2102,12 @@ function pesosToCents(pesos: number): number {
  */
 function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | number | null | undefined): number {
   return Math.max(0, pedidoCents - pesosToCents(Number(registrado ?? 0)))
+}
+
+function assertIdempotentPaymentOrder(payment: { orderId?: string | null }, orderId: string): void {
+  if (payment.orderId && payment.orderId !== orderId) {
+    throw new ConflictError('La idempotencyKey ya pertenece a otra orden. Genera una llave nueva para este cobro.', 'IDEMPOTENCY_KEY_REUSED')
+  }
 }
 
 /**
@@ -2240,6 +2247,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       include: { receipts: true },
     })
     if (existingByKey) {
+      assertIdempotentPaymentOrder(existingByKey, orderId)
       logger.info(
         `🔄 [ORDER.MOBILE] Reintento idempotente detectado (key=${input.idempotencyKey}) — devuelvo el pago existente ${existingByKey.id}`,
       )
@@ -2284,12 +2292,6 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const tenderState: { resolved: import('../dashboard/tenderType.dashboard.service').ResolvedTenderCharge | null } = {
     resolved: null,
   }
-  // Sólo el efectivo entra al cajón; lo cobrado por fuera se marca como manual
-  // para que el arqueo y la atribución de ingresos no lo confundan con nuestro
-  // procesamiento.
-  const paymentSource = paymentMethod === 'CASH' ? 'APP' : 'OTHER'
-  const externalSource = paymentMethod === 'CASH' ? null : input.externalSource?.trim()?.slice(0, 50) || null
-
   const effectiveStaffId = await validateStaffVenue(input.staffId, venueId)
 
   // Find current open shift for this staff member (if any)
@@ -2347,6 +2349,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         /** Lo que de verdad se registró como pago (≤ saldo) y lo que sobró, en centavos. */
         aplicadoCents: number
         cambioCents: number
+        /** Base de puntos en pesos, sin propinas. */
+        loyaltyBase: number
         // El saldo que la transacción YA calculó — antes se quedaba dentro y el
         // código de abajo (respuesta, broadcast, hook de referidos) tenía que
         // adivinarlo o mentir. Mismo patrón que `postingId`.
@@ -2436,9 +2440,38 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // sin devoluciones, es exactamente el saldo.
         const saldoAntes = computeOrderBalance(fresh, previousPayments)
         const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
-        const cambioCents = Math.max(0, amount - saldoCents)
+
+        // Resolver la semántica ANTES de decidir si un exceso es cambio. Una
+        // tarjeta/transferencia externa ya capturada no produjo efectivo para
+        // devolver: recortarla escondería dinero real y rompería conciliación.
+        const resolvedTender =
+          input.tenderTypeId != null && input.tenderRevision != null
+            ? await resolveTenderForCharge(
+                venueId,
+                input.tenderTypeId,
+                input.tenderRevision,
+                tx,
+                input.isOfflineReplay ? 'replay' : 'online',
+              )
+            : null
+        tenderState.resolved = resolvedTender
+        const effectiveMethod = resolvedTender?.method ?? paymentMethod
+        const fundsFlow =
+          resolvedTender?.fundsFlow ??
+          (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
+        const countsAsDrawerCash = paymentCountsAsDrawerCash({
+          method: effectiveMethod,
+          fundsFlow,
+          tenderTypeId: resolvedTender?.tenderTypeId ?? null,
+          tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? null,
+        })
+        const cambioCents = countsAsDrawerCash ? Math.max(0, amount - saldoCents) : 0
         const aplicadoCents = amount - cambioCents
         const amountDecimal = aplicadoCents / 100
+
+        if (resolvedTender && !resolvedTender.tenderCaptureTip && tipDecimal > 0) {
+          throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
+        }
 
         const balance = computeOrderBalance(fresh, [...previousPayments, { amount: amountDecimal, tipAmount: tipDecimal, type: 'REGULAR' }])
 
@@ -2500,26 +2533,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
         // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
         //    insert nunca ocurre — que es exactamente lo que evita el segundo cobro.
-        // 🔑 Semántica de dinero SERVER-OWNED: si el POS referenció un tender del
-        // catálogo, el método fiscal y los snapshots salen de la revisión congelada,
-        // no de lo que mandó el cliente.
-        const resolvedTender =
-          input.tenderTypeId != null && input.tenderRevision != null
-            ? await resolveTenderForCharge(
-                venueId,
-                input.tenderTypeId,
-                input.tenderRevision,
-                tx,
-                input.isOfflineReplay ? 'replay' : 'online',
-              )
-            : null
-        tenderState.resolved = resolvedTender
-
-        // Propina prohibida en un tender configurado sin propina: el POS no debería
-        // ofrecerla, pero la frontera del sistema no confía en la UI.
-        if (resolvedTender && !resolvedTender.tenderCaptureTip && tipDecimal > 0) {
-          throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
-        }
+        const paymentSource = countsAsDrawerCash ? 'APP' : 'OTHER'
+        const externalSource = countsAsDrawerCash ? null : input.externalSource?.trim()?.slice(0, 50) || null
 
         const newPayment = await tx.payment.create({
           data: {
@@ -2533,6 +2548,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             splitType: 'FULLPAYMENT',
             source: paymentSource,
             externalSource,
+            fundsFlow,
             processedById: effectiveStaffId,
             shiftId: currentShift?.id,
             // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
@@ -2648,6 +2664,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             orderTotalCents: pesosToCents(newTotal),
             totalPaidCents: pesosToCents(totalPaidIncludingTip),
           },
+          loyaltyBase: Math.max(0, newTotal - totalTip),
         }
       })
       break // ganamos la transición
@@ -2662,6 +2679,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           include: { receipts: true },
         })
         if (winner) {
+          assertIdempotentPaymentOrder(winner, orderId)
           logger.info(`🔄 [ORDER.MOBILE] Carrera idempotente (P2002) — devuelvo el pago ganador ${winner.id}`)
           return {
             paymentId: winner.id,
@@ -2695,6 +2713,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             include: { receipts: true },
           })
           if (mine) {
+            assertIdempotentPaymentOrder(mine, orderId)
             return {
               paymentId: mine.id,
               orderId,
@@ -2734,7 +2753,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // Inalcanzable: el bucle o devuelve, o asigna, o lanza. Guard para el tipo.
     throw new ConflictError('No se pudo registrar el cobro. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
   }
-  const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId, balance, aplicadoCents, cambioCents } = paymentResult
+  const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId, balance, aplicadoCents, cambioCents, loyaltyBase } = paymentResult
   // Los payloads de abajo (cajón, sockets, respuesta) llevan lo REGISTRADO, no lo solicitado.
   const amountDecimal = aplicadoCents / 100
   if (cambioCents > 0) {
@@ -2883,9 +2902,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // (Testarudo, 2026-09-01). Al cliente que pagó su séptimo café en efectivo se le
   // quedaba a deber su café gratis — y nada fallaba, así que nadie se enteraba.
   //
-  // Base: `orderTotalCents`, que son exactamente los pesos que se acaban de
-  // escribir en `Order.total` (misma base que `updatedOrder.total` en la PAX); se
-  // regresa a pesos porque `earnPoints` y la PAX trabajan en pesos. SÓLO con la
+  // Base: venta/cargos menos propinas, igual en todos los canales. La propina
+  // pertenece al personal y nunca compra puntos. SÓLO con la
   // cuenta SALDADA: un abono de $1 no puede acercar a nadie al café gratis.
   // `awardLoyaltyForPaidOrder` no lanza, pero el try/catch se queda: el cobro ya
   // está commiteado y nada de aquí abajo puede desmentirlo.
@@ -2895,7 +2913,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       await awardLoyaltyForPaidOrder({
         venueId,
         orderId,
-        orderTotal: balance.orderTotalCents / 100,
+        orderTotal: loyaltyBase,
         staffId: effectiveStaffId,
         legacyCustomer: order.customer
           ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
@@ -2918,7 +2936,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       orderNumber: order.orderNumber,
       amount: amountDecimal,
       tipAmount: tipDecimal,
-      method: paymentMethod,
+      method: tenderState.resolved?.method ?? paymentMethod,
       status: 'completed',
     })
 
@@ -2939,7 +2957,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     amount: aplicadoCents,
     tipAmount: tip,
     changeCents: cambioCents,
-    method: paymentMethod,
+    method: tenderState.resolved?.method ?? paymentMethod,
     status: 'COMPLETED',
     digitalReceipt,
     ...(inventoryWarning ? { inventoryWarning } : {}),

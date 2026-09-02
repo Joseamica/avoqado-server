@@ -422,6 +422,35 @@ function tally(rows: any[], pick: (row: any) => { id: string; name: string } | n
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'))
 }
 
+type SupervisorStaffRow = {
+  id: string
+  active: boolean
+  venues: Array<{
+    venueId: string
+    startDate: Date
+    role: string
+    venue?: { organizationId?: string | null } | null
+  }>
+}
+
+/** Un solo supervisor canónico por sucursal, independiente del orden de Postgres. */
+export function buildVenueSupervisorMap(staffRows: SupervisorStaffRow[], organizationId: string): Record<string, string> {
+  const winners = new Map<string, { staffId: string; startDate: Date }>()
+
+  for (const row of staffRows) {
+    if (!row.active) continue
+    for (const venue of row.venues) {
+      if (venue.role !== 'MANAGER' || venue.venue?.organizationId !== organizationId) continue
+      const current = winners.get(venue.venueId)
+      const isMoreRecent = !current || venue.startDate.getTime() > current.startDate.getTime()
+      const winsTie = current && venue.startDate.getTime() === current.startDate.getTime() && row.id.localeCompare(current.staffId) < 0
+      if (isMoreRecent || winsTie) winners.set(venue.venueId, { staffId: row.id, startDate: venue.startDate })
+    }
+  }
+
+  return Object.fromEntries([...winners.entries()].map(([venueId, winner]) => [venueId, winner.staffId]))
+}
+
 export class OrgInventoryByResponsibleService {
   /**
    * Devuelve la tabla Ciudad › Supervisor › Promotor para una organización.
@@ -531,6 +560,7 @@ export class OrgInventoryByResponsibleService {
                 select: { venueId: true, startDate: true, role: true, venue: { select: { city: true, organizationId: true } } },
               },
             },
+            orderBy: { id: 'asc' },
             take: 10_000,
           })
         : []
@@ -553,14 +583,7 @@ export class OrgInventoryByResponsibleService {
 
     // Supervisor de cada sucursal: es la única pista para colgar de alguien a un
     // promotor que no tiene SIMs (sin inventario no hay de dónde deducirlo).
-    const venueSupervisors: Record<string, string> = {}
-    for (const row of staffRows) {
-      for (const v of row.venues) {
-        if (v.role === 'MANAGER' && v.venue?.organizationId === organizationId && !venueSupervisors[v.venueId]) {
-          venueSupervisors[v.venueId] = row.id
-        }
-      }
-    }
+    const venueSupervisors = buildVenueSupervisorMap(staffRows, organizationId)
 
     // Las opciones de los selectores se calculan sobre el universo SIN filtrar:
     // si salieran del conjunto ya filtrado, elegir una sucursal dejaría el
