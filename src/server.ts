@@ -73,6 +73,7 @@ import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
 import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
+import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -155,6 +156,7 @@ const gracefulShutdown = async (signal: string) => {
       inventoryPostingSweeperJob.stop()
       loyaltyReconciliationJob.stop()
       cashDrawerReconcilerJob.stop()
+      paidOrderReconcilerJob.stop()
 
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
@@ -472,6 +474,7 @@ const startApplication = async (retries = 3) => {
       inventoryPostingSweeperJob.start()
       loyaltyReconciliationJob.start()
       cashDrawerReconcilerJob.start()
+      paidOrderReconcilerJob.start()
 
       // Start subscription cancellation job
       subscriptionCancellationJob.start()

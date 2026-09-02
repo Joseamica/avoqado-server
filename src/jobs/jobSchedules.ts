@@ -28,4 +28,6 @@ export const DATABASE_JOB_SCHEDULES = {
   publishScheduledAnnouncements: '47 */5 * * * *',
   // Entrega de anuncios encolados. Cada 30 s en los segundos 6 y 36, huecos libres.
   announcementOutbox: '6,36 * * * * *',
+  // Fase 0 del turno de caja del negocio: cierra órdenes cuyos cobros ya las cubren.
+  paidOrderReconciler: '55 */10 * * * *',
 } as const
