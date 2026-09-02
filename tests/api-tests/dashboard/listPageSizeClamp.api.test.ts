@@ -127,7 +127,9 @@ describe('GET /orders — el tope de página se impone y se declara', () => {
 
 describe('GET /payments/summary y /orders/summary', () => {
   it('summary de pagos: 200 con grupos y totales; los filtros del navegador se aceptan', async () => {
-    prismaMock.$queryRaw.mockResolvedValue([{ status: 'COMPLETED', type: 'REGULAR', count: 3, amount: '150.50', tipAmount: '10' }])
+    prismaMock.$queryRaw.mockResolvedValue([
+      { status: 'COMPLETED', type: 'REGULAR', count: 3, amount: '150.50', tipAmount: '10', fcount: 1, famount: '120', ftipAmount: '5' },
+    ])
     const res = await request(app)
       .get(`${BASE}/payments/summary?methods=CASH&subtotalOp=gt&subtotalValue=100&international=yes&cardBrands=VISA,MASTERCARD`)
       .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
@@ -135,17 +137,40 @@ describe('GET /payments/summary y /orders/summary', () => {
     expect(res.body.success).toBe(true)
     expect(res.body.data.groups).toEqual([{ status: 'COMPLETED', type: 'REGULAR', count: 3, amount: 150.5, tipAmount: 10 }])
     expect(res.body.data.total).toBe(3)
-    // Con filtros del cliente se corre una SEGUNDA agregación (la de las tarjetas).
-    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
+    expect(res.body.data.filteredGroups).toEqual([{ status: 'COMPLETED', type: 'REGULAR', count: 1, amount: 120, tipAmount: 5 }])
+    expect(res.body.data.filteredTotal).toBe(1)
+    // Pestañas y tarjetas salen del MISMO escaneo (FILTER): una sola agregación aunque haya filtros del cliente.
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
     // La ruta /summary no puede caer en /:paymentId.
     expect(prismaMock.payment.findFirst).not.toHaveBeenCalled()
   })
 
-  it('summary de pagos sin filtros del navegador: UNA sola agregación', async () => {
+  it('summary de pagos sin filtros del navegador: también UNA sola agregación', async () => {
     await request(app)
       .get(`${BASE}/payments/summary?startDate=2026-08-01T06:00:00.000Z`)
       .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+  })
+
+  it('methods repetido (?methods=CASH&methods=CARD) llega como lista, no como 400', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([])
+    const res = await request(app)
+      .get(`${BASE}/payments/summary?methods=CASH&methods=CREDIT_CARD`)
+      .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
+    expect(res.status).toBe(200)
+    // El `where` viaja como fragmentos anidados de Prisma.sql; se aplana para buscar el IN y sus binds.
+    const flat = JSON.stringify(prismaMock.$queryRaw.mock.calls[0])
+    expect(flat).toContain('\\"method\\"::text IN')
+    expect(flat).toContain('CASH')
+    expect(flat).toContain('CREDIT_CARD')
+  })
+
+  it("international=true (ni 'yes' ni 'no') → 400", async () => {
+    const res = await request(app)
+      .get(`${BASE}/payments/summary?international=true`)
+      .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
+    expect(res.status).toBe(400)
+    expect(res.body.message ?? JSON.stringify(res.body)).toMatch(/international/)
   })
 
   it('un operador de monto inválido → 400 (Zod)', async () => {
@@ -157,7 +182,9 @@ describe('GET /payments/summary y /orders/summary', () => {
   })
 
   it('summary de órdenes: 200 con grupos', async () => {
-    prismaMock.$queryRaw.mockResolvedValue([{ status: 'COMPLETED', count: 2, total: '250', tipAmount: '5' }])
+    prismaMock.$queryRaw.mockResolvedValue([
+      { status: 'COMPLETED', count: 2, total: '250', tipAmount: '5', fcount: 2, ftotal: '250', ftipAmount: '5' },
+    ])
     const res = await request(app)
       .get(`${BASE}/orders/summary?totalOp=gt&totalValue=100`)
       .set('Authorization', `Bearer ${makeToken('OWNER')}`)
@@ -180,7 +207,7 @@ describe('GET /payments/summary y /orders/summary', () => {
   })
 
   it('filter-options: 200 con la forma esperada', async () => {
-    prismaMock.$queryRaw.mockResolvedValue([])
+    prismaMock.$queryRaw.mockResolvedValue([{ merchantIds: null, methods: null, sources: null, staffIds: null, brands: null }])
     const res = await request(app)
       .get(`${BASE}/payments/filter-options`)
       .set('Authorization', `Bearer ${makeToken('ADMIN')}`)

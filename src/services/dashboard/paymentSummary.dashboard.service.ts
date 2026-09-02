@@ -195,26 +195,47 @@ export function paymentRowPassesClientFilters(
 
 // ─── Grupos ────────────────────────────────────────────────────────────────────
 
-async function groupPayments(scope: Prisma.Sql, clientScope: Prisma.Sql): Promise<PaymentSummaryGroup[]> {
-  const rows = await prisma.$queryRaw<
-    Array<{ status: string; type: string | null; count: number; amount: Prisma.Decimal; tipAmount: Prisma.Decimal }>
-  >`
+type GroupRow = {
+  status: string
+  type: string | null
+  count: number
+  amount: Prisma.Decimal
+  tipAmount: Prisma.Decimal
+  fcount: number
+  famount: Prisma.Decimal
+  ftipAmount: Prisma.Decimal
+}
+
+/**
+ * UNA pasada sobre los pagos del alcance: los agregados "de las pestañas" y los "de las
+ * tarjetas" salen del mismo escaneo con `FILTER (WHERE …)`. Sin filtros del cliente el
+ * segundo juego es idéntico al primero (el FILTER es `TRUE`).
+ */
+async function groupPayments(
+  scope: Prisma.Sql,
+  clientScope: Prisma.Sql,
+): Promise<{ groups: PaymentSummaryGroup[]; filteredGroups: PaymentSummaryGroup[] }> {
+  const rows = await prisma.$queryRaw<GroupRow[]>`
     SELECT p."status"::text AS "status", p."type"::text AS "type",
            COUNT(*)::int AS "count",
            COALESCE(SUM(p."amount"), 0) AS "amount",
-           COALESCE(SUM(p."tipAmount"), 0) AS "tipAmount"
+           COALESCE(SUM(p."tipAmount"), 0) AS "tipAmount",
+           COUNT(*) FILTER (WHERE ${clientScope})::int AS "fcount",
+           COALESCE(SUM(p."amount") FILTER (WHERE ${clientScope}), 0) AS "famount",
+           COALESCE(SUM(p."tipAmount") FILTER (WHERE ${clientScope}), 0) AS "ftipAmount"
     FROM "Payment" p
-    WHERE ${scope} AND ${clientScope}
+    WHERE ${scope}
     GROUP BY p."status", p."type"
     ORDER BY p."status", p."type"
   `
-  return (rows ?? []).map(r => ({
-    status: r.status,
-    type: r.type,
-    count: r.count,
-    amount: Number(r.amount),
-    tipAmount: Number(r.tipAmount),
-  }))
+  const all = rows ?? []
+  return {
+    groups: all.map(r => ({ status: r.status, type: r.type, count: r.count, amount: Number(r.amount), tipAmount: Number(r.tipAmount) })),
+    // Un grupo que el filtro del cliente vacía no aparece (igual que un GROUP BY sobre el subconjunto).
+    filteredGroups: all
+      .filter(r => r.fcount > 0)
+      .map(r => ({ status: r.status, type: r.type, count: r.fcount, amount: Number(r.famount), tipAmount: Number(r.ftipAmount) })),
+  }
 }
 
 /** Suma filas sueltas a los grupos (las legacy de MindForm no están en Postgres). */
@@ -239,6 +260,19 @@ export function foldRowsIntoGroups(
 
 export const sumGroupCount = (groups: PaymentSummaryGroup[]): number => groups.reduce((s, g) => s + g.count, 0)
 
+/**
+ * MindForm: las filas del QR legacy viven en otra base. Se traen con las MISMAS puertas que
+ * el listado (pre-flight por método/origen, filtro post-fetch); merchant/staff no aplican a
+ * legacy (sus ids son nulos), exactamente como en `getPaymentsData`. Cualquier otro venue: [].
+ */
+async function legacyRowsFor(venueId: string, filters?: PaymentFilters) {
+  if (venueId !== MINDFORM_NEW_VENUE_ID) return []
+  const legacyFilter = { methods: filters?.methods as readonly string[] | undefined, sources: filters?.sources }
+  if (!shouldIncludeLegacyPayments(legacyFilter)) return []
+  const legacy = await getLegacyPayments({ startDate: filters?.startDate, endDate: filters?.endDate, search: filters?.search })
+  return filterLegacyRowsByMethodSource(legacy.rows, legacyFilter)
+}
+
 export async function getPaymentsSummary(
   venueId: string,
   filters?: PaymentFilters,
@@ -246,31 +280,21 @@ export async function getPaymentsSummary(
 ): Promise<PaymentsSummary> {
   if (!venueId) throw new NotFoundError('Venue ID es requerido')
 
-  const scope = paymentsSqlScope(venueId, filters)
   const withClient = hasClientFilters(client)
+  let { groups, filteredGroups } = await groupPayments(
+    paymentsSqlScope(venueId, filters),
+    withClient ? paymentsClientSqlScope(client) : Prisma.sql`TRUE`,
+  )
 
-  let groups = await groupPayments(scope, Prisma.sql`TRUE`)
-  let filteredGroups = withClient ? await groupPayments(scope, paymentsClientSqlScope(client)) : groups
-
-  // ─── MindForm: las filas del QR legacy viven en otra base y se suman aquí, con las
-  // MISMAS puertas que el listado (pre-flight por método/origen + filtro post-fetch).
-  if (venueId === MINDFORM_NEW_VENUE_ID) {
-    const legacyFilter = { methods: filters?.methods as readonly string[] | undefined, sources: filters?.sources }
-    if (shouldIncludeLegacyPayments(legacyFilter)) {
-      const legacy = await getLegacyPayments({
-        startDate: filters?.startDate,
-        endDate: filters?.endDate,
-        search: filters?.search,
-      })
-      const kept = filterLegacyRowsByMethodSource(legacy.rows, legacyFilter)
-      groups = foldRowsIntoGroups(groups, kept)
-      filteredGroups = withClient
-        ? foldRowsIntoGroups(
-            filteredGroups,
-            kept.filter(r => paymentRowPassesClientFilters(r, client)),
-          )
-        : groups
-    }
+  const legacy = await legacyRowsFor(venueId, filters)
+  if (legacy.length > 0) {
+    groups = foldRowsIntoGroups(groups, legacy)
+    filteredGroups = withClient
+      ? foldRowsIntoGroups(
+          filteredGroups,
+          legacy.filter(r => paymentRowPassesClientFilters(r, client)),
+        )
+      : groups
   }
 
   return {
@@ -291,44 +315,65 @@ export interface PaymentFilterOptions {
   cardBrands: string[]
 }
 
+const uniqSorted = (values: Array<string | null | undefined>): string[] =>
+  Array.from(new Set(values.filter((v): v is string => Boolean(v)))).sort()
+
 /**
- * Valores DISTINTOS que aparecen en los pagos del venue (todo el historial, no sólo
- * las 500 filas más recientes): son las opciones de las píldoras de filtro. Mismo
- * alcance base que el listado (`status <> PENDING`).
+ * Valores DISTINTOS que aparecen en los pagos del venue (todo el historial, no sólo las
+ * 500 filas más recientes): son las opciones de las píldoras de filtro. Mismo alcance base
+ * que el listado (`status <> PENDING`). UN escaneo de los pagos (`array_agg(DISTINCT …)`)
+ * y dos búsquedas por id para los nombres — no cinco escaneos en paralelo.
  */
 export async function getPaymentFilterOptions(venueId: string): Promise<PaymentFilterOptions> {
   if (!venueId) throw new NotFoundError('Venue ID es requerido')
   const scope = paymentsSqlScope(venueId)
 
-  const [merchantAccounts, methods, sources, waiters, cardBrands] = await Promise.all([
-    prisma.$queryRaw<Array<{ id: string; displayName: string | null; externalMerchantId: string }>>`
-      SELECT m."id", m."displayName", m."externalMerchantId"
-      FROM "MerchantAccount" m
-      WHERE m."id" IN (SELECT DISTINCT p."merchantAccountId" FROM "Payment" p WHERE ${scope} AND p."merchantAccountId" IS NOT NULL)
-      ORDER BY m."displayName" NULLS LAST, m."externalMerchantId"
-    `,
-    prisma.$queryRaw<Array<{ v: string }>>`
-      SELECT DISTINCT p."method"::text AS "v" FROM "Payment" p WHERE ${scope} ORDER BY 1
-    `,
-    prisma.$queryRaw<Array<{ v: string }>>`
-      SELECT DISTINCT p."source"::text AS "v" FROM "Payment" p WHERE ${scope} ORDER BY 1
-    `,
-    prisma.$queryRaw<Array<{ id: string; firstName: string; lastName: string }>>`
-      SELECT s."id", s."firstName", s."lastName"
-      FROM "Staff" s
-      WHERE s."id" IN (SELECT DISTINCT p."processedById" FROM "Payment" p WHERE ${scope} AND p."processedById" IS NOT NULL)
-      ORDER BY s."firstName", s."lastName", s."id"
-    `,
-    prisma.$queryRaw<Array<{ v: string }>>`
-      SELECT DISTINCT ${BRAND_SQL} AS "v" FROM "Payment" p WHERE ${scope} ORDER BY 1
-    `,
+  const [facets] = await prisma.$queryRaw<
+    Array<{
+      merchantIds: string[] | null
+      methods: string[] | null
+      sources: string[] | null
+      staffIds: string[] | null
+      brands: string[] | null
+    }>
+  >`
+    SELECT array_agg(DISTINCT p."merchantAccountId") FILTER (WHERE p."merchantAccountId" IS NOT NULL) AS "merchantIds",
+           array_agg(DISTINCT p."method"::text) AS "methods",
+           array_agg(DISTINCT p."source"::text) AS "sources",
+           array_agg(DISTINCT p."processedById") FILTER (WHERE p."processedById" IS NOT NULL) AS "staffIds",
+           array_agg(DISTINCT ${BRAND_SQL}) FILTER (WHERE ${BRAND_SQL} <> '') AS "brands"
+    FROM "Payment" p
+    WHERE ${scope}
+  `
+  const merchantIds = facets?.merchantIds ?? []
+  const staffIds = facets?.staffIds ?? []
+
+  const [merchantAccounts, waiters] = await Promise.all([
+    merchantIds.length > 0
+      ? prisma.merchantAccount.findMany({
+          where: { id: { in: merchantIds } },
+          select: { id: true, displayName: true, externalMerchantId: true },
+          orderBy: [{ displayName: 'asc' }, { externalMerchantId: 'asc' }],
+        })
+      : Promise.resolve([]),
+    staffIds.length > 0
+      ? prisma.staff.findMany({
+          where: { id: { in: staffIds } },
+          select: { id: true, firstName: true, lastName: true },
+          orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }, { id: 'asc' }],
+        })
+      : Promise.resolve([]),
   ])
 
+  // MindForm: sus filas legacy traen método CARD, origen QR_LEGACY y marcas propias que no
+  // están en Postgres; sin esto las píldoras no ofrecerían lo que el listado sí muestra.
+  const legacy = await legacyRowsFor(venueId)
+
   return {
-    merchantAccounts: merchantAccounts ?? [],
-    methods: (methods ?? []).map(r => r.v).filter(Boolean),
-    sources: (sources ?? []).map(r => r.v).filter(Boolean),
-    waiters: waiters ?? [],
-    cardBrands: (cardBrands ?? []).map(r => r.v).filter(Boolean),
+    merchantAccounts,
+    methods: uniqSorted([...(facets?.methods ?? []), ...legacy.map(r => r.method)]),
+    sources: uniqSorted([...(facets?.sources ?? []), ...legacy.map(r => r.source)]),
+    waiters,
+    cardBrands: uniqSorted([...(facets?.brands ?? []), ...legacy.map(r => r.cardBrand?.toUpperCase())]),
   }
 }

@@ -14,7 +14,7 @@ const mockGetOrgStockSummary = jest.fn((_req: any, res: any) => res.status(200).
 
 jest.mock('@/controllers/dashboard/organizationStockControl.controller', () => ({
   getOrgStockOverview: jest.fn(),
-  getOrgStockSummary: (...args: unknown[]) => mockGetOrgStockSummary(...args),
+  getOrgStockSummary: (...args: Parameters<typeof mockGetOrgStockSummary>) => mockGetOrgStockSummary(...args),
   getOrgStockItems: jest.fn(),
   getOrgStockBulkGroups: jest.fn(),
   getOrgStockCustody: jest.fn(),

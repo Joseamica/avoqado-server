@@ -76,7 +76,7 @@ describe('getShiftsSummary — pagos huérfanos acotados', () => {
     expect(where.createdAt.lte).toBeUndefined()
   })
 
-  it('la rama de turnos abiertos no cambia: sin fechas sigue pidiendo endTime null', async () => {
+  it('sin fechas, los turnos ABIERTOS siguen entrando aunque empezaran hace días (solapan con la ventana)', async () => {
     await getShiftsSummary('venue-1', {})
 
     const whereShifts = m.shift.findMany.mock.calls[0][0].where
@@ -120,6 +120,31 @@ describe('getShiftsSummary — UNA ventana efectiva para todo el resumen', () =>
     const res = await getShiftsSummary('venue-1', {})
 
     expect(res.dateRange.startTime).toBeInstanceOf(Date)
+  })
+
+  // P1 de la auditoría pre-push de Codex (2026-09-01): la ventana de 24 h se aplicaba a
+  // huérfanos y reseñas pero NO a la rama de turnos — dateRange declaraba 24 h y los turnos
+  // seguían otra regla (sólo abiertos, con TODO su historial de pagos). Ahora, sin fechas,
+  // la ventana efectiva se fija ANTES de armar cualquier consulta y todas la comparten.
+  it('sin fechas, la rama de TURNOS también usa la ventana de 24 h (solapan con el periodo, pagos dentro)', async () => {
+    const antes = Date.now()
+    await getShiftsSummary('venue-1', {})
+
+    const whereShifts = m.shift.findMany.mock.calls[0][0].where
+    // Con ventana, el OR trae más que { endTime: null }: la rama de solapamiento y la de pagos en el periodo.
+    expect(whereShifts.OR.length).toBeGreaterThan(1)
+    const inc = m.shift.findMany.mock.calls[0][0].include
+    const gte = (inc.payments.where.createdAt.gte as Date).getTime()
+    expect(gte).toBeGreaterThanOrEqual(antes - DIA_MS - 5000)
+    expect(gte).toBeLessThanOrEqual(Date.now() - DIA_MS + 5000)
+  })
+
+  it('con sólo endTime, la ventana empieza 24 h ANTES de ese endTime (nunca gte > lte)', async () => {
+    await getShiftsSummary('venue-1', { endTime: '2026-08-30T23:59:59.000Z' })
+
+    const where = m.payment.findMany.mock.calls[0][0].where
+    expect(where.createdAt.gte).toEqual(new Date(new Date('2026-08-30T23:59:59.000Z').getTime() - DIA_MS))
+    expect(where.createdAt.lte).toEqual(new Date('2026-08-30T23:59:59.000Z'))
   })
 
   it('con fechas del cliente, órdenes y reseñas usan la ventana del cliente (sin cambios)', async () => {

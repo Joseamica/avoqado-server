@@ -21,8 +21,16 @@
  *     npx jest --selectProjects integration --testPathPattern basic-metrics-sql-aggregation
  */
 
+import { Prisma } from '@prisma/client'
+
 import { getBasicMetricsData } from '@/services/dashboard/generalStats.dashboard.service'
 import prisma from '@/utils/prismaClient'
+
+/** Semilla de un pago: sólo lo que `orden()` NO pone por ti (amount y method son obligatorios). */
+type PagoSemilla = Omit<
+  Prisma.PaymentUncheckedCreateWithoutOrderInput,
+  'venueId' | 'createdAt' | 'feePercentage' | 'feeAmount' | 'netAmount'
+>
 
 const DAY = new Date('2025-03-11T18:00:00.000Z')
 const FILTERS = { fromDate: '2025-03-09T00:00:00.000Z', toDate: '2025-03-12T23:59:59.999Z' }
@@ -58,7 +66,7 @@ beforeAll(async () => {
   })
   venueId = venue.id
 
-  const orden = (n: string, status: 'COMPLETED' | 'CANCELLED', pagos: Array<Record<string, unknown>>) =>
+  const orden = (n: string, status: 'COMPLETED' | 'CANCELLED', pagos: PagoSemilla[]) =>
     prisma.order.create({
       data: {
         venueId,

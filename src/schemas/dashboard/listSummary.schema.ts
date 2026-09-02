@@ -11,7 +11,8 @@
 import { z } from 'zod'
 import { AMOUNT_OPERATORS, LIST_PAGE_SIZE_DEFAULT, LIST_PAGE_SIZE_MAX } from '../../services/dashboard/listSummary.shared'
 
-const csv = z.string().optional()
+/** CSV, o el mismo parámetro repetido (`?methods=CASH&methods=CARD`, que Express entrega como arreglo). */
+const csv = z.union([z.string(), z.array(z.string())]).optional()
 const page = z.coerce.number().int().min(1).catch(1)
 const pageSize = z.coerce
   .number()
@@ -20,8 +21,18 @@ const pageSize = z.coerce
   .catch(LIST_PAGE_SIZE_DEFAULT)
   .transform(n => Math.min(n, LIST_PAGE_SIZE_MAX))
 
-const amountOp = z.enum(AMOUNT_OPERATORS as unknown as [string, ...string[]]).optional()
-const amountValue = z.coerce.number().optional()
+const amountOp = z
+  .enum(AMOUNT_OPERATORS as unknown as [string, ...string[]], {
+    errorMap: () => ({ message: 'Operador de monto inválido (gt, lt, eq, between)' }),
+  })
+  .optional()
+const amountValue = z.coerce.number({ invalid_type_error: 'El monto debe ser un número' }).optional()
+const yesNoCsv = csv.refine(
+  v => (v === undefined ? true : (Array.isArray(v) ? v.join(',') : v).split(',').every(x => ['yes', 'no', ''].includes(x.trim()))),
+  {
+    message: "international sólo acepta 'yes' y/o 'no'",
+  },
+)
 
 /** Filtros del listado de pagos (los mismos de siempre, incluidos los de UN valor). */
 const paymentListFilters = {
@@ -71,7 +82,7 @@ export const PaymentsSummaryQuerySchema = z.object({
     totalValue: amountValue,
     totalValue2: amountValue,
     /** CSV de 'yes' | 'no' */
-    international: csv,
+    international: yesNoCsv,
     /** CSV de marcas (VISA, MASTERCARD, …) */
     cardBrands: csv,
   }),

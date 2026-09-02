@@ -176,9 +176,9 @@ export async function getPaymentsData(
         },
         transactionCost: true, // Include profit/cost information for SUPERADMIN
       },
-      orderBy: {
-        createdAt: 'desc',
-      },
+      // Desempate por id: con el tope de 100 el cliente pagina de verdad, y dos pagos
+      // con el mismo createdAt cambiaban de página entre peticiones (offset inestable).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip,
       take,
     }),

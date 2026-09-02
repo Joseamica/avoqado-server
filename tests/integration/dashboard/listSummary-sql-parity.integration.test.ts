@@ -24,14 +24,20 @@
  */
 import prisma from '@/utils/prismaClient'
 import { buildPaymentsWhereClause, PaymentFilters } from '@/services/dashboard/payment.dashboard.service'
-import { buildOrdersWhereClause, OrderFilters } from '@/services/dashboard/order.dashboard.service'
+import { buildOrdersWhereClause, getOrders, OrderFilters } from '@/services/dashboard/order.dashboard.service'
 import {
   getPaymentsSummary,
   getPaymentFilterOptions,
   PaymentClientFilters,
   paymentRowPassesClientFilters,
+  paymentsSqlScope,
 } from '@/services/dashboard/paymentSummary.dashboard.service'
-import { getOrdersSummary, getOrderFilterOptions, OrderClientFilters } from '@/services/dashboard/orderSummary.dashboard.service'
+import {
+  getOrdersSummary,
+  getOrderFilterOptions,
+  OrderClientFilters,
+  ordersSqlScope,
+} from '@/services/dashboard/orderSummary.dashboard.service'
 import { passesAmountFilter } from '@/services/dashboard/listSummary.shared'
 
 const suffix = `ls-${Date.now()}`
@@ -406,6 +412,19 @@ describe('paridad pagos: summary.total === prisma.payment.count({ where: buildPa
     const esperado = await prisma.payment.count({ where: buildPaymentsWhereClause(venueId, filters) })
     const summary = await getPaymentsSummary(venueId, filters)
     expect(summary.total).toBe(esperado)
+    // No sólo el CONTEO: el MISMO conjunto de filas. Un espejo que casa la fila A donde Prisma
+    // casa la B daría el mismo total y seguiría mintiendo.
+    const idsPrisma = (
+      await prisma.payment.findMany({ where: buildPaymentsWhereClause(venueId, filters), select: { id: true }, take: 1000 })
+    )
+      .map(r => r.id)
+      .sort()
+    const idsSql = (
+      await prisma.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM "Payment" p WHERE ${paymentsSqlScope(venueId, filters)}`
+    )
+      .map(r => r.id)
+      .sort()
+    expect(idsSql).toEqual(idsPrisma)
     // Sin filtros del cliente, los dos juegos de grupos son el mismo.
     expect(summary.filteredGroups).toEqual(summary.groups)
     expect(summary.filteredTotal).toBe(esperado)
@@ -427,6 +446,10 @@ describe('paridad órdenes: summary.total === prisma.order.count({ where: buildO
     ['statuses PENDING+DELETED', { ...RANGE, statuses: ['PENDING', 'DELETED'] }],
     ['types DINE_IN', { ...RANGE, types: ['DINE_IN'] }],
     ['types DELIVERY+TAKEOUT', { ...RANGE, types: ['DELIVERY', 'TAKEOUT'] }],
+    ['types FAST («Venta sin productos»: prefijo del número, no un OrderType)', { ...RANGE, types: ['FAST'] }],
+    ['types FAST + DINE_IN', { ...RANGE, types: ['FAST', 'DINE_IN'] }],
+    ['types FAST + búsqueda (el OR de la búsqueda no se pisa)', { ...RANGE, types: ['FAST'], search: 'fast' }],
+    ['types FAST + búsqueda sin resultados', { ...RANGE, types: ['FAST'], search: 'zzz-nadie' }],
     ['tableIds', { ...RANGE, tableIds: [] as string[] }],
     ['staffIds (servedBy)', { ...RANGE, staffIds: [] as string[] }],
     ['búsqueda FAST', { ...RANGE, search: 'fast' }],
@@ -449,6 +472,13 @@ describe('paridad órdenes: summary.total === prisma.order.count({ where: buildO
     const esperado = await prisma.order.count({ where: buildOrdersWhereClause(venueId, filters) })
     const summary = await getOrdersSummary(venueId, filters)
     expect(summary.total).toBe(esperado)
+    const idsPrisma = (await prisma.order.findMany({ where: buildOrdersWhereClause(venueId, filters), select: { id: true }, take: 1000 }))
+      .map(r => r.id)
+      .sort()
+    const idsSql = (await prisma.$queryRaw<Array<{ id: string }>>`SELECT o."id" FROM "Order" o WHERE ${ordersSqlScope(venueId, filters)}`)
+      .map(r => r.id)
+      .sort()
+    expect(idsSql).toEqual(idsPrisma)
     expect(summary.filteredGroups).toEqual(summary.groups)
   })
 })
@@ -491,6 +521,21 @@ describe('grupos de pagos (dominio)', () => {
   it('un venue sin pagos devuelve grupos vacíos y total 0', async () => {
     const s = await getPaymentsSummary(otherVenueId, { ...RANGE, methods: ['CRYPTOCURRENCY'] as any })
     expect(s).toEqual({ groups: [], filteredGroups: [], total: 0, filteredTotal: 0 })
+  })
+})
+
+describe('el filtro «Venta sin productos» (types=FAST) — cerrado el 2026-09-01', () => {
+  it('el listado ya NO revienta y devuelve sólo las órdenes FAST-…', async () => {
+    const r = await getOrders(venueId, 1, 10, { ...RANGE, types: ['FAST'] })
+    expect(r.meta.total).toBe(1)
+    expect(r.data[0].orderNumber).toBe(`FAST-${suffix}`)
+  })
+
+  it('FAST junto a un tipo real es un OR: las FAST más las de ese tipo', async () => {
+    const r = await getOrdersSummary(venueId, { ...RANGE, types: ['FAST', 'DELIVERY'] })
+    expect(r.total).toBe(2) // FAST-… + la READY de tipo DELIVERY
+    const soloDelivery = await getOrdersSummary(venueId, { ...RANGE, types: ['DELIVERY'] })
+    expect(soloDelivery.total).toBe(1)
   })
 })
 
@@ -549,6 +594,7 @@ describe('filtros del cliente en SQL == réplica en Node sobre las filas', () =>
       select: { amount: true, tipAmount: true, cardBrand: true, processorData: true, status: true, type: true },
       take: 1000,
     })
+    expect(rows.length).toBeLessThan(1000) // el oráculo tiene que ver TODAS las filas
     const esperadas = rows.filter(r => paymentRowPassesClientFilters(r, client))
     const summary = await getPaymentsSummary(venueId, RANGE, client)
     expect(summary.filteredTotal).toBe(esperadas.length)
@@ -557,6 +603,13 @@ describe('filtros del cliente en SQL == réplica en Node sobre las filas', () =>
     expect(round2(summary.filteredGroups.reduce((s, g) => s + g.amount, 0))).toBe(sumaEsperada)
     // Los grupos SIN filtros del cliente no se tocan.
     expect(summary.total).toBe(rows.length)
+  })
+
+  it('un grupo que el filtro del cliente vacía desaparece de filteredGroups (como un GROUP BY del subconjunto)', async () => {
+    const s = await getPaymentsSummary(venueId, RANGE, { subtotal: { operator: 'gt', value: 100 } })
+    expect(s.groups.some(g => g.status === 'PROCESSING')).toBe(true)
+    expect(s.filteredGroups.some(g => g.status === 'PROCESSING')).toBe(false) // el de $20 no pasa
+    expect(s.filteredGroups.every(g => g.count > 0)).toBe(true)
   })
 
   it('la réplica en Node de passesAmountFilter es la de Payments.tsx', () => {

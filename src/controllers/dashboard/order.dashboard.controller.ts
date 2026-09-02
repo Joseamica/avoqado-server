@@ -12,14 +12,18 @@ import logger from '../../config/logger'
 import * as orderSummaryService from '../../services/dashboard/orderSummary.dashboard.service'
 import { LIST_PAGE_SIZE_MAX, amountFilterFromQuery, clampPage, clampPageSize, parseCsv } from '../../services/dashboard/listSummary.shared'
 
+/** Un valor de query como cadena no vacía, o undefined. */
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+/** CSV o parámetro repetido (arreglo): los dos caminos llegan a parseCsv. */
+const list = (v: unknown): string[] | undefined => (Array.isArray(v) ? parseCsv(v.map(String)) : parseCsv(str(v)))
+
 /** Los filtros del listado, tal como llegan en la query (CSV) → `OrderFilters`. */
 function orderFiltersFromQuery(q: Record<string, unknown>): orderDashboardService.OrderFilters {
-  const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
   return {
-    statuses: parseCsv(str(q.statuses)),
-    types: parseCsv(str(q.types)),
-    tableIds: parseCsv(str(q.tableIds)),
-    staffIds: parseCsv(str(q.staffIds)),
+    statuses: list(q.statuses),
+    types: list(q.types),
+    tableIds: list(q.tableIds),
+    staffIds: list(q.staffIds),
     search: str(q.search),
     startDate: str(q.startDate),
     endDate: str(q.endDate),

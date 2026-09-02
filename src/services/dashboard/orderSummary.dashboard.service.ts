@@ -13,7 +13,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
-import { OrderFilters } from './order.dashboard.service'
+import { FAST_ORDER_NUMBER_PREFIX, FAST_TYPE_FILTER, OrderFilters } from './order.dashboard.service'
 import { AmountFilter, amountPredicate, andAll, decimalBind, ilikeContains, orAny } from './listSummary.shared'
 
 /** Los filtros que hoy aplica `Orders.tsx` en el navegador, encima del listado. */
@@ -53,7 +53,17 @@ export function ordersSqlScope(venueId: string, filters?: OrderFilters): Prisma.
   if (!filters) return andAll(parts)
 
   // { type: { in } }
-  if (filters.types && filters.types.length > 0) parts.push(Prisma.sql`${O}."type"::text IN (${Prisma.join(filters.types)})`)
+  // { type: { in } } — 'FAST' se traduce a `orderNumber LIKE 'FAST-%'` (ver buildOrdersWhereClause)
+  if (filters.types && filters.types.length > 0) {
+    const realTypes = filters.types.filter(t => t !== FAST_TYPE_FILTER)
+    if (realTypes.length === filters.types.length) {
+      parts.push(Prisma.sql`${O}."type"::text IN (${Prisma.join(filters.types)})`)
+    } else {
+      const or: Prisma.Sql[] = [Prisma.sql`${O}."orderNumber" LIKE ${`${FAST_ORDER_NUMBER_PREFIX}%`}`]
+      if (realTypes.length > 0) or.push(Prisma.sql`${O}."type"::text IN (${Prisma.join(realTypes)})`)
+      parts.push(orAny(or))
+    }
+  }
   // { tableId: { in } }
   if (filters.tableIds && filters.tableIds.length > 0) parts.push(Prisma.sql`${O}."tableId" IN (${Prisma.join(filters.tableIds)})`)
   // { servedById: { in } }
@@ -93,27 +103,51 @@ export function ordersClientSqlScope(client?: OrderClientFilters): Prisma.Sql {
 
 export const hasOrderClientFilters = (client?: OrderClientFilters): boolean => Boolean(client && (client.total || client.tip))
 
-async function groupOrders(scope: Prisma.Sql, clientScope: Prisma.Sql): Promise<OrderSummaryGroup[]> {
-  const rows = await prisma.$queryRaw<Array<{ status: string; count: number; total: Prisma.Decimal; tipAmount: Prisma.Decimal }>>`
+type OrderGroupRow = {
+  status: string
+  count: number
+  total: Prisma.Decimal
+  tipAmount: Prisma.Decimal
+  fcount: number
+  ftotal: Prisma.Decimal
+  ftipAmount: Prisma.Decimal
+}
+
+/** UNA pasada: agregados de pestañas y de tarjetas del mismo escaneo, con `FILTER (WHERE …)`. */
+async function groupOrders(
+  scope: Prisma.Sql,
+  clientScope: Prisma.Sql,
+): Promise<{ groups: OrderSummaryGroup[]; filteredGroups: OrderSummaryGroup[] }> {
+  const rows = await prisma.$queryRaw<OrderGroupRow[]>`
     SELECT o."status"::text AS "status",
            COUNT(*)::int AS "count",
            COALESCE(SUM(o."total"), 0) AS "total",
-           COALESCE(SUM(o."tipAmount"), 0) AS "tipAmount"
+           COALESCE(SUM(o."tipAmount"), 0) AS "tipAmount",
+           COUNT(*) FILTER (WHERE ${clientScope})::int AS "fcount",
+           COALESCE(SUM(o."total") FILTER (WHERE ${clientScope}), 0) AS "ftotal",
+           COALESCE(SUM(o."tipAmount") FILTER (WHERE ${clientScope}), 0) AS "ftipAmount"
     FROM "Order" o
-    WHERE ${scope} AND ${clientScope}
+    WHERE ${scope}
     GROUP BY o."status"
     ORDER BY o."status"
   `
-  return (rows ?? []).map(r => ({ status: r.status, count: r.count, total: Number(r.total), tipAmount: Number(r.tipAmount) }))
+  const all = rows ?? []
+  return {
+    groups: all.map(r => ({ status: r.status, count: r.count, total: Number(r.total), tipAmount: Number(r.tipAmount) })),
+    filteredGroups: all
+      .filter(r => r.fcount > 0)
+      .map(r => ({ status: r.status, count: r.fcount, total: Number(r.ftotal), tipAmount: Number(r.ftipAmount) })),
+  }
 }
 
 export const sumOrderGroupCount = (groups: OrderSummaryGroup[]): number => groups.reduce((s, g) => s + g.count, 0)
 
 export async function getOrdersSummary(venueId: string, filters?: OrderFilters, client?: OrderClientFilters): Promise<OrdersSummary> {
   if (!venueId) throw new NotFoundError('Venue ID es requerido')
-  const scope = ordersSqlScope(venueId, filters)
-  const groups = await groupOrders(scope, Prisma.sql`TRUE`)
-  const filteredGroups = hasOrderClientFilters(client) ? await groupOrders(scope, ordersClientSqlScope(client)) : groups
+  const { groups, filteredGroups } = await groupOrders(
+    ordersSqlScope(venueId, filters),
+    hasOrderClientFilters(client) ? ordersClientSqlScope(client) : Prisma.sql`TRUE`,
+  )
   return { groups, filteredGroups, total: sumOrderGroupCount(groups), filteredTotal: sumOrderGroupCount(filteredGroups) }
 }
 
@@ -129,37 +163,50 @@ export interface OrderFilterOptions {
 }
 
 /**
- * Valores DISTINTOS de las órdenes del venue, con el MISMO alcance base que el listado
- * sin filtros (fuera PENDING/CANCELLED/DELETED — por eso el filtro de estado nunca
- * ofreció "cancelada": así era y así sigue). Meseros = `servedBy || createdBy`.
+ * Valores DISTINTOS de las órdenes del venue, con el MISMO alcance base que el listado sin
+ * filtros (fuera PENDING/CANCELLED/DELETED — por eso el filtro de estado nunca ofreció
+ * "cancelada": así era y así sigue). Meseros = `servedBy || createdBy`. UN escaneo de las
+ * órdenes + dos búsquedas por id.
  */
 export async function getOrderFilterOptions(venueId: string): Promise<OrderFilterOptions> {
   if (!venueId) throw new NotFoundError('Venue ID es requerido')
   const scope = ordersSqlScope(venueId)
 
-  const [statuses, types, fast, tables, waiters] = await Promise.all([
-    prisma.$queryRaw<Array<{ v: string }>>`SELECT DISTINCT o."status"::text AS "v" FROM "Order" o WHERE ${scope} ORDER BY 1`,
-    prisma.$queryRaw<Array<{ v: string }>>`SELECT DISTINCT o."type"::text AS "v" FROM "Order" o WHERE ${scope} ORDER BY 1`,
-    prisma.$queryRaw<
-      Array<{ v: boolean }>
-    >`SELECT EXISTS (SELECT 1 FROM "Order" o WHERE ${scope} AND o."orderNumber" LIKE 'FAST-%') AS "v"`,
-    prisma.$queryRaw<Array<{ id: string; number: string }>>`
-      SELECT t."id", t."number" FROM "Table" t
-      WHERE t."id" IN (SELECT DISTINCT o."tableId" FROM "Order" o WHERE ${scope} AND o."tableId" IS NOT NULL)
-      ORDER BY t."number", t."id"
-    `,
-    prisma.$queryRaw<Array<{ id: string; firstName: string; lastName: string }>>`
-      SELECT s."id", s."firstName", s."lastName" FROM "Staff" s
-      WHERE s."id" IN (SELECT DISTINCT COALESCE(o."servedById", o."createdById") FROM "Order" o WHERE ${scope} AND COALESCE(o."servedById", o."createdById") IS NOT NULL)
-      ORDER BY s."firstName", s."lastName", s."id"
-    `,
+  const [facets] = await prisma.$queryRaw<
+    Array<{ statuses: string[] | null; types: string[] | null; fast: boolean | null; tableIds: string[] | null; staffIds: string[] | null }>
+  >`
+    SELECT array_agg(DISTINCT o."status"::text) AS "statuses",
+           array_agg(DISTINCT o."type"::text) AS "types",
+           bool_or(o."orderNumber" LIKE 'FAST-%') AS "fast",
+           array_agg(DISTINCT o."tableId") FILTER (WHERE o."tableId" IS NOT NULL) AS "tableIds",
+           array_agg(DISTINCT COALESCE(o."servedById", o."createdById")) FILTER (WHERE COALESCE(o."servedById", o."createdById") IS NOT NULL) AS "staffIds"
+    FROM "Order" o
+    WHERE ${scope}
+  `
+  const tableIds = facets?.tableIds ?? []
+  const staffIds = facets?.staffIds ?? []
+  const [tables, waiters] = await Promise.all([
+    tableIds.length > 0
+      ? prisma.table.findMany({
+          where: { id: { in: tableIds } },
+          select: { id: true, number: true },
+          orderBy: [{ number: 'asc' }, { id: 'asc' }],
+        })
+      : Promise.resolve([]),
+    staffIds.length > 0
+      ? prisma.staff.findMany({
+          where: { id: { in: staffIds } },
+          select: { id: true, firstName: true, lastName: true },
+          orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }, { id: 'asc' }],
+        })
+      : Promise.resolve([]),
   ])
 
   return {
-    statuses: (statuses ?? []).map(r => r.v).filter(Boolean),
-    types: (types ?? []).map(r => r.v).filter(Boolean),
-    hasFastSales: Boolean(fast?.[0]?.v),
-    tables: tables ?? [],
-    waiters: waiters ?? [],
+    statuses: [...(facets?.statuses ?? [])].sort(),
+    types: [...(facets?.types ?? [])].sort(),
+    hasFastSales: Boolean(facets?.fast),
+    tables,
+    waiters,
   }
 }

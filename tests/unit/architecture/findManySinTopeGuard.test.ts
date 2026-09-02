@@ -66,11 +66,10 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/attendance.dashboard.service.ts': 2,
   'src/services/dashboard/attendanceLiveAlert.ts': 1,
   'src/services/dashboard/autoReorder.service.ts': 2,
-  // 2026-09-01: 8 → 2. Calendar, byCardType, projection y los cash se agregaron en
-  // Postgres (golden al centavo). Los 2 que quedan pasan cada pago pendiente por el
-  // motor de liquidación vivo (projectPaymentSettlement) — duplicar ese motor en SQL
-  // sería mantener la lógica del dinero en dos lenguajes; llevan select quirúrgico.
-  'src/services/dashboard/availableBalance.dashboard.service.ts': 2,
+  // 2026-09-01: availableBalance bajó de 8 → 0. Calendar, byCardType, projection y
+  // cash se agregaron en Postgres; timeline y saldo completo recorren páginas
+  // internas con cursores. Al llegar a cero sale del inventario en vez de guardar
+  // una excepción vacía.
   'src/services/dashboard/bankReconciliation.service.ts': 1,
   'src/services/dashboard/cash-out/cash-out.ledger.service.ts': 2,
   'src/services/dashboard/cashCloseout.dashboard.service.ts': 1,

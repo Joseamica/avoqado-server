@@ -490,12 +490,16 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     }
   }
 
-  // P2 de la auditoría de Codex (2026-09-01): el resumen usa UNA ventana efectiva.
-  // Con fechas del cliente, la del cliente; sin fechas, las últimas 24 h. La comparten
-  // los pagos huérfanos, el conteo de órdenes huérfanas, el de reseñas y el dateRange
-  // de la respuesta — antes cada uno cortaba distinto (ventas de 24 h junto a conteos
-  // históricos, con dateRange null/null: inservible para conciliar).
-  const effectiveStartTime: Date = parsedStartTime ?? new Date(Date.now() - 24 * 60 * 60 * 1000)
+  // Auditorías de Codex (2026-09-01, P2 y luego P1 pre-push): el resumen usa UNA ventana
+  // efectiva y la fija ANTES de armar cualquier consulta. Con fechas del cliente, la del
+  // cliente; sin startTime, 24 h antes del endTime (o de ahora). La comparten los TURNOS
+  // (solapamiento + pagos dentro del periodo), los huérfanos, las reseñas y el dateRange.
+  // Antes la ventana sólo regía huérfanos y reseñas: los turnos seguían otra regla (sólo
+  // abiertos, con TODO su historial) y dateRange declaraba 24 h que sus totales no cumplían.
+  if (!parsedStartTime) {
+    parsedStartTime = new Date((parsedEndTime ?? new Date()).getTime() - 24 * 60 * 60 * 1000)
+  }
+  const effectiveStartTime: Date = parsedStartTime
   const effectiveEndTime: Date | null = parsedEndTime ?? null
 
   // Build the base query filters for shifts

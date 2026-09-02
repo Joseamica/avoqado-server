@@ -19,14 +19,18 @@ import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 
+/** Un valor de query como cadena no vacía, o undefined. */
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+/** CSV o parámetro repetido (arreglo): los dos caminos llegan a parseCsv. */
+const list = (v: unknown): string[] | undefined => (Array.isArray(v) ? parseCsv(v.map(String)) : parseCsv(str(v)))
+
 /** Los filtros del listado, tal como llegan en la query (CSV) → `PaymentFilters`. */
 function paymentFiltersFromQuery(q: Record<string, unknown>): paymentDashboardService.PaymentFilters {
-  const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
   return {
-    merchantAccountIds: parseCsv(str(q.merchantAccountIds)),
-    methods: parseCsv(str(q.methods)) as any,
-    sources: parseCsv(str(q.sources)),
-    staffIds: parseCsv(str(q.staffIds)),
+    merchantAccountIds: list(q.merchantAccountIds),
+    methods: list(q.methods) as any,
+    sources: list(q.sources),
+    staffIds: list(q.staffIds),
     // Backward-compat single-value filters
     merchantAccountId: str(q.merchantAccountId),
     method: str(q.method) as any,
@@ -68,8 +72,8 @@ export async function getPaymentsSummary(req: Request<{ venueId: string }>, res:
       subtotal: amountFilterFromQuery(q, 'subtotal'),
       tip: amountFilterFromQuery(q, 'tip'),
       total: amountFilterFromQuery(q, 'total'),
-      international: parseCsv(typeof q.international === 'string' ? q.international : undefined),
-      cardBrands: parseCsv(typeof q.cardBrands === 'string' ? q.cardBrands : undefined),
+      international: list(q.international),
+      cardBrands: list(q.cardBrands),
     })
     res.status(200).json({ success: true, data: summary })
   } catch (error) {

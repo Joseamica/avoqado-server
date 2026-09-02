@@ -36,8 +36,6 @@ jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({
 
 import { Decimal } from '@prisma/client/runtime/library'
 
-import { Decimal } from '@prisma/client/runtime/library'
-
 import logger from '@/config/logger'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'

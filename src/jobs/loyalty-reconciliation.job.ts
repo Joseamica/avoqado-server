@@ -3,6 +3,7 @@ import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { awardLoyaltyForPaidOrder } from '../services/shared/loyaltyOnPaidOrder'
 import prisma from '../utils/prismaClient'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 
 const BATCH_LIMIT = 25
@@ -65,26 +66,33 @@ export class LoyaltyReconciliationJob {
     try {
       const now = this.dependencies.now()
       const staleBefore = new Date(now.getTime() - LEASE_MS)
-      const candidates = await this.dependencies.prisma.order.findMany({
-        where: {
-          loyaltyEligibleAt: { not: null },
-          loyaltyProcessedAt: null,
-          loyaltyAttempts: { lt: MAX_ATTEMPTS },
-          OR: [{ loyaltyProcessingAt: null }, { loyaltyProcessingAt: { lt: staleBefore } }],
-        },
-        select: {
-          id: true,
-          venueId: true,
-          total: true,
-          loyaltyEligibleAt: true,
-          loyaltyProcessingAt: true,
-          loyaltyAttempts: true,
-          loyaltyStaffId: true,
-          customer: { select: { id: true, firstName: true, lastName: true } },
-        },
-        orderBy: [{ loyaltyEligibleAt: 'asc' }, { id: 'asc' }],
-        take: BATCH_LIMIT,
-      })
+      // Regla cron-jobs.md: la lectura de ENTRADA reintenta errores transitorios de
+      // conexión — sin esto, un P1001 en la estampida de la hora en punto mata el tick
+      // (lo cazó jobDbRetryGuard en la verificación pre-push del 2026-09-01).
+      const candidates = await retry(
+        () =>
+          this.dependencies.prisma.order.findMany({
+            where: {
+              loyaltyEligibleAt: { not: null },
+              loyaltyProcessedAt: null,
+              loyaltyAttempts: { lt: MAX_ATTEMPTS },
+              OR: [{ loyaltyProcessingAt: null }, { loyaltyProcessingAt: { lt: staleBefore } }],
+            },
+            select: {
+              id: true,
+              venueId: true,
+              total: true,
+              loyaltyEligibleAt: true,
+              loyaltyProcessingAt: true,
+              loyaltyAttempts: true,
+              loyaltyStaffId: true,
+              customer: { select: { id: true, firstName: true, lastName: true } },
+            },
+            orderBy: [{ loyaltyEligibleAt: 'asc' }, { id: 'asc' }],
+            take: BATCH_LIMIT,
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'loyalty-reconciliation.find' },
+      )
 
       let applied = 0
       let failed = 0
