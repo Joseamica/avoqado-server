@@ -163,7 +163,7 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
    * tomó justo mientras evaluábamos) el resultado se descarta — se resuelve `UNKNOWN`, no se
    * inventa un SKIPPED que nunca quedó escrito.
    */
-  async function marcarSkipped(lastError: string): Promise<'SKIPPED' | 'UNKNOWN'> {
+  const marcarSkipped = async (lastError: string): Promise<'SKIPPED' | 'UNKNOWN'> => {
     try {
       await prisma.$transaction(async tx => {
         const updated = await tx.customerCampaignDelivery.updateMany({
@@ -200,7 +200,7 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
     }
   }
 
-  async function marcarDead(lastError: string): Promise<'DEAD' | 'UNKNOWN'> {
+  const marcarDead = async (lastError: string): Promise<'DEAD' | 'UNKNOWN'> => {
     try {
       const updated = await prisma.customerCampaignDelivery.updateMany({
         where: casWhere,
@@ -218,7 +218,7 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
     }
   }
 
-  async function marcarRetrying(lastError: string): Promise<'RETRYING' | 'UNKNOWN'> {
+  const marcarRetrying = async (lastError: string): Promise<'RETRYING' | 'UNKNOWN'> => {
     // `attempts` ya viene incrementado por el reclamo del scheduler (vale 1 en el primer
     // intento — ver R4 y campaignScheduler.service.ts), así que el backoff se indexa con
     // `attempts - 1`. El corte de `MAX_INTENTOS_ANTES_DE_DEAD` arriba garantiza que aquí
