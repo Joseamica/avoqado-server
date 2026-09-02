@@ -5,6 +5,7 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
+import { COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '../services/shared/pagadaPeroAbierta'
 
 /**
  * Vigilante de integridad del dinero — PRUEBA TEMPORAL DE 4 DÍAS.
@@ -107,7 +108,7 @@ export interface WatchdogRun {
 }
 
 /**
- * Las 5 invariantes de dinero como un CTE, y dos consultas encima: los totales por tipo (sin
+ * Las 6 invariantes de dinero como un CTE, y dos consultas encima: los totales por tipo (sin
  * tope) y el detalle (con tope). Exportado puro para poder probar su forma y correrlo a mano
  * contra producción en sólo lectura. Consultas probadas contra prod el 2026-08-03 y el 2026-09-02.
  */
@@ -184,6 +185,28 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         WHERE o."paymentStatus" = 'PAID' AND o."paidAmount" > 0
           AND o."createdAt" >= '2026-08-31'
           AND NOT EXISTS (SELECT 1 FROM "Payment" p WHERE p."orderId" = o.id)
+          AND ${REAL_VENUES}
+
+        UNION ALL
+
+        -- 6. PAGADA PERO ABIERTA: los cobros YA cubren la cuenta y la orden sigue sin cerrar.
+        --    Caso semilla ORD-1788276418170 (Testarudo, 1-sep-2026): el Payment quedó COMPLETED
+        --    y la transición a PAID nunca aterrizó, así que el Cierre del día la lista como
+        --    pendiente para siempre — y esa pantalla es de sólo lectura.
+        --    🔴 El criterio NO se escribe aquí: sale del MISMO módulo que usa el barrido
+        --    paid-order-reconciler.job.ts (cada 10 min). Si divergieran, el barrido cerraría un
+        --    conjunto de órdenes y el vigilante vigilaría otro. Consecuencia de compartirlo:
+        --    aquí sólo puede quedar lo que el barrido NO pudo cerrar (p. ej. falló el vale de
+        --    inventario). Una orden que reaparece pasada tras pasada NO se cierra a mano: el
+        --    motivo está en el log de ESE job.
+        --    Sin tope de fecha a propósito, al revés que la invariante 5: el barrido sólo mira
+        --    30 días hacia atrás, así que el rezago más viejo no lo vigila nadie más.
+        SELECT 'PAGADA PERO ABIERTA', v.name, o.id,
+               'status=' || o.status || ' paymentStatus=' || o."paymentStatus" ||
+               ' base=' || GREATEST(0, o.subtotal - COALESCE(o."discountAmount", 0)) ||
+               ' pagado=' || (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p WHERE p."orderId" = o.id AND ${COBRO_QUE_CUBRE})
+        FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
+        WHERE ${criterioPagadaPeroAbiertaSql('o')}
           AND ${REAL_VENUES}
     )`
 
@@ -278,7 +301,7 @@ export class MoneyIntegrityWatchdogJob {
     }
   }
 
-  /** Las 5 invariantes de dinero: totales sin tope + detalle acotado. */
+  /** Las 6 invariantes de dinero: totales sin tope + detalle acotado. */
   private async check(): Promise<{ counts: Array<{ check: string; n: number }>; rows: Violation[] }> {
     const sql = buildWatchdogSql()
     // Entry read con retry por la regla de cron-jobs.md (lecturas puras, seguras de reintentar).

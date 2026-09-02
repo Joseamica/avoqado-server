@@ -2,8 +2,9 @@ import { Prisma, type PrismaClient } from '@prisma/client'
 import { utcTs } from '../../utils/sqlDates'
 
 /**
- * Qué cobro CUENTA para cubrir la cuenta. Vive una sola vez porque lo usan dos lugares que
- * NO pueden divergir: la comparación del criterio y la columna `pagado` que se reporta. Si
+ * Qué cobro CUENTA para cubrir la cuenta. Vive una sola vez porque lo usan lugares que NO
+ * pueden divergir: la comparación del criterio, la columna `pagado` que reporta el barrido y
+ * la que reporta el vigilante de dinero (check «PAGADA PERO ABIERTA», por eso se exporta). Si
  * uno sumara distinto del otro, el número que explica por qué se eligió una orden no sería
  * el que la eligió.
  *
@@ -13,11 +14,11 @@ import { utcTs } from '../../utils/sqlDates'
  * reembolsos, una orden pagada y luego devuelta por completo sería `isFullyPaid` para quien
  * cierra y NO candidata para nosotros: el barrido nunca la alcanzaría.
  */
-const COBRO_QUE_CUBRE = `p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'`
+export const COBRO_QUE_CUBRE = `p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'`
 
 /**
  * Criterio ÚNICO de «orden cobrada que sigue abierta». Lo consumen el barrido
- * (`paid-order-reconciler.job.ts`) y el vigilante de dinero (check #5): si alguna vez
+ * (`paid-order-reconciler.job.ts`) y el vigilante de dinero (check #6): si alguna vez
  * divergen, uno de los dos miente. Caso semilla: ORD-1788276418170 (Testarudo, 1-sep-2026).
  *
  * Reglas:

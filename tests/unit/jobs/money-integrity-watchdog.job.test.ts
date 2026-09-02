@@ -20,6 +20,7 @@ import {
   DETAIL_LIMIT,
   buildWatchdogSql,
 } from '@/jobs/money-integrity-watchdog.job'
+import { COBRO_QUE_CUBRE } from '@/services/shared/pagadaPeroAbierta'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -70,6 +71,22 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(huerfanas).toContain(`o."paymentStatus" = 'PAID'`)
     expect(huerfanas).toMatch(/NOT EXISTS \(SELECT 1 FROM "Payment" p WHERE p\."orderId" = o\.id\)/)
     expect(HUERFANAS_DESDE).toBe('2026-08-31')
+  })
+
+  it('🔴 «pagada pero abierta» usa el criterio del barrido, y el `pagado` que reporta es el que la eligió', () => {
+    for (const sql of [counts, details]) expect(sql).toContain("'PAGADA PERO ABIERTA'")
+
+    const pagadaAbierta = regla('PAGADA PERO ABIERTA')
+    // El criterio lo pone `criterioPagadaPeroAbiertaSql`. Reescrito a mano aquí, el barrido
+    // cerraría un conjunto de órdenes y el vigilante vigilaría otro — y nadie se enteraría.
+    expect(pagadaAbierta).toMatch(/o\.status NOT IN \('COMPLETED', ?'CANCELLED', ?'DELETED'\)/)
+    expect(pagadaAbierta).toMatch(/p\.type IN \('REGULAR', ?'FAST'\)/)
+    // Y el número del detalle sale de la MISMA regla de dinero (REFUND fuera), no de una copia:
+    // si sumara distinto, explicaría la alerta con una cifra que no fue la que la disparó.
+    expect(pagadaAbierta).toContain(
+      `' pagado=' || (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p WHERE p."orderId" = o.id AND ${COBRO_QUE_CUBRE})`,
+    )
+    expect(pagadaAbierta).toContain('Grupo Avoqado Prime')
   })
 
   it('los totales se cuentan sin tope y el detalle sí lleva tope', () => {
