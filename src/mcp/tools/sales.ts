@@ -7,7 +7,12 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { getVenueChartData } from '../chartData'
-import { fetchPaymentsForAnalytics } from '@/services/legacy/mergedPayments.service'
+import {
+  aggregatePaymentsByMethod,
+  aggregateTipsByProcessor,
+  type AnalyticsMethodTotal,
+  type AnalyticsProcessorTips,
+} from '@/services/legacy/mergedPayments.service'
 import { planGateMessage } from '../planGate'
 import {
   computeSettlementProjection,
@@ -158,6 +163,20 @@ export function summarizeByPaymentMethod(payments: AnalyticsPaymentRow[], includ
     .sort((a, b) => b.total - a.total)
 }
 
+/**
+ * Same output as summarizeByPaymentMethod, but from totals ALREADY summed in Postgres
+ * (aggregatePaymentsByMethod) — one row per method instead of one per payment.
+ * 2026-09-01: the per-row path materialized the whole range ("this year" = 24k rows).
+ */
+export function methodTotalsFromAggregates(rows: AnalyticsMethodTotal[], includeTips = false): PaymentMethodTotal[] {
+  return (
+    rows
+      .map(r => ({ method: r.method || 'UNKNOWN', total: round2(r.amount + (includeTips ? r.tips : 0)), count: r.count }))
+      // GROUP BY no garantiza orden: el desempate por nombre hace la salida determinista.
+      .sort((a, b) => b.total - a.total || a.method.localeCompare(b.method))
+  )
+}
+
 export interface ChannelMixRow {
   channel: string
   revenue: number
@@ -269,6 +288,32 @@ export function aggregateStaffTips(payments: StaffTipPaymentRow[]): {
   const staff = Array.from(map.entries())
     .map(([staffId, s]) => ({ staffId, name: s.name, tips: round2(s.tips), payments: s.payments }))
     .sort((a, b) => b.tips - a.tips)
+  return { total: round2(total), count, staff, unattributed: { tips: round2(unattributed.tips), payments: unattributed.payments } }
+}
+
+/**
+ * Same output as aggregateStaffTips, but from tips ALREADY summed per processor in
+ * Postgres (aggregateTipsByProcessor) — one row per cashier, never one per payment.
+ * The `processedById: null` row is the unattributed bucket (QR/self-serve/legacy).
+ */
+export function rankProcessorTips(rows: AnalyticsProcessorTips[]): ReturnType<typeof aggregateStaffTips> {
+  const unattributed = { tips: 0, payments: 0 }
+  const staff: StaffTipsRow[] = []
+  let total = 0
+  let count = 0
+  for (const r of rows) {
+    if (r.payments <= 0) continue
+    total += r.tips
+    count += r.payments
+    if (!r.processedById) {
+      unattributed.tips += r.tips
+      unattributed.payments += r.payments
+      continue
+    }
+    staff.push({ staffId: r.processedById, name: r.processedByName || 'Sin nombre', tips: round2(r.tips), payments: r.payments })
+  }
+  // GROUP BY no garantiza orden: el desempate por id hace la salida determinista.
+  staff.sort((a, b) => b.tips - a.tips || a.staffId.localeCompare(b.staffId))
   return { total: round2(total), count, staff, unattributed: { tips: round2(unattributed.tips), payments: unattributed.payments } }
 }
 
@@ -446,14 +491,16 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       // - netSales: includeRefunds=true too — the OLD code left this false, which meant
       //   "netSales" never actually subtracted refunds (the bug: a field labeled "net of
       //   refunds" that ignored them). excludeCancelledOrders=true keeps it a clean sales figure.
+      // Summed in Postgres (one row per method) — the per-payment fetch materialized the
+      // whole range in Node (2026-09-01 query-guard incident, "this year" = 24k rows).
       const [grossRows, netRows] = await Promise.all([
-        fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: false }),
-        fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: true }),
+        aggregatePaymentsByMethod(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: false }),
+        aggregatePaymentsByMethod(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: true }),
       ])
       // grossCollected is tips-INCLUSIVE (true) to match the dashboard panel; netSales is
       // amount-only (false) because tips are not sales revenue.
-      const grossByMethod = summarizeByPaymentMethod(grossRows as unknown as AnalyticsPaymentRow[], true)
-      const netByMethod = summarizeByPaymentMethod(netRows as unknown as AnalyticsPaymentRow[], false)
+      const grossByMethod = methodTotalsFromAggregates(grossRows, true)
+      const netByMethod = methodTotalsFromAggregates(netRows, false)
 
       return text({
         venueId,
@@ -548,8 +595,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const to = toDate ? venueEndOfDay(tz, new Date(`${toDate}T12:00:00`)) : new Date()
       // Same payment universe as tips_over_time (COMPLETED, no refunds, no cancelled orders,
       // MindForm legacy QR included) so both tools cuadran to the cent.
-      const payments = await fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to })
-      const result = aggregateStaffTips(payments)
+      // Summed per cashier in Postgres — never one row per payment (2026-09-01 incident).
+      const result = rankProcessorTips(await aggregateTipsByProcessor(venueId, { fromDate: from, toDate: to }))
       const staff = staffId ? result.staff.filter(s => s.staffId === staffId) : result.staff
       return text({
         venueId,

@@ -558,6 +558,26 @@ describe('Customer Dashboard Service', () => {
   })
 
   describe('updateCustomerMetrics', () => {
+    it('applies an order to customer metrics only once using a durable order ledger', async () => {
+      const metric = (prismaMock as any).customerOrderMetric
+      prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+      ;(prismaMock as any).$queryRaw.mockResolvedValue([
+        { id: 'customer-123', venueId: 'venue-123', totalVisits: 5, totalSpent: new Decimal(500), firstVisitAt: new Date('2024-01-01') },
+      ])
+      metric.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'metric-1' })
+      metric.create.mockResolvedValue({ id: 'metric-1' })
+      prismaMock.customer.update.mockResolvedValue({} as any)
+
+      await (updateCustomerMetrics as any)('customer-123', 150, 'order-1', 'venue-123')
+      await (updateCustomerMetrics as any)('customer-123', 150, 'order-1', 'venue-123')
+
+      expect(metric.create).toHaveBeenCalledTimes(1)
+      expect(metric.create).toHaveBeenCalledWith({
+        data: { customerId: 'customer-123', orderId: 'order-1', venueId: 'venue-123', amount: 150 },
+      })
+      expect(prismaMock.customer.update).toHaveBeenCalledTimes(1)
+    })
+
     it('should update customer metrics after order completion', async () => {
       const existingCustomer = {
         id: 'customer-123',

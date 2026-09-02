@@ -127,6 +127,17 @@ export interface OrgStockOverview {
   bulkGroups: OrgStockBulkGroup[]
   aggregatesBySucursal: OrgStockSucursalAggregate[]
   aggregatesByCategoria: OrgStockCategoriaAggregate[]
+  /** Additive compatibility signal. Old clients ignore it; new clients never mistake a subset for the whole. */
+  meta?: {
+    itemsTotal: number
+    itemsTruncated: boolean
+  }
+}
+
+export interface OrgStockSummaryData {
+  summary: OrgStockSummary
+  aggregatesBySucursal: OrgStockSucursalAggregate[]
+  aggregatesByCategoria: OrgStockCategoriaAggregate[]
 }
 
 export interface OrgStockSummaryData {

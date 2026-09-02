@@ -6,6 +6,18 @@ export const GeneralStatsQuerySchema = z.object({
   toDate: z.string().datetime().optional(),
 })
 
+export const BasicMetricsQuerySchema = GeneralStatsQuerySchema.extend({
+  // Opt-in keeps deployed/older clients on the legacy row contract while the
+  // current dashboard consumes bounded server-side aggregates.
+  responseMode: z.enum(['aggregated-v1']).optional(),
+})
+
+export const BasicMetricsDetailsQuerySchema = GeneralStatsQuerySchema.pick({ fromDate: true, toDate: true }).extend({
+  kind: z.enum(['payments', 'reviews']),
+  cursor: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(500),
+})
+
 // Type definitions for general stats response
 export const TablePerformanceSchema = z.object({
   tableId: z.string(),
@@ -67,6 +79,11 @@ export const PrepTimesByCategorySchema = z.object({
     avg: z.number(),
     target: z.number(),
   }),
+  overall: z.object({
+    avg: z.number(),
+    target: z.null(),
+    medicion: z.number(),
+  }),
 })
 
 export const ExtraMetricsSchema = z.object({
@@ -117,6 +134,8 @@ export const GeneralStatsResponseSchema = z.object({
 
 // Export types
 export type GeneralStatsQuery = z.infer<typeof GeneralStatsQuerySchema>
+export type BasicMetricsQuery = z.infer<typeof BasicMetricsQuerySchema>
+export type BasicMetricsDetailsQuery = z.infer<typeof BasicMetricsDetailsQuerySchema>
 export type GeneralStatsResponse = z.infer<typeof GeneralStatsResponseSchema>
 export type TablePerformance = z.infer<typeof TablePerformanceSchema>
 export type StaffPerformance = z.infer<typeof StaffPerformanceSchema>

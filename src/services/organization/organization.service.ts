@@ -16,6 +16,7 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { NotFoundError } from '../../errors/AppError'
 import { Prisma, VenueStatus, TransactionStatus } from '@prisma/client'
+import { utcTs } from '../../utils/sqlDates'
 
 // Types for organization overview
 export interface VenueMetrics {
@@ -679,7 +680,7 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
       FROM "Payment" p
       WHERE p."venueId" = ANY(${venueIds})
         AND p.status = 'COMPLETED'
-        AND p."createdAt" >= ${from} AND p."createdAt" <= ${to}
+        AND p."createdAt" >= ${utcTs(from)} AND p."createdAt" <= ${utcTs(to)}
       GROUP BY TO_CHAR(p."createdAt", 'YYYY-MM-DD')
       ORDER BY date`,
     prisma.$queryRaw<Array<{ date: string; count: bigint }>>`
@@ -687,7 +688,7 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
              COUNT(*) as count
       FROM "Order"
       WHERE "venueId" = ANY(${venueIds})
-        AND "createdAt" >= ${from} AND "createdAt" <= ${to}
+        AND "createdAt" >= ${utcTs(from)} AND "createdAt" <= ${utcTs(to)}
       GROUP BY TO_CHAR("createdAt", 'YYYY-MM-DD')`,
     prisma.$queryRaw<Array<{ date: string; revenue: number }>>`
       SELECT TO_CHAR(p."createdAt", 'YYYY-MM-DD') as date,
@@ -695,7 +696,7 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
       FROM "Payment" p
       WHERE p."venueId" = ANY(${venueIds})
         AND p.status = 'COMPLETED'
-        AND p."createdAt" >= ${previousPeriodDates.from} AND p."createdAt" <= ${previousPeriodDates.to}
+        AND p."createdAt" >= ${utcTs(previousPeriodDates.from)} AND p."createdAt" <= ${utcTs(previousPeriodDates.to)}
       GROUP BY TO_CHAR(p."createdAt", 'YYYY-MM-DD')
       ORDER BY date`,
     prisma.$queryRaw<Array<{ date: string; count: bigint }>>`
@@ -703,7 +704,7 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
              COUNT(*) as count
       FROM "Order"
       WHERE "venueId" = ANY(${venueIds})
-        AND "createdAt" >= ${previousPeriodDates.from} AND "createdAt" <= ${previousPeriodDates.to}
+        AND "createdAt" >= ${utcTs(previousPeriodDates.from)} AND "createdAt" <= ${utcTs(previousPeriodDates.to)}
       GROUP BY TO_CHAR("createdAt", 'YYYY-MM-DD')`,
   ])
 

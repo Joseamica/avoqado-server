@@ -118,6 +118,14 @@ const prismaMock: any = {
   area: createMockModel(),
   order: createMockModel(),
   orderItem: createMockModel(),
+  // 🔴 Sin esta entrada, `awardLoyaltyForPaidOrder` (services/shared/loyaltyOnPaidOrder.ts:84)
+  // revienta con "Cannot read properties of undefined (reading 'findMany')", entra por su
+  // catch y guarda `loyaltyLastError` — o sea que el camino de lealtad del cobro en efectivo
+  // móvil, el que se cerró el 2026-09-01 porque el sello no subía en el Sunmi de Testarudo,
+  // NUNCA se ejercitaba: sus pruebas pasaban sin tocar la lógica que dicen cuidar.
+  // El `?? []` de ese archivo no alcanza: protege de un findMany que devuelve undefined,
+  // no de un modelo ausente, que falla un paso antes al leer `.findMany`.
+  orderCustomer: createMockModel(),
   promotion: createMockModel(),
   promotionGroup: createMockModel(),
   promotionOption: createMockModel(),
@@ -164,6 +172,7 @@ const prismaMock: any = {
   consumer: createMockModel(),
   otpChallenge: createMockModel(),
   customerGroup: createMockModel(),
+  customerOrderMetric: createMockModel(),
   loyaltyConfig: createMockModel(),
   loyaltyTransaction: createMockModel(),
   walletPass: createMockModel(),

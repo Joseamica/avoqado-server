@@ -226,16 +226,32 @@ function resolveCity(staff: StaffInput | undefined): string | null {
 /**
  * El supervisor se deduce del promotor, no del campo de cada SIM.
  *
- * Casi la mitad del inventario en mano no trae `assignedSupervisorId` (756 de
- * 1,628 medidos el 25-ago-2026), así que agrupar por el campo del ítem partiría
- * a un mismo promotor en varios renglones y dejaría el nivel Supervisor hueco.
- * Isaac lo pidió explícitamente así: los SIMs de un promotor caen bajo su
- * supervisor "para que cuadre bottom-up, de promotor hasta nivel país".
+ * 🔴 Manda la ESTRUCTURA DEL EQUIPO —el supervisor de la sucursal donde el
+ * promotor trabaja hoy— y no `assignedSupervisorId`, que es un dato histórico:
+ * queda grabado en cada SIM el día que se entrega y no se mueve nunca. Cuando
+ * alguien cambia de equipo, su inventario viejo se queda con el jefe anterior y
+ * la tabla lo colgaba de ahí.
  *
- * Gana el supervisor mayoritario entre sus ítems; el id desempata para que el
- * resultado sea estable entre corridas.
+ * Lo reportó Isaac el 31-ago-2026 con captura: "Juan Nájera aparece que tiene 2
+ * vendedores" cuando su archivo le da 11. Yolanda salía bajo Hugo porque sus 61
+ * SIMs sin vender siguen a nombre de Hugo, aunque ella ya trabaje con Juan; y
+ * el equipo de Juan quedaba partido entre tres supervisores.
+ *
+ * El respaldo por SIMs se conserva SÓLO para la sucursal que todavía no tiene
+ * supervisor asignado: ahí el dato viejo es la única pista, y es mejor que dejar
+ * al promotor colgando de nadie. Casi la mitad del inventario en mano tampoco
+ * trae `assignedSupervisorId` (756 de 1,628 medidos el 25-ago-2026), así que sin
+ * ese respaldo el nivel Supervisor quedaría hueco. Entre varios gana el
+ * mayoritario, con el id de desempate para que el resultado sea estable.
  */
-function resolveSupervisorId(items: InventoryItemInput[]): string | null {
+function resolveSupervisorId(
+  staffRecord: StaffInput | undefined,
+  items: InventoryItemInput[],
+  venueSupervisors: Record<string, string> | undefined,
+): string | null {
+  const porEstructura = venueSupervisors?.[mostRecentVenueId(staffRecord) ?? '']
+  if (porEstructura) return porEstructura
+
   const tally = new Map<string, number>()
   for (const item of items) {
     if (!item.assignedSupervisorId) continue
@@ -255,8 +271,8 @@ function resolveSupervisorId(items: InventoryItemInput[]): string | null {
 }
 
 /** La sucursal de la asignación más reciente — mismo desempate que `resolveCity`. */
-function mostRecentVenueId(staff: StaffInput): string | null {
-  if (staff.venues.length === 0) return null
+function mostRecentVenueId(staff: StaffInput | undefined): string | null {
+  if (!staff || staff.venues.length === 0) return null
   return staff.venues.reduce((best, v) => (v.startDate.getTime() > best.startDate.getTime() ? v : best)).venueId
 }
 
@@ -304,7 +320,7 @@ export function buildInventoryByResponsible(input: BuildInventoryByResponsibleIn
       continue
     }
 
-    const supervisorId = resolveSupervisorId(promoterItems)
+    const supervisorId = resolveSupervisorId(staffRecord, promoterItems, venueSupervisors)
     const supervisorName = supervisorId ? (staffById.get(supervisorId)?.name ?? NO_SUPERVISOR_LABEL) : NO_SUPERVISOR_LABEL
 
     const supervisors = cityMap.get(city) ?? (new Map() as SupervisorMap)
@@ -404,6 +420,35 @@ function tally(rows: any[], pick: (row: any) => { id: string; name: string } | n
     else map.set(opt.id, { id: opt.id, name: opt.name, itemCount: weight })
   }
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'))
+}
+
+type SupervisorStaffRow = {
+  id: string
+  active: boolean
+  venues: Array<{
+    venueId: string
+    startDate: Date
+    role: string
+    venue?: { organizationId?: string | null } | null
+  }>
+}
+
+/** Un solo supervisor canónico por sucursal, independiente del orden de Postgres. */
+export function buildVenueSupervisorMap(staffRows: SupervisorStaffRow[], organizationId: string): Record<string, string> {
+  const winners = new Map<string, { staffId: string; startDate: Date }>()
+
+  for (const row of staffRows) {
+    if (!row.active) continue
+    for (const venue of row.venues) {
+      if (venue.role !== 'MANAGER' || venue.venue?.organizationId !== organizationId) continue
+      const current = winners.get(venue.venueId)
+      const isMoreRecent = !current || venue.startDate.getTime() > current.startDate.getTime()
+      const winsTie = current && venue.startDate.getTime() === current.startDate.getTime() && row.id.localeCompare(current.staffId) < 0
+      if (isMoreRecent || winsTie) winners.set(venue.venueId, { staffId: row.id, startDate: venue.startDate })
+    }
+  }
+
+  return Object.fromEntries([...winners.entries()].map(([venueId, winner]) => [venueId, winner.staffId]))
 }
 
 export class OrgInventoryByResponsibleService {
@@ -515,6 +560,7 @@ export class OrgInventoryByResponsibleService {
                 select: { venueId: true, startDate: true, role: true, venue: { select: { city: true, organizationId: true } } },
               },
             },
+            orderBy: { id: 'asc' },
             take: 10_000,
           })
         : []
@@ -537,14 +583,7 @@ export class OrgInventoryByResponsibleService {
 
     // Supervisor de cada sucursal: es la única pista para colgar de alguien a un
     // promotor que no tiene SIMs (sin inventario no hay de dónde deducirlo).
-    const venueSupervisors: Record<string, string> = {}
-    for (const row of staffRows) {
-      for (const v of row.venues) {
-        if (v.role === 'MANAGER' && v.venue?.organizationId === organizationId && !venueSupervisors[v.venueId]) {
-          venueSupervisors[v.venueId] = row.id
-        }
-      }
-    }
+    const venueSupervisors = buildVenueSupervisorMap(staffRows, organizationId)
 
     // Las opciones de los selectores se calculan sobre el universo SIN filtrar:
     // si salieran del conjunto ya filtrado, elegir una sucursal dejaría el

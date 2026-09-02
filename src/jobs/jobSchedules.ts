@@ -14,6 +14,9 @@ export const DATABASE_JOB_SCHEDULES = {
   catalogPublicationWatchdog: '32 * * * * *',
   shiftCloseWatchdog: '35 * * * * *',
   inventoryPostingSweeper: '44 */2 * * * *',
+  // Lealtad post-cobro durable. Cada 5 min en :41, lejos del reconciliador de
+  // caja (:02), inventario (:44) y calendarios (:26/:56). Máximo 25 órdenes.
+  loyaltyReconciliation: '41 */5 * * * *',
   // Fase 3 de la unificación de caja: repone ventas en efectivo sin evento en el cajón.
   // Segundo :02, cada 5 min — hueco libre antes del watchdog de pagos (:08).
   cashDrawerReconciler: '2 */5 * * * *',

@@ -63,10 +63,12 @@ const path = buildStoragePath(`venues/${venue.slug}/kyc/${doc}.pdf`)
 
 ## Timezone: Prisma = UTC, Raw SQL = Mexico Local
 
-PostgreSQL has `timezone = 'America/Mexico_City'` + `timestamp without time zone` columns.
+Local PostgreSQL has `timezone = 'America/Mexico_City'`; **production (Render) runs `timezone = 'UTC'`** (measured with
+`SHOW timezone` on 2026-09-01). Columns are `timestamp without time zone` in both.
 
 - **Prisma stores REAL UTC** — `new Date()` in JS → UTC in DB (verified: 1:10 PM Mexico → `19:10` in DB)
-- **Raw SQL `NOW()`** → stores Mexico local time (PG applies timezone)
+- **Raw SQL `NOW()`** → stores the SESSION zone's wall clock: Mexico local time on the local DB, UTC in prod — never mix
+  it with Prisma-written rows; use `(NOW() AT TIME ZONE 'UTC')` when a manual fix must sit next to Prisma values
 - For Prisma date range queries, use `fromZonedTime()` to convert venue-local → UTC:
 
 ```typescript
@@ -76,6 +78,18 @@ import { fromZonedTime } from 'date-fns-tz'
 const dayStart = fromZonedTime(`${dateStr}T00:00:00.000`, venueTz)
 const dayEnd = fromZonedTime(`${dateStr}T23:59:59.999`, venueTz) // INCLUSIVE end-of-day
 ```
+
+### 🔴 Raw SQL: a `Date` bind is `timestamptz` — ALWAYS `utcTs` / `utcTsParam` (`src/utils/sqlDates.ts`), never bare or `::timestamp`
+
+Bound bare into `$queryRaw` / `$queryRawUnsafe`, a Date is converted with the SESSION zone before it is compared against our
+`timestamp without time zone` columns (which store UTC): the filter shifts **6 hours** wherever the session zone is not UTC —
+locally always; in prod only if Render's default ever changes — and `${from}` and `${from}::timestamp` are equally wrong.
+`utcTs` is session-independent (proved under both zones in `tests/integration/dashboard/org-stock-date-binds.integration.test.ts`).
+🔴 The BUCKET bug (a single `AT TIME ZONE tz` over a UTC column) is wrong in BOTH environments — that one was live in prod. Audit 2026-09-01: ~90 binds in 25 files (sales reports, settlement to aggregators, the nightly email, **the reservation
+locks**, the SIM-custody `UPDATE`). Buckets: `((col AT TIME ZONE 'UTC') AT TIME ZONE tz)` via `localWallClock*` — a SINGLE
+`AT TIME ZONE tz` reads the UTC value as local and puts a 20:00 sale on the next day. Guard test:
+`tests/unit/architecture/rawSqlDateBindGuard.test.ts` (a bare bind fails the suite). Details:
+`docs/auditorias/2026-09-01-auditoria-binds-fecha-sql-timezone.md`.
 
 ### 🔴 A bare `YYYY-MM-DD` is a RUNTIME-TZ trap (real LIVE prod money bug, 2026-06-15)
 

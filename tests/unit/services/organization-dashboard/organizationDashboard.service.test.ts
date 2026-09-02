@@ -82,11 +82,10 @@ describe('OrganizationDashboardService', () => {
         { venueId: 'v2', _count: 3 },
       ])
 
-      // activePromoterEntries
-      prismaMock.timeEntry.findMany.mockResolvedValue([
-        { staffId: 's1', venueId: 'v1' },
-        { staffId: 's2', venueId: 'v1' },
-        { staffId: 's3', venueId: 'v2' },
+      // activePromoters por tienda (raw SQL: COUNT(DISTINCT staffId) GROUP BY venueId — 2026-09-01)
+      prismaMock.$queryRaw.mockResolvedValueOnce([
+        { venueId: 'v1', n: 2 },
+        { venueId: 'v2', n: 1 },
       ])
 
       const result = await organizationDashboardService.getStorePerformance(orgId, 10)
@@ -135,7 +134,7 @@ describe('OrganizationDashboardService', () => {
         .mockResolvedValueOnce([]) // no prev week sales
       prismaMock.$queryRaw.mockResolvedValueOnce([]) // no units
       prismaMock.staffVenue.groupBy.mockResolvedValue([])
-      prismaMock.timeEntry.findMany.mockResolvedValue([])
+      prismaMock.$queryRaw.mockResolvedValueOnce([]) // no active promoters (raw SQL)
 
       const result = await organizationDashboardService.getStorePerformance(orgId, 10)
 

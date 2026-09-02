@@ -81,6 +81,25 @@ export interface MigrationCommandLike {
  * `lastActivationStatusCheckAt` is strictly after the command's `createdAt`. An offline
  * device (no rebound) stays `inProgress: true`.
  */
+/**
+ * Proof of wipe — the ONE rule for "did the device already execute this FACTORY_RESET?".
+ *
+ * A FACTORY_RESET never ACKs (the device wipes and kills its own process before it can), so
+ * the command's status is useless as a completion signal: it lingers in SENT until its expiry
+ * sweep. What DOES prove the wipe is the device re-binding through `activation-status` —
+ * stamped on `Terminal.lastActivationStatusCheckAt` — strictly AFTER the command was created.
+ *
+ * Shared by the terminals-list badge, `migrateStatus` and `migratePreflight` so the three can
+ * never disagree about whether a migration is still live (Asana 1218069201250971: the list
+ * said "not migrating" while the wizard said "migration in progress" for the same terminal).
+ */
+export function deviceReboundAfter(
+  commandCreatedAt: Date | null | undefined,
+  lastActivationStatusCheckAt: Date | null | undefined,
+): boolean {
+  return Boolean(lastActivationStatusCheckAt && commandCreatedAt && lastActivationStatusCheckAt > commandCreatedAt)
+}
+
 export function computeTerminalMigration(
   command: MigrationCommandLike | null | undefined,
   lastActivationStatusCheckAt: Date | null | undefined,
@@ -93,7 +112,7 @@ export function computeTerminalMigration(
     return null
   }
 
-  const rebound = Boolean(lastActivationStatusCheckAt && command.createdAt && lastActivationStatusCheckAt > command.createdAt)
+  const rebound = deviceReboundAfter(command.createdAt, lastActivationStatusCheckAt)
 
   return {
     inProgress: !rebound,

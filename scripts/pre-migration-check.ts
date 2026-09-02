@@ -6,6 +6,7 @@
  */
 
 import { PrismaClient } from '@prisma/client'
+import { unresolvedMigrationNames, type MigrationStatusRow } from './pre-migration-status'
 
 const prisma = new PrismaClient()
 
@@ -75,18 +76,18 @@ async function main() {
   // Check for pending migrations
   console.log('📋 Migration Status:')
   try {
-    const migrations = await prisma.$queryRaw<{ migration_name: string; finished_at: Date | null }[]>`
-      SELECT migration_name, finished_at
+    const migrations = await prisma.$queryRaw<MigrationStatusRow[]>`
+      SELECT migration_name, finished_at, rolled_back_at
       FROM "_prisma_migrations"
       ORDER BY started_at DESC
       LIMIT 5
     `
 
-    const failed = migrations.filter(m => m.finished_at === null)
-    if (failed.length > 0) {
+    const failedNames = unresolvedMigrationNames(migrations)
+    if (failedNames.length > 0) {
       hasErrors = true
       console.log('❌ Failed migrations found:')
-      failed.forEach(m => console.log(`   - ${m.migration_name}`))
+      failedNames.forEach(name => console.log(`   - ${name}`))
       console.log('   Action: Resolve with `prisma migrate resolve` or delete from _prisma_migrations\n')
     } else {
       console.log('✅ No failed migrations\n')

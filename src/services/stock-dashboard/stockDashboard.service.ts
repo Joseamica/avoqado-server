@@ -3,8 +3,10 @@
  * Provides stock metrics, charts, alerts, and bulk upload for
  * the PlayTelecom/White-Label dashboard.
  */
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueStartOfDayOffset } from '../../utils/datetime'
+import { utcTs } from '../../utils/sqlDates'
 import { normalizeSerial } from '../serialized-inventory/serializedInventory.service'
 
 // Types for the service responses
@@ -510,25 +512,12 @@ class StockDashboardService {
   }> {
     const safeLimit = Math.min(100, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 20))
     const page = Math.max(1, Number.isFinite(options.page) ? Math.floor(options.page!) : 1)
-    const { itemWhere } = await this.getItemScope(venueId)
+    const { orgId } = await this.getItemScope(venueId)
     const { dateFrom, dateTo, responsibleStaffId } = options
 
-    // When a date window is given, include rows whose registration OR sale
-    // timestamp falls inside it. Without this OR, filtering by `createdAt`
-    // alone would hide items that were registered earlier but sold in-range.
-    const dateFilter =
-      dateFrom || dateTo
-        ? {
-            OR: [
-              { createdAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } },
-              { soldAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } },
-            ],
-          }
-        : null
-
-    let responsiblePredicate: Record<string, any> | null = null
+    let responsiblePredicate = Prisma.empty
     if (responsibleStaffId === '__admin_held__') {
-      responsiblePredicate = { custodyState: 'ADMIN_HELD' }
+      responsiblePredicate = Prisma.sql`AND si."custodyState" = 'ADMIN_HELD'`
     } else if (responsibleStaffId) {
       const staffVenue = await prisma.staffVenue.findFirst({
         where: { staffId: responsibleStaffId, venueId },
@@ -538,26 +527,56 @@ class StockDashboardService {
 
       switch (staffVenue.role) {
         case 'WAITER':
-          responsiblePredicate = { assignedPromoterId: responsibleStaffId }
+          responsiblePredicate = Prisma.sql`AND si."assignedPromoterId" = ${responsibleStaffId}`
           break
         case 'MANAGER':
-          responsiblePredicate = { assignedSupervisorId: responsibleStaffId }
+          responsiblePredicate = Prisma.sql`AND si."assignedSupervisorId" = ${responsibleStaffId}`
           break
         default:
-          responsiblePredicate = {
-            OR: [{ assignedPromoterId: responsibleStaffId }, { assignedSupervisorId: responsibleStaffId }],
-          }
+          responsiblePredicate = Prisma.sql`AND (si."assignedPromoterId" = ${responsibleStaffId} OR si."assignedSupervisorId" = ${responsibleStaffId})`
       }
     }
 
-    const filters = [itemWhere]
-    if (dateFilter) filters.push(dateFilter)
-    if (responsiblePredicate) filters.push(responsiblePredicate)
-    const where = filters.length === 1 ? { ...itemWhere } : { AND: filters }
+    const scopePredicate = orgId
+      ? Prisma.sql`(si."venueId" = ${venueId} OR (si."organizationId" = ${orgId} AND si."venueId" IS NULL))`
+      : Prisma.sql`si."venueId" = ${venueId}`
+    const offset = (page - 1) * safeLimit
+    type EventKey = { itemId: string; eventType: 'REGISTERED' | 'SOLD' | 'RETURNED' | 'DAMAGED'; timestamp: Date }
+    const eventKeysWithLookahead = await prisma.$queryRaw<EventKey[]>(Prisma.sql`
+      WITH events AS (
+        SELECT si."id" AS "itemId", 'REGISTERED'::text AS "eventType", si."createdAt" AS "timestamp"
+        FROM "SerializedItem" si
+        WHERE ${scopePredicate} ${responsiblePredicate}
+        UNION ALL
+        SELECT si."id" AS "itemId",
+               CASE
+                 WHEN si."status" = 'SOLD' THEN 'SOLD'
+                 WHEN si."status" = 'RETURNED' THEN 'RETURNED'
+                 ELSE 'DAMAGED'
+               END::text AS "eventType",
+               COALESCE(si."soldAt", si."createdAt") AS "timestamp"
+        FROM "SerializedItem" si
+        WHERE ${scopePredicate} ${responsiblePredicate}
+          AND (
+            (si."status" = 'SOLD' AND si."soldAt" IS NOT NULL)
+            OR si."status" IN ('RETURNED', 'DAMAGED')
+          )
+      )
+      SELECT e."itemId", e."eventType", e."timestamp"
+      FROM events e
+      WHERE TRUE
+        ${dateFrom ? Prisma.sql`AND e."timestamp" >= ${utcTs(dateFrom)}` : Prisma.empty}
+        ${dateTo ? Prisma.sql`AND e."timestamp" <= ${utcTs(dateTo)}` : Prisma.empty}
+      ORDER BY e."timestamp" DESC, e."itemId" DESC, e."eventType" DESC
+      LIMIT ${safeLimit + 1}
+      OFFSET ${offset}
+    `)
+    const hasMore = eventKeysWithLookahead.length > safeLimit
+    const eventKeys = eventKeysWithLookahead.slice(0, safeLimit)
+    const itemIds = Array.from(new Set(eventKeys.map(event => event.itemId)))
 
-    // Get recent items — includes org-level items
-    const recentItemsWithLookahead = await prisma.serializedItem.findMany({
-      where,
+    const recentItems = itemIds.length === 0 ? [] : await prisma.serializedItem.findMany({
+      where: { id: { in: itemIds } },
       include: {
         category: true,
         venue: { select: { name: true } },
@@ -574,12 +593,14 @@ class StockDashboardService {
           },
         },
       },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      skip: (page - 1) * safeLimit,
-      take: safeLimit + 1,
+      take: safeLimit,
     })
-    const hasMore = recentItemsWithLookahead.length > safeLimit
-    const recentItems = recentItemsWithLookahead.slice(0, safeLimit)
+    const selectedEvents = new Map<string, Set<EventKey['eventType']>>()
+    for (const event of eventKeys) {
+      const types = selectedEvents.get(event.itemId) ?? new Set<EventKey['eventType']>()
+      types.add(event.eventType)
+      selectedEvents.set(event.itemId, types)
+    }
 
     // Resolve staff names
     const staffIdSet = new Set<string>()
@@ -627,6 +648,7 @@ class StockDashboardService {
     const regGroups = new Map<string, typeof recentItems>()
 
     for (const item of recentItems) {
+      if (!selectedEvents.get(item.id)?.has('REGISTERED')) continue
       const bucket = Math.floor(item.createdAt.getTime() / BULK_WINDOW_MS)
       const key = `${item.createdBy}|${item.categoryId}|${item.registeredFromVenueId || ''}|${bucket}`
       const group = regGroups.get(key) || []
@@ -675,10 +697,11 @@ class StockDashboardService {
 
     // ── Individual sale / return / damage events ──
     for (const item of recentItems) {
+      const itemEvents = selectedEvents.get(item.id)
       const registeredByName = staffMap.get(item.createdBy) || null
       const itemVenueName = item.venueId ? item.venue?.name || null : 'Todas las tiendas'
 
-      if (item.status === 'SOLD' && item.soldAt) {
+      if (itemEvents?.has('SOLD') && item.status === 'SOLD' && item.soldAt) {
         const orderStaff = item.orderItem?.order?.createdBy
         const soldByName = orderStaff ? `${orderStaff.firstName} ${orderStaff.lastName}`.trim() : null
         const soldAtVenue = item.orderItem?.order?.venue?.name || item.sellingVenue?.name || null
@@ -696,7 +719,7 @@ class StockDashboardService {
         })
       }
 
-      if (item.status === 'RETURNED' || item.status === 'DAMAGED') {
+      if ((item.status === 'RETURNED' || item.status === 'DAMAGED') && itemEvents?.has(item.status)) {
         movements.push({
           id: `${item.status.toLowerCase()}-${item.id}`,
           serialNumber: item.serialNumber,
@@ -713,21 +736,12 @@ class StockDashboardService {
     // Filter emitted movements by the window (a single item can produce a
     // REGISTERED event + a SOLD event at different times — we only want the
     // events whose own timestamp lands inside the range).
-    const windowed = dateFilter
-      ? movements.filter(m => {
-          const ts = m.timestamp.getTime()
-          if (dateFrom && ts < dateFrom.getTime()) return false
-          if (dateTo && ts > dateTo.getTime()) return false
-          return true
-        })
-      : movements
-
     // A single item can emit both REGISTERED and SOLD. Return every event from
     // this bounded item page so pagination never makes the second event
     // unreachable. The legacy non-paginated method above still honors its
     // historical event-count limit for MCP/older callers.
     return {
-      movements: windowed.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()),
+      movements: movements.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()),
       hasMore,
     }
   }

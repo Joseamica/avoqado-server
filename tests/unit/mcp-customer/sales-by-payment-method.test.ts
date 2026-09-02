@@ -8,15 +8,20 @@
  * field labeled "net of refunds" never subtracted them; and gross summed amount
  * only, so it did NOT match the tips-inclusive dashboard panel. Both corrected.
  * Regression preserved: the bare-date path used to drop the last day + shift ~6h.
+ *
+ * 2026-09-01: the tool no longer fetches rows — it asks Postgres for ONE row per
+ * method (aggregatePaymentsByMethod). The mock therefore returns GROUPS
+ * ({ method, amount, tips, count }), and the assertions on the filters/window are the
+ * same ones that protected the row-based path.
  */
-import { registerSalesTools } from '../../../src/mcp/tools/sales'
+import { methodTotalsFromAggregates, registerSalesTools } from '../../../src/mcp/tools/sales'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockPlanGate = jest.fn()
 const mockFetch = jest.fn()
 
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...(a as [])) }))
-jest.mock('@/services/legacy/mergedPayments.service', () => ({ fetchPaymentsForAnalytics: (...a: unknown[]) => mockFetch(...(a as [])) }))
+jest.mock('@/services/legacy/mergedPayments.service', () => ({ aggregatePaymentsByMethod: (...a: unknown[]) => mockFetch(...(a as [])) }))
 jest.mock('@/mcp/chartData', () => ({ getVenueChartData: jest.fn() }))
 jest.mock('@/services/dashboard/sales-summary.dashboard.service', () => ({
   computeSettlementProjection: jest.fn(),
@@ -49,6 +54,36 @@ beforeEach(() => {
   mockPlanGate.mockResolvedValue(null) // ADVANCED_REPORTS entitled
 })
 
+// ── Pure: one row per method from Postgres → same shape/order as summarizeByPaymentMethod ──
+describe('methodTotalsFromAggregates', () => {
+  it('sorts desc by total, folds tips only when asked, buckets an empty method as UNKNOWN, rounds to cents', () => {
+    const rows = [
+      { method: 'CASH', amount: 100.004, tips: 10, count: 3 },
+      { method: 'CREDIT_CARD', amount: 150, tips: 0, count: 1 },
+      { method: '', amount: 5, tips: 1, count: 1 },
+    ]
+    expect(methodTotalsFromAggregates(rows)).toEqual([
+      { method: 'CREDIT_CARD', total: 150, count: 1 },
+      { method: 'CASH', total: 100, count: 3 },
+      { method: 'UNKNOWN', total: 5, count: 1 },
+    ])
+    expect(methodTotalsFromAggregates(rows, true).map(r => r.total)).toEqual([150, 110, 6])
+  })
+
+  it('ties are deterministic (GROUP BY has no order): alphabetical by method', () => {
+    const a = methodTotalsFromAggregates([
+      { method: 'DEBIT_CARD', amount: 50, tips: 0, count: 1 },
+      { method: 'CASH', amount: 50, tips: 0, count: 1 },
+    ])
+    const b = methodTotalsFromAggregates([
+      { method: 'CASH', amount: 50, tips: 0, count: 1 },
+      { method: 'DEBIT_CARD', amount: 50, tips: 0, count: 1 },
+    ])
+    expect(a.map(r => r.method)).toEqual(['CASH', 'DEBIT_CARD'])
+    expect(b).toEqual(a)
+  })
+})
+
 describe('sales_by_payment_method — gross vs net, venue-local window', () => {
   it('denied when ADVANCED_REPORTS gate returns a message', async () => {
     mockPlanGate.mockResolvedValueOnce('Los reportes avanzados no...')
@@ -58,12 +93,10 @@ describe('sales_by_payment_method — gross vs net, venue-local window', () => {
   })
 
   it('runs TWO analytics passes and correctly labels gross (tips-incl, net of refunds) vs net sales', async () => {
-    // Same sale+refund rows on BOTH passes (the mock controls each return). A sale of
-    // $100 + $15 tip, and a partial refund of -$10 + -$2 tip (refunds are negative rows).
-    const rows = [
-      { method: 'CASH', amount: 100, tipAmount: 15, type: 'REGULAR', status: 'COMPLETED' },
-      { method: 'CASH', amount: -10, tipAmount: -2, type: 'REFUND', status: 'COMPLETED' },
-    ]
+    // Same group on BOTH passes (the mock controls each return): Postgres already summed
+    // a sale of $100 + $15 tip and a partial refund of -$10 + -$2 tip (refunds are
+    // negative rows) into ONE CASH row: amount 90, tips 13, count 2.
+    const rows = [{ method: 'CASH', amount: 90, tips: 13, count: 2 }]
     mockFetch.mockResolvedValueOnce(rows).mockResolvedValueOnce(rows)
 
     const out = parse(await call('sales_by_payment_method', { venueId: 'v1', fromDate: '2026-06-02', toDate: '2026-06-15' }))

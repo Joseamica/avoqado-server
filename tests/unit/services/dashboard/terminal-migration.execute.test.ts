@@ -20,7 +20,10 @@ jest.mock('@/utils/prismaClient', () => ({
     organizationPaymentConfig: { findUnique: jest.fn() },
     merchantAccount: { findMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
-    tpvCommandQueue: { findFirst: jest.fn(), update: jest.fn() },
+    // `findMany`: migrateExecute re-corre migratePreflight, que lista los borrados
+    // pendientes de la terminal. Sin declararlo aquí el mock revienta con
+    // "is not a function" — la trampa del mock de módulo con lista fija.
+    tpvCommandQueue: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn() },
   },
 }))
 // updateTerminal now owns the wipe-queueing ("blindar"). We mock the whole
@@ -36,7 +39,7 @@ const m = prisma as unknown as {
   organizationPaymentConfig: { findUnique: jest.Mock }
   merchantAccount: { findMany: jest.Mock }
   staffVenue: { findFirst: jest.Mock }
-  tpvCommandQueue: { findFirst: jest.Mock; update: jest.Mock }
+  tpvCommandQueue: { findFirst: jest.Mock; findMany: jest.Mock; update: jest.Mock }
 }
 const mockedUpdate = terminalsService.updateTerminal as jest.Mock
 
@@ -45,10 +48,10 @@ const healthyPreflight = () => {
   m.venue.findUnique.mockResolvedValue({ id: 'venue-new', name: 'New' })
   m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1' })
   m.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
-  // Idempotency check (preflight) AND the post-reparent commandId recovery both
-  // call findFirst. Default: preflight sees no in-flight wipe (null), then the
-  // recovery sees the wipe blindar queued. Tests override per-call as needed.
-  m.tpvCommandQueue.findFirst.mockResolvedValueOnce(null).mockResolvedValue({ id: 'cmd-1', commandType: 'FACTORY_RESET' })
+  // El preflight lista los borrados pendientes con findMany (ninguno: la terminal
+  // está lista para migrar); el commandId post-reparent se recupera con findFirst.
+  m.tpvCommandQueue.findMany.mockResolvedValue([])
+  m.tpvCommandQueue.findFirst.mockResolvedValue({ id: 'cmd-1', commandType: 'FACTORY_RESET' })
 }
 
 describe('migrateExecute', () => {
@@ -186,9 +189,10 @@ describe('migrateExecute — migrateMerchant', () => {
     m.organizationPaymentConfig.findUnique.mockResolvedValue(null)
     m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p' }])
     m.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
-    // Preflight's in-flight check (1st call) → sin migración en curso; la recuperación del
-    // wipe (2nd call, en migrateExecute) → el FACTORY_RESET recién encolado.
-    m.tpvCommandQueue.findFirst.mockResolvedValueOnce(null).mockResolvedValue({ id: 'cmd-1', commandType: 'FACTORY_RESET', payload: null })
+    // El preflight lista los borrados pendientes con findMany (ninguno); la recuperación
+    // del wipe en migrateExecute usa findFirst → el FACTORY_RESET recién encolado.
+    m.tpvCommandQueue.findMany.mockResolvedValue([])
+    m.tpvCommandQueue.findFirst.mockResolvedValue({ id: 'cmd-1', commandType: 'FACTORY_RESET', payload: null })
     m.tpvCommandQueue.update.mockResolvedValue({})
     m.venuePaymentConfig.create.mockResolvedValue({ id: 'vpc-nueva' })
     mockedUpdate.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', name: 'T1' })

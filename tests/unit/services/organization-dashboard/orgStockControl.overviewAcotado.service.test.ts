@@ -38,7 +38,7 @@ describe('OrgStockControlService.getOrgOverview — legacy acotado', () => {
     const args = prismaMock.serializedItem.findMany.mock.calls[0][0]
     expect(args.take).toBe(LEGACY_OVERVIEW_ITEMS_CAP)
     expect(LEGACY_OVERVIEW_ITEMS_CAP).toBeLessThanOrEqual(500)
-    expect(args.orderBy).toEqual({ createdAt: 'desc' })
+    expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
   })
 
   it('los totales y agregados vienen del summary en SQL, no de los items acotados', async () => {
@@ -59,5 +59,6 @@ describe('OrgStockControlService.getOrgOverview — legacy acotado', () => {
 
     expect(Array.isArray(res.items)).toBe(true)
     expect(Array.isArray(res.bulkGroups)).toBe(true)
+    expect(res.meta).toEqual({ itemsTotal: 20288, itemsTruncated: true })
   })
 })

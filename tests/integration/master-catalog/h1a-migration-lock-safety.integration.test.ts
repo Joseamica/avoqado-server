@@ -128,6 +128,7 @@ describe('H1A deployed lock-safe migration chain', () => {
       env: process.env,
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
+      timeout: 180_000,
     })
     if (harness.status !== 0) {
       throw new Error(`H1A lock-safety harness failed\n${harness.stdout}\n${harness.stderr}`)
@@ -137,7 +138,7 @@ describe('H1A deployed lock-safe migration chain', () => {
 
     client = new Client({ connectionString: process.env.TEST_DATABASE_URL })
     await client.connect()
-  })
+  }, 190_000)
 
   afterAll(async () => {
     await client?.end()
