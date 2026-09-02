@@ -222,6 +222,7 @@ describe('mintNormalAppointmentHold', () => {
 
 describe('mintRescheduleAppointmentHold', () => {
   const requestedStartsAt = new Date('2026-09-02T15:00:00.000Z')
+  const mintCheckedAt = new Date('2026-08-01T10:00:00.000Z')
   const sibling = {
     id: 'hold-old',
     venueId,
@@ -410,9 +411,14 @@ describe('mintRescheduleAppointmentHold', () => {
     prismaMock.$queryRaw.mockResolvedValueOnce([reservation()] as any).mockResolvedValueOnce([sibling] as any)
     const capacity = jest.spyOn(availabilityService, 'countAppointmentOccupancy').mockResolvedValue({ reservations: 1, holds: 0 })
 
-    await expect(mintRescheduleAppointmentHold({ venueId, reservationId: 'reservation-1', requestedStartsAt })).rejects.toMatchObject({
-      statusCode: 409,
-    })
+    await expect(
+      mintRescheduleAppointmentHold({
+        venueId,
+        reservationId: 'reservation-1',
+        requestedStartsAt,
+        clock: () => mintCheckedAt,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 })
 
     expect(prismaMock.slotHold.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(capacity.mock.invocationCallOrder[0])
     expect(prismaMock.slotHold.create).not.toHaveBeenCalled()
@@ -428,6 +434,7 @@ describe('mintRescheduleAppointmentHold', () => {
         reservationId: 'reservation-1',
         requestedStartsAt,
         requestedEndsAt: new Date(derivedEndsAt.getTime() + delta),
+        clock: () => mintCheckedAt,
       }),
     ).resolves.toMatchObject({ id: 'hold-new' })
     expect(prismaMock.slotHold.create.mock.calls[0][0].data.endsAt).toEqual(derivedEndsAt)
@@ -512,7 +519,12 @@ describe('mintRescheduleAppointmentHold', () => {
       .mockRejectedValueOnce(Object.assign(new Error('retry'), { code: 'P2034' }))
       .mockImplementationOnce(async ({ data }: any) => ({ id: 'hold-new', expiresAt: data.expiresAt, staffId: data.staffId }))
 
-    await mintRescheduleAppointmentHold({ venueId, reservationId: 'reservation-1', requestedStartsAt })
+    await mintRescheduleAppointmentHold({
+      venueId,
+      reservationId: 'reservation-1',
+      requestedStartsAt,
+      clock: () => mintCheckedAt,
+    })
 
     expect(settingsService.getReservationSettings).toHaveBeenCalledTimes(2)
     expect(assignmentService.lockAppointmentVenue).toHaveBeenCalledTimes(2)
