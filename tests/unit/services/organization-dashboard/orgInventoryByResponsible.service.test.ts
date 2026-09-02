@@ -69,6 +69,23 @@ describe('buildInventoryByResponsible', () => {
   })
 
   describe('las 7 columnas', () => {
+    it('acepta filas agregadas con peso sin cambiar ningún total', () => {
+      const result = buildInventoryByResponsible({
+        items: [
+          item({ custodyState: 'PROMOTER_HELD', promoterAcceptedAt: new Date('2026-08-01T10:00:00.000Z'), weight: 120 } as any),
+          item({ custodyState: 'SOLD', saleVerificationStatus: 'COMPLETED', weight: 75 } as any),
+        ],
+        staff: [staff(), SUP_1],
+      })
+
+      expect(result.total).toMatchObject({
+        assigned: 195,
+        receptionApproved: 195,
+        inHandToday: 120,
+        saleApproved: 75,
+      })
+    })
+
     it('cuenta cada columna contra su estado', () => {
       const result = buildInventoryByResponsible({
         items: [
