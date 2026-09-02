@@ -2021,10 +2021,13 @@ export interface CashPaymentResponse {
   paymentId: string
   orderId: string
   orderNumber: string
+  /** Lo REGISTRADO como pago, en centavos: como máximo el saldo de la cuenta (sin propina). */
   amount: number
   tipAmount: number
   method: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'BANK_TRANSFER' | 'OTHER'
   status: 'COMPLETED'
+  /** Lo que sobró de `amount` solicitado sobre el saldo, en centavos: el cambio que debe dar el cajero. 0 si no sobró nada. */
+  changeCents: number
   changeAmount?: number // For display purposes (calculated on iOS)
   // Digital receipt for the mobile client's receipt QR (customer display +
   // printed receipt). Same shape the TPV order/fast endpoints return. Null only
@@ -2089,6 +2092,15 @@ export interface CashPaymentResponse {
  */
 function pesosToCents(pesos: number): number {
   return Math.round(pesos * 100)
+}
+
+/**
+ * El cambio que le toca a un REINTENTO idempotente: lo que pidió el cliente (la
+ * misma llave trae el mismo `amount`) menos lo que quedó registrado la primera
+ * vez. Así el cajero ve el mismo cambio aunque la respuesta original se perdiera.
+ */
+function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | number | null | undefined): number {
+  return Math.max(0, pedidoCents - pesosToCents(Number(registrado ?? 0)))
 }
 
 /**
@@ -2244,6 +2256,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // quiso devolver, y nadie puede depender del ruido.
         amount: pesosToCents(Number(existingByKey.amount)),
         tipAmount: pesosToCents(Number(existingByKey.tipAmount)),
+        changeCents: cambioDeReintento(amount, existingByKey.amount),
         // El método REAL del pago que ya existe: devolver 'CASH' fijo haría
         // que el reintento de un cobro con tarjeta se reportara como efectivo.
         method: existingByKey.method as CashPaymentResponse['method'],
@@ -2293,8 +2306,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     })
   }
 
-  // Convert cents to decimal for database
-  const amountDecimal = amount / 100
+  // Convert cents to decimal for database. `amount` es lo SOLICITADO; lo que se
+  // registra como pago se decide dentro de la transacción (ver `aplicadoCents`).
+  const amountSolicitadoDecimal = amount / 100
   const tipDecimal = tip / 100
 
   // ══════════════════════════════════════════════════════════════════════════════
@@ -2330,6 +2344,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         areaTicketOrder: boolean
         areaTicketSessionId?: string
         postingId?: string | null
+        /** Lo que de verdad se registró como pago (≤ saldo) y lo que sobró, en centavos. */
+        aplicadoCents: number
+        cambioCents: number
         // El saldo que la transacción YA calculó — antes se quedaba dentro y el
         // código de abajo (respuesta, broadcast, hook de referidos) tenía que
         // adivinarlo o mentir. Mismo patrón que `postingId`.
@@ -2347,7 +2364,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           venueId,
           orderId,
           idempotencyKey: input.idempotencyKey,
-          amount: new Prisma.Decimal(amountDecimal),
+          amount: new Prisma.Decimal(amountSolicitadoDecimal),
           method: paymentMethod,
         })
 
@@ -2403,6 +2420,26 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // corte del día (ORD-1779465117373, 2026-08-09)—, el cargo por servicio
         // dentro del total, y la tolerancia de un centavo para darla por saldada.
         // Lo único que cambia es que la suma va en `Decimal` y no en float.
+        // 🔴 Un cobro MAYOR al saldo no es una venta mayor: es CAMBIO. Medido el
+        // 2026-09-01: `amount: 3000` sobre una cuenta de $25 registraba un Payment de
+        // $30.00 (y `999999999999`, uno de $9,999,999,999.99) e inflaba ventas y
+        // VenueTransaction. La app manda siempre el total exacto y calcula el cambio
+        // en el aparato, así que esto sólo lo abre un cliente raro por API — por eso
+        // el aviso de abajo. Se registra como máximo lo que la cuenta DEBE (sin
+        // propina: la propina va aparte y no se toca) y el resto regresa en la
+        // respuesta como `changeCents`. El pago manual del dashboard rechaza el
+        // exceso con 400; aquí no se bloquea porque el dinero sí entró al cajón.
+        //
+        // Con devoluciones previas el saldo NO revive (`orderBalance.ts`), pero un
+        // cobro nuevo sobre esa cuenta sí se registra (`payCashOrder.refund.test.ts`):
+        // lo devuelto se puede volver a cobrar. Por eso el tope es saldo + devuelto;
+        // sin devoluciones, es exactamente el saldo.
+        const saldoAntes = computeOrderBalance(fresh, previousPayments)
+        const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
+        const cambioCents = Math.max(0, amount - saldoCents)
+        const aplicadoCents = amount - cambioCents
+        const amountDecimal = aplicadoCents / 100
+
         const balance = computeOrderBalance(fresh, [...previousPayments, { amount: amountDecimal, tipAmount: tipDecimal, type: 'REGULAR' }])
 
         // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
@@ -2596,6 +2633,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         return {
           newPayment,
           isFullyPaid,
+          aplicadoCents,
+          cambioCents,
           areaTicketOrder: areaFinalization.areaTicketOrder,
           areaTicketSessionId: areaFinalization.sessionId,
           postingId,
@@ -2630,6 +2669,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             // Enteros, igual que el camino idempotente de arriba.
             amount: pesosToCents(Number(winner.amount)),
             tipAmount: pesosToCents(Number(winner.tipAmount)),
+            changeCents: cambioDeReintento(amount, winner.amount),
             method: winner.method as CashPaymentResponse['method'],
             status: 'COMPLETED',
             digitalReceipt: winner.receipts?.[0]
@@ -2661,6 +2701,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               // Enteros, igual que los otros dos caminos idempotentes.
               amount: pesosToCents(Number(mine.amount)),
               tipAmount: pesosToCents(Number(mine.tipAmount)),
+              changeCents: cambioDeReintento(amount, mine.amount),
               method: mine.method as CashPaymentResponse['method'],
               status: 'COMPLETED',
               digitalReceipt: mine.receipts?.[0]
@@ -2692,7 +2733,18 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // Inalcanzable: el bucle o devuelve, o asigna, o lanza. Guard para el tipo.
     throw new ConflictError('No se pudo registrar el cobro. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
   }
-  const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId, balance } = paymentResult
+  const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId, balance, aplicadoCents, cambioCents } = paymentResult
+  // Los payloads de abajo (cajón, sockets, respuesta) llevan lo REGISTRADO, no lo solicitado.
+  const amountDecimal = aplicadoCents / 100
+  if (cambioCents > 0) {
+    logger.warn('[ORDER.MOBILE] payCash: el monto excede el saldo; se registra el saldo y el resto es cambio', {
+      venueId,
+      orderId,
+      amountCents: amount,
+      aplicadoCents,
+      cambioCents,
+    })
+  }
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
 
@@ -2883,8 +2935,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     paymentId: payment.id,
     orderId,
     orderNumber: order.orderNumber,
-    amount,
+    amount: aplicadoCents,
     tipAmount: tip,
+    changeCents: cambioCents,
     method: paymentMethod,
     status: 'COMPLETED',
     digitalReceipt,
