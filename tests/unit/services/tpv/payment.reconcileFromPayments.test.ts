@@ -128,15 +128,6 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
         },
       ],
     })
-    p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) =>
-      fn({
-        order: {
-          update: jest.fn().mockResolvedValue({ id: 'ord-1', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] }),
-        },
-        inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
-      }),
-    )
-
     // Colaboradores del camino de cobro: no deciden nada aquí, pero la función envuelta los
     // consulta y sin ellos reventaría por el andamiaje, no por el comportamiento bajo prueba.
     createSalePostingInTxMock.mockResolvedValue({ id: 'posting-1', status: 'PENDING' })
@@ -171,7 +162,14 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
     expect(fakeTx.order.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'ord-1' },
-        data: expect.objectContaining({ paymentStatus: 'PAID', status: 'COMPLETED', remainingBalance: 0, paidAmount: 74.75 }),
+        data: expect.objectContaining({
+          paymentStatus: 'PAID',
+          status: 'COMPLETED',
+          remainingBalance: 0,
+          paidAmount: 74.75,
+          total: 74.75,
+          tipAmount: 9.75,
+        }),
       }),
     )
     expect(p.payment.create).not.toHaveBeenCalled()
@@ -210,5 +208,46 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
     const data = fakeTx.order.update.mock.calls[0][0].data
     expect(data).not.toHaveProperty('status')
     expect(data).toMatchObject({ paymentStatus: 'PARTIAL', paidAmount: 40, remainingBalance: 60 })
+  })
+
+  it('reescribe la propina de la orden desde sus cobros (mismo comportamiento que un cobro en vivo)', async () => {
+    // La orden trae 9.75 de propina y 74.75 de total, pero su ÚNICO cobro COMPLETED no lleva
+    // propina. El cierre recalcula desde los pagos: gana la propina de los `Payment`, no la de la
+    // orden — 0 de propina y 65 de total. No es daño colateral del barrido: es exactamente lo que
+    // hace un cobro en vivo por este mismo camino.
+    p.order.findUnique.mockResolvedValue({
+      id: 'ord-3',
+      venueId: 'v1',
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(65),
+      discountAmount: new Decimal(0),
+      tipAmount: new Decimal(9.75),
+      total: new Decimal(74.75),
+      servedById: 'staff-1',
+      createdById: 'staff-1',
+      tableId: null,
+      customer: null,
+      payments: [{ amount: new Decimal(65), tipAmount: new Decimal(0), type: 'REGULAR' }],
+      items: [],
+    })
+    const fakeTx = {
+      order: {
+        update: jest.fn().mockResolvedValue({ id: 'ord-3', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] }),
+      },
+      inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
+    }
+    p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
+
+    await reconcileOrderFromPayments('ord-3')
+
+    expect(fakeTx.order.update.mock.calls[0][0].data).toMatchObject({
+      paymentStatus: 'PAID',
+      status: 'COMPLETED',
+      tipAmount: 0,
+      total: 65,
+      paidAmount: 65,
+      remainingBalance: 0,
+    })
   })
 })
