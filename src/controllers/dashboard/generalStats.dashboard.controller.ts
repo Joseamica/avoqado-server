@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as generalStatsService from '../../services/dashboard/generalStats.dashboard.service'
-import { GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
+import { BasicMetricsDetailsQuery, BasicMetricsQuery, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
 
 /**
  * Controller para obtener estadísticas generales del dashboard
@@ -28,7 +28,7 @@ export async function getGeneralStats(
  * Ruta: GET /api/v1/dashboard/venues/:venueId/basic-metrics
  */
 export async function getBasicMetrics(
-  req: Request<{ venueId: string }, {}, {}, GeneralStatsQuery>,
+  req: Request<{ venueId: string }, {}, {}, BasicMetricsQuery>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -39,6 +39,22 @@ export async function getBasicMetrics(
     const basicMetrics = await generalStatsService.getBasicMetricsData(venueId, filters)
 
     res.status(200).json(basicMetrics)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Página acotada de filas para una exportación explícita del dashboard.
+ * Ruta: GET /api/v1/dashboard/venues/:venueId/basic-metrics/details
+ */
+export async function getBasicMetricsDetails(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    // validateRequest parsed/coerced this query before the controller. Express'
+    // generic still exposes ParsedQs at route-registration time, so narrow here.
+    const filters = req.query as unknown as BasicMetricsDetailsQuery
+    const page = await generalStatsService.getBasicMetricsDetailsPage(req.params.venueId, filters)
+    res.status(200).json(page)
   } catch (error) {
     next(error)
   }

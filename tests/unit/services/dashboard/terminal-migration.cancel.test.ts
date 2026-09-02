@@ -1,7 +1,7 @@
 import { migrateCancel } from '@/services/dashboard/terminal-migration.service'
 import prisma from '@/utils/prismaClient'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, ForbiddenError } from '@/errors/AppError'
 
 // migrateCancel reverts the terminal DIRECTLY via prisma (bypassing updateTerminal
 // so the "blindar" auto-wipe does NOT re-queue a FACTORY_RESET on the revert).
@@ -10,6 +10,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     tpvCommandQueue: { findFirst: jest.fn() },
     terminal: { update: jest.fn(), findUnique: jest.fn() },
+    venue: { findFirst: jest.fn() },
     venuePaymentConfig: { deleteMany: jest.fn() },
   },
 }))
@@ -22,6 +23,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 const m = prisma as unknown as {
   tpvCommandQueue: { findFirst: jest.Mock }
   terminal: { update: jest.Mock; findUnique: jest.Mock }
+  venue: { findFirst: jest.Mock }
   venuePaymentConfig: { deleteMany: jest.Mock }
 }
 const mockedCancelCommand = tpvCommandQueueService.cancelCommand as jest.Mock
@@ -63,6 +65,26 @@ describe('migrateCancel', () => {
       data: { venueId: 'venue-old', assignedMerchantIds: ['ma-1', 'ma-2'] },
     })
     expect(r).toEqual({ cancelled: true, restoredVenueId: 'venue-old' })
+  })
+
+  it('refuses an org-scoped cancel when the migration origin belongs to another organization', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue({
+      id: 'cmd-cross-org',
+      terminalId: 'term-1',
+      commandType: 'FACTORY_RESET',
+      status: 'QUEUED',
+      payload: { migration: { fromVenueId: 'venue-foreign', previousMerchantIds: ['ma-foreign'] } },
+    })
+    m.venue.findFirst.mockResolvedValue(null)
+
+    await expect(migrateCancel('term-1', { staffId: 'owner-1' }, 'org-1')).rejects.toBeInstanceOf(ForbiddenError)
+
+    expect(m.venue.findFirst).toHaveBeenCalledWith({
+      where: { id: 'venue-foreign', organizationId: 'org-1' },
+      select: { id: true },
+    })
+    expect(mockedCancelCommand).not.toHaveBeenCalled()
+    expect(m.terminal.update).not.toHaveBeenCalled()
   })
 
   it('reverts to an empty merchant list when previousMerchantIds is absent in the payload', async () => {

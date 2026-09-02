@@ -64,6 +64,7 @@ let vC: string
 let dana: string
 let zoe: string
 let ximena: string
+let yago: string
 let zonaA: string
 let zonaB: string
 let haceTresDias: Date
@@ -410,12 +411,18 @@ beforeAll(async () => {
   dana = (await mkStaff('Dana', 'Doble')).id
   zoe = (await mkStaff('Zoe', 'Ajena')).id
   ximena = (await mkStaff('Ximena', 'Exempleada')).id
+  // Yago fue miembro de ESTA org (StaffOrganization dado de baja) y hoy trabaja en la otra.
+  yago = (await mkStaff('Yago', 'Exmiembro')).id
   await prisma.staffOrganization.create({ data: { staffId: dana, organizationId: orgId, role: 'MEMBER' } })
+  await prisma.staffOrganization.create({
+    data: { staffId: yago, organizationId: orgId, role: 'MEMBER', isActive: false, leftAt: new Date('2025-01-15T00:00:00.000Z') },
+  })
   await prisma.staffVenue.createMany({
     data: [
       { staffId: dana, venueId: vB, role: 'CASHIER' },
       { staffId: zoe, venueId: vB, role: 'CASHIER' },
       { staffId: ximena, venueId: v1, role: 'HOST', active: false },
+      { staffId: yago, venueId: vB, role: 'CASHIER' },
     ],
   })
   const catFuga = await prisma.menuCategory.create({
@@ -499,7 +506,7 @@ afterAll(async () => {
   await prisma.venue.deleteMany({ where: { id: { in: venueIds } } })
   await prisma.staffOrganization.deleteMany({ where: { organizationId: orgId } })
   await prisma.zone.deleteMany({ where: { organizationId: { in: [orgId, orgB].filter(Boolean) } } })
-  await prisma.staff.deleteMany({ where: { id: { in: [ana, beto, carla, mario, dana, zoe, ximena].filter(Boolean) } } })
+  await prisma.staff.deleteMany({ where: { id: { in: [ana, beto, carla, mario, dana, zoe, ximena, yago].filter(Boolean) } } })
   await prisma.organization.deleteMany({ where: { id: { in: [orgId, orgB].filter(Boolean) } } })
 })
 
@@ -690,6 +697,12 @@ describe('Acotado a la org — el id de un empleado de otra org no lee nada (IDO
     await expect(svc.getStaffAttendanceCalendar(orgId, ximena)).rejects.toBeInstanceOf(NotFoundError)
   })
 
+  it('una membresía de org dada de baja (isActive=false) tampoco basta', async () => {
+    await expect(svc.getStaffSalesTrend(orgId, yago)).rejects.toBeInstanceOf(NotFoundError)
+    await expect(svc.getStaffSalesMix(orgId, yago)).rejects.toBeInstanceOf(NotFoundError)
+    await expect(svc.getStaffAttendanceCalendar(orgId, yago)).rejects.toBeInstanceOf(NotFoundError)
+  })
+
   it('la tendencia de un miembro sólo suma sus ventas en tiendas de ESTA org', async () => {
     const { salesData } = await svc.getStaffSalesTrend(orgId, dana)
     const nombre = dayNames[haceTresDias.getDay()]
@@ -717,7 +730,7 @@ describe('Acotado a la org — el id de un empleado de otra org no lee nada (IDO
   })
 })
 
-describe('Zonas y panel del gerente — acotados a la org (mismo patrón IDOR)', () => {
+describe('Zonas, panel del gerente y reset de contraseña — acotados a la org (mismo patrón IDOR)', () => {
   // Las rutas van sólo con checkOrgAccess y el id de la URL se usaba tal cual: cualquier miembro
   // de una org podía renombrar o borrar una zona de OTRA org, y el panel del gerente listaba las
   // tiendas que gestiona en otras orgs.
@@ -740,6 +753,23 @@ describe('Zonas y panel del gerente — acotados a la org (mismo patrón IDOR)',
   it('el panel del gerente sólo lista sus tiendas de ESTA org', async () => {
     const d = (await svc.getManagerDashboard(orgId, mario, TZ))!
     expect(d.stores.map(s => s.id).sort()).toEqual([v1, v2].sort()) // la tienda ajena que también gestiona no aparece
+  })
+
+  it('el panel del gerente no reconoce a un ex-miembro de la org', async () => {
+    expect(await svc.getManagerDashboard(orgId, yago, TZ)).toBeNull()
+  })
+
+  it('restablecer la contraseña de un ex-miembro se rechaza (404) y su contraseña no cambia', async () => {
+    // Yago hoy trabaja en la otra org: resetear su contraseña desde aquí sería apropiarse de su cuenta.
+    const antes = (await prisma.staff.findUnique({ where: { id: yago }, select: { password: true } }))!.password
+    await expect(svc.resetUserPassword(orgId, yago, mario)).rejects.toBeInstanceOf(NotFoundError)
+    const despues = (await prisma.staff.findUnique({ where: { id: yago }, select: { password: true } }))!.password
+    expect(despues).toBe(antes)
+  })
+
+  it('borrar una zona propia sigue funcionando', async () => {
+    await svc.deleteZone(orgId, zonaA)
+    expect(await prisma.zone.count({ where: { id: zonaA } })).toBe(0)
   })
 })
 

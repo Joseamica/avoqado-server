@@ -291,15 +291,26 @@ export async function earnPoints(
   //
   // Se le pasa la config que ya tenemos: esta función corre en CADA cobro de CADA
   // negocio, y releerla serían miles de consultas diarias que no aportan nada.
+  let deferredStampError: unknown
   try {
     await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
   } catch (stampError: any) {
+    deferredStampError = stampError
     logger.error('⚠️ Falló el sellado — los puntos siguen su curso', {
       venueId,
       customerId,
       orderId,
       error: stampError?.message,
     })
+  }
+
+  // The payment callers already isolate loyalty failures from the approved
+  // charge. We therefore persist points first, then surface a stamp failure so
+  // the durable paid-order reconciler can retry the missing stamp. Swallowing it
+  // here would mark the order processed forever with a visibly missing reward.
+  const finish = <T>(result: T): T => {
+    if (deferredStampError) throw deferredStampError
+    return result
   }
 
   // 🔒 IDEMPOTENCY CHECK: Prevent double-earning on payment retries
@@ -321,16 +332,16 @@ export async function earnPoints(
       existingPoints: existingEarnTransaction.points,
       currentBalance: customer?.loyaltyPoints,
     })
-    return {
+    return finish({
       pointsEarned: existingEarnTransaction.points,
       newBalance: customer?.loyaltyPoints ?? 0,
-    }
+    })
   }
 
   const pointsEarned = await calculatePointsForAmount(venueId, amount)
 
   if (pointsEarned === 0) {
-    return { pointsEarned: 0, newBalance: 0 }
+    return finish({ pointsEarned: 0, newBalance: 0 })
   }
 
   // 🔒 RACE CONDITION FIX: Database has partial unique index to prevent duplicates
@@ -359,10 +370,10 @@ export async function earnPoints(
       }),
     ])
 
-    return {
+    return finish({
       pointsEarned,
       newBalance: customer.loyaltyPoints,
-    }
+    })
   } catch (error: any) {
     // Handle unique constraint violation from partial unique index
     // This happens when concurrent calls race past the idempotency check
@@ -380,10 +391,10 @@ export async function earnPoints(
         where: { id: customerId },
         select: { loyaltyPoints: true },
       })
-      return {
+      return finish({
         pointsEarned: existingTransaction?.points ?? pointsEarned,
         newBalance: customer?.loyaltyPoints ?? 0,
-      }
+      })
     }
     throw error
   }

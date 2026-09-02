@@ -255,7 +255,7 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       const terminalOrder = prismaMock.terminal.findUnique.mock.invocationCallOrder[0]
       const migrateOrder = migrateCancelMock.mock.invocationCallOrder[0]
       expect(terminalOrder).toBeLessThan(migrateOrder)
-      expect(migrateCancelMock).toHaveBeenCalledWith(TERMINAL_ID, actor)
+      expect(migrateCancelMock).toHaveBeenCalledWith(TERMINAL_ID, actor, ORG_ID)
     })
 
     it('throws ForbiddenError and does NOT call migrateCancel when the terminal is in another org', async () => {
@@ -281,7 +281,7 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       const terminalOrder = prismaMock.terminal.findUnique.mock.invocationCallOrder[0]
       const migrateOrder = migrateDiscardMock.mock.invocationCallOrder[0]
       expect(terminalOrder).toBeLessThan(migrateOrder)
-      expect(migrateDiscardMock).toHaveBeenCalledWith(TERMINAL_ID, actor)
+      expect(migrateDiscardMock).toHaveBeenCalledWith(TERMINAL_ID, actor, ORG_ID)
     })
 
     it('throws ForbiddenError and does NOT call migrateDiscard when the terminal is in another org', async () => {

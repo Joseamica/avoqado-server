@@ -2479,6 +2479,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             // (`payment.tpv.service`, `manualPayment.service` y el webhook de
             // cripto ya se comportaban así.)
             ...(isFullyPaid ? { status: 'COMPLETED' as const } : {}),
+            ...(isFullyPaid ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
             paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
             remainingBalance: Math.max(0, remainingAfterPayment),
             tipAmount: totalTip,

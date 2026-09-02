@@ -82,7 +82,9 @@ const INVENTARIO: Record<string, number> = {
   // Postgres (golden snapshots al centavo + integración con base real). Los 3
   // que quedan devuelven las FILAS al dashboard (contrato de la API, con select
   // acotado): quitarlos exige paginar también el cliente — trabajo aparte.
-  'src/services/dashboard/generalStats.dashboard.service.ts': 3,
+  // 2026-09-01 (tarde): 3 → 2. basic-metrics pasó a summary en SQL; sus listas de
+  // compatibilidad llevan take (BASIC_METRICS_ROWS_CAP).
+  'src/services/dashboard/generalStats.dashboard.service.ts': 2,
   'src/services/dashboard/inventoryRestock.service.ts': 1,
   'src/services/dashboard/itemCategory.dashboard.service.ts': 1,
   'src/services/dashboard/order.dashboard.service.ts': 2,

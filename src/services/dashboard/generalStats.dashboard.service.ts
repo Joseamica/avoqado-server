@@ -1,7 +1,12 @@
 import { PaymentMethod, ProductType, TransactionStatus, OrderStatus, Prisma } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
+import {
+  BasicMetricsDetailsQuery,
+  BasicMetricsQuery,
+  GeneralStatsResponse,
+  GeneralStatsQuery,
+} from '../../schemas/dashboard/generalStats.schema'
 import { SharedQueryService } from './shared-query.service'
 import { isItemLevelDiscountSql, lineRevenueSql } from './lineRevenue'
 import { parseDateRange, DEFAULT_TIMEZONE } from '../../utils/datetime'
@@ -10,6 +15,7 @@ import { DateTime } from 'luxon'
 // ⚠️ TECH DEBT — delete when MindForm migrates to native QR module.
 // See: src/services/legacy/mergedPayments.service.ts for full context.
 import { fetchPaymentsForAnalytics } from '../legacy/mergedPayments.service'
+import { MINDFORM_NEW_VENUE_ID, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
 
 /**
  * ── Reescritura 2026-09-01 (incidente del event loop) ────────────────────────
@@ -469,7 +475,7 @@ function mapPaymentMethod(method: PaymentMethod | string): string {
 /**
  * Get basic metrics data for initial dashboard load (priority data)
  */
-export async function getBasicMetricsData(venueId: string, filters: GeneralStatsQuery = {}) {
+export async function getBasicMetricsData(venueId: string, filters: BasicMetricsQuery = {}) {
   // Validate venue exists
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
@@ -482,49 +488,134 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
   // Set default date range (last 7 days) if not provided
   const { from: fromDate, to: toDate } = parseDateRange(filters.fromDate, filters.toDate, 7)
 
-  // Fetch only valid payments: COMPLETED status, non-cancelled orders, and
-  // exclude refund payments (type=REFUND). Refund Payments also carry
-  // status=COMPLETED but they're corrections, not sales — including them here
-  // makes the "Total ventas" KPI negative on days that only had refunds and
-  // inflates downstream derived metrics (avg ticket, tips, etc.).
+  // 🔴 2026-09-01 (query-guard en producción): con el rango «este año», Testarudo
+  // materializaba 24,631 pagos aquí — la PRIMERA llamada del home — para que el
+  // navegador los sumara. Ahora los KPIs los suma Postgres (`summary`,
+  // `paymentMethodsData`, `reviewStats`) sobre TODAS las filas del rango, y las
+  // listas `payments`/`reviews` se conservan sólo por compatibilidad con pestañas
+  // viejas, ACOTADAS a BASIC_METRICS_ROWS_CAP y declaradas en `meta`.
   //
-  // ⚠️ Uses fetchPaymentsForAnalytics instead of prisma.payment.findMany directly
-  // so MindForm's legacy QR payments are included in KPIs. For ~999 other
-  // venues this is a no-op (single string comparison, zero extra queries).
-  // Remove once MindForm is on the native QR module.
-  const validPayments = await fetchPaymentsForAnalytics(venueId, {
-    fromDate,
-    toDate,
-  })
+  // Reglas de negocio idénticas a las de siempre: pagos COMPLETED, tipo != REFUND
+  // (una devolución también es COMPLETED, pero es corrección, no venta), y órdenes
+  // no CANCELLED. Puente legacy de MindForm: sus pagos QR viven en otra base, así
+  // que se suman en Node SÓLO para ese venue (conjunto histórico finito).
+  const cap = basicMetricsRowsCap()
 
-  // Fetch reviews for star rating
-  const reviews = await prisma.review.findMany({
-    where: {
-      venueId,
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-    select: {
-      id: true,
-      overallRating: true,
-      createdAt: true,
-    },
-  })
+  const compactResponse = filters.responseMode === 'aggregated-v1'
+  const tz = venue.timezone || DEFAULT_TIMEZONE
 
-  // Transform data for basic metrics
-  const transformedPayments = validPayments.map(payment => ({
+  const [paymentAggregateRows, reviewStatsRows, payments, reviews] = await Promise.all([
+    prisma.$queryRaw<Array<{ method: string; weekday: number; total: unknown; count: unknown; tips: unknown; tipPercentageSum: unknown }>>`
+      SELECT
+        CASE
+          WHEN p."method" = 'CASH' THEN 'Efectivo'
+          WHEN p."method" IN ('CREDIT_CARD', 'DEBIT_CARD') THEN 'Tarjeta'
+          ELSE 'Otro'
+        END AS "method",
+        EXTRACT(DOW FROM ${localTs(tz, Prisma.raw('p."createdAt"'))})::int AS "weekday",
+        COALESCE(SUM(p."amount"), 0) AS "total",
+        COUNT(*) AS "count",
+        COALESCE(SUM(p."tipAmount"), 0) AS "tips",
+        COALESCE(SUM(CASE WHEN p."amount" > 0 THEN (p."tipAmount" / p."amount") * 100 ELSE 0 END), 0) AS "tipPercentageSum"
+      FROM "Payment" p
+      LEFT JOIN "Order" o ON o."id" = p."orderId"
+      WHERE p."venueId" = ${venueId}
+        AND p."status" = 'COMPLETED'
+        AND p."type" <> 'REFUND'
+        AND p."createdAt" >= ${utcTs(fromDate)} AND p."createdAt" <= ${utcTs(toDate)}
+        AND (o."id" IS NULL OR o."status" <> 'CANCELLED')
+      GROUP BY 1, 2
+      ORDER BY 1, 2
+    `,
+    prisma.$queryRaw<Array<{ total: unknown; fiveStar: unknown }>>`
+      SELECT COUNT(*) AS "total", COUNT(*) FILTER (WHERE r."overallRating" = 5) AS "fiveStar"
+      FROM "Review" r
+      WHERE r."venueId" = ${venueId}
+        AND r."createdAt" >= ${utcTs(fromDate)} AND r."createdAt" <= ${utcTs(toDate)}
+    `,
+    compactResponse
+      ? Promise.resolve([])
+      : prisma.payment.findMany({
+          where: {
+            venueId,
+            status: TransactionStatus.COMPLETED,
+            type: { not: 'REFUND' },
+            createdAt: { gte: fromDate, lte: toDate },
+            order: { status: { not: 'CANCELLED' } },
+          },
+          select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: cap,
+        }),
+    compactResponse
+      ? Promise.resolve([])
+      : prisma.review.findMany({
+          where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
+          select: { id: true, overallRating: true, createdAt: true },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: cap,
+        }),
+  ])
+
+  const summary = { totalAmount: 0, totalTransactions: 0, totalTips: 0, avgTipPercentage: 0 }
+  const methodTotals: Record<string, number> = {}
+  const methodCounts: Record<string, number> = {}
+  const reviewStats = { total: toNumber(reviewStatsRows[0]?.total), fiveStar: toNumber(reviewStatsRows[0]?.fiveStar) }
+  const performanceByWeekday = new Array<number>(7).fill(0)
+  let tipPercentageSum = 0
+  for (const row of paymentAggregateRows) {
+    const total = toNumber(row.total)
+    const count = toNumber(row.count)
+    summary.totalAmount += total
+    summary.totalTransactions += count
+    summary.totalTips += toNumber(row.tips)
+    tipPercentageSum += toNumber(row.tipPercentageSum)
+    methodTotals[row.method] = (methodTotals[row.method] ?? 0) + total
+    methodCounts[row.method] = (methodCounts[row.method] ?? 0) + count
+    performanceByWeekday[row.weekday] += total
+  }
+  summary.totalAmount = round2(summary.totalAmount)
+  summary.totalTips = round2(summary.totalTips)
+  summary.avgTipPercentage = summary.totalTransactions > 0 ? tipPercentageSum / summary.totalTransactions : 0
+  for (let weekday = 0; weekday < performanceByWeekday.length; weekday++) {
+    performanceByWeekday[weekday] = round2(performanceByWeekday[weekday])
+  }
+
+  // Listas de compatibilidad (acotadas). Se mantiene la forma exacta de siempre.
+  const transformedPayments = payments.map(payment => ({
     id: payment.id,
-    amount: payment.amount,
+    amount: Number(payment.amount),
     method: mapPaymentMethod(payment.method),
     createdAt: payment.createdAt.toISOString(),
-    tips: [
-      {
-        amount: payment.tipAmount,
-      },
-    ],
+    tips: [{ amount: Number(payment.tipAmount) }],
   }))
+
+  // Puente legacy de MindForm (ver mergedPayments.service.ts): sus pagos QR no
+  // están en Postgres, así que se suman aquí con las MISMAS reglas.
+  if (venueId === MINDFORM_NEW_VENUE_ID) {
+    const legacy = await fetchLegacyAnalyticsPayments(fromDate, toDate)
+    for (const p of legacy) {
+      summary.totalAmount = round2(summary.totalAmount + p.amount)
+      summary.totalTips = round2(summary.totalTips + p.tipAmount)
+      summary.totalTransactions += 1
+      tipPercentageSum += p.amount > 0 ? (p.tipAmount / p.amount) * 100 : 0
+      const label = mapPaymentMethod(p.method) === 'CASH' ? 'Efectivo' : mapPaymentMethod(p.method) === 'CARD' ? 'Tarjeta' : 'Otro'
+      methodTotals[label] = (methodTotals[label] ?? 0) + p.amount
+      methodCounts[label] = (methodCounts[label] ?? 0) + 1
+      const weekday = DateTime.fromJSDate(p.createdAt, { zone: 'utc' }).setZone(tz).weekday % 7
+      performanceByWeekday[weekday] = round2(performanceByWeekday[weekday] + p.amount)
+      if (transformedPayments.length < cap) {
+        transformedPayments.push({
+          id: p.id,
+          amount: p.amount,
+          method: mapPaymentMethod(p.method),
+          createdAt: p.createdAt.toISOString(),
+          tips: [{ amount: p.tipAmount }],
+        })
+      }
+    }
+    summary.avgTipPercentage = summary.totalTransactions > 0 ? tipPercentageSum / summary.totalTransactions : 0
+  }
 
   const transformedReviews = reviews.map(review => ({
     id: review.id,
@@ -532,13 +623,144 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
     createdAt: review.createdAt.toISOString(),
   }))
 
-  // Generate payment methods data for pie chart
-  const paymentMethodsData = generatePaymentMethodsData(transformedPayments)
+  const paymentMethodsData = Object.entries(methodTotals).map(([method, total]) => ({
+    method,
+    total: round2(total),
+    count: methodCounts[method] ?? 0,
+  }))
 
   return {
+    ...(compactResponse ? { responseMode: 'aggregated-v1' as const } : {}),
     payments: transformedPayments,
     reviews: transformedReviews,
     paymentMethodsData,
+    summary,
+    reviewStats,
+    performanceByWeekday,
+    meta: {
+      paymentsTruncated: summary.totalTransactions > transformedPayments.length,
+      paymentsTotal: summary.totalTransactions,
+      reviewsTruncated: reviewStats.total > transformedReviews.length,
+      reviewsTotal: reviewStats.total,
+    },
+  }
+}
+
+/** Tope de las listas de compatibilidad de basic-metrics (ver getBasicMetricsData). */
+export const BASIC_METRICS_ROWS_CAP_DEFAULT = 5000
+function basicMetricsRowsCap(): number {
+  const crudo = Number(process.env.BASIC_METRICS_ROWS_CAP)
+  return Number.isFinite(crudo) && crudo > 0 ? Math.floor(crudo) : BASIC_METRICS_ROWS_CAP_DEFAULT
+}
+function toNumber(value: unknown): number {
+  if (typeof value === 'bigint') return Number(value)
+  return Number(value ?? 0)
+}
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+/**
+ * Pagos QR legacy de MindForm ya filtrados con las reglas de analytics (COMPLETED,
+ * sin REFUND). Sólo se llama para ese venue; para los demás nunca abre el pool.
+ */
+async function fetchLegacyAnalyticsPayments(fromDate: Date, toDate: Date) {
+  const { rows } = await getLegacyPayments({ startDate: fromDate.toISOString(), endDate: toDate.toISOString() })
+  return rows
+    .filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND')
+    .map(p => ({
+      id: p.id,
+      amount: Number(p.amount),
+      tipAmount: Number(p.tipAmount),
+      method: String(p.method),
+      createdAt: p.createdAt as Date,
+    }))
+}
+
+/**
+ * Página de detalle usada únicamente después de que el usuario pide exportar.
+ * La carga normal del home nunca recorre estas filas; una exportación completa
+ * avanza en páginas de hasta 500 y conserva el mismo filtro contable del KPI.
+ */
+export async function getBasicMetricsDetailsPage(venueId: string, filters: BasicMetricsDetailsQuery) {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
+  if (!venue) throw new NotFoundError(`Venue with ID ${venueId} not found`)
+
+  const { from: fromDate, to: toDate } = parseDateRange(filters.fromDate, filters.toDate, 7)
+  const limit = filters.limit ?? 500
+
+  if (filters.kind === 'payments') {
+    // MindForm is the only two-database exception. Its legacy history cannot
+    // participate in a Prisma cursor, so the explicit export merges/sorts it
+    // first and then slices deterministically. Other venues stay DB-paginated.
+    if (venueId === MINDFORM_NEW_VENUE_ID) {
+      const merged = (await fetchPaymentsForAnalytics(venueId, { fromDate, toDate })).sort(
+        (a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id),
+      )
+      const cursorIndex = filters.cursor ? merged.findIndex(payment => payment.id === filters.cursor) : -1
+      const start = cursorIndex >= 0 ? cursorIndex + 1 : 0
+      const pageRows = merged.slice(start, start + limit + 1)
+      const hasMore = pageRows.length > limit
+      const visible = pageRows.slice(0, limit)
+      return {
+        items: visible.map(payment => transformBasicMetricPayment(payment)),
+        nextCursor: hasMore ? (visible[visible.length - 1]?.id ?? null) : null,
+      }
+    }
+
+    const rows = await prisma.payment.findMany({
+      where: {
+        venueId,
+        status: TransactionStatus.COMPLETED,
+        type: { not: 'REFUND' },
+        createdAt: { gte: fromDate, lte: toDate },
+        order: { status: { not: 'CANCELLED' } },
+      },
+      select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(filters.cursor ? { cursor: { id: filters.cursor }, skip: 1 } : {}),
+    })
+    const hasMore = rows.length > limit
+    const visible = rows.slice(0, limit)
+    return {
+      items: visible.map(payment => transformBasicMetricPayment(payment)),
+      nextCursor: hasMore ? (visible[visible.length - 1]?.id ?? null) : null,
+    }
+  }
+
+  const rows = await prisma.review.findMany({
+    where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
+    select: { id: true, overallRating: true, createdAt: true },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: limit + 1,
+    ...(filters.cursor ? { cursor: { id: filters.cursor }, skip: 1 } : {}),
+  })
+  const hasMore = rows.length > limit
+  const visible = rows.slice(0, limit)
+  return {
+    items: visible.map(review => ({
+      id: review.id,
+      stars: review.overallRating,
+      createdAt: review.createdAt.toISOString(),
+    })),
+    nextCursor: hasMore ? (visible[visible.length - 1]?.id ?? null) : null,
+  }
+}
+
+function transformBasicMetricPayment(payment: {
+  id: string
+  amount: Prisma.Decimal | number
+  tipAmount: Prisma.Decimal | number
+  method: PaymentMethod | string
+  createdAt: Date
+}) {
+  return {
+    id: payment.id,
+    amount: Number(payment.amount),
+    method: mapPaymentMethod(payment.method),
+    createdAt: payment.createdAt.toISOString(),
+    tips: [{ amount: Number(payment.tipAmount) }],
   }
 }
 
@@ -713,18 +935,6 @@ async function getSalesByPaymentMethodData(venueId: string, dateFilter: { create
   }))
 
   return { payments: transformedPayments }
-}
-
-function generatePaymentMethodsData(payments: any[]) {
-  const methodTotals: Record<string, number> = {}
-
-  payments.forEach(payment => {
-    const methodKey = payment.method || 'OTHER'
-    const method = methodKey === 'CASH' ? 'Efectivo' : methodKey === 'CARD' ? 'Tarjeta' : 'Otro'
-    methodTotals[method] = (methodTotals[method] || 0) + Number(payment.amount)
-  })
-
-  return Object.entries(methodTotals).map(([method, total]) => ({ method, total }))
 }
 
 // Strategic Analytics Chart Data Functions

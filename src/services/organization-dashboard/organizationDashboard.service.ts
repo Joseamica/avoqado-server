@@ -1009,7 +1009,7 @@ class OrganizationDashboardService {
     const manager = await prisma.staff.findFirst({
       where: {
         id: managerId,
-        organizations: { some: { organizationId: orgId } },
+        organizations: { some: { organizationId: orgId, isActive: true } },
       },
       select: {
         id: true,
@@ -2615,7 +2615,7 @@ class OrganizationDashboardService {
         id: staffId,
         OR: [
           { venues: { some: { active: true, venue: { organizationId: orgId } } } },
-          { organizations: { some: { organizationId: orgId } } },
+          { organizations: { some: { organizationId: orgId, isActive: true } } },
         ],
       },
       select: { id: true },
@@ -2774,7 +2774,7 @@ class OrganizationDashboardService {
   async updateZone(orgId: string, zoneId: string, data: { name?: string; slug?: string }) {
     await this.assertZoneInOrg(orgId, zoneId)
     const zone = await prisma.zone.update({
-      where: { id: zoneId },
+      where: { id: zoneId, organizationId: orgId },
       data,
     })
 
@@ -2790,12 +2790,14 @@ class OrganizationDashboardService {
 
   async deleteZone(orgId: string, zoneId: string) {
     await this.assertZoneInOrg(orgId, zoneId)
-    // Set null on venues referencing this zone, then delete
-    await prisma.venue.updateMany({
-      where: { zoneId, organizationId: orgId },
-      data: { zoneId: null },
-    })
-    const zone = await prisma.zone.delete({ where: { id: zoneId } })
+    // Desvincular los venues de la org y borrar, en una transacción y con el borrado acotado a
+    // la org: la escritura no depende sólo del chequeo previo. (Un venue de OTRA org que apunte
+    // a esta zona —estado que el schema permite— queda en NULL por el ON DELETE SET NULL; la
+    // FK compuesta que lo impediría es una migración aparte.)
+    const [, zone] = await prisma.$transaction([
+      prisma.venue.updateMany({ where: { zoneId, organizationId: orgId }, data: { zoneId: null } }),
+      prisma.zone.delete({ where: { id: zoneId, organizationId: orgId } }),
+    ])
 
     logAction({
       action: 'ZONE_DELETED',
@@ -2956,13 +2958,25 @@ class OrganizationDashboardService {
   // ==========================================
 
   async resetUserPassword(orgId: string, userId: string, performedBy?: string) {
-    // Verify user belongs to org
+    // Membresía VIGENTE en la org. Sin `isActive`, el dueño de la org A podía resetear la
+    // contraseña (global) de alguien que ya se fue y hoy trabaja en la org B: apropiación de
+    // cuenta (IDOR cross-tenant, 2026-09-01). 404 para no confirmar la existencia del id.
+    //
+    // 🔴 RIESGO ACEPTADO por el founder (2026-09-01, opción C): la contraseña es UNA por persona
+    // (`Staff.password`), así que un OWNER que resetea a un empleado activo en DOS orgs obtiene
+    // acceso a la otra con la contraseña temporal. Medido en producción ese día: 7 cuentas con
+    // acceso a 2+ organizaciones (1 nuestra, 1-2 de clientes reales). Mitiga: owner-only en las
+    // tres rutas, la víctima queda fuera al instante (sello `lastPasswordReset` + cierre de
+    // sesiones) y el reset queda en ActivityLog con quién lo hizo. Si se reabre: (B) rechazar el
+    // reset cuando la persona tenga otra org activa, o (A) enlace de restablecimiento por correo
+    // en vez de contraseña temporal en pantalla.
     const staffOrg = await prisma.staffOrganization.findFirst({
-      where: { staffId: userId, organizationId: orgId },
+      where: { staffId: userId, organizationId: orgId, isActive: true },
+      select: { id: true },
     })
 
     if (!staffOrg) {
-      throw new Error('User not found in this organization')
+      throw new NotFoundError('El usuario no pertenece a esta organización')
     }
 
     // Generate a temp password

@@ -1408,7 +1408,7 @@ async function creditPaymentLinkCustomer(args: {
   const base = Number(args.amount.toString())
 
   try {
-    await updateCustomerMetrics(args.customerId, base)
+    await updateCustomerMetrics(args.customerId, base, args.orderId, args.venueId)
     logger.info('📊 Métricas del cliente actualizadas (liga de pago)', {
       orderId: args.orderId,
       customerId: args.customerId,

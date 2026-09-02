@@ -84,6 +84,50 @@ function hasSettlementLanded(status: SettlementStatus, estimatedSettlementDate: 
   return estimatedSettlementDate != null && estimatedSettlementDate.getTime() <= now.getTime()
 }
 
+// A page is intentionally small enough that the live settlement engine cannot
+// monopolize the event loop for a long burst, but large enough to avoid turning a
+// historical report into thousands of round trips. This is INTERNAL pagination:
+// every row is still reduced and the public response remains byte-for-byte
+// compatible (no hidden records, no frontend pagination contract to migrate).
+const PAYMENT_HISTORY_PAGE_SIZE = 500
+
+const SETTLEMENT_CONFIG_SELECT = {
+  merchantAccountId: true,
+  cardType: true,
+  settlementDays: true,
+  settlementDayType: true,
+  cutoffTime: true,
+  cutoffTimezone: true,
+  effectiveFrom: true,
+  effectiveTo: true,
+} satisfies Prisma.SettlementConfigurationSelect
+
+async function appendMissingSettlementConfigs(
+  merchantAccountIds: Array<string | null>,
+  loadedMerchantIds: Set<string>,
+  configs: ActiveConfig[],
+): Promise<void> {
+  const missingMerchantIds: string[] = []
+  for (const merchantAccountId of merchantAccountIds) {
+    if (!merchantAccountId || loadedMerchantIds.has(merchantAccountId)) continue
+    loadedMerchantIds.add(merchantAccountId)
+    missingMerchantIds.push(merchantAccountId)
+  }
+
+  if (missingMerchantIds.length === 0) return
+
+  const rows = await prisma.settlementConfiguration.findMany({
+    where: { merchantAccountId: { in: missingMerchantIds } },
+    select: SETTLEMENT_CONFIG_SELECT,
+    orderBy: { effectiveFrom: 'desc' },
+  })
+  configs.push(...rows)
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve))
+}
+
 /**
  * Get available balance summary for a venue
  *
@@ -106,7 +150,11 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   const venueRecord = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const venueTimezone = venueRecord?.timezone || DEFAULT_TIMEZONE
 
-  // Get all completed card payments with settlement info
+  // Read completed card payments in bounded INTERNAL pages. Each payment still
+  // goes through the canonical live settlement engine, so totals and the public
+  // response are unchanged; only peak Node memory and event-loop burst size are
+  // bounded. A visible `take` here without exhausting the cursor would silently
+  // hide money from the venue and is therefore forbidden.
   //
   // 🔑 El saldo disponible es la promesa "Avoqado te va a depositar esto", así que
   // sólo puede contener dinero que Avoqado PROCESÓ. Una venta cobrada con una
@@ -116,75 +164,143 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   // El filtro por `paymentIsAvoqadoSettled` va DESPUÉS del query a propósito: un
   // `not:` de Prisma sobre un enum nullable deja fuera los NULL (todo lo histórico),
   // que es justo lo que NO queremos cambiar. Ver `shared/tenderSemantics.ts`.
-  // ⚠️ Este findMany NO se convirtió a GROUP BY a propósito (2026-09-01): cada pago
+  // ⚠️ Esto NO se convirtió a GROUP BY a propósito (2026-09-01): cada pago
   // pendiente pasa por `projectPaymentSettlement`, el motor de liquidación vivo
   // (config vigente por fecha, cutoff con timezone, días hábiles). Replicarlo en SQL
-  // sería mantener el motor del dinero en DOS lenguajes. Lo que sí se recortó es el
-  // ANCHO de cada fila: de todas las columnas + transaction completa a los campos que
-  // el cálculo usa. Los rangos que devuelvan resultados gigantes los denuncia el
-  // [query-guard] de runtime.
-  const cardPaymentsRaw = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      method: {
-        not: PaymentMethod.CASH, // Exclude cash, handle separately
-      },
-      ...dateFilter,
-    },
-    select: {
-      amount: true,
-      tipAmount: true,
-      createdAt: true,
-      merchantAccountId: true,
-      ...TENDER_SEMANTICS_SELECT,
-      transaction: {
-        select: {
-          status: true,
-          estimatedSettlementDate: true,
-          netSettlementAmount: true,
-        },
-      },
-      transactionCost: {
-        select: {
-          venueChargeAmount: true,
-          venueFixedFee: true,
-          transactionType: true,
-        },
-      },
-    },
-  })
+  // sería mantener el motor del dinero en DOS lenguajes.
 
-  // Dinero que Avoqado NO procesó (terminal ajena, transferencia directa, tender
-  // personalizado) queda fuera del saldo. Con `fundsFlow` sin estampar —todo lo
-  // histórico— el predicado cae al comportamiento legacy y el número no se mueve.
-  const cardPayments = cardPaymentsRaw.filter(paymentIsAvoqadoSettled)
+  const now = new Date()
+  let totalSales = 0
+  let totalFees = 0
+  let availableNow = 0
+  let pendingSettlement = 0
+  let uncostedCount = 0
+  let uncostedAmount = 0
+  let firstUpcomingDate: Date | null = null
+  const settlementsByDate = new Map<string, number>()
+  const settlementConfigs: ActiveConfig[] = []
+  const loadedMerchantIds = new Set<string>()
+  let cursorId: string | undefined
 
-  // Settlement dates/nets for still-PENDING money are RECOMPUTED live via the same
-  // shared engine as the week strip / settlement calendar / timeline — NOT read from
-  // the stored transaction.{estimatedSettlementDate,netSettlementAmount}, which can go
-  // stale (pre-engine-fix dates, a rate correction, a payment/tip edit after the first
-  // estimate). Without this, "Próximo depósito" (this function) could disagree by a few
-  // cents or a day with the settlement-week strip on the SAME page, which recomputes
-  // live already. Money already SETTLED is left untouched — that already happened, and
-  // recomputing after the fact would rewrite history for money the bank already moved.
-  const pendingMerchantIds = Array.from(new Set(cardPayments.map(p => p.merchantAccountId).filter((x): x is string => Boolean(x))))
-  const settlementConfigs: ActiveConfig[] = pendingMerchantIds.length
-    ? await prisma.settlementConfiguration.findMany({
-        where: { merchantAccountId: { in: pendingMerchantIds } },
-        select: {
-          merchantAccountId: true,
-          cardType: true,
-          settlementDays: true,
-          settlementDayType: true,
-          cutoffTime: true,
-          cutoffTimezone: true,
-          effectiveFrom: true,
-          effectiveTo: true,
+  while (true) {
+    const cardPaymentsRaw = await prisma.payment.findMany({
+      where: {
+        venueId,
+        status: 'COMPLETED',
+        method: {
+          not: PaymentMethod.CASH, // Exclude cash, handle separately
         },
-        orderBy: { effectiveFrom: 'desc' },
-      })
-    : []
+        ...dateFilter,
+      },
+      select: {
+        id: true,
+        amount: true,
+        tipAmount: true,
+        createdAt: true,
+        merchantAccountId: true,
+        ...TENDER_SEMANTICS_SELECT,
+        transaction: {
+          select: {
+            status: true,
+            estimatedSettlementDate: true,
+            netSettlementAmount: true,
+          },
+        },
+        transactionCost: {
+          select: {
+            venueChargeAmount: true,
+            venueFixedFee: true,
+            transactionType: true,
+          },
+        },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: PAYMENT_HISTORY_PAGE_SIZE,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+    })
+
+    if (cardPaymentsRaw.length === 0) break
+
+    // Dinero que Avoqado NO procesó (terminal ajena, transferencia directa, tender
+    // personalizado) queda fuera del saldo. Con `fundsFlow` sin estampar —todo lo
+    // histórico— el predicado cae al comportamiento legacy y el número no se mueve.
+    const cardPayments = cardPaymentsRaw.filter(paymentIsAvoqadoSettled)
+
+    // Settlement dates/nets for still-PENDING money are RECOMPUTED live via the
+    // same shared engine as the week strip / settlement calendar / timeline. Load
+    // each merchant's versioned rules once as its first page appears.
+    await appendMissingSettlementConfigs(
+      cardPayments.map(payment => payment.merchantAccountId),
+      loadedMerchantIds,
+      settlementConfigs,
+    )
+
+    for (const payment of cardPayments) {
+      const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
+      const fees = payment.transactionCost
+        ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
+        : 0
+      const netAmount = amount - fees
+
+      if (!payment.transactionCost) {
+        uncostedCount += 1
+        uncostedAmount += amount
+      }
+
+      totalSales += amount
+      totalFees += fees
+
+      const projected =
+        payment.transactionCost && payment.merchantAccountId
+          ? projectPaymentSettlement(
+              {
+                amount: payment.amount,
+                tipAmount: payment.tipAmount,
+                createdAt: payment.createdAt,
+                merchantAccountId: payment.merchantAccountId,
+                transactionCost: payment.transactionCost,
+              },
+              settlementConfigs,
+              venueTimezone,
+            )
+          : null
+      const projectedDate = projected ? fromZonedTime(`${projected.settlementDateKey}T12:00:00.000`, venueTimezone) : null
+
+      if (payment.transaction) {
+        const { status, estimatedSettlementDate, netSettlementAmount } = payment.transaction
+
+        if (status === SettlementStatus.SETTLED) {
+          // Already landed and confirmed — authoritative; never rewrite money that
+          // already moved, even if a rate correction happened afterward.
+          availableNow += Number(netSettlementAmount || netAmount)
+          continue
+        }
+
+        const effectiveDate = projectedDate ?? estimatedSettlementDate
+        const effectiveNet = projected ? projected.net : Number(netSettlementAmount || netAmount)
+
+        if (hasSettlementLanded(status, effectiveDate, now)) {
+          availableNow += effectiveNet
+        } else {
+          pendingSettlement += effectiveNet
+          if (effectiveDate) {
+            const dateKey = formatInTimeZone(effectiveDate, venueTimezone, 'yyyy-MM-dd')
+            settlementsByDate.set(dateKey, (settlementsByDate.get(dateKey) ?? 0) + effectiveNet)
+            if (!firstUpcomingDate || effectiveDate.getTime() < firstUpcomingDate.getTime()) {
+              firstUpcomingDate = effectiveDate
+            }
+          }
+        }
+      } else {
+        // No transaction record → no settlement date to project → treat as pending.
+        pendingSettlement += netAmount
+      }
+    }
+
+    if (cardPaymentsRaw.length < PAYMENT_HISTORY_PAGE_SIZE) break
+    cursorId = cardPaymentsRaw[cardPaymentsRaw.length - 1].id
+    await yieldToEventLoop()
+  }
 
   // Get CASH payments (instant settlement, 0 fees) — agregado en Postgres: la única
   // lectura era la suma. Both REGULAR and REFUND payments carry status=COMPLETED;
@@ -206,88 +322,6 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
       AND ${cashCreatedAt}
   `) as Array<{ total: Prisma.Decimal | null }>) ?? []
 
-  // Calculate totals
-  const now = new Date()
-  let totalSales = 0
-  let totalFees = 0
-  let availableNow = 0
-  let pendingSettlement = 0
-  // Card money we could NOT cost (no TransactionCost — e.g. a merchant account
-  // without a VenuePricingStructure). Counted into the balance at fee 0, but
-  // surfaced so the UI can explain the gap vs the per-card-type breakdown.
-  let uncostedCount = 0
-  let uncostedAmount = 0
-  const upcomingSettlements: { date: Date; amount: number }[] = []
-
-  // Process card payments
-  for (const payment of cardPayments) {
-    // Include the tip: customer charged amount + tip; commission is on amount+tip.
-    const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
-    // Venue fee = percentage charge + per-transaction fixed fee. Dropping the
-    // fixed fee overstated the net the venue receives (it is netted out by the
-    // settlement engine, so the stored netSettlementAmount already includes it).
-    const fees = payment.transactionCost
-      ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
-      : 0
-    const netAmount = amount - fees
-
-    if (!payment.transactionCost) {
-      uncostedCount += 1
-      uncostedAmount += amount
-    }
-
-    totalSales += amount
-    totalFees += fees
-
-    // Recompute the settlement projection LIVE via the shared engine (date + net) —
-    // wins over the stored transaction fields for money not yet settled. Falls back
-    // to the stored values when a payment can't be projected (no cost / no rule).
-    const projected =
-      payment.transactionCost && payment.merchantAccountId
-        ? projectPaymentSettlement(
-            {
-              amount: payment.amount,
-              tipAmount: payment.tipAmount,
-              createdAt: payment.createdAt,
-              merchantAccountId: payment.merchantAccountId,
-              transactionCost: payment.transactionCost,
-            },
-            settlementConfigs,
-            venueTimezone,
-          )
-        : null
-    // Noon venue-local avoids any day-boundary ambiguity when read back as an instant.
-    const projectedDate = projected ? fromZonedTime(`${projected.settlementDateKey}T12:00:00.000`, venueTimezone) : null
-
-    if (payment.transaction) {
-      const { status, estimatedSettlementDate, netSettlementAmount } = payment.transaction
-
-      if (status === SettlementStatus.SETTLED) {
-        // Already landed and confirmed — authoritative; never rewrite money that
-        // already moved, even if a rate correction happened afterward.
-        availableNow += Number(netSettlementAmount || netAmount)
-        continue
-      }
-
-      const effectiveDate = projectedDate ?? estimatedSettlementDate
-      const effectiveNet = projected ? projected.net : Number(netSettlementAmount || netAmount)
-
-      if (hasSettlementLanded(status, effectiveDate, now)) {
-        // Landed automatically — its (recomputed) settlement date has passed.
-        availableNow += effectiveNet
-      } else {
-        // Still pending — its settlement date is in the future.
-        pendingSettlement += effectiveNet
-        if (effectiveDate) {
-          upcomingSettlements.push({ date: effectiveDate, amount: effectiveNet })
-        }
-      }
-    } else {
-      // No transaction record → no settlement date to project → treat as pending.
-      pendingSettlement += netAmount
-    }
-  }
-
   // Add CASH payments (instant settlement, 0 fees, 100% available)
   const cashTotal = Number(cashRows[0]?.total ?? 0)
   totalSales += cashTotal
@@ -300,26 +334,10 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     amount: 0,
   }
 
-  if (upcomingSettlements.length > 0) {
-    // Sort by date ascending
-    upcomingSettlements.sort((a, b) => a.date.getTime() - b.date.getTime())
-
-    // Group by VENUE-LOCAL calendar day (not UTC) — a settlement instant near a UTC
-    // day boundary (e.g. late-evening local time) formats to a DIFFERENT calendar day
-    // in UTC than in the venue timezone, which would silently move money to the wrong
-    // day here while the week strip (already venue-local) kept it on the right one.
-    const settlementsByDate = new Map<string, number>()
-    for (const settlement of upcomingSettlements) {
-      const dateKey = formatInTimeZone(settlement.date, venueTimezone, 'yyyy-MM-dd')
-      const currentAmount = settlementsByDate.get(dateKey) || 0
-      settlementsByDate.set(dateKey, currentAmount + settlement.amount)
-    }
-
-    // Get first upcoming settlement
-    const firstDate = upcomingSettlements[0].date
-    const firstDateKey = formatInTimeZone(firstDate, venueTimezone, 'yyyy-MM-dd')
+  if (firstUpcomingDate) {
+    const firstDateKey = formatInTimeZone(firstUpcomingDate, venueTimezone, 'yyyy-MM-dd')
     estimatedNextSettlement = {
-      date: firstDate,
+      date: firstUpcomingDate,
       amount: settlementsByDate.get(firstDateKey) || 0,
     }
   }
@@ -539,137 +557,128 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
   })
   const venueTimezone = venueRecord?.timezone || DEFAULT_TIMEZONE
 
-  // Get payments within date range. We pull `transactionCost.transactionType`
-  // so we can split a transaction-day into per-card-type rows: payments on the
-  // same day with different card types settle on different dates, and showing
-  // a single Fecha de Liquidación per day misled users.
+  // Read payments in bounded INTERNAL pages and reduce them immediately into
+  // day/card-type groups. The frontend still receives every group in the same
+  // response; Node simply never retains every raw payment at once.
   //
-  // ⚠️ NO convertido a GROUP BY (2026-09-01): cada grupo recomputa su fecha de
+  // ⚠️ NO convertido a GROUP BY (2026-09-01): cada pago recomputa su fecha de
   // liquidación con el motor vivo (`projectPaymentSettlement`) sobre el primer
   // pago proyectable — duplicar ese motor en SQL es más peligroso que
-  // materializar. El select acota el ancho por fila; el [query-guard] de runtime
-  // denuncia los rangos gigantes.
-  const payments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      createdAt: {
-        gte: dateRange.from,
-        lte: dateRange.to,
-      },
-    },
-    select: {
-      amount: true,
-      tipAmount: true,
-      createdAt: true,
-      merchantAccountId: true,
-      method: true,
-      transaction: {
-        select: {
-          status: true,
-          estimatedSettlementDate: true,
-        },
-      },
-      transactionCost: {
-        select: {
-          venueChargeAmount: true,
-          venueFixedFee: true,
-          transactionType: true,
-        },
-      },
-    },
-    orderBy: {
-      createdAt: 'asc',
-    },
-  })
-
-  // Settlement dates are RECOMPUTED on read via the corrected engine (same shared
-  // helper as the week strip / settlement calendar), NOT taken from the stored
-  // per-payment estimatedSettlementDate: payments created before the 2026-07-04
-  // engine fix carry stale stored dates (e.g. weekend landings) and would
-  // contradict the week strip rendered on the same page. The stored date remains
-  // only as a fallback when a payment can't be projected (no cost / no rule).
-  const merchantIds = Array.from(new Set(payments.map(p => p.merchantAccountId).filter((x): x is string => Boolean(x))))
-  const configs: ActiveConfig[] = merchantIds.length
-    ? await prisma.settlementConfiguration.findMany({
-        where: { merchantAccountId: { in: merchantIds } },
-        select: {
-          merchantAccountId: true,
-          cardType: true,
-          settlementDays: true,
-          settlementDayType: true,
-          cutoffTime: true,
-          cutoffTimezone: true,
-          effectiveFrom: true,
-          effectiveTo: true,
-        },
-        orderBy: { effectiveFrom: 'desc' },
-      })
-    : []
+  // materializar todo el rango.
 
   // Group by (transaction date, card type)
   const timelineMap = new Map<string, TimelineEntry>()
   const recomputedGroups = new Set<string>() // groups whose date came from the live engine (wins over stored)
+  const configs: ActiveConfig[] = []
+  const loadedMerchantIds = new Set<string>()
+  let cursorId: string | undefined
 
-  for (const payment of payments) {
-    const dateKey = formatInTimeZone(payment.createdAt, venueTimezone, 'yyyy-MM-dd')
-    const cardType: ExtendedCardType =
-      payment.method === PaymentMethod.CASH ? 'CASH' : (payment.transactionCost?.transactionType ?? TransactionCardType.OTHER)
-    const groupKey = `${dateKey}::${cardType}`
-    // Include the tip: customer charged amount + tip; commission is on amount+tip.
-    const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
-    // Venue fee = percentage charge + per-transaction fixed fee.
-    const fees = payment.transactionCost
-      ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
-      : 0
-    const netAmount = amount - fees
+  while (true) {
+    const payments = await prisma.payment.findMany({
+      where: {
+        venueId,
+        status: 'COMPLETED',
+        createdAt: {
+          gte: dateRange.from,
+          lte: dateRange.to,
+        },
+      },
+      select: {
+        id: true,
+        amount: true,
+        tipAmount: true,
+        createdAt: true,
+        merchantAccountId: true,
+        method: true,
+        transaction: {
+          select: {
+            status: true,
+            estimatedSettlementDate: true,
+          },
+        },
+        transactionCost: {
+          select: {
+            venueChargeAmount: true,
+            venueFixedFee: true,
+            transactionType: true,
+          },
+        },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: PAYMENT_HISTORY_PAGE_SIZE,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+    })
 
-    if (!timelineMap.has(groupKey)) {
-      timelineMap.set(groupKey, {
-        date: new Date(`${dateKey}T00:00:00.000Z`),
-        cardType,
-        transactionCount: 0,
-        grossAmount: 0,
-        fees: 0,
-        netAmount: 0,
-        status: SettlementStatus.PENDING,
-        estimatedSettlementDate: null,
-      })
+    if (payments.length === 0) break
+
+    // Settlement dates are RECOMPUTED on read via the corrected engine (same
+    // shared helper as the week strip / settlement calendar). Cache each
+    // merchant's versioned rules once as soon as that merchant appears.
+    await appendMissingSettlementConfigs(
+      payments.map(payment => payment.merchantAccountId),
+      loadedMerchantIds,
+      configs,
+    )
+
+    for (const payment of payments) {
+      const dateKey = formatInTimeZone(payment.createdAt, venueTimezone, 'yyyy-MM-dd')
+      const cardType: ExtendedCardType =
+        payment.method === PaymentMethod.CASH ? 'CASH' : (payment.transactionCost?.transactionType ?? TransactionCardType.OTHER)
+      const groupKey = `${dateKey}::${cardType}`
+      const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
+      const fees = payment.transactionCost
+        ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
+        : 0
+      const netAmount = amount - fees
+
+      if (!timelineMap.has(groupKey)) {
+        timelineMap.set(groupKey, {
+          date: new Date(`${dateKey}T00:00:00.000Z`),
+          cardType,
+          transactionCount: 0,
+          grossAmount: 0,
+          fees: 0,
+          netAmount: 0,
+          status: SettlementStatus.PENDING,
+          estimatedSettlementDate: null,
+        })
+      }
+
+      const entry = timelineMap.get(groupKey)!
+      entry.transactionCount += 1
+      entry.grossAmount += amount
+      entry.fees += fees
+      entry.netAmount += netAmount
+
+      const projected =
+        payment.method !== PaymentMethod.CASH && payment.merchantAccountId && payment.transactionCost
+          ? projectPaymentSettlement(
+              {
+                amount: payment.amount,
+                tipAmount: payment.tipAmount,
+                createdAt: payment.createdAt,
+                merchantAccountId: payment.merchantAccountId,
+                transactionCost: payment.transactionCost,
+              },
+              configs,
+              venueTimezone,
+            )
+          : null
+      if (projected && !recomputedGroups.has(groupKey)) {
+        entry.estimatedSettlementDate = fromZonedTime(`${projected.settlementDateKey}T12:00:00.000`, venueTimezone)
+        recomputedGroups.add(groupKey)
+      } else if (!recomputedGroups.has(groupKey) && payment.transaction?.estimatedSettlementDate && !entry.estimatedSettlementDate) {
+        entry.estimatedSettlementDate = payment.transaction.estimatedSettlementDate
+      }
+
+      if (payment.transaction?.status === SettlementStatus.SETTLED) {
+        entry.status = SettlementStatus.SETTLED
+      }
     }
 
-    const entry = timelineMap.get(groupKey)!
-    entry.transactionCount += 1
-    entry.grossAmount += amount
-    entry.fees += fees
-    entry.netAmount += netAmount
-
-    // Prefer the live-engine date; fall back to the first stored date otherwise.
-    const projected =
-      payment.method !== PaymentMethod.CASH && payment.merchantAccountId && payment.transactionCost
-        ? projectPaymentSettlement(
-            {
-              amount: payment.amount,
-              tipAmount: payment.tipAmount,
-              createdAt: payment.createdAt,
-              merchantAccountId: payment.merchantAccountId,
-              transactionCost: payment.transactionCost,
-            },
-            configs,
-            venueTimezone,
-          )
-        : null
-    if (projected && !recomputedGroups.has(groupKey)) {
-      // Noon venue-local: formats back to the same calendar day in any client tz handling.
-      entry.estimatedSettlementDate = fromZonedTime(`${projected.settlementDateKey}T12:00:00.000`, venueTimezone)
-      recomputedGroups.add(groupKey)
-    } else if (!recomputedGroups.has(groupKey) && payment.transaction?.estimatedSettlementDate && !entry.estimatedSettlementDate) {
-      entry.estimatedSettlementDate = payment.transaction.estimatedSettlementDate
-    }
-
-    // If any transaction in the group is settled, mark group as settled
-    if (payment.transaction?.status === SettlementStatus.SETTLED) {
-      entry.status = SettlementStatus.SETTLED
-    }
+    if (payments.length < PAYMENT_HISTORY_PAGE_SIZE) break
+    cursorId = payments[payments.length - 1].id
+    await yieldToEventLoop()
   }
 
   const timeline = Array.from(timelineMap.values()).sort((a, b) => {

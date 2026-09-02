@@ -787,6 +787,7 @@ async function updateOrderTotalsForStandalonePayment(
               status: 'COMPLETED',
               completedAt: new Date(),
             }),
+            ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
           },
           include: {
             items: {

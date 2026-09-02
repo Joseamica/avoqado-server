@@ -164,6 +164,7 @@ const prismaMock: any = {
   consumer: createMockModel(),
   otpChallenge: createMockModel(),
   customerGroup: createMockModel(),
+  customerOrderMetric: createMockModel(),
   loyaltyConfig: createMockModel(),
   loyaltyTransaction: createMockModel(),
   walletPass: createMockModel(),

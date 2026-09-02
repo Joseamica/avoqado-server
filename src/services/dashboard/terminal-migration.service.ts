@@ -1,7 +1,7 @@
 import { Prisma, PaymentProcessor } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import { deviceReboundAfter, updateTerminal, type TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -660,7 +660,7 @@ export interface MigrateCancelResult {
   restoredVenueId: string
 }
 
-export async function migrateCancel(terminalId: string, actor: TerminalActor): Promise<MigrateCancelResult> {
+export async function migrateCancel(terminalId: string, actor: TerminalActor, scopedOrgId?: string): Promise<MigrateCancelResult> {
   // 1) Find the cancellable in-flight wipe. PENDING/QUEUED + not-expired only —
   //    SENT and beyond means the device may already have wiped.
   const command = await prisma.tpvCommandQueue.findFirst({
@@ -710,6 +710,19 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor): P
     return { cancelled: true, restoredVenueId: terminal.venueId }
   }
   const { fromVenueId, previousMerchantIds, createdVenuePaymentConfigId } = migration
+
+  // Superadmin migrations may cross organizations, but an OWNER of the
+  // destination organization must never be able to write the terminal back into
+  // an organization they do not control (or delete that migration's config).
+  if (scopedOrgId) {
+    const origin = await prisma.venue.findFirst({
+      where: { id: fromVenueId, organizationId: scopedOrgId },
+      select: { id: true },
+    })
+    if (!origin) {
+      throw new ForbiddenError('No puedes cancelar una migración cuyo origen pertenece a otra organización.')
+    }
+  }
 
   // 3) Cancel the queued wipe so it never reaches the device.
   await tpvCommandQueueService.cancelCommand(command.id, actor.staffId ?? 'system', 'Migración cancelada por el operador')
@@ -790,7 +803,7 @@ export interface MigrateDiscardResult {
  * rebound, i.e. never executed the wipe. It also avoids a `SAME_VENUE` trap: the operator is
  * about to re-run the very migration this wipe belonged to.
  */
-export async function migrateDiscard(terminalId: string, actor: TerminalActor): Promise<MigrateDiscardResult> {
+export async function migrateDiscard(terminalId: string, actor: TerminalActor, scopedOrgId?: string): Promise<MigrateDiscardResult> {
   const terminal = await prisma.terminal.findUnique({ where: { id: terminalId } })
   if (!terminal) throw new NotFoundError('Terminal not found')
 
@@ -822,12 +835,27 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor): 
 
   const now = new Date()
   const { discardedIds } = await prisma.$transaction(async tx => {
-    // Re-check the proof of wipe INSIDE the transaction: between the read above and this
-    // write the device may have rebound (i.e. it DID execute the wipe). Expiring then would
-    // record a discard that never happened and — worse — revert a migration that completed.
-    const fresh = await tx.terminal.findUnique({ where: { id: terminalId }, select: { lastActivationStatusCheckAt: true } })
+    // Serialize against heartbeat/rebind writes. A plain re-read still leaves a race
+    // between the read and the writes; this row lock keeps the proof stable until commit.
+    const [fresh] = await tx.$queryRaw<Array<{ lastActivationStatusCheckAt: Date | null }>>`
+      SELECT "lastActivationStatusCheckAt"
+      FROM "Terminal"
+      WHERE "id" = ${terminalId}
+      FOR UPDATE
+    `
+    if (!fresh) throw new NotFoundError('Terminal not found')
     if (deviceReboundAfter(newest.createdAt, fresh?.lastActivationStatusCheckAt)) {
       throw new ConflictError('La terminal acaba de reconectarse: ya ejecutó el borrado. Vuelve a verificar el destino.')
+    }
+
+    if (scopedOrgId && revert?.fromVenueId) {
+      const origin = await tx.venue.findFirst({
+        where: { id: revert.fromVenueId, organizationId: scopedOrgId },
+        select: { id: true },
+      })
+      if (!origin) {
+        throw new ForbiddenError('No puedes descartar una migración cuyo origen pertenece a otra organización.')
+      }
     }
 
     // One update per id so the audit trail names the rows that ACTUALLY moved: `updateMany`
@@ -839,7 +867,10 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor): 
         where: { id, status: { in: [...IN_FLIGHT_STATUSES] } },
         data: { status: 'EXPIRED', expiresAt: now },
       })
-      if (r.count > 0) discardedIds.push(id)
+      if (r.count !== 1) {
+        throw new ConflictError('El estado del borrado cambió mientras se descartaba. Actualiza la terminal e inténtalo de nuevo.')
+      }
+      discardedIds.push(id)
     }
 
     if (revert?.fromVenueId) {

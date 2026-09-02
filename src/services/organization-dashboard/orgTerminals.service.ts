@@ -604,7 +604,7 @@ export async function migrateStatusForOrg(orgId: string, terminalId: string, com
  */
 export async function migrateCancelForOrg(orgId: string, terminalId: string, actor: TerminalActor) {
   await validateTerminalInOrg(terminalId, orgId)
-  return migrateCancel(terminalId, actor)
+  return migrateCancel(terminalId, actor, orgId)
 }
 
 /**
@@ -613,5 +613,5 @@ export async function migrateCancelForOrg(orgId: string, terminalId: string, act
  */
 export async function migrateDiscardForOrg(orgId: string, terminalId: string, actor: TerminalActor) {
   await validateTerminalInOrg(terminalId, orgId)
-  return migrateDiscard(terminalId, actor)
+  return migrateDiscard(terminalId, actor, orgId)
 }

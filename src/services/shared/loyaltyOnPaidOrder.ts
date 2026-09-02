@@ -56,12 +56,18 @@ export interface AwardLoyaltyForPaidOrderArgs {
   legacyCustomer?: LegacyOrderCustomer | null
 }
 
+export interface AwardLoyaltyForPaidOrderResult {
+  complete: boolean
+  errors: string[]
+}
+
 function nombre(c: { firstName: string | null; lastName: string | null } | null | undefined): string {
   return `${c?.firstName || ''} ${c?.lastName || ''}`.trim()
 }
 
-export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArgs): Promise<void> {
+export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArgs): Promise<AwardLoyaltyForPaidOrderResult> {
   const { venueId, orderId, orderTotal } = args
+  const errors: string[] = []
   try {
     let staffVenueId: string | undefined
     if (args.staffId) {
@@ -84,7 +90,7 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
     if (orderCustomers.length > 0) {
       for (const oc of orderCustomers) {
         try {
-          await updateCustomerMetrics(oc.customerId, orderTotal)
+          await updateCustomerMetrics(oc.customerId, orderTotal, orderId, venueId)
           logger.info('📊 Customer metrics updated', {
             orderId,
             customerId: oc.customerId,
@@ -92,6 +98,7 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
             isPrimary: oc.isPrimary,
           })
         } catch (metricsError: any) {
+          errors.push(`metrics:${oc.customerId}:${metricsError?.message ?? String(metricsError)}`)
           logger.error('⚠️ Failed to update customer metrics (continuing)', {
             orderId,
             customerId: oc.customerId,
@@ -101,40 +108,62 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
 
         // Puntos y sello SÓLO al primario (el primero que se agregó a la cuenta).
         if (oc.isPrimary) {
-          await acreditar(venueId, oc.customerId, nombre(oc.customer), orderTotal, orderId, staffVenueId, 'PRIMARY customer')
+          const credited = await acreditar(venueId, oc.customerId, nombre(oc.customer), orderTotal, orderId, staffVenueId, 'PRIMARY customer')
+          if (!credited) errors.push(`loyalty:${oc.customerId}`)
         }
       }
-      return
-    }
-
-    const legacy = args.legacyCustomer
-    if (legacy?.id) {
+    } else if (args.legacyCustomer?.id) {
+      const legacy = args.legacyCustomer
       try {
-        await updateCustomerMetrics(legacy.id, orderTotal)
+        await updateCustomerMetrics(legacy.id, orderTotal, orderId, venueId)
       } catch (metricsError: any) {
+        errors.push(`metrics:${legacy.id}:${metricsError?.message ?? String(metricsError)}`)
         logger.error('⚠️ Failed to update customer metrics (continuing)', {
           orderId,
           customerId: legacy.id,
           error: metricsError?.message,
         })
       }
-      await acreditar(venueId, legacy.id, nombre(legacy), orderTotal, orderId, staffVenueId, 'legacy single customer')
-      return
+      const credited = await acreditar(venueId, legacy.id, nombre(legacy), orderTotal, orderId, staffVenueId, 'legacy single customer')
+      if (!credited) errors.push(`loyalty:${legacy.id}`)
+    } else {
+      logger.info('⏭️ Loyalty points skipped: Order has no customer', {
+        orderId,
+        hasCustomerId: false,
+        orderCustomersCount: 0,
+        isGuestOrder: true,
+      })
     }
-
-    logger.info('⏭️ Loyalty points skipped: Order has no customer', {
-      orderId,
-      hasCustomerId: false,
-      orderCustomersCount: 0,
-      isGuestOrder: true,
-    })
   } catch (error: any) {
+    errors.push(`query:${error?.message ?? String(error)}`)
     logger.error('⚠️ Loyalty on paid order failed (payment still succeeded)', {
       orderId,
       venueId,
       error: error?.message,
     })
   }
+
+  const complete = errors.length === 0
+  try {
+    if (complete) {
+      await prisma.order.updateMany({
+        where: { id: orderId, venueId, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
+        data: { loyaltyProcessedAt: new Date(), loyaltyProcessingAt: null, loyaltyLastError: null },
+      })
+    } else {
+      await prisma.order.updateMany({
+        where: { id: orderId, venueId, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
+        data: { loyaltyLastError: errors.join(' | ').slice(0, 4000) },
+      })
+    }
+  } catch (markerError: any) {
+    const message = `marker:${markerError?.message ?? String(markerError)}`
+    errors.push(message)
+    logger.error('⚠️ Loyalty outcome marker failed; reconciler will retry', { orderId, venueId, error: message })
+    return { complete: false, errors }
+  }
+
+  return { complete, errors }
 }
 
 async function acreditar(
@@ -145,7 +174,7 @@ async function acreditar(
   orderId: string,
   staffVenueId: string | undefined,
   quien: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const loyaltyResult = await earnPoints(venueId, customerId, orderTotal, orderId, staffVenueId)
     logger.info(`🎁 Loyalty points earned (${quien})`, {
@@ -156,6 +185,7 @@ async function acreditar(
       pointsEarned: loyaltyResult.pointsEarned,
       newBalance: loyaltyResult.newBalance,
     })
+    return true
   } catch (loyaltyError: any) {
     const message: string = loyaltyError?.message ?? ''
     logger.error('⚠️ Failed to earn loyalty points (payment still succeeded)', {
@@ -164,5 +194,6 @@ async function acreditar(
       error: message,
       reason: message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
     })
+    return false
   }
 }

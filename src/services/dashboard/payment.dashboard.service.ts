@@ -43,75 +43,9 @@ export async function getPaymentsData(
   const skip = (page - 1) * pageSize
   const take = pageSize
 
-  // La cláusula 'where' será la misma para la búsqueda y el conteo
-  const whereClause: any = {
-    venueId,
-    status: {
-      not: 'PENDING' as TransactionStatus, // No mostrar pagos pendientes de completar
-    },
-  }
-
-  // Aplicar filtros opcionales (arrays have priority over single values)
-  if (filters) {
-    if (filters.merchantAccountIds && filters.merchantAccountIds.length > 0) {
-      whereClause.merchantAccountId = { in: filters.merchantAccountIds }
-    } else if (filters.merchantAccountId) {
-      whereClause.merchantAccountId = filters.merchantAccountId
-    }
-
-    if (filters.methods && filters.methods.length > 0) {
-      whereClause.method = { in: filters.methods }
-    } else if (filters.method) {
-      whereClause.method = filters.method
-    }
-
-    if (filters.sources && filters.sources.length > 0) {
-      whereClause.source = { in: filters.sources }
-    } else if (filters.source) {
-      whereClause.source = filters.source
-    }
-
-    if (filters.staffIds && filters.staffIds.length > 0) {
-      whereClause.processedById = { in: filters.staffIds }
-    } else if (filters.staffId) {
-      whereClause.processedById = filters.staffId
-    }
-
-    if (filters.startDate || filters.endDate) {
-      whereClause.createdAt = {}
-      if (filters.startDate) {
-        whereClause.createdAt.gte = new Date(filters.startDate)
-      }
-      if (filters.endDate) {
-        whereClause.createdAt.lte = new Date(filters.endDate)
-      }
-    }
-
-    // Búsqueda por texto (amount, reference, last4, waiter name)
-    if (filters.search) {
-      const searchTerm = filters.search.trim()
-      const searchNumber = parseFloat(searchTerm)
-
-      whereClause.OR = [
-        // Búsqueda por monto (amount o tipAmount)
-        ...(isNaN(searchNumber)
-          ? []
-          : [{ amount: { gte: searchNumber, lt: searchNumber + 1 } }, { tipAmount: { gte: searchNumber, lt: searchNumber + 1 } }]),
-        // Búsqueda por masked pan (últimos dígitos de tarjeta)
-        { maskedPan: { contains: searchTerm, mode: 'insensitive' } },
-        // Búsqueda por número de referencia
-        { referenceNumber: { contains: searchTerm, mode: 'insensitive' } },
-        // Búsqueda por número de autorización
-        { authorizationNumber: { contains: searchTerm, mode: 'insensitive' } },
-        // Búsqueda por nombre del mesero
-        {
-          processedBy: {
-            OR: [{ firstName: { contains: searchTerm, mode: 'insensitive' } }, { lastName: { contains: searchTerm, mode: 'insensitive' } }],
-          },
-        },
-      ]
-    }
-  }
+  // La cláusula 'where' es la MISMA para la búsqueda, el conteo, el export y el
+  // resumen (paymentSummary.dashboard.service.ts espeja sus predicados en SQL).
+  const whereClause = buildPaymentsWhereClause(venueId, filters)
 
   // ─── MindForm legacy QR bridge — short-circuit pagination ───
   // For MindForm we CANNOT use Prisma's skip/take here, because we need to
@@ -266,10 +200,12 @@ export async function getPaymentsData(
 }
 
 /**
- * Build the same `where` clause used by `getPaymentsData` — extracted so the export endpoint
- * can apply the same filters without duplicating logic.
+ * The ONE `where` clause of the payments listing — shared by `getPaymentsData`, the export
+ * and (mirrored predicate by predicate in SQL) the summary in
+ * `paymentSummary.dashboard.service.ts`. Add a filter here → add it there → run
+ * `tests/integration/dashboard/listSummary-sql-parity.integration.test.ts`.
  */
-function buildPaymentsWhereClause(venueId: string, filters?: PaymentFilters): any {
+export function buildPaymentsWhereClause(venueId: string, filters?: PaymentFilters): any {
   const whereClause: any = {
     venueId,
     status: {

@@ -12,73 +12,76 @@ import {
   type ExportColumnDef,
 } from '../../services/dashboard/export.helpers'
 
+import * as paymentSummaryService from '../../services/dashboard/paymentSummary.dashboard.service'
+import { LIST_PAGE_SIZE_MAX, amountFilterFromQuery, clampPage, clampPageSize, parseCsv } from '../../services/dashboard/listSummary.shared'
+
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 
+/** Los filtros del listado, tal como llegan en la query (CSV) → `PaymentFilters`. */
+function paymentFiltersFromQuery(q: Record<string, unknown>): paymentDashboardService.PaymentFilters {
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+  return {
+    merchantAccountIds: parseCsv(str(q.merchantAccountIds)),
+    methods: parseCsv(str(q.methods)) as any,
+    sources: parseCsv(str(q.sources)),
+    staffIds: parseCsv(str(q.staffIds)),
+    // Backward-compat single-value filters
+    merchantAccountId: str(q.merchantAccountId),
+    method: str(q.method) as any,
+    source: str(q.source),
+    staffId: str(q.staffId),
+    search: str(q.search),
+    startDate: str(q.startDate),
+    endDate: str(q.endDate),
+  }
+}
+
 // Ruta: GET /venues/:venueId/payments
-export async function getPaymentsData(
-  req: Request<
-    { venueId: string },
-    {},
-    {},
-    {
-      page?: string
-      pageSize?: string
-      // Multi-select arrays (comma-separated)
-      merchantAccountIds?: string
-      methods?: string
-      sources?: string
-      staffIds?: string
-      // Single-value legacy params
-      merchantAccountId?: string
-      method?: string
-      source?: string
-      staffId?: string
-      search?: string
-      startDate?: string
-      endDate?: string
-    }
-  >,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+export async function getPaymentsData(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    // Parseamos los query params con valores por defecto
-    const page = parseInt(req.query.page || '1')
-    const pageSize = parseInt(req.query.pageSize || '10')
+    const q = req.query as Record<string, unknown>
+    // 🔴 Tope REAL de página (2026-09-01): el dashboard pedía pageSize=10000 y el server
+    // lo servía tal cual (10,000 filas de Payment, 37 veces en 6 h en Testarudo). El Zod
+    // de la ruta ya recorta; esto es cinturón y tirantes para quien llame sin él.
+    const page = clampPage(q.page)
+    const pageSize = clampPageSize(q.pageSize)
 
-    // Helper to parse comma-separated query param into string array (drops empty entries)
-    const parseList = (raw?: string): string[] | undefined => {
-      if (!raw) return undefined
-      const list = raw
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean)
-      return list.length > 0 ? list : undefined
-    }
+    const paymentsData = await paymentDashboardService.getPaymentsData(venueId, page, pageSize, paymentFiltersFromQuery(q))
 
-    // Extraer filtros opcionales
-    const filters: paymentDashboardService.PaymentFilters = {
-      merchantAccountIds: parseList(req.query.merchantAccountIds),
-      methods: parseList(req.query.methods) as any,
-      sources: parseList(req.query.sources),
-      staffIds: parseList(req.query.staffIds),
-      // Backward-compat single-value filters
-      merchantAccountId: req.query.merchantAccountId,
-      method: req.query.method as any,
-      source: req.query.source,
-      staffId: req.query.staffId,
-      search: req.query.search,
-      startDate: req.query.startDate,
-      endDate: req.query.endDate,
-    }
+    // `meta.pageSize` ya es el EFECTIVO; `maxPageSize` declara el tope para que ningún
+    // cliente crea que 100 filas son el total (regla: nunca truncar en silencio).
+    res.status(200).json({ ...paymentsData, meta: { ...paymentsData.meta, maxPageSize: LIST_PAGE_SIZE_MAX } })
+  } catch (error) {
+    next(error)
+  }
+}
 
-    // Llamada al servicio con los parámetros ya parseados
-    const paymentsData = await paymentDashboardService.getPaymentsData(venueId, page, pageSize, filters)
+// Ruta: GET /venues/:venueId/payments/summary — conteos por estado×tipo y sumas, en Postgres
+export async function getPaymentsSummary(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const q = req.query as Record<string, unknown>
+    const summary = await paymentSummaryService.getPaymentsSummary(venueId, paymentFiltersFromQuery(q), {
+      subtotal: amountFilterFromQuery(q, 'subtotal'),
+      tip: amountFilterFromQuery(q, 'tip'),
+      total: amountFilterFromQuery(q, 'total'),
+      international: parseCsv(typeof q.international === 'string' ? q.international : undefined),
+      cardBrands: parseCsv(typeof q.cardBrands === 'string' ? q.cardBrands : undefined),
+    })
+    res.status(200).json({ success: true, data: summary })
+  } catch (error) {
+    next(error)
+  }
+}
 
-    res.status(200).json(paymentsData)
+// Ruta: GET /venues/:venueId/payments/filter-options — valores distintos para las píldoras
+export async function getPaymentsFilterOptions(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const options = await paymentSummaryService.getPaymentFilterOptions(req.params.venueId)
+    res.status(200).json({ success: true, data: options })
   } catch (error) {
     next(error)
   }

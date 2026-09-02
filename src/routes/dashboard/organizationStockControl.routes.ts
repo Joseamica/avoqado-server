@@ -48,6 +48,8 @@ function requireOrgRole(allowedRoles: StaffRole[], forbiddenMessage: string) {
       const membership = await prisma.staffVenue.findFirst({
         where: {
           staffId: userId,
+          active: true,
+          staff: { active: true },
           venue: { organizationId: orgId },
           role: { in: allowedRoles },
         },

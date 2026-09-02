@@ -548,7 +548,7 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
     const metricsAmount = Number(metricsState.orderTotal.toString())
     for (const customerId of metricsCustomerIds) {
       try {
-        await updateCustomerMetrics(customerId, metricsAmount)
+        await updateCustomerMetrics(customerId, metricsAmount, loyaltyOrderId, venueId)
         logger.info('📊 Customer metrics updated (manual payment)', {
           orderId: loyaltyOrderId,
           customerId,

@@ -2,6 +2,32 @@ import { prismaMock } from '../../../__helpers__/setup'
 import { orgStockControlService } from '@/services/organization-dashboard/orgStockControl.service'
 
 describe('OrgStockControlService.getOrgCustodyPage', () => {
+  it('builds custody scope only from active memberships of an active staff account', async () => {
+    prismaMock.staffVenue.findMany.mockResolvedValue([])
+    prismaMock.serializedItem.groupBy.mockResolvedValue([])
+    prismaMock.serializedItem.count.mockResolvedValue(0)
+    prismaMock.serializedItem.findMany.mockResolvedValue([])
+    prismaMock.staff.findMany.mockResolvedValue([])
+
+    await orgStockControlService.getOrgCustodyPage('org-1', 'supervisor-1', {
+      page: 1,
+      pageSize: 50,
+      filter: 'todos',
+    })
+
+    expect(prismaMock.staffVenue.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          staffId: 'supervisor-1',
+          active: true,
+          staff: { active: true },
+          role: { in: ['MANAGER', 'ADMIN', 'OWNER'] },
+          venue: { organizationId: 'org-1' },
+        },
+      }),
+    )
+  })
+
   it('agrega la custodia completa y solo hidrata una pagina del supervisor', async () => {
     prismaMock.staffVenue.findMany.mockResolvedValue([{ venueId: 'venue-managed' }] as any)
     prismaMock.serializedItem.groupBy.mockResolvedValue([

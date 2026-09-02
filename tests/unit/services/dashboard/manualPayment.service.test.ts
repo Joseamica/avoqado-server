@@ -1441,8 +1441,8 @@ describe('manualPayment.service', () => {
 
       // Metrics must fire for both customers with the FINAL order total (300),
       // not 0. Order independent — assert each call individually.
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-A', 300)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-B', 300)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-A', 300, ORDER_ID, VENUE_ID)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-B', 300, ORDER_ID, VENUE_ID)
       expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(2)
       // No primary customer ⇒ loyalty must NOT fire.
       expect(earnPointsMock).not.toHaveBeenCalled()
@@ -1935,7 +1935,7 @@ describe('manualPayment.service', () => {
         customerId: 'customer-1',
       })
 
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('customer-1', 100)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('customer-1', 100, 'shadow-metrics', VENUE_ID)
       expect(callOrder).toEqual(['updateCustomerMetrics', 'earnPoints'])
     })
 
@@ -1997,9 +1997,9 @@ describe('manualPayment.service', () => {
       })
 
       expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(3)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('primary-1', 150)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('secondary-A', 150)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('secondary-B', 150)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('primary-1', 150, ORDER_ID, VENUE_ID)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('secondary-A', 150, ORDER_ID, VENUE_ID)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('secondary-B', 150, ORDER_ID, VENUE_ID)
 
       expect(earnPointsMock).toHaveBeenCalledTimes(1)
       expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'primary-1', 150, ORDER_ID, 'sv-1')
@@ -2075,7 +2075,7 @@ describe('manualPayment.service', () => {
       })
 
       expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-once', 100)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-once', 100, ORDER_ID, VENUE_ID)
       expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-once', 100, ORDER_ID, 'sv-1')
     })
 
@@ -2107,8 +2107,8 @@ describe('manualPayment.service', () => {
       })
 
       // Both p-1 (primary) and "override" get metrics
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('p-1', 100)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('override', 100)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('p-1', 100, ORDER_ID, VENUE_ID)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('override', 100, ORDER_ID, VENUE_ID)
       // ONLY override gets loyalty (override wins for loyalty per contract)
       expect(earnPointsMock).toHaveBeenCalledTimes(1)
       expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'override', 100, ORDER_ID, 'sv-1')
@@ -2141,7 +2141,7 @@ describe('manualPayment.service', () => {
       })
 
       expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('legacy-only-cust', 75)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('legacy-only-cust', 75, ORDER_ID, VENUE_ID)
       expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'legacy-only-cust', 75, ORDER_ID, 'sv-1')
     })
 
@@ -2173,7 +2173,7 @@ describe('manualPayment.service', () => {
 
       // Set dedupe ensures cust-X gets metrics ONCE not twice
       expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
-      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-X', 50)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-X', 50, ORDER_ID, VENUE_ID)
     })
 
     it('REVIEW P2: updateCustomerMetrics NOT called when no customer attached', async () => {

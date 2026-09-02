@@ -342,3 +342,66 @@ describe('getSettlementTimeline — recompute-on-read settlement dates', () => {
     expect(dateKey(credit.estimatedSettlementDate)).toBe('2026-07-06')
   })
 })
+
+describe('available balance history — bounded database pages without truncating the response', () => {
+  const pageOf = (count: number, prefix: string, createdAt: Date) =>
+    Array.from({ length: count }, (_, index) => ({
+      id: `${prefix}-${index}`,
+      amount: 1,
+      tipAmount: 0,
+      createdAt,
+      merchantAccountId: null,
+      method: 'CREDIT_CARD',
+      transactionCost: null,
+      transaction: null,
+    }))
+
+  beforeEach(() => {
+    ;(prismaMock.payment.findMany as jest.Mock).mockReset()
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockReset()
+    ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'UTC' })
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+  })
+
+  it('reads every card-payment page for the summary instead of silently stopping at the backend page size', async () => {
+    const firstPage = pageOf(500, 'summary', new Date('2026-07-01T12:00:00Z'))
+    const lastPayment = {
+      ...pageOf(1, 'summary-last', new Date('2026-07-02T12:00:00Z'))[0],
+      amount: 7,
+    }
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce(firstPage).mockResolvedValueOnce([lastPayment])
+
+    const summary = await getAvailableBalance(VENUE)
+
+    expect(summary.pendingSettlement).toBe(507)
+    expect(summary.uncostedCount).toBe(501)
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(2)
+    expect((prismaMock.payment.findMany as jest.Mock).mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        take: 500,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      }),
+    )
+    expect((prismaMock.payment.findMany as jest.Mock).mock.calls[1][0]).toEqual(
+      expect.objectContaining({ cursor: { id: 'summary-499' }, skip: 1, take: 500 }),
+    )
+  })
+
+  it('reads every timeline page and keeps the exact complete day grouping returned to the frontend', async () => {
+    const firstPage = pageOf(500, 'timeline', new Date('2026-07-01T12:00:00Z')).map(payment => ({ ...payment, method: 'CASH' }))
+    const lastPayment = { ...pageOf(1, 'timeline-last', new Date('2026-07-02T12:00:00Z'))[0], method: 'CASH' }
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce(firstPage).mockResolvedValueOnce([lastPayment])
+
+    const timeline = await getSettlementTimeline(VENUE, {
+      from: new Date('2026-07-01T00:00:00Z'),
+      to: new Date('2026-07-03T00:00:00Z'),
+    })
+
+    expect(timeline).toHaveLength(2)
+    expect(timeline.map(entry => entry.transactionCount)).toEqual([500, 1])
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(2)
+    expect((prismaMock.payment.findMany as jest.Mock).mock.calls[1][0]).toEqual(
+      expect.objectContaining({ cursor: { id: 'timeline-499' }, skip: 1, take: 500 }),
+    )
+  })
+})

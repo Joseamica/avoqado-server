@@ -99,6 +99,9 @@ describe('payCashOrder — lealtad al quedar pagada (paridad con la PAX)', () =>
 
     expect(result.paymentId).toBe('payment-1')
     expect(awardMock).toHaveBeenCalledTimes(1)
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ loyaltyEligibleAt: expect.any(Date) }) }),
+    )
     expect(awardMock).toHaveBeenCalledWith(
       expect.objectContaining({
         venueId: 'venue-1',

@@ -9,55 +9,59 @@ import {
   type ExportColumnDef,
 } from '../../services/dashboard/export.helpers'
 import logger from '../../config/logger'
+import * as orderSummaryService from '../../services/dashboard/orderSummary.dashboard.service'
+import { LIST_PAGE_SIZE_MAX, amountFilterFromQuery, clampPage, clampPageSize, parseCsv } from '../../services/dashboard/listSummary.shared'
 
-export async function getOrdersData(
-  req: Request<
-    { venueId: string },
-    {},
-    {},
-    {
-      page?: string
-      pageSize?: string
-      statuses?: string
-      types?: string
-      tableIds?: string
-      staffIds?: string
-      search?: string
-      startDate?: string
-      endDate?: string
-    }
-  >,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+/** Los filtros del listado, tal como llegan en la query (CSV) → `OrderFilters`. */
+function orderFiltersFromQuery(q: Record<string, unknown>): orderDashboardService.OrderFilters {
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+  return {
+    statuses: parseCsv(str(q.statuses)),
+    types: parseCsv(str(q.types)),
+    tableIds: parseCsv(str(q.tableIds)),
+    staffIds: parseCsv(str(q.staffIds)),
+    search: str(q.search),
+    startDate: str(q.startDate),
+    endDate: str(q.endDate),
+  }
+}
+
+export async function getOrdersData(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    const page = parseInt(req.query.page || '1')
-    const pageSize = parseInt(req.query.pageSize || '10')
+    const q = req.query as Record<string, unknown>
+    // 🔴 Tope REAL de página (2026-09-01) — ver payment.dashboard.controller.ts.
+    const page = clampPage(q.page)
+    const pageSize = clampPageSize(q.pageSize)
 
-    // Helper to parse comma-separated list from query string
-    const parseList = (raw?: string): string[] | undefined => {
-      if (!raw) return undefined
-      const list = raw
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean)
-      return list.length > 0 ? list : undefined
-    }
+    const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize, orderFiltersFromQuery(q))
 
-    const filters: orderDashboardService.OrderFilters = {
-      statuses: parseList(req.query.statuses),
-      types: parseList(req.query.types),
-      tableIds: parseList(req.query.tableIds),
-      staffIds: parseList(req.query.staffIds),
-      search: req.query.search,
-      startDate: req.query.startDate,
-      endDate: req.query.endDate,
-    }
+    res.status(200).json({ ...ordersData, meta: { ...ordersData.meta, maxPageSize: LIST_PAGE_SIZE_MAX } })
+  } catch (error) {
+    next(error)
+  }
+}
 
-    const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize, filters)
+// Ruta: GET /venues/:venueId/orders/summary — conteos por estado y sumas, en Postgres
+export async function getOrdersSummary(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const q = req.query as Record<string, unknown>
+    const summary = await orderSummaryService.getOrdersSummary(venueId, orderFiltersFromQuery(q), {
+      total: amountFilterFromQuery(q, 'total'),
+      tip: amountFilterFromQuery(q, 'tip'),
+    })
+    res.status(200).json({ success: true, data: summary })
+  } catch (error) {
+    next(error)
+  }
+}
 
-    res.status(200).json(ordersData)
+// Ruta: GET /venues/:venueId/orders/filter-options — valores distintos para las píldoras
+export async function getOrdersFilterOptions(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const options = await orderSummaryService.getOrderFilterOptions(req.params.venueId)
+    res.status(200).json({ success: true, data: options })
   } catch (error) {
     next(error)
   }

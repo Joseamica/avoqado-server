@@ -12,28 +12,30 @@
 import { migrateDiscard, DISCARD_AFTER_MS } from '@/services/dashboard/terminal-migration.service'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
     terminal: { findUnique: jest.fn(), update: jest.fn() },
-    venue: { findUnique: jest.fn() },
+    venue: { findUnique: jest.fn(), findFirst: jest.fn() },
     tpvCommandQueue: { findMany: jest.fn(), updateMany: jest.fn() },
     venuePaymentConfig: { deleteMany: jest.fn() },
   }
   // Interactive transaction: the callback receives the same mocked client, so the
   // assertions below see every write the transaction performs.
   client.$transaction = jest.fn((fn: any) => fn(client))
+  client.$queryRaw = jest.fn()
   return { __esModule: true, default: client }
 })
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
 
 const m = prisma as unknown as {
   terminal: { findUnique: jest.Mock; update: jest.Mock }
-  venue: { findUnique: jest.Mock }
+  venue: { findUnique: jest.Mock; findFirst: jest.Mock }
   tpvCommandQueue: { findMany: jest.Mock; updateMany: jest.Mock }
   venuePaymentConfig: { deleteMany: jest.Mock }
   $transaction: jest.Mock
+  $queryRaw: jest.Mock
 }
 const mockedLogAction = logAction as jest.Mock
 
@@ -72,6 +74,7 @@ describe('migrateDiscard', () => {
     m.terminal.findUnique.mockResolvedValue(terminal())
     m.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
     m.tpvCommandQueue.updateMany.mockResolvedValue({ count: 1 })
+    m.$queryRaw.mockResolvedValue([{ lastActivationStatusCheckAt: null }])
     m.$transaction.mockImplementation((fn: any) => fn(prisma))
   })
 
@@ -119,17 +122,18 @@ describe('migrateDiscard', () => {
     )
   })
 
-  // P3 #1 de Codex: `updateMany` puede tocar MENOS filas de las pedidas (el barrendero o
-  // el propio aparato movieron una entre la lectura y la escritura). Reportar y auditar
-  // ids que no se movieron es una afirmación falsa.
-  it('reporta y audita SÓLO los comandos que realmente quedaron expirados', async () => {
-    m.tpvCommandQueue.findMany.mockResolvedValue([wipe({ id: 'a' }), wipe({ id: 'b', createdAt: new Date(Date.now() - 50 * HOUR) })])
-    m.tpvCommandQueue.updateMany.mockImplementation(({ where }: any) => Promise.resolve({ count: where.id === 'a' ? 1 : 0 }))
+  // Another process may transition the wipe after the eligibility read. Reverting the
+  // terminal after a failed conditional command update would split command state from
+  // terminal state, so the whole discard must abort.
+  it('aborts without reverting when the pending wipe was concurrently transitioned', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe({ id: 'a' })])
+    m.tpvCommandQueue.updateMany.mockResolvedValue({ count: 0 })
 
-    const r = await migrateDiscard('term-1', actor)
+    await expect(migrateDiscard('term-1', actor)).rejects.toBeInstanceOf(ConflictError)
 
-    expect(r).toEqual({ discarded: 1, commandIds: ['a'], restoredVenueId: 'venue-a' })
-    expect(mockedLogAction).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ commandIds: ['a'] }) }))
+    expect(m.terminal.update).not.toHaveBeenCalled()
+    expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
+    expect(mockedLogAction).not.toHaveBeenCalled()
   })
 
   // ---- P1 de Codex: el borrado de una MIGRACIÓN no puede dejar la terminal a medias ----
@@ -171,12 +175,26 @@ describe('migrateDiscard', () => {
       expect(r.restoredVenueId).toBe('venue-a')
     })
 
-    it('todo ocurre en UNA transacción: expirar y revertir no pueden quedar a medias', async () => {
+  it('todo ocurre en UNA transacción: expirar y revertir no pueden quedar a medias', async () => {
       m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
 
       await migrateDiscard('term-1', actor)
 
-      expect(m.$transaction).toHaveBeenCalledTimes(1)
+    expect(m.$transaction).toHaveBeenCalledTimes(1)
+  })
+
+    it('rejects an org-scoped discard when the migration origin belongs to another organization', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+      m.venue.findFirst.mockResolvedValue(null)
+
+      await expect(migrateDiscard('term-1', actor, 'org-1')).rejects.toBeInstanceOf(ForbiddenError)
+
+      expect(m.venue.findFirst).toHaveBeenCalledWith({
+        where: { id: 'venue-origen', organizationId: 'org-1' },
+        select: { id: true },
+      })
+      expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
+      expect(m.terminal.update).not.toHaveBeenCalled()
     })
   })
 
@@ -185,14 +203,23 @@ describe('migrateDiscard', () => {
   // y —peor— revertiría el venue de una migración que ya se completó.
   it('aborta si el aparato rebotó entre la lectura y la escritura', async () => {
     m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
-    m.terminal.findUnique
-      .mockResolvedValueOnce(terminal(null)) // lectura inicial: no rebotó
-      .mockResolvedValueOnce(terminal(new Date())) // dentro de la transacción: YA rebotó
+    m.terminal.findUnique.mockResolvedValueOnce(terminal(null)) // lectura inicial: no rebotó
+    m.$queryRaw.mockResolvedValueOnce([{ lastActivationStatusCheckAt: new Date() }]) // bajo lock: YA rebotó
 
     await expect(migrateDiscard('term-1', actor)).rejects.toBeInstanceOf(ConflictError)
 
     expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
     expect(m.terminal.update).not.toHaveBeenCalled()
+  })
+
+  it('locks the terminal row before the final rebound check and any writes', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+
+    await migrateDiscard('term-1', actor)
+
+    expect(m.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(String(m.$queryRaw.mock.calls[0][0])).toContain('FOR UPDATE')
+    expect(m.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0])
   })
 
   // ---- GUARDS ----

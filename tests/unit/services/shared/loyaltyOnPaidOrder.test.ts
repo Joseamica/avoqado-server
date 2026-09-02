@@ -21,6 +21,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     staffVenue: { findFirst: jest.fn() },
     orderCustomer: { findMany: jest.fn() },
+    order: { updateMany: jest.fn() },
   },
 }))
 
@@ -44,6 +45,7 @@ import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 
 const staffVenueFindFirst = prisma.staffVenue.findFirst as jest.Mock
 const orderCustomerFindMany = prisma.orderCustomer.findMany as jest.Mock
+const orderUpdateMany = prisma.order.updateMany as jest.Mock
 const earnPointsMock = earnPoints as jest.Mock
 const metricsMock = updateCustomerMetrics as jest.Mock
 
@@ -56,6 +58,7 @@ describe('awardLoyaltyForPaidOrder', () => {
     staffVenueFindFirst.mockResolvedValue({ id: 'sv-1' })
     earnPointsMock.mockResolvedValue({ pointsEarned: 0, newBalance: 0 })
     metricsMock.mockResolvedValue(undefined)
+    orderUpdateMany.mockResolvedValue({ count: 1 })
   })
 
   it('métricas para TODOS los clientes de la orden, puntos SÓLO para el primario', async () => {
@@ -67,11 +70,25 @@ describe('awardLoyaltyForPaidOrder', () => {
     await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90, staffId: 'staff-1' })
 
     expect(metricsMock).toHaveBeenCalledTimes(2)
-    expect(metricsMock).toHaveBeenCalledWith('cust-A', 90)
-    expect(metricsMock).toHaveBeenCalledWith('cust-B', 90)
+    expect(metricsMock).toHaveBeenCalledWith('cust-A', 90, ORDER, VENUE)
+    expect(metricsMock).toHaveBeenCalledWith('cust-B', 90, ORDER, VENUE)
 
     expect(earnPointsMock).toHaveBeenCalledTimes(1)
     expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-A', 90, ORDER, 'sv-1')
+  })
+
+  it('marks the paid order processed only after every loyalty step succeeds', async () => {
+    orderCustomerFindMany.mockResolvedValue([
+      { customerId: 'cust-A', isPrimary: true, customer: { id: 'cust-A', firstName: 'Ana', lastName: null } },
+    ])
+
+    const result = await awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 90 })
+
+    expect(result).toEqual({ complete: true, errors: [] })
+    expect(orderUpdateMany).toHaveBeenCalledWith({
+      where: { id: ORDER, venueId: VENUE, loyaltyEligibleAt: { not: null }, loyaltyProcessedAt: null },
+      data: { loyaltyProcessedAt: expect.any(Date), loyaltyProcessingAt: null, loyaltyLastError: null },
+    })
   })
 
   it('el Staff.id se traduce a StaffVenue.id del MISMO venue — es lo que espera createdById', async () => {
@@ -109,7 +126,7 @@ describe('awardLoyaltyForPaidOrder', () => {
       legacyCustomer: { id: 'cust-L', firstName: 'Lucía', lastName: 'Ríos' },
     })
 
-    expect(metricsMock).toHaveBeenCalledWith('cust-L', 120)
+    expect(metricsMock).toHaveBeenCalledWith('cust-L', 120, ORDER, VENUE)
     expect(earnPointsMock).toHaveBeenCalledWith(VENUE, 'cust-L', 120, ORDER, 'sv-1')
   })
 
@@ -128,14 +145,24 @@ describe('awardLoyaltyForPaidOrder', () => {
     ])
     earnPointsMock.mockRejectedValue(new Error('Loyalty program not enabled'))
 
-    await expect(awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, staffId: 'staff-1' })).resolves.toBeUndefined()
-    expect(metricsMock).toHaveBeenCalledWith('cust-A', 50)
+    await expect(awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, staffId: 'staff-1' })).resolves.toEqual(
+      expect.objectContaining({ complete: false }),
+    )
+    expect(metricsMock).toHaveBeenCalledWith('cust-A', 50, ORDER, VENUE)
+    expect(orderUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: ORDER, loyaltyProcessedAt: null }),
+        data: { loyaltyLastError: expect.stringContaining('loyalty:cust-A') },
+      }),
+    )
   })
 
   it('🔴 NUNCA lanza: si falla la consulta de clientes, tampoco', async () => {
     orderCustomerFindMany.mockRejectedValue(new Error('connection reset'))
 
-    await expect(awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, staffId: 'staff-1' })).resolves.toBeUndefined()
+    await expect(awardLoyaltyForPaidOrder({ venueId: VENUE, orderId: ORDER, orderTotal: 50, staffId: 'staff-1' })).resolves.toEqual(
+      expect.objectContaining({ complete: false }),
+    )
     expect(earnPointsMock).not.toHaveBeenCalled()
   })
 
