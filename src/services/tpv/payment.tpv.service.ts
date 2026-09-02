@@ -1213,6 +1213,28 @@ async function updateOrderTotalsForStandalonePayment(
   return inventoryIssues.length > 0 ? buildInventoryWarning(inventoryIssues, !deductionFailed) : null
 }
 
+/**
+ * Fase 0 (turno de caja del negocio): vuelve a correr, sin cobro nuevo, la misma transacción
+ * que marca una orden como pagada y crea su vale de inventario. Sirve para las órdenes cuyos
+ * cobros ya la cubren pero se quedaron CONFIRMED/PENDING (caso semilla ORD-1788276418170:
+ * el Payment quedó COMPLETED y la transición a PAID nunca aterrizó). Con `paymentAmount = 0`
+ * y sin `currentPaymentId`, `totalPaid` es la suma de TODOS los COMPLETED, así que si cubren
+ * la base la orden pasa a PAID/COMPLETED; si no la cubren, queda como estaba (PARTIAL).
+ * Idempotente: sobre una orden ya COMPLETED, `settledBeforeThisPayment` evita un segundo vale.
+ *
+ * 🔴 Y ese guard llega más lejos de lo que suena — conviene saberlo antes de usar esto como
+ * barrido: SIN cobro nuevo, `settledBeforeThisPayment` coincide con `isFullyPaid` en cuanto la
+ * orden tenga al menos un `Payment`. O sea que una cuenta cubierta por sus cobros se CIERRA y
+ * nada más: no nace vale de inventario, no se acredita lealtad y no se finalizan cupones. La
+ * única excepción es la cuenta que llega saldada SIN un solo cobro (cortesía total, base 0),
+ * que sí dispara esos efectos — y por eso el criterio del barrido
+ * (`shared/pagadaPeroAbierta.ts`) exige un cobro positivo.
+ */
+export async function reconcileOrderFromPayments(orderId: string): Promise<{ orderId: string; warning: OrderInventoryWarning | null }> {
+  const warning = await updateOrderTotalsForStandalonePayment(orderId, 0, 0, undefined, undefined)
+  return { orderId, warning }
+}
+
 interface PaymentFilters {
   fromDate?: string
   toDate?: string
