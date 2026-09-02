@@ -28,21 +28,26 @@ import { signCustomerUnsubscribeToken } from '@/utils/customerActionToken'
  *    resuelve en `UNKNOWN`, que 1B concilia por webhook.
  */
 
-/** 1m · 5m · 30m · 2h · 6h · 24h — backoff exponencial por intento fallido TRANSITORIO. */
-const BACKOFF_MS = [1 * 60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000]
+/**
+ * 1m · 5m · 30m · 2h · 6h — espera antes de cada reintento tras un fallo TRANSITORIO.
+ *
+ * 🔴 El spec lista un sexto valor (24h) que este código NO puede alcanzar: con 6 intentos como
+ * máximo sólo caben 5 esperas — se espera después de cada fallo MENOS el último, que ya no
+ * reintenta. Dejarlo escrito sería una mentira para el siguiente lector, y de las caras: alguien
+ * lee «reintenta hasta 24h» y concluye que una campaña fallida se recupera sola al día
+ * siguiente. Se retira el valor muerto y se ata la relación entre las dos constantes abajo, para
+ * que subir el tope de intentos obligue a añadir su espera y no vuelva a desincronizarse.
+ * Ventana total de reintento: ~8h 36m.
+ */
+export const BACKOFF_MS = [1 * 60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 6 * 60 * 60_000]
 
 /**
- * Con `attempts >= 6` ya no se reintenta — pasa directo a `DEAD`.
- *
- * 🔴 Declarado en el reporte (pedido explícito del coordinador): con este corte, el ÚLTIMO
- * backoff que de verdad se usa es `BACKOFF_MS[4]` (6h), en el intento con `attempts === 5`.
- * `BACKOFF_MS[5]` (24h) queda escrito pero estructuralmente INALCANZABLE — en cuanto
- * `attempts` llega a 6 este `if` gana antes de que el índice `attempts - 1 === 5` se
- * consulte. No lo "arreglé" corriendo el corte a `> 6`: es exactamente lo que dice R4 del
- * brief (`Con attempts >= 6 ⇒ DEAD`), así que se implementa tal cual y se deja la
- * observación por escrito en vez de relitigar la regla.
+ * Con `attempts >= MAX_INTENTOS_ANTES_DE_DEAD` ya no se reintenta — pasa directo a `DEAD`.
+ * El spec fija «máx 6 intentos», y aquí se DERIVA de la tabla de esperas en vez de escribirse
+ * suelto: N esperas ⇒ N+1 intentos. Así no pueden desincronizarse, que es justo lo que dejó
+ * una espera inalcanzable en la primera versión. Hay una prueba que fija esta relación.
  */
-const MAX_INTENTOS_ANTES_DE_DEAD = 6
+export const MAX_INTENTOS_ANTES_DE_DEAD = BACKOFF_MS.length + 1
 
 export type ResultadoEnvio = 'SENT' | 'SKIPPED' | 'RETRYING' | 'DEAD' | 'UNKNOWN'
 

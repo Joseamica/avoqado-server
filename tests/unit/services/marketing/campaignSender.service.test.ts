@@ -6,7 +6,7 @@
  * pierde el CAS o un `catch` que reintenta un correo ya aceptado por Resend son exactamente
  * los defectos que un mock complaciente no cazaría si sólo se comparara el resultado final.
  */
-import { enviarDelivery } from '@/services/marketing/campaignSender.service'
+import { enviarDelivery, BACKOFF_MS, MAX_INTENTOS_ANTES_DE_DEAD } from '@/services/marketing/campaignSender.service'
 import prisma from '@/utils/prismaClient'
 import emailService from '@/services/email.service'
 import { isSuppressed } from '@/services/marketing/emailSuppression.service'
@@ -426,7 +426,19 @@ describe('R4 — desenlaces del envío', () => {
     expect(data.nextAttemptAt.getTime()).toBe(AHORA.getTime() + 6 * 60 * 60_000)
   })
 
-  it('🔴 attempts=6 ⇒ DEAD directo, se agotaron los intentos (el backoff de 24h NUNCA se consulta)', async () => {
+  // 🔴 La tabla de esperas y el corte de intentos son DOS números que tienen que cuadrar entre
+  // sí: con N esperas caben N+1 intentos (se espera DESPUÉS de cada fallo menos el último, que
+  // ya no reintenta). Escribirlos sueltos deja una entrada inalcanzable — y una espera que el
+  // código nunca puede usar no es un detalle interno: alguien lee «reintenta hasta 24h» y
+  // concluye que una campaña fallida se recupera sola al día siguiente. Esta prueba fija la
+  // relación para que no puedan desincronizarse.
+  it('🔴 la tabla de esperas y el corte de intentos cuadran: no hay esperas inalcanzables', () => {
+    expect(MAX_INTENTOS_ANTES_DE_DEAD).toBe(BACKOFF_MS.length + 1)
+    // El último intento que SÍ reintenta usa la última espera de la tabla.
+    expect(BACKOFF_MS[MAX_INTENTOS_ANTES_DE_DEAD - 2]).toBe(BACKOFF_MS[BACKOFF_MS.length - 1])
+  })
+
+  it('🔴 attempts=6 ⇒ DEAD directo: se agotaron los intentos y ya no se programa otra espera', async () => {
     findUniqueMock.mockResolvedValue(baseDelivery({ attempts: 6 }))
     sendEmailWithResultMock.mockResolvedValue({ ok: false, transient: true, errorCode: 'ETIMEDOUT' })
 
