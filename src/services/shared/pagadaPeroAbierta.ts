@@ -2,27 +2,36 @@ import { Prisma, type PrismaClient } from '@prisma/client'
 import { utcTs } from '../../utils/sqlDates'
 
 /**
+ * Qué cobro CUENTA para cubrir la cuenta. Vive una sola vez porque lo usan dos lugares que
+ * NO pueden divergir: la comparación del criterio y la columna `pagado` que se reporta. Si
+ * uno sumara distinto del otro, el número que explica por qué se eligió una orden no sería
+ * el que la eligió.
+ *
+ * 🔴 Los REFUND no restan. Misma regla que `summarizeRefunds` en `orderBalance.ts` (decisión
+ * del founder 2026-08-18: «un reembolso NO reabre saldo») porque es exactamente lo que usa el
+ * camino que cierra, `updateOrderTotalsForStandalonePayment`. Si esta suma restara los
+ * reembolsos, una orden pagada y luego devuelta por completo sería `isFullyPaid` para quien
+ * cierra y NO candidata para nosotros: el barrido nunca la alcanzaría.
+ */
+const COBRO_QUE_CUBRE = `p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'`
+
+/**
  * Criterio ÚNICO de «orden cobrada que sigue abierta». Lo consumen el barrido
  * (`paid-order-reconciler.job.ts`) y el vigilante de dinero (check #5): si alguna vez
  * divergen, uno de los dos miente. Caso semilla: ORD-1788276418170 (Testarudo, 1-sep-2026).
  *
  * Reglas:
  *  - la orden no está en estado terminal;
- *  - la suma de sus cobros COMPLETED que NO son REFUND cubre la base sin propina,
- *    `max(0, subtotal − descuento)`, con un centavo de tolerancia. 🔴 Misma regla que
- *    `summarizeRefunds` en `orderBalance.ts` —los REFUND no restan de lo pagado (decisión
- *    del founder 2026-08-18: «un reembolso NO reabre saldo»)— porque es exactamente lo que
- *    usa el camino que cierra, `updateOrderTotalsForStandalonePayment`. Si esta suma
- *    restara los reembolsos, una orden pagada y luego devuelta por completo sería
- *    `isFullyPaid` para quien cierra y NO candidata para nosotros: el barrido nunca la
- *    alcanzaría;
+ *  - la suma de sus cobros que cuentan (ver `COBRO_QUE_CUBRE`) cubre la base sin propina,
+ *    `max(0, subtotal − descuento)`, con un centavo de tolerancia;
  *  - la suma es CIEGA AL TIPO salvo REFUND: los TEST y los ADJUSTMENT cuentan, igual que
  *    en el camino de cierre. No se filtra por `type` más allá de excluir la devolución;
  *  - existe al menos un cobro REGULAR o FAST positivo — así una cuenta de $0 sin cobro
  *    (cortesía total) NO se marca pagada: ésa la cierra el cajero cobrando $0;
  *  - asimetría deliberada con `type` NULL: la puerta del EXISTS lo RECHAZA (un NULL no
  *    entra en un `IN (...)`) pero la suma sí lo CUENTA (`IS DISTINCT FROM` conserva los
- *    NULL). Hoy producción no tiene ninguno — REGULAR 41,616 · FAST 2,244 · REFUND 31.
+ *    NULL). Es el lado conservador: un tipo desconocido no basta para declarar cobrada una
+ *    orden, pero tampoco se ignora al sumar lo que ya entró.
  *
  * `alias` es texto de confianza (código propio), nunca entrada de usuario: se interpola
  * sin parametrizar y acaba dentro de un `$queryRawUnsafe`.
@@ -38,7 +47,7 @@ export function criterioPagadaPeroAbiertaSql(alias = 'o'): string {
     )
     AND (
       SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p
-      WHERE p."orderId" = ${o}.id AND p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'
+      WHERE p."orderId" = ${o}.id AND ${COBRO_QUE_CUBRE}
     ) >= GREATEST(0, ${o}.subtotal - COALESCE(${o}."discountAmount", 0)) - 0.01`
 }
 
@@ -58,13 +67,18 @@ type Db = Pick<PrismaClient, '$queryRaw'> | Pick<Prisma.TransactionClient, '$que
 /**
  * Candidatas, del más viejo al más nuevo, sin tocar órdenes actualizadas hace menos de `graceMs`.
  *
- * `pagado` aplica el MISMO filtro que el criterio (COMPLETED y no REFUND) para que el número
+ * `pagado` aplica el MISMO filtro que el criterio (`COBRO_QUE_CUBRE`) para que el número
  * reportado sea el que decidió la selección. `paymentIds` en cambio trae TODOS los COMPLETED,
- * reembolsos incluidos: es rastro de auditoría, no la suma que manda.
+ * reembolsos incluidos: es rastro de auditoría, no la suma que manda — nunca se suma.
+ *
+ * 🔴 `since` acota por `Order.createdAt` y es lo que hace barato el tic del barrido: el
+ * criterio no tiene índice que sirva (`status NOT IN (...)`, `updatedAt <`), así que sin tope
+ * cada pasada recorrería la historia entera de órdenes no terminales. El barrido periódico
+ * pasa una ventana corta; el rezago viejo lo alcanza el script a mano, que pide la suya.
  */
 export async function findPaidButOpenOrders(
   db: Db,
-  opts: { graceMs: number; limit: number; now?: Date },
+  opts: { graceMs: number; limit: number; now?: Date; since?: Date },
 ): Promise<CandidataPagadaAbierta[]> {
   const now = opts.now ?? new Date()
   const antesDe = new Date(now.getTime() - opts.graceMs)
@@ -73,11 +87,12 @@ export async function findPaidButOpenOrders(
     SELECT o.id, o."venueId", o."orderNumber", o.status::text AS status, o."paymentStatus"::text AS "paymentStatus",
            GREATEST(0, o.subtotal - COALESCE(o."discountAmount", 0))::text AS base,
            (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p
-             WHERE p."orderId" = o.id AND p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND')::text AS pagado,
+             WHERE p."orderId" = o.id AND ${Prisma.raw(COBRO_QUE_CUBRE)})::text AS pagado,
            ARRAY(SELECT p.id FROM "Payment" p WHERE p."orderId" = o.id AND p.status = 'COMPLETED' ORDER BY p."createdAt") AS "paymentIds"
     FROM "Order" o
     WHERE ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}
       AND o."updatedAt" < ${utcTs(antesDe)}
+      ${opts.since ? Prisma.sql`AND o."createdAt" >= ${utcTs(opts.since)}` : Prisma.empty}
     ORDER BY o."createdAt" ASC
     LIMIT ${opts.limit}
   `
