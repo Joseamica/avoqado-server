@@ -153,16 +153,16 @@ describe('basic-metrics — Postgres suma lo que antes sumaba el navegador', () 
     expect(res.meta.paymentsTruncated).toBe(false)
   })
 
-  it('acotar las listas NO acota los totales: con tope 2, payments trae 2 y summary sigue en 350', async () => {
+  it('el tope interno nunca recorta en silencio el contrato legacy', async () => {
     const anterior = process.env.BASIC_METRICS_ROWS_CAP
     process.env.BASIC_METRICS_ROWS_CAP = '2'
     try {
       const res = await getBasicMetricsData(venueId, FILTERS)
 
-      expect(res.payments).toHaveLength(2)
+      expect(res.payments).toHaveLength(3)
       expect(res.summary.totalAmount).toBe(350)
       expect(res.summary.totalTransactions).toBe(3)
-      expect(res.meta).toEqual({ paymentsTruncated: true, paymentsTotal: 3, reviewsTruncated: true, reviewsTotal: 3 })
+      expect(res.meta).toEqual({ paymentsTruncated: false, paymentsTotal: 3, reviewsTruncated: false, reviewsTotal: 3 })
     } finally {
       if (anterior === undefined) delete process.env.BASIC_METRICS_ROWS_CAP
       else process.env.BASIC_METRICS_ROWS_CAP = anterior

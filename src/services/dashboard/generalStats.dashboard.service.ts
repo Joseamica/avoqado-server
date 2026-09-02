@@ -93,9 +93,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
       createdAt: true,
       tipAmount: true,
     },
-    orderBy: {
-      createdAt: 'desc',
-    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
   })
 
   // Fetch reviews data — también contrato: el dashboard recibe la lista.
