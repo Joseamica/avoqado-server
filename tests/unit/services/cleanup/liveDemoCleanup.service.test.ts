@@ -236,3 +236,42 @@ describe('deleteVenueData — nada que apunte a un producto sobrevive a su borra
     })
   })
 })
+
+describe('P3-1A1c-c live demo webhook evidence preservation', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('deletes only unbound WebhookEvent rows and reports every preserved evidence source', async () => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+    prismaMock.webhookEvent.count.mockResolvedValue(3)
+    prismaMock.webhookEvent.deleteMany.mockResolvedValue({ count: 2 })
+
+    await expect(cleanupExpiredLiveDemos()).resolves.toBe(1)
+
+    const evidenceFreeWhere = {
+      venueId: 'venue-1',
+      stripeObjectBindings: { none: {} },
+      dispatchObservations: { none: {} },
+      operationalAlerts: { none: {} },
+      manualRetryResultOutboxes: { none: {} },
+    }
+    expect(prismaMock.webhookEvent.count).toHaveBeenCalledWith({
+      where: {
+        venueId: 'venue-1',
+        OR: [
+          { stripeObjectBindings: { some: {} } },
+          { dispatchObservations: { some: {} } },
+          { operationalAlerts: { some: {} } },
+          { manualRetryResultOutboxes: { some: {} } },
+        ],
+      },
+    })
+    expect(prismaMock.webhookEvent.deleteMany).toHaveBeenCalledWith({ where: evidenceFreeWhere })
+    expect(prismaMock.stripeObjectBinding.deleteMany).not.toHaveBeenCalled()
+    expect(prismaMock.webhookDispatchObservation.deleteMany).not.toHaveBeenCalled()
+    expect(prismaMock.webhookDispatchObservation.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.webhookOperationalAlert.deleteMany).not.toHaveBeenCalled()
+  })
+})

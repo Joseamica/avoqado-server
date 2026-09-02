@@ -6,13 +6,15 @@
 
 import { Request, Response, NextFunction } from 'express'
 import Stripe from 'stripe'
+import { env } from '../config/env'
 import logger from '../config/logger'
-import { handleStripeWebhookEvent } from '../services/stripe.webhook.service'
 import { StripeConnectProvider } from '../services/payments/providers/stripe-connect.provider'
 import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
+import { WebhookEventConflictError } from '../services/stripe-webhooks/platformWebhookInbox.service'
+import { platformWebhookRuntime } from '../services/stripe-webhooks/platformWebhookRuntime.service'
 
 // Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
+const stripe = new Stripe(env.STRIPE_SECRET_KEY || '', {
   apiVersion: '2024-10-28' as any,
 })
 
@@ -35,7 +37,7 @@ export async function handleStripeWebhook(req: Request, res: Response, _next: Ne
     return
   }
 
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+  const webhookSecret = env.STRIPE_WEBHOOK_SECRET
 
   if (!webhookSecret) {
     logger.error('❌ Webhook: STRIPE_WEBHOOK_SECRET not configured')
@@ -70,33 +72,58 @@ export async function handleStripeWebhook(req: Request, res: Response, _next: Ne
     return
   }
 
+  let observed: Awaited<ReturnType<typeof platformWebhookRuntime.inbox.observe>>
   try {
-    // Process the event
-    await handleStripeWebhookEvent(event)
-
-    // Return 200 OK to Stripe to acknowledge receipt
-    res.status(200).json({
-      success: true,
-      message: 'Webhook processed successfully',
-      eventId: event.id,
+    observed = await platformWebhookRuntime.inbox.observe({
+      stripeEventId: event.id,
       eventType: event.type,
+      payload: event,
     })
   } catch (error) {
-    logger.error('❌ Webhook: Event processing failed', {
+    if (error instanceof WebhookEventConflictError) {
+      logger.error('🚨 Webhook: immutable Stripe event content conflict', {
+        eventId: event.id,
+        eventType: event.type,
+        code: error.code,
+      })
+      res.status(200).json({ success: false, code: 'PLATFORM_WEBHOOK_IMMUTABLE_CONFLICT' })
+      return
+    }
+    logger.error('❌ Webhook: event could not be made durable', {
       eventId: event.id,
       eventType: event.type,
       error: error instanceof Error ? error.message : 'Unknown error',
     })
-
-    // Still return 200 to Stripe to prevent retries
-    // Log the error for manual investigation
-    res.status(200).json({
-      success: false,
-      message: 'Webhook received but processing failed',
-      eventId: event.id,
-      eventType: event.type,
-    })
+    res.set('Retry-After', '5')
+    res.status(503).json({ success: false, code: 'PLATFORM_WEBHOOK_NOT_DURABLE' })
+    return
   }
+
+  res.status(200).json({
+    success: true,
+    code: 'PLATFORM_WEBHOOK_ACCEPTED',
+    message: 'Webhook processed successfully',
+    eventId: event.id,
+    eventType: event.type,
+  })
+
+  // Durability is the ACK boundary. Never make Stripe wait for unbounded
+  // classifier/business effects that are recoverable from the durable row.
+  void Promise.resolve()
+    .then(() =>
+      platformWebhookRuntime.processor.processIngress(observed.event.id, {
+        mode: platformWebhookRuntime.mode,
+        created: observed.created,
+      }),
+    )
+    .catch(error => {
+      logger.error('❌ Webhook: best-effort inline phase failed after durability and ACK', {
+        webhookEventId: observed.event.id,
+        eventId: event.id,
+        eventType: event.type,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+    })
 }
 
 /**

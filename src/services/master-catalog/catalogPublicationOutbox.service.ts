@@ -3,6 +3,7 @@ import cuid from 'cuid'
 import { createHash } from 'node:crypto'
 import socketManager from '../../communication/sockets'
 import prisma from '../../utils/prismaClient'
+import { utcTs } from '../../utils/sqlDates'
 import type { CatalogPublicationOperation } from '../../types/master-catalog'
 import type {
   CatalogPublicationOutboxPayloadV1,
@@ -73,11 +74,6 @@ function ordinal(left: string, right: string): number {
 
 function sequenceId(organizationId: string, venueId: string): string {
   return `catalog-seq-${createHash('sha256').update(`${organizationId}\u0000${venueId}`).digest('hex').slice(0, 24)}`
-}
-
-function utcTimestampSql(value: Date): Prisma.Sql {
-  // WHY: These legacy Prisma DateTime columns are timestamp-without-time-zone. Raw Date parameters are timestamptz and shift in non-UTC DB sessions.
-  return Prisma.sql`${value.toISOString()}::timestamp`
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -385,8 +381,8 @@ export function createCatalogPublicationOutboxService(overrides: Partial<OutboxD
       const limit = Math.max(1, Math.min(MAX_CLAIM, input.limit ?? MAX_CLAIM))
       const claimedAt = dependencies.now()
       const claimExpiresAt = new Date(claimedAt.getTime() + CLAIM_LEASE_MS)
-      const claimedAtSql = utcTimestampSql(claimedAt)
-      const claimExpiresAtSql = utcTimestampSql(claimExpiresAt)
+      const claimedAtSql = utcTs(claimedAt)
+      const claimExpiresAtSql = utcTs(claimExpiresAt)
       const claimed = await dependencies.prisma.$transaction(async tx => {
         // WHY: NOT EXISTS enforces venue order while SKIP LOCKED gives workers
         // disjoint claims; one venue can expose only its earliest undelivered row.

@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api.avoqado.io/contracts/commercial/catalog-v2.schema.json",
+  "title": "Avoqado Commercial Catalog Snapshot v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "contractVersion", "publicationId", "publishedAt", "market", "products", "bundles"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "contractVersion": { "const": "2.0.0" },
+    "publicationId": { "$ref": "#/definitions/id" },
+    "publishedAt": { "$ref": "#/definitions/timestamp" },
+    "market": { "$ref": "#/definitions/market" },
+    "products": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/product" } },
+    "bundles": { "type": "array", "items": { "$ref": "#/definitions/bundle" } }
+  },
+  "definitions": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+    "money": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,16})\\.[0-9]{2}$" },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "market": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["country", "currency", "timezone", "taxLabel", "taxRateBasisPoints"],
+      "properties": {
+        "country": { "const": "MX" },
+        "currency": { "const": "MXN" },
+        "timezone": { "const": "America/Mexico_City" },
+        "taxLabel": { "const": "IVA" },
+        "taxRateBasisPoints": { "const": 1600 }
+      }
+    },
+    "activationNotRequired": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": { "mode": { "const": "NOT_REQUIRED" } }
+    },
+    "activationVenueSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "settingKey", "defaultState"],
+      "properties": {
+        "mode": { "const": "VENUE_SETTING" },
+        "settingKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "defaultState": { "enum": ["ON", "OFF"] }
+      }
+    },
+    "activationRequirement": {
+      "oneOf": [{ "$ref": "#/definitions/activationNotRequired" }, { "$ref": "#/definitions/activationVenueSetting" }]
+    },
+    "capabilityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilityCode", "capabilityKind", "activationRequirement"],
+      "properties": {
+        "capabilityCode": { "$ref": "#/definitions/code" },
+        "capabilityKind": { "enum": ["FEATURE", "MODULE", "CORE"] },
+        "activationRequirement": { "$ref": "#/definitions/activationRequirement" }
+      }
+    },
+    "price": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "billingUnit", "amount", "currency", "taxBehavior", "taxRateBasisPoints"],
+      "properties": {
+        "code": { "$ref": "#/definitions/code" },
+        "billingUnit": { "enum": ["VENUE_MONTH", "VENUE_YEAR"] },
+        "amount": { "$ref": "#/definitions/money" },
+        "currency": { "const": "MXN" },
+        "taxBehavior": { "enum": ["EXCLUSIVE", "NOT_APPLICABLE"] },
+        "taxRateBasisPoints": { "type": "integer", "enum": [0, 1600] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "amount": { "const": "0.00" } }, "required": ["amount"] },
+          "then": {
+            "properties": {
+              "taxBehavior": { "const": "NOT_APPLICABLE" },
+              "taxRateBasisPoints": { "const": 0 }
+            }
+          },
+          "else": {
+            "properties": {
+              "taxBehavior": { "const": "EXCLUSIVE" },
+              "taxRateBasisPoints": { "const": 1600 }
+            }
+          }
+        }
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["users", "devices"],
+      "properties": {
+        "users": { "const": "UNLIMITED" },
+        "devices": { "const": "UNLIMITED" }
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "slug", "kind", "name", "description", "salesMode", "sortOrder", "capabilityBindings", "prices"],
+      "properties": {
+        "code": { "$ref": "#/definitions/code" },
+        "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "kind": { "enum": ["PLAN", "POS", "MODULE"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "salesMode": { "enum": ["SELF_SERVICE", "CONTACT"] },
+        "sortOrder": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "capabilityBindings": { "type": "array", "items": { "$ref": "#/definitions/capabilityBinding" } },
+        "prices": { "type": "array", "maxItems": 2, "items": { "$ref": "#/definitions/price" } },
+        "limits": { "$ref": "#/definitions/limits" }
+      }
+    },
+    "bundleItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["productCode", "quantity", "sortOrder"],
+      "properties": {
+        "productCode": { "$ref": "#/definitions/code" },
+        "quantity": { "const": 1 },
+        "sortOrder": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "slug", "name", "description", "sortOrder", "items", "prices"],
+      "properties": {
+        "code": { "$ref": "#/definitions/code" },
+        "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "sortOrder": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "items": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/bundleItem" } },
+        "prices": { "type": "array", "minItems": 1, "maxItems": 2, "items": { "$ref": "#/definitions/price" } }
+      }
+    }
+  }
+}

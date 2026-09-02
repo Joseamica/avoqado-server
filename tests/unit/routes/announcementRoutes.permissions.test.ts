@@ -9,8 +9,9 @@ const PADRE = path.join(__dirname, '../../../src/routes/superadmin.routes.ts')
  *
  * Es estática a propósito: caza EXACTAMENTE la regresión que la auditoría de Codex
  * encontró (pasarle a `authorizeRole` un rol suelto en vez de un arreglo, con lo que
- * "SUPERADMIN".includes("ADMIN") dejaría pasar a un ADMIN). No sustituye a una prueba
- * de integración con supertest, que verificaría un 403 real.
+ * "SUPERADMIN".includes("ADMIN") dejaría pasar a un ADMIN). El padre ahora usa la
+ * autoridad más fuerte: `requireActiveSuperadmin`, que relee Staff activo desde DB.
+ * No sustituye a la integración con supertest que verifica el 403 real.
  */
 describe('rutas de anuncios: autorizacion', () => {
   // ===== CASOS NUEVOS =====
@@ -20,9 +21,9 @@ describe('rutas de anuncios: autorizacion', () => {
     expect(padre).toMatch(/router\.use\('\/announcements', announcementRoutes\)/)
   })
 
-  it('el padre exige SUPERADMIN con un ARREGLO', () => {
+  it('el padre exige una cuenta SUPERADMIN activa confirmada por DB', () => {
     const padre = fs.readFileSync(PADRE, 'utf8')
-    expect(padre).toMatch(/authorizeRole\(\[StaffRole\.SUPERADMIN\]\)/)
+    expect(padre).toMatch(/router\.use\(requireActiveSuperadmin\)/)
   })
 
   // ===== REGRESION: el P1 de la auditoria no puede volver =====

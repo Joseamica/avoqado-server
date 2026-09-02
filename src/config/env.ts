@@ -3,6 +3,7 @@ import dotenv from 'dotenv'
 import logger from './logger'
 import { revisarConfiguracionCritica } from './configCheck'
 import { dropEmptyValues } from './envHelpers'
+import { getCommercialQuotePreviewSecretIssues } from './commercialQuotePreviewSecrets'
 
 // Load .env file FIRST (before any validation)
 dotenv.config()
@@ -16,7 +17,7 @@ dotenv.config()
 // Pattern: "Fail Fast" - catch configuration errors immediately, not at runtime
 // ============================================================================
 
-const envSchema = z.object({
+const envObjectSchema = z.object({
   // ─────────────────────────────────────────────────────────────────────────
   // CORE APPLICATION
   // ─────────────────────────────────────────────────────────────────────────
@@ -24,6 +25,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(3000),
   BASE_URL: z.string().url().optional(),
   FRONTEND_URL: z.string().url().default('http://localhost:5173'),
+  CORS_PREVIEW_ORIGINS: z.string().optional(),
 
   // ─────────────────────────────────────────────────────────────────────────
   // DATABASE (REQUIRED)
@@ -86,6 +88,17 @@ const envSchema = z.object({
   STRIPE_SECRET_KEY: z.string().startsWith('sk_').optional(),
   STRIPE_PUBLISHABLE_KEY: z.string().startsWith('pk_').optional(),
   STRIPE_WEBHOOK_SECRET: z.string().startsWith('whsec_').optional(),
+  COMMERCIAL_V2_CHECKOUT_MODE: z.enum(['OFF', 'SHADOW', 'ALLOWLIST', 'ACTIVE']).default('OFF'),
+  PLATFORM_WEBHOOK_ORCHESTRATOR_MODE: z.enum(['OFF', 'SHADOW']).default('OFF'),
+  PLATFORM_WEBHOOK_RECOVERY_ENABLED: z
+    .enum(['false', 'true'])
+    .transform(value => value === 'true')
+    .default('false'),
+
+  // HMAC key for immutable commercial-publication previews. Required because
+  // publishing without it would either fail at runtime or make tokens forgeable.
+  COMMERCIAL_PREVIEW_SIGNING_SECRET: z.string().min(32, 'COMMERCIAL_PREVIEW_SIGNING_SECRET must contain at least 32 characters'),
+  COMMERCIAL_QUOTE_PREVIEW_SIGNING_SECRET: z.string(),
 
   // OpenAI
   OPENAI_API_KEY: z.string().optional(),
@@ -284,6 +297,26 @@ const envSchema = z.object({
   RENDER_SERVICE_NAME: z.string().optional(),
 })
 
+const envSchema = envObjectSchema.superRefine((value, context) => {
+  if (value.PLATFORM_WEBHOOK_ORCHESTRATOR_MODE === 'OFF' && value.PLATFORM_WEBHOOK_RECOVERY_ENABLED) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['PLATFORM_WEBHOOK_RECOVERY_ENABLED'],
+      message: 'PLATFORM_WEBHOOK_RECOVERY_ENABLED=true requires PLATFORM_WEBHOOK_ORCHESTRATOR_MODE=SHADOW',
+    })
+  }
+  for (const issue of getCommercialQuotePreviewSecretIssues({
+    quotePreviewSigningSecret: value.COMMERCIAL_QUOTE_PREVIEW_SIGNING_SECRET,
+    publicationPreviewSigningSecret: value.COMMERCIAL_PREVIEW_SIGNING_SECRET,
+  })) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [issue.field],
+      message: issue.message,
+    })
+  }
+})
+
 // ============================================================================
 // Parse and Validate
 // ============================================================================
@@ -300,6 +333,9 @@ if (!parsed.success) {
   logger.error('═══════════════════════════════════════════════════════════════\n')
 
   const errors = parsed.error.flatten().fieldErrors
+  if (errors.COMMERCIAL_QUOTE_PREVIEW_SIGNING_SECRET?.length) {
+    process.stderr.write('COMMERCIAL_QUOTE_PREVIEW_SIGNING_SECRET_INVALID\n')
+  }
   for (const [field, messages] of Object.entries(errors)) {
     logger.error(`   • ${field}: ${messages?.join(', ')}`)
   }
@@ -357,6 +393,7 @@ export const {
   PORT,
   BASE_URL,
   FRONTEND_URL,
+  CORS_PREVIEW_ORIGINS,
   DATABASE_URL,
   ACCESS_TOKEN_SECRET,
   SESSION_SECRET,

@@ -56,7 +56,11 @@ jest.mock('@/config/logger', () => ({
 import prisma from '@/utils/prismaClient'
 import { fulfillPlanCheckout } from '@/services/stripe.service'
 import { executeSeatReconciliation, reactivateSeatCapDeactivated } from '@/services/dashboard/seatReconciliation.service'
-import { handleSubscriptionUpdated, handleSubscriptionDeleted, handleStripeWebhookEvent } from '@/services/stripe.webhook.service'
+import {
+  dispatchCurrentStripeWebhookEffects,
+  handleSubscriptionDeleted,
+  handleSubscriptionUpdated,
+} from '@/services/stripe.webhook.service'
 
 const execMock = executeSeatReconciliation as jest.Mock
 const reactivateMock = reactivateSeatCapDeactivated as jest.Mock
@@ -114,7 +118,7 @@ describe('stripe webhook → seat reconciliation hook', () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
     execMock.mockRejectedValueOnce(new Error('boom'))
 
-    await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).resolves.toBeUndefined()
+    await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).resolves.toBe('APPLIED')
     expect(execMock).toHaveBeenCalledWith('venue_1')
   })
 })
@@ -145,7 +149,7 @@ describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', 
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
     reactivateMock.mockRejectedValueOnce(new Error('boom'))
 
-    await expect(handleSubscriptionUpdated({ id: 'sub_7', status: 'active' } as Stripe.Subscription)).resolves.toBeUndefined()
+    await expect(handleSubscriptionUpdated({ id: 'sub_7', status: 'active' } as Stripe.Subscription)).resolves.toBe('APPLIED')
     expect(reactivateMock).toHaveBeenCalledWith('venue_1')
   })
 
@@ -172,7 +176,7 @@ describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', 
       },
     } as unknown as Stripe.Event
 
-    await handleStripeWebhookEvent(event)
+    await dispatchCurrentStripeWebhookEffects(event, 'whe_1')
 
     expect(fulfillMock).toHaveBeenCalled()
     expect(reactivateMock).toHaveBeenCalledWith('venue_1')
@@ -193,7 +197,7 @@ describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', 
       },
     } as unknown as Stripe.Event
 
-    await handleStripeWebhookEvent(event)
+    await dispatchCurrentStripeWebhookEffects(event, 'whe_2')
 
     expect(fulfillMock).not.toHaveBeenCalled()
     expect(reactivateMock).not.toHaveBeenCalled()

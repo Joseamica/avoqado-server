@@ -66,6 +66,7 @@ module.exports = {
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
+        '^\\.prisma/client/(.*)$': '<rootDir>/node_modules/.prisma/client/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
         // ultrahtml uses an `exports` map with only the `import`
         // condition, which the default jest resolver can't satisfy.
@@ -95,6 +96,7 @@ module.exports = {
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
+        '^\\.prisma/client/(.*)$': '<rootDir>/node_modules/.prisma/client/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
         // ultrahtml uses an `exports` map with only the `import`
         // condition, which the default jest resolver can't satisfy.
@@ -124,6 +126,7 @@ module.exports = {
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
+        '^\\.prisma/client/(.*)$': '<rootDir>/node_modules/.prisma/client/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
         // ultrahtml uses an `exports` map with only the `import`
         // condition, which the default jest resolver can't satisfy.
@@ -153,6 +156,7 @@ module.exports = {
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
+        '^\\.prisma/client/(.*)$': '<rootDir>/node_modules/.prisma/client/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
         // ultrahtml uses an `exports` map with only the `import`
         // condition, which the default jest resolver can't satisfy.

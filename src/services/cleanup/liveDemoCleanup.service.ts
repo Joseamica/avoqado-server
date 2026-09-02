@@ -24,6 +24,30 @@ interface DisposableDemoSession {
   staffId: string
 }
 
+export async function deleteUnboundPlatformWebhookEventsForVenue(tx: DbClient, venueId: string) {
+  const preservedWebhookEvents = await tx.webhookEvent.count({
+    where: {
+      venueId,
+      OR: [
+        { stripeObjectBindings: { some: {} } },
+        { dispatchObservations: { some: {} } },
+        { operationalAlerts: { some: {} } },
+        { manualRetryResultOutboxes: { some: {} } },
+      ],
+    },
+  })
+  const deletedWebhookEvents = await tx.webhookEvent.deleteMany({
+    where: {
+      venueId,
+      stripeObjectBindings: { none: {} },
+      dispatchObservations: { none: {} },
+      operationalAlerts: { none: {} },
+      manualRetryResultOutboxes: { none: {} },
+    },
+  })
+  return { preserved: preservedWebhookEvents, deleted: deletedWebhookEvents.count }
+}
+
 export function createDisposableDemoSessionDeletion(
   overrides: { prisma?: typeof prisma; afterVenueLock?: (venueId: string) => Promise<void> } = {},
 ) {
@@ -353,8 +377,15 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<void> {
   await tx.venueFeature.deleteMany({ where: { venueId } })
   await tx.venueSettings.deleteMany({ where: { venueId } })
 
-  // 11. Webhook events
-  await tx.webhookEvent.deleteMany({ where: { venueId } })
+  // 11. Webhook events without durable routing/dispatch evidence. Evidence rows
+  // use RESTRICT FKs: if an alert/binding arrives concurrently, PostgreSQL
+  // serializes the FK check against this delete and one side safely loses.
+  const webhookCleanup = await deleteUnboundPlatformWebhookEventsForVenue(tx, venueId)
+  logger.info('Live demo webhook cleanup preserved durable evidence', {
+    venueId,
+    preservedWebhookEvents: webhookCleanup.preserved,
+    deletedWebhookEvents: webhookCleanup.deleted,
+  })
 
   // 12. Finally, delete the venue
   await tx.venue.delete({ where: { id: venueId } })

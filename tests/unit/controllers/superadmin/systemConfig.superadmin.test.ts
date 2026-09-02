@@ -17,10 +17,10 @@ const RAIZ = path.join(__dirname, '../../../..')
 const leer = (p: string) => fs.readFileSync(path.join(RAIZ, p), 'utf8')
 
 describe('GET /superadmin/system/config-check', () => {
-  it('🔴 está montado BAJO el router de superadmin, después del candado de rol', () => {
+  it('🔴 está montado BAJO el router de superadmin, después de validar autoridad activa en DB', () => {
     const rutas = leer('src/routes/superadmin.routes.ts')
 
-    const candado = rutas.indexOf('authorizeRole([StaffRole.SUPERADMIN])')
+    const candado = rutas.indexOf('router.use(requireActiveSuperadmin)')
     const montaje = rutas.indexOf("router.use('/system', systemConfigRoutes)")
 
     expect(candado).toBeGreaterThan(-1)
@@ -30,11 +30,12 @@ describe('GET /superadmin/system/config-check', () => {
   })
 
   it('🔴 su propio archivo de rutas NO afloja la autenticación por su cuenta', () => {
-    // Un `authenticateTokenMiddleware` o un `authorizeRole` propio aquí sería la señal de que
+    // Un `authenticateTokenMiddleware` o un guard de superadmin propio aquí sería la señal de que
     // alguien lo desacopló del padre — y desacoplarlo es como se afloja sin querer.
     const propio = leer('src/routes/superadmin/systemConfig.routes.ts')
 
     expect(propio).not.toContain('authorizeRole')
+    expect(propio).not.toContain('requireActiveSuperadmin')
     expect(propio).not.toContain('optionalAuth')
   })
 

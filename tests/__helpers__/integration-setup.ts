@@ -41,6 +41,8 @@ process.env.SESSION_SUCCESSOR_ENC_KEY = process.env.SESSION_SUCCESSOR_ENC_KEY ||
 // lets those deterministic paths initialize without authorizing a real request.
 process.env.OPENAI_API_KEY = 'sk-test-dummy-for-jest'
 process.env.STRIPE_SECRET_KEY = 'sk_test_dummy_for_jest'
+process.env.COMMERCIAL_PREVIEW_SIGNING_SECRET = 'c'.repeat(48)
+process.env.COMMERCIAL_QUOTE_PREVIEW_SIGNING_SECRET = 'q'.repeat(48)
 // Never inherit a developer or release broker from dotenv in integration tests.
 // Port 1 is deliberately inert; suites that exercise messaging mock the client.
 process.env.RABBITMQ_URL = 'amqp://127.0.0.1:1'

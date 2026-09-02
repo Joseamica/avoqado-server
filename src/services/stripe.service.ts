@@ -9,6 +9,7 @@
  */
 
 import Stripe from 'stripe'
+import { randomUUID } from 'node:crypto'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { Feature } from '@prisma/client'
@@ -16,6 +17,7 @@ import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
+import { assertLegacyPlanCheckoutVenueEligible } from './commercial/legacyPlanCheckoutEligibility.service'
 
 // Initialize Stripe
 // Using default API version from SDK (automatically uses the latest compatible version)
@@ -705,6 +707,12 @@ export interface CreatePlanCheckoutSessionInput {
 export async function createPlanCheckoutSession(input: CreatePlanCheckoutSessionInput): Promise<string> {
   const tierCode: PlanTierCode = input.tierCode ?? 'PLAN_PRO'
 
+  const checkoutVenue = await prisma.venue.findUnique({
+    where: { id: input.venueId },
+    select: { status: true },
+  })
+  if (checkoutVenue) assertLegacyPlanCheckoutVenueEligible(checkoutVenue.status)
+
   const feature = await prisma.feature.findFirst({ where: { code: tierCode, active: true } })
   if (!feature) throw new Error(`Feature ${tierCode} not found or inactive`)
 
@@ -714,38 +722,85 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
   if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
 
   const description = input.venueName ? `Plan Avoqado ${planLabel(tierCode)} - ${input.venueName}` : `Plan Avoqado ${planLabel(tierCode)}`
+  const idempotencyKey = `legacy-plan-checkout:${randomUUID()}`
 
   const session = await retry(
     () =>
-      stripe.checkout.sessions.create({
-        mode: 'subscription',
-        customer: input.customerId,
-        line_items: [{ price: price.id, quantity: 1 }],
-        allow_promotion_codes: true,
-        subscription_data: {
-          description,
+      stripe.checkout.sessions.create(
+        {
+          mode: 'subscription',
+          customer: input.customerId,
+          line_items: [{ price: price.id, quantity: 1 }],
+          allow_promotion_codes: true,
+          subscription_data: {
+            description,
+            metadata: {
+              venueId: input.venueId,
+              tierCode,
+              featureId: feature.id,
+              featureCode: feature.code,
+              interval: input.interval,
+              ...(input.venueName ? { venueName: input.venueName } : {}),
+              ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
+            },
+          },
           metadata: {
             venueId: input.venueId,
             tierCode,
-            featureId: feature.id,
-            featureCode: feature.code,
             interval: input.interval,
-            ...(input.venueName ? { venueName: input.venueName } : {}),
-            ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
           },
+          success_url: input.successUrl,
+          cancel_url: input.cancelUrl,
         },
-        metadata: {
-          venueId: input.venueId,
-          tierCode,
-          interval: input.interval,
-        },
-        success_url: input.successUrl,
-        cancel_url: input.cancelUrl,
-      }),
+        { idempotencyKey },
+      ),
     { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanCheckoutSession' },
   )
 
-  if (!session.url) throw new Error('Stripe Checkout Session created without a URL')
+  try {
+    await prisma.stripeCheckoutOrigin.create({
+      data: {
+        stripeCheckoutSessionId: session.id,
+        ownerKind: 'LEGACY',
+        routeKey: 'LEGACY_PLAN_CHECKOUT',
+        venueId: input.venueId,
+        featureId: feature.id,
+        stripeCustomerId: input.customerId,
+        billingInterval: input.interval === 'annual' ? 'ANNUAL' : 'MONTHLY',
+      },
+    })
+  } catch (persistenceError) {
+    try {
+      await stripe.checkout.sessions.expire(session.id)
+      logger.warn('Legacy plan Checkout Session expired after origin persistence failed', {
+        sessionId: session.id,
+        cleanupResult: 'expired',
+      })
+    } catch {
+      logger.error('Legacy plan Checkout Session cleanup failed after origin persistence failed', {
+        sessionId: session.id,
+        cleanupResult: 'failed',
+      })
+    }
+    throw persistenceError
+  }
+
+  if (!session.url) {
+    const missingUrlError = new Error('Stripe Checkout Session created without a URL')
+    try {
+      await stripe.checkout.sessions.expire(session.id)
+      logger.warn('Legacy plan Checkout Session expired after Stripe returned no URL', {
+        sessionId: session.id,
+        cleanupResult: 'expired',
+      })
+    } catch {
+      logger.error('Legacy plan Checkout Session cleanup failed after Stripe returned no URL', {
+        sessionId: session.id,
+        cleanupResult: 'failed',
+      })
+    }
+    throw missingUrlError
+  }
 
   logger.info(`✅ createPlanCheckoutSession: ${session.id} (${tierCode}, ${input.interval}) for venue ${input.venueId}`)
   return session.url

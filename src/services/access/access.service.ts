@@ -288,6 +288,8 @@ export async function getUserAccess(
           staffId: userId,
           venueId: venueId,
         },
+        active: true,
+        staff: { active: true },
       },
       select: {
         role: true,
@@ -342,6 +344,7 @@ export async function getUserAccess(
         staffId: userId,
         role: OrgRole.OWNER,
         isActive: true,
+        staff: { active: true },
       },
       select: { organizationId: true },
     }),

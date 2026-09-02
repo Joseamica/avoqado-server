@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api.avoqado.io/contracts/commercial/catalog-v1.schema.json",
+  "title": "Avoqado Commercial Catalog Snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "publicationId", "publishedAt", "market", "products", "bundles"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "publicationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "publishedAt": { "type": "string", "format": "date-time" },
+    "market": { "$ref": "#/definitions/market" },
+    "products": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/product" }
+    },
+    "bundles": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/bundle" }
+    }
+  },
+  "definitions": {
+    "market": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["country", "currency", "timezone", "taxLabel", "taxRateBasisPoints"],
+      "properties": {
+        "country": { "const": "MX" },
+        "currency": { "const": "MXN" },
+        "timezone": { "const": "America/Mexico_City" },
+        "taxLabel": { "const": "IVA" },
+        "taxRateBasisPoints": { "const": 1600 }
+      }
+    },
+    "price": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "billingUnit", "amountMinor", "currency", "taxBehavior", "taxRateBasisPoints"],
+      "allOf": [
+        {
+          "if": { "properties": { "amountMinor": { "const": 0 } } },
+          "then": {
+            "properties": {
+              "taxBehavior": { "const": "NOT_APPLICABLE" },
+              "taxRateBasisPoints": { "const": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "amountMinor": { "minimum": 1 } } },
+          "then": {
+            "properties": {
+              "taxBehavior": { "const": "EXCLUSIVE" },
+              "taxRateBasisPoints": { "const": 1600 }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+        "billingUnit": { "enum": ["VENUE_MONTH", "VENUE_YEAR"] },
+        "amountMinor": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "currency": { "const": "MXN" },
+        "taxBehavior": { "enum": ["EXCLUSIVE", "NOT_APPLICABLE"] },
+        "taxRateBasisPoints": { "type": "integer", "enum": [0, 1600] }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["users", "devices"],
+      "properties": {
+        "users": { "const": "UNLIMITED" },
+        "devices": { "const": "UNLIMITED" }
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "slug", "kind", "name", "description", "salesMode", "capabilityCodes", "prices"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+        "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "kind": { "enum": ["PLAN", "POS", "MODULE"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "salesMode": { "enum": ["SELF_SERVICE", "CONTACT"] },
+        "capabilityCodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" }
+        },
+        "prices": {
+          "type": "array",
+          "maxItems": 2,
+          "items": { "$ref": "#/definitions/price" }
+        },
+        "limits": { "$ref": "#/definitions/limits" }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "slug", "name", "description", "itemProductCodes", "prices"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+        "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "itemProductCodes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" }
+        },
+        "prices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "$ref": "#/definitions/price" }
+        }
+      }
+    }
+  }
+}

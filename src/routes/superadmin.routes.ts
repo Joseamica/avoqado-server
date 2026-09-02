@@ -1,8 +1,7 @@
 // src/routes/superadmin.routes.ts
 import express from 'express'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
-import { authorizeRole } from '../middlewares/authorizeRole.middleware'
-import { StaffRole } from '@prisma/client'
+import { requireActiveSuperadmin } from '../middlewares/requireActiveSuperadmin.middleware'
 
 // Import superadmin sub-routes
 import kycReviewRoutes from './superadmin/kycReview.routes'
@@ -41,14 +40,17 @@ import deliveryActivationRoutes from './superadmin/deliveryActivation.routes'
 import masterCatalogRoutes from './superadmin/masterCatalog.routes'
 import announcementRoutes from './superadmin/announcement.routes'
 import systemConfigRoutes from './superadmin/systemConfig.routes'
+import commercialRoutes from './superadmin/commercial.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
 const router = express.Router({ mergeParams: true })
 
-// All superadmin routes require authentication and SUPERADMIN role
+// All superadmin routes require authentication plus current database authority.
+// Token role claims can be stale until expiry; disabled Staff or assignments must
+// be revoked immediately across the entire platform control plane.
 router.use(authenticateTokenMiddleware)
-router.use(authorizeRole([StaffRole.SUPERADMIN]))
+router.use(requireActiveSuperadmin)
 
 // Mount superadmin sub-routes
 router.use('/announcements', announcementRoutes)
@@ -83,6 +85,7 @@ router.use('/billing', billingRoutes) // Platform billing CFDI (Avoqado factura 
 router.use('/reports', reportsRoutes)
 router.use('/delivery-activation', deliveryActivationRoutes) // Task 4/7 delivery-activation-backend: cola de ops + avanzar status
 router.use('/master-catalog', masterCatalogRoutes)
+router.use('/commercial', commercialRoutes)
 // Aditivo (2026-05): mismos controllers que ya viven en /api/v1/dashboard/superadmin/*,
 // expuestos también aquí para que el frontend superadmin use un solo namespace.
 router.use('/settlement-configurations', settlementConfigRoutes)

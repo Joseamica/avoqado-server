@@ -7,6 +7,8 @@
 
 import { Router } from 'express'
 import webhookController from '@/controllers/superadmin/webhook.superadmin.controller'
+import { validateRequest } from '@/middlewares/validation'
+import { listSuperadminWebhooksSchema, retrySuperadminWebhookSchema } from '@/dtos/superadminWebhook.dto'
 
 const router = Router()
 
@@ -17,13 +19,17 @@ const router = Router()
  * Query params:
  * - eventType: string (optional) - Filter by event type (e.g., "customer.subscription.updated")
  * - status: string (optional) - Filter by status (PENDING, SUCCESS, FAILED, RETRYING)
+ * - classificationState: string (optional) - PENDING_CLASSIFICATION, CLASSIFIED, IGNORED, UNRESOLVED, LEGACY_UNCLASSIFIED
+ * - ownerKind: string (optional) - COMMERCIAL_V2, LEGACY, INDEPENDENT
+ * - routeKey: string (optional) - canonical StripeEventRouteKey
+ * - claimPhase: string (optional) - CLASSIFICATION or EFFECT
  * - venueId: string (optional) - Filter by venue
- * - startDate: string (optional) - ISO date string
- * - endDate: string (optional) - ISO date string
+ * - startDate: string (optional) - YYYY-MM-DD or an ISO date-time
+ * - endDate: string (optional) - YYYY-MM-DD or an ISO date-time
  * - limit: number (optional) - Items per page (default: 50)
  * - offset: number (optional) - Pagination offset (default: 0)
  */
-router.get('/', webhookController.listWebhookEvents)
+router.get('/', validateRequest(listSuperadminWebhooksSchema), webhookController.listWebhookEvents)
 
 /**
  * GET /api/v1/superadmin/webhooks/metrics
@@ -57,6 +63,6 @@ router.get('/:eventId', webhookController.getWebhookEventDetails)
  * Path params:
  * - eventId: string - WebhookEvent ID
  */
-router.post('/:eventId/retry', webhookController.retryWebhookEvent)
+router.post('/:eventId/retry', validateRequest(retrySuperadminWebhookSchema), webhookController.retryWebhookEvent)
 
 export default router

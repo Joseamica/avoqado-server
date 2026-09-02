@@ -19,6 +19,53 @@ type CheckoutSessionLike = {
   metadata?: Record<string, string> | null
 }
 
+const COMMERCIAL_SUBSCRIPTION_MARKER = 'commercial_subscription_v1'
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null
+}
+
+function hasCommercialSubscriptionMarker(event: VerifiedWebhookEvent): boolean {
+  const object = record(event.data)
+  if (!object) return false
+  const parentSubscriptionDetails = record(record(object.parent)?.subscription_details)
+  const subscriptionDetails = record(object.subscription_details)
+  return [object.metadata, parentSubscriptionDetails?.metadata, subscriptionDetails?.metadata].some(
+    metadata => record(metadata)?.type === COMMERCIAL_SUBSCRIPTION_MARKER,
+  )
+}
+
+async function rejectCommercialMarkerFromConnect(event: VerifiedWebhookEvent): Promise<void> {
+  try {
+    await prisma.processedStripeEvent.create({
+      data: {
+        stripeEventId: event.id,
+        endpoint: 'connect',
+        eventType: event.type,
+        account: event.account,
+        payload: event.data as Prisma.InputJsonValue,
+      },
+    })
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      logger.info('Stripe Connect duplicate SaaS commercial marker ignored', {
+        securityEvent: 'STRIPE_CONNECT_SAAS_MARKER_DUPLICATE',
+        eventId: event.id,
+        eventType: event.type,
+      })
+      return
+    }
+    throw error
+  }
+
+  logger.error('Stripe Connect rejected a SaaS commercial marker', {
+    securityEvent: 'STRIPE_CONNECT_SAAS_MARKER_REJECTED',
+    eventId: event.id,
+    eventType: event.type,
+    livemode: event.livemode,
+  })
+}
+
 function getPaymentIntentId(session: CheckoutSessionLike): string | null {
   if (!session.payment_intent) return null
   return typeof session.payment_intent === 'string' ? session.payment_intent : (session.payment_intent.id ?? null)
@@ -617,6 +664,11 @@ async function processPaymentIntentFailed(event: VerifiedWebhookEvent) {
 }
 
 export async function processStripeConnectWebhookEvent(event: VerifiedWebhookEvent) {
+  if (hasCommercialSubscriptionMarker(event)) {
+    await rejectCommercialMarkerFromConnect(event)
+    return
+  }
+
   switch (event.type) {
     case 'checkout.session.completed':
       await processCheckoutCompleted(event)

@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api.avoqado.io/contracts/commercial/lifecycle-v2.schema.json",
+  "title": "Avoqado Commercial Lifecycle Vocabulary v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contractVersion",
+    "quoteStates",
+    "acceptanceStates",
+    "redemptionStates",
+    "checkoutAttemptStates",
+    "entitlementStates"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "contractVersion": { "const": "2.0.0" },
+    "quoteStates": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["ISSUED", "VOIDED", "EXPIRED"] }
+    },
+    "acceptanceStates": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["ACCEPTED", "STRIPE_PENDING", "ACTIVE", "FAILED", "CANCELED", "REFUNDED", "DISPUTED"] }
+    },
+    "redemptionStates": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["RESERVED", "RECONCILING", "CONSUMED", "RELEASED"] }
+    },
+    "checkoutAttemptStates": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": ["PENDING", "PROCESSING", "STRIPE_PENDING", "OUTCOME_UNKNOWN", "SUCCEEDED", "FAILED_RETRYABLE", "FAILED_FINAL"]
+      }
+    },
+    "entitlementStates": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["ACTIVE", "PENDING", "GRACE_PERIOD", "SUSPENDED", "REVOKED", "EXPIRED"] }
+    }
+  }
+}

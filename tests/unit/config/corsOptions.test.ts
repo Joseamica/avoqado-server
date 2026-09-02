@@ -16,8 +16,11 @@
 import { getCorsConfig, Environment } from '@/config/corsOptions'
 
 /** Runs the real `origin` callback and reports whether the origin was accepted. */
-const isAllowed = (env: Environment, origin: string | undefined): boolean => {
-  const originFn = getCorsConfig(env).origin as (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => void
+const isAllowed = (env: Environment, origin: string | undefined, previewOrigins?: string): boolean => {
+  const originFn = getCorsConfig(env, previewOrigins).origin as (
+    origin: string | undefined,
+    cb: (err: Error | null, allow?: boolean) => void,
+  ) => void
 
   let allowed = false
   originFn(origin, (err, allow) => {
@@ -110,6 +113,33 @@ describe('CORS origin policy', () => {
     it('keeps dev-only tunnel origins out of production', () => {
       expect(isAllowed('production', 'https://random-name.trycloudflare.com')).toBe(false)
       expect(isAllowed('development', 'https://random-name.trycloudflare.com')).toBe(true)
+    })
+  })
+
+  describe('Render temporal preview allowlist', () => {
+    const dashboard = 'https://avq-q3b-20260902-dashboard.onrender.com'
+    const superadmin = 'https://avq-q3b-20260902-superadmin.onrender.com'
+    const configured = `${dashboard}, ${superadmin}`
+
+    it('allows only the exact configured HTTPS origins in staging', () => {
+      expect(isAllowed('staging', dashboard, configured)).toBe(true)
+      expect(isAllowed('staging', superadmin, configured)).toBe(true)
+      expect(isAllowed('staging', `${dashboard}.evil.com`, configured)).toBe(false)
+      expect(isAllowed('staging', 'https://evil.onrender.com', configured)).toBe(false)
+    })
+
+    it('never extends the production allowlist', () => {
+      expect(isAllowed('production', dashboard, configured)).toBe(false)
+    })
+
+    it.each([
+      'http://avq-q3b-20260902-dashboard.onrender.com',
+      'https://avq-q3b-20260902-dashboard.onrender.com/path',
+      'https://user@avq-q3b-20260902-dashboard.onrender.com',
+      'https://avoqado.example.com',
+      'not-a-url',
+    ])('fails closed for an invalid configured origin: %s', invalid => {
+      expect(() => getCorsConfig('staging', invalid)).toThrow('CORS_PREVIEW_ORIGINS_INVALID')
     })
   })
 })

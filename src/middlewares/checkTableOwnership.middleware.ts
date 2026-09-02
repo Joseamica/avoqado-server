@@ -55,7 +55,12 @@ export async function staffCanManageAllTables(
 ): Promise<boolean> {
   // SUPERADMIN bypass (mismo criterio que checkPermission)
   const superAdminVenue = await prisma.staffVenue.findFirst({
-    where: { staffId: userId, role: StaffRole.SUPERADMIN },
+    where: {
+      staffId: userId,
+      role: StaffRole.SUPERADMIN,
+      active: true,
+      staff: { active: true },
+    },
     select: { id: true },
   })
   if (superAdminVenue) return true

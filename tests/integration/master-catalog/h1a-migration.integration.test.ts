@@ -55,6 +55,117 @@ const h1aEmptyTables = [
 ] as const
 
 /**
+ * The replay suites immediately before this one freeze and prove the exact H1A
+ * migration bytes. This suite then exercises that historical schema with the
+ * current Prisma Client, whose default model reads include scalars introduced
+ * after H1A. Add only those missing read-shape columns to the disposable H1A
+ * database. This is not an applied migration and is not evidence that an H1A
+ * database can run current application code.
+ */
+async function addCurrentPrismaReadShape(): Promise<void> {
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "Organization" ADD COLUMN IF NOT EXISTS "seatCapExempt" BOOLEAN NOT NULL DEFAULT false',
+  )
+  await prisma.$executeRawUnsafe('ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "scheduledFor" TIMESTAMP(3)')
+  await prisma.$executeRawUnsafe('ALTER TABLE "OrderItem" ADD COLUMN IF NOT EXISTS "orderPromotionId" TEXT')
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "VenueSettings" ADD COLUMN IF NOT EXISTS "managerPinOverrideEnabled" BOOLEAN NOT NULL DEFAULT false',
+  )
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "Staff" ADD COLUMN IF NOT EXISTS "commercialCreatedAt" TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP',
+  )
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "VenueRolePermission" ADD COLUMN IF NOT EXISTS "deniedPermissions" TEXT[] DEFAULT ARRAY[]::TEXT[]',
+  )
+  await prisma.$executeRawUnsafe('ALTER TABLE "InventoryMovement" ADD COLUMN IF NOT EXISTS "postingLineId" TEXT')
+  await prisma.$executeRawUnsafe('ALTER TABLE "RawMaterialMovement" ADD COLUMN IF NOT EXISTS "postingLineId" TEXT')
+  await prisma.$executeRawUnsafe('ALTER TABLE "StockCount" ADD COLUMN IF NOT EXISTS "applyingAt" TIMESTAMP(3)')
+  await prisma.$executeRawUnsafe('ALTER TABLE "StockCountItem" ADD COLUMN IF NOT EXISTS "appliedAt" TIMESTAMP(3)')
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "Shift" ADD COLUMN IF NOT EXISTS "totalCashTips" DECIMAL(10,2) NOT NULL DEFAULT 0',
+  )
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "Payment"
+      ADD COLUMN IF NOT EXISTS "tenderTypeId" TEXT,
+      ADD COLUMN IF NOT EXISTS "tenderRevision" INTEGER,
+      ADD COLUMN IF NOT EXISTS "tenderLabel" VARCHAR(80),
+      ADD COLUMN IF NOT EXISTS "tenderCountsAsCash" BOOLEAN,
+      ADD COLUMN IF NOT EXISTS "tenderCaptureTip" BOOLEAN,
+      ADD COLUMN IF NOT EXISTS "tenderSatFormaPago" VARCHAR(2),
+      ADD COLUMN IF NOT EXISTS "tenderCommissionPercent" DECIMAL(5,2),
+      ADD COLUMN IF NOT EXISTS "tenderCommissionAmount" DECIMAL(10,2)
+  `)
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "WebhookEvent"
+      ADD COLUMN IF NOT EXISTS "classificationAttempts" INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "classificationNextAttemptAt" TIMESTAMP(3) DEFAULT timezone('UTC', CURRENT_TIMESTAMP),
+      ADD COLUMN IF NOT EXISTS "classificationErrorCode" VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS "classificationErrorMessage" VARCHAR(1024),
+      ADD COLUMN IF NOT EXISTS "classificationResolvedAt" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "effectAttempts" INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "effectNextAttemptAt" TIMESTAMP(3) DEFAULT timezone('UTC', CURRENT_TIMESTAMP),
+      ADD COLUMN IF NOT EXISTS "subjectId" TEXT,
+      ADD COLUMN IF NOT EXISTS "claimToken" TEXT,
+      ADD COLUMN IF NOT EXISTS "claimedBy" TEXT,
+      ADD COLUMN IF NOT EXISTS "claimedAt" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "claimExpiresAt" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT timezone('UTC', CURRENT_TIMESTAMP)
+  `)
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "Terminal" ADD COLUMN IF NOT EXISTS "customerDisplayInverted" BOOLEAN NOT NULL DEFAULT false',
+  )
+  await prisma.$executeRawUnsafe('ALTER TABLE "TerminalPaymentRequest" ADD COLUMN IF NOT EXISTS "customerId" TEXT')
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "DeliveryChannelLink"
+      ADD COLUMN IF NOT EXISTS "lastMenuHash" TEXT,
+      ADD COLUMN IF NOT EXISTS "snoozedUntil" TIMESTAMP(3)
+  `)
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "DeliveryOrderEvent"
+      ADD COLUMN IF NOT EXISTS "externalOrderId" TEXT,
+      ADD COLUMN IF NOT EXISTS "dedupKey" TEXT,
+      ADD COLUMN IF NOT EXISTS "claimToken" TEXT,
+      ADD COLUMN IF NOT EXISTS "lockedUntil" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "resourcePayload" JSONB,
+      ADD COLUMN IF NOT EXISTS "resourceFetchedAt" TIMESTAMP(3)
+  `)
+  await prisma.$executeRawUnsafe('ALTER TABLE "UpsellRule" ADD COLUMN IF NOT EXISTS "suggestedModifiers" JSONB')
+  await prisma.$executeRawUnsafe('ALTER TABLE "CashDrawerEvent" ADD COLUMN IF NOT EXISTS "localId" TEXT')
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "KdsOrder"
+      ADD COLUMN IF NOT EXISTS "printClaimedAt" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "printClaimedBy" TEXT,
+      ADD COLUMN IF NOT EXISTS "printedAt" TIMESTAMP(3)
+  `)
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE "KdsOrderItem"
+      ADD COLUMN IF NOT EXISTS "productId" TEXT,
+      ADD COLUMN IF NOT EXISTS "categoryId" TEXT
+  `)
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "Printer" ADD COLUMN IF NOT EXISTS "leftMarginChars" INTEGER NOT NULL DEFAULT 0',
+  )
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "PrintStation" ADD COLUMN IF NOT EXISTS "isPacking" BOOLEAN NOT NULL DEFAULT false',
+  )
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "AreaTicketInventoryReservation" ADD COLUMN IF NOT EXISTS "reversalMovementId" TEXT',
+  )
+  await prisma.$executeRawUnsafe(
+    'CREATE TABLE IF NOT EXISTS "StripeObjectBinding" ("sourceWebhookEventId" TEXT)',
+  )
+  await prisma.$executeRawUnsafe(
+    'CREATE TABLE IF NOT EXISTS "WebhookDispatchObservation" ("webhookEventId" TEXT)',
+  )
+  await prisma.$executeRawUnsafe(
+    'CREATE TABLE IF NOT EXISTS "WebhookOperationalAlert" ("webhookEventId" TEXT)',
+  )
+  await prisma.$executeRawUnsafe(
+    'CREATE TABLE IF NOT EXISTS "WebhookManualRetryResultOutbox" ("webhookEventId" TEXT)',
+  )
+}
+
+/**
  * Idempotent fixture creation is deliberate: the RED process exits with the
  * graph in place so migrate deploy can exercise the real legacy-to-H1A edge.
  * Subsequent GREEN runs reuse the same rows instead of manufacturing a new
@@ -201,6 +312,7 @@ async function seedLegacyProductGraph(): Promise<void> {
 
 describe('H1A master-catalog migration — expand-only legacy safety', () => {
   beforeAll(async () => {
+    await addCurrentPrismaReadShape()
     await seedLegacyProductGraph()
   })
 

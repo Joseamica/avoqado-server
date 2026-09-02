@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "quoteId": "quote-pos-50-v1",
+  "catalogPublicationId": "commercial-catalog-initial-v1",
+  "campaignVersionId": "campaign-version-pos-50-v1",
+  "campaignCode": "POS_50",
+  "market": "MX",
+  "currency": "MXN",
+  "quotedAt": "2026-08-22T12:00:00.000Z",
+  "expiresAt": "2026-08-22T12:30:00.000Z",
+  "lines": [
+    {
+      "targetType": "PRODUCT",
+      "targetCode": "POS",
+      "priceCode": "POS_MONTHLY",
+      "quantity": 1,
+      "productKind": "POS",
+      "name": "Punto de venta",
+      "billingUnit": "VENUE_MONTH",
+      "currency": "MXN",
+      "taxRateBasisPoints": 1600,
+      "unitAmountMinor": 24900,
+      "listSubtotalMinor": 24900,
+      "adjustments": [
+        {
+          "ruleCode": "POS_FIXED_50",
+          "type": "FIXED_PRICE",
+          "beforeMinor": 24900,
+          "afterMinor": 5000,
+          "discountMinor": 19900,
+          "cycles": 3
+        }
+      ],
+      "discountMinor": 19900,
+      "subtotalMinor": 5000,
+      "taxMinor": 800,
+      "totalMinor": 5800,
+      "promotionalCycles": 3,
+      "renewalSubtotalMinor": 24900,
+      "renewalTaxMinor": 3984,
+      "renewalTotalMinor": 28884
+    }
+  ],
+  "totals": {
+    "listSubtotalMinor": 24900,
+    "discountMinor": 19900,
+    "subtotalMinor": 5000,
+    "taxMinor": 800,
+    "totalMinor": 5800
+  },
+  "renewal": {
+    "subtotalMinor": 24900,
+    "taxMinor": 3984,
+    "totalMinor": 28884
+  }
+}

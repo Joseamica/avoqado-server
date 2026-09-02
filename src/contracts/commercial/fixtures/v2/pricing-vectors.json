@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "vectors": [
+    {
+      "code": "POS_BASE",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "POS",
+          "priceCode": "POS_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "249.00",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [],
+      "expected": {
+        "current": { "listSubtotal": "249.00", "discount": "0.00", "subtotal": "249.00", "tax": "39.84", "total": "288.84" },
+        "renewal": { "subtotal": "249.00", "tax": "39.84", "total": "288.84" }
+      }
+    },
+    {
+      "code": "POS_FIXED_50",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "POS",
+          "priceCode": "POS_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "249.00",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [{ "code": "POS_FIXED_50", "type": "FIXED_PRICE", "amount": "50.00", "cycles": 3, "targetProductCodes": ["POS"] }],
+      "expected": {
+        "current": { "listSubtotal": "249.00", "discount": "199.00", "subtotal": "50.00", "tax": "8.00", "total": "58.00" },
+        "renewal": { "subtotal": "249.00", "tax": "39.84", "total": "288.84" }
+      }
+    },
+    {
+      "code": "POS_FIXED_22",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "POS",
+          "priceCode": "POS_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "249.00",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [{ "code": "POS_FIXED_22", "type": "FIXED_PRICE", "amount": "22.00", "cycles": 3, "targetProductCodes": ["POS"] }],
+      "expected": {
+        "current": { "listSubtotal": "249.00", "discount": "227.00", "subtotal": "22.00", "tax": "3.52", "total": "25.52" },
+        "renewal": { "subtotal": "249.00", "tax": "39.84", "total": "288.84" }
+      }
+    },
+    {
+      "code": "TEN_PERCENT_POS",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "POS",
+          "priceCode": "POS_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "249.00",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [
+        { "code": "TEN_PERCENT_POS", "type": "PERCENT_OFF", "percentBasisPoints": 1000, "cycles": 3, "targetProductCodes": ["POS"] }
+      ],
+      "expected": {
+        "current": { "listSubtotal": "249.00", "discount": "24.90", "subtotal": "224.10", "tax": "35.86", "total": "259.96" },
+        "renewal": { "subtotal": "249.00", "tax": "39.84", "total": "288.84" }
+      }
+    },
+    {
+      "code": "TEN_PERCENT_MODULE",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "KITCHEN_DISPLAY_MODULE",
+          "priceCode": "KITCHEN_DISPLAY_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "179.00",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [
+        { "code": "TEN_PERCENT_MODULE", "type": "PERCENT_OFF", "percentBasisPoints": 1000, "cycles": 3, "targetProductKinds": ["MODULE"] }
+      ],
+      "expected": {
+        "current": { "listSubtotal": "179.00", "discount": "17.90", "subtotal": "161.10", "tax": "25.78", "total": "186.88" },
+        "renewal": { "subtotal": "179.00", "tax": "28.64", "total": "207.64" }
+      }
+    },
+    {
+      "code": "TEN_PERCENT_POS_AND_MODULES",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "KITCHEN_DISPLAY_MODULE",
+          "priceCode": "KITCHEN_DISPLAY_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "179.00",
+          "taxRateBasisPoints": 1600
+        },
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "POS",
+          "priceCode": "POS_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "249.00",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [
+        { "code": "TEN_PERCENT_MODULES", "type": "PERCENT_OFF", "percentBasisPoints": 1000, "cycles": 3, "targetProductKinds": ["MODULE"] },
+        { "code": "TEN_PERCENT_POS", "type": "PERCENT_OFF", "percentBasisPoints": 1000, "cycles": 3, "targetProductCodes": ["POS"] }
+      ],
+      "expected": {
+        "current": { "listSubtotal": "428.00", "discount": "42.80", "subtotal": "385.20", "tax": "61.64", "total": "446.84" },
+        "renewal": { "subtotal": "428.00", "tax": "68.48", "total": "496.48" }
+      }
+    },
+    {
+      "code": "ALL_MODULE_BUNDLE",
+      "lines": [
+        {
+          "targetType": "BUNDLE",
+          "targetCode": "ALL_MODULES",
+          "priceCode": "ALL_MODULES_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "1999.00",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [],
+      "expected": {
+        "current": { "listSubtotal": "1999.00", "discount": "0.00", "subtotal": "1999.00", "tax": "319.84", "total": "2318.84" },
+        "renewal": { "subtotal": "1999.00", "tax": "319.84", "total": "2318.84" }
+      }
+    },
+    {
+      "code": "FREE_PERIOD",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "POS",
+          "priceCode": "POS_MONTHLY",
+          "quantity": 1,
+          "unitAmount": "249.00",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [{ "code": "POS_FREE_PERIOD", "type": "FREE_PERIOD", "cycles": 1, "targetProductCodes": ["POS"] }],
+      "expected": {
+        "current": { "listSubtotal": "249.00", "discount": "249.00", "subtotal": "0.00", "tax": "0.00", "total": "0.00" },
+        "renewal": { "subtotal": "249.00", "tax": "39.84", "total": "288.84" }
+      }
+    },
+    {
+      "code": "QUANTITY_TAX_HALF_UP",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "EDGE",
+          "priceCode": "EDGE_MONTHLY",
+          "quantity": 4,
+          "unitAmount": "0.01",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [],
+      "expected": {
+        "current": { "listSubtotal": "0.04", "discount": "0.00", "subtotal": "0.04", "tax": "0.01", "total": "0.05" },
+        "renewal": { "subtotal": "0.04", "tax": "0.01", "total": "0.05" }
+      }
+    },
+    {
+      "code": "DOMAIN_EDGE",
+      "lines": [
+        {
+          "targetType": "PRODUCT",
+          "targetCode": "EDGE",
+          "priceCode": "EDGE_MONTHLY",
+          "quantity": 1000,
+          "unitAmount": "9999999999.99",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "campaignRules": [],
+      "expected": {
+        "current": {
+          "listSubtotal": "9999999999990.00",
+          "discount": "0.00",
+          "subtotal": "9999999999990.00",
+          "tax": "1599999999998.40",
+          "total": "11599999999988.40"
+        },
+        "renewal": { "subtotal": "9999999999990.00", "tax": "1599999999998.40", "total": "11599999999988.40" }
+      }
+    }
+  ]
+}

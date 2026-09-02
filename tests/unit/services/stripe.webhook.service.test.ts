@@ -16,6 +16,11 @@ jest.mock('@/services/dashboard/creditPack.public.service', () => ({
   fulfillPurchase: jest.fn(),
 }))
 
+const enrichVenueId = jest.fn()
+jest.mock('@/services/stripe-webhooks/platformWebhookRuntime.service', () => ({
+  platformWebhookRuntime: { inbox: { enrichVenueId } },
+}))
+
 // Mock Stripe service BEFORE importing webhook service to prevent Stripe SDK initialization error
 jest.mock('@/services/stripe.service', () => ({
   __esModule: true,
@@ -52,7 +57,7 @@ jest.mock('@/services/stripe.service', () => ({
   }),
 }))
 
-import { handleStripeWebhookEvent, handleCustomerDeleted, handleSubscriptionUpdated } from '@/services/stripe.webhook.service'
+import { dispatchCurrentStripeWebhookEffects, handleCustomerDeleted, handleSubscriptionUpdated } from '@/services/stripe.webhook.service'
 
 // Mock dependencies
 jest.mock('@/utils/prismaClient', () => ({
@@ -99,9 +104,13 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
   createNotification: jest.fn(),
 }))
 
+const dispatchEvent = (event: Stripe.Event, localWebhookEventId = `whe-${event.id}`) =>
+  dispatchCurrentStripeWebhookEffects(event, localWebhookEventId)
+
 describe('Stripe Webhook Service - Critical Tests', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    enrichVenueId.mockResolvedValue(true)
     // Default mock for webhookEvent.create - tests can override if needed
     ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValue({
       id: 'webhook_default_id',
@@ -111,8 +120,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     })
   })
 
-  describe('🔒 TEST 1: Idempotency - Prevent Duplicate Processing', () => {
-    it('should process webhook event only once when received twice', async () => {
+  describe('🔒 TEST 1: Effect dispatcher has no direct idempotency writers', () => {
+    it('leaves durable claiming to the inbox/processor when the same effect is invoked twice', async () => {
       const mockEvent: Stripe.Event = {
         id: 'evt_test_123',
         object: 'event',
@@ -138,7 +147,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         processed: false,
         createdAt: new Date(),
       })
-      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
         id: 'vf_1',
         venueId: 'venue_1',
         featureId: 'feature_1',
@@ -146,12 +155,12 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
         venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
       ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValueOnce({})
 
-      await handleStripeWebhookEvent(mockEvent)
+      await dispatchEvent(mockEvent)
 
-      expect(prisma.webhookEvent.create).toHaveBeenCalledTimes(1)
+      expect(prisma.webhookEvent.create).not.toHaveBeenCalled()
       expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
 
       // Second call - should skip (idempotency)
@@ -159,14 +168,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       ;(P2002Error as any).code = 'P2002'
       ;(prisma.webhookEvent.create as jest.Mock).mockRejectedValueOnce(P2002Error)
 
-      await handleStripeWebhookEvent(mockEvent)
+      await dispatchEvent(mockEvent)
 
       // Should NOT process again
-      expect(prisma.webhookEvent.create).toHaveBeenCalledTimes(2)
-      expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1) // Still 1, not 2
+      expect(prisma.webhookEvent.create).not.toHaveBeenCalled()
+      expect(prisma.venueFeature.update).toHaveBeenCalledTimes(2)
     })
 
-    it('should handle concurrent webhook processing without race conditions', async () => {
+    it('never performs a durable claim even when effects are invoked concurrently', async () => {
       const mockEvent: Stripe.Event = {
         id: 'evt_concurrent_123',
         object: 'event',
@@ -210,13 +219,15 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       // Simulate 10 concurrent webhooks
       const promises = []
       for (let i = 0; i < 10; i++) {
-        promises.push(handleStripeWebhookEvent(mockEvent))
+        promises.push(dispatchEvent(mockEvent))
       }
 
       await Promise.all(promises)
 
-      // Only ONE should actually process
-      expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
+      // The lease-owning processor is the single concurrency authority. This
+      // low-level effect function intentionally contains no hidden claim.
+      expect(prisma.webhookEvent.create).not.toHaveBeenCalled()
+      expect(prisma.venueFeature.update).toHaveBeenCalledTimes(10)
     })
   })
 
@@ -454,7 +465,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
-      await handleStripeWebhookEvent({
+      await dispatchEvent({
         id: 'evt_payment_success',
         object: 'event',
         type: 'invoice.payment_succeeded',
@@ -502,7 +513,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ slug: 'test-venue' })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue(mockVenueFeature)
 
-      await handleStripeWebhookEvent({
+      await dispatchEvent({
         id: 'evt_payment_failed',
         object: 'event',
         type: 'invoice.payment_failed',
@@ -542,7 +553,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       expect(prisma.venueFeature.update).not.toHaveBeenCalled()
     })
 
-    it('should track failed webhook processing with retry count', async () => {
+    it('rethrows effect errors without restoring a direct WebhookEvent failure writer', async () => {
       const mockEvent: Stripe.Event = {
         id: 'evt_error_123',
         object: 'event',
@@ -576,21 +587,12 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         retryCount: 1,
       })
 
-      await expect(handleStripeWebhookEvent(mockEvent)).rejects.toThrow('Database connection failed')
+      await expect(dispatchEvent(mockEvent)).rejects.toThrow('Database connection failed')
 
-      // Should track failure
-      expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
-        where: { id: 'webhook_1' },
-        data: {
-          status: 'FAILED',
-          errorMessage: 'Database connection failed',
-          processingTime: expect.any(Number),
-          retryCount: { increment: 1 },
-        },
-      })
+      expect(prisma.webhookEvent.update).not.toHaveBeenCalled()
     })
 
-    it('should alert when webhook fails 3+ times', async () => {
+    it('does not read legacy retry counters from the effect dispatcher', async () => {
       const mockEvent: Stripe.Event = {
         id: 'evt_critical_failure',
         object: 'event',
@@ -621,17 +623,12 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         retryCount: 3, // Critical threshold
       })
 
-      await expect(handleStripeWebhookEvent(mockEvent)).rejects.toThrow('Critical error')
+      await expect(dispatchEvent(mockEvent)).rejects.toThrow('Critical error')
 
-      // Should log critical alert (in production: send to PagerDuty/Slack)
-      // Verify it checked retry count
-      expect(prisma.webhookEvent.findUnique).toHaveBeenCalledWith({
-        where: { id: 'webhook_1' },
-        select: { retryCount: true },
-      })
+      expect(prisma.webhookEvent.findUnique).not.toHaveBeenCalled()
     })
 
-    it('should handle database error when tracking failure', async () => {
+    it('preserves the original effect error because failure bookkeeping belongs to the processor', async () => {
       const mockEvent: Stripe.Event = {
         id: 'evt_db_error',
         object: 'event',
@@ -658,10 +655,9 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       // Database update fails when tracking error
       ;(prisma.webhookEvent.update as jest.Mock).mockRejectedValueOnce(new Error('Database write failed'))
 
-      await expect(handleStripeWebhookEvent(mockEvent)).rejects.toThrow('Processing error')
+      await expect(dispatchEvent(mockEvent)).rejects.toThrow('Processing error')
 
-      // Should NOT throw secondary error, just log warning
-      expect(prisma.webhookEvent.update).toHaveBeenCalled()
+      expect(prisma.webhookEvent.update).not.toHaveBeenCalled()
     })
   })
 
@@ -714,7 +710,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         },
       }))
 
-      await handleStripeWebhookEvent({
+      await dispatchEvent({
         id: 'evt_trial_ending',
         object: 'event',
         type: 'customer.subscription.trial_will_end',
@@ -757,58 +753,34 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       }) as Stripe.Event
 
     it('should NOT crash and should skip enrichment when metadata.venueId does not exist', async () => {
-      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({ id: 'webhook_pi_1' })
-      // Venue does not exist (deleted / foreign-environment id)
-      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce(null)
-      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
+      // The inbox repository validates the FK target and reports a non-applied enrichment.
+      enrichVenueId.mockResolvedValueOnce(false)
 
       // Must NOT throw (previously threw the FK violation and lost the event)
-      await expect(handleStripeWebhookEvent(buildPaymentIntentEvent('venue_deleted_999'))).resolves.not.toThrow()
+      const trace = await dispatchEvent(buildPaymentIntentEvent('venue_deleted_999'), 'webhook_pi_1')
 
-      // Validated the venue before touching the FK column
-      expect(prisma.venue.findUnique).toHaveBeenCalledWith({
-        where: { id: 'venue_deleted_999' },
-        select: { id: true },
-      })
-
-      // Enrichment update with the bad venueId must NOT happen
-      expect(prisma.webhookEvent.update).not.toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ venueId: 'venue_deleted_999' }) }),
-      )
-
-      // Event still reaches the SUCCESS update (processing was not blocked)
-      expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
-        where: { id: 'webhook_pi_1' },
-        data: expect.objectContaining({ status: 'SUCCESS' }),
-      })
+      expect(enrichVenueId).toHaveBeenCalledWith('webhook_pi_1', 'venue_deleted_999')
+      expect(trace.steps).toContainEqual({ step: 'VENUE_ENRICHMENT', outcome: 'SKIPPED_INVALID' })
+      expect(trace.steps).toContainEqual({ step: 'PAYMENT_INTENT_SUCCEEDED', outcome: 'COMPLETED' })
+      expect(prisma.webhookEvent.update).not.toHaveBeenCalled()
     })
 
     it('should still enrich the webhook event when metadata.venueId exists (regression)', async () => {
-      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({ id: 'webhook_pi_2' })
-      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({ id: 'venue_real_1' })
-      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
+      const trace = await dispatchEvent(buildPaymentIntentEvent('venue_real_1'), 'webhook_pi_2')
 
-      await expect(handleStripeWebhookEvent(buildPaymentIntentEvent('venue_real_1'))).resolves.not.toThrow()
-
-      expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
-        where: { id: 'webhook_pi_2' },
-        data: { venueId: 'venue_real_1' },
-      })
+      expect(enrichVenueId).toHaveBeenCalledWith('webhook_pi_2', 'venue_real_1')
+      expect(trace.steps).toContainEqual({ step: 'VENUE_ENRICHMENT', outcome: 'APPLIED' })
+      expect(prisma.webhookEvent.update).not.toHaveBeenCalled()
     })
 
     it('should keep enrichment non-fatal if the existence check throws', async () => {
-      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({ id: 'webhook_pi_3' })
-      // A transient DB error during the venue lookup must not bring down the webhook
-      ;(prisma.venue.findUnique as jest.Mock).mockRejectedValueOnce(new Error('connection reset'))
-      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
+      enrichVenueId.mockRejectedValueOnce(new Error('connection reset'))
 
-      await expect(handleStripeWebhookEvent(buildPaymentIntentEvent('venue_real_1'))).resolves.not.toThrow()
+      const trace = await dispatchEvent(buildPaymentIntentEvent('venue_real_1'), 'webhook_pi_3')
 
-      // Event still processed to SUCCESS despite the enrichment failure
-      expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
-        where: { id: 'webhook_pi_3' },
-        data: expect.objectContaining({ status: 'SUCCESS' }),
-      })
+      expect(trace.steps).toContainEqual({ step: 'VENUE_ENRICHMENT', outcome: 'FAILED_NON_FATAL' })
+      expect(trace.steps).toContainEqual({ step: 'PAYMENT_INTENT_SUCCEEDED', outcome: 'COMPLETED' })
+      expect(prisma.webhookEvent.update).not.toHaveBeenCalled()
     })
   })
 })

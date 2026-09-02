@@ -11,6 +11,7 @@ export const DATABASE_JOB_SCHEDULES = {
   gcalInboxSweeper: '23,53 * * * * *',
   gcalOutboxSweeper: '26,56 * * * * *',
   catalogPublicationOutboxSweeper: '29,59 * * * * *',
+  commercialPublicationOutboxSweeper: '5,35 * * * * *',
   catalogPublicationWatchdog: '32 * * * * *',
   shiftCloseWatchdog: '35 * * * * *',
   inventoryPostingSweeper: '44 */2 * * * *',

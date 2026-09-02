@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **Acceso auditado a evidencia privada de conciliación SPEI.** `GET /api/v1/superadmin/commercial/billing/manual-spei/evidence/:evidenceId/access` exige `commercial:reconcile_payment`, acota la evidencia a `organizationId` + `venueId`, deriva el actor exclusivamente de la sesión y devuelve una URL firmada de lectura por 10 minutos. La ruta privada de Storage nunca sale en los listados ni en el detalle del caso; cada apertura queda en `ActivityLog` como `COMMERCIAL_MANUAL_SPEI_EVIDENCE_VIEWED`.
+
 - **PITS H1A — catálogo maestro corporativo, default-off y reversible**: se añadió gobierno de catálogo por organización sin cambiar la
   identidad ni las relaciones operativas de `Product`. Incluye autoridad separada de entitlement/módulo/configuración, roles y permisos por
   organización/sucursal, alta y retiro de artículos con marca/fabricante/familia/subfamilia/presentación/IVA/IEPS/SAT, valores corporativos,

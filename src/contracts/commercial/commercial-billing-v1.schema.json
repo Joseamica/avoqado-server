@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://avoqado.io/schemas/commercial-billing-v1.schema.json",
+  "title": "Avoqado Commercial Billing Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contractVersion",
+    "acceptanceId",
+    "quoteId",
+    "quoteChecksum",
+    "organizationId",
+    "venueId",
+    "currency",
+    "timezone",
+    "startsAt",
+    "cadence",
+    "schedules",
+    "entitlements"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "contractVersion": { "const": "1.0.0" },
+    "acceptanceId": { "$ref": "#/definitions/id" },
+    "quoteId": { "$ref": "#/definitions/id" },
+    "quoteChecksum": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "organizationId": { "$ref": "#/definitions/id" },
+    "venueId": { "$ref": "#/definitions/id" },
+    "currency": { "const": "MXN" },
+    "timezone": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "startsAt": { "type": "string", "format": "date-time" },
+    "cadence": { "enum": ["MONTHLY", "ANNUAL", "MIXED"] },
+    "schedules": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": { "$ref": "#/definitions/schedule" }
+    },
+    "entitlements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/definitions/entitlement" }
+    }
+  },
+  "definitions": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 191 },
+    "moneyMinor": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,18})$" },
+    "scheduleKey": { "enum": ["SAAS_MONTHLY", "SAAS_ANNUAL"] },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheduleKey", "cadence", "firstPeriodAmountMinor", "renewalAmountMinor"],
+      "properties": {
+        "scheduleKey": { "$ref": "#/definitions/scheduleKey" },
+        "cadence": { "enum": ["MONTHLY", "ANNUAL"] },
+        "firstPeriodAmountMinor": { "$ref": "#/definitions/moneyMinor" },
+        "renewalAmountMinor": { "$ref": "#/definitions/moneyMinor" }
+      }
+    },
+    "entitlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["featureCode", "requiredScheduleKeys"],
+      "properties": {
+        "featureCode": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+        "requiredScheduleKeys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/scheduleKey" }
+        }
+      }
+    }
+  }
+}

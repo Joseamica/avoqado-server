@@ -20,6 +20,13 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
       if (schema.shape.params) {
         dataToParse.params = req.params
       }
+      // Conditional-write APIs use HTTP validators such as If-Match. Keep
+      // headers opt-in so existing schemas and request normalization remain
+      // unchanged, while allowing Zod to reject stale/malformed validators
+      // before authorization or mutation handlers run.
+      if (schema.shape.headers) {
+        dataToParse.headers = req.headers
+      }
     } else {
       // If the schema is not a ZodObject (e.g., a direct schema for req.body without nesting),
       // this basic implementation might need adjustment or a more specific schema type.

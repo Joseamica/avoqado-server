@@ -176,6 +176,8 @@ export async function resolveUserRoleForVenue(params: {
         staffId: userId,
         venueId: targetVenueId,
       },
+      active: true,
+      staff: { active: true },
     },
     select: {
       role: true,
@@ -211,6 +213,9 @@ export async function resolveUserRoleForVenue(params: {
         staffId: userId,
         organizationId: targetVenue.organizationId,
       },
+      isActive: true,
+      role: OrgRole.OWNER,
+      staff: { active: true },
     },
     select: {
       role: true,
@@ -295,6 +300,8 @@ export const checkPermission = (requiredPermission: string) => {
             where: {
               staffId: authContext.userId,
               role: StaffRole.SUPERADMIN,
+              active: true,
+              staff: { active: true },
             },
             select: { id: true },
           })

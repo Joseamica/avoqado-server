@@ -80,6 +80,17 @@ model Organization {
   catalogPublicationOutboxes       CatalogPublicationOutbox[]
   catalogVenueEventSequences       CatalogVenueEventSequence[]
   organizationScopedActivityLogs   ActivityLog[]
+  commercialQuotes                 CommercialQuote[]
+  commercialQuoteAcceptances       CommercialQuoteAcceptance[]
+  commercialQuotePreviewBridges    CommercialQuotePreviewBridge[]
+  commercialAcquisitionBindings    CommercialAcquisitionContextBinding[] @relation("CommercialAcquisitionContextBindingOrganization")
+  commercialAcquisitionRedemptions CommercialAcquisitionRedemption[]     @relation("CommercialAcquisitionRedemptionOrganization")
+  commercialSubscriptionContracts  CommercialSubscriptionContract[]
+  commercialAccountReceivables     CommercialAccountReceivable[]
+  commercialCashReceipts           CommercialCashReceipt[]
+  commercialEventOutboxes          CommercialEventOutbox[]
+  commercialEntitlementProjections CommercialEntitlementProjection[]
+  commercialManualSpeiCases        CommercialManualSpeiCase[]
 
   // ✅ NEW: Onboarding tracking
   onboardingProgress    OnboardingProgress?
@@ -157,9 +168,20 @@ model Zone {
 }
 
 model Venue {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  id                            String                         @id @default(cuid())
+  organizationId                String
+  organization                  Organization                   @relation(fields: [organizationId], references: [id])
+  commercialQuotes              CommercialQuote[]
+  commercialQuoteAcceptances    CommercialQuoteAcceptance[]
+  commercialQuotePreviewBridges CommercialQuotePreviewBridge[]
+  commercialAcquisitionRedemptions CommercialAcquisitionRedemption[] @relation("CommercialAcquisitionRedemptionVenue")
+  stripeCheckoutOrigins         StripeCheckoutOrigin[]
+  commercialSubscriptionContracts CommercialSubscriptionContract[]
+  commercialAccountReceivables    CommercialAccountReceivable[]
+  commercialCashReceipts          CommercialCashReceipt[]
+  commercialEventOutboxes         CommercialEventOutbox[]
+  commercialEntitlementProjections CommercialEntitlementProjection[]
+  commercialManualSpeiCases        CommercialManualSpeiCase[]
 
   // Zone assignment (optional geographic grouping)
   zoneId String?
@@ -952,6 +974,10 @@ model Staff {
   emailVerified Boolean      @default(false)
   invitations   Invitation[]
 
+  // Nullable for legacy identities. The Q3-B migration sets the DB default only
+  // after adding this column, so existing Staff rows are never misclassified as new.
+  commercialCreatedAt DateTime? @default(now())
+
   // Email Verification
   emailVerificationCode    String? // 4-digit PIN code
   emailVerificationExpires DateTime? // Expiration time for verification code
@@ -1143,36 +1169,58 @@ model Staff {
   // H1A keeps actor FKs explicit for durable corporate audit. Product alone is
   // nullable/SET NULL for legacy compatibility; catalog audit actors are
   // RESTRICTed so deleting a Staff row cannot erase who approved a mutation.
-  productsCreated                        Product[]                        @relation("ProductCreatedBy")
-  organizationEntitlementsGranted        OrganizationEntitlement[]        @relation("OrganizationEntitlementGrantedBy")
-  catalogBrandsCreated                   CatalogBrand[]                   @relation("CatalogBrandCreatedBy")
-  catalogBrandsUpdated                   CatalogBrand[]                   @relation("CatalogBrandUpdatedBy")
-  catalogManufacturersCreated            CatalogManufacturer[]            @relation("CatalogManufacturerCreatedBy")
-  catalogManufacturersUpdated            CatalogManufacturer[]            @relation("CatalogManufacturerUpdatedBy")
-  catalogFamiliesCreated                 CatalogFamily[]                  @relation("CatalogFamilyCreatedBy")
-  catalogFamiliesUpdated                 CatalogFamily[]                  @relation("CatalogFamilyUpdatedBy")
-  catalogItemsCreated                    CatalogItem[]                    @relation("CatalogItemCreatedBy")
-  catalogItemsUpdated                    CatalogItem[]                    @relation("CatalogItemUpdatedBy")
-  catalogIdentifiersCreated              CatalogIdentifier[]              @relation("CatalogIdentifierCreatedBy")
-  catalogProductTypeMappingsCreated      CatalogProductTypeMapping[]      @relation("CatalogProductTypeMappingCreatedBy")
-  catalogValidationProfilesCreated       CatalogValidationProfile[]       @relation("CatalogValidationProfileCreatedBy")
-  catalogValidationProfilesUpdated       CatalogValidationProfile[]       @relation("CatalogValidationProfileUpdatedBy")
-  catalogItemPricesCreated               CatalogItemPrice[]               @relation("CatalogItemPriceCreatedBy")
-  catalogItemPricesUpdated               CatalogItemPrice[]               @relation("CatalogItemPriceUpdatedBy")
-  catalogVenueRolloutsCreated            CatalogVenueRollout[]            @relation("CatalogVenueRolloutCreatedBy")
-  catalogVenueRolloutsUpdated            CatalogVenueRollout[]            @relation("CatalogVenueRolloutUpdatedBy")
-  catalogVenueClientRequirementsCreated  CatalogVenueClientRequirement[]  @relation("CatalogVenueClientRequirementCreatedBy")
-  catalogVenueClientRequirementsUpdated  CatalogVenueClientRequirement[]  @relation("CatalogVenueClientRequirementUpdatedBy")
-  catalogClientReadinessOverridesCreated CatalogClientReadinessOverride[] @relation("CatalogClientReadinessOverrideCreatedBy")
-  catalogClientReadinessOverridesRevoked CatalogClientReadinessOverride[] @relation("CatalogClientReadinessOverrideRevokedBy")
-  catalogVenueBindingsCreated            CatalogVenueBinding[]            @relation("CatalogVenueBindingCreatedBy")
-  catalogVenueBindingsUpdated            CatalogVenueBinding[]            @relation("CatalogVenueBindingUpdatedBy")
-  catalogVenueOverridesRequested         CatalogVenueOverride[]           @relation("CatalogVenueOverrideRequestedBy")
-  catalogVenueOverridesDecided           CatalogVenueOverride[]           @relation("CatalogVenueOverrideDecidedBy")
-  catalogImportBatches                   CatalogImportBatch[]             @relation("CatalogImportBatchHumanActor")
-  catalogBindingBatches                  CatalogBindingBatch[]            @relation("CatalogBindingBatchHumanActor")
-  catalogIdempotencyRecords              CatalogIdempotencyRecord[]       @relation("CatalogIdempotencyRecordHumanActor")
-  catalogPublicationBatches              CatalogPublicationBatch[]        @relation("CatalogPublicationBatchHumanActor")
+  productsCreated                        Product[]                         @relation("ProductCreatedBy")
+  organizationEntitlementsGranted        OrganizationEntitlement[]         @relation("OrganizationEntitlementGrantedBy")
+  catalogBrandsCreated                   CatalogBrand[]                    @relation("CatalogBrandCreatedBy")
+  catalogBrandsUpdated                   CatalogBrand[]                    @relation("CatalogBrandUpdatedBy")
+  catalogManufacturersCreated            CatalogManufacturer[]             @relation("CatalogManufacturerCreatedBy")
+  catalogManufacturersUpdated            CatalogManufacturer[]             @relation("CatalogManufacturerUpdatedBy")
+  catalogFamiliesCreated                 CatalogFamily[]                   @relation("CatalogFamilyCreatedBy")
+  catalogFamiliesUpdated                 CatalogFamily[]                   @relation("CatalogFamilyUpdatedBy")
+  catalogItemsCreated                    CatalogItem[]                     @relation("CatalogItemCreatedBy")
+  catalogItemsUpdated                    CatalogItem[]                     @relation("CatalogItemUpdatedBy")
+  catalogIdentifiersCreated              CatalogIdentifier[]               @relation("CatalogIdentifierCreatedBy")
+  catalogProductTypeMappingsCreated      CatalogProductTypeMapping[]       @relation("CatalogProductTypeMappingCreatedBy")
+  catalogValidationProfilesCreated       CatalogValidationProfile[]        @relation("CatalogValidationProfileCreatedBy")
+  catalogValidationProfilesUpdated       CatalogValidationProfile[]        @relation("CatalogValidationProfileUpdatedBy")
+  catalogItemPricesCreated               CatalogItemPrice[]                @relation("CatalogItemPriceCreatedBy")
+  catalogItemPricesUpdated               CatalogItemPrice[]                @relation("CatalogItemPriceUpdatedBy")
+  catalogVenueRolloutsCreated            CatalogVenueRollout[]             @relation("CatalogVenueRolloutCreatedBy")
+  catalogVenueRolloutsUpdated            CatalogVenueRollout[]             @relation("CatalogVenueRolloutUpdatedBy")
+  catalogVenueClientRequirementsCreated  CatalogVenueClientRequirement[]   @relation("CatalogVenueClientRequirementCreatedBy")
+  catalogVenueClientRequirementsUpdated  CatalogVenueClientRequirement[]   @relation("CatalogVenueClientRequirementUpdatedBy")
+  catalogClientReadinessOverridesCreated CatalogClientReadinessOverride[]  @relation("CatalogClientReadinessOverrideCreatedBy")
+  catalogClientReadinessOverridesRevoked CatalogClientReadinessOverride[]  @relation("CatalogClientReadinessOverrideRevokedBy")
+  catalogVenueBindingsCreated            CatalogVenueBinding[]             @relation("CatalogVenueBindingCreatedBy")
+  catalogVenueBindingsUpdated            CatalogVenueBinding[]             @relation("CatalogVenueBindingUpdatedBy")
+  catalogVenueOverridesRequested         CatalogVenueOverride[]            @relation("CatalogVenueOverrideRequestedBy")
+  catalogVenueOverridesDecided           CatalogVenueOverride[]            @relation("CatalogVenueOverrideDecidedBy")
+  catalogImportBatches                   CatalogImportBatch[]              @relation("CatalogImportBatchHumanActor")
+  catalogBindingBatches                  CatalogBindingBatch[]             @relation("CatalogBindingBatchHumanActor")
+  catalogIdempotencyRecords              CatalogIdempotencyRecord[]        @relation("CatalogIdempotencyRecordHumanActor")
+  catalogPublicationBatches              CatalogPublicationBatch[]         @relation("CatalogPublicationBatchHumanActor")
+  commercialDraftsCreated                CommercialDraft[]                 @relation("CommercialDraftCreatedBy")
+  commercialDraftsUpdated                CommercialDraft[]                 @relation("CommercialDraftUpdatedBy")
+  commercialPublications                 CommercialPublication[]           @relation("CommercialPublicationPublishedBy")
+  commercialActivations                  CommercialPublicationActivation[] @relation("CommercialPublicationActivationUpdatedBy")
+  commercialCampaignDraftsCreated        CommercialCampaignDraft[]         @relation("CommercialCampaignDraftCreatedBy")
+  commercialCampaignDraftsUpdated        CommercialCampaignDraft[]         @relation("CommercialCampaignDraftUpdatedBy")
+  commercialCampaignVersionsPublished    CommercialCampaignVersion[]       @relation("CommercialCampaignVersionPublishedBy")
+  commercialCampaignActivationsUpdated   CommercialCampaignActivation[]    @relation("CommercialCampaignActivationUpdatedBy")
+  commercialCampaignClaimsIssued         CommercialCampaignClaim[]         @relation("CommercialCampaignClaimIssuedBy")
+  commercialOfferControlEventsConfirmed  CommercialOfferControlEvent[]      @relation("CommercialOfferControlEventConfirmedBy")
+  commercialQuotesCreated                CommercialQuote[]                 @relation("CommercialQuoteCreatedBy")
+  commercialQuoteAcceptances             CommercialQuoteAcceptance[]       @relation("CommercialQuoteAcceptanceAcceptedBy")
+  commercialQuotePreviewBridges          CommercialQuotePreviewBridge[]
+  commercialAcquisitionBindings          CommercialAcquisitionContextBinding[] @relation("CommercialAcquisitionContextBindingStaff")
+  commercialAcquisitionRedemptions        CommercialAcquisitionRedemption[]     @relation("CommercialAcquisitionRedemptionStaff")
+  commercialCashReceiptsReconciled        CommercialCashReceipt[]               @relation("CommercialCashReceiptReconciledBy")
+  commercialManualSpeiPoliciesPublished   CommercialManualSpeiPolicyVersion[]     @relation("CommercialManualSpeiPolicyPublishedBy")
+  commercialManualSpeiPoliciesActivated   CommercialManualSpeiPolicyActivation[]  @relation("CommercialManualSpeiPolicyActivatedBy")
+  commercialManualSpeiCasesCreated         CommercialManualSpeiCase[]               @relation("CommercialManualSpeiCaseCreatedBy")
+  commercialManualSpeiEvidenceUploaded    CommercialManualSpeiEvidence[]          @relation("CommercialManualSpeiEvidenceUploadedBy")
+  commercialManualSpeiEvidenceReviewed    CommercialManualSpeiEvidenceReview[]    @relation("CommercialManualSpeiEvidenceReviewedBy")
+  commercialManualSpeiApprovals            CommercialManualSpeiApproval[]          @relation("CommercialManualSpeiApprovalActor")
 
   // Reglas de upsell que este staff aprobó (ver nota en UpsellRule.approvedBy).
   upsellRulesApproved UpsellRule[]       @relation("UpsellRuleApprovedBy")
@@ -4490,7 +4538,8 @@ model Feature {
 
   active Boolean @default(true)
 
-  venues VenueFeature[]
+  venues                VenueFeature[]
+  stripeCheckoutOrigins StripeCheckoutOrigin[]
 }
 
 model VenueFeature {
@@ -4539,16 +4588,52 @@ model WebhookEvent {
   processingTime Int? // Time in milliseconds
   retryCount     Int                @default(0)
 
+  // E6-A keeps status/retryCount as the backwards-compatible EFFECT
+  // projection while classification advances on its own budget and schedule.
+  classificationState         WebhookClassificationState @default(PENDING_CLASSIFICATION)
+  classificationAttempts      Int                        @default(0)
+  classificationNextAttemptAt DateTime?                  @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)"))
+  classificationErrorCode     String?                    @db.VarChar(64)
+  classificationErrorMessage  String?                    @db.VarChar(1024)
+  classificationResolvedAt    DateTime?
+  effectAttempts              Int                        @default(0)
+  effectNextAttemptAt         DateTime?                  @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)"))
+
+  // Nullable until the local classifier fixes the complete authority tuple.
+  // PostgreSQL makes it write-once and enforces the exact routing matrix.
+  ownerKind   StripeEventOwnerKind?
+  routeKey    StripeEventRouteKey?
+  subjectKind StripeEventSubjectKind?
+  subjectId   String?
+
+  // One shared physical lease, phase-specific budgets. claimToken changes on
+  // every acquisition so a stale worker cannot win an ABA race.
+  claimPhase     WebhookClaimPhase?
+  claimToken     String?
+  claimedBy      String?
+  claimedAt      DateTime?
+  claimExpiresAt DateTime?
+
   // Related entities (optional)
   venueId String?
   venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: SetNull)
 
   createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)")) @updatedAt
   processedAt DateTime? // When successfully processed
+
+  stripeObjectBindings      StripeObjectBinding[]
+  dispatchObservations      WebhookDispatchObservation[]
+  operationalAlerts         WebhookOperationalAlert[]
+  manualRetryResultOutboxes WebhookManualRetryResultOutbox[]
 
   @@index([stripeEventId])
   @@index([eventType])
   @@index([status])
+  @@index([classificationState, classificationNextAttemptAt, createdAt])
+  @@index([status, effectNextAttemptAt, createdAt])
+  @@index([claimPhase, claimExpiresAt])
+  @@index([ownerKind, routeKey, subjectKind, subjectId])
   @@index([venueId])
   @@index([createdAt])
 }
@@ -5118,6 +5203,7 @@ model TerminalOrder {
 
   // Relaciones
   terminals Terminal[] @relation("TerminalToTerminalOrder")
+  commercialAccountReceivable CommercialAccountReceivable?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -5126,6 +5212,7 @@ model TerminalOrder {
   @@index([venueId, createdAt])
   @@index([paymentStatus])
   @@index([fulfillmentStatus])
+  @@index([stripeCheckoutSessionId])
   @@index([speiApprovalToken])
   @@index([serialAssignmentToken])
 }
@@ -6728,6 +6815,8 @@ model ActivityLog {
   userAgent String?
 
   createdAt DateTime @default(now())
+
+  manualWebhookRetryRequests WebhookManualRetryResultOutbox[] @relation("WebhookManualRetryRequestActivity")
 
   @@index([staffId])
   @@index([venueId])
@@ -8674,6 +8763,27 @@ enum WebhookEventStatus {
   RETRYING // Currently retrying after failure
 }
 
+enum WebhookClassificationState {
+  LEGACY_UNCLASSIFIED
+  PENDING_CLASSIFICATION
+  CLASSIFIED
+  IGNORED
+  UNRESOLVED
+}
+
+enum WebhookClaimPhase {
+  CLASSIFICATION
+  EFFECT
+}
+
+enum WebhookManualRetryOutcome {
+  SUCCEEDED
+  FAILED
+  REJECTED
+  INTERRUPTED
+  UNKNOWN
+}
+
 enum ReviewSource {
   AVOQADO
   GOOGLE
@@ -9417,6 +9527,7 @@ model TokenPurchase {
   @@index([budgetId])
   @@index([status])
   @@index([stripePaymentIntentId])
+  @@index([stripeInvoiceId])
   @@index([createdAt])
 }
 
@@ -11319,6 +11430,1364 @@ model CatalogPublicationOutbox {
   @@index([status, claimExpiresAt])
   @@index([batchId, organizationId])
   @@index([venueId, venueSequence])
+}
+
+// ==========================================
+// COMMERCIAL PLATFORM (Avoqado sells to venues)
+// Separate from the Master Catalog above (venues sell items to customers).
+// ==========================================
+
+enum CommercialDraftStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum CommercialProductKind {
+  PLAN
+  POS
+  MODULE
+}
+
+enum CommercialSalesMode {
+  SELF_SERVICE
+  CONTACT
+}
+
+enum CommercialBillingUnit {
+  VENUE_MONTH
+  VENUE_YEAR
+}
+
+enum CommercialTaxBehavior {
+  EXCLUSIVE
+  NOT_APPLICABLE
+}
+
+enum CommercialCapabilityKind {
+  FEATURE
+  MODULE
+  CORE
+}
+
+enum CommercialPublicationEnvironment {
+  PRODUCTION
+  PREVIEW
+}
+
+enum CommercialPublicationOutboxStatus {
+  PENDING
+  CLAIMED
+  DELIVERED
+  FAILED
+}
+
+enum CommercialPublicationEventType {
+  PUBLICATION_CREATED
+  PUBLICATION_ACTIVATED
+  PUBLICATION_ROLLED_BACK
+}
+
+enum CommercialCampaignRuleType {
+  FIXED_PRICE
+  PERCENT_OFF
+  AMOUNT_OFF
+  FREE_PERIOD
+  BUNDLE_PRICE
+}
+
+enum CommercialOfferBenefitDraftKind {
+  HARDWARE_PERCENT_OFF
+  HARDWARE_FIXED_PRICE
+  PAYMENTS_RATE_SCHEDULE
+}
+
+enum CommercialOfferControlAction {
+  SUSPEND_NEW_CLAIMS
+  SUSPEND_ALL_PENDING
+  RESUME
+}
+
+enum CommercialAcquisitionChannel {
+  PAID_META
+  PAID_GOOGLE
+  SELLER
+  DISTRIBUTOR
+  ORGANIC
+  PARTNER
+  DIRECT
+}
+
+enum CommercialAcquisitionBindingPurpose {
+  NEW_ACCOUNT
+}
+
+enum CommercialQuoteAcceptanceStatus {
+  ACCEPTED
+  STRIPE_PENDING
+  ACTIVE
+  FAILED
+  CANCELED
+  REFUNDED
+  DISPUTED
+}
+
+enum CommercialStripeOperationType {
+  CHECKOUT_SESSION
+  SUBSCRIPTION_UPDATE
+}
+
+enum CommercialStripeOperationStatus {
+  PENDING
+  SUCCEEDED
+  OUTCOME_UNKNOWN
+  FAILED
+}
+
+enum CommercialSubscriptionEventType {
+  CHECKOUT_COMPLETED
+  INVOICE_PAID
+  INVOICE_FAILED
+  SUBSCRIPTION_CANCELED
+  REFUND_SUCCEEDED
+  PARTIAL_REFUND
+  DISPUTE_OPENED
+  DISPUTE_WON
+  DISPUTE_LOST
+}
+
+enum CommercialSubscriptionContractStatus {
+  DRAFT
+  PENDING_PAYMENT
+  ACTIVE
+  PAUSED
+  CANCELED
+  COMPLETED
+}
+
+enum CommercialBillingCadence {
+  MONTHLY
+  ANNUAL
+  MIXED
+}
+
+enum CommercialReceivableSubjectType {
+  SUBSCRIPTION_PERIOD
+  TERMINAL_ORDER
+}
+
+enum CommercialAccountReceivableStatus {
+  OPEN
+  PARTIALLY_PAID
+  PAID
+  PAST_DUE
+  EXPIRED
+  CANCELED
+}
+
+enum CommercialBillingProvider {
+  STRIPE
+  MANUAL_SPEI
+  AUTOMATIC_SPEI
+}
+
+enum CommercialBillingPaymentAttemptStatus {
+  PENDING
+  SUCCEEDED
+  OUTCOME_UNKNOWN
+  FAILED
+  CANCELED
+}
+
+enum CommercialCashReceiptEntryType {
+  PAYMENT
+  REFUND
+  REVERSAL
+}
+
+enum CommercialBillingAllocationDirection {
+  CREDIT
+  DEBIT
+}
+
+enum CommercialSubscriptionPeriodStatus {
+  OPEN
+  PAST_DUE
+  EXPIRED
+  PAID
+}
+
+enum CommercialEventOutboxSourceType {
+  SUBSCRIPTION_PERIOD
+  OFFER_CONTROL_EVENT
+  CASH_RECEIPT
+}
+
+enum CommercialEventOutboxEventType {
+  SUBSCRIPTION_PAYMENT_RECONCILED
+  SUBSCRIPTION_NON_CASH_ACTIVATED
+  SUBSCRIPTION_PAYMENT_COVERAGE_REVERSED
+  COMMERCIAL_OFFER_CONTROL_CHANGED
+}
+
+enum CommercialEventOutboxStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  DEAD_LETTER
+}
+
+enum CommercialEntitlementProjectionAction {
+  GRANT
+  REVOKE
+}
+
+enum CommercialManualSpeiCaseStatus {
+  PENDING_REVIEW
+  AWAITING_APPROVAL
+  READY_TO_RECONCILE
+  RECONCILED
+  REJECTED
+}
+
+enum CommercialManualSpeiEvidenceReviewAction {
+  ACCEPT
+  REJECT
+  SUPERSEDE
+}
+
+/// Persisted owner chosen from local authority for Stripe SaaS events.
+/// P3-1A1 expands this enum before WebhookEvent classification uses it.
+enum StripeEventOwnerKind {
+  COMMERCIAL_V2
+  LEGACY
+  INDEPENDENT
+}
+
+/// Exclusive local handler route for Stripe SaaS events.
+/// P3-1A1 expands this enum as additional persisted origins land.
+enum StripeEventRouteKey {
+  COMMERCIAL_SUBSCRIPTION_LIFECYCLE
+  LEGACY_PLAN_CHECKOUT
+  LEGACY_SUBSCRIPTION_LIFECYCLE
+  TERMINAL_ORDER_CHECKOUT
+  TOKEN_PAYMENT_INTENT
+  TOKEN_INVOICE
+  CREDIT_PACK_CHECKOUT
+  VENUE_BILLING_PROFILE
+}
+
+enum StripeEventSubjectKind {
+  COMMERCIAL_ACCEPTANCE
+  STRIPE_CHECKOUT_ORIGIN
+  VENUE_FEATURE
+  TERMINAL_ORDER
+  TOKEN_PURCHASE
+  VENUE
+}
+
+enum StripeObjectType {
+  CHECKOUT_SESSION
+  SUBSCRIPTION
+  INVOICE
+  PAYMENT_INTENT
+  CHARGE
+}
+
+enum StripeCheckoutBillingInterval {
+  MONTHLY
+  ANNUAL
+}
+
+/// Mutable normalized workspace. Optimistic concurrency is enforced with
+/// revision + If-Match; publications never point at mutable child rows.
+model CommercialDraft {
+  id          String                @id @default(cuid())
+  sourceKey   String?               @unique
+  name        String
+  description String?               @db.Text
+  status      CommercialDraftStatus @default(ACTIVE)
+  revision    Int                   @default(1)
+  createdById String
+  createdBy   Staff                 @relation("CommercialDraftCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById String
+  updatedBy   Staff                 @relation("CommercialDraftUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  products        CommercialProductDraft[]
+  pricebooks      CommercialPricebookDraft[]
+  prices          CommercialPriceDraft[]
+  bundles         CommercialBundleDraft[]
+  bundleItems     CommercialBundleItemDraft[]
+  featureBindings CommercialFeatureBindingDraft[]
+  publications    CommercialPublication[]
+
+  @@index([status, updatedAt])
+}
+
+model CommercialProductDraft {
+  id          String                @id @default(cuid())
+  draftId     String
+  draft       CommercialDraft       @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  code        String
+  slug        String
+  kind        CommercialProductKind
+  salesMode   CommercialSalesMode
+  name        String
+  description String                @db.Text
+  active      Boolean               @default(true)
+  sortOrder   Int                   @default(0)
+  limits      Json?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  prices          CommercialPriceDraft[]          @relation("CommercialProductPrices")
+  bundleItems     CommercialBundleItemDraft[]     @relation("CommercialBundleProducts")
+  featureBindings CommercialFeatureBindingDraft[]
+
+  @@unique([draftId, code])
+  @@unique([draftId, slug])
+  @@unique([id, draftId])
+  @@index([draftId, active, sortOrder])
+}
+
+model CommercialPricebookDraft {
+  id            String          @id @default(cuid())
+  draftId       String
+  draft         CommercialDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  code          String
+  name          String
+  marketCountry String          @default("MX")
+  currency      String          @default("MXN")
+  active        Boolean         @default(true)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  prices CommercialPriceDraft[]
+
+  @@unique([draftId, code])
+  @@unique([id, draftId])
+  @@index([draftId, active])
+}
+
+model CommercialBundleDraft {
+  id          String          @id @default(cuid())
+  draftId     String
+  draft       CommercialDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  code        String
+  slug        String
+  name        String
+  description String          @db.Text
+  active      Boolean         @default(true)
+  sortOrder   Int             @default(0)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  items  CommercialBundleItemDraft[]
+  prices CommercialPriceDraft[]      @relation("CommercialBundlePrices")
+
+  @@unique([draftId, code])
+  @@unique([draftId, slug])
+  @@unique([id, draftId])
+  @@index([draftId, active, sortOrder])
+}
+
+model CommercialPriceDraft {
+  id                 String                   @id @default(cuid())
+  draftId            String
+  draft              CommercialDraft          @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  pricebookId        String
+  pricebook          CommercialPricebookDraft @relation(fields: [pricebookId, draftId], references: [id, draftId], onDelete: Cascade)
+  productId          String?
+  product            CommercialProductDraft?  @relation("CommercialProductPrices", fields: [productId, draftId], references: [id, draftId], onDelete: Cascade)
+  bundleId           String?
+  bundle             CommercialBundleDraft?   @relation("CommercialBundlePrices", fields: [bundleId, draftId], references: [id, draftId], onDelete: Cascade)
+  code               String
+  billingUnit        CommercialBillingUnit
+  amount             Decimal                  @db.Decimal(12, 2)
+  currency           String                   @default("MXN")
+  taxBehavior        CommercialTaxBehavior    @default(EXCLUSIVE)
+  taxRateBasisPoints Int                      @default(1600)
+  active             Boolean                  @default(true)
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+
+  @@unique([draftId, code])
+  @@unique([pricebookId, productId, billingUnit])
+  @@unique([pricebookId, bundleId, billingUnit])
+  @@index([draftId, active])
+  @@index([productId, draftId])
+  @@index([bundleId, draftId])
+}
+
+model CommercialBundleItemDraft {
+  id        String                 @id @default(cuid())
+  draftId   String
+  draft     CommercialDraft        @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  bundleId  String
+  bundle    CommercialBundleDraft  @relation(fields: [bundleId, draftId], references: [id, draftId], onDelete: Cascade)
+  productId String
+  product   CommercialProductDraft @relation("CommercialBundleProducts", fields: [productId, draftId], references: [id, draftId], onDelete: Cascade)
+  quantity  Int                    @default(1)
+  sortOrder Int                    @default(0)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  @@unique([bundleId, productId])
+  @@index([draftId, bundleId, sortOrder])
+  @@index([productId, draftId])
+}
+
+model CommercialFeatureBindingDraft {
+  id             String                   @id @default(cuid())
+  draftId        String
+  draft          CommercialDraft          @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  productId      String
+  product        CommercialProductDraft   @relation(fields: [productId, draftId], references: [id, draftId], onDelete: Cascade)
+  capabilityCode String
+  capabilityKind CommercialCapabilityKind @default(FEATURE)
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  @@unique([productId, capabilityCode])
+  @@index([draftId, capabilityCode])
+}
+
+/// Immutable catalog body. Update/delete are additionally rejected by database
+/// triggers so rollback can only move CommercialPublicationActivation.
+model CommercialPublication {
+  id             String          @id @default(cuid())
+  sourceDraftId  String
+  sourceDraft    CommercialDraft @relation(fields: [sourceDraftId], references: [id], onDelete: Restrict)
+  sourceRevision Int
+  schemaVersion  Int             @default(2)
+  snapshot       Json
+  checksum       String          @unique
+  reason         String          @db.Text
+  publishedById  String
+  publishedBy    Staff           @relation("CommercialPublicationPublishedBy", fields: [publishedById], references: [id], onDelete: Restrict)
+  publishedAt    DateTime        @default(now())
+  createdAt      DateTime        @default(now())
+
+  activations          CommercialPublicationActivation[]
+  outboxEvents         CommercialPublicationOutbox[]     @relation("CommercialOutboxPublication")
+  previousOutboxEvents CommercialPublicationOutbox[]     @relation("CommercialOutboxPreviousPublication")
+  quotes               CommercialQuote[]
+  reservedAcquisitionContexts CommercialAcquisitionContext[] @relation("CommercialAcquisitionContextReservedCatalogV2")
+
+  @@unique([sourceDraftId, sourceRevision, checksum])
+  @@unique([id, schemaVersion], map: "CommercialPublication_id_schemaVersion_key")
+  @@index([publishedAt, id])
+}
+
+/// Mutable pointer with independent optimistic revision. Pointing it at an older
+/// immutable publication is the only catalog rollback operation.
+model CommercialPublicationActivation {
+  id            String                           @id @default(cuid())
+  environment   CommercialPublicationEnvironment @unique
+  publicationId String
+  publication   CommercialPublication            @relation(fields: [publicationId], references: [id], onDelete: Restrict)
+  revision      Int                              @default(1)
+  reason        String                           @db.Text
+  updatedById   String
+  updatedBy     Staff                            @relation("CommercialPublicationActivationUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt     DateTime                         @default(now())
+  updatedAt     DateTime                         @updatedAt
+
+  @@index([publicationId])
+}
+
+model CommercialPublicationOutbox {
+  id                    String                            @id @default(cuid())
+  eventType             CommercialPublicationEventType
+  publicationId         String
+  publication           CommercialPublication             @relation("CommercialOutboxPublication", fields: [publicationId], references: [id], onDelete: Restrict)
+  previousPublicationId String?
+  previousPublication   CommercialPublication?            @relation("CommercialOutboxPreviousPublication", fields: [previousPublicationId], references: [id], onDelete: Restrict)
+  payloadVersion        Int                               @default(1)
+  payload               Json
+  dedupeKey             String                            @unique
+  status                CommercialPublicationOutboxStatus @default(PENDING)
+  attempts              Int                               @default(0)
+  nextAttemptAt         DateTime                          @default(now())
+  claimedBy             String?
+  claimedAt             DateTime?
+  claimExpiresAt        DateTime?
+  deliveredAt           DateTime?
+  lastError             String?                           @db.Text
+  createdAt             DateTime                          @default(now())
+  updatedAt             DateTime                          @updatedAt
+
+  @@index([status, nextAttemptAt, createdAt])
+  @@index([status, claimExpiresAt])
+  @@index([publicationId])
+}
+
+/// Mutable normalized campaign workspace. Campaign prices are never consumed
+/// from this row; only immutable CommercialCampaignVersion snapshots can quote.
+model CommercialCampaignDraft {
+  id                    String                @id @default(cuid())
+  code                  String                @unique
+  name                  String
+  description           String?               @db.Text
+  status                CommercialDraftStatus @default(ACTIVE)
+  revision              Int                   @default(1)
+  offerSchemaVersion    Int                   @default(2)
+  startsAt              DateTime
+  endsAt                DateTime
+  allowedRuleCodeGroups Json?
+  stackingGroups        Json?
+  createdById           String
+  createdBy             Staff                 @relation("CommercialCampaignDraftCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedById           String
+  updatedBy             Staff                 @relation("CommercialCampaignDraftUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  rules         CommercialCampaignRuleDraft[]
+  offerBenefits CommercialOfferBenefitDraft[]
+  versions      CommercialCampaignVersion[]
+
+  @@unique([id, offerSchemaVersion], map: "CommercialCampaignDraft_id_offerSchemaVersion_key")
+  @@index([status, startsAt, endsAt])
+}
+
+model CommercialCampaignRuleDraft {
+  id                 String                     @id @default(cuid())
+  campaignDraftId    String
+  campaignDraft      CommercialCampaignDraft    @relation(fields: [campaignDraftId], references: [id], onDelete: Cascade)
+  code               String
+  type               CommercialCampaignRuleType
+  priority           Int                        @default(0)
+  target             Json
+  amountMinor        BigInt?
+  percentBasisPoints Int?
+  cycles             Int                        @default(1)
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+
+  @@unique([campaignDraftId, code])
+  @@index([campaignDraftId, priority])
+}
+
+/// Mutable normalized non-SaaS benefits for a schema-v3 commercial offer.
+/// The composite FK makes it impossible to attach one to a schema-v2 draft.
+model CommercialOfferBenefitDraft {
+  id                            String                          @id @default(cuid())
+  campaignDraftId               String
+  offerSchemaVersion            Int                             @default(3)
+  campaignDraft                 CommercialCampaignDraft         @relation(fields: [campaignDraftId, offerSchemaVersion], references: [id, offerSchemaVersion], onDelete: Cascade, map: "CommercialOfferBenefitDraft_parent_schema_fkey")
+  benefitCode                   String
+  kind                          CommercialOfferBenefitDraftKind
+  priority                      Int                             @default(0)
+  hardwareCatalogKey            String?
+  percentBasisPoints            Int?
+  unitAmountMinor               BigInt?
+  quantityLimit                 Int?
+  benefitStartsAt               DateTime?
+  benefitEndsAt                 DateTime?
+  paymentsRateScheduleVersionId String?
+  createdAt                     DateTime                        @default(now())
+  updatedAt                     DateTime                        @updatedAt
+
+  @@unique([campaignDraftId, benefitCode])
+  @@index([campaignDraftId, priority, benefitCode], map: "CommercialOfferBenefitDraft_parent_priority_idx")
+  @@index([hardwareCatalogKey, benefitStartsAt, benefitEndsAt], map: "CommercialOfferBenefitDraft_sku_window_idx")
+}
+
+/// Immutable, reviewable campaign body. Activation is a separate mutable pointer.
+model CommercialCampaignVersion {
+  id             String                  @id @default(cuid())
+  campaignCode   String
+  sourceDraftId  String
+  sourceDraft    CommercialCampaignDraft @relation(fields: [sourceDraftId], references: [id], onDelete: Restrict)
+  sourceRevision Int
+  schemaVersion  Int                     @default(2)
+  snapshot       Json
+  checksum       String                  @unique
+  reason         String                  @db.Text
+  publishedById  String
+  publishedBy    Staff                   @relation("CommercialCampaignVersionPublishedBy", fields: [publishedById], references: [id], onDelete: Restrict)
+  publishedAt    DateTime                @default(now())
+  createdAt      DateTime                @default(now())
+
+  activations         CommercialCampaignActivation[]
+  acquisitionClaimsV1V2   CommercialCampaignClaim[]      @relation("CommercialCampaignClaimCampaignV1V2")
+  offerClaimsV3            CommercialCampaignClaim[]      @relation("CommercialCampaignClaimOfferV3")
+  acquisitionContextsV1V2 CommercialAcquisitionContext[]  @relation("CommercialAcquisitionContextCampaignV1V2")
+  offerAcquisitionContextsV3 CommercialAcquisitionContext[] @relation("CommercialAcquisitionContextOfferV3")
+  campaignQuotesV1V2  CommercialQuote[]               @relation("CommercialQuoteCampaignV1V2")
+  offerQuotesV3       CommercialQuote[]               @relation("CommercialQuoteOfferV3")
+  offerControlEvents  CommercialOfferControlEvent[]
+
+  @@unique([sourceDraftId, sourceRevision, schemaVersion], map: "CommercialCampaignVersion_sourceDraft_revision_schema_key")
+  @@unique([id, schemaVersion], map: "CommercialCampaignVersion_id_schemaVersion_key")
+  @@unique([id, campaignCode])
+  @@index([campaignCode, publishedAt])
+}
+
+/// Append-only incident-control evidence for one immutable Offer v3.
+/// No row means OPEN; readers resolve the latest monotonic revision.
+model CommercialOfferControlEvent {
+  id                 String                       @id @default(cuid())
+  offerVersionId     String
+  offerSchemaVersion Int                          @default(3)
+  offerVersion       CommercialCampaignVersion    @relation(fields: [offerVersionId, offerSchemaVersion], references: [id, schemaVersion], onDelete: Restrict, map: "CommercialOfferControlEvent_offer_schema_fkey")
+  revision           Int
+  action             CommercialOfferControlAction
+  reason             String                       @db.Text
+  confirmedById      String
+  confirmedBy        Staff                        @relation("CommercialOfferControlEventConfirmedBy", fields: [confirmedById], references: [id], onDelete: Restrict)
+  createdAt          DateTime                     @default(now())
+
+  @@unique([offerVersionId, revision], map: "CommercialOfferControlEvent_offerVersionId_revision_key")
+  @@index([offerVersionId, revision(sort: Desc)], map: "CommercialOfferControlEvent_latest_idx")
+  @@index([confirmedById, createdAt], map: "CommercialOfferControlEvent_confirmedBy_createdAt_idx")
+}
+
+model CommercialCampaignActivation {
+  id                String                           @id @default(cuid())
+  environment       CommercialPublicationEnvironment
+  campaignCode      String
+  campaignVersionId String
+  campaignVersion   CommercialCampaignVersion        @relation(fields: [campaignVersionId, campaignCode], references: [id, campaignCode], onDelete: Restrict, map: "CommercialCampaignActivation_campaignVersionId_campaignCode_fke")
+  revision          Int                              @default(1)
+  reason            String                           @db.Text
+  updatedById       String
+  updatedBy         Staff                            @relation("CommercialCampaignActivationUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  createdAt         DateTime                         @default(now())
+  updatedAt         DateTime                         @updatedAt
+
+  @@unique([environment, campaignCode])
+  @@index([campaignVersionId])
+}
+
+/// Opaque bearer capability generated by a publisher for one exact active
+/// campaign version and acquisition source. The raw token is never persisted.
+model CommercialCampaignClaim {
+  id                String                       @id @default(cuid())
+  tokenHash         String                       @unique
+  campaignVersionId String?
+  campaignCode      String?
+  campaignVersion   CommercialCampaignVersion?   @relation("CommercialCampaignClaimCampaignV1V2", fields: [campaignVersionId, campaignCode], references: [id, campaignCode], onDelete: Restrict)
+  offerVersionId    String?
+  offerSchemaVersion Int?
+  offerVersion      CommercialCampaignVersion?   @relation("CommercialCampaignClaimOfferV3", fields: [offerVersionId, offerSchemaVersion], references: [id, schemaVersion], onDelete: Restrict, map: "CommercialCampaignClaim_offerVersionId_offerSchemaVersion_fkey")
+  channel           CommercialAcquisitionChannel
+  sourceRef         String
+  issuedById        String
+  issuedBy          Staff                        @relation("CommercialCampaignClaimIssuedBy", fields: [issuedById], references: [id], onDelete: Restrict)
+  reason            String                       @db.Text
+  createdAt         DateTime                     @default(now())
+  expiresAt         DateTime
+
+  @@index([campaignVersionId, expiresAt])
+  @@index([offerVersionId, expiresAt])
+  @@index([channel, sourceRef, createdAt])
+  @@index([expiresAt])
+}
+
+/// Public acquisition claims are opaque capabilities. Only tokenHash is stored;
+/// attribution is analytics-only and can never carry an authoritative amount.
+model CommercialAcquisitionContext {
+  id                               String                       @id @default(cuid())
+  tokenHash                        String                       @unique
+  campaignVersionId                String?
+  campaignVersion                  CommercialCampaignVersion?   @relation("CommercialAcquisitionContextCampaignV1V2", fields: [campaignVersionId], references: [id], onDelete: Restrict)
+  offerVersionId                   String?
+  offerSchemaVersion               Int?
+  offerVersion                     CommercialCampaignVersion?   @relation("CommercialAcquisitionContextOfferV3", fields: [offerVersionId, offerSchemaVersion], references: [id, schemaVersion], onDelete: Restrict, map: "CommercialAcqContext_offerVersion_schemaVersion_fkey")
+  reservedCatalogPublicationId     String?
+  reservedCatalogSchemaVersion     Int?
+  reservedCatalogPublication       CommercialPublication?       @relation("CommercialAcquisitionContextReservedCatalogV2", fields: [reservedCatalogPublicationId, reservedCatalogSchemaVersion], references: [id, schemaVersion], onDelete: Restrict, map: "CommercialAcqContext_reservedCatalog_schemaVersion_fkey")
+  channel                          CommercialAcquisitionChannel
+  attribution                      Json
+  createdAt                        DateTime                     @default(now())
+  expiresAt                        DateTime
+
+  quotes                        CommercialQuote[]
+  commercialQuotePreviewBridges CommercialQuotePreviewBridge[]
+  binding                       CommercialAcquisitionContextBinding?
+  redemption                    CommercialAcquisitionRedemption?
+
+  @@index([expiresAt])
+  @@index([campaignVersionId])
+  @@index([offerVersionId])
+  @@index([reservedCatalogPublicationId])
+}
+
+model CommercialAcquisitionContextBinding {
+  id                    String                              @id @default(cuid())
+  acquisitionContextId  String                              @unique
+  acquisitionContext    CommercialAcquisitionContext        @relation(fields: [acquisitionContextId], references: [id], onDelete: Cascade)
+  staffId               String
+  staff                 Staff                               @relation("CommercialAcquisitionContextBindingStaff", fields: [staffId], references: [id], onDelete: Restrict)
+  organizationId        String
+  organization          Organization                        @relation("CommercialAcquisitionContextBindingOrganization", fields: [organizationId], references: [id], onDelete: Restrict)
+  purpose               CommercialAcquisitionBindingPurpose @default(NEW_ACCOUNT)
+  staffCreatedAt        DateTime
+  organizationCreatedAt DateTime
+  boundAt               DateTime                            @default(now())
+
+  @@unique([staffId, purpose])
+  @@unique([organizationId, purpose])
+  @@index([boundAt])
+}
+
+/// Immutable accepted-price candidate. All money is integer MXN minor units and
+/// the complete user-visible quote is preserved in snapshot for reconstruction.
+model CommercialQuote {
+  id                   String                        @id @default(cuid())
+  catalogPublicationId String
+  catalogPublication   CommercialPublication         @relation(fields: [catalogPublicationId], references: [id], onDelete: Restrict)
+  campaignVersionId    String?
+  campaignVersion      CommercialCampaignVersion?    @relation("CommercialQuoteCampaignV1V2", fields: [campaignVersionId], references: [id], onDelete: Restrict)
+  offerVersionId       String?
+  offerSchemaVersion   Int?
+  offerVersion         CommercialCampaignVersion?    @relation("CommercialQuoteOfferV3", fields: [offerVersionId, offerSchemaVersion], references: [id, schemaVersion], onDelete: Restrict, map: "CommercialQuote_offerVersionId_offerSchemaVersion_fkey")
+  acquisitionContextId String?
+  acquisitionContext   CommercialAcquisitionContext? @relation(fields: [acquisitionContextId], references: [id], onDelete: Restrict)
+  organizationId       String?
+  organization         Organization?                 @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId              String?
+  venue                Venue?                        @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  createdById          String?
+  createdBy            Staff?                        @relation("CommercialQuoteCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  schemaVersion        Int                           @default(2)
+  market               String                        @default("MX")
+  currency             String                        @default("MXN")
+  snapshot             Json
+  checksum             String                        @unique
+  listSubtotalMinor    BigInt
+  discountMinor        BigInt
+  subtotalMinor        BigInt
+  taxMinor             BigInt
+  totalMinor           BigInt
+  renewalSubtotalMinor BigInt
+  renewalTaxMinor      BigInt
+  renewalTotalMinor    BigInt
+  quotedAt             DateTime                      @default(now())
+  expiresAt            DateTime
+  createdAt            DateTime                      @default(now())
+
+  acceptance                   CommercialQuoteAcceptance?
+  commercialQuotePreviewBridge CommercialQuotePreviewBridge? @relation("CommercialPreviewVenueQuote")
+  acquisitionRedemption        CommercialAcquisitionRedemption?
+
+  @@index([expiresAt])
+  @@index([organizationId, createdAt])
+  @@index([venueId, createdAt])
+  @@index([createdById, createdAt])
+  @@index([catalogPublicationId])
+  @@index([campaignVersionId])
+  @@index([offerVersionId])
+  @@index([acquisitionContextId])
+}
+
+model CommercialQuotePreviewBridge {
+  id                   String                       @id @default(cuid())
+  previewQuoteId       String                       @unique @db.VarChar(128)
+  previewChecksum      String                       @db.Char(64)
+  acquisitionContextId String
+  acquisitionContext   CommercialAcquisitionContext @relation(fields: [acquisitionContextId], references: [id], onDelete: Restrict)
+  organizationId       String
+  organization         Organization                 @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId              String
+  venue                Venue                        @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  actorId              String
+  actor                Staff                        @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  selectionFingerprint String                       @db.Char(64)
+  venueQuoteId         String                       @unique
+  venueQuote           CommercialQuote              @relation("CommercialPreviewVenueQuote", fields: [venueQuoteId], references: [id], onDelete: Restrict)
+  createdAt            DateTime                     @default(now())
+
+  @@index([organizationId, venueId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([acquisitionContextId, createdAt])
+}
+
+/// Mutable lifecycle kept outside CommercialQuote so accepting/retrying Stripe
+/// cannot alter the exact price, tax, duration or renewal the customer saw.
+model CommercialQuoteAcceptance {
+  id                       String                          @id @default(cuid())
+  quoteId                  String                          @unique
+  quote                    CommercialQuote                 @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  idempotencyKey           String                          @unique
+  organizationId           String
+  organization             Organization                    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId                  String
+  venue                    Venue                           @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  acceptedById             String
+  acceptedBy               Staff                           @relation("CommercialQuoteAcceptanceAcceptedBy", fields: [acceptedById], references: [id], onDelete: Restrict)
+  status                   CommercialQuoteAcceptanceStatus @default(ACCEPTED)
+  revision                 Int                             @default(1)
+  acceptedAt               DateTime                        @default(now())
+  createdAt                DateTime                        @default(now())
+  updatedAt                DateTime                        @updatedAt
+  lastStripeEventId        String?
+  lastStripeEventCreatedAt DateTime?
+
+  stripeOperations   CommercialStripeOperation[]
+  subscriptionEvents CommercialSubscriptionEvent[]
+  acquisitionRedemption CommercialAcquisitionRedemption?
+  subscriptionContract CommercialSubscriptionContract?
+
+  @@index([organizationId, status, updatedAt])
+  @@index([venueId, status, updatedAt])
+  @@unique([id, organizationId, venueId], map: "CommercialQuoteAcceptance_id_org_venue_key")
+}
+
+model CommercialAcquisitionRedemption {
+  id                   String                        @id @default(cuid())
+  acquisitionContextId String                        @unique
+  acquisitionContext   CommercialAcquisitionContext  @relation(fields: [acquisitionContextId], references: [id], onDelete: Restrict)
+  quoteId              String                        @unique
+  quote                CommercialQuote               @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  acceptanceId         String                        @unique
+  acceptance           CommercialQuoteAcceptance     @relation(fields: [acceptanceId], references: [id], onDelete: Restrict)
+  organizationId       String
+  organization         Organization                  @relation("CommercialAcquisitionRedemptionOrganization", fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId              String
+  venue                Venue                         @relation("CommercialAcquisitionRedemptionVenue", fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  staffId              String
+  staff                Staff                         @relation("CommercialAcquisitionRedemptionStaff", fields: [staffId], references: [id], onDelete: Restrict)
+  redeemedAt           DateTime                      @default(now())
+
+  @@index([organizationId, venueId, redeemedAt], map: "CommercialAcqRedemption_org_venue_redeemed_idx")
+  @@index([staffId, redeemedAt])
+}
+
+model CommercialStripeOperation {
+  id                      String                          @id @default(cuid())
+  acceptanceId            String
+  acceptance              CommercialQuoteAcceptance       @relation(fields: [acceptanceId], references: [id], onDelete: Restrict)
+  idempotencyKey          String                          @unique
+  type                    CommercialStripeOperationType
+  status                  CommercialStripeOperationStatus @default(PENDING)
+  requestFingerprint      String
+  stripeCheckoutSessionId String?                         @unique
+  stripeCheckoutUrl       String?
+  stripeSubscriptionId    String?
+  lastError               String?                         @db.Text
+  createdAt               DateTime                        @default(now())
+  updatedAt               DateTime                        @updatedAt
+
+  @@unique([acceptanceId, type])
+  @@index([acceptanceId, createdAt])
+  @@index([status, updatedAt])
+  @@index([stripeSubscriptionId])
+}
+
+/// Append-only state transition evidence for commercial SaaS subscriptions.
+/// Webhook delivery is idempotent by stripeEventId and ordered by Stripe's
+/// event timestamp plus conservative state precedence for same-second ties.
+model CommercialSubscriptionEvent {
+  id                      String                          @id @default(cuid())
+  acceptanceId            String
+  acceptance              CommercialQuoteAcceptance       @relation(fields: [acceptanceId], references: [id], onDelete: Restrict)
+  stripeEventId           String                          @unique
+  type                    CommercialSubscriptionEventType
+  effectiveAt             DateTime
+  fromStatus              CommercialQuoteAcceptanceStatus
+  toStatus                CommercialQuoteAcceptanceStatus
+  applied                 Boolean                         @default(true)
+  stripeCheckoutSessionId String?
+  stripeSubscriptionId    String?
+  createdAt               DateTime                        @default(now())
+
+  @@index([acceptanceId, effectiveAt])
+  @@index([stripeSubscriptionId, effectiveAt])
+}
+
+/// Immutable commercial terms copied from one accepted Quote. Provider calls
+/// and mutable collection state live in child authorities, never in snapshot.
+model CommercialSubscriptionContract {
+  id                String                               @id @default(cuid())
+  quoteAcceptanceId String                               @unique
+  quoteAcceptance   CommercialQuoteAcceptance            @relation(fields: [quoteAcceptanceId, organizationId, venueId], references: [id, organizationId, venueId], onDelete: Restrict)
+  idempotencyKey    String                               @unique
+  organizationId    String
+  organization      Organization                         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId           String
+  venue              Venue                                @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  schemaVersion     Int                                  @default(1)
+  snapshot          Json
+  checksum          String                               @db.Char(64)
+  status            CommercialSubscriptionContractStatus @default(DRAFT)
+  cadence           CommercialBillingCadence
+  currency          String                               @default("MXN") @db.Char(3)
+  timezone          String                               @default("America/Mexico_City")
+  startsAt          DateTime
+  endedAt           DateTime?
+  createdAt         DateTime                             @default(now())
+  updatedAt         DateTime                             @updatedAt
+
+  periods                CommercialSubscriptionPeriod[]
+  entitlementProjections CommercialEntitlementProjection[]
+
+  @@unique([quoteAcceptanceId, organizationId, venueId], map: "CommercialSubscriptionContract_acceptance_org_venue_key")
+  @@unique([id, organizationId, venueId], map: "CommercialSubscriptionContract_id_org_venue_key")
+  @@index([organizationId, status])
+  @@index([venueId, status])
+}
+
+/// One payable obligation. Exactly one subject is selected by a SQL CHECK.
+model CommercialAccountReceivable {
+  id                   String                             @id @default(cuid())
+  organizationId       String
+  organization         Organization                       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId              String
+  venue                 Venue                              @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  subjectType          CommercialReceivableSubjectType
+  subscriptionPeriodId String?                            @unique
+  subscriptionPeriod   CommercialSubscriptionPeriod?      @relation(fields: [subscriptionPeriodId], references: [id], onDelete: Restrict)
+  terminalOrderId      String?                            @unique
+  terminalOrder        TerminalOrder?                     @relation(fields: [terminalOrderId], references: [id], onDelete: Restrict)
+  reference            String                             @unique @db.VarChar(128)
+  amountDueMinor       BigInt
+  currency             String                             @default("MXN") @db.Char(3)
+  dueAt                DateTime
+  status               CommercialAccountReceivableStatus @default(OPEN)
+  createdAt            DateTime                           @default(now())
+  updatedAt            DateTime                           @updatedAt
+
+  paymentAttempts CommercialBillingPaymentAttempt[]
+  allocations     CommercialBillingAllocation[]
+  manualSpeiCases CommercialManualSpeiCase[]
+
+  @@index([organizationId, status, dueAt])
+  @@index([venueId, status, dueAt])
+}
+
+/// Provider communication is evidence, not cash.
+model CommercialBillingPaymentAttempt {
+  id                 String                                @id @default(cuid())
+  receivableId       String
+  receivable         CommercialAccountReceivable           @relation(fields: [receivableId], references: [id], onDelete: Restrict)
+  provider           CommercialBillingProvider
+  providerAttemptId  String?                               @db.VarChar(255)
+  idempotencyKey     String                                @unique
+  status             CommercialBillingPaymentAttemptStatus @default(PENDING)
+  amountMinor        BigInt
+  currency           String                                @default("MXN") @db.Char(3)
+  requestFingerprint String                                @db.Char(64)
+  lastErrorCode      String?                               @db.VarChar(128)
+  createdAt          DateTime                              @default(now())
+  updatedAt          DateTime                              @updatedAt
+
+  cashReceipts CommercialCashReceipt[]
+  manualSpeiCase CommercialManualSpeiCase?
+  providerObjects CommercialBillingProviderObject[]
+
+  @@unique([provider, providerAttemptId])
+  @@index([receivableId, status, createdAt])
+}
+
+/// Append-only proof of reconciled money in or out of an Avoqado receiving account.
+model CommercialCashReceipt {
+  id                          String                           @id @default(cuid())
+  organizationId              String
+  organization                Organization                     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId                     String
+  venue                        Venue                            @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  paymentAttemptId            String?
+  paymentAttempt              CommercialBillingPaymentAttempt? @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+  provider                    CommercialBillingProvider
+  providerEventId             String                           @db.VarChar(255)
+  idempotencyKey              String                           @unique
+  entryType                   CommercialCashReceiptEntryType
+  relatedReceiptId            String?
+  relatedReceipt              CommercialCashReceipt?           @relation("CommercialCashReceiptAdjustments", fields: [relatedReceiptId], references: [id], onDelete: Restrict)
+  adjustments                 CommercialCashReceipt[]           @relation("CommercialCashReceiptAdjustments")
+  amountMinor                 BigInt
+  currency                    String                           @default("MXN") @db.Char(3)
+  receivingAccountFingerprint String                           @db.Char(64)
+  observedAt                  DateTime
+  reconciledById              String?
+  reconciledBy                Staff?                           @relation("CommercialCashReceiptReconciledBy", fields: [reconciledById], references: [id], onDelete: Restrict)
+  createdAt                   DateTime                         @default(now())
+
+  allocations    CommercialBillingAllocation[]
+  manualSpeiCase CommercialManualSpeiCase?
+  providerObjects CommercialBillingProviderObject[]
+
+  @@unique([provider, providerEventId])
+  @@unique([id, organizationId, venueId], map: "CommercialCashReceipt_id_org_venue_key")
+  @@index([organizationId, observedAt])
+  @@index([venueId, observedAt])
+  @@index([relatedReceiptId])
+  @@index([paymentAttemptId])
+  @@index([reconciledById])
+}
+
+/// Immutable aliases from signed provider objects to Avoqado's canonical cash
+/// receipt. Refunds and disputes resolve here; Stripe metadata is never authority.
+model CommercialBillingProviderObject {
+  id               String                           @id @default(cuid())
+  provider         CommercialBillingProvider
+  objectType       String                           @db.VarChar(32)
+  objectId         String                           @db.VarChar(255)
+  organizationId   String
+  venueId          String
+  paymentAttemptId String
+  paymentAttempt   CommercialBillingPaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+  cashReceiptId    String
+  cashReceipt      CommercialCashReceipt            @relation(fields: [cashReceiptId, organizationId, venueId], references: [id, organizationId, venueId], onDelete: Restrict)
+  createdAt        DateTime                         @default(now())
+
+  @@unique([provider, objectId], map: "CommercialBillingProviderObject_provider_object_key")
+  @@index([paymentAttemptId, createdAt])
+  @@index([cashReceiptId, createdAt])
+}
+
+/// Append-only signed application of one receipt. CREDIT covers a receivable;
+/// DEBIT compensates coverage after a refund or reversal receipt.
+model CommercialBillingAllocation {
+  id             String                               @id @default(cuid())
+  cashReceiptId  String
+  cashReceipt    CommercialCashReceipt                @relation(fields: [cashReceiptId], references: [id], onDelete: Restrict)
+  receivableId   String
+  receivable     CommercialAccountReceivable          @relation(fields: [receivableId], references: [id], onDelete: Restrict)
+  direction      CommercialBillingAllocationDirection
+  amountMinor    BigInt
+  idempotencyKey String                               @unique
+  createdAt      DateTime                             @default(now())
+
+  @@index([cashReceiptId, createdAt])
+  @@index([receivableId, createdAt])
+}
+
+model CommercialSubscriptionPeriod {
+  id             String                             @id @default(cuid())
+  contractId     String
+  contract       CommercialSubscriptionContract      @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  scheduleKey    String                               @default("SAAS_MONTHLY") @db.VarChar(64)
+  cadence        CommercialBillingCadence             @default(MONTHLY)
+  sequence       Int
+  startsAt       DateTime
+  endsAt         DateTime
+  dueAt          DateTime
+  graceEndsAt    DateTime
+  amountDueMinor BigInt
+  currency       String                             @default("MXN") @db.Char(3)
+  status         CommercialSubscriptionPeriodStatus @default(OPEN)
+  statusRevision Int                                @default(1)
+  paidAt         DateTime?
+  createdAt      DateTime                           @default(now())
+  updatedAt      DateTime                           @updatedAt
+
+  receivable             CommercialAccountReceivable?
+  entitlementProjections CommercialEntitlementProjection[]
+
+  @@unique([contractId, scheduleKey, sequence], map: "CommercialSubscriptionPeriod_contract_schedule_sequence_key")
+  @@unique([id, contractId], map: "CommercialSubscriptionPeriod_id_contract_key")
+  @@index([status, dueAt])
+  @@index([contractId, startsAt])
+}
+
+/// Provider-neutral durable events. Payload and source identity are immutable;
+/// delivery fields are retried idempotently by consumers.
+model CommercialEventOutbox {
+  id             String                         @id @default(cuid())
+  eventId        String                         @unique
+  organizationId String?
+  organization   Organization?                  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId        String?
+  venue           Venue?                         @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  sourceType     CommercialEventOutboxSourceType
+  sourceId       String
+  sourceRevision Int
+  eventType      CommercialEventOutboxEventType
+  payload        Json
+  status         CommercialEventOutboxStatus     @default(PENDING)
+  attemptCount   Int                             @default(0)
+  availableAt    DateTime                        @default(now())
+  firstAttemptAt DateTime?
+  lastAttemptAt  DateTime?
+  deliveredAt    DateTime?
+  lastError      String?                         @db.Text
+  createdAt      DateTime                        @default(now())
+  updatedAt      DateTime                        @updatedAt
+
+  entitlementProjections CommercialEntitlementProjection[]
+
+  @@unique([sourceType, sourceId, sourceRevision, eventType], map: "CommercialEventOutbox_source_revision_event_key")
+  @@index([status, availableAt])
+  @@index([organizationId, createdAt])
+  @@index([venueId, createdAt])
+}
+
+/// Immutable evidence that one canonical billing event changed paid feature
+/// coverage. OrganizationEntitlement remains a rebuildable organization summary;
+/// this row preserves the exact venue, contract, period and event provenance.
+model CommercialEntitlementProjection {
+  id                   String                                  @id @default(cuid())
+  eventId              String
+  event                 CommercialEventOutbox                   @relation(fields: [eventId], references: [eventId], onDelete: Restrict)
+  organizationId       String
+  organization         Organization                            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId              String
+  venue                 Venue                                   @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  contractId           String
+  contract             CommercialSubscriptionContract          @relation(fields: [contractId, organizationId, venueId], references: [id, organizationId, venueId], onDelete: Restrict)
+  subscriptionPeriodId String
+  subscriptionPeriod   CommercialSubscriptionPeriod            @relation(fields: [subscriptionPeriodId, contractId], references: [id, contractId], onDelete: Restrict)
+  sourceRevision       Int
+  featureCode          String                                  @db.VarChar(128)
+  action               CommercialEntitlementProjectionAction
+  coverageStartsAt     DateTime
+  coverageEndsAt       DateTime
+  createdAt            DateTime                                @default(now())
+
+  @@unique([eventId, featureCode], map: "CommercialEntitlementProjection_event_feature_key")
+  @@unique([contractId, featureCode, subscriptionPeriodId, sourceRevision, action], map: "CommercialEntitlementProjection_source_action_key")
+  @@index([organizationId, featureCode, createdAt])
+  @@index([venueId, featureCode, createdAt])
+  @@index([contractId, featureCode, createdAt])
+}
+
+/// Immutable, published approval economics for manual SPEI. The mutable
+/// activation pointer selects the policy; cases pin the exact version forever.
+model CommercialManualSpeiPolicyVersion {
+  id                         String      @id @default(cuid())
+  market                     String      @db.Char(2)
+  version                    Int
+  dualApprovalThresholdMinor BigInt
+  currency                   String      @default("MXN") @db.Char(3)
+  checksum                   String      @db.Char(64)
+  publishedAt                DateTime    @default(now())
+  publishedById              String?
+  publishedBy                Staff?      @relation("CommercialManualSpeiPolicyPublishedBy", fields: [publishedById], references: [id], onDelete: Restrict)
+  createdAt                  DateTime    @default(now())
+
+  activation CommercialManualSpeiPolicyActivation?
+  cases      CommercialManualSpeiCase[]
+  approvals  CommercialManualSpeiApproval[]
+
+  @@unique([market, version])
+  @@unique([id, market], map: "CommercialManualSpeiPolicyVersion_id_market_key")
+  @@index([publishedAt])
+}
+
+model CommercialManualSpeiPolicyActivation {
+  market          String                            @id @db.Char(2)
+  policyVersionId String                            @unique
+  policyVersion   CommercialManualSpeiPolicyVersion @relation(fields: [policyVersionId, market], references: [id, market], onDelete: Restrict)
+  activatedAt     DateTime                          @default(now())
+  activatedById   String?
+  activatedBy     Staff?                            @relation("CommercialManualSpeiPolicyActivatedBy", fields: [activatedById], references: [id], onDelete: Restrict)
+  updatedAt       DateTime                          @updatedAt
+
+  @@unique([policyVersionId, market], map: "CommercialManualSpeiPolicyActivation_version_market_key")
+}
+
+/// Mutable review state over immutable proof, approval and cash authorities.
+/// Proof acceptance alone never fills reconciledReceiptId.
+model CommercialManualSpeiCase {
+  id                           String                         @id @default(cuid())
+  organizationId               String
+  organization                 Organization                   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId                      String
+  venue                        Venue                          @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  receivableId                 String
+  receivable                   CommercialAccountReceivable    @relation(fields: [receivableId], references: [id], onDelete: Restrict)
+  paymentAttemptId             String                         @unique
+  paymentAttempt               CommercialBillingPaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+  policyVersionId              String
+  policyVersion                CommercialManualSpeiPolicyVersion @relation(fields: [policyVersionId], references: [id], onDelete: Restrict)
+  observedAmountMinor          BigInt
+  currency                     String                         @default("MXN") @db.Char(3)
+  bankReference                String?                        @db.VarChar(128)
+  receivingAccountFingerprint String                         @db.Char(64)
+  observedAt                   DateTime
+  attributedCommercialActorIds Json                           @default("[]")
+  createdById                  String
+  createdBy                    Staff                          @relation("CommercialManualSpeiCaseCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  requiredApprovals            Int
+  exceptionReasons             Json                           @default("[]")
+  status                       CommercialManualSpeiCaseStatus @default(PENDING_REVIEW)
+  reconciledReceiptId          String?                        @unique
+  reconciledReceipt            CommercialCashReceipt?         @relation(fields: [reconciledReceiptId], references: [id], onDelete: Restrict)
+  createdAt                    DateTime                       @default(now())
+  updatedAt                    DateTime                       @updatedAt
+
+  evidence  CommercialManualSpeiEvidence[]
+  approvals CommercialManualSpeiApproval[]
+
+  @@index([organizationId, status, createdAt])
+  @@index([venueId, status, createdAt])
+  @@index([policyVersionId, createdAt])
+  @@index([createdById, createdAt])
+}
+
+/// Write-once private object metadata. It stores no public URL and no bank
+/// account number; reviewers receive short-lived signed URLs outside this row.
+model CommercialManualSpeiEvidence {
+  id               String                   @id @default(cuid())
+  caseId           String
+  case             CommercialManualSpeiCase  @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  sequence         Int
+  storageObjectKey String                   @unique @db.VarChar(512)
+  contentSha256    String                   @db.Char(64)
+  mimeType         String                   @db.VarChar(128)
+  sizeBytes        Int
+  uploadedById     String
+  uploadedBy       Staff                    @relation("CommercialManualSpeiEvidenceUploadedBy", fields: [uploadedById], references: [id], onDelete: Restrict)
+  createdAt        DateTime                 @default(now())
+
+  reviews CommercialManualSpeiEvidenceReview[]
+
+  @@unique([caseId, sequence])
+  @@index([caseId, createdAt])
+}
+
+model CommercialManualSpeiEvidenceReview {
+  id         String                                   @id @default(cuid())
+  evidenceId String
+  evidence   CommercialManualSpeiEvidence              @relation(fields: [evidenceId], references: [id], onDelete: Restrict)
+  action     CommercialManualSpeiEvidenceReviewAction
+  actorId    String
+  actor      Staff                                    @relation("CommercialManualSpeiEvidenceReviewedBy", fields: [actorId], references: [id], onDelete: Restrict)
+  reason     String?                                  @db.VarChar(500)
+  createdAt  DateTime                                 @default(now())
+
+  @@unique([evidenceId, actorId, action])
+  @@index([evidenceId, createdAt])
+}
+
+/// Write-once financial approval. A DB trigger rejects attributed commercial
+/// actors even if a future controller forgets the separation-of-duties rule.
+model CommercialManualSpeiApproval {
+  id               String                   @id @default(cuid())
+  caseId           String
+  case             CommercialManualSpeiCase  @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  actorId          String
+  actor            Staff                    @relation("CommercialManualSpeiApprovalActor", fields: [actorId], references: [id], onDelete: Restrict)
+  policyVersionId  String
+  policyVersion    CommercialManualSpeiPolicyVersion @relation(fields: [policyVersionId], references: [id], onDelete: Restrict)
+  exceptionReasons Json                     @default("[]")
+  createdAt        DateTime                 @default(now())
+
+  @@unique([caseId, actorId])
+  @@index([policyVersionId, createdAt])
+}
+
+/// Write-once authority for every legacy base-plan Checkout Session created
+/// after P3-1A0. Stripe metadata remains a pointer, never the owner authority.
+model StripeCheckoutOrigin {
+  stripeCheckoutSessionId String                        @id
+  ownerKind               StripeEventOwnerKind
+  routeKey                StripeEventRouteKey
+  venueId                 String
+  venue                   Venue                         @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  featureId               String
+  feature                 Feature                       @relation(fields: [featureId], references: [id], onDelete: Restrict)
+  stripeCustomerId        String
+  billingInterval         StripeCheckoutBillingInterval
+  createdAt               DateTime                      @default(now())
+
+  @@index([venueId, createdAt])
+  @@index([featureId])
+  @@index([stripeCustomerId])
+}
+
+/// Immutable local routing authority for Stripe objects referenced by later
+/// events. Re-observing the same tuple is idempotent; provenance is first-write.
+model StripeObjectBinding {
+  objectType           StripeObjectType
+  stripeObjectId       String
+  ownerKind            StripeEventOwnerKind
+  routeKey             StripeEventRouteKey
+  subjectKind          StripeEventSubjectKind
+  subjectId            String
+  sourceWebhookEventId String?
+  sourceWebhookEvent   WebhookEvent?          @relation(fields: [sourceWebhookEventId], references: [id], onDelete: Restrict)
+  createdAt            DateTime               @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)"))
+
+  @@id([objectType, stripeObjectId])
+  @@index([ownerKind, routeKey, subjectKind, subjectId])
+  @@index([sourceWebhookEventId])
+}
+
+/// Append-only, low-cardinality evidence of the current EFFECT fan-out.
+/// PostgreSQL rejects updates/deletes; no Stripe payload or exception text is stored.
+model WebhookDispatchObservation {
+  webhookEventId String
+  webhookEvent   WebhookEvent @relation(fields: [webhookEventId], references: [id], onDelete: Restrict)
+  effectAttempt  Int
+  steps          Json
+  effectOutcome  String       @db.VarChar(64)
+  failureStep    String?      @db.VarChar(64)
+  comparisonCode String       @db.VarChar(64)
+  createdAt      DateTime     @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)"))
+
+  @@id([webhookEventId, effectAttempt])
+  @@index([createdAt])
+}
+
+/// Durable operational-alert outbox for terminal webhook phases.
+/// Authority/payload are immutable; only the delivery state machine may change.
+model WebhookOperationalAlert {
+  webhookEventId String
+  webhookEvent   WebhookEvent      @relation(fields: [webhookEventId], references: [id], onDelete: Restrict)
+  phase          WebhookClaimPhase
+  terminalReason String            @db.VarChar(64)
+  attempt        Int
+  payload        Json
+
+  deliveryAttempts Int       @default(0)
+  nextAttemptAt    DateTime? @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)"))
+  claimToken       String?
+  claimedBy        String?
+  claimedAt        DateTime?
+  claimExpiresAt   DateTime?
+  deliveredAt      DateTime?
+  createdAt        DateTime  @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)"))
+  updatedAt        DateTime  @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)")) @updatedAt
+
+  @@id([webhookEventId, phase, terminalReason])
+  @@index([deliveredAt, nextAttemptAt, createdAt])
+  @@index([claimExpiresAt])
+}
+
+/// Durable, local-only result audit outbox for a Superadmin EFFECT retry.
+/// Authority/correlation is immutable; delivery fields and the one-way final
+/// outcome are the only mutable state.
+model WebhookManualRetryResultOutbox {
+  id                   String       @id
+  webhookEventId       String
+  webhookEvent         WebhookEvent @relation(fields: [webhookEventId], references: [id], onDelete: Restrict)
+  /// Immutable snapshot of the requesting Staff id. Deliberately no FK: retry
+  /// audit retention must not retain a deleted Staff/live-demo identity.
+  actorId              String
+  venueId              String?
+  reason               String       @db.VarChar(160)
+  requestActivityLogId String       @unique
+  requestActivityLog   ActivityLog  @relation("WebhookManualRetryRequestActivity", fields: [requestActivityLogId], references: [id], onDelete: Restrict)
+  resultActivityLogId  String       @unique
+
+  effectAttempt        Int
+  effectClaimToken     String                     @unique
+  effectClaimedBy      String
+  effectClaimedAt      DateTime
+  effectClaimExpiresAt DateTime
+  dispatchStartedAt    DateTime?
+  outcome              WebhookManualRetryOutcome?
+
+  deliveryAttempts       Int       @default(0)
+  nextAttemptAt          DateTime? @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)"))
+  deliveryClaimToken     String?
+  deliveryClaimedBy      String?
+  deliveryClaimedAt      DateTime?
+  deliveryClaimExpiresAt DateTime?
+  deliveredAt            DateTime?
+  createdAt              DateTime  @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)"))
+  updatedAt              DateTime  @default(dbgenerated("timezone('UTC', CURRENT_TIMESTAMP)")) @updatedAt
+
+  @@unique([webhookEventId, effectAttempt])
+  @@index([deliveredAt, nextAttemptAt, createdAt])
+  @@index([deliveryClaimExpiresAt])
+  @@index([actorId, createdAt])
 }
 
 /// Categories for SerializedItems (NOT to be confused with MenuCategory).

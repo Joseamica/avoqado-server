@@ -19,6 +19,13 @@ import { tokenBudgetService } from './dashboard/token-budget.service'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { fulfillPurchase as fulfillCreditPackPurchase } from './dashboard/creditPack.public.service'
 import { executeSeatReconciliation, reactivateSeatCapDeactivated } from './dashboard/seatReconciliation.service'
+import { commercialStripeWebhookAdapter } from './commercial/commercialStripeWebhookAdapter.service'
+import {
+  createCurrentStripeWebhookDispatcher,
+  type CurrentHandlerEffectResult,
+  type InvoiceEffectResult,
+  type PaymentIntentEffectResult,
+} from './stripe-webhooks/platformWebhookCurrentDispatcher.service'
 
 /**
  * Run the pending Pro→Free seat reconciliation for a venue AFTER its paid plan has been
@@ -76,7 +83,7 @@ async function runSeatReactivationSafely(venueId: string): Promise<void> {
  *
  * @param subscription - Stripe Subscription object
  */
-export async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
+export async function handleSubscriptionUpdated(subscription: Stripe.Subscription): Promise<CurrentHandlerEffectResult> {
   const subscriptionId = subscription.id
   const status = subscription.status
   const trialEnd = subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
@@ -98,7 +105,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
 
   if (!venueFeature) {
     logger.warn('⚠️ Webhook: Subscription not found in database', { subscriptionId })
-    return
+    return 'NOOP_SUBJECT_NOT_FOUND'
   }
 
   // Security Enhancement: Skip activation for non-operational venues
@@ -110,7 +117,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       venueStatus: venueFeature.venue.status,
       status,
     })
-    return
+    return 'NOOP_VENUE_NOT_OPERATIONAL'
   }
 
   // Update VenueFeature based on subscription status
@@ -152,7 +159,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
         await runSeatReactivationSafely(venueFeature.venueId)
       }
-      break
+      return 'APPLIED'
 
     case 'trialing':
       // Still in trial period
@@ -168,7 +175,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         featureCode: venueFeature.feature.code,
         trialEnd,
       })
-      break
+      return 'APPLIED'
 
     case 'past_due':
       // Payment failed, but subscription still active
@@ -178,7 +185,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         subscriptionId,
       })
       // Don't deactivate yet - Stripe will retry payment
-      break
+      return 'MATCHED_NO_CHANGE'
 
     case 'canceled':
     case 'unpaid':
@@ -217,7 +224,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
         await runSeatReconciliationSafely(venueFeature.venueId)
       }
-      break
+      return 'APPLIED'
 
     case 'incomplete':
     case 'incomplete_expired':
@@ -234,10 +241,11 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         subscriptionId,
         status,
       })
-      break
+      return 'APPLIED'
 
     default:
       logger.info('ℹ️ Webhook: Unhandled subscription status', { status, subscriptionId })
+      return 'MATCHED_NO_CHANGE'
   }
 }
 
@@ -247,7 +255,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
  *
  * @param subscription - Stripe Subscription object
  */
-export async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
+export async function handleSubscriptionDeleted(subscription: Stripe.Subscription): Promise<CurrentHandlerEffectResult> {
   const subscriptionId = subscription.id
 
   logger.info('📥 Webhook: Subscription deleted', { subscriptionId })
@@ -278,6 +286,7 @@ export async function handleSubscriptionDeleted(subscription: Stripe.Subscriptio
   for (const venueId of baseplanVenueIds) {
     await runSeatReconciliationSafely(venueId)
   }
+  return result.count > 0 ? 'APPLIED' : 'NOOP_SUBJECT_NOT_FOUND'
 }
 
 /**
@@ -286,7 +295,7 @@ export async function handleSubscriptionDeleted(subscription: Stripe.Subscriptio
  *
  * @param invoice - Stripe Invoice object
  */
-export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
+export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice): Promise<InvoiceEffectResult> {
   const metadata = invoice.metadata
   const amountPaid = invoice.amount_paid / 100 // Convert cents to dollars
   const currency = invoice.currency.toUpperCase()
@@ -335,7 +344,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       })
       throw error
     }
-    return
+    return 'TOKEN_INVOICE_APPLIED'
   }
 
   // Handle subscription invoices (original logic)
@@ -345,7 +354,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
 
   if (!subscriptionIdStr) {
     logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
-    return
+    return 'INVOICE_NOOP_NO_SUBSCRIPTION'
   }
 
   // ✅ FIX BUG #7: Retry with backoff if VenueFeature not yet created
@@ -369,7 +378,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       // Still not found after retry - log warning and return
       // The sync code's immediate activation should handle this
       logger.warn('⚠️ Webhook: VenueFeature still not found after retry', { subscriptionId: subscriptionIdStr, invoiceId: invoice.id })
-      return
+      return 'INVOICE_NOOP_SUBJECT_NOT_FOUND'
     }
 
     logger.info('✅ Webhook: VenueFeature found on retry', { subscriptionId: subscriptionIdStr, venueId: venueFeature.venueId })
@@ -382,7 +391,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       venueId: venueFeature.venueId,
       venueStatus: venueFeature.venue.status,
     })
-    return
+    return 'INVOICE_NOOP_VENUE_NOT_OPERATIONAL'
   }
 
   // Ensure feature is active
@@ -399,6 +408,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       featureCode: venueFeature.feature.code,
       amountPaid,
     })
+    return 'SUBSCRIPTION_INVOICE_APPLIED'
   } else {
     // Feature already active - this is expected when immediate payment activation
     // happened in createTrialSubscriptions() before webhook arrived
@@ -407,6 +417,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       featureCode: venueFeature.feature.code,
       subscriptionId: subscriptionIdStr,
     })
+    return 'SUBSCRIPTION_INVOICE_MATCHED_NO_CHANGE'
   }
 }
 
@@ -538,7 +549,7 @@ async function sendPaymentFailedNotifications(
  *
  * @param invoice - Stripe Invoice object
  */
-export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
+export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice): Promise<InvoiceEffectResult> {
   const metadata = invoice.metadata
   const attemptCount = invoice.attempt_count || 1
   const amountDue = invoice.amount_due
@@ -579,7 +590,7 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
       })
       throw error
     }
-    return
+    return 'TOKEN_INVOICE_APPLIED'
   }
 
   // Handle subscription invoices (original logic)
@@ -589,7 +600,7 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
 
   if (!subscriptionIdStr) {
     logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
-    return
+    return 'INVOICE_NOOP_NO_SUBSCRIPTION'
   }
 
   const venueFeature = await prisma.venueFeature.findFirst({
@@ -599,7 +610,7 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
 
   if (!venueFeature) {
     logger.warn('⚠️ Webhook: Subscription not found for failed invoice', { subscriptionId: subscriptionIdStr })
-    return
+    return 'INVOICE_NOOP_SUBJECT_NOT_FOUND'
   }
 
   logger.warn('⚠️ Webhook: Payment failed for feature', {
@@ -642,6 +653,7 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
     currency,
     last4,
   })
+  return 'SUBSCRIPTION_INVOICE_APPLIED'
 }
 
 /**
@@ -766,7 +778,7 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
  *
  * @param subscription - Stripe Subscription object
  */
-export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscription) {
+export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscription): Promise<CurrentHandlerEffectResult> {
   const subscriptionId = subscription.id
   const trialEnd = subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
 
@@ -782,7 +794,7 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
 
   if (!venueFeature) {
     logger.warn('⚠️ Webhook: Subscription not found', { subscriptionId })
-    return
+    return 'NOOP_SUBJECT_NOT_FOUND'
   }
 
   // Security Enhancement: Skip notifications for non-operational venues
@@ -792,7 +804,7 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
       venueId: venueFeature.venueId,
       venueStatus: venueFeature.venue.status,
     })
-    return
+    return 'NOOP_VENUE_NOT_OPERATIONAL'
   }
 
   logger.info('ℹ️ Webhook: Trial ending soon', {
@@ -805,7 +817,9 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
   // Send notifications to venue owners and admins
   if (trialEnd) {
     await sendTrialEndingNotifications(venueFeature.venueId, venueFeature.venue.name, venueFeature.feature.name, trialEnd)
+    return 'APPLIED'
   }
+  return 'MATCHED_NO_CHANGE'
 }
 
 /**
@@ -814,7 +828,7 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
  *
  * @param customer - Stripe Customer object
  */
-export async function handleCustomerDeleted(customer: Stripe.Customer) {
+export async function handleCustomerDeleted(customer: Stripe.Customer): Promise<CurrentHandlerEffectResult> {
   const customerId = customer.id
 
   logger.warn('📥 Webhook: Customer deleted from Stripe', {
@@ -835,7 +849,7 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
 
   if (!venue) {
     logger.warn('⚠️ Webhook: No venue found for deleted customer', { customerId })
-    return
+    return 'NOOP_SUBJECT_NOT_FOUND'
   }
 
   logger.warn('⚠️ Webhook: Removing Stripe customer ID from venue', {
@@ -867,6 +881,7 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
     venueId: venue.id,
     deactivatedFeatures: deactivatedCount.count,
   })
+  return 'APPLIED'
 }
 
 /**
@@ -876,7 +891,7 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
  *
  * @param paymentMethod - Stripe PaymentMethod object
  */
-export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentMethod) {
+export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentMethod): Promise<CurrentHandlerEffectResult> {
   const paymentMethodId = paymentMethod.id
   const customerId = paymentMethod.customer as string
   const fingerprint = paymentMethod.card?.fingerprint
@@ -891,12 +906,12 @@ export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentM
 
   if (!customerId) {
     logger.warn('⚠️ Webhook: Payment method has no customer', { paymentMethodId })
-    return
+    return 'NOOP_INVALID_INPUT'
   }
 
   if (!fingerprint) {
     logger.warn('⚠️ Webhook: Payment method has no fingerprint (not a card)', { paymentMethodId })
-    return
+    return 'NOOP_INVALID_INPUT'
   }
 
   try {
@@ -927,6 +942,7 @@ export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentM
         removedPaymentMethodId: paymentMethodId,
         keptPaymentMethodId: duplicates[0].id,
       })
+      return 'APPLIED'
 
       // Note: This won't send an error to the user immediately since the webhook
       // happens asynchronously. The frontend will simply not see the new payment method
@@ -993,7 +1009,9 @@ export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentM
           error: setDefaultError instanceof Error ? setDefaultError.message : 'Unknown error',
         })
         // Don't throw - setting as default is important but not critical for the webhook
+        return 'NOOP_PROCESSING_FAILED'
       }
+      return 'APPLIED'
     }
   } catch (error) {
     // Don't throw - this is informational and shouldn't block the webhook
@@ -1001,6 +1019,7 @@ export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentM
       paymentMethodId,
       error: error instanceof Error ? error.message : 'Unknown error',
     })
+    return 'NOOP_PROCESSING_FAILED'
   }
 }
 
@@ -1009,7 +1028,7 @@ export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentM
  *
  * @param paymentIntent - Stripe PaymentIntent object
  */
-export async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent) {
+export async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent): Promise<PaymentIntentEffectResult> {
   const paymentIntentId = paymentIntent.id
   const metadata = paymentIntent.metadata
 
@@ -1019,7 +1038,7 @@ export async function handlePaymentIntentSucceeded(paymentIntent: Stripe.Payment
       paymentIntentId,
       type: metadata?.type,
     })
-    return
+    return 'PAYMENT_INTENT_NOOP_NOT_TOKEN'
   }
 
   logger.info('📥 Webhook: Token purchase payment succeeded', {
@@ -1053,6 +1072,7 @@ export async function handlePaymentIntentSucceeded(paymentIntent: Stripe.Payment
     })
     throw error
   }
+  return 'TOKEN_PAYMENT_INTENT_APPLIED'
 }
 
 /**
@@ -1060,7 +1080,7 @@ export async function handlePaymentIntentSucceeded(paymentIntent: Stripe.Payment
  *
  * @param paymentIntent - Stripe PaymentIntent object
  */
-export async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentIntent) {
+export async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentIntent): Promise<PaymentIntentEffectResult> {
   const paymentIntentId = paymentIntent.id
   const metadata = paymentIntent.metadata
 
@@ -1070,7 +1090,7 @@ export async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentInt
       paymentIntentId,
       type: metadata?.type,
     })
-    return
+    return 'PAYMENT_INTENT_NOOP_NOT_TOKEN'
   }
 
   logger.warn('⚠️ Webhook: Token purchase payment failed', {
@@ -1104,367 +1124,150 @@ export async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentInt
     })
     throw error
   }
+  return 'TOKEN_PAYMENT_INTENT_APPLIED'
 }
 
 /**
- * Maximum number of reprocessing attempts for a FAILED event before it is left
- * alone for manual investigation. Enforced by
- * `StripeWebhookReconciliationJob` (which only picks up rows below this count),
- * NOT here — this constant is the single place both sides agree on.
+ * Kept as a compatibility export for existing Superadmin consumers. The durable
+ * inbox owns the actual effect budget.
  */
 export const STRIPE_WEBHOOK_MAX_RETRIES = 5
 
-/**
- * Main webhook event dispatcher
- * Routes events to appropriate handlers
- *
- * Implements idempotency to prevent duplicate event processing
- * by tracking events in the StripeWebhookEvent table
- *
- * @param event - Stripe Event object
- * @param opts.claimedEventId - `WebhookEvent.id` of a row the CALLER already
- *   owns. Pass this ONLY from a replay path (`replayStripeWebhookEvent`).
- *
- *   Why it exists: the claim below is a `create` on a UNIQUE column, so a
- *   second call for the same `event.id` hits P2002 and returns early. That is
- *   exactly right for a duplicate delivery from Stripe — but it also meant a
- *   replay of an already-claimed FAILED row silently did NOTHING while
- *   reporting success. Skipping the claim (instead of deleting and re-creating
- *   the row) keeps the idempotency guarantee intact for real duplicates.
- */
-export async function handleStripeWebhookEvent(event: Stripe.Event, opts?: { claimedEventId?: string }) {
-  logger.info('📥 Webhook received', { type: event.type, id: event.id, replay: !!opts?.claimedEventId })
-
-  const startTime = Date.now()
-  let webhookEventId: string | null = opts?.claimedEventId ?? null
+async function enrichCurrentWebhookVenue(
+  event: Stripe.Event,
+  localWebhookEventId: string,
+): Promise<'APPLIED' | 'NOT_APPLICABLE' | 'SKIPPED_INVALID' | 'FAILED_NON_FATAL'> {
+  const eventData = event.data.object as any
+  let venueId: string | null = typeof eventData.metadata?.venueId === 'string' ? eventData.metadata.venueId : null
+  if (!venueId && eventData.subscription) {
+    const subscriptionId = typeof eventData.subscription === 'string' ? eventData.subscription : eventData.subscription.id
+    const venueFeature = await prisma.venueFeature.findFirst({
+      where: { stripeSubscriptionId: subscriptionId },
+      select: { venueId: true },
+    })
+    venueId = venueFeature?.venueId ?? null
+  }
+  if (!venueId) return 'NOT_APPLICABLE'
 
   try {
-    // 🔒 ATOMIC IDEMPOTENCY: Create event record to claim this event
-    // If another process already claimed it, Prisma will throw unique constraint error
-    // (skipped on replay — the caller already holds the claim)
-    if (!webhookEventId) {
-      try {
-        const webhookEvent = await prisma.webhookEvent.create({
-          data: {
-            stripeEventId: event.id,
-            eventType: event.type,
-            payload: event as any,
-            status: 'PENDING',
-          },
-        })
-        webhookEventId = webhookEvent.id
-      } catch (error: any) {
-        // P2002 = Unique constraint violation (stripeEventId already exists)
-        if (error.code === 'P2002') {
-          logger.info('⏭️ Webhook event already being processed by another instance, skipping', {
-            eventId: event.id,
-            type: event.type,
-          })
-          return
-        }
-        // Re-throw other errors
-        throw error
-      }
-    }
-
-    // 📊 Update webhook event with venue info if available
-    // Extract venueId from event data
-    let venueId: string | null = null
-    const eventData = event.data.object as any
-
-    // Try to find venueId from subscription metadata
-    if (eventData.metadata?.venueId) {
-      venueId = eventData.metadata.venueId
-    } else if (eventData.subscription) {
-      // For invoice events, fetch subscription to get venueId
-      const subscriptionId = typeof eventData.subscription === 'string' ? eventData.subscription : eventData.subscription.id
-      const venueFeature = await prisma.venueFeature.findFirst({
-        where: { stripeSubscriptionId: subscriptionId },
-        select: { venueId: true },
+    const { platformWebhookRuntime } = await import('./stripe-webhooks/platformWebhookRuntime.service')
+    const applied = await platformWebhookRuntime.inbox.enrichVenueId(localWebhookEventId, venueId)
+    if (!applied) {
+      logger.warn('⚠️ Webhook: venueId from event metadata is invalid or conflicts with durable enrichment', {
+        eventId: event.id,
+        type: event.type,
+        venueId,
       })
-      venueId = venueFeature?.venueId || null
+      return 'SKIPPED_INVALID'
     }
-
-    // Update the webhook event with venueId if found.
-    // ⚠️ metadata.venueId is UNTRUSTED input from Stripe — a venue that was deleted (or an
-    // id from another environment) violates WebhookEvent_venueId_fkey. Because this runs
-    // BEFORE the switch below, an unvalidated id would crash the whole webhook before the
-    // event is ever processed, and the controller returns 200 to Stripe (no retry) → the
-    // event would be silently lost. This enrichment is monitoring-only, so it must NEVER be
-    // able to block event processing: validate the venue exists, and keep it non-fatal.
-    if (venueId && webhookEventId) {
-      try {
-        const venueExists = await prisma.venue.findUnique({
-          where: { id: venueId },
-          select: { id: true },
-        })
-
-        if (venueExists) {
-          await prisma.webhookEvent.update({
-            where: { id: webhookEventId },
-            data: { venueId },
-          })
-        } else {
-          logger.warn('⚠️ Webhook: venueId from event metadata does not exist, skipping enrichment', {
-            eventId: event.id,
-            type: event.type,
-            venueId,
-          })
-        }
-      } catch (enrichError) {
-        // Monitoring metadata must never block event processing
-        logger.warn('⚠️ Webhook: failed to enrich event with venueId (non-fatal)', {
-          eventId: event.id,
-          type: event.type,
-          venueId,
-          error: enrichError instanceof Error ? enrichError.message : 'Unknown error',
-        })
-      }
-    }
-
-    logger.info('🎯 Processing webhook event', { type: event.type, id: event.id, webhookEventId })
-
-    // Process event based on type
-    switch (event.type) {
-      case 'customer.subscription.created':
-        // Handle new subscription created (immediate payment, no trial)
-        await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
-        break
-
-      case 'customer.subscription.updated':
-        await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
-        break
-
-      case 'customer.subscription.deleted':
-        await handleSubscriptionDeleted(event.data.object as Stripe.Subscription)
-        break
-
-      case 'invoice.payment_succeeded':
-        await handleInvoicePaymentSucceeded(event.data.object as Stripe.Invoice)
-        break
-
-      case 'invoice.payment_failed':
-        await handleInvoicePaymentFailed(event.data.object as Stripe.Invoice)
-        break
-
-      case 'customer.subscription.trial_will_end':
-        await handleSubscriptionTrialWillEnd(event.data.object as Stripe.Subscription)
-        break
-
-      case 'customer.deleted':
-        await handleCustomerDeleted(event.data.object as Stripe.Customer)
-        break
-
-      case 'payment_method.attached':
-        await handlePaymentMethodAttached(event.data.object as Stripe.PaymentMethod)
-        break
-
-      case 'payment_intent.succeeded':
-        await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent)
-        break
-
-      case 'payment_intent.payment_failed':
-        await handlePaymentIntentFailed(event.data.object as Stripe.PaymentIntent)
-        break
-
-      case 'checkout.session.completed': {
-        const session = event.data.object as Stripe.Checkout.Session
-        if (session.metadata?.type === 'credit_pack_purchase') {
-          // LEGACY FALLBACK ONLY. New credit-pack sessions are created on the
-          // venue's connected account and fulfilled by the Stripe CONNECT
-          // webhook (reservation-deposit-webhook.service). This platform-account
-          // branch remains solely to fulfill any in-flight legacy sessions that
-          // were created on the platform account before the routing fix — hence
-          // no connectAccountId (retrieve happens on the platform account).
-          logger.info('📥 Webhook (platform, LEGACY): Credit pack checkout completed', {
-            sessionId: session.id,
-            venueId: session.metadata.venueId,
-            packId: session.metadata.packId,
-          })
-          await fulfillCreditPackPurchase(session.id)
-        }
-        // Only our TPV-Shop terminal orders carry this metadata flag
-        if (session.metadata?.terminalOrderId) {
-          const { handleTerminalOrderCheckoutCompleted } = await import('./stripe-webhooks/terminalOrderCheckoutCompleted.handler')
-          await handleTerminalOrderCheckoutCompleted(session)
-        }
-        // Base-plan self-serve checkout (createPlanCheckoutSession), PLAN_PRO or PLAN_PREMIUM.
-        // Stripe creates the subscription, but nothing creates the local VenueFeature tier row —
-        // fulfill it here.
-        if (
-          session.metadata?.tierCode &&
-          (PAID_PLAN_TIER_CODES as readonly string[]).includes(session.metadata.tierCode) &&
-          session.metadata.venueId
-        ) {
-          logger.info('📥 Webhook: base-plan checkout completed', {
-            sessionId: session.id,
-            venueId: session.metadata.venueId,
-            tierCode: session.metadata.tierCode,
-            interval: session.metadata.interval,
-          })
-          const result = await fulfillPlanCheckout(session)
-
-          // 🪑 Free→Paid RE-UPGRADE via self-serve checkout: the base plan is now active, so
-          // reactivate any seats the Free-tier cap previously deactivated (paid = unlimited).
-          // Already inside the PAID_PLAN_TIER_CODES guard above; no-op when nothing was
-          // cap-deactivated; never throws.
-          await runSeatReactivationSafely(result?.venueId ?? session.metadata.venueId)
-
-          // 🔔 Emit socket event for real-time UI update (mirrors handleSubscriptionUpdated)
-          if (result && socketManager.getServer()) {
-            socketManager.broadcastToVenue(result.venueId, 'subscription.activated' as any, {
-              featureId: result.featureId,
-              featureCode: result.featureCode,
-              subscriptionId: result.subscriptionId,
-              status: 'active',
-              endDate: result.endDate,
-              timestamp: new Date(),
-            })
-            logger.info('📡 Socket event emitted: subscription.activated', {
-              venueId: result.venueId,
-              featureCode: result.featureCode,
-            })
-          }
-        }
-        break
-      }
-
-      default:
-        logger.info('ℹ️ Webhook: Unhandled event type', { type: event.type })
-    }
-
-    // 📊 UPDATE MONITORING LOG: Mark as success with processing time
-    const processingTime = Date.now() - startTime
-    if (webhookEventId) {
-      await prisma.webhookEvent.update({
-        where: { id: webhookEventId },
-        data: {
-          status: 'SUCCESS',
-          processingTime,
-          processedAt: new Date(),
-        },
-      })
-    }
-
-    logger.info('✅ Webhook processed successfully', { type: event.type, id: event.id, processingTime: `${processingTime}ms` })
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-
-    logger.error('❌ Webhook processing failed', {
+    return 'APPLIED'
+  } catch (error) {
+    logger.warn('⚠️ Webhook: failed to enrich event with venueId (non-fatal)', {
+      eventId: event.id,
       type: event.type,
-      id: event.id,
-      error: errorMessage,
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
     })
-
-    // 📊 UPDATE MONITORING LOG: Mark as failed with error details
-    const processingTime = Date.now() - startTime
-    if (webhookEventId) {
-      try {
-        await prisma.webhookEvent.update({
-          where: { id: webhookEventId },
-          data: {
-            status: 'FAILED',
-            errorMessage: errorMessage,
-            processingTime,
-            // On a REPLAY the attempt was already counted up-front by
-            // `replayStripeWebhookEvent` (so a hard crash mid-replay still
-            // consumes it and can't crash-loop). Incrementing here too would
-            // burn two attempts per replay. `undefined` = leave the column
-            // untouched in Prisma.
-            retryCount: opts?.claimedEventId ? undefined : { increment: 1 },
-          },
-        })
-      } catch (updateError) {
-        logger.error('Failed to update webhook event status', { updateError })
-      }
-
-      // If failed 3+ times, log critical alert (in production, send to PagerDuty/Slack)
-      if (webhookEventId) {
-        try {
-          const failedEvent = await prisma.webhookEvent.findUnique({
-            where: { id: webhookEventId },
-            select: { retryCount: true },
-          })
-
-          if (failedEvent && failedEvent.retryCount >= 3) {
-            logger.error('🚨 CRITICAL: Webhook failed 3+ times', {
-              eventId: event.id,
-              type: event.type,
-              retryCount: failedEvent.retryCount,
-              error: errorMessage,
-            })
-            // TODO: Send alert to ops team (Slack/PagerDuty)
-            // await alertOps(`Webhook ${event.id} failed ${failedEvent.retryCount} times`)
-          }
-        } catch (dbError) {
-          // Don't throw if DB query fails - webhook failure is more important
-          logger.warn('⚠️ Failed to check webhook retry count', {
-            eventId: event.id,
-            error: dbError instanceof Error ? dbError.message : 'Unknown error',
-          })
-        }
-      }
-    }
-
-    throw error
+    return 'FAILED_NON_FATAL'
   }
 }
 
+async function fulfillLegacyPlanCheckout(session: Stripe.Checkout.Session): Promise<CurrentHandlerEffectResult> {
+  logger.info('📥 Webhook: base-plan checkout completed', {
+    sessionId: session.id,
+    venueId: session.metadata?.venueId,
+    tierCode: session.metadata?.tierCode,
+    interval: session.metadata?.interval,
+  })
+  const result = await fulfillPlanCheckout(session)
+  await runSeatReactivationSafely(result?.venueId ?? session.metadata!.venueId)
+  if (result && socketManager.getServer()) {
+    socketManager.broadcastToVenue(result.venueId, 'subscription.activated' as any, {
+      featureId: result.featureId,
+      featureCode: result.featureCode,
+      subscriptionId: result.subscriptionId,
+      status: 'active',
+      endDate: result.endDate,
+      timestamp: new Date(),
+    })
+    logger.info('📡 Socket event emitted: subscription.activated', {
+      venueId: result.venueId,
+      featureCode: result.featureCode,
+    })
+  }
+  return result ? 'APPLIED' : 'NOOP_NOT_APPLICABLE'
+}
+
+const currentStripeWebhookDispatcher = createCurrentStripeWebhookDispatcher({
+  commercialAdapter: event => commercialStripeWebhookAdapter.reconcile(event),
+  enrichVenue: enrichCurrentWebhookVenue,
+  handlers: {
+    subscriptionUpdated: handleSubscriptionUpdated,
+    subscriptionDeleted: handleSubscriptionDeleted,
+    invoicePaymentSucceeded: handleInvoicePaymentSucceeded,
+    invoicePaymentFailed: handleInvoicePaymentFailed,
+    subscriptionTrialWillEnd: handleSubscriptionTrialWillEnd,
+    customerDeleted: handleCustomerDeleted,
+    paymentMethodAttached: handlePaymentMethodAttached,
+    paymentIntentSucceeded: handlePaymentIntentSucceeded,
+    paymentIntentFailed: handlePaymentIntentFailed,
+    async creditPackCheckout(session) {
+      logger.info('📥 Webhook (platform, LEGACY): Credit pack checkout completed', {
+        sessionId: session.id,
+        venueId: session.metadata?.venueId,
+        packId: session.metadata?.packId,
+      })
+      const result = await fulfillCreditPackPurchase(session.id)
+      // The existing helper exposes only subject found/not-found, not whether
+      // this invocation inserted or hit its idempotent existing purchase.
+      return result ? 'MATCHED' : 'NOOP_NOT_APPLICABLE'
+    },
+    async terminalOrderCheckout(session) {
+      const { handleTerminalOrderCheckoutCompleted } = await import('./stripe-webhooks/terminalOrderCheckoutCompleted.handler')
+      return handleTerminalOrderCheckoutCompleted(session)
+    },
+    legacyPlanCheckout: fulfillLegacyPlanCheckout,
+  },
+  isLegacyPaidPlanTier: tierCode => (PAID_PLAN_TIER_CODES as readonly string[]).includes(tierCode),
+  logUnhandled: type => logger.info('ℹ️ Webhook: Unhandled event type', { type }),
+})
+
 /**
- * Reprocess a stored `WebhookEvent` row that did not reach SUCCESS.
- *
- * This is the ONLY correct way to retry a Stripe platform webhook, and it is
- * shared by both retry paths (the `StripeWebhookReconciliationJob` sweeper and
- * the superadmin "retry" action). Calling `handleStripeWebhookEvent` directly
- * for an already-stored event does nothing: the claim `create` hits P2002 and
- * returns early.
- *
- * The attempt is counted BEFORE processing so that a hard crash (OOM, process
- * kill) still consumes it — otherwise a poison-pill event could crash-loop the
- * sweeper forever.
- *
- * Replays the STORED payload rather than re-fetching from Stripe: that is what
- * Stripe itself does on a redelivery, it keeps the retry usable when the Stripe
- * API is the thing that's down, and it avoids burning API quota per pass.
- *
- * @returns `{ replayed: false }` when the row is not eligible (already SUCCESS,
- *   or out of attempts) — callers should treat that as "nothing to do", not an
- *   error.
+ * Exact current platform fan-out. It never owns WebhookEvent persistence or
+ * phase state; callers must hold an EFFECT lease.
+ */
+export function dispatchCurrentStripeWebhookEffects(event: Stripe.Event, localWebhookEventId: string) {
+  return currentStripeWebhookDispatcher(event, localWebhookEventId)
+}
+
+/**
+ * Compatibility adapter for legacy in-process callers. New HTTP ingress calls
+ * the runtime directly so persistence failures can map to HTTP 503.
+ */
+export async function handleStripeWebhookEvent(event: Stripe.Event): Promise<void> {
+  const { platformWebhookRuntime } = await import('./stripe-webhooks/platformWebhookRuntime.service')
+  const observed = await platformWebhookRuntime.inbox.observe({
+    stripeEventId: event.id,
+    eventType: event.type,
+    payload: event,
+  })
+  await platformWebhookRuntime.processor.processIngress(observed.event.id, {
+    mode: platformWebhookRuntime.mode,
+    created: observed.created,
+  })
+}
+
+/**
+ * Compatibility adapter consumed by Superadmin until A1c-c adds typed manual
+ * retry responses. It acquires a manual EFFECT lease and never writes
+ * WebhookEvent directly.
  */
 export async function replayStripeWebhookEvent(webhookEventId: string): Promise<{ replayed: boolean; reason?: string }> {
-  const row = await prisma.webhookEvent.findUnique({
-    where: { id: webhookEventId },
-    select: { id: true, stripeEventId: true, eventType: true, status: true, retryCount: true, payload: true },
-  })
-
-  if (!row) throw new Error('Webhook event not found')
-  if (row.status === 'SUCCESS') return { replayed: false, reason: 'ALREADY_SUCCEEDED' }
-  if (row.retryCount >= STRIPE_WEBHOOK_MAX_RETRIES) {
-    return { replayed: false, reason: 'MAX_RETRIES_EXHAUSTED' }
-  }
-
-  // Count the attempt up-front (crash-safe) and mark it in flight so a
-  // concurrent sweeper pass skips this row.
-  await prisma.webhookEvent.update({
-    where: { id: row.id },
-    data: { status: 'RETRYING', retryCount: { increment: 1 } },
-  })
-
-  logger.info('🔄 Replaying Stripe webhook event', {
-    webhookEventId: row.id,
-    stripeEventId: row.stripeEventId,
-    eventType: row.eventType,
-    attempt: row.retryCount + 1,
-  })
-
-  // `payload` is the full Stripe.Event as delivered — signature was already
-  // verified at ingest, so no re-verification is needed (or possible) here.
-  const event = row.payload as unknown as Stripe.Event
-
-  // handleStripeWebhookEvent owns the SUCCESS/FAILED bookkeeping and rethrows
-  // on failure; let it propagate so the caller can log/alert per its own rules.
-  await handleStripeWebhookEvent(event, { claimedEventId: row.id })
-
+  const { platformWebhookRuntime } = await import('./stripe-webhooks/platformWebhookRuntime.service')
+  await platformWebhookRuntime.inbox.load(webhookEventId)
+  const lease = await platformWebhookRuntime.inbox.acquire(webhookEventId, 'EFFECT', { manual: true })
+  if (!lease) return { replayed: false, reason: 'NOT_ELIGIBLE' }
+  await platformWebhookRuntime.processor.processEffect(webhookEventId, lease)
   return { replayed: true }
 }
 

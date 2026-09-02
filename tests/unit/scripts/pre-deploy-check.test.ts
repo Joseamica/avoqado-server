@@ -5,12 +5,48 @@ import { spawnSync } from 'node:child_process'
 
 describe('pre-deploy database safety contract', () => {
   const source = fs.readFileSync(path.resolve(process.cwd(), 'scripts/pre-deploy-check.sh'), 'utf8')
+  const packageJson = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')) as {
+    scripts: Record<string, string>
+  }
 
-  it('runs destructive migration replays before the ordinary integration project', () => {
-    const migrations = source.indexOf('npm run test:integration:migrations')
-    const ordinary = source.indexOf('npm run test:integration;', migrations + 1)
+  it('runs migration replays and H1 integration through the guarded database before current-schema integration', () => {
+    const migrations = source.indexOf('npm run test:integration:migrations:guarded')
+    const h1 = source.indexOf('npm run test:integration:h1:guarded', migrations + 1)
+    const commercialContractV2 = source.indexOf('npm run test:integration:commercial-contract-v2-migration', h1 + 1)
+    const commercialIsolated = source.indexOf('npm run test:integration:commercial-isolated', commercialContractV2 + 1)
+    const ordinary = source.indexOf('npm run test:integration;', commercialIsolated + 1)
     expect(migrations).toBeGreaterThanOrEqual(0)
-    expect(ordinary).toBeGreaterThan(migrations)
+    expect(h1).toBeGreaterThan(migrations)
+    expect(commercialContractV2).toBeGreaterThan(h1)
+    expect(commercialIsolated).toBeGreaterThan(commercialContractV2)
+    expect(ordinary).toBeGreaterThan(commercialIsolated)
+    expect(packageJson.scripts['test:integration:migrations:guarded']).toBe(
+      'node scripts/run-with-h1-test-db.cjs npm run test:integration:migrations',
+    )
+    expect(packageJson.scripts['test:integration:h1:guarded']).toBe(
+      'node scripts/run-with-h1-test-db.cjs npm run test:integration:h1',
+    )
+    expect(packageJson.scripts['test:integration:commercial-isolated']).toBe(
+      'node scripts/commercial/run-all-c3-integration-tests.cjs',
+    )
+    expect(packageJson.scripts['test:integration:commercial-contract-v2-migration']).toBe(
+      "NODE_OPTIONS='--max-old-space-size=8192' node scripts/commercial/run-contract-v2-migration-tests.cjs",
+    )
+    expect(packageJson.scripts['test:integration']).toContain('tests/integration/master-catalog/')
+    expect(packageJson.scripts['test:integration']).toContain('tests/integration/inventory/recipe-cost-serialization')
+    expect(packageJson.scripts['test:integration']).toContain('tests/integration/commercial/')
+  })
+
+  it('runs the complete unit gate as four bounded shards with the required heap', () => {
+    expect(source).not.toContain('npm run test:unit')
+    expect(source).toContain('for shard in 1 2 3 4; do')
+    expect(source).toContain("NODE_OPTIONS='--max-old-space-size=8192' npx jest --selectProjects unit")
+    expect(source).toContain('--shard="$shard/4" --maxWorkers=2 --ci')
+  })
+
+  it('uses the bounded production typecheck before the sharded test gates', () => {
+    expect(source).toContain('npm run typecheck:build')
+    expect(source).not.toContain('if npm run typecheck;')
   })
 
   it('preserves an existing DATABASE_URL while loading dotenv', () => {
@@ -62,7 +98,10 @@ describe('pre-deploy database safety contract', () => {
       expect(result.status).toBe(0)
       const childCalls = fs.readFileSync(captureFile, 'utf8').split('\n')
       expect(childCalls).toContain(`run test:integration|${testDatabaseUrl}|${testDatabaseUrl}`)
-      expect(childCalls).toContain(`run test:integration:migrations|${testDatabaseUrl}|${testDatabaseUrl}`)
+      expect(childCalls).toContain(`run test:integration:migrations:guarded|${testDatabaseUrl}|${testDatabaseUrl}`)
+      expect(childCalls).toContain(`run test:integration:h1:guarded|${testDatabaseUrl}|${testDatabaseUrl}`)
+      expect(childCalls).toContain(`run test:integration:commercial-contract-v2-migration|${testDatabaseUrl}|${testDatabaseUrl}`)
+      expect(childCalls).toContain(`run test:integration:commercial-isolated|${testDatabaseUrl}|${testDatabaseUrl}`)
       expect(childCalls).toContain(`run assistant:consistency|${testDatabaseUrl}|${testDatabaseUrl}`)
       expect(result.stdout).toContain('test DB configurada')
       expect(result.stdout).not.toContain(databaseUrl)

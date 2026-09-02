@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api.avoqado.io/contracts/commercial/campaign-v1.schema.json",
+  "title": "Avoqado Commercial Campaign Version v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "campaignVersionId",
+    "campaignCode",
+    "version",
+    "status",
+    "startsAt",
+    "endsAt",
+    "allowedRuleCodeGroups",
+    "rules"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "campaignVersionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "campaignCode": { "$ref": "#/definitions/code" },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["ACTIVE", "INACTIVE"] },
+    "startsAt": { "type": "string", "format": "date-time" },
+    "endsAt": { "type": "string", "format": "date-time" },
+    "allowedRuleCodeGroups": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "type": "array", "minItems": 2, "maxItems": 10, "uniqueItems": true, "items": { "$ref": "#/definitions/code" } }
+    },
+    "rules": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/definitions/rule" } }
+  },
+  "definitions": {
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "productCodes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/code" } },
+        "productKinds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["PLAN", "POS", "MODULE"] } },
+        "bundleCodes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/code" } }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "type", "priority", "target", "cycles"],
+      "properties": {
+        "code": { "$ref": "#/definitions/code" },
+        "type": { "enum": ["FIXED_PRICE", "PERCENT_OFF", "AMOUNT_OFF", "FREE_PERIOD", "BUNDLE_PRICE"] },
+        "priority": { "type": "integer", "minimum": -10000, "maximum": 10000 },
+        "target": { "$ref": "#/definitions/target" },
+        "cycles": { "type": "integer", "minimum": 1, "maximum": 120 },
+        "amountMinor": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "percentBasisPoints": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["FIXED_PRICE", "AMOUNT_OFF", "BUNDLE_PRICE"] } } },
+          "then": { "required": ["amountMinor"], "not": { "required": ["percentBasisPoints"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "PERCENT_OFF" } } },
+          "then": { "required": ["percentBasisPoints"], "not": { "required": ["amountMinor"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "FREE_PERIOD" } } },
+          "then": { "not": { "anyOf": [{ "required": ["amountMinor"] }, { "required": ["percentBasisPoints"] }] } }
+        }
+      ]
+    }
+  }
+}

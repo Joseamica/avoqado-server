@@ -2086,6 +2086,71 @@ $1,534.67 including 16% tax.
 **Use Case**: Avoqado Centro subscribes to "AI Assistant" ($39.99/month) and "Advanced Reports" ($19.99/month) while Avoqado Sur only has
 basic features.
 
+#### **StripeCheckoutOrigin**
+
+**Purpose**: Write-once local authority identifying the owner and exclusive route of newly created Stripe Checkout Sessions. P3-1A0 writes
+legacy base-plan sessions as `LEGACY / LEGACY_PLAN_CHECKOUT` before returning the hosted URL; Stripe metadata is only a lookup pointer.
+
+**Safety constraints**: Checkout session ID is the primary key, Venue and Feature foreign keys use `RESTRICT`, the allowed owner/route pair
+is enforced by a PostgreSQL `CHECK`, and a database trigger rejects both `UPDATE` and `DELETE`. Existing sessions are intentionally not
+backfilled from metadata.
+
+#### **WebhookEvent platform inbox & StripeObjectBinding**
+
+**Purpose**: `WebhookEvent` now keeps two independent durable pipelines: local routing classification and the existing Stripe effect. Each
+phase has its own attempts and due time while sharing one expiring claim lease. `StripeObjectBinding` is the append-only local authority
+that links later Stripe objects to the exact owner, route and business subject selected by the classifier.
+
+**Safety constraints**: Historical events become terminal `LEGACY_UNCLASSIFIED` records without reading payload or metadata. New events
+start `PENDING_CLASSIFICATION` and immediately due. PostgreSQL enforces the frozen owner/route/subject matrix, complete non-empty lease and
+authority tuples, resolved terminal classification states, non-negative attempts and an explicit reason for `UNRESOLVED`. A classified event
+tuple cannot be changed or cleared; object bindings cannot be updated or deleted. Lease completion/retry/finalization uses an unexpired
+event + phase + random claim token + worker compare-and-swap, so a recovered stale worker cannot overwrite the current owner.
+
+`StripeObjectBinding` also validates object type against authority: checkout sessions accept commercial, legacy-plan-origin or terminal;
+subscriptions accept commercial or legacy `VenueFeature`; invoices additionally accept token-invoice; payment intents additionally accept
+token-payment-intent; charges accept only commercial or legacy `VenueFeature`. Venue billing never creates a binding, token authority never
+binds a charge, and a legacy checkout origin cannot authorize a subscription.
+
+Classifier lookups use non-unique B-tree indexes on `TerminalOrder.stripeCheckoutSessionId` and `TokenPurchase.stripeInvoiceId`. They speed
+local lookup while deliberately preserving legacy duplicates; A1b must query with ambiguity limit two rather than assume uniqueness.
+
+**Compatibility**: Existing `status` and `retryCount` remain the effect projection. Effect lease acquisition increments both
+`effectAttempts` and `retryCount`; classification never changes them. A null next-attempt means terminal/not scheduled, not due now.
+
+#### **WebhookManualRetryResultOutbox**
+
+**Purpose**: Durable, local-only result-audit intent for an accepted Superadmin EFFECT retry. The inbox claims EFFECT and inserts this row
+in one PostgreSQL statement before dispatch. A restart-safe sweeper derives `SUCCEEDED`/`FAILED` from the exact
+`WebhookDispatchObservation(eventId,effectAttempt)` and conservatively records `REJECTED`, `INTERRUPTED` or `UNKNOWN` when exact evidence is
+not available. ActivityLog insertion and outbox delivery acknowledgement commit in the same transaction under stable request/result IDs.
+
+**Retention**: `webhookEventId` and `requestActivityLogId` use `RESTRICT`; the immutable request audit is intentionally retained as the
+authority for the eventual result. `actorId` and `venueId` are scalar snapshots, not identity-retaining foreign keys. A result ActivityLog
+links `staffId`/`venueId` only while those rows still exist and always preserves the original snapshot IDs in its JSON data. Therefore a
+live-demo Staff/Venue can be deleted without losing the audit chain; referenced WebhookEvent/outbox/request evidence remains.
+
+**Safety constraints**: Authority/correlation, attempt and EFFECT claim identity are immutable; dispatch start and final outcome are
+write-once; delivered rows are terminal; `(webhookEventId,effectAttempt)`, request/result ActivityLog IDs and claim tokens are unique.
+Conflicting intents abort the complete claim statement, so a collision cannot spend an attempt without an outbox row.
+
+---
+
+### 💼 **Commercial Platform**
+
+#### **CommercialQuotePreviewBridge**
+
+**Purpose**: Immutable, one-to-one binding between a signed public schema-v2 quote preview and the authenticated venue quote created from
+it. It makes retries idempotent without trusting prices, tenant identity, campaign authority, or subject fields supplied by a browser.
+
+**Authority and retention**: `previewQuoteId` and `venueQuoteId` are unique. The row snapshots the preview checksum, acquisition context,
+organization, venue, actor, and selection fingerprint. All five foreign keys use `RESTRICT`, so a quote, acquisition context, organization,
+venue, or actor cannot be removed while it is evidence for a commercial quote. The service locks and revalidates all authorities before
+inserting it; replay returns the already verified venue quote and never emits or audits a second one.
+
+**Concurrency**: Concurrent first use is resolved by the exact `previewQuoteId` unique constraint. The losing transaction rolls back its
+quote and audit, then performs one bounded read of the winner. Other uniqueness or serialization errors are not retried.
+
 ---
 
 ### 🔄 **POS Integration**
@@ -2174,5 +2239,5 @@ improvement with user feedback on accuracy.
 
 ---
 
-_Last updated: January 2026_ _Schema version: v3.0.0 (Multi-Org StaffOrganization Junction Table + Generic Payment Providers + Cost
-Management)_
+_Last updated: August 2026_ _Schema version: v3.1.0 (Commercial quote preview binding + Multi-Org StaffOrganization Junction Table + Generic
+Payment Providers + Cost Management)_

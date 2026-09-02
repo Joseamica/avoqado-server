@@ -113,6 +113,13 @@ const SUPERADMIN_ONLY_ALLOWLIST = new Set<string>([
   'platform-billing:configure',
   'platform-billing:issue',
   'platform-billing:delete',
+  // Global Avoqado SaaS catalog. The production routes are mounted below the
+  // SUPERADMIN parent router; explicit permissions separate reader, editor and
+  // publisher responsibilities for the control-plane UI and audit trail.
+  'commercial:read',
+  'commercial:edit',
+  'commercial:publish',
+  'commercial:reconcile_payment',
 ])
 
 // Permissions intentionally absent from INDIVIDUAL_PERMISSIONS_BY_RESOURCE.

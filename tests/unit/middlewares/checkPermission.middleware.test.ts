@@ -226,6 +226,8 @@ describe('checkPermission Middleware', () => {
             staffId: 'user_123',
             venueId: 'different_venue_456',
           },
+          active: true,
+          staff: { active: true },
         },
         select: { role: true, active: true, permissionSetId: true, permissionSet: true },
       })
@@ -286,7 +288,11 @@ describe('checkPermission Middleware', () => {
         await middleware(mockReq as Request, mockRes as Response, mockNext)
 
         expect(prisma.staffVenue.findUnique).toHaveBeenCalledWith({
-          where: { staffId_venueId: { staffId: 'user_123', venueId: 'venue_from_header' } },
+          where: {
+            staffId_venueId: { staffId: 'user_123', venueId: 'venue_from_header' },
+            active: true,
+            staff: { active: true },
+          },
           select: { role: true, active: true, permissionSetId: true, permissionSet: true },
         })
         expect(mockNext).toHaveBeenCalledWith()
@@ -308,7 +314,11 @@ describe('checkPermission Middleware', () => {
 
         expect(prisma.staffVenue.findUnique).toHaveBeenCalledWith(
           expect.objectContaining({
-            where: { staffId_venueId: { staffId: 'user_123', venueId: 'venue_from_url' } },
+            where: {
+              staffId_venueId: { staffId: 'user_123', venueId: 'venue_from_url' },
+              active: true,
+              staff: { active: true },
+            },
           }),
         )
       })

@@ -37,7 +37,12 @@ import { resolveRequestVenueId } from './checkPermission.middleware'
 async function requestIsSuperAdmin(authContext: { userId: string; isImpersonating?: boolean }): Promise<boolean> {
   if (authContext.isImpersonating) return false
   const superAdminVenue = await prisma.staffVenue.findFirst({
-    where: { staffId: authContext.userId, role: StaffRole.SUPERADMIN },
+    where: {
+      staffId: authContext.userId,
+      role: StaffRole.SUPERADMIN,
+      active: true,
+      staff: { active: true },
+    },
     select: { id: true },
   })
   return !!superAdminVenue

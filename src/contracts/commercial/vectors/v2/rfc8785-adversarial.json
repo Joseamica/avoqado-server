@@ -1,0 +1,31 @@
+{
+  "valid": [
+    {
+      "id": "nested-raw-utf16-order",
+      "input": { "z": { "😀": 1, "€": 2 }, "a": [{ "b": 1, "a": 2 }] },
+      "canonical": "{\"a\":[{\"a\":2,\"b\":1}],\"z\":{\"€\":2,\"😀\":1}}"
+    },
+    {
+      "id": "unicode-is-not-normalized",
+      "input": { "composed": "é", "decomposed": "é" },
+      "canonical": "{\"composed\":\"é\",\"decomposed\":\"é\"}"
+    },
+    {
+      "id": "magic-keys-are-data",
+      "input": { "__proto__": 1, "constructor": 2, "prototype": 3 },
+      "canonical": "{\"__proto__\":1,\"constructor\":2,\"prototype\":3}"
+    }
+  ],
+  "invalidKinds": [
+    "lone-surrogate",
+    "non-finite-number",
+    "bigint",
+    "undefined",
+    "symbol",
+    "function",
+    "sparse-array",
+    "cycle",
+    "non-plain-object",
+    "toJSON"
+  ]
+}

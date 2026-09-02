@@ -1,26 +1,37 @@
 const mockSessionCreate = jest.fn()
+const mockSessionExpire = jest.fn()
 const mockPriceList = jest.fn()
 jest.mock('stripe', () => {
   return jest.fn().mockImplementation(() => ({
-    checkout: { sessions: { create: mockSessionCreate } },
+    checkout: { sessions: { create: mockSessionCreate, expire: mockSessionExpire } },
     prices: { list: mockPriceList },
   }))
 })
 const mockFeatureFindFirst = jest.fn()
+const mockVenueFindUnique = jest.fn()
+const mockStripeCheckoutOriginCreate = jest.fn()
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    venue: {
+      findUnique: (...args: any[]) => mockVenueFindUnique(...args),
+    },
     feature: {
       findFirst: (...args: any[]) => mockFeatureFindFirst(...args),
+    },
+    stripeCheckoutOrigin: {
+      create: (...args: any[]) => mockStripeCheckoutOriginCreate(...args),
     },
   },
 }))
 
+import { ForbiddenError } from '../../../src/errors/AppError'
 import { createPlanCheckoutSession } from '../../../src/services/stripe.service'
 
 beforeEach(() => {
   jest.clearAllMocks()
   process.env.STRIPE_SECRET_KEY = 'sk_test_x'
+  mockVenueFindUnique.mockResolvedValue({ status: 'ACTIVE' })
   // Resolve the feature by the code the service queries (PLAN_PRO / PLAN_PREMIUM).
   mockFeatureFindFirst.mockImplementation(async ({ where }: any) => {
     const code = where?.code
@@ -29,9 +40,30 @@ beforeEach(() => {
   })
   mockPriceList.mockResolvedValue({ data: [{ id: 'price_monthly' }] })
   mockSessionCreate.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.com/c/pay/cs_1' })
+  mockSessionExpire.mockResolvedValue({ id: 'cs_1', status: 'expired' })
+  mockStripeCheckoutOriginCreate.mockResolvedValue({ stripeCheckoutSessionId: 'cs_1' })
 })
 
 describe('createPlanCheckoutSession', () => {
+  it.each(['LIVE_DEMO', 'TRIAL'] as const)('rejects %s before resolving prices, creating Stripe state or writing origin', async status => {
+    mockVenueFindUnique.mockResolvedValueOnce({ status })
+
+    const failure = await createPlanCheckoutSession({
+      venueId: 'v-demo',
+      customerId: 'cus_demo',
+      interval: 'monthly',
+      successUrl: 'https://dash/ok',
+      cancelUrl: 'https://dash/cancel',
+    }).catch(error => error)
+
+    expect(failure).toBeInstanceOf(ForbiddenError)
+    expect(failure).toEqual(expect.objectContaining({ statusCode: 403, code: 'LEGACY_PLAN_CHECKOUT_DEMO_VENUE_FORBIDDEN' }))
+    expect(mockFeatureFindFirst).not.toHaveBeenCalled()
+    expect(mockPriceList).not.toHaveBeenCalled()
+    expect(mockSessionCreate).not.toHaveBeenCalled()
+    expect(mockStripeCheckoutOriginCreate).not.toHaveBeenCalled()
+  })
+
   it('monthly: subscription-mode session with PLAN_PRO monthly price and the dashboard URLs', async () => {
     const url = await createPlanCheckoutSession({
       venueId: 'v1',
@@ -57,6 +89,145 @@ describe('createPlanCheckoutSession', () => {
     expect(arg.subscription_data.metadata).toEqual(expect.objectContaining({ venueId: 'v1', tierCode: 'PLAN_PRO' }))
     // IVA is baked into the price (inclusive) — Stripe Tax must NOT be enabled.
     expect(arg.automatic_tax).toBeUndefined()
+    expect(mockStripeCheckoutOriginCreate).toHaveBeenCalledWith({
+      data: {
+        stripeCheckoutSessionId: 'cs_1',
+        ownerKind: 'LEGACY',
+        routeKey: 'LEGACY_PLAN_CHECKOUT',
+        venueId: 'v1',
+        featureId: 'feat-pro',
+        stripeCustomerId: 'cus_1',
+        billingInterval: 'MONTHLY',
+      },
+    })
+    expect(mockSessionCreate.mock.invocationCallOrder[0]).toBeLessThan(mockStripeCheckoutOriginCreate.mock.invocationCallOrder[0])
+  })
+
+  it('does not return the remote URL until the durable local origin has been written', async () => {
+    let finishPersistence!: () => void
+    mockStripeCheckoutOriginCreate.mockReturnValueOnce(
+      new Promise(resolve => {
+        finishPersistence = () => resolve({ stripeCheckoutSessionId: 'cs_1' })
+      }),
+    )
+    let settled = false
+
+    const pending = createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      interval: 'monthly',
+      successUrl: 'https://dash/ok',
+      cancelUrl: 'https://dash/cancel',
+    }).finally(() => {
+      settled = true
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    expect(mockStripeCheckoutOriginCreate).toHaveBeenCalledTimes(1)
+    expect(settled).toBe(false)
+
+    finishPersistence()
+    await expect(pending).resolves.toBe('https://checkout.stripe.com/c/pay/cs_1')
+  })
+
+  it('reuses one explicit Stripe idempotency key across an ambiguous outer retry and originates only the returned session', async () => {
+    mockSessionCreate
+      .mockRejectedValueOnce(Object.assign(new Error('ambiguous Stripe response'), { code: 'ETIMEDOUT' }))
+      .mockResolvedValueOnce({ id: 'cs_after_retry', url: 'https://checkout.stripe.com/c/pay/cs_after_retry' })
+
+    await expect(
+      createPlanCheckoutSession({
+        venueId: 'v1',
+        customerId: 'cus_1',
+        interval: 'monthly',
+        successUrl: 'https://dash/ok',
+        cancelUrl: 'https://dash/cancel',
+      }),
+    ).resolves.toBe('https://checkout.stripe.com/c/pay/cs_after_retry')
+
+    expect(mockSessionCreate).toHaveBeenCalledTimes(2)
+    const firstIdempotencyKey = mockSessionCreate.mock.calls[0][1]?.idempotencyKey
+    const secondIdempotencyKey = mockSessionCreate.mock.calls[1][1]?.idempotencyKey
+    expect(firstIdempotencyKey).toEqual(expect.stringMatching(/^legacy-plan-checkout:[0-9a-f-]{36}$/))
+    expect(secondIdempotencyKey).toBe(firstIdempotencyKey)
+    expect(mockStripeCheckoutOriginCreate).toHaveBeenCalledTimes(1)
+    expect(mockStripeCheckoutOriginCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ stripeCheckoutSessionId: 'cs_after_retry' }),
+    })
+  })
+
+  it('persists the returned session origin before expiring and rejecting a null Checkout URL', async () => {
+    mockSessionCreate.mockResolvedValueOnce({ id: 'cs_without_url', url: null })
+
+    await expect(
+      createPlanCheckoutSession({
+        venueId: 'v1',
+        customerId: 'cus_1',
+        interval: 'monthly',
+        successUrl: 'https://dash/ok',
+        cancelUrl: 'https://dash/cancel',
+      }),
+    ).rejects.toThrow('Stripe Checkout Session created without a URL')
+
+    expect(mockStripeCheckoutOriginCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ stripeCheckoutSessionId: 'cs_without_url' }),
+    })
+    expect(mockSessionExpire).toHaveBeenCalledWith('cs_without_url')
+    expect(mockStripeCheckoutOriginCreate.mock.invocationCallOrder[0]).toBeLessThan(mockSessionExpire.mock.invocationCallOrder[0])
+  })
+
+  it('preserves the null-URL error when expiration cleanup also fails', async () => {
+    mockSessionCreate.mockResolvedValueOnce({ id: 'cs_without_url', url: null })
+    mockSessionExpire.mockRejectedValueOnce(new Error('Stripe cleanup unavailable'))
+
+    const failure = await createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      interval: 'monthly',
+      successUrl: 'https://dash/ok',
+      cancelUrl: 'https://dash/cancel',
+    }).catch(error => error)
+
+    expect(failure).toEqual(expect.objectContaining({ message: 'Stripe Checkout Session created without a URL' }))
+    expect(mockStripeCheckoutOriginCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ stripeCheckoutSessionId: 'cs_without_url' }),
+    })
+    expect(mockSessionExpire).toHaveBeenCalledWith('cs_without_url')
+  })
+
+  it('expires the remote session and rejects with the original error when origin persistence fails', async () => {
+    const persistenceError = new Error('origin database write failed')
+    mockStripeCheckoutOriginCreate.mockRejectedValueOnce(persistenceError)
+
+    await expect(
+      createPlanCheckoutSession({
+        venueId: 'v1',
+        customerId: 'cus_1',
+        interval: 'monthly',
+        successUrl: 'https://dash/ok',
+        cancelUrl: 'https://dash/cancel',
+      }),
+    ).rejects.toBe(persistenceError)
+    expect(mockSessionExpire).toHaveBeenCalledWith('cs_1')
+    expect(mockSessionCreate).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the persistence error when remote cleanup also fails', async () => {
+    const persistenceError = new Error('origin database write failed')
+    mockStripeCheckoutOriginCreate.mockRejectedValueOnce(persistenceError)
+    mockSessionExpire.mockRejectedValueOnce(new Error('Stripe cleanup unavailable'))
+
+    await expect(
+      createPlanCheckoutSession({
+        venueId: 'v1',
+        customerId: 'cus_1',
+        interval: 'annual',
+        successUrl: 'https://dash/ok',
+        cancelUrl: 'https://dash/cancel',
+      }),
+    ).rejects.toBe(persistenceError)
+    expect(mockSessionExpire).toHaveBeenCalledWith('cs_1')
+    expect(mockSessionCreate).toHaveBeenCalledTimes(1)
   })
 
   it('annual: uses the annual price lookup_key', async () => {

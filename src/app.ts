@@ -16,7 +16,7 @@ import cookieParser from 'cookie-parser'
 import { monitorEventLoopDelay } from 'perf_hooks'
 import { StaffRole } from '@prisma/client' // Assuming Prisma client is set up
 
-import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
+import { NODE_ENV, ACCESS_TOKEN_SECRET, CORS_PREVIEW_ORIGINS } from './config/env'
 import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
@@ -42,7 +42,7 @@ import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
-import { authorizeRole } from './middlewares/authorizeRole.middleware'
+import { requireActiveSuperadmin } from './middlewares/requireActiveSuperadmin.middleware'
 import { requestLoggerMiddleware } from './middlewares/requestLogger'
 import { isJsonBodyParseError } from './utils/httpErrors'
 
@@ -130,11 +130,11 @@ app.use(
 // Needs CORS + cookieParser since it's mounted before global middlewares
 app.use(
   '/api/v1/superadmin/app-updates',
-  cors(getCorsConfig(NODE_ENV as Environment)),
+  cors(getCorsConfig(NODE_ENV as Environment, CORS_PREVIEW_ORIGINS)),
   cookieParser(),
   express.json({ limit: '100mb' }),
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.SUPERADMIN]),
+  requireActiveSuperadmin,
   appUpdateRoutes,
 )
 

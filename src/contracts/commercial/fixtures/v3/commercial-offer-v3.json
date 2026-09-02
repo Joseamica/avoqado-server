@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 3,
+  "contractVersion": "3.0.0",
+  "campaignVersionId": "commercial-offer-version-summer-2026-v3",
+  "campaignCode": "SUMMER_2026",
+  "version": 1,
+  "status": "ACTIVE",
+  "publishedAt": "2026-07-31T06:00:00.000Z",
+  "claimStartsAt": "2026-08-01T06:00:00.000Z",
+  "claimEndsAt": "2026-09-01T06:00:00.000Z",
+  "benefits": [
+    {
+      "benefitCode": "HARDWARE_N62_FIXED",
+      "kind": "HARDWARE_FIXED_PRICE",
+      "skuSnapshot": {
+        "catalogKey": "NEXGO_N62",
+        "catalogContentHash": "33f66e9abc28e9a15155e0e747046073e617fd2a526bc0a7056c4210c97c9cfa",
+        "brand": "NEXGO",
+        "model": "N62",
+        "name": "NexGo N62",
+        "listUnitAmountMinor": "180000",
+        "currency": "MXN",
+        "taxRateBasisPoints": 1600
+      },
+      "unitAmountMinor": "150000",
+      "quantityLimit": 2,
+      "benefitStartsAt": "2026-08-01T06:00:00.000Z",
+      "benefitEndsAt": "2026-09-01T06:00:00.000Z"
+    },
+    {
+      "benefitCode": "HARDWARE_PAX_10_OFF",
+      "kind": "HARDWARE_PERCENT_OFF",
+      "skuSnapshot": {
+        "catalogKey": "PAX_A910S",
+        "catalogContentHash": "4d7c226bdc1eb2ef3ce91f87702c386f1fa362868157d775cfd80a33461735b6",
+        "brand": "PAX",
+        "model": "A910S",
+        "name": "PAX A910S",
+        "listUnitAmountMinor": "400000",
+        "currency": "MXN",
+        "taxRateBasisPoints": 1600
+      },
+      "percentBasisPoints": 1000,
+      "quantityLimit": 1,
+      "benefitStartsAt": "2026-08-01T06:00:00.000Z",
+      "benefitEndsAt": "2026-09-01T06:00:00.000Z"
+    },
+    {
+      "benefitCode": "PAYMENTS_STARTER_RATE",
+      "kind": "PAYMENTS_RATE_SCHEDULE",
+      "paymentsRateScheduleVersionId": "payments-rate-schedule-version-starter-2026-v1"
+    },
+    {
+      "benefitCode": "SAAS_POS_50",
+      "kind": "SAAS_PRICE",
+      "stackingGroups": [],
+      "rules": [
+        {
+          "code": "POS_FIXED_50",
+          "type": "FIXED_PRICE",
+          "priority": 100,
+          "target": { "productCodes": ["POS"] },
+          "cycles": 3,
+          "amount": "50.00"
+        }
+      ]
+    }
+  ]
+}

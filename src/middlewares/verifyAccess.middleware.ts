@@ -149,6 +149,8 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
                 where: {
                   staffId: userId,
                   role: StaffRole.SUPERADMIN,
+                  active: true,
+                  staff: { active: true },
                 },
                 select: { id: true },
               }),

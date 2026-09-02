@@ -55,6 +55,14 @@ import prisma from '@/utils/prismaClient'
  * en avoqado-web-dashboard y su modo `--check`.
  */
 export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
+  // Avoqado's global SaaS catalog control plane (SUPERADMIN today). These
+  // explicit entries keep the permission catalog auditable despite the
+  // SUPERADMIN wildcard and allow future separation of editor/publisher roles.
+  'commercial:read': ['commercial:read'],
+  'commercial:edit': ['commercial:edit', 'commercial:read'],
+  'commercial:publish': ['commercial:publish', 'commercial:read'],
+  'commercial:reconcile_payment': ['commercial:reconcile_payment', 'commercial:read'],
+
   // ===========================
   // ORDERS - Viewing and Managing
   // ===========================
@@ -1806,6 +1814,7 @@ export function validatePermissionFormat(permission: string): string | null {
  */
 export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   home: ['home:read'],
+  commercial: ['commercial:read', 'commercial:edit', 'commercial:publish', 'commercial:reconcile_payment'],
   'catalog-venue': ['catalog-venue:read', 'catalog-venue:request-override'],
   activity: ['activity:read'],
   analytics: ['analytics:read', 'analytics:export'],

@@ -1,0 +1,209 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api.avoqado.io/contracts/commercial/offer-v3.schema.json",
+  "title": "Avoqado Commercial Offer v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contractVersion",
+    "campaignVersionId",
+    "campaignCode",
+    "version",
+    "status",
+    "publishedAt",
+    "claimStartsAt",
+    "claimEndsAt",
+    "benefits"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "contractVersion": { "const": "3.0.0" },
+    "campaignVersionId": { "$ref": "#/definitions/id" },
+    "campaignCode": { "$ref": "#/definitions/code" },
+    "version": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "status": { "enum": ["ACTIVE", "INACTIVE"] },
+    "publishedAt": { "$ref": "#/definitions/timestamp" },
+    "claimStartsAt": { "$ref": "#/definitions/timestamp" },
+    "claimEndsAt": { "$ref": "#/definitions/timestamp" },
+    "benefits": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/saasPriceBenefit" },
+          { "$ref": "#/definitions/hardwarePercentOffBenefit" },
+          { "$ref": "#/definitions/hardwareFixedPriceBenefit" },
+          { "$ref": "#/definitions/paymentsRateScheduleBenefit" }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+    "minorAmount": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,11})$" },
+    "positiveMinorAmount": { "type": "string", "pattern": "^[1-9][0-9]{0,11}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "productCodes": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/definitions/code" } },
+        "productKinds": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "enum": ["PLAN", "POS", "MODULE"] } },
+        "bundleCodes": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/definitions/code" } }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "type", "priority", "target", "cycles"],
+      "properties": {
+        "code": { "$ref": "#/definitions/code" },
+        "type": { "enum": ["FIXED_PRICE", "PERCENT_OFF", "AMOUNT_OFF", "FREE_PERIOD", "BUNDLE_PRICE"] },
+        "priority": { "type": "integer", "minimum": -10000, "maximum": 10000 },
+        "target": { "$ref": "#/definitions/target" },
+        "cycles": { "type": "integer", "minimum": 1, "maximum": 120 },
+        "amount": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$" },
+        "percentBasisPoints": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["FIXED_PRICE", "AMOUNT_OFF", "BUNDLE_PRICE"] } }, "required": ["type"] },
+          "then": { "required": ["amount"], "not": { "required": ["percentBasisPoints"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "PERCENT_OFF" } }, "required": ["type"] },
+          "then": { "required": ["percentBasisPoints"], "not": { "required": ["amount"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "FREE_PERIOD" } }, "required": ["type"] },
+          "then": { "not": { "anyOf": [{ "required": ["amount"] }, { "required": ["percentBasisPoints"] }] } }
+        }
+      ]
+    },
+    "stackingGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "steps"],
+      "properties": {
+        "code": { "$ref": "#/definitions/code" },
+        "steps": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["position", "ruleCode"],
+            "properties": {
+              "position": { "type": "integer", "minimum": 1, "maximum": 10 },
+              "ruleCode": { "$ref": "#/definitions/code" }
+            }
+          }
+        }
+      }
+    },
+    "hardwareSkuSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalogKey",
+        "catalogContentHash",
+        "brand",
+        "model",
+        "name",
+        "listUnitAmountMinor",
+        "currency",
+        "taxRateBasisPoints"
+      ],
+      "properties": {
+        "catalogKey": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+        "catalogContentHash": { "$ref": "#/definitions/sha256" },
+        "brand": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "listUnitAmountMinor": { "$ref": "#/definitions/positiveMinorAmount" },
+        "currency": { "const": "MXN" },
+        "taxRateBasisPoints": { "const": 1600 }
+      }
+    },
+    "saasPriceBenefit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["benefitCode", "kind", "stackingGroups", "rules"],
+      "properties": {
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "kind": { "const": "SAAS_PRICE" },
+        "stackingGroups": { "type": "array", "maxItems": 50, "items": { "$ref": "#/definitions/stackingGroup" } },
+        "rules": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/definitions/rule" } }
+      }
+    },
+    "hardwarePercentOffBenefit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benefitCode",
+        "kind",
+        "skuSnapshot",
+        "percentBasisPoints",
+        "quantityLimit",
+        "benefitStartsAt",
+        "benefitEndsAt"
+      ],
+      "properties": {
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "kind": { "const": "HARDWARE_PERCENT_OFF" },
+        "skuSnapshot": { "$ref": "#/definitions/hardwareSkuSnapshot" },
+        "percentBasisPoints": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "quantityLimit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "benefitStartsAt": { "$ref": "#/definitions/timestamp" },
+        "benefitEndsAt": { "$ref": "#/definitions/timestamp" }
+      }
+    },
+    "hardwareFixedPriceBenefit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benefitCode",
+        "kind",
+        "skuSnapshot",
+        "unitAmountMinor",
+        "quantityLimit",
+        "benefitStartsAt",
+        "benefitEndsAt"
+      ],
+      "properties": {
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "kind": { "const": "HARDWARE_FIXED_PRICE" },
+        "skuSnapshot": { "$ref": "#/definitions/hardwareSkuSnapshot" },
+        "unitAmountMinor": { "$ref": "#/definitions/minorAmount" },
+        "quantityLimit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "benefitStartsAt": { "$ref": "#/definitions/timestamp" },
+        "benefitEndsAt": { "$ref": "#/definitions/timestamp" }
+      }
+    },
+    "paymentsRateScheduleBenefit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["benefitCode", "kind", "paymentsRateScheduleVersionId"],
+      "properties": {
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "kind": { "const": "PAYMENTS_RATE_SCHEDULE" },
+        "paymentsRateScheduleVersionId": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 128,
+          "pattern": "^payments-rate-schedule-version-[A-Za-z0-9][A-Za-z0-9._:-]{0,95}-v[1-9][0-9]{0,8}$"
+        }
+      }
+    }
+  }
+}

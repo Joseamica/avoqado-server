@@ -1,0 +1,144 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api.avoqado.io/contracts/commercial/offer-resolution-v2.schema.json",
+  "title": "Avoqado Commercial Offer Resolution v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "resolutionVersion", "campaignVersionId", "resolvedAt", "applied", "exclusions"],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "resolutionVersion": { "const": 2 },
+    "campaignVersionId": { "$ref": "#/definitions/id" },
+    "resolvedAt": { "$ref": "#/definitions/timestamp" },
+    "applied": {
+      "type": "array",
+      "maxItems": 600,
+      "items": {
+        "oneOf": [{ "$ref": "#/definitions/appliedSaas" }, { "$ref": "#/definitions/appliedHardware" }]
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "maxItems": 5050,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/excludedSaas" },
+          { "$ref": "#/definitions/unselectedHardware" },
+          { "$ref": "#/definitions/excludedHardwareExcess" },
+          { "$ref": "#/definitions/inactiveHardware" },
+          { "$ref": "#/definitions/excludedPaymentsRate" }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+    "lineKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "hardwareKey": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+    "paymentsRateKey": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 128,
+      "pattern": "^payments-rate-schedule-version-[A-Za-z0-9][A-Za-z0-9._:-]{0,95}-v[1-9][0-9]{0,8}$"
+    },
+    "quantity": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "appliedSaas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectKind", "subjectKey", "benefitCode", "ruleCode"],
+      "properties": {
+        "subjectKind": { "const": "SAAS_LINE" },
+        "subjectKey": { "$ref": "#/definitions/lineKey" },
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "ruleCode": { "$ref": "#/definitions/code" }
+      }
+    },
+    "appliedHardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectKind", "subjectKey", "benefitCode", "appliedQuantity"],
+      "properties": {
+        "subjectKind": { "const": "HARDWARE_SKU" },
+        "subjectKey": { "$ref": "#/definitions/hardwareKey" },
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "appliedQuantity": { "$ref": "#/definitions/quantity" }
+      }
+    },
+    "excludedSaas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectKind", "subjectKey", "benefitCode", "ruleCode", "accountingEffect", "reasonCode"],
+      "properties": {
+        "subjectKind": { "const": "SAAS_LINE" },
+        "subjectKey": { "$ref": "#/definitions/lineKey" },
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "ruleCode": { "$ref": "#/definitions/code" },
+        "accountingEffect": { "const": "EXPLANATORY" },
+        "reasonCode": { "enum": ["LOWER_PRIORITY_SAAS_RULE", "SAAS_STACKING_NOT_ALLOWED"] }
+      }
+    },
+    "unselectedHardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectKind", "subjectKey", "benefitCode", "accountingEffect", "reasonCode"],
+      "properties": {
+        "subjectKind": { "const": "HARDWARE_SKU" },
+        "subjectKey": { "$ref": "#/definitions/hardwareKey" },
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "accountingEffect": { "const": "EXPLANATORY" },
+        "reasonCode": { "const": "HARDWARE_SKU_NOT_SELECTED" }
+      }
+    },
+    "excludedHardwareExcess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectKind", "subjectKey", "benefitCode", "excludedQuantity", "accountingEffect", "reasonCode"],
+      "properties": {
+        "subjectKind": { "const": "HARDWARE_SKU" },
+        "subjectKey": { "$ref": "#/definitions/hardwareKey" },
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "excludedQuantity": { "$ref": "#/definitions/quantity" },
+        "accountingEffect": { "const": "LIST_PRICE_EXCESS" },
+        "reasonCode": { "const": "HARDWARE_QUANTITY_EXCEEDED" }
+      }
+    },
+    "inactiveHardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectKind", "subjectKey", "benefitCode", "accountingEffect", "reasonCode"],
+      "properties": {
+        "subjectKind": { "const": "HARDWARE_SKU" },
+        "subjectKey": { "$ref": "#/definitions/hardwareKey" },
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "accountingEffect": { "const": "EXPLANATORY" },
+        "reasonCode": { "const": "HARDWARE_WINDOW_INACTIVE" }
+      }
+    },
+    "excludedPaymentsRate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjectKind", "subjectKey", "benefitCode", "accountingEffect", "reasonCode"],
+      "properties": {
+        "subjectKind": { "const": "PAYMENTS_RATE" },
+        "subjectKey": { "$ref": "#/definitions/paymentsRateKey" },
+        "benefitCode": { "$ref": "#/definitions/code" },
+        "accountingEffect": { "const": "EXPLANATORY" },
+        "reasonCode": {
+          "enum": [
+            "NEGOTIATED_RATE_PRESENT",
+            "ENTERPRISE_RATE_PRESENT",
+            "PRIOR_PROMOTION_PRESENT",
+            "CHANNEL_AGREEMENT_PRESENT",
+            "RATE_SCHEDULE_AUTHORITY_UNAVAILABLE"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -845,13 +845,27 @@ export async function getConsolidatedRawMaterialInventory(contextVenueId: string
   if (!contextVenue) throw new AppError('Sucursal no encontrada', 404)
 
   const [isSuperAdmin, isOwner, staffVenues] = await Promise.all([
-    prisma.staffVenue.findFirst({ where: { staffId, active: true, role: StaffRole.SUPERADMIN }, select: { id: true } }),
+    prisma.staffVenue.findFirst({
+      where: { staffId, active: true, role: StaffRole.SUPERADMIN, staff: { active: true } },
+      select: { id: true },
+    }),
     prisma.staffOrganization.findFirst({
-      where: { staffId, organizationId: contextVenue.organizationId, isActive: true, role: 'OWNER' },
+      where: {
+        staffId,
+        organizationId: contextVenue.organizationId,
+        isActive: true,
+        role: 'OWNER',
+        staff: { active: true },
+      },
       select: { id: true },
     }),
     prisma.staffVenue.findMany({
-      where: { staffId, active: true, venue: { organizationId: contextVenue.organizationId } },
+      where: {
+        staffId,
+        active: true,
+        staff: { active: true },
+        venue: { organizationId: contextVenue.organizationId },
+      },
       select: { venueId: true },
     }),
   ])

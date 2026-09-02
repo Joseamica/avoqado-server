@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "subject": { "kind": "VENUE", "organizationId": "organization-pos-50-v2", "venueId": "venue-pos-50-v2" },
+  "capabilities": [
+    {
+      "capabilityCode": "POS_CORE",
+      "capabilityKind": "CORE",
+      "entitlement": {
+        "state": "ACTIVE",
+        "origins": [{ "kind": "PRODUCT", "sourceCode": "POS", "lineKey": "PRODUCT:POS:POS_MONTHLY" }]
+      },
+      "activation": { "state": "NOT_REQUIRED" }
+    }
+  ]
+}

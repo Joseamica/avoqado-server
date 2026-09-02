@@ -5,8 +5,15 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
-import { WebhookEventStatus } from '@prisma/client'
+import {
+  StripeEventOwnerKind,
+  StripeEventRouteKey,
+  WebhookClaimPhase,
+  WebhookClassificationState,
+  WebhookEventStatus,
+} from '@prisma/client'
 import webhookService from '@/services/superadmin/webhook.superadmin.service'
+import { isWebhookSuperadminDomainError } from '@/services/superadmin/webhook.superadmin.service'
 import logger from '@/config/logger'
 
 /**
@@ -15,11 +22,27 @@ import logger from '@/config/logger'
  */
 export async function listWebhookEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { eventType, status, venueId, startDate, endDate, limit = '50', offset = '0' } = req.query
+    const {
+      eventType,
+      status,
+      classificationState,
+      ownerKind,
+      routeKey,
+      claimPhase,
+      venueId,
+      startDate,
+      endDate,
+      limit = '50',
+      offset = '0',
+    } = req.query
 
     const filters = {
       eventType: eventType as string | undefined,
       status: status as WebhookEventStatus | undefined,
+      classificationState: classificationState as WebhookClassificationState | undefined,
+      ownerKind: ownerKind as StripeEventOwnerKind | undefined,
+      routeKey: routeKey as StripeEventRouteKey | undefined,
+      claimPhase: claimPhase as WebhookClaimPhase | undefined,
       venueId: venueId as string | undefined,
       startDate: startDate ? new Date(startDate as string) : undefined,
       endDate: endDate ? new Date(endDate as string) : undefined,
@@ -100,8 +123,12 @@ export async function getWebhookMetrics(req: Request, res: Response, next: NextF
 export async function retryWebhookEvent(req: Request, res: Response, _next: NextFunction): Promise<void> {
   try {
     const { eventId } = req.params
+    const { userId } = (req as any).authContext
 
-    const result = await webhookService.retryWebhookEvent(eventId)
+    const result = await webhookService.retryWebhookEvent(eventId, {
+      actorId: userId,
+      reason: req.body?.reason,
+    })
 
     res.json({
       success: true,
@@ -113,7 +140,35 @@ export async function retryWebhookEvent(req: Request, res: Response, _next: Next
       error: error instanceof Error ? error.message : 'Unknown error',
     })
 
-    // Return error response (don't throw to next - we want controlled error)
+    if (isWebhookSuperadminDomainError(error)) {
+      const message = error.message
+      res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        error: message,
+        ...(error.code === 'WEBHOOK_EFFECT_ATTEMPT_FAILED' || error.intentId
+          ? {
+              data: {
+                success: false,
+                message,
+                eventId: error.eventId,
+                phase: error.phase,
+                attempt: error.attempt,
+                ...(error.intentId
+                  ? {
+                      intentId: error.intentId,
+                      auditState: error.auditState,
+                      auditRecorded: error.auditRecorded,
+                      auditPending: error.auditPending,
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      })
+      return
+    }
+
     res.status(400).json({
       success: false,
       error: error instanceof Error ? error.message : 'Failed to retry webhook',

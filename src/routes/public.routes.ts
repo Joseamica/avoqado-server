@@ -76,6 +76,8 @@ import {
   venueMpPaySchema,
   venueCheckoutSessionSchema,
 } from '../schemas/public/venueCheckout.schema'
+import commercialRoutes from './public/commercial.routes'
+import { commercialPublicParentRateLimiter } from '../middlewares/commercial-public-rate-limit.middleware'
 
 import * as passkitController from '../controllers/public/passkit.public.controller'
 
@@ -89,6 +91,9 @@ const readLimit = rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, 
 const writeLimit = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false })
 const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
 const authLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
+
+// Avoqado's own SaaS catalog. This is unrelated to a venue's public menu.
+router.use('/commercial', commercialPublicParentRateLimiter, commercialRoutes)
 // CFDI stamping costs money — tight per-IP cap to prevent abuse
 const cfdiLimit = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false })
 // Second limiter keyed on the receipt accessKey: no single ticket can be hammered regardless of IP.

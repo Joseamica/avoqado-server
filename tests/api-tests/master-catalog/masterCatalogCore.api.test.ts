@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
+import { prismaMock } from '@tests/__helpers__/setup'
 
 const routeHits: string[] = []
 const handler = (name: string) => (_req: Request, res: Response) => {
@@ -231,6 +232,8 @@ describe('H1A superadmin master-catalog route surface', () => {
 
   it('is mounted only beneath the authenticated production superadmin router', async () => {
     await request(superadminApp(true)).get(`${adminBase}/organizations`).expect(401)
+
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'membership-superadmin' })
     const response = await request(superadminApp(true))
       .get(`${adminBase}/organizations`)
       .set('Authorization', `Bearer ${adminToken()}`)

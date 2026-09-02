@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 1,
+  "publicationId": "commercial-publication-v1",
+  "publishedAt": "2026-08-21T06:00:00.000Z",
+  "market": {
+    "country": "MX",
+    "currency": "MXN",
+    "timezone": "America/Mexico_City",
+    "taxLabel": "IVA",
+    "taxRateBasisPoints": 1600
+  },
+  "products": [
+    {
+      "code": "FREE",
+      "slug": "free",
+      "kind": "PLAN",
+      "name": "Free",
+      "description": "Herramientas esenciales para empezar con Avoqado.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["CHATBOT"],
+      "prices": [
+        { "code": "FREE_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 0, "currency": "MXN", "taxBehavior": "NOT_APPLICABLE", "taxRateBasisPoints": 0 },
+        { "code": "FREE_ANNUAL", "billingUnit": "VENUE_YEAR", "amountMinor": 0, "currency": "MXN", "taxBehavior": "NOT_APPLICABLE", "taxRateBasisPoints": 0 }
+      ]
+    },
+    {
+      "code": "PRO",
+      "slug": "pro",
+      "kind": "PLAN",
+      "name": "Pro",
+      "description": "Operación y crecimiento para negocios que quieren más control.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["CHATBOT", "ADVANCED_REPORTS", "AVAILABLE_BALANCE", "AI_ASSISTANT_BUBBLE", "LOYALTY_PROGRAM", "REFERRAL_PROGRAM", "PROMOTIONS", "RESERVATIONS", "ONLINE_ORDERING", "BANK_RECONCILIATION", "BANKING_HUB", "VENUE_AUDIT_LOG", "GOOGLE_REVIEW_REDIRECT", "CASH_RECONCILIATION", "TABLE_SERVICE", "UPSELL", "AREA_TICKETS", "VARIABLE_WEIGHT_BARCODE"],
+      "prices": [
+        { "code": "PRO_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 99900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 },
+        { "code": "PRO_ANNUAL", "billingUnit": "VENUE_YEAR", "amountMinor": 999000, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }
+      ]
+    },
+    {
+      "code": "PREMIUM",
+      "slug": "premium",
+      "kind": "PLAN",
+      "name": "Premium",
+      "description": "Automatización, control avanzado y operación multicanal.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["CHATBOT", "ADVANCED_REPORTS", "AVAILABLE_BALANCE", "AI_ASSISTANT_BUBBLE", "LOYALTY_PROGRAM", "REFERRAL_PROGRAM", "PROMOTIONS", "RESERVATIONS", "ONLINE_ORDERING", "BANK_RECONCILIATION", "BANKING_HUB", "VENUE_AUDIT_LOG", "GOOGLE_REVIEW_REDIRECT", "CASH_RECONCILIATION", "TABLE_SERVICE", "UPSELL", "AREA_TICKETS", "VARIABLE_WEIGHT_BARCODE", "CFDI", "INVENTORY_TRACKING", "COMMISSIONS", "ATTENDANCE_TRACKING", "SERIALIZED_INVENTORY", "AUTO_REORDER", "TRANSACTION_EXPORT", "MERCHANT_ROUTING_RULES", "DELIVERY_CHANNELS", "OFFLINE_LAN_HUB", "SCALE_INTEGRATION", "UPSELL_AI"],
+      "prices": [
+        { "code": "PREMIUM_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 169900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 },
+        { "code": "PREMIUM_ANNUAL", "billingUnit": "VENUE_YEAR", "amountMinor": 1699000, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }
+      ]
+    },
+    {
+      "code": "ENTERPRISE",
+      "slug": "enterprise",
+      "kind": "PLAN",
+      "name": "Enterprise",
+      "description": "Implementación y capacidades acordadas para operaciones complejas.",
+      "salesMode": "CONTACT",
+      "capabilityCodes": ["CHATBOT", "ADVANCED_REPORTS", "AVAILABLE_BALANCE", "AI_ASSISTANT_BUBBLE", "LOYALTY_PROGRAM", "REFERRAL_PROGRAM", "PROMOTIONS", "RESERVATIONS", "ONLINE_ORDERING", "BANK_RECONCILIATION", "BANKING_HUB", "VENUE_AUDIT_LOG", "GOOGLE_REVIEW_REDIRECT", "CASH_RECONCILIATION", "TABLE_SERVICE", "UPSELL", "AREA_TICKETS", "VARIABLE_WEIGHT_BARCODE", "CFDI", "INVENTORY_TRACKING", "COMMISSIONS", "ATTENDANCE_TRACKING", "SERIALIZED_INVENTORY", "AUTO_REORDER", "TRANSACTION_EXPORT", "MERCHANT_ROUTING_RULES", "DELIVERY_CHANNELS", "OFFLINE_LAN_HUB", "SCALE_INTEGRATION", "UPSELL_AI", "WHITE_LABEL_DASHBOARD"],
+      "prices": []
+    },
+    {
+      "code": "POS",
+      "slug": "pos",
+      "kind": "POS",
+      "name": "Punto de venta",
+      "description": "Ventas, menú, órdenes, corte de caja y reportes por sucursal.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["POS_CORE"],
+      "prices": [
+        { "code": "POS_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 24900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }
+      ],
+      "limits": { "users": "UNLIMITED", "devices": "UNLIMITED" }
+    },
+    {
+      "code": "TABLE_SERVICE_MODULE",
+      "slug": "mesas-y-meseros",
+      "kind": "MODULE",
+      "name": "Mesas y meseros",
+      "description": "Servicio de mesa, asignación y atención por mesero.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["TABLE_SERVICE"],
+      "prices": [{ "code": "TABLE_SERVICE_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 26900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    },
+    {
+      "code": "KITCHEN_DISPLAY_MODULE",
+      "slug": "pantalla-de-cocina",
+      "kind": "MODULE",
+      "name": "Pantalla de cocina",
+      "description": "Órdenes visibles y organizadas para producción.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["KITCHEN_DISPLAY"],
+      "prices": [{ "code": "KITCHEN_DISPLAY_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 17900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    },
+    {
+      "code": "CFDI_MODULE",
+      "slug": "facturacion-cfdi",
+      "kind": "MODULE",
+      "name": "Facturación CFDI 4.0",
+      "description": "Emisión y administración de facturas CFDI 4.0.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["CFDI"],
+      "prices": [{ "code": "CFDI_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 17900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    },
+    {
+      "code": "ACCOUNTING_MODULE",
+      "slug": "contabilidad",
+      "kind": "MODULE",
+      "name": "Contabilidad",
+      "description": "Conciliación y herramientas contables del negocio.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["BANK_RECONCILIATION", "BANKING_HUB"],
+      "prices": [{ "code": "ACCOUNTING_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 17900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    },
+    {
+      "code": "RECIPE_INVENTORY_MODULE",
+      "slug": "inventario-por-receta",
+      "kind": "MODULE",
+      "name": "Inventario por receta",
+      "description": "Consumos e inventario calculados desde recetas.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["INVENTORY_TRACKING"],
+      "prices": [{ "code": "RECIPE_INVENTORY_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 17900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    },
+    {
+      "code": "DELIVERY_APPS_MODULE",
+      "slug": "apps-de-delivery",
+      "kind": "MODULE",
+      "name": "Apps de delivery",
+      "description": "Operación de canales de delivery desde Avoqado.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["DELIVERY_CHANNELS"],
+      "prices": [{ "code": "DELIVERY_APPS_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 17900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    },
+    {
+      "code": "RESERVATIONS_ORDERS_MODULE",
+      "slug": "reservas-y-pedidos-en-linea",
+      "kind": "MODULE",
+      "name": "Reservas y pedidos en línea",
+      "description": "Reservaciones y pedidos digitales para tus clientes.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["RESERVATIONS", "ONLINE_ORDERING"],
+      "prices": [{ "code": "RESERVATIONS_ORDERS_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 26900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    },
+    {
+      "code": "LOYALTY_PROMOTIONS_MODULE",
+      "slug": "lealtad-y-promociones",
+      "kind": "MODULE",
+      "name": "Lealtad y promociones",
+      "description": "Programas de lealtad, referidos y promociones.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["LOYALTY_PROGRAM", "REFERRAL_PROGRAM", "PROMOTIONS"],
+      "prices": [{ "code": "LOYALTY_PROMOTIONS_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 26900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    },
+    {
+      "code": "MULTI_LOCATION_MODULE",
+      "slug": "varias-sucursales",
+      "kind": "MODULE",
+      "name": "Varias sucursales",
+      "description": "Visibilidad y operación coordinada de varias sucursales.",
+      "salesMode": "SELF_SERVICE",
+      "capabilityCodes": ["MULTI_LOCATION"],
+      "prices": [{ "code": "MULTI_LOCATION_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 17900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    }
+  ],
+  "bundles": [
+    {
+      "code": "ALL_MODULES",
+      "slug": "todos-los-modulos",
+      "name": "Todos los módulos",
+      "description": "Los nueve módulos comerciales en una sola mensualidad.",
+      "itemProductCodes": ["TABLE_SERVICE_MODULE", "KITCHEN_DISPLAY_MODULE", "CFDI_MODULE", "ACCOUNTING_MODULE", "RECIPE_INVENTORY_MODULE", "DELIVERY_APPS_MODULE", "RESERVATIONS_ORDERS_MODULE", "LOYALTY_PROMOTIONS_MODULE", "MULTI_LOCATION_MODULE"],
+      "prices": [{ "code": "ALL_MODULES_MONTHLY", "billingUnit": "VENUE_MONTH", "amountMinor": 199900, "currency": "MXN", "taxBehavior": "EXCLUSIVE", "taxRateBasisPoints": 1600 }]
+    }
+  ]
+}

@@ -35,7 +35,12 @@ import { blumonPaymentAuditJob } from './jobs/blumon-payment-audit.job'
 import { deliveryMenuSyncJob } from './jobs/delivery-menu-sync.job'
 import { deliverySnoozeResumeJob } from './jobs/delivery-snooze-resume.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
-import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
+import {
+  platformWebhookClassificationRecoveryJob,
+  platformWebhookEffectRecoveryJob,
+  platformWebhookOperationalAlertJob,
+} from './jobs/platform-webhook-recovery.job'
+import { webhookManualRetryAuditOutboxJob } from './jobs/webhook-manual-retry-audit-outbox.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
@@ -67,6 +72,7 @@ import { mercadoPagoTokenRefreshJob } from './jobs/mercadopago-token-refresh.job
 import { cfdiGlobalJob } from './jobs/cfdiGlobal.job'
 import { cfdiReconcileJob } from './jobs/cfdiReconcile.job'
 import { catalogPublicationOutboxSweeperJob } from './jobs/catalog-publication-outbox-sweeper.job'
+import { commercialPublicationOutboxSweeperJob } from './jobs/commercial-publication-outbox-sweeper.job'
 import { catalogPublicationWatchdogJob } from './jobs/catalog-publication-watchdog.job'
 import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
@@ -112,6 +118,10 @@ const gracefulShutdown = async (signal: string) => {
   httpServer.close(() => logger.info('Http server closed.'))
   httpServer.closeAllConnections?.()
 
+  // This correctness-critical local outbox runs in every runtime where the
+  // Superadmin retry endpoints are mounted, including DEMO_MODE.
+  webhookManualRetryAuditOutboxJob.stop()
+
   // Dev fast-path: tsx watch spawns the replacement process within ~100ms
   // of killing the old one. Running the full Rabbit/Socket/DB cleanup would
   // hold the port past that deadline. Local dev doesn't need graceful
@@ -149,6 +159,7 @@ const gracefulShutdown = async (signal: string) => {
       // WHY: Publication delivery and expired attempts have independent
       // durable recovery loops and both must stop before Prisma disconnects.
       catalogPublicationOutboxSweeperJob.stop()
+      commercialPublicationOutboxSweeperJob.stop()
       catalogPublicationWatchdogJob.stop()
       shiftCloseWatchdogJob.stop()
       cashDrawerAutoCloseJob.stop()
@@ -194,8 +205,10 @@ const gracefulShutdown = async (signal: string) => {
       deliveryMenuSyncJob.stop()
       deliverySnoozeResumeJob.stop()
 
-      logger.info('Stopping Stripe webhook reconciliation job...')
-      stripeWebhookReconciliationJob.stop()
+      logger.info('Stopping Stripe platform webhook recovery jobs...')
+      platformWebhookClassificationRecoveryJob.stop()
+      platformWebhookEffectRecoveryJob.stop()
+      platformWebhookOperationalAlertJob.stop()
 
       logger.info('Stopping money integrity watchdog...')
       moneyIntegrityWatchdogJob.stop()
@@ -409,7 +422,11 @@ const startApplication = async (retries = 3) => {
         })
     }
 
-    // DEMO MODE: Skip background jobs to save memory on free tier deployments
+    // This DB-local deliverer is correctness-critical for the Superadmin retry
+    // endpoints, which remain mounted in both standard and demo runtimes.
+    webhookManualRetryAuditOutboxJob.start()
+
+    // DEMO MODE: Skip optional background jobs to save memory on free tier deployments
     if (process.env.DEMO_MODE === 'true') {
       logger.info('⏭️  Background jobs disabled (DEMO_MODE=true)')
 
@@ -460,6 +477,7 @@ const startApplication = async (retries = 3) => {
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
       // through these no-overlap durable workers after a process restart.
       catalogPublicationOutboxSweeperJob.start()
+      commercialPublicationOutboxSweeperJob.start()
       catalogPublicationWatchdogJob.start()
       shiftCloseWatchdogJob.start()
       // Cierra las cajas que nadie cerró, en el corte del día de negocio (04:00
@@ -534,12 +552,11 @@ const startApplication = async (retries = 3) => {
       deliveryMenuSyncJob.start()
       deliverySnoozeResumeJob.start()
 
-      // Start Stripe PLATFORM webhook reconciliation job (every 5min at :03 —
-      // replays FAILED WebhookEvent rows. The controller answers 200 even on
-      // failure, so Stripe never redelivers: without this, one transient blip
-      // during invoice.payment_succeeded / plan-checkout fulfillment meant the
-      // venue paid and never got its plan, silently.)
-      stripeWebhookReconciliationJob.start()
+      // Platform Stripe recovery is phase-separated. Each job is a no-op until
+      // PLATFORM_WEBHOOK_RECOVERY_ENABLED=true after the drained cutover.
+      platformWebhookClassificationRecoveryJob.start()
+      platformWebhookEffectRecoveryJob.start()
+      platformWebhookOperationalAlertJob.start()
 
       // Vigilante de dinero — PRUEBA DE 4 DÍAS, se auto-apaga el 2026-08-07.
       // Revisa cada 6h: totales negativos, descuentos que exceden el consumo, propinas que no cuadran.

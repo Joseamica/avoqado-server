@@ -59,13 +59,13 @@ describe('handleTerminalOrderCheckoutCompleted', () => {
   })
 
   it('is a noop if metadata.terminalOrderId is missing', async () => {
-    await handleTerminalOrderCheckoutCompleted({ ...baseSession, metadata: {} })
+    await expect(handleTerminalOrderCheckoutCompleted({ ...baseSession, metadata: {} })).resolves.toBe('NOOP_NOT_APPLICABLE')
     expect(prisma.terminalOrder.update).not.toHaveBeenCalled()
   })
 
   it('is a noop if order not found', async () => {
     ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue(null)
-    await handleTerminalOrderCheckoutCompleted(baseSession)
+    await expect(handleTerminalOrderCheckoutCompleted(baseSession)).resolves.toBe('NOOP_SUBJECT_NOT_FOUND')
     expect(prisma.terminalOrder.update).not.toHaveBeenCalled()
   })
 
@@ -74,13 +74,13 @@ describe('handleTerminalOrderCheckoutCompleted', () => {
       ...baseOrder,
       paymentStatus: 'PAID',
     })
-    await handleTerminalOrderCheckoutCompleted(baseSession)
+    await expect(handleTerminalOrderCheckoutCompleted(baseSession)).resolves.toBe('MATCHED_NO_CHANGE')
     expect(prisma.terminalOrder.update).not.toHaveBeenCalled()
     expect(sendPaymentConfirmedMock).not.toHaveBeenCalled()
   })
 
   it('updates order to PAID + AWAITING_SERIALS and triggers both emails', async () => {
-    await handleTerminalOrderCheckoutCompleted(baseSession)
+    await expect(handleTerminalOrderCheckoutCompleted(baseSession)).resolves.toBe('APPLIED')
     expect(prisma.terminalOrder.update).toHaveBeenCalledWith({
       where: { id: 'ord_1' },
       data: {

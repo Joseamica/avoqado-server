@@ -25,7 +25,12 @@ const SRC_DIR = path.resolve(__dirname, '../../../src')
 
 /** A date-looking column compared to (or assigned) a bound value. */
 const DATE_COLUMN_BIND =
-  /"[A-Za-z]+(?:At|Time|Date|Until|Expires|Expiry)"\s*(?:>=|<=|<|>|=)\s*(\$\{[^}]*\}(?:::timestamp\b)?|\$\d+(?:::timestamp\b)?)/g
+  /"([A-Za-z]+(?:At|Time|Date|Until|Expires|Expiry))"\s*(?:>=|<=|<|>|=)\s*(\$\{[^}]*\}(?:::timestamp\b)?|\$\d+(?:::timestamp\b)?)/g
+
+// These schema columns end in "Time" but are numeric durations, not instants.
+// Keeping the exception explicit prevents the suffix heuristic from hiding a
+// real DateTime bind while avoiding false positives on millisecond/minute data.
+const NON_DATE_TIME_COLUMNS = new Set(['prepTime', 'cookTime', 'processingTime', 'executionTime'])
 
 const ALLOWED_BIND = [
   /^\$\{utcTs\(/,
@@ -48,7 +53,9 @@ export function findBiasedDateBinds(line: string): string[] {
   if (trimmed.startsWith('*') || trimmed.startsWith('//')) return []
   const offenders: string[] = []
   for (const match of line.matchAll(DATE_COLUMN_BIND)) {
-    const bind = match[1]
+    const column = match[1]
+    const bind = match[2]
+    if (NON_DATE_TIME_COLUMNS.has(column)) continue
     if (!ALLOWED_BIND.some(re => re.test(bind))) offenders.push(bind)
   }
   return offenders
@@ -79,6 +86,7 @@ describe('raw SQL date binds go through sqlDates.ts', () => {
     expect(findBiasedDateBinds('"promoterRejectedAt" = ${utcTsOrNull(promoterRejectedAt)},')).toEqual([])
     expect(findBiasedDateBinds('AND d."nextAttemptAt" <= ${nowSql}')).toEqual([])
     expect(findBiasedDateBinds('AND "createdAt" >= $2::timestamp')).toEqual([])
+    expect(findBiasedDateBinds('"processingTime" = ${command.processingTime ?? null}')).toEqual([])
     expect(findBiasedDateBinds(' *   WHERE o."createdAt" >= ${fromDate}          -- ❌')).toEqual([])
   })
 

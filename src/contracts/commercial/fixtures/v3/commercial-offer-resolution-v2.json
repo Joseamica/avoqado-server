@@ -1,0 +1,51 @@
+{
+  "input": {
+    "resolvedAt": "2026-08-15T12:00:00.000Z",
+    "saasMatches": [],
+    "hardwareSelections": [
+      {
+        "catalogKey": "NEXGO_N62",
+        "quantity": 5
+      }
+    ],
+    "rateBlockers": []
+  },
+  "expected": {
+    "schemaVersion": 3,
+    "resolutionVersion": 2,
+    "campaignVersionId": "commercial-offer-version-summer-2026-v3",
+    "resolvedAt": "2026-08-15T12:00:00.000Z",
+    "applied": [
+      {
+        "subjectKind": "HARDWARE_SKU",
+        "subjectKey": "NEXGO_N62",
+        "benefitCode": "HARDWARE_N62_FIXED",
+        "appliedQuantity": 2
+      }
+    ],
+    "exclusions": [
+      {
+        "subjectKind": "HARDWARE_SKU",
+        "subjectKey": "NEXGO_N62",
+        "benefitCode": "HARDWARE_N62_FIXED",
+        "excludedQuantity": 3,
+        "accountingEffect": "LIST_PRICE_EXCESS",
+        "reasonCode": "HARDWARE_QUANTITY_EXCEEDED"
+      },
+      {
+        "subjectKind": "HARDWARE_SKU",
+        "subjectKey": "PAX_A910S",
+        "benefitCode": "HARDWARE_PAX_10_OFF",
+        "accountingEffect": "EXPLANATORY",
+        "reasonCode": "HARDWARE_SKU_NOT_SELECTED"
+      },
+      {
+        "subjectKind": "PAYMENTS_RATE",
+        "subjectKey": "payments-rate-schedule-version-starter-2026-v1",
+        "benefitCode": "PAYMENTS_STARTER_RATE",
+        "accountingEffect": "EXPLANATORY",
+        "reasonCode": "RATE_SCHEDULE_AUTHORITY_UNAVAILABLE"
+      }
+    ]
+  }
+}

@@ -40,6 +40,7 @@ function makeToken(role: string) {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  prismaMock.staffVenue.findFirst.mockResolvedValue(null)
   ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([])
   ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([])
 })
@@ -60,6 +61,8 @@ describe('GET /superadmin/settlement-calendar — HTTP layer', () => {
   // La prueba de que la ruta está montada: sin el `router.use('/settlement-calendar', ...)`
   // esto devolvería 404 aunque el service y el controller estén perfectos.
   it('200 para SUPERADMIN y devuelve la forma del calendario', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'membership-superadmin' })
+
     const res = await request(app)
       .get(`${PATH}?month=2026-07`)
       .set('Authorization', `Bearer ${makeToken('SUPERADMIN')}`)
@@ -76,6 +79,8 @@ describe('GET /superadmin/settlement-calendar — HTTP layer', () => {
   })
 
   it('un ?month basura no truena: cae al mes actual', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'membership-superadmin' })
+
     const res = await request(app)
       .get(`${PATH}?month=no-es-un-mes`)
       .set('Authorization', `Bearer ${makeToken('SUPERADMIN')}`)
@@ -85,6 +90,8 @@ describe('GET /superadmin/settlement-calendar — HTTP layer', () => {
   })
 
   it('acepta un rango explícito from/to', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'membership-superadmin' })
+
     const res = await request(app)
       .get(`${PATH}?from=2026-07-06&to=2026-07-12`)
       .set('Authorization', `Bearer ${makeToken('SUPERADMIN')}`)
@@ -95,6 +102,8 @@ describe('GET /superadmin/settlement-calendar — HTTP layer', () => {
 
   // El efectivo nunca liquida: si un día se cuela al query, el calendario mentiría.
   it('nunca pide pagos en efectivo a la DB', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'membership-superadmin' })
+
     await request(app)
       .get(`${PATH}?month=2026-07`)
       .set('Authorization', `Bearer ${makeToken('SUPERADMIN')}`)

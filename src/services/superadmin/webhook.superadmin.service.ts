@@ -4,9 +4,30 @@
  * Provides webhook event monitoring, debugging, and retry capabilities
  */
 
-import { WebhookEventStatus } from '@prisma/client'
+import {
+  StripeEventOwnerKind,
+  StripeEventRouteKey,
+  WebhookClaimPhase,
+  WebhookClassificationState,
+  WebhookEventStatus,
+} from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import logger from '@/config/logger'
+import { retryWebhookEvent } from './webhookManualRetry.service'
+
+export {
+  LEGACY_DASHBOARD_WEBHOOK_RETRY_REASON,
+  WebhookAuditUnavailableError,
+  WebhookEffectAttemptFailedError,
+  WebhookEffectNotRetryableError,
+  WebhookLeaseBusyError,
+  WebhookNotFoundError,
+  WebhookSuperadminDomainError,
+  createDurableManualRetryAuditWriter,
+  createWebhookManualRetryService,
+  createWebhookManualRetryService as createWebhookSuperadminManualRetryService,
+  isWebhookSuperadminDomainError,
+  retryWebhookEvent,
+} from './webhookManualRetry.service'
 
 // NOTE: no Stripe client here anymore — `retryWebhookEvent` used to re-fetch the
 // event via `stripe.events.retrieve`, but the replay now reuses the payload
@@ -19,13 +40,29 @@ import logger from '@/config/logger'
 export async function listWebhookEvents(filters: {
   eventType?: string
   status?: WebhookEventStatus
+  classificationState?: WebhookClassificationState
+  ownerKind?: StripeEventOwnerKind
+  routeKey?: StripeEventRouteKey
+  claimPhase?: WebhookClaimPhase
   venueId?: string
   startDate?: Date
   endDate?: Date
   limit?: number
   offset?: number
 }) {
-  const { eventType, status, venueId, startDate, endDate, limit = 50, offset = 0 } = filters
+  const {
+    eventType,
+    status,
+    classificationState,
+    ownerKind,
+    routeKey,
+    claimPhase,
+    venueId,
+    startDate,
+    endDate,
+    limit = 50,
+    offset = 0,
+  } = filters
 
   // Build where clause
   const where: any = {}
@@ -36,6 +73,22 @@ export async function listWebhookEvents(filters: {
 
   if (status) {
     where.status = status
+  }
+
+  if (classificationState) {
+    where.classificationState = classificationState
+  }
+
+  if (ownerKind) {
+    where.ownerKind = ownerKind
+  }
+
+  if (routeKey) {
+    where.routeKey = routeKey
+  }
+
+  if (claimPhase) {
+    where.claimPhase = claimPhase
   }
 
   if (venueId) {
@@ -94,6 +147,7 @@ export async function getWebhookEventDetails(eventId: string) {
           stripeCustomerId: true,
         },
       },
+      stripeObjectBindings: true,
     },
   })
 
@@ -138,19 +192,33 @@ export async function getWebhookMetrics(timeRange: { startDate: Date; endDate: D
   })
 
   // Get events by type (top 10)
-  const eventsByType = await prisma.webhookEvent.groupBy({
-    by: ['eventType'],
-    where,
-    _count: {
-      id: true,
-    },
-    orderBy: {
+  const [eventsByType, classificationStates, effectStatuses] = await Promise.all([
+    prisma.webhookEvent.groupBy({
+      by: ['eventType'],
+      where,
       _count: {
-        id: 'desc',
+        id: true,
       },
-    },
-    take: 10,
-  })
+      orderBy: {
+        _count: {
+          id: 'desc',
+        },
+      },
+      take: 10,
+    }),
+    prisma.webhookEvent.groupBy({
+      by: ['classificationState'],
+      where,
+      _count: { id: true },
+      orderBy: { classificationState: 'asc' },
+    }),
+    prisma.webhookEvent.groupBy({
+      by: ['status'],
+      where,
+      _count: { id: true },
+      orderBy: { status: 'asc' },
+    }),
+  ])
 
   // Get events with high retry counts (potential issues)
   const failingEvents = await prisma.webhookEvent.findMany({
@@ -187,87 +255,14 @@ export async function getWebhookMetrics(timeRange: { startDate: Date; endDate: D
       count: e._count.id,
     })),
     failingEvents,
-  }
-}
-
-/**
- * Retry a failed webhook event
- *
- * Replays the payload stored on the row via `replayStripeWebhookEvent`.
- */
-export async function retryWebhookEvent(eventId: string) {
-  // Get the webhook event from database
-  const webhookEvent = await prisma.webhookEvent.findUnique({
-    where: { id: eventId },
-  })
-
-  if (!webhookEvent) {
-    throw new Error('Webhook event not found')
-  }
-
-  if (webhookEvent.status === 'SUCCESS') {
-    throw new Error('Cannot retry successful event')
-  }
-
-  logger.info('🔄 Retrying webhook event', {
-    webhookEventId: eventId,
-    stripeEventId: webhookEvent.stripeEventId,
-    eventType: webhookEvent.eventType,
-    previousRetries: webhookEvent.retryCount,
-  })
-
-  try {
-    // Delegate to the shared replay path. Do NOT call `handleStripeWebhookEvent`
-    // directly here: this row is already claimed, so its idempotency `create`
-    // would hit P2002 and return early — the retry did NOTHING while this
-    // function reported success. `replayStripeWebhookEvent` also owns the
-    // RETRYING flip and the attempt counter, so neither is done here anymore.
-    const { replayStripeWebhookEvent } = await import('../stripe.webhook.service')
-    const result = await replayStripeWebhookEvent(eventId)
-
-    if (!result.replayed) {
-      logger.info('ℹ️ Webhook retry skipped', {
-        webhookEventId: eventId,
-        stripeEventId: webhookEvent.stripeEventId,
-        reason: result.reason,
-      })
-      return {
-        success: false,
-        message:
-          result.reason === 'MAX_RETRIES_EXHAUSTED'
-            ? 'El evento agotó sus reintentos automáticos. Requiere revisión manual.'
-            : 'El evento no es elegible para reintento.',
-      }
-    }
-
-    logger.info('✅ Webhook retry successful', {
-      webhookEventId: eventId,
-      stripeEventId: webhookEvent.stripeEventId,
-    })
-
-    return {
-      success: true,
-      message: 'Webhook event reprocessed successfully',
-    }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-
-    logger.error('❌ Webhook retry failed', {
-      webhookEventId: eventId,
-      stripeEventId: webhookEvent.stripeEventId,
-      error: errorMessage,
-    })
-
-    // Update failure in database
-    await prisma.webhookEvent.update({
-      where: { id: eventId },
-      data: {
-        status: 'FAILED',
-        errorMessage: errorMessage,
-      },
-    })
-
-    throw new Error(`Retry failed: ${errorMessage}`)
+    classificationSummary: classificationStates.map(entry => ({
+      state: entry.classificationState,
+      count: entry._count.id,
+    })),
+    effectSummary: effectStatuses.map(entry => ({
+      status: entry.status,
+      count: entry._count.id,
+    })),
   }
 }
 

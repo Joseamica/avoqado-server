@@ -19,7 +19,7 @@ export async function handleTerminalOrderCheckoutCompleted(session: Stripe.Check
   const orderId = session.metadata?.terminalOrderId
   if (!orderId) {
     // Not a terminal-order session — handled elsewhere
-    return
+    return 'NOOP_NOT_APPLICABLE' as const
   }
 
   const order = await prisma.terminalOrder.findUnique({
@@ -28,12 +28,12 @@ export async function handleTerminalOrderCheckoutCompleted(session: Stripe.Check
   })
   if (!order) {
     logger.warn('Stripe webhook: TerminalOrder not found', { orderId, sessionId: session.id })
-    return
+    return 'NOOP_SUBJECT_NOT_FOUND' as const
   }
 
   if (order.paymentStatus === 'PAID') {
     logger.info('Stripe webhook: order already PAID, skipping (idempotent)', { orderId })
-    return
+    return 'MATCHED_NO_CHANGE' as const
   }
 
   const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : (session.payment_intent?.id ?? null)
@@ -94,4 +94,5 @@ export async function handleTerminalOrderCheckoutCompleted(session: Stripe.Check
       error: err instanceof Error ? err.message : String(err),
     })
   }
+  return 'APPLIED' as const
 }

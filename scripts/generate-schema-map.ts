@@ -66,6 +66,10 @@ const DOMAINS: Domain[] = [
     description: 'Organization-owned catalog identity, validation, rollout, bindings, batch recovery, and publication outbox.',
   },
   {
+    name: 'Commercial Platform',
+    description: 'Avoqado SaaS catalog, campaigns, acquisition claims, quotes, Stripe lifecycle, activation, and publication outbox.',
+  },
+  {
     name: 'Inventory & Stock',
     description: 'Stock on hand, raw materials, recipes, suppliers, purchase orders, FIFO batches.',
   },
@@ -236,6 +240,51 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CatalogPublicationFieldDecision: 'Master Catalog & Publication',
   CatalogVenueEventSequence: 'Master Catalog & Publication',
   CatalogPublicationOutbox: 'Master Catalog & Publication',
+
+  // 7. Commercial Platform
+  // Separate from the Master Catalog: these models describe what Avoqado
+  // sells to venues, not the products a venue sells to its customers.
+  CommercialDraft: 'Commercial Platform',
+  CommercialProductDraft: 'Commercial Platform',
+  CommercialPricebookDraft: 'Commercial Platform',
+  CommercialPriceDraft: 'Commercial Platform',
+  CommercialBundleDraft: 'Commercial Platform',
+  CommercialBundleItemDraft: 'Commercial Platform',
+  CommercialFeatureBindingDraft: 'Commercial Platform',
+  CommercialPublication: 'Commercial Platform',
+  CommercialPublicationActivation: 'Commercial Platform',
+  CommercialPublicationOutbox: 'Commercial Platform',
+  CommercialCampaignDraft: 'Commercial Platform',
+  CommercialCampaignRuleDraft: 'Commercial Platform',
+  CommercialOfferBenefitDraft: 'Commercial Platform',
+  CommercialCampaignVersion: 'Commercial Platform',
+  CommercialOfferControlEvent: 'Commercial Platform',
+  CommercialCampaignActivation: 'Commercial Platform',
+  CommercialCampaignClaim: 'Commercial Platform',
+  CommercialAcquisitionContext: 'Commercial Platform',
+  CommercialAcquisitionContextBinding: 'Commercial Platform',
+  CommercialAcquisitionRedemption: 'Commercial Platform',
+  CommercialQuote: 'Commercial Platform',
+  CommercialQuotePreviewBridge: 'Commercial Platform',
+  CommercialQuoteAcceptance: 'Commercial Platform',
+  CommercialStripeOperation: 'Commercial Platform',
+  CommercialSubscriptionEvent: 'Commercial Platform',
+  CommercialSubscriptionContract: 'Commercial Platform',
+  CommercialSubscriptionPeriod: 'Commercial Platform',
+  CommercialAccountReceivable: 'Commercial Platform',
+  CommercialBillingPaymentAttempt: 'Commercial Platform',
+  CommercialBillingProviderObject: 'Commercial Platform',
+  CommercialCashReceipt: 'Commercial Platform',
+  CommercialBillingAllocation: 'Commercial Platform',
+  CommercialEventOutbox: 'Commercial Platform',
+  CommercialEntitlementProjection: 'Commercial Platform',
+  CommercialManualSpeiPolicyVersion: 'Commercial Platform',
+  CommercialManualSpeiPolicyActivation: 'Commercial Platform',
+  CommercialManualSpeiCase: 'Commercial Platform',
+  CommercialManualSpeiEvidence: 'Commercial Platform',
+  CommercialManualSpeiEvidenceReview: 'Commercial Platform',
+  CommercialManualSpeiApproval: 'Commercial Platform',
+  StripeCheckoutOrigin: 'Commercial Platform',
 
   // 7. Inventory & Stock
   Inventory: 'Inventory & Stock',
@@ -531,6 +580,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
 
   // 20. Customers, Consumers & Reviews
   Customer: 'Customers, Consumers & Reviews',
+  CustomerOrderMetric: 'Customers, Consumers & Reviews',
   CustomerGroup: 'Customers, Consumers & Reviews',
   // Fase 1 — aprobación del cliente por el venue: el evento y su entrega por destinatario
   CustomerApprovalOutbox: 'Customers, Consumers & Reviews',
@@ -543,6 +593,10 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 21. System: Audit, Webhooks & Platform
   ActivityLog: 'System: Audit, Webhooks & Platform',
   WebhookEvent: 'System: Audit, Webhooks & Platform',
+  WebhookDispatchObservation: 'System: Audit, Webhooks & Platform',
+  WebhookOperationalAlert: 'System: Audit, Webhooks & Platform',
+  WebhookManualRetryResultOutbox: 'System: Audit, Webhooks & Platform',
+  StripeObjectBinding: 'System: Audit, Webhooks & Platform',
   WebhookSubscription: 'System: Audit, Webhooks & Platform',
   PartnerAPIKey: 'System: Audit, Webhooks & Platform',
   PlatformSettings: 'System: Audit, Webhooks & Platform',

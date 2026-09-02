@@ -2,6 +2,14 @@
 
 Deferred work items with full context. Formato: What / Why / Pros / Cons / Context / Depends on.
 
+## Infraestructura: retirar Fly fuera de la migración comercial
+
+- **What:** inventariar y retirar configuración, aplicaciones y secretos heredados de Fly.io cuando operaciones programe la limpieza.
+- **Why:** Render es el destino de despliegue de la plataforma comercial unificada; Fly no se utilizará para previews ni producción.
+- **Context:** limpieza deliberadamente fuera del programa comercial para no mezclar infraestructura heredada con catálogo, campañas,
+  entitlements y canales. El release manifest comercial no puede declarar Fly como dependencia o fallback.
+- **Depends on:** confirmar que ningún servicio productivo ni rollback vigente conserva una dependencia de Fly.
+
 ## 0. SPEI externo — verificación en vivo pendiente (código completo, sin probar con dinero real)
 
 - **What:** el envío SPEI a cualquier banco (backend `sendSpeiOut` + página `bancos/spei` del dashboard) quedó implementado y testeado

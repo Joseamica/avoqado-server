@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "campaignVersionId": "campaign-version-pos-50-v1",
+  "campaignCode": "POS_50",
+  "version": 1,
+  "status": "ACTIVE",
+  "startsAt": "2026-08-01T06:00:00.000Z",
+  "endsAt": "2026-09-01T06:00:00.000Z",
+  "allowedRuleCodeGroups": [],
+  "rules": [
+    {
+      "code": "POS_FIXED_50",
+      "type": "FIXED_PRICE",
+      "priority": 100,
+      "target": { "productCodes": ["POS"] },
+      "amountMinor": 5000,
+      "cycles": 3
+    }
+  ]
+}

@@ -110,6 +110,36 @@ describe('lo que NO se debe romper al quitar el atajo', () => {
 
     expect(r.role).toBe(StaffRole.OWNER)
     expect(r.source).toBe('orgOwner')
+    expect(prisma.staffOrganization.findUnique).toHaveBeenCalledWith({
+      where: {
+        staffId_organizationId: { staffId: STAFF, organizationId: 'org-1' },
+        isActive: true,
+        role: OrgRole.OWNER,
+        staff: { active: true },
+      },
+      select: { role: true, isActive: true },
+    })
+  })
+
+  it('una cuenta Staff desactivada no revive por una membresía OWNER activa', async () => {
+    ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org-1' })
+    // PostgreSQL devuelve null porque la consulta debe filtrar staff.active=true.
+    ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
+
+    const r = await resolveUserRoleForVenue({
+      userId: STAFF,
+      targetVenueId: VENUE,
+      tokenVenueId: VENUE,
+      tokenRole: StaffRole.OWNER,
+    })
+
+    expect(r).toMatchObject({ role: null, source: 'none' })
+    expect(prisma.staffOrganization.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ staff: { active: true } }),
+      }),
+    )
   })
 
   it('el staff activo sin PermissionSet resuelve por su rol, como siempre', async () => {

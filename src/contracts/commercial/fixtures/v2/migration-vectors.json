@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "int4MaximumCents": "2147483647",
+  "cases": [
+    {
+      "code": "V1_INT4_IDENTITY",
+      "sourceSchemaVersion": 1,
+      "wireAmount": 2147483647,
+      "storageCents": "2147483647",
+      "identity": { "rowId": "quote-v1-int4", "snapshotId": "quote-v1-int4", "matches": true },
+      "rollbackOutcome": "SAFE"
+    },
+    {
+      "code": "V2_ABOVE_INT4",
+      "sourceSchemaVersion": 2,
+      "wireAmount": "21474836.48",
+      "storageCents": "2147483648",
+      "identity": { "rowId": "quote-v2-above-int4", "snapshotId": "quote-v2-above-int4", "matches": true },
+      "rollbackOutcome": "BLOCKED_SCHEMA_V2"
+    },
+    {
+      "code": "V2_MAX_DOMAIN",
+      "sourceSchemaVersion": 2,
+      "wireAmount": "92233720368547758.07",
+      "storageCents": "9223372036854775807",
+      "identity": { "rowId": "quote-v2-max", "snapshotId": "quote-v2-max", "matches": true },
+      "rollbackOutcome": "BLOCKED_SCHEMA_V2"
+    },
+    {
+      "code": "ROLLBACK_SAFE_V1",
+      "sourceSchemaVersion": 1,
+      "wireAmount": 5000,
+      "storageCents": "5000",
+      "identity": { "rowId": "quote-v1-safe", "snapshotId": "quote-v1-safe", "matches": true },
+      "rollbackOutcome": "SAFE"
+    },
+    {
+      "code": "ROLLBACK_BLOCKED_BY_V2",
+      "sourceSchemaVersion": 2,
+      "wireAmount": "50.00",
+      "storageCents": "5000",
+      "identity": { "rowId": "quote-v2-blocked", "snapshotId": "quote-v2-blocked", "matches": true },
+      "rollbackOutcome": "BLOCKED_SCHEMA_V2"
+    },
+    {
+      "code": "ROLLBACK_BLOCKED_BY_INT4_OVERFLOW",
+      "sourceSchemaVersion": 1,
+      "wireAmount": 2147483648,
+      "storageCents": "2147483648",
+      "identity": { "rowId": "quote-v1-overflow", "snapshotId": "quote-v1-overflow", "matches": true },
+      "rollbackOutcome": "BLOCKED_INT4_OVERFLOW"
+    },
+    {
+      "code": "IDENTITY_MISMATCH",
+      "sourceSchemaVersion": 2,
+      "wireAmount": "249.00",
+      "storageCents": "24900",
+      "identity": { "rowId": "quote-row", "snapshotId": "quote-other", "matches": false },
+      "rollbackOutcome": "BLOCKED_IDENTITY_MISMATCH"
+    }
+  ]
+}

@@ -93,7 +93,7 @@ echo ""
 
 # 2. TypeScript compilation check
 echo "🔍 Step 2/10: TypeScript compilation check..."
-if npm run typecheck; then
+if npm run typecheck:build; then
   echo -e "${GREEN}✅ TypeScript compilation check passed!${NC}"
 else
   echo -e "${RED}❌ TypeScript compilation failed!${NC}"
@@ -133,7 +133,15 @@ echo ""
 
 # 6. Run unit tests
 echo "🧪 Step 6/10: Running unit tests..."
-if npm run test:unit; then
+run_unit_test_shards() {
+  for shard in 1 2 3 4; do
+    echo "   Unit shard $shard/4"
+    NODE_OPTIONS='--max-old-space-size=8192' npx jest --selectProjects unit \
+      --shard="$shard/4" --maxWorkers=2 --ci || return 1
+  done
+}
+
+if run_unit_test_shards; then
   echo -e "${GREEN}✅ Unit tests passed!${NC}"
 else
   echo -e "${RED}❌ Unit tests failed!${NC}"
@@ -162,7 +170,13 @@ else
   export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
   export DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
   echo "test DB configurada"
-  if npm run test:integration:migrations && npm run test:integration; then
+  # Historical H1 replays own an exact, local-only database. Ordinary
+  # integration remains on the caller's current-schema disposable DB.
+  if npm run test:integration:migrations:guarded &&
+    npm run test:integration:h1:guarded &&
+    npm run test:integration:commercial-contract-v2-migration &&
+    npm run test:integration:commercial-isolated &&
+    npm run test:integration; then
     echo -e "${GREEN}✅ Integration tests passed!${NC}"
   else
     echo -e "${RED}❌ Integration tests failed!${NC}"

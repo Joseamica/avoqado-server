@@ -58,6 +58,7 @@ import { registerCashOutTools } from './tools/cash-out'
 import { registerWhiteLabelOpsTools } from './tools/whiteLabelOps'
 import { registerInterVenueTransferTools } from './tools/interVenueTransfers'
 import { registerMasterCatalogTools } from './tools/masterCatalog'
+import { registerCommercialTools } from './tools/commercial'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 import { buildMcpInstructions } from './instructions'
 import { registerHelpTools } from './tools/help'
@@ -124,6 +125,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerPrinterTools(server, scope)
   registerTenderTypeTools(server, scope)
   registerAreaTicketTools(server, scope)
+  registerCommercialTools(server, scope)
 
   if (flags.catalogEnabled) registerMasterCatalogTools(server, scope)
 

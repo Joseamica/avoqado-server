@@ -1,0 +1,22 @@
+{
+  "serialization": {
+    "input": {
+      "numbers": [333333333.33333329, 1e30, 4.5, 0.002, 1e-27],
+      "string": "€$\u000f\nA'B\"\\\\\"/",
+      "literals": [null, true, false]
+    },
+    "canonical": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}"
+  },
+  "propertyOrder": {
+    "input": {
+      "€": "Euro Sign",
+      "\r": "Carriage Return",
+      "דּ": "Hebrew Letter Dalet With Dagesh",
+      "1": "One",
+      "😀": "Emoji: Grinning Face",
+      "": "Control",
+      "ö": "Latin Small Letter O With Diaeresis"
+    },
+    "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\":\"Control\",\"ö\":\"Latin Small Letter O With Diaeresis\",\"€\":\"Euro Sign\",\"😀\":\"Emoji: Grinning Face\",\"דּ\":\"Hebrew Letter Dalet With Dagesh\"}"
+  }
+}

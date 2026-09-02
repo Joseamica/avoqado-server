@@ -28,6 +28,8 @@ process.env.SESSION_SUCCESSOR_ENC_KEY = process.env.SESSION_SUCCESSOR_ENC_KEY ||
 // on jest.mock('stripe') hooking that constructor. Without this, CI (which has
 // no STRIPE_SECRET_KEY) skips Stripe init and chargeOverage returns 'no_stripe'.
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_dummy_for_jest'
+process.env.COMMERCIAL_PREVIEW_SIGNING_SECRET = 'c'.repeat(48)
+process.env.COMMERCIAL_QUOTE_PREVIEW_SIGNING_SECRET = 'q'.repeat(48)
 
 // OpenAI key must be set before any service module imports — AssistantDashboardService
 // builds its OpenAI client in the constructor and is exported as a module-load singleton
@@ -117,6 +119,11 @@ const prismaMock: any = {
   learnedPatterns: createMockModel(),
   area: createMockModel(),
   order: createMockModel(),
+  // Paid-order loyalty reads the additive OrderCustomer join after the money
+  // transaction commits. Keep the shared mock structurally aligned with Prisma
+  // so unrelated payment tests exercise the no-customer path instead of
+  // manufacturing a post-payment query failure.
+  orderCustomer: createMockModel(),
   orderItem: createMockModel(),
   // 🔴 Sin esta entrada, `awardLoyaltyForPaidOrder` (services/shared/loyaltyOnPaidOrder.ts:84)
   // revienta con "Cannot read properties of undefined (reading 'findMany')", entra por su
@@ -137,6 +144,7 @@ const prismaMock: any = {
   deliveryActivationRequest: createMockModel(),
   payment: createMockModel(),
   terminalPaymentRequest: createMockModel(),
+  terminalOrder: createMockModel(),
   paymentAllocation: createMockModel(),
   shift: createMockModel(),
   // El cajón físico: `getShiftById` lo consulta desde `resolveShiftCashDrawer`
@@ -345,12 +353,19 @@ const prismaMock: any = {
   moneyAnomaly: createMockModel(),
   // Stripe webhook idempotency claims (Connect + platform)
   processedStripeEvent: createMockModel(),
+  // Durable platform-webhook routing/dispatch evidence. The Prisma mock is a
+  // fixed model list, so every new delegate used by cleanup must be explicit.
+  stripeObjectBinding: createMockModel(),
+  webhookDispatchObservation: createMockModel(),
+  webhookOperationalAlert: createMockModel(),
+  webhookManualRetryResultOutbox: createMockModel(),
   // Fase 1: outbox de avisos de aprobación de clientes (evento + entrega por destinatario)
   customerApprovalOutbox: createMockModel(),
   customerApprovalDelivery: createMockModel(),
   // Payment Link models
   paymentLink: createMockModel(),
   checkoutSession: createMockModel(),
+  stripeCheckoutOrigin: createMockModel(),
   ecommerceMerchant: createMockModel(),
   paymentProvider: createMockModel(),
   // Mercado Pago (Phase 0 of MP marketplace integration)
@@ -395,6 +410,11 @@ prismaMock.$queryRaw = jest.fn()
 // Set safe default return values for mocks that are frequently queried
 prismaMock.productModifierGroup.findMany.mockResolvedValue([])
 prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
+// Real Prisma always returns numeric/delete envelopes. Safe empty defaults let
+// unrelated cleanup tests model "no durable webhook evidence" without turning
+// an undefined test double into a false transaction failure.
+prismaMock.webhookEvent.count.mockResolvedValue(0)
+prismaMock.webhookEvent.deleteMany.mockResolvedValue({ count: 0 })
 // Terminal list endpoints (getOrgTerminals / getAllTerminals) run an incidental
 // migration-badge query (prisma.tpvCommandQueue.findMany) for the page's terminals.
 // Tests that don't exercise migration badges shouldn't have to mock it — default to

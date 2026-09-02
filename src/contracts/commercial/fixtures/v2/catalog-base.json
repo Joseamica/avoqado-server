@@ -1,0 +1,461 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "publicationId": "commercial-catalog-initial-v2",
+  "publishedAt": "2026-08-24T06:00:00.000Z",
+  "market": {
+    "country": "MX",
+    "currency": "MXN",
+    "timezone": "America/Mexico_City",
+    "taxLabel": "IVA",
+    "taxRateBasisPoints": 1600
+  },
+  "products": [
+    {
+      "code": "FREE",
+      "slug": "free",
+      "kind": "PLAN",
+      "name": "Free",
+      "description": "Herramientas esenciales para empezar con Avoqado.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 10,
+      "capabilityBindings": [
+        { "capabilityCode": "CHATBOT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "FREE_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "0.00",
+          "currency": "MXN",
+          "taxBehavior": "NOT_APPLICABLE",
+          "taxRateBasisPoints": 0
+        },
+        {
+          "code": "FREE_ANNUAL",
+          "billingUnit": "VENUE_YEAR",
+          "amount": "0.00",
+          "currency": "MXN",
+          "taxBehavior": "NOT_APPLICABLE",
+          "taxRateBasisPoints": 0
+        }
+      ]
+    },
+    {
+      "code": "PRO",
+      "slug": "pro",
+      "kind": "PLAN",
+      "name": "Pro",
+      "description": "Operación y crecimiento para negocios que quieren más control.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 20,
+      "capabilityBindings": [
+        { "capabilityCode": "ADVANCED_REPORTS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AI_ASSISTANT_BUBBLE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AREA_TICKETS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AVAILABLE_BALANCE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "BANKING_HUB", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "BANK_RECONCILIATION", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        {
+          "capabilityCode": "CASH_RECONCILIATION",
+          "capabilityKind": "FEATURE",
+          "activationRequirement": { "mode": "VENUE_SETTING", "settingKey": "cashReconciliationEnabled", "defaultState": "OFF" }
+        },
+        { "capabilityCode": "CHATBOT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "GOOGLE_REVIEW_REDIRECT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "LOYALTY_PROGRAM", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "ONLINE_ORDERING", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "PROMOTIONS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "REFERRAL_PROGRAM", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "RESERVATIONS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "TABLE_SERVICE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "UPSELL", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "VARIABLE_WEIGHT_BARCODE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "VENUE_AUDIT_LOG", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "PRO_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "999.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        },
+        {
+          "code": "PRO_ANNUAL",
+          "billingUnit": "VENUE_YEAR",
+          "amount": "9990.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "PREMIUM",
+      "slug": "premium",
+      "kind": "PLAN",
+      "name": "Premium",
+      "description": "Automatización, control avanzado y operación multicanal.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 30,
+      "capabilityBindings": [
+        { "capabilityCode": "ADVANCED_REPORTS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AI_ASSISTANT_BUBBLE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AREA_TICKETS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "ATTENDANCE_TRACKING", "capabilityKind": "MODULE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AUTO_REORDER", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AVAILABLE_BALANCE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "BANKING_HUB", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "BANK_RECONCILIATION", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        {
+          "capabilityCode": "CASH_RECONCILIATION",
+          "capabilityKind": "FEATURE",
+          "activationRequirement": { "mode": "VENUE_SETTING", "settingKey": "cashReconciliationEnabled", "defaultState": "OFF" }
+        },
+        { "capabilityCode": "CFDI", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "CHATBOT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "COMMISSIONS", "capabilityKind": "MODULE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "DELIVERY_CHANNELS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "GOOGLE_REVIEW_REDIRECT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "INVENTORY_TRACKING", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "LOYALTY_PROGRAM", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "MERCHANT_ROUTING_RULES", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "OFFLINE_LAN_HUB", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "ONLINE_ORDERING", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "PROMOTIONS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "REFERRAL_PROGRAM", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "RESERVATIONS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "SCALE_INTEGRATION", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "SERIALIZED_INVENTORY", "capabilityKind": "MODULE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "TABLE_SERVICE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "TRANSACTION_EXPORT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "UPSELL", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "UPSELL_AI", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "VARIABLE_WEIGHT_BARCODE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "VENUE_AUDIT_LOG", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "PREMIUM_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "1699.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        },
+        {
+          "code": "PREMIUM_ANNUAL",
+          "billingUnit": "VENUE_YEAR",
+          "amount": "16990.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "ENTERPRISE",
+      "slug": "enterprise",
+      "kind": "PLAN",
+      "name": "Enterprise",
+      "description": "Implementación y capacidades acordadas para operaciones complejas.",
+      "salesMode": "CONTACT",
+      "sortOrder": 40,
+      "capabilityBindings": [
+        { "capabilityCode": "ADVANCED_REPORTS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AI_ASSISTANT_BUBBLE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AREA_TICKETS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "ATTENDANCE_TRACKING", "capabilityKind": "MODULE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AUTO_REORDER", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "AVAILABLE_BALANCE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "BANKING_HUB", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "BANK_RECONCILIATION", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        {
+          "capabilityCode": "CASH_RECONCILIATION",
+          "capabilityKind": "FEATURE",
+          "activationRequirement": { "mode": "VENUE_SETTING", "settingKey": "cashReconciliationEnabled", "defaultState": "OFF" }
+        },
+        { "capabilityCode": "CFDI", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "CHATBOT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "COMMISSIONS", "capabilityKind": "MODULE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "DELIVERY_CHANNELS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "GOOGLE_REVIEW_REDIRECT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "INVENTORY_TRACKING", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "LOYALTY_PROGRAM", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "MERCHANT_ROUTING_RULES", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "OFFLINE_LAN_HUB", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "ONLINE_ORDERING", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "PROMOTIONS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "REFERRAL_PROGRAM", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "RESERVATIONS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "SCALE_INTEGRATION", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "SERIALIZED_INVENTORY", "capabilityKind": "MODULE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "TABLE_SERVICE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "TRANSACTION_EXPORT", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "UPSELL", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "UPSELL_AI", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "VARIABLE_WEIGHT_BARCODE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "VENUE_AUDIT_LOG", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "WHITE_LABEL_DASHBOARD", "capabilityKind": "MODULE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": []
+    },
+    {
+      "code": "POS",
+      "slug": "pos",
+      "kind": "POS",
+      "name": "Punto de venta",
+      "description": "Ventas, menú, órdenes, corte de caja y reportes por sucursal.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 50,
+      "capabilityBindings": [
+        { "capabilityCode": "POS_CORE", "capabilityKind": "CORE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "POS_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "249.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ],
+      "limits": { "users": "UNLIMITED", "devices": "UNLIMITED" }
+    },
+    {
+      "code": "TABLE_SERVICE_MODULE",
+      "slug": "mesas-y-meseros",
+      "kind": "MODULE",
+      "name": "Mesas y meseros",
+      "description": "Servicio de mesa, asignación y atención por mesero.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 60,
+      "capabilityBindings": [
+        { "capabilityCode": "TABLE_SERVICE", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "TABLE_SERVICE_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "269.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "KITCHEN_DISPLAY_MODULE",
+      "slug": "pantalla-de-cocina",
+      "kind": "MODULE",
+      "name": "Pantalla de cocina",
+      "description": "Órdenes visibles y organizadas para producción.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 70,
+      "capabilityBindings": [
+        { "capabilityCode": "KITCHEN_DISPLAY", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "KITCHEN_DISPLAY_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "179.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "CFDI_MODULE",
+      "slug": "facturacion-cfdi",
+      "kind": "MODULE",
+      "name": "Facturación CFDI 4.0",
+      "description": "Emisión y administración de facturas CFDI 4.0.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 80,
+      "capabilityBindings": [
+        { "capabilityCode": "CFDI", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "CFDI_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "179.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "ACCOUNTING_MODULE",
+      "slug": "contabilidad",
+      "kind": "MODULE",
+      "name": "Contabilidad",
+      "description": "Conciliación y herramientas contables del negocio.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 90,
+      "capabilityBindings": [
+        { "capabilityCode": "BANKING_HUB", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "BANK_RECONCILIATION", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "ACCOUNTING_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "179.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "RECIPE_INVENTORY_MODULE",
+      "slug": "inventario-por-receta",
+      "kind": "MODULE",
+      "name": "Inventario por receta",
+      "description": "Consumos e inventario calculados desde recetas.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 100,
+      "capabilityBindings": [
+        { "capabilityCode": "INVENTORY_TRACKING", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "RECIPE_INVENTORY_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "179.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "DELIVERY_APPS_MODULE",
+      "slug": "apps-de-delivery",
+      "kind": "MODULE",
+      "name": "Apps de delivery",
+      "description": "Operación de canales de delivery desde Avoqado.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 110,
+      "capabilityBindings": [
+        { "capabilityCode": "DELIVERY_CHANNELS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "DELIVERY_APPS_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "179.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "RESERVATIONS_ORDERS_MODULE",
+      "slug": "reservas-y-pedidos-en-linea",
+      "kind": "MODULE",
+      "name": "Reservas y pedidos en línea",
+      "description": "Reservaciones y pedidos digitales para tus clientes.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 120,
+      "capabilityBindings": [
+        { "capabilityCode": "ONLINE_ORDERING", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "RESERVATIONS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "RESERVATIONS_ORDERS_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "269.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "LOYALTY_PROMOTIONS_MODULE",
+      "slug": "lealtad-y-promociones",
+      "kind": "MODULE",
+      "name": "Lealtad y promociones",
+      "description": "Programas de lealtad, referidos y promociones.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 130,
+      "capabilityBindings": [
+        { "capabilityCode": "LOYALTY_PROGRAM", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "PROMOTIONS", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } },
+        { "capabilityCode": "REFERRAL_PROGRAM", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "LOYALTY_PROMOTIONS_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "269.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    },
+    {
+      "code": "MULTI_LOCATION_MODULE",
+      "slug": "varias-sucursales",
+      "kind": "MODULE",
+      "name": "Varias sucursales",
+      "description": "Visibilidad y operación coordinada de varias sucursales.",
+      "salesMode": "SELF_SERVICE",
+      "sortOrder": 140,
+      "capabilityBindings": [
+        { "capabilityCode": "MULTI_LOCATION", "capabilityKind": "FEATURE", "activationRequirement": { "mode": "NOT_REQUIRED" } }
+      ],
+      "prices": [
+        {
+          "code": "MULTI_LOCATION_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "179.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    }
+  ],
+  "bundles": [
+    {
+      "code": "ALL_MODULES",
+      "slug": "todos-los-modulos",
+      "name": "Todos los módulos",
+      "description": "Los nueve módulos comerciales en una sola mensualidad.",
+      "sortOrder": 10,
+      "items": [
+        { "productCode": "TABLE_SERVICE_MODULE", "quantity": 1, "sortOrder": 10 },
+        { "productCode": "KITCHEN_DISPLAY_MODULE", "quantity": 1, "sortOrder": 20 },
+        { "productCode": "CFDI_MODULE", "quantity": 1, "sortOrder": 30 },
+        { "productCode": "ACCOUNTING_MODULE", "quantity": 1, "sortOrder": 40 },
+        { "productCode": "RECIPE_INVENTORY_MODULE", "quantity": 1, "sortOrder": 50 },
+        { "productCode": "DELIVERY_APPS_MODULE", "quantity": 1, "sortOrder": 60 },
+        { "productCode": "RESERVATIONS_ORDERS_MODULE", "quantity": 1, "sortOrder": 70 },
+        { "productCode": "LOYALTY_PROMOTIONS_MODULE", "quantity": 1, "sortOrder": 80 },
+        { "productCode": "MULTI_LOCATION_MODULE", "quantity": 1, "sortOrder": 90 }
+      ],
+      "prices": [
+        {
+          "code": "ALL_MODULES_MONTHLY",
+          "billingUnit": "VENUE_MONTH",
+          "amount": "1999.00",
+          "currency": "MXN",
+          "taxBehavior": "EXCLUSIVE",
+          "taxRateBasisPoints": 1600
+        }
+      ]
+    }
+  ]
+}

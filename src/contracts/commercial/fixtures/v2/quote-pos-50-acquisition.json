@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "quoteId": "quote-pos-50-acquisition-v2",
+  "subject": { "kind": "ACQUISITION_CONTEXT", "acquisitionContextId": "acquisition-pos-50-v2" },
+  "acquisitionContextId": "acquisition-pos-50-v2",
+  "derivedFromPreview": null,
+  "catalogPublicationId": "commercial-catalog-initial-v2",
+  "campaignVersionId": "campaign-version-pos-50-v2",
+  "campaignCode": "POS_50",
+  "market": "MX",
+  "currency": "MXN",
+  "quotedAt": "2026-08-24T12:00:00.000Z",
+  "expiresAt": "2026-08-24T12:15:00.000Z",
+  "lines": [
+    {
+      "lineKey": "PRODUCT:POS:POS_MONTHLY",
+      "targetType": "PRODUCT",
+      "targetCode": "POS",
+      "priceCode": "POS_MONTHLY",
+      "quantity": 1,
+      "productKind": "POS",
+      "name": "Punto de venta",
+      "billingUnit": "VENUE_MONTH",
+      "currency": "MXN",
+      "taxRateBasisPoints": 1600,
+      "unitAmount": "249.00",
+      "listSubtotal": "249.00",
+      "appliedCampaigns": [
+        {
+          "campaignVersionId": "campaign-version-pos-50-v2",
+          "campaignCode": "POS_50",
+          "ruleCode": "POS_FIXED_50",
+          "type": "FIXED_PRICE",
+          "position": 1,
+          "inputAmount": "249.00",
+          "discountAmount": "199.00",
+          "outputAmount": "50.00",
+          "cycles": 3
+        }
+      ],
+      "discount": "199.00",
+      "subtotal": "50.00",
+      "tax": "8.00",
+      "total": "58.00",
+      "promotionalCycles": 3,
+      "renewalSubtotal": "249.00",
+      "renewalTax": "39.84",
+      "renewalTotal": "288.84"
+    }
+  ],
+  "entitlementGrants": [
+    {
+      "capabilityCode": "POS_CORE",
+      "capabilityKind": "CORE",
+      "origins": [
+        { "kind": "PRODUCT", "sourceCode": "POS", "lineKey": "PRODUCT:POS:POS_MONTHLY" },
+        {
+          "kind": "CAMPAIGN",
+          "sourceCode": "POS_50",
+          "sourceId": "campaign-version-pos-50-v2",
+          "lineKey": "PRODUCT:POS:POS_MONTHLY"
+        }
+      ],
+      "activationRequirement": { "mode": "NOT_REQUIRED" }
+    }
+  ],
+  "totals": {
+    "listSubtotal": "249.00",
+    "discount": "199.00",
+    "subtotal": "50.00",
+    "tax": "8.00",
+    "total": "58.00"
+  },
+  "renewal": { "subtotal": "249.00", "tax": "39.84", "total": "288.84" }
+}

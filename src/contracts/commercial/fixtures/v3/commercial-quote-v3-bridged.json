@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 3,
+  "contractVersion": "3.0.0",
+  "quoteId": "commercial-quote-v3-bridged",
+  "subject": {
+    "kind": "VENUE",
+    "organizationId": "organization-bridged-v3",
+    "venueId": "venue-bridged-v3",
+    "actorId": "staff-bridged-v3"
+  },
+  "acquisitionContextId": "acquisition-context-summer-2026",
+  "derivedFromPreview": {
+    "previewQuoteId": "commercial-quote-v3-anonymous-preview",
+    "previewChecksum": "893c29c30f9bf9a50b3db1d2707a5bfb05d67c4e0c84d1852144ed69e27ab2ed",
+    "selectionFingerprint": "934a31d9b6495822a10bb8d4d07b17920982dcf13583eea0b1f8e9e6184d9eea"
+  },
+  "catalogPublicationId": "commercial-catalog-initial-v2",
+  "catalogChecksum": "f487bb2a340cec9018e833718a0c3a53a1e503efb1587da8f7346dd0e994236e",
+  "offerVersionId": "commercial-offer-version-summer-2026-v3",
+  "offerCode": "SUMMER_2026",
+  "offerChecksum": "b491005815029ea8f5cfaa838ee4fcf180c59a1a9bd192d9f69011b857f69be3",
+  "market": "MX",
+  "currency": "MXN",
+  "quotedAt": "2026-08-15T12:00:00.000Z",
+  "expiresAt": "2026-08-15T12:15:00.000Z",
+  "saasLines": [
+    {
+      "lineKey": "PRODUCT:POS:POS_MONTHLY",
+      "targetType": "PRODUCT",
+      "targetCode": "POS",
+      "priceCode": "POS_MONTHLY",
+      "quantity": 1,
+      "productKind": "POS",
+      "name": "Punto de venta",
+      "billingUnit": "VENUE_MONTH",
+      "currency": "MXN",
+      "taxRateBasisPoints": 1600,
+      "listUnitAmountMinor": "24900",
+      "listSubtotalMinor": "24900",
+      "appliedOfferSteps": [
+        {
+          "benefitCode": "SAAS_POS_50",
+          "ruleCode": "Z_FIXED_200",
+          "type": "FIXED_PRICE",
+          "position": 1,
+          "inputAmountMinor": "24900",
+          "discountAmountMinor": "4900",
+          "outputAmountMinor": "20000",
+          "cycles": 3
+        },
+        {
+          "benefitCode": "SAAS_POS_50",
+          "ruleCode": "A_TEN_PERCENT",
+          "type": "PERCENT_OFF",
+          "position": 2,
+          "inputAmountMinor": "20000",
+          "discountAmountMinor": "2000",
+          "outputAmountMinor": "18000",
+          "cycles": 3
+        }
+      ],
+      "discountMinor": "6900",
+      "subtotalMinor": "18000",
+      "taxMinor": "2880",
+      "totalMinor": "20880",
+      "promotionalCycles": 3,
+      "renewalSubtotalMinor": "24900",
+      "renewalTaxMinor": "3984",
+      "renewalTotalMinor": "28884"
+    }
+  ],
+  "hardwareLines": [],
+  "entitlementGrants": [
+    {
+      "capabilityCode": "POS_CORE",
+      "capabilityKind": "CORE",
+      "origins": [
+        { "kind": "PRODUCT", "sourceCode": "POS", "lineKey": "PRODUCT:POS:POS_MONTHLY" },
+        {
+          "kind": "CAMPAIGN",
+          "sourceCode": "SUMMER_2026",
+          "sourceId": "commercial-offer-version-summer-2026-v3",
+          "lineKey": "PRODUCT:POS:POS_MONTHLY"
+        }
+      ],
+      "activationRequirement": { "mode": "NOT_REQUIRED" }
+    }
+  ],
+  "resolution": {
+    "schemaVersion": 3,
+    "resolutionVersion": 2,
+    "campaignVersionId": "commercial-offer-version-summer-2026-v3",
+    "resolvedAt": "2026-08-15T11:55:00.000Z",
+    "applied": [
+      {
+        "subjectKind": "SAAS_LINE",
+        "subjectKey": "PRODUCT:POS:POS_MONTHLY",
+        "benefitCode": "SAAS_POS_50",
+        "ruleCode": "Z_FIXED_200"
+      },
+      {
+        "subjectKind": "SAAS_LINE",
+        "subjectKey": "PRODUCT:POS:POS_MONTHLY",
+        "benefitCode": "SAAS_POS_50",
+        "ruleCode": "A_TEN_PERCENT"
+      }
+    ],
+    "exclusions": [
+      {
+        "subjectKind": "HARDWARE_SKU",
+        "subjectKey": "NEXGO_N62",
+        "benefitCode": "HARDWARE_N62_FIXED",
+        "accountingEffect": "EXPLANATORY",
+        "reasonCode": "HARDWARE_SKU_NOT_SELECTED"
+      },
+      {
+        "subjectKind": "HARDWARE_SKU",
+        "subjectKey": "PAX_A910S",
+        "benefitCode": "HARDWARE_PAX_10_OFF",
+        "accountingEffect": "EXPLANATORY",
+        "reasonCode": "HARDWARE_SKU_NOT_SELECTED"
+      },
+      {
+        "subjectKind": "PAYMENTS_RATE",
+        "subjectKey": "payments-rate-schedule-version-starter-2026-v1",
+        "benefitCode": "PAYMENTS_STARTER_RATE",
+        "accountingEffect": "EXPLANATORY",
+        "reasonCode": "RATE_SCHEDULE_AUTHORITY_UNAVAILABLE"
+      }
+    ]
+  },
+  "totals": {
+    "recurringCurrent": {
+      "listSubtotalMinor": "24900",
+      "discountMinor": "6900",
+      "subtotalMinor": "18000",
+      "taxMinor": "2880",
+      "totalMinor": "20880"
+    },
+    "oneTime": {
+      "listSubtotalMinor": "0",
+      "discountMinor": "0",
+      "subtotalMinor": "0",
+      "taxMinor": "0",
+      "totalMinor": "0"
+    },
+    "dueNow": {
+      "listSubtotalMinor": "24900",
+      "discountMinor": "6900",
+      "subtotalMinor": "18000",
+      "taxMinor": "2880",
+      "totalMinor": "20880"
+    }
+  },
+  "renewal": {
+    "listSubtotalMinor": "24900",
+    "discountMinor": "0",
+    "subtotalMinor": "24900",
+    "taxMinor": "3984",
+    "totalMinor": "28884"
+  }
+}

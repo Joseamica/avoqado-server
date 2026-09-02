@@ -1,0 +1,157 @@
+[
+  {
+    "code": "POS_FIXED_50",
+    "campaign": {
+      "schemaVersion": 1,
+      "campaignVersionId": "golden-pos-fixed-50-v1",
+      "campaignCode": "POS_FIXED_50",
+      "version": 1,
+      "status": "ACTIVE",
+      "startsAt": "2026-08-01T06:00:00.000Z",
+      "endsAt": "2026-09-01T06:00:00.000Z",
+      "allowedRuleCodeGroups": [],
+      "rules": [
+        {
+          "code": "POS_FIXED_50",
+          "type": "FIXED_PRICE",
+          "priority": 100,
+          "target": { "productCodes": ["POS"] },
+          "cycles": 3,
+          "amountMinor": 5000
+        }
+      ]
+    },
+    "lines": [{ "targetType": "PRODUCT", "targetCode": "POS", "priceCode": "POS_MONTHLY", "quantity": 1 }],
+    "expected": {
+      "totals": { "listSubtotalMinor": 24900, "discountMinor": 19900, "subtotalMinor": 5000, "taxMinor": 800, "totalMinor": 5800 },
+      "renewal": { "subtotalMinor": 24900, "taxMinor": 3984, "totalMinor": 28884 }
+    }
+  },
+  {
+    "code": "POS_FIXED_22",
+    "campaign": {
+      "schemaVersion": 1,
+      "campaignVersionId": "golden-pos-fixed-22-v1",
+      "campaignCode": "POS_FIXED_22",
+      "version": 1,
+      "status": "ACTIVE",
+      "startsAt": "2026-08-01T06:00:00.000Z",
+      "endsAt": "2026-09-01T06:00:00.000Z",
+      "allowedRuleCodeGroups": [],
+      "rules": [
+        {
+          "code": "POS_FIXED_22",
+          "type": "FIXED_PRICE",
+          "priority": 100,
+          "target": { "productCodes": ["POS"] },
+          "cycles": 3,
+          "amountMinor": 2200
+        }
+      ]
+    },
+    "lines": [{ "targetType": "PRODUCT", "targetCode": "POS", "priceCode": "POS_MONTHLY", "quantity": 1 }],
+    "expected": {
+      "totals": { "listSubtotalMinor": 24900, "discountMinor": 22700, "subtotalMinor": 2200, "taxMinor": 352, "totalMinor": 2552 },
+      "renewal": { "subtotalMinor": 24900, "taxMinor": 3984, "totalMinor": 28884 }
+    }
+  },
+  {
+    "code": "TEN_PERCENT_POS",
+    "campaign": {
+      "schemaVersion": 1,
+      "campaignVersionId": "golden-ten-percent-pos-v1",
+      "campaignCode": "TEN_PERCENT_POS",
+      "version": 1,
+      "status": "ACTIVE",
+      "startsAt": "2026-08-01T06:00:00.000Z",
+      "endsAt": "2026-09-01T06:00:00.000Z",
+      "allowedRuleCodeGroups": [],
+      "rules": [
+        {
+          "code": "TEN_PERCENT_POS",
+          "type": "PERCENT_OFF",
+          "priority": 100,
+          "target": { "productCodes": ["POS"] },
+          "cycles": 3,
+          "percentBasisPoints": 1000
+        }
+      ]
+    },
+    "lines": [{ "targetType": "PRODUCT", "targetCode": "POS", "priceCode": "POS_MONTHLY", "quantity": 1 }],
+    "expected": {
+      "totals": { "listSubtotalMinor": 24900, "discountMinor": 2490, "subtotalMinor": 22410, "taxMinor": 3586, "totalMinor": 25996 },
+      "renewal": { "subtotalMinor": 24900, "taxMinor": 3984, "totalMinor": 28884 }
+    }
+  },
+  {
+    "code": "TEN_PERCENT_MODULES",
+    "campaign": {
+      "schemaVersion": 1,
+      "campaignVersionId": "golden-ten-percent-modules-v1",
+      "campaignCode": "TEN_PERCENT_MODULES",
+      "version": 1,
+      "status": "ACTIVE",
+      "startsAt": "2026-08-01T06:00:00.000Z",
+      "endsAt": "2026-09-01T06:00:00.000Z",
+      "allowedRuleCodeGroups": [],
+      "rules": [
+        {
+          "code": "TEN_PERCENT_MODULES",
+          "type": "PERCENT_OFF",
+          "priority": 100,
+          "target": { "productKinds": ["MODULE"] },
+          "cycles": 3,
+          "percentBasisPoints": 1000
+        }
+      ]
+    },
+    "lines": [
+      {
+        "targetType": "PRODUCT",
+        "targetCode": "KITCHEN_DISPLAY_MODULE",
+        "priceCode": "KITCHEN_DISPLAY_MONTHLY",
+        "quantity": 1
+      }
+    ],
+    "expected": {
+      "totals": { "listSubtotalMinor": 17900, "discountMinor": 1790, "subtotalMinor": 16110, "taxMinor": 2578, "totalMinor": 18688 },
+      "renewal": { "subtotalMinor": 17900, "taxMinor": 2864, "totalMinor": 20764 }
+    }
+  },
+  {
+    "code": "TEN_PERCENT_POS_AND_MODULES",
+    "campaign": {
+      "schemaVersion": 1,
+      "campaignVersionId": "golden-ten-percent-pos-modules-v1",
+      "campaignCode": "TEN_PERCENT_POS_MODULES",
+      "version": 1,
+      "status": "ACTIVE",
+      "startsAt": "2026-08-01T06:00:00.000Z",
+      "endsAt": "2026-09-01T06:00:00.000Z",
+      "allowedRuleCodeGroups": [],
+      "rules": [
+        {
+          "code": "TEN_PERCENT_EVERYTHING",
+          "type": "PERCENT_OFF",
+          "priority": 100,
+          "target": { "productCodes": ["POS"], "productKinds": ["MODULE"] },
+          "cycles": 3,
+          "percentBasisPoints": 1000
+        }
+      ]
+    },
+    "lines": [
+      { "targetType": "PRODUCT", "targetCode": "POS", "priceCode": "POS_MONTHLY", "quantity": 1 },
+      {
+        "targetType": "PRODUCT",
+        "targetCode": "KITCHEN_DISPLAY_MODULE",
+        "priceCode": "KITCHEN_DISPLAY_MONTHLY",
+        "quantity": 1
+      }
+    ],
+    "expected": {
+      "totals": { "listSubtotalMinor": 42800, "discountMinor": 4280, "subtotalMinor": 38520, "taxMinor": 6164, "totalMinor": 44684 },
+      "renewal": { "subtotalMinor": 42800, "taxMinor": 6848, "totalMinor": 49648 }
+    }
+  }
+]

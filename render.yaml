@@ -50,6 +50,8 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: COMMERCIAL_PREVIEW_SIGNING_SECRET
+        sync: false
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT
@@ -122,6 +124,8 @@ services:
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: COMMERCIAL_PREVIEW_SIGNING_SECRET
         sync: false
       - key: SMTP_HOST
         sync: false

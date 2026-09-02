@@ -2,6 +2,30 @@ import { CorsOptions } from 'cors'
 
 export type Environment = 'development' | 'staging' | 'production'
 
+const parsePreviewOrigins = (raw: string | undefined): string[] => {
+  if (!raw?.trim()) return []
+
+  return raw.split(',').map(candidate => {
+    const value = candidate.trim()
+    let parsed: URL
+
+    try {
+      parsed = new URL(value)
+    } catch {
+      throw new Error(`CORS_PREVIEW_ORIGINS_INVALID: ${value}`)
+    }
+
+    const isExactOrigin = parsed.origin === value && parsed.pathname === '/' && !parsed.username && !parsed.password
+    const isRenderHttps = parsed.protocol === 'https:' && parsed.port === '' && parsed.hostname.endsWith('.onrender.com')
+
+    if (!isExactOrigin || !isRenderHttps) {
+      throw new Error(`CORS_PREVIEW_ORIGINS_INVALID: ${value}`)
+    }
+
+    return value
+  })
+}
+
 /**
  * Cloudflare Pages preview deployments for the dashboard: `<branch>.<project>.pages.dev`.
  *
@@ -41,7 +65,8 @@ export type Environment = 'development' | 'staging' | 'production'
 const CLOUDFLARE_PAGES_PREVIEW = /^https:\/\/[a-z0-9-]+\.(?:avoqado-web-dashboard-4wx|demo-avoqado-web-dashboard)\.pages\.dev$/
 
 // Environment-specific CORS configuration
-export const getCorsConfig = (env: Environment): CorsOptions => {
+export const getCorsConfig = (env: Environment, previewOriginsRaw?: string): CorsOptions => {
+  const previewOrigins = parsePreviewOrigins(previewOriginsRaw)
   // Define allowed origins based on environment
   const dashboardOrigins = {
     development: [
@@ -119,6 +144,9 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     ...(swaggerOrigins[env] || []),
     ...(publicSiteOrigins[env] || []),
     ...(sdkOrigins[env] || []),
+    // Exact, operator-provided Render origins for a disposable staging preview.
+    // Production deliberately ignores this escape hatch even if configured.
+    ...(env === 'staging' ? previewOrigins : []),
   ]
 
   return {
@@ -162,7 +190,14 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       'Access-Control-Request-Method',
       'Access-Control-Request-Headers',
     ],
-    exposedHeaders: ['X-Client-Id', 'X-Total-Labels'],
+    exposedHeaders: [
+      'X-Client-Id',
+      'X-Total-Labels',
+      'ETag',
+      'X-Avoqado-Commercial-Fallback',
+      'X-Avoqado-Commercial-Active-Publication',
+      'X-Avoqado-Commercial-Served-Publication',
+    ],
     credentials: true,
     optionsSuccessStatus: 200,
     maxAge: 86400, // Cache preflight results for 24 hours

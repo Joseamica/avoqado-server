@@ -197,16 +197,21 @@ describe('integration setup database isolation', () => {
     expect(packageJson.scripts['test:integration']).toContain('--runInBand')
   })
 
-  it('runs destructive H1A migration replays in isolated Jest processes', () => {
+  it('keeps H1 history and commercial stateful suites outside the ordinary shared database', () => {
     const packageJson = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')) as {
       scripts: Record<string, string>
     }
 
     expect(packageJson.scripts['test:integration']).toContain('--testPathIgnorePatterns')
-    expect(packageJson.scripts['test:integration']).toContain('h1a-migration(?:-(?:lock-safety|replay))?')
+    expect(packageJson.scripts['test:integration']).toContain('tests/integration/master-catalog/')
+    expect(packageJson.scripts['test:integration']).toContain('tests/integration/inventory/recipe-cost-serialization')
+    expect(packageJson.scripts['test:integration']).toContain('tests/integration/commercial/')
     expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration-replay.integration.test.ts')
     expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration-lock-safety.integration.test.ts')
     expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration.integration.test.ts')
+    expect(packageJson.scripts['test:integration:migrations:guarded']).toContain('run-with-h1-test-db.cjs')
+    expect(packageJson.scripts['test:integration:h1:guarded']).toContain('run-with-h1-test-db.cjs')
+    expect(packageJson.scripts['test:integration:commercial-isolated']).toContain('run-all-c3-integration-tests.cjs')
   })
 
   it('disconnects the per-suite Prisma singleton before Jest loads the next integration file', () => {

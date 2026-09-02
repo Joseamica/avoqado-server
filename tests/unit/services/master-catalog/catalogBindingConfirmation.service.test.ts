@@ -1,5 +1,4 @@
-import { CatalogItemKind, ProductType, Unit } from '@prisma/client'
-import { Decimal } from '@prisma/client/runtime/library'
+import { CatalogItemKind, ProductType, Unit, Prisma } from '@prisma/client'
 import { hashCatalogManagedFieldsV1 } from '@/services/master-catalog/catalogHash.service'
 import { hashCanonicalJsonV1 } from '@/services/master-catalog/catalogHash.service'
 import { CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1, CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 } from '@/types/master-catalog'
@@ -14,6 +13,11 @@ import {
   recipeLine,
   stageConfirmablePreview,
 } from './catalogBindingTestHarness'
+
+// Keep expected money values in the same public Prisma runtime used by the
+// product writer. Importing the private runtime subpath can create a second
+// Decimal prototype inside Jest and make equal values fail deep comparison.
+const Decimal = Prisma.Decimal
 
 describe('catalogBinding.service — atomic confirm', () => {
   it('LINK creates provenance only and preserves the captured inactive Product byte-for-byte', async () => {

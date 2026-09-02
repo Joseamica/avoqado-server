@@ -1,0 +1,309 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api.avoqado.io/contracts/commercial/quote-v2.schema.json",
+  "title": "Avoqado Commercial Quote v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contractVersion",
+    "quoteId",
+    "subject",
+    "acquisitionContextId",
+    "derivedFromPreview",
+    "catalogPublicationId",
+    "campaignVersionId",
+    "campaignCode",
+    "market",
+    "currency",
+    "quotedAt",
+    "expiresAt",
+    "lines",
+    "entitlementGrants",
+    "totals",
+    "renewal"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "contractVersion": { "const": "2.0.0" },
+    "quoteId": { "$ref": "#/definitions/id" },
+    "subject": { "oneOf": [{ "$ref": "#/definitions/acquisitionSubject" }, { "$ref": "#/definitions/venueSubject" }] },
+    "acquisitionContextId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+    "derivedFromPreview": { "oneOf": [{ "$ref": "#/definitions/derivedFromPreview" }, { "type": "null" }] },
+    "catalogPublicationId": { "$ref": "#/definitions/id" },
+    "campaignVersionId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+    "campaignCode": { "oneOf": [{ "$ref": "#/definitions/code" }, { "type": "null" }] },
+    "market": { "const": "MX" },
+    "currency": { "const": "MXN" },
+    "quotedAt": { "$ref": "#/definitions/timestamp" },
+    "expiresAt": { "$ref": "#/definitions/timestamp" },
+    "lines": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "$ref": "#/definitions/line" } },
+    "entitlementGrants": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/definitions/grant" } },
+    "totals": { "$ref": "#/definitions/totals" },
+    "renewal": { "$ref": "#/definitions/renewal" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "subject": { "$ref": "#/definitions/acquisitionSubject" },
+        "acquisitionContextId": { "$ref": "#/definitions/id" },
+        "derivedFromPreview": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "subject": { "$ref": "#/definitions/venueSubject" },
+        "acquisitionContextId": { "type": "null" },
+        "derivedFromPreview": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "subject": { "$ref": "#/definitions/venueSubject" },
+        "acquisitionContextId": { "$ref": "#/definitions/id" },
+        "derivedFromPreview": { "$ref": "#/definitions/derivedFromPreview" }
+      }
+    }
+  ],
+  "definitions": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+    "lineKey": { "type": "string", "minLength": 1, "maxLength": 192 },
+    "money": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,16})\\.[0-9]{2}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "acquisitionSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "acquisitionContextId"],
+      "properties": {
+        "kind": { "const": "ACQUISITION_CONTEXT" },
+        "acquisitionContextId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "venueSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "organizationId", "venueId", "actorId"],
+      "properties": {
+        "kind": { "const": "VENUE" },
+        "organizationId": { "$ref": "#/definitions/id" },
+        "venueId": { "$ref": "#/definitions/id" },
+        "actorId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "derivedFromPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["previewQuoteId", "previewChecksum", "selectionFingerprint"],
+      "properties": {
+        "previewQuoteId": { "$ref": "#/definitions/id" },
+        "previewChecksum": { "$ref": "#/definitions/sha256" },
+        "selectionFingerprint": { "$ref": "#/definitions/sha256" }
+      }
+    },
+    "activationNotRequired": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": { "mode": { "const": "NOT_REQUIRED" } }
+    },
+    "activationVenueSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "settingKey", "defaultState"],
+      "properties": {
+        "mode": { "const": "VENUE_SETTING" },
+        "settingKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "defaultState": { "enum": ["ON", "OFF"] }
+      }
+    },
+    "activationRequirement": {
+      "oneOf": [{ "$ref": "#/definitions/activationNotRequired" }, { "$ref": "#/definitions/activationVenueSetting" }]
+    },
+    "originFree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "lineKey"],
+      "properties": {
+        "kind": { "const": "FREE" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originProduct": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "lineKey"],
+      "properties": {
+        "kind": { "const": "PRODUCT" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "lineKey"],
+      "properties": {
+        "kind": { "const": "BUNDLE" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originBundleComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "parentSourceCode", "lineKey"],
+      "properties": {
+        "kind": { "const": "BUNDLE_COMPONENT" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "parentSourceCode": { "$ref": "#/definitions/code" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originCampaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "sourceId", "lineKey"],
+      "properties": {
+        "kind": { "const": "CAMPAIGN" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "sourceId": { "$ref": "#/definitions/id" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originIdOnly": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceId"],
+      "properties": {
+        "kind": { "enum": ["TRIAL", "GRANDFATHERED", "CONTRACT", "MANUAL"] },
+        "sourceId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "origin": {
+      "oneOf": [
+        { "$ref": "#/definitions/originFree" },
+        { "$ref": "#/definitions/originProduct" },
+        { "$ref": "#/definitions/originBundle" },
+        { "$ref": "#/definitions/originBundleComponent" },
+        { "$ref": "#/definitions/originCampaign" },
+        { "$ref": "#/definitions/originIdOnly" }
+      ]
+    },
+    "grant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilityCode", "capabilityKind", "origins", "activationRequirement"],
+      "properties": {
+        "capabilityCode": { "$ref": "#/definitions/code" },
+        "capabilityKind": { "enum": ["FEATURE", "MODULE", "CORE"] },
+        "origins": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/definitions/origin" } },
+        "activationRequirement": { "$ref": "#/definitions/activationRequirement" }
+      }
+    },
+    "appliedCampaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "campaignVersionId",
+        "campaignCode",
+        "ruleCode",
+        "type",
+        "position",
+        "inputAmount",
+        "discountAmount",
+        "outputAmount",
+        "cycles"
+      ],
+      "properties": {
+        "campaignVersionId": { "$ref": "#/definitions/id" },
+        "campaignCode": { "$ref": "#/definitions/code" },
+        "ruleCode": { "$ref": "#/definitions/code" },
+        "type": { "enum": ["FIXED_PRICE", "PERCENT_OFF", "AMOUNT_OFF", "FREE_PERIOD", "BUNDLE_PRICE"] },
+        "position": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "inputAmount": { "$ref": "#/definitions/money" },
+        "discountAmount": { "$ref": "#/definitions/money" },
+        "outputAmount": { "$ref": "#/definitions/money" },
+        "cycles": { "type": "integer", "minimum": 1, "maximum": 120 }
+      }
+    },
+    "line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lineKey",
+        "targetType",
+        "targetCode",
+        "priceCode",
+        "quantity",
+        "productKind",
+        "name",
+        "billingUnit",
+        "currency",
+        "taxRateBasisPoints",
+        "unitAmount",
+        "listSubtotal",
+        "appliedCampaigns",
+        "discount",
+        "subtotal",
+        "tax",
+        "total",
+        "promotionalCycles",
+        "renewalSubtotal",
+        "renewalTax",
+        "renewalTotal"
+      ],
+      "properties": {
+        "lineKey": { "$ref": "#/definitions/lineKey" },
+        "targetType": { "enum": ["PRODUCT", "BUNDLE"] },
+        "targetCode": { "$ref": "#/definitions/code" },
+        "priceCode": { "$ref": "#/definitions/code" },
+        "quantity": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "productKind": { "enum": ["PLAN", "POS", "MODULE", "BUNDLE"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "billingUnit": { "enum": ["VENUE_MONTH", "VENUE_YEAR"] },
+        "currency": { "const": "MXN" },
+        "taxRateBasisPoints": { "type": "integer", "enum": [0, 1600] },
+        "unitAmount": { "$ref": "#/definitions/money" },
+        "listSubtotal": { "$ref": "#/definitions/money" },
+        "appliedCampaigns": { "type": "array", "maxItems": 10, "items": { "$ref": "#/definitions/appliedCampaign" } },
+        "discount": { "$ref": "#/definitions/money" },
+        "subtotal": { "$ref": "#/definitions/money" },
+        "tax": { "$ref": "#/definitions/money" },
+        "total": { "$ref": "#/definitions/money" },
+        "promotionalCycles": { "type": ["integer", "null"], "minimum": 1, "maximum": 120 },
+        "renewalSubtotal": { "$ref": "#/definitions/money" },
+        "renewalTax": { "$ref": "#/definitions/money" },
+        "renewalTotal": { "$ref": "#/definitions/money" }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listSubtotal", "discount", "subtotal", "tax", "total"],
+      "properties": {
+        "listSubtotal": { "$ref": "#/definitions/money" },
+        "discount": { "$ref": "#/definitions/money" },
+        "subtotal": { "$ref": "#/definitions/money" },
+        "tax": { "$ref": "#/definitions/money" },
+        "total": { "$ref": "#/definitions/money" }
+      }
+    },
+    "renewal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subtotal", "tax", "total"],
+      "properties": {
+        "subtotal": { "$ref": "#/definitions/money" },
+        "tax": { "$ref": "#/definitions/money" },
+        "total": { "$ref": "#/definitions/money" }
+      }
+    }
+  }
+}

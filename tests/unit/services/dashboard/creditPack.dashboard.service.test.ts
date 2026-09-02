@@ -30,8 +30,13 @@ import { prismaMock } from '../../../__helpers__/setup'
 // Mocked globally in setup.ts — asserting on it verifies the audit dual-write.
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
-import { CreditPurchaseStatus, CreditTransactionType } from '@prisma/client'
-import { Decimal } from '@prisma/client/runtime/library'
+import { CreditPurchaseStatus, CreditTransactionType, Prisma } from '@prisma/client'
+
+// Exercise the same public Decimal constructor used by the service. Importing
+// Prisma's internal runtime subpath gives Jest a second module identity when the
+// generated client resolves `runtime/library.js`, making valid Decimal values
+// fail `instanceof` despite preserving the exact amount.
+const Decimal = Prisma.Decimal
 
 // ==========================================
 // MOCK HELPERS

@@ -117,6 +117,15 @@ describe('checkTableOwnership Middleware', () => {
         message: expect.stringContaining('Juan Pérez'),
       }),
     )
+    expect(prisma.staffVenue.findFirst).toHaveBeenCalledWith({
+      where: {
+        staffId: ALBERTO,
+        role: 'SUPERADMIN',
+        active: true,
+        staff: { active: true },
+      },
+      select: { id: true },
+    })
   })
 
   it("override con 'tables:manage-all' pasa", async () => {

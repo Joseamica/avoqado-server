@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "quoteStates": ["ISSUED", "VOIDED", "EXPIRED"],
+  "acceptanceStates": ["ACCEPTED", "STRIPE_PENDING", "ACTIVE", "FAILED", "CANCELED", "REFUNDED", "DISPUTED"],
+  "redemptionStates": ["RESERVED", "RECONCILING", "CONSUMED", "RELEASED"],
+  "checkoutAttemptStates": ["PENDING", "PROCESSING", "STRIPE_PENDING", "OUTCOME_UNKNOWN", "SUCCEEDED", "FAILED_RETRYABLE", "FAILED_FINAL"],
+  "entitlementStates": ["ACTIVE", "PENDING", "GRACE_PERIOD", "SUSPENDED", "REVOKED", "EXPIRED"]
+}

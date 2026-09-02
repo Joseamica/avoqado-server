@@ -95,6 +95,7 @@ import * as saleVerificationController from '../controllers/dashboard/sale-verif
 import * as cryptoConfigController from '../controllers/dashboard/cryptoConfig.dashboard.controller'
 import * as tpvMessageController from '../controllers/dashboard/tpv-message.dashboard.controller'
 import { preserveContext } from '@/observability/preserveContext'
+import commercialDashboardRoutes from './dashboard/commercial.routes'
 import {
   issueCfdiForOrderController,
   listCfdisController,
@@ -372,6 +373,10 @@ import impersonationRoutes from './dashboard/impersonation.routes'
 import referralsRoutes from './dashboard/referrals.routes'
 
 const router = express.Router({ mergeParams: true })
+
+// Avoqado SaaS quote authority. Kept in a focused subrouter so the legacy
+// billing endpoints can remain untouched while release mode is OFF.
+router.use('/commercial', commercialDashboardRoutes)
 
 // Rate limiters for security (FAANG best practices)
 // More permissive rate limits in development for easier testing

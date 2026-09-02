@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://api.avoqado.io/contracts/commercial/entitlements-v2.schema.json",
+  "title": "Avoqado Commercial Entitlement Projection v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "contractVersion", "subject", "capabilities"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "contractVersion": { "const": "2.0.0" },
+    "subject": { "$ref": "#/definitions/subject" },
+    "capabilities": { "type": "array", "items": { "$ref": "#/definitions/capability" } }
+  },
+  "definitions": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$" },
+    "lineKey": { "type": "string", "minLength": 1, "maxLength": 192 },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "organizationId", "venueId"],
+      "properties": {
+        "kind": { "const": "VENUE" },
+        "organizationId": { "$ref": "#/definitions/id" },
+        "venueId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "originFree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "lineKey"],
+      "properties": {
+        "kind": { "const": "FREE" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originProduct": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "lineKey"],
+      "properties": {
+        "kind": { "const": "PRODUCT" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "lineKey"],
+      "properties": {
+        "kind": { "const": "BUNDLE" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originBundleComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "parentSourceCode", "lineKey"],
+      "properties": {
+        "kind": { "const": "BUNDLE_COMPONENT" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "parentSourceCode": { "$ref": "#/definitions/code" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originCampaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceCode", "sourceId", "lineKey"],
+      "properties": {
+        "kind": { "const": "CAMPAIGN" },
+        "sourceCode": { "$ref": "#/definitions/code" },
+        "sourceId": { "$ref": "#/definitions/id" },
+        "lineKey": { "$ref": "#/definitions/lineKey" }
+      }
+    },
+    "originIdOnly": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceId"],
+      "properties": {
+        "kind": { "enum": ["TRIAL", "GRANDFATHERED", "CONTRACT", "MANUAL"] },
+        "sourceId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "origin": {
+      "oneOf": [
+        { "$ref": "#/definitions/originFree" },
+        { "$ref": "#/definitions/originProduct" },
+        { "$ref": "#/definitions/originBundle" },
+        { "$ref": "#/definitions/originBundleComponent" },
+        { "$ref": "#/definitions/originCampaign" },
+        { "$ref": "#/definitions/originIdOnly" }
+      ]
+    },
+    "entitlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "origins"],
+      "properties": {
+        "state": { "enum": ["ACTIVE", "PENDING", "GRACE_PERIOD", "SUSPENDED", "REVOKED", "EXPIRED"] },
+        "origins": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/definitions/origin" } }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": { "state": { "enum": ["NOT_REQUIRED", "ON", "OFF"] } }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilityCode", "capabilityKind", "entitlement", "activation"],
+      "properties": {
+        "capabilityCode": { "$ref": "#/definitions/code" },
+        "capabilityKind": { "enum": ["FEATURE", "MODULE", "CORE"] },
+        "entitlement": { "$ref": "#/definitions/entitlement" },
+        "activation": { "$ref": "#/definitions/activation" }
+      }
+    }
+  }
+}

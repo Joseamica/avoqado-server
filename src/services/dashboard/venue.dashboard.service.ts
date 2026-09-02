@@ -49,6 +49,7 @@ import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.servi
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
 import { OPERATIONAL_VENUE_STATUSES, canDeleteVenue, isDemoVenue, isTrialVenue } from '@/lib/venueStatus.constants'
+import { assertLegacyPlanCheckoutVenueEligible } from '@/services/commercial/legacyPlanCheckoutEligibility.service'
 import { logAction } from './activity-log.service'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
@@ -1593,12 +1594,17 @@ export async function createVenuePlanCheckoutSession(
       slug: true,
       stripeCustomerId: true,
       organizationId: true,
+      status: true,
     },
   })
 
   if (!venue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
+
+  // Reject ephemeral venues before tier resolution, customer creation or any
+  // Stripe/origin side effect. The deeper Stripe guard remains defense in depth.
+  assertLegacyPlanCheckoutVenueEligible(venue.status)
 
   // Guard: don't create a duplicate base subscription if the venue already has ANY
   // active base plan (PLAN_PRO or PLAN_PREMIUM). A fresh checkout would stack a second
