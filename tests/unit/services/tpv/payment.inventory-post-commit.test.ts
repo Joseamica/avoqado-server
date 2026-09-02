@@ -122,6 +122,13 @@ jest.mock('@/services/payments/transactionCost.service', () => ({
   createTransactionCost: jest.fn(),
 }))
 
+// La lealtad (puntos + sellos) al quedar pagada es UNA regla compartida con el cobro en
+// efectivo de Android/iOS. Aquí sólo se fija que este camino la invoque.
+jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({
+  awardLoyaltyForPaidOrder: jest.fn().mockResolvedValue(undefined),
+}))
+import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
+
 const VENUE_ID = 'venue-123'
 const ORDER_ID = 'order-123'
 
@@ -242,6 +249,15 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
       expect(prisma.payment.create).toHaveBeenCalled()
       expect(result.id).toBe('payment-1')
       expect(result.status).toBe('COMPLETED')
+    })
+
+    it('🎁 acredita lealtad por la regla COMPARTIDA con el efectivo móvil, con el Order.total recién escrito', async () => {
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+      expect(awardLoyaltyForPaidOrder).toHaveBeenCalledTimes(1)
+      expect(awardLoyaltyForPaidOrder).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, orderTotal: 100 }),
+      )
     })
 
     it('le dice al cajero QUÉ pasó y POR QUÉ: producto, cuánto se pidió, cuánto había y el motivo', async () => {

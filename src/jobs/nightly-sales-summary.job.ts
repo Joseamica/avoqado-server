@@ -18,6 +18,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard/sales-summary.dashboard.service'
 import emailService from '../services/email.service'
+import { utcTs } from '../utils/sqlDates'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import { isItemLevelDiscountSql, lineRevenueSql } from '../services/dashboard/lineRevenue'
 import { FRONTEND_URL } from '../config/env'
@@ -429,8 +430,8 @@ async function getCategoryBreakdown(
     LEFT JOIN "Product" p ON oi."productId" = p.id
     LEFT JOIN "MenuCategory" c ON p."categoryId" = c.id
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${startDate}
-      AND o."createdAt" <= ${endDate}
+      AND o."createdAt" >= ${utcTs(startDate)}
+      AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
     GROUP BY c.name
@@ -474,8 +475,8 @@ async function warnOnClampedOrders(venueId: string, startDate: Date, endDate: Da
              WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())}) as net_sales
       FROM "Order" o
       WHERE o."venueId" = ${venueId}
-        AND o."createdAt" >= ${startDate}
-        AND o."createdAt" <= ${endDate}
+        AND o."createdAt" >= ${utcTs(startDate)}
+        AND o."createdAt" <= ${utcTs(endDate)}
         AND o.status NOT IN ('CANCELLED')
         AND o."paymentStatus" NOT IN ('REFUNDED')
         AND o.subtotal - o."discountAmount"
@@ -550,8 +551,8 @@ export async function getOrderSourcesBreakdown(
       , 0)), 0) as net_sales
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${startDate}
-      AND o."createdAt" <= ${endDate}
+      AND o."createdAt" >= ${utcTs(startDate)}
+      AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
     GROUP BY o.source

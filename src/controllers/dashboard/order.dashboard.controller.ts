@@ -9,55 +9,73 @@ import {
   type ExportColumnDef,
 } from '../../services/dashboard/export.helpers'
 import logger from '../../config/logger'
+import * as orderSummaryService from '../../services/dashboard/orderSummary.dashboard.service'
+import {
+  LIST_PAGE_SIZE_MAX,
+  amountFilterFromQuery,
+  clampLegacyPageSize,
+  clampPage,
+  clampPageSize,
+  parseCsv,
+} from '../../services/dashboard/listSummary.shared'
 
-export async function getOrdersData(
-  req: Request<
-    { venueId: string },
-    {},
-    {},
-    {
-      page?: string
-      pageSize?: string
-      statuses?: string
-      types?: string
-      tableIds?: string
-      staffIds?: string
-      search?: string
-      startDate?: string
-      endDate?: string
-    }
-  >,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+/** Un valor de query como cadena no vacía, o undefined. */
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+/** CSV o parámetro repetido (arreglo): los dos caminos llegan a parseCsv. */
+const list = (v: unknown): string[] | undefined => (Array.isArray(v) ? parseCsv(v.map(String)) : parseCsv(str(v)))
+
+/** Los filtros del listado, tal como llegan en la query (CSV) → `OrderFilters`. */
+function orderFiltersFromQuery(q: Record<string, unknown>): orderDashboardService.OrderFilters {
+  return {
+    statuses: list(q.statuses),
+    types: list(q.types),
+    tableIds: list(q.tableIds),
+    staffIds: list(q.staffIds),
+    search: str(q.search),
+    startDate: str(q.startDate),
+    endDate: str(q.endDate),
+  }
+}
+
+export async function getOrdersData(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    const page = parseInt(req.query.page || '1')
-    const pageSize = parseInt(req.query.pageSize || '10')
+    const q = req.query as Record<string, unknown>
+    const page = clampPage(q.page)
+    const boundedResponse = q.responseMode === 'paginated-v1'
+    const pageSize = boundedResponse ? clampPageSize(q.pageSize) : clampLegacyPageSize(q.pageSize)
 
-    // Helper to parse comma-separated list from query string
-    const parseList = (raw?: string): string[] | undefined => {
-      if (!raw) return undefined
-      const list = raw
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean)
-      return list.length > 0 ? list : undefined
-    }
+    const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize, orderFiltersFromQuery(q))
 
-    const filters: orderDashboardService.OrderFilters = {
-      statuses: parseList(req.query.statuses),
-      types: parseList(req.query.types),
-      tableIds: parseList(req.query.tableIds),
-      staffIds: parseList(req.query.staffIds),
-      search: req.query.search,
-      startDate: req.query.startDate,
-      endDate: req.query.endDate,
-    }
+    res.status(200).json({
+      ...ordersData,
+      meta: { ...ordersData.meta, ...(boundedResponse ? { maxPageSize: LIST_PAGE_SIZE_MAX, responseMode: 'paginated-v1' } : {}) },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
 
-    const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize, filters)
+// Ruta: GET /venues/:venueId/orders/summary — conteos por estado y sumas, en Postgres
+export async function getOrdersSummary(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const q = req.query as Record<string, unknown>
+    const summary = await orderSummaryService.getOrdersSummary(venueId, orderFiltersFromQuery(q), {
+      total: amountFilterFromQuery(q, 'total'),
+      tip: amountFilterFromQuery(q, 'tip'),
+    })
+    res.status(200).json({ success: true, data: summary })
+  } catch (error) {
+    next(error)
+  }
+}
 
-    res.status(200).json(ordersData)
+// Ruta: GET /venues/:venueId/orders/filter-options — valores distintos para las píldoras
+export async function getOrdersFilterOptions(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const options = await orderSummaryService.getOrderFilterOptions(req.params.venueId)
+    res.status(200).json({ success: true, data: options })
   } catch (error) {
     next(error)
   }

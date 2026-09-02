@@ -66,7 +66,10 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/attendance.dashboard.service.ts': 2,
   'src/services/dashboard/attendanceLiveAlert.ts': 1,
   'src/services/dashboard/autoReorder.service.ts': 2,
-  'src/services/dashboard/availableBalance.dashboard.service.ts': 8,
+  // 2026-09-01: availableBalance bajó de 8 → 0. Calendar, byCardType, projection y
+  // cash se agregaron en Postgres; timeline y saldo completo recorren páginas
+  // internas con cursores. Al llegar a cero sale del inventario en vez de guardar
+  // una excepción vacía.
   'src/services/dashboard/bankReconciliation.service.ts': 1,
   'src/services/dashboard/cash-out/cash-out.ledger.service.ts': 2,
   'src/services/dashboard/cashCloseout.dashboard.service.ts': 1,
@@ -74,11 +77,19 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/commission/commission-utils.ts': 1,
   'src/services/dashboard/cost-management.service.ts': 1,
   'src/services/dashboard/customer.dashboard.service.ts': 1,
-  'src/services/dashboard/generalStats.dashboard.service.ts': 19,
+  // 2026-09-01: 19 → 3. Las 16 agregaciones se reescribieron a GROUP BY en
+  // Postgres (golden snapshots al centavo + integración con base real). Los 3
+  // que quedan devuelven las FILAS al dashboard (contrato de la API, con select
+  // acotado): quitarlos exige paginar también el cliente — trabajo aparte.
+  // 2026-09-01 (tarde): 3 → 2. basic-metrics pasó a summary en SQL; sus listas de
+  // compatibilidad llevan take (BASIC_METRICS_ROWS_CAP).
+  'src/services/dashboard/generalStats.dashboard.service.ts': 2,
   'src/services/dashboard/inventoryRestock.service.ts': 1,
   'src/services/dashboard/itemCategory.dashboard.service.ts': 1,
   'src/services/dashboard/order.dashboard.service.ts': 2,
-  'src/services/dashboard/payment.dashboard.service.ts': 2,
+  // 2026-09-02: la rama MindForm dejó de materializar todo el histórico; sólo
+  // conserva el findMany paginado del listado nativo.
+  'src/services/dashboard/payment.dashboard.service.ts': 1,
   'src/services/dashboard/purchaseOrder.service.ts': 1,
   'src/services/dashboard/receipt.dashboard.service.ts': 2,
   'src/services/dashboard/refund.dashboard.service.ts': 3,
@@ -111,7 +122,12 @@ const INVENTARIO: Record<string, number> = {
   'src/services/mobile/transaction.mobile.service.ts': 1,
   'src/services/onboarding/demoCleanup.service.ts': 1,
   'src/services/organization-dashboard/orgStockControl.service.ts': 1,
-  'src/services/organization-dashboard/organizationDashboard.service.ts': 15,
+  // 2026-09-01: 15 → 5. Diez agregaciones (resumen global, promotores activos ×3, top
+  // promotor, efectivo por checada, tendencia y mezcla por vendedor, los dos heatmaps) se
+  // reescribieron a SQL (golden al centavo + integración con base real). Los 5 que quedan
+  // devuelven FILAS al dashboard o corren un motor por fila (GPS de hoy, personal en línea,
+  // checadas del día, calendario, reporte de cierre) y llevan select quirúrgico.
+  'src/services/organization-dashboard/organizationDashboard.service.ts': 5,
   'src/services/promoters/promoters.service.ts': 3,
   'src/services/promoters/terminalLocation.service.ts': 1,
   'src/services/referrals/referralRefund.service.ts': 1,

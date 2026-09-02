@@ -33,12 +33,14 @@ const migratePreflightMock = jest.fn()
 const migrateExecuteMock = jest.fn()
 const migrateStatusMock = jest.fn()
 const migrateCancelMock = jest.fn()
+const migrateDiscardMock = jest.fn()
 jest.mock('@/services/dashboard/terminal-migration.service', () => ({
   __esModule: true,
   migratePreflight: (...args: any[]) => migratePreflightMock(...args),
   migrateExecute: (...args: any[]) => migrateExecuteMock(...args),
   migrateStatus: (...args: any[]) => migrateStatusMock(...args),
   migrateCancel: (...args: any[]) => migrateCancelMock(...args),
+  migrateDiscard: (...args: any[]) => migrateDiscardMock(...args),
 }))
 
 import * as orgTerminals from '@/services/organization-dashboard/orgTerminals.service'
@@ -253,7 +255,7 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       const terminalOrder = prismaMock.terminal.findUnique.mock.invocationCallOrder[0]
       const migrateOrder = migrateCancelMock.mock.invocationCallOrder[0]
       expect(terminalOrder).toBeLessThan(migrateOrder)
-      expect(migrateCancelMock).toHaveBeenCalledWith(TERMINAL_ID, actor)
+      expect(migrateCancelMock).toHaveBeenCalledWith(TERMINAL_ID, actor, ORG_ID)
     })
 
     it('throws ForbiddenError and does NOT call migrateCancel when the terminal is in another org', async () => {
@@ -262,6 +264,32 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       await expect(orgTerminals.migrateCancelForOrg(ORG_ID, TERMINAL_ID, actor)).rejects.toBeInstanceOf(ForbiddenError)
 
       expect(migrateCancelMock).not.toHaveBeenCalled()
+    })
+  })
+
+  // ------------------------------------------------------------------ discard
+  // Same guard as cancel: discarding a pending wipe is a write on a terminal, so the
+  // terminal MUST belong to the caller's org before the shared service is reached.
+  describe('migrateDiscardForOrg', () => {
+    const actor = { staffId: 'staff-1' }
+
+    it('validates terminal-in-org BEFORE calling migrateDiscard', async () => {
+      prismaMock.terminal.findUnique.mockResolvedValue(terminalInOrg())
+
+      await orgTerminals.migrateDiscardForOrg(ORG_ID, TERMINAL_ID, actor)
+
+      const terminalOrder = prismaMock.terminal.findUnique.mock.invocationCallOrder[0]
+      const migrateOrder = migrateDiscardMock.mock.invocationCallOrder[0]
+      expect(terminalOrder).toBeLessThan(migrateOrder)
+      expect(migrateDiscardMock).toHaveBeenCalledWith(TERMINAL_ID, actor, ORG_ID)
+    })
+
+    it('throws ForbiddenError and does NOT call migrateDiscard when the terminal is in another org', async () => {
+      prismaMock.terminal.findUnique.mockResolvedValue(terminalInOtherOrg())
+
+      await expect(orgTerminals.migrateDiscardForOrg(ORG_ID, TERMINAL_ID, actor)).rejects.toBeInstanceOf(ForbiddenError)
+
+      expect(migrateDiscardMock).not.toHaveBeenCalled()
     })
   })
 })

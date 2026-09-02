@@ -1,8 +1,8 @@
 import { Prisma, PaymentProcessor } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
-import { updateTerminal, type TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
+import { deviceReboundAfter, updateTerminal, type TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
@@ -115,6 +115,30 @@ export interface MerchantMigrationInfo {
   merchants: { id: string; displayName: string | null }[]
 }
 
+/**
+ * The FACTORY_RESET that is blocking a migration, described so the wizard can say WHEN it
+ * was queued, WHERE it came from, and offer the way out instead of a dead end
+ * (founder decision 2026-09-01, Asana 1218069201250971):
+ *
+ * - `cancellable` — the device has NOT received it yet (PENDING/QUEUED): the operator can
+ *   cancel it (`migrateCancel`) and go on.
+ * - `discardable` — the device received it but has been silent for `DISCARD_AFTER_MS`
+ *   since it was queued: the operator can discard it (`migrateDiscard`). Before that the
+ *   only honest answer is "power the terminal on and wait", and `discardableAt` says
+ *   exactly until when.
+ */
+export interface PendingWipeInfo {
+  commandId: string
+  queuedAt: Date
+  status: string
+  origin: 'MIGRATION' | 'MANUAL'
+  /** Destination venue of the migration that queued the wipe; null for a manual wipe. */
+  toVenueId: string | null
+  cancellable: boolean
+  discardable: boolean
+  discardableAt: Date
+}
+
 export interface PreflightResult {
   canProceed: boolean
   fromVenueId: string
@@ -122,6 +146,109 @@ export interface PreflightResult {
   blockers: MigrationBlocker[]
   warnings: MigrationWarning[]
   merchantMigration: MerchantMigrationInfo
+  /** Present (non-null) exactly when `MIGRATION_IN_PROGRESS` is among the blockers. */
+  pendingWipe: PendingWipeInfo | null
+}
+
+/**
+ * How long a delivered-but-unexecuted wipe must stay silent before an operator may discard
+ * it. Founder decision (2026-09-01): 24 h, for the org OWNER too. A device that has ignored
+ * its wipe for a day is not going to execute it on its own; leaving the command alive only
+ * blocks every future migration of that terminal (7-day TTL) — or blocks it forever, which
+ * is how the hand-inserted rows with no expiresAt kept 3 terminals stuck for 5 months.
+ */
+export const DISCARD_AFTER_MS = 24 * 60 * 60 * 1000
+
+const IN_FLIGHT_STATUSES = ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING'] as const
+/** The device has not received the command: it can still be cancelled server-side. */
+const CANCELLABLE_STATUSES: readonly string[] = ['PENDING', 'QUEUED']
+
+interface PendingWipeRow {
+  id: string
+  createdAt: Date
+  status: string
+  payload: unknown
+  venueId: string
+}
+
+/**
+ * FACTORY_RESETs that are STILL pending for this terminal. Two filters, and BOTH are
+ * needed (Asana 1218069201250971, 2026-09-01):
+ *  1. Expiry-aware: a FACTORY_RESET never ACKs (the device wipes + kills its process before
+ *     it can), so it lingers in a non-terminal status until the expiry sweep marks it
+ *     EXPIRED. A stale/expired-but-unswept command must NOT falsely block a new migration.
+ *  2. Rebind-aware: the sweep only ever touches commands WITH an expiresAt. Hand-inserted
+ *     rows with `expiresAt = null` stayed SENT forever and blocked the org wizard for MONTHS
+ *     on 3 terminals; and the 7-day migration TTL blocked re-migrating a terminal for a week
+ *     after its wipe had already completed. The device's own post-wipe rebind is the proof
+ *     the wipe happened — `deviceReboundAfter`, the same rule the terminals-list badge and
+ *     `migrateStatus` use, so the three surfaces can never disagree.
+ */
+async function findPendingWipes(terminalId: string, lastActivationStatusCheckAt: Date | null | undefined): Promise<PendingWipeRow[]> {
+  const inFlight = await prisma.tpvCommandQueue.findMany({
+    where: {
+      terminalId,
+      commandType: 'FACTORY_RESET',
+      status: { in: [...IN_FLIGHT_STATUSES] },
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+    },
+    select: { id: true, createdAt: true, status: true, payload: true, venueId: true },
+  })
+  return inFlight.filter(c => !deviceReboundAfter(c.createdAt, lastActivationStatusCheckAt))
+}
+
+function newestOf(pending: PendingWipeRow[]): PendingWipeRow {
+  return pending.reduce((a, b) => (b.createdAt > a.createdAt ? b : a))
+}
+
+function describePendingWipe(pending: PendingWipeRow[], now = Date.now()): PendingWipeInfo | null {
+  if (pending.length === 0) return null
+  const newest = newestOf(pending)
+  const migration = (newest.payload as { migration?: { toVenueId?: unknown } } | null)?.migration
+  // `cancellable` describes the SAME row as commandId/status/origin — the newest. Looking at
+  // "any pending wipe" made the three disagree: a newest SENT with an older QUEUED behind it
+  // reported `status: SENT, cancellable: true`, and cancelling then dropped the OLD one,
+  // leaving the blocker in place and the operator with no idea why (Codex P2, 2026-09-01).
+  const cancellable = CANCELLABLE_STATUSES.includes(newest.status)
+  const discardableAt = new Date(newest.createdAt.getTime() + DISCARD_AFTER_MS)
+  return {
+    commandId: newest.id,
+    queuedAt: newest.createdAt,
+    status: newest.status,
+    origin: migration ? 'MIGRATION' : 'MANUAL',
+    toVenueId: typeof migration?.toVenueId === 'string' ? migration.toVenueId : null,
+    cancellable,
+    discardable: !cancellable && discardableAt.getTime() <= now,
+    discardableAt,
+  }
+}
+
+/**
+ * Human date+time for messages an older client renders verbatim. Carries the HOUR because
+ * "you can discard it from…" is an exact 24 h boundary, and the VENUE's timezone because a
+ * hardcoded Mexico City reads an hour off for a Tijuana venue (Codex P3, 2026-09-01).
+ */
+function fechaCorta(d: Date, timezone = 'America/Mexico_City'): string {
+  return d.toLocaleString('es-MX', {
+    timeZone: timezone,
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+/** The migration payload of a pending wipe, when it was queued BY a migration. */
+interface WipeMigrationPayload {
+  fromVenueId?: string
+  previousMerchantIds?: string[]
+  createdVenuePaymentConfigId?: string
+}
+function migrationPayloadOf(row: PendingWipeRow): WipeMigrationPayload | null {
+  const m = (row.payload as { migration?: WipeMigrationPayload } | null)?.migration
+  return m && typeof m.fromVenueId === 'string' ? m : null
 }
 
 export async function migratePreflight(terminalId: string, toVenueId: string, migrateMerchant = false): Promise<PreflightResult> {
@@ -236,23 +363,15 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
     })
   }
 
-  // Idempotency: refuse if a FACTORY_RESET is already queued/pending for this terminal.
-  // Must be expiry-aware: a FACTORY_RESET never ACKs (the device wipes + kills its process
-  // before it can), so it lingers in a non-terminal status until the 30-min expiry sweep
-  // marks it EXPIRED. A stale/expired-but-unswept command must NOT falsely block a new
-  // migration — so we exclude commands already past their expiresAt.
-  const inFlight = await prisma.tpvCommandQueue.findFirst({
-    where: {
-      terminalId,
-      commandType: 'FACTORY_RESET',
-      status: { in: ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING'] },
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-    },
-  })
-  if (inFlight) {
+  // Idempotency: refuse while a FACTORY_RESET is still pending for this terminal (see
+  // `findPendingWipes` for what "pending" means and why). The blocker is never a dead end:
+  // `pendingWipe` tells the wizard when it was queued, where it came from, and which way
+  // out applies (cancel / wait / discard).
+  const pendingWipe = describePendingWipe(await findPendingWipes(terminalId, terminal.lastActivationStatusCheckAt))
+  if (pendingWipe) {
     blockers.push({
       code: 'MIGRATION_IN_PROGRESS',
-      message: 'Ya hay una migración (factory reset) en curso para esta terminal.',
+      message: `Hay un borrado de fábrica pendiente desde el ${fechaCorta(pendingWipe.queuedAt, originVenue?.timezone)} que la terminal aún no ejecuta.`,
     })
   }
 
@@ -269,6 +388,7 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
     blockers,
     warnings,
     merchantMigration,
+    pendingWipe,
   }
 }
 
@@ -540,7 +660,7 @@ export interface MigrateCancelResult {
   restoredVenueId: string
 }
 
-export async function migrateCancel(terminalId: string, actor: TerminalActor): Promise<MigrateCancelResult> {
+export async function migrateCancel(terminalId: string, actor: TerminalActor, scopedOrgId?: string): Promise<MigrateCancelResult> {
   // 1) Find the cancellable in-flight wipe. PENDING/QUEUED + not-expired only —
   //    SENT and beyond means the device may already have wiped.
   const command = await prisma.tpvCommandQueue.findFirst({
@@ -567,11 +687,42 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor): P
     } | null
   )?.migration
   if (!migration || !migration.fromVenueId) {
-    throw new BadRequestError(
-      'Esta migración no se puede revertir automáticamente: el comando de borrado no tiene la información del venue de origen.',
-    )
+    // MANUAL wipe (queued from the superadmin, no venue move behind it) — or a legacy
+    // command queued before the blindar payload existed. There is nothing to revert: the
+    // terminal never moved. Cancelling is just dropping the queued command so it never
+    // reaches the device. This path used to throw "cannot revert" and left the operator
+    // with no way out of MIGRATION_IN_PROGRESS (Asana 1218069201250971, 2026-09-01).
+    const terminal = await prisma.terminal.findUnique({ where: { id: terminalId }, select: { venueId: true } })
+    if (!terminal) throw new NotFoundError('Terminal not found')
+
+    await tpvCommandQueueService.cancelCommand(command.id, actor.staffId ?? 'system', 'Borrado pendiente cancelado por el operador')
+    await logAction({
+      staffId: actor.staffId ?? null,
+      venueId: terminal.venueId,
+      action: 'TERMINAL_PENDING_WIPE_CANCELLED',
+      entity: 'Terminal',
+      entityId: terminalId,
+      data: { commandId: command.id, origin: 'MANUAL' },
+      ipAddress: actor.ipAddress,
+      userAgent: actor.userAgent,
+    })
+    logger.info(`Pending manual wipe cancelled for terminal ${terminalId}`, { commandId: command.id })
+    return { cancelled: true, restoredVenueId: terminal.venueId }
   }
   const { fromVenueId, previousMerchantIds, createdVenuePaymentConfigId } = migration
+
+  // Superadmin migrations may cross organizations, but an OWNER of the
+  // destination organization must never be able to write the terminal back into
+  // an organization they do not control (or delete that migration's config).
+  if (scopedOrgId) {
+    const origin = await prisma.venue.findFirst({
+      where: { id: fromVenueId, organizationId: scopedOrgId },
+      select: { id: true },
+    })
+    if (!origin) {
+      throw new ForbiddenError('No puedes cancelar una migración cuyo origen pertenece a otra organización.')
+    }
+  }
 
   // 3) Cancel the queued wipe so it never reaches the device.
   await tpvCommandQueueService.cancelCommand(command.id, actor.staffId ?? 'system', 'Migración cancelada por el operador')
@@ -621,6 +772,150 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor): P
   return { cancelled: true, restoredVenueId: fromVenueId }
 }
 
+export interface MigrateDiscardResult {
+  discarded: number
+  commandIds: string[]
+  /** Venue the terminal is left at: its origin when a migration wipe was undone, else unchanged. */
+  restoredVenueId: string
+}
+
+/**
+ * Discard a pending FACTORY_RESET the device has received but never executed — the way out
+ * of a MIGRATION_IN_PROGRESS that cannot be cancelled (founder decision 2026-09-01, Asana
+ * 1218069201250971; the org OWNER may do this too).
+ *
+ * Refuses, in this order:
+ *  - nothing pending (the device already rebound after every wipe, or there was none);
+ *  - a wipe still PENDING/QUEUED — the device hasn't received it, so `migrateCancel` is the
+ *    safer path and the UI must offer it first;
+ *  - the newest wipe is younger than `DISCARD_AFTER_MS` — the device may still be about to
+ *    execute it; the message says from when discarding will be allowed.
+ *
+ * 🔴 A wipe queued BY A MIGRATION is UNDONE, not merely dropped: the terminal goes back to
+ * its origin venue with its origin merchants, and the `VenuePaymentConfig` that migration
+ * created at the destination is deleted — exactly what `migrateCancel` does. A FACTORY_RESET
+ * is the ONLY thing that re-points the merchant credentials the device holds in memory (see
+ * `terminals.superadmin.service.ts`), so leaving the terminal re-parented at the destination
+ * WITHOUT its wipe is the split-brain the migration exists to prevent — the device would
+ * charge through the origin's merchant while the server books the sale under the destination.
+ * The 7-day TTL leaves that same hole today; discarding must not open it 6 days earlier
+ * (Codex P1, 2026-09-01). Undoing is safe precisely because the device provably never
+ * rebound, i.e. never executed the wipe. It also avoids a `SAME_VENUE` trap: the operator is
+ * about to re-run the very migration this wipe belonged to.
+ */
+export async function migrateDiscard(terminalId: string, actor: TerminalActor, scopedOrgId?: string): Promise<MigrateDiscardResult> {
+  const terminal = await prisma.terminal.findUnique({ where: { id: terminalId } })
+  if (!terminal) throw new NotFoundError('Terminal not found')
+
+  const pending = await findPendingWipes(terminalId, terminal.lastActivationStatusCheckAt)
+  if (pending.length === 0) {
+    throw new BadRequestError('No hay un borrado pendiente que descartar: la terminal ya lo ejecutó o nunca hubo uno.')
+  }
+  const newest = newestOf(pending)
+  if (CANCELLABLE_STATUSES.includes(newest.status)) {
+    throw new BadRequestError('Ese borrado todavía no llega a la terminal: cancélalo en vez de descartarlo.')
+  }
+  const discardableAt = new Date(newest.createdAt.getTime() + DISCARD_AFTER_MS)
+  if (discardableAt.getTime() > Date.now()) {
+    const venue = await prisma.venue.findUnique({ where: { id: terminal.venueId }, select: { timezone: true } })
+    throw new BadRequestError(
+      `El borrado se envió hace menos de 24 horas. Prende la terminal con internet y espera a que se reinicie; ` +
+        `si sigue sin aparecer, podrás descartarlo a partir del ${fechaCorta(discardableAt, venue?.timezone)}.`,
+    )
+  }
+
+  // Revert target: the OLDEST pending migration wipe — the venue the terminal sat at before
+  // this pile of unexecuted moves. (Normally there is at most one: preflight blocks a second
+  // migration while one is pending.)
+  const revert = pending
+    .slice()
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+    .map(migrationPayloadOf)
+    .find(Boolean)
+
+  const now = new Date()
+  const { discardedIds } = await prisma.$transaction(async tx => {
+    // Serialize against heartbeat/rebind writes. A plain re-read still leaves a race
+    // between the read and the writes; this row lock keeps the proof stable until commit.
+    const [fresh] = await tx.$queryRaw<Array<{ lastActivationStatusCheckAt: Date | null }>>`
+      SELECT "lastActivationStatusCheckAt"
+      FROM "Terminal"
+      WHERE "id" = ${terminalId}
+      FOR UPDATE
+    `
+    if (!fresh) throw new NotFoundError('Terminal not found')
+    if (deviceReboundAfter(newest.createdAt, fresh?.lastActivationStatusCheckAt)) {
+      throw new ConflictError('La terminal acaba de reconectarse: ya ejecutó el borrado. Vuelve a verificar el destino.')
+    }
+
+    if (scopedOrgId && revert?.fromVenueId) {
+      const origin = await tx.venue.findFirst({
+        where: { id: revert.fromVenueId, organizationId: scopedOrgId },
+        select: { id: true },
+      })
+      if (!origin) {
+        throw new ForbiddenError('No puedes descartar una migración cuyo origen pertenece a otra organización.')
+      }
+    }
+
+    // One update per id so the audit trail names the rows that ACTUALLY moved: `updateMany`
+    // reports a count, not which rows, and the sweep or the device may have moved one of
+    // them to a terminal status in the meantime (Codex P3).
+    const discardedIds: string[] = []
+    for (const id of pending.map(c => c.id)) {
+      const r = await tx.tpvCommandQueue.updateMany({
+        where: { id, status: { in: [...IN_FLIGHT_STATUSES] } },
+        data: { status: 'EXPIRED', expiresAt: now },
+      })
+      if (r.count !== 1) {
+        throw new ConflictError('El estado del borrado cambió mientras se descartaba. Actualiza la terminal e inténtalo de nuevo.')
+      }
+      discardedIds.push(id)
+    }
+
+    if (revert?.fromVenueId) {
+      // Direct write, NOT updateTerminal: the "blindar" auto-wipe would queue a fresh
+      // FACTORY_RESET on the revert and re-create the very blocker we are clearing.
+      await tx.terminal.update({
+        where: { id: terminalId },
+        data: { venueId: revert.fromVenueId, assignedMerchantIds: revert.previousMerchantIds ?? [] },
+      })
+      if (revert.createdVenuePaymentConfigId) {
+        await tx.venuePaymentConfig.deleteMany({ where: { id: revert.createdVenuePaymentConfigId } })
+      }
+    }
+
+    return { discardedIds }
+  })
+
+  const restoredVenueId = revert?.fromVenueId ?? terminal.venueId
+
+  await logAction({
+    staffId: actor.staffId ?? null,
+    venueId: restoredVenueId,
+    action: 'TERMINAL_PENDING_WIPE_DISCARDED',
+    entity: 'Terminal',
+    entityId: terminalId,
+    data: {
+      commandIds: discardedIds,
+      newestQueuedAt: newest.createdAt,
+      silentForMs: now.getTime() - newest.createdAt.getTime(),
+      lastActivationStatusCheckAt: terminal.lastActivationStatusCheckAt,
+      revertedFromVenueId: revert?.fromVenueId ? terminal.venueId : undefined,
+      restoredVenueId,
+      deletedVenuePaymentConfigId: revert?.createdVenuePaymentConfigId,
+    },
+    ipAddress: actor.ipAddress,
+    userAgent: actor.userAgent,
+  })
+  logger.warn(`Pending wipe(s) discarded for terminal ${terminalId} by ${actor.staffId ?? 'system'}`, {
+    commandIds: discardedIds,
+    restoredVenueId,
+  })
+
+  return { discarded: discardedIds.length, commandIds: discardedIds, restoredVenueId }
+}
+
 const ONLINE_THRESHOLD_MS = 2 * 60 * 1000 // mirror tpv-health/command-execution online cutoff
 
 export interface MigrateStatusResult {
@@ -647,7 +942,7 @@ export async function migrateStatus(terminalId: string, commandId: string): Prom
   const now = Date.now()
 
   const commandDelivered = ['SENT', 'RECEIVED', 'EXECUTING', 'COMPLETED'].includes(command.status)
-  const reboundAfterWipe = !!terminal.lastActivationStatusCheckAt && terminal.lastActivationStatusCheckAt > t0
+  const reboundAfterWipe = deviceReboundAfter(t0, terminal.lastActivationStatusCheckAt)
   const currentlyOnline = !!terminal.lastHeartbeat && now - terminal.lastHeartbeat.getTime() < ONLINE_THRESHOLD_MS
   const onlineUnderNewVenue = currentlyOnline && terminal.venueId === command.venueId
   const confirmed = reboundAfterWipe && onlineUnderNewVenue

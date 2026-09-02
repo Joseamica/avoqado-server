@@ -12,6 +12,7 @@ import {
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../services/shared/tenderSemantics'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { utcTs } from '../utils/sqlDates'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 
 /**
@@ -113,8 +114,8 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
     WHERE p.status = 'COMPLETED'
       AND p.type NOT IN ('REFUND', 'TEST')
       AND p."originSystem" = 'AVOQADO'
-      AND p."createdAt" >= ${since}
-      AND p."createdAt" <= ${until}
+      AND p."createdAt" >= ${utcTs(since)}
+      AND p."createdAt" <= ${utcTs(until)}
       AND (
         p."fundsFlow" = 'CASH_DRAWER'
         OR (p."fundsFlow" IS NULL AND (p.method = 'CASH' OR p."tenderCountsAsCash" = true))

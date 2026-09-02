@@ -376,14 +376,14 @@ model Venue {
   terminalOrders        TerminalOrder[]
 
   // Customer Management (Phase 1)
-  customers      Customer[]
-  customerGroups CustomerGroup[]
-  loyaltyConfig  LoyaltyConfig?
-  walletPasses   WalletPass[]
-  stampCards     StampCard[]
+  customers        Customer[]
+  customerGroups   CustomerGroup[]
+  loyaltyConfig    LoyaltyConfig?
+  walletPasses     WalletPass[]
+  stampCards       StampCard[]
   walletCardDesign WalletCardDesign?
-  stampEvents    StampEvent[]
-  stampRewards   StampReward[]
+  stampEvents      StampEvent[]
+  stampRewards     StampReward[]
 
   // Referral Program
   referralProgramConfig ReferralProgramConfig?
@@ -435,8 +435,8 @@ model Venue {
   lowStockAlerts              LowStockAlert[]
   stockBatches                StockBatch[] // FIFO batch tracking
   stockCounts                 StockCount[]
-  outgoingInterVenueTransfers InterVenueTransfer[]  @relation("InterVenueTransferSourceVenue")
-  incomingInterVenueTransfers InterVenueTransfer[]  @relation("InterVenueTransferDestinationVenue")
+  outgoingInterVenueTransfers InterVenueTransfer[]   @relation("InterVenueTransferSourceVenue")
+  incomingInterVenueTransfers InterVenueTransfer[]   @relation("InterVenueTransferDestinationVenue")
 
   // ✅ NEW: Webhook event logging
   webhookEvents WebhookEvent[]
@@ -632,15 +632,15 @@ model Venue {
   kioskCheckInAttempts   KioskCheckInAttempt[]
   kioskOutreachOutbox    KioskOutreachOutbox[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  supplierItemCodes SupplierItemCode[]
 
   @@unique([id, organizationId])
   @@index([organizationId])
   @@index([slug])
   @@index([active])
   @@index([status]) // For filtering by operational status
-  supplierItemCodes SupplierItemCode[]
 }
 
 enum VenueChatMode {
@@ -848,8 +848,8 @@ model VenueSettings {
   /// aparatos se enteran sin recompilar) y el dashboard esconde la sección. Default true:
   /// los negocios existentes venían checando y no se les apaga por migración.
   /// 🔴 Independiente de `enableShifts` (caja). Rieles distintos.
-  attendanceEnabled       Boolean @default(true)
-  attendanceGraceMinutes  Int     @default(10)
+  attendanceEnabled          Boolean @default(true)
+  attendanceGraceMinutes     Int     @default(10)
   /// Aviso EN VIVO cuando alguien no ha checado y ya pasó su hora + la tolerancia: llega al
   /// dashboard Y por correo a OWNER/ADMIN/MANAGER. **Apagado de fábrica**: manda correos, y un
   /// negocio no puede empezar a recibirlos por una actualización que no pidió. Sin este
@@ -860,11 +860,11 @@ model VenueSettings {
   /// fábrica y explícito por venue: crear una plantilla puede ser prueba y no debe cambiar en silencio
   /// la fuente de retardos y comisiones (Codex, 27-ago). Prendido, una asignación PUBLICADA gana sobre
   /// la jornada fija; apagado, las asignaciones se ignoran. El ICP (jornada fija) nunca lo ve.
-  rotatingShiftsEnabled   Boolean @default(false)
-  autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
-  autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
-  maxShiftDurationEnabled Boolean @default(false) // Enable max shift duration enforcement
-  maxShiftDurationHours   Int     @default(12) // Max hours before auto clock-out
+  rotatingShiftsEnabled      Boolean @default(false)
+  autoClockOutEnabled        Boolean @default(false) // Enable automatic clock-out at fixed time
+  autoClockOutTime           String? // "HH:mm" format - e.g., "03:00" for 3 AM
+  maxShiftDurationEnabled    Boolean @default(false) // Enable max shift duration enforcement
+  maxShiftDurationHours      Int     @default(12) // Max hours before auto clock-out
 
   // Reviews
   autoReplyReviews    Boolean  @default(false)
@@ -993,7 +993,7 @@ model Staff {
   deviceTokens            DeviceToken[]
 
   /// Anuncios de plataforma que esta persona abrió (ver PlatformAnnouncementClick).
-  platformAnnouncementClicks PlatformAnnouncementClick[]
+  platformAnnouncementClicks     PlatformAnnouncementClick[]
   /// Acuses de recibo de anuncios de plataforma (ver PlatformAnnouncementDelivery).
   platformAnnouncementDeliveries PlatformAnnouncementDelivery[]
 
@@ -1007,7 +1007,7 @@ model Staff {
   chatLearningEvents ChatLearningEvent[] @relation("UserChatLearningEvents")
 
   // Time tracking
-  timeEntries TimeEntry[]
+  timeEntries            TimeEntry[]
   overtimeApprovalsGiven OvertimeApproval[] @relation("OvertimeApprovedBy")
 
   // Field-promoter geolocation ("cambaceo" tracking)
@@ -1175,11 +1175,11 @@ model Staff {
   catalogPublicationBatches              CatalogPublicationBatch[]        @relation("CatalogPublicationBatchHumanActor")
 
   // Reglas de upsell que este staff aprobó (ver nota en UpsellRule.approvedBy).
-  upsellRulesApproved UpsellRule[] @relation("UpsellRuleApprovedBy")
+  upsellRulesApproved UpsellRule[]       @relation("UpsellRuleApprovedBy")
+  supplierItemCodes   SupplierItemCode[]
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
-  supplierItemCodes SupplierItemCode[]
 }
 
 model StaffVenue {
@@ -1235,7 +1235,13 @@ model StaffVenue {
   productStaff       ProductStaff[]
 
   // Referral Program
-  referralsCaptured Referral[] @relation("ReferralsCaptured")
+  referralsCaptured      Referral[]                   @relation("ReferralsCaptured")
+  stampEventsCreated     StampEvent[]                 @relation("StampEventCreatedBy")
+  /// Cuadrante LABORAL (jornada). Distinto de `schedule`, que es disponibilidad para citas.
+  workSchedule           StaffWorkSchedule?
+  workScheduleExceptions StaffWorkScheduleException[]
+  overtimeApprovals      OvertimeApproval[]
+  workShiftAssignments   WorkShiftAssignment[]
 
   @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
   @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
@@ -1245,12 +1251,6 @@ model StaffVenue {
   @@index([role])
   @@index([pin]) // ✅ Índice para búsquedas de PIN
   @@index([permissionSetId])
-  stampEventsCreated StampEvent[] @relation("StampEventCreatedBy")
-  /// Cuadrante LABORAL (jornada). Distinto de `schedule`, que es disponibilidad para citas.
-  workSchedule           StaffWorkSchedule?
-  workScheduleExceptions StaffWorkScheduleException[]
-  overtimeApprovals      OvertimeApproval[]
-  workShiftAssignments   WorkShiftAssignment[]
 }
 
 // ==========================================
@@ -1412,20 +1412,20 @@ model PermissionSet {
 // the internal StaffRole enum for type safety.
 // Example: CASHIER -> "Promotor" for events businesses
 model VenueRoleConfig {
-  id          String    @id @default(cuid())
-  venueId     String
-  venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  role        StaffRole // Internal enum (never changes)
-  displayName String // Custom name shown to users (e.g., "Promotor")
-  description String? // Optional description for this role
-  icon        String? // Optional icon name (e.g., "ticket", "users")
-  color       String? // Optional hex color for UI badges (e.g., "#7C3AED")
-  isActive    Boolean   @default(true) // Can hide unused roles
-  sortOrder   Int       @default(0) // Custom ordering in UI
+  id           String    @id @default(cuid())
+  venueId      String
+  venue        Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  role         StaffRole // Internal enum (never changes)
+  displayName  String // Custom name shown to users (e.g., "Promotor")
+  description  String? // Optional description for this role
+  icon         String? // Optional icon name (e.g., "ticket", "users")
+  color        String? // Optional hex color for UI badges (e.g., "#7C3AED")
+  isActive     Boolean   @default(true) // Can hide unused roles
+  sortOrder    Int       @default(0) // Custom ordering in UI
   /// ¿Este rol aparece en el selector de "Vendedor" del POS? Default TRUE
   /// (todos salen, como siempre) — el venue lo APAGA para roles que no venden
   /// (p.ej. un VIEWER renombrado a "Investor"). Founder 2026-09-01.
-  showAsSeller Boolean  @default(true)
+  showAsSeller Boolean   @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1881,7 +1881,9 @@ model Product {
   upsellSuggestedBy UpsellRule[] @relation("UpsellSuggestedProduct")
 
   // Opciones de promoción que ofrecen ESTE producto.
-  promotionOptions PromotionOption[]
+  promotionOptions  PromotionOption[]
+  supplierItemCodes SupplierItemCode[]
+  invoiceLines      PurchaseOrderInvoiceLine[]
 
   @@unique([venueId, sku])
   @@unique([venueId, gtin])
@@ -1893,8 +1895,6 @@ model Product {
   @@index([type])
   @@index([syncStatus]) // ✅ NUEVO ÍNDICE
   @@index([venueId, upsellEnabled])
-  supplierItemCodes SupplierItemCode[]
-  invoiceLines PurchaseOrderInvoiceLine[]
 }
 
 model Inventory {
@@ -2134,8 +2134,10 @@ model RawMaterial {
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  supplierItemCodes SupplierItemCode[]
+  invoiceLines      PurchaseOrderInvoiceLine[]
 
   @@unique([venueId, sku])
   @@unique([venueId, gtin])
@@ -2144,8 +2146,6 @@ model RawMaterial {
   @@index([active])
   @@index([currentStock]) // For low stock queries
   @@index([deletedAt]) // For filtering out deleted records
-  supplierItemCodes SupplierItemCode[]
-  invoiceLines PurchaseOrderInvoiceLine[]
 }
 
 // Presentaciones de compra/salida por insumo (CEDIS): la unidad en que se compra
@@ -2271,19 +2271,19 @@ model Supplier {
   deletedBy String? // Staff ID who deleted
 
   // Relations
-  pricing         SupplierPricing[]
-  purchaseOrders  PurchaseOrder[]
+  pricing          SupplierPricing[]
+  purchaseOrders   PurchaseOrder[]
   purchaseInvoices PurchaseOrderInvoice[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  itemCodes SupplierItemCode[]
 
   @@unique([venueId, name])
   @@index([venueId])
   @@index([active])
   @@index([rating])
   @@index([deletedAt]) // For filtering out deleted records
-  itemCodes SupplierItemCode[]
 }
 
 // Supplier pricing history for raw materials
@@ -2467,13 +2467,13 @@ model PurchaseOrderItem {
 /// costo de ventas que YA ocurrieron con ese lote. Una diferencia se AVISA (`matchStatus`),
 /// no se corrige — misma postura que Odoo, que manda la diferencia a una cuenta aparte.
 model PurchaseOrderInvoice {
-  id              String        @id @default(cuid())
+  id              String         @id @default(cuid())
   /// Null = factura SIN orden previa (fase 2): llego sola, se identifica y se aprende.
   /// SetNull y no Cascade: si la orden se borra, la factura sigue siendo evidencia fiscal.
   purchaseOrderId String?
   purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
   venueId         String
-  venue           Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venue           Venue          @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   /// Emisor del CFDI. Se guarda aunque no coincida con el proveedor de la orden: el
   /// desajuste es justo lo que hay que poder ver.
@@ -2483,18 +2483,18 @@ model PurchaseOrderInvoice {
   /// Folio fiscal. Unico POR NEGOCIO: la misma factura no se sube dos veces. No es global
   /// porque dos negocios distintos pueden, legitimamente, recibir el mismo CFDI de un
   /// corporativo que factura a varios.
-  uuid          String
-  serie         String?
-  folio         String?
-  emisorRfc     String
-  emisorNombre  String
-  fechaEmision  DateTime
+  uuid         String
+  serie        String?
+  folio        String?
+  emisorRfc    String
+  emisorNombre String
+  fechaEmision DateTime
 
   /// Centavos enteros, como el resto de lo fiscal.
-  subtotalCents Int
+  subtotalCents  Int
   descuentoCents Int @default(0)
-  ivaCents      Int  @default(0)
-  totalCents    Int
+  ivaCents       Int @default(0)
+  totalCents     Int
 
   xmlUrl String?
 
@@ -2546,7 +2546,7 @@ model PurchaseOrderInvoiceLine {
   productId     String?
   product       Product?     @relation(fields: [productId], references: [id], onDelete: SetNull)
   /// Catalogo de unidades del SAT (`KGM`, `H87`…), NO nuestro enum `Unit`.
-  claveUnidad      String?
+  claveUnidad   String?
 
   cantidad           Decimal @db.Decimal(12, 3)
   valorUnitarioCents Int
@@ -2565,9 +2565,9 @@ model PurchaseOrderInvoiceLine {
 /// proveedor reconocen solas. El mapeo es del PROVEEDOR (no de una orden): por eso sirve
 /// para ordenes nuevas y para facturas sin orden.
 model SupplierItemCode {
-  id       String @id @default(cuid())
-  venueId  String
-  venue    Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  id         String   @id @default(cuid())
+  venueId    String
+  venue      Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
   supplierId String
   supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
 
@@ -3285,10 +3285,10 @@ model WorkShiftTemplate {
 /// StaffWorkScheduleException: el endpoint del cuadrante borra y recrea todas las excepciones de la
 /// persona en cada guardado — reusarlo destruiría el cuadrante al editar un horario.
 model WorkShiftAssignment {
-  id           String     @id @default(cuid())
+  id           String             @id @default(cuid())
   venueId      String
   staffVenueId String
-  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  staffVenue   StaffVenue         @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
   /// 'YYYY-MM-DD' en fecha del negocio.
   date         String
   templateId   String?
@@ -3297,9 +3297,9 @@ model WorkShiftAssignment {
   startTime    String
   endTime      String
   /// DRAFT = se está armando · PUBLISHED = cuenta para asistencia y comisiones.
-  status       String     @default("DRAFT")
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  status       String             @default("DRAFT")
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
 
   /// Una fila PUBLISHED y otra DRAFT pueden convivir en la misma celda: editar en borrador NO despublica
   /// el horario vigente (Codex, 2ª auditoría). Un DRAFT con templateId null = "vaciar al publicar".
@@ -3309,33 +3309,33 @@ model WorkShiftAssignment {
 
 /// Excepción al cuadrante: un día libre, o un día con horario distinto.
 model OvertimeApproval {
-  id           String     @id @default(cuid())
-  staffVenueId String
-  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
-  venueId      String
-  venue        Venue      @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  id                String     @id @default(cuid())
+  staffVenueId      String
+  staffVenue        StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  venueId           String
+  venue             Venue      @relation(fields: [venueId], references: [id], onDelete: Cascade)
   /// 'YYYY-MM-DD' en fecha del NEGOCIO — el día del TURNO, no el del reloj de la checada.
-  date String
+  date              String
   /// Minutos AUTORIZADOS. Puede ser menos que lo medido: el gerente autoriza 1 h de las 2 que
   /// se quedó. Cero = revisado y NO autorizado (distinto de "sin revisar", que es no tener fila).
-  minutesApproved Int
+  minutesApproved   Int
   /// Lo que el reloj medía CUANDO se autorizó.
   /// 🔴 Es lo que impide un agujero de dinero: sin este retrato, editar la salida después de
   /// autorizar convertiría en autorizadas unas horas que nadie miró. Si deja de coincidir con lo
   /// medido hoy, la fila se marca para revisar de nuevo.
-  minutesMeasured Int
+  minutesMeasured   Int
   /// Huella de la JORNADA que produjo esos minutos: tramos trabajados, descansos y cuadrante.
   /// 🔴 Versionar sólo el NÚMERO deja un hueco: si una corrección baja el extra a cero y otra
   /// posterior vuelve a producir el mismo total con checadas DISTINTAS, la autorización vieja
   /// revivía sin que nadie la mirara (hallazgo #4 de Codex). Null en las filas anteriores a
   /// este campo: se tratan como "hay que revisar".
   sourceFingerprint String?
-  approvedById    String
-  approvedBy      Staff    @relation("OvertimeApprovedBy", fields: [approvedById], references: [id])
-  approvedAt      DateTime @default(now())
-  note            String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  approvedById      String
+  approvedBy        Staff      @relation("OvertimeApprovedBy", fields: [approvedById], references: [id])
+  approvedAt        DateTime   @default(now())
+  note              String?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
 
   /// Una autorización por persona y día: volver a autorizar CORRIGE, no acumula.
   @@unique([staffVenueId, date])
@@ -3359,7 +3359,7 @@ model StaffWorkScheduleException {
   /// Sólo para kind=OFF (fase 3 del checador): por qué no viene. null = descanso simple
   /// (filas previas y el default). REST · VACATION · PAID_LEAVE · UNPAID_LEAVE · SICK_LEAVE ·
   /// JUSTIFIED_ABSENCE. Con goce o sin goce lo deriva el código, no un segundo campo.
-  type String?
+  type      String?
 
   createdAt DateTime @default(now())
 
@@ -3377,17 +3377,17 @@ model StaffDocument {
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  type StaffDocumentType
+  type  StaffDocumentType
   /// Nombre libre. Obligatorio en la práctica cuando `type` es OTHER, donde el tipo no dice nada.
   label String?
 
-  fileName  String
+  fileName    String
   /// 🔴 RUTA en el prefijo privado de Storage (`private/...`), NUNCA una URL. El archivo se
   /// entrega sólo con una URL firmada que caduca, generada al leer. Guardar una URL aquí
   /// sería guardar una llave permanente (auditoría Codex 26-ago, P1: Storage público).
   storagePath String
-  mimeType  String
-  sizeBytes Int
+  mimeType    String
+  sizeBytes   Int
 
   /// Para lo que caduca (certificados, licencias, permisos de trabajo). Null = no vence.
   expiresAt DateTime?
@@ -3595,6 +3595,16 @@ model Order {
   kitchenStatus KitchenStatus @default(PENDING)
   paymentStatus PaymentStatus @default(PENDING)
 
+  // Durable post-payment loyalty recovery. Only the transaction that first
+  // settles the order sets eligibleAt; inline processing sets processedAt, and
+  // the bounded reconciler retries rows left behind by a crash/transient error.
+  loyaltyEligibleAt   DateTime?
+  loyaltyProcessingAt DateTime?
+  loyaltyProcessedAt  DateTime?
+  loyaltyAttempts     Int       @default(0)
+  loyaltyLastError    String?   @db.Text
+  loyaltyStaffId      String?
+
   // Payment split type (set on first payment, enforces UI consistency)
   splitType SplitType?
 
@@ -3622,11 +3632,12 @@ model Order {
   syncedAt     DateTime?
 
   // Relations
-  items               OrderItem[]
-  payments            Payment[]
-  paymentAllocations  PaymentAllocation[]
-  actions             OrderAction[] // Audit trail for order modifications
-  loyaltyTransactions LoyaltyTransaction[]
+  items                OrderItem[]
+  payments             Payment[]
+  paymentAllocations   PaymentAllocation[]
+  actions              OrderAction[] // Audit trail for order modifications
+  loyaltyTransactions  LoyaltyTransaction[]
+  customerOrderMetrics CustomerOrderMetric[]
 
   // Discount System (Phase 2)
   orderDiscounts   OrderDiscount[]
@@ -3722,7 +3733,8 @@ model Order {
   completedAt DateTime?
 
   // Instancias de promoción vendidas en esta orden.
-  promotions OrderPromotion[]
+  promotions  OrderPromotion[]
+  stampEvents StampEvent[]
 
   @@unique([venueId, externalId])
   @@unique([venueId, areaTicketCode])
@@ -3738,7 +3750,6 @@ model Order {
   @@index([venueId, customerIdentifier, paymentStatus])
   @@index([venueId, createdAt])
   @@index([venueId, status, createdAt])
-  stampEvents StampEvent[]
 }
 
 // Junction table for many-to-many Order <-> Customer relationship
@@ -3757,6 +3768,26 @@ model OrderCustomer {
   @@unique([orderId, customerId]) // Prevent duplicate customer on same order
   @@index([orderId])
   @@index([customerId])
+}
+
+/// Durable idempotency ledger for customer visit/spend metrics.
+///
+/// Payment retries and offline replays may run post-payment hooks more than once.
+/// The unique key makes one paid order count at most once for each customer,
+/// independently from whether that venue awards points or stamps.
+model CustomerOrderMetric {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  venueId    String
+  amount     Decimal  @db.Decimal(12, 2)
+  createdAt  DateTime @default(now())
+
+  @@unique([customerId, orderId])
+  @@index([venueId, createdAt])
+  @@index([orderId])
 }
 
 model OrderItem {
@@ -3989,6 +4020,8 @@ model OrderItemModifier {
 
   quantity Int     @default(1)
   price    Decimal @db.Decimal(10, 2)
+
+  @@index([orderItemId])
 }
 
 // Order Action Audit Trail
@@ -4772,9 +4805,9 @@ model Terminal {
   /// en la chica. Es por DISPOSITIVO (así está armado ESE mostrador), no por
   /// venue. El POS aplica su valor local y sincroniza con este; el dashboard lo
   /// puede cambiar en remoto.
-  customerDisplayInverted         Boolean  @default(false)
+  customerDisplayInverted         Boolean   @default(false)
   customerDisplayRequest          Json?
-  customerDisplayRequestVersion   Int      @default(0)
+  customerDisplayRequestVersion   Int       @default(0)
   customerDisplayRequestExpiresAt DateTime?
 
   scaleProfileId String?
@@ -6790,11 +6823,12 @@ model Customer {
   updatedAt DateTime @updatedAt
 
   // Relations
-  orders              Order[]
-  loyaltyTransactions LoyaltyTransaction[]
-  walletPasses        WalletPass[]
-  stampCards          StampCard[]
-  stampRewards        StampReward[]
+  orders               Order[]
+  loyaltyTransactions  LoyaltyTransaction[]
+  customerOrderMetrics CustomerOrderMetric[]
+  walletPasses         WalletPass[]
+  stampCards           StampCard[]
+  stampRewards         StampReward[]
 
   // Discount System (Phase 2)
   customerDiscounts CustomerDiscount[]
@@ -7041,11 +7075,11 @@ model WalletPass {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([venueId, updatedAt])
-  @@index([customerId])
-
   /// Los aparatos que piden enterarse cuando esta tarjeta cambia.
   registrations WalletPassRegistration[]
+
+  @@index([venueId, updatedAt])
+  @@index([customerId])
 }
 
 enum StampEventType {
@@ -11967,12 +12001,12 @@ model CommissionCalculation {
   netCommission   Decimal @db.Decimal(10, 2) // Final commission amount
 
   // Metadata
-  calcType CommissionCalcType
-  tier     Int? // Tier level if tiered
-  tierName String? // Tier name for display
+  calcType              CommissionCalcType
+  tier                  Int? // Tier level if tiered
+  tierName              String? // Tier name for display
   // Castigo por retardo aplicado a ESTE cálculo (snapshot; null = sin castigo). El neto ya lo
   // trae descontado — esto deja el rastro de cuánto y por qué.
-  attendancePenaltyRate Decimal? @db.Decimal(5, 4)
+  attendancePenaltyRate Decimal?           @db.Decimal(5, 4)
 
   // Status
   status       CommissionCalcStatus @default(CALCULATED)

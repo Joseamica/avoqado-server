@@ -1,4 +1,9 @@
-import { migratePreflightSchema, migrateExecuteSchema, migrateStatusSchema } from '@/routes/superadmin/terminal-migration.schemas'
+import {
+  migratePreflightSchema,
+  migrateExecuteSchema,
+  migrateStatusSchema,
+  migrateDiscardSchema,
+} from '@/routes/superadmin/terminal-migration.schemas'
 
 // Real terminal ids are MIXED format in production: most are cuid, some are UUID.
 const CUID = 'cmph332eq00039kg8z9cqyc4g'
@@ -84,6 +89,19 @@ describe('terminal-migration route validation schemas', () => {
       const r = migrateStatusSchema.safeParse({ params: { terminalId: CUID }, query: { commandId: '' } })
       expect(r.success).toBe(false)
       if (!r.success) expect(r.error.issues[0].message).toBe('ID de comando inválido')
+    })
+  })
+
+  describe('migrateDiscardSchema', () => {
+    it('is params-only and accepts both id formats', () => {
+      expect(migrateDiscardSchema.safeParse({ params: { terminalId: UUID } }).success).toBe(true)
+      expect(migrateDiscardSchema.safeParse({ params: { terminalId: CUID } }).success).toBe(true)
+    })
+
+    it('rejects an empty terminalId with the Spanish message', () => {
+      const r = migrateDiscardSchema.safeParse({ params: { terminalId: '' } })
+      expect(r.success).toBe(false)
+      if (!r.success) expect(r.error.issues[0].message).toBe('ID de terminal inválido')
     })
   })
 })

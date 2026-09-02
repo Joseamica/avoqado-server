@@ -1,5 +1,28 @@
 import { prismaMock } from '../../../__helpers__/setup'
-import { orgInventoryByResponsibleService } from '@/services/organization-dashboard/orgInventoryByResponsible.service'
+import {
+  buildVenueSupervisorMap,
+  orgInventoryByResponsibleService,
+} from '@/services/organization-dashboard/orgInventoryByResponsible.service'
+
+describe('buildVenueSupervisorMap', () => {
+  it('elige al MANAGER activo más reciente y desempata por id de forma estable', () => {
+    const venue = (venueId: string, startDate: string) => ({
+      venueId,
+      startDate: new Date(startDate),
+      role: 'MANAGER',
+      venue: { organizationId: 'org-1' },
+    })
+    const staffRows = [
+      { id: 'sup-inactivo', active: false, venues: [venue('venue-1', '2026-09-01T00:00:00.000Z')] },
+      { id: 'sup-z', active: true, venues: [venue('venue-1', '2026-08-01T00:00:00.000Z')] },
+      { id: 'sup-b', active: true, venues: [venue('venue-1', '2026-08-20T00:00:00.000Z')] },
+      { id: 'sup-a', active: true, venues: [venue('venue-1', '2026-08-20T00:00:00.000Z')] },
+    ]
+
+    expect(buildVenueSupervisorMap(staffRows as any, 'org-1')).toEqual({ 'venue-1': 'sup-a' })
+    expect(buildVenueSupervisorMap([...staffRows].reverse() as any, 'org-1')).toEqual({ 'venue-1': 'sup-a' })
+  })
+})
 
 describe('OrgInventoryByResponsibleService database aggregation', () => {
   it('preserva totales y filtros sin hidratar cada SIM ni sus pagos', async () => {

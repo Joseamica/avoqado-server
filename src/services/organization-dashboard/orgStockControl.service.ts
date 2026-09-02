@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import { utcTs } from '../../utils/sqlDates'
 import { Prisma } from '@prisma/client'
+import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import type {
   OrgStockBulkGroup,
   OrgStockBulkGroupsPage,
@@ -56,8 +57,10 @@ export class OrgStockControlService {
     const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)))
     const search = options.search?.trim()
     const managedMemberships = await prisma.staffVenue.findMany({
-      where: {
-        staffId: actorStaffId,
+        where: {
+          staffId: actorStaffId,
+          active: true,
+          staff: { active: true },
         role: { in: ['MANAGER', 'ADMIN', 'OWNER'] },
         venue: { organizationId: orgId },
       },
@@ -308,8 +311,13 @@ export class OrgStockControlService {
     if (options.dateTo) conditions.push(Prisma.sql`si."createdAt" <= ${utcTs(options.dateTo)}`)
     const whereSql = Prisma.join(conditions, ' AND ')
 
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const days = Array.from({ length: 7 }, (_, index) => new Date(startOfToday.getTime() - (6 - index) * DAY_MS))
+    // Cada sucursal corta el día con SU timezone. El proceso de Render corre en
+    // UTC, así que construir medianoches con getFullYear/getMonth movía las ventas
+    // nocturnas al día siguiente. Las columnas guardan UTC sin zona: doble AT TIME
+    // ZONE para obtener el calendario local, igual que sqlDates.localWallClock.
+    const venueTimezone = Prisma.sql`COALESCE(NULLIF(v."timezone", ''), ${DEFAULT_TIMEZONE})`
+    const soldLocalDate = Prisma.sql`(((f."soldAt" AT TIME ZONE 'UTC') AT TIME ZONE ${venueTimezone})::date)`
+    const venueToday = Prisma.sql`((${now} AT TIME ZONE ${venueTimezone})::date)`
 
     type SummaryRow = {
       totalSims: unknown
@@ -386,13 +394,13 @@ export class OrgStockControlService {
           COUNT(*) FILTER (WHERE f."status" = 'SOLD')::int AS "sold",
           COUNT(*) FILTER (WHERE f."status" = 'DAMAGED')::int AS "damaged",
           COUNT(*) FILTER (WHERE f."status" = 'RETURNED')::int AS "returned",
-          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND f."soldAt" >= ${utcTs(days[0])} AND f."soldAt" < ${utcTs(days[1])})::int AS "soldDay0",
-          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND f."soldAt" >= ${utcTs(days[1])} AND f."soldAt" < ${utcTs(days[2])})::int AS "soldDay1",
-          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND f."soldAt" >= ${utcTs(days[2])} AND f."soldAt" < ${utcTs(days[3])})::int AS "soldDay2",
-          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND f."soldAt" >= ${utcTs(days[3])} AND f."soldAt" < ${utcTs(days[4])})::int AS "soldDay3",
-          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND f."soldAt" >= ${utcTs(days[4])} AND f."soldAt" < ${utcTs(days[5])})::int AS "soldDay4",
-          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND f."soldAt" >= ${utcTs(days[5])} AND f."soldAt" < ${utcTs(days[6])})::int AS "soldDay5",
-          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND f."soldAt" >= ${utcTs(days[6])})::int AS "soldDay6",
+          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND ${soldLocalDate} = ${venueToday} - 6)::int AS "soldDay0",
+          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND ${soldLocalDate} = ${venueToday} - 5)::int AS "soldDay1",
+          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND ${soldLocalDate} = ${venueToday} - 4)::int AS "soldDay2",
+          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND ${soldLocalDate} = ${venueToday} - 3)::int AS "soldDay3",
+          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND ${soldLocalDate} = ${venueToday} - 2)::int AS "soldDay4",
+          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND ${soldLocalDate} = ${venueToday} - 1)::int AS "soldDay5",
+          COUNT(*) FILTER (WHERE f."status" = 'SOLD' AND ${soldLocalDate} = ${venueToday})::int AS "soldDay6",
           GREATEST(MAX(f."createdAt"), MAX(f."soldAt")) AS "lastActivity"
         FROM filtered f
         LEFT JOIN "Venue" v ON v."id" = f."registeredFromVenueId"
@@ -622,7 +630,12 @@ export class OrgStockControlService {
    * Fetches serialized items for an organization, optionally filtered by createdAt range.
    * Uses organizationId scope (bulk uploads are stored at org level with null venueId).
    */
-  async fetchSerializedItems(orgId: string, options: OrgStockOverviewOptions, take: number = LEGACY_OVERVIEW_ITEMS_CAP) {
+  async fetchSerializedItems(
+    orgId: string,
+    options: OrgStockOverviewOptions,
+    take: number = LEGACY_OVERVIEW_ITEMS_CAP,
+    cursor?: string,
+  ) {
     const { dateFrom, dateTo } = options
     const dateFilter =
       dateFrom || dateTo
@@ -651,8 +664,9 @@ export class OrgStockControlService {
         assignedSupervisor: { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
         assignedPromoter: { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     })
   }
 
@@ -892,6 +906,53 @@ export class OrgStockControlService {
       bulkGroups,
       aggregatesBySucursal: summaryData.aggregatesBySucursal,
       aggregatesByCategoria: summaryData.aggregatesByCategoria,
+      meta: {
+        itemsTotal: summaryData.summary.totalSims,
+        itemsTruncated: summaryData.summary.totalSims > serializedItems.length,
+      },
+    }
+  }
+
+  /**
+   * Explicit export path. It may assemble the complete dataset because the user
+   * requested a file, but every database round-trip remains bounded and ordered.
+   */
+  async getOrgExportOverview(orgId: string, options: OrgStockOverviewOptions): Promise<OrgStockOverview> {
+    const pageSize = 500
+    const items: any[] = []
+    let cursor: string | undefined
+
+    do {
+      const page = await this.fetchSerializedItems(orgId, options, pageSize + 1, cursor)
+      const hasMore = page.length > pageSize
+      const visible = page.slice(0, pageSize)
+      items.push(...visible)
+      cursor = hasMore ? visible[visible.length - 1]?.id : undefined
+    } while (cursor)
+
+    const staffIds = Array.from(new Set(items.map(item => item.createdBy).filter(Boolean))) as string[]
+    const staffMap = new Map<string, string>()
+    const employeeCodeMap = new Map<string, string | null>()
+    if (staffIds.length > 0) {
+      const staff = await prisma.staff.findMany({
+        where: { id: { in: staffIds } },
+        select: { id: true, firstName: true, lastName: true, employeeCode: true },
+      })
+      for (const person of staff) {
+        staffMap.set(person.id, `${person.firstName ?? ''} ${person.lastName ?? ''}`.trim())
+        employeeCodeMap.set(person.id, person.employeeCode ?? null)
+      }
+    }
+
+    const summaryData = await this.getOrgSummary(orgId, options)
+    const serializedItems = items.map(item => this.serializeItem(item, staffMap, employeeCodeMap))
+    return {
+      summary: summaryData.summary,
+      items: serializedItems,
+      bulkGroups: this.groupByBulkUpload(items, staffMap, employeeCodeMap),
+      aggregatesBySucursal: summaryData.aggregatesBySucursal,
+      aggregatesByCategoria: summaryData.aggregatesByCategoria,
+      meta: { itemsTotal: summaryData.summary.totalSims, itemsTruncated: false },
     }
   }
 }
