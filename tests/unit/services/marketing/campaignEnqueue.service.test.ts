@@ -413,8 +413,17 @@ describe('enqueueCampaign — totalRecipients y resultado', () => {
     mockTransaccion(tx)
 
     await enqueueCampaign({ venueId: VENUE_ID, campaignId: CAMPAIGN_ID, ahora: AHORA })
-    expect(tx.customerCampaignDelivery.count).toHaveBeenCalledWith({ where: { campaignId: CAMPAIGN_ID } })
-    expect(tx.customerCampaign.update).toHaveBeenCalledWith({ where: { id: CAMPAIGN_ID }, data: { totalRecipients: 2 } })
+    // 🔴 Minor #1 de la revisión: las DOS consultas del paso i) llevan `venueId` propio. Hoy es
+    // seguro sin él (el CAS ya validó el tenant en la MISMA transacción), pero la regla del repo
+    // es «TODA consulta filtra por venueId, sin excepciones» — una consulta que depende de que
+    // otra la haya protegido deja de ser segura en cuanto alguien reordena los pasos.
+    expect(tx.customerCampaignDelivery.count).toHaveBeenCalledWith({ where: { campaignId: CAMPAIGN_ID, venueId: VENUE_ID } })
+    expect(tx.customerCampaign.updateMany).toHaveBeenCalledWith({
+      where: { id: CAMPAIGN_ID, venueId: VENUE_ID },
+      data: { totalRecipients: 2 },
+    })
+    // `update` (clave única, sin tenant posible en el where) ya no se usa para esto.
+    expect(tx.customerCampaign.update).not.toHaveBeenCalled()
   })
 })
 

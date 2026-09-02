@@ -175,8 +175,13 @@ export async function enqueueCampaign({
     // Paso i) — `totalRecipients` es CACHE reconstruible: se fija con un COUNT real de
     // las deliveries, nunca con la aritmética de arriba (que podría divergir si algún
     // día una delivery se crea por otro camino).
-    const totalRecipients = await tx.customerCampaignDelivery.count({ where: { campaignId } })
-    await tx.customerCampaign.update({ where: { id: campaignId }, data: { totalRecipients } })
+    // 🔴 Las dos llevan `venueId` PROPIO aunque el CAS de arriba ya validó el tenant en esta
+    // misma transacción: la regla del repo no admite «esta consulta está protegida por aquella»
+    // — deja de ser cierta en cuanto alguien reordena los pasos. Por eso el segundo es
+    // `updateMany` y no `update`: el `where` de un `update` sólo acepta una clave ÚNICA, y
+    // `(id, venueId)` no lo es, así que con `update` el tenant no cabe en la consulta.
+    const totalRecipients = await tx.customerCampaignDelivery.count({ where: { campaignId, venueId } })
+    await tx.customerCampaign.updateMany({ where: { id: campaignId, venueId }, data: { totalRecipients } })
 
     return { encoladas, omitidas, period }
   })
