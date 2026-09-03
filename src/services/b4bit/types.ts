@@ -159,6 +159,11 @@ export interface InitiateCryptoPaymentParams {
   amount: number // In centavos (e.g., 5500 = $55.00 MXN)
   tip?: number // In centavos
   staffId: string
+  /**
+   * @deprecated IGNORADO desde el 3-sep-2026 (aislamiento de tenant): el turno lo resuelve el
+   * SERVIDOR por `venueId` con `turnoAbiertoDelNegocio`. Se conserva —y el esquema Zod lo sigue
+   * aceptando— para que una app que todavía lo mande reciba 200 y no un 400.
+   */
   shiftId?: string
   orderId?: string
   orderNumber?: string
@@ -175,6 +180,11 @@ export interface InitiateCryptoPaymentResult {
   expiresInSeconds: number
   cryptoSymbol?: string
   cryptoAddress?: string
+  /**
+   * Turno de caja del NEGOCIO en el que quedó el cobro; `null` si no había ninguno abierto.
+   * Campo NUEVO y opcional: nada de lo que ya existía se quita ni se renombra.
+   */
+  shiftId?: string | null
 }
 
 export interface ProcessWebhookResult {

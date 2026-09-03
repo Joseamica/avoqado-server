@@ -20,6 +20,7 @@ import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { logAction } from '../dashboard/activity-log.service'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
@@ -241,7 +242,7 @@ async function createPaymentOrder(request: B4BitCreateOrderRequest & { venueId: 
  * @returns Payment URL and tracking information
  */
 export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams): Promise<InitiateCryptoPaymentResult> {
-  const { venueId, amount, tip = 0, staffId, shiftId, orderId, orderNumber, deviceSerialNumber, rating } = params
+  const { venueId, amount, tip = 0, staffId, orderId, orderNumber, deviceSerialNumber, rating } = params
   await assertVenueSalesEnabled(venueId)
 
   // Convert centavos to decimal (5500 centavos = $55.00 MXN)
@@ -264,17 +265,21 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
     orderId,
   })
 
-  // Validate shift is open (if shiftId provided)
-  if (shiftId) {
-    const shift = await prisma.shift.findUnique({
-      where: { id: shiftId },
-      select: { id: true, status: true },
-    })
-
-    if (!shift || shift.status !== 'OPEN') {
-      throw new BadRequestError('No hay turno abierto para procesar el pago')
-    }
-  }
+  // 🔴 AISLAMIENTO DE TENANT: el turno NO lo elige el cliente.
+  //
+  // Aquí se validaba el turno de la petición con `shift.findUnique({ where: { id } })` — SIN
+  // `venueId` — y ese mismo id acababa en el `Payment`: el venue A podía mandar un turno abierto
+  // del venue B y su cobro salía del corte de A para sumarse al de B. La regla dura del repo no
+  // admite matices: toda consulta filtra por `venueId`.
+  //
+  // Ahora el turno se resuelve UNA sola vez por negocio, dentro de la transacción, y ese id va a
+  // la `Order` Y al `Payment` (antes la orden ya lo hacía bien y el pago no: dos fuentes de verdad
+  // para el mismo dato son justo de donde salió el defecto).
+  //
+  // El turno que llegue en la petición se IGNORA en silencio, no se rechaza: hoy no lo manda
+  // nadie (`CryptoPaymentRequest` de avoqado-tpv ni siquiera declara el campo) y rechazar lo que
+  // no cuadra rompería a las PAX ya instaladas, que no se actualizan a la vez que el servidor. El
+  // esquema Zod lo sigue aceptando, así que una petición que lo traiga nunca se vuelve un 400.
 
   // Resolve terminal ID from device serial number
   let terminalId: string | null = null
@@ -290,7 +295,7 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
   }
 
   // Create payment and order in a transaction (atomic)
-  const { payment } = await prisma.$transaction(async tx => {
+  const { payment, turnoDelCobro } = await prisma.$transaction(async tx => {
     // For crypto payments without an existing order, create a "fast order" (placeholder)
     let orderIdToUse = orderId
 
@@ -315,24 +320,26 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
       }
     }
 
+    // 🔴 EL TURNO, UNA SOLA VEZ, PARA LAS DOS MITADES DEL COBRO.
+    //
+    // El turno de caja es del NEGOCIO, no de la persona ni del aparato (`../shared/turnoDeCaja.ts`,
+    // decisión del founder del 2-sep-2026), y se resuelve con el cliente de la transacción. La orden
+    // testigo y el pago tienen que llevar el MISMO id: si cada uno lo resolviera por su cuenta, las
+    // dos mitades del mismo cobro podrían acabar en turnos distintos.
+    //
+    // `null` es un desenlace legítimo: un negocio sin turno abierto sigue vendiendo, y el cobro se
+    // registra sin turno — nunca en uno ajeno ni en uno cerrado.
+    const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
+
     if (!orderIdToUse) {
       // Generate order number
       const orderNumberGenerated = orderNumber || `CRYPTO-${Date.now()}`
-
-      // 🔴 Cobro cripto en la terminal: la orden nace en el turno abierto del NEGOCIO
-      // (`../shared/turnoDeCaja.ts`), resuelto con el cliente de la transacción.
-      //
-      // Se resuelve por `venueId` en vez de reusar el `shiftId` del parámetro a propósito: ese
-      // valor llega del cliente y arriba sólo se comprueba que el turno esté OPEN, NO que sea de
-      // ESTE negocio. La orden no hereda ese hueco. En el caso normal coinciden — sólo puede
-      // haber un turno abierto por venue.
-      const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
 
       // Create fast order for crypto payment
       const newOrder = await tx.order.create({
         data: {
           venueId,
-          shiftId: currentShift?.id ?? null,
+          shiftId: turnoDelNegocio?.id ?? null,
           orderNumber: orderNumberGenerated,
           type: 'TAKEOUT',
           source: 'TPV',
@@ -371,7 +378,8 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
         type: 'FAST',
         processor: 'B4BIT',
         processedById: staffId,
-        shiftId,
+        // El MISMO turno que llevó la orden: el del negocio, nunca el que mandó el cliente.
+        shiftId: turnoDelNegocio?.id ?? null,
         terminalId,
         feePercentage: 0.0095, // B4Bit 0.95% fee
         feeAmount: (totalAmount / 100) * 0.0095,
@@ -385,10 +393,30 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
       },
     })
 
-    return { payment: newPayment, fastOrder: orderIdToUse !== orderId ? orderIdToUse : null }
+    return { payment: newPayment, fastOrder: orderIdToUse !== orderId ? orderIdToUse : null, turnoDelCobro: turnoDelNegocio?.id ?? null }
   })
 
-  logger.info('💾 Created pending crypto payment', { paymentId: payment.id })
+  logger.info('💾 Created pending crypto payment', { paymentId: payment.id, turnoDelCobro })
+
+  // 🔴 Dinero FUERA de todo turno: es la anomalía que este proyecto existe para eliminar
+  // (Testarudo, 1-sep-2026: 78 de 92 cobros, $10,337 de $12,002, fuera de todo turno). No detiene
+  // el cobro —un negocio sin turno abierto sigue vendiendo— pero deja el rastro que hace falta
+  // para no tener que adivinar después por qué ese dinero no aparece en ningún corte.
+  //
+  // El camino normal NO se registra a propósito: la bitácora guarda las anomalías que un dueño
+  // audita, no un asiento por cada venta. `logAction` es best-effort y nunca lanza, así que la
+  // bitácora no puede tumbar un cobro.
+  if (!turnoDelCobro) {
+    logger.warn('⚠️ Cobro cripto sin turno de caja abierto: queda fuera de todo corte', { venueId, paymentId: payment.id })
+    void logAction({
+      staffId,
+      venueId,
+      action: 'CRYPTO_PAYMENT_WITHOUT_SHIFT',
+      entity: 'Payment',
+      entityId: payment.id,
+      data: { amount, tip, processor: 'B4BIT', orderId: orderId ?? null },
+    })
+  }
 
   // Create order with B4Bit
   const webhookUrl = `${process.env.API_BASE_URL || 'https://api.avoqado.io'}/api/v1/webhooks/b4bit`
@@ -461,6 +489,9 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
     expiresInSeconds: b4bitResponse.data.expires_in_seconds,
     cryptoSymbol: b4bitResponse.data.crypto_symbol,
     cryptoAddress: b4bitResponse.data.crypto_address,
+    // Campo NUEVO y opcional: el turno en el que quedó el cobro (`null` = ninguno abierto). La
+    // respuesta no puede callar dónde cayó el dinero; nada de lo que ya existía cambia.
+    shiftId: turnoDelCobro,
   }
 }
 

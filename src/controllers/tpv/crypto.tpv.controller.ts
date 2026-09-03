@@ -26,7 +26,10 @@ export async function initiateCryptoPaymentHandler(req: Request, res: Response, 
       throw new BadRequestError('Organization ID not found in auth context')
     }
 
-    const { amount, tip, staffId, shiftId, orderId, orderNumber, deviceSerialNumber, rating } = req.body
+    // 🔴 El `shiftId` del cuerpo NO se reenvía: el turno lo resuelve el servidor por `venueId`
+    // (aislamiento de tenant, 3-sep-2026). El esquema lo sigue aceptando para no romper a una app
+    // que todavía lo mande, pero nadie lo lee.
+    const { amount, tip, staffId, orderId, orderNumber, deviceSerialNumber, rating } = req.body
 
     logger.info('🔐 TPV: Initiating crypto payment', {
       venueId,
@@ -42,7 +45,6 @@ export async function initiateCryptoPaymentHandler(req: Request, res: Response, 
       amount, // In centavos
       tip: tip || 0,
       staffId,
-      shiftId,
       orderId,
       orderNumber,
       deviceSerialNumber,
@@ -59,6 +61,8 @@ export async function initiateCryptoPaymentHandler(req: Request, res: Response, 
         expiresInSeconds: result.expiresInSeconds,
         cryptoSymbol: result.cryptoSymbol,
         cryptoAddress: result.cryptoAddress,
+        // En qué turno de caja quedó el cobro (`null` = el negocio no tenía ninguno abierto).
+        shiftId: result.shiftId ?? null,
       },
       message: 'Crypto payment initiated successfully',
     })

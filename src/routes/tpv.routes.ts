@@ -3156,7 +3156,11 @@ router.post(
  *               shiftId:
  *                 type: string
  *                 format: cuid
- *                 description: Current shift ID (optional)
+ *                 deprecated: true
+ *                 description: |
+ *                   IGNORADO desde el 3-sep-2026 (aislamiento de tenant). El turno de caja lo
+ *                   resuelve el servidor por `venueId`; el valor que mande el cliente no se lee.
+ *                   Se sigue aceptando para no romper a una app que todavía lo envíe.
  *               orderId:
  *                 type: string
  *                 format: cuid
@@ -3205,6 +3209,13 @@ router.post(
  *                       type: integer
  *                       description: Seconds until expiration
  *                       example: 900
+ *                     shiftId:
+ *                       type: string
+ *                       format: cuid
+ *                       nullable: true
+ *                       description: |
+ *                         Turno de caja del NEGOCIO en el que quedó el cobro; `null` si no había
+ *                         ninguno abierto. Campo nuevo y opcional (3-sep-2026).
  *       401:
  *         description: Unauthorized
  *       403:
