@@ -113,6 +113,20 @@ export interface NoReparable {
 }
 
 /**
+ * Una pareja a medias que el barrido NO va a reparar y que SÍ merece que alguien la vea.
+ *
+ * 🔴 Existe separada de `ReparacionDelCierre` a propósito: lo que no se puede reparar no puede
+ * viajar con los campos de una reparación (`conteo`, `esperado`, `momento`) — tenerlos ahí invitaría
+ * a cerrar la mitad que falta con números que nadie firmó, que es justo lo que la regla 1 prohíbe.
+ */
+export interface ParejaBloqueada {
+  venueId: string
+  shiftId: string
+  cashDrawerSessionId: string
+  motivo: MotivoNoReparable
+}
+
+/**
  * ¿Esta pareja quedó a medias, y con qué números se cierra la mitad que falta? PURA: sin base y sin
  * reloj — el instante sale de lo que la primera mitad firmó.
  *
@@ -236,7 +250,10 @@ export type LectorDeParejas = Pick<PrismaClient, 'cashDrawerSession' | 'shift'>
  * ⚠️ La ventana `since` acota el barrido: el criterio no tiene índice que sirva y sin tope cada
  * pasada recorrería la historia entera de cajones. Es el mismo recurso de `paid-order-reconciler`.
  */
-export async function buscarParejasAMedias(db: LectorDeParejas, opciones: { limit: number; since: Date }): Promise<ReparacionDelCierre[]> {
+export async function buscarParejasAMedias(
+  db: LectorDeParejas,
+  opciones: { limit: number; since: Date },
+): Promise<{ parejas: ReparacionDelCierre[]; bloqueadas: ParejaBloqueada[] }> {
   const filas = (await db.cashDrawerSession.findMany({
     where: {
       shiftId: { not: null },
