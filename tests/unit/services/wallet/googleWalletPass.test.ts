@@ -8,7 +8,6 @@
 const insertClass = jest.fn().mockResolvedValue({ data: {} })
 const getClass = jest.fn()
 const insertObject = jest.fn().mockResolvedValue({ data: {} })
-const getObject = jest.fn()
 
 jest.mock('@/services/wallet/googleWalletClient', () => ({
   googleWalletAvailable: jest.fn(() => true),
@@ -16,7 +15,10 @@ jest.mock('@/services/wallet/googleWalletClient', () => ({
   issuerId: jest.fn(() => '338'),
   walletClient: jest.fn(async () => ({
     loyaltyclass: { insert: insertClass, get: getClass },
-    loyaltyobject: { insert: insertObject, get: getObject },
+    // 🔴 Sin `get`: `issueGooglePass` decide si ya existe el pase por la BASE (el
+    // `WalletPass.googleObjectId`), nunca preguntándole a Google. Nadie en producción
+    // llama a `loyaltyobject.get`, así que un mock aquí quedaba sin usar.
+    loyaltyobject: { insert: insertObject },
   })),
 }))
 jest.mock('jsonwebtoken', () => ({ sign: jest.fn(() => 'JWT-FALSO') }))
@@ -31,7 +33,6 @@ describe('googleWalletPass', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     getClass.mockRejectedValue({ code: 404 })
-    getObject.mockRejectedValue({ code: 404 })
     prismaMock.venue.findFirst.mockResolvedValue(VENUE as any)
     prismaMock.customer.findFirst.mockResolvedValue({ id: 'c1' } as any)
     prismaMock.walletCardDesign.findUnique.mockResolvedValue(null)
@@ -60,6 +61,15 @@ describe('googleWalletPass', () => {
     expect(insertClass).not.toHaveBeenCalled()
   })
 
+  it('🔴 un 403 (o cualquier error que no sea 404) al preguntar por la clase se propaga, no se confunde con "no existe"', async () => {
+    // Un 403 significa "no pudimos SABER si existe" (casi siempre, permisos del service
+    // account). Confundirlo con 404 dispara un insert a ciegas que Google rechaza con un
+    // 409 cuyo mensaje apunta al lugar equivocado y esconde el problema real.
+    getClass.mockRejectedValue({ code: 403 })
+    await expect(ensureLoyaltyClass('v1')).rejects.toEqual({ code: 403 })
+    expect(insertClass).not.toHaveBeenCalled()
+  })
+
   it('emite el pase y guarda el googleObjectId', async () => {
     prismaMock.walletPass.findFirst.mockResolvedValue(null)
     prismaMock.walletPass.create.mockResolvedValue({ id: 'wp-1', serialNumber: 'AVQ-1', qrToken: 'q'.repeat(48), revision: 1 } as any)
@@ -75,6 +85,26 @@ describe('googleWalletPass', () => {
     // 🔴 El nombre de la prueba promete "guarda el googleObjectId", pero sin esta
     // aserción nada obliga a que se persista: el valor devuelto se arma en memoria y la
     // prueba pasaría igual aunque se borrara el `prisma.walletPass.update` de producción.
+    expect(prismaMock.walletPass.update).toHaveBeenCalledWith({
+      where: { id: 'wp-1' },
+      data: { googleObjectId: '338.pass-wp-1' },
+    })
+  })
+
+  it('🔴 el objeto ya existe en Google (409): se trata como éxito, no como error', async () => {
+    // El id es determinista (`<issuer>.pass-<walletPassId>`): un intento anterior pudo crear
+    // el objeto en Google y morir ANTES de guardar el id en la base. El objeto que Google
+    // dice que ya existe es exactamente el que queríamos crear — reusarlo es lo correcto.
+    prismaMock.walletPass.findFirst.mockResolvedValue(null)
+    prismaMock.walletPass.create.mockResolvedValue({ id: 'wp-1', serialNumber: 'AVQ-1', qrToken: 'q'.repeat(48), revision: 1 } as any)
+    prismaMock.walletPass.update.mockResolvedValue({} as any)
+    insertObject.mockRejectedValueOnce({ code: 409 })
+
+    const r = await issueGooglePass('v1', 'c1')
+
+    expect(r.googleObjectId).toBe('338.pass-wp-1')
+    // Sin esto el cliente se queda sin poder guardar su tarjeta nunca: el id no se persiste
+    // y el siguiente intento vuelve a chocar con el mismo 409, para siempre.
     expect(prismaMock.walletPass.update).toHaveBeenCalledWith({
       where: { id: 'wp-1' },
       data: { googleObjectId: '338.pass-wp-1' },

@@ -59,6 +59,13 @@ describe('GET /public/wallet/stamps/:serialNumber/:revision.png', () => {
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 404 }))
   })
 
+  it('🔴 el Cache-Control es corto, no "immutable": el endpoint sirve el estado ACTUAL, no un retrato de la revisión pedida', async () => {
+    prismaMock.walletPass.findFirst.mockResolvedValue(PASE as any)
+    const r = res()
+    await getStampStrip({ params: { serialNumber: 'AVQ-1111', revision: '3' } } as any, r, jest.fn())
+    expect(r.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=300')
+  })
+
   it('🔴 sirve la franja aunque la revisión pedida sea vieja: Google puede pedir una URL cacheada', async () => {
     prismaMock.walletPass.findFirst.mockResolvedValue(PASE as any)
     const r = res()
@@ -70,7 +77,9 @@ describe('GET /public/wallet/stamps/:serialNumber/:revision.png', () => {
     prismaMock.walletPass.findFirst.mockResolvedValue(null)
     const next = jest.fn()
     await getStampStrip({ params: { serialNumber: 'AVQ-1111', revision: '3' } } as any, res(), next)
-    expect(prismaMock.walletPass.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ active: true }) }))
+    expect(prismaMock.walletPass.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ active: true }) }),
+    )
     expect(next).toHaveBeenCalled()
   })
 })

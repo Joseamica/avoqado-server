@@ -34,8 +34,12 @@ export async function ensureLoyaltyClass(venueId: string): Promise<string> {
   try {
     await client.loyaltyclass.get({ resourceId: classId })
     return classId
-  } catch {
-    // No existe todavía: se crea.
+  } catch (error: any) {
+    const codigo = error?.code ?? error?.response?.status
+    // 🔴 Sólo un 404 significa «no existe, créala». Un 403 o un fallo de red significan que
+    // NO pudimos saberlo: crear a ciegas produce un 409 cuyo mensaje apunta al lugar
+    // equivocado y esconde el problema real (permisos del service account, casi siempre).
+    if (codigo !== 404) throw error
   }
 
   // 🔴 `rewardLabel` sale de `LoyaltyConfig`, NO de `getStampCardStatus(venueId, '')`: esa
@@ -100,18 +104,30 @@ export async function issueGooglePass(venueId: string, customerId: string) {
   const stamps = await getStampCardStatus(venueId, customerId)
 
   const client = await walletClient()
-  await client.loyaltyobject.insert({
-    requestBody: buildLoyaltyObject({
-      issuerId: issuerId(),
-      venueId,
-      walletPassId: pass.id,
-      serialNumber: pass.serialNumber,
-      qrToken: pass.qrToken,
-      revision: pass.revision,
-      baseUrl: env.BASE_URL as string,
-      content: stamps,
-    }) as any,
-  })
+  try {
+    await client.loyaltyobject.insert({
+      requestBody: buildLoyaltyObject({
+        issuerId: issuerId(),
+        venueId,
+        walletPassId: pass.id,
+        serialNumber: pass.serialNumber,
+        qrToken: pass.qrToken,
+        revision: pass.revision,
+        baseUrl: env.BASE_URL as string,
+        content: stamps,
+      }) as any,
+    })
+  } catch (error: any) {
+    // 🔴 409 = el objeto YA existe con este id. Pasa cuando un intento anterior lo creó en
+    // Google y murió antes de guardar el id en la base (p.ej. el `update` de abajo falló).
+    // El id es determinista, así que el objeto que existe es EXACTAMENTE el que queríamos
+    // crear: seguir adelante y guardar el id es lo correcto. Sin esto, ese cliente no puede
+    // volver a guardar su tarjeta nunca — cada intento recalcula el mismo id, Google
+    // vuelve a responder 409, y no hay salida.
+    const codigo = error?.code ?? error?.response?.status
+    if (codigo !== 409) throw error
+    logger.info('El objeto de Google ya existía; se reusa', { objectId, venueId, customerId })
+  }
 
   await prisma.walletPass.update({ where: { id: pass.id }, data: { googleObjectId: objectId } })
 

@@ -49,9 +49,10 @@ export async function getStampStrip(req: Request, res: Response, next: NextFunct
     })
 
     res.setHeader('Content-Type', 'image/png')
-    // 🔴 Cacheable a lo bestia y sin riesgo: esta URL es inmutable por diseño — cuando
-    // el contenido cambia, cambia la revisión y por tanto la dirección.
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+    // 🔴 Caché corto y honesto. La URL cambia con cada sello (lleva la revisión dentro), así
+    // que no hace falta que Google la pida seguido; pero como servimos SIEMPRE el estado
+    // actual y no un retrato de esa revisión, no podemos prometer inmutabilidad.
+    res.setHeader('Cache-Control', 'public, max-age=300')
     res.send(png)
   } catch (error) {
     next(error)
