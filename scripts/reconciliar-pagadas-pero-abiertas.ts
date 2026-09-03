@@ -51,6 +51,22 @@ const TOPE_POR_PASADA = 50
 
 const RE_FECHA_CIVIL = /^\d{4}-\d{2}-\d{2}$/
 
+/**
+ * Rechazo de seguridad (host equivocado, `--desde` inválido, `DATABASE_URL` inservible). El motivo
+ * se imprime donde se detecta y esto sólo lleva el código de salida hasta la cadena final.
+ *
+ * 🔴 Por qué no un `process.exit(2)` en el sitio: un exit seco NO drena la salida, y hacia un pipe
+ * (`2>&1 | tee`) `process.stderr` es asíncrono — se perdía justo el renglón que dice qué host hay
+ * que repetir, que es el único con el que el operador puede corregir su comando. Saliendo por la
+ * cadena de abajo, todo rechazo pasa por el mismo drenado que el camino bueno.
+ */
+class Rechazo extends Error {
+  constructor(readonly codigo: number) {
+    super(`rechazo (${codigo})`)
+    this.name = 'Rechazo'
+  }
+}
+
 function leerValor(bandera: string): string | undefined {
   const i = process.argv.indexOf(bandera)
   return i >= 0 ? process.argv[i + 1] : undefined
@@ -62,14 +78,14 @@ function leerDesde(): Date | undefined {
   if (crudo === undefined) return undefined
   if (!RE_FECHA_CIVIL.test(crudo)) {
     console.error(`--desde espera una fecha en formato YYYY-MM-DD (recibí «${crudo}»). No se leyó nada.`)
-    process.exit(2)
+    throw new Rechazo(2)
   }
   // Fecha civil a medianoche UTC: es una cota inferior de rezago, no un día de negocio, así que no
   // necesita la zona del venue — y así el resultado no depende del reloj de la máquina que corre.
   const desde = new Date(`${crudo}T00:00:00Z`)
   if (Number.isNaN(desde.getTime())) {
     console.error(`--desde: «${crudo}» no es una fecha que exista. No se leyó nada.`)
-    process.exit(2)
+    throw new Rechazo(2)
   }
   return desde
 }
@@ -79,14 +95,24 @@ function hostDeLaBase(): string {
   const url = process.env.DATABASE_URL
   if (!url) {
     console.error('Falta DATABASE_URL: no hay base a la que conectarse.')
-    process.exit(2)
+    throw new Rechazo(2)
   }
+  let host: string
   try {
-    return new URL(url).hostname
+    host = new URL(url).hostname
   } catch {
     console.error('DATABASE_URL no es una URL válida (su valor no se imprime).')
-    process.exit(2)
+    throw new Rechazo(2)
   }
+  // 🔴 Un DSN por socket unix (`postgres:///base`) deja el host VACÍO, y entonces `--confirm-host ""`
+  // satisface la comparación: el candado se abriría solo. Sin host no hay nada que confirmar, así que
+  // no se escribe. La comprobación va FUERA del `try` a propósito: dentro, su propio `throw` caería en
+  // el `catch` de arriba y el operador leería «no es una URL válida», que es mentira.
+  if (!host) {
+    console.error('DATABASE_URL no declara un host (¿conexión por socket?): no hay nada que repetir en --confirm-host.')
+    throw new Rechazo(2)
+  }
+  return host
 }
 
 const pesos = (monto: string): string => `$${new Prisma.Decimal(monto).toFixed(2)}`
@@ -135,7 +161,7 @@ async function main(): Promise<void> {
       console.error('🔴 No se escribió NADA.')
       console.error(`Para reparar en esta base hay que repetir su host exacto:  --confirm-host ${host}`)
       console.error(confirmado === undefined ? 'No recibí --confirm-host.' : `Recibí «${confirmado}».`)
-      process.exit(2)
+      throw new Rechazo(2)
     }
   }
 
@@ -156,10 +182,18 @@ async function main(): Promise<void> {
 
   const resultado = await barrido.runNow({ since: desde })
   console.log(`Revisadas ${resultado.scanned} · reparadas ${resultado.reconciled} · fallidas ${resultado.failed}`)
-  if (resultado.skipped > 0) console.log('⚠️  El barrido ya venía corriendo y esta pasada se saltó. Vuelve a correr.')
+  if (resultado.skipped > 0) {
+    // El candado `running` es de ESTA instancia, recién creada, así que aquí no debería saltar nunca.
+    // Y no promete lo que parece: NO protege contra el tic de 10 min del servidor desplegado — si
+    // coinciden, lo peor que pasa es que se repita trabajo idempotente sobre las mismas órdenes.
+    console.log('⚠️  El barrido se saltó su propia pasada y aquí eso no debería ocurrir: el candado es de esta')
+    console.log('    instancia, que acaba de nacer. Vuelve a correr y repórtalo.')
+  }
 
   const despues = await barrido.runNow({ dryRun: true, since: desde })
-  console.log(`\nQuedan ${despues.candidates.length} candidatas (deben ser sólo las que fallaron).`)
+  console.log(
+    `\nQuedan ${despues.candidates.length} candidatas (deben ser sólo las que fallaron, o las que no cupieron en el lote de ${TOPE_POR_PASADA} de esta pasada).`,
+  )
   if (resultado.failed > 0) {
     console.log('El motivo de cada fallida está en el log del servidor. Una fallida que ya no salga aquí es la')
     console.log('gracia de 5 minutos del criterio: reaparecerá en la siguiente corrida.')
@@ -171,15 +205,27 @@ async function main(): Promise<void> {
  * Espera a que la salida llegue de verdad al otro lado antes de matar el proceso: hacia un pipe
  * (`| tee`, `| tail`) `process.stdout` es ASÍNCRONO, y un `process.exit` seco cortaría la tabla a
  * media línea — justo la tabla que el founder tiene que leer.
+ *
+ * 🔴 Se drenan LOS DOS flujos: los rechazos se imprimen por `stderr`, que es un stream aparte con su
+ * propio búfer aunque `2>&1` los mande al mismo sitio. Drenar sólo stdout dejaba truncado el
+ * «repite su host exacto», que es el renglón que sirve para corregir el comando.
  */
-function drenarSalida(): Promise<void> {
-  if (process.stdout.writableLength === 0) return Promise.resolve()
-  return new Promise(resolve => process.stdout.write('', () => resolve()))
+function drenarFlujo(flujo: NodeJS.WriteStream): Promise<void> {
+  if (flujo.writableLength === 0) return Promise.resolve()
+  return new Promise(resolve => flujo.write('', () => resolve()))
+}
+
+async function drenarSalida(): Promise<void> {
+  await drenarFlujo(process.stdout)
+  await drenarFlujo(process.stderr)
 }
 
 main()
   .then(() => 0)
   .catch(error => {
+    // Un `Rechazo` ya imprimió su motivo donde se detectó; aquí sólo trae su código para que la
+    // salida pase por el drenado de abajo en vez de por un `process.exit` seco.
+    if (error instanceof Rechazo) return error.codigo
     console.error(error)
     return 1
   })
