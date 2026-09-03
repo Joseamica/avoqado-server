@@ -44,7 +44,10 @@ export type VerificarTokenDeEnvioResult = { ok: true } | { ok: false; motivo: 'I
 const SEND_KEY_LABEL = 'avoqado-campaign-send-v1'
 
 // 15 minutos: lo que dura una vista previa antes de exigir que el dueño la vuelva a revisar.
-const VIGENCIA_MS = 15 * 60 * 1000
+// Exportada (Task 5, campaignPublish.service.ts) para que `previsualizarEnvio` calcule
+// `expiraEn` sin duplicar el número mágico — dos copias del mismo plazo es exactamente la
+// clase de bug que ya mordió a este repo cuando divergen con el tiempo.
+export const VIGENCIA_MS = 15 * 60 * 1000
 
 function sendKey(): Buffer {
   return crypto.createHmac('sha256', ACCESS_TOKEN_SECRET).update(SEND_KEY_LABEL).digest()
