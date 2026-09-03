@@ -56,11 +56,9 @@ describe('parejaDeCierre — qué mitad falta y con qué números se firma', () 
     })
 
     it('🔴 una gaveta que cerró SOLA (auto-cierre o relevo) no repara nada: nadie contó y no es este gesto', () => {
-      const r = decidirReparacionDelCierre(
-        gaveta({ actualAmount: null, overShort: null, closedByStaffId: null }),
-        turno(),
-        { hayTurnoAbierto: true },
-      )
+      const r = decidirReparacionDelCierre(gaveta({ actualAmount: null, overShort: null, closedByStaffId: null }), turno(), {
+        hayTurnoAbierto: true,
+      })
 
       expect(r.reparable).toBe(false)
       if (r.reparable) return
@@ -117,11 +115,9 @@ describe('parejaDeCierre — qué mitad falta y con qué números se firma', () 
     })
 
     it('🔴 si el turno cerró SIN conteo, la gaveta se cierra SIN conteo: jamás se inventa uno', () => {
-      const r = decidirReparacionDelCierre(
-        gavetaAbierta,
-        turno({ status: 'CLOSED', endTime: CERRADO_A_LAS, closedById: 'staff-2' }),
-        { hayTurnoAbierto: false },
-      )
+      const r = decidirReparacionDelCierre(gavetaAbierta, turno({ status: 'CLOSED', endTime: CERRADO_A_LAS, closedById: 'staff-2' }), {
+        hayTurnoAbierto: false,
+      })
 
       expect(r.reparable).toBe(true)
       if (!r.reparable) return
@@ -145,7 +141,14 @@ describe('parejaDeCierre — qué mitad falta y con qué números se firma', () 
       // Testarudo, 1-sep: la caja abrió 07:38 y el turno 08:12. Un filtro por `openedAt >= startTime`
       // dejaría fuera justo la forma que produce producción.
       const r = decidirReparacionDelCierre(
-        gaveta({ status: 'OPEN', closedAt: null, actualAmount: null, overShort: null, closedByStaffId: null, openedAt: new Date('2026-09-03T13:38:00.000Z') }),
+        gaveta({
+          status: 'OPEN',
+          closedAt: null,
+          actualAmount: null,
+          overShort: null,
+          closedByStaffId: null,
+          openedAt: new Date('2026-09-03T13:38:00.000Z'),
+        }),
         turnoCerrado,
         { hayTurnoAbierto: false },
       )
