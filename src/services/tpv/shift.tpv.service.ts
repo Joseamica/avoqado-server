@@ -16,6 +16,7 @@ import {
 } from '../shared/cashReconciliation.service'
 import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, esperadoDelCajonAbierto } from '../shared/turnoDeCaja'
+import { asegurarLaLiga } from '../shared/parejaDeCierre'
 
 interface ShiftFilters {
   staffId?: string
@@ -1691,6 +1692,22 @@ async function closeShiftUsingRequest(
           })
           return null
         })
+
+    // ── El registro durable del gesto, ANTES del primer commit ────────────────────────────
+    //
+    // 🔴 Este cierre son DOS commits, y si el proceso muere en medio lo que queda NO «degrada a lo
+    // de hoy»: la gaveta se queda OPEN mientras `turnoAbiertoDelNegocio` ya devuelve `null`, así
+    // que los cobros nuevos nacen sin turno y sus `CASH_SALE` se siguen posteando a esa caja —
+    // efectivo acumulándose en una gaveta que ya nadie va a cuadrar. El barrido
+    // `cash-close-pair-reconciler` lo repara, pero sólo si la gaveta dice de QUÉ turno era:
+    // emparejarlas por reloj es lo que mezclaría jornadas.
+    //
+    // Cuando el cierre lo dispara la propia gaveta no hay nada que ligar: esa pareja ya la resolvió
+    // quien llamó. Y `asegurarLaLiga` nunca lanza ni roba una liga ajena, así que no puede tumbar
+    // un cierre que por lo demás está bien.
+    if (cajon && !context.cerrandoDesdeElCajon) {
+      await asegurarLaLiga(prisma, venueId, shiftId, cajon.sessionId)
+    }
 
     const expectedCash = cajon?.esperado ?? new Decimal(shift.startingCash || 0).add(cashInDrawer)
     let outcome: CashReconciliationOutcome = request.outcome

@@ -54,14 +54,17 @@ jest.mock('@/services/shared/turnoDeCaja', () => ({
   cerrarTurnoDeCaja: jest.fn(),
   esperadoDelCajonAbierto: jest.fn(),
 }))
+jest.mock('@/services/shared/parejaDeCierre', () => ({ __esModule: true, asegurarLaLiga: jest.fn() }))
 
 import prisma from '@/utils/prismaClient'
 import { cerrarTurnoDeCaja, esperadoDelCajonAbierto } from '@/services/shared/turnoDeCaja'
+import { asegurarLaLiga } from '@/services/shared/parejaDeCierre'
 import { closeShiftForVenueWithResult, cerrarTurnoPorCierreDeCaja } from '@/services/tpv/shift.tpv.service'
 
 const m = prisma as any
 const mockCerrar = cerrarTurnoDeCaja as jest.MockedFunction<typeof cerrarTurnoDeCaja>
 const mockEsperado = esperadoDelCajonAbierto as jest.MockedFunction<typeof esperadoDelCajonAbierto>
+const mockLigar = asegurarLaLiga as jest.MockedFunction<typeof asegurarLaLiga>
 
 const VENUE = 'venue-1'
 const TURNO = 'turno-1'
@@ -131,6 +134,7 @@ beforeEach(() => {
   mundo()
   mockCerrar.mockResolvedValue({ conConteo: false } as never)
   mockEsperado.mockResolvedValue(null)
+  mockLigar.mockResolvedValue(true as never)
 })
 
 // ============================================================================
@@ -305,6 +309,41 @@ describe('cerrar el turno desde la PAX cierra también la gaveta ligada', () => 
     const r = await closeShiftForVenueWithResult(VENUE, TURNO, {}, { now: () => AHORA })
 
     expect(r.shift.id).toBe(TURNO)
+  })
+
+  /**
+   * 🔴 Y lo que queda cuando eso pasa NO «degrada a lo de hoy» (Codex, 3-sep-2026): la gaveta sigue
+   * OPEN mientras `turnoAbiertoDelNegocio` ya devuelve `null`, así que cada cobro nuevo nace sin
+   * turno y su `CASH_SALE` se sigue posteando a esa caja. Efectivo acumulándose en una gaveta que
+   * ya nadie va a cuadrar. Por eso el fallo tiene que quedar REPARABLE.
+   */
+  it('🔴 el fallo queda REPARABLE: la gaveta se liga al turno ANTES de que el turno se cierre', async () => {
+    mockEsperado.mockResolvedValue({ sessionId: CAJA, esperado: new Decimal('2950.00') })
+    mockCerrar.mockRejectedValue(new Error('la base se cayó') as never)
+
+    await closeShiftForVenueWithResult(VENUE, TURNO, conteo('2950.00'), { now: () => AHORA })
+
+    expect(mockLigar).toHaveBeenCalledWith(expect.anything(), VENUE, TURNO, CAJA)
+    // ANTES: si la liga se escribiera después del commit del turno, un proceso que muere en medio
+    // dejaría la pareja sin identificar y el barrido no podría cerrarla nunca.
+    expect(mockLigar.mock.invocationCallOrder[0]).toBeLessThan(m.$transaction.mock.invocationCallOrder[0])
+  })
+
+  it('sin gaveta no hay pareja que ligar', async () => {
+    await closeShiftForVenueWithResult(VENUE, TURNO, {}, { now: () => AHORA })
+
+    expect(mockLigar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 si el cierre viene DESDE la gaveta tampoco se liga: esa pareja ya la resolvió quien llamó', async () => {
+    await cerrarTurnoPorCierreDeCaja(VENUE, TURNO, {
+      conteo: new Decimal('2950.00'),
+      esperadoDelCajon: new Decimal('2950.00'),
+      actorStaffId: 'staff-1',
+      cashDrawerSessionId: CAJA,
+    })
+
+    expect(mockLigar).not.toHaveBeenCalled()
   })
 
   it('🔴 si el cierre viene DESDE la gaveta, no se cierra ninguna otra: nada de ping-pong', async () => {
