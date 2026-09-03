@@ -200,7 +200,7 @@ export async function getReceiptById(
   }
 }
 
-// Ruta: PUT /venues/:venueId/payments/:paymentId (SUPERADMIN only)
+// Ruta: PUT /venues/:venueId/payments/:paymentId — ADMIN/OWNER por el comodín `payments:*`.
 export async function updatePayment(
   req: Request<{ paymentId: string; venueId: string }, {}, paymentDashboardService.UpdatePaymentData>,
   res: Response,
@@ -241,7 +241,7 @@ export async function updatePayment(
   }
 }
 
-// Ruta: DELETE /venues/:venueId/payments/:paymentId (SUPERADMIN only)
+// Ruta: DELETE /venues/:venueId/payments/:paymentId — ADMIN/OWNER por el comodín `payments:*`.
 export async function deletePayment(
   req: Request<{ paymentId: string; venueId: string }>,
   res: Response,

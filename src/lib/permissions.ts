@@ -612,7 +612,8 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // "Forma C" de la auditoría, donde gana el más estricto y el fix se vuelve invisible.
   // Es seguro porque `shifts:create` y `shifts:close` YA NO GATEAN NINGUNA RUTA del
   // backend (lo asegura un test); `shifts:update`/`shifts:delete`, que sí abren el
-  // back-office de turnos, NO entran en el alias y se quedan en MANAGER+.
+  // back-office de turnos, NO entran en el alias: `shifts:update` se queda en MANAGER+ y
+  // `shifts:delete` subió a ADMIN/OWNER (founder, 3-sep-2026).
   'tpv-shifts:create': ['tpv-shifts:create', 'shifts:create', 'shifts:read'],
   'tpv-shifts:close': ['tpv-shifts:close', 'shifts:close', 'shifts:read', 'payments:read', 'orders:read'],
 
@@ -977,7 +978,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'shifts:read',
     'shifts:create',
     'shifts:update',
-    'shifts:delete',
+    // 🔴 `shifts:delete` NO va aquí — decisión del founder, 3-sep-2026: «editar sí, borrar no».
+    // Corregir un número de un corte es trabajo de gerencia; hacer DESAPARECER el corte no, porque
+    // el borrado es duro y las órdenes, pagos, comisiones y la sesión de gaveta que apuntaban al
+    // turno quedan sueltas (`onDelete: SetNull`). El dinero sobrevive sin nada que lo firme.
+    // Queda en ADMIN/OWNER vía `shifts:*`, y sigue en el catálogo por si un venue quiere
+    // concedérselo a un gerente concreto desde el editor de roles.
     'shifts:close',
     'tables:read',
     'tables:update',

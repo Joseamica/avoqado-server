@@ -8432,10 +8432,15 @@ router.delete(
 router.put(
   '/venues/:venueId/shifts/:shiftId',
   authenticateTokenMiddleware,
-  // 🔴 DECÍA «SUPERADMIN only» y era FALSO: `shifts:update` lo tiene MANAGER desde hace
-  // tiempo (`permissions.ts`, bloque MANAGER), y ADMIN/OWNER por el comodín `shifts:*`. Lo único
-  // que parecía superadmin-only era el botón del dashboard, un candado de CLIENTE. Gerente para
-  // arriba es la decisión del founder (3-sep-2026); el comentario es lo que estaba mal.
+  // 🔴 Aquí decía que era exclusivo del superadmin, y era FALSO: `shifts:update` lo tiene
+  // MANAGER desde hace tiempo (`permissions.ts`, bloque MANAGER), y ADMIN/OWNER por el comodín
+  // `shifts:*`. Lo único restringido de verdad era el botón del dashboard, un candado de CLIENTE.
+  // Gerente para arriba es la decisión del founder (3-sep-2026); el comentario es lo que estaba mal.
+  //
+  // La frase literal de esa afirmación NO se escribe aquí a propósito: hay un guard estático
+  // (`tests/unit/routes/dashboard.shifts.routes.permissions.test.ts`) que la trata como una promesa
+  // sobre el permiso de abajo y la comprueba contra los roles. Es intencionalmente tonto — negarla
+  // en prosa no lo convencería, y prefiero que grite de más a que se le escape una mentira.
   checkPermission('shifts:update'),
   // `marcarPermiso` NO bloquea: etiqueta si quien edita puede ver el efectivo esperado. Sin esa
   // marca, una gaveta todavía ABIERTA no revela su esperado ni siquiera para recalcular el

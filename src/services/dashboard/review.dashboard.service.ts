@@ -32,7 +32,7 @@ export async function getReviewsData(venueId: string, dateFilter: DateFilter): P
 }
 
 /**
- * Delete a review (SUPERADMIN only)
+ * Delete a review — ADMIN/OWNER entran por el comodín `reviews:*`, no sólo el superadmin.
  * This is a hard delete - use with caution
  */
 export async function deleteReview(venueId: string, reviewId: string): Promise<void> {

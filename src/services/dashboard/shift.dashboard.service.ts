@@ -747,6 +747,18 @@ export async function deleteShift(venueId: string, shiftId: string, performedBy?
       return false
     }
 
+    // 🔴 CLOSING se juzga por el estado CRUDO, nunca por el "efectivo" de abajo. Esa derivación
+    // por reloj declara CLOSED cualquier turno cuyo `endTime` ya pasó — y el cierre ESCRIBE `endTime`
+    // mientras trabaja, así que un turno en pleno cierre se vería como cerrado y la guarda no
+    // dispararía. `CLOSING` es el compare-and-set del cierre (`shift.tpv.service.ts`): significa que
+    // alguien está contando el efectivo AHORA. Borrar ahí deja al cierre sin fila que actualizar,
+    // falla a medias, y suelta las órdenes, pagos, comisiones y la gaveta.
+    // P1.4 de la auditoría de Codex (3-sep-2026).
+    if (existingShift.status === 'CLOSING') {
+      logger.warn('Cannot delete a shift that is being closed', { venueId, shiftId })
+      throw new BadRequestError('No se puede borrar un turno que se está cerrando. Espera a que el cierre termine.')
+    }
+
     // Check if shift is still open using time-based logic
     const now = new Date()
     const effectiveStatus = existingShift.endTime && existingShift.endTime < now ? 'CLOSED' : existingShift.status

@@ -365,7 +365,7 @@ export async function getPaymentById(venueId: string, paymentId: string) {
 }
 
 /**
- * Update a payment (SUPERADMIN only)
+ * Update a payment — ADMIN/OWNER entran por el comodín `payments:*`, no sólo el superadmin.
  * Allows editing of specific fields
  */
 export interface UpdatePaymentData {
@@ -444,7 +444,7 @@ export async function updatePayment(venueId: string, paymentId: string, data: Up
 }
 
 /**
- * Delete a payment (SUPERADMIN only)
+ * Delete a payment — ADMIN/OWNER entran por el comodín `payments:*`, no sólo el superadmin.
  * This is a hard delete - use with caution
  */
 export async function deletePayment(venueId: string, paymentId: string): Promise<void> {
