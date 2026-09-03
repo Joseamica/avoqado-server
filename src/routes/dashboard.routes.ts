@@ -1,5 +1,11 @@
 import express, { RequestHandler } from 'express'
 import { z } from 'zod'
+import {
+  OrdersListQuerySchema,
+  OrdersSummaryQuerySchema,
+  PaymentsListQuerySchema,
+  PaymentsSummaryQuerySchema,
+} from '../schemas/dashboard/listSummary.schema'
 import multer from 'multer'
 import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
@@ -102,6 +108,7 @@ import {
   upsertMerchantFiscalConfigController,
   provisionEmisorController,
   uploadEmisorCsdController,
+  getEmisorProviderStatusController,
   triggerGlobalCfdiController,
   searchSatCatalogController,
 } from '../controllers/dashboard/cfdi.dashboard.controller'
@@ -152,7 +159,7 @@ import {
   updateAccountSchema,
 } from '../schemas/dashboard/auth.schema'
 import { enhancedCreateVenueSchema } from '../schemas/dashboard/cost-management.schema'
-import { GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
+import { BasicMetricsDetailsQuerySchema, BasicMetricsQuerySchema, GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
 import {
   // Assignment schemas
   AssignCategoryToMenuSchema,
@@ -3204,7 +3211,43 @@ router.post(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
-router.get('/venues/:venueId/payments', authenticateTokenMiddleware, checkPermission('payments:read'), paymentController.getPaymentsData)
+router.get(
+  '/venues/:venueId/payments',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(PaymentsListQuerySchema), // recorta pageSize al tope (100), nunca rechaza
+  paymentController.getPaymentsData,
+)
+
+// Summary + filter-options — declared BEFORE the `:paymentId` routes so Express matches them first.
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/payments/summary:
+ *   get:
+ *     tags: [Payments]
+ *     summary: Conteos por estado×tipo y sumas (monto, propina) de los pagos que casan con los filtros del listado
+ *     description: Mismos filtros que el listado (fechas, cuentas, métodos, orígenes, personal, búsqueda) más los que el dashboard aplicaba en el navegador (subtotalOp/Value/Value2, tipOp…, totalOp…, international=yes|no, cardBrands). Devuelve `groups` (sólo filtros del listado) y `filteredGroups` (con los del navegador).
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200: { description: Resumen agregado }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/payments/summary',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(PaymentsSummaryQuerySchema),
+  paymentController.getPaymentsSummary,
+)
+router.get(
+  '/venues/:venueId/payments/filter-options',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  paymentController.getPaymentsFilterOptions,
+)
 
 // Export route — must be declared BEFORE the `:paymentId` routes so Express matches it first.
 router.get(
@@ -3241,7 +3284,38 @@ router.get(
   '/venues/:venueId/orders', // Nueva ruta semántica
   authenticateTokenMiddleware,
   checkPermission('orders:read'),
+  validateRequest(OrdersListQuerySchema), // recorta pageSize al tope (100), nunca rechaza
   orderController.getOrdersData, // Apunta al nuevo controlador
+)
+
+// Summary + filter-options — declared BEFORE the `:orderId` routes so Express matches them first.
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/orders/summary:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Conteos por estado y sumas (total, propina) de las órdenes que casan con los filtros del listado
+ *     description: Mismos filtros que el listado (statuses, types, tableIds, staffIds, search, fechas) más los que el dashboard aplicaba en el navegador (totalOp/Value/Value2, tipOp…). Devuelve `groups` y `filteredGroups`.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200: { description: Resumen agregado }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/orders/summary',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  validateRequest(OrdersSummaryQuerySchema),
+  orderController.getOrdersSummary,
+)
+router.get(
+  '/venues/:venueId/orders/filter-options',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  orderController.getOrdersFilterOptions,
 )
 
 // Export route — must be declared BEFORE the `:orderId` routes so Express matches it first.
@@ -3571,6 +3645,14 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   uploadEmisorCsdController,
+)
+// Read-only: onboarding status at the PAC (Carta Manifiesto pendiente, etc.)
+router.get(
+  '/venues/:venueId/fiscal/emisores/:emisorId/provider-status',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  getEmisorProviderStatusController,
 )
 
 // ---- Facturación CFDI 4.0 — Flow C: admin manual-trigger for factura global ----
@@ -6262,6 +6344,10 @@ router.get(
  *       - in: query
  *         name: toDate
  *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: responseMode
+ *         schema: { type: string, enum: [aggregated-v1] }
+ *         description: Opt-in bounded response; KPIs and weekday chart cover the full range while row arrays stay empty.
  *     responses:
  *       200:
  *         description: Basic metrics data
@@ -6277,11 +6363,37 @@ router.get(
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { description: "Venue not found" }
  */
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/basic-metrics/details:
+ *   get:
+ *     tags: [Dashboard Analytics]
+ *     summary: Page basic-metric rows for an explicit export
+ *     parameters:
+ *       - { in: path, name: venueId, required: true, schema: { type: string } }
+ *       - { in: query, name: kind, required: true, schema: { type: string, enum: [payments, reviews] } }
+ *       - { in: query, name: cursor, schema: { type: string } }
+ *       - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 500, default: 500 } }
+ *       - { in: query, name: fromDate, schema: { type: string, format: date-time } }
+ *       - { in: query, name: toDate, schema: { type: string, format: date-time } }
+ *     responses:
+ *       200: { description: Bounded page with items and nextCursor }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/basic-metrics/details',
+  authenticateTokenMiddleware,
+  checkPermission('analytics:read'),
+  validateRequest(z.object({ query: BasicMetricsDetailsQuerySchema })),
+  generalStatsController.getBasicMetricsDetails,
+)
+
 router.get(
   '/venues/:venueId/basic-metrics',
   authenticateTokenMiddleware,
   checkPermission('analytics:read'),
-  validateRequest(z.object({ query: GeneralStatsQuerySchema })),
+  validateRequest(z.object({ query: BasicMetricsQuerySchema })),
   generalStatsController.getBasicMetrics,
 )
 
@@ -11797,6 +11909,7 @@ router.get(
  *                     color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
  *                     isActive: { type: boolean }
  *                     sortOrder: { type: integer, minimum: 0, maximum: 100 }
+ *                     showAsSeller: { type: boolean, description: "¿Este rol aparece como vendedor en el POS? Default true" }
  *     responses:
  *       200:
  *         description: Role configs updated successfully

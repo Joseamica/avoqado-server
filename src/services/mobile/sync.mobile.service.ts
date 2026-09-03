@@ -1025,6 +1025,15 @@ async function applyPayCash(
       paymentId: payment.paymentId,
       orderNumber: payment.orderNumber,
       digitalReceipt: payment.digitalReceipt ?? null,
+      // Resultado económico autoritativo del replay. Una orden puede cambiar
+      // entre el cobro sin red y su reproducción (otra caja, descuento o
+      // abono). El POS necesita lo que el server realmente registró para
+      // reconciliar ticket/cambio/cajón; repetir el payload original volvería
+      // a presentar dinero que no quedó en la orden.
+      ...(payment.amount !== undefined ? { amount: payment.amount } : {}),
+      ...(payment.tipAmount !== undefined ? { tipAmount: payment.tipAmount } : {}),
+      ...(payment.changeCents !== undefined ? { changeCents: payment.changeCents } : {}),
+      ...(payment.method !== undefined ? { method: payment.method } : {}),
       // 🔴 El saldo autoritativo TAMBIÉN por aquí. El ack se arma a mano, así
       // que no heredaba los campos nuevos de `payCashOrder` y el contrato nuevo
       // no existía justo en el flujo que más lo necesita: un abono parcial hecho

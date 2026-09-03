@@ -714,7 +714,13 @@ describe('order.mobile.service', () => {
     prismaMock.order.findUnique.mockResolvedValue({ ...orderRow, paymentStatus: 'PARTIAL' })
     prismaMock.payment.findMany.mockResolvedValue([{ amount: new Decimal(50), tipAmount: new Decimal(0) }])
     await payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1' })
-    expect(prismaMock.order.updateMany).toHaveBeenLastCalledWith(
+    // `toHaveBeenCalledWith`, no `Last`: al quedar PAID corre `awardLoyaltyForPaidOrder`,
+    // que escribe DESPUÉS su propio `order.updateMany` con la marca de lealtad
+    // (`loyaltyProcessedAt`). Esa marca lleva otro `where` y sólo toca campos de lealtad,
+    // así que no revierte nada — pero deja de ser la última. Lo que esta prueba cuida es
+    // que el cobro haya escrito PAID/COMPLETED, no que nadie escriba después.
+    // (El abono PARCIAL de arriba conserva `Last`: no queda pagada, así que no hay lealtad.)
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           paymentStatus: 'PAID',
@@ -724,6 +730,40 @@ describe('order.mobile.service', () => {
         }),
       }),
     )
+  })
+
+  // 🔴 La COSTURA que no cubría nadie. `loyaltyOnPaidOrder.test.ts` prueba el helper con su
+  // PROPIO mock de Prisma, y `payCashOrder.loyalty.test.ts` prueba la llamada con el helper
+  // MOCKEADO. El helper real corriendo dentro de `payCashOrder` —que es lo que pasa en
+  // producción— no lo ejercitaba ninguna de las dos, y por ahí se coló que `orderCustomer`
+  // faltara en el mock global (2026-09-02): cada cobro en efectivo entraba al catch del
+  // helper y marcaba `loyaltyLastError`, con las pruebas en verde. Esto caza esa familia
+  // entera — cualquier modelo que el helper consulte y el mock no declare la tumba.
+  it('🔴 al saldar la cuenta la lealtad COMPLETA: la orden queda procesada y sin loyaltyLastError', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(100),
+      discountAmount: new Decimal(0),
+      total: new Decimal(100),
+      remainingBalance: new Decimal(100),
+      venueId: 'venue-1',
+    })
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.shift.findFirst.mockResolvedValue(null)
+    prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
+    prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
+    prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.payment.findMany.mockResolvedValue([])
+
+    await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1' })
+
+    const marcas = prismaMock.order.updateMany.mock.calls.map((call: unknown[]) => (call[0] as { data: Record<string, unknown> }).data)
+    expect(marcas).toContainEqual(expect.objectContaining({ loyaltyProcessedAt: expect.any(Date), loyaltyLastError: null }))
+    expect(marcas.filter((d: Record<string, unknown>) => d.loyaltyLastError)).toEqual([])
   })
 
   // ── Aviso de inventario post-cobro (Square-parity, mockup ②) ──

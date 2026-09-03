@@ -38,10 +38,12 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
 //    other handlers, never invoked unless that route is hit).
 const mockMigratePreflightForOrg = jest.fn()
 const mockMigrateExecuteForOrg = jest.fn()
+const mockMigrateDiscardForOrg = jest.fn()
 jest.mock('@/services/organization-dashboard/orgTerminals.service', () => ({
   __esModule: true,
   migratePreflightForOrg: (...args: unknown[]) => mockMigratePreflightForOrg(...args),
   migrateExecuteForOrg: (...args: unknown[]) => mockMigrateExecuteForOrg(...args),
+  migrateDiscardForOrg: (...args: unknown[]) => mockMigrateDiscardForOrg(...args),
 }))
 
 // ─── Import router AFTER mocks (real router, real Zod schemas, real validateRequest) ──
@@ -109,6 +111,56 @@ describe('POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-pre
 
     expect(res.status).toBe(400)
     expect(mockMigratePreflightForOrg).not.toHaveBeenCalled()
+  })
+})
+
+// Asana 1218069201250971 (2026-09-01): the org OWNER's way out of a MIGRATION_IN_PROGRESS
+// the device will never execute. Params-only route, same guards as migrate-cancel.
+describe('POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-discard', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockMigrateDiscardForOrg.mockResolvedValue({ discarded: 1, commandIds: ['cmd-1'] })
+  })
+
+  it('reaches migrateDiscardForOrg with the org, the terminal and the acting staff', async () => {
+    const res = await request(makeApp())
+      .post(`/dashboard/organizations/${ORG_ID}/terminals/${TERMINAL_ID}/migrate-discard`)
+      .set(authHeader(superadminCtx))
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual({ discarded: 1, commandIds: ['cmd-1'] })
+    expect(mockMigrateDiscardForOrg).toHaveBeenCalledWith(ORG_ID, TERMINAL_ID, expect.objectContaining({ staffId: 'staff-1' }))
+  })
+
+  // P3 #3 de Codex: los casos de arriba entran como SUPERADMIN, que se salta
+  // `requireOrgOwner` — sus assertions seguirían pasando si alguien quitara ese guard de la
+  // ruta. Esta prueba mira la cadena de middlewares REAL del router y la compara con la de
+  // `migrate-cancel`, que es la ruta hermana ya revisada.
+  it('monta EXACTAMENTE los mismos guards que migrate-cancel (si alguien quita requireOrgOwner, falla aquí)', () => {
+    const stack = (organizationDashboardRoutes as any).stack as any[]
+    const nombres = (sufijo: string) =>
+      stack
+        .filter(l => l.route?.path?.endsWith(sufijo))
+        .flatMap(l => l.route.stack.map((h: any) => h.name))
+        .filter((n: string) => n && n !== '<anonymous>')
+
+    const discard = nombres('/migrate-discard')
+    expect(discard).toContain('requireOrgOwner')
+    expect(discard).toEqual(nombres('/migrate-cancel'))
+  })
+
+  it('surfaces the service refusal (e.g. younger than 24 h) as a 400 with its message', async () => {
+    const { BadRequestError } = jest.requireActual('@/errors/AppError')
+    mockMigrateDiscardForOrg.mockRejectedValue(new BadRequestError('El borrado se envió hace menos de 24 horas.'))
+
+    const res = await request(makeApp())
+      .post(`/dashboard/organizations/${ORG_ID}/terminals/${TERMINAL_ID}/migrate-discard`)
+      .set(authHeader(superadminCtx))
+      .send({})
+
+    expect(res.status).toBe(400)
+    expect(res.body.message).toContain('24 horas')
   })
 })
 

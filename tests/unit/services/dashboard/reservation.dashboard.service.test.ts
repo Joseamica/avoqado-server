@@ -1379,7 +1379,12 @@ describe('Reservation Dashboard Service', () => {
       const tableOverlapCall = prismaMock.$queryRaw.mock.calls.find((call: unknown[]) =>
         String((call[0] as TemplateStringsArray).join('?')).includes('AND "tableId" = ?'),
       )
-      expect(tableOverlapCall?.slice(1)).toEqual([VENUE_ID, blockedEndsAt, startsAt, 'table-1'])
+      // The overlap predicate is a nested Prisma.sql fragment (reservationOverlapSql): its binds
+      // are the NEW blocked end and start, each wrapped in AT TIME ZONE 'UTC'.
+      expect(tableOverlapCall?.slice(1)).toEqual([VENUE_ID, expect.objectContaining({ values: [blockedEndsAt, startsAt] }), 'table-1'])
+      expect((tableOverlapCall?.[2] as Prisma.Sql).strings.join('?')).toMatch(
+        /"startsAt" < \(\? AT TIME ZONE 'UTC'\) AND "blockedEndsAt" > \(\? AT TIME ZONE 'UTC'\)/,
+      )
     })
 
     it('should create a PENDING reservation when autoConfirm is false', async () => {
@@ -2751,7 +2756,14 @@ describe('Reservation Dashboard Service', () => {
       const tableOverlapCall = prismaMock.$queryRaw.mock.calls.find((call: unknown[]) =>
         String((call[0] as TemplateStringsArray).join('?')).includes('AND "tableId" = ?'),
       )
-      expect(tableOverlapCall?.slice(1)).toEqual([VENUE_ID, 'table-1', existing.id, blockedEndsAt, startsAt])
+      // The overlap predicate is a nested Prisma.sql fragment (reservationOverlapSql) bound to
+      // the MOVED blocked end and start.
+      expect(tableOverlapCall?.slice(1)).toEqual([
+        VENUE_ID,
+        'table-1',
+        existing.id,
+        expect.objectContaining({ values: [blockedEndsAt, startsAt] }),
+      ])
     })
 
     it('should check staff conflicts when changing staff', async () => {
@@ -3702,16 +3714,20 @@ describe('rescheduleAppointmentReservation', () => {
     ).rejects.toMatchObject({ statusCode: 409, message: 'Mesa tiene conflicto con reservacion RES-OTHER' })
 
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    // The overlap predicate is a nested Prisma.sql fragment (reservationOverlapSql), hence the
+    // bare `AND ?` in the outer template; its own binds are the blocked end and the new start.
     expect((prismaMock.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')).toMatch(
-      /FROM "Reservation"[\s\S]*"venueId" = \?[\s\S]*"tableId" = \?[\s\S]*id <> \?[\s\S]*"startsAt" < \?[\s\S]*"blockedEndsAt" > \?[\s\S]*FOR UPDATE NOWAIT/i,
+      /FROM "Reservation"[\s\S]*"venueId" = \?[\s\S]*"tableId" = \?[\s\S]*id <> \?[\s\S]*AND \?[\s\S]*FOR UPDATE NOWAIT/i,
     )
     expect(prismaMock.$queryRaw.mock.calls[0].slice(1)).toEqual([
       VENUE,
       'table-1',
       'res-appt-1',
-      new Date('2026-09-02T16:30:00.000Z'),
-      newStart,
+      expect.objectContaining({ values: [new Date('2026-09-02T16:30:00.000Z'), newStart] }),
     ])
+    expect((prismaMock.$queryRaw.mock.calls[0][4] as Prisma.Sql).strings.join('?')).toMatch(
+      /"startsAt" < \(\? AT TIME ZONE 'UTC'\) AND "blockedEndsAt" > \(\? AT TIME ZONE 'UTC'\)/,
+    )
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()
     expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
   })

@@ -121,6 +121,12 @@ export async function getVenueById(orgId: string, venueId: string, options?: { s
 
   const venue = await prisma.venue.findFirst({
     where: whereClause,
+    // 🔴 Aquí NUNCA se incluyen relaciones que crecen con cada venta (orders, payments,
+    // transactions, shifts, reviews). Incidente 2026-09-01: con 33k órdenes + 33k pagos
+    // de Testarudo, cada carga del dashboard materializaba ~66k filas → bloqueos del
+    // event loop de 4-14 s, /health muerto de hambre y Render reemplazando la instancia.
+    // Nadie leía esos arreglos (verificado en dashboard y desktop). El historial se
+    // consulta por sus endpoints paginados. Guardia: venue-detalle-sin-historial.test.ts
     include: {
       menuCategories: true,
       modifierGroups: true,
@@ -129,11 +135,6 @@ export async function getVenueById(orgId: string, venueId: string, options?: { s
       staff: true,
       inventories: true,
       tables: true,
-      shifts: true,
-      orders: true,
-      payments: true,
-      transactions: true,
-      reviews: true,
       features: true,
       settings: true, // VenueSettings with enableShifts, autoCloseShifts, etc.
     },
@@ -142,6 +143,29 @@ export async function getVenueById(orgId: string, venueId: string, options?: { s
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
   return venue
+}
+
+/**
+ * Comprueba que el venue exista y pertenezca a la organización — y nada más.
+ *
+ * Es el chequeo de acceso que usan los controladores (29 handlers del menú, entre
+ * otros) antes de operar sobre un venue. Antes llamaban a `getVenueById`, que carga
+ * el objeto completo con sus relaciones: pagar ese costo sólo para verificar
+ * existencia fue la causa del incidente del 2026-09-01. Esto consulta UN campo.
+ */
+export async function assertVenueAccessible(orgId: string, venueId: string, options?: { skipOrgCheck?: boolean }): Promise<void> {
+  const whereClause: any = { id: venueId }
+  if (!options?.skipOrgCheck) {
+    whereClause.organizationId = orgId
+  }
+
+  const venue = await prisma.venue.findFirst({
+    where: whereClause,
+    select: { id: true },
+  })
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found or not accessible by your organization.`)
+  }
 }
 
 /**

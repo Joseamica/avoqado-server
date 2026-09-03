@@ -30,6 +30,16 @@ export interface UploadCsdResult {
   csdExpiresAt: Date | null
 }
 
+/**
+ * Estado de la organización en el PAC (onboarding). `pendingSteps` trae los
+ * códigos que el PAC reporta como faltantes para timbrar en Live:
+ * 'legal' | 'logo' | 'certificate' | 'manifiesto'.
+ */
+export interface OrgStatusResult {
+  isProductionReady: boolean
+  pendingSteps: string[]
+}
+
 export interface ReceptorInput {
   rfc: string
   razonSocial: string
@@ -253,6 +263,8 @@ export interface FiscalProvider {
   createOrganization(params: CreateOrgParams): Promise<CreateOrgResult>
   updateOrgLegal(params: UpdateOrgLegalParams): Promise<void>
   uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult>
+  /** Consulta el estado de onboarding de la org en el PAC (pasos pendientes, p.ej. la Carta Manifiesto). */
+  getOrganizationStatus(providerOrgId: string): Promise<OrgStatusResult>
   // NOTA: la validación de formato del receptor NO vive aquí. `validateBeforeStamp()`
   // (src/services/fiscal/cfdiValidation.ts) es el único pre-check antes de timbrar y ya
   // cubre RFC, CP, razón social, régimen y uso de CFDI — además de CSD, forma de pago,

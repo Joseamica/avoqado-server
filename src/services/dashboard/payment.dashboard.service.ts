@@ -16,17 +16,28 @@ import logger from '../../config/logger'
 export interface PaymentFilters {
   // Multi-select filter arrays (preferred)
   merchantAccountIds?: string[]
-  methods?: PaymentMethod[]
+  methods?: string[]
   sources?: string[]
   staffIds?: string[]
   // Single-value filters kept for backward compatibility (TPV, scripts, etc.)
   merchantAccountId?: string
-  method?: PaymentMethod
+  method?: string
   source?: string
   staffId?: string
   search?: string
   startDate?: string
   endDate?: string
+}
+
+/**
+ * `CARD` sólo existe en el puente QR legacy. Para la tabla Payment nativa equivale
+ * a las dos variantes reales; sin esta expansión, seleccionar “Tarjeta” ocultaba
+ * todos los pagos nuevos y el listado discrepaba del resumen.
+ */
+export function normalizeNativePaymentMethods(methods?: readonly string[]): string[] | undefined {
+  if (!methods) return undefined
+  const normalized = methods.flatMap(method => (method === 'CARD' ? ['CREDIT_CARD', 'DEBIT_CARD'] : [method]))
+  return Array.from(new Set(normalized))
 }
 
 export async function getPaymentsData(
@@ -43,83 +54,17 @@ export async function getPaymentsData(
   const skip = (page - 1) * pageSize
   const take = pageSize
 
-  // La cláusula 'where' será la misma para la búsqueda y el conteo
-  const whereClause: any = {
-    venueId,
-    status: {
-      not: 'PENDING' as TransactionStatus, // No mostrar pagos pendientes de completar
-    },
-  }
-
-  // Aplicar filtros opcionales (arrays have priority over single values)
-  if (filters) {
-    if (filters.merchantAccountIds && filters.merchantAccountIds.length > 0) {
-      whereClause.merchantAccountId = { in: filters.merchantAccountIds }
-    } else if (filters.merchantAccountId) {
-      whereClause.merchantAccountId = filters.merchantAccountId
-    }
-
-    if (filters.methods && filters.methods.length > 0) {
-      whereClause.method = { in: filters.methods }
-    } else if (filters.method) {
-      whereClause.method = filters.method
-    }
-
-    if (filters.sources && filters.sources.length > 0) {
-      whereClause.source = { in: filters.sources }
-    } else if (filters.source) {
-      whereClause.source = filters.source
-    }
-
-    if (filters.staffIds && filters.staffIds.length > 0) {
-      whereClause.processedById = { in: filters.staffIds }
-    } else if (filters.staffId) {
-      whereClause.processedById = filters.staffId
-    }
-
-    if (filters.startDate || filters.endDate) {
-      whereClause.createdAt = {}
-      if (filters.startDate) {
-        whereClause.createdAt.gte = new Date(filters.startDate)
-      }
-      if (filters.endDate) {
-        whereClause.createdAt.lte = new Date(filters.endDate)
-      }
-    }
-
-    // Búsqueda por texto (amount, reference, last4, waiter name)
-    if (filters.search) {
-      const searchTerm = filters.search.trim()
-      const searchNumber = parseFloat(searchTerm)
-
-      whereClause.OR = [
-        // Búsqueda por monto (amount o tipAmount)
-        ...(isNaN(searchNumber)
-          ? []
-          : [{ amount: { gte: searchNumber, lt: searchNumber + 1 } }, { tipAmount: { gte: searchNumber, lt: searchNumber + 1 } }]),
-        // Búsqueda por masked pan (últimos dígitos de tarjeta)
-        { maskedPan: { contains: searchTerm, mode: 'insensitive' } },
-        // Búsqueda por número de referencia
-        { referenceNumber: { contains: searchTerm, mode: 'insensitive' } },
-        // Búsqueda por número de autorización
-        { authorizationNumber: { contains: searchTerm, mode: 'insensitive' } },
-        // Búsqueda por nombre del mesero
-        {
-          processedBy: {
-            OR: [{ firstName: { contains: searchTerm, mode: 'insensitive' } }, { lastName: { contains: searchTerm, mode: 'insensitive' } }],
-          },
-        },
-      ]
-    }
-  }
+  // La cláusula 'where' es la MISMA para la búsqueda, el conteo, el export y el
+  // resumen (paymentSummary.dashboard.service.ts espeja sus predicados en SQL).
+  const whereClause = buildPaymentsWhereClause(venueId, filters)
 
   // ─── MindForm legacy QR bridge — short-circuit pagination ───
   // For MindForm we CANNOT use Prisma's skip/take here, because we need to
   // merge its legacy payments with the new-system ones before slicing the
   // current page. Otherwise page N of the new data + all legacy gets sliced
   // wrong and later pages end up almost empty.
-  // MindForm's total volume is small (hundreds), so we fetch all rows and
-  // slice in memory.
+  // We only need the first `skip + take` rows from EACH sorted source to build
+  // the exact global page; no source can contribute more than that to the top N.
   //
   // ⚠️ This list endpoint keeps its own MindForm branch because it needs
   // relations (processedBy, order.table, merchantAccount, transactionCost) that
@@ -160,21 +105,26 @@ export async function getPaymentsData(
     // legacy DB round-trip entirely. Without this guard the legacy QR rows leak
     // into every filtered view because they ignore the filter — see Bug:
     // "filtrar Efectivo y aparecen los pagos QR".
-    const methodFilterValues = (filters?.methods as readonly string[] | undefined) ?? undefined
-    const sourceFilterValues = filters?.sources
+    const methodFilterValues = filters?.methods ?? (filters?.method ? [filters.method] : undefined)
+    const sourceFilterValues = filters?.sources ?? (filters?.source ? [filters.source] : undefined)
     const legacyFilter = { methods: methodFilterValues, sources: sourceFilterValues }
+    const requestedEnd = skip + take
 
-    const [allNewPayments, legacy] = await Promise.all([
+    const [newPaymentsWindow, newPaymentsTotal, legacy] = await Promise.all([
       prisma.payment.findMany({
         where: whereClause,
         include: sharedInclude,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: requestedEnd,
       }),
+      prisma.payment.count({ where: whereClause }),
       shouldIncludeLegacyPayments(legacyFilter)
         ? getLegacyPayments({
             startDate: filters?.startDate,
             endDate: filters?.endDate,
             search: filters?.search,
+            methods: methodFilterValues,
+            limit: requestedEnd,
           })
         : Promise.resolve({ rows: [] as Awaited<ReturnType<typeof getLegacyPayments>>['rows'], total: 0 }),
     ])
@@ -190,13 +140,13 @@ export async function getPaymentsData(
       legacyRows: legacy.rows.length,
       legacyKept: filteredLegacyRows.length,
       legacyTotal: legacy.total,
-      newRows: allNewPayments.length,
+      newRows: newPaymentsWindow.length,
     })
 
-    const merged = [...allNewPayments, ...filteredLegacyRows].sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    const merged = [...newPaymentsWindow, ...filteredLegacyRows].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() || b.id.localeCompare(a.id),
     )
-    const combinedTotal = merged.length
+    const combinedTotal = newPaymentsTotal + legacy.total
     const paginated = merged.slice(skip, skip + take)
 
     return {
@@ -242,9 +192,9 @@ export async function getPaymentsData(
         },
         transactionCost: true, // Include profit/cost information for SUPERADMIN
       },
-      orderBy: {
-        createdAt: 'desc',
-      },
+      // Desempate por id: con el tope de 100 el cliente pagina de verdad, y dos pagos
+      // con el mismo createdAt cambiaban de página entre peticiones (offset inestable).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip,
       take,
     }),
@@ -266,10 +216,12 @@ export async function getPaymentsData(
 }
 
 /**
- * Build the same `where` clause used by `getPaymentsData` — extracted so the export endpoint
- * can apply the same filters without duplicating logic.
+ * The ONE `where` clause of the payments listing — shared by `getPaymentsData`, the export
+ * and (mirrored predicate by predicate in SQL) the summary in
+ * `paymentSummary.dashboard.service.ts`. Add a filter here → add it there → run
+ * `tests/integration/dashboard/listSummary-sql-parity.integration.test.ts`.
  */
-function buildPaymentsWhereClause(venueId: string, filters?: PaymentFilters): any {
+export function buildPaymentsWhereClause(venueId: string, filters?: PaymentFilters): any {
   const whereClause: any = {
     venueId,
     status: {
@@ -284,9 +236,10 @@ function buildPaymentsWhereClause(venueId: string, filters?: PaymentFilters): an
     whereClause.merchantAccountId = filters.merchantAccountId
   }
   if (filters.methods && filters.methods.length > 0) {
-    whereClause.method = { in: filters.methods }
+    whereClause.method = { in: normalizeNativePaymentMethods(filters.methods) }
   } else if (filters.method) {
-    whereClause.method = filters.method
+    const nativeMethods = normalizeNativePaymentMethods([filters.method]) ?? []
+    whereClause.method = nativeMethods.length === 1 ? nativeMethods[0] : { in: nativeMethods }
   }
   if (filters.sources && filters.sources.length > 0) {
     whereClause.source = { in: filters.sources }

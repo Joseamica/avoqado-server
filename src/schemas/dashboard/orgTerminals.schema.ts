@@ -222,3 +222,11 @@ export const orgMigrateStatusSchema = z.object({
 export const orgMigrateCancelSchema = z.object({
   params: OrgTerminalParams,
 })
+
+/**
+ * POST /:orgId/terminals/:terminalId/migrate-discard
+ * Params only. Discards a pending wipe the device never executed (24 h rule in the service).
+ */
+export const orgMigrateDiscardSchema = z.object({
+  params: OrgTerminalParams,
+})

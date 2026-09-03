@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { TransactionCardType, Prisma } from '@prisma/client'
+import { utcTs } from '../../utils/sqlDates'
 
 /**
  * PaymentAnalytics Service
@@ -138,7 +139,7 @@ export async function getProfitMetrics(dateRange?: DateRange): Promise<ProfitMet
       FROM "TransactionCost" tc
       JOIN "Payment" p ON tc."paymentId" = p.id
       JOIN "Venue" v ON p."venueId" = v.id
-      WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
+      WHERE tc."createdAt" >= ${utcTs(startDate)} AND tc."createdAt" <= ${utcTs(endDate)}
       GROUP BY v.id, v.name
       ORDER BY profit DESC
       LIMIT 10
@@ -163,7 +164,7 @@ export async function getProfitMetrics(dateRange?: DateRange): Promise<ProfitMet
       FROM "TransactionCost" tc
       JOIN "MerchantAccount" ma ON tc."merchantAccountId" = ma.id
       JOIN "PaymentProvider" pp ON ma."providerId" = pp.id
-      WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
+      WHERE tc."createdAt" >= ${utcTs(startDate)} AND tc."createdAt" <= ${utcTs(endDate)}
       GROUP BY pp.id, pp.code, pp.name
       ORDER BY volume DESC
       LIMIT 10
@@ -298,7 +299,7 @@ export async function getVenueProfitMetrics(venueId: string, dateRange?: DateRan
       JOIN "MerchantAccount" ma ON tc."merchantAccountId" = ma.id
       JOIN "PaymentProvider" pp ON ma."providerId" = pp.id
       WHERE p."venueId" = ${venueId}
-        AND tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
+        AND tc."createdAt" >= ${utcTs(startDate)} AND tc."createdAt" <= ${utcTs(endDate)}
       GROUP BY pp.id, pp.code, pp.name
     `,
   ])
@@ -378,7 +379,7 @@ export async function getProfitTimeSeries(dateRange?: DateRange, granularity: 'd
         COALESCE(SUM("venueChargeAmount" + "venueFixedFee"), 0) as "venueCharge",
         COALESCE(SUM("grossProfit"), 0) as profit
       FROM "TransactionCost"
-      WHERE "createdAt" >= ${startDate} AND "createdAt" <= ${endDate}
+      WHERE "createdAt" >= ${utcTs(startDate)} AND "createdAt" <= ${utcTs(endDate)}
       GROUP BY date
       ORDER BY date
     `,
@@ -432,7 +433,7 @@ export async function getProviderComparison(dateRange?: DateRange) {
     FROM "TransactionCost" tc
     JOIN "MerchantAccount" ma ON tc."merchantAccountId" = ma.id
     JOIN "PaymentProvider" pp ON ma."providerId" = pp.id
-    WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
+    WHERE tc."createdAt" >= ${utcTs(startDate)} AND tc."createdAt" <= ${utcTs(endDate)}
     GROUP BY pp.id, pp.code, pp.name, tc."transactionType"
   `
 

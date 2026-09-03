@@ -1,5 +1,11 @@
 import { Request, Response, NextFunction } from 'express'
-import { migratePreflight, migrateExecute, migrateStatus, migrateCancel } from '@/services/dashboard/terminal-migration.service'
+import {
+  migratePreflight,
+  migrateExecute,
+  migrateStatus,
+  migrateCancel,
+  migrateDiscard,
+} from '@/services/dashboard/terminal-migration.service'
 
 /**
  * Preflight a terminal venue migration
@@ -95,6 +101,30 @@ export const cancel = async (req: Request, res: Response, next: NextFunction) =>
       userAgent: req.get('user-agent'),
     })
     return res.status(200).json({ data, message: 'Migration cancelled' })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Discard a pending wipe the device received but never executed (24 h rule in the service),
+ * so the terminal can be migrated again — the way out of MIGRATION_IN_PROGRESS when the
+ * wipe can no longer be cancelled (Asana 1218069201250971).
+ *
+ * @route POST /api/v1/dashboard/superadmin/terminals/:terminalId/migrate-discard
+ * @param req Request with terminalId in params
+ * @param res Response with the MigrateDiscardResult
+ */
+export const discard = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { terminalId } = req.params
+    const authContext = (req as any).authContext
+    const data = await migrateDiscard(terminalId, {
+      staffId: authContext?.userId,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    })
+    return res.status(200).json({ data, message: 'Pending wipe discarded' })
   } catch (error) {
     next(error)
   }

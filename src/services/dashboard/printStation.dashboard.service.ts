@@ -6,11 +6,13 @@
  * - Toda mutación escribe ActivityLog (fire-and-forget, con `previous` para reversibilidad).
  * - I9: máximo UN default por venue (índice único parcial en DB) — al marcar un default
  *   se limpia el anterior en la MISMA transacción para no violar el índice.
- * - v1.1: impresoras NETWORK y BLUETOOTH son ruteables por el gateway de impresión del
- *   POS Android (su PrinterService ya implementa el transporte BT/SPP). USB_SPOOLER
- *   (POS de escritorio/Windows) y TERMINAL_INTERNAL (impresora interna del PAX) siguen
- *   rechazadas — el gateway Android no puede servir esas rutas ("rechazar rutas no
- *   servibles", spec v3).
+ * - v1.2: impresoras NETWORK, BLUETOOTH y POS_INTERNAL son servibles. Las dos primeras
+ *   las rutea el gateway de impresión del POS Android (transporte BT/SPP incluido);
+ *   POS_INTERNAL es la impresora integrada del propio POS (Sunmi) — cada aparato la
+ *   resuelve a SU cabezal, la comanda sale donde se cobró y no lleva dirección.
+ *   USB_SPOOLER (POS de escritorio/Windows) y TERMINAL_INTERNAL (impresora interna del
+ *   PAX) siguen rechazadas — el gateway Android no puede servir esas rutas ("rechazar
+ *   rutas no servibles", spec v3).
  * - El preview delega en el MISMO motor puro que consumirá la app (simulador honesto).
  */
 import { Prisma, PrinterConnectionType } from '@prisma/client'
@@ -24,6 +26,7 @@ import {
   isValidBluetoothAddress,
   isValidNetworkAddress,
   NETWORK_ADDRESS_MESSAGE,
+  POS_INTERNAL_ADDRESS_MESSAGE,
 } from '../../schemas/dashboard/printStation.schema'
 import type {
   AssignRoutingInput,
@@ -55,6 +58,11 @@ function assertServiceableConnectionType(connectionType: PrinterConnectionType):
 }
 
 function assertValidAddressShape(connectionType: PrinterConnectionType, address: string | null | undefined): void {
+  // POS_INTERNAL no lleva dirección: aceptar una aquí es exactamente el error que
+  // originó este tipo (una "impresora de barra" NETWORK con la IP del propio POS).
+  if (connectionType === 'POS_INTERNAL' && address) {
+    throw new BadRequestError(POS_INTERNAL_ADDRESS_MESSAGE)
+  }
   if (!address) return
   if (connectionType === 'NETWORK' && !isValidNetworkAddress(address)) {
     throw new BadRequestError(NETWORK_ADDRESS_MESSAGE)

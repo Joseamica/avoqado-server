@@ -709,7 +709,7 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
     'Feed de movimientos recientes de inventario serializado (SIMs): registros, ventas, devoluciones y daños, con quién los tiene/tuvo (promotor, supervisor o almacén). Responde "¿qué ha pasado con las SIMs últimamente?" / "¿quién registró/vendió tal SIM?". Solo venues con SERIALIZED_INVENTORY. Pass venueId; opcionalmente limit, fromDate/toDate (YYYY-MM-DD) y responsibleStaffId para filtrar.',
     {
       venueId: z.string().describe('Venue (must be in your scope)'),
-      limit: z.number().int().positive().max(200).optional().describe('Max movements (default 20)'),
+      limit: z.number().int().positive().max(100).optional().describe('Max movements (default 20)'),
       fromDate: z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)

@@ -69,7 +69,19 @@ function validarBanderas(argv: string[]): void {
  */
 const VENUES_SIN_ID: Record<string, string> = {
   ACTIVACIONES: 'ACTIVACIÓN SLP',
-  CUBRE_DESCANSO: 'Cubre Descanso',
+
+  // 🔴 Los "Cubre descanso" van por NÚMERO DE EMPLEADO, no por el literal del puesto.
+  // Compartiendo una sola tienda todos colgaban del mismo supervisor —una tienda tiene UNO— y
+  // era imposible cumplir lo que pidió Isaac el 1-sep-2026: José con Juan, los otros dos con
+  // René. Cada uno vive ahora en su tienda de zona (`separar-cubre-descanso-zonas.ts`).
+  BSCBJOSE04: 'CUBRE DESCANSO ZONA SUR1', // José Lopes → Juan Nájera
+  BESDICC9701: 'CUBRE DESCANSO ZONA NORTE1', // Carlos Vicente Díaz → René Cubos
+
+  // Respaldo para un relevo sin entrada propia. Apunta a SUR1 —la tienda que ya existía, sólo
+  // renombrada— a propósito: es donde están hoy, así que nadie se queda sin tienda mientras
+  // falte crear la ZONA NORTE2 de Heavan Leigh (BSCLOXH0405), que espera decisión sobre sus
+  // 140 ventas históricas. Cuando exista, se le añade su entrada propia aquí.
+  CUBRE_DESCANSO: 'CUBRE DESCANSO ZONA SUR1',
 }
 
 const FILE = arg('file')

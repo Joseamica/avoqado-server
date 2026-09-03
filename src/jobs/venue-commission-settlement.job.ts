@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client'
 import { CronJob } from 'cron'
 import { fromZonedTime } from 'date-fns-tz'
 import logger from '../config/logger'
+import { utcTs } from '../utils/sqlDates'
 import prisma from '../utils/prismaClient'
 import emailService from '../services/email.service'
 import { scheduleJob } from '../observability/jobContext'
@@ -405,8 +406,8 @@ export class VenueCommissionSettlementJob {
       WHERE ma."aggregatorId" = ${aggregatorId}
         AND vc.active = true
         AND p.status = 'COMPLETED'
-        AND p."createdAt" >= ${startUTC}
-        AND p."createdAt" <= ${endUTC}
+        AND p."createdAt" >= ${utcTs(startUTC)}
+        AND p."createdAt" <= ${utcTs(endUTC)}
         AND tc."transactionType"::text IN (${Prisma.join(cardTypes)})
       GROUP BY v.name, tc."transactionType", vc.rate, vc."referredBy"
       ORDER BY v.name, tc."transactionType"

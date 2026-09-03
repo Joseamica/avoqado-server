@@ -7,6 +7,7 @@ const mockOrgRenewLiveApiKey = jest.fn()
 const mockOrgGetTestApiKey = jest.fn()
 const mockOrgUploadCertificate = jest.fn()
 const mockOrgUpdateLegal = jest.fn()
+const mockOrgRetrieve = jest.fn()
 const mockInvoicesDownloadXml = jest.fn()
 const mockInvoicesDownloadPdf = jest.fn()
 
@@ -26,6 +27,7 @@ jest.mock('facturapi', () => {
       getTestApiKey: mockOrgGetTestApiKey,
       uploadCertificate: mockOrgUploadCertificate,
       updateLegal: mockOrgUpdateLegal,
+      retrieve: mockOrgRetrieve,
     },
   }))
 })
@@ -291,15 +293,41 @@ describe('FacturapiProvider', () => {
     expect(['accepted', 'canceled']).toContain(r.status)
   })
 
-  it('updateOrgLegal calls organizations.updateLegal with the mapped body', async () => {
+  it('updateOrgLegal calls organizations.updateLegal with the mapped body — including the REQUIRED name', async () => {
     mockOrgUpdateLegal.mockResolvedValue({ id: 'org1' })
     const provider = new FacturapiProvider('sk_test_x')
     await provider.updateOrgLegal({ providerOrgId: 'org1', legalName: 'Empresa SA', taxSystem: '601', zip: '64000' })
+    // Facturapi's OrganizationLegalInput marks FOUR fields required: name (nombre
+    // comercial), legal_name, tax_system, address. Omitting name makes the whole
+    // provision fail with 'El campo "name" es requerido.' (prod, 2026-09-01).
     expect(mockOrgUpdateLegal).toHaveBeenCalledWith('org1', {
+      name: 'Empresa SA',
       legal_name: 'Empresa SA',
       tax_system: '601',
       address: { zip: '64000' },
     })
+  })
+
+  it('getOrganizationStatus maps is_production_ready + pending_steps types', async () => {
+    mockOrgRetrieve.mockResolvedValue({
+      id: 'org1',
+      is_production_ready: false,
+      pending_steps: [
+        { type: 'certificate', description: 'Sube tus certificados' },
+        { type: 'manifiesto', description: 'Firma la carta manifiesto' },
+      ],
+    })
+    const provider = new FacturapiProvider('sk_test_x')
+    const r = await provider.getOrganizationStatus('org1')
+    expect(mockOrgRetrieve).toHaveBeenCalledWith('org1')
+    expect(r).toEqual({ isProductionReady: false, pendingSteps: ['certificate', 'manifiesto'] })
+  })
+
+  it('getOrganizationStatus tolerates a missing pending_steps array (org lista)', async () => {
+    mockOrgRetrieve.mockResolvedValue({ id: 'org1', is_production_ready: true })
+    const provider = new FacturapiProvider('sk_test_x')
+    const r = await provider.getOrganizationStatus('org1')
+    expect(r).toEqual({ isProductionReady: true, pendingSteps: [] })
   })
 
   it('throws a clear error when the SDK rejects (PAC/SAT error)', async () => {

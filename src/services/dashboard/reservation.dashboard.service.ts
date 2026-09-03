@@ -38,6 +38,7 @@ import {
   shouldAutoAssign,
 } from './appointmentStaffAssignment.service'
 import { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
+import { utcTs } from '@/utils/sqlDates'
 import {
   lockAndValidateNormalAppointmentHold,
   lockAndValidateRescheduleAppointmentHold,
@@ -229,6 +230,19 @@ async function validateLegacyStaffMembership(
 }
 
 // ---- Core Service Methods ----
+
+/**
+ * Overlap predicate shared by every booking lock (table, staff and product-capacity
+ * checks in create, update and reschedule). One definition, so the seven `FOR UPDATE`
+ * queries cannot drift from each other — and so it can be tested against real rows.
+ *
+ * The binds go through `utcTs`: bound bare, a Date reaches Postgres as `timestamptz` and the
+ * `timestamp` columns get converted with the session zone before comparing, so the existing
+ * booking looked six hours later than it was — the same slot never conflicted, and a slot six
+ * hours away did.
+ */
+export const reservationOverlapSql = (startsAt: Date, blockedEndsAt: Date): Prisma.Sql =>
+  Prisma.sql`"startsAt" < ${utcTs(blockedEndsAt)} AND "blockedEndsAt" > ${utcTs(startsAt)}`
 
 export interface CreateReservationInput {
   startsAt: Date
@@ -563,8 +577,7 @@ export async function createReservation(
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-        AND "startsAt" < ${blockedEndsAt}
-        AND "blockedEndsAt" > ${data.startsAt}
+        AND ${reservationOverlapSql(data.startsAt, blockedEndsAt)}
         AND "tableId" = ${data.tableId}
         FOR UPDATE NOWAIT
       `
@@ -579,8 +592,7 @@ export async function createReservation(
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-        AND "startsAt" < ${blockedEndsAt}
-        AND "blockedEndsAt" > ${data.startsAt}
+        AND ${reservationOverlapSql(data.startsAt, blockedEndsAt)}
         AND "assignedStaffId" = ${effectiveAssignedStaffId}
         FOR UPDATE NOWAIT
       `
@@ -599,8 +611,7 @@ export async function createReservation(
           FROM "Reservation"
           WHERE "venueId" = ${venueId}
             AND "productId" = ${leadProductId}
-            AND "startsAt" < ${blockedEndsAt}
-            AND "blockedEndsAt" > ${data.startsAt}
+            AND ${reservationOverlapSql(data.startsAt, blockedEndsAt)}
             AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           FOR UPDATE
         `
@@ -1635,8 +1646,7 @@ export async function updateReservation(
           AND "tableId" = ${newTableId}
           AND id <> ${reservationId}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-          AND "startsAt" < ${effectiveBlockedEndsAt}
-          AND "blockedEndsAt" > ${newStartsAt}
+          AND ${reservationOverlapSql(newStartsAt, effectiveBlockedEndsAt)}
         FOR UPDATE NOWAIT
       `
       if (tableConflicts.length > 0) {
@@ -1652,8 +1662,7 @@ export async function updateReservation(
           AND "assignedStaffId" = ${newStaffId}
           AND id <> ${reservationId}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-          AND "startsAt" < ${effectiveBlockedEndsAt}
-          AND "blockedEndsAt" > ${newStartsAt}
+          AND ${reservationOverlapSql(newStartsAt, effectiveBlockedEndsAt)}
         FOR UPDATE NOWAIT
       `
       if (staffConflicts.length > 0) {
@@ -1671,8 +1680,7 @@ export async function updateReservation(
         WHERE "venueId" = ${venueId}
           AND "productId" = ${newProductId}
           AND id <> ${reservationId}
-          AND "startsAt" < ${effectiveBlockedEndsAt}
-          AND "blockedEndsAt" > ${newStartsAt}
+          AND ${reservationOverlapSql(newStartsAt, effectiveBlockedEndsAt)}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         FOR UPDATE
       `
@@ -1990,8 +1998,7 @@ async function rescheduleAppointmentWithHold(args: {
           AND "tableId" = ${reservation.tableId}
           AND id <> ${reservation.id}
           AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-          AND "startsAt" < ${rescheduledBlockedEndsAt}
-          AND "blockedEndsAt" > ${newStartsAt}
+          AND ${reservationOverlapSql(newStartsAt, rescheduledBlockedEndsAt)}
         FOR UPDATE NOWAIT
       `
       if (tableConflicts.length > 0) {

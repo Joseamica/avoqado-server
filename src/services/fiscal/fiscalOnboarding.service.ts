@@ -31,9 +31,9 @@ export interface EmisorOnboardingDeps {
   findEmisor: (emisorId: string) => Promise<any | null>
   /**
    * Account-level provider (built from FACTURAPI_USER_KEY).
-   * Only createOrganization, updateOrgLegal, and uploadCsd are used here.
+   * Only createOrganization, updateOrgLegal, uploadCsd and getOrganizationStatus are used here.
    */
-  accountProvider: Pick<FiscalProvider, 'createOrganization' | 'updateOrgLegal' | 'uploadCsd'>
+  accountProvider: Pick<FiscalProvider, 'createOrganization' | 'updateOrgLegal' | 'uploadCsd' | 'getOrganizationStatus'>
   /** Persist changes to a FiscalEmisor row. */
   updateEmisor: (emisorId: string, data: Record<string, any>) => Promise<any>
   /** Encrypt a provider key before DB storage. Injected so tests can assert without real crypto. */
@@ -43,8 +43,11 @@ export interface EmisorOnboardingDeps {
 // ─── Service functions ────────────────────────────────────────────────────────
 
 /**
- * Provision a FiscalEmisor: create the facturapi organization, set its legal info,
- * then store the providerOrgId + encrypted live key in our DB.
+ * Provision a FiscalEmisor: create the facturapi organization, store the
+ * providerOrgId + encrypted live key in our DB IMMEDIATELY, then set the org's
+ * legal info. Persisting first makes the call resumable: a legal-info failure
+ * can't orphan the org, and a retry (providerOrgId already set) skips the
+ * create and only re-runs the legal update on the same org.
  *
  * After this call the emisor's csdStatus remains NONE — the CSD upload step
  * (uploadEmisorCsd) is what advances it to ACTIVE.
@@ -61,26 +64,34 @@ export async function provisionEmisor(
     throw new Error(`Emisor ${params.emisorId} not found`) // tenant guard → 404
   }
 
-  // Create the org in facturapi using the account-level key.
-  const org = await deps.accountProvider.createOrganization({
-    legalName: emisor.legalName,
-    email: 'facturacion@avoqado.io',
-  })
+  let provisioned = emisor
+  if (!emisor.providerOrgId) {
+    // Create the org in facturapi using the account-level key.
+    const org = await deps.accountProvider.createOrganization({
+      legalName: emisor.legalName,
+      email: 'facturacion@avoqado.io',
+    })
+
+    // Persist providerOrgId + ENCRYPTED live key BEFORE any further provider call:
+    // if updateOrgLegal fails, the org id survives and the retry reuses the SAME
+    // org instead of orphaning one per attempt (prod, 2026-09-01). The plaintext
+    // liveKey is never stored.
+    provisioned = await deps.updateEmisor(emisor.id, {
+      providerOrgId: org.providerOrgId,
+      providerKeyEnc: deps.encryptKey(org.liveKey),
+      // csdStatus stays NONE — CSD upload is the next step
+    })
+  }
 
   // Set the org's legal information (required before it can issue CFDIs).
   await deps.accountProvider.updateOrgLegal({
-    providerOrgId: org.providerOrgId,
+    providerOrgId: provisioned.providerOrgId,
     legalName: emisor.legalName,
     taxSystem: emisor.regimenFiscal,
     zip: emisor.lugarExpedicion,
   })
 
-  // Persist providerOrgId + ENCRYPTED live key only. The plaintext liveKey is never stored.
-  return deps.updateEmisor(emisor.id, {
-    providerOrgId: org.providerOrgId,
-    providerKeyEnc: deps.encryptKey(org.liveKey),
-    // csdStatus stays NONE — CSD upload is the next step
-  })
+  return provisioned
 }
 
 /**
@@ -125,6 +136,30 @@ export async function uploadEmisorCsd(
     csdExpiresAt: result.csdExpiresAt,
     csdLastCheckedAt: new Date(),
   })
+}
+
+/**
+ * Estado del onboarding del emisor en el PAC — qué pasos le faltan para poder
+ * timbrar en Live (hoy el que importa: la Carta Manifiesto).
+ *
+ * Un emisor sin provisionar responde `provisioned: false` sin tocar la red:
+ * antes de conectar no hay organización que consultar.
+ *
+ * @throws {Error} "Emisor {id} not found" on tenant mismatch → 404.
+ */
+export async function getEmisorProviderStatus(
+  params: { emisorId: string; expectedVenueId: string },
+  deps: EmisorOnboardingDeps = defaultDeps(),
+): Promise<{ provisioned: boolean; isProductionReady: boolean; pendingSteps: string[] }> {
+  const emisor = await deps.findEmisor(params.emisorId)
+  if (!emisor || emisor.venueId !== params.expectedVenueId) {
+    throw new Error(`Emisor ${params.emisorId} not found`) // tenant guard → 404
+  }
+  if (!emisor.providerOrgId) {
+    return { provisioned: false, isProductionReady: false, pendingSteps: [] }
+  }
+  const status = await deps.accountProvider.getOrganizationStatus(emisor.providerOrgId)
+  return { provisioned: true, ...status }
 }
 
 // ─── Default deps (production) ────────────────────────────────────────────────

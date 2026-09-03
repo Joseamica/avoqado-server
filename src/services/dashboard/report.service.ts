@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
 import { lineRevenueSql, lineUnitsSql } from './lineRevenue'
+import { utcTs } from '../../utils/sqlDates'
 
 /**
  * 🔴 These queries were WRITTEN IN snake_case (`o.venue_id`, `rmm.raw_material_id`,
@@ -68,8 +69,8 @@ export async function getPMIXReport(
     INNER JOIN "Product" p ON p.id = oi."productId"
     LEFT JOIN "Recipe" r ON r."productId" = p.id
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${startDate}
-      AND o."createdAt" <= ${endDate}
+      AND o."createdAt" >= ${utcTs(startDate)}
+      AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status = 'COMPLETED'
     GROUP BY oi."productId", p.name, r."totalCost"
     ORDER BY total_revenue DESC, oi."productId" ASC
@@ -93,8 +94,8 @@ export async function getPMIXReport(
     INNER JOIN "Order" o ON o.id = oi."orderId"
     LEFT JOIN "Recipe" r ON r."productId" = oi."productId"
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${startDate}
-      AND o."createdAt" <= ${endDate}
+      AND o."createdAt" >= ${utcTs(startDate)}
+      AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status = 'COMPLETED'
   `
 
@@ -333,8 +334,8 @@ export async function getIngredientUsageReport(
     FROM "RawMaterialMovement" rmm
     INNER JOIN "RawMaterial" rm ON rm.id = rmm."rawMaterialId"
     WHERE rmm."venueId" = ${venueId}
-      AND rmm."createdAt" >= ${startDate}
-      AND rmm."createdAt" <= ${endDate}
+      AND rmm."createdAt" >= ${utcTs(startDate)}
+      AND rmm."createdAt" <= ${utcTs(endDate)}
       ${options?.rawMaterialId ? Prisma.sql`AND rmm."rawMaterialId" = ${options.rawMaterialId}` : Prisma.empty}
     GROUP BY rmm."rawMaterialId", rm.name, rm.category, rm.unit, rm."costPerUnit"
     ORDER BY total_cost DESC, rmm."rawMaterialId" ASC
@@ -397,8 +398,8 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
     INNER JOIN "Order" o ON o.id = oi."orderId"
     LEFT JOIN "Recipe" r ON r."productId" = oi."productId"
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${startDate}
-      AND o."createdAt" <= ${endDate}
+      AND o."createdAt" >= ${utcTs(startDate)}
+      AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status = 'COMPLETED'
   `
 
@@ -413,8 +414,8 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
     FROM "RawMaterialMovement" rmm
     INNER JOIN "RawMaterial" rm ON rm.id = rmm."rawMaterialId"
     WHERE rmm."venueId" = ${venueId}
-      AND rmm."createdAt" >= ${startDate}
-      AND rmm."createdAt" <= ${endDate}
+      AND rmm."createdAt" >= ${utcTs(startDate)}
+      AND rmm."createdAt" <= ${utcTs(endDate)}
       AND rmm.type IN ('USAGE', 'SPOILAGE')
   `
 
@@ -600,7 +601,7 @@ export async function getStockCoverageReport(
     LEFT JOIN "RawMaterialMovement" rmm
       ON rmm."rawMaterialId" = rm.id
       AND rmm."venueId" = ${venueId}
-      AND rmm."createdAt" >= ${since}
+      AND rmm."createdAt" >= ${utcTs(since)}
     WHERE rm."venueId" = ${venueId}
       AND rm.active = true
     GROUP BY rm.id, rm.name, rm.category, rm.unit, rm."currentStock", rm."reorderPoint"

@@ -41,12 +41,17 @@ const emisor = (over: Record<string, unknown> = {}) => ({
   providerKeyEnc: 'enc-key',
   csdStatus: 'ACTIVE' as const,
   csdExpiresAt: new Date('2027-01-01T00:00:00Z'),
+  // Sin org provisionada en el PAC: el check de Carta Manifiesto se OMITE, así que
+  // estas pruebas (anteriores a ese check) conservan sus expectativas intactas.
+  // El manifiesto tiene su propia suite: fiscal/fiscalReadiness.manifiesto.test.ts.
+  providerOrgId: null,
   ...over,
 })
 
 const baseInput = (over: Record<string, unknown> = {}) => ({
   rfc: 'EKU9003173C9',
   emisor: emisor(),
+  manifiestoPendingSteps: null,
   venueZipCode: '06700',
   catalogSeeded: true,
   mappingsTotal: 28,

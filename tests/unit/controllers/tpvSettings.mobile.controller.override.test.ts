@@ -8,6 +8,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     terminal: { findMany: jest.fn() },
     venueSettings: { findUnique: jest.fn() },
+    venue: { findUnique: jest.fn() },
   },
 }))
 jest.mock('@/services/access/basePlan.service', () => ({ getVenuePlanInfo: jest.fn().mockResolvedValue(undefined) }))
@@ -31,6 +32,9 @@ describe('GET /mobile/venues/:venueId/settings — managerPinOverrideEnabled', (
     next = jest.fn()
     req = { params: { venueId: 'venue_1' }, headers: {} } as any
     ;(prisma.terminal.findMany as jest.Mock).mockResolvedValue([])
+    // receiptInfo fuera de foco aquí: null ⇒ el bloque se omite y el contrato
+    // viejo queda byte a byte (lo cubre tpvSettings.mobile.controller.test.ts).
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue(null)
   })
 
   // 1. NUEVO

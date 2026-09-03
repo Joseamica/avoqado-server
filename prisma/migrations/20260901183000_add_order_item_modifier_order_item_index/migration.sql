@@ -1,0 +1,12 @@
+-- `OrderItemModifier` sólo tenía el índice de su llave primaria. La subconsulta correlacionada
+-- de `lineModifiersSql` (src/services/dashboard/lineRevenue.ts) suma los modificadores de CADA
+-- OrderItem dentro de un SUM(), así que sin este índice cada renglón evaluado recorría la tabla
+-- entera. La usan nightly-sales-summary, promotion-sales, sales-by-item, el MCP de productos y
+-- generalStats (product-profitability).
+--
+-- Sin CONCURRENTLY a propósito: la tabla tiene ~700 filas (local y prod), el índice se construye
+-- en milisegundos y el candado que toma sobre escrituras dura eso mismo. CONCURRENTLY no puede
+-- correr dentro de una transacción y sólo valdría la pena con millones de filas.
+--
+-- Escrita a mano porque la base local es COMPARTIDA y `migrate dev` puede proponer un reset.
+CREATE INDEX IF NOT EXISTS "OrderItemModifier_orderItemId_idx" ON "OrderItemModifier"("orderItemId");

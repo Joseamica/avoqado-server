@@ -55,6 +55,26 @@ export interface OrgStockBulkGroup {
   returnedCount: number
 }
 
+export type OrgStockBulkGroupPageItem = Omit<OrgStockBulkGroup, 'serialNumbers'>
+
+export interface OrgStockBulkGroupsPageOptions extends OrgStockOverviewOptions {
+  page: number
+  pageSize: number
+  search?: string
+  categoryId?: string
+  registeredFromVenueId?: string
+}
+
+export interface OrgStockBulkGroupsPage {
+  groups: OrgStockBulkGroupPageItem[]
+  pagination: {
+    page: number
+    pageSize: number
+    total: number
+    totalPages: number
+  }
+}
+
 export interface OrgStockSucursalAggregate {
   venueId: string
   venueName: string
@@ -107,9 +127,77 @@ export interface OrgStockOverview {
   bulkGroups: OrgStockBulkGroup[]
   aggregatesBySucursal: OrgStockSucursalAggregate[]
   aggregatesByCategoria: OrgStockCategoriaAggregate[]
+  /** Additive compatibility signal. Old clients ignore it; new clients never mistake a subset for the whole. */
+  meta?: {
+    itemsTotal: number
+    itemsTruncated: boolean
+  }
+}
+
+export interface OrgStockSummaryData {
+  summary: OrgStockSummary
+  aggregatesBySucursal: OrgStockSucursalAggregate[]
+  aggregatesByCategoria: OrgStockCategoriaAggregate[]
 }
 
 export interface OrgStockOverviewOptions {
   dateFrom?: Date
   dateTo?: Date
+}
+
+export interface OrgStockItemsPageOptions extends OrgStockOverviewOptions {
+  page: number
+  pageSize: number
+  search?: string
+  status?: SerializedItemStatus
+  custodyState?: SerializedItemCustodyState
+  custodyStates?: SerializedItemCustodyState[]
+  categoryId?: string
+  registeredFromVenueId?: string
+}
+
+export interface OrgStockItemsPage {
+  items: OrgStockOverviewItem[]
+  pagination: {
+    page: number
+    pageSize: number
+    total: number
+    totalPages: number
+  }
+}
+
+export type OrgStockCustodyFilter = 'todos' | 'almacen' | 'pendientes' | 'aceptados' | 'rechazados' | 'vendidos' | 'estancados'
+
+export interface OrgStockCustodyPageOptions extends OrgStockOverviewOptions {
+  targetVenueId?: string
+  page: number
+  pageSize: number
+  search?: string
+  filter: OrgStockCustodyFilter
+}
+
+export interface OrgStockCustodyPage {
+  summary: {
+    total: number
+    almacen: number
+    pendientes: number
+    aceptados: number
+    rechazados: number
+    vendidos: number
+    estancados: number
+  }
+  promoterRanking: Array<{
+    id: string
+    name: string
+    pending: number
+    held: number
+    sold: number
+  }>
+  items: OrgStockOverviewItem[]
+  pagination: {
+    page: number
+    pageSize: number
+    total: number
+    totalPages: number
+  }
 }

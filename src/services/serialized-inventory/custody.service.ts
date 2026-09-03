@@ -8,6 +8,7 @@ import {
   StaffRole,
 } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { utcTsOrNull } from '../../utils/sqlDates'
 import { SimCustodyError, type SimCustodyErrorCode } from '../../lib/sim-custody-error-codes'
 import { notifySimCustody } from './custody.notifications'
 import { logAction } from '../dashboard/activity-log.service'
@@ -1015,15 +1016,18 @@ export class SimCustodyService {
     const promoterAcceptedAt = 'promoterAcceptedAt' in patch ? patch.promoterAcceptedAt : item.promoterAcceptedAt
     const promoterRejectedAt = 'promoterRejectedAt' in patch ? patch.promoterRejectedAt : item.promoterRejectedAt
 
+    // The dates go through utcTsOrNull: bound bare, a Date reaches Postgres as timestamptz and is
+    // written into the `timestamp` column converted to the SESSION zone — six hours early, and
+    // compounding on every transition that preserves the previous value.
     const rows = await tx.$queryRaw<SerializedItem[]>`
       UPDATE "SerializedItem"
          SET "custodyState"         = ${patch.custodyState}::"SerializedItemCustodyState",
              "assignedSupervisorId" = ${assignedSupervisorId},
-             "assignedSupervisorAt" = ${assignedSupervisorAt},
+             "assignedSupervisorAt" = ${utcTsOrNull(assignedSupervisorAt)},
              "assignedPromoterId"   = ${assignedPromoterId},
-             "assignedPromoterAt"   = ${assignedPromoterAt},
-             "promoterAcceptedAt"   = ${promoterAcceptedAt},
-             "promoterRejectedAt"   = ${promoterRejectedAt},
+             "assignedPromoterAt"   = ${utcTsOrNull(assignedPromoterAt)},
+             "promoterAcceptedAt"   = ${utcTsOrNull(promoterAcceptedAt)},
+             "promoterRejectedAt"   = ${utcTsOrNull(promoterRejectedAt)},
              "custodyVersion"       = "custodyVersion" + 1
        WHERE "id" = ${item.id}
          AND "custodyVersion" = ${item.custodyVersion}

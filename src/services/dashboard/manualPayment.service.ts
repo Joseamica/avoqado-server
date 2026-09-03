@@ -215,7 +215,7 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
           const resolvedCustomerId = input.customerId ?? primaryCustomer?.customerId ?? order.customerId ?? null
           if (resolvedCustomerId) {
             loyaltyCustomerId = resolvedCustomerId
-            loyaltyOrderTotal = anchorOrderTotal
+            loyaltyOrderTotal = Prisma.Decimal.max(new Prisma.Decimal(0), anchorOrderTotal.minus(aggregatedTipAmount))
             loyaltyShouldEarn = true
           }
           // Customer metrics: queue updates for ALL customers on the order
@@ -305,7 +305,7 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
           metricsState.orderTotal = shadowTotal
           loyaltyCustomerId = input.customerId
           loyaltyOrderId = shadow.id
-          loyaltyOrderTotal = shadowTotal
+          loyaltyOrderTotal = Prisma.Decimal.max(new Prisma.Decimal(0), shadowTotal.minus(tipAmount))
           loyaltyShouldEarn = true
         }
       }
@@ -548,7 +548,7 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
     const metricsAmount = Number(metricsState.orderTotal.toString())
     for (const customerId of metricsCustomerIds) {
       try {
-        await updateCustomerMetrics(customerId, metricsAmount)
+        await updateCustomerMetrics(customerId, metricsAmount, loyaltyOrderId, venueId)
         logger.info('📊 Customer metrics updated (manual payment)', {
           orderId: loyaltyOrderId,
           customerId,
