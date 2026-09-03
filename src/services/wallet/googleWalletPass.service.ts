@@ -3,13 +3,12 @@ import { WalletPlatform } from '@prisma/client'
 import jwt from 'jsonwebtoken'
 import { randomBytes } from 'crypto'
 import prisma from '../../utils/prismaClient'
-import { env } from '../../config/env'
 import logger from '../../config/logger'
 import { getCardDesign } from './cardDesign.service'
 import { getStampCardStatus } from './stampLedger.service'
 import { buildLoyaltyClass, googleClassId } from './googleClassBuilder.service'
 import { buildLoyaltyObject, googleObjectId } from './googleObjectBuilder.service'
-import { googleWalletAvailable, googleWalletCredentials, issuerId, walletClient } from './googleWalletClient'
+import { googleWalletAvailable, googleWalletCredentials, issuerId, walletBaseUrl, walletClient } from './googleWalletClient'
 
 /**
  * Emisión de la tarjeta de Google — espejo de `walletPass.service.ts` + `issuePass.service.ts`
@@ -113,7 +112,11 @@ export async function issueGooglePass(venueId: string, customerId: string) {
         serialNumber: pass.serialNumber,
         qrToken: pass.qrToken,
         revision: pass.revision,
-        baseUrl: env.BASE_URL as string,
+        // 🔴 `walletBaseUrl()`, no `env.BASE_URL as string`: BASE_URL es opcional en el
+        // schema de env, y el cast mentía. Aquí es seguro porque `buildSaveJwt` — la
+        // única entrada de producción — ya llamó `googleWalletAvailable()`, que ahora
+        // exige una URL pública válida antes de llegar hasta acá.
+        baseUrl: walletBaseUrl() as string,
         content: stamps,
       }) as any,
     })

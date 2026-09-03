@@ -9,7 +9,7 @@
  * siquiera usa tarjetas digitales no puede quedarse sin cobrar porque falte una
  * variable de entorno.
  */
-import { googleWalletAvailable, googleWalletCredentials, issuerId } from '@/services/wallet/googleWalletClient'
+import { googleWalletAvailable, googleWalletCredentials, issuerId, walletBaseUrl } from '@/services/wallet/googleWalletClient'
 import { env } from '@/config/env'
 
 const CUENTA = { client_email: 'sa@proyecto.iam.gserviceaccount.com', private_key: '-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n' }
@@ -18,6 +18,12 @@ const B64 = Buffer.from(JSON.stringify({ ...CUENTA, type: 'service_account', pro
 describe('googleWalletClient', () => {
   const original = { ...env }
   afterEach(() => Object.assign(env, original))
+  // 🔴 Fija el BASE_URL para que las pruebas de "disponible: true" NO dependan de lo
+  // que traiga el .env de esta máquina — antes lo hacían, y eso pasaba aquí y fallaba
+  // en un servidor sin ese .env (el Alienware lo destapó: `env.BASE_URL as string`
+  // reventaba en silencio dentro de un try/catch que se lo tragaba). Las pruebas que
+  // SÍ quieren probar el caso sin BASE_URL lo pisan explícitamente.
+  beforeEach(() => Object.assign(env, { BASE_URL: 'https://api.avoqado.io' }))
 
   it('sin issuer NI credencial, no está disponible y no lanza', () => {
     Object.assign(env, { GOOGLE_WALLET_ISSUER_ID: undefined, GOOGLE_WALLET_SERVICE_ACCOUNT_BASE64: undefined, FIREBASE_SERVICE_ACCOUNT_BASE64: undefined })
@@ -69,5 +75,39 @@ describe('googleWalletClient', () => {
   it('issuerId devuelve el configurado', () => {
     Object.assign(env, { GOOGLE_WALLET_ISSUER_ID: '3388000000023181777' })
     expect(issuerId()).toBe('3388000000023181777')
+  })
+
+  it('🔴 sin BASE_URL, walletBaseUrl() es null — el caso que reventó en un server recién desplegado', () => {
+    // Un servidor sin BASE_URL configurado (BASE_URL es .optional() en env.ts) no puede
+    // ofrecer la tarjeta de Google: Google la descarga desde SUS servidores, no desde el
+    // navegador del cliente, así que no hay "URL del cliente" de respaldo.
+    Object.assign(env, { BASE_URL: undefined })
+    expect(walletBaseUrl()).toBeNull()
+  })
+
+  it('un BASE_URL apuntando a localhost tampoco sirve', () => {
+    Object.assign(env, { BASE_URL: 'http://localhost:3000' })
+    expect(walletBaseUrl()).toBeNull()
+    Object.assign(env, { BASE_URL: 'http://127.0.0.1:3000' })
+    expect(walletBaseUrl()).toBeNull()
+  })
+
+  it('un BASE_URL público válido se devuelve tal cual', () => {
+    Object.assign(env, { BASE_URL: 'https://api.avoqado.io' })
+    expect(walletBaseUrl()).toBe('https://api.avoqado.io')
+  })
+
+  it('🔴 googleWalletAvailable() exige BASE_URL aunque credencial e issuer estén completos', () => {
+    // Antes de este fix, con issuer+credencial pero SIN BASE_URL, googleWalletAvailable()
+    // devolvía true y notifyGooglePass/issueGooglePass llegaban hasta el `.replace` sobre
+    // `undefined` — el TypeError que el Alienware (sin .env) destapó.
+    Object.assign(env, {
+      GOOGLE_WALLET_ISSUER_ID: '338',
+      GOOGLE_WALLET_SERVICE_ACCOUNT_BASE64: B64,
+      FIREBASE_SERVICE_ACCOUNT_BASE64: undefined,
+      BASE_URL: undefined,
+    })
+    expect(googleWalletCredentials()).not.toBeNull() // la credencial sí está completa
+    expect(googleWalletAvailable()).toBe(false) // pero sin BASE_URL, no está "disponible"
   })
 })

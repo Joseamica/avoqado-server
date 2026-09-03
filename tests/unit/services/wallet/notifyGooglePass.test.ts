@@ -15,11 +15,19 @@ jest.mock('@/services/wallet/apnsClient', () => ({
 jest.mock('@/services/wallet/googleWalletClient', () => ({
   googleWalletAvailable: jest.fn(() => true),
   issuerId: jest.fn(() => '338'),
+  // 🔴 `notifyGooglePass` ya no lee `env.BASE_URL` directo — pasa por `walletBaseUrl()`
+  // (googleWalletClient), y este módulo está mockeado completo aquí. Sin esto, el mock
+  // deja `walletBaseUrl` en `undefined`: "is not a function" cae dentro del try/catch
+  // de `notifyGooglePass` y `patchObject` nunca se llama, con las mismas 3 pruebas
+  // "reventando en silencio" que destapó el Alienware (sin .env, `env.BASE_URL as
+  // string` producía el mismo TypeError vía un camino distinto).
+  walletBaseUrl: jest.fn(() => 'https://api.avoqado.io'),
   walletClient: jest.fn(async () => ({ loyaltyobject: { patch: patchObject } })),
 }))
 
 import { notifyCustomerPassUpdated } from '@/services/wallet/notifyPassUpdated.service'
 import { sendSilentPush } from '@/services/wallet/apnsClient'
+import { googleWalletAvailable, walletBaseUrl } from '@/services/wallet/googleWalletClient'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const APPLE = { id: 'wp-a', platform: 'APPLE', serialNumber: 'AVQ-A', qrToken: 'a'.repeat(48), revision: 1, venueId: 'v1', customerId: 'c1', googleObjectId: null }
@@ -73,5 +81,22 @@ describe('notifyCustomerPassUpdated con las dos plataformas', () => {
     patchObject.mockRejectedValueOnce(new Error('Google caído'))
     prismaMock.walletPass.findMany.mockResolvedValue([GOOGLE] as any)
     await expect(notifyCustomerPassUpdated('v1', 'c1')).resolves.toEqual(expect.objectContaining({ notified: expect.any(Number) }))
+  })
+
+  it('🔴 sin BASE_URL configurado, Google ni se toca (el caso que el Alienware destapó)', async () => {
+    // Un servidor recién desplegado sin BASE_URL: `googleWalletAvailable()` real ya
+    // devolvería false por esto mismo (ver googleWalletClient.test.ts), pero aquí el
+    // módulo está mockeado completo — así que se prueba el guard de `notifyGooglePass`
+    // directamente, pisando SÓLO `walletBaseUrl` y dejando `googleWalletAvailable` en
+    // true, para aislar que el guard nuevo es el que lo detiene.
+    ;(walletBaseUrl as jest.Mock).mockReturnValueOnce(null)
+    prismaMock.walletPass.findMany.mockResolvedValue([GOOGLE] as any)
+    const r = await notifyCustomerPassUpdated('v1', 'c1')
+    expect(patchObject).not.toHaveBeenCalled()
+    // Tampoco se gastó el `update` que sube la revisión: si Google no puede recibir el
+    // objeto, no tiene sentido haber subido la revisión igual.
+    expect(prismaMock.walletPass.update).not.toHaveBeenCalled()
+    expect(r).toEqual(expect.objectContaining({ notified: 0 }))
+    expect(googleWalletAvailable).toHaveBeenCalled()
   })
 })

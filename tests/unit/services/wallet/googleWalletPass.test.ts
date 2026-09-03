@@ -13,6 +13,11 @@ jest.mock('@/services/wallet/googleWalletClient', () => ({
   googleWalletAvailable: jest.fn(() => true),
   googleWalletCredentials: jest.fn(() => ({ client_email: 'sa@x.iam.gserviceaccount.com', private_key: 'k' })),
   issuerId: jest.fn(() => '338'),
+  // 🔴 `issueGooglePass` ya no lee `env.BASE_URL` directo — pasa por `walletBaseUrl()`
+  // (googleWalletClient), y este módulo está mockeado completo aquí. Sin esto, el mock
+  // deja `walletBaseUrl` en `undefined` y revienta con "is not a function" — no es la
+  // credencial ilegible que las otras pruebas prueban, es un hueco del mock.
+  walletBaseUrl: jest.fn(() => 'https://api.avoqado.io'),
   walletClient: jest.fn(async () => ({
     loyaltyclass: { insert: insertClass, get: getClass },
     // 🔴 Sin `get`: `issueGooglePass` decide si ya existe el pase por la BASE (el

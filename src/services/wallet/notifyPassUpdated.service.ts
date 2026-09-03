@@ -1,11 +1,10 @@
 import { WalletPlatform } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { env } from '../../config/env'
 import { apnsAvailable, sendSilentPush } from './apnsClient'
 import { getStampCardStatus } from './stampLedger.service'
 import { buildLoyaltyObject } from './googleObjectBuilder.service'
-import { googleWalletAvailable, issuerId, walletClient } from './googleWalletClient'
+import { googleWalletAvailable, issuerId, walletBaseUrl, walletClient } from './googleWalletClient'
 
 /**
  * Le avisa a los teléfonos donde vive una tarjeta que su contenido cambió.
@@ -77,7 +76,14 @@ async function notifyGooglePass(pass: {
   googleObjectId: string | null
 }): Promise<boolean> {
   try {
-    if (!googleWalletAvailable() || !pass.googleObjectId) return false
+    // 🔴 `walletBaseUrl()` puede ser null aunque `googleWalletAvailable()` diga que sí
+    // hay credenciales: un cast `as string` sobre `env.BASE_URL` (optional en el schema
+    // de env) reventaba aquí con un TypeError críptico en un servidor recién
+    // desplegado sin configurar — atrapado por el try/catch de abajo, así que el
+    // cliente se quedaba SIN su sello, en silencio. Se sale temprano, igual que sin
+    // credencial.
+    const urlBase = walletBaseUrl()
+    if (!googleWalletAvailable() || !pass.googleObjectId || !urlBase) return false
 
     const actualizado = await prisma.walletPass.update({
       where: { id: pass.id },
@@ -97,7 +103,7 @@ async function notifyGooglePass(pass: {
         serialNumber: pass.serialNumber,
         qrToken: pass.qrToken,
         revision: actualizado.revision,
-        baseUrl: env.BASE_URL as string,
+        baseUrl: urlBase,
         content: stamps,
       }) as any,
     })

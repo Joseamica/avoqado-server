@@ -39,8 +39,19 @@ export function googleWalletCredentials(): GoogleWalletCredentials | null {
   }
 }
 
+/**
+ * 🔴 Sin una URL pública, la tarjeta de Google es inservible: Google descarga la franja de sellos
+ * desde SUS servidores, así que `localhost` no le sirve. Mismo criterio que `passWebServiceURL()`
+ * del lado de Apple: mejor no ofrecer la tarjeta que emitir una que nace sin imagen.
+ */
+export function walletBaseUrl(): string | null {
+  const base = env.BASE_URL
+  if (!base || /localhost|127\.0\.0\.1/i.test(base)) return null
+  return base
+}
+
 export function googleWalletAvailable(): boolean {
-  return Boolean(env.GOOGLE_WALLET_ISSUER_ID && googleWalletCredentials())
+  return Boolean(env.GOOGLE_WALLET_ISSUER_ID && googleWalletCredentials() && walletBaseUrl())
 }
 
 export function issuerId(): string {
