@@ -186,6 +186,15 @@ export async function createOneManualSale(
           const orderNumber = `ORD-EXT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
 
           // 4. Order (shadow MANUAL_ENTRY). taxAmount is required on the model.
+          //
+          // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles" copiando lo que hacen
+          // el mostrador o la venta rápida. Esto es una carga masiva de ventas PASADAS desde el
+          // Excel del cliente: `createdAt: soldAt` es la fecha de la HOJA, de otros días.
+          // Estampar «el turno abierto ahora» metería ventas de la semana pasada —de OTRA
+          // tienda, porque el venue se resuelve por renglón— dentro del corte de hoy, y ese
+          // corte lo firma una persona. Un `shiftId` nulo sólo deja el renglón fuera de un
+          // conteo; uno equivocado mete dinero ajeno en la caja de alguien.
+          // Guardado por `tests/unit/services/dashboard/manualSale.sinTurno.test.ts`.
           const order = await tx.order.create({
             data: {
               venueId: venue.id,

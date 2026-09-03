@@ -51,6 +51,7 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro.
 import { computeOrderBalance } from '../shared/orderBalance'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
@@ -1537,9 +1538,14 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
           }
           const requiresDeliveryCode = fresh.tickets.some(ticket => ticket.fulfillmentModeSnapshot !== FulfillmentMode.IMMEDIATE)
 
+          // 🔴 Cobro de vales en la caja: la orden nace en el turno abierto ahora
+          // (`../shared/turnoDeCaja.ts`), con el cliente de la transacción. Opcional.
+          const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+
           const order = await tx.order.create({
             data: {
               venueId,
+              shiftId: currentShift?.id ?? null,
               orderNumber: `ORD-${Date.now()}-${randomInt(0, 1_679_616).toString(36).padStart(4, '0').toUpperCase()}`,
               terminalId: fresh.terminalId,
               createdById: staffId ?? fresh.staffId ?? null,

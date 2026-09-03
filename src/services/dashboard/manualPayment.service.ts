@@ -249,6 +249,10 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
         const shadow = await tx.order.create({
           data: {
             venueId,
+            // 🔴 La orden sombra ancla un cobro que está ocurriendo AHORA: cae en el mismo
+            // turno que su `Payment`, reusando el `shiftId` ya resuelto arriba (nunca una
+            // segunda consulta, que podría devolver otro turno si alguien cierra caja en medio).
+            shiftId,
             orderNumber,
             type: 'MANUAL_ENTRY',
             source: 'DASHBOARD_MANUAL',

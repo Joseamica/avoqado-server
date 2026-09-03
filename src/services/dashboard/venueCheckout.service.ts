@@ -553,6 +553,10 @@ export async function finalizeVenueCheckout(args: {
       },
     })
 
+    // 🔴 NO se estampa `shiftId`, y es DELIBERADO — mismo criterio que las ligas de pago.
+    // Es un checkout en línea (`source: 'WEB'`): paga el cliente desde su navegador y esto corre
+    // en el webhook de Stripe, sin cajero ni cajón de por medio. Meterlo en el turno abierto de
+    // ese instante le cargaría a un cajero una venta que nunca tocó.
     const order = await tx.order.create({
       data: {
         venueId,

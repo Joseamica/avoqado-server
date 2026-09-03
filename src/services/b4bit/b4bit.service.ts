@@ -21,6 +21,7 @@ import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { computeOrderBalance } from '../shared/orderBalance'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import type {
@@ -318,10 +319,20 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
       // Generate order number
       const orderNumberGenerated = orderNumber || `CRYPTO-${Date.now()}`
 
+      // 🔴 Cobro cripto en la terminal: la orden nace en el turno abierto del NEGOCIO
+      // (`../shared/turnoDeCaja.ts`), resuelto con el cliente de la transacción.
+      //
+      // Se resuelve por `venueId` en vez de reusar el `shiftId` del parámetro a propósito: ese
+      // valor llega del cliente y arriba sólo se comprueba que el turno esté OPEN, NO que sea de
+      // ESTE negocio. La orden no hereda ese hueco. En el caso normal coinciden — sólo puede
+      // haber un turno abierto por venue.
+      const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+
       // Create fast order for crypto payment
       const newOrder = await tx.order.create({
         data: {
           venueId,
+          shiftId: currentShift?.id ?? null,
           orderNumber: orderNumberGenerated,
           type: 'TAKEOUT',
           source: 'TPV',

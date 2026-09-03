@@ -1,5 +1,6 @@
 import { Prisma, OrderType, OrderSource, OrderStatus } from '@prisma/client'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
+import { turnoAbiertoDelNegocio } from '@/services/shared/turnoDeCaja'
 
 /** Statuses that do NOT count as "the reservation already has an order". Mirrors the partial unique index. */
 export const ALIVE_ORDER_EXCLUDED_STATUSES: OrderStatus[] = ['CANCELLED', 'DELETED']
@@ -182,9 +183,22 @@ export async function createOrderFromReservation(
   // at the booked table (when present). The cashier can change in TPV.
   const orderNumber = `RES-${Date.now().toString().slice(-8)}`
 
+  // 🔴 SÍ se estampa el turno, y el porqué importa porque la intuición dice lo contrario.
+  //
+  // «Una orden de reserva nace días antes de que exista turno» NO aplica aquí: esta función se
+  // llama SÓLO en el CHECK-IN — `reservation/checkIn.service.ts` (el cliente llega al mostrador)
+  // y `dashboard/classSession.dashboard.service.ts` con `checkInImmediately` (walk-in). Nunca al
+  // reservar. La orden nace con el cliente enfrente, igual que abrir una mesa.
+  //
+  // Y el ICP son citas y clases: dejarla sin turno haría que un spa o un gym —cuyo día ENTERO
+  // pasa por este camino— viera «0 órdenes» en su turno, que es justo el defecto que se arregla.
+  // Con el cliente de la transacción; opcional, sin turno abierto el check-in ocurre igual.
+  const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+
   const created = await tx.order.create({
     data: {
       venueId,
+      shiftId: currentShift?.id ?? null,
       orderNumber,
       type: OrderType.DINE_IN,
       source: OrderSource.TPV,

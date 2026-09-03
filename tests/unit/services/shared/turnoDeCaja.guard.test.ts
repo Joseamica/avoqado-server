@@ -11,11 +11,23 @@ const raiz = join(__dirname, '../../../../src/services')
 const esperado: Record<string, number> = {
   'tpv/payment.tpv.service.ts': 2,
   'tpv/refund.tpv.service.ts': 1,
-  'tpv/order.tpv.service.ts': 1,
+  // 3 desde el 3-sep-2026 (task 2b): `createOrderWithItems` ya lo llamaba; se suman `createOrder`
+  // (orden de mostrador) y `sellSerializedItem`, que ahora estampan `Order.shiftId`.
+  'tpv/order.tpv.service.ts': 3,
+  'tpv/table.tpv.service.ts': 1,
   'dashboard/manualPayment.service.ts': 1,
   'dashboard/refund.dashboard.service.ts': 1,
-  'mobile/order.mobile.service.ts': 1,
+  // 2 desde el 3-sep-2026: `payCashOrder` (el que ya estaba) y `createOrderWithItems`.
+  'mobile/order.mobile.service.ts': 2,
   'mobile/refund.mobile.service.ts': 1,
+  'mobile/areaTicket.mobile.service.ts': 1,
+  'mobile/areaTicketV7.mobile.service.ts': 1,
+  'mobile/estimate.mobile.service.ts': 1,
+  'reservation/createOrderFromReservation.ts': 1,
+  // ⚠️ `b4bit/b4bit.service.ts` también llama al helper (1) y NO está en esta lista a propósito:
+  // su `initiateCryptoPayment` destructura `shiftId` de `params` para el `Payment` (dato del
+  // CLIENTE), así que dispararía el segundo describe. La `Order` sí resuelve por negocio; la
+  // cobertura de eso vive en `tests/unit/services/shared/ordenLlevaElTurno.guard.test.ts`.
 }
 
 /**

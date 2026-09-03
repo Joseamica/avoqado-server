@@ -1587,6 +1587,14 @@ export async function finalizePaymentLinkCheckout(args: {
     //    so they don't clog kitchen prep queues or other operational views.
     const isPaymentOrDonation = !isItemLink
 
+    // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
+    //
+    // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
+    // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
+    // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
+    // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
+    // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
+    // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
     const order = await tx.order.create({
       data: {
         venueId,
@@ -2449,6 +2457,14 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
 
       const orderNumber = `PL-${Date.now()}`
 
+      // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
+      //
+      // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
+      // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
+      // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
+      // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
+      // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
+      // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
       const order = await tx.order.create({
         data: {
           venueId,
@@ -3318,6 +3334,14 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
       const fresh = await tx.checkoutSession.findUnique({ where: { id: session.id }, select: { paymentId: true } })
       if (fresh?.paymentId) return
 
+      // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles".
+      //
+      // Quien paga es el CLIENTE desde su teléfono, cuando quiere: este código corre en un webhook
+      // del procesador, no en el mostrador. `createdById` es quien CREÓ LA LIGA, a veces días antes.
+      // Estampar «el turno abierto ahora» metería en el corte de un cajero una venta en la que no
+      // participó —y una liga pagada de madrugada caería en el turno que alguien dejó abierto—.
+      // El dinero SÍ llega al turno correcto por otra vía: `Payment.shiftId` lo resuelve el camino
+      // del cobro. Guardado por `tests/unit/services/dashboard/paymentLink.sinTurno.test.ts`.
       const order = await tx.order.create({
         data: {
           venueId,

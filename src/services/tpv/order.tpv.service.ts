@@ -414,10 +414,17 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
     }
   }
 
+  // 🔴 La orden abierta en el mostrador pertenece al turno de caja abierto AHORA
+  // (`../shared/turnoDeCaja.ts`): `getActiveShifts` cuenta las órdenes del turno agrupando por
+  // `Order.shiftId`, y sin esto un turno enseña el dinero correcto y «0 órdenes».
+  // Opcional a propósito — un negocio que no abrió caja sigue vendiendo.
+  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
+
   // Create order
   const order = await prisma.order.create({
     data: {
       venueId,
+      shiftId: currentShift?.id ?? null,
       tableId: input.tableId || null,
       covers: input.covers || 1,
       orderNumber,
@@ -1125,6 +1132,12 @@ export async function createOrderWithItems(
           servedById: input.staffId,
           createdById: input.staffId,
           terminalId: resolvedTerminalId,
+          // 🔴 La orden nace en el turno de caja abierto AHORA: se toma en el mostrador, con
+          // el cajero enfrente. Se reusa el `currentShift` de arriba (que ya se estampa en el
+          // `Payment` del carrito gratis), nunca una segunda consulta: si el turno cerrara
+          // entre las dos lecturas, la orden y su cobro caerían en turnos distintos.
+          // Opcional a propósito — un negocio que no abrió caja sigue vendiendo.
+          shiftId: currentShift?.id ?? null,
           status: isFreeCart ? 'COMPLETED' : 'PENDING',
           paymentStatus: isFreeCart ? 'PAID' : 'PENDING',
           kitchenStatus: 'PENDING',
@@ -3681,10 +3694,16 @@ export async function sellSerializedItem(
     const tags: string[] = []
     if (input.isPortabilidad) tags.push('portabilidad')
 
+    // 🔴 Venta de mostrador: la orden nace en el turno de caja abierto AHORA
+    // (`../shared/turnoDeCaja.ts`), con el MISMO cliente de la transacción — pasar `prisma`
+    // aquí se saldría de ella. Opcional: sin turno abierto la venta ocurre igual.
+    const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+
     // Create order (PENDING until payment)
     const order = await tx.order.create({
       data: {
         venueId,
+        shiftId: currentShift?.id ?? null,
         orderNumber,
         status: 'PENDING', // Will be COMPLETED when payment succeeds
         paymentStatus: 'PENDING',

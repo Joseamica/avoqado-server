@@ -11,6 +11,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 
 // ============================================================================
 // TYPES
@@ -326,9 +327,15 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
   // Create order from estimate
   const orderNumber = `ORD-${Date.now()}`
 
+  // 🔴 Convertir el presupuesto lo hace una persona en el mostrador AHORA: la orden nace en el
+  // turno abierto de ese momento (`../shared/turnoDeCaja.ts`). La FECHA del presupuesto no manda
+  // — lo que nace hoy es la orden. Opcional: sin turno abierto la conversión ocurre igual.
+  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
+
   const order = await prisma.order.create({
     data: {
       venueId,
+      shiftId: currentShift?.id ?? null,
       orderNumber,
       createdById: staffId,
       status: 'PENDING',

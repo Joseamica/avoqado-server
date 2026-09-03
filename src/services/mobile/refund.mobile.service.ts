@@ -92,6 +92,13 @@ export async function createRefund(params: CreateRefundParams) {
     const order = await tx.order.create({
       data: {
         venueId,
+        // 🔴 La orden testigo cae en el MISMO turno que su `Payment` de abajo: se reusa el
+        // `shiftId` ya RECLAMADO arriba, nunca una segunda consulta. Si el claim falló (el
+        // turno cerró en medio), las dos quedan sin turno — juntas, que es lo que importa:
+        // una orden en un turno y su reembolso en otro descuadra el corte.
+        // ⚠️ Consecuencia declarada: el testigo cuenta como una orden más del turno en
+        // `getActiveShifts`. Se acepta a cambio de que Order y Payment nunca divergan.
+        shiftId,
         orderNumber,
         type: 'TAKEOUT',
         source: 'AVOQADO_IOS',

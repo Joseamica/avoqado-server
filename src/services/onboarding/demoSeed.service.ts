@@ -1297,6 +1297,9 @@ async function seedOrders(
     const customer = hasCustomer ? customers[Math.floor(Math.random() * customers.length)] : null
 
     // Create order
+    // 🔴 NO se estampa `shiftId`, y es DELIBERADO: son órdenes de DEMO con fecha inventada
+    // (`createdAt: orderDate`, repartidas hacia atrás). Atarlas al turno abierto de hoy metería
+    // semanas de ventas ficticias en un solo corte.
     const order = await prisma.order.create({
       data: {
         venueId,

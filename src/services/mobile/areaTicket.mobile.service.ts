@@ -45,6 +45,7 @@ import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { logAction } from '../dashboard/activity-log.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 import { formatVenueTime } from '@/utils/datetime'
 
@@ -490,9 +491,14 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
 
   try {
     const created = await prisma.$transaction(async tx => {
+      // 🔴 El vale se abre EN el mostrador: la cuenta nace en el turno de caja abierto ahora
+      // (`../shared/turnoDeCaja.ts`), resuelto con el cliente de la transacción. Opcional.
+      const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+
       const order = await tx.order.create({
         data: {
           venueId,
+          shiftId: currentShift?.id ?? null,
           orderNumber: `ORD-${Date.now()}`,
           areaTicketCode: parsed.code,
           terminalId: terminal.id,

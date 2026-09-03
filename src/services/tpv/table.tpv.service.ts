@@ -6,6 +6,7 @@ import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { logAction } from '../dashboard/activity-log.service'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 
 interface TableStatusResponse {
   id: string
@@ -271,9 +272,16 @@ export async function assignTable(
   // Create new order
   const orderNumber = `ORD-${Date.now()}`
 
+  // 🔴 Abrir mesa ocurre EN el mostrador, dentro del turno de caja abierto ahora
+  // (`../shared/turnoDeCaja.ts`). Desde la fase 1, `getActiveShifts` cuenta las órdenes del
+  // turno agrupando por `Order.shiftId`: sin esto, un restaurante entero salía con «0 órdenes».
+  // Opcional a propósito — un negocio que no abrió caja sigue atendiendo mesas.
+  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
+
   const newOrder = await prisma.order.create({
     data: {
       venueId,
+      shiftId: currentShift?.id ?? null,
       tableId: table.id,
       covers,
       orderNumber,

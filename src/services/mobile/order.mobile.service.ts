@@ -850,9 +850,16 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   let order
   try {
     order = await prisma.$transaction(async tx => {
+      // 🔴 La venta se toma en el mostrador: la orden nace en el turno de caja abierto AHORA
+      // (`../shared/turnoDeCaja.ts`), resuelto con el MISMO cliente de la transacción — pasar
+      // `prisma` aquí se saldría de ella. Desde la fase 1, `getActiveShifts` cuenta las órdenes
+      // del turno agrupando por `Order.shiftId`. Opcional: sin turno abierto la venta ocurre igual.
+      const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+
       const createdOrder = await tx.order.create({
         data: {
           venueId,
+          shiftId: currentShift?.id ?? null,
           orderNumber,
           externalId,
           reservationId: linkedReservationId,
@@ -1548,6 +1555,7 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
       servedById: true,
       type: true,
       paidAmount: true,
+      shiftId: true,
       items: { select: { id: true, orderPromotionId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
@@ -1606,6 +1614,11 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
     const created = await tx.order.create({
       data: {
         venueId,
+        // 🔴 El cheque separado HEREDA el turno de su origen, no «el turno abierto ahora»:
+        // es la MISMA comida, y separar la cuenta a caballo de un cambio de turno la partiría
+        // entre dos cortes. Heredar es un hecho copiado; resolver sería una suposición.
+        // Si el origen no tiene turno, el hijo tampoco — no se inventa uno.
+        shiftId: source.shiftId,
         tableId: source.tableId,
         covers: source.covers,
         orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
@@ -1684,6 +1697,7 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
       servedById: true,
       type: true,
       paidAmount: true,
+      shiftId: true,
       items: { select: { id: true, seat: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
@@ -1730,6 +1744,10 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
       const newOrder = await tx.order.create({
         data: {
           venueId,
+          // 🔴 Mismo criterio que separar cheque: el turno se HEREDA del origen (es la misma
+          // comida), nunca se resuelve «el turno abierto ahora» — dividir por puesto a caballo
+          // de un cambio de turno partiría una sola mesa entre dos cortes.
+          shiftId: source.shiftId,
           tableId: source.tableId,
           // Un cheque POR ASIENTO es de UNA persona: heredar los covers de la
           // mesa inflaría el conteo y dispararía cargos automáticos por grupo.
@@ -2107,7 +2125,10 @@ function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | num
 
 function assertIdempotentPaymentOrder(payment: { orderId?: string | null }, orderId: string): void {
   if (payment.orderId && payment.orderId !== orderId) {
-    throw new ConflictError('La idempotencyKey ya pertenece a otra orden. Genera una llave nueva para este cobro.', 'IDEMPOTENCY_KEY_REUSED')
+    throw new ConflictError(
+      'La idempotencyKey ya pertenece a otra orden. Genera una llave nueva para este cobro.',
+      'IDEMPOTENCY_KEY_REUSED',
+    )
   }
 }
 
@@ -2448,8 +2469,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         tenderState.resolved = resolvedTender
         const effectiveMethod = resolvedTender?.method ?? paymentMethod
         const fundsFlow =
-          resolvedTender?.fundsFlow ??
-          (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
+          resolvedTender?.fundsFlow ?? (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
         const countsAsDrawerCash = paymentCountsAsDrawerCash({
           method: effectiveMethod,
           fundsFlow,
