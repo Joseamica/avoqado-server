@@ -442,13 +442,15 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       ? await tx.cashDrawerSession.findUnique({ where: { shiftId: turnoAReusar.id }, select: { id: true } })
       : null
 
-    // ⚠️ `!= null` y no truthiness: un `Decimal(0)` es un OBJETO y por tanto truthy, así que un `&&`
-    // no distinguiría «cero» de «ausente». Quien decide es `greaterThan(0)`, explícito.
+    // ⚠️ `!= null` sobre `turnoAReusar` y no truthiness: un `Decimal(0)` es un OBJETO y por tanto
+    // truthy, así que un `&&` sobre el fondo no distinguiría «cero» de «ausente». Quien decide es
+    // `greaterThan(0)`, explícito.
+    //
+    // 🔴 `startingCash` NO se comprueba contra null: `schema.prisma` la declara **no-nulable con
+    // `@default(0)`**, así que una guarda `!= null` sería código muerto — y encima haría creer que
+    // un `de: 0` en la bitácora puede significar «era null», que es una cosa distinta.
     const fondoDelTurnoSinGaveta =
-      turnoAReusar != null &&
-      cajonDelTurnoReusado == null &&
-      turnoAReusar.startingCash != null &&
-      new Prisma.Decimal(turnoAReusar.startingCash).greaterThan(0)
+      turnoAReusar != null && cajonDelTurnoReusado == null && new Prisma.Decimal(turnoAReusar.startingCash).greaterThan(0)
         ? new Prisma.Decimal(turnoAReusar.startingCash)
         : null
 
@@ -565,13 +567,29 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     // sube el cero al fondo que de verdad tiene la caja. **Nunca al revés y nunca sobre un turno
     // que ya tuvo gaveta**: ahí su `startingCash` es suyo y describe su propia sesión de caja.
     let turnoAlineadoDesde: string | undefined
-    if (cajaCreada && turnoAReusar && !cajonDelTurnoReusado && !new Prisma.Decimal(turnoAReusar.startingCash ?? 0).equals(fondoEfectivo)) {
+    if (cajaCreada && turnoAReusar && !cajonDelTurnoReusado && !new Prisma.Decimal(turnoAReusar.startingCash).equals(fondoEfectivo)) {
       // CAS por estado: si el turno cambió debajo (cierre en curso), no se le toca el dinero.
       const alineado = await tx.shift.updateMany({
         where: { id: shiftId, venueId, status: ShiftStatus.OPEN },
         data: { startingCash: fondoEfectivo, updatedAt: ahora },
       })
-      if (alineado.count === 1) turnoAlineadoDesde = new Prisma.Decimal(turnoAReusar.startingCash ?? 0).toString()
+      if (alineado.count === 1) {
+        turnoAlineadoDesde = new Prisma.Decimal(turnoAReusar.startingCash).toString()
+      } else {
+        // 🔴 Perder ESTE CAS no es benigno como los del relevo: la gaveta se acaba de crear con el
+        // fondo bueno y el turno se queda con el suyo, que es JUSTO la divergencia que este bloque
+        // existe para matar — uno de los dos cierres firmará un descuadre que nadie causó. No se
+        // reintenta (el turno está cerrándose y tocarle el dinero sería peor), pero tampoco se
+        // calla: sin este aviso la divergencia sólo se descubre al cuadrar la caja.
+        logger.warn('[TURNO DE CAJA] no se pudo alinear el fondo del turno: cambió de estado a media apertura', {
+          venueId,
+          shiftId,
+          source,
+          fondoDelTurno: new Prisma.Decimal(turnoAReusar.startingCash).toString(),
+          fondoDeLaGaveta: fondoEfectivo.toString(),
+          cashDrawerSessionId,
+        })
+      }
     }
 
     // ── La liga ───────────────────────────────────────────────────────────────────────────

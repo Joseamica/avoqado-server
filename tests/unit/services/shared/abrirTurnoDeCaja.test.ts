@@ -19,10 +19,15 @@
 jest.mock('@/communication/rabbitmq/publisher', () => ({ publishCommand: jest.fn() }))
 
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { publishCommand } from '@/communication/rabbitmq/publisher'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { abrirTurnoDeCaja } from '@/services/shared/turnoDeCaja'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
 import { Prisma } from '@prisma/client'
+
+const mockLogAction = logAction as jest.MockedFunction<typeof logAction>
+const mockLogger = logger as unknown as { warn: jest.Mock }
 
 const m = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -723,5 +728,124 @@ describe('abrirTurnoDeCaja — el POS externo no recibe turnos que Avoqado nunca
 
     await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'SHIFT_CLOSE_IN_PROGRESS' })
     expect(publishCommand).not.toHaveBeenCalled()
+  })
+})
+
+// ============================================================================
+// LA BITÁCORA DICE LO QUE DE VERDAD SE ESCRIBIÓ
+// ============================================================================
+
+/**
+ * 🔴 Estas pruebas nacieron de un hueco medido, no de un antojo: la re-revisión de la Task 4
+ * comprobó que **borrar el bloque de auditoría entero dejaba las 45 pruebas en verde**. Las que
+ * había filtraban `logAction` por `action` y afirmaban sólo el CONTEO, nunca los VALORES — o sea
+ * que la única fila que registra «se mutó el fondo de un turno que abrió otra persona» no tenía
+ * guarda ninguna. Es la familia `prueba-que-pasa-por-el-motivo-equivocado`.
+ *
+ * Lo que aquí se fija es el CONTENIDO: el fondo que se registra es el APLICADO (el que quedó en la
+ * fila), nunca el tecleado, y el `de`/`a` de la alineación es lo único que le permite a un dueño
+ * auditar por qué su turno cambió de fondo sin que nadie lo tocara.
+ */
+describe('abrirTurnoDeCaja — la bitácora registra lo ESCRITO, no lo pedido', () => {
+  /** La caja que la tablet dejó abierta con $2,000 CONTADOS. */
+  const cajaContada = {
+    id: 'caja-de-la-tablet',
+    venueId: VENUE,
+    status: 'OPEN',
+    startingAmount: new Prisma.Decimal(2000),
+    shiftId: null,
+    openedAt: new Date('2026-09-03T13:38:00.000Z'),
+  }
+
+  /** El turno de la PAX: abierto HOY, con el $0 que es el default del campo. */
+  const turnoEnCero = {
+    id: 'turno-de-hoy',
+    venueId: VENUE,
+    status: 'OPEN',
+    endTime: null,
+    startTime: new Date('2026-09-03T14:12:00.000Z'),
+    startingCash: new Prisma.Decimal(0),
+    notes: null,
+  }
+
+  const asientos = (action: string) => mockLogAction.mock.calls.filter(c => (c[0] as { action?: string })?.action === action)
+
+  it('🔴 SHIFT_OPENED registra el fondo APLICADO, no el tecleado (Testarudo: $2,000, no $0)', async () => {
+    m.cashDrawerSession.findFirst.mockResolvedValue(cajaContada)
+
+    await abrirTurnoDeCaja(params({ source: 'TURNO_TPV', startingCash: 0 }))
+
+    // Registrar el $0 tecleado dejaría al dueño leyendo «abrió con $0» sobre una fila que dice
+    // $2,000: una divergencia entre el log y el dato que parece un bug del sistema.
+    const [asiento] = asientos('SHIFT_OPENED')
+    expect(asiento[0]).toMatchObject({ entity: 'Shift', entityId: 'turno-nuevo', venueId: VENUE, staffId: STAFF })
+    expect((asiento[0].data as { startingCash: number }).startingCash).toBe(2000)
+    expect((asiento[0].data as { source: string }).source).toBe('TURNO_TPV')
+  })
+
+  it('🔴 CASH_DRAWER_OPENED registra el `startingAmount` con el que la gaveta de verdad nació', async () => {
+    m.shift.findFirst.mockResolvedValue({ ...turnoEnCero, startingCash: new Prisma.Decimal(2000) })
+
+    await abrirTurnoDeCaja(params({ source: 'CAJA_MOVIL', startingCash: 0 }))
+
+    const [asiento] = asientos('CASH_DRAWER_OPENED')
+    expect(asiento[0]).toMatchObject({ entity: 'CashDrawerSession', entityId: 'caja-nueva' })
+    expect((asiento[0].data as { startingAmount: number }).startingAmount).toBe(2000)
+  })
+
+  it('🔴 SHIFT_STARTING_CASH_ALIGNED dice de CUÁNTO a CUÁNTO se movió el fondo, y de qué gaveta', async () => {
+    // Mutar el fondo de un turno YA ABIERTO es tocar dinero. Sin el `de`/`a`, la fila de la
+    // bitácora no permite reconstruir qué cambió, que es exactamente para lo que existe.
+    m.shift.findFirst.mockResolvedValue(turnoEnCero)
+
+    await abrirTurnoDeCaja(params({ source: 'CAJA_MOVIL', startingCash: 2000 }))
+
+    const [asiento] = asientos('SHIFT_STARTING_CASH_ALIGNED')
+    expect(asiento).toBeDefined()
+    expect(asiento[0]).toMatchObject({ entity: 'Shift', entityId: 'turno-de-hoy', venueId: VENUE, staffId: STAFF })
+    expect(asiento[0].data).toMatchObject({ de: 0, a: 2000, cashDrawerSessionId: 'caja-nueva', source: 'CAJA_MOVIL' })
+  })
+
+  it('🔴 y NO se escribe cuando no se movió nada: un asiento de más miente igual que uno de menos', async () => {
+    m.shift.findFirst.mockResolvedValue({ ...turnoEnCero, startingCash: new Prisma.Decimal(2000) })
+
+    await abrirTurnoDeCaja(params({ source: 'CAJA_MOVIL', startingCash: 2000 }))
+
+    expect(asientos('SHIFT_STARTING_CASH_ALIGNED')).toHaveLength(0)
+  })
+
+  it('🔴 si el CAS de la alineación PIERDE, no se registra la alineación y queda un aviso', async () => {
+    // El turno pasó a CLOSING entre la lectura y el UPDATE: la gaveta nace con el fondo bueno y el
+    // turno se queda en 0. Es JUSTO la divergencia que ese bloque existe para matar, así que
+    // callarla sería peor que no haberlo intentado.
+    m.shift.findFirst.mockResolvedValue(turnoEnCero)
+    m.shift.updateMany.mockResolvedValue({ count: 0 })
+
+    const r = await abrirTurnoDeCaja(params({ source: 'CAJA_MOVIL', startingCash: 2000 }))
+
+    expect(r.turnoAlineadoDesde).toBeUndefined()
+    expect(asientos('SHIFT_STARTING_CASH_ALIGNED')).toHaveLength(0)
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no se pudo alinear el fondo del turno'),
+      expect.objectContaining({ venueId: VENUE, shiftId: 'turno-de-hoy', fondoDeLaGaveta: '2000' }),
+    )
+  })
+
+  it('el relevo deja constancia de que NADIE contó, con el id de lo que cerró', async () => {
+    m.shift.findFirst.mockResolvedValue({
+      id: 'turno-de-ayer',
+      venueId: VENUE,
+      status: 'OPEN',
+      endTime: null,
+      startTime: new Date('2026-09-02T16:00:00.000Z'),
+      startingCash: new Prisma.Decimal(500),
+      notes: null,
+    })
+
+    await abrirTurnoDeCaja(params({ source: 'CAJA_MOVIL' }))
+
+    const [asiento] = asientos('SHIFT_CLOSED_ON_NEXT_OPEN')
+    expect(asiento[0]).toMatchObject({ entity: 'Shift', entityId: 'turno-de-ayer' })
+    expect(asiento[0].data).toMatchObject({ sinConteo: true, source: 'CAJA_MOVIL' })
   })
 })
