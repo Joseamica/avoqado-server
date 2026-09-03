@@ -109,8 +109,30 @@ export async function createOrderFromReservation(
   }
 
   // 4. Compute monetary totals.
+  //
+  // 🔴 DINERO: el precio del catálogo es FINAL — el IVA va DENTRO, no encima.
+  //
+  // Hasta el 2026-09-03 esto hacía `lineTax = lineSubtotal × product.taxRate` y lo
+  // SUMABA al total. Con `Product.taxRate` en `@default(0.16)` y ningún formulario
+  // que exponga el campo, eso inflaba 16% cada cita. Caso real: Amaena, orden
+  // RES-14508324 — un paquete de $1,000 nació en $1,160, y la dueña confirmó que
+  // el precio es $1,000. En México el precio en pantalla ya trae el IVA salvo que
+  // diga "+ IVA" (misma convención que Fudo: "el precio indicado es el precio final
+  // de venta, incluyendo los impuestos"; el impuesto se desglosa en el comprobante,
+  // no se suma a la cuenta).
+  //
+  // 🔑 `taxAmount = 0` NO es cosmético: es el discriminador que el CFDI lee para
+  // decidir que el precio trae el IVA adentro y desglosarlo hacia atrás
+  // (`pricesIncludeIva` en `fiscal/cfdi.service.ts` → `splitIvaIncluded`). Dejarlo
+  // en 0 alinea este camino con los otros ocho caminos de venta nativos, que ya lo
+  // escriben así.
+  //
+  // ⚠️ Cuando exista un discriminador explícito de intención del negocio (hoy no se
+  // puede distinguir "el dueño eligió 16%" de "el schema lo rellenó"), ESTE es el
+  // único sitio de esta función que hay que tocar para volver a sumar el impuesto.
   let subtotal = new Prisma.Decimal(0)
-  let totalTax = new Prisma.Decimal(0)
+  /** Impuesto SEPARADO de la cuenta. Cero por definición: el IVA va dentro del precio. */
+  const SIN_IMPUESTO_SEPARADO = new Prisma.Decimal(0)
   type LineDraft = {
     productId: string
     productName: string
@@ -127,15 +149,13 @@ export async function createOrderFromReservation(
     const product = productById.get(pid)
     if (!product) continue
     const unitPrice = new Prisma.Decimal(product.price)
-    const taxRate = new Prisma.Decimal(product.taxRate)
     // Line subtotal scales with seatCount so a partySize=3 walk-in charges
     // 3× the class price in one transaction. seatCount=1 (the historical
     // default) leaves the math identical to the previous behavior.
     const lineSubtotal = unitPrice.mul(seatCount)
-    const lineTax = lineSubtotal.mul(taxRate)
-    const lineTotal = lineSubtotal.add(lineTax)
+    // El total del renglón ES su precio de lista: el IVA ya está contenido.
+    const lineTotal = lineSubtotal
     subtotal = subtotal.add(lineSubtotal)
-    totalTax = totalTax.add(lineTax)
 
     const modRows = modifiersByProduct.get(pid) ?? []
     const modLines: LineDraft['modifiers'] = []
@@ -144,8 +164,6 @@ export async function createOrderFromReservation(
       // booking time times a family of 3 means 3 esmaltes on the bill.
       const lineTotalMod = new Prisma.Decimal(m.price).mul(m.quantity).mul(seatCount)
       subtotal = subtotal.add(lineTotalMod)
-      const modTax = lineTotalMod.mul(taxRate)
-      totalTax = totalTax.add(modTax)
       modLines.push({
         name: m.name ?? '',
         // `quantity` se queda PER-UNIT porque hay dos lectores que lo exigen: el analytics
@@ -172,13 +190,14 @@ export async function createOrderFromReservation(
       productSku: product.sku,
       categoryName: product.category?.name ?? null,
       unitPrice,
-      taxAmount: lineTax,
+      taxAmount: SIN_IMPUESTO_SEPARADO,
       total: lineTotal,
       modifiers: modLines,
     })
   }
 
-  const total = subtotal.add(totalTax)
+  // El total de la cuenta ES la suma de precios de lista: el IVA ya está contenido.
+  const total = subtotal
   // Reservation-originated orders default to DINE_IN — they're seat-anchored
   // at the booked table (when present). The cashier can change in TPV.
   const orderNumber = `RES-${Date.now().toString().slice(-8)}`
@@ -212,7 +231,7 @@ export async function createOrderFromReservation(
       createdById: input.createdByStaffId ?? undefined,
       ...(reservation.assignedStaffId !== null && { servedById: reservation.assignedStaffId }),
       subtotal,
-      taxAmount: totalTax,
+      taxAmount: SIN_IMPUESTO_SEPARADO,
       total,
       remainingBalance: total,
       // PENDING / kitchen PENDING / paymentStatus PENDING — cashier picks up
