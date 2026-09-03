@@ -9,7 +9,8 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
-import { abrirTurnoDeCaja, cerrarTurnoDeCaja } from '../shared/turnoDeCaja'
+import { abrirTurnoDeCaja, cerrarTurnoDeCaja, turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma } from '@prisma/client'
 
@@ -452,6 +453,23 @@ export async function closeSession(params: CloseSessionParams) {
     throw new NotFoundError('No hay una caja abierta')
   }
   const actualDecimal = dollarsToDecimal(actualAmount)
+
+  // ── El registro durable del gesto, ANTES del primer commit ────────────────────────────────
+  //
+  // 🔴 Este cierre son DOS commits, y si el proceso muere en medio lo que queda NO «degrada a lo de
+  // hoy»: con la apertura ya unificada, el turno que sobrevive a su gaveta lo REUSA la cajera de la
+  // tarde y acaba firmando dos arqueos con los totales del día entero (mezcla jornadas). El barrido
+  // `cash-close-pair-reconciler` repara eso, pero sólo puede si la gaveta dice de QUÉ turno era:
+  // emparejarlas por reloj es justo lo que mezclaría las jornadas (la forma real de producción es
+  // una caja abierta a las 07:38 y un turno a las 08:12).
+  //
+  // Casi siempre no hace nada —desde la Task 4 la apertura ya deja los dos registros ligados—, así
+  // que sólo cuesta consultas cuando la liga de verdad falta. Y nunca lanza: si no se puede ligar,
+  // la pareja queda como hoy y el barrido la reporta en vez de repararla.
+  if (!session.shiftId) {
+    const turno = await turnoAbiertoDelNegocio(prisma, venueId).catch(() => null)
+    if (turno) await asegurarLaLiga(prisma, venueId, turno.id, session.id)
+  }
 
   // Fase 4: el cierre es UNA transacción con CAS. Antes era leer → calcular → actualizar en
   // tres pasos sueltos: una venta que entrara entre "leer" y "escribir" dejaba el `overShort`

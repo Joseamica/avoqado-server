@@ -24,14 +24,19 @@ jest.mock('@/services/shared/turnoDeCaja', () => ({
   __esModule: true,
   abrirTurnoDeCaja: jest.fn(),
   cerrarTurnoDeCaja: jest.fn(),
+  turnoAbiertoDelNegocio: jest.fn(),
 }))
+jest.mock('@/services/shared/parejaDeCierre', () => ({ __esModule: true, asegurarLaLiga: jest.fn() }))
 
 import { Prisma } from '@prisma/client'
-import { cerrarTurnoDeCaja } from '@/services/shared/turnoDeCaja'
+import { cerrarTurnoDeCaja, turnoAbiertoDelNegocio } from '@/services/shared/turnoDeCaja'
+import { asegurarLaLiga } from '@/services/shared/parejaDeCierre'
 import { closeSession } from '@/services/mobile/cash-drawer.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const mockCerrar = cerrarTurnoDeCaja as jest.MockedFunction<typeof cerrarTurnoDeCaja>
+const mockTurnoAbierto = turnoAbiertoDelNegocio as jest.MockedFunction<typeof turnoAbiertoDelNegocio>
+const mockLigar = asegurarLaLiga as jest.MockedFunction<typeof asegurarLaLiga>
 const VENUE = 'venue-1'
 const CAJA = 's-1'
 const TURNO = 'turno-1'
@@ -89,6 +94,8 @@ beforeEach(() => {
   jest.clearAllMocks()
   mundo()
   mockCerrar.mockResolvedValue({ shiftCerradoId: TURNO, conConteo: true } as never)
+  mockTurnoAbierto.mockResolvedValue({ id: TURNO } as never)
+  mockLigar.mockResolvedValue(true as never)
 })
 
 describe('cerrar la caja desde la tablet cierra el turno del negocio', () => {
@@ -126,6 +133,48 @@ describe('cerrar la caja desde la tablet cierra el turno del negocio', () => {
     expect(sesion.id).toBe(CAJA)
     expect(sesion.status).toBe('CLOSED')
     expect(sesion.actualAmount).toBe(2950)
+  })
+
+  /**
+   * 🔴 Y lo que queda cuando eso pasa NO «degrada a lo de hoy» (Codex, 3-sep-2026). Con la apertura
+   * ya unificada, un turno que sobrevive a su gaveta lo REUSA la cajera de la tarde
+   * (`abrirTurnoDeCaja` lo encuentra dentro del mismo día de negocio) y acaba firmando dos arqueos
+   * con los totales del día entero: MEZCLA JORNADAS. Por eso el fallo tiene que quedar REPARABLE, y
+   * lo único que hace falta para repararlo es que la gaveta diga de qué turno era.
+   */
+  it('🔴 el fallo queda REPARABLE: la gaveta y su turno se ligan ANTES de que la gaveta se cierre', async () => {
+    // Una gaveta anterior a la apertura unificada, o cuya liga no se pudo escribir: sin `shiftId`
+    // nadie puede saber después de qué turno era, y emparejarla por reloj es lo que mezcla jornadas.
+    mundo()
+    ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue(abierta({ shiftId: null }))
+    mockCerrar.mockRejectedValue(new Error('el turno está en CLOSING') as never)
+
+    await cerrar()
+
+    expect(mockLigar).toHaveBeenCalledWith(expect.anything(), VENUE, TURNO, CAJA)
+    // ANTES: la liga es el registro durable del gesto, así que tiene que estar commiteada antes de
+    // que la primera mitad lo esté. Después no serviría de nada si el proceso muere en medio.
+    expect(mockLigar.mock.invocationCallOrder[0]).toBeLessThan(
+      (prismaMock as any).cashDrawerSession.updateMany.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('con la gaveta ya ligada no se vuelve a ligar: es el estado normal desde la Task 4', async () => {
+    await cerrar()
+
+    expect(mockLigar).not.toHaveBeenCalled()
+    expect(mockTurnoAbierto).not.toHaveBeenCalled()
+  })
+
+  it('🔴 sin turno abierto no hay pareja que ligar, y el cierre de la gaveta sigue igual', async () => {
+    mundo()
+    ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue(abierta({ shiftId: null }))
+    mockTurnoAbierto.mockResolvedValue(null as never)
+
+    const sesion: any = await cerrar()
+
+    expect(mockLigar).not.toHaveBeenCalled()
+    expect(sesion.status).toBe('CLOSED')
   })
 
   it('la respuesta conserva EXACTAMENTE los campos de hoy, más `shiftId` (aditivo)', async () => {
