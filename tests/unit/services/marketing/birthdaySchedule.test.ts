@@ -20,6 +20,7 @@ import {
   cumpleanosAFelicitar,
   fechasPendientes,
   MAX_FECHAS_POR_BARRIDO,
+  diasDeNacimientoQueCumplenEl,
 } from '@/services/marketing/birthdaySchedule'
 
 describe('aniversarioNormalizado', () => {
@@ -79,11 +80,7 @@ describe('fechasPendientes — el catch-up, y su tolerancia de atraso', () => {
   })
 
   it('varios días caídos: los evalúa en ORDEN', () => {
-    expect(fechasPendientes({ desde: '2026-07-07', hoy: '2026-07-10', daysBefore: 7 })).toEqual([
-      '2026-07-08',
-      '2026-07-09',
-      '2026-07-10',
-    ])
+    expect(fechasPendientes({ desde: '2026-07-07', hoy: '2026-07-10', daysBefore: 7 })).toEqual(['2026-07-08', '2026-07-09', '2026-07-10'])
   })
 
   it('🔴 una fecha tan vieja que el correo llegaría DESPUÉS del cumpleaños se omite', () => {
@@ -118,5 +115,33 @@ describe('fechasPendientes — el catch-up, y su tolerancia de atraso', () => {
     expect(fechas.length).toBeLessThanOrEqual(MAX_FECHAS_POR_BARRIDO)
     // Y lo que evalúe debe ser lo MÁS RECIENTE, que es lo que sigue sirviendo.
     expect(fechas[fechas.length - 1]).toBe('2026-07-10')
+  })
+})
+
+describe('diasDeNacimientoQueCumplenEl — la inversa, para poder buscarlos en la base', () => {
+  it('un día normal corresponde a un solo día de nacimiento', () => {
+    expect(diasDeNacimientoQueCumplenEl(2026, 7, 15)).toEqual([15])
+  })
+
+  it('🔴 el 28 de febrero de un año NO bisiesto incluye también a los nacidos el 29', () => {
+    // Es la misma regla que `aniversarioNormalizado`, vista al revés. Si las dos no
+    // coinciden, quien nació un 29-feb no aparece en la búsqueda y se queda sin felicitación.
+    expect(diasDeNacimientoQueCumplenEl(2026, 2, 28)).toEqual([28, 29])
+  })
+
+  it('el 28 de febrero de un año BISIESTO es sólo el 28: el 29 tiene su propio día', () => {
+    expect(diasDeNacimientoQueCumplenEl(2028, 2, 28)).toEqual([28])
+  })
+
+  it('el 29 de febrero de un año bisiesto es sólo el 29', () => {
+    expect(diasDeNacimientoQueCumplenEl(2028, 2, 29)).toEqual([29])
+  })
+
+  it('🔴 la directa y la inversa CONCUERDAN para quien nació un 29-feb', () => {
+    // El invariante que de verdad importa: si la directa dice que en 2026 se celebra el 28,
+    // la inversa tiene que devolver a esa persona al buscar el 28.
+    const celebra = aniversarioNormalizado('1992-02-29', 2026)
+    expect(celebra).toBe('2026-02-28')
+    expect(diasDeNacimientoQueCumplenEl(2026, 2, 28)).toContain(29)
   })
 })

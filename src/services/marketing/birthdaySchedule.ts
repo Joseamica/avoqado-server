@@ -100,3 +100,21 @@ export function fechasPendientes({ desde, hoy, daysBefore }: FechasPendientesPar
   // Regla 3: nos quedamos con la cola más reciente.
   return fechas.slice(-MAX_FECHAS_POR_BARRIDO)
 }
+
+/**
+ * La relación INVERSA de `aniversarioNormalizado`: dado el día en que se celebra un
+ * aniversario, qué días de nacimiento le corresponden.
+ *
+ * 🔴 Vive aquí, junto a su directa, porque son la MISMA regla mirada desde los dos lados.
+ * Estaba escrita otra vez dentro de la consulta del barrido, y una regla en dos sitios se
+ * arregla en uno solo: si algún día se decidiera celebrar el 29-feb el 1 de marzo, la
+ * copia olvidada seguiría buscando el 28 y esa gente dejaría de recibir su felicitación
+ * sin que ninguna prueba lo notara.
+ *
+ * Casi siempre es un solo día. La excepción es el 28 de febrero de un año NO bisiesto: ahí
+ * cumplen también los nacidos un 29.
+ */
+export function diasDeNacimientoQueCumplenEl(año: number, mes: number, dia: number): number[] {
+  const esFebrero28DeAñoNoBisiesto = mes === 2 && dia === 28 && !DateTime.fromObject({ year: año }, { zone: 'utc' }).isInLeapYear
+  return esFebrero28DeAñoNoBisiesto ? [28, 29] : [dia]
+}

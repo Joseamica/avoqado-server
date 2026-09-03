@@ -47,8 +47,6 @@ jest.mock('@/controllers/dashboard/birthdayAutomation.dashboard.controller', () 
 
 import birthdayAutomationRoutes from '@/routes/dashboard/birthdayAutomation.routes'
 
-
-
 const VENUE = 'clv1000000000000000000000'
 const URL = `/api/v1/dashboard/venues/${VENUE}/birthday-automation`
 
@@ -71,7 +69,7 @@ const cuerpo = (activa: boolean) => ({
   activa,
 })
 
-let servers: Server[] = []
+const servers: Server[] = []
 function servidor(role: string) {
   rolEnLaBase.valor = role
   const s = app(role).listen(0)

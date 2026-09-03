@@ -4,7 +4,7 @@ import { Prisma, BirthdayAutomationStatus, CustomerCampaignDeliveryStatus } from
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
-import { fechasPendientes, cumpleanosAFelicitar, aniversarioNormalizado } from './birthdaySchedule'
+import { fechasPendientes, cumpleanosAFelicitar, diasDeNacimientoQueCumplenEl } from './birthdaySchedule'
 
 /**
  * Barrido del cumpleaños automático: encola las felicitaciones que tocan hoy.
@@ -140,10 +140,10 @@ async function encolarFecha(tx: Prisma.TransactionClient, auto: AutomatizacionDe
   const mes = Number(mesStr)
   const dia = Number(diaStr)
 
-  // Quien cumple años ese día. 🔴 Si el objetivo es 28-feb en un año NO bisiesto, también
-  // entran los nacidos el 29 — su aniversario se normaliza a ese día (ver birthdaySchedule).
-  const esFebrero28NoBisiesto = mes === 2 && dia === 28 && !DateTime.fromObject({ year: año }).isInLeapYear
-  const dias = esFebrero28NoBisiesto ? [28, 29] : [dia]
+  // Quién cumple años ese día. La regla del 29-feb vive en UN solo sitio, junto a su
+  // inversa (`birthdaySchedule`): tenerla también aquí era pedir que un cambio futuro se
+  // aplicara a medias.
+  const dias = diasDeNacimientoQueCumplenEl(año, mes, dia)
 
   const candidatos = await tx.$queryRaw<{ id: string; birthDate: Date }[]>`
     SELECT c."id", c."birthDate"
