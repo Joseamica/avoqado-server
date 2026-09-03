@@ -6,7 +6,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { logAction } from '../dashboard/activity-log.service'
-import { businessDayStart } from './cashDrawerAutoClose'
+import { AUTO_CLOSED_BY_NAME, businessDayStart } from './cashDrawerAutoClose'
 
 /** Acepta el cliente de Prisma o un `tx`: los sitios que atan dinero llaman desde ambos. */
 export type ShiftReader = Pick<PrismaClient, 'shift'> | Pick<Prisma.TransactionClient, 'shift'>
@@ -126,19 +126,49 @@ export interface AbrirTurnoDeCajaResult {
   /** `false` = ya estaba abierto y se LIGÓ. Es lo que la UI necesita para no decir «abriste» cuando reusó. */
   shiftCreado: boolean
   cajaCreada: boolean
-  /** Sólo cuando se relevó un turno de un día de negocio anterior. */
-  relevo?: { shiftCerradoId: string }
+  /**
+   * Lo que ESTA llamada cerró SIN CONTEO por ser de un día de negocio anterior. Van por separado
+   * porque se relevan por separado: el turno puede estar abierto de ayer con la caja de hoy, o al
+   * revés. Si otro aparato se adelantó y cerró primero, el campo NO aparece — no lo hicimos nosotros.
+   */
+  relevo?: { shiftCerradoId?: string; cajaCerradaId?: string }
 }
 
 /** Marca legible del relevo. Va en `Shift.notes`: quien lo lea tiene que saber que NADIE contó. */
 export const NOTA_DEL_RELEVO = 'Cerrado por relevo al abrir el turno del día siguiente. Sin conteo.'
 
+/** Su gemela para el cajón. Va en `closingNote`, con la misma promesa: nadie contó. */
+export const NOTA_DEL_RELEVO_DE_CAJA = '[Sistema] Cerrada por relevo al abrir la caja del día siguiente. Sin conteo.'
+
+/** Los dos índices únicos PARCIALES que garantizan «uno abierto por negocio». Se crean en SQL. */
+export const INDICE_TURNO_ABIERTO = 'Shift_venueId_open_key'
+export const INDICE_CAJA_ABIERTA = 'CashDrawerSession_venueId_open_key'
+
 function conflictoDeApertura(): ConflictError {
   return new ConflictError('Ya hay un turno de caja abierto en este negocio. Ciérralo antes de abrir otro.', 'CASH_SHIFT_ALREADY_OPEN')
 }
 
-function esChoqueDeUnico(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
+function cierreEnProceso(): ConflictError {
+  return new ConflictError('El cierre de turno ya está en proceso. Intenta de nuevo en unos momentos.', 'SHIFT_CLOSE_IN_PROGRESS')
+}
+
+/**
+ * 🔴 NO TODO P2002 ES «YA HAY UNO ABIERTO», y confundirlos manda al cajero a buscar algo que no
+ * existe. `Shift` tiene un segundo único —`@@unique([venueId, externalId])`, que SÍ se puebla en los
+ * venues integrados con SoftRestaurant— y `CashDrawerSession` tiene el suyo por `shiftId`. Mirar
+ * sólo `error.code` traduciría cualquiera de esos choques a «ya hay un turno abierto» sobre un
+ * negocio que no tiene ninguno.
+ *
+ * Se discrimina por `meta.target`, que en Postgres trae el nombre del índice (o la lista de campos).
+ * 🔴 Y si NO viene, no se adivina: se deja subir el error tal cual. Un 500 honesto es mejor que un
+ * 409 que miente — el 409 además lo tratan las apps como rechazo PERMANENTE y descartan lo encolado.
+ */
+export function esChoqueDelUnico(error: unknown, nombreDelIndice: string): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false
+  const target = (error.meta as { target?: unknown } | undefined)?.target
+  if (target === undefined || target === null) return false
+  const comoTexto = Array.isArray(target) ? target.join(',') : String(target)
+  return comoTexto.includes(nombreDelIndice)
 }
 
 /**
@@ -194,6 +224,11 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     orderBy: { startTime: 'desc' },
     select: { id: true, status: true, startTime: true },
   })
+  // 🔴 El rechazo por CLOSING va ANTES de publicar, igual que en `openShiftForVenue`: si no, el POS
+  // externo se queda con un `Shift OPEN` que Avoqado nunca va a crear. La comprobación se repite
+  // dentro de la transacción porque ésta no es autoritativa — aquí sólo evita el efecto externo.
+  if (turnoPrevio && turnoPrevio.status === ShiftStatus.CLOSING) throw cierreEnProceso()
+
   const hariaFaltaCrearTurno = !turnoPrevio || turnoPrevio.startTime < corteDelDiaDeNegocio
 
   let shiftExternalId: string | null = null
@@ -230,16 +265,13 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       select: { id: true, status: true, startTime: true, notes: true },
     })
 
-    if (turno && turno.status === ShiftStatus.CLOSING) {
-      throw new ConflictError('El cierre de turno ya está en proceso. Intenta de nuevo en unos momentos.', 'SHIFT_CLOSE_IN_PROGRESS')
-    }
+    if (turno && turno.status === ShiftStatus.CLOSING) throw cierreEnProceso()
 
-    let relevo: { shiftCerradoId: string } | undefined
+    let shiftCerradoId: string | undefined
     let turnoAReusar = turno
 
     if (turno && turno.startTime < corteDelDiaDeNegocio) {
-      // CAS: sólo cierra si sigue OPEN y sin `endTime`. Si alguien lo cerró entre la lectura y
-      // aquí, no se pisa nada — se aborta y quien reintente encontrará el estado ya limpio.
+      // CAS: sólo cierra si sigue OPEN y sin `endTime`.
       const cerrado = await tx.shift.updateMany({
         where: { id: turno.id, venueId, status: ShiftStatus.OPEN, endTime: null },
         data: {
@@ -249,9 +281,32 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
           updatedAt: ahora,
         },
       })
-      if (cerrado.count !== 1) throw conflictoDeApertura()
-      relevo = { shiftCerradoId: turno.id }
-      turnoAReusar = null
+
+      if (cerrado.count === 1) {
+        shiftCerradoId = turno.id
+        turnoAReusar = null
+      } else {
+        // 🔴 PERDER EL CAS AQUÍ ES UNA CARRERA BENIGNA, NO UN CONFLICTO: significa que otro aparato
+        // ya cerró el turno de ayer, que es EXACTAMENTE el estado que queríamos. Lanzar «ya hay un
+        // turno abierto, ciérralo» diría lo contrario de la verdad — y las apps tratan el 409 como
+        // rechazo PERMANENTE, así que una apertura encolada que cayera aquí se descartaría para
+        // siempre. Se relee y se sigue.
+        const estadoReal = await tx.shift.findUnique({ where: { id: turno.id }, select: { status: true, endTime: true } })
+
+        if (!estadoReal || estadoReal.endTime !== null || estadoReal.status === ShiftStatus.CLOSED) {
+          logger.info('[TURNO DE CAJA] Otro aparato ya había relevado el turno del día anterior', { venueId, shiftId: turno.id })
+          turnoAReusar = null
+        } else if (estadoReal.status === ShiftStatus.CLOSING) {
+          throw cierreEnProceso()
+        } else {
+          // Prácticamente inalcanzable (el `where` del CAS sólo fija id, venue, estado y endTime),
+          // pero si pasa el mensaje dice la verdad: no se pudo cerrar, vuelve a intentar.
+          throw new ConflictError(
+            'No se pudo cerrar el turno del día anterior; vuelve a intentar en unos segundos.',
+            'SHIFT_HANDOVER_RETRY',
+          )
+        }
+      }
     }
 
     let shiftId: string
@@ -289,8 +344,9 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
           select: { id: true },
         })
         .catch((error: unknown) => {
-          // El índice único parcial `Shift(venueId) WHERE status='OPEN'`: otra terminal ganó.
-          if (esChoqueDeUnico(error)) throw conflictoDeApertura()
+          // SÓLO el índice único parcial `Shift(venueId) WHERE status='OPEN'`: otra terminal ganó.
+          // Un choque de `venueId_externalId` (venues integrados) sube tal cual, no se disfraza.
+          if (esChoqueDelUnico(error, INDICE_TURNO_ABIERTO)) throw conflictoDeApertura()
           throw error
         })
       shiftId = nuevo.id
@@ -298,10 +354,45 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     }
 
     // ── El cajón físico ───────────────────────────────────────────────────────────────────
-    const caja = await tx.cashDrawerSession.findFirst({
+    //
+    // 🔴 SE RELEVA IGUAL QUE EL TURNO, y la simetría no es estética. Buscar aquí un
+    // `{ venueId, status: 'OPEN' }` pelado —sin comparar contra el corte— hace que el turno de HOY
+    // herede la caja de AYER con su fondo y sus eventos de dos días, y quien cierre hoy cuenta el
+    // efectivo contra un esperado que no es el suyo. No es un caso raro: abren a las 05:30, el turno
+    // de ayer se releva bien, pero la caja de ayer sigue abierta porque `cashDrawerAutoClose` la
+    // respeta si tuvo un movimiento hace menos de 2 h — y una venta de las 03:30 la protege.
+    //
+    // 🔴 Y aquí NO se aplica esa gracia de inactividad, a propósito: el barrido corre solo con un
+    // temporizador y la necesita para no arrancarle la caja a un local que sigue vendiendo a las
+    // 04:05. Aquí hay una PERSONA en el mostrador pidiendo abrir, que es la señal más fuerte que
+    // existe de que la sesión anterior terminó.
+    const cajaAbierta = await tx.cashDrawerSession.findFirst({
       where: { venueId, status: 'OPEN' },
-      select: { id: true, shiftId: true },
+      select: { id: true, shiftId: true, openedAt: true },
     })
+
+    let cajaCerradaId: string | undefined
+    let caja = cajaAbierta
+
+    if (cajaAbierta && cajaAbierta.openedAt < corteDelDiaDeNegocio) {
+      // Misma forma exacta que `cashDrawerAutoClose`: sin `actualAmount`, sin `overShort`, sin
+      // `closedByStaffId` y SIN evento `CLOSE` — un evento lleva `amount`, y una fila en cero se
+      // lee como un conteo. Es la firma que `isAutoClosedSession` reconoce como «nadie contó».
+      const cerrada = await tx.cashDrawerSession.updateMany({
+        where: { id: cajaAbierta.id, status: 'OPEN' },
+        data: {
+          status: 'CLOSED',
+          closedAt: ahora,
+          closedByStaffId: null,
+          closedByName: AUTO_CLOSED_BY_NAME,
+          closingNote: NOTA_DEL_RELEVO_DE_CAJA,
+        },
+      })
+      // Perder el CAS otra vez es benigno: alguien la cerró primero, que es lo que queríamos.
+      if (cerrada.count === 1) cajaCerradaId = cajaAbierta.id
+      else logger.info('[TURNO DE CAJA] Otro aparato ya había cerrado la caja del día anterior', { venueId, cajaId: cajaAbierta.id })
+      caja = null
+    }
 
     let cashDrawerSessionId: string
     let cajaCreada = false
@@ -334,7 +425,9 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
           select: { id: true },
         })
         .catch((error: unknown) => {
-          if (esChoqueDeUnico(error)) throw conflictoDeApertura()
+          // SÓLO el índice de cajas abiertas. Un choque de `CashDrawerSession_shiftId_key` o del
+          // `localId` del evento no significa «ya hay una caja abierta» y sube tal cual.
+          if (esChoqueDelUnico(error, INDICE_CAJA_ABIERTA)) throw conflictoDeApertura()
           throw error
         })
       cashDrawerSessionId = nueva.id
@@ -373,12 +466,17 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       })
     }
 
+    const relevo =
+      shiftCerradoId || cajaCerradaId
+        ? { ...(shiftCerradoId ? { shiftCerradoId } : {}), ...(cajaCerradaId ? { cajaCerradaId } : {}) }
+        : undefined
+
     return { shiftId, cashDrawerSessionId, shiftCreado, cajaCreada, ...(relevo ? { relevo } : {}) } as AbrirTurnoDeCajaResult
   })
 
   // ── Bitácora: fuera de la transacción y fire-and-forget ───────────────────────────────────
   // Si la bitácora truena, la apertura NO se deshace (mismo patrón que el resto del repo).
-  if (resultado.relevo) {
+  if (resultado.relevo?.shiftCerradoId) {
     void logAction({
       staffId,
       venueId,
@@ -386,6 +484,16 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       entity: 'Shift',
       entityId: resultado.relevo.shiftCerradoId,
       data: { motivo: 'relevo al abrir el turno del día siguiente', sinConteo: true, source },
+    })
+  }
+  if (resultado.relevo?.cajaCerradaId) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'CASH_DRAWER_CLOSED_ON_NEXT_OPEN',
+      entity: 'CashDrawerSession',
+      entityId: resultado.relevo.cajaCerradaId,
+      data: { motivo: 'relevo al abrir la caja del día siguiente', sinConteo: true, source },
     })
   }
   if (resultado.shiftCreado) {
@@ -416,7 +524,8 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     cashDrawerSessionId: resultado.cashDrawerSessionId,
     shiftCreado: resultado.shiftCreado,
     cajaCreada: resultado.cajaCreada,
-    relevo: resultado.relevo?.shiftCerradoId ?? null,
+    turnoRelevado: resultado.relevo?.shiftCerradoId ?? null,
+    cajaRelevada: resultado.relevo?.cajaCerradaId ?? null,
   })
 
   return resultado

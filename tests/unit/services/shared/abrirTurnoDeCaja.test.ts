@@ -27,7 +27,7 @@ import { Prisma } from '@prisma/client'
 const m = prisma as unknown as {
   venue: { findUnique: jest.Mock }
   staffVenue: { findFirst: jest.Mock }
-  shift: { findFirst: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
+  shift: { findFirst: jest.Mock; findUnique: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
   cashDrawerSession: { findFirst: jest.Mock; findUnique: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
   $transaction: jest.Mock
 }
@@ -64,9 +64,20 @@ function sinNada() {
   m.cashDrawerSession.create.mockImplementation(({ data }: any) => Promise.resolve({ id: 'caja-nueva', ...data }))
   m.cashDrawerSession.updateMany.mockResolvedValue({ count: 1 })
   m.shift.updateMany.mockResolvedValue({ count: 1 })
+  m.shift.findUnique.mockResolvedValue(null)
 }
 
-const p2002 = () => new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'x' } as any)
+/**
+ * Un P2002 CON su `meta.target`, que es lo que permite saber QUÉ único chocó. Sin discriminar,
+ * un choque de `Shift(venueId, externalId)` —que se puebla en los venues integrados— le diría al
+ * cajero «ya hay un turno abierto» sobre un negocio que no tiene ninguno.
+ */
+const p2002 = (target: string | string[] = 'Shift_venueId_open_key') =>
+  new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: 'x',
+    meta: { target },
+  } as any)
 
 const params = (over: Record<string, unknown> = {}) => ({
   venueId: VENUE,
@@ -287,11 +298,38 @@ describe('abrirTurnoDeCaja — relevo al abrir, NUNCA cierre por reloj', () => {
     })
   })
 
-  it('si el CAS del relevo no gana (alguien lo cerró primero), es ConflictError y NO se crea turno', async () => {
+  it('🔴 si otro aparato ya cerró el turno de ayer, eso es LO QUE QUERÍAMOS: se sigue, no se lanza', async () => {
+    // El CAS pierde porque alguien más ya lo cerró. Lanzar aquí sería reportar una carrera BENIGNA
+    // como conflicto permanente — y las apps tratan el 409 como rechazo definitivo, así que una
+    // apertura encolada que cayera aquí se descartaría PARA SIEMPRE.
     m.shift.findFirst.mockResolvedValue(turnoDeAyer)
     m.shift.updateMany.mockResolvedValue({ count: 0 })
+    m.shift.findUnique.mockResolvedValue({ status: 'CLOSED', endTime: new Date('2026-09-03T09:00:00.000Z') })
 
-    await expect(abrirTurnoDeCaja(params())).rejects.toBeInstanceOf(ConflictError)
+    const r = await abrirTurnoDeCaja(params())
+
+    expect(r.shiftCreado).toBe(true)
+    expect(r.shiftId).toBe('turno-nuevo')
+    // No lo cerramos nosotros, así que no se reporta como relevo de esta llamada.
+    expect(r.relevo?.shiftCerradoId).toBeUndefined()
+  })
+
+  it('si el turno de ayer quedó en CLOSING mientras se abría, el mensaje dice LA VERDAD (cierre en curso)', async () => {
+    m.shift.findFirst.mockResolvedValue(turnoDeAyer)
+    m.shift.updateMany.mockResolvedValue({ count: 0 })
+    m.shift.findUnique.mockResolvedValue({ status: 'CLOSING', endTime: null })
+
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'SHIFT_CLOSE_IN_PROGRESS' })
+    expect(m.shift.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 si falla y el turno sigue abierto, el mensaje NO miente diciendo «ciérralo antes de abrir otro»', async () => {
+    m.shift.findFirst.mockResolvedValue(turnoDeAyer)
+    m.shift.updateMany.mockResolvedValue({ count: 0 })
+    m.shift.findUnique.mockResolvedValue({ status: 'OPEN', endTime: null })
+
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'SHIFT_HANDOVER_RETRY' })
+    await expect(abrirTurnoDeCaja(params())).rejects.toThrow(/vuelve a intentar/i)
     expect(m.shift.create).not.toHaveBeenCalled()
   })
 
@@ -354,7 +392,7 @@ describe('abrirTurnoDeCaja — dos aperturas simultáneas: una gana, la otra rec
   })
 
   it('🔴 el índice único parcial de la CAJA (P2002) se traduce al MISMO ConflictError', async () => {
-    m.cashDrawerSession.create.mockRejectedValue(p2002())
+    m.cashDrawerSession.create.mockRejectedValue(p2002('CashDrawerSession_venueId_open_key'))
 
     await expect(abrirTurnoDeCaja(params())).rejects.toBeInstanceOf(ConflictError)
   })
@@ -458,5 +496,180 @@ describe('abrirTurnoDeCaja — el puente a SoftRestaurant', () => {
     await expect(abrirTurnoDeCaja(params())).rejects.toThrow()
     expect(m.shift.create).not.toHaveBeenCalled()
     expect(m.cashDrawerSession.create).not.toHaveBeenCalled()
+  })
+})
+
+// ============================================================================
+// EL RELEVO DE LA CAJA (la asimetría que encontró la revisión)
+// ============================================================================
+
+/**
+ * 🔴 EL TURNO DE HOY NO PUEDE HEREDAR LA CAJA DE AYER.
+ *
+ * La primera versión relevaba el TURNO comparando contra el corte del día de negocio, pero buscaba
+ * la caja con un `{ venueId, status: 'OPEN' }` pelado, sin comparar contra nada. La asimetría era
+ * la señal.
+ *
+ * El escenario que lo destapa es real y no raro: abren a las 05:30; el turno de ayer se releva
+ * bien, pero la caja de ayer sigue abierta porque el auto-cierre (`cashDrawerAutoClose`) la respeta
+ * si tuvo movimiento hace menos de 2 h — y una venta de las 03:30 la protege. El turno de hoy
+ * adoptaba esa caja con su fondo de ayer y sus eventos de DOS días, y quien cerrara hoy contaría el
+ * efectivo contra un esperado que no es el suyo.
+ *
+ * 🔴 Y aquí NO aplica la gracia de inactividad del job, a propósito: ese barrido corre solo, con un
+ * temporizador, y necesita la salvaguarda para no arrancarle la caja a un local que sigue vendiendo
+ * a las 04:05. Aquí hay una PERSONA en el mostrador pidiendo abrir, que es la señal más fuerte que
+ * existe de que la sesión anterior terminó.
+ */
+describe('abrirTurnoDeCaja — la caja de un día anterior se releva, no se adopta', () => {
+  const cajaDeAyer = {
+    id: 'caja-de-ayer',
+    venueId: VENUE,
+    status: 'OPEN',
+    startingAmount: new Prisma.Decimal(500),
+    shiftId: null,
+    // Abierta ayer a las 10:00 CDMX.
+    openedAt: new Date('2026-09-02T16:00:00.000Z'),
+  }
+
+  it('🔴 el escenario de las 05:30: se releva el turno de ayer Y la caja de ayer', async () => {
+    m.shift.findFirst.mockResolvedValue({
+      id: 'turno-de-ayer',
+      venueId: VENUE,
+      status: 'OPEN',
+      endTime: null,
+      startTime: new Date('2026-09-02T16:00:00.000Z'),
+      notes: null,
+    })
+    m.cashDrawerSession.findFirst.mockResolvedValue(cajaDeAyer)
+
+    const r = await abrirTurnoDeCaja(params({ now: () => new Date('2026-09-03T11:30:00.000Z'), startingCash: 1000 }))
+
+    expect(r.relevo).toEqual({ shiftCerradoId: 'turno-de-ayer', cajaCerradaId: 'caja-de-ayer' })
+    // La caja de hoy es NUEVA, con el fondo de hoy — no la de ayer con sus eventos de dos días.
+    expect(r.cajaCreada).toBe(true)
+    expect(r.cashDrawerSessionId).toBe('caja-nueva')
+    expect(Number(m.cashDrawerSession.create.mock.calls[0][0].data.startingAmount)).toBe(1000)
+  })
+
+  it('🔴 el relevo de la caja NO INVENTA UN CONTEO: `actualAmount` y `overShort` no se tocan', async () => {
+    m.cashDrawerSession.findFirst.mockResolvedValue(cajaDeAyer)
+
+    await abrirTurnoDeCaja(params())
+
+    const cierre = m.cashDrawerSession.updateMany.mock.calls.find((c: any) => c[0].data.status === 'CLOSED')
+    expect(cierre).toBeDefined()
+    expect(cierre![0].where).toMatchObject({ id: 'caja-de-ayer', status: 'OPEN' })
+    for (const campo of ['actualAmount', 'overShort']) {
+      expect(cierre![0].data).not.toHaveProperty(campo)
+    }
+    // La firma que `isAutoClosedSession` reconoce: sin persona que cerrara.
+    expect(cierre![0].data.closedByStaffId).toBeNull()
+  })
+
+  it('el relevo de la caja NO crea un evento CLOSE (una fila en cero se leería como un conteo)', async () => {
+    m.cashDrawerSession.findFirst.mockResolvedValue(cajaDeAyer)
+
+    await abrirTurnoDeCaja(params())
+
+    for (const llamada of m.cashDrawerSession.create.mock.calls) {
+      expect(llamada[0].data.events?.create?.type).not.toBe('CLOSE')
+    }
+  })
+
+  it('una caja abierta HOY se adopta como siempre: no se releva', async () => {
+    m.cashDrawerSession.findFirst.mockResolvedValue({ ...cajaDeAyer, id: 'caja-de-hoy', openedAt: new Date('2026-09-03T13:38:00.000Z') })
+
+    const r = await abrirTurnoDeCaja(params())
+
+    expect(r.cashDrawerSessionId).toBe('caja-de-hoy')
+    expect(r.cajaCreada).toBe(false)
+    expect(r.relevo?.cajaCerradaId).toBeUndefined()
+    expect(m.cashDrawerSession.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una venta de madrugada NO protege la caja de ayer: aquí no hay gracia de inactividad', async () => {
+    // El job la respetaría (movimiento hace < 2 h). El gesto humano no: alguien está pidiendo abrir.
+    m.cashDrawerSession.findFirst.mockResolvedValue(cajaDeAyer)
+
+    const r = await abrirTurnoDeCaja(params({ now: () => new Date('2026-09-03T11:30:00.000Z') }))
+
+    expect(r.relevo?.cajaCerradaId).toBe('caja-de-ayer')
+  })
+
+  it('si alguien cerró la caja de ayer entre la lectura y el CAS, se crea la de hoy igual', async () => {
+    m.cashDrawerSession.findFirst.mockResolvedValue(cajaDeAyer)
+    m.cashDrawerSession.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValue({ count: 1 })
+
+    const r = await abrirTurnoDeCaja(params())
+
+    expect(r.cajaCreada).toBe(true)
+    // No lo hicimos nosotros, así que no se reporta como relevo de esta llamada.
+    expect(r.relevo?.cajaCerradaId).toBeUndefined()
+  })
+})
+
+// ============================================================================
+// EL P2002 TIENE QUE DECIR QUÉ ÚNICO CHOCÓ
+// ============================================================================
+
+describe('abrirTurnoDeCaja — no todo P2002 es «ya hay un turno abierto»', () => {
+  it('🔴 un P2002 de `Shift(venueId, externalId)` NO se disfraza de turno abierto', async () => {
+    // Se puebla en los venues integrados con SoftRestaurant. Traducirlo mandaría al cajero a buscar
+    // un turno abierto que no existe.
+    m.shift.create.mockRejectedValue(p2002(['venueId', 'externalId']))
+
+    await expect(abrirTurnoDeCaja(params())).rejects.not.toBeInstanceOf(ConflictError)
+  })
+
+  it('un P2002 sin `meta.target` tampoco se traduce: no se adivina', async () => {
+    m.shift.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'x' } as any),
+    )
+
+    await expect(abrirTurnoDeCaja(params())).rejects.not.toBeInstanceOf(ConflictError)
+  })
+
+  it('el P2002 del índice de abiertos SÍ se traduce, venga como nombre de índice o como lista de campos', async () => {
+    m.shift.create.mockRejectedValue(p2002('Shift_venueId_open_key'))
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'CASH_SHIFT_ALREADY_OPEN' })
+
+    m.shift.create.mockRejectedValue(p2002(['Shift_venueId_open_key']))
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'CASH_SHIFT_ALREADY_OPEN' })
+  })
+
+  it('🔴 un P2002 de la CAJA por otro único (`shiftId`) no se disfraza de «ya hay caja abierta»', async () => {
+    m.cashDrawerSession.create.mockRejectedValue(p2002('CashDrawerSession_shiftId_key'))
+
+    await expect(abrirTurnoDeCaja(params())).rejects.not.toBeInstanceOf(ConflictError)
+  })
+
+  it('el P2002 del índice de cajas abiertas SÍ se traduce', async () => {
+    m.cashDrawerSession.create.mockRejectedValue(p2002('CashDrawerSession_venueId_open_key'))
+
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'CASH_SHIFT_ALREADY_OPEN' })
+  })
+})
+
+// ============================================================================
+// NO SE AVISA AL POS DE UNA APERTURA QUE VA A RECHAZARSE
+// ============================================================================
+
+describe('abrirTurnoDeCaja — el POS externo no recibe turnos que Avoqado nunca creará', () => {
+  it('🔴 con un turno en CLOSING, se rechaza ANTES de publicar (como hace `openShiftForVenue`)', async () => {
+    sembrarVenue({ posType: 'SOFTRESTAURANT', posStatus: 'CONNECTED' })
+    m.shift.findFirst.mockResolvedValue({
+      id: 'turno-cerrandose',
+      venueId: VENUE,
+      status: 'CLOSING',
+      endTime: null,
+      // 🔴 De AYER a propósito: un CLOSING de hoy ya no publicaba «por suerte» (no haría falta
+      // crear turno). El caso que de verdad publica es el de un día anterior, que además parece
+      // relevable — y publicar ahí deja al POS con un turno que Avoqado va a rechazar.
+      startTime: new Date('2026-09-02T16:00:00.000Z'),
+    })
+
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'SHIFT_CLOSE_IN_PROGRESS' })
+    expect(publishCommand).not.toHaveBeenCalled()
   })
 })

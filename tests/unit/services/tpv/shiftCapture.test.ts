@@ -351,10 +351,11 @@ describe('openShiftForVenue — la doble apertura simultánea no puede salir com
   const { ConflictError } = jest.requireActual('@/errors/AppError')
   const { Prisma } = jest.requireActual('@prisma/client')
 
-  const p2002 = () =>
-    new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`venueId`)', {
+  const p2002 = (target: string | string[] = 'Shift_venueId_open_key') =>
+    new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
       code: 'P2002',
       clientVersion: 'test',
+      meta: { target },
     })
 
   beforeEach(() => {
@@ -379,5 +380,21 @@ describe('openShiftForVenue — la doble apertura simultánea no puede salir com
     mockPrisma.shift.create.mockRejectedValue(new Error('la base se cayó'))
 
     await expect(openShiftForVenue(VENUE_ID, STAFF_ID, 500, 'station-1')).rejects.toThrow('la base se cayó')
+  })
+
+  it('🔴 OTRO P2002 —`Shift(venueId, externalId)`, que se puebla en venues integrados— NO se disfraza de turno abierto', async () => {
+    // Mirar sólo `error.code` le diría al cajero «ya hay un turno abierto» sobre un negocio que no
+    // tiene ninguno, y lo mandaría a buscar algo que no existe.
+    mockPrisma.shift.create.mockRejectedValue(p2002(['venueId', 'externalId']))
+
+    await expect(openShiftForVenue(VENUE_ID, STAFF_ID, 500, 'station-1')).rejects.not.toBeInstanceOf(ConflictError)
+  })
+
+  it('un P2002 sin `meta.target` tampoco se traduce: no se adivina', async () => {
+    mockPrisma.shift.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }),
+    )
+
+    await expect(openShiftForVenue(VENUE_ID, STAFF_ID, 500, 'station-1')).rejects.not.toBeInstanceOf(ConflictError)
   })
 })
