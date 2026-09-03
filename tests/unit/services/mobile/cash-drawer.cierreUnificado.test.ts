@@ -56,6 +56,8 @@ const abierta = (over: Record<string, unknown> = {}) => ({
   openedByName: 'Viridiana',
   openedAt: new Date('2026-09-03T14:00:00Z'),
   startingAmount: new Prisma.Decimal(2000),
+  // La gaveta que la apertura unificada dejó LIGADA a su turno: es el estado normal desde la Task 4.
+  shiftId: TURNO,
   closedByStaffId: null,
   closedByName: null,
   closedAt: null,
@@ -161,6 +163,18 @@ describe('cerrar la caja desde la tablet cierra el turno del negocio', () => {
 
     expect(sesion.shiftId).toBeNull()
     expect(sesion.status).toBe('CLOSED')
+  })
+
+  it('🔴 le dice a qué turno pertenecía la gaveta: sin eso podría cerrar el turno de otro', async () => {
+    // El `sessionId` sólo prueba que ésa era la gaveta abierta, no que su turno siga siendo el
+    // abierto. Un cierre encolado que se reproduce después de que se abrió un turno nuevo pasa la
+    // guarda del 404 y cerraría el turno equivocado con este conteo.
+    await cerrar()
+
+    expect(mockCerrar.mock.calls[0][0].shiftIdDeLaGaveta).toBe(TURNO)
+    // Y se LEE de la sesión: si el `select` no lo trae, el servicio no puede saberlo.
+    const select = (prismaMock as any).cashDrawerSession.findFirst.mock.calls[0][0].select
+    expect(select).toMatchObject({ shiftId: true })
   })
 
   it('🔴 un cierre encolado que llega tarde sigue recibiendo su 404 y NO cierra ningún turno', async () => {

@@ -138,6 +138,14 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       // que nunca se le sumó, y un recálculo desde los pagos discreparía de su propio `totalSales`.
       // El UPDATE además toma el candado de la fila, así que un cierre concurrente espera a que
       // esta transacción termine y ve el incremento.
+      //
+      // ⚠️ PRECIO DECLARADO, a medir antes de un sábado ocupado: reclamar al PRINCIPIO significa que
+      // el candado sobre la fila del `Shift` se sostiene durante TODA esta transacción (órdenes,
+      // artículos, inventario, lealtad), y **todo pago del negocio contiende sobre esa misma fila**
+      // porque el turno es uno solo. Es correcto —es justo lo que impide sellar un `shiftId` cuyo
+      // claim no ganó— pero convierte el turno en un punto de serialización. Si aparece contención,
+      // la salida NO es soltar el candado: es acortar la transacción (sacar de ella lo que no es
+      // dinero), porque mover el claim al final devuelve el agujero que este cambio cerró.
       let shiftId: string | null = null
       const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
       if (turnoDelNegocio) {

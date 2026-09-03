@@ -151,14 +151,37 @@ describe('el esperado del turno sale de la GAVETA cuando hay una', () => {
   })
 
   it('🔴 relevo de mostrador: la gaveta se refondeó a $500 y el turno conserva sus $2,000', async () => {
-    // La gaveta de la tarde abrió con $500 y vendió $800 ⇒ esperado 1300. El turno cree que su
-    // fondo son $2,000 y que las ventas del día son $1,800: 3,800. Diferencia entre las dos
-    // fórmulas: **$2,500** de faltante inventado.
+    // La gaveta de la tarde abrió con $500 y vendió $800 ⇒ esperado 1,300. El turno cree que su
+    // fondo son $2,000 y que las ventas del día entero (mañana + tarde) son $1,800 ⇒ 3,800.
+    // 🔴 La magnitud se MIDE, no se narra: por eso el mundo lleva los $1,800 de cobros de verdad.
+    // Revertir el arreglo hace que este mismo cierre firme **−$2,500**.
+    m.payment.findMany.mockResolvedValue([
+      {
+        id: 'p-manana',
+        amount: new Decimal('1000.00'),
+        tipAmount: new Decimal('0'),
+        method: 'CASH',
+        fundsFlow: null,
+        tenderTypeId: null,
+        tenderCountsAsCash: null,
+      },
+      {
+        id: 'p-tarde',
+        amount: new Decimal('800.00'),
+        tipAmount: new Decimal('0'),
+        method: 'CASH',
+        fundsFlow: null,
+        tenderTypeId: null,
+        tenderCountsAsCash: null,
+      },
+    ])
     mockEsperado.mockResolvedValue({ sessionId: CAJA, esperado: new Decimal('1300.00') })
 
     const r = await closeShiftForVenueWithResult(VENUE, TURNO, conteo('1300.00'), { now: () => AHORA })
 
     expect(r.reconciliation.cashDifference).toBe('0.00')
+    // El esperado firmado es el de la GAVETA. Con el del turno serían $3,800 (2,000 + 1,800).
+    expect(escrito.endingCash.toString()).toBe('1300')
   })
 
   it('sin gaveta, el esperado sigue siendo el de HOY: `startingCash` + efectivo del turno', async () => {
@@ -256,6 +279,24 @@ describe('cerrar el turno desde la PAX cierra también la gaveta ligada', () => 
     await closeShiftForVenueWithResult(VENUE, TURNO, {}, { now: () => AHORA })
 
     expect(escrito.closedById).toBeNull()
+  })
+
+  it('🔴 la gaveta recibe el MISMO esperado que el turno acaba de firmar, no una segunda foto', async () => {
+    // Entre que el turno resuelve su esperado y la gaveta se cierra pasan segundos (pagos, reporte,
+    // transacción, publicación al POS, broadcast). Una venta en efectivo en esa ventana postea su
+    // `CASH_SALE` a la gaveta abierta: si la gaveta releyera sus eventos firmaría `overShort` = −venta
+    // mientras el turno firma 0. La foto es una sola; las firmas, dos.
+    mockEsperado.mockResolvedValue({ sessionId: CAJA, esperado: new Decimal('2950.00') })
+
+    await closeShiftForVenueWithResult(VENUE, TURNO, conteo('2950.00'), { now: () => AHORA })
+
+    expect(Number(mockCerrar.mock.calls[0][0].esperadoDelCajon)).toBe(2950)
+  })
+
+  it('sin gaveta, no se le inventa un esperado a la que no existe', async () => {
+    await closeShiftForVenueWithResult(VENUE, TURNO, {}, { now: () => AHORA })
+
+    expect(mockCerrar.mock.calls[0][0].esperadoDelCajon ?? null).toBeNull()
   })
 
   it('🔴 un fallo al cerrar la gaveta NO tumba el cierre del turno, que ya está commiteado', async () => {

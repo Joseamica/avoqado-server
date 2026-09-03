@@ -436,7 +436,11 @@ export async function closeSession(params: CloseSessionParams) {
     // el fondo real del esperado y le inventaba al cajero un sobrante del tamaño del fondo.
     // Es la misma columna que leen el dashboard, el turno de la PAX y `cashDrawerPosting`,
     // así que los cuatro dicen por fin el mismo número.
-    select: { id: true, startingAmount: true },
+    //
+    // `shiftId`: a qué turno pertenece ESTA gaveta. Sin él, el cierre unificado sólo sabría que
+    // había una gaveta abierta, no que su turno siga siendo el abierto — y un cierre encolado que
+    // se reproduce tarde cerraría el turno equivocado con este conteo.
+    select: { id: true, startingAmount: true, shiftId: true },
   })
   if (!session) {
     throw new NotFoundError('No hay una caja abierta')
@@ -525,8 +529,9 @@ export async function closeSession(params: CloseSessionParams) {
       // ⚠️ Siempre hay conteo por esta puerta: el controlador devuelve 400 si falta `actualAmount`.
       // Y contar CERO es un conteo REAL — una gaveta vacía con $2,950 esperados es un faltante de
       // $2,950—, por eso viaja el `Decimal` tal cual y nunca detrás de un `&&`.
-      conteo: actualDecimal as unknown as Prisma.Decimal,
-      esperadoDelCajon: new Decimal(expectedAmount.toFixed(2)) as unknown as Prisma.Decimal,
+      conteo: new Prisma.Decimal(actualDecimal.toFixed(2)),
+      esperadoDelCajon: new Prisma.Decimal(expectedAmount.toFixed(2)),
+      shiftIdDeLaGaveta: session.shiftId,
       note: note || null,
     })
     shiftId = cierre.shiftCerradoId ?? null

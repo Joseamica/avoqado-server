@@ -68,20 +68,34 @@ function gavetaAbierta(over: Record<string, unknown> = {}) {
   }
 }
 
-function mundo({ gaveta = gavetaAbierta() as any, turno = { id: TURNO } as any, casGana = true } = {}) {
+function mundo({
+  gaveta = gavetaAbierta() as any,
+  turno = { id: TURNO } as any,
+  casGana = true,
+  staff = { firstName: 'Héctor', lastName: 'Ruiz' } as any,
+} = {}) {
   m.cashDrawerSession.findFirst.mockResolvedValue(gaveta)
   m.cashDrawerSession.updateMany.mockResolvedValue({ count: casGana ? 1 : 0 })
   m.cashDrawerSession.update.mockResolvedValue({})
   m.cashDrawerEvent.findMany.mockResolvedValue(EVENTOS)
   m.cashDrawerEvent.create.mockResolvedValue({ id: 'ev-close' })
   m.shift.findFirst.mockResolvedValue(turno)
+  m.staff.findUnique.mockResolvedValue(staff)
   m.$transaction = jest.fn((fn: any) => fn(m))
 }
 
+const datosDelEventoClose = () => m.cashDrawerEvent.create.mock.calls[0][0].data
+
+/**
+ * 🔴 `staffName: null` A PROPÓSITO: es lo que manda el ÚNICO llamador real
+ * (`shift.tpv.service.ts`, que no tiene el nombre a la mano). Un fixture con el nombre ya puesto es
+ * más amable que la producción, y por eso el defecto de «Cerrada por Staff» sobrevivió a las
+ * pruebas de la primera ronda. El nombre lo tiene que resolver el servicio.
+ */
 const paramsPax = (over: Record<string, unknown> = {}) => ({
   venueId: VENUE,
-  staffId: STAFF,
-  staffName: 'Héctor Ruiz',
+  staffId: STAFF as string | null,
+  staffName: null,
   source: 'TURNO_TPV' as const,
   yaCerrado: { shiftId: TURNO },
   conteo: null,
@@ -184,6 +198,56 @@ describe('cerrarTurnoDeCaja — desde la PAX: el turno cerró, se cierra la gave
     expect(m.cashDrawerEvent.create).not.toHaveBeenCalled()
   })
 
+  it('🔴 registra el NOMBRE REAL de quien cerró, nunca el literal «Staff»', async () => {
+    // El único llamador real manda `staffName: null`. Antes se caía al literal 'Staff' y el 100% de
+    // los cierres desde la PAX quedaban «Cerrada por Staff» — con el turno diciendo «Héctor Ruiz» a
+    // dos centímetros. Es exactamente la desunión que `closedById` existía para matar, y el mismo
+    // hallazgo del /full-testing del 27-ago («Abierta por Staff») reintroducido por la otra puerta.
+    await cerrarTurnoDeCaja(paramsPax({ conteo: new Prisma.Decimal(2950) }))
+
+    expect(m.staff.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: STAFF } }))
+    expect(datosDelCas().data.closedByName).toBe('Héctor Ruiz')
+    expect(datosDelEventoClose().staffName).toBe('Héctor Ruiz')
+  })
+
+  it('el placeholder «Staff» que mandan las apps tampoco gana al nombre del registro', async () => {
+    await cerrarTurnoDeCaja(paramsPax({ staffName: 'Staff', conteo: new Prisma.Decimal(2950) }))
+
+    expect(datosDelCas().data.closedByName).toBe('Héctor Ruiz')
+  })
+
+  it('un nombre real que sí venga se respeta y NO se consulta la base', async () => {
+    await cerrarTurnoDeCaja(paramsPax({ staffName: 'Viridiana Soto' }))
+
+    expect(datosDelCas().data.closedByName).toBe('Viridiana Soto')
+    expect(m.staff.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('🔴 SIN persona (un script), el evento lleva la centinela del sistema y NO revienta', async () => {
+    // `CashDrawerEvent.staffId` y `staffName` son NO NULABLES en el schema, así que un `null` aquí
+    // tumba la transacción entera y deja al cajero sin poder cerrar. La centinela `'SYSTEM'` ya es
+    // la convención de ESTA MISMA TABLA (`shared/cashDrawerPosting.ts` la escribe y la lee), así
+    // que no hace falta ni columna nulable ni convención nueva.
+    await cerrarTurnoDeCaja(paramsPax({ staffId: null, conteo: new Prisma.Decimal(2950) }))
+
+    expect(datosDelEventoClose().staffId).toBe('SYSTEM')
+    expect(datosDelEventoClose().staffName).toBe('Sistema')
+    // Y en la SESIÓN el autor sigue siendo nulo: la columna sí es nulable y ahí no se inventa nadie.
+    expect(datosDelCas().data.closedByStaffId).toBeNull()
+    expect(datosDelCas().data.closedByName).toBe('Sistema')
+  })
+
+  it('🔴 y con el conteo tomado del ESPERADO que le pasa el turno, no de una segunda lectura', async () => {
+    // Entre que el turno calcula su esperado y esta transacción corre pasan segundos (consulta de
+    // pagos, reporte, transacción, publicación al POS, broadcast). Una venta en efectivo en esa
+    // ventana postea su `CASH_SALE` a la gaveta abierta: si aquí se releyeran los eventos, la
+    // gaveta firmaría `overShort = −venta` mientras el turno firma `0`. Dos verdades otra vez.
+    await cerrarTurnoDeCaja(paramsPax({ conteo: new Prisma.Decimal(2950), esperadoDelCajon: new Prisma.Decimal(2950) }))
+
+    expect(m.cashDrawerEvent.findMany).not.toHaveBeenCalled()
+    expect(Number(m.cashDrawerSession.update.mock.calls[0][0].data.overShort)).toBe(0)
+  })
+
   it('la bitácora dice si hubo conteo, y con qué números', async () => {
     await cerrarTurnoDeCaja(paramsPax({ conteo: new Prisma.Decimal(2900) }))
 
@@ -231,6 +295,32 @@ describe('cerrarTurnoDeCaja — desde la tablet: la gaveta cerró, se cierra el 
 
     expect(Number(mockCerrarTurno.mock.calls[0][2].esperadoDelCajon)).toBe(2950)
     expect(mockCerrarTurno.mock.calls[0][2].cashDrawerSessionId).toBe(CAJA)
+  })
+
+  it('🔴 no cierra un turno que NO es el de la gaveta que se acaba de cerrar', async () => {
+    // Degradado sobre degradado, y alcanzable: la PAX cierra el turno A a las 20:05 y la mitad de
+    // la gaveta falla; la gaveta sigue OPEN ligada a A; 20:20 se abre el turno B; 20:30 se
+    // reproduce el cierre encolado de la tablet. El `sessionId` sigue siendo el de la única gaveta
+    // abierta, así que pasa la guarda del 404 — y sin esto cerraría B con el conteo y el esperado
+    // de A, firmando una diferencia sobre un turno que nunca tuvo ese dinero.
+    mundo({ turno: { id: 'turno-B' } })
+
+    const r = await cerrarTurnoDeCaja(paramsTablet({ shiftIdDeLaGaveta: 'turno-A' }))
+
+    expect(r.motivo).toBe('SIN_PAREJA')
+    expect(mockCerrarTurno).not.toHaveBeenCalled()
+  })
+
+  it('una gaveta SIN turno ligado sí puede cerrar el que esté abierto (espejo de `gavetaCerrable`)', async () => {
+    // Es el caso de las gavetas anteriores a la liga y el de las que nacieron sin turno: el `OR`
+    // de la dirección contraria acepta `shiftId: null` por la misma razón.
+    mundo({ turno: { id: 'turno-B' } })
+
+    await cerrarTurnoDeCaja(paramsTablet({ shiftIdDeLaGaveta: null }))
+
+    // Lo que importa es a QUÉ turno se le mandó el cierre, no el id que devuelva el mock.
+    expect(mockCerrarTurno).toHaveBeenCalledTimes(1)
+    expect(mockCerrarTurno.mock.calls[0][1]).toBe('turno-B')
   })
 
   it('sin turno abierto no hay nada que cerrar', async () => {

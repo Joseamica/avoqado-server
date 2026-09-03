@@ -1761,6 +1761,14 @@ async function closeShiftUsingRequest(
     // Va después del commit y en try/catch: el turno YA está cerrado y firmado. Un fallo aquí
     // degrada exactamente a lo de HOY (la gaveta se queda abierta y la recoge el relevo o el
     // auto-cierre) y nunca convierte un cierre bueno en un error para el mostrador.
+    //
+    // ⚠️ CONSECUENCIA DECLARADA, sin mitigación inventada: **no hay evento de socket para el estado
+    // de la gaveta** (no existe en `src/communication/`) — la tablet SONDEA. Antes, cerrar el turno
+    // desde la PAX dejaba la gaveta abierta y la tablet seguía vendiendo en ella; ahora la gaveta se
+    // cierra a media operación y la tablet se entera hasta su siguiente sondeo, así que lo que se
+    // cobre en ese hueco cae `outsideDrawer` y el reconciliador no lo puede colocar (sólo repone
+    // DENTRO de la ventana de una sesión). Es la misma familia que la ventana del `CLOSING`, y como
+    // aquélla tiene dueño: se cierra con un evento de socket para la gaveta, no aquí.
     if (!context.cerrandoDesdeElCajon) {
       try {
         await cerrarTurnoDeCaja({
@@ -1770,6 +1778,12 @@ async function closeShiftUsingRequest(
           source: 'TURNO_TPV',
           yaCerrado: { shiftId },
           conteo: outcome === 'APPLIED' && cashDeclared ? cashDeclared : null,
+          // 🔴 El MISMO esperado que el turno acaba de firmar. Entre que se resolvió (antes de la
+          // consulta de pagos) y esta escritura pasan segundos: una venta en efectivo en esa
+          // ventana postea su `CASH_SALE` a la gaveta abierta, y si la gaveta recalculara desde sus
+          // eventos firmaría `overShort = −venta` mientras el turno firma 0. Una foto, dos firmas.
+          // Va `null` cuando no hubo gaveta: no se le inventa un esperado a la que no existe.
+          esperadoDelCajon: cajon?.esperado ?? null,
           note: legacy?.notes ?? null,
           now: () => claimedAt,
         })

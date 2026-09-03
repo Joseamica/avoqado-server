@@ -236,6 +236,27 @@ function nombreDelCajero(dado: string | null | undefined, staff: { firstName?: s
   return delRegistro || limpio || 'Staff'
 }
 
+/**
+ * El nombre que queda en el historial del cajón al CERRAR.
+ *
+ * 🔴 El único llamador real (`tpv/shift.tpv.service.ts`) manda `staffName: null` porque no lo tiene
+ * a la mano, así que resolverlo aquí no es un lujo: sin esto el **100 %** de los cierres desde la
+ * PAX quedaban «Cerrada por Staff» mientras el turno, a dos centímetros en la misma pantalla, decía
+ * el nombre real. Es la desunión que `Shift.closedById` existía para matar, y el mismo hallazgo del
+ * /full-testing del 27-ago («Abierta por Staff») reintroducido por la otra puerta.
+ *
+ * La regla de qué nombre gana es la de `nombreDelCajero` —una sola, no una copia—; lo que añade es
+ * la consulta, y sólo cuando hace falta: con un nombre real ya dado no toca la base.
+ */
+async function nombreDeQuienCierra(staffId: string | null, dado?: string | null): Promise<string> {
+  const limpio = (dado || '').trim()
+  if (limpio && limpio !== 'Staff') return limpio
+  // Sin persona no se inventa una: es un script, y decirlo es más honesto que un 'Staff' anónimo.
+  if (!staffId) return NOMBRE_DEL_SISTEMA
+  const staff = await prisma.staff.findUnique({ where: { id: staffId }, select: { firstName: true, lastName: true } }).catch(() => null)
+  return nombreDelCajero(dado, staff ?? {})
+}
+
 export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Promise<AbrirTurnoDeCajaResult> {
   const { venueId, staffId, startingCash, deviceName, source, stationId } = parametros
   const ahora = (parametros.now ?? (() => new Date()))()
@@ -792,11 +813,30 @@ export interface CerrarTurnoDeCajaParams {
    */
   conteo: Prisma.Decimal | null
   /**
-   * El esperado de la gaveta que se acaba de cerrar (sólo desde `CAJA_MOVIL`). Es lo que hace que
-   * los DOS cierres firmen el MISMO número: sin él, el turno recalcularía su esperado contra un
-   * `Shift.startingCash` congelado en la apertura, que es ciego a los retiros y al refondeo.
+   * El esperado de la gaveta, ya resuelto. Es lo que hace que los DOS cierres firmen el MISMO
+   * número, y viaja en las DOS direcciones:
+   *
+   *   · desde `CAJA_MOVIL` lo calculó la gaveta al cerrarse; sin él, el turno recalcularía su
+   *     esperado contra un `Shift.startingCash` congelado en la apertura, ciego a los retiros y al
+   *     refondeo;
+   *   · desde `TURNO_TPV` lo calculó el turno al reclamar. 🔴 Entre ese instante y esta escritura
+   *     pasan SEGUNDOS (consulta de pagos, armado del reporte, transacción, publicación al POS,
+   *     broadcast), y una venta en efectivo en esa ventana postea su `CASH_SALE` a la gaveta
+   *     abierta: releer los eventos aquí haría que la gaveta firmara `overShort = −venta` mientras
+   *     el turno firma `0`. La foto es una sola; las firmas, dos.
+   *
+   * Ausente ⇒ se calcula de los eventos de la gaveta (el camino de siempre).
    */
   esperadoDelCajon?: Prisma.Decimal | null
+  /**
+   * A qué turno pertenece la gaveta que se acaba de cerrar (sólo desde `CAJA_MOVIL`).
+   *
+   * 🔴 Es el espejo del `OR` de `gavetaCerrable`, y protege del mismo escenario al revés: si la
+   * gaveta pertenecía al turno A y el abierto ahora es B, cerrar B con el conteo y el esperado de A
+   * le firmaría una diferencia sobre dinero que nunca tuvo. `null` (gaveta sin turno ligado, o
+   * anterior a la liga) sí puede cerrar el que esté abierto, por la misma razón que el `OR`.
+   */
+  shiftIdDeLaGaveta?: string | null
   note?: string | null
   now?: () => Date
 }
@@ -810,6 +850,21 @@ export interface CerrarTurnoDeCajaResult {
   /** Por qué no se cerró nada. Va al log; nunca es un error para el mostrador. */
   motivo?: 'SIN_PAREJA' | 'YA_CERRADO' | 'CIERRE_EN_CURSO'
 }
+
+/**
+ * Autor de un `CashDrawerEvent` que no tiene una persona detrás (un script, un cierre sin sesión).
+ *
+ * 🔴 NO es una convención nueva: `shared/cashDrawerPosting.ts` ya escribe exactamente
+ * `posting.staffId || 'SYSTEM'` en ESTA MISMA TABLA y la vuelve a leer para no atribuirle la
+ * bitácora a nadie. Hace falta porque `CashDrawerEvent.staffId` y `staffName` son **columnas NO
+ * NULABLES**: un `null` ahí tumba la transacción entera y deja al cajero sin poder cerrar la caja.
+ * Por eso no se resuelve volviendo la columna nulable —cambiaría el TIPO de dos campos que las
+ * apps de la calle ya reciben— ni cayendo a «quien abrió», que sería afirmar algo falso.
+ */
+export const STAFF_ID_DEL_SISTEMA = 'SYSTEM'
+
+/** Su gemelo legible, el mismo que usa `resolveStaffName` de `cashDrawerPosting`. */
+export const NOMBRE_DEL_SISTEMA = 'Sistema'
 
 /** Va en `closingNote` cuando la PAX cierra el turno sin mandar un conteo. Nadie contó, y se dice. */
 export const NOTA_DEL_CIERRE_SIN_CONTEO =
@@ -871,11 +926,7 @@ export async function esperadoDelCajonAbierto(
 async function cerrarLaGavetaDelTurno(p: CerrarTurnoDeCajaParams, shiftId: string): Promise<CerrarTurnoDeCajaResult> {
   const { venueId, staffId, source, conteo } = p
   const ahora = (p.now ?? (() => new Date()))()
-  // 🔴 Sin persona conocida NO se escribe el placeholder 'Staff' en el historial del cajón: eso fue
-  // un hallazgo real del /full-testing del 27-ago («Abierta por Staff»), y aquí además sería falso
-  // — no es que se ignore el nombre, es que no hubo sesión de nadie (un script). Se marca como del
-  // sistema, que es lo que de verdad pasó.
-  const staffName = (p.staffName || '').trim() || (staffId ? 'Staff' : AUTO_CLOSED_BY_NAME)
+  const staffName = await nombreDeQuienCierra(staffId, p.staffName)
 
   const gaveta = await prisma.cashDrawerSession.findFirst({
     where: gavetaCerrable(venueId, shiftId, ahora),
@@ -913,13 +964,35 @@ async function cerrarLaGavetaDelTurno(p: CerrarTurnoDeCajaParams, shiftId: strin
 
     if (conteo == null) return { esperado: null as number | null, overShort: null as number | null }
 
-    const eventos = await tx.cashDrawerEvent.findMany({ where: { sessionId: gaveta.id }, orderBy: { createdAt: 'asc' } })
-    const esperado = calculateExpectedAmount({ startingAmount: gaveta.startingAmount, events: eventos })
-    const diferencia = Number(Number(conteo).toFixed(2)) - esperado
-    const overShort = Number(diferencia.toFixed(2))
+    // 🔴 El esperado que firmó el turno MANDA cuando viene dado. Recalcularlo aquí sería una
+    // SEGUNDA foto, tomada segundos después: una venta en efectivo en esa ventana la cambia y las
+    // dos mitades firmarían números distintos del mismo billete. Cuando no viene, se calcula de los
+    // eventos con la MISMA fórmula que ve el cajero en la tablet (`calculateExpectedAmount`).
+    const esperado =
+      p.esperadoDelCajon != null
+        ? Number(p.esperadoDelCajon)
+        : calculateExpectedAmount({
+            startingAmount: gaveta.startingAmount,
+            events: await tx.cashDrawerEvent.findMany({ where: { sessionId: gaveta.id }, orderBy: { createdAt: 'asc' } }),
+          })
+    // ⚠️ EXCEPCIÓN CONSCIENTE a «dinero nunca en float»: `calculateExpectedAmount` devuelve `number`
+    // y `closeSession` calcula su `overShort` así desde siempre. Hacerlo aquí con `Decimal` podría
+    // dar un centavo distinto del que la tablet acaba de enseñarle al cajero para LA MISMA gaveta,
+    // que es peor que el redondeo: la paridad entre los dos cierres vale más aquí. Se redondea a
+    // centavos antes de persistir, y la columna sigue siendo `Decimal`.
+    const overShort = Number((Number(Number(conteo).toFixed(2)) - esperado).toFixed(2))
     await tx.cashDrawerSession.update({ where: { id: gaveta.id }, data: { overShort: new Prisma.Decimal(overShort.toFixed(2)) } })
     await tx.cashDrawerEvent.create({
-      data: { sessionId: gaveta.id, venueId, type: 'CLOSE', amount: conteo, staffId, staffName, note: p.note || null },
+      data: {
+        sessionId: gaveta.id,
+        venueId,
+        type: 'CLOSE',
+        amount: conteo,
+        // Columnas NO NULABLES: sin persona va la centinela que esta misma tabla ya usa.
+        staffId: staffId ?? STAFF_ID_DEL_SISTEMA,
+        staffName,
+        note: p.note || null,
+      },
     })
     return { esperado, overShort }
   })
@@ -963,6 +1036,28 @@ async function cerrarElTurnoDeLaGaveta(p: CerrarTurnoDeCajaParams, cashDrawerSes
   const turno = await turnoAbiertoDelNegocio(prisma, venueId)
   if (!turno) {
     logger.info('[TURNO DE CAJA] La gaveta se cerró sin turno abierto que cerrar', { venueId, cashDrawerSessionId, source })
+    return { conConteo: false, motivo: 'SIN_PAREJA' }
+  }
+
+  // 🔴 PERTENENCIA — el espejo del `OR` de `gavetaCerrable`, y protege del mismo daño al revés.
+  //
+  // Escenario alcanzable, degradado sobre degradado: la PAX cierra el turno A a las 20:05 y la
+  // mitad de la gaveta falla (se queda en el `try/catch`), así que la gaveta sigue OPEN ligada a A;
+  // 20:20 se abre el turno B; 20:30 se reproduce el cierre encolado de la tablet. Su `sessionId`
+  // sigue siendo el de la única gaveta abierta, así que pasa la guarda del 404 — y sin esto
+  // cerraría **B** con el conteo y el esperado de **A**, firmándole una diferencia sobre dinero que
+  // ese turno nunca tuvo.
+  //
+  // Una gaveta SIN turno ligado (anterior a la liga, o abierta sin turno) sí puede cerrar el que
+  // esté abierto: es la misma razón por la que el `OR` de la otra dirección acepta `shiftId: null`.
+  if (p.shiftIdDeLaGaveta != null && p.shiftIdDeLaGaveta !== turno.id) {
+    logger.warn('[TURNO DE CAJA] La gaveta pertenece a OTRO turno; no se cierra el que está abierto', {
+      venueId,
+      cashDrawerSessionId,
+      turnoDeLaGaveta: p.shiftIdDeLaGaveta,
+      turnoAbierto: turno.id,
+      source,
+    })
     return { conConteo: false, motivo: 'SIN_PAREJA' }
   }
 
