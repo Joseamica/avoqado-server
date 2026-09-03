@@ -1075,7 +1075,11 @@ describe('PaymentLink Service', () => {
       await completeCharge('abc12345', 'cs_pl_test123')
 
       expect(mockUpdateCustomerMetrics).toHaveBeenCalledTimes(1)
-      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100)
+      // (customerId, base, orderId, venueId). Los dos últimos NO son decorativos:
+      // `updateCustomerMetrics` sólo toma el row lock de `Customer` cuando recibe
+      // `orderId` (customer.dashboard.service.ts:903). Sin él, dos cobros del mismo
+      // cliente leen los mismos contadores y el último pisa al anterior.
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100, 'order-123', VENUE_ID)
     })
 
     it('🔴 la propina NO entra en la base: es del empleado, no venta del negocio', async () => {
@@ -1092,7 +1096,7 @@ describe('PaymentLink Service', () => {
       await completeCharge('abc12345', 'cs_pl_test123')
 
       expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 450, 'order-123')
-      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 450)
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 450, 'order-123', VENUE_ID)
     })
 
     it('la venta queda atada al cliente (Order.customerId), no sólo los puntos', async () => {
@@ -1119,7 +1123,7 @@ describe('PaymentLink Service', () => {
       await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })
 
       expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 100, 'order-stripe-1')
-      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100)
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100, 'order-stripe-1', VENUE_ID)
       expect(prismaMock.order.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ customerId: CUSTOMER_ID }) }),
       )
@@ -1133,7 +1137,7 @@ describe('PaymentLink Service', () => {
       await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
 
       expect(mockEarnPoints).toHaveBeenCalledWith(VENUE_ID, CUSTOMER_ID, 500, 'order-mp-9')
-      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 500)
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 500, 'order-mp-9', VENUE_ID)
       expect(prismaMock.order.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ customerId: CUSTOMER_ID }) }),
       )
@@ -1236,7 +1240,7 @@ describe('PaymentLink Service', () => {
 
       expect(result.status).toBe('COMPLETED')
       // Las métricas SÍ se mueven aunque no haya puntos: la visita ocurrió.
-      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100)
+      expect(mockUpdateCustomerMetrics).toHaveBeenCalledWith(CUSTOMER_ID, 100, 'order-123', VENUE_ID)
     })
 
     // ── REGRESIÓN: lo que ya funcionaba sigue funcionando ──

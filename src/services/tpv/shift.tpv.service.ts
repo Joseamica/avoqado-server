@@ -478,16 +478,22 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     }
   }
 
-  // Build payment filter for date range
-  const paymentDateFilter: any = {}
-  if (parsedStartTime || parsedEndTime) {
-    paymentDateFilter.createdAt = {}
-    if (parsedStartTime) {
-      paymentDateFilter.createdAt.gte = parsedStartTime
-    }
-    if (parsedEndTime) {
-      paymentDateFilter.createdAt.lte = parsedEndTime
-    }
+  // Auditorías de Codex (2026-09-01, P2 y luego P1 pre-push): el resumen usa UNA ventana
+  // efectiva y la fija ANTES de armar cualquier consulta. Con fechas del cliente, la del
+  // cliente; sin startTime, 24 h antes del endTime (o de ahora). La comparten los TURNOS
+  // (solapamiento + pagos dentro del periodo), los huérfanos, las reseñas y el dateRange.
+  // Antes la ventana sólo regía huérfanos y reseñas: los turnos seguían otra regla (sólo
+  // abiertos, con TODO su historial) y dateRange declaraba 24 h que sus totales no cumplían.
+  if (!parsedStartTime) {
+    parsedStartTime = new Date((parsedEndTime ?? new Date()).getTime() - 24 * 60 * 60 * 1000)
+  }
+  const effectiveStartTime: Date = parsedStartTime
+  const effectiveEndTime: Date | null = parsedEndTime ?? null
+  const paymentDateFilter = {
+    createdAt: {
+      gte: effectiveStartTime,
+      ...(effectiveEndTime ? { lte: effectiveEndTime } : {}),
+    },
   }
 
   // Build the base query filters for shifts
@@ -575,20 +581,22 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   })
 
   // Also fetch orphan payments (shiftId = null) — venues without shifts module
-  // These payments exist but aren't associated with any shift
+  // These payments exist but aren't associated with any shift.
+  // 🔴 SIN fechas del cliente, esta rama se acota a las últimas 24 h. Sin esa ventana
+  // materializaba TODOS los huérfanos históricos en el hilo único — Testarudo tiene
+  // 32,646 (pagos importados de otro POS, sin turno): la misma clase de bomba que
+  // tumbó producción el 2026-09-01 con el detalle del venue. La pantalla de turnos de
+  // la PAX habla del día en curso; con fechas explícitas, la ventana del cliente manda.
+  // Guardia: tests/unit/services/tpv/shiftsSummary.huerfanosAcotados.test.ts
   const orphanPaymentWhere: any = {
     venueId,
     shiftId: null,
     status: 'COMPLETED',
     ...(staffId ? { processedById: staffId } : {}),
-    ...(parsedStartTime || parsedEndTime
-      ? {
-          createdAt: {
-            ...(parsedStartTime ? { gte: parsedStartTime } : {}),
-            ...(parsedEndTime ? { lte: parsedEndTime } : {}),
-          },
-        }
-      : {}),
+    createdAt: {
+      gte: effectiveStartTime,
+      ...(effectiveEndTime ? { lte: effectiveEndTime } : {}),
+    },
   }
 
   const orphanPayments = await prisma.payment.findMany({
@@ -616,14 +624,12 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
       venueId,
       shiftId: null,
       status: 'COMPLETED',
-      ...(parsedStartTime || parsedEndTime
-        ? {
-            createdAt: {
-              ...(parsedStartTime ? { gte: parsedStartTime } : {}),
-              ...(parsedEndTime ? { lte: parsedEndTime } : {}),
-            },
-          }
-        : {}),
+      // Misma ventana efectiva que los pagos huérfanos — sin ella, el resumen mezclaba
+      // ventas de 24 h con un conteo de órdenes de TODA la historia (32k en Testarudo).
+      createdAt: {
+        gte: effectiveStartTime,
+        ...(effectiveEndTime ? { lte: effectiveEndTime } : {}),
+      },
     },
   })
 
@@ -764,16 +770,11 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   try {
     const reviewWhereClause: any = {
       venueId,
-    }
-
-    if (startTime) {
-      reviewWhereClause.createdAt = { gte: new Date(startTime) }
-    }
-    if (endTime) {
-      reviewWhereClause.createdAt = {
-        ...reviewWhereClause.createdAt,
-        lte: new Date(endTime),
-      }
+      // Misma ventana efectiva que el resto del resumen (P2 de la auditoría).
+      createdAt: {
+        gte: effectiveStartTime,
+        ...(effectiveEndTime ? { lte: effectiveEndTime } : {}),
+      },
     }
 
     totalRatings = await prisma.review.count({
@@ -808,9 +809,11 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   const salesTrend = generateSalesTrend(allPayments, parsedStartTime, parsedEndTime)
 
   return {
+    // La ventana EFECTIVA, nunca null/null: si el cliente no mandó fechas, aquí se
+    // declara el default de 24 h con el que se calculó todo lo de arriba.
     dateRange: {
-      startTime: startTime ? new Date(startTime) : null,
-      endTime: endTime ? new Date(endTime) : null,
+      startTime: effectiveStartTime,
+      endTime: effectiveEndTime,
     },
     summary: {
       totalSales: totalSales,

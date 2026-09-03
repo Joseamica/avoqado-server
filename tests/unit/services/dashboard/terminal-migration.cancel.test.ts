@@ -1,7 +1,7 @@
 import { migrateCancel } from '@/services/dashboard/terminal-migration.service'
 import prisma from '@/utils/prismaClient'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, ForbiddenError } from '@/errors/AppError'
 
 // migrateCancel reverts the terminal DIRECTLY via prisma (bypassing updateTerminal
 // so the "blindar" auto-wipe does NOT re-queue a FACTORY_RESET on the revert).
@@ -9,7 +9,8 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     tpvCommandQueue: { findFirst: jest.fn() },
-    terminal: { update: jest.fn() },
+    terminal: { update: jest.fn(), findUnique: jest.fn() },
+    venue: { findFirst: jest.fn() },
     venuePaymentConfig: { deleteMany: jest.fn() },
   },
 }))
@@ -21,7 +22,8 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 
 const m = prisma as unknown as {
   tpvCommandQueue: { findFirst: jest.Mock }
-  terminal: { update: jest.Mock }
+  terminal: { update: jest.Mock; findUnique: jest.Mock }
+  venue: { findFirst: jest.Mock }
   venuePaymentConfig: { deleteMany: jest.Mock }
 }
 const mockedCancelCommand = tpvCommandQueueService.cancelCommand as jest.Mock
@@ -65,6 +67,26 @@ describe('migrateCancel', () => {
     expect(r).toEqual({ cancelled: true, restoredVenueId: 'venue-old' })
   })
 
+  it('refuses an org-scoped cancel when the migration origin belongs to another organization', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue({
+      id: 'cmd-cross-org',
+      terminalId: 'term-1',
+      commandType: 'FACTORY_RESET',
+      status: 'QUEUED',
+      payload: { migration: { fromVenueId: 'venue-foreign', previousMerchantIds: ['ma-foreign'] } },
+    })
+    m.venue.findFirst.mockResolvedValue(null)
+
+    await expect(migrateCancel('term-1', { staffId: 'owner-1' }, 'org-1')).rejects.toBeInstanceOf(ForbiddenError)
+
+    expect(m.venue.findFirst).toHaveBeenCalledWith({
+      where: { id: 'venue-foreign', organizationId: 'org-1' },
+      select: { id: true },
+    })
+    expect(mockedCancelCommand).not.toHaveBeenCalled()
+    expect(m.terminal.update).not.toHaveBeenCalled()
+  })
+
   it('reverts to an empty merchant list when previousMerchantIds is absent in the payload', async () => {
     m.tpvCommandQueue.findFirst.mockResolvedValue({
       id: 'cmd-1',
@@ -94,7 +116,11 @@ describe('migrateCancel', () => {
     expect(m.terminal.update).not.toHaveBeenCalled()
   })
 
-  it('throws when the command payload has no migration info (older command, cannot auto-revert)', async () => {
+  // Asana 1218069201250971 (2026-09-01): a MANUAL wipe (queued from the superadmin, no
+  // `migration` payload) also blocks the wizard. Before, this path threw "cannot revert"
+  // and left the operator with no way out. There is nothing to revert — the terminal never
+  // moved — so cancelling is just dropping the queued command.
+  it('cancels a MANUAL wipe (no migration payload) by dropping the command, without touching the venue', async () => {
     m.tpvCommandQueue.findFirst.mockResolvedValue({
       id: 'cmd-1',
       terminalId: 'term-1',
@@ -102,12 +128,14 @@ describe('migrateCancel', () => {
       status: 'QUEUED',
       payload: {}, // no .migration
     })
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-current' })
 
-    await expect(migrateCancel('term-1', { staffId: 'admin-1' })).rejects.toThrow(BadRequestError)
-    await expect(migrateCancel('term-1', { staffId: 'admin-1' })).rejects.toThrow('revertir')
-    // nothing mutated when we can't determine the revert target
-    expect(mockedCancelCommand).not.toHaveBeenCalled()
+    const r = await migrateCancel('term-1', { staffId: 'admin-1' })
+
+    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.any(String))
+    // nothing to revert: the terminal stays exactly where it is
     expect(m.terminal.update).not.toHaveBeenCalled()
+    expect(r).toEqual({ cancelled: true, restoredVenueId: 'venue-current' })
   })
 })
 

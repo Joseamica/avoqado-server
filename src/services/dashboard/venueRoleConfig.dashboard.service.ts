@@ -116,6 +116,7 @@ export async function getVenueRoleConfigs(venueId: string): Promise<RoleConfigRe
         color: customConfig.color,
         isActive: customConfig.isActive,
         sortOrder: customConfig.sortOrder,
+        showAsSeller: customConfig.showAsSeller,
       }
     }
 
@@ -128,6 +129,9 @@ export async function getVenueRoleConfigs(venueId: string): Promise<RoleConfigRe
       color: null,
       isActive: true,
       sortOrder: DEFAULT_ROLE_SORT_ORDER[role],
+      // Default PRENDIDO: todos salen como vendedor mientras el venue no lo
+      // apague (founder 2026-09-01).
+      showAsSeller: true,
     }
   })
 
@@ -191,6 +195,7 @@ export async function updateVenueRoleConfigs(venueId: string, configs: RoleConfi
           color: config.color ?? null,
           isActive: config.isActive ?? true,
           sortOrder: config.sortOrder ?? DEFAULT_ROLE_SORT_ORDER[config.role as StaffRole],
+          showAsSeller: config.showAsSeller ?? true,
         },
         update: {
           displayName: config.displayName,
@@ -199,6 +204,7 @@ export async function updateVenueRoleConfigs(venueId: string, configs: RoleConfi
           color: config.color ?? undefined,
           isActive: config.isActive ?? undefined,
           sortOrder: config.sortOrder ?? undefined,
+          showAsSeller: config.showAsSeller ?? undefined,
         },
       }),
     ),

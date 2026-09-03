@@ -1,4 +1,4 @@
-import { aggregateStaffTips, registerSalesTools } from '../../../src/mcp/tools/sales'
+import { aggregateStaffTips, rankProcessorTips, registerSalesTools } from '../../../src/mcp/tools/sales'
 import type { McpScope } from '../../../src/mcp/scope'
 
 // ── Pure aggregation helper ────────────────────────────────────────────────
@@ -50,6 +50,35 @@ describe('aggregateStaffTips', () => {
   })
 })
 
+// ── Same shape from Postgres groups (2026-09-01: the tool no longer fetches rows) ──
+describe('rankProcessorTips', () => {
+  it('produces the aggregateStaffTips shape from one row per cashier, null cashier = unattributed', () => {
+    const out = rankProcessorTips([
+      { processedById: 'ana', processedByName: 'Ana Sofia Gonzalez', tips: 10, payments: 1 },
+      { processedById: null, processedByName: null, tips: 25, payments: 2 },
+      { processedById: 'fatima', processedByName: 'Fatima Flores', tips: 75.5, payments: 2 },
+    ])
+    expect(out).toEqual(
+      aggregateStaffTips([
+        { tipAmount: 50, processedById: 'fatima', processedByName: 'Fatima Flores' },
+        { tipAmount: '25.50', processedById: 'fatima', processedByName: 'Fatima Flores' },
+        { tipAmount: 10, processedById: 'ana', processedByName: 'Ana Sofia Gonzalez' },
+        { tipAmount: 20, processedById: null, processedByName: null },
+        { tipAmount: 5 },
+      ]),
+    )
+  })
+
+  it('a cashier with no name falls back to "Sin nombre" and cents are rounded (same as the row path)', () => {
+    const out = rankProcessorTips([{ processedById: 'f', processedByName: null, tips: 12.345, payments: 1 }])
+    expect(out.staff).toEqual([{ staffId: 'f', name: 'Sin nombre', tips: 12.35, payments: 1 }])
+  })
+
+  it('returns empty shape for no rows', () => {
+    expect(rankProcessorTips([])).toEqual({ total: 0, count: 0, staff: [], unattributed: { tips: 0, payments: 0 } })
+  })
+})
+
 // ── Tool handler (gating + wiring) ─────────────────────────────────────────
 const mockFetchPayments = jest.fn()
 const mockVenueFindUnique = jest.fn()
@@ -73,7 +102,7 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...(a as [])) }))
 jest.mock('@/services/legacy/mergedPayments.service', () => ({
-  fetchPaymentsForAnalytics: (...a: unknown[]) => mockFetchPayments(...(a as [])),
+  aggregateTipsByProcessor: (...a: unknown[]) => mockFetchPayments(...(a as [])),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -151,8 +180,8 @@ describe('staff_tips tool', () => {
 
   it('queries venue-local day boundaries (host-tz independent) and returns processor-attributed tips', async () => {
     mockFetchPayments.mockResolvedValue([
-      { tipAmount: 50, processedById: 'fatima', processedByName: 'Fatima Flores' },
-      { tipAmount: 20, processedById: null, processedByName: null }, // QR
+      { processedById: 'fatima', processedByName: 'Fatima Flores', tips: 50, payments: 1 },
+      { processedById: null, processedByName: null, tips: 20, payments: 1 }, // QR
     ])
     const out = parse(await call({ venueId: 'v1', fromDate: '2026-06-01', toDate: '2026-06-02' }))
 
@@ -170,8 +199,8 @@ describe('staff_tips tool', () => {
 
   it('staffId narrows the staff list but keeps the venue-wide total for context', async () => {
     mockFetchPayments.mockResolvedValue([
-      { tipAmount: 50, processedById: 'fatima', processedByName: 'Fatima Flores' },
-      { tipAmount: 10, processedById: 'ana', processedByName: 'Ana Sofia Gonzalez' },
+      { processedById: 'fatima', processedByName: 'Fatima Flores', tips: 50, payments: 1 },
+      { processedById: 'ana', processedByName: 'Ana Sofia Gonzalez', tips: 10, payments: 1 },
     ])
     const out = parse(await call({ venueId: 'v1', staffId: 'ana' }))
 

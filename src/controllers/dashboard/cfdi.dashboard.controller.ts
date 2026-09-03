@@ -19,7 +19,7 @@ import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fisc
 import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
 import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
-import { provisionEmisor, uploadEmisorCsd } from '@/services/fiscal/fiscalOnboarding.service'
+import { provisionEmisor, uploadEmisorCsd, getEmisorProviderStatus } from '@/services/fiscal/fiscalOnboarding.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 
@@ -643,6 +643,39 @@ export async function uploadEmisorCsdController(req: Request, res: Response): Pr
     }
 
     res.status(500).json({ error: 'Error interno al subir el CSD del emisor fiscal' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/provider-status
+ *
+ * Onboarding status of the emisor's org at the PAC: provisioned?, production
+ * ready?, and which steps are still pending ('manifiesto' is the one the
+ * dashboard acts on). Read-only — NO ActivityLog.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function getEmisorProviderStatusController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  try {
+    const status = await getEmisorProviderStatus({ emisorId, expectedVenueId: venueId })
+    res.status(200).json({ status })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] getEmisorProviderStatus failed for emisor ${emisorId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'Emisor no encontrado' })
+      return
+    }
+
+    res.status(502).json({ error: 'No se pudo consultar el estado del emisor con el proveedor fiscal' })
   }
 }
 

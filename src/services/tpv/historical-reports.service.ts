@@ -14,6 +14,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { localInstantRaw, localWallClockRaw, utcTs } from '@/utils/sqlDates'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { BadRequestError } from '@/errors/AppError'
 import { Prisma } from '@prisma/client'
@@ -66,17 +67,22 @@ function getTruncateExpression(grouping: HistoricalGrouping, timezone: string): 
   // SECURITY: Sanitize timezone to prevent SQL injection
   const safeTz = sanitizeTimezone(timezone)
 
+  // Venue wall clock of the UTC column. A single `AT TIME ZONE tz` read the stored UTC value
+  // as if it were local time and put a 20:00 sale on the next day. The period is returned as
+  // the INSTANT it starts (midnight on the venue clock): the TPV formats `periodStart` itself.
+  const wall = localWallClockRaw(safeTz, 'o."createdAt"')
+
   switch (grouping) {
     case HistoricalGrouping.DAILY:
-      return `DATE_TRUNC('day', o."createdAt" AT TIME ZONE '${safeTz}')`
+      return localInstantRaw(safeTz, `DATE_TRUNC('day', ${wall})`)
     case HistoricalGrouping.WEEKLY:
-      return `DATE_TRUNC('week', o."createdAt" AT TIME ZONE '${safeTz}')`
+      return localInstantRaw(safeTz, `DATE_TRUNC('week', ${wall})`)
     case HistoricalGrouping.MONTHLY:
-      return `DATE_TRUNC('month', o."createdAt" AT TIME ZONE '${safeTz}')`
+      return localInstantRaw(safeTz, `DATE_TRUNC('month', ${wall})`)
     case HistoricalGrouping.QUARTERLY:
-      return `DATE_TRUNC('quarter', o."createdAt" AT TIME ZONE '${safeTz}')`
+      return localInstantRaw(safeTz, `DATE_TRUNC('quarter', ${wall})`)
     case HistoricalGrouping.YEARLY:
-      return `DATE_TRUNC('year', o."createdAt" AT TIME ZONE '${safeTz}')`
+      return localInstantRaw(safeTz, `DATE_TRUNC('year', ${wall})`)
   }
 }
 
@@ -231,8 +237,8 @@ async function calculatePreviousPeriodsBulk(
       COALESCE(COUNT(DISTINCT o.id), 0) as total_orders
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${earliestPrevStart}
-      AND o."createdAt" < ${latestPrevEnd}
+      AND o."createdAt" >= ${utcTs(earliestPrevStart)}
+      AND o."createdAt" < ${utcTs(latestPrevEnd)}
       AND o.status = 'COMPLETED'
     GROUP BY period_start
   `
@@ -291,8 +297,10 @@ export async function getHistoricalSummaries(
     if (isNaN(cursorDate.getTime())) {
       throw new BadRequestError('Invalid cursor format. Must be a valid ISO 8601 timestamp.')
     }
-    // Use validated ISO string to prevent injection
-    cursorCondition = `AND ${truncateExpr} < '${cursorDate.toISOString()}'::timestamp`
+    // Use validated ISO string to prevent injection. `::timestamptz` keeps the literal's Z:
+    // cast to a bare `::timestamp` it was re-read in the session zone, six hours later than
+    // the period it names, and the next page repeated the last period of the previous one.
+    cursorCondition = `AND ${truncateExpr} < '${cursorDate.toISOString()}'::timestamptz`
   }
 
   // 3. Query aggregated data by period
@@ -323,8 +331,8 @@ export async function getHistoricalSummaries(
       COALESCE(SUM((SELECT COALESCE(SUM(oi.quantity), 0) FROM "OrderItem" oi WHERE oi."orderId" = o.id)), 0) as total_products
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${startDate}
-      AND o."createdAt" <= ${endDate}
+      AND o."createdAt" >= ${utcTs(startDate)}
+      AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status = 'COMPLETED'
       ${Prisma.raw(cursorCondition)}
     GROUP BY period_start

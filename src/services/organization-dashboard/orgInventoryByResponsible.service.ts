@@ -14,6 +14,8 @@
  * llega como parámetro.
  */
 import prisma from '../../utils/prismaClient'
+import { utcTs } from '../../utils/sqlDates'
+import { Prisma } from '@prisma/client'
 import type { SaleVerificationStatus, SerializedItemCustodyState } from '@prisma/client'
 
 /** Un ítem serializado con su estado de venta YA resuelto por quien lo carga. */
@@ -25,6 +27,10 @@ export interface InventoryItemInput {
   registeredFromVenueId: string | null
   /** null = todavía no se vendió, o se vendió sin verificación asociada. */
   saleVerificationStatus: SaleVerificationStatus | null
+  /** Number of physical items represented by this database-aggregated row. */
+  weight?: number
+  /** Present on database-aggregated rows so category filtering stays exact. */
+  categoryId?: string
 }
 
 export interface StaffVenueInput {
@@ -175,23 +181,24 @@ function addCounts(target: ResponsibleCounts, source: ResponsibleCounts): void {
  * Mayoral, 25-ago-2026, verificada contra `sale-verification.dashboard.service`).
  */
 function accumulateItem(counts: ResponsibleCounts, item: InventoryItemInput): void {
-  counts.assigned += 1
-  if (item.promoterAcceptedAt !== null) counts.receptionApproved += 1
-  if (item.custodyState === 'PROMOTER_HELD') counts.inHandToday += 1
+  const weight = item.weight ?? 1
+  counts.assigned += weight
+  if (item.promoterAcceptedAt !== null) counts.receptionApproved += weight
+  if (item.custodyState === 'PROMOTER_HELD') counts.inHandToday += weight
 
   switch (item.saleVerificationStatus) {
     case 'COMPLETED':
-      counts.saleApproved += 1
+      counts.saleApproved += weight
       break
     case 'PENDING':
     case 'PROCESSING':
-      counts.saleInAdminReview += 1
+      counts.saleInAdminReview += weight
       break
     case 'FAILED': // "Revisar" — el promotor puede corregir desde la TPV
-      counts.saleInPromoterReview += 1
+      counts.saleInPromoterReview += weight
       break
     case 'REJECTED':
-      counts.saleRejected += 1
+      counts.saleRejected += weight
       break
     default:
       break
@@ -219,20 +226,36 @@ function resolveCity(staff: StaffInput | undefined): string | null {
 /**
  * El supervisor se deduce del promotor, no del campo de cada SIM.
  *
- * Casi la mitad del inventario en mano no trae `assignedSupervisorId` (756 de
- * 1,628 medidos el 25-ago-2026), así que agrupar por el campo del ítem partiría
- * a un mismo promotor en varios renglones y dejaría el nivel Supervisor hueco.
- * Isaac lo pidió explícitamente así: los SIMs de un promotor caen bajo su
- * supervisor "para que cuadre bottom-up, de promotor hasta nivel país".
+ * 🔴 Manda la ESTRUCTURA DEL EQUIPO —el supervisor de la sucursal donde el
+ * promotor trabaja hoy— y no `assignedSupervisorId`, que es un dato histórico:
+ * queda grabado en cada SIM el día que se entrega y no se mueve nunca. Cuando
+ * alguien cambia de equipo, su inventario viejo se queda con el jefe anterior y
+ * la tabla lo colgaba de ahí.
  *
- * Gana el supervisor mayoritario entre sus ítems; el id desempata para que el
- * resultado sea estable entre corridas.
+ * Lo reportó Isaac el 31-ago-2026 con captura: "Juan Nájera aparece que tiene 2
+ * vendedores" cuando su archivo le da 11. Yolanda salía bajo Hugo porque sus 61
+ * SIMs sin vender siguen a nombre de Hugo, aunque ella ya trabaje con Juan; y
+ * el equipo de Juan quedaba partido entre tres supervisores.
+ *
+ * El respaldo por SIMs se conserva SÓLO para la sucursal que todavía no tiene
+ * supervisor asignado: ahí el dato viejo es la única pista, y es mejor que dejar
+ * al promotor colgando de nadie. Casi la mitad del inventario en mano tampoco
+ * trae `assignedSupervisorId` (756 de 1,628 medidos el 25-ago-2026), así que sin
+ * ese respaldo el nivel Supervisor quedaría hueco. Entre varios gana el
+ * mayoritario, con el id de desempate para que el resultado sea estable.
  */
-function resolveSupervisorId(items: InventoryItemInput[]): string | null {
+function resolveSupervisorId(
+  staffRecord: StaffInput | undefined,
+  items: InventoryItemInput[],
+  venueSupervisors: Record<string, string> | undefined,
+): string | null {
+  const porEstructura = venueSupervisors?.[mostRecentVenueId(staffRecord) ?? '']
+  if (porEstructura) return porEstructura
+
   const tally = new Map<string, number>()
   for (const item of items) {
     if (!item.assignedSupervisorId) continue
-    tally.set(item.assignedSupervisorId, (tally.get(item.assignedSupervisorId) ?? 0) + 1)
+    tally.set(item.assignedSupervisorId, (tally.get(item.assignedSupervisorId) ?? 0) + (item.weight ?? 1))
   }
   if (tally.size === 0) return null
 
@@ -248,8 +271,8 @@ function resolveSupervisorId(items: InventoryItemInput[]): string | null {
 }
 
 /** La sucursal de la asignación más reciente — mismo desempate que `resolveCity`. */
-function mostRecentVenueId(staff: StaffInput): string | null {
-  if (staff.venues.length === 0) return null
+function mostRecentVenueId(staff: StaffInput | undefined): string | null {
+  if (!staff || staff.venues.length === 0) return null
   return staff.venues.reduce((best, v) => (v.startDate.getTime() > best.startDate.getTime() ? v : best)).venueId
 }
 
@@ -297,7 +320,7 @@ export function buildInventoryByResponsible(input: BuildInventoryByResponsibleIn
       continue
     }
 
-    const supervisorId = resolveSupervisorId(promoterItems)
+    const supervisorId = resolveSupervisorId(staffRecord, promoterItems, venueSupervisors)
     const supervisorName = supervisorId ? (staffById.get(supervisorId)?.name ?? NO_SUPERVISOR_LABEL) : NO_SUPERVISOR_LABEL
 
     const supervisors = cityMap.get(city) ?? (new Map() as SupervisorMap)
@@ -385,22 +408,6 @@ export interface FetchInventoryByResponsibleOptions {
   receivingVenueId?: string | null
 }
 
-/**
- * Toma la verificación de venta que corresponde al ítem.
- *
- * Una orden puede traer varios pagos y sólo algunos con verificación; nos
- * interesa la primera que exista, porque en este flujo la venta de un SIM
- * produce una sola verificación. Si no hay ninguna, el ítem simplemente no
- * suma a las columnas de venta.
- */
-function pickVerificationStatus(orderItem: any): SaleVerificationStatus | null {
-  const payments = orderItem?.order?.payments ?? []
-  for (const payment of payments) {
-    if (payment?.saleVerification?.status) return payment.saleVerification.status
-  }
-  return null
-}
-
 /** Cuenta ítems por opción y ordena por nombre, para que el selector sea estable. */
 function tally(rows: any[], pick: (row: any) => { id: string; name: string } | null | undefined): FilterOption[] {
   const map = new Map<string, FilterOption>()
@@ -408,10 +415,40 @@ function tally(rows: any[], pick: (row: any) => { id: string; name: string } | n
     const opt = pick(row)
     if (!opt) continue
     const existing = map.get(opt.id)
-    if (existing) existing.itemCount += 1
-    else map.set(opt.id, { id: opt.id, name: opt.name, itemCount: 1 })
+    const weight = Number(row.itemCount ?? 1)
+    if (existing) existing.itemCount += weight
+    else map.set(opt.id, { id: opt.id, name: opt.name, itemCount: weight })
   }
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'))
+}
+
+type SupervisorStaffRow = {
+  id: string
+  active: boolean
+  venues: Array<{
+    venueId: string
+    startDate: Date
+    role: string
+    venue?: { organizationId?: string | null } | null
+  }>
+}
+
+/** Un solo supervisor canónico por sucursal, independiente del orden de Postgres. */
+export function buildVenueSupervisorMap(staffRows: SupervisorStaffRow[], organizationId: string): Record<string, string> {
+  const winners = new Map<string, { staffId: string; startDate: Date }>()
+
+  for (const row of staffRows) {
+    if (!row.active) continue
+    for (const venue of row.venues) {
+      if (venue.role !== 'MANAGER' || venue.venue?.organizationId !== organizationId) continue
+      const current = winners.get(venue.venueId)
+      const isMoreRecent = !current || venue.startDate.getTime() > current.startDate.getTime()
+      const winsTie = current && venue.startDate.getTime() === current.startDate.getTime() && row.id.localeCompare(current.staffId) < 0
+      if (isMoreRecent || winsTie) winners.set(venue.venueId, { staffId: row.id, startDate: venue.startDate })
+    }
+  }
+
+  return Object.fromEntries([...winners.entries()].map(([venueId, winner]) => [venueId, winner.staffId]))
 }
 
 export class OrgInventoryByResponsibleService {
@@ -425,34 +462,69 @@ export class OrgInventoryByResponsibleService {
   async getInventoryByResponsible(organizationId: string, options: FetchInventoryByResponsibleOptions = {}) {
     const { dateFrom, dateTo, categoryId, receivingVenueId } = options
 
-    const rows = await prisma.serializedItem.findMany({
-      where: {
-        organizationId,
-        assignedPromoterId: { not: null },
-        ...(dateFrom || dateTo ? { createdAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } } : {}),
-      },
-      select: {
-        assignedPromoterId: true,
-        assignedSupervisorId: true,
-        custodyState: true,
-        promoterAcceptedAt: true,
-        registeredFromVenueId: true,
-        registeredFromVenue: { select: { id: true, name: true } },
-        categoryId: true,
-        category: { select: { id: true, name: true } },
-        orderItem: {
-          select: { order: { select: { payments: { select: { saleVerification: { select: { status: true } } } } } } },
-        },
-      },
-    })
+    const conditions: Prisma.Sql[] = [Prisma.sql`si."organizationId" = ${organizationId}`, Prisma.sql`si."assignedPromoterId" IS NOT NULL`]
+    if (dateFrom) conditions.push(Prisma.sql`si."createdAt" >= ${utcTs(dateFrom)}`)
+    if (dateTo) conditions.push(Prisma.sql`si."createdAt" <= ${utcTs(dateTo)}`)
+
+    type AggregatedInventoryRow = {
+      assignedPromoterId: string
+      assignedSupervisorId: string | null
+      custodyState: SerializedItemCustodyState
+      promoterAccepted: boolean
+      registeredFromVenueId: string | null
+      registeredFromVenueName: string | null
+      categoryId: string
+      categoryName: string
+      saleVerificationStatus: SaleVerificationStatus | null
+      itemCount: number | bigint
+    }
+
+    const rows = await prisma.$queryRaw<AggregatedInventoryRow[]>(Prisma.sql`
+      SELECT
+        si."assignedPromoterId" AS "assignedPromoterId",
+        si."assignedSupervisorId" AS "assignedSupervisorId",
+        si."custodyState" AS "custodyState",
+        (si."promoterAcceptedAt" IS NOT NULL) AS "promoterAccepted",
+        si."registeredFromVenueId" AS "registeredFromVenueId",
+        v."name" AS "registeredFromVenueName",
+        si."categoryId" AS "categoryId",
+        COALESCE(c."name", 'Sin categoría') AS "categoryName",
+        verification."status" AS "saleVerificationStatus",
+        COUNT(*)::int AS "itemCount"
+      FROM "SerializedItem" si
+      LEFT JOIN "Venue" v ON v."id" = si."registeredFromVenueId"
+      LEFT JOIN "ItemCategory" c ON c."id" = si."categoryId"
+      LEFT JOIN LATERAL (
+        SELECT sv."status"
+        FROM "OrderItem" oi
+        JOIN "Payment" p ON p."orderId" = oi."orderId"
+        JOIN "SaleVerification" sv ON sv."paymentId" = p."id"
+        WHERE oi."id" = si."orderItemId"
+        ORDER BY sv."createdAt" ASC, sv."id" ASC
+        LIMIT 1
+      ) verification ON TRUE
+      WHERE ${Prisma.join(conditions, ' AND ')}
+      GROUP BY
+        si."assignedPromoterId",
+        si."assignedSupervisorId",
+        si."custodyState",
+        (si."promoterAcceptedAt" IS NOT NULL),
+        si."registeredFromVenueId",
+        v."name",
+        si."categoryId",
+        c."name",
+        verification."status"
+    `)
 
     const items: InventoryItemInput[] = rows.map(row => ({
       assignedPromoterId: row.assignedPromoterId,
       assignedSupervisorId: row.assignedSupervisorId,
       custodyState: row.custodyState,
-      promoterAcceptedAt: row.promoterAcceptedAt,
+      promoterAcceptedAt: row.promoterAccepted ? new Date(0) : null,
       registeredFromVenueId: row.registeredFromVenueId,
-      saleVerificationStatus: pickVerificationStatus(row.orderItem),
+      saleVerificationStatus: row.saleVerificationStatus,
+      categoryId: row.categoryId,
+      weight: Number(row.itemCount),
     }))
 
     // Los promotores dados de baja ya no tienen StaffVenue activo, así que el
@@ -488,6 +560,8 @@ export class OrgInventoryByResponsibleService {
                 select: { venueId: true, startDate: true, role: true, venue: { select: { city: true, organizationId: true } } },
               },
             },
+            orderBy: { id: 'asc' },
+            take: 10_000,
           })
         : []
 
@@ -509,20 +583,17 @@ export class OrgInventoryByResponsibleService {
 
     // Supervisor de cada sucursal: es la única pista para colgar de alguien a un
     // promotor que no tiene SIMs (sin inventario no hay de dónde deducirlo).
-    const venueSupervisors: Record<string, string> = {}
-    for (const row of staffRows) {
-      for (const v of row.venues) {
-        if (v.role === 'MANAGER' && v.venue?.organizationId === organizationId && !venueSupervisors[v.venueId]) {
-          venueSupervisors[v.venueId] = row.id
-        }
-      }
-    }
+    const venueSupervisors = buildVenueSupervisorMap(staffRows, organizationId)
 
     // Las opciones de los selectores se calculan sobre el universo SIN filtrar:
     // si salieran del conjunto ya filtrado, elegir una sucursal dejaría el
     // selector con una sola opción y el usuario no podría volver atrás.
-    const receivingVenues = tally(rows, r => r.registeredFromVenue)
-    const categories = tally(rows, r => r.category)
+    const receivingVenues = tally(rows, row =>
+      row.registeredFromVenueId && row.registeredFromVenueName
+        ? { id: row.registeredFromVenueId, name: row.registeredFromVenueName }
+        : null,
+    )
+    const categories = tally(rows, row => ({ id: row.categoryId, name: row.categoryName }))
 
     const moduleRow = await prisma.organizationModule.findFirst({
       where: { organizationId, enabled: true, module: { code: 'SERIALIZED_INVENTORY' } },
@@ -534,7 +605,7 @@ export class OrgInventoryByResponsibleService {
     // sin explicación: se ignora y se abre mostrando todo.
     const defaultReceivingVenueId = receivingVenues.some(v => v.id === configuredDefault) ? configuredDefault : null
 
-    const scopedByCategory = categoryId ? items.filter((_, i) => rows[i].categoryId === categoryId) : items
+    const scopedByCategory = categoryId ? items.filter(item => item.categoryId === categoryId) : items
 
     const result = buildInventoryByResponsible({ items: scopedByCategory, staff, receivingVenueId, venueSupervisors })
     return { ...result, filters: { receivingVenues, categories, defaultReceivingVenueId } }

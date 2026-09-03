@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { computeRevenueSplit, type CardType, type MerchantRevenueShareConfig } from '../payments/revenueShare.service'
+import { utcTs } from '../../utils/sqlDates'
 
 export interface DateRange {
   startDate?: Date
@@ -196,7 +197,7 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
         FROM "CheckoutSession" cs
         JOIN "EcommerceMerchant" em ON cs."ecommerceMerchantId" = em.id
         JOIN "Venue" v ON em."venueId" = v.id
-        WHERE cs.status = 'COMPLETED' AND cs."createdAt" >= ${startDate} AND cs."createdAt" <= ${endDate} ${onlineVenueClause}
+        WHERE cs.status = 'COMPLETED' AND cs."createdAt" >= ${utcTs(startDate)} AND cs."createdAt" <= ${utcTs(endDate)} ${onlineVenueClause}
         GROUP BY v.id, v.name
       `),
       prisma.checkoutSession.aggregate({
@@ -226,7 +227,7 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
         FROM "CheckoutSession" cs
         JOIN "EcommerceMerchant" em ON cs."ecommerceMerchantId" = em.id
         JOIN "PaymentProvider" pp ON em."providerId" = pp.id
-        WHERE cs.status = 'COMPLETED' AND cs."createdAt" >= ${startDate} AND cs."createdAt" <= ${endDate} ${onlineVenueClause}
+        WHERE cs.status = 'COMPLETED' AND cs."createdAt" >= ${utcTs(startDate)} AND cs."createdAt" <= ${utcTs(endDate)} ${onlineVenueClause}
         GROUP BY em.id, em."channelName", em."businessName", pp.code
         ORDER BY fees DESC
       `),

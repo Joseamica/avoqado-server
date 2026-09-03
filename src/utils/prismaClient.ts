@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client'
+import { extensionResultadoGigante } from './queryResultGuard'
 
 /**
  * Prisma Client Singleton
@@ -65,7 +66,7 @@ const serverOnlyOmit = {
 // TransactionClient ports. The stable public type preserves those ports while
 // the constructed runtime client still enforces the omit; H1 readers opt in
 // explicitly with select or omit:false.
-const prisma = (datasourceUrl
+const prismaBase = datasourceUrl
   ? new PrismaClient({
       datasources: { db: { url: datasourceUrl } },
       omit: serverOnlyOmit,
@@ -74,7 +75,13 @@ const prisma = (datasourceUrl
   : new PrismaClient({
       omit: serverOnlyOmit,
       // log: process.env.NODE_ENV === 'development' ? ['query', 'info', 'warn', 'error'] : ['error'],
-    })) as unknown as PrismaClient
+    })
+
+// Guardia del incidente 2026-09-01: todo findMany que devuelva un resultado gigante se
+// denuncia en el log con modelo + tamaño (el contexto le estampa el endpoint). Nunca
+// recorta ni lanza — ver src/utils/queryResultGuard.ts. El mismo cast de abajo aplica:
+// $extends cambia el tipo genérico y rompería los puertos estrechos del repo.
+const prisma = prismaBase.$extends(extensionResultadoGigante) as unknown as PrismaClient
 
 // Graceful shutdown to close database connections
 process.on('beforeExit', async () => {

@@ -35,6 +35,10 @@ function flattenOrderModifiers(order: any): any {
   }
 }
 
+/** Valor sintético que manda el dashboard para «Venta sin productos»; no existe en `OrderType`. */
+export const FAST_TYPE_FILTER = 'FAST'
+export const FAST_ORDER_NUMBER_PREFIX = 'FAST-'
+
 export interface OrderFilters {
   statuses?: string[]
   types?: string[]
@@ -53,62 +57,9 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
   const skip = (page - 1) * pageSize
   const take = pageSize
 
-  // Exclude PENDING, CANCELLED, DELETED orders - they shouldn't appear in order list
-  const whereClause: any = {
-    venueId,
-    status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
-  }
-
-  if (filters) {
-    // Status filter (overrides the default "not in [PENDING, CANCELLED, DELETED]" exclusion)
-    if (filters.statuses && filters.statuses.length > 0) {
-      whereClause.status = { in: filters.statuses }
-    }
-
-    if (filters.types && filters.types.length > 0) {
-      whereClause.type = { in: filters.types }
-    }
-
-    if (filters.tableIds && filters.tableIds.length > 0) {
-      whereClause.tableId = { in: filters.tableIds }
-    }
-
-    // staffIds maps to servedById (who attended the order)
-    if (filters.staffIds && filters.staffIds.length > 0) {
-      whereClause.servedById = { in: filters.staffIds }
-    }
-
-    if (filters.startDate || filters.endDate) {
-      whereClause.createdAt = {}
-      if (filters.startDate) whereClause.createdAt.gte = new Date(filters.startDate)
-      if (filters.endDate) whereClause.createdAt.lte = new Date(filters.endDate)
-    }
-
-    if (filters.search) {
-      const searchTerm = filters.search.trim()
-      const searchNumber = parseFloat(searchTerm)
-      whereClause.OR = [
-        // Order number (string or numeric)
-        { orderNumber: { contains: searchTerm, mode: 'insensitive' } },
-        // Total amount match (coarse match: amount in [n, n+1))
-        ...(isNaN(searchNumber) ? [] : [{ total: { gte: searchNumber, lt: searchNumber + 1 } }]),
-        // Customer name on OrderCustomer relation
-        {
-          orderCustomers: {
-            some: {
-              customer: {
-                OR: [
-                  { firstName: { contains: searchTerm, mode: 'insensitive' } },
-                  { lastName: { contains: searchTerm, mode: 'insensitive' } },
-                  { phone: { contains: searchTerm, mode: 'insensitive' } },
-                ],
-              },
-            },
-          },
-        },
-      ]
-    }
-  }
+  // La cláusula 'where' es la MISMA para el listado, el conteo, el export y el resumen
+  // (orderSummary.dashboard.service.ts espeja sus predicados en SQL).
+  const whereClause = buildOrdersWhereClause(venueId, filters)
 
   const [orders, total] = await prisma.$transaction([
     prisma.order.findMany({
@@ -142,7 +93,8 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
           select: { amount: true, tipAmount: true, type: true },
         },
       },
-      orderBy: { updatedAt: 'desc' },
+      // Desempate por id: con el tope de 100 el cliente pagina de verdad (ver payment.dashboard.service).
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
       skip,
       take,
     }),
@@ -168,10 +120,14 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
   }
 }
 /**
- * Build the same `where` clause used by `getOrders` — extracted so the export endpoint
- * can apply the same filters without duplicating logic.
+ * The ONE `where` clause of the orders listing — shared by `getOrders`, the export and
+ * (mirrored predicate by predicate in SQL) the summary in `orderSummary.dashboard.service.ts`.
+ * Add a filter here → add it there → run
+ * `tests/integration/dashboard/listSummary-sql-parity.integration.test.ts`.
  */
-function buildOrdersWhereClause(venueId: string, filters?: OrderFilters): any {
+export function buildOrdersWhereClause(venueId: string, filters?: OrderFilters): any {
+  // Exclude PENDING, CANCELLED, DELETED orders - they shouldn't appear in order list
+  // (a `statuses` filter overrides this default exclusion).
   const whereClause: any = {
     venueId,
     status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
@@ -179,7 +135,21 @@ function buildOrdersWhereClause(venueId: string, filters?: OrderFilters): any {
   if (!filters) return whereClause
 
   if (filters.statuses && filters.statuses.length > 0) whereClause.status = { in: filters.statuses }
-  if (filters.types && filters.types.length > 0) whereClause.type = { in: filters.types }
+  if (filters.types && filters.types.length > 0) {
+    // 'FAST' («Venta sin productos») NO es un valor de OrderType: es el prefijo del número de
+    // esas órdenes (FAST-…). Pasarlo a Prisma como tipo reventaba el listado (defecto desde el
+    // 2026-01-13, cerrado el 2026-09-01). Se traduce a `orderNumber startsWith 'FAST-'`, en OR
+    // con los tipos reales que vengan junto a él.
+    const realTypes = filters.types.filter(t => t !== FAST_TYPE_FILTER)
+    if (realTypes.length === filters.types.length) {
+      whereClause.type = { in: filters.types }
+    } else {
+      const orTypes: any[] = [{ orderNumber: { startsWith: FAST_ORDER_NUMBER_PREFIX } }]
+      if (realTypes.length > 0) orTypes.push({ type: { in: realTypes } })
+      // `AND` en vez de `OR` a secas: la búsqueda (`search`) ya ocupa el OR de primer nivel.
+      whereClause.AND = [{ OR: orTypes }]
+    }
+  }
   if (filters.tableIds && filters.tableIds.length > 0) whereClause.tableId = { in: filters.tableIds }
   if (filters.staffIds && filters.staffIds.length > 0) whereClause.servedById = { in: filters.staffIds }
   if (filters.startDate || filters.endDate) {

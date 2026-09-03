@@ -1,6 +1,7 @@
 import { Decimal } from '@prisma/client/runtime/library'
 import { fromZonedTime } from 'date-fns-tz'
 import prisma from '../utils/prismaClient'
+import { utcTs } from '../utils/sqlDates'
 import {
   calculateVenueCommissions,
   buildVenueBreakdown,
@@ -130,8 +131,8 @@ export async function getLayer1Report(aggregatorId: string, dateFrom: string, da
     JOIN "Venue" v ON p."venueId" = v.id
     WHERE ma."aggregatorId" = ${aggregatorId}
       AND p.status = 'COMPLETED'
-      AND p."createdAt" >= ${startUTC}
-      AND p."createdAt" <= ${endUTC}
+      AND p."createdAt" >= ${utcTs(startUTC)}
+      AND p."createdAt" <= ${utcTs(endUTC)}
     GROUP BY v.name, tc."transactionType"
     ORDER BY v.name, tc."transactionType"
   `
@@ -259,8 +260,8 @@ export async function getLayer2Report(aggregatorId: string, dateFrom: string, da
     WHERE ma."aggregatorId" = ${aggregatorId}
       AND vc.active = true
       AND p.status = 'COMPLETED'
-      AND p."createdAt" >= ${startUTC}
-      AND p."createdAt" <= ${endUTC}
+      AND p."createdAt" >= ${utcTs(startUTC)}
+      AND p."createdAt" <= ${utcTs(endUTC)}
     GROUP BY v.name, tc."transactionType", vc.rate, vc."referredBy"
     ORDER BY v.name, tc."transactionType"
   `

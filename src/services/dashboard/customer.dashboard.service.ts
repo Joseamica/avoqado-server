@@ -10,7 +10,7 @@
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
-import { CustomerApprovalStatus, PaymentStatus } from '@prisma/client'
+import { CustomerApprovalStatus, PaymentStatus, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
@@ -976,7 +976,65 @@ export async function settleCustomerBalance(
  * Update customer metrics when an order is completed
  * (Called from order/payment service)
  */
-export async function updateCustomerMetrics(customerId: string, orderTotal: number) {
+export async function updateCustomerMetrics(customerId: string, orderTotal: number, orderId?: string, venueId?: string) {
+  if (orderId) {
+    const applied = await prisma.$transaction(async tx => {
+      // Metrics for different orders of the same customer must serialize. Without
+      // the row lock, two payments can read the same counters and the later
+      // absolute update silently overwrites the earlier one.
+      const [customer] = await tx.$queryRaw<
+        Array<{ id: string; venueId: string; totalVisits: number; totalSpent: Prisma.Decimal; firstVisitAt: Date | null }>
+      >`
+        SELECT "id", "venueId", "totalVisits", "totalSpent", "firstVisitAt"
+        FROM "Customer"
+        WHERE "id" = ${customerId}
+        FOR UPDATE
+      `
+
+      if (!customer) {
+        logger.warn(`Customer ${customerId} not found for metrics update`)
+        return false
+      }
+      if (venueId && customer.venueId !== venueId) {
+        logger.warn('Customer metrics tenant mismatch ignored', { customerId, orderId, venueId, customerVenueId: customer.venueId })
+        return false
+      }
+
+      const existing = await tx.customerOrderMetric.findUnique({
+        where: { customerId_orderId: { customerId, orderId } },
+        select: { id: true },
+      })
+      if (existing) return false
+
+      const newTotalVisits = customer.totalVisits + 1
+      const newTotalSpent = customer.totalSpent.toNumber() + orderTotal
+      const now = new Date()
+
+      await tx.customerOrderMetric.create({
+        data: { customerId, orderId, venueId: customer.venueId, amount: orderTotal },
+      })
+      await tx.customer.update({
+        where: { id: customerId },
+        data: {
+          totalVisits: newTotalVisits,
+          totalSpent: newTotalSpent,
+          averageOrderValue: newTotalSpent / newTotalVisits,
+          lastVisitAt: now,
+          firstVisitAt: customer.firstVisitAt || now,
+        },
+      })
+
+      return true
+    })
+
+    if (applied) {
+      logger.info(`Customer metrics updated: ${customerId}`, { customerId, orderId, orderTotal })
+    }
+    return
+  }
+
+  // Backward-compatible path for non-order adjustments. Paid-order callers must
+  // always provide orderId so retries are structurally idempotent.
   const customer = await prisma.customer.findUnique({
     where: { id: customerId },
     select: {

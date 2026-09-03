@@ -4,6 +4,7 @@ import { VenueStatus } from '@prisma/client'
 import { PRODUCTION_VENUE_STATUSES, OPERATIONAL_VENUE_STATUSES, DEMO_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
 import { NotFoundError } from '@/errors/AppError'
+import { utcTs } from '@/utils/sqlDates'
 
 // ===== PRODUCTION VENUE FILTER =====
 // Excludes demo/trial venues (LIVE_DEMO, TRIAL) from analytics to prevent skewed metrics
@@ -1395,8 +1396,8 @@ async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<Perio
       FROM "Payment" p
       INNER JOIN "Order" o ON o.id = p."orderId"
       INNER JOIN "Venue" v ON v.id = o."venueId"
-      WHERE p."createdAt" >= ${startDate}
-        AND p."createdAt" <= ${endDate}
+      WHERE p."createdAt" >= ${utcTs(startDate)}
+        AND p."createdAt" <= ${utcTs(endDate)}
         AND p.status = 'COMPLETED'
         AND p.method != 'CASH'
         AND v.status NOT IN ('LIVE_DEMO', 'TRIAL')

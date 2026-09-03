@@ -12,73 +12,86 @@ import {
   type ExportColumnDef,
 } from '../../services/dashboard/export.helpers'
 
+import * as paymentSummaryService from '../../services/dashboard/paymentSummary.dashboard.service'
+import {
+  LIST_PAGE_SIZE_MAX,
+  amountFilterFromQuery,
+  clampLegacyPageSize,
+  clampPage,
+  clampPageSize,
+  parseCsv,
+} from '../../services/dashboard/listSummary.shared'
+
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 
+/** Un valor de query como cadena no vacía, o undefined. */
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+/** CSV o parámetro repetido (arreglo): los dos caminos llegan a parseCsv. */
+const list = (v: unknown): string[] | undefined => (Array.isArray(v) ? parseCsv(v.map(String)) : parseCsv(str(v)))
+
+/** Los filtros del listado, tal como llegan en la query (CSV) → `PaymentFilters`. */
+function paymentFiltersFromQuery(q: Record<string, unknown>): paymentDashboardService.PaymentFilters {
+  return {
+    merchantAccountIds: list(q.merchantAccountIds),
+    methods: list(q.methods) as any,
+    sources: list(q.sources),
+    staffIds: list(q.staffIds),
+    // Backward-compat single-value filters
+    merchantAccountId: str(q.merchantAccountId),
+    method: str(q.method) as any,
+    source: str(q.source),
+    staffId: str(q.staffId),
+    search: str(q.search),
+    startDate: str(q.startDate),
+    endDate: str(q.endDate),
+  }
+}
+
 // Ruta: GET /venues/:venueId/payments
-export async function getPaymentsData(
-  req: Request<
-    { venueId: string },
-    {},
-    {},
-    {
-      page?: string
-      pageSize?: string
-      // Multi-select arrays (comma-separated)
-      merchantAccountIds?: string
-      methods?: string
-      sources?: string
-      staffIds?: string
-      // Single-value legacy params
-      merchantAccountId?: string
-      method?: string
-      source?: string
-      staffId?: string
-      search?: string
-      startDate?: string
-      endDate?: string
-    }
-  >,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+export async function getPaymentsData(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    // Parseamos los query params con valores por defecto
-    const page = parseInt(req.query.page || '1')
-    const pageSize = parseInt(req.query.pageSize || '10')
+    const q = req.query as Record<string, unknown>
+    const page = clampPage(q.page)
+    const boundedResponse = q.responseMode === 'paginated-v1'
+    const pageSize = boundedResponse ? clampPageSize(q.pageSize) : clampLegacyPageSize(q.pageSize)
 
-    // Helper to parse comma-separated query param into string array (drops empty entries)
-    const parseList = (raw?: string): string[] | undefined => {
-      if (!raw) return undefined
-      const list = raw
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean)
-      return list.length > 0 ? list : undefined
-    }
+    const paymentsData = await paymentDashboardService.getPaymentsData(venueId, page, pageSize, paymentFiltersFromQuery(q))
 
-    // Extraer filtros opcionales
-    const filters: paymentDashboardService.PaymentFilters = {
-      merchantAccountIds: parseList(req.query.merchantAccountIds),
-      methods: parseList(req.query.methods) as any,
-      sources: parseList(req.query.sources),
-      staffIds: parseList(req.query.staffIds),
-      // Backward-compat single-value filters
-      merchantAccountId: req.query.merchantAccountId,
-      method: req.query.method as any,
-      source: req.query.source,
-      staffId: req.query.staffId,
-      search: req.query.search,
-      startDate: req.query.startDate,
-      endDate: req.query.endDate,
-    }
+    res.status(200).json({
+      ...paymentsData,
+      meta: { ...paymentsData.meta, ...(boundedResponse ? { maxPageSize: LIST_PAGE_SIZE_MAX, responseMode: 'paginated-v1' } : {}) },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
 
-    // Llamada al servicio con los parámetros ya parseados
-    const paymentsData = await paymentDashboardService.getPaymentsData(venueId, page, pageSize, filters)
+// Ruta: GET /venues/:venueId/payments/summary — conteos por estado×tipo y sumas, en Postgres
+export async function getPaymentsSummary(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const q = req.query as Record<string, unknown>
+    const summary = await paymentSummaryService.getPaymentsSummary(venueId, paymentFiltersFromQuery(q), {
+      subtotal: amountFilterFromQuery(q, 'subtotal'),
+      tip: amountFilterFromQuery(q, 'tip'),
+      total: amountFilterFromQuery(q, 'total'),
+      international: list(q.international),
+      cardBrands: list(q.cardBrands),
+    })
+    res.status(200).json({ success: true, data: summary })
+  } catch (error) {
+    next(error)
+  }
+}
 
-    res.status(200).json(paymentsData)
+// Ruta: GET /venues/:venueId/payments/filter-options — valores distintos para las píldoras
+export async function getPaymentsFilterOptions(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const options = await paymentSummaryService.getPaymentFilterOptions(req.params.venueId)
+    res.status(200).json({ success: true, data: options })
   } catch (error) {
     next(error)
   }

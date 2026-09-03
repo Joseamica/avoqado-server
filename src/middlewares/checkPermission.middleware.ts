@@ -8,6 +8,37 @@ import { getVenueName } from '@/observability/venueNames'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { consumePermissionOverride, isManagerPinOverrideEnabled } from '@/services/mobile/permission-override.mobile.service'
 
+/** Métodos que no cambian nada: un rebote aquí no dejó daño que auditar. */
+const METODOS_DE_LECTURA = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+/**
+ * ¿Esta denegación merece una fila en la bitácora que LEE EL DUEÑO?
+ *
+ * 🔴 Nació de un dato, no de una opinión: en el venue Testarudo Cafe los 122
+ * registros que la pantalla mostraba eran `PERMISSION_DENIED`, y ninguno era un
+ * intento de intrusión. Eran GETs del PROPIO dashboard — al abrir el panel, la
+ * app pide `/features`, `/settlement-calendar`, `/ecommerce-merchants` y
+ * `/role-config`; un rol de piso rebota las cuatro y el servidor apuntaba cuatro
+ * líneas por visita. El descuento, el borrado y el cambio de precio —lo que un
+ * dueño abre la bitácora a buscar— quedaban enterrados.
+ *
+ * La lectura rebotada NO se pierde: `logger.warn` la sigue emitiendo siempre, así
+ * que la observabilidad de seguridad (Better Stack) la conserva. Lo que cambia es
+ * que deja de ocupar el registro de auditoría del negocio.
+ *
+ * 🔴 El cruce de TENANT (`venue-access`) se audita SIEMPRE, aunque sea un GET:
+ * alguien tocando el negocio de otro es justo lo que un auditor busca, y ahí el
+ * daño no es haber escrito — es haber mirado.
+ *
+ * Ante la duda (entidad nueva, método desconocido) se AUDITA: una fila de más es
+ * barata; un rastro perdido no se recupera.
+ */
+export function debeAuditarDenegacion({ method, entity }: { method?: string; entity: string }): boolean {
+  if (entity !== 'permission') return true
+  if (!method) return true
+  return !METODOS_DE_LECTURA.has(method.toUpperCase())
+}
+
 type RoleResolutionSource = 'token' | 'staffVenue' | 'orgOwner' | 'none'
 
 export interface ResolvedUserRole {
@@ -430,26 +461,32 @@ export const checkPermission = (requiredPermission: string) => {
         // Wrapped in try/catch so a mocked req without .get() (in unit tests)
         // or any unexpected synchronous failure can't leak as a 500 response.
         // logAction() itself is also fire-and-forget + try/catch internally.
-        try {
-          void logAction({
-            staffId: authContext.userId,
-            venueId,
-            action: 'PERMISSION_DENIED',
-            entity: 'permission',
-            entityId: requiredPermission,
-            data: {
-              permission: requiredPermission,
-              userRole,
-              roleSource,
-              method: req.method,
-              path: req.originalUrl,
-              hasPermissionSet: !!permissionSet,
-            },
-            ipAddress: req.ip,
-            userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
-          })
-        } catch (auditErr) {
-          logger.error('checkPermission: audit log construction failed (non-fatal)', auditErr)
+        //
+        // Las LECTURAS rebotadas no entran: son la propia app preguntando de más
+        // y ahogaban la bitácora del dueño (ver `debeAuditarDenegacion`). El
+        // `logger.warn` de arriba las conserva para observabilidad.
+        if (debeAuditarDenegacion({ method: req.method, entity: 'permission' })) {
+          try {
+            void logAction({
+              staffId: authContext.userId,
+              venueId,
+              action: 'PERMISSION_DENIED',
+              entity: 'permission',
+              entityId: requiredPermission,
+              data: {
+                permission: requiredPermission,
+                userRole,
+                roleSource,
+                method: req.method,
+                path: req.originalUrl,
+                hasPermissionSet: !!permissionSet,
+              },
+              ipAddress: req.ip,
+              userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+            })
+          } catch (auditErr) {
+            logger.error('checkPermission: audit log construction failed (non-fatal)', auditErr)
+          }
         }
 
         // `overridable` es ADITIVO y sólo aparece con el switch del venue ON.

@@ -47,3 +47,7 @@ export const migrateStatusSchema = z.object({
 export const migrateCancelSchema = z.object({
   params: z.object({ terminalId: z.string().min(1, 'ID de terminal inválido') }),
 })
+
+export const migrateDiscardSchema = z.object({
+  params: z.object({ terminalId: z.string().min(1, 'ID de terminal inválido') }),
+})

@@ -9,18 +9,20 @@ import {
   lineUnits,
   lineUnitsSql,
 } from '@/services/dashboard/lineRevenue'
-import { getExtendedMetrics } from '@/services/dashboard/generalStats.dashboard.service'
 import { getShiftById } from '@/services/dashboard/shift.dashboard.service'
 
 /**
  * Seven reports summed `unitPrice * quantity` and ignored
  * `OrderItem.discountAmount`, so a combo line was billed at LIST price
- * (89 instead of 77.29). The SQL sites are proven end-to-end in
- * `tests/integration/dashboard/sales-report-accuracy.integration.test.ts`
- * against a real database — mocking `$queryRaw` would only echo the mock back.
+ * (89 instead of 77.29). The SQL sites are proven end-to-end against a real
+ * database — mocking `$queryRaw` would only echo the mock back:
+ *  - tests/integration/dashboard/sales-report-accuracy.integration.test.ts
+ *  - tests/integration/dashboard/generalStats-sql-aggregation.integration.test.ts
+ *    (product-profitability moved there on 2026-09-01, when its aggregation
+ *    moved from JavaScript-over-findMany to `SUM(lineRevenueSql())` in Postgres)
  *
- * The two sites below do the arithmetic in JavaScript over rows Prisma already
- * returned, so a mocked client DOES exercise the real code path.
+ * The shift site below still does the arithmetic in JavaScript over rows Prisma
+ * already returned, so a mocked client DOES exercise the real code path.
  */
 
 // The line the whole bug report is about.
@@ -133,104 +135,6 @@ describe('isItemLevelDiscount — only count a giveaway once', () => {
 
   it('ignores a line with no discount at all', () => {
     expect(isItemLevelDiscount({ quantity: 1, unitPrice: 50, discountAmount: 0, total: 50 })).toBe(false)
-  })
-})
-
-describe('product profitability — revenue is net of the line discount', () => {
-  beforeEach(() => {
-    jest.clearAllMocks()
-  })
-
-  it('reports the discounted combo line at 77.29, not 89', async () => {
-    prismaMock.venue.findUnique.mockResolvedValue({ id: 'venue-1', timezone: 'America/Mexico_City' })
-    prismaMock.order.findMany.mockResolvedValue([
-      {
-        id: 'order-1',
-        items: [{ ...COMBO_LINE, product: { id: 'p1', name: 'Tacos al Pastor', type: 'FOOD', price: 89 } }],
-      },
-    ])
-
-    const rows = (await getExtendedMetrics('venue-1', 'product-profitability', {
-      fromDate: '2025-03-09T00:00:00.000Z',
-      toDate: '2025-03-12T23:59:59.999Z',
-    })) as any[]
-
-    expect(rows).toHaveLength(1)
-    expect(rows[0].totalRevenue).toBeCloseTo(77.29, 2)
-  })
-
-  it('still reports an undiscounted line at full price (regression)', async () => {
-    prismaMock.venue.findUnique.mockResolvedValue({ id: 'venue-1', timezone: 'America/Mexico_City' })
-    prismaMock.order.findMany.mockResolvedValue([
-      {
-        id: 'order-1',
-        items: [
-          { quantity: 2, unitPrice: 45, discountAmount: 0, total: 90, product: { id: 'p2', name: 'Cerveza', type: 'BEVERAGE', price: 45 } },
-        ],
-      },
-    ])
-
-    const rows = (await getExtendedMetrics('venue-1', 'product-profitability', {
-      fromDate: '2025-03-09T00:00:00.000Z',
-      toDate: '2025-03-12T23:59:59.999Z',
-    })) as any[]
-
-    expect(rows[0].totalRevenue).toBe(90)
-  })
-
-  it('counts the modifiers the customer paid for (169 + 280 = 449)', async () => {
-    prismaMock.venue.findUnique.mockResolvedValue({ id: 'venue-1', timezone: 'America/Mexico_City' })
-    prismaMock.order.findMany.mockResolvedValue([
-      {
-        id: 'order-1',
-        items: [
-          {
-            quantity: 1,
-            unitPrice: 169,
-            discountAmount: 0,
-            total: 449,
-            modifiers: [
-              { price: 250, quantity: 1 },
-              { price: 30, quantity: 1 },
-            ],
-            product: { id: 'p3', name: 'Hamburguesa Doble', type: 'FOOD', price: 169 },
-          },
-        ],
-      },
-    ])
-
-    const rows = (await getExtendedMetrics('venue-1', 'product-profitability', {
-      fromDate: '2025-03-09T00:00:00.000Z',
-      toDate: '2025-03-12T23:59:59.999Z',
-    })) as any[]
-
-    expect(rows[0].totalRevenue).toBe(449)
-  })
-
-  it('charges a weighed item by the kilo (240/kg × 0.435 = 104.40, not 240)', async () => {
-    prismaMock.venue.findUnique.mockResolvedValue({ id: 'venue-1', timezone: 'America/Mexico_City' })
-    prismaMock.order.findMany.mockResolvedValue([
-      {
-        id: 'order-1',
-        items: [
-          {
-            quantity: 1,
-            unitPrice: 240,
-            discountAmount: 0,
-            weightQuantity: 0.435,
-            total: 104.4,
-            product: { id: 'p4', name: 'QA Jamón por kg', type: 'FOOD', price: 240 },
-          },
-        ],
-      },
-    ])
-
-    const rows = (await getExtendedMetrics('venue-1', 'product-profitability', {
-      fromDate: '2025-03-09T00:00:00.000Z',
-      toDate: '2025-03-12T23:59:59.999Z',
-    })) as any[]
-
-    expect(rows[0].totalRevenue).toBeCloseTo(104.4, 2)
   })
 })
 

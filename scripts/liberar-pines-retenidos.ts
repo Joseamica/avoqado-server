@@ -11,7 +11,8 @@
  * este script limpia lo que quedó de ANTES.
  *
  *   npx tsx scripts/liberar-pines-retenidos.ts                                  # dry-run
- *   npx tsx scripts/liberar-pines-retenidos.ts --apply --actor-staff-id=<id>    # escribe
+ *   npx tsx scripts/liberar-pines-retenidos.ts --org-id=<id>                    # dry-run, sólo esa organización
+ *   npx tsx scripts/liberar-pines-retenidos.ts --apply --actor-staff-id=<id>    # escribe (acepta --org-id)
  *
  * Qué NO toca (deliberado):
  *   - Filas con deactivatedBySeatCap=true: esa gente NO se fue — el tope de asientos la
@@ -26,7 +27,7 @@ import prisma from '../src/utils/prismaClient'
 
 const arg = (name: string): string | undefined => process.argv.find(a => a.startsWith(`--${name}=`))?.split('=')[1]
 
-const VALID_FLAG_PREFIXES = ['--actor-staff-id=']
+const VALID_FLAG_PREFIXES = ['--actor-staff-id=', '--org-id=']
 const VALID_FLAG_EXACT = ['--apply']
 
 function validarBanderas(argv: string[]): void {
@@ -50,17 +51,26 @@ export const WHERE_PINES_RETENIDOS = {
   deactivatedBySeatCap: false,
 } as const
 
+/** El filtro completo, opcionalmente acotado a UNA organización (--org-id). */
+export function wherePinesRetenidos(orgId?: string) {
+  return {
+    ...WHERE_PINES_RETENIDOS,
+    ...(orgId ? { venue: { organizationId: orgId } } : {}),
+  }
+}
+
 async function main() {
   validarBanderas(process.argv.slice(2))
   const apply = process.argv.includes('--apply')
   const actorStaffId = arg('actor-staff-id')
+  const orgId = arg('org-id')
 
   if (apply && !actorStaffId) {
     throw new Error('--apply exige --actor-staff-id=<id> (queda en ActivityLog como el actor de la limpieza)')
   }
 
   const retenidos = await prisma.staffVenue.findMany({
-    where: WHERE_PINES_RETENIDOS,
+    where: wherePinesRetenidos(orgId),
     select: {
       id: true,
       pin: true,
@@ -98,7 +108,7 @@ async function main() {
 
   await prisma.$transaction(async tx => {
     const result = await tx.staffVenue.updateMany({
-      where: { ...WHERE_PINES_RETENIDOS, id: { in: retenidos.map(r => r.id) } },
+      where: { ...wherePinesRetenidos(orgId), id: { in: retenidos.map(r => r.id) } },
       data: { pin: null },
     })
     console.log(`\n✅ Liberados ${result.count} PIN(s).`)

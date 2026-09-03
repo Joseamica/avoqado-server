@@ -11,7 +11,7 @@ import {
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { logAction } from '../dashboard/activity-log.service'
 import type { TerminalActor } from '../dashboard/terminals.superadmin.service'
-import { migratePreflight, migrateExecute, migrateStatus, migrateCancel } from '../dashboard/terminal-migration.service'
+import { migratePreflight, migrateExecute, migrateStatus, migrateCancel, migrateDiscard } from '../dashboard/terminal-migration.service'
 import { toDeviceManagementDto } from '../device-capabilities.service'
 
 // Allowed commands at org level
@@ -604,5 +604,14 @@ export async function migrateStatusForOrg(orgId: string, terminalId: string, com
  */
 export async function migrateCancelForOrg(orgId: string, terminalId: string, actor: TerminalActor) {
   await validateTerminalInOrg(terminalId, orgId)
-  return migrateCancel(terminalId, actor)
+  return migrateCancel(terminalId, actor, orgId)
+}
+
+/**
+ * Discard a pending wipe the device never executed, scoped to an org (Asana 1218069201250971).
+ * Guards: terminal ∈ org. The 24 h rule lives in the shared service.
+ */
+export async function migrateDiscardForOrg(orgId: string, terminalId: string, actor: TerminalActor) {
+  await validateTerminalInOrg(terminalId, orgId)
+  return migrateDiscard(terminalId, actor, orgId)
 }
