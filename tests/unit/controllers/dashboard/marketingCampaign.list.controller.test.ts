@@ -109,13 +109,17 @@ describe('listCampaigns — consulta acotada', () => {
 
   // ---- REGRESIÓN: lo que ya funcionaba sigue igual ----
 
-  it('sigue acotada al venue del token y ordenada por creación descendente', async () => {
+  it('sigue acotada al venue del token, y ordena con un desempate ÚNICO', async () => {
     const { req, res, next } = armar()
     await listCampaigns(req, res, next)
 
     const args = findMany.mock.calls[0][0]
     expect(args.where).toEqual({ venueId: VENUE })
-    expect(args.orderBy).toEqual({ createdAt: 'desc' })
+    // 🔴 Con `skip`/`take`, `createdAt` SOLO no basta: entre dos campañas creadas en el
+    // mismo instante el orden no está definido, así que una puede salir dos veces o
+    // desaparecer al pasar de página. El desempate por `id` lo vuelve total.
+    // Lo vigila también `tests/unit/services/pagination-stability.guard.test.ts`.
+    expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
     expect(count).toHaveBeenCalledWith({ where: { venueId: VENUE } })
   })
 
