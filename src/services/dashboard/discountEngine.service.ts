@@ -15,6 +15,7 @@ import prisma from '@/utils/prismaClient'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType } from '@prisma/client'
 import { logAction } from './activity-log.service'
+import { computeStoredOrderTotal } from '../shared/orderBalance'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -816,7 +817,17 @@ export async function applyDiscountToOrder(
     // Update order totals
     const newDiscountAmount = alreadyDiscounted + appliedAmount
     const newTaxAmount = Number(order.taxAmount) - appliedTaxReduction
-    const newTotal = Math.max(0, subtotal - newDiscountAmount + newTaxAmount + Number(order.tipAmount))
+    // 🔴 MONEY: el total sale de `computeStoredOrderTotal` —la ÚNICA definición de la regla—
+    // y no de una suma escrita aquí. Escrita aquí OMITÍA `serviceChargeAmount`, que el schema
+    // define como ingreso gravable que SUMA al total y entra al corte y al CFDI: descontar
+    // borraba el cargo del total guardado hasta que un cobro posterior lo recalculaba.
+    const newTotal = computeStoredOrderTotal({
+      subtotal,
+      discountAmount: newDiscountAmount,
+      taxAmount: newTaxAmount,
+      serviceChargeAmount: order.serviceChargeAmount,
+      tipAmount: order.tipAmount,
+    }).toNumber()
 
     await tx.order.update({
       where: { id: orderId },
@@ -903,8 +914,16 @@ export async function removeDiscountFromOrder(orderId: string, orderDiscountId: 
     // included the charge; only this legacy path kept the old formula (since
     // Nov 2025). The bug was LATENT: nobody could remove a discount from the TPV
     // until that action was added, and that is what surfaced it.
-    const newTotal =
-      Number(order.subtotal) - newDiscountAmount + newTaxAmount + Number(order.serviceChargeAmount ?? 0) + Number(order.tipAmount)
+    // Misma función que los caminos de APLICAR: era la última copia a mano de la regla, y
+    // conservarla aparte es justo lo que dejó a los otros tres sin el cargo por servicio.
+    // Gana además el clamp de la mercancía, que aquí faltaba.
+    const newTotal = computeStoredOrderTotal({
+      subtotal: order.subtotal,
+      discountAmount: newDiscountAmount,
+      taxAmount: newTaxAmount,
+      serviceChargeAmount: order.serviceChargeAmount,
+      tipAmount: order.tipAmount,
+    }).toNumber()
 
     await tx.order.update({
       where: { id: orderId },
@@ -1069,10 +1088,18 @@ export async function applyManualDiscount(
     })
 
     // Update order totals. `amount <= remainingDiscountable` garantiza que newDiscountAmount
-    // nunca supere el subtotal, así que el total no puede quedar negativo; el Math.max es
-    // cinturón-y-tirantes por si alguien cambia el cálculo de arriba.
+    // nunca supere el subtotal, así que el total no puede quedar negativo; el clamp de la
+    // mercancía que hace `computeStoredOrderTotal` es cinturón-y-tirantes por si alguien
+    // cambia el cálculo de arriba.
     const newDiscountAmount = alreadyDiscounted + amount
-    const newTotal = Math.max(0, subtotal - newDiscountAmount + Number(order.taxAmount) + Number(order.tipAmount))
+    // 🔴 MONEY: misma regla compartida — sin ella este camino omitía `serviceChargeAmount`.
+    const newTotal = computeStoredOrderTotal({
+      subtotal,
+      discountAmount: newDiscountAmount,
+      taxAmount: order.taxAmount,
+      serviceChargeAmount: order.serviceChargeAmount,
+      tipAmount: order.tipAmount,
+    }).toNumber()
 
     await tx.order.update({
       where: { id: orderId },

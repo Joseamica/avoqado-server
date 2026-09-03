@@ -172,6 +172,56 @@ export function summarizeRefunds(completedPayments: readonly CompletedPaymentFor
   }
 }
 
+/** Los importes de una orden que definen su `Order.total` GUARDADO. */
+export interface StoredOrderTotalAmounts {
+  subtotal: DecimalLike
+  discountAmount?: DecimalLike
+  /**
+   * 🔴 SÓLO para los caminos de descuento, que históricamente lo suman al total
+   * guardado. La aritmética canónica del SALDO (`computeOrderBalance`) NO lo pasa
+   * —y no debe—: en México el precio en pantalla ya trae el IVA, así que sumarlo
+   * otra vez lo cobraría dos veces. Se deja explícito, nunca por herencia del
+   * objeto `Order`.
+   */
+  taxAmount?: DecimalLike
+  serviceChargeAmount?: DecimalLike
+  tipAmount?: DecimalLike
+}
+
+/**
+ * El `Order.total` que se GUARDA, a partir de los importes de la cuenta. PURA.
+ *
+ * ── Por qué existe ──────────────────────────────────────────────────────────
+ * Es la MISMA regla escrita en varios sitios, y esa duplicación ya costó dinero
+ * dos veces sobre el mismo campo. `Order.serviceChargeAmount` —cargo por
+ * servicio: propina automática por grupo, descorche, entrega— es, dicho por el
+ * schema, «INGRESO GRAVABLE del negocio: SUMA al total y entra al corte y al
+ * CFDI», a diferencia de la propina, que pasa al mesero. Quitar un descuento lo
+ * tiraba del total (reproducido en hardware, NEXGO 2026-08-06: $35 → $55
+ * aterrizaba en $35) y se arregló ahí; los tres caminos que APLICAN un descuento
+ * conservaron la fórmula vieja hasta el 2026-09-03.
+ *
+ * ── La regla ────────────────────────────────────────────────────────────────
+ *   mercancía = max(0, subtotal − descuento)   ← el clamp cubre SÓLO la mercancía
+ *   total     = mercancía + impuesto + cargo por servicio + propina
+ *
+ * 🔴 El clamp NO envuelve al resto. Un `discountAmount` mayor que el subtotal es
+ * un estado que sí existe en la base (cortesía de cuenta completa encima de un
+ * descuento previo) y sin clamp el total sale NEGATIVO y RESTA del corte del día
+ * (caso M13: subtotal 253.00 − descuento 278.30 = −25.30). Pero la propina y el
+ * cargo por servicio no son mercancía: meterlos dentro del `max` deja que un
+ * descuento excedente se los coma.
+ *
+ * 🔴 Todo en `Prisma.Decimal`. En float, 0.10 + 0.20 deja un residuo que
+ * convierte una cuenta saldada en una con «$0.0000000001 por cobrar».
+ */
+export function computeStoredOrderTotal(amounts: StoredOrderTotalAmounts): Prisma.Decimal {
+  const merchandiseRaw = dec(amounts.subtotal).minus(dec(amounts.discountAmount))
+  const merchandise = merchandiseRaw.isNegative() ? ZERO : merchandiseRaw
+
+  return merchandise.plus(dec(amounts.taxAmount)).plus(dec(amounts.serviceChargeAmount)).plus(dec(amounts.tipAmount))
+}
+
 /**
  * Dado el total canónico de una orden y sus pagos COMPLETED, devuelve cuánto se
  * lleva pagado, cuánto falta y si la cuenta puede darse por saldada.
@@ -182,14 +232,18 @@ export function summarizeRefunds(completedPayments: readonly CompletedPaymentFor
  * acumular (`paidAmount += amount` duplicaría el abono).
  */
 export function computeOrderBalance(order: OrderAmountsForBalance, completedPayments: readonly CompletedPaymentForBalance[]): OrderBalance {
-  const merchandiseRaw = dec(order.subtotal).minus(dec(order.discountAmount))
-  const merchandise = merchandiseRaw.isNegative() ? ZERO : merchandiseRaw
-
   const refunds = summarizeRefunds(completedPayments)
   const tipAmount = refunds.netTipAmount
   const paidAmount = refunds.netPaidAmount
 
-  const total = merchandise.plus(dec(order.serviceChargeAmount)).plus(tipAmount)
+  // 🔴 Campo por campo, NUNCA `...order`: pasar el objeto entero le colaría
+  // `taxAmount` al total del saldo y el cobro empezaría a cobrar el IVA dos veces.
+  const total = computeStoredOrderTotal({
+    subtotal: order.subtotal,
+    discountAmount: order.discountAmount,
+    serviceChargeAmount: order.serviceChargeAmount,
+    tipAmount,
+  })
   const remaining = total.minus(paidAmount)
 
   return {

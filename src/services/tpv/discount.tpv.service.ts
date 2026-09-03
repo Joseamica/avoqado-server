@@ -13,6 +13,7 @@ import logger from '@/config/logger'
 import { DiscountType } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
 import * as couponService from '@/services/dashboard/coupon.dashboard.service'
+import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -437,9 +438,19 @@ export async function applyCouponCode(
     })
 
     // Update order totals. El recorte de arriba ya garantiza newDiscountAmount <= subtotal;
-    // el Math.max es cinturón-y-tirantes.
+    // el clamp de la mercancía es cinturón-y-tirantes.
+    //
+    // 🔴 MONEY: la suma vive en `computeStoredOrderTotal` (shared/orderBalance.ts), no aquí.
+    // Escrita a mano OMITÍA `serviceChargeAmount` —ingreso gravable que SUMA al total y entra
+    // al corte y al CFDI—, así que aplicar un cupón borraba el cargo del total guardado.
     const newDiscountAmount = alreadyDiscounted + discountAmount
-    const newTotal = Math.max(0, subtotal - newDiscountAmount + Number(order.taxAmount) + Number(order.tipAmount))
+    const newTotal = computeStoredOrderTotal({
+      subtotal,
+      discountAmount: newDiscountAmount,
+      taxAmount: order.taxAmount,
+      serviceChargeAmount: order.serviceChargeAmount,
+      tipAmount: order.tipAmount,
+    }).toNumber()
 
     await tx.order.update({
       where: { id: orderId },
