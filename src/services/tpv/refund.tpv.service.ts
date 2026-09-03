@@ -387,12 +387,61 @@ export async function recordRefund(
       },
     })
 
+    // ═══════════════════════════════════════════════════════════════════════
     // Update original payment's processorData with refund tracking
-    const newRefundedAmount = alreadyRefunded + refundAmountInPesos
-    const isFullyRefunded = newRefundedAmount >= originalAmountNumber
+    // ═══════════════════════════════════════════════════════════════════════
+    // 🔴 TODO lo de aquí abajo sale de la foto BLOQUEADA (`lockedProcessorData`,
+    // `lockedAlreadyRefunded`, `locked.amount`), NUNCA de `processorData` /
+    // `alreadyRefunded` / `originalAmountNumber`, que se leyeron con el `findUnique` del
+    // STEP 1 — FUERA de la transacción y, por tanto, antes de que existiera candado alguno.
+    //
+    // Hasta el 3-sep-2026 este bloque validaba con la foto bloqueada y ESCRIBÍA con la
+    // vieja, y eso devolvía dinero de más. Cobro de $100, dos reembolsos concurrentes de
+    // $60 y $40: los dos leen `refundedAmount = 0` fuera del candado; A escribe 60; B toma
+    // el candado, ve correctamente `lockedRemaining = 40` y pasa — pero escribía
+    // `0 + 40 = 40`, **borrando los 60 de A** y su historial. Un tercero de $50 leía «40
+    // devueltos», pasaba, y salían **$150 sobre $100**.
+    //
+    // El `FOR UPDATE` de arriba serializa las transacciones, así que la foto bloqueada SÍ
+    // ve lo que escribió quien ganó: acumular sobre ella es lo que cierra la carrera. Y el
+    // spread tiene que partir de `lockedProcessorData` por lo mismo — con la foto vieja se
+    // borra cualquier llave que otro escritor haya puesto en medio (el webhook de AngelPay
+    // estampa `angelpayWebhook` sobre esta misma columna: `angelpay-webhook.service.ts`).
+    //
+    // Prueba: `tests/unit/services/tpv/refund.acumuladoBajoCandado.test.ts`, donde las dos
+    // fotos DIFIEREN a propósito (exterior 0, bloqueada 60). Con el mismo valor en ambas la
+    // prueba pasaría con el defecto vivo.
+    const newRefundedAmount = lockedAlreadyRefunded + refundAmountInPesos
+
+    // 🔎 Si las dos fotos NO coinciden es que otro reembolso del MISMO cobro entró entre la
+    // lectura del STEP 1 y este candado: exactamente la carrera de arriba. Con el defecto
+    // vivo esto era invisible; dejarlo dicho es la única forma de saber si pasa de verdad
+    // en producción. Importes en PESOS. No cambia el resultado: sólo lo cuenta.
+    if (lockedAlreadyRefunded !== alreadyRefunded) {
+      logger.warn('Reembolso concurrente sobre el mismo cobro: se acumula sobre la foto BLOQUEADA', {
+        venueId,
+        originalPaymentId: refundData.originalPaymentId,
+        devueltoAlLeerFueraDelCandado: alreadyRefunded,
+        devueltoBajoElCandado: lockedAlreadyRefunded,
+        esteReembolso: refundAmountInPesos,
+        totalDevueltoTrasEste: newRefundedAmount,
+      })
+    }
+    // ⚠️ Esta línea NO está protegida por ninguna prueba, y se deja escrito en vez de
+    // fingir que lo está: `Number(locked.amount)` y `originalAmountNumber` valen HOY lo
+    // mismo siempre, porque un reembolso nunca toca la columna `amount` del cobro original
+    // (crea una fila aparte). Se lee del candado por coherencia con el resto del bloque;
+    // ninguna prueba puede distinguirlas sin fabricar un estado imposible. Lo que sí cambia
+    // —y sí está probado— es `newRefundedAmount`.
+    //
+    // Se conserva la comparación contra la VENTA (sin propina) que tenía este camino desde
+    // dic-2025. Nadie lee esta bandera persistida: el consumidor la recalcula en
+    // `payment.tpv.service.ts:1439` contra el total CON propina, así que unificar los dos
+    // criterios es una decisión aparte y no entra en un arreglo de concurrencia.
+    const isFullyRefunded = newRefundedAmount >= Number(locked.amount)
 
     // Build refund history array safely as plain JSON
-    const existingHistory = Array.isArray(processorData.refundHistory) ? processorData.refundHistory : []
+    const existingHistory = Array.isArray(lockedProcessorData.refundHistory) ? lockedProcessorData.refundHistory : []
 
     const newRefundEntry = {
       refundId: refundPayment.id,
@@ -406,9 +455,7 @@ export async function recordRefund(
     // the new format (e.g. `transaction.mobile.service.ts:208`) can aggregate
     // TPV-originated refunds without special casing. Keep `refundHistory`
     // intact for backwards compatibility with legacy readers.
-    const existingRefundsArray = Array.isArray((processorData as Record<string, unknown>).refunds)
-      ? ((processorData as Record<string, unknown>).refunds as Prisma.JsonArray)
-      : []
+    const existingRefundsArray = Array.isArray(lockedProcessorData.refunds) ? (lockedProcessorData.refunds as Prisma.JsonArray) : []
     const newRefundsEntry = {
       refundPaymentId: refundPayment.id,
       amount: refundAmountInPesos,
@@ -419,7 +466,7 @@ export async function recordRefund(
 
     // Build updated processorData as plain object for Prisma JSON field
     const updatedProcessorData = {
-      ...processorData,
+      ...lockedProcessorData,
       refundedAmount: newRefundedAmount,
       refundedAmountCents: Math.round(newRefundedAmount * 100),
       isFullyRefunded,
