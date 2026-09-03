@@ -38,6 +38,94 @@ export interface EnqueueCampaignResult {
   omitidas: number
 }
 
+/**
+ * Resuelve la AUDIENCIA elegible de una campaña — extraída para Task 5 (vista previa +
+ * publicación) porque el conteo que el dueño ve en la vista previa y el conjunto que de
+ * verdad se encola DEBEN salir de la MISMA función. Si contaran distinto (una consulta
+ * para "cuántos son" y otra, ligeramente diferente, para "a quién le mando"), el token de
+ * confirmación (`campaignConfirmToken.ts`) bloquearía publicaciones legítimas por un
+ * "cambio" que en realidad nunca ocurrió — o peor, dejaría pasar una publicación cuya
+ * audiencia real no es la que el dueño confirmó.
+ *
+ * `tx` acepta tanto una transacción (`enqueueCampaign`, que necesita el snapshot
+ * consistente de la propia transacción de publicación) como el cliente Prisma normal
+ * (`previsualizarEnvio`, que sólo LEE y no necesita abrir una transacción) — `PrismaClient`
+ * es estructuralmente un superconjunto de `Prisma.TransactionClient`.
+ */
+export interface ResolverAudienciaParams {
+  tx: Prisma.TransactionClient
+  venueId: string
+  audience: CustomerCampaignAudience
+  customerGroupId: string | null
+  tags: string[]
+}
+
+export interface ResolverAudienciaResult {
+  elegibles: Array<{ id: string; email: string; tags: string[] }>
+  omitidas: number
+}
+
+export async function resolverAudiencia({
+  tx,
+  venueId,
+  audience,
+  customerGroupId,
+  tags,
+}: ResolverAudienciaParams): Promise<ResolverAudienciaResult> {
+  // Los `marketingConsent: true` LEGACY sin un `ConsentEvent` GRANTED detrás NO son
+  // elegibles — lo dice el spec: el consentimiento probado es el ledger, el booleano es
+  // sólo su caché.
+  let extra: Prisma.CustomerWhereInput = {}
+  if (audience === CustomerCampaignAudience.GROUP) {
+    if (!customerGroupId) {
+      throw new BadRequestError('La campaña de audiencia GROUP no tiene un grupo de clientes asignado.')
+    }
+    const grupo = await tx.customerGroup.findFirst({ where: { id: customerGroupId, venueId } })
+    if (!grupo) {
+      throw new BadRequestError('El grupo de clientes de la campaña no existe en este negocio.')
+    }
+    extra = { customerGroupId }
+  } else if (audience === CustomerCampaignAudience.TAGS) {
+    if (tags.length === 0) {
+      throw new BadRequestError('La campaña de audiencia TAGS no tiene ninguna etiqueta configurada.')
+    }
+    // `Customer.tags` guarda la capitalización ORIGINAL con la que se escribió cada tag
+    // (ver `applyTagChanges` en src/mcp/tools/customers.ts) — comparar con `hasSome`
+    // (igualdad exacta de Postgres) fallaría contra "Vip" vs "VIP". Se filtra en SQL sólo
+    // lo barato (que tenga AL MENOS un tag) y la semántica ANY real —insensible a
+    // mayúsculas— se aplica en JS abajo. Una versión con índice GIN + comparación
+    // insensible en SQL queda para una fase futura.
+    extra = { tags: { isEmpty: false } }
+  }
+
+  const candidatos = await tx.customer.findMany({
+    where: {
+      venueId,
+      active: true,
+      marketingConsent: true,
+      email: { not: null },
+      consentEvents: { some: { action: ConsentAction.GRANTED } },
+      ...extra,
+    },
+    select: { id: true, email: true, tags: true },
+  })
+
+  let elegiblesPorAudiencia = candidatos
+  if (audience === CustomerCampaignAudience.TAGS) {
+    const tagsCampaña = new Set(tags.map(t => t.trim().toLowerCase()))
+    elegiblesPorAudiencia = candidatos.filter(c => c.tags.some(t => tagsCampaña.has(t.trim().toLowerCase())))
+  }
+
+  // Supresión GLOBAL, en UN solo lote (nunca `isSuppressed` N veces: una consulta por
+  // persona en una audiencia de miles sería miles de idas y vueltas).
+  const emails = elegiblesPorAudiencia.map(c => c.email as string)
+  const suprimidos = await filtrarSuprimidos(tx, emails)
+  const elegibles = elegiblesPorAudiencia.filter(c => !suprimidos.has(normalizeEmail(c.email as string)))
+  const omitidas = elegiblesPorAudiencia.length - elegibles.length
+
+  return { elegibles: elegibles as Array<{ id: string; email: string; tags: string[] }>, omitidas }
+}
+
 export async function enqueueCampaign({
   venueId,
   campaignId,
@@ -90,56 +178,18 @@ export async function enqueueCampaign({
       throw new ConflictError('La campaña ya fue encolada o no está en un estado publicable.')
     }
 
-    // Paso d) — audiencia. Los `marketingConsent: true` LEGACY sin un `ConsentEvent`
-    // GRANTED detrás NO son elegibles — lo dice el spec: el consentimiento probado es
-    // el ledger, el booleano es sólo su caché.
-    let extra: Prisma.CustomerWhereInput = {}
-    if (campaign.audience === CustomerCampaignAudience.GROUP) {
-      if (!campaign.customerGroupId) {
-        throw new BadRequestError('La campaña de audiencia GROUP no tiene un grupo de clientes asignado.')
-      }
-      const grupo = await tx.customerGroup.findFirst({ where: { id: campaign.customerGroupId, venueId } })
-      if (!grupo) {
-        throw new BadRequestError('El grupo de clientes de la campaña no existe en este negocio.')
-      }
-      extra = { customerGroupId: campaign.customerGroupId }
-    } else if (campaign.audience === CustomerCampaignAudience.TAGS) {
-      if (campaign.tags.length === 0) {
-        throw new BadRequestError('La campaña de audiencia TAGS no tiene ninguna etiqueta configurada.')
-      }
-      // `Customer.tags` guarda la capitalización ORIGINAL con la que se escribió cada
-      // tag (ver `applyTagChanges` en src/mcp/tools/customers.ts) — comparar con
-      // `hasSome` (igualdad exacta de Postgres) fallaría contra "Vip" vs "VIP". Se
-      // filtra en SQL sólo lo barato (que tenga AL MENOS un tag) y la semántica ANY
-      // real —insensible a mayúsculas— se aplica en JS abajo. Una versión con índice
-      // GIN + comparación insensible en SQL queda para una fase futura.
-      extra = { tags: { isEmpty: false } }
-    }
-
-    const candidatos = await tx.customer.findMany({
-      where: {
-        venueId,
-        active: true,
-        marketingConsent: true,
-        email: { not: null },
-        consentEvents: { some: { action: ConsentAction.GRANTED } },
-        ...extra,
-      },
-      select: { id: true, email: true, tags: true },
+    // Pasos d) + e) — audiencia + supresión GLOBAL, resueltas por `resolverAudiencia`
+    // (arriba en este mismo archivo): es la MISMA función que usa `previsualizarEnvio`
+    // (Task 5, campaignPublish.service.ts) para el conteo de la vista previa — si contaran
+    // distinto, el token de confirmación bloquearía publicaciones legítimas por un "cambio"
+    // que nunca ocurrió.
+    const { elegibles, omitidas } = await resolverAudiencia({
+      tx,
+      venueId,
+      audience: campaign.audience,
+      customerGroupId: campaign.customerGroupId,
+      tags: campaign.tags,
     })
-
-    let elegiblesPorAudiencia = candidatos
-    if (campaign.audience === CustomerCampaignAudience.TAGS) {
-      const tagsCampaña = new Set(campaign.tags.map(t => t.trim().toLowerCase()))
-      elegiblesPorAudiencia = candidatos.filter(c => c.tags.some(t => tagsCampaña.has(t.trim().toLowerCase())))
-    }
-
-    // Paso e) — supresión GLOBAL, en UN solo lote (nunca `isSuppressed` N veces: una
-    // consulta por persona en una audiencia de miles sería miles de idas y vueltas).
-    const emails = elegiblesPorAudiencia.map(c => c.email as string)
-    const suprimidos = await filtrarSuprimidos(tx, emails)
-    const elegibles = elegiblesPorAudiencia.filter(c => !suprimidos.has(normalizeEmail(c.email as string)))
-    const omitidas = elegiblesPorAudiencia.length - elegibles.length
 
     // Paso f) — sin nadie a quién mandarle, la transacción entera revierte: la
     // campaña NO se queda ENQUEUED con cero destinatarios. Declarado: el futuro job de

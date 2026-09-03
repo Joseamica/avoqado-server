@@ -6981,6 +6981,10 @@ model CustomerCampaign {
   name             String
   status           CustomerCampaignStatus     @default(DRAFT)
   subject          String
+  /// Los bloques ORIGINALES (T1 `bloquesCampanaSchema`) tal como los escribió el dueño.
+  /// `htmlBody`/`textBody`/`linkDomains` son DERIVADOS de esto al guardar (T3) — se
+  /// necesitan de vuelta para reabrir el editor y para la huella del token de envío (T4).
+  contentBlocks    Json?
   htmlBody         String                     @db.Text
   textBody         String                     @db.Text
   /// Plantilla del beneficio; los CÓDIGOS concretos nacen por delivery (fase 1B)

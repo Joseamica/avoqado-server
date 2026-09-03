@@ -71,11 +71,37 @@ function buildUnsubscribeUrl(customerId: string, venueId: string): string {
 }
 
 /**
- * El pie del correo — R3 del brief: nombre del negocio, su dato de contacto y la liga de
- * baja. Se AÑADE al `html`/`text` de la campaña, nunca se inserta a mitad del documento ni
- * se sanitiza — eso es responsabilidad del editor (Fase 1C), no de esta task.
+ * URL pública del aviso de privacidad del NEGOCIO — Task 7. A diferencia de la liga de baja,
+ * NO lleva token: un aviso de privacidad es información que cualquiera puede leer (la propia
+ * LFPDPPP lo exige accesible), no una acción sobre la cuenta de un cliente concreto.
+ *
+ * 🔴 Deliberadamente ESTÁTICA — nunca consulta si el venue YA publicó un aviso real. Decisión
+ * del founder (2026-09-02): el pie SIEMPRE lleva el enlace; un venue sin aviso no debería
+ * tener audiencia consentida (consent.service.ts ya lo impide al capturar el consentimiento),
+ * así que ese caso no debería ocurrir — pero si ocurriera, blindar el envío contra una
+ * consulta que podría fallar es más seguro que arriesgar el resto del correo por ella. La
+ * ruta pública (`privacyNotice.public.controller.ts`) resuelve el contenido en el momento en
+ * que alguien de verdad hace clic, con el mismo fallback a la plantilla que usa el dashboard
+ * (Task 8) — nunca un 404 para un venueId real.
  */
-function buildFooter(params: { venueName: string; venueEmail: string | null; venuePhone: string | null; unsubscribeUrl: string }): {
+function buildPrivacyNoticeUrl(venueId: string): string {
+  const base = (env.BASE_URL || 'https://api.avoqado.io').replace(/\/$/, '')
+  return `${base}/api/v1/public/venues/${venueId}/privacy-notice`
+}
+
+/**
+ * El pie del correo — R3 del brief: nombre del negocio, su dato de contacto, la liga de baja
+ * y (Task 7) el enlace al aviso de privacidad. Se AÑADE al `html`/`text` de la campaña, nunca
+ * se inserta a mitad del documento ni se sanitiza — eso es responsabilidad del editor (Fase
+ * 1C), no de esta task.
+ */
+function buildFooter(params: {
+  venueName: string
+  venueEmail: string | null
+  venuePhone: string | null
+  unsubscribeUrl: string
+  privacyNoticeUrl: string
+}): {
   htmlFooter: string
   textFooter: string
 } {
@@ -92,13 +118,15 @@ function buildFooter(params: { venueName: string; venueEmail: string | null; ven
 <div style="font-size: 12px; color: #999; line-height: 1.6;">
   <p style="margin: 0 0 8px 0;">${nombreEscapado}${contactoEscapado ? ` &middot; ${contactoEscapado}` : ''}</p>
   <p style="margin: 0;"><a href="${params.unsubscribeUrl}" style="color: #666; text-decoration: underline;">Dejar de recibir estos correos</a></p>
+  <p style="margin: 4px 0 0 0;"><a href="${params.privacyNoticeUrl}" style="color: #666; text-decoration: underline;">Aviso de privacidad</a></p>
 </div>`
 
   const textFooter = `
 
 ---
 ${params.venueName}${contacto ? ` · ${contacto}` : ''}
-Dejar de recibir estos correos: ${params.unsubscribeUrl}`
+Dejar de recibir estos correos: ${params.unsubscribeUrl}
+Aviso de privacidad: ${params.privacyNoticeUrl}`
 
   return { htmlFooter, textFooter }
 }
@@ -298,11 +326,13 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
   // --- A partir de aquí se manda de verdad ----------------------------------------------
 
   const unsubscribeUrl = buildUnsubscribeUrl(delivery.customerId, delivery.venueId)
+  const privacyNoticeUrl = buildPrivacyNoticeUrl(delivery.venueId)
   const { htmlFooter, textFooter } = buildFooter({
     venueName: venue.name,
     venueEmail: venue.email,
     venuePhone: venue.phone,
     unsubscribeUrl,
+    privacyNoticeUrl,
   })
 
   const html = `${campaign.htmlBody}${htmlFooter}`
