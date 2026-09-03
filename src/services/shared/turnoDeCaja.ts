@@ -968,6 +968,13 @@ async function cerrarLaGavetaDelTurno(p: CerrarTurnoDeCajaParams, shiftId: strin
     // SEGUNDA foto, tomada segundos después: una venta en efectivo en esa ventana la cambia y las
     // dos mitades firmarían números distintos del mismo billete. Cuando no viene, se calcula de los
     // eventos con la MISMA fórmula que ve el cajero en la tablet (`calculateExpectedAmount`).
+    //
+    // ⚠️ ALCANCE de esta garantía: vale AL CERRAR, no para siempre. Un `CASH_SALE` tardío que el
+    // reconciliador reponga después (`cash-drawer-reconciler`, dentro de `[openedAt, closedAt]`)
+    // recalcula el `overShort` de la GAVETA y deja `CASH_DRAWER_ADJUSTED_AFTER_CLOSE` — pero nadie
+    // le da esa misma corrección al `Shift`, cuyo `cashDifference` sólo se escribe al cerrar. Así
+    // que las dos mitades pueden volver a diverger minutos después, con rastro sólo del lado de la
+    // gaveta. Cerrarlo pide que la reposición toque también el turno; no está hecho.
     const esperado =
       p.esperadoDelCajon != null
         ? Number(p.esperadoDelCajon)

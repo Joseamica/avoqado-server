@@ -1781,7 +1781,9 @@ async function closeShiftUsingRequest(
           // 🔴 El MISMO esperado que el turno acaba de firmar. Entre que se resolvió (antes de la
           // consulta de pagos) y esta escritura pasan segundos: una venta en efectivo en esa
           // ventana postea su `CASH_SALE` a la gaveta abierta, y si la gaveta recalculara desde sus
-          // eventos firmaría `overShort = −venta` mientras el turno firma 0. Una foto, dos firmas.
+          // eventos firmaría `overShort = −venta` mientras el turno firma 0. Una foto, dos firmas
+          // — AL CERRAR. Una reposición posterior del reconciliador mueve la gaveta y no el turno
+          // (ver el alcance en `cerrarLaGavetaDelTurno`).
           // Va `null` cuando no hubo gaveta: no se le inventa un esperado a la que no existe.
           esperadoDelCajon: cajon?.esperado ?? null,
           note: legacy?.notes ?? null,
