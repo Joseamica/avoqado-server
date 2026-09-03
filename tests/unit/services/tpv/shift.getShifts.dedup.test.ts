@@ -1,0 +1,97 @@
+/**
+ * `getShifts` (lista de turnos de la TPV) contaba CADA COBRO DOS VECES.
+ *
+ * El servicio arma `allPayments` uniendo dos caminos al mismo dinero: los cobros alcanzables
+ * por `Order.shiftId` (`shift.orders[].payments`) y los alcanzables por `Payment.shiftId`
+ * (`shift.payments`). Un cobro que tenga las DOS referencias —que es justo lo que produce la
+ * fase 1 del «turno de caja del negocio», donde la orden y su cobro se atan al mismo turno—
+ * entraba dos veces en `paymentSum`, `tipsSum` y `tipsCount`.
+ *
+ * Hasta ahora no mordía porque las órdenes históricas quedaron con `shiftId = null`; el script
+ * de reatribución las ata, así que sin esta deduplicación la pantalla de turnos de la TPV
+ * empezaría a enseñar el doble del dinero real.
+ *
+ * El servicio del dashboard (`shift.dashboard.service.ts`) NO tiene este defecto: suma sólo
+ * `shift.payments`.
+ */
+
+jest.mock('@/utils/prismaClient', () => ({
+  __esModule: true,
+  default: {
+    shift: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+    payment: { findMany: jest.fn() },
+    order: { count: jest.fn() },
+    orderItem: { findMany: jest.fn() },
+    rawMaterialMovement: { findMany: jest.fn() },
+    venue: { findUnique: jest.fn() },
+    staff: { findFirst: jest.fn() },
+    activityLog: { create: jest.fn() },
+    $transaction: jest.fn(),
+  },
+}))
+
+jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+jest.mock('@/communication/rabbitmq/publisher', () => ({ publishCommand: jest.fn() }))
+jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn().mockReturnValue(null) } }))
+jest.mock('@/services/access/cashReconciliationAccess.service', () => ({ isCashReconciliationEnabled: jest.fn() }))
+jest.mock('@/services/dashboard/shift.dashboard.service', () => ({ resolveShiftCashDrawer: jest.fn().mockResolvedValue(null) }))
+
+import prisma from '@/utils/prismaClient'
+import { getShifts } from '@/services/tpv/shift.tpv.service'
+
+const mockPrisma = prisma as unknown as { $transaction: jest.Mock }
+
+/** Un turno donde el MISMO cobro llega por los dos caminos: por su orden y por `shiftId`. */
+function turnoConElMismoCobroPorLosDosCaminos() {
+  const cobro = { id: 'pago-1', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
+  return {
+    id: 'turno-1',
+    venueId: 'venue-1',
+    staff: { id: 'staff-1', firstName: 'Ana', lastName: 'P' },
+    orders: [{ id: 'orden-1', payments: [cobro] }],
+    payments: [cobro],
+  }
+}
+
+describe('getShifts — un cobro alcanzable por los dos caminos se cuenta UNA vez', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('no dobla el dinero cuando la orden y el cobro cuelgan del mismo turno', async () => {
+    mockPrisma.$transaction.mockResolvedValue([[turnoConElMismoCobroPorLosDosCaminos()], 1])
+
+    const { data } = await getShifts('venue-1', 20, 1)
+
+    expect(data).toHaveLength(1)
+    // 100, no 200. Es el defecto que esta prueba guarda.
+    expect(data[0].paymentSum).toBe(100)
+    expect(data[0].tipsSum).toBe(15)
+    expect(data[0].tipsCount).toBe(1)
+    expect(data[0].avgTipPercentage).toBe(15)
+  })
+
+  it('sigue sumando DOS cobros distintos que llegan por caminos distintos', async () => {
+    // Regresión: deduplicar por id no puede convertirse en «me quedo con uno».
+    const porLaOrden = { id: 'pago-1', amount: 100, tipAmount: 10, processedById: 'staff-1', allocations: [] }
+    const porElTurno = { id: 'pago-2', amount: 40, tipAmount: 0, processedById: 'staff-2', allocations: [] }
+    mockPrisma.$transaction.mockResolvedValue([
+      [{ id: 'turno-1', venueId: 'venue-1', staff: null, orders: [{ id: 'orden-1', payments: [porLaOrden] }], payments: [porElTurno] }],
+      1,
+    ])
+
+    const { data } = await getShifts('venue-1', 20, 1)
+
+    expect(data[0].paymentSum).toBe(140)
+    expect(data[0].tipsSum).toBe(10)
+    expect(data[0].tipsCount).toBe(1)
+  })
+
+  it('un turno sin cobros no divide entre cero', async () => {
+    mockPrisma.$transaction.mockResolvedValue([[{ id: 'turno-1', venueId: 'venue-1', staff: null, orders: [], payments: [] }], 1])
+
+    const { data } = await getShifts('venue-1', 20, 1)
+
+    expect(data[0].paymentSum).toBe(0)
+    expect(data[0].avgTipPercentage).toBe(0)
+  })
+})

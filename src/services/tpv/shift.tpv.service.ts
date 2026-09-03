@@ -341,7 +341,12 @@ export async function getShifts(
   const shiftsWithCalculations = shifts.map(shift => {
     // Calculate payment totals from orders
     const orderPayments = shift.orders.flatMap(order => order.payments)
-    const allPayments = [...orderPayments, ...shift.payments]
+    // 🔴 Los dos caminos llevan AL MISMO dinero: un cobro es alcanzable por `Order.shiftId`
+    // (via `shift.orders[].payments`) y por `Payment.shiftId` (via `shift.payments`). Desde la
+    // fase 1 del «turno de caja del negocio» la orden y su cobro se atan al MISMO turno, así que
+    // sin deduplicar por id esta pantalla enseñaría el DOBLE del dinero real. Se conserva el
+    // orden actual (primero los de la orden) para no mover nada más que el conteo.
+    const allPayments = [...new Map([...orderPayments, ...shift.payments].map(payment => [payment.id, payment])).values()]
 
     // Calculate tip sum from payment allocations and tipAmount
     const tipSum = allPayments.reduce((sum, payment) => {
