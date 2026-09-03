@@ -140,6 +140,12 @@ export interface OrgStockSummaryData {
   aggregatesByCategoria: OrgStockCategoriaAggregate[]
 }
 
+export interface OrgStockSummaryData {
+  summary: OrgStockSummary
+  aggregatesBySucursal: OrgStockSucursalAggregate[]
+  aggregatesByCategoria: OrgStockCategoriaAggregate[]
+}
+
 export interface OrgStockOverviewOptions {
   dateFrom?: Date
   dateTo?: Date
