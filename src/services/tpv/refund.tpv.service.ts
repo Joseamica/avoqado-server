@@ -2,7 +2,7 @@ import { PaymentType, TransactionStatus, CardBrand, CardEntryMode, Prisma } from
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -264,9 +264,57 @@ export async function recordRefund(
     if (!locked) {
       throw new NotFoundError(`Payment ${refundData.originalPaymentId} disappeared`)
     }
+    // 🔴 El `SELECT` de arriba declara su tipo A MANO, así que TypeScript NO comprueba que el
+    // SQL devuelva de verdad estas columnas. Recortar una en una edición futura vuelve la
+    // guarda del remanente INOFENSIVA, en silencio y para siempre:
+    //
+    //   · sin `amount` → `Number(undefined)` = `NaN` ⇒ `lockedRemaining` es `NaN` ⇒
+    //     `refundAmountInPesos > NaN` es **false** ⇒ TODOS los reembolsos pasan la validación;
+    //   · 🔴 sin `processorData` → aquí NO aparece ningún `NaN` que delate nada: el `?? {}` de
+    //     abajo deja `lockedAlreadyRefunded` en 0 en CADA reembolso, el acumulado se reinicia
+    //     solo y resucita el «$150 sobre $100» que este mismo bloque acaba de cerrar.
+    //
+    // Por eso se comprueba la PRESENCIA de la columna y no sólo que el número sea finito:
+    // `Number.isFinite` es ciego al segundo caso. Y se mira la LLAVE, no el valor, porque
+    // `tipAmount` y `processorData` son nulables: `null` es una fila normal (llave presente),
+    // mientras que una columna que no se pidió no aparece en el objeto. Confundirlos
+    // rechazaría reembolsos buenos.
+    //
+    // Falla RUIDOSO —y por tanto no registra el reembolso— a propósito: el dinero ya salió de
+    // la terminal, así que ninguna de las dos salidas es buena, pero un rechazo sistemático se
+    // nota en minutos y devolver de más no se nota nunca. Es 500 y no 4xx porque el fallo es
+    // del servidor, no de quien llama, y así entra a las alertas por `logger.error`.
+    for (const columna of ['amount', 'tipAmount', 'processorData'] as const) {
+      if (!(columna in locked)) {
+        logger.error('El SELECT … FOR UPDATE del reembolso dejó de traer una columna', {
+          venueId,
+          originalPaymentId: refundData.originalPaymentId,
+          columnaFaltante: columna,
+          columnasRecibidas: Object.keys(locked),
+        })
+        throw new InternalServerError(
+          `El candado del reembolso no devolvió la columna "${columna}": no se puede validar el monto reembolsable. ` +
+            'No se registró ningún reembolso.',
+        )
+      }
+    }
+
     const lockedProcessorData = (locked.processorData as Record<string, unknown> | null) ?? {}
     const lockedAlreadyRefunded = Number(lockedProcessorData.refundedAmount ?? 0)
     const lockedTotal = Number(locked.amount) + Number(locked.tipAmount ?? 0)
+    // Cinturón además de los tirantes: la llave puede estar y el valor no ser un número
+    // (una cadena que no parsea, por ejemplo). Comparar contra `NaN` da `false` igual.
+    if (!Number.isFinite(lockedTotal)) {
+      logger.error('El importe del pago bloqueado no es un número: no se puede validar el reembolso', {
+        venueId,
+        originalPaymentId: refundData.originalPaymentId,
+        amount: locked.amount,
+        tipAmount: locked.tipAmount,
+      })
+      throw new InternalServerError(
+        'El importe del cobro original no es un número: no se puede validar el monto reembolsable. No se registró ningún reembolso.',
+      )
+    }
     const lockedRemaining = lockedTotal - lockedAlreadyRefunded
     if (refundAmountInPesos > lockedRemaining + 0.001) {
       throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)

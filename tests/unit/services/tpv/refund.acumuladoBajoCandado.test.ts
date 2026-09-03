@@ -264,3 +264,91 @@ describe('Task 5k — el acumulado del reembolso se construye con la foto BLOQUE
     expect((logger.warn as jest.Mock).mock.calls.filter(([m]) => String(m).includes('Reembolso concurrente'))).toHaveLength(0)
   })
 })
+
+/**
+ * Ronda de arreglo 1 — la guarda del remanente se puede volver INOFENSIVA sin que nadie se entere.
+ *
+ * El `SELECT … FOR UPDATE` de `:258` declara su tipo A MANO (`{ id; amount: unknown; tipAmount:
+ * unknown; processorData: unknown }`), así que TypeScript NO comprueba que el SQL devuelva de
+ * verdad esas columnas. Si una edición futura recorta una:
+ *
+ *   · sin `amount` → `Number(undefined)` = `NaN` ⇒ `lockedTotal` y `lockedRemaining` son `NaN` ⇒
+ *     `refundAmountInPesos > NaN` es **`false`** ⇒ TODOS los reembolsos pasan la validación, en
+ *     silencio y para siempre;
+ *   · 🔴 sin `processorData` → no hay ningún `NaN` que delate nada: `?? {}` deja
+ *     `lockedAlreadyRefunded` en **0** en cada reembolso ⇒ el acumulado se reinicia solo y
+ *     RESUCITA el defecto de esta misma tarea. Por eso la guarda comprueba la PRESENCIA de la
+ *     columna y no sólo que el número sea finito: `Number.isFinite` no ve este caso.
+ *
+ * Es la trampa «el mock te da el campo gratis, el `select` real no» que esta fase ya pagó una vez.
+ */
+describe('Ronda 1 — un SELECT recortado no puede volver inofensiva la guarda del remanente', () => {
+  /** El pago bloqueado sin una de sus columnas: exactamente lo que deja un `SELECT` recortado. */
+  function sinColumna(columna: 'amount' | 'tipAmount' | 'processorData') {
+    const { fotoBloqueada } = armarCarrera()
+    const recortada: Record<string, unknown> = { ...fotoBloqueada }
+    delete recortada[columna]
+    ;(prismaMock as any).$queryRaw.mockResolvedValue([recortada])
+  }
+
+  const noSeEscribioNada = () => {
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    expect((prismaMock as any).payment.update).not.toHaveBeenCalled()
+    expect((prismaMock as any).shift.updateMany).not.toHaveBeenCalled()
+  }
+
+  it.each(['amount', 'tipAmount', 'processorData'] as const)(
+    '🔴 si el SELECT deja de traer «%s», el reembolso se RECHAZA en vez de colarse',
+    async columna => {
+      sinColumna(columna)
+
+      await expect(refundService.recordRefund(VENUE, cuerpo() as never)).rejects.toThrow(/columna|SELECT/i)
+
+      // Y no se registró nada: rechazar ruidosamente es lo único mejor que devolver de más.
+      noSeEscribioNada()
+    },
+  )
+
+  it('🔴 sin «processorData» NO hay NaN que delate nada — y aun así se rechaza', async () => {
+    sinColumna('processorData')
+
+    // Sin la guarda esto NO fallaba: `?? {}` dejaba el acumulado en 0 y el reembolso pasaba
+    // tan campante, reiniciando el total devuelto en cada llamada.
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never)).rejects.toThrow()
+    noSeEscribioNada()
+  })
+
+  it('un valor NULO legítimo NO es una columna ausente: el reembolso pasa', async () => {
+    const { fotoBloqueada } = armarCarrera()
+    // `tipAmount` y `processorData` son nulables en el modelo. La llave ESTÁ, el valor es null:
+    // eso es una fila normal, no un SELECT roto. Si la guarda no distinguiera los dos casos,
+    // rechazaría reembolsos buenos — que es peor que el defecto que viene a cerrar.
+    ;(prismaMock as any).$queryRaw.mockResolvedValue([{ ...fotoBloqueada, tipAmount: null }])
+
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never)).resolves.toMatchObject({ id: 'pay-refund-B' })
+  })
+
+  it('🔴 un importe que no es número tampoco pasa (el cinturón, además de los tirantes)', async () => {
+    const { fotoBloqueada } = armarCarrera()
+    // La llave está, así que la comprobación de presencia no lo ve. Lo caza `Number.isFinite`.
+    ;(prismaMock as any).$queryRaw.mockResolvedValue([{ ...fotoBloqueada, amount: 'no-es-un-numero' }])
+
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never)).rejects.toThrow()
+    noSeEscribioNada()
+  })
+
+  it('el SQL del candado nombra las tres columnas (aviso temprano, en CI y no en la caja)', async () => {
+    armarCarrera()
+
+    await refundService.recordRefund(VENUE, cuerpo() as never)
+
+    const sql = (prismaMock as any).$queryRaw.mock.calls[0][0]
+    const texto: string = typeof sql === 'string' ? sql : (sql.sql ?? sql.strings?.join(' ') ?? String(sql))
+    // La guarda de runtime protege el dinero pase lo que pase; esta prueba existe para que quien
+    // recorte el SELECT se entere en CI, y no un cajero a media devolución.
+    expect(texto).toMatch(/\bamount\b/)
+    expect(texto).toMatch(/"tipAmount"/)
+    expect(texto).toMatch(/"processorData"/)
+    expect(texto).toMatch(/FOR UPDATE/)
+  })
+})

@@ -12,7 +12,12 @@
  * 🔴 A propósito NO importa `scripts/_solo-base-local.ts`: ese cortafuegos rechaza toda base que
  * no sea local, y esta medición existe justamente para correrse contra producción. Como no
  * escribe, su seguridad no depende de un candado de host — pero la PRIMERA línea que imprime es
- * a qué base se conectó, para que nadie confunda de dónde salieron los números.
+ * a qué base se conectó.
+ *
+ * 🔴 Y esa línea se la pregunta AL SERVIDOR (`inet_server_addr()` / `current_database()`), no a la
+ * `DATABASE_URL`: el host de la cadena es lo que alguien TECLEÓ, no dónde acabó la conexión. Con
+ * un túnel SSH abierto, `localhost:5433` es producción — leer la URL diría «local» sobre datos
+ * reales. Es el mismo defecto que Codex ya rechazó en un script de esta fase.
  *
  * Qué mide, y por qué son TRES preguntas y no una:
  *
@@ -49,18 +54,25 @@ function pesos(v: unknown): string {
 }
 
 async function main() {
-  const url = process.env.DATABASE_URL ?? ''
-  let host = '(DATABASE_URL ilegible)'
-  try {
-    host = new URL(url).host
-  } catch {
-    /* se imprime tal cual abajo */
-  }
-  console.log(`🔌 base: ${host}`)
+  // La procedencia la contesta el SERVIDOR, no la cadena de conexión (ver la cabecera).
+  const [proc] = await prisma.$queryRaw<Array<{ servidor: string | null; base: string; usuario: string }>>(Prisma.sql`
+    SELECT host(COALESCE(inet_server_addr(), '127.0.0.1'::inet)) AS "servidor",
+           current_database()                                    AS "base",
+           current_user                                          AS "usuario"
+  `)
+  console.log(`🔌 servidor: ${proc?.servidor ?? '(socket local)'} · base: ${proc?.base} · usuario: ${proc?.usuario}`)
   console.log('👁️  SÓLO LECTURA — este script no escribe nada.\n')
 
   const venueId = leerValor('--venue') ?? null
-  const detalle = Number(leerValor('--detalle') ?? 20)
+
+  // `Number('abc')` es `NaN`, y un `NaN` aquí imprime «primeros NaN» y no lista nada.
+  const detalleRaw = leerValor('--detalle')
+  const detalle = detalleRaw === undefined ? 20 : Number(detalleRaw)
+  if (!Number.isInteger(detalle) || detalle < 0) {
+    console.error(`--detalle debe ser un entero >= 0 (recibí "${detalleRaw}")`)
+    process.exitCode = 2
+    return
+  }
   const filtroVenue = venueId ? Prisma.sql`AND p."venueId" = ${venueId}` : Prisma.empty
 
   // Un solo recorrido: por cada cobro con reembolsos, su acumulado declarado y las dos sumas
