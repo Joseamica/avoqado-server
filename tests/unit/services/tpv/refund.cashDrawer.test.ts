@@ -46,6 +46,9 @@ function armar(method: 'CASH' | 'CREDIT_CARD', tip = 0) {
   ;(prismaMock as any).payment = {
     findUnique: jest.fn().mockResolvedValue(original),
     findFirst: jest.fn().mockResolvedValue(original),
+    // El candado del reembolso consulta ahora las filas de reembolso del cobro
+    // (`shared/devueltoDeUnCobro.ts`): sin reembolsos previos, la lista va vacía.
+    findMany: jest.fn().mockResolvedValue([]),
     create: jest.fn().mockImplementation(async (a: any) => ({ id: 'pay-refund', ...a.data })),
     update: jest.fn().mockResolvedValue(original),
   }

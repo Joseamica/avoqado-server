@@ -316,6 +316,13 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     // las filas de reembolso, que este camino ya tenía a la mano— y gana la mayor; el
     // porqué está en la cabecera de ese archivo. La cuenta se hace en CENTAVOS enteros.
     //
+    // ⚠️ El `SELECT` de arriba NO filtra por `status` a propósito, y no es un descuido: sus
+    // filas alimentan también a `collectExistingRefundedItems`, que lleva las CANTIDADES ya
+    // devueltas por artículo. Restringirlo ahí dejaría re-reembolsar los artículos de un
+    // reembolso no completado — un aflojamiento, y en la dirección que cuesta dinero. Del
+    // lado del DINERO el filtro sí aplica, y vive dentro de `centavosDevueltosDeFilas`: sólo
+    // cuentan los `COMPLETED`, igual que `summarizeRefunds`.
+    //
     // 🔴 Esto sustituye a un `reduce` que sumaba sólo `Math.abs(refund.amount)`: la propina
     // ya devuelta no contaba, así que un cobro de $100 + $20 admitía dos reembolsos de $60
     // ($120 entregados) y todavía declaraba $10 reembolsables. Prueba:

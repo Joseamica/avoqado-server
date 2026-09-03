@@ -45,6 +45,14 @@ import { InternalServerError } from '../../errors/AppError'
  * deja salir de más, y quedarse con el número más alto sólo puede rechazar de más — un
  * rechazo se nota en minutos, un peso de más no se nota nunca.
  *
+ * 🔴 Y por eso **LOS DOS RIELES QUE AUTORIZAN DINERO PASAN LAS FILAS**, no sólo el del
+ * dashboard. Es una consulta más dentro de una transacción que ya está abierta, y sin ella la
+ * promesa de arriba sería falsa justo donde termina la fuga: un cobro de $100 + $20 con el
+ * acumulado corto en 110 (dos reembolsos viejos del dashboard que suman 120) haría que la
+ * TERMINAL creyera que quedan $10 y sacara $130 sobre $120. «Se autocorrige al leerlo» ahí
+ * se cumpliría **pagando la diferencia**. Quien lo llame SIN `filas` sólo puede ser una
+ * lectura informativa, nunca una que autorice una salida de dinero.
+ *
  * Consecuencia práctica, y por eso NO hace falta migrar ninguna fila: un acumulado corto
  * escrito con la regla vieja se corrige solo la próxima vez que alguien lea este cobro con
  * sus filas a la mano, y se reescribe correcto en el siguiente reembolso.
@@ -66,7 +74,17 @@ export interface FilaDeReembolso {
   amount: unknown
   /** Propina devuelta, en PESOS y en negativo. Nulable: `null` es una fila normal. */
   tipAmount: unknown
+  /**
+   * `TransactionStatus` como cadena. **Sólo los `COMPLETED` movieron dinero**, y son los
+   * únicos que cuentan — misma restricción que el precedente que cita la cabecera
+   * (`orderBalance.ts:summarizeRefunds`, que sus llamadores alimentan sólo con completados).
+   * Contar una fila que no completó inflaría el piso y rechazaría reembolsos legítimos.
+   */
+  status: unknown
 }
+
+/** El único estado en el que un `Payment` movió dinero de verdad. */
+const COMPLETADO = 'COMPLETED'
 
 /** Pesos → centavos enteros, redondeando ANTES de sumar. */
 function aCentavos(pesos: unknown): number {
@@ -88,7 +106,7 @@ function aCentavos(pesos: unknown): number {
 export function centavosDevueltosDeFilas(filas: readonly FilaDeReembolso[]): number {
   let centavos = 0
   for (const fila of filas) {
-    for (const columna of ['amount', 'tipAmount'] as const) {
+    for (const columna of ['amount', 'tipAmount', 'status'] as const) {
       if (!fila || typeof fila !== 'object' || !(columna in fila)) {
         throw new InternalServerError(
           `Una fila de reembolso llegó sin la columna "${columna}": no se puede medir cuánto se ha devuelto de este cobro. ` +
@@ -96,6 +114,11 @@ export function centavosDevueltosDeFilas(filas: readonly FilaDeReembolso[]): num
         )
       }
     }
+    // Sólo el dinero que de verdad salió. `status` se exige como llave (y no se tolera su
+    // ausencia) por lo mismo que las otras dos: una columna que el `SELECT` deje de pedir no
+    // puede cambiar en silencio lo que esta función cuenta.
+    if (fila.status !== COMPLETADO) continue
+
     const venta = aCentavos(fila.amount)
     const propina = aCentavos(fila.tipAmount)
     if (!Number.isFinite(venta) || !Number.isFinite(propina)) {
@@ -151,9 +174,10 @@ export function centavosDevueltosDeclarados(processorData: unknown): number {
 /**
  * Lo YA devuelto de un cobro, en centavos: **la mayor** de las dos evidencias disponibles.
  *
- * `filas` se omite (o va en `null`) cuando quien pregunta no las tiene a la mano — es el caso
- * del riel de la terminal, que valida bajo un `SELECT … FOR UPDATE` del cobro y no consulta
- * sus reembolsos. El razonamiento de por qué la mayor está en la cabecera del archivo.
+ * 🔴 `filas` se omite (o va en `null`) SÓLO en lecturas informativas. Los dos rieles que
+ * autorizan una salida de dinero las pasan siempre: sin ellas, el piso es el acumulado
+ * persistido, que puede venir corto por la regla vieja. El razonamiento completo —y el
+ * escenario del «$130 sobre $120» que esto cierra— está en la cabecera del archivo.
  */
 export function centavosYaDevueltos(args: { processorData: unknown; filas?: readonly FilaDeReembolso[] | null }): number {
   const declarado = centavosDevueltosDeclarados(args.processorData)

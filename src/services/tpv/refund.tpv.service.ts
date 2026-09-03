@@ -386,11 +386,20 @@ export async function recordRefund(
   //
   // Esto es sólo el PRE-VUELO (fuera de la transacción). Quien autoriza de verdad es el mismo
   // cálculo bajo el `SELECT … FOR UPDATE` del STEP 4.
+  //
+  // Se compara en CENTAVOS ENTEROS, igual que el bloque bloqueado: sumar y restar pesos con
+  // `+`/`-` teniendo los centavos a la mano deriva, y aquí el error de float es
+  // consistentemente PERMISIVO (deja pasar un reembolso que el candado luego rechaza). Las
+  // copias en pesos se conservan para el log y el mensaje, que hablan en pesos.
   const processorData = (originalPayment.processorData as Record<string, unknown>) || {}
-  const alreadyRefunded = centavosYaDevueltos({ processorData }) / 100
-  const remainingRefundable = totalOriginalAmount - alreadyRefunded
+  const yaDevueltoCentsPrevuelo = centavosYaDevueltos({ processorData })
+  const totalOriginalCentsPrevuelo = Math.round(originalAmountNumber * 100) + Math.round(originalTipNumber * 100)
+  const esteReembolsoCentsPrevuelo = Math.round(refundAmountInPesos * 100)
+  const remainingRefundableCents = totalOriginalCentsPrevuelo - yaDevueltoCentsPrevuelo
+  const alreadyRefunded = yaDevueltoCentsPrevuelo / 100
+  const remainingRefundable = remainingRefundableCents / 100
 
-  if (refundAmountInPesos > remainingRefundable) {
+  if (esteReembolsoCentsPrevuelo > remainingRefundableCents) {
     logger.error('Refund amount exceeds remaining refundable', {
       originalPaymentId: refundData.originalPaymentId,
       requestedRefund: refundAmountInPesos,
@@ -523,10 +532,37 @@ export async function recordRefund(
       }
 
       const lockedProcessorData = (locked.processorData as Record<string, unknown> | null) ?? {}
+
+      // 🔴 LAS FILAS DE REEMBOLSO, NO SÓLO EL ACUMULADO. Es una consulta más dentro de una
+      // transacción que YA está abierta, y es lo que cierra el último paso de la fuga: un
+      // cobro de $100 + $20 con `refundedAmount: 110` escrito por la regla vieja (dos
+      // reembolsos del dashboard que en realidad suman 120) haría creer a la terminal que
+      // quedan $10 y sacaría **$130 sobre $120**. Con el acumulado solo, lo que protegía este
+      // riel era que ningún cobro vivo tuviera dos reembolsos — o sea una medición, no el
+      // código. `centavosYaDevueltos` toma la MAYOR de las dos evidencias
+      // (`shared/devueltoDeUnCobro.ts`).
+      //
+      // Va DESPUÉS del `FOR UPDATE`: el candado serializa a los escritores del mismo cobro,
+      // así que esta lectura ve lo que ya commiteó quien ganó. Antes del candado sería una
+      // foto vieja, que es exactamente el defecto que cerró la Task 5k.
+      //
+      // Es `findMany` y no `$queryRaw` a propósito: el `select` lo comprueba TypeScript, así
+      // que aquí la columna `tipAmount` no se puede recortar en silencio — que es el descuido
+      // del que esta tarea entera nació. El resultado está acotado por construcción: son los
+      // reembolsos de UN cobro.
+      const filasDeReembolso = await tx.payment.findMany({
+        where: {
+          venueId,
+          type: PaymentType.REFUND,
+          processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
+        },
+        select: { amount: true, tipAmount: true, status: true },
+      })
+
       // Misma definición ÚNICA que el pre-vuelo y que el riel del dashboard: venta + propina,
       // en centavos enteros (`shared/devueltoDeUnCobro.ts`). Se conserva la copia en pesos
       // porque la usan el aviso de concurrencia y los mensajes de error, que hablan en pesos.
-      const lockedAlreadyRefundedCents = centavosYaDevueltos({ processorData: lockedProcessorData })
+      const lockedAlreadyRefundedCents = centavosYaDevueltos({ processorData: lockedProcessorData, filas: filasDeReembolso })
       const lockedAlreadyRefunded = lockedAlreadyRefundedCents / 100
       const lockedTotal = Number(locked.amount) + Number(locked.tipAmount ?? 0)
       // Cinturón además de los tirantes: la llave puede estar y el valor no ser un número

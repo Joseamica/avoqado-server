@@ -22,8 +22,8 @@ import {
   centavosYaDevueltos,
 } from '@/services/shared/devueltoDeUnCobro'
 
-/** Un reembolso se guarda NEGATIVO en las dos columnas. */
-const reembolso = (venta: number, propina: number) => ({ amount: venta, tipAmount: propina })
+/** Un reembolso se guarda NEGATIVO en las dos columnas. Sólo cuenta si COMPLETÓ. */
+const reembolso = (venta: number, propina: number, status = 'COMPLETED') => ({ amount: venta, tipAmount: propina, status })
 
 describe('Task 5r — devueltoDeUnCobro: la propina devuelta CUENTA como devuelta', () => {
   describe('centavosDevueltosDeFilas', () => {
@@ -39,7 +39,15 @@ describe('Task 5r — devueltoDeUnCobro: la propina devuelta CUENTA como devuelt
     })
 
     it('una propina nula es una fila normal: cuenta como 0, no revienta', () => {
-      expect(centavosDevueltosDeFilas([{ amount: -50, tipAmount: null }])).toBe(5000)
+      expect(centavosDevueltosDeFilas([{ amount: -50, tipAmount: null, status: 'COMPLETED' }])).toBe(5000)
+    })
+
+    it('🔴 sólo cuentan los reembolsos COMPLETED: uno que no movió dinero no infla el piso', () => {
+      // Contar una fila que no completó rechazaría reembolsos legítimos. Es la misma
+      // restricción que `summarizeRefunds` (`orderBalance.ts`), el precedente que la
+      // cabecera de este módulo cita como definición de la casa.
+      expect(centavosDevueltosDeFilas([reembolso(-50, -10, 'PENDING'), reembolso(-50, -10)])).toBe(6000)
+      expect(centavosDevueltosDeFilas([reembolso(-50, -10, 'CANCELLED')])).toBe(0)
     })
 
     it('redondea CADA monto antes de sumar: no arrastra el error de punto flotante', () => {
@@ -47,16 +55,20 @@ describe('Task 5r — devueltoDeUnCobro: la propina devuelta CUENTA como devuelt
       expect(centavosDevueltosDeFilas([reembolso(-0.1, -0.2)])).toBe(30)
     })
 
+    it('🔴 una fila SIN la llave `status` revienta: no puede contarse a ciegas', () => {
+      expect(() => centavosDevueltosDeFilas([{ amount: -50, tipAmount: 0 } as never])).toThrow(/status/)
+    })
+
     it('🔴 una fila SIN la llave `tipAmount` revienta en vez de contarla como 0', () => {
       // Es el defecto original vestido de descuido: recortar la columna del `SELECT`
       // devuelve el acumulado a la semántica vieja EN SILENCIO. Mismo criterio que la
       // guarda de columnas del candado de `refund.tpv.service.ts` (commit 4a52652b):
       // se mira la LLAVE, no el valor, porque `null` es una fila legítima.
-      expect(() => centavosDevueltosDeFilas([{ amount: -50 } as never])).toThrow(/tipAmount/)
+      expect(() => centavosDevueltosDeFilas([{ amount: -50, status: 'COMPLETED' } as never])).toThrow(/tipAmount/)
     })
 
     it('🔴 una fila SIN la llave `amount` revienta', () => {
-      expect(() => centavosDevueltosDeFilas([{ tipAmount: 0 } as never])).toThrow(/amount/)
+      expect(() => centavosDevueltosDeFilas([{ tipAmount: 0, status: 'COMPLETED' } as never])).toThrow(/amount/)
     })
   })
 

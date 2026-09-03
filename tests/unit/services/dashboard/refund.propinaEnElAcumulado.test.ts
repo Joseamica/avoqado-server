@@ -131,6 +131,18 @@ describe('Task 5r — la propina ya devuelta cuenta en el acumulado del dashboar
     expect(result.remainingRefundable).toBe(30)
   })
 
+  it('🔴 un reembolso previo que NO completó no cuenta como dinero devuelto', async () => {
+    // Contar una fila que nunca movió dinero rechazaría un reembolso legítimo. El filtro vive
+    // en `centavosDevueltosDeFilas` y NO en el SQL, para no tocar el conteo de ARTÍCULOS
+    // devueltos, que sí necesita ver todas las filas.
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([cobroConPropina()])
+      .mockResolvedValueOnce([{ ...REEMBOLSO_A, status: TransactionStatus.PENDING }])
+
+    await expect(reembolsar(12000)).resolves.toMatchObject({ amount: 120 })
+    expect(acumuladoEscrito().refundedAmountCents).toBe(12000)
+  })
+
   it('🔴 el `SELECT` de los reembolsos previos SIGUE pidiendo "tipAmount"', () => {
     // El tipo de un `$queryRaw` se declara a mano: quitar la columna del SQL no rompe el
     // compilador, y en las pruebas unitarias el `$queryRaw` está mockeado, así que el texto

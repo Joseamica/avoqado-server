@@ -43,7 +43,7 @@ import { prismaMock } from '../../../__helpers__/setup'
 const VENUE = 'venue-1'
 
 /** Cobro de $100 de venta + $20 de propina = $120 que el cliente entregó. */
-function armar(processorData: Record<string, unknown>) {
+function armar(processorData: Record<string, unknown>, filas: Array<Record<string, unknown>> = []) {
   const pago = {
     id: 'pay-orig',
     venueId: VENUE,
@@ -66,7 +66,7 @@ function armar(processorData: Record<string, unknown>) {
   ;(prismaMock as any).payment = {
     findUnique: jest.fn().mockResolvedValue(pago),
     findFirst: jest.fn().mockResolvedValue(pago),
-    findMany: jest.fn().mockResolvedValue([]),
+    findMany: jest.fn().mockResolvedValue(filas),
     create: jest.fn().mockImplementation(async (a: any) => ({ id: 'pay-refund-nuevo', ...a.data })),
     update: jest.fn().mockResolvedValue(pago),
   }
@@ -77,11 +77,15 @@ function armar(processorData: Record<string, unknown>) {
   }
   ;(prismaMock as any).venueTransaction = { create: jest.fn().mockResolvedValue({}) }
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
-  // El ÚNICO `$queryRaw` de este camino sigue siendo el `SELECT … FOR UPDATE` del cobro.
+  // El ÚNICO `$queryRaw` de este camino sigue siendo el `SELECT … FOR UPDATE` del cobro:
+  // las filas de reembolso se leen con `findMany`, arriba.
   ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([pago])
 
   return pago
 }
+
+/** Un reembolso ya registrado de este cobro, negativo en las dos columnas. */
+const filaDeReembolso = (venta: number, propina: number, status = 'COMPLETED') => ({ amount: venta, tipAmount: propina, status })
 
 /**
  * Las DOS fotos del mismo cobro, como en `refund.acumuladoBajoCandado.test.ts`: `findUnique`
@@ -223,6 +227,44 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
 
     await expect(refundService.recordRefund(VENUE, cuerpo(500) as never)).rejects.toThrow(/exceeds remaining refundable/i)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 EL ÚLTIMO PASO DE LA FUGA: las FILAS mandan sobre un acumulado corto (los $130 sobre $120)', async () => {
+    // El cobro arrastra `refundedAmount: 110` de dos reembolsos viejos del dashboard escritos
+    // con la regla vieja; las filas dicen la verdad: $120, o sea el cobro entero.
+    //
+    // Con el acumulado SOLO —que es lo que este riel leía— la terminal veía $10 disponibles y
+    // los sacaba: $130 sobre $120. Lo que lo hacía inofensivo hoy era una MEDICIÓN («ningún
+    // cobro vivo tiene dos reembolsos»), no el código.
+    armar({ refundedAmount: 110, refundedAmountCents: 11000 }, [filaDeReembolso(-50, -10), filaDeReembolso(-50, -10)])
+
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never)).rejects.toThrow(/exceeds remaining refundable/i)
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    // Y lo rechaza el CANDADO, no el pre-vuelo: el pre-vuelo sólo ve el acumulado (110) y
+    // cree que quedan $10. Sin esta línea la prueba no distinguiría los dos caminos.
+    expect((prismaMock as any).$transaction).toHaveBeenCalled()
+  })
+
+  it('las filas se consultan DENTRO de la transacción, acotadas a este cobro y a este negocio', async () => {
+    armar({}, [filaDeReembolso(-50, -10)])
+
+    await refundService.recordRefund(VENUE, cuerpo(1000) as never)
+
+    const args = (prismaMock as any).payment.findMany.mock.calls[0][0]
+    expect(args.where).toMatchObject({ venueId: VENUE, type: 'REFUND' })
+    expect(args.where.processorData).toEqual({ path: ['originalPaymentId'], equals: 'pay-orig' })
+    // El `select` es lo que hace imposible recortar `tipAmount` sin que TypeScript lo vea.
+    expect(args.select).toEqual({ amount: true, tipAmount: true, status: true })
+  })
+
+  it('🔴 una fila de reembolso que NO completó no infla el piso ni rechaza de más', async () => {
+    // Contar dinero que nunca salió rechazaría un reembolso legítimo. Misma restricción que
+    // `summarizeRefunds` (`orderBalance.ts`), el precedente que cita el módulo compartido.
+    armar({}, [filaDeReembolso(-50, -10, 'PENDING')])
+
+    await refundService.recordRefund(VENUE, cuerpo(12000) as never)
+
+    expect(escrito().refundedAmountCents).toBe(12000)
   })
 
   // ─── Regresión: el camino de todos los días no cambia ────────────────────────────────
