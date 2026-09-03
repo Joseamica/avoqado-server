@@ -949,6 +949,14 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
       logger.warn('🔐 [MOBILE AUTH] Refresh rejected: grant reuse detected', { sessionId: session.id })
       throw new AuthenticationError('Tu sesión ya no es válida. Vuelve a iniciar sesión.')
     }
+    if (resultado.retransmision) {
+      // El cliente ya había rotado este grant: o reintentó porque se perdió la respuesta, o
+      // mandó dos refrescos que se solaparon. Se le devuelve el MISMO sucesor y sigue
+      // trabajando. Se registra para poder MEDIRLO: hasta el 2026-09-02 este caso terminaba
+      // en un 401 que sacaba al cajero, y sin esta línea no hay forma de saber si sigue
+      // ocurriendo ni con qué frecuencia.
+      logger.info('🔐 [MOBILE AUTH] Refresh retransmitido (eco del mismo cliente)', { sessionId: session.id })
+    }
     newRefreshToken = resultado.sucesor
   }
 
