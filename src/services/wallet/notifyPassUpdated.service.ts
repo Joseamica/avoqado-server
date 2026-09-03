@@ -16,6 +16,31 @@ import { googleWalletAvailable, issuerId, walletBaseUrl, walletClient } from './
 
 export interface NotifyResult {
   notified: number
+  /**
+   * 🔴 Sin esto, `{ notified: 0 }` significaba DOS cosas incompatibles: «este cliente no
+   * tenía tarjeta» y «reventó y nadie se enteró». El aviso sigue siendo un extra —el cobro
+   * es el negocio— pero quien llame puede ahora distinguirlas.
+   */
+  failed?: boolean
+}
+
+/**
+ * ¿Es un defecto de DESPLIEGUE y no un tropiezo pasajero?
+ *
+ * Medido el 3-sep-2026: con el código nuevo arriba y la migración sin correr, la consulta
+ * revienta con `Unknown field ... for select statement`. Ese error se veía igual que un
+ * timeout de red, así que se trataba como «no había a quién avisar» y los sellos del iPhone
+ * se apagaban sin ruido. Un fallo de red se cura solo; éste no se cura NUNCA hasta que
+ * alguien corra la migración, y por eso tiene que gritar distinto.
+ */
+function esDespliegueIncompleto(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const nombre = error.name
+  if (nombre === 'PrismaClientValidationError' || nombre === 'PrismaClientInitializationError') return true
+  const codigo = (error as { code?: unknown }).code
+  // P2021 tabla inexistente · P2022 columna inexistente — la base va atrás del código.
+  if (codigo === 'P2021' || codigo === 'P2022') return true
+  return /unknown field|unknown arg|does not exist in the current database/i.test(error.message)
 }
 
 export async function notifyPassUpdated(walletPassId: string): Promise<NotifyResult> {
@@ -154,11 +179,18 @@ export async function notifyCustomerPassUpdated(venueId: string, customerId: str
 
     return { notified }
   } catch (error) {
-    logger.error('No se pudo resolver la tarjeta de un cliente para avisarle', {
-      venueId,
-      customerId,
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return { notified: 0 }
+    const despliegueIncompleto = esDespliegueIncompleto(error)
+    logger.error(
+      despliegueIncompleto
+        ? '🔴 DESPLIEGUE INCOMPLETO: el esquema de la base no coincide con el código y los sellos NO están llegando a las tarjetas'
+        : 'No se pudo resolver la tarjeta de un cliente para avisarle',
+      {
+        venueId,
+        customerId,
+        despliegueIncompleto,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    )
+    return { notified: 0, failed: true }
   }
 }
