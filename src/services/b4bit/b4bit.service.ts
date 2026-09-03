@@ -398,26 +398,6 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
 
   logger.info('💾 Created pending crypto payment', { paymentId: payment.id, turnoDelCobro })
 
-  // 🔴 Dinero FUERA de todo turno: es la anomalía que este proyecto existe para eliminar
-  // (Testarudo, 1-sep-2026: 78 de 92 cobros, $10,337 de $12,002, fuera de todo turno). No detiene
-  // el cobro —un negocio sin turno abierto sigue vendiendo— pero deja el rastro que hace falta
-  // para no tener que adivinar después por qué ese dinero no aparece en ningún corte.
-  //
-  // El camino normal NO se registra a propósito: la bitácora guarda las anomalías que un dueño
-  // audita, no un asiento por cada venta. `logAction` es best-effort y nunca lanza, así que la
-  // bitácora no puede tumbar un cobro.
-  if (!turnoDelCobro) {
-    logger.warn('⚠️ Cobro cripto sin turno de caja abierto: queda fuera de todo corte', { venueId, paymentId: payment.id })
-    void logAction({
-      staffId,
-      venueId,
-      action: 'CRYPTO_PAYMENT_WITHOUT_SHIFT',
-      entity: 'Payment',
-      entityId: payment.id,
-      data: { amount, tip, processor: 'B4BIT', orderId: orderId ?? null },
-    })
-  }
-
   // Create order with B4Bit
   const webhookUrl = `${process.env.API_BASE_URL || 'https://api.avoqado.io'}/api/v1/webhooks/b4bit`
 
@@ -444,6 +424,58 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
     })
 
     throw new InternalServerError(b4bitResponse.error?.message || 'Error al crear orden de pago crypto')
+  }
+
+  // 🔴 Dinero FUERA de todo turno: es la anomalía que este proyecto existe para eliminar
+  // (Testarudo, 1-sep-2026: 78 de 92 cobros, $10,337 de $12,002, fuera de todo turno). No detiene
+  // el cobro —un negocio sin turno abierto sigue vendiendo— pero deja el rastro que hace falta
+  // para no tener que adivinar después por qué ese dinero no aparece en ningún corte.
+  //
+  // Va AQUÍ, después de que B4Bit aceptó la orden, y no junto a la escritura del `Payment`: hasta
+  // este punto no hay nada cobrable, y un venue con la configuración cripto rota escribiría una
+  // fila por CADA intento fallido — la bitácora acabaría llena de pagos que nunca ocurrieron.
+  //
+  // El camino normal NO se registra a propósito: la bitácora guarda las anomalías que un dueño
+  // audita, no un asiento por cada venta.
+  if (!turnoDelCobro) {
+    // 🔴 Y tampoco es anomalía si el negocio APAGÓ los turnos: ahí «sin turno» no es un descuadre,
+    // es el ajuste, y sin este gate cada cobro dejaría una falsa alarma permanente.
+    //
+    // `?? true`, NUNCA `=== true`: la mayoría de los venues no tiene fila de `VenueSettings` (53 de
+    // 68 en local) y una fila ausente vale el default `true` del schema — con `=== true` el gate
+    // mataría la señal justo para casi todos. Es el defecto que ya se cazó dos veces con
+    // `attendanceEnabled`. La consulta vive DENTRO de esta rama: el camino feliz no la paga.
+    //
+    // Si leer la configuración falla, se registra igual: un error de lectura no puede silenciar una
+    // anomalía de dinero.
+    let turnosEncendidos = true
+    try {
+      const ajustes = await prisma.venueSettings.findUnique({ where: { venueId }, select: { enableShifts: true } })
+      turnosEncendidos = ajustes?.enableShifts ?? true
+    } catch (error) {
+      logger.warn('⚠️ No se pudo leer `enableShifts`; el cobro fuera de turno se registra igual', {
+        venueId,
+        error: error instanceof Error ? error.message : error,
+      })
+    }
+
+    if (turnosEncendidos) {
+      logger.warn('⚠️ Cobro cripto sin turno de caja abierto: queda fuera de todo corte', { venueId, paymentId: payment.id })
+      // `logAction` es best-effort y nunca lanza, así que la bitácora no puede tumbar un cobro.
+      void logAction({
+        staffId,
+        venueId,
+        action: 'CRYPTO_PAYMENT_WITHOUT_SHIFT',
+        entity: 'Payment',
+        entityId: payment.id,
+        // 🔴 PESOS, jamás centavos. Esto se pinta VERBATIM en la bitácora que ve el dueño
+        // (`VenueActivityLog.tsx` → `toDetailRows` → `formatDetailValue` → `String(value)`), así que
+        // un `5500` se leería como $5,500 encima de un cargo de $55 — y justo lo está mirando quien
+        // investiga por qué le falta dinero. Son los MISMOS valores que se escribieron en el
+        // `Payment`: los centavos mueren en la frontera del proveedor.
+        data: { amount: amount / 100, tip: tip / 100, total: fiatAmount, processor: 'B4BIT', orderId: orderId ?? null },
+      })
+    }
   }
 
   // Update payment with B4Bit tracking info
