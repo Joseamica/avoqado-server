@@ -368,6 +368,7 @@ import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
 // Campañas de correo a clientes (Fase 1C-A, Task 6)
 import marketingCampaignRoutes from './dashboard/marketingCampaign.routes'
+import birthdayAutomationRoutes from './dashboard/birthdayAutomation.routes'
 // Per-staff, per-venue onboarding UX state (tour banners, checklists, welcome-tour flags)
 import staffOnboardingRoutes from './dashboard/staffOnboarding.routes'
 // SUPERADMIN impersonation — view the dashboard as another user/role (read-only)
@@ -10133,6 +10134,14 @@ router.put(
 // entre todos los negocios. Mismo montaje que RESERVATIONS (los venues grandfathered y los
 // demo pasan por dentro del middleware).
 router.use('/venues/:venueId/campaigns', authenticateTokenMiddleware, checkFeatureAccess('CUSTOMER_CAMPAIGNS'), marketingCampaignRoutes)
+// Felicitación automática de cumpleaños — misma feature de plan que las campañas puntuales:
+// es el mismo producto, sólo que el correo lo dispara el calendario en vez de una persona.
+router.use(
+  '/venues/:venueId/birthday-automation',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CUSTOMER_CAMPAIGNS'),
+  birthdayAutomationRoutes,
+)
 
 // ============================================================================
 // Customer Group Routes (Phase 1: Customer System)
