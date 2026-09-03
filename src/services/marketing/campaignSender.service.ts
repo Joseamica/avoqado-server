@@ -1,6 +1,17 @@
 // src/services/marketing/campaignSender.service.ts
 import { CustomerCampaignDeliveryStatus, CustomerCampaignStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { aniversarioNormalizado } from './birthdaySchedule'
+import { hoyEnElVenue } from './birthdaySweep.service'
+
+/**
+ * `Customer.birthDate` es `@db.Date`: Prisma lo entrega como Date a medianoche UTC. Se
+ * formatea en UTC a propósito — leerlo en la zona local del servidor correría la fecha un
+ * día para quien nació el 1 de mes.
+ */
+function toIsoDate(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
 import logger from '@/config/logger'
 import { env } from '@/config/env'
 import emailService from '@/services/email.service'
@@ -155,7 +166,11 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
     where: { id: deliveryId },
     include: {
       campaign: true,
-      customer: { select: { id: true, email: true, marketingConsent: true, active: true } },
+      // Fase 2: una delivery es de una campaña puntual O de la automatización de
+      // cumpleaños (CHECK XOR en la base). `birthDate` viene para poder revalidar al borde
+      // que la felicitación siga llegando a tiempo.
+      automation: true,
+      customer: { select: { id: true, email: true, marketingConsent: true, active: true, birthDate: true } },
     },
   })
 
@@ -271,19 +286,61 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
 
   // --- R1: los cinco motivos de SKIP, evaluados al borde -------------------------------
 
-  if (!delivery.campaign) {
-    // XOR con automationId — la automatización de cumpleaños (Fase 2) todavía no existe.
-    return marcarSkipped('La delivery pertenece a una automatización (Fase 2), que esta task aún no maneja.')
-  }
-  const { campaign } = delivery
+  /** De dónde sale el correo: de la campaña puntual o de la automatización. */
+  let contenido: { subject: string; htmlBody: string; textBody: string } | null = null
 
-  // c) la campaña ya no es publicable.
-  if (
-    campaign.status === CustomerCampaignStatus.CANCELLED ||
-    campaign.status === CustomerCampaignStatus.BLOCKED ||
-    campaign.status === CustomerCampaignStatus.EXPIRED
-  ) {
-    return marcarSkipped(`La campaña está ${campaign.status}; ya no se manda.`)
+  // ── Fase 2: la felicitación de cumpleaños ────────────────────────────────────────
+  //
+  // Comparte TODO el carril con las puntuales (reparto justo, cuota, backoff, supresión) y
+  // sólo cambia de dónde sale el contenido y qué la vuelve inválida al borde.
+  if (!delivery.campaign) {
+    const { automation } = delivery
+    if (!automation) {
+      // Ni campaña ni automatización: el CHECK XOR de la base lo impide, así que si pasa
+      // es que alguien escribió por debajo. No se manda a ciegas.
+      return marcarSkipped('La delivery no tiene ni campaña ni automatización.')
+    }
+
+    // a) la apagaron después de encolar.
+    if (automation.status !== 'ACTIVE') {
+      return marcarSkipped('La felicitación de cumpleaños está pausada; ya no se manda.')
+    }
+
+    // b) 🔴 ¿todavía llega a tiempo? Es el equivalente del `sendNoLaterThan` de las
+    // puntuales: una delivery rezagada en el backlog llegaría DESPUÉS del cumpleaños, y
+    // felicitar tarde es peor que no felicitar. El barrido ya lo comprueba al encolar;
+    // esto lo revalida al BORDE, que es donde de verdad importa.
+    const añoDelAniversario = Number(delivery.dedupeKey.split(':').pop())
+    const cumple =
+      delivery.customer.birthDate && Number.isFinite(añoDelAniversario)
+        ? aniversarioNormalizado(toIsoDate(delivery.customer.birthDate), añoDelAniversario)
+        : null
+    const hoyAllá = hoyEnElVenue(venue?.timezone, ahora)
+    if (cumple && hoyAllá && cumple < hoyAllá) {
+      return marcarSkipped('El cumpleaños ya pasó; felicitar tarde es peor que no felicitar.')
+    }
+
+    // 🔴 NO se manda desde aquí. Se resuelve el CONTENIDO y el flujo sigue por el MISMO
+    // camino que una campaña puntual — incluido el candado de la LFPC de más abajo (nombre
+    // y contacto del negocio), que un `return` temprano se saltaría: el correo saldría sin
+    // identificar al responsable. Un solo camino, todos los candados.
+    contenido = { subject: automation.subject, htmlBody: automation.htmlBody, textBody: automation.textBody }
+  }
+
+  const campaign = delivery.campaign
+
+  // c) la campaña ya no es publicable. (Sólo aplica a las puntuales; la felicitación tiene
+  // su propio equivalente arriba — que esté pausada.) 🔴 Los candados se envuelven en vez
+  // de reordenarse: mover uno cambiaría QUÉ motivo se reporta cuando aplican varios.
+  if (campaign) {
+    if (
+      campaign.status === CustomerCampaignStatus.CANCELLED ||
+      campaign.status === CustomerCampaignStatus.BLOCKED ||
+      campaign.status === CustomerCampaignStatus.EXPIRED
+    ) {
+      return marcarSkipped(`La campaña está ${campaign.status}; ya no se manda.`)
+    }
+    contenido = { subject: campaign.subject, htmlBody: campaign.htmlBody, textBody: campaign.textBody }
   }
 
   // a) consentimiento revocado o cliente inactivo.
@@ -305,10 +362,13 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
   }
 
   // d) tope de atraso — una promoción navideña el 3 de enero hace daño, no ventas.
-  const limite =
-    campaign.sendNoLaterThan ?? (campaign.scheduledFor ? new Date(campaign.scheduledFor.getTime() + 24 * 60 * 60 * 1000) : null)
-  if (limite && ahora > limite) {
-    return marcarSkipped(`Venció el plazo de envío (${limite.toISOString()}); una promoción tardía hace daño, no ventas.`)
+  // (La felicitación tiene el suyo arriba: si el cumpleaños ya pasó, no se manda.)
+  if (campaign) {
+    const limite =
+      campaign.sendNoLaterThan ?? (campaign.scheduledFor ? new Date(campaign.scheduledFor.getTime() + 24 * 60 * 60 * 1000) : null)
+    if (limite && ahora > limite) {
+      return marcarSkipped(`Venció el plazo de envío (${limite.toISOString()}); una promoción tardía hace daño, no ventas.`)
+    }
   }
 
   // e) el negocio no se puede identificar — un correo de marketing sin nombre ni dato de
@@ -335,12 +395,16 @@ export async function enviarDelivery(deliveryId: string, opts?: EnviarDeliveryOp
     privacyNoticeUrl,
   })
 
-  const html = `${campaign.htmlBody}${htmlFooter}`
-  const text = `${campaign.textBody}${textFooter}`
+  if (!contenido) {
+    // Inalcanzable con el CHECK XOR de la base puesto; se declara en vez de asumirse.
+    return marcarSkipped('La delivery no tiene contenido que mandar.')
+  }
+  const html = `${contenido.htmlBody}${htmlFooter}`
+  const text = `${contenido.textBody}${textFooter}`
 
   const result = await emailService.sendEmailWithResult({
     to: destinatario,
-    subject: campaign.subject,
+    subject: contenido.subject,
     html,
     text,
     from: buildMarketingFrom(venue.name),
