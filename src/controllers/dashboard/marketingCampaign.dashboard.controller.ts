@@ -29,6 +29,29 @@ export async function listCampaigns(req: Request, res: Response, next: NextFunct
     const [items, total] = await Promise.all([
       prisma.customerCampaign.findMany({
         where: { venueId },
+        // 🔴 `select` acotado, NO la fila completa. `htmlBody` y `textBody` son `@db.Text`
+        // (el correo renderizado entero) y `contentBlocks` es el JSON del editor: ninguno
+        // se pinta en un renglón de lista, y con el pageSize por default se multiplicarían
+        // por 20 en cada carga de pantalla. Es la misma familia que el `include` sin tope de
+        // `getVenueById` (2026-09-01) y lo que pide
+        // `.claude/rules/bounded-queries-and-server-load.md`. El DETALLE (`getCampaign`) sí
+        // los devuelve: ahí es una fila y el editor los necesita para reabrir la campaña.
+        select: {
+          id: true,
+          name: true,
+          subject: true,
+          status: true,
+          audience: true,
+          customerGroupId: true,
+          tags: true,
+          totalRecipients: true,
+          sentCount: true,
+          failedCount: true,
+          skippedCount: true,
+          scheduledFor: true,
+          createdAt: true,
+          updatedAt: true,
+        },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * pageSize,
         take: pageSize,
