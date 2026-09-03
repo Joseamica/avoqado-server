@@ -11,6 +11,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     $transaction: jest.fn(),
     privacyNoticeVersion: { findFirst: jest.fn().mockResolvedValue(null) },
+    venue: { findUnique: jest.fn().mockResolvedValue(null) },
   },
 }))
 
@@ -101,6 +102,42 @@ describe('getCurrentPrivacyNotice', () => {
         select: expect.objectContaining({ content: true, id: true, contentHash: true, language: true, createdAt: true }),
       }),
     )
+  })
+
+  // Task 8: con versión propia guardada, se devuelve LA SUYA — nunca la plantilla — marcada
+  // esPlantilla:false. `prisma.venue.findUnique` NO debe consultarse en este caso: no hace
+  // falta, ya hay un aviso real.
+  it('T8: con versión propia devuelve la SUYA, marcada esPlantilla:false', async () => {
+    ;(prisma.privacyNoticeVersion.findFirst as jest.Mock).mockResolvedValueOnce({
+      id: 'not1',
+      content: 'Mi aviso real, ya publicado',
+      contentHash: 'hash123',
+      language: 'es',
+      createdAt: new Date('2026-01-01'),
+    })
+    const notice = await getCurrentPrivacyNotice('venueA')
+    expect(notice).toEqual(expect.objectContaining({ id: 'not1', content: 'Mi aviso real, ya publicado', esPlantilla: false }))
+    expect(prisma.venue.findUnique as jest.Mock).not.toHaveBeenCalled()
+  })
+
+  // Task 8: sin versión propia, se devuelve la PLANTILLA precargada con los datos del venue,
+  // marcada esPlantilla:true — nunca null, nunca un {{marcador}} sin sustituir.
+  it('T8: sin versión propia devuelve la PLANTILLA como borrador, marcada esPlantilla:true', async () => {
+    ;(prisma.privacyNoticeVersion.findFirst as jest.Mock).mockResolvedValueOnce(null)
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({
+      name: 'Testarudo Café',
+      address: 'Av. Reforma 123',
+      city: 'CDMX',
+      state: null,
+      email: 'hola@testarudo.mx',
+      phone: null,
+    })
+    const notice = await getCurrentPrivacyNotice('venueA')
+    expect(notice.esPlantilla).toBe(true)
+    expect(notice.id).toBeNull()
+    expect(notice.content).toContain('Testarudo Café')
+    expect(notice.content).toContain('hola@testarudo.mx')
+    expect(notice.content).not.toMatch(/\{\{[^}]+\}\}/)
   })
 })
 

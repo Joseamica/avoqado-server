@@ -1,6 +1,7 @@
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import type { ConsentChannel } from '@prisma/client'
+import { plantillaDeAviso } from './privacyNoticeTemplate'
 
 interface ConsentParams {
   venueId: string
@@ -15,13 +16,49 @@ interface ConsentParams {
  * `content` va en el select a propósito (T10): es contenido del PROPIO negocio (no dato
  * personal de un tercero) y la ruta que lo expone exige `marketing:read` — el editor del
  * dashboard necesita el texto completo para precargarlo, no sólo sus metadatos.
+ *
+ * 🔴 Task 8: si el venue NO tiene una versión propia, se devuelve la PLANTILLA por defecto
+ * como BORRADOR (`esPlantilla: true`) — hoy CERO negocios tienen aviso escrito, y sin uno el
+ * candado de `writeConsent` (abajo) rechaza cualquier consentimiento; sin este borrador el
+ * dueño se enfrenta a una hoja en blanco en vez de poder revisar y publicar.
+ *
+ * Es SÓLO un borrador de PRECARGA: `writeConsent` NUNCA llama a esta función — tiene su
+ * PROPIA consulta a `privacyNoticeVersion` unas líneas abajo — así que la plantilla jamás
+ * cuenta como aviso publicado; el candado de consentimiento sigue exigiendo una fila real.
  */
 export async function getCurrentPrivacyNotice(venueId: string) {
-  return prisma.privacyNoticeVersion.findFirst({
+  const version = await prisma.privacyNoticeVersion.findFirst({
     where: { venueId },
     orderBy: { createdAt: 'desc' },
     select: { id: true, content: true, contentHash: true, language: true, createdAt: true },
   })
+
+  if (version) {
+    return { ...version, esPlantilla: false as const }
+  }
+
+  // Sin versión propia: se arma el borrador con lo que el venue YA tiene capturado. Nunca
+  // lanza por datos faltantes — `plantillaDeAviso` deja un placeholder explícito en vez de
+  // un hueco, para que precargar el editor nunca truene por un venue a medio configurar.
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { name: true, address: true, city: true, state: true, email: true, phone: true },
+  })
+  const domicilio = venue ? [venue.address, venue.city, venue.state].filter(Boolean).join(', ') || undefined : undefined
+
+  return {
+    id: null,
+    content: plantillaDeAviso({
+      nombreDelNegocio: venue?.name ?? '',
+      domicilio,
+      contacto: venue?.email?.trim() || venue?.phone?.trim() || '',
+      fecha: new Date(),
+    }),
+    contentHash: null,
+    language: 'es',
+    createdAt: null,
+    esPlantilla: true as const,
+  }
 }
 
 /**
@@ -38,6 +75,11 @@ async function writeConsent(p: ConsentParams, action: 'GRANTED' | 'REVOKED') {
 
     let noticeVersionId: string | null = null
     if (action === 'GRANTED') {
+      // 🔴 Consulta PROPIA, deliberadamente DISTINTA de getCurrentPrivacyNotice (arriba): esa
+      // función cae a la PLANTILLA cuando el venue no tiene versión propia (Task 8), y la
+      // plantilla NUNCA puede contar como aviso publicado — sólo una fila real guardada
+      // autoriza a capturar consentimiento. Confirmado con sabotaje: reusar
+      // getCurrentPrivacyNotice aquí hace que este candado deje de rechazar (ver reporte).
       const notice = await tx.privacyNoticeVersion.findFirst({
         where: { venueId: p.venueId },
         orderBy: { createdAt: 'desc' },
