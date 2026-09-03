@@ -541,6 +541,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OtpChallenge: 'Customers, Consumers & Reviews',
   Review: 'Customers, Consumers & Reviews',
   // Fase 0 — consentimiento y captura de datos para campañas de correo
+  BirthdayAutomation: 'Customers, Consumers & Reviews',
   ConsentEvent: 'Customers, Consumers & Reviews',
   PrivacyNoticeVersion: 'Customers, Consumers & Reviews',
   CustomerCaptureToken: 'Customers, Consumers & Reviews',

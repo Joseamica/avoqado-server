@@ -639,6 +639,9 @@ model Venue {
   customerCampaigns  CustomerCampaign[]
   emailQuotaLedgers  EmailQuotaLedger[]
 
+  // Fase 2 — felicitación automática de cumpleaños
+  birthdayAutomation BirthdayAutomation?
+
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   supplierItemCodes SupplierItemCode[]
@@ -7012,12 +7015,57 @@ model CustomerCampaign {
 }
 
 /// Cola de envío Y acuse en la misma fila (patrón outbox del kiosco, endurecido).
+/// Estado de la felicitación automática de cumpleaños. Nace PAUSED: nadie empieza a
+/// mandarle correos a sus clientes por una actualización que no pidió.
+enum BirthdayAutomationStatus {
+  ACTIVE
+  PAUSED
+}
+
+/// Felicitación automática de cumpleaños — CONFIGURACIÓN por venue, no una campaña.
+///
+/// 🔴 El "switch" de encendido es EXCLUSIVO de este modelo: una campaña puntual no tiene
+/// switch, existe cuando el dueño la escribe. Aquí sí hace falta, porque el correo sale
+/// solo todos los días.
+model BirthdayAutomation {
+  id       String                   @id @default(cuid())
+  venueId  String                   @unique
+  venue    Venue                    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  status   BirthdayAutomationStatus @default(PAUSED)
+  subject  String
+
+  /// Contenido por BLOQUES (decisión del founder, 2026-09-02): el servidor los renderiza.
+  /// Nadie escribe HTML, así que no hay nada que sanitizar.
+  contentBlocks Json?
+  htmlBody      String @db.Text
+  textBody      String @db.Text
+  linkDomains   String[]
+
+  /// Con cuántos días de antelación sale la felicitación.
+  daysBefore Int @default(7)
+
+  /// 🔴 Cursor del barrido, como FECHA CIVIL (`YYYY-MM-DD`) del venue, no como instante:
+  /// un cumpleaños ocurre un día, no a una hora, y así el barrido es inmune a las horas
+  /// que el cambio de horario duplica o borra. `null` = nunca se ha evaluado, y entonces
+  /// el primer barrido sólo mira HOY (encenderlo no dispara felicitaciones retroactivas).
+  lastEvaluatedLocalDate String?
+
+  createdByStaffId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  deliveries CustomerCampaignDelivery[]
+
+  @@index([status])
+}
+
 model CustomerCampaignDelivery {
   id            String                      @id @default(cuid())
   /// XOR con automationId (fase 2): exactamente uno, garantizado por CHECK en la base
   campaignId    String?
   campaign      CustomerCampaign?           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   automationId  String?
+  automation    BirthdayAutomation?         @relation(fields: [automationId], references: [id], onDelete: Cascade)
   customerId    String
   customer      Customer                    @relation(fields: [customerId], references: [id], onDelete: Cascade)
   venueId       String
