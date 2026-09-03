@@ -1,6 +1,11 @@
+import { WalletPlatform } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { env } from '../../config/env'
 import { apnsAvailable, sendSilentPush } from './apnsClient'
+import { getStampCardStatus } from './stampLedger.service'
+import { buildLoyaltyObject } from './googleObjectBuilder.service'
+import { googleWalletAvailable, issuerId, walletClient } from './googleWalletClient'
 
 /**
  * Le avisa a los teléfonos donde vive una tarjeta que su contenido cambió.
@@ -54,6 +59,61 @@ export async function notifyPassUpdated(walletPassId: string): Promise<NotifyRes
 }
 
 /**
+ * Le avisa a Google que una tarjeta cambió.
+ *
+ * 🔴 No hay push ni registro de aparatos, a diferencia de Apple: se actualiza el objeto
+ * y Google reparte. Por eso `WalletPassRegistration` no participa.
+ *
+ * 🔴 La revisión sube ANTES de armar el objeto: la URL de la franja la lleva dentro, y
+ * es lo único que obliga a Google a redescargar la imagen en vez de servir la vieja.
+ */
+async function notifyGooglePass(pass: {
+  id: string
+  venueId: string
+  customerId: string
+  serialNumber: string
+  qrToken: string
+  revision: number
+  googleObjectId: string | null
+}): Promise<boolean> {
+  try {
+    if (!googleWalletAvailable() || !pass.googleObjectId) return false
+
+    const actualizado = await prisma.walletPass.update({
+      where: { id: pass.id },
+      data: { revision: { increment: 1 } },
+      select: { revision: true },
+    })
+
+    const stamps = await getStampCardStatus(pass.venueId, pass.customerId)
+    const client = await walletClient()
+
+    await client.loyaltyobject.patch({
+      resourceId: pass.googleObjectId,
+      requestBody: buildLoyaltyObject({
+        issuerId: issuerId(),
+        venueId: pass.venueId,
+        walletPassId: pass.id,
+        serialNumber: pass.serialNumber,
+        qrToken: pass.qrToken,
+        revision: actualizado.revision,
+        baseUrl: env.BASE_URL as string,
+        content: stamps,
+      }) as any,
+    })
+
+    return true
+  } catch (error) {
+    // Igual que APNs: el aviso es un extra, el cobro es el negocio.
+    logger.error('No se pudo avisarle a Google de la actualización de una tarjeta', {
+      walletPassId: pass.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
+}
+
+/**
  * Avisa a los teléfonos de UN cliente en UN negocio.
  *
  * 🔴 Es el punto que llaman el sellado, el canje y la reversión. Cada uno de esos
@@ -64,15 +124,29 @@ export async function notifyPassUpdated(walletPassId: string): Promise<NotifyRes
  */
 export async function notifyCustomerPassUpdated(venueId: string, customerId: string): Promise<NotifyResult> {
   try {
-    if (!apnsAvailable()) return { notified: 0 }
-
-    const pass = await prisma.walletPass.findFirst({
+    // 🔴 findMany y no findFirst, y se atiende cada pase POR SU PLATAFORMA. Con
+    // findFirst sin filtro, un cliente con las dos tarjetas podía recibir el pase de
+    // Google donde se esperaba el de Apple: APNs no encontraba aparatos y devolvía 0
+    // en silencio, y el iPhone dejaba de recibir sellos sin que nada fallara.
+    const passes = await prisma.walletPass.findMany({
       where: { venueId, customerId, active: true },
-      select: { id: true },
+      select: { id: true, platform: true, venueId: true, customerId: true, serialNumber: true, qrToken: true, revision: true, googleObjectId: true },
     })
-    if (!pass) return { notified: 0 }
+    if (passes.length === 0) return { notified: 0 }
 
-    return notifyPassUpdated(pass.id)
+    let notified = 0
+
+    for (const pass of passes) {
+      if (pass.platform === WalletPlatform.APPLE) {
+        if (!apnsAvailable()) continue
+        const r = await notifyPassUpdated(pass.id)
+        notified += r.notified
+      } else if (pass.platform === WalletPlatform.GOOGLE) {
+        if (await notifyGooglePass(pass)) notified += 1
+      }
+    }
+
+    return { notified }
   } catch (error) {
     logger.error('No se pudo resolver la tarjeta de un cliente para avisarle', {
       venueId,
