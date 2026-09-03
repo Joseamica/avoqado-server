@@ -408,6 +408,44 @@ describe('R3 — el envío de verdad: remitente, pie, cabeceras y tags', () => {
     const [{ headers }] = sendEmailWithResultMock.mock.calls[0]
     expect(headers['List-Unsubscribe']).toContain('https://api.avoqado.io/api/v1/public/customers/unsubscribe?token=TOKEN123')
   })
+
+  // Task 7 — el pie del correo enlaza al aviso de privacidad del NEGOCIO (venueId, sin
+  // token: es lectura pública, no una acción sobre la cuenta del cliente).
+  it('Task 7: el pie enlaza al aviso de privacidad del negocio', async () => {
+    findUniqueMock.mockResolvedValue(baseDelivery())
+    sendEmailWithResultMock.mockResolvedValue({ ok: true, resendId: 're_1', transient: false })
+
+    await enviarDelivery('dlv-1', { ahora: AHORA })
+
+    const [{ html, text }] = sendEmailWithResultMock.mock.calls[0]
+    const urlEsperada = 'https://api.avoqado.io/api/v1/public/venues/venue-1/privacy-notice'
+    expect(html).toContain(urlEsperada)
+    expect(html).toContain('Aviso de privacidad')
+    expect(text).toContain(urlEsperada)
+  })
+
+  // 🔴 Decisión del founder (2026-09-02): un venue sin aviso registrado no debería tener
+  // audiencia consentida (consent.service.ts ya lo impide al capturar el consentimiento) —
+  // pero SI ese caso ocurriera, el correo debe SEGUIR saliendo con el resto del pie completo,
+  // en vez de que una consulta sobre el aviso bloquee un envío legítimo. Esta prueba lo
+  // demuestra estructuralmente: `buildPrivacyNoticeUrl` es una función PURA que nunca toca
+  // `privacyNoticeVersion` — el mismo happy path de siempre, con el resto del pie intacto,
+  // confirma que nada en el camino de envío depende de si el aviso existe.
+  it('Task 7: sin aviso registrado, el correo SIGUE saliendo con el resto del pie completo', async () => {
+    findUniqueMock.mockResolvedValue(baseDelivery())
+    sendEmailWithResultMock.mockResolvedValue({ ok: true, resendId: 're_1', transient: false })
+
+    const resultado = await enviarDelivery('dlv-1', { ahora: AHORA })
+
+    expect(resultado).toBe('SENT')
+    const [{ html, text }] = sendEmailWithResultMock.mock.calls[0]
+    expect(html).toContain('Testarudo Café')
+    expect(html).toContain('hola@testarudo.mx')
+    expect(html).toContain('TOKEN123') // liga de baja, intacta
+    expect(html).toContain('/privacy-notice')
+    expect(text).toContain('Testarudo Café')
+    expect(text).toContain('/privacy-notice')
+  })
 })
 
 describe('R4 — desenlaces del envío', () => {
