@@ -552,16 +552,26 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
           id: true,
           total: true,
         },
-        // Filter orders by date if date range is provided
-        where:
-          parsedStartTime || parsedEndTime
+        // 🔴 Sólo las COMPLETADAS, y tiene que ser el MISMO predicado que `orphanOrderCount`
+        // (abajo, `status: 'COMPLETED'` + `shiftId: null`), porque `totalOrders` SUMA los dos.
+        //
+        // Hasta el 3-sep-2026 daba igual: casi ninguna orden llevaba `shiftId`, así que este
+        // lado aportaba ~0 y el conteo lo cargaba entero la mitad huérfana. Al estampar el turno
+        // al ABRIR la orden, sin este filtro las cuentas abiertas y las canceladas empezarían a
+        // contar aquí — cuando antes no contaban en NINGUNA de las dos mitades—, e inflarían un
+        // «total de órdenes» que se lee al lado del total de ventas.
+        where: {
+          status: 'COMPLETED',
+          // Filter orders by date if date range is provided
+          ...(parsedStartTime || parsedEndTime
             ? {
                 createdAt: {
                   ...(parsedStartTime ? { gte: parsedStartTime } : {}),
                   ...(parsedEndTime ? { lte: parsedEndTime } : {}),
                 },
               }
-            : undefined,
+            : {}),
+        },
       },
       payments: {
         select: {

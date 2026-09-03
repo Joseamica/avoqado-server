@@ -47,13 +47,19 @@ const SIN_TURNO_A_PROPOSITO: Record<string, string> = {
     'Carga masiva de ventas PASADAS desde el Excel del cliente (`createdAt: soldAt`, de otros ' +
     'días y de otra tienda). Atarlas al turno de hoy metería ventas ajenas en el corte de alguien.',
   'onboarding/demoSeed.service.ts': 'Órdenes de DEMO con fecha inventada, repartidas semanas hacia atrás.',
+  'delivery-channels/core/deliveryOrderIngestion.service.ts':
+    'Reparto (Uber/Rappi/DiDi): el pedido lo levanta el cliente en la app del marketplace y esto ' +
+    'corre en su webhook, sin cajero; `scheduledFor` permite además pedidos para otro día.',
 }
 
 /** Cada `await <cliente>.order.create(…)` de `src/services/`, con su archivo y su cuerpo. */
 function sitiosDeCreacion(): Array<{ rel: string; cuerpo: string }> {
   // `grep -rn` en vez de recorrer el árbol a mano: es la MISMA búsqueda del inventario, así que
   // la prueba y el reporte no pueden divergir.
-  const salida = execFileSync('grep', ['-rn', '--include=*.ts', String.raw`await \w\+\.order\.create(`, raizServicios], {
+  // 🔴 `create` Y `upsert`: el 3-sep-2026 el inventario se hizo sólo con `create` y se le
+  // escaparon DOS caminos de alta de órdenes — el de pos-sync y el de reparto. Un `upsert` crea
+  // órdenes igual que un `create`.
+  const salida = execFileSync('grep', ['-rn', '--include=*.ts', String.raw`await \w\+\.order\.\(create\|upsert\)(`, raizServicios], {
     encoding: 'utf8',
   })
 
@@ -116,9 +122,10 @@ describe('toda orden nueva decide explícitamente si cae en el turno de caja', (
     }
   }
 
-  it('el upsert de pos-sync (que no es `create`) sigue conectando el turno', () => {
-    // Es el otro camino de alta de órdenes y no lo ve el `grep` de arriba: SoftRestaurant manda
-    // su propio `shiftId`, resuelto por `posSyncShift.service.ts`.
+  it('el upsert de pos-sync conecta el turno por RELACIÓN, no por campo plano', () => {
+    // El `grep` de arriba ya lo incluye, pero sólo comprueba que la palabra `shiftId` aparezca:
+    // aquí se fija la FORMA, porque pos-sync es el único que lo ata por relación (SoftRestaurant
+    // manda su propio `shiftId`, resuelto por `posSyncShift.service.ts`).
     const fuente = readFileSync(join(raizServicios, 'pos-sync/posSyncOrder.service.ts'), 'utf8')
     expect(fuente).toMatch(/shift:\s*\{\s*connect:\s*\{\s*id:\s*shiftId\s*\}\s*\}/)
   })

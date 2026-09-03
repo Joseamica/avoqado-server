@@ -209,6 +209,11 @@ export async function ingestDeliveryOrder(
       // Nombre local para el resto de la transacción. El de afuera se declara al cerrarla.
       const esNueva = nuevaState.valor
 
+      // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles" copiando lo que hacen el
+      // mostrador o la venta rápida. El pedido lo levanta el CLIENTE en la app del marketplace
+      // (Uber/Rappi/DiDi) y esto corre en su webhook, sin cajero ni cajón de por medio; encima
+      // `scheduledFor` permite pedidos programados para otro día. Meterlo en el turno abierto de
+      // ese instante le cargaría a un cajero una venta que nunca tocó.
       const order = await tx.order.upsert({
         where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
         update: { posRawData: normalized.raw as Prisma.InputJsonValue, syncedAt: new Date() },
