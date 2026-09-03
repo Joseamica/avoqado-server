@@ -19,6 +19,14 @@
  * las órdenes históricas de pos-sync tienen turno y su `Payment.shiftId` es NULO. Si se quitara
  * ese camino, su dinero desaparecería de la pantalla. Por eso el filtro deja pasar el cobro sin
  * turno — es de esta orden y no lo reclama ningún otro.
+ *
+ * ⚠️ Los fixtures llevan `status`, `createdAt` y la VENTANA del turno (`startTime`/`endTime`)
+ * porque la task 5c (3-sep-2026) le puso techo a ese respaldo: un cobro sin turno sólo es de este
+ * turno si ocurrió DENTRO de su ventana, y el reporte pide únicamente cobros `COMPLETED`. Sin esos
+ * campos las pruebas de este archivo pasaban por el motivo equivocado — no distinguían un
+ * `COMPLETED` de un `FAILED`, ni un cobro histórico legítimo de uno posterior al cierre. Los casos
+ * de la ventana y del `status` viven en `shift.reporteNoCuentaLoNoCobrado.test.ts`; aquí sólo se
+ * los honra para que este archivo siga midiendo lo que dice medir: la NO duplicación entre turnos.
  */
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -48,16 +56,41 @@ import { getShifts } from '@/services/tpv/shift.tpv.service'
 
 const mockPrisma = prisma as unknown as { $transaction: jest.Mock }
 
+// La ventana del turno, y un instante DENTRO de ella: así el único motivo por el que un cobro
+// entra o no entra es el que cada prueba dice estar midiendo.
+const ABRE = new Date('2026-09-03T14:00:00.000Z')
+const CIERRA = new Date('2026-09-03T22:00:00.000Z')
+const DURANTE = new Date('2026-09-03T18:00:00.000Z')
+
+const turno = (id: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  venueId: 'venue-1',
+  staff: null,
+  startTime: ABRE,
+  endTime: CIERRA,
+  orders: [],
+  payments: [],
+  ...extra,
+})
+
+const pago = (extra: Record<string, unknown> = {}) => ({
+  id: 'pago-1',
+  status: 'COMPLETED',
+  amount: 100,
+  tipAmount: 15,
+  processedById: 'staff-1',
+  createdAt: DURANTE,
+  allocations: [],
+  ...extra,
+})
+
 describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
   beforeEach(() => jest.clearAllMocks())
 
   it('🔴 la mesa abierta en A y pagada en B NO deja su dinero en A', async () => {
     // La orden se estampó con A (se abrió en A), pero su cobro se resolvió a B (se pagó en B).
-    const cobroDeB = { id: 'pago-1', shiftId: 'turno-B', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
-    mockPrisma.$transaction.mockResolvedValue([
-      [{ id: 'turno-A', venueId: 'venue-1', staff: null, orders: [{ id: 'orden-1', payments: [cobroDeB] }], payments: [] }],
-      1,
-    ])
+    const cobroDeB = pago({ shiftId: 'turno-B' })
+    mockPrisma.$transaction.mockResolvedValue([[turno('turno-A', { orders: [{ id: 'orden-1', payments: [cobroDeB] }] })], 1])
 
     const { data } = await getShifts('venue-1', 20, 1)
 
@@ -69,8 +102,8 @@ describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
 
   it('el mismo cobro SÍ suma en el turno donde entró el dinero', async () => {
     // La otra cara: el filtro no puede dejar a B sin su propio cobro.
-    const cobroDeB = { id: 'pago-1', shiftId: 'turno-B', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
-    mockPrisma.$transaction.mockResolvedValue([[{ id: 'turno-B', venueId: 'venue-1', staff: null, orders: [], payments: [cobroDeB] }], 1])
+    const cobroDeB = pago({ shiftId: 'turno-B' })
+    mockPrisma.$transaction.mockResolvedValue([[turno('turno-B', { payments: [cobroDeB] })], 1])
 
     const { data } = await getShifts('venue-1', 20, 1)
 
@@ -80,12 +113,10 @@ describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
 
   it('🔴 el cobro SIN turno de una orden CON turno sigue contando (pos-sync histórico)', async () => {
     // Es lo que impide «arreglar» esto borrando la rama por orden: a estas órdenes se les
-    // borraría el dinero de la pantalla.
-    const cobroSinTurno = { id: 'pago-1', shiftId: null, amount: 80, tipAmount: 0, processedById: 'staff-1', allocations: [] }
-    mockPrisma.$transaction.mockResolvedValue([
-      [{ id: 'turno-A', venueId: 'venue-1', staff: null, orders: [{ id: 'orden-pos', payments: [cobroSinTurno] }], payments: [] }],
-      1,
-    ])
+    // borraría el dinero de la pantalla. Ocurrió DENTRO de la ventana del turno — el respaldo
+    // tiene techo desde la task 5c, y el histórico legítimo cae de este lado del techo.
+    const cobroSinTurno = pago({ shiftId: null, amount: 80, tipAmount: 0 })
+    mockPrisma.$transaction.mockResolvedValue([[turno('turno-A', { orders: [{ id: 'orden-pos', payments: [cobroSinTurno] }] })], 1])
 
     const { data } = await getShifts('venue-1', 20, 1)
 
@@ -94,9 +125,9 @@ describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
 
   it('el cobro de ESTE turno alcanzable por los dos caminos sigue contando UNA vez', async () => {
     // Regresión de la deduplicación que ya existía: el filtro no la sustituye.
-    const cobro = { id: 'pago-1', shiftId: 'turno-A', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
+    const cobro = pago({ shiftId: 'turno-A' })
     mockPrisma.$transaction.mockResolvedValue([
-      [{ id: 'turno-A', venueId: 'venue-1', staff: null, orders: [{ id: 'orden-1', payments: [cobro] }], payments: [cobro] }],
+      [turno('turno-A', { orders: [{ id: 'orden-1', payments: [cobro] }], payments: [cobro] })],
       1,
     ])
 
@@ -147,11 +178,11 @@ describe('getShifts — la consulta tiene que TRAER `shiftId` de los cobros de l
     // La forma exacta que produciría un `select` sin `shiftId`. Con `==` este cobro pasaba el
     // filtro y sumaba en un turno que no lo cobró; con `===` no pasa. Perder un renglón de la
     // pantalla se nota y se investiga; contar dos veces el mismo dinero, no.
-    const cobroSinCampo = { id: 'pago-1', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
-    mockPrisma.$transaction.mockResolvedValue([
-      [{ id: 'turno-A', venueId: 'venue-1', staff: null, orders: [{ id: 'orden-1', payments: [cobroSinCampo] }], payments: [] }],
-      1,
-    ])
+    // 🔴 Trae `createdAt` DENTRO de la ventana a propósito: si el techo de la task 5c fuera el
+    // que lo excluye, esta prueba pasaría por el motivo equivocado y dejaría de vigilar el `===`.
+    const cobroSinCampo = pago({ amount: 100 })
+    delete (cobroSinCampo as Record<string, unknown>).shiftId
+    mockPrisma.$transaction.mockResolvedValue([[turno('turno-A', { orders: [{ id: 'orden-1', payments: [cobroSinCampo] }] })], 1])
 
     const { data } = await getShifts('venue-1', 20, 1)
 

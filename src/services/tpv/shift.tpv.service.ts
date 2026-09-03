@@ -190,6 +190,49 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
   }
 }
 
+/** Un instante legible, o `null` si el dato falta o no se puede leer. Nunca lanza. */
+function instanteDe(valor: unknown): number | null {
+  if (valor === null || valor === undefined) return null
+  const ms = valor instanceof Date ? valor.getTime() : new Date(valor as string | number).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * ¿Un cobro SIN turno propio pertenece a ESTE turno? Sólo si ocurrió DENTRO de su ventana.
+ *
+ * 🔴 Gobierna EXCLUSIVAMENTE el respaldo histórico de `getShifts` —los cobros con `shiftId` nulo
+ * que cuelgan de una orden del turno (órdenes de pos-sync)—, NUNCA la rama estampada. Un cobro
+ * que trae su propio `Payment.shiftId` cuenta sin condiciones: ése lo resolvió el servidor
+ * (`shared/turnoDeCaja.ts`) y es la autoridad. Medido el 3-sep-2026 en la base local: 19 cobros
+ * con su `shiftId` propio caen fuera de la ventana de ese mismo turno ($6 874.06) — acotarlos
+ * borraría dinero bien atribuido, que es peor que el defecto que se está arreglando.
+ *
+ * Sin este techo, el respaldo aceptaba CUALQUIER cobro sin turno de una orden del turno, incluido
+ * uno ocurrido DESPUÉS del cierre: dinero que entra retrospectivamente a un turno ya firmado.
+ * Medido: los 8 cobros con esa forma en la base local caen tras el cierre de su turno, entre
+ * 1 701 y 3 015 horas después (70–125 días), $4 638.00.
+ *
+ * Es el mismo patrón que `gavetaCerrable` (`shared/turnoDeCaja.ts:888`): ventana + `OR` sobre el id.
+ *
+ * 🔴 FALLA CERRADO, y `endTime === null` NO es lo mismo que `endTime` ausente. `null` significa
+ * turno abierto (sin techo); `undefined` significa que el campo no se pidió, y de un dato que no
+ * está no se puede afirmar pertenencia. Un renglón que se cae de la pantalla se ve y se investiga;
+ * dinero que se cuenta en un turno que no lo cobró, no.
+ */
+export function cobroSinTurnoPerteneceAlTurno(
+  cobro: { createdAt?: Date | string | null },
+  turno: { startTime?: Date | string | null; endTime?: Date | string | null },
+): boolean {
+  const ocurrio = instanteDe(cobro?.createdAt)
+  const abre = instanteDe(turno?.startTime)
+  if (ocurrio === null || abre === null) return false
+  if (ocurrio < abre) return false
+  if (turno.endTime === null) return true
+  const cierra = instanteDe(turno.endTime)
+  if (cierra === null) return false
+  return ocurrio <= cierra
+}
+
 /**
  * Get shifts for a venue with pagination and filtering
  * @param orgId Organization ID (for future authorization)
@@ -283,6 +326,18 @@ export async function getShifts(
           include: {
             payments: {
               where: {
+                // 🔴 SÓLO lo que de verdad se cobró. `b4bit.service.ts` crea el `Payment` en
+                // PENDING con el turno ya estampado y lo pasa a FAILED al cancelarse o vencer:
+                // sin este filtro, un cobro cripto que nunca entró salía como venta del turno.
+                // Es el MISMO predicado que ya usan `getCurrentShift` y el CIERRE en este archivo
+                // — el reporte era el único de los tres que no lo aplicaba. Va en la CONSULTA, no
+                // en JavaScript: aprovecha `Payment_venueId_status_createdAt_idx` y no hidrata una
+                // fila para tirarla. Guardia de FORMA (que es el candado real de esto):
+                // `tests/unit/services/tpv/shift.reporteNoCuentaLoNoCobrado.test.ts`.
+                //
+                // NO se filtra por `type`: el reembolso llega con `amount` negativo y RESTA, igual
+                // que en `aggregateShiftPayments` («el cierre nunca ramificó por `type`»).
+                status: 'COMPLETED',
                 ...(staffId ? { processedById: staffId } : {}),
                 // Filter payments by date range if provided
                 ...(parsedStartTime || parsedEndTime
@@ -312,6 +367,8 @@ export async function getShifts(
         },
         payments: {
           where: {
+            // Misma regla que la rama por orden de arriba: sólo cobros COMPLETED.
+            status: 'COMPLETED',
             ...(staffId ? { processedById: staffId } : {}),
             // Filter payments by date range if provided
             ...(parsedStartTime || parsedEndTime
@@ -361,7 +418,14 @@ export async function getShifts(
     // cae del conteo — que se ve y se investiga— en vez de duplicarse en silencio. La otra mitad
     // del candado es la aserción sobre la FORMA de la consulta en
     // `tests/unit/services/tpv/shift.getShifts.cobroDeOtroTurno.test.ts`.
-    const orderPayments = shift.orders.flatMap(order => order.payments).filter(p => p.shiftId === shift.id || p.shiftId === null)
+    //
+    // 🔴 Y el respaldo lleva TECHO: un cobro sin turno sólo es de éste si ocurrió DENTRO de su
+    // ventana (`cobroSinTurnoPerteneceAlTurno`, arriba en este archivo). Sin él, un cobro
+    // posterior al cierre entraba retrospectivamente a un turno ya firmado. El techo NO se le
+    // aplica a la rama estampada: ese `shiftId` lo puso el servidor y es la autoridad.
+    const orderPayments = shift.orders
+      .flatMap(order => order.payments)
+      .filter(p => p.shiftId === shift.id || (p.shiftId === null && cobroSinTurnoPerteneceAlTurno(p, shift)))
     // Deduplicar por id sigue haciendo falta: un cobro de ESTE turno llega por los dos caminos.
     // Se conserva el orden actual (primero los de la orden) para no mover nada más.
     const allPayments = [...new Map([...orderPayments, ...shift.payments].map(payment => [payment.id, payment])).values()]
@@ -598,6 +662,12 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
           },
         },
         where: {
+          // 🔴 SÓLO cobros COMPLETED — la MISMA regla que ya aplica la mitad huérfana de este
+          // mismo resumen (`orphanPaymentWhere`, abajo) y que el cierre. Sin ella un `Payment`
+          // PENDING de B4Bit —creado con el turno ya estampado— sumaba a `totalSales` y seguía
+          // sumando después de quedar FAILED, en la MISMA cifra que la mitad huérfana calculaba
+          // bien: dos mitades del mismo total con reglas distintas.
+          status: 'COMPLETED',
           ...(staffId ? { processedById: staffId } : {}),
           // Filter payments by date range if provided
           ...(parsedStartTime || parsedEndTime
