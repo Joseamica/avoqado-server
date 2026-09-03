@@ -526,9 +526,17 @@ describe('refund.dashboard.service', () => {
    * reembolso, no sólo quién lo firma — y hasta esta prueba TODOS los casos del archivo
    * mockeaban `shift.findFirst → null`, o sea que sólo se ejercitaba la rama sin turno.
    *
-   * La regla que fijan estos dos casos:
+   * 🔴 **Task 5 (3-sep-2026) cambió la segunda mitad de esta regla, y a propósito.** Antes, sin
+   * turno abierto, el reembolso caía al turno del COBRO ORIGINAL —normalmente uno ya CERRADO— y le
+   * decrementaba sus totales. Eso reescribe hacia atrás un corte que una persona ya firmó: el
+   * dueño lo revisó, lo imprimió y cuadró su efectivo, y meses después el número cambia solo.
+   * Además ese `shift.update({ where: { id } })` iba sin `venueId` ni `status`.
+   *
+   * La regla vigente, unificada con los otros dos rieles (`refund.tpv`, `refund.mobile`):
    *   · con turno abierto  ⇒ el reembolso nace en el turno de HOY y se le descuenta a ÉSE;
-   *   · sin turno abierto  ⇒ cae al turno del cobro original, para no dejarlo inflado.
+   *   · sin turno abierto  ⇒ `shiftId = null` y NO SE TOCA NINGÚN TURNO CERRADO. Un pago con
+   *     `shiftId` nulo es REATRIBUIBLE después (`scripts/reatribuir-cobros-al-turno.ts`);
+   *     uno estampado en un turno cerrado con conteo es justo lo que ese script se niega a tocar.
    */
   describe('🔴 de qué turno sale el reembolso (fase 1: el turno es del negocio)', () => {
     const pagoConTurnoViejo = (over: Record<string, unknown> = {}) => ({
@@ -569,6 +577,7 @@ describe('refund.dashboard.service', () => {
       // del describe de tender): sin este reset, un Once heredado rompe el caso sin culpa suya.
       prismaMock.$queryRaw.mockReset()
       prismaMock.payment.create.mockResolvedValue({ id: 'refund-turno-1' })
+      prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as never)
     })
 
     it('CON turno abierto: el reembolso nace en el turno del NEGOCIO y le descuenta a ÉSE, no al del cobro', async () => {
@@ -589,28 +598,43 @@ describe('refund.dashboard.service', () => {
       const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
       expect(data.shiftId).toBe('shift-negocio')
 
-      // (iii) y el descuento va a ESE turno: $50 fuera de la caja de hoy.
-      expect(prismaMock.shift.update).toHaveBeenCalledTimes(1)
-      const upd = prismaMock.shift.update.mock.calls.at(-1)![0]
-      expect(upd.where).toEqual({ id: 'shift-negocio' })
+      // (iii) y el descuento va a ESE turno: $50 fuera de la caja de hoy. Es un CLAIM condicional,
+      //       no un `update` por id: acotado al venue y al estado OPEN, igual que los otros dos
+      //       rieles. Sin `venueId` el `where` aceptaba el turno de OTRO negocio.
+      expect(prismaMock.shift.update).not.toHaveBeenCalled()
+      expect(prismaMock.shift.updateMany).toHaveBeenCalledTimes(1)
+      const upd = prismaMock.shift.updateMany.mock.calls.at(-1)![0]
+      expect(upd.where).toEqual({ id: 'shift-negocio', venueId: 'venue-1', status: 'OPEN', endTime: null })
       expect(upd.data.totalSales.decrement.toString()).toBe('50')
       // Sin propina reembolsada, `totalTips` ni se toca (el código lo omite del `data`).
       expect(upd.data.totalTips).toBeUndefined()
     })
 
-    it('SIN turno abierto: cae al turno del cobro original y el descuento va ahí', async () => {
+    it('🔴 SIN turno abierto: el reembolso queda SIN turno y no se toca el turno CERRADO del cobro', async () => {
       prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo()]).mockResolvedValueOnce([])
       prismaMock.shift.findFirst.mockResolvedValue(null)
 
       await reembolsar()
 
       const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
-      expect(data.shiftId).toBe('shift-viejo')
+      expect(data.shiftId).toBeUndefined()
 
-      expect(prismaMock.shift.update).toHaveBeenCalledTimes(1)
-      const upd = prismaMock.shift.update.mock.calls.at(-1)![0]
-      expect(upd.where).toEqual({ id: 'shift-viejo' })
-      expect(upd.data.totalSales.decrement.toString()).toBe('50')
+      // Reescribir los totales de un corte que alguien ya firmó es lo único que no se puede hacer.
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.shift.update).not.toHaveBeenCalled()
+    })
+
+    it('🔴 si el turno cerró entre la lectura y el claim, el reembolso entra SIN turno', async () => {
+      // El claim devuelve 0 filas. Estampar el `shiftId` igual dejaría un REFUND colgando de un
+      // turno al que nunca se le restó: un recálculo desde los pagos discreparía de su propio
+      // `totalSales` por el monto del reembolso.
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo()]).mockResolvedValueOnce([])
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio' } as never)
+      prismaMock.shift.updateMany.mockResolvedValue({ count: 0 } as never)
+
+      await reembolsar()
+
+      expect(prismaMock.payment.create.mock.calls.at(-1)![0].data.shiftId).toBeUndefined()
     })
   })
 })

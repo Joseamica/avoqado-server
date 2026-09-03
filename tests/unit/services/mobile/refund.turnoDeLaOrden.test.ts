@@ -65,6 +65,17 @@ describe('createRefund (móvil) — la orden testigo comparte turno con su cobro
     expect(datosDelCobro().shiftId ?? null).toBeNull()
   })
 
+  it('🔴 el claim va acotado al VENUE: por id solo aceptaba el turno de otro negocio', async () => {
+    // El riel de la TPV (`refund.tpv.service.ts`) ya lo llevaba; éste, del que se copió, no —
+    // quedó más laxo que su hermano. Los tres rieles usan ahora el MISMO claim condicional.
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-negocio' } as any)
+
+    await reembolso()
+
+    const claim = (prismaMock.shift.updateMany as jest.Mock).mock.calls.at(-1)![0]
+    expect(claim.where).toEqual({ id: 'turno-negocio', venueId: VENUE, status: 'OPEN', endTime: null })
+  })
+
   it('sin turno abierto el reembolso SIGUE ocurriendo, sin turno en ninguno', async () => {
     prismaMock.shift.findFirst.mockResolvedValue(null)
 

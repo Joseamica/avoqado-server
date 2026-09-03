@@ -245,11 +245,6 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     throw new BadRequestError('Either amount (cents) or items[] is required')
   }
 
-  // El turno abierto del NEGOCIO (opcional, para conciliación) — `../shared/turnoDeCaja.ts`.
-  // Ya no se condiciona a que venga `staffId`: el turno no es de quien reembolsa.
-  const openShift = await turnoAbiertoDelNegocio(prisma, input.venueId)
-  const shiftId: string | null = openShift?.id ?? null
-
   const result = await prisma.$transaction(async tx => {
     const lockedOriginalRows = await tx.$queryRaw<LockedPaymentRow[]>(Prisma.sql`
       SELECT
@@ -420,12 +415,47 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       tipRefundCents += excess
     }
 
+    // ── ¿DE QUÉ TURNO SALE ESTE REEMBOLSO? ────────────────────────────────────────────────
+    //
+    // El turno abierto del NEGOCIO (`../shared/turnoDeCaja.ts`), resuelto y RECLAMADO **dentro** de
+    // la transacción, igual que los otros dos rieles (`refund.tpv`, `refund.mobile`). El claim ES
+    // el decremento: un `updateMany` condicionado a `{ venueId, status: 'OPEN', endTime: null }`.
+    //
+    // 🔴 Tres cosas cambian respecto de la versión anterior, y las tres son de dinero:
+    //
+    //   · **Ya no se cae a `original.shiftId`.** Ese turno normalmente está CERRADO, y
+    //     decrementarle sus totales reescribe hacia atrás un corte que una persona ya firmó,
+    //     imprimió y cuadró. Sin turno abierto el reembolso queda con `shiftId` nulo, que es
+    //     REATRIBUIBLE después (`scripts/reatribuir-cobros-al-turno.ts`); uno estampado en un turno
+    //     cerrado con conteo es justo lo que ese script se niega a tocar.
+    //   · **El `where` lleva `venueId` y `status`.** Era un `update({ where: { id } })` pelón, que
+    //     aceptaba el turno de otro negocio y uno ya cerrado.
+    //   · **El `Payment` se sella con el turno SÓLO si el claim GANÓ.** Sellar antes de reclamar
+    //     dejaba un REFUND colgando de un turno al que nunca se le restó, y el cierre selecciona
+    //     estrictamente por `shiftId`: un recálculo desde los pagos discreparía de su propio
+    //     `totalSales` por el monto del reembolso.
+    //
+    // El efectivo físico no se pierde en ningún caso: el `PAY_OUT` al cajón se publica post-commit
+    // contra la `CashDrawerSession` abierta del venue, que no depende del `Shift`.
+    let shiftId: string | null = null
+    const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, input.venueId)
+    if (turnoDelNegocio) {
+      const reclamado = await tx.shift.updateMany({
+        where: { id: turnoDelNegocio.id, venueId: input.venueId, status: 'OPEN', endTime: null },
+        data: {
+          totalSales: { decrement: centsToDecimal(salesRefundCents) },
+          ...(tipRefundCents > 0 ? { totalTips: { decrement: centsToDecimal(tipRefundCents) } } : {}),
+        },
+      })
+      if (reclamado.count === 1) shiftId = turnoDelNegocio.id
+    }
+
     const originalProcessorData = asRecord(original.processorData)
     const refundPayment = await tx.payment.create({
       data: {
         venueId: input.venueId,
         orderId: original.orderId,
-        ...(shiftId || original.shiftId ? { shiftId: shiftId || original.shiftId! } : {}),
+        ...(shiftId ? { shiftId } : {}),
         ...(input.staffId ? { processedById: input.staffId } : {}),
         ...(original.merchantAccountId ? { merchantAccountId: original.merchantAccountId } : {}),
 
@@ -511,21 +541,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       },
     })
 
-    // Se descuenta del MISMO turno al que se ató el reembolso (`shiftId || original.shiftId`,
-    // ver el `payment.create` de arriba). Con turno abierto del negocio el dinero sale de la
-    // caja de HOY, que es donde físicamente salió y como lo registran Square y Toast: en la
-    // sesión que procesa la devolución, no en la del cobro. Sin turno abierto cae al turno del
-    // cobro original, para no dejar su `totalSales` inflado. Ver `../shared/turnoDeCaja.ts`.
-    const resolvedShiftId = shiftId || original.shiftId
-    if (resolvedShiftId) {
-      await tx.shift.update({
-        where: { id: resolvedShiftId },
-        data: {
-          totalSales: { decrement: centsToDecimal(salesRefundCents) },
-          ...(tipRefundCents > 0 ? { totalTips: { decrement: centsToDecimal(tipRefundCents) } } : {}),
-        },
-      })
-    }
+    // El decremento del turno YA ocurrió arriba: el claim ES el decremento, y sellar el `Payment`
+    // después es lo que garantiza que nunca haya un REFUND en un turno al que no se le restó.
 
     return {
       refundPaymentId: refundPayment.id,

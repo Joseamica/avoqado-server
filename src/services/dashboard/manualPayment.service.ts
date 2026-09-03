@@ -122,10 +122,31 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       let orderItems: unknown[] = []
       let yaEstabaPagada = false
 
-      // El pago manual cae en el turno abierto del NEGOCIO, no en el de quien lo captura
-      // (`@/services/shared/turnoDeCaja.ts`): quién cobró vive en `processedById`.
-      const openShift = await turnoAbiertoDelNegocio(tx, venueId)
-      const shiftId = openShift?.id ?? null
+      // ── ¿A QUÉ TURNO SE LE SUMA ESTE PAGO? ──────────────────────────────────────────────
+      //
+      // El turno abierto del NEGOCIO, no el de quien lo captura (`@/services/shared/turnoDeCaja.ts`):
+      // quién cobró vive en `processedById`.
+      //
+      // 🔴 El claim ES el incremento, y va PRIMERO: un `updateMany` condicionado a
+      // `{ venueId, status: 'OPEN', endTime: null }`, igual que los tres rieles de reembolso. Antes
+      // era un `shift.update({ where: { id } })` al FINAL de la transacción, y eso tenía dos
+      // agujeros de dinero: sin `venueId` aceptaba el turno de OTRO negocio, y sin `status` sumaba
+      // ventas a un turno ya CERRADO — reescribiendo hacia atrás un corte que una persona ya firmó.
+      //
+      // 🔴 Y va antes de crear nada porque el `shiftId` se estampa en la orden sombra y en el
+      // `Payment`: sellarlos con un turno cuyo claim no ganó dejaría dinero colgando de un turno al
+      // que nunca se le sumó, y un recálculo desde los pagos discreparía de su propio `totalSales`.
+      // El UPDATE además toma el candado de la fila, así que un cierre concurrente espera a que
+      // esta transacción termine y ve el incremento.
+      let shiftId: string | null = null
+      const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
+      if (turnoDelNegocio) {
+        const reclamado = await tx.shift.updateMany({
+          where: { id: turnoDelNegocio.id, venueId, status: 'OPEN', endTime: null },
+          data: { totalSales: { increment: amount }, totalTips: { increment: tipAmount } },
+        })
+        if (reclamado.count === 1) shiftId = turnoDelNegocio.id
+      }
 
       if (input.orderId) {
         // Mode 1 — attach to existing order
@@ -378,18 +399,13 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
         },
       })
 
-      // 3. Shift totals — keep `totalSales`, `totalTips`, `totalOrders` in sync.
-      // totalOrders++ only for shadow orders; Mode 1 attaches to an existing
-      // order that already counted in shift totals when first created.
-      if (shiftId) {
-        await tx.shift.update({
-          where: { id: shiftId },
-          data: {
-            totalSales: { increment: amount },
-            totalTips: { increment: tipAmount },
-            ...(isShadow ? { totalOrders: { increment: 1 } } : {}),
-          },
-        })
+      // 3. `totalOrders` — lo único del turno que no se pudo reclamar arriba, porque `isShadow`
+      //    todavía no se conocía. `totalOrders++` sólo para órdenes sombra: en el Modo 1 el pago se
+      //    engancha a una orden que ya contó cuando se creó.
+      //    Va sin CAS de estado a propósito: `shiftId` sólo tiene valor si el claim de arriba GANÓ,
+      //    y ese UPDATE dejó la fila bloqueada por esta transacción — nadie pudo cerrarla en medio.
+      if (shiftId && isShadow) {
+        await tx.shift.updateMany({ where: { id: shiftId, venueId }, data: { totalOrders: { increment: 1 } } })
       }
 
       // Only update existing-order totals in Mode 1; shadow orders were

@@ -79,8 +79,11 @@ export async function createRefund(params: CreateRefundParams) {
     if (currentShift) {
       // El claim ES el decremento (espejo del refund TPV): el cierre usa también
       // los contadores denormalizados; sin esto el reporte sobrestima ventas.
+      // 🔴 `venueId` en el `where` no es decorativo: por id solo, el claim aceptaba el turno de
+      // OTRO negocio. El riel de la TPV (`refund.tpv.service.ts`), del que éste se copió, ya lo
+      // llevaba — este quedó más laxo que su hermano. Los tres rieles usan ahora el mismo claim.
       const claimed = await tx.shift.updateMany({
-        where: { id: currentShift.id, status: 'OPEN', endTime: null },
+        where: { id: currentShift.id, venueId, status: 'OPEN', endTime: null },
         data: { totalSales: { decrement: amountDecimal } },
       })
       if (claimed.count === 1) {
