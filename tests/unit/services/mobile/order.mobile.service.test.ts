@@ -1094,4 +1094,43 @@ describe('cancelOrder — guard against live terminal charges', () => {
       expect.objectContaining({ data: expect.objectContaining({ status: 'CANCELLED' }) }),
     )
   })
+  /**
+   * 🔴 Fase 1 del «turno de caja del negocio» (2-sep-2026): `payCashOrder` dejó de envolver
+   * el lookup en `if (effectiveStaffId)` y resuelve el turno abierto del NEGOCIO
+   * (`@/services/shared/turnoDeCaja.ts`). Todas las demás pruebas de este archivo mockean
+   * `shift.findFirst → null`, así que sólo se ejercitaba la rama sin turno.
+   */
+  it('🔴 con turno abierto del negocio, el cobro en efectivo nace atado a ESE turno (nunca por persona)', async () => {
+    const orderRow = {
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(100),
+      discountAmount: new Decimal(0),
+      total: new Decimal(100),
+      remainingBalance: new Decimal(100),
+      venueId: 'venue-1',
+    }
+    prismaMock.order.findUnique.mockResolvedValue(orderRow)
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio' })
+    prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
+    prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
+    prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.payment.findMany.mockResolvedValue([])
+
+    await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1' })
+
+    // El turno se busca por NEGOCIO. Igualdad EXACTA del `where`: con `objectContaining`,
+    // volver a colar `staffId` seguiría pasando.
+    expect(prismaMock.shift.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: 'venue-1', status: 'OPEN', endTime: null } }),
+    )
+    const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
+    expect(data.shiftId).toBe('shift-negocio')
+    // …y quién cobró se conserva: el turno es del negocio, la venta es de la persona.
+    expect(data.processedById).toBe('staff-1')
+  })
 })

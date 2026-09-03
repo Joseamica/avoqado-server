@@ -511,11 +511,11 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       },
     })
 
-    // Decrement shift totals for whatever shift the refund is attributed to.
-    // The refund Payment uses `shiftId || original.shiftId` (see refundPayment
-    // create above), so mirror the same resolution here. Otherwise refunds
-    // issued outside a staff's open shift (e.g. via dashboard) would leave the
-    // original shift's totalSales inflated.
+    // Se descuenta del MISMO turno al que se ató el reembolso (`shiftId || original.shiftId`,
+    // ver el `payment.create` de arriba). Con turno abierto del negocio el dinero sale de la
+    // caja de HOY, que es donde físicamente salió y como lo registran Square y Toast: en la
+    // sesión que procesa la devolución, no en la del cobro. Sin turno abierto cae al turno del
+    // cobro original, para no dejar su `totalSales` inflado. Ver `../shared/turnoDeCaja.ts`.
     const resolvedShiftId = shiftId || original.shiftId
     if (resolvedShiftId) {
       await tx.shift.update({
