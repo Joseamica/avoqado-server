@@ -30,7 +30,10 @@ export interface GuardarBorradorParams {
   audience: CustomerCampaignAudience
   customerGroupId?: string
   tags?: string[]
-  scheduledFor?: Date
+  // 🔴 `scheduledFor` NO vive aquí a propósito — ver el comentario en
+  // `marketingCampaign.schema.ts` sobre por qué se quitó del cuerpo de la API. No lo
+  // reintroduzcas sólo en este servicio: sin el job que lo honre, aceptarlo aquí abriría
+  // la misma puerta por un camino que no pasa por Zod (p. ej. un futuro consumidor MCP).
   actorStaffId?: string
 }
 
@@ -70,7 +73,9 @@ export async function guardarBorrador(p: GuardarBorradorParams): Promise<{ id: s
     audience: p.audience,
     customerGroupId: p.audience === CustomerCampaignAudience.GROUP ? (p.customerGroupId ?? null) : null,
     tags: p.tags ?? [],
-    scheduledFor: p.scheduledFor ?? null,
+    // `scheduledFor` NO se escribe aquí — ver el comentario de `GuardarBorradorParams`
+    // arriba. El campo del modelo se queda en `null` para toda campaña creada por esta
+    // puerta hasta que exista el job de campañas agendadas.
   }
 
   const { id, accion } = await prisma.$transaction(async tx => {

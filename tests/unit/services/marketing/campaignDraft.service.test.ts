@@ -193,6 +193,27 @@ describe('guardarBorrador — crear (sin campaignId)', () => {
     expect(tx.customerCampaign.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ tags: [] }) }))
   })
 
+  // 🔴 Fix ronda final (revisor): `guardarBorrador` ya NO escribe `scheduledFor` — ni
+  // siquiera si un caller que no pasa por Zod (p. ej. un futuro tool del MCP) se lo manda
+  // de todos modos. `as any` simula ese caller hostil; el `data` del create no debe tener
+  // la llave en absoluto.
+  it('🔴 scheduledFor NUNCA se escribe, aunque un caller que no pasa por Zod lo mande', async () => {
+    const tx = crearTxMock()
+    mockTransaccion(tx)
+
+    await guardarBorrador({
+      venueId: VENUE_ID,
+      name: 'Promo',
+      subject: 'S',
+      audience: 'ALL_CONSENTED' as any,
+      bloques: BLOQUES_VALIDOS,
+      scheduledFor: new Date('2026-12-25T00:00:00.000Z'),
+    } as any)
+
+    const dataEnviada = (tx.customerCampaign.create as jest.Mock).mock.calls[0][0].data
+    expect(dataEnviada).not.toHaveProperty('scheduledFor')
+  })
+
   it('con campaignId ausente, NO se consulta ni se actualiza nada — sólo create', async () => {
     const tx = crearTxMock()
     mockTransaccion(tx)

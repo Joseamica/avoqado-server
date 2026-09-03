@@ -38,7 +38,18 @@ const cuerpoCampana = {
   audience: z.nativeEnum(CustomerCampaignAudience, { errorMap: () => ({ message: 'La audiencia no es válida' }) }),
   customerGroupId: z.string().cuid('ID de grupo inválido').optional(),
   tags: z.array(z.string().trim().min(1, 'Una etiqueta no puede estar vacía')).optional(),
-  scheduledFor: z.coerce.date({ errorMap: () => ({ message: 'La fecha de agenda no es válida' }) }).optional(),
+  // 🔴 `scheduledFor` se QUITÓ del cuerpo a propósito (fix ronda final, revisor): las
+  // campañas agendadas están declaradas fuera de alcance de esta fase (spec, Fase 1
+  // pendiente), y aceptar el campo aquí sin un job que lo honre era peor que no tenerlo —
+  // `campaignEnqueue.service.ts:220` lee `campaign.scheduledFor ?? ahora` para calcular el
+  // PERÍODO de la cuota mensual (`periodoDeEnvio`), así que una fecha futura en el cuerpo
+  // hacía que el correo saliera HOY pero la cuota se cargara a un mes futuro — el tope que
+  // protege la reputación del subdominio de correo quedaba evadible desde el request. Esa
+  // lectura en `campaignEnqueue.service.ts` NO se tocó: es correcta para cuando el campo
+  // exista de verdad. Lo que se cierra es la puerta que lo dejaba entrar sin que nada lo
+  // aplicara. Para devolverlo hace falta: un job que transicione DRAFT/SCHEDULED → ENQUEUED
+  // en la fecha agendada, y que el envío real respete esa fecha (hoy publicarCampana manda
+  // en minutos, sin importar lo que diga `scheduledFor`).
 }
 
 export const crearCampanaSchema = z.object({
