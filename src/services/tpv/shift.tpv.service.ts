@@ -353,7 +353,15 @@ export async function getShifts(
     // pos-sync con turno cuyo `Payment.shiftId` es NULO, y quitarla les borraría el dinero de la
     // pantalla. Por eso el filtro deja pasar también el cobro sin turno: es de esta orden y no lo
     // reclama nadie más.
-    const orderPayments = shift.orders.flatMap(order => order.payments).filter(p => p.shiftId === shift.id || p.shiftId == null)
+    //
+    // 🔴 `=== null`, NUNCA `== null`. El `==` suelto traga también `undefined`, y `undefined` es lo
+    // que llega si alguien estrecha el `include` de arriba a un `select` sin `shiftId`: entonces
+    // TODOS los cobros pasan el filtro y el mismo dinero vuelve a contarse en dos turnos, con las
+    // pruebas en verde porque sus fixtures sí traen el campo. Con `===`, un cobro sin el dato se
+    // cae del conteo — que se ve y se investiga— en vez de duplicarse en silencio. La otra mitad
+    // del candado es la aserción sobre la FORMA de la consulta en
+    // `tests/unit/services/tpv/shift.getShifts.cobroDeOtroTurno.test.ts`.
+    const orderPayments = shift.orders.flatMap(order => order.payments).filter(p => p.shiftId === shift.id || p.shiftId === null)
     // Deduplicar por id sigue haciendo falta: un cobro de ESTE turno llega por los dos caminos.
     // Se conserva el orden actual (primero los de la orden) para no mover nada más.
     const allPayments = [...new Map([...orderPayments, ...shift.payments].map(payment => [payment.id, payment])).values()]

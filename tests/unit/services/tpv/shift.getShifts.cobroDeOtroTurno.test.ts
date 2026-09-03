@@ -106,3 +106,55 @@ describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
     expect(data[0].tipsCount).toBe(1)
   })
 })
+
+/**
+ * 🔴 EL FILTRO DE ARRIBA PUEDE VOLVERSE NO-OP EN SILENCIO, Y ÉSTE ES SU CANDADO.
+ *
+ * Revisión de la task 2b (3-sep-2026): el predicado era `p.shiftId === shift.id || p.shiftId == null`
+ * con `==` SUELTO, que además de `null` traga `undefined`. Si alguien estrecha el `include` de los
+ * cobros de las órdenes a un `select` sin `shiftId`, TODOS los cobros llegan con `shiftId:
+ * undefined`, el filtro deja pasar todo, y el mismo dinero vuelve a contarse en dos turnos — con
+ * las cuatro pruebas de arriba EN VERDE, porque sus fixtures sí traen el campo. Es exactamente la
+ * trampa que dejó ciega a la suite de dedup vieja.
+ *
+ * Se cierra por los dos lados: `=== null` en el predicado (un cobro sin el campo ya no pasa) y la
+ * aserción de FORMA de aquí abajo, que es la que de verdad ve el estrechamiento del `include`.
+ */
+describe('getShifts — la consulta tiene que TRAER `shiftId` de los cobros de la orden', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const findManyDeTurnos = () => (prisma as unknown as { shift: { findMany: jest.Mock } }).shift.findMany
+
+  it('🔴 el `include` de los cobros de las órdenes no puede ser un `select` sin `shiftId`', async () => {
+    mockPrisma.$transaction.mockResolvedValue([[], 0])
+    ;(prisma as unknown as { shift: { count: jest.Mock } }).shift.count.mockResolvedValue(0)
+    ;(prisma as unknown as { venue: { findUnique: jest.Mock } }).venue.findUnique.mockResolvedValue(null)
+
+    await getShifts('venue-1', 20, 1)
+
+    const args = findManyDeTurnos().mock.calls[0][0]
+    const cobrosDeLaOrden = args.include.orders.include.payments
+    // Sin `select`, Prisma trae la fila entera y `shiftId` viene siempre. Con `select`, tiene que
+    // pedirlo explícitamente: si no, el filtro de arriba se queda sin el dato con el que decide.
+    if (cobrosDeLaOrden.select) {
+      expect(cobrosDeLaOrden.select.shiftId).toBe(true)
+    } else {
+      expect(cobrosDeLaOrden.select).toBeUndefined()
+    }
+  })
+
+  it('🔴 un cobro SIN el campo `shiftId` (select estrechado) NO se cuenta: nunca se duplica dinero', async () => {
+    // La forma exacta que produciría un `select` sin `shiftId`. Con `==` este cobro pasaba el
+    // filtro y sumaba en un turno que no lo cobró; con `===` no pasa. Perder un renglón de la
+    // pantalla se nota y se investiga; contar dos veces el mismo dinero, no.
+    const cobroSinCampo = { id: 'pago-1', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
+    mockPrisma.$transaction.mockResolvedValue([
+      [{ id: 'turno-A', venueId: 'venue-1', staff: null, orders: [{ id: 'orden-1', payments: [cobroSinCampo] }], payments: [] }],
+      1,
+    ])
+
+    const { data } = await getShifts('venue-1', 20, 1)
+
+    expect(data[0].paymentSum).toBe(0)
+  })
+})

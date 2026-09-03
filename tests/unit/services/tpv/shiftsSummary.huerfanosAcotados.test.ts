@@ -157,3 +157,54 @@ describe('getShiftsSummary — UNA ventana efectiva para todo el resumen', () =>
     expect(m.review.count.mock.calls[0][0].where.createdAt.lte).toEqual(new Date('2026-08-30T23:59:59.000Z'))
   })
 })
+
+/**
+ * 🔴 LAS DOS MITADES DE `totalOrders` SE SUMAN, ASÍ QUE TIENEN QUE CONTAR LO MISMO.
+ *
+ * `totalOrders = Σ shift.orders.length + orphanOrderCount`. La primera mitad sale del `include` de
+ * los turnos; la segunda, de un `order.count` aparte. Hasta el 3-sep-2026 daba igual que sus
+ * predicados no coincidieran: casi ninguna orden llevaba `shiftId`, así que la mitad de los turnos
+ * aportaba ~0 y el conteo lo cargaba entera la huérfana. Al estampar el turno al ABRIR la orden
+ * (task 2b), esa mitad se llenó: sin el mismo filtro, las cuentas ABIERTAS y las CANCELADAS
+ * empezarían a contar aquí —cuando no cuentan en la mitad huérfana— e inflarían un «total de
+ * órdenes» que se lee justo al lado del total de ventas.
+ *
+ * El filtro `status: 'COMPLETED'` está puesto y bien comentado, pero no lo guardaba ninguna prueba:
+ * un refactor podía desincronizar las mitades en silencio. Éstas lo fijan — el estado Y la ventana.
+ */
+describe('getShiftsSummary — las dos mitades de `totalOrders` usan el MISMO predicado', () => {
+  const ordenesDelTurno = () => m.shift.findMany.mock.calls[0][0].include.orders.where
+  const ordenesHuerfanas = () => m.order.count.mock.calls[0][0].where
+
+  it('🔴 las órdenes del turno se filtran a COMPLETED, igual que las huérfanas', async () => {
+    await getShiftsSummary('venue-1', {})
+
+    expect(ordenesDelTurno().status).toBe('COMPLETED')
+    expect(ordenesHuerfanas().status).toBe('COMPLETED')
+    expect(ordenesDelTurno().status).toBe(ordenesHuerfanas().status)
+  })
+
+  it('🔴 sin fechas, las dos mitades usan la MISMA ventana efectiva', async () => {
+    await getShiftsSummary('venue-1', {})
+
+    expect(ordenesDelTurno().createdAt.gte).toEqual(ordenesHuerfanas().createdAt.gte)
+    expect(ordenesDelTurno().createdAt.lte).toEqual(ordenesHuerfanas().createdAt.lte)
+  })
+
+  it('🔴 con fechas del cliente, las dos mitades usan la MISMA ventana del cliente', async () => {
+    await getShiftsSummary('venue-1', { startTime: '2026-08-30T00:00:00.000Z', endTime: '2026-08-30T23:59:59.000Z' })
+
+    expect(ordenesDelTurno().createdAt.gte).toEqual(new Date('2026-08-30T00:00:00.000Z'))
+    expect(ordenesDelTurno().createdAt.lte).toEqual(new Date('2026-08-30T23:59:59.000Z'))
+    expect(ordenesDelTurno().createdAt.gte).toEqual(ordenesHuerfanas().createdAt.gte)
+    expect(ordenesDelTurno().createdAt.lte).toEqual(ordenesHuerfanas().createdAt.lte)
+  })
+
+  it('la mitad huérfana es la de las órdenes SIN turno (no se solapan ni se pierde ninguna)', async () => {
+    await getShiftsSummary('venue-1', {})
+
+    // Las dos mitades particionan: con turno (el `include`) y sin turno (`shiftId: null`).
+    expect(ordenesHuerfanas().shiftId).toBeNull()
+    expect(ordenesHuerfanas().venueId).toBe('venue-1')
+  })
+})
