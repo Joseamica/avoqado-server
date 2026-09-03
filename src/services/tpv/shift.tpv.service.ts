@@ -1126,26 +1126,44 @@ export async function openShiftForVenue(
   }
 
   // Create shift record in database
-  const shift = await prisma.shift.create({
-    data: {
-      venueId: venueId,
-      staffId: staffId,
-      startTime: new Date(),
-      endTime: null,
-      status: 'OPEN' as ShiftStatus,
-      startingCash: startingCash || 0,
-      endingCash: null,
-      cashDeclared: null,
-      cardDeclared: null,
-      vouchersDeclared: null,
-      otherDeclared: null,
-      totalSales: 0,
-      totalTips: 0,
-      notes: null,
-      externalId: shiftExternalId,
-      posRawData: stationId ? { stationId } : undefined,
-    },
-  })
+  //
+  // 🔴 El `findFirst` de arriba es la respuesta amable del caso normal, pero NO evita la carrera:
+  // dos terminales que abren a la vez pasan las dos el check antes de que ninguna cree. Lo que la
+  // evita es el índice único PARCIAL `Shift(venueId) WHERE status='OPEN'` (migración
+  // `20260903030000_shift_one_open_per_venue`, Fase 2 del turno de caja del negocio). Y no es un
+  // registro de más: `turnoAbiertoDelNegocio` elige «el más reciente», así que con dos turnos
+  // abiertos el dinero del negocio se parte entre ellos según el reloj.
+  //
+  // Aquí sólo se traduce ese choque al MISMO `ConflictError` que las apps ya conocen del cajón
+  // (`mobile/cash-drawer.mobile.service.openSession`), en vez de dejar escapar un P2002 como 500:
+  // un 500 al abrir el turno es un cajero mirando «algo salió mal» con la fila enfrente.
+  const shift = await prisma.shift
+    .create({
+      data: {
+        venueId: venueId,
+        staffId: staffId,
+        startTime: new Date(),
+        endTime: null,
+        status: 'OPEN' as ShiftStatus,
+        startingCash: startingCash || 0,
+        endingCash: null,
+        cashDeclared: null,
+        cardDeclared: null,
+        vouchersDeclared: null,
+        otherDeclared: null,
+        totalSales: 0,
+        totalTips: 0,
+        notes: null,
+        externalId: shiftExternalId,
+        posRawData: stationId ? { stationId } : undefined,
+      },
+    })
+    .catch((error: unknown) => {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictError('Ya hay un turno de caja abierto en este negocio. Ciérralo antes de abrir otro.', 'CASH_SHIFT_ALREADY_OPEN')
+      }
+      throw error
+    })
 
   logger.info('Shift opened successfully', {
     shiftId: shift.id,

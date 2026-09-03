@@ -3185,6 +3185,13 @@ model Shift {
   orders   Order[]
   payments Payment[]
 
+  /// El cajón físico ligado a este turno (Fase 2, 3-sep-2026). Opcional: los turnos anteriores a la
+  /// unificación del gesto no lo tienen, y un venue puede seguir operando sin módulo de caja.
+  /// 🔴 En la BASE hay además un índice único PARCIAL `Shift(venueId) WHERE status='OPEN'` que
+  /// Prisma no sabe expresar (migración `20260903030000_shift_one_open_per_venue`): es lo que
+  /// garantiza UN turno abierto por negocio, que es la premisa de `turnoAbiertoDelNegocio`.
+  cashDrawerSession CashDrawerSession?
+
   // Commission System
   commissionCalculations CommissionCalculation[]
 
@@ -14042,6 +14049,21 @@ model CashDrawerSession {
   closingNote     String?
   status          CashDrawerStatus  @default(OPEN)
   events          CashDrawerEvent[]
+  /// Turno de caja del NEGOCIO al que pertenece este cajón (Fase 2 del turno unificado, 3-sep-2026).
+  ///
+  /// Hoy el negocio abre DOS cosas cada mañana: la Caja en la tablet (con su fondo) y el Turno en
+  /// la PAX (con otro fondo). Testarudo, 1-sep: la caja abrió 07:38 con $2,000 y el turno 08:12 con
+  /// $0 — dos registros y dos fondos distintos para UNA sola caja física. `abrirTurnoDeCaja`
+  /// (`services/shared/turnoDeCaja.ts`) hace que cualquiera de los dos gestos deje los dos
+  /// registros LIGADOS por esta columna, sin fusionar las tablas: el `Shift` sigue siendo la
+  /// jornada de venta y la `CashDrawerSession` el cajón físico (decisión del 27-ago-2026).
+  ///
+  /// `@unique` y no un índice normal: la relación es 1:1 — un turno tiene a lo sumo un cajón.
+  /// Nullable a propósito, y con muchos NULL: todas las cajas anteriores a esta migración se
+  /// quedan sin ligar (`resolveShiftCashDrawer` sigue resolviéndolas por ventana de tiempo, que es
+  /// lo único que se puede hacer con lo histórico). Postgres admite varios NULL en un único.
+  shiftId         String?           @unique
+  shift           Shift?            @relation(fields: [shiftId], references: [id])
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 

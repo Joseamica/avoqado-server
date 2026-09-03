@@ -1,4 +1,12 @@
-import type { Prisma, PrismaClient } from '@prisma/client'
+import type { PrismaClient } from '@prisma/client'
+import { Prisma, ShiftStatus } from '@prisma/client'
+
+import logger from '../../config/logger'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
+import { publishCommand } from '../../communication/rabbitmq/publisher'
+import { logAction } from '../dashboard/activity-log.service'
+import { businessDayStart } from './cashDrawerAutoClose'
 
 /** Acepta el cliente de Prisma o un `tx`: los sitios que atan dinero llaman desde ambos. */
 export type ShiftReader = Pick<PrismaClient, 'shift'> | Pick<Prisma.TransactionClient, 'shift'>
@@ -39,4 +47,377 @@ export async function turnoAbiertoDelNegocio(db: ShiftReader, venueId: string): 
     select: { id: true },
   })
   return shift ? { id: shift.id } : null
+}
+
+// ============================================================================
+// ABRIR EL TURNO DE CAJA DEL NEGOCIO — UN SOLO GESTO
+// ============================================================================
+
+/**
+ * 🔴 UN GESTO, DOS REGISTROS LIGADOS. Es la Fase 2 del turno de caja del negocio (3-sep-2026).
+ *
+ * Hoy el negocio abre DOS cosas cada mañana: la **Caja** en la tablet (con su fondo) y el **Turno**
+ * en la PAX (con otro fondo). Testarudo, 1-sep-2026: la caja abrió a las 07:38 con $2,000 en un
+ * Sunmi D3 y el turno a las 08:12 con $0 en la PAX — dos aperturas, dos fondos y dos cierres para
+ * UNA sola caja física. El founder, que es quien lo pidió: «la persona va a pensar "abro mi turno
+ * desde el POS con saldo inicial en abrir caja" — los confundirá».
+ *
+ * La respuesta NO es fusionar las tablas (decisión del 27-ago-2026: el `Shift` es la jornada de
+ * venta y la `CashDrawerSession` el cajón físico; migrar todo a una perdería lo que cada una tiene).
+ * Es que **cualquiera de los dos gestos deje los dos registros abiertos y LIGADOS**, y que ligar
+ * gane siempre a duplicar. Como quien llama es la ruta que ya existe, las apps en la calle reciben
+ * el gesto único **sin actualizarse**.
+ *
+ * ── Las cuatro ramas ──────────────────────────────────────────────────────────
+ *   · no hay nada        → crea las dos con el MISMO fondo y las liga
+ *   · ya hay caja        → crea el turno y lo liga a esa caja (el caso de Testarudo)
+ *   · ya hay turno       → crea la caja y la liga a ese turno
+ *   · ya hay las dos     → no crea nada; devuelve las que hay (una apertura encolada sin red no
+ *                          rebota, sólo confirma lo que ya estaba)
+ *
+ * 🔴 **El fondo de lo que ya estaba NUNCA se pisa.** Si la caja se abrió con $2,000 contados, esos
+ * $2,000 siguen siendo el fondo aunque el segundo gesto teclee otra cosa: el dinero que alguien
+ * contó gana sobre el que alguien tecleó después.
+ *
+ * ── El relevo NO es un cierre por reloj ───────────────────────────────────────
+ *
+ * El founder vetó el cierre automático de turnos (2-sep-2026). Lo que esto hace es distinto: si al
+ * abrir encuentra un turno que quedó abierto de un **día de negocio anterior**, lo cierra **sin
+ * conteo** y abre el nuevo. El corte de las 04:00 en la zona del venue —el mismo de
+ * `cashDrawerAutoClose`, que es el default de Toast— se usa **sólo para decidir «es de otro día»**,
+ * nunca para cerrar por la hora: a las 02:00 todavía corre el día de negocio de ayer, y un turno
+ * del MISMO día se reusa tal cual por muchas horas que lleve abierto.
+ *
+ * 🔴 Y el cierre del relevo **no inventa un conteo**: `endingCash`, `cashDeclared` y
+ * `cashDifference` se quedan como estén (normalmente NULL). Escribir un 0 diría «alguien contó y
+ * había cero» y le firmaría al cajero un faltante del tamaño de las ventas del día. Es la misma
+ * regla dura del auto-cierre de caja.
+ *
+ * ── Concurrencia ──────────────────────────────────────────────────────────────
+ *
+ * Dos terminales que abren a la vez no pueden dejar dos turnos ni dos cajas: lo impiden los índices
+ * únicos PARCIALES de la base — `Shift(venueId) WHERE status='OPEN'` (migración
+ * `20260903030000_shift_one_open_per_venue`) y `CashDrawerSession(venueId) WHERE status='OPEN'`
+ * (`20260827151634`) —, y los DOS choques se traducen aquí al MISMO `ConflictError` que las apps ya
+ * entienden, nunca a un 500. El check previo es la respuesta amable del caso normal; el índice es
+ * lo que de verdad evita la carrera.
+ */
+export type OrigenDeLaApertura = 'CAJA_MOVIL' | 'TURNO_TPV' | 'DASHBOARD'
+
+export interface AbrirTurnoDeCajaParams {
+  venueId: string
+  staffId: string
+  /** Nombre para el historial del cajón. Si falta (o llega el placeholder 'Staff'), se resuelve del `Staff`. */
+  staffName?: string | null
+  /** Fondo con el que se abre, en pesos. Sólo se usa si hay algo que CREAR: nunca pisa un fondo ya contado. */
+  startingCash: number
+  deviceName?: string | null
+  /** Por dónde entró el gesto. Va a la bitácora; no cambia el comportamiento. */
+  source: OrigenDeLaApertura
+  /** Estación del POS integrado (se conserva de `openShiftForVenue`). */
+  stationId?: string
+  /** Reloj inyectable: el relevo depende de la fecha y las pruebas no pueden depender de «hoy». */
+  now?: () => Date
+}
+
+export interface AbrirTurnoDeCajaResult {
+  shiftId: string
+  cashDrawerSessionId: string
+  /** `false` = ya estaba abierto y se LIGÓ. Es lo que la UI necesita para no decir «abriste» cuando reusó. */
+  shiftCreado: boolean
+  cajaCreada: boolean
+  /** Sólo cuando se relevó un turno de un día de negocio anterior. */
+  relevo?: { shiftCerradoId: string }
+}
+
+/** Marca legible del relevo. Va en `Shift.notes`: quien lo lea tiene que saber que NADIE contó. */
+export const NOTA_DEL_RELEVO = 'Cerrado por relevo al abrir el turno del día siguiente. Sin conteo.'
+
+function conflictoDeApertura(): ConflictError {
+  return new ConflictError('Ya hay un turno de caja abierto en este negocio. Ciérralo antes de abrir otro.', 'CASH_SHIFT_ALREADY_OPEN')
+}
+
+function esChoqueDeUnico(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
+}
+
+/**
+ * El nombre que se guarda en el historial del cajón. Espeja `resolveMobileStaffName` de
+ * `mobile/cash-drawer.mobile.service.ts` — «Abierta por Staff» fue un hallazgo real del
+ * /full-testing del 27-ago— pero SIN una consulta extra: el `Staff` ya viene con el `StaffVenue`.
+ */
+function nombreDelCajero(dado: string | null | undefined, staff: { firstName?: string | null; lastName?: string | null }): string {
+  const limpio = (dado || '').trim()
+  if (limpio && limpio !== 'Staff') return limpio
+  const delRegistro = [staff.firstName, staff.lastName].filter(Boolean).join(' ').trim()
+  return delRegistro || limpio || 'Staff'
+}
+
+export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Promise<AbrirTurnoDeCajaResult> {
+  const { venueId, staffId, startingCash, deviceName, source, stationId } = parametros
+  const ahora = (parametros.now ?? (() => new Date()))()
+
+  if (!Number.isFinite(startingCash) || startingCash < 0) {
+    throw new BadRequestError('El fondo inicial no puede ser negativo')
+  }
+
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { id: true, name: true, timezone: true, posType: true, posStatus: true },
+  })
+  if (!venue) throw new NotFoundError('Venue not found')
+
+  const staffVenue = await prisma.staffVenue.findFirst({
+    where: { staffId, venueId },
+    select: { posStaffId: true, staff: { select: { id: true, firstName: true, lastName: true } } },
+  })
+  if (!staffVenue) throw new NotFoundError('Staff member not found or not associated with this venue')
+
+  const staffName = nombreDelCajero(parametros.staffName, staffVenue.staff ?? {})
+  const fondo = new Prisma.Decimal(Number(startingCash).toFixed(2))
+  const corteDelDiaDeNegocio = businessDayStart(ahora, venue.timezone)
+
+  // ── El puente a SoftRestaurant, conservado de `openShiftForVenue` ──────────────────────────
+  //
+  // 🔴 Va FUERA de la transacción a propósito: publicar en RabbitMQ es una llamada de red y
+  // sostenerla con una transacción abierta ata una conexión del pool a la latencia del bróker.
+  // Por eso hace falta una PRE-lectura que conteste «¿va a hacer falta crear turno?». La lectura
+  // que MANDA es la de dentro de la transacción; ésta sólo decide si se avisa al POS.
+  //
+  // ⚠️ Límite declarado: si entre la pre-lectura y la transacción otro aparato abre el turno,
+  // se habrá publicado un comando para un turno que acabó ligándose en vez de crearse. Se
+  // registra en el log. El caso contrario —crear sin avisarle al POS— sería peor, y el corte
+  // duro de abajo (si el POS no acepta, no se abre nada) es el mismo de `openShiftForVenue`.
+  const posIntegrado = venue.posType === 'SOFTRESTAURANT' && venue.posStatus === 'CONNECTED'
+  const turnoPrevio = await prisma.shift.findFirst({
+    where: { venueId, endTime: null },
+    orderBy: { startTime: 'desc' },
+    select: { id: true, status: true, startTime: true },
+  })
+  const hariaFaltaCrearTurno = !turnoPrevio || turnoPrevio.startTime < corteDelDiaDeNegocio
+
+  let shiftExternalId: string | null = null
+  if (posIntegrado && hariaFaltaCrearTurno) {
+    const tempShiftId = `SHIFT_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
+    try {
+      await publishCommand(`command.softrestaurant.${venueId}`, {
+        entity: 'Shift',
+        action: 'OPEN',
+        payload: {
+          tempShiftId,
+          posStaffId: staffVenue.posStaffId || staffId,
+          startingCash: startingCash || 0,
+          stationId: stationId || 'AVOQADO',
+        },
+      })
+      shiftExternalId = tempShiftId
+    } catch (error) {
+      logger.error('Failed to send shift open command to POS', error)
+      throw new BadRequestError('Failed to open shift in POS system. Please try again.')
+    }
+  }
+
+  const resultado = await prisma.$transaction(async tx => {
+    // ── El turno ──────────────────────────────────────────────────────────────────────────
+    //
+    // `endTime: null` y no `status: 'OPEN'`: un turno en CLOSING sigue con `endTime` nulo y su
+    // cierre puede REVERTIRSE a OPEN (`releaseShiftCloseClaim`). Abrir otro encima dejaría al
+    // venue con dos abiertos en cuanto ese cierre falle —y el índice único haría fallar la
+    // reversión, dejando el turno atorado en CLOSING—. Mientras hay un cierre en curso, se espera.
+    const turno = await tx.shift.findFirst({
+      where: { venueId, endTime: null },
+      orderBy: { startTime: 'desc' },
+      select: { id: true, status: true, startTime: true, notes: true },
+    })
+
+    if (turno && turno.status === ShiftStatus.CLOSING) {
+      throw new ConflictError('El cierre de turno ya está en proceso. Intenta de nuevo en unos momentos.', 'SHIFT_CLOSE_IN_PROGRESS')
+    }
+
+    let relevo: { shiftCerradoId: string } | undefined
+    let turnoAReusar = turno
+
+    if (turno && turno.startTime < corteDelDiaDeNegocio) {
+      // CAS: sólo cierra si sigue OPEN y sin `endTime`. Si alguien lo cerró entre la lectura y
+      // aquí, no se pisa nada — se aborta y quien reintente encontrará el estado ya limpio.
+      const cerrado = await tx.shift.updateMany({
+        where: { id: turno.id, venueId, status: ShiftStatus.OPEN, endTime: null },
+        data: {
+          status: ShiftStatus.CLOSED,
+          endTime: ahora,
+          notes: [turno.notes, NOTA_DEL_RELEVO].filter(Boolean).join(' · '),
+          updatedAt: ahora,
+        },
+      })
+      if (cerrado.count !== 1) throw conflictoDeApertura()
+      relevo = { shiftCerradoId: turno.id }
+      turnoAReusar = null
+    }
+
+    let shiftId: string
+    let shiftCreado = false
+    if (turnoAReusar) {
+      shiftId = turnoAReusar.id
+      if (posIntegrado && hariaFaltaCrearTurno) {
+        logger.warn('[TURNO DE CAJA] Se avisó al POS de una apertura que acabó ligándose a un turno ya abierto', {
+          venueId,
+          shiftId,
+          shiftExternalId,
+        })
+      }
+    } else {
+      const nuevo = await tx.shift
+        .create({
+          data: {
+            venueId,
+            staffId,
+            startTime: ahora,
+            endTime: null,
+            status: ShiftStatus.OPEN,
+            startingCash: fondo,
+            endingCash: null,
+            cashDeclared: null,
+            cardDeclared: null,
+            vouchersDeclared: null,
+            otherDeclared: null,
+            totalSales: 0,
+            totalTips: 0,
+            notes: null,
+            externalId: shiftExternalId,
+            posRawData: stationId ? { stationId } : undefined,
+          },
+          select: { id: true },
+        })
+        .catch((error: unknown) => {
+          // El índice único parcial `Shift(venueId) WHERE status='OPEN'`: otra terminal ganó.
+          if (esChoqueDeUnico(error)) throw conflictoDeApertura()
+          throw error
+        })
+      shiftId = nuevo.id
+      shiftCreado = true
+    }
+
+    // ── El cajón físico ───────────────────────────────────────────────────────────────────
+    const caja = await tx.cashDrawerSession.findFirst({
+      where: { venueId, status: 'OPEN' },
+      select: { id: true, shiftId: true },
+    })
+
+    let cashDrawerSessionId: string
+    let cajaCreada = false
+    let cajaYaLigadaA: string | null | undefined
+    if (caja) {
+      cashDrawerSessionId = caja.id
+      cajaYaLigadaA = caja.shiftId
+    } else {
+      const nueva = await tx.cashDrawerSession
+        .create({
+          data: {
+            venueId,
+            openedByStaffId: staffId,
+            openedByName: staffName,
+            openedAt: ahora,
+            startingAmount: fondo,
+            deviceName: deviceName || null,
+            status: 'OPEN',
+            events: {
+              create: {
+                venueId,
+                type: 'OPEN',
+                amount: fondo,
+                staffId,
+                staffName,
+                note: `Caja abierta con $${fondo}`,
+              },
+            },
+          },
+          select: { id: true },
+        })
+        .catch((error: unknown) => {
+          if (esChoqueDeUnico(error)) throw conflictoDeApertura()
+          throw error
+        })
+      cashDrawerSessionId = nueva.id
+      cajaCreada = true
+      cajaYaLigadaA = null
+    }
+
+    // ── La liga ───────────────────────────────────────────────────────────────────────────
+    //
+    // 🔴 NUNCA SE ROBA UNA LIGA. Si el cajón ya apunta a otro turno, se deja como está: ese
+    // `shiftId` es la única constancia de bajo qué turno se abrió ese arqueo, y sobrescribirlo
+    // le borraría el cajón al turno que sí lo tuvo. Y si OTRO cajón ya reclama este turno
+    // (`shiftId` es `@unique`), tampoco se intenta: un P2002 aquí abortaría la transacción
+    // entera y tumbaría una apertura que por lo demás está bien. La liga mejora el reporte;
+    // no es dinero, y `resolveShiftCashDrawer` sigue resolviendo por ventana de tiempo sin ella.
+    if (cajaYaLigadaA == null) {
+      const reclamadoPorOtra = await tx.cashDrawerSession.findUnique({ where: { shiftId }, select: { id: true } })
+      if (reclamadoPorOtra && reclamadoPorOtra.id !== cashDrawerSessionId) {
+        logger.warn('[TURNO DE CAJA] El turno ya está ligado a otro cajón; no se reescribe la liga', {
+          venueId,
+          shiftId,
+          cajaDelTurno: reclamadoPorOtra.id,
+          cajaAbierta: cashDrawerSessionId,
+        })
+      } else if (!reclamadoPorOtra) {
+        // Condicional (`shiftId: null`) para que dos aperturas simultáneas no choquen contra el
+        // único: la segunda encuentra 0 filas y sigue, en vez de reventar.
+        await tx.cashDrawerSession.updateMany({ where: { id: cashDrawerSessionId, shiftId: null }, data: { shiftId } })
+      }
+    } else if (cajaYaLigadaA !== shiftId) {
+      logger.warn('[TURNO DE CAJA] El cajón abierto ya pertenece a otro turno; se conserva su liga', {
+        venueId,
+        shiftId,
+        cajaAbierta: cashDrawerSessionId,
+        ligadaA: cajaYaLigadaA,
+      })
+    }
+
+    return { shiftId, cashDrawerSessionId, shiftCreado, cajaCreada, ...(relevo ? { relevo } : {}) } as AbrirTurnoDeCajaResult
+  })
+
+  // ── Bitácora: fuera de la transacción y fire-and-forget ───────────────────────────────────
+  // Si la bitácora truena, la apertura NO se deshace (mismo patrón que el resto del repo).
+  if (resultado.relevo) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'SHIFT_CLOSED_ON_NEXT_OPEN',
+      entity: 'Shift',
+      entityId: resultado.relevo.shiftCerradoId,
+      data: { motivo: 'relevo al abrir el turno del día siguiente', sinConteo: true, source },
+    })
+  }
+  if (resultado.shiftCreado) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'SHIFT_OPENED',
+      entity: 'Shift',
+      entityId: resultado.shiftId,
+      data: { startingCash, stationId: stationId ?? undefined, isIntegratedPOS: posIntegrado, source },
+    })
+  }
+  if (resultado.cajaCreada) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'CASH_DRAWER_OPENED',
+      entity: 'CashDrawerSession',
+      entityId: resultado.cashDrawerSessionId,
+      data: { startingAmount: Number(fondo), deviceName, source },
+    })
+  }
+
+  logger.info('[TURNO DE CAJA] Apertura resuelta', {
+    venueId,
+    source,
+    shiftId: resultado.shiftId,
+    cashDrawerSessionId: resultado.cashDrawerSessionId,
+    shiftCreado: resultado.shiftCreado,
+    cajaCreada: resultado.cajaCreada,
+    relevo: resultado.relevo?.shiftCerradoId ?? null,
+  })
+
+  return resultado
 }

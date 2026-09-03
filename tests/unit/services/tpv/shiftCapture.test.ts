@@ -333,3 +333,51 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
     })
   })
 })
+
+/**
+ * 🔴 EL CHECK Y EL CREATE SON OPERACIONES SEPARADAS: la carrera la para la BASE, no el código.
+ *
+ * `openShiftForVenue` pregunta con un `findFirst` si ya hay turno abierto y CREA después. Dos
+ * terminales que abren a la vez pasan las dos el check antes de que ninguna cree, y el venue queda
+ * con DOS turnos OPEN — que no es sólo un registro de más: `turnoAbiertoDelNegocio` elige «el más
+ * reciente», así que con dos abiertos el dinero del negocio se parte entre ellos según el reloj.
+ *
+ * Lo que de verdad lo impide es el índice único parcial `Shift(venueId) WHERE status='OPEN'`
+ * (migración `20260903030000_shift_one_open_per_venue`, Fase 2). Aquí sólo se traduce ese choque al
+ * `ConflictError` que las apps ya conocen del cajón, en vez de dejar escapar un P2002 como 500 —
+ * un 500 en la apertura del turno es un cajero mirando «algo salió mal» con fila enfrente.
+ */
+describe('openShiftForVenue — la doble apertura simultánea no puede salir como 500', () => {
+  const { ConflictError } = jest.requireActual('@/errors/AppError')
+  const { Prisma } = jest.requireActual('@prisma/client')
+
+  const p2002 = () =>
+    new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`venueId`)', {
+      code: 'P2002',
+      clientVersion: 'test',
+    })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockPrisma.venue.findUnique.mockResolvedValue({ id: VENUE_ID, name: 'Test Venue', posType: 'NONE', posStatus: 'DISCONNECTED' })
+    mockPrisma.shift.findFirst.mockResolvedValue(null)
+    mockPrisma.staffVenue.findFirst.mockResolvedValue({
+      staffId: STAFF_ID,
+      venueId: VENUE_ID,
+      posStaffId: null,
+      staff: { id: STAFF_ID, firstName: 'Ana', lastName: 'García' },
+    })
+  })
+
+  it('🔴 el P2002 del índice único parcial se traduce a ConflictError (409), no a un 500', async () => {
+    mockPrisma.shift.create.mockRejectedValue(p2002())
+
+    await expect(openShiftForVenue(VENUE_ID, STAFF_ID, 500, 'station-1')).rejects.toBeInstanceOf(ConflictError)
+  })
+
+  it('cualquier otro error de la base sigue subiendo tal cual (no se disfraza de conflicto)', async () => {
+    mockPrisma.shift.create.mockRejectedValue(new Error('la base se cayó'))
+
+    await expect(openShiftForVenue(VENUE_ID, STAFF_ID, 500, 'station-1')).rejects.toThrow('la base se cayó')
+  })
+})
