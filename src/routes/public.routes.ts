@@ -1,6 +1,7 @@
-import { Router } from 'express'
+import express, { Router } from 'express'
 import { z } from 'zod'
 import cors from 'cors'
+import crypto from 'crypto'
 import rateLimit from 'express-rate-limit'
 import { getPublicReceipt } from '../controllers/public/receipt.public.controller'
 import {
@@ -21,6 +22,8 @@ import { submitContact, submitLabsBrief, continuarOnboarding } from '../controll
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
 import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
+import * as customerEmailController from '../controllers/public/customerEmail.public.controller'
+import { getPublicPrivacyNotice } from '../controllers/public/privacyNotice.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
@@ -596,6 +599,40 @@ router.post(
 const unsubscribePostLimit = rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false })
 router.get('/unsubscribe', readLimit, getUnsubscribePage)
 router.post('/unsubscribe', unsubscribePostLimit, postUnsubscribe)
+
+// ---- Baja one-click y captura de cumpleaños de CLIENTES (token propio, no auth) ----
+// La baja usa rate limit POR TOKEN: los one-click de Gmail/Yahoo salen de pocas IPs
+// compartidas y un límite por IP los tiraría con 429 (auditoría Codex ronda 1 #22).
+const customerUnsubLimit = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req =>
+    crypto
+      .createHash('sha256')
+      .update(String(req.query.token ?? req.ip))
+      .digest('hex'),
+})
+router.get('/customers/unsubscribe', readLimit, customerEmailController.getCustomerUnsubscribePage)
+router.post('/customers/unsubscribe', customerUnsubLimit, customerEmailController.postCustomerUnsubscribe)
+router.get('/customers/birthdate', readLimit, customerEmailController.getBirthdateCapturePage)
+// El GET no necesita parseo de body; el POST viene de un <form> HTML real (no fetch/JSON),
+// que el navegador manda como application/x-www-form-urlencoded — sin este parser, escoped
+// SOLO a esta ruta, `req.body.birthdate` llegaría undefined (sólo `express.json()` está
+// montado a nivel app para /api/v1/public).
+router.post(
+  '/customers/birthdate',
+  customerUnsubLimit,
+  express.urlencoded({ extended: true }),
+  customerEmailController.postBirthdateCapture,
+)
+
+// ---- Aviso de privacidad del NEGOCIO — enlace desde el pie de cada correo (Fase 1C, T7) ----
+// Sin auth: cualquiera puede leer un aviso de privacidad, y así lo exige la propia LFPDPPP.
+// No lleva token porque no protege nada personal — sólo el texto que el propio negocio ya
+// publicó (o, si aún no publicó ninguno, su borrador precargado — Task 8).
+router.get('/venues/:venueId/privacy-notice', readLimit, getPublicPrivacyNotice)
 
 // ==========================================
 // SERVICIO WEB DE PASSKIT — lo llama APPLE, no nuestro dashboard

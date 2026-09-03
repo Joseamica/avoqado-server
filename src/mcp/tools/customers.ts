@@ -294,7 +294,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'create_customer',
-    'Create a NEW customer in a venue you can access. Requires at least an email OR a phone (one is enough); optionally first/last name, notes, tags, marketing consent. Fails if a customer with the same email or phone already exists in the venue. This WRITES — requires customers:create.',
+    'Create a NEW customer in a venue you can access. Requires at least an email OR a phone (one is enough); optionally first/last name, notes, tags, marketing consent. Fails if a customer with the same email or phone already exists in the venue. This WRITES — requires customers:create. Capturing marketing consent requires the venue to have a registered privacy notice (aviso de privacidad) — if it does not, the customer is still created but consent is NOT recorded, and the response carries a consentWarning explaining why.',
     {
       venueId: z.string().describe('Venue to create the customer in (must be in your scope)'),
       firstName: z.string().optional().describe('First name'),
@@ -311,7 +311,17 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       if (!email && !phone) return text({ ok: false, error: 'Pasa al menos un email o un teléfono.' })
 
       try {
-        const customer = await createCustomer(venueId, { firstName, lastName, email, phone, notes, tags, marketingConsent })
+        // `performedBy: scope.staffId` — sin esto, createCustomer no puede atribuir el
+        // ConsentEvent a nadie (mismo patrón que decideCustomerApprovalFromDashboard abajo).
+        const created = await createCustomer(venueId, { firstName, lastName, email, phone, notes, tags, marketingConsent }, scope.staffId)
+        // 🔴 `consentWarning` viaja cuando marketingConsent:true se pidió pero el venue no
+        // tiene aviso de privacidad registrado (Task 5) — el customer SÍ se crea, pero el
+        // consentimiento no se pudo capturar. Descartarlo aquí (como hacía antes de esta
+        // corrección) deja al llamador creyendo que el cliente quedó suscrito sin estarlo.
+        // Mismo patrón de cast que `customer.dashboard.controller.ts` createCustomer/updateCustomer.
+        const { consentWarning, ...customer } = created as typeof created & {
+          consentWarning?: { code: string; reason: string }
+        }
         await auditMcpWrite(scope, {
           action: 'CUSTOMER_CREATED',
           entity: 'Customer',
@@ -327,6 +337,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
             email: customer.email,
             phone: customer.phone,
           },
+          ...(consentWarning ? { consentWarning } : {}),
         })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
