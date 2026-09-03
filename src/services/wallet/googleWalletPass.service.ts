@@ -134,13 +134,23 @@ export async function issueGooglePass(venueId: string, customerId: string) {
   return { id: pass.id, serialNumber: pass.serialNumber, qrToken: pass.qrToken, googleObjectId: objectId }
 }
 
+/** El JWT del botón «Guardar», más el id del pase — que el llamador necesita para auditar. */
+export interface SaveJwtResult {
+  jwt: string
+  passId: string
+}
+
 /**
  * El JWT que firma el botón «Guardar en Google Wallet».
  *
  * Devuelve null —en vez de lanzar— cuando el negocio o el cliente no existen, o cuando
  * la cuenta de Google no está configurada: el llamador responde un 404 entendible.
+ *
+ * 🔴 Devuelve también `passId`, no sólo el JWT: el llamador (el controlador público)
+ * escribe un `ActivityLog` con `entity: 'WalletPass'`, y ese registro sólo resuelve si
+ * `entityId` es el id REAL de esa tabla — el JWT no vive en ninguna.
  */
-export async function buildSaveJwt(venueId: string, customerId: string): Promise<string | null> {
+export async function buildSaveJwt(venueId: string, customerId: string): Promise<SaveJwtResult | null> {
   if (!googleWalletAvailable()) {
     logger.warn('Google Wallet no está configurado; no se puede emitir la tarjeta', { venueId })
     return null
@@ -156,7 +166,7 @@ export async function buildSaveJwt(venueId: string, customerId: string): Promise
   const creds = googleWalletCredentials()
   if (!creds) return null
 
-  return jwt.sign(
+  const signedJwt = jwt.sign(
     {
       iss: creds.client_email,
       aud: 'google',
@@ -167,4 +177,6 @@ export async function buildSaveJwt(venueId: string, customerId: string): Promise
     creds.private_key,
     { algorithm: 'RS256' },
   )
+
+  return { jwt: signedJwt, passId: pass.id }
 }

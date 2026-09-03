@@ -9,11 +9,17 @@ jest.mock('@/services/wallet/googleWalletPass.service', () => ({
   buildSaveJwt: jest.fn(),
 }))
 
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn().mockResolvedValue(undefined),
+}))
+
 import { downloadGooglePass } from '@/controllers/public/walletPass.public.controller'
 import { buildSaveJwt } from '@/services/wallet/googleWalletPass.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const jwtMock = buildSaveJwt as jest.Mock
+const logActionMock = logAction as jest.Mock
 
 function res() {
   return { redirect: jest.fn(), setHeader: jest.fn(), send: jest.fn() } as any
@@ -24,13 +30,21 @@ describe('GET /public/venues/:venueSlug/wallet/google/:customerId', () => {
     jest.clearAllMocks()
     prismaMock.venue.findFirst.mockResolvedValue({ id: 'v1', name: 'Testarudo Café' } as any)
     prismaMock.customer.findFirst.mockResolvedValue({ id: 'c1' } as any)
-    jwtMock.mockResolvedValue('JWT-FALSO')
+    jwtMock.mockResolvedValue({ jwt: 'JWT-FALSO', passId: 'wp1' })
   })
 
   it('manda al cliente a la pantalla de guardar de Google', async () => {
     const r = res()
     await downloadGooglePass({ params: { venueSlug: 'testarudo', customerId: 'c1' } } as any, r, jest.fn())
     expect(r.redirect).toHaveBeenCalledWith(302, 'https://pay.google.com/gp/v/save/JWT-FALSO')
+  })
+
+  it('🔴 el registro de auditoría guarda el id del PASE, no el del cliente', async () => {
+    await downloadGooglePass({ params: { venueSlug: 'testarudo', customerId: 'c1' } } as any, res(), jest.fn())
+    // Espejo del bug que corrigió esta ronda: `entity: 'WalletPass'` obliga a que
+    // `entityId` sea el id de ESA tabla. Guardar `customer.id` ahí apunta a otra
+    // tabla y el que audite no puede resolver el registro.
+    expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ entity: 'WalletPass', entityId: 'wp1', venueId: 'v1' }))
   })
 
   it('🔴 un cliente de OTRO negocio no recibe tarjeta', async () => {

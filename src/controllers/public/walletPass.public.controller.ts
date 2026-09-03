@@ -86,7 +86,7 @@ export async function downloadGooglePass(req: Request, res: Response, next: Next
 
     const venue = await prisma.venue.findFirst({
       where: { slug: venueSlug, active: true },
-      select: { id: true, name: true },
+      select: { id: true },
     })
     if (!venue) throw new NotFoundError('Negocio no encontrado')
 
@@ -98,18 +98,20 @@ export async function downloadGooglePass(req: Request, res: Response, next: Next
     })
     if (!customer) throw new NotFoundError('Cliente no encontrado')
 
-    const token = await buildSaveJwt(venue.id, customer.id)
-    if (!token) throw new NotFoundError('No se pudo generar la credencial')
+    const emitido = await buildSaveJwt(venue.id, customer.id)
+    if (!emitido) throw new NotFoundError('No se pudo generar la credencial')
 
     void logAction({
       action: 'WALLET_PASS_ISSUED',
       entity: 'WalletPass',
-      entityId: customer.id,
+      // 🔴 El id del PASE, no el del cliente: el registro dice `entity: 'WalletPass'`, así
+      // que quien audite va a buscar ese id en esa tabla. Apple ya lo hace así.
+      entityId: emitido.passId,
       venueId: venue.id,
       data: { customerId: customer.id, platform: 'GOOGLE' },
     })
 
-    res.redirect(302, `https://pay.google.com/gp/v/save/${token}`)
+    res.redirect(302, `https://pay.google.com/gp/v/save/${emitido.jwt}`)
   } catch (error) {
     next(error)
   }

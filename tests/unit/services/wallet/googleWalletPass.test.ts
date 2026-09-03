@@ -148,7 +148,10 @@ describe('googleWalletPass', () => {
       googleObjectId: '338.pass-wp-1',
       revision: 1,
     } as any)
-    await expect(buildSaveJwt('v1', 'c1')).resolves.toBe('JWT-FALSO')
+    // 🔴 Devuelve también `passId`: quien llama (el controlador) audita la emisión con
+    // `entity: 'WalletPass'`, y ese registro sólo resuelve si el `entityId` es el id REAL
+    // del pase — no el JWT, que no vive en ninguna tabla.
+    await expect(buildSaveJwt('v1', 'c1')).resolves.toEqual({ jwt: 'JWT-FALSO', passId: 'wp-1' })
     // 🔴 `jwt.sign` está mockeado para devolver 'JWT-FALSO' SIN IMPORTAR los argumentos —
     // así que comprobar sólo el valor de retorno pasaría igual si el código nunca llamara
     // a `jwt.sign`, o lo llamara con la llave de OTRO negocio. Lo que prueba algo es que
