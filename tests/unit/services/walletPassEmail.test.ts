@@ -10,7 +10,11 @@ import emailService from '@/services/email.service'
  * de su tipo, asi que ademas del checklist de `.claude/rules/email-templates.md`
  * (sin emoji en el asunto, isotipo dos veces, CTA negro, texto plano no vacio) se
  * verifica lo que solo aplica cuando el lector es el cliente: nunca se le habla de
- * planes ni del dashboard, y se le dice que hoy la tarjeta solo abre en iPhone.
+ * planes ni del dashboard, y que ofrece la cartera que le toca a cada quien.
+ *
+ * 🔴 Un correo no puede detectar el telefono de quien lo abre (se lee en cualquier
+ * lado, y los clientes de correo no corren JavaScript). Por eso van DOS botones
+ * visibles, uno por cartera, en vez de adivinar como hace la pagina publica.
  */
 const LOGO = 'https://avoqado.io/isotipo.svg'
 
@@ -28,7 +32,8 @@ function captureSend(): { sent: Sent[]; restore: () => void } {
 const BASE = {
   venueName: 'Café Centro',
   customerName: 'Ana',
-  passUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/apple/cus_1',
+  applePassUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/apple/cus_1',
+  googlePassUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/google/cus_1',
   stampsEarned: 1,
   stampsRequired: 7,
   rewardLabel: 'Un café gratis',
@@ -53,13 +58,15 @@ describe('sendWalletPassEmail', () => {
     expect(m.html).toContain('Servicios Tecnologicos Avo S.A. de C.V.')
   })
 
-  it('la liga del pase va en el CTA y tambien en el texto plano', async () => {
+  it('las DOS ligas van en sus CTAs y tambien en el texto plano', async () => {
     // Muchos clientes de correo bloquean el HTML: si la liga solo vive en el boton,
     // ese lector se queda sin forma de obtener su tarjeta.
     await emailService.sendWalletPassEmail('ana@example.com', BASE)
     const [m] = cap.sent
-    expect(m.html).toContain(BASE.passUrl)
-    expect(m.text).toContain(BASE.passUrl)
+    expect(m.html).toContain(BASE.applePassUrl)
+    expect(m.html).toContain(BASE.googlePassUrl)
+    expect(m.text).toContain(BASE.applePassUrl)
+    expect(m.text).toContain(BASE.googlePassUrl)
   })
 
   it('dice el avance real de la cartilla y cual es el premio', async () => {
@@ -70,12 +77,33 @@ describe('sendWalletPassEmail', () => {
     expect(m.html).toContain('Un caf')
   })
 
-  it('advierte que hoy solo abre en iPhone', async () => {
-    // Sin esto, quien tenga Android toca el boton, no le abre nada, y el que queda
-    // mal es el negocio que se lo mando.
+  it('con Google configurado: dos botones visibles, uno por cartera, y cero disculpas de que Android falta', async () => {
+    // 🔴 El mercado resuelve esto con dos botones, no adivinando el telefono (que un
+    // correo no puede detectar). Y si SI hay liga de Google, decir que "viene en
+    // camino" ya seria falso.
     await emailService.sendWalletPassEmail('ana@example.com', BASE)
-    expect(cap.sent[0].html).toMatch(/iPhone/)
-    expect(cap.sent[0].text).toMatch(/iPhone/)
+    const [m] = cap.sent
+    expect(m.html).toMatch(/Guardar en iPhone/)
+    expect(m.html).toMatch(/Guardar en Android/)
+    expect(m.text).toMatch(/Guardar en iPhone/)
+    expect(m.text).toMatch(/Guardar en Android/)
+    const todo = (m.html! + m.text!).toLowerCase()
+    expect(todo).not.toContain('viene en camino')
+    expect(todo).not.toContain('solo se guarda en iphone')
+  })
+
+  it('sin Google configurado: solo aparece la liga y el boton de Apple', async () => {
+    // 🔴 `googlePassUrl` viene null cuando el servidor no tiene Google Wallet
+    // configurado — ofrecer un boton que apunta a una liga que va a fallar es peor
+    // que no ofrecerlo (ver `googleWalletAvailable()`).
+    await emailService.sendWalletPassEmail('ana@example.com', { ...BASE, googlePassUrl: null })
+    const [m] = cap.sent
+    expect(m.html).toMatch(/Guardar en iPhone/)
+    expect(m.html).not.toMatch(/Guardar en Android/)
+    expect(m.html).not.toContain(BASE.googlePassUrl)
+    expect(m.text).toMatch(/Guardar en iPhone/)
+    expect(m.text).not.toMatch(/Guardar en Android/)
+    expect(m.text).not.toContain(BASE.googlePassUrl)
   })
 
   it('nunca le habla al cliente de planes, dashboard ni suscripciones', async () => {

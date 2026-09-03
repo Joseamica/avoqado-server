@@ -10,13 +10,21 @@ jest.mock('@/services/email.service', () => ({
   __esModule: true,
   default: { sendWalletPassEmail: jest.fn().mockResolvedValue(true) },
 }))
+// 🔴 `passPublicUrls` decide si ofrece el boton de Android preguntandole a
+// `googleWalletAvailable()` — no lo deriva de BASE_URL por su cuenta. Mockeamos el
+// modulo completo para poder apagar/prender Google sin tocar credenciales reales.
+jest.mock('@/services/wallet/googleWalletClient', () => ({
+  googleWalletAvailable: jest.fn(() => true),
+}))
 
-import { sendFirstStampEmailIfDue, passPublicUrl } from '../../../../src/services/wallet/firstStampEmail.service'
+import { sendFirstStampEmailIfDue, passPublicUrls } from '../../../../src/services/wallet/firstStampEmail.service'
 import emailService from '@/services/email.service'
 import { env } from '@/config/env'
+import { googleWalletAvailable } from '@/services/wallet/googleWalletClient'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const enviar = emailService.sendWalletPassEmail as jest.Mock
+const googleDisponible = googleWalletAvailable as jest.Mock
 
 function sembrar(over: Record<string, any> = {}) {
   prismaMock.stampCard.findUnique.mockResolvedValue({
@@ -36,16 +44,42 @@ function sembrar(over: Record<string, any> = {}) {
   prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ stampRewardLabel: 'Un café gratis' } as any)
 }
 
-describe('passPublicUrl', () => {
-  it('arma la ruta publica del pase', () => {
-    expect(passPublicUrl('cafe-centro', 'c1')).toBe('https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/apple/c1')
+describe('passPublicUrls', () => {
+  beforeEach(() => {
+    googleDisponible.mockReturnValue(true)
   })
 
-  it('devuelve null contra localhost', () => {
+  it('arma las DOS rutas cuando Google esta disponible', () => {
+    expect(passPublicUrls('cafe-centro', 'c1')).toEqual({
+      appleUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/apple/c1',
+      googleUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/google/c1',
+    })
+  })
+
+  it('omite la de Google cuando el servidor no la tiene configurada', () => {
+    // 🔴 Sin issuer o sin credencial esa liga da error al tocarla — mejor no ofrecerla.
+    googleDisponible.mockReturnValue(false)
+    expect(passPublicUrls('cafe-centro', 'c1')).toEqual({
+      appleUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/apple/c1',
+      googleUrl: null,
+    })
+  })
+
+  it('escapa el slug y el customerId en las dos ligas', () => {
+    const urls = passPublicUrls('café con leche', 'cus/raro?1')
+    expect(urls?.appleUrl).toBe(
+      `https://api.avoqado.io/api/v1/public/venues/${encodeURIComponent('café con leche')}/wallet/apple/${encodeURIComponent('cus/raro?1')}`,
+    )
+    expect(urls?.googleUrl).toBe(
+      `https://api.avoqado.io/api/v1/public/venues/${encodeURIComponent('café con leche')}/wallet/google/${encodeURIComponent('cus/raro?1')}`,
+    )
+  })
+
+  it('devuelve null contra localhost (ninguna de las dos ligas sirve)', () => {
     // Mandarle al cliente una liga a `localhost` es mandarle un correo inservible:
     // su telefono no es esta maquina. Mismo criterio que `passWebServiceURL`.
     ;(env as any).BASE_URL = 'http://localhost:3000'
-    expect(passPublicUrl('cafe-centro', 'c1')).toBeNull()
+    expect(passPublicUrls('cafe-centro', 'c1')).toBeNull()
     ;(env as any).BASE_URL = 'https://api.avoqado.io'
   })
 })
@@ -55,9 +89,10 @@ describe('sendFirstStampEmailIfDue', () => {
     jest.clearAllMocks()
     ;(env as any).BASE_URL = 'https://api.avoqado.io'
     enviar.mockResolvedValue(true)
+    googleDisponible.mockReturnValue(true)
   })
 
-  it('manda el correo en el primer sello de la primera cartilla', async () => {
+  it('manda el correo con las DOS ligas cuando Google esta configurado', async () => {
     sembrar()
     await sendFirstStampEmailIfDue('v1', 'c1', 'card1')
     expect(enviar).toHaveBeenCalledTimes(1)
@@ -66,10 +101,25 @@ describe('sendFirstStampEmailIfDue', () => {
       expect.objectContaining({
         venueName: 'Café Centro',
         customerName: 'Ana',
-        passUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/apple/c1',
+        applePassUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/apple/c1',
+        googlePassUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/google/c1',
         stampsEarned: 1,
         stampsRequired: 7,
         rewardLabel: 'Un café gratis',
+      }),
+    )
+  })
+
+  it('manda el correo solo con la liga de Apple cuando Google NO esta configurado', async () => {
+    googleDisponible.mockReturnValue(false)
+    sembrar()
+    await sendFirstStampEmailIfDue('v1', 'c1', 'card1')
+    expect(enviar).toHaveBeenCalledTimes(1)
+    expect(enviar).toHaveBeenCalledWith(
+      'ana@example.com',
+      expect.objectContaining({
+        applePassUrl: 'https://api.avoqado.io/api/v1/public/venues/cafe-centro/wallet/apple/c1',
+        googlePassUrl: null,
       }),
     )
   })
@@ -114,5 +164,16 @@ describe('sendFirstStampEmailIfDue', () => {
     sembrar()
     enviar.mockRejectedValue(new Error('Resend caido'))
     await expect(sendFirstStampEmailIfDue('v1', 'c1', 'card1')).resolves.toBeUndefined()
+  })
+
+  it('tampoco lanza si googleWalletAvailable() revienta', async () => {
+    // 🔴 Este correo cuelga de un cobro (`stampLedger.service.ts`): si el chequeo de
+    // Google truena, la venta no se puede ver afectada — el correo simplemente no sale.
+    sembrar()
+    googleDisponible.mockImplementation(() => {
+      throw new Error('credencial ilegible')
+    })
+    await expect(sendFirstStampEmailIfDue('v1', 'c1', 'card1')).resolves.toBeUndefined()
+    expect(enviar).not.toHaveBeenCalled()
   })
 })

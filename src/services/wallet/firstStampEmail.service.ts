@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { env } from '../../config/env'
 import emailService from '../email.service'
+import { googleWalletAvailable } from './googleWalletClient'
 
 /**
  * Le manda al cliente la liga de su tarjeta cuando gana su PRIMER sello.
@@ -17,17 +18,37 @@ import emailService from '../email.service'
  * haria ver como fallido un cobro que ya entro.
  */
 
+/** Las dos rutas publicas de la tarjeta: `null` cuando una cartera no aplica. */
+export interface WalletPassUrls {
+  /** La ruta publica del `.pkpass` (Apple Wallet). Siempre viene si el objeto no es null. */
+  appleUrl: string
+  /**
+   * La ruta publica de la tarjeta de Google Wallet.
+   *
+   * 🔴 `null` cuando este servidor no tiene Google Wallet configurado (sin issuer o
+   * sin credencial, ver `googleWalletAvailable()`): ofrecer un boton que apunta a una
+   * liga que va a fallar es peor que no ofrecerlo.
+   */
+  googleUrl: string | null
+}
+
 /**
- * La ruta publica del `.pkpass`, o null si no hay una URL alcanzable desde fuera.
+ * Las rutas publicas de la tarjeta, o null si no hay una URL alcanzable desde fuera.
  *
  * 🔴 Mismo criterio que `passWebServiceURL`: contra `localhost` devuelve null en vez
- * de armar la liga. El telefono del cliente no es esta maquina, asi que ese correo
- * llegaria con un boton que no abre nada — peor que no mandarlo.
+ * de armar las ligas. El telefono del cliente no es esta maquina, asi que ese correo
+ * llegaria con botones que no abren nada — peor que no mandarlo.
  */
-export function passPublicUrl(venueSlug: string, customerId: string): string | null {
+export function passPublicUrls(venueSlug: string, customerId: string): WalletPassUrls | null {
   const base = env.BASE_URL
   if (!base || /localhost|127\.0\.0\.1/i.test(base)) return null
-  return `${base.replace(/\/$/, '')}/api/v1/public/venues/${encodeURIComponent(venueSlug)}/wallet/apple/${encodeURIComponent(customerId)}`
+  const raiz = base.replace(/\/$/, '')
+  const slug = encodeURIComponent(venueSlug)
+  const cliente = encodeURIComponent(customerId)
+  return {
+    appleUrl: `${raiz}/api/v1/public/venues/${slug}/wallet/apple/${cliente}`,
+    googleUrl: googleWalletAvailable() ? `${raiz}/api/v1/public/venues/${slug}/wallet/google/${cliente}` : null,
+  }
 }
 
 export async function sendFirstStampEmailIfDue(venueId: string, customerId: string, stampCardId: string): Promise<void> {
@@ -54,8 +75,8 @@ export async function sendFirstStampEmailIfDue(venueId: string, customerId: stri
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true, slug: true } })
     if (!venue?.slug) return
 
-    const url = passPublicUrl(venue.slug, customerId)
-    if (!url) return
+    const urls = passPublicUrls(venue.slug, customerId)
+    if (!urls) return
 
     const config = await prisma.loyaltyConfig.findUnique({
       where: { venueId },
@@ -65,7 +86,8 @@ export async function sendFirstStampEmailIfDue(venueId: string, customerId: stri
     await emailService.sendWalletPassEmail(customer.email, {
       venueName: venue.name,
       customerName: customer.firstName ?? '',
-      passUrl: url,
+      applePassUrl: urls.appleUrl,
+      googlePassUrl: urls.googleUrl,
       stampsEarned: card.stampsEarned,
       stampsRequired: card.stampsRequired,
       rewardLabel: config?.stampRewardLabel ?? '',

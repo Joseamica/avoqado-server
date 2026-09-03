@@ -3329,8 +3329,18 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     data: {
       venueName: string
       customerName: string
-      /** La ruta publica del `.pkpass`. Va en el CTA Y en el texto plano. */
-      passUrl: string
+      /** La ruta publica del `.pkpass` (Apple Wallet). Va en su CTA Y en el texto plano. */
+      applePassUrl: string
+      /**
+       * La ruta publica de la tarjeta de Google Wallet.
+       *
+       * 🔴 Un correo NO puede detectar el telefono de quien lo abre (se lee en
+       * cualquier lado, y los clientes de correo no corren JavaScript) — a diferencia
+       * de la pagina publica, aqui no se adivina: van DOS botones visibles, uno por
+       * cartera. `null` cuando este servidor no tiene Google Wallet configurado; en
+       * ese caso el correo sale como antes, solo con el boton de Apple.
+       */
+      googlePassUrl: string | null
       stampsEarned: number
       stampsRequired: number
       /** Lo que el negocio prometio. Puede venir vacio: no todos lo escriben. */
@@ -3372,7 +3382,7 @@ Servicios Tecnologicos Avo S.A. de C.V.`
       Ya tienes tu tarjeta de ${data.venueName}
     </h1>
     <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">
-      ${saludo} gu&aacute;rdala en tu iPhone y tus sellos se suman solos.
+      ${saludo} gu&aacute;rdala en tu tel&eacute;fono y tus sellos se suman solos.
     </p>
 
     <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
@@ -3388,15 +3398,22 @@ Servicios Tecnologicos Avo S.A. de C.V.`
 
     ${lineaPremio}
 
-    <div style="margin: 0 0 24px 0;">
-      <a href="${data.passUrl}" style="display: inline-block; background-color:#000000; color: #ffffff; padding: 12px 24px; border-radius:6px; text-decoration: none; font-size: 14px; font-weight: 600;">
-        Guardar mi tarjeta
-      </a>
+    <div style="margin: 0 0 32px 0;">
+      <div style="margin: 0 0 12px 0;">
+        <a href="${data.applePassUrl}" style="display: inline-block; background-color:#000000; color: #ffffff; padding: 12px 24px; border-radius:6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+          Guardar en iPhone
+        </a>
+      </div>
+      ${
+        data.googlePassUrl
+          ? `<div style="margin: 0;">
+        <a href="${data.googlePassUrl}" style="display: inline-block; background-color:#000000; color: #ffffff; padding: 12px 24px; border-radius:6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+          Guardar en Android
+        </a>
+      </div>`
+          : ''
+      }
     </div>
-
-    <p style="margin: 0 0 32px 0; font-size: 13px; color: #666;">
-      &Aacute;brelo desde tu iPhone. Por ahora la tarjeta solo se guarda en iPhone; la versi&oacute;n para Android viene en camino.
-    </p>
 
     <div style="padding-top: 8px; border-top: 1px solid #e5e7eb;">
       <div style="margin: 16px 0;">
@@ -3420,15 +3437,13 @@ Servicios Tecnologicos Avo S.A. de C.V.`
 
     const text = `Ya tienes tu tarjeta de ${data.venueName}
 
-${saludo} guardala en tu iPhone y tus sellos se suman solos.
+${saludo} guardala en tu telefono y tus sellos se suman solos.
 
 Sellos: ${data.stampsEarned} de ${data.stampsRequired}
 Te faltan: ${faltan} ${faltan === 1 ? 'sello' : 'sellos'}
 ${lineaPremioTexto}
 
-Guardar mi tarjeta: ${data.passUrl}
-
-Abrelo desde tu iPhone. Por ahora la tarjeta solo se guarda en iPhone; la version para Android viene en camino.
+Guardar en iPhone: ${data.applePassUrl}${data.googlePassUrl ? `\nGuardar en Android: ${data.googlePassUrl}` : ''}
 
 ---
 Recibiste este correo porque ${data.venueName} te dio un sello en tu tarjeta.
