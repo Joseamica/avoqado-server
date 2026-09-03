@@ -25,7 +25,9 @@ interface RefundRequestData {
   amount: number // In cents (5000 = $50.00)
   reason: string // RefundReason.name (e.g., "CUSTOMER_REQUEST")
   staffId: string
-  shiftId?: string | null
+  // 🔴 NO hay `shiftId`: el turno lo resuelve el SERVIDOR (`../shared/turnoDeCaja.ts`).
+  // La PAX lo sigue mandando en el cuerpo (`RefundRequest.kt` → `RefundRecorder.kt:265`) y
+  // aquí se DESCARTA — el contrato HTTP no cambia y las terminales en la calle no se rompen.
   merchantAccountId?: string | null
   tpvId?: string | null // Terminal that processed this refund (for sales attribution)
   // Blumon serial: REQUIRED for Blumon/PAX refunds (used for SDK merchant switch
@@ -215,12 +217,14 @@ export async function recordRefund(
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 3: el turno abierto del NEGOCIO (para conciliación) — `../shared/turnoDeCaja.ts`
   // ═══════════════════════════════════════════════════════════════════════════
-  let shiftId = refundData.shiftId
-
-  if (!shiftId) {
-    const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
-    shiftId = currentShift?.id || null
-  }
+  //
+  // 🔴 SIN rama que lea al cliente. Hasta el 3-sep-2026 esto era «el `shiftId` del cuerpo, y
+  // si viene vacío el helper» — y venía SIEMPRE lleno: la ruta valida con
+  // `recordFastPaymentParamsSchema`, que declara sólo `params`, así que `validateRequest` no
+  // parsea ni reemplaza el body y `req.body.shiftId` llegaba crudo. El reembolso se ataba al
+  // turno que creía la TERMINAL, y la Fase 1 («el turno es del NEGOCIO») quedaba anulada
+  // justo aquí. El campo sigue llegando de las PAX en la calle; se ignora a propósito.
+  const shiftId = (await turnoAbiertoDelNegocio(prisma, venueId))?.id ?? null
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 4: Create refund payment and update original in transaction
@@ -389,8 +393,14 @@ export async function recordRefund(
     // reports reflect reality. Uses the same proportional split computed above
     // so tip refunds don't incorrectly deflate sales.
     if (shiftId) {
-      await tx.shift.update({
-        where: { id: shiftId },
+      // 🔴 Claim ACOTADO (mismo patrón que `mobile/refund.mobile.service.ts`): por id solo,
+      // este `update` aceptaba un turno de OTRO negocio y uno ya CERRADO — movía un conteo
+      // que alguien ya firmó, sin dejar rastro. Y es `updateMany` y no `update` porque si el
+      // turno se cerró entre la lectura y el claim el resultado tiene que ser `count: 0`, no
+      // un P2025 que tumbe la transacción: el dinero YA salió de la caja física y el
+      // reembolso se registra igual (lo recoge el cierre por ventana de tiempo).
+      await tx.shift.updateMany({
+        where: { id: shiftId, venueId, status: 'OPEN', endTime: null },
         data: {
           totalSales: { decrement: new Decimal(salesRefund) },
           ...(tipRefund > 0 ? { totalTips: { decrement: new Decimal(tipRefund) } } : {}),

@@ -15,7 +15,7 @@ import * as refundTpvService from '../../services/tpv/refund.tpv.service'
  *   "amount": 5000,
  *   "reason": "CUSTOMER_REQUEST",
  *   "staffId": "claaa...",
- *   "shiftId": "clbbb...",
+ *   "shiftId": "clbbb...",   // ACEPTADO PERO IGNORADO — el turno lo resuelve el servidor
  *   "merchantAccountId": "clccc...",
  *   "blumonSerialNumber": "2841548417",
  *   "authorizationNumber": "502511",
@@ -57,7 +57,9 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       amount: req.body.amount, // In cents
       reason: req.body.reason,
       staffId: req.body.staffId,
-      shiftId: req.body.shiftId,
+      // 🔴 `req.body.shiftId` NO se lee: el turno de caja es del NEGOCIO y lo resuelve el
+      // servidor (`services/shared/turnoDeCaja.ts`). La PAX lo sigue mandando y aquí se
+      // descarta — quitarlo del contrato rompería a las terminales que ya están en la calle.
       merchantAccountId: req.body.merchantAccountId,
       blumonSerialNumber: req.body.blumonSerialNumber,
       authorizationNumber: req.body.authorizationNumber,
