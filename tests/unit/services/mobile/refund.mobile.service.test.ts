@@ -160,7 +160,9 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
       // así el refund nunca se estampa en un turno que cerró en la ventana.
       expect(prismaMock.shift.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'shift-1', status: 'OPEN', endTime: null },
+          // 🔴 `venueId` va en el claim, no sólo `id`: sin él, un `shiftId` que llegara de otro
+          // negocio decrementaría SUS ventas. Los tres rieles de reembolso lo llevan igual.
+          where: { id: 'shift-1', venueId: VENUE, status: 'OPEN', endTime: null },
           data: { totalSales: { decrement: new Decimal('50.00') } },
         }),
       )
