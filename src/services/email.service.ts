@@ -27,6 +27,48 @@ interface EmailOptions {
   idempotencyKey?: string
 }
 
+/**
+ * Opciones exclusivas de `sendEmailWithResult` — `sendEmail` NO las conoce ni las acepta.
+ *
+ * - `from`: el carril de campañas manda por el subdominio de marketing
+ *   (`buildMarketingFrom`), no por el `FROM_EMAIL` transaccional que usa todo lo demás. Si se
+ *   omite, el comportamiento es idéntico al de antes de esta tarea: se manda con
+ *   `FROM_EMAIL`.
+ * - `tags`: pares que Resend adjunta al envío. El carril de campañas manda el `deliveryId`
+ *   como tag de correlación, para ubicar la entrega exacta desde un webhook de Resend sin
+ *   depender sólo del `resendId`.
+ */
+export interface EmailOptionsWithSender extends EmailOptions {
+  from?: string
+  tags?: Array<{ name: string; value: string }>
+}
+
+/**
+ * Resultado de `sendEmailWithResult` (hermano de `sendEmail` que devuelve detalle en vez de
+ * un booleano). El carril de campañas de correo necesita `resendId` para conciliar los
+ * webhooks de apertura/click y `transient` para decidir si vale la pena reintentar.
+ */
+export interface EmailSendResult {
+  ok: boolean
+  resendId?: string
+  errorCode?: string
+  transient: boolean
+}
+
+/**
+ * `408` (timeout) y `429` (límite de tasa) son errores de INFRAESTRUCTURA que se resuelven
+ * solos con el tiempo; un `5xx` es un fallo del lado de Resend. Un `statusCode` ausente
+ * (`null`/`undefined`) se trata igual que "no hubo respuesta HTTP": reintentable. Cualquier
+ * otro 4xx (400 remitente mal formado, 403 API key inválida, 422 payload inválido…) es un
+ * error de VALIDACIÓN que reintentar no arregla — el correo nunca va a salir sin que alguien
+ * corrija el problema primero.
+ */
+function isTransientResendStatus(statusCode: number | null | undefined): boolean {
+  if (statusCode == null) return true
+  if (statusCode === 408 || statusCode === 429) return true
+  return statusCode >= 500
+}
+
 interface InvitationEmailData {
   inviterName: string
   organizationName: string
@@ -358,6 +400,81 @@ class EmailService {
     } catch (error) {
       logger.error('📧 Failed to send email:', error)
       return false
+    }
+  }
+
+  /**
+   * Hermano de `sendEmail` que devuelve el DETALLE del resultado en vez de un booleano.
+   *
+   * 🔴 `sendEmail` (arriba) NO se toca — tiene ~40 llamadores que dependen exactamente del
+   * booleano que ya devuelve. Este método es NUEVO y vive a su lado, reusando el MISMO
+   * camino de envío (el filtro de entregabilidad de `isDeliverableRecipient`, el payload de
+   * Resend, la clave de idempotencia): un remitente venue-abusivo o un destinatario
+   * no-entregable se comportan IGUAL en los dos caminos — sólo cambia lo que se devuelve.
+   *
+   * Existe porque el carril de campañas de correo necesita dos cosas que el booleano no da:
+   * el `resendId` para conciliar los webhooks de apertura/click contra la entrega, y si un
+   * fallo es TRANSITORIO (vale la pena reintentar con backoff) o TERMINAL (reintentarlo es
+   * inútil — el correo nunca va a salir sin que alguien corrija el problema).
+   */
+  async sendEmailWithResult(options: EmailOptionsWithSender): Promise<EmailSendResult> {
+    if (!resend || !this.isAvailable) {
+      logger.warn('📧 Email service not available. Skipping email send.')
+      // 🔴 transient:true — el motor de campañas reintenta de forma DURABLE en Postgres con
+      // backoff de hasta 24h, y sobrevive a un redeploy. "No se arregla sola con el tiempo"
+      // es cierto DENTRO de este proceso, pero falso a la escala en la que este resultado se
+      // usa: si falta RESEND_API_KEY (secreto rotado, .env incompleto) y alguien lo corrige
+      // dos minutos después, marcar esto terminal mandaría esas entregas a DEAD para siempre
+      // por una falla que ya no existe. El destinatario NO entregable de abajo SÍ es terminal
+      // a propósito — ese problema es del destinatario, no del sistema, y no lo arregla nadie
+      // con el tiempo.
+      return { ok: false, transient: true, errorCode: 'EMAIL_SERVICE_UNAVAILABLE' }
+    }
+
+    // Mismo filtro que `sendEmail`. Ver src/utils/undeliverableEmail.ts.
+    if (!isDeliverableRecipient(options.to, 'emailService.sendEmailWithResult', { subject: options.subject })) {
+      return { ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' }
+    }
+
+    try {
+      // Mismo payload que `sendEmail` — ver ahí el porqué de cada pieza. `from` y `tags` son
+      // exclusivos de este método (ver `EmailOptionsWithSender`): sin ellos, el comportamiento
+      // es idéntico a antes (FROM transaccional, sin tags).
+      const emailPayload: Parameters<typeof resend.emails.send>[0] = {
+        from: options.from || FROM_EMAIL,
+        to: options.to,
+        subject: options.subject,
+        html: options.html || undefined,
+        text: options.text || 'Please view this email in an HTML-compatible email client.',
+        ...(options.headers && { headers: options.headers }),
+        ...(options.tags?.length && { tags: options.tags }),
+        ...(options.attachments?.length && {
+          attachments: options.attachments.map(a => ({
+            filename: a.filename,
+            content: a.content instanceof Buffer ? a.content : Buffer.from(a.content as string, 'utf-8'),
+            ...(a.contentType && { content_type: a.contentType }),
+          })),
+        }),
+      }
+
+      const result = await resend.emails.send(emailPayload, options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined)
+
+      if (result.error) {
+        logger.error('📧 Failed to send email (sendEmailWithResult):', result.error)
+        return {
+          ok: false,
+          errorCode: result.error.name,
+          transient: isTransientResendStatus(result.error.statusCode),
+        }
+      }
+
+      logger.info('📧 Email sent successfully (sendEmailWithResult):', { id: result.data?.id, to: options.to })
+      return { ok: true, resendId: result.data?.id, transient: false }
+    } catch (error) {
+      // No hubo respuesta HTTP en absoluto (red caída, DNS, timeout de socket antes de que
+      // Resend respondiera) — el carril de campañas SIEMPRE lo trata como reintentable.
+      logger.error('📧 Failed to send email (sendEmailWithResult):', error)
+      return { ok: false, transient: true }
     }
   }
 

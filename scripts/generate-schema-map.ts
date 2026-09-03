@@ -544,6 +544,11 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   ConsentEvent: 'Customers, Consumers & Reviews',
   PrivacyNoticeVersion: 'Customers, Consumers & Reviews',
   CustomerCaptureToken: 'Customers, Consumers & Reviews',
+  // Fase 1A — carril de envío de campañas de correo a clientes
+  CustomerCampaign: 'Customers, Consumers & Reviews',
+  CustomerCampaignDelivery: 'Customers, Consumers & Reviews',
+  EmailSuppression: 'Customers, Consumers & Reviews',
+  EmailQuotaLedger: 'Customers, Consumers & Reviews',
 
   // 21. System: Audit, Webhooks & Platform
   ActivityLog: 'System: Audit, Webhooks & Platform',

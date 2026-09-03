@@ -70,7 +70,25 @@ const LINEAS_DE_LECTURA_ANIDADA = [/^\s*customer:\s*\{\s*marketingConsent:\s*tru
  * escritura = "marketingConsent:" seguido de un valor (true/false/identificador) — no una
  * lectura ni la declaración de un tipo.
  */
-function esLineaViolatoria(linea: string): boolean {
+/**
+ * Fix round 2 (Fase 1A): decide, mirando hacia atrás, qué bloque GOBIERNA un `marketingConsent`
+ * que cae en su propia línea. Devuelve `'data'` (escritura), `'lectura'` (`where`/`select`), o
+ * `null` si no hay nada concluyente cerca.
+ *
+ * Se para en la apertura más CERCANA hacia arriba: en `update({ where: {…}, data: { …` el
+ * `data:` está más abajo que el `where:`, así que gana el `data:` — que es lo correcto.
+ * La ventana es corta (12 líneas) a propósito: más allá, la "cercanía" deja de significar nada
+ * y sólo produce adivinanzas con cara de certeza.
+ */
+function bloqueQueGobierna(contexto: string[]): 'data' | 'lectura' | null {
+  for (const linea of contexto.slice(-12).reverse()) {
+    if (/\bdata\s*:\s*\{/.test(linea)) return 'data'
+    if (/\b(where|select|include|omit)\s*:\s*\{/.test(linea)) return 'lectura'
+  }
+  return null
+}
+
+function esLineaViolatoria(linea: string, contexto?: string[]): boolean {
   if (!/marketingConsent\s*:\s*(true|false|[a-zA-Z])/.test(linea)) return false
 
   // `campo: z.boolean()...` es una declaración de esquema Zod (el valor arranca con el
@@ -98,6 +116,14 @@ function esLineaViolatoria(linea: string): boolean {
   const dataGobiernaElCampo = idxData !== -1 && idxConsent > idxData
   if (!dataGobiernaElCampo && /select|where|expect|\/\//.test(linea)) return false
 
+  // La línea sola ya no dice nada más: si el llamador trajo el contexto, manda el bloque que
+  // gobierna el campo. Sin contexto se mantiene el veredicto conservador (violación) — un
+  // guard que ante la duda calla es un guard que no protege.
+  if (contexto) {
+    const bloque = bloqueQueGobierna(contexto)
+    if (bloque === 'lectura') return false
+  }
+
   return true
 }
 
@@ -112,7 +138,10 @@ describe('marketingConsent sólo se ESCRIBE en consent.service.ts', () => {
 
       const src = fs.readFileSync(f, 'utf8')
       for (const [i, linea] of src.split('\n').entries()) {
-        if (esLineaViolatoria(linea)) violaciones.push(`${relPath}:${i + 1}`)
+        // El barrido SÍ tiene el contexto (las líneas de arriba del mismo archivo) y se lo pasa:
+        // es lo que distingue un `where` multi-línea de un `data` multi-línea cuando el campo
+        // cae solo en su línea. Los sabotajes de abajo lo llaman SIN contexto a propósito.
+        if (esLineaViolatoria(linea, src.split('\n').slice(0, i))) violaciones.push(`${relPath}:${i + 1}`)
       }
     }
 
@@ -141,5 +170,39 @@ describe('marketingConsent sólo se ESCRIBE en consent.service.ts', () => {
     // limpias con la heurística endurecida, o el barrido empezaría a acusar código honesto.
     expect(esLineaViolatoria('      customer: { marketingConsent: true },')).toBe(false) // kioskOutreach.service.ts:71 (where arriba)
     expect(esLineaViolatoria('select: { email: true, firstName: true, marketingConsent: true } },')).toBe(false) // select en la misma línea
+  })
+
+  // 🔴 Fix round 2 (Fase 1A, Task 8): `campaignEnqueue.service.ts` resuelve la audiencia con un
+  // `where` multi-línea donde `marketingConsent: true,` cae en su PROPIA línea, sin nada más.
+  // Esa línea es idéntica —carácter por carácter— a la del sabotaje del escritor multi-línea,
+  // así que mirando sólo la línea física es IMPOSIBLE distinguir una lectura de una escritura:
+  // el barrido acusaba código honesto. Y la salida fácil (meter el archivo en la lista de
+  // excluidos, o la línea en LINEAS_DE_LECTURA_ANIDADA) es peor que el falso positivo — dejaría
+  // de vigilar un archivo entero, o taparía para siempre el `data: { \n marketingConsent … }`
+  // real, que es EXACTAMENTE lo que este guard existe para cazar.
+  //
+  // Por eso la heurística ahora acepta el contexto previo y decide por el bloque que GOBIERNA
+  // el campo. Sin contexto se comporta como antes (conservador: violación), que es lo que
+  // mantienen verdes los dos sabotajes de arriba.
+  describe('con CONTEXTO, distingue un where multi-línea de un data multi-línea', () => {
+    const contextoWhere = [
+      '    const candidatos = await tx.customer.findMany({',
+      '      where: {',
+      '        venueId,',
+      '        active: true,',
+    ]
+    const contextoData = ['    await prisma.customer.update({', '      where: { id },', '      data: {']
+
+    it('dentro de un where multi-línea es LECTURA ⇒ no es violación', () => {
+      expect(esLineaViolatoria('        marketingConsent: true,', contextoWhere)).toBe(false)
+    })
+
+    it('🔴 dentro de un data multi-línea sigue siendo ESCRITURA ⇒ violación', () => {
+      expect(esLineaViolatoria('        marketingConsent: true,', contextoData)).toBe(true)
+    })
+
+    it('sin contexto se mantiene conservador (violación): la línea sola es ambigua', () => {
+      expect(esLineaViolatoria('        marketingConsent: true,')).toBe(true)
+    })
   })
 })

@@ -93,6 +93,34 @@ const envSchema = z.object({
   // Resend (Email)
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
+  // Carril de campañas de correo a clientes (Fase 1A): dirección FIJA del subdominio de
+  // marketing. Vive separada de OTP/recibos (EMAIL_FROM) a propósito — un venue que abusa del
+  // envío masivo daña la reputación de @promos, nunca la de las transaccionales. El SERVICIO
+  // (marketingSender.ts) es el único que la lee; el llamador nunca construye el remitente.
+  MARKETING_FROM_EMAIL: z.string().default('promos@promos.avoqado.io'),
+  // Tope mensual de correos de campaña por venue (spec §cuota: default 2,000). Hoy es GLOBAL
+  // para todos los venues; el ajuste por venue «sólo superadmin» llega en la Fase 1C. Lo lee
+  // `campaignEnqueue.service.ts` y se lo pasa a `reservarCuota`, que rechaza un tope que no
+  // sea entero ≥ 0 — por eso el default vive AQUÍ y no como `??` en el llamador: sin esta
+  // línea `env.MARKETING_MONTHLY_QUOTA` es `undefined` y NINGÚN encolado pasa la reserva.
+  MARKETING_MONTHLY_QUOTA: z.coerce.number().int().min(0).default(2000),
+  // Job del carril de envío (Fase 1A, Task 8). El spec pide ~3,000 correos/hora para TODO
+  // el subdominio de marketing; el job corre cada 5 minutos (12 ticks/hora), así que
+  // 3000 / 12 = 250 por tick es lo que da ese ritmo. 🔴 Costo declarado (heredado de T6):
+  // `reclamarLote` bloquea, mientras dura la sentencia, hasta `lotePorVenue × (venues con
+  // pendientes)` filas — subir este número sube directamente cuántas filas quedan bajo
+  // lock por tick, no sólo cuántas se reclaman.
+  MARKETING_TOPE_GLOBAL_POR_TICK: z.coerce.number().int().min(0).default(250),
+  // Tope POR VENUE de lo que un solo tick reclama de un mismo negocio — es lo que da el
+  // reparto justo entre venues (`repartirEquitativo`, T6): con esto, una campaña de 10,000
+  // clientes de un venue no acapara el lote y mata de hambre a los demás. El spec fija 50.
+  MARKETING_LOTE_POR_VENUE: z.coerce.number().int().min(1).default(50),
+  // Apagador de emergencia del carril de campañas: con 'true' el job NO reclama nada (ni
+  // una consulta) — para cortar en caliente si una campaña se descontrola (rebotes,
+  // configuración mala) sin tener que redeployar. String, no boolean-transform: sólo el
+  // job lo compara contra 'true', y así queda simétrico con DISABLE_RABBITMQ
+  // (`src/server.ts`), que usa el mismo criterio.
+  MARKETING_KILL_SWITCH: z.string().optional(),
   ORDER_NOTIFICATIONS_EMAIL: z.string().email().optional(),
   // Recipient for the weekly "new activated/paid venues" report (see
   // jobs/weekly-new-customers-report.job.ts). Unset = job logs a warning and
