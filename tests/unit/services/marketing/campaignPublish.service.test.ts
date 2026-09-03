@@ -111,8 +111,15 @@ describe('previsualizarEnvio', () => {
 
     // Firma manual con la MISMA huella/conteo que debería producir la campaña sin cambios —
     // si el token real coincidiera con éste, es que huellaDeCampana se llamó con subject +
-    // contentBlocks (no con algún otro campo) y con el conteo real de elegibles.
-    const huellaEsperada = huellaDeCampana({ subject: campaign.subject, bloques: campaign.contentBlocks })
+    // contentBlocks + audience/customerGroupId/tags (no con algún otro campo) y con el
+    // conteo real de elegibles.
+    const huellaEsperada = huellaDeCampana({
+      subject: campaign.subject,
+      bloques: campaign.contentBlocks,
+      audience: campaign.audience,
+      customerGroupId: campaign.customerGroupId,
+      tags: campaign.tags,
+    })
     const tokenEsperado = firmarTokenDeEnvio({
       campaignId: CAMPAIGN_ID,
       venueId: VENUE_ID,
@@ -126,7 +133,13 @@ describe('previsualizarEnvio', () => {
 
 describe('publicarCampana', () => {
   function tokenValido(campaign: ReturnType<typeof campañaBase>, n: number, emitidoEn: Date) {
-    const huella = huellaDeCampana({ subject: campaign.subject, bloques: campaign.contentBlocks })
+    const huella = huellaDeCampana({
+      subject: campaign.subject,
+      bloques: campaign.contentBlocks,
+      audience: campaign.audience,
+      customerGroupId: campaign.customerGroupId,
+      tags: campaign.tags,
+    })
     return firmarTokenDeEnvio({
       campaignId: CAMPAIGN_ID,
       venueId: VENUE_ID,
@@ -177,7 +190,14 @@ describe('publicarCampana', () => {
   it('🔴 con token de OTRO contenido (la campaña se editó desde la vista previa) ⇒ BadRequestError, y enqueueCampaign NUNCA se llama', async () => {
     // El token se firmó cuando el asunto era "Versión vieja"; para cuando se publica, la
     // campaña YA tiene otro asunto — la huella recalculada no coincide.
-    const huellaVieja = huellaDeCampana({ subject: 'Versión vieja', bloques: campañaBase().contentBlocks })
+    const base = campañaBase()
+    const huellaVieja = huellaDeCampana({
+      subject: 'Versión vieja',
+      bloques: base.contentBlocks,
+      audience: base.audience,
+      customerGroupId: base.customerGroupId,
+      tags: base.tags,
+    })
     const token = firmarTokenDeEnvio({
       campaignId: CAMPAIGN_ID,
       venueId: VENUE_ID,
@@ -187,6 +207,23 @@ describe('publicarCampana', () => {
     })
     findFirstMock.mockResolvedValue(campañaBase({ subject: 'Versión nueva' }))
     resolverAudienciaMock.mockResolvedValue({ elegibles: elegibles(3), omitidas: 0 })
+
+    await expect(publicarCampana({ venueId: VENUE_ID, campaignId: CAMPAIGN_ID, token, ahora: AHORA })).rejects.toThrow(BadRequestError)
+    expect(enqueueCampaignMock).not.toHaveBeenCalled()
+  })
+
+  // 🔴 El defecto central de este fix (revisor, ronda final, probado en vivo): un token
+  // firmado sobre GROUP=grupo-A (50 elegibles) seguía verificando si otro empleado cambiaba
+  // la campaña a GROUP=grupo-B (también 50 elegibles) sin tocar asunto ni bloques — el
+  // conteo coincide, así que sólo la audiencia dentro de la huella puede cazarlo.
+  it('🔴 con la AUDIENCIA cambiada (mismo conteo, otro grupo) ⇒ BadRequestError motivo CAMBIO, y enqueueCampaign NUNCA se llama', async () => {
+    const campaignGrupoA = campañaBase({ audience: 'GROUP', customerGroupId: 'grupo-A' })
+    const token = tokenValido(campaignGrupoA, 50, AHORA)
+
+    // Entre la vista previa y la publicación, otro empleado cambió el grupo — el conteo real
+    // sigue siendo 50, idéntico al que el token firmó.
+    findFirstMock.mockResolvedValue(campañaBase({ audience: 'GROUP', customerGroupId: 'grupo-B' }))
+    resolverAudienciaMock.mockResolvedValue({ elegibles: elegibles(50), omitidas: 0 })
 
     await expect(publicarCampana({ venueId: VENUE_ID, campaignId: CAMPAIGN_ID, token, ahora: AHORA })).rejects.toThrow(BadRequestError)
     expect(enqueueCampaignMock).not.toHaveBeenCalled()

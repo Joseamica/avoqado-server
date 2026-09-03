@@ -66,7 +66,13 @@ export async function previsualizarEnvio({
   })
   const totalDestinatarios = elegibles.length
 
-  const huellaContenido = huellaDeCampana({ subject: campaign.subject, bloques: campaign.contentBlocks })
+  const huellaContenido = huellaDeCampana({
+    subject: campaign.subject,
+    bloques: campaign.contentBlocks,
+    audience: campaign.audience,
+    customerGroupId: campaign.customerGroupId,
+    tags: campaign.tags,
+  })
   const token = firmarTokenDeEnvio({ campaignId, venueId, huellaContenido, totalDestinatarios, ahora })
 
   return { totalDestinatarios, token, expiraEn: new Date(ahora.getTime() + VIGENCIA_MS) }
@@ -114,7 +120,13 @@ export async function publicarCampana({
     tags: campaign.tags,
   })
   const totalDestinatarios = elegibles.length
-  const huellaContenido = huellaDeCampana({ subject: campaign.subject, bloques: campaign.contentBlocks })
+  const huellaContenido = huellaDeCampana({
+    subject: campaign.subject,
+    bloques: campaign.contentBlocks,
+    audience: campaign.audience,
+    customerGroupId: campaign.customerGroupId,
+    tags: campaign.tags,
+  })
 
   const verificacion = verificarTokenDeEnvio(token, { campaignId, venueId, huellaContenido, totalDestinatarios, ahora })
   if (!verificacion.ok) {

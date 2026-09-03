@@ -83,13 +83,36 @@ function serializacionCanonica(valor: unknown): string {
 }
 
 /**
- * Huella del CONTENIDO de una campaña (asunto + bloques del cuerpo). Determinista — la misma
- * entrada siempre da la misma salida, condición necesaria para que el token alguna vez
- * verifique — y sensible a cualquier cambio real: texto de un bloque, tipo de bloque, un
- * bloque agregado o quitado, o el ORDEN de los bloques.
+ * Huella del CONTENIDO **y la AUDIENCIA** de una campaña (asunto + bloques del cuerpo +
+ * a quién le llega). Determinista — la misma entrada siempre da la misma salida, condición
+ * necesaria para que el token alguna vez verifique — y sensible a cualquier cambio real:
+ * texto de un bloque, tipo de bloque, un bloque agregado o quitado, el ORDEN de los bloques,
+ * o la audiencia (tipo, grupo o etiquetas).
+ *
+ * 🔴 La audiencia entra a la huella a propósito (fix ronda final, revisor): sin ella, cambiar
+ * el `customerGroupId` o los `tags` de la campaña — sin tocar el asunto ni los bloques — deja
+ * un token viejo verificando contra una audiencia que el dueño NUNCA revisó. `totalDestinatarios`
+ * (fuera de esta huella, en el payload del token) sólo detecta un cambio de CONTEO; dos grupos
+ * de 50 elegibles cada uno no lo mueven, así que el conteo solo no basta.
+ *
+ * Los `tags` se ordenan ANTES de serializar: el mismo conjunto de etiquetas en otro orden es
+ * la MISMA audiencia (TAGS no depende del orden en que se listen) — sin ordenar, reordenarlos
+ * invalidaría tokens por un "cambio" que en realidad no le movió nada a nadie.
  */
-export function huellaDeCampana(p: { subject: string; bloques: unknown }): string {
-  const canonico = serializacionCanonica({ subject: p.subject, bloques: p.bloques })
+export function huellaDeCampana(p: {
+  subject: string
+  bloques: unknown
+  audience: string
+  customerGroupId: string | null
+  tags: string[]
+}): string {
+  const canonico = serializacionCanonica({
+    subject: p.subject,
+    bloques: p.bloques,
+    audience: p.audience,
+    customerGroupId: p.customerGroupId,
+    tags: [...p.tags].sort(),
+  })
   return crypto.createHash('sha256').update(canonico).digest('hex')
 }
 
