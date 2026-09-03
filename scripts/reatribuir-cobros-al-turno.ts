@@ -75,7 +75,6 @@ const D = (v: Prisma.Decimal.Value | null | undefined): Decimal => new Prisma.De
 const pesos = (v: Decimal | number | string): string => `$${new Prisma.Decimal(v).toFixed(2)}`
 
 const RE_FECHA_CIVIL = /^\d{4}-\d{2}-\d{2}$/
-const RE_HORA_CIVIL = /^\d{2}:\d{2}:\d{2}$/
 
 /**
  * Rechazo de seguridad (host equivocado, bandera inválida, la realidad no cuadra con lo que el
@@ -103,21 +102,6 @@ function detener(...lineas: string[]): never {
 function leerValor(bandera: string): string | undefined {
   const i = process.argv.indexOf(bandera)
   return i >= 0 ? process.argv[i + 1] : undefined
-}
-
-/** Banderas repetibles con forma `--<bandera> <YYYY-MM-DD>=<valor>` → Map por día. */
-function leerPorDia(bandera: string, validarValor: (v: string) => boolean, comoSeEscribe: string): Map<string, string> {
-  const mapa = new Map<string, string>()
-  process.argv.forEach((token, i) => {
-    if (token !== bandera) return
-    const crudo = process.argv[i + 1] ?? ''
-    const [dia, valor] = crudo.split('=')
-    if (!RE_FECHA_CIVIL.test(dia ?? '') || valor === undefined || !validarValor(valor)) {
-      detener(`${bandera} espera ${comoSeEscribe} (recibí «${crudo}»).`)
-    }
-    mapa.set(dia, valor)
-  })
-  return mapa
 }
 
 /** Host de la base a la que ESTA corrida se va a conectar. Nunca se imprime la cadena completa. */
@@ -245,7 +229,6 @@ function totalesDe(pagos: ShiftPaymentForTotals[], orderIds: string[]) {
 async function main(): Promise<void> {
   const aplicar = process.argv.includes('--apply')
   const cerrarSinConteo = process.argv.includes('--cerrar-sin-conteo')
-  const resumen = process.argv.includes('--resumen')
   const venueId = leerValor('--venue')
   if (!venueId) detener('Falta --venue <venueId>.')
 
@@ -277,9 +260,6 @@ async function main(): Promise<void> {
   // desde que se midió (addendum 3 §4). Son opcionales: sin ellas el script no supone nada.
   const turnoEsperado = leerValor('--turno-esperado')
   const staffForzado = leerValor('--staff')
-  const iniciosForzados = leerPorDia('--inicio', v => RE_HORA_CIVIL.test(v), '<YYYY-MM-DD>=<HH:MM:SS>')
-  const finesForzados = leerPorDia('--fin', v => RE_HORA_CIVIL.test(v), '<YYYY-MM-DD>=<HH:MM:SS>')
-  const fondosForzados = leerPorDia('--fondo', v => /^\d+(\.\d{1,2})?$/.test(v), '<YYYY-MM-DD>=<MONTO>')
 
   const dias = diasDelRango(desde, hasta, zona)
   const ventana = { gte: inicioDelDia(desde, zona), lte: finDelDia(hasta, zona) }
@@ -409,13 +389,9 @@ async function main(): Promise<void> {
     const primeraCaja = cajasDelDia[0]
     const primerCobro = (porDia.get(d.dia) ?? [])[0]
 
-    const forzado = iniciosForzados.get(d.dia)
     let startTime: Date
     let origenInicio: string
-    if (forzado) {
-      startTime = fromZonedTime(`${d.dia}T${forzado}`, zona)
-      origenInicio = `--inicio ${d.dia}=${forzado}`
-    } else if (primeraCaja && (!primerCobro || primeraCaja.openedAt <= primerCobro.createdAt)) {
+    if (primeraCaja && (!primerCobro || primeraCaja.openedAt <= primerCobro.createdAt)) {
       startTime = primeraCaja.openedAt
       origenInicio = `apertura de la caja ${primeraCaja.id}${primeraCaja.deviceName ? ` (${primeraCaja.deviceName})` : ''}`
     } else if (primerCobro) {
@@ -425,13 +401,8 @@ async function main(): Promise<void> {
       detener(`El día ${d.dia} necesita un turno nuevo y no hay ni caja ni cobros de los que derivar su hora de inicio.`)
     }
 
-    const fondoForzado = fondosForzados.get(d.dia)
-    const startingCash = fondoForzado ? D(fondoForzado) : D(primeraCaja?.startingAmount ?? 0)
-    const origenFondo = fondoForzado
-      ? `--fondo ${d.dia}=${fondoForzado}`
-      : primeraCaja
-        ? `fondo de la caja ${primeraCaja.id}`
-        : 'sin caja ese día ⇒ 0.00'
+    const startingCash = D(primeraCaja?.startingAmount ?? 0)
+    const origenFondo = primeraCaja ? `fondo de la caja ${primeraCaja.id}` : 'sin caja ese día ⇒ 0.00'
 
     const staffId = staffForzado ?? abiertoDelNegocio?.staffId ?? primeraCaja?.openedByStaffId
     if (!staffId) {
@@ -476,13 +447,9 @@ async function main(): Promise<void> {
       c => diaDelNegocio(c.openedAt, zona) === d.dia && c.closedAt != null && diaDelNegocio(c.closedAt, zona) === d.dia,
     )
 
-    const forzado = finesForzados.get(d.dia)
     let endTime: Date
     let origenFin: string
-    if (forzado) {
-      endTime = fromZonedTime(`${d.dia}T${forzado}`, zona)
-      origenFin = `--fin ${d.dia}=${forzado}`
-    } else if (cajaCerradaMismoDia?.closedAt && (!ultimoCobro || cajaCerradaMismoDia.closedAt > ultimoCobro)) {
+    if (cajaCerradaMismoDia?.closedAt && (!ultimoCobro || cajaCerradaMismoDia.closedAt > ultimoCobro)) {
       endTime = cajaCerradaMismoDia.closedAt
       origenFin = `cierre de la caja ${cajaCerradaMismoDia.id} (mismo día)`
     } else if (ultimoCobro) {
@@ -520,7 +487,7 @@ async function main(): Promise<void> {
     )
   }
 
-  imprimirPlan({ plan, enTurnosContados, zona, turnosPorId, pagosDeLaVentana, resumen })
+  imprimirPlan({ plan, enTurnosContados, zona, turnosPorId, pagosDeLaVentana })
 
   if (!aplicar) {
     console.log('Simulación: no se tocó nada.')
@@ -544,9 +511,8 @@ function imprimirPlan(ctx: {
   zona: string
   turnosPorId: Map<string, TurnoLeido>
   pagosDeLaVentana: Pago[]
-  resumen: boolean
 }): void {
-  const { plan, enTurnosContados, zona, turnosPorId, resumen } = ctx
+  const { plan, enTurnosContados, zona, turnosPorId } = ctx
 
   if (plan.length === 0) {
     console.log('No hay nada que reatribuir en esta ventana.\n')
@@ -571,7 +537,7 @@ function imprimirPlan(ctx: {
     const despues = proyeccion.get(d.turno?.id ?? `NUEVO:${d.dia}`) ?? []
     const t = totalesDe(despues, despues.map(p => p.orderId))
 
-    console.log(`   cobros  ${antes.pagos} → ${despues.length}      $ ${pesos(antes.monto)} → ${pesos(sumaDe(despues))}`)
+    console.log(`   cobros  ${antes.pagos} → ${despues.length}      ${pesos(antes.monto)} → ${pesos(sumaDe(despues))}`)
     console.log(
       `   totales guardados: ventas ${pesos(antes.ventas)} → ${pesos(t.totalSales)} · propinas ${pesos(antes.propinas)} → ${pesos(t.totalTips)} · órdenes ${antes.ordenes} → ${t.totalOrders}`,
     )
@@ -589,13 +555,11 @@ function imprimirPlan(ctx: {
     const huerfanos = d.mover.filter(p => p.shiftId === null)
     const deOtroTurno = d.mover.filter(p => p.shiftId !== null)
     console.log(`   se mueven ${d.mover.length} cobros (${pesos(sumaDe(d.mover))}): ${huerfanos.length} huérfanos, ${deOtroTurno.length} desde otro turno`)
-    if (!resumen) {
-      for (const p of d.mover) {
-        const origen = p.shiftId ? `de ${p.shiftId}` : 'huérfano'
-        console.log(
-          `     ${horaLocal(p.createdAt, zona)}  folio ${String(p.order.orderNumber).padStart(6)}  ${pesos(D(p.amount)).padStart(11)}  ${String(p.method).padEnd(13)} ${nombreDe(p).padEnd(22)} ${origen}`,
-        )
-      }
+    for (const p of d.mover) {
+      const origen = p.shiftId ? `de ${p.shiftId}` : 'huérfano'
+      console.log(
+        `     ${horaLocal(p.createdAt, zona)}  folio ${String(p.order.orderNumber).padStart(6)}  ${pesos(D(p.amount)).padStart(11)}  ${String(p.method).padEnd(13)} ${nombreDe(p).padEnd(22)} ${origen}`,
+      )
     }
     console.log('')
   }
