@@ -391,6 +391,10 @@ const requireWalletPlan = checkPublicVenueFeature('LOYALTY_WALLET', 'Este negoci
 
 router.get('/venues/:venueSlug/wallet/apple/:customerId', readLimit, requireWalletPlan, walletPassController.downloadApplePass)
 
+// La tarjeta para Android. Mismo candado de plan que la de Apple: el negocio tiene el
+// mismo derecho a una u otra, y sería absurdo que el plan cubriera un teléfono y no el otro.
+router.get('/venues/:venueSlug/wallet/google/:customerId', readLimit, requireWalletPlan, walletPassController.downloadGooglePass)
+
 // La franja de sellos que Google descarga para pintar la tarjeta. Sin gate de plan: la
 // pide un servidor de Google, no una persona, y para llegar aquí ya tuvo que existir un
 // pase emitido — que sí pasó por el candado.

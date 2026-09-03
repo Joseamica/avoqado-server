@@ -4,6 +4,7 @@ import { NotFoundError } from '../../errors/AppError'
 import { issueApplePass } from '../../services/wallet/walletPass.service'
 import { buildAndSignPassForCustomer } from '../../services/wallet/issuePass.service'
 import { getPublicCardInfo } from '../../services/wallet/publicCardInfo.service'
+import { buildSaveJwt } from '../../services/wallet/googleWalletPass.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { env } from '../../config/env'
 
@@ -64,6 +65,51 @@ export async function downloadApplePass(req: Request, res: Response, next: NextF
     res.setHeader('Content-Type', 'application/vnd.apple.pkpass')
     res.setHeader('Content-Disposition', `attachment; filename="${venue.name}.pkpass"`)
     res.send(buffer)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/public/venues/:venueSlug/wallet/google/:customerId
+ *
+ * Manda al cliente a la pantalla de «Guardar en Google Wallet». Espejo de
+ * `downloadApplePass`, con el MISMO aislamiento: el cliente tiene que pertenecer a ese
+ * venue.
+ *
+ * 🔴 Responde 302 y no un archivo. Google no entrega un `.pkpass`: entrega una URL
+ * firmada que abre su propia pantalla de confirmación.
+ */
+export async function downloadGooglePass(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueSlug, customerId } = req.params
+
+    const venue = await prisma.venue.findFirst({
+      where: { slug: venueSlug, active: true },
+      select: { id: true, name: true },
+    })
+    if (!venue) throw new NotFoundError('Negocio no encontrado')
+
+    // 🔴 Filtrado por venueId, no sólo por id — misma razón que en Apple: el slug es
+    // público y sin esto se filtraría la existencia de un cliente ajeno.
+    const customer = await prisma.customer.findFirst({
+      where: { id: customerId, venueId: venue.id },
+      select: { id: true },
+    })
+    if (!customer) throw new NotFoundError('Cliente no encontrado')
+
+    const token = await buildSaveJwt(venue.id, customer.id)
+    if (!token) throw new NotFoundError('No se pudo generar la credencial')
+
+    void logAction({
+      action: 'WALLET_PASS_ISSUED',
+      entity: 'WalletPass',
+      entityId: customer.id,
+      venueId: venue.id,
+      data: { customerId: customer.id, platform: 'GOOGLE' },
+    })
+
+    res.redirect(302, `https://pay.google.com/gp/v/save/${token}`)
   } catch (error) {
     next(error)
   }
