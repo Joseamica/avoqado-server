@@ -18,6 +18,14 @@ import logger from '@/config/logger'
  */
 export async function ensureFeaturesAreSyncedToStripe(): Promise<boolean> {
   try {
+    // DEMO_MODE is an isolation boundary, not just a performance hint. Preview
+    // environments deliberately carry invalid provider keys and must not emit
+    // any Stripe request (or even query whether a request would be needed).
+    if (process.env.DEMO_MODE === 'true') {
+      logger.info('⏭️  Stripe sync skipped: DEMO_MODE=true')
+      return false
+    }
+
     // Skip if Stripe is not configured
     if (!process.env.STRIPE_SECRET_KEY) {
       logger.warn('⏭️  Stripe sync skipped: STRIPE_SECRET_KEY not configured')
