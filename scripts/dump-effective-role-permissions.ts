@@ -29,8 +29,26 @@
  */
 import { createHash } from 'crypto'
 import { readFileSync } from 'fs'
-import { StaffRole } from '@prisma/client'
-import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../src/lib/permissions'
+
+// 🔴 Importar `../src/lib/permissions` arrastra el logger del server, que al cargarse escribe su
+// banner («Logger initialized…») en STDOUT — y este script existe para que su stdout sea JSON y
+// NADA más. Con el banner por delante, el `JSON.parse` de los generadores de avoqado-android y
+// avoqado-ios revienta con «Unexpected non-whitespace character after JSON at position 4», así que
+// los espejos de permisos por rol NO se podían regenerar ni comprobar con `--check`: el detector
+// de drift entre repos estaba muerto y fallaba por una causa que no se parece en nada al síntoma.
+// No hay variable que lo apague (el banner se emite en las DOS ramas de `logger.ts:128-132`, y
+// `LOG_LEVEL` no lo toca), así que se desvía al canal correcto: durante la carga, todo lo que
+// alguien escriba en stdout se reenvía a STDERR. No se descarta —el diagnóstico sigue visible y
+// los generadores no lo leen— y se restaura antes de imprimir el JSON.
+const escrituraReal = process.stdout.write.bind(process.stdout)
+process.stdout.write = ((chunk: any, ...resto: any[]) => (process.stderr.write as any)(chunk, ...resto)) as any
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { StaffRole } = require('@prisma/client')
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } = require('../src/lib/permissions')
+
+process.stdout.write = escrituraReal
 
 /** Rutas que consumen los POS (Android, iOS, TPV). El dashboard web va aparte. */
 const ROUTE_FILES = ['mobile.routes.ts', 'tpv.routes.ts', 'pos-sync.routes.ts'] as const
@@ -47,7 +65,7 @@ for (const file of ROUTE_FILES) routePermissions[file] = permissionsCheckedIn(fi
 
 const roles: Record<string, { declared: string[]; effective: string[]; implicit: string[] }> = {}
 
-for (const role of Object.values(StaffRole) as StaffRole[]) {
+for (const role of Object.values(StaffRole) as any[]) {
   const declared = [...(DEFAULT_PERMISSIONS[role] ?? [])].sort()
   const effective = getEffectiveRolePermissions(role, null).slice().sort()
   const declaredSet = new Set(declared)
