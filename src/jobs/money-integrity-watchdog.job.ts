@@ -5,7 +5,7 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
-import { COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '../services/shared/pagadaPeroAbierta'
+import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '../services/shared/pagadaPeroAbierta'
 
 /**
  * Vigilante de integridad del dinero — PRUEBA TEMPORAL DE 4 DÍAS.
@@ -219,7 +219,7 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    30 días hacia atrás, así que el rezago más viejo no lo vigila nadie más.
         SELECT 'PAGADA PERO ABIERTA', v.name, o.id,
                'status=' || o.status || ' paymentStatus=' || o."paymentStatus" ||
-               ' base=' || GREATEST(0, o.subtotal - COALESCE(o."discountAmount", 0)) ||
+               ' base=' || ${baseQueDebeCubrirseSql('o')} ||
                ' pagado=' || (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p WHERE p."orderId" = o.id AND ${COBRO_QUE_CUBRE})
         FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
         WHERE ${criterioPagadaPeroAbiertaSql('o')}

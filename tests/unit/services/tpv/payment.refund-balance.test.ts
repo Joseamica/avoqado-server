@@ -259,10 +259,17 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
     expect(Number(data.remainingBalance)).toBe(0)
   })
 
-  it('REGRESIÓN: la propina acumulada sigue entrando al total (sin cargo por servicio)', async () => {
-    // 🔑 Este camino NO suma `serviceChargeAmount` al total — divergencia
-    // PREEXISTENTE con `payCashOrder`, fuera del alcance de este trabajo. El test
-    // la deja clavada para que un cambio futuro se note.
+  it('la propina acumulada entra al total, y el cargo por servicio TAMBIÉN', async () => {
+    // 🔴 ACTUALIZADO el 2026-09-02 (auditoría de Codex). Este test nació clavando a propósito
+    // una divergencia PREEXISTENTE —este camino no sumaba `serviceChargeAmount`, `payCashOrder`
+    // sí— «para que un cambio futuro se note». Éste es ese cambio, y la divergencia era el
+    // defecto: el schema define el cargo como «INGRESO GRAVABLE del negocio: SUMA al total y
+    // entra al corte y al CFDI». La expectativa vieja (220) era correcta como retrato del
+    // código de entonces, no como regla de dinero.
+    //
+    // 🔑 Y el efecto que hace visible por qué importaba: con 220 cobrados sobre una cuenta que
+    // vale 240, la cuenta ya NO queda saldada. Antes se cerraba PAID y los $20 del cargo se
+    // evaporaban del corte.
     seedOrder([{ amount: new Decimal(100), tipAmount: new Decimal(10), type: 'REGULAR' }], {
       serviceChargeAmount: new Decimal(20),
     })
@@ -271,8 +278,10 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
 
     const data = lastOrderUpdate()
     expect(Number(data.tipAmount)).toBe(20) // 10 previa + 10 nueva
-    expect(Number(data.total)).toBe(220) // 200 mercancía + 20 propina, SIN el cargo por servicio
+    expect(Number(data.total)).toBe(240) // 200 mercancía + 20 cargo por servicio + 20 propina
     expect(Number(data.paidAmount)).toBe(220) // 110 previos + 100 + 10 de propina
+    expect(Number(data.remainingBalance)).toBe(20) // justo el cargo por servicio
+    expect(data.paymentStatus).toBe('PARTIAL')
   })
 
   it('REGRESIÓN: el descuento mayor que el subtotal sigue clampando el total a la propina', async () => {

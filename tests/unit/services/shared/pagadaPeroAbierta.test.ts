@@ -19,11 +19,40 @@ describe('criterio SQL «pagada pero abierta»', () => {
     expect(sql).toMatch(/SUM\(p\.amount\)[\s\S]*?p\.status = 'COMPLETED' AND p\.type IS DISTINCT FROM 'REFUND'/)
   })
 
-  it('compara la suma de cobros COMPLETED que NO son REFUND contra la base sin propina, con tolerancia de un centavo', () => {
-    expect(sql).toMatch(/GREATEST\(0, o\.subtotal - COALESCE\(o\."discountAmount", 0\)\) - 0\.01/)
+  it('compara la suma de cobros COMPLETED que NO son REFUND contra lo que la cuenta DEBE, con tolerancia de un centavo', () => {
     expect(sql).toMatch(
       /SELECT COALESCE\(SUM\(p\.amount\), 0\) FROM "Payment" p\s+WHERE p\."orderId" = o\.id AND p\.status = 'COMPLETED' AND p\.type IS DISTINCT FROM 'REFUND'\s*\)\s*>=/,
     )
+  })
+
+  /**
+   * 🔴 EL CARGO POR SERVICIO ES PARTE DE LO QUE LA CUENTA DEBE (auditoría de Codex, 2-sep-2026).
+   *
+   * El schema lo dice con todas sus letras (`Order.serviceChargeAmount`): «A DIFERENCIA de la
+   * propina, esto es INGRESO GRAVABLE del negocio: SUMA al total y entra al corte y al CFDI».
+   * Comparando sólo contra `subtotal − descuento`, una cuenta de $100 + $10 de cargo con $100
+   * cobrados salía elegida como «pagada»: el barrido la cerraba, `reconcileOrderFromPayments`
+   * le REESCRIBÍA el total hacia abajo y la mesa se liberaba — $10 perdidos, sin rastro.
+   *
+   * La propina se queda FUERA a propósito: no es deuda de la cuenta sino dinero del mesero, y
+   * `computeOrderBalance` (`shared/orderBalance.ts`) la pone a los DOS lados de la comparación
+   * (entra al total y entra a lo pagado), así que se cancela. Lo que el criterio compara es lo
+   * mismo que aquélla: `mercancía + cargo por servicio` contra `Σ amount`.
+   */
+  it('lo que la cuenta debe INCLUYE el cargo por servicio y EXCLUYE la propina', () => {
+    expect(sql).toMatch(
+      /GREATEST\(0, o\.subtotal - COALESCE\(o\."discountAmount", 0\)\) \+ COALESCE\(o\."serviceChargeAmount", 0\) - 0\.01/,
+    )
+
+    // El alias manda también aquí: el cargo se lee de la MISMA tabla que el subtotal.
+    expect(criterioPagadaPeroAbiertaSql('x')).toContain('COALESCE(x."serviceChargeAmount", 0)')
+
+    // 🔴 Guarda contra la «simplificación» que reintroduce el defecto: la base NO puede volver
+    // a terminar en el descuento. Con el término del cargo borrado, esta línea falla.
+    expect(sql).not.toMatch(/COALESCE\(o\."discountAmount", 0\)\) - 0\.01/)
+
+    // La propina NUNCA entra: sumarla haría que una cuenta saldada pareciera deber la propina.
+    expect(sql).not.toContain('tipAmount')
   })
 })
 

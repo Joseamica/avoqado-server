@@ -250,4 +250,115 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
       remainingBalance: 0,
     })
   })
+
+  /**
+   * 🔴 EL CARGO POR SERVICIO CUENTA — auditoría de Codex, 2-sep-2026.
+   *
+   * `Order.serviceChargeAmount` (propina automática por grupo, descorche, entrega) es, según el
+   * propio schema, «INGRESO GRAVABLE del negocio: SUMA al total y entra al corte y al CFDI» — a
+   * diferencia de la propina, que pasa al mesero. El recálculo del cierre lo omitía, así que una
+   * cuenta de $100 + $10 de cargo con $100 cobrados se daba por SALDADA, se le reescribía el
+   * total a $100 y se cerraba: $10 desaparecían del corte sin que nada fallara.
+   *
+   * `computeOrderBalance` (`shared/orderBalance.ts`) —la aritmética canónica que ya usan el
+   * efectivo móvil y los vales por área— siempre lo sumó. Este camino era el que discrepaba.
+   */
+  const ordenConCargo = (payments: { amount: Decimal; tipAmount: Decimal; type: string }[]) => ({
+    id: 'ord-svc',
+    venueId: 'v1',
+    status: 'CONFIRMED',
+    paymentStatus: 'PARTIAL',
+    subtotal: new Decimal(100),
+    discountAmount: new Decimal(0),
+    serviceChargeAmount: new Decimal(10),
+    tipAmount: new Decimal(0),
+    total: new Decimal(110),
+    servedById: 'staff-1',
+    createdById: 'staff-1',
+    tableId: null,
+    customer: null,
+    payments,
+    items: [],
+  })
+
+  const txDeCierre = () => {
+    const fakeTx = {
+      order: {
+        update: jest.fn().mockResolvedValue({ id: 'ord-svc', venueId: 'v1', status: 'CONFIRMED', paymentStatus: 'PARTIAL', items: [] }),
+      },
+      inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
+    }
+    p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
+    return fakeTx
+  }
+
+  it('NO cierra una cuenta cuyos cobros cubren la mercancía pero no el cargo por servicio', async () => {
+    p.order.findUnique.mockResolvedValue(ordenConCargo([{ amount: new Decimal(100), tipAmount: new Decimal(0), type: 'REGULAR' }]))
+    const fakeTx = txDeCierre()
+
+    await reconcileOrderFromPayments('ord-svc')
+
+    const data = fakeTx.order.update.mock.calls[0][0].data
+    // Sigue debiendo los $10 del cargo: ni PAID, ni COMPLETED, ni total reescrito a la baja.
+    expect(data).not.toHaveProperty('status')
+    expect(data).toMatchObject({ paymentStatus: 'PARTIAL', total: 110, paidAmount: 100, remainingBalance: 10 })
+  })
+
+  it('SÍ cierra la misma cuenta cuando los cobros cubren mercancía + cargo por servicio', async () => {
+    p.order.findUnique.mockResolvedValue(ordenConCargo([{ amount: new Decimal(110), tipAmount: new Decimal(0), type: 'REGULAR' }]))
+    const fakeTx = txDeCierre()
+
+    await reconcileOrderFromPayments('ord-svc')
+
+    expect(fakeTx.order.update.mock.calls[0][0].data).toMatchObject({
+      paymentStatus: 'PAID',
+      status: 'COMPLETED',
+      total: 110,
+      paidAmount: 110,
+      remainingBalance: 0,
+    })
+  })
+
+  it('la propina sigue FUERA de lo que la cuenta debe: se suma al total y también a lo pagado', async () => {
+    // $100 de mercancía + $10 de cargo, cobrados con $110 y $15 de propina encima. El total
+    // canónico lleva la propina (125) y lo pagado también (125): la cuenta queda saldada, y el
+    // cargo NO se paga con la propina del mesero.
+    p.order.findUnique.mockResolvedValue(ordenConCargo([{ amount: new Decimal(110), tipAmount: new Decimal(15), type: 'REGULAR' }]))
+    const fakeTx = txDeCierre()
+
+    await reconcileOrderFromPayments('ord-svc')
+
+    expect(fakeTx.order.update.mock.calls[0][0].data).toMatchObject({
+      paymentStatus: 'PAID',
+      status: 'COMPLETED',
+      tipAmount: 15,
+      total: 125,
+      paidAmount: 125,
+      remainingBalance: 0,
+    })
+  })
+
+  it('una orden SIN cargo por servicio se comporta exactamente igual que antes (regresión)', async () => {
+    // El campo puede llegar ausente (mocks viejos, `select` parciales) o en 0: los dos casos
+    // tienen que dar el MISMO resultado que daba el código anterior al arreglo.
+    for (const cargo of [undefined, new Decimal(0)]) {
+      jest.clearAllMocks()
+      p.order.findUnique.mockResolvedValue({
+        ...ordenConCargo([{ amount: new Decimal(100), tipAmount: new Decimal(0), type: 'REGULAR' }]),
+        serviceChargeAmount: cargo,
+        total: new Decimal(100),
+      })
+      const fakeTx = txDeCierre()
+
+      await reconcileOrderFromPayments('ord-svc')
+
+      expect(fakeTx.order.update.mock.calls[0][0].data).toMatchObject({
+        paymentStatus: 'PAID',
+        status: 'COMPLETED',
+        total: 100,
+        paidAmount: 100,
+        remainingBalance: 0,
+      })
+    }
+  })
 })

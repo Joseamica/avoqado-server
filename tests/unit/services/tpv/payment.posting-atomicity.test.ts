@@ -236,6 +236,32 @@ describe('recordOrderPayment — el posting nace atómico con la transición a P
     expect(createSalePostingInTxMock.mock.calls[0][0]).not.toBe(prisma)
   })
 
+  /**
+   * 🔴 El umbral de «ya estaba saldada ANTES de este cobro» tiene que contar el cargo por
+   * servicio, igual que el total (auditoría de Codex, 2026-09-02).
+   *
+   * `settledBeforeThisPayment` decide si nace el vale de inventario: existe para que
+   * re-cobrar una cuenta YA saldada no vuelva a descontar mercancía. Si ese umbral omite el
+   * cargo mientras `isFullyPaid` sí lo cuenta, los dos dejan de hablar del mismo dinero, y
+   * el abono que de verdad salda la cuenta se confunde con un re-cobro: la venta se cierra
+   * PAID y su stock NO se deduce nunca — silenciosamente, porque nada falla.
+   */
+  it('el abono que salda una cuenta CON cargo por servicio sí crea el vale (no se lee como re-cobro)', async () => {
+    // $100 de mercancía + $10 de cargo. Ya entraron $100; este cobro de $10 es el que salda.
+    const orden = makeOrder({
+      serviceChargeAmount: new Decimal(10),
+      total: new Decimal(110),
+      paymentStatus: 'PARTIAL',
+      payments: [{ amount: new Decimal(100), tipAmount: new Decimal(0), type: 'REGULAR' }],
+    })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(orden)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...orden, paymentStatus: 'PAID', status: 'COMPLETED' })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, amount: 1000 }, 'user-1')
+
+    expect(createSalePostingInTxMock).toHaveBeenCalled()
+  })
+
   it('si la transición a PAID falla, NO queda un posting huérfano', async () => {
     ;(prisma.order.update as jest.Mock).mockRejectedValue(new Error('deadlock en el update de la orden'))
 

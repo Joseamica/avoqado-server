@@ -21,7 +21,7 @@ import {
   VENTANA_DEL_BARRIDO_MIN,
   buildWatchdogSql,
 } from '@/jobs/money-integrity-watchdog.job'
-import { COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '@/services/shared/pagadaPeroAbierta'
+import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '@/services/shared/pagadaPeroAbierta'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -90,6 +90,12 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(pagadaAbierta).toContain(
       `' pagado=' || (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p WHERE p."orderId" = o.id AND ${COBRO_QUE_CUBRE})`,
     )
+    // 🔴 Y el OTRO lado de la comparación, por el mismo motivo: `base=` se re-derivaba a mano
+    // (`GREATEST(0, subtotal − descuento)`, sin el cargo por servicio) mientras el criterio que
+    // eligió la orden sí lo cuenta desde el arreglo del 2-sep-2026. La alerta explicaría la
+    // orden con una cifra que no fue la que la disparó.
+    expect(pagadaAbierta).toContain(`' base=' || ${baseQueDebeCubrirseSql('o')}`)
+    expect(baseQueDebeCubrirseSql('o')).toContain('COALESCE(o."serviceChargeAmount", 0)')
     expect(pagadaAbierta).toContain('Grupo Avoqado Prime')
   })
 

@@ -519,6 +519,19 @@ async function updateOrderTotalsForStandalonePayment(
   // Without this, discounted orders never reach isFullyPaid and stay in PENDING.
   const orderDiscount = order.discountAmount ? parseFloat(order.discountAmount.toString()) : 0
 
+  // 🔴 EL CARGO POR SERVICIO ES DEUDA DE LA CUENTA (auditoría Codex, 2026-09-02).
+  //
+  // `Order.serviceChargeAmount` (propina automática por grupo, descorche, entrega) es —dicho
+  // por el propio schema— «INGRESO GRAVABLE del negocio: SUMA al total y entra al corte y al
+  // CFDI», a diferencia de la propina, que pasa al mesero. Este recálculo lo OMITÍA: una
+  // cuenta de $100 + $10 de cargo con $100 cobrados se declaraba saldada, se le reescribía el
+  // `total` a $100 —hacia ABAJO— y se cerraba con la mesa liberada. $10 fuera del corte, sin
+  // error y sin rastro.
+  //
+  // `computeOrderBalance` (`shared/orderBalance.ts`) —la aritmética canónica que ya usan el
+  // efectivo móvil y los vales por área— siempre lo sumó: era este camino el que discrepaba.
+  const orderServiceCharge = order.serviceChargeAmount ? parseFloat(order.serviceChargeAmount.toString()) : 0
+
   // ✅ FIX: Calculate cumulative tip from all completed payments + current tip
   // 🔴 Sin los REFUND: la propina DEVUELTA (negativa) borraba del total la
   // propina que el mesero sí había cobrado.
@@ -542,7 +555,10 @@ async function updateOrderTotalsForStandalonePayment(
   // excedente no debe comérsela. Mismo criterio que
   // `recalculateOrderTotals` (base clampada, luego se suman los cargos) y que
   // `applyManualDiscount` en discount.tpv.service.ts.
-  const newTotal = Math.max(0, orderSubtotal - orderDiscount) + totalTip
+  //
+  // El cargo por servicio va DESPUÉS del clamp, como la propina: un descuento excedente se
+  // come la mercancía, no los cargos (mismo criterio que `computeOrderBalance`).
+  const newTotal = Math.max(0, orderSubtotal - orderDiscount) + orderServiceCharge + totalTip
 
   // Calculate remaining amount (based on new total)
   // 🔴 El clamp a 0 se CONSERVA a propósito: clientes viejos (TPV/Android/iOS) esperan
@@ -568,7 +584,7 @@ async function updateOrderTotalsForStandalonePayment(
   // Y exige pagos PREVIOS: una orden 100% cortesía (total clampado a 0) sin
   // pagos aún NO está saldada — su primer cobro de $0 sí debe deducir.
   const settledBeforeThisPayment =
-    order.payments.length > 0 && previousPayments >= Math.max(0, orderSubtotal - orderDiscount) + previousTips - 0.01
+    order.payments.length > 0 && previousPayments >= Math.max(0, orderSubtotal - orderDiscount) + orderServiceCharge + previousTips - 0.01
   const coveredAreaTicketLines = isFullyPaid
     ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
     : new Set<string>()
@@ -1154,7 +1170,6 @@ async function updateOrderTotalsForStandalonePayment(
         totalItems: updatedOrder.items.length,
       })
     }
-
   }
 
   // Efectos del settlement, independientes del modo de inventario. Los vales
@@ -3313,6 +3328,17 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           terminalId,
           status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
           completedAt: new Date(),
+          // 🔴 La orden cae en el MISMO turno que su cobro (auditoría Codex, 2026-09-02).
+          //
+          // El `Payment` de abajo ya llevaba `shiftId`; la orden no. Y desde la fase 1 del
+          // turno del negocio, `getActiveShifts` cuenta las órdenes de un turno agrupando por
+          // `Order.shiftId`: un turno con diez ventas rápidas enseñaba el dinero correcto y
+          // «0 órdenes», y el cierre tampoco veía sus productos.
+          //
+          // Se reusa el `currentShift` YA resuelto arriba, nunca una segunda consulta: si el
+          // turno se cerrara entre las dos lecturas, el cobro y su orden caerían en turnos
+          // distintos. Opcional a propósito — un negocio que no abrió caja sigue vendiendo.
+          shiftId: currentShift?.id,
           subtotal: totalAmount, // Base amount (without tip)
           taxAmount: 0, // No tax for fast payments
           total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip

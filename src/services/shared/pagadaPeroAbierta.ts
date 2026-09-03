@@ -17,14 +17,43 @@ import { utcTs } from '../../utils/sqlDates'
 export const COBRO_QUE_CUBRE = `p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'`
 
 /**
+ * Lo que la cuenta DEBE: `max(0, subtotal − descuento) + cargo por servicio`.
+ *
+ * Vive una sola vez por el mismo motivo que `COBRO_QUE_CUBRE` —es el OTRO lado de la misma
+ * comparación— y lo usan tres sitios que no pueden divergir: el criterio, la columna `base`
+ * del barrido y el detalle del vigilante de dinero. Cuando se re-derivaba a mano, el
+ * vigilante explicaba una alerta con una cifra distinta de la que la disparó.
+ *
+ * 🔴 El cargo por servicio entra y la propina NO. El schema define
+ * `Order.serviceChargeAmount` como «INGRESO GRAVABLE del negocio: SUMA al total y entra al
+ * corte y al CFDI», mientras la propina pasa al mesero; y `computeOrderBalance`
+ * (`shared/orderBalance.ts`) —la aritmética canónica del saldo— pone la propina a los DOS
+ * lados (entra al total y entra a lo pagado), de modo que se cancela y la comparación se
+ * reduce exactamente a ésta. El cargo va DESPUÉS del clamp: un descuento excedente se come
+ * la mercancía, nunca los cargos.
+ */
+export function baseQueDebeCubrirseSql(alias = 'o'): string {
+  return `GREATEST(0, ${alias}.subtotal - COALESCE(${alias}."discountAmount", 0)) + COALESCE(${alias}."serviceChargeAmount", 0)`
+}
+
+/**
  * Criterio ÚNICO de «orden cobrada que sigue abierta». Lo consumen el barrido
  * (`paid-order-reconciler.job.ts`) y el vigilante de dinero (check #6): si alguna vez
  * divergen, uno de los dos miente. Caso semilla: ORD-1788276418170 (Testarudo, 1-sep-2026).
  *
  * Reglas:
  *  - la orden no está en estado terminal;
- *  - la suma de sus cobros que cuentan (ver `COBRO_QUE_CUBRE`) cubre la base sin propina,
- *    `max(0, subtotal − descuento)`, con un centavo de tolerancia;
+ *  - la suma de sus cobros que cuentan (ver `COBRO_QUE_CUBRE`) cubre lo que la cuenta DEBE,
+ *    `max(0, subtotal − descuento) + cargo por servicio`, con un centavo de tolerancia;
+ *  - 🔴 el CARGO POR SERVICIO entra y la PROPINA no, y no es una asimetría arbitraria: el
+ *    schema define `Order.serviceChargeAmount` como «INGRESO GRAVABLE del negocio: SUMA al
+ *    total y entra al corte y al CFDI», mientras la propina pasa al mesero. Es exactamente
+ *    lo que hace `computeOrderBalance` (`shared/orderBalance.ts`), la aritmética canónica
+ *    del saldo: `total = mercancía + cargo + propinas` contra `pagado = Σ(amount + tip)`, de
+ *    modo que la propina se cancela a los dos lados y la comparación se reduce a esta misma
+ *    —`Σ amount >= mercancía + cargo`—. Omitiendo el cargo, una cuenta de $100 + $10 con
+ *    $100 cobrados salía elegida como pagada: el barrido la cerraba, le reescribía el total
+ *    hacia abajo y liberaba la mesa. $10 perdidos, en silencio (auditoría Codex 2-sep-2026);
  *  - la suma es CIEGA AL TIPO salvo REFUND: los TEST y los ADJUSTMENT cuentan, igual que
  *    en el camino de cierre. No se filtra por `type` más allá de excluir la devolución;
  *  - existe al menos un cobro REGULAR o FAST positivo — así una cuenta de $0 sin cobro
@@ -49,7 +78,7 @@ export function criterioPagadaPeroAbiertaSql(alias = 'o'): string {
     AND (
       SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p
       WHERE p."orderId" = ${o}.id AND ${COBRO_QUE_CUBRE}
-    ) >= GREATEST(0, ${o}.subtotal - COALESCE(${o}."discountAmount", 0)) - 0.01`
+    ) >= ${baseQueDebeCubrirseSql(o)} - 0.01`
 }
 
 export interface CandidataPagadaAbierta {
@@ -68,9 +97,11 @@ type Db = Pick<PrismaClient, '$queryRaw'> | Pick<Prisma.TransactionClient, '$que
 /**
  * Candidatas, del más viejo al más nuevo, sin tocar órdenes actualizadas hace menos de `graceMs`.
  *
- * `pagado` aplica el MISMO filtro que el criterio (`COBRO_QUE_CUBRE`) para que el número
- * reportado sea el que decidió la selección. `paymentIds` en cambio trae TODOS los COMPLETED,
- * reembolsos incluidos: es rastro de auditoría, no la suma que manda — nunca se suma.
+ * `base` y `pagado` reproducen los DOS lados de la comparación del criterio —el cargo por
+ * servicio incluido— para que los números que explican por qué se eligió una orden sean los
+ * que la eligieron; `pagado` aplica el MISMO filtro (`COBRO_QUE_CUBRE`). `paymentIds` en cambio
+ * trae TODOS los COMPLETED, reembolsos incluidos: es rastro de auditoría, no la suma que manda
+ * — nunca se suma.
  *
  * 🔴 `since` acota por `Order.createdAt` y es lo que hace barato el tic del barrido: el
  * criterio no tiene índice que sirva (`status NOT IN (...)`, `updatedAt <`), así que sin tope
@@ -86,7 +117,7 @@ export async function findPaidButOpenOrders(
   // `$queryRaw` con template: sólo los valores van parametrizados; el fragmento es texto fijo.
   const rows = await db.$queryRaw<CandidataPagadaAbierta[]>`
     SELECT o.id, o."venueId", o."orderNumber", o.status::text AS status, o."paymentStatus"::text AS "paymentStatus",
-           GREATEST(0, o.subtotal - COALESCE(o."discountAmount", 0))::text AS base,
+           (${Prisma.raw(baseQueDebeCubrirseSql('o'))})::text AS base,
            (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p
              WHERE p."orderId" = o.id AND ${Prisma.raw(COBRO_QUE_CUBRE)})::text AS pagado,
            ARRAY(SELECT p.id FROM "Payment" p WHERE p."orderId" = o.id AND p.status = 'COMPLETED' ORDER BY p."createdAt") AS "paymentIds"
