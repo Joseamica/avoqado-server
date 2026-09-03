@@ -1,6 +1,7 @@
 import {
   assertQ3bRenderReviewSeedTarget,
   Q3B_RENDER_REVIEW_CATALOG,
+  Q3B_RENDER_REVIEW_DASHBOARD_ROLE,
   Q3B_RENDER_REVIEW_MAIN_SELECTIONS,
   Q3B_RENDER_REVIEW_MONEY,
   Q3B_RENDER_REVIEW_OFFER,
@@ -71,6 +72,7 @@ describe('Q3B Render review seed boundary', () => {
   })
 
   it('pins the founder-review offer and money expectations before any preview data is written', () => {
+    expect(Q3B_RENDER_REVIEW_DASHBOARD_ROLE).toBe('OWNER')
     expect(Q3B_RENDER_REVIEW_CATALOG).toEqual({
       sourceKey: 'Q3B_RENDER_CONFIGURATOR_CATALOG_20260902',
       requiredPackageCapabilities: {

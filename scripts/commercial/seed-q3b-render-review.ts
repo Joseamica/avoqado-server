@@ -37,6 +37,7 @@ import prisma from '@/utils/prismaClient'
 import {
   assertQ3bRenderReviewSeedTarget,
   Q3B_RENDER_REVIEW_CATALOG,
+  Q3B_RENDER_REVIEW_DASHBOARD_ROLE,
   Q3B_RENDER_REVIEW_MAIN_CONTRACT,
   Q3B_RENDER_REVIEW_MAIN_SELECTIONS,
   Q3B_RENDER_REVIEW_MONEY,
@@ -192,8 +193,8 @@ async function ensurePreviewOwnerVenueAuthority(
     venueIds.map(venueId =>
       prisma.staffVenue.upsert({
         where: { staffId_venueId: { staffId, venueId } },
-        update: { role: 'SUPERADMIN', active: true, permissionSetId: null },
-        create: { staffId, venueId, role: 'SUPERADMIN', active: true },
+        update: { role: Q3B_RENDER_REVIEW_DASHBOARD_ROLE, active: true, permissionSetId: null },
+        create: { staffId, venueId, role: Q3B_RENDER_REVIEW_DASHBOARD_ROLE, active: true },
       }),
     ),
   )

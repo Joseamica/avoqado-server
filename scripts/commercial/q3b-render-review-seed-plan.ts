@@ -1,5 +1,6 @@
 export const Q3B_RENDER_REVIEW_CONFIRMATION = 'avq-q3b-20260902-a91e-staging-db'
 export const Q3B_RENDER_REVIEW_DATABASE = 'avoqado_q3b_preview'
+export const Q3B_RENDER_REVIEW_DASHBOARD_ROLE = 'OWNER' as const
 
 export const Q3B_RENDER_REVIEW_CATALOG = Object.freeze({
   sourceKey: 'Q3B_RENDER_CONFIGURATOR_CATALOG_20260902',
