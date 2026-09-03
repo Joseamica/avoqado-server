@@ -21,18 +21,24 @@ function opaqueSecret(): string {
 }
 
 /**
- * Asegura que la plantilla del negocio existe en Google.
+ * Asegura que la plantilla del negocio existe en Google — y si ya existe, la ACTUALIZA.
  *
  * 🔴 Se pregunta antes de insertar: `insert` sobre una clase que ya existe devuelve
  * error 409 y abortaría la emisión de un cliente que no tiene la culpa.
+ *
+ * 🔴 Sin el `patch` del bloque de abajo, la plantilla se crea UNA vez y nunca se vuelve
+ * a tocar: si el negocio cambia su logo, colores o premio en el diseñador, el pase de
+ * Apple lo relee en cada emisión pero el de Android queda congelado para siempre en
+ * como estaba el día de la primera tarjeta. Rompe la paridad justo donde nadie mira.
  */
 export async function ensureLoyaltyClass(venueId: string): Promise<string> {
   const client = await walletClient()
   const classId = googleClassId(issuerId(), venueId)
 
+  let yaExiste = false
   try {
     await client.loyaltyclass.get({ resourceId: classId })
-    return classId
+    yaExiste = true
   } catch (error: any) {
     const codigo = error?.code ?? error?.response?.status
     // 🔴 Sólo un 404 significa «no existe, créala». Un 403 o un fallo de red significan que
@@ -45,22 +51,42 @@ export async function ensureLoyaltyClass(venueId: string): Promise<string> {
   // función lee la cartilla de un CLIENTE, y aquí todavía no hay ninguno — se está creando
   // la plantilla del NEGOCIO. Mismo respaldo que usa `getStampCardStatus` cuando el negocio
   // no configuró nada.
+  //
+  // 🔴 `select` amplía a `logo`: es el respaldo del logo cuando el negocio no subió uno al
+  // diseñador (ver `googleClassBuilder.service.ts`).
   const [venue, design, config] = await Promise.all([
-    prisma.venue.findFirst({ where: { id: venueId, active: true }, select: { name: true } }),
+    prisma.venue.findFirst({ where: { id: venueId, active: true }, select: { name: true, logo: true } }),
     getCardDesign(venueId),
     prisma.loyaltyConfig.findUnique({ where: { venueId } }),
   ])
   const rewardLabel = config?.stampRewardLabel ?? 'Un producto gratis'
 
-  await client.loyaltyclass.insert({
-    requestBody: buildLoyaltyClass({
-      issuerId: issuerId(),
-      venueId,
-      venueName: venue?.name ?? 'Avoqado',
-      design,
-      rewardLabel,
-    }) as any,
-  })
+  const requestBody = buildLoyaltyClass({
+    issuerId: issuerId(),
+    venueId,
+    venueName: venue?.name ?? 'Avoqado',
+    design,
+    rewardLabel,
+    venueLogo: venue?.logo ?? null,
+  }) as any
+
+  if (yaExiste) {
+    // 🔴 Un fallo del patch NO debe impedir emitir: el cliente prefiere una tarjeta con
+    // el logo/colores viejos que ninguna tarjeta. Se registra y se sigue con la clase que
+    // ya existe en Google.
+    try {
+      await client.loyaltyclass.patch({ resourceId: classId, requestBody })
+    } catch (error) {
+      logger.error('No se pudo actualizar la plantilla de Google Wallet del negocio; se sigue con la existente', {
+        venueId,
+        classId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+    return classId
+  }
+
+  await client.loyaltyclass.insert({ requestBody })
 
   return classId
 }

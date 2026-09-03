@@ -7,6 +7,7 @@
  */
 const insertClass = jest.fn().mockResolvedValue({ data: {} })
 const getClass = jest.fn()
+const patchClass = jest.fn().mockResolvedValue({ data: {} })
 const insertObject = jest.fn().mockResolvedValue({ data: {} })
 
 jest.mock('@/services/wallet/googleWalletClient', () => ({
@@ -19,7 +20,7 @@ jest.mock('@/services/wallet/googleWalletClient', () => ({
   // credencial ilegible que las otras pruebas prueban, es un hueco del mock.
   walletBaseUrl: jest.fn(() => 'https://api.avoqado.io'),
   walletClient: jest.fn(async () => ({
-    loyaltyclass: { insert: insertClass, get: getClass },
+    loyaltyclass: { insert: insertClass, get: getClass, patch: patchClass },
     // 🔴 Sin `get`: `issueGooglePass` decide si ya existe el pase por la BASE (el
     // `WalletPass.googleObjectId`), nunca preguntándole a Google. Nadie en producción
     // llama a `loyaltyobject.get`, así que un mock aquí quedaba sin usar.
@@ -64,6 +65,24 @@ describe('googleWalletPass', () => {
     // casualidad resolvió.
     expect(getClass).toHaveBeenCalledWith({ resourceId: '338.venue-v1' })
     expect(insertClass).not.toHaveBeenCalled()
+  })
+
+  it('🔴 si la clase YA existe, la actualiza con patch: si el negocio cambió logo/colores/premio en el diseñador, Android se queda congelado sin esto', async () => {
+    getClass.mockResolvedValue({ data: { id: '338.venue-v1' } })
+    await ensureLoyaltyClass('v1')
+    expect(patchClass).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resourceId: '338.venue-v1',
+        requestBody: expect.objectContaining({ id: '338.venue-v1' }),
+      }),
+    )
+    expect(insertClass).not.toHaveBeenCalled()
+  })
+
+  it('🔴 si el patch falla, ensureLoyaltyClass IGUAL devuelve el classId: mejor la tarjeta con el logo viejo que ninguna tarjeta', async () => {
+    getClass.mockResolvedValue({ data: { id: '338.venue-v1' } })
+    patchClass.mockRejectedValueOnce(new Error('Google truena'))
+    await expect(ensureLoyaltyClass('v1')).resolves.toBe('338.venue-v1')
   })
 
   it('🔴 un 403 (o cualquier error que no sea 404) al preguntar por la clase se propaga, no se confunde con "no existe"', async () => {

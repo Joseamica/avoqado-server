@@ -15,6 +15,9 @@ const BASE = {
   venueName: 'Testarudo Café',
   design: { ...DEFAULT_CARD_DESIGN },
   rewardLabel: 'Un café gratis',
+  // 🔴 Sin logo del diseñador ni del venue por default: así cada prueba deja explícito
+  // cuál de los tres niveles de la cadena de respaldo está ejercitando.
+  venueLogo: null as string | null,
 }
 
 describe('googleClassId', () => {
@@ -45,14 +48,31 @@ describe('buildLoyaltyClass', () => {
     expect(buildLoyaltyClass(BASE).reviewStatus).toBe('UNDER_REVIEW')
   })
 
-  it('el logo del negocio va como programLogo cuando lo subió', () => {
-    const c = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: 'https://cdn/logo.png' } }) as any
+  it('el logo del negocio va como programLogo cuando lo subió en el diseñador', () => {
+    const c = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: 'https://cdn/logo.png' }, venueLogo: 'https://cdn/venue-logo.png' }) as any
+    // 🔴 El del diseñador manda sobre el del venue: es el más específico de la cadena.
     expect(c.programLogo.sourceUri.uri).toBe('https://cdn/logo.png')
   })
 
-  it('🔴 sin logo propio NO se manda programLogo vacío: Google rechaza un uri nulo', () => {
-    const c = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: null } })
-    expect(c).not.toHaveProperty('programLogo')
+  it('🔴 sin logo del diseñador pero con Venue.logo, usa el del venue', () => {
+    const c = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: null }, venueLogo: 'https://cdn/venue-logo.jpg' }) as any
+    expect(c.programLogo.sourceUri.uri).toBe('https://cdn/venue-logo.jpg')
+  })
+
+  it('🔴 sin logo del diseñador NI del venue, cae al logo fijo de Avoqado: programLogo es obligatorio para Google', () => {
+    const c = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: null }, venueLogo: null }) as any
+    expect(c.programLogo.sourceUri.uri).toMatch(/^https:\/\//)
+    expect(c.programLogo.sourceUri.uri).not.toBe('')
+  })
+
+  it('🔴 NUNCA se emite una clase sin programLogo: Google la rechaza con un 400 si falta', () => {
+    const sinNada = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: null }, venueLogo: null })
+    const soloVenue = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: null }, venueLogo: 'https://cdn/venue-logo.png' })
+    const soloDiseno = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: 'https://cdn/logo.png' }, venueLogo: null })
+    for (const c of [sinNada, soloVenue, soloDiseno]) {
+      expect(c).toHaveProperty('programLogo')
+      expect((c as any).programLogo.sourceUri.uri).toBeTruthy()
+    }
   })
 
   it('el premio se explica en el reverso, en minúscula a media frase como en el pase de Apple', () => {
