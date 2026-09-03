@@ -132,13 +132,22 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
 
   // ─── Regresión: lo que NO se puede romper ───────────────────────────────────
 
-  it('si el turno cerró entre la lectura y el claim, el reembolso se registra IGUAL', async () => {
+  it('🔴 si el turno cerró entre la lectura y el claim, el pago NO se sella con ese turno', async () => {
     armar()
+    // El turno existía al leerlo y ya no estaba OPEN al reclamarlo: `count: 0`.
     ;(prismaMock as any).shift.updateMany.mockResolvedValue({ count: 0 })
 
     await expect(refundService.recordRefund(VENUE, cuerpo() as never)).resolves.toMatchObject({ id: 'pay-refund' })
-    // El dinero ya salió de la caja física: que el turno se moviera no puede tumbar el registro.
+
+    // 1) El dinero ya salió de la caja física: que el turno se moviera no tumba el registro.
     expect((prismaMock as any).payment.create).toHaveBeenCalledTimes(1)
+    // 2) 🔴 Y —la aserción que faltaba en la primera versión— el `Payment` NO queda apuntando
+    //    a ese turno. Sellarlo dejaría un REFUND colgando de un turno CERRADO al que nunca se
+    //    le restó: el cierre selecciona estrictamente por `shiftId`, así que un recálculo
+    //    desde los pagos discreparía de su propio `totalSales` por el monto del reembolso.
+    //    Con `shiftId` nulo el reembolso queda fuera de todo turno de forma coherente, y
+    //    reatribuible después (`scripts/reatribuir-cobros-al-turno.ts`).
+    expect(datosDelPagoCreado().shiftId).toBeUndefined()
   })
 
   it('sin turno abierto el reembolso se registra sin turno y no decrementa ninguno', async () => {

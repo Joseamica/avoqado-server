@@ -215,16 +215,14 @@ export async function recordRefund(
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // STEP 3: el turno abierto del NEGOCIO (para conciliación) — `../shared/turnoDeCaja.ts`
+  // STEP 3: el turno abierto del NEGOCIO — se resuelve DENTRO de la transacción (STEP 4)
   // ═══════════════════════════════════════════════════════════════════════════
-  //
-  // 🔴 SIN rama que lea al cliente. Hasta el 3-sep-2026 esto era «el `shiftId` del cuerpo, y
-  // si viene vacío el helper» — y venía SIEMPRE lleno: la ruta valida con
+  // Aquí NO queda nada: hasta el 3-sep-2026 este paso leía `refundData.shiftId` y sólo caía
+  // al helper cuando venía vacío — y venía SIEMPRE lleno (la ruta valida con
   // `recordFastPaymentParamsSchema`, que declara sólo `params`, así que `validateRequest` no
-  // parsea ni reemplaza el body y `req.body.shiftId` llegaba crudo. El reembolso se ataba al
-  // turno que creía la TERMINAL, y la Fase 1 («el turno es del NEGOCIO») quedaba anulada
-  // justo aquí. El campo sigue llegando de las PAX en la calle; se ignora a propósito.
-  const shiftId = (await turnoAbiertoDelNegocio(prisma, venueId))?.id ?? null
+  // parsea ni reemplaza el body y `req.body.shiftId` llegaba crudo). El campo sigue llegando
+  // de las PAX en la calle y se ignora a propósito. El porqué de resolverlo dentro de la
+  // transacción está en el bloque «turno» del STEP 4.
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 4: Create refund payment and update original in transaction
@@ -249,6 +247,46 @@ export async function recordRefund(
     const lockedRemaining = lockedTotal - lockedAlreadyRefunded
     if (refundAmountInPesos > lockedRemaining + 0.001) {
       throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // El turno abierto del NEGOCIO: resolver → RECLAMAR → sellar, todo aquí dentro
+    // ═══════════════════════════════════════════════════════════════════════
+    // 🔴 Plantilla de `mobile/refund.mobile.service.ts:65-88`, y las tres piezas cuentan:
+    //
+    // 1. Se resuelve con `tx` y DENTRO de la transacción. Resolverlo fuera dejaba una
+    //    ventana en la que el turno se cerraba en medio (otro aparato, o el cierre
+    //    automático) con el `Payment` ya sellado apuntando a él.
+    // 2. El claim ES el decremento: `updateMany` condicionado a `status: 'OPEN'` y acotado
+    //    por `venueId` — por id solo aceptaba el turno de OTRO negocio. Es `updateMany` y no
+    //    `update` porque un `where` que no encaja tiene que dar `count: 0`, no un P2025 que
+    //    tumbe la transacción entera: el dinero YA salió de la caja física.
+    // 3. 🔴 El `Payment` se sella con el turno SÓLO si el claim GANÓ. Sellar antes de
+    //    reclamar (y descartar el `count`) dejaba un REFUND colgando de un turno cerrado al
+    //    que nunca se le restó, y el cierre selecciona estrictamente por `shiftId`
+    //    (`shift.tpv.service.ts:1485-1489`): un recálculo desde los pagos discreparía de su
+    //    propio `totalSales` por el monto del reembolso.
+    //
+    // `shiftId` queda en null en DOS casos, y sólo en ésos: no hay ningún turno abierto, o el
+    // que había se cerró entre la lectura y el claim. En ambos el reembolso se registra igual
+    // y queda FUERA de todo turno de forma coherente (ni el contador denormalizado ni un
+    // recálculo desde los pagos lo cuentan). El efectivo físico no se pierde: el `PAY_OUT` al
+    // cajón se publica post-commit contra la `CashDrawerSession` abierta del venue
+    // (`shared/cashDrawerPosting.ts:334-336`), que no depende del `Shift`. Y un pago con
+    // `shiftId` nulo es REATRIBUIBLE después (`scripts/reatribuir-cobros-al-turno.ts`),
+    // mientras que uno estampado en un turno ya cerrado CON conteo es justo lo que ese script
+    // se niega a tocar.
+    let shiftId: string | null = null
+    const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
+    if (turnoDelNegocio) {
+      const reclamado = await tx.shift.updateMany({
+        where: { id: turnoDelNegocio.id, venueId, status: 'OPEN', endTime: null },
+        data: {
+          totalSales: { decrement: new Decimal(salesRefund) },
+          ...(tipRefund > 0 ? { totalTips: { decrement: new Decimal(tipRefund) } } : {}),
+        },
+      })
+      if (reclamado.count === 1) shiftId = turnoDelNegocio.id
     }
 
     // Create new Payment record with type=REFUND
@@ -389,24 +427,9 @@ export async function recordRefund(
       },
     })
 
-    // Decrement Shift.totalSales (and totalTips when applicable) so closeout
-    // reports reflect reality. Uses the same proportional split computed above
-    // so tip refunds don't incorrectly deflate sales.
-    if (shiftId) {
-      // 🔴 Claim ACOTADO (mismo patrón que `mobile/refund.mobile.service.ts`): por id solo,
-      // este `update` aceptaba un turno de OTRO negocio y uno ya CERRADO — movía un conteo
-      // que alguien ya firmó, sin dejar rastro. Y es `updateMany` y no `update` porque si el
-      // turno se cerró entre la lectura y el claim el resultado tiene que ser `count: 0`, no
-      // un P2025 que tumbe la transacción: el dinero YA salió de la caja física y el
-      // reembolso se registra igual (lo recoge el cierre por ventana de tiempo).
-      await tx.shift.updateMany({
-        where: { id: shiftId, venueId, status: 'OPEN', endTime: null },
-        data: {
-          totalSales: { decrement: new Decimal(salesRefund) },
-          ...(tipRefund > 0 ? { totalTips: { decrement: new Decimal(tipRefund) } } : {}),
-        },
-      })
-    }
+    // El decremento de `Shift.totalSales`/`totalTips` NO va aquí: ES el claim del bloque
+    // «turno» de arriba, y tiene que ocurrir ANTES del `payment.create` para poder sellar el
+    // pago sólo si ganó. Mismo split proporcional, una sola escritura.
 
     return refundPayment
   })

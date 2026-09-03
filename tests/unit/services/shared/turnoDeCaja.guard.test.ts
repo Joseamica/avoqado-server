@@ -48,6 +48,21 @@ function sinComentarios(src: string): string {
  *
  * `original.shiftId` / `payment.shiftId` NO entran: ésos son filas de la BASE (dato del
  * servidor), no del cuerpo de la petición. Lo que se prohíbe es que lo elija el cliente.
+ *
+ * 🔴 SUS DOS LÍMITES, verificados — esto es un TRIPWIRE, no una demostración. Caza el error
+ * de copiar-pegar, que es como volvió a aparecer el hueco; no caza a quien lo esquive:
+ *
+ *   1. **Una variable intermedia lo evade.** `const cuerpo = refundData; … cuerpo.shiftId`
+ *      no dispara ninguno de los tres patrones: el nombre `cuerpo` no está en la lista de
+ *      fuentes, y seguirle el rastro pediría analizar el AST, no texto.
+ *   2. **Un `//` dentro de un literal de cadena trunca el resto de esa línea** antes de
+ *      comparar (`sinComentarios` sólo protege el `://` de una URL). Una lectura del cliente
+ *      escrita después de una cadena con `//` en la MISMA línea pasaría inadvertida.
+ *
+ * Se dejan sin arreglar a propósito: cerrarlos pide un parser, y el costo no lo justifica
+ * mientras la verdad de verdad la fijen las pruebas de comportamiento
+ * (`tests/unit/services/tpv/refund.turnoDelNegocio.test.ts`). Están escritos para que nadie
+ * lea un verde de este archivo como «ya no puede pasar».
  */
 const FUENTES_DEL_CLIENTE = String.raw`refundData|paymentData|orderData|input|payload|body|params|dto|req\.body`
 const LECTURAS_DEL_CLIENTE = [
