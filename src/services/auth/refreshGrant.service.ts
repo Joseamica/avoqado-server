@@ -22,6 +22,14 @@ export type ResultadoRotacion = { sucesor: string; sessionId: string; familyId: 
 
 const REUTILIZADO: ResultadoRotacion = { reutilizado: true }
 
+/**
+ * Marcador INTERNO: la transacción encontró el grant ya consumido por otra petición.
+ * No es un veredicto — sólo dice "alguien llegó antes"; quién fue se decide fuera de la
+ * transacción, donde ya se puede leer el sucesor que ese ganador acaba de dejar.
+ * Nunca sale de este módulo.
+ */
+const CARRERA_PERDIDA = Symbol('carrera-perdida')
+
 /** Ventana en la que un reintento del MISMO refresh consumido se trata como retransmisión
  * (red que se cae después de que el servidor ya rotó), no como robo. Task 9. */
 const VENTANA_RETRANSMISION_MS = 60_000
@@ -60,6 +68,43 @@ export async function limpiarSucesoresVencidos(): Promise<number> {
     { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'refreshGrant.limpiarSucesoresVencidos' },
   )
   return count
+}
+
+/**
+ * ¿Este grant ya consumido es un ECO del mismo cliente, o una reutilización?
+ *
+ * Devuelve el sucesor que ya se acuñó (misma respuesta que la primera vez) cuando el
+ * ciphertext sigue vigente y la familia sigue viva; `null` cuando no hay forma honesta
+ * de responder eso — fuera de la ventana, familia ya revocada por otro grant de la
+ * cadena, sucesor nunca guardado (p. ej. SESSION_SUCCESSOR_ENC_KEY ausente al rotar), o
+ * el descifrado falla por un motivo operativo (llave rotada a media ventana, ciphertext
+ * corrupto). Ese `null` es la salida segura por defecto: nunca "no se puede saber, así
+ * que dejamos pasar".
+ *
+ * 🔴 Vive aparte porque el MISMO criterio hace falta en DOS puntos de entrada, y tenerlo
+ * en uno solo fue el defecto: ver el bloque "carrera perdida" en `rotateGrant`.
+ */
+function retransmisionDe(previo: {
+  id: string
+  familyId: string
+  sessionId: string
+  successorEnc: string | null
+  successorEncExpiresAt: Date | null
+  revokedAt: Date | null
+}): ResultadoRotacion | null {
+  if (!previo.successorEnc || !previo.successorEncExpiresAt || previo.successorEncExpiresAt <= new Date() || previo.revokedAt) {
+    return null
+  }
+  try {
+    const sucesor = descifrarSucesor(previo.successorEnc, {
+      grantId: previo.id,
+      familyId: previo.familyId,
+      sessionId: previo.sessionId,
+    })
+    return { sucesor, sessionId: previo.sessionId, familyId: previo.familyId, retransmision: true }
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -126,21 +171,8 @@ export async function rotateGrant(token: string, nuevoToken: string, nuevoExpire
 
   const previo = await prisma.refreshGrant.findUnique({ where: { tokenHash } })
   if (previo && previo.consumedAt) {
-    if (previo.successorEnc && previo.successorEncExpiresAt && previo.successorEncExpiresAt > new Date() && !previo.revokedAt) {
-      try {
-        const sucesor = descifrarSucesor(previo.successorEnc, {
-          grantId: previo.id,
-          familyId: previo.familyId,
-          sessionId: previo.sessionId,
-        })
-        return { sucesor, sessionId: previo.sessionId, familyId: previo.familyId, retransmision: true }
-      } catch {
-        // 🔴 [Auditoría Task 9, hallazgo menor] Un descifrado que falla por un motivo
-        // OPERATIVO (la llave se rotó a media ventana, el ciphertext se corrompió) no debe
-        // propagar y reventar el refresh: cae a reutilización real, la salida segura por
-        // defecto — nunca "no se puede saber, así que dejamos pasar".
-      }
-    }
+    const eco = retransmisionDe(previo)
+    if (eco) return eco
 
     // Reutilización real: fuera de la ventana de retransmisión, la familia ya estaba
     // revocada por otro grant de la cadena, nunca se guardó sucesor (p. ej.
@@ -161,9 +193,14 @@ export async function rotateGrant(token: string, nuevoToken: string, nuevoExpire
     return REUTILIZADO
   }
 
-  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+  const resultado = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const grant = await tx.refreshGrant.findUnique({ where: { tokenHash } })
-    if (!grant || grant.revokedAt || grant.consumedAt || grant.expiresAt <= new Date()) {
+    if (!grant) return REUTILIZADO
+    // Un grant CONSUMIDO entre el pre-chequeo de arriba y este instante es una carrera
+    // contra otra petición del MISMO cliente, no un grant inválido: se resuelve fuera de
+    // la transacción (ver abajo). Revocado o vencido sí son rechazos definitivos.
+    if (grant.consumedAt) return CARRERA_PERDIDA
+    if (grant.revokedAt || grant.expiresAt <= new Date()) {
       return REUTILIZADO
     }
 
@@ -186,8 +223,9 @@ export async function rotateGrant(token: string, nuevoToken: string, nuevoExpire
     if (consumo.count !== 1) {
       // Otro refresh concurrente (o un reintento) ganó la carrera entre el findUnique y
       // aquí. No se acuña sucesor: sería un grant sin dueño, porque el original ya no es
-      // nuestro para enlazarlo con `rotatedToId`.
-      return REUTILIZADO
+      // nuestro para enlazarlo con `rotatedToId`. Quién es ese "otro" se decide fuera de
+      // la transacción — ver el bloque de carrera perdida.
+      return CARRERA_PERDIDA
     }
 
     const sucesor = await tx.refreshGrant.create({
@@ -204,4 +242,37 @@ export async function rotateGrant(token: string, nuevoToken: string, nuevoExpire
 
     return { sucesor: nuevoToken, sessionId: grant.sessionId, familyId: grant.familyId }
   })
+
+  if (resultado !== CARRERA_PERDIDA) return resultado
+
+  // 🔴 CARRERA PERDIDA — dos peticiones del MISMO cliente pidiendo refresco a la vez.
+  //
+  // Medido en producción local el 2026-09-02 16:07 (Sunmi D3, sesión
+  // cmtkmm7sv0001q0t1z0ogtsgz): el POS despertó del background, seis peticiones con el
+  // access ya vencido salieron juntas y dos refrescos se SOLAPARON 915 ms. Uno rotó bien;
+  // el otro perdió este `updateMany` y recibía `reutilizado` → 401 «Tu sesión ya no es
+  // válida» → el cajero fuera, a media venta. La base lo desmiente: NADA quedó revocado —
+  // ni la `Session` ni un solo grant de la familia. No hubo robo; hubo concurrencia.
+  //
+  // El criterio para contestarle bien ya existía y estaba a un `if` de distancia: el
+  // ganador acaba de dejar su sucesor cifrado en la MISMA fila, vigente 60 s. La ventana
+  // de retransmisión cubría "el cliente reintenta DESPUÉS" y dejaba fuera "las dos
+  // peticiones se SOLAPAN" — que es justo lo que produce el wifi del mostrador. Se relee
+  // FUERA de la transacción: para entonces el ganador ya commiteó, así que su sucesor es
+  // legible; releer dentro dependería del nivel de aislamiento.
+  const ganador = await prisma.refreshGrant.findUnique({ where: { tokenHash } })
+  if (ganador) {
+    const eco = retransmisionDe(ganador)
+    if (eco) return eco
+  }
+
+  // Sin sucesor legible (llave ausente al rotar, ciphertext corrupto, ventana vencida) no
+  // se puede afirmar de quién es este token: se rechaza este refresco y punto.
+  //
+  // 🔴 Y NO se revoca la familia, a propósito — es el comportamiento que ya tenía esta
+  // rama. Revocar aquí convertiría una carrera perdida del cliente legítimo en la muerte
+  // de su sesión, que es exactamente el daño que este bloque existe para evitar. La
+  // reutilización de verdad —un token consumido que reaparece pasada la ventana— sigue
+  // entrando por el pre-chequeo de arriba, que sí revoca.
+  return REUTILIZADO
 }
