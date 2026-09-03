@@ -42,9 +42,18 @@ import { getShifts } from '@/services/tpv/shift.tpv.service'
 
 const mockPrisma = prisma as unknown as { $transaction: jest.Mock }
 
-/** Un turno donde el MISMO cobro llega por los dos caminos: por su orden y por `shiftId`. */
+/**
+ * Un turno donde el MISMO cobro llega por los dos caminos: por su orden y por `shiftId`.
+ *
+ * 🔴 `shiftId` es OBLIGATORIO en estos fixtures, y no es cosmético. La consulta real trae la fila
+ * entera del `Payment`, así que ese campo SIEMPRE viene —con el id del turno o con `null`—; un
+ * fixture sin él modela un estado que la base no puede producir. Cuando faltaba, estas tres pruebas
+ * pasaban con el filtro «el cobro es de este turno o de ninguno» convertido en un no-op, que es
+ * justo el defecto que ese filtro existe para impedir (ver
+ * `shift.getShifts.cobroDeOtroTurno.test.ts`).
+ */
 function turnoConElMismoCobroPorLosDosCaminos() {
-  const cobro = { id: 'pago-1', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
+  const cobro = { id: 'pago-1', shiftId: 'turno-1', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
   return {
     id: 'turno-1',
     venueId: 'venue-1',
@@ -72,8 +81,8 @@ describe('getShifts — un cobro alcanzable por los dos caminos se cuenta UNA ve
 
   it('sigue sumando DOS cobros distintos que llegan por caminos distintos', async () => {
     // Regresión: deduplicar por id no puede convertirse en «me quedo con uno».
-    const porLaOrden = { id: 'pago-1', amount: 100, tipAmount: 10, processedById: 'staff-1', allocations: [] }
-    const porElTurno = { id: 'pago-2', amount: 40, tipAmount: 0, processedById: 'staff-2', allocations: [] }
+    const porLaOrden = { id: 'pago-1', shiftId: 'turno-1', amount: 100, tipAmount: 10, processedById: 'staff-1', allocations: [] }
+    const porElTurno = { id: 'pago-2', shiftId: 'turno-1', amount: 40, tipAmount: 0, processedById: 'staff-2', allocations: [] }
     mockPrisma.$transaction.mockResolvedValue([
       [{ id: 'turno-1', venueId: 'venue-1', staff: null, orders: [{ id: 'orden-1', payments: [porLaOrden] }], payments: [porElTurno] }],
       1,
