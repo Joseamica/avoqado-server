@@ -1753,22 +1753,24 @@ export class SharedQueryService {
       },
     })
 
-    // Fetch all relevant orders in one query, then count per-shift in memory
     if (shifts.length === 0) return []
 
     const shiftIds = shifts.map(s => s.id)
     // El turno es del negocio (fase 1): sus órdenes son las que llevan su `shiftId`,
     // las haya creado quien las haya creado. Antes se contaban por `createdById =
     // shift.staffId` y las de los demás cajeros desaparecían del conteo.
-    // Consulta indexada: `Order.shiftId` tiene @@index([shiftId]).
-    const allOrders = await prisma.order.findMany({
+    //
+    // El conteo lo hace POSTGRES agrupando por `shiftId` (índice `@@index([shiftId])`):
+    // vuelve UNA fila por turno, no una por orden. Importa porque un turno puede quedar
+    // abierto semanas y este camino lo dispara el usuario a voluntad desde el chatbot.
+    const grupos = await prisma.order.groupBy({
+      by: ['shiftId'],
       where: { venueId, shiftId: { in: shiftIds } },
-      select: { shiftId: true },
+      _count: true,
     })
 
-    // Índice por turno para lookup O(1) en vez de un barrido O(n*m)
     const ordersByShift = new Map<string, number>()
-    for (const o of allOrders) if (o.shiftId) ordersByShift.set(o.shiftId, (ordersByShift.get(o.shiftId) ?? 0) + 1)
+    for (const g of grupos) if (g.shiftId) ordersByShift.set(g.shiftId, g._count ?? 0)
 
     const shiftInfos: ActiveShiftInfo[] = shifts.map(shift => {
       // Una orden con `shiftId` pertenece al turno por construcción: no hace falta
