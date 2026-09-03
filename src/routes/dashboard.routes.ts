@@ -10126,7 +10126,13 @@ router.put(
 // verbo vive DENTRO de `marketingCampaignRoutes` (leer/crear/editar/previsualizar
 // vs `marketing:send` en publicar); aquí sólo se abre el paso autenticado.
 // ---------------------------------------------------------------------------
-router.use('/venues/:venueId/campaigns', authenticateTokenMiddleware, marketingCampaignRoutes)
+// 🔴 Gate de PLAN, además del de permiso que vive dentro del sub-router. Sin él, un venue
+// en plan GRATIS puede mandar campañas por API: el dashboard lo esconde tras <FeatureGate>,
+// pero esconder no es impedir. Y aquí el coste no es sólo de producto — cada correo lo
+// pagamos nosotros y consume la reputación del subdominio de marketing, que es compartido
+// entre todos los negocios. Mismo montaje que RESERVATIONS (los venues grandfathered y los
+// demo pasan por dentro del middleware).
+router.use('/venues/:venueId/campaigns', authenticateTokenMiddleware, checkFeatureAccess('CUSTOMER_CAMPAIGNS'), marketingCampaignRoutes)
 
 // ============================================================================
 // Customer Group Routes (Phase 1: Customer System)

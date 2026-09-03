@@ -87,10 +87,16 @@ describe('rutas de campañas de correo — candados', () => {
     expect(rutasAuditadas).toEqual(rutasDeclaradas)
   })
 
-  it('está montada bajo /venues/:venueId/campaigns en el router del dashboard', () => {
+  it('está montada bajo /venues/:venueId/campaigns, con auth Y gate de plan', () => {
     const padre = fs.readFileSync(path.join(__dirname, '../../../src/routes/dashboard.routes.ts'), 'utf8')
+    // 🔴 El gate de plan (`CUSTOMER_CAMPAIGNS`) es parte del montaje, no un extra: sin él un
+    // venue GRATIS manda campañas por API — el dashboard las esconde tras <FeatureGate>,
+    // pero esconder no es impedir, y cada correo lo pagamos nosotros y consume la reputación
+    // del subdominio de marketing, que es COMPARTIDO entre todos los negocios.
+    // Su comportamiento por tier se prueba en `marketingCampaignRoutes.featureGate.test.ts`;
+    // esto sólo fija que siga cableado aquí.
     expect(padre).toMatch(
-      /router\.use\(\s*'\/venues\/:venueId\/campaigns',\s*authenticateTokenMiddleware,\s*marketingCampaignRoutes,?\s*\)/,
+      /router\.use\(\s*'\/venues\/:venueId\/campaigns',\s*authenticateTokenMiddleware,\s*checkFeatureAccess\('CUSTOMER_CAMPAIGNS'\),\s*marketingCampaignRoutes,?\s*\)/,
     )
   })
 })
