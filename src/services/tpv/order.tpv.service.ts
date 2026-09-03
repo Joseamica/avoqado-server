@@ -20,6 +20,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { computeStoredOrderTotal } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 
@@ -2444,6 +2445,58 @@ interface CompItemsInput {
 }
 
 /**
+ * Recalcula los cargos por servicio de una orden contra una base NUEVA y devuelve el
+ * importe total del cargo, persistiendo las filas que cambiaron.
+ *
+ * 🔴 MONEY: el schema define `OrderServiceCharge.type = PERCENTAGE` como «13 = 13% sobre
+ * la base (subtotal − descuentos)». Cuando un descuento o una cortesía baja esa base, el
+ * cargo tiene que bajar con ella. Pasarle a `computeStoredOrderTotal` el snapshot
+ * CONGELADO `Order.serviceChargeAmount` deja el total ALTO y el cliente paga de más
+ * (auditoría 2026-09-03: $100 con 15% de cargo y $20 de descuento guardaba $95 cuando lo
+ * correcto son $92). Antes de migrar a la regla compartida el cargo se perdía ENTERO
+ * ($80): el error bajó de $15 a $3 y cambió de dirección — antes perdía el negocio, ahora
+ * paga de más el cliente.
+ *
+ * Es la MISMA regla que ya escriben `addItemsToOrder` y `removeOrderItem` (este archivo) y
+ * `recalcOrderTotals` (`comp-item.mobile.service.ts`); aquí vive UNA vez para que los tres
+ * caminos que la llaman no puedan volver a divergir.
+ *
+ * 🔴 SIN filas se conserva el SNAPSHOT, no se pone 0. Un `Order.serviceChargeAmount` > 0
+ * sin filas es un estado defensivo —hoy nadie lo produce por el camino de la TPV, donde
+ * las filas nacen en `service-charge.mobile.service.ts`— y ponerlo en 0 regalaría el
+ * ingreso: exactamente el defecto que este archivo acababa de cerrar. Mismo criterio que el
+ * respaldo del DESCUENTO en `removeOrderItem` («sin filas, conserva lo que la orden traía»).
+ *
+ * @param db la transacción de quien llama: el recálculo y el `order.update` que lo consume
+ *           tienen que caer o persistir JUNTOS, o queda la fila nueva con el total viejo.
+ * @param base `max(0, subtotal − descuentos)` YA calculada por quien llama.
+ */
+async function recalcServiceChargesOnBase(
+  db: Prisma.TransactionClient,
+  orderId: string,
+  base: number,
+  snapshotAmount: Prisma.Decimal | number | null | undefined,
+): Promise<number> {
+  const charges = await db.orderServiceCharge.findMany({ where: { orderId } })
+  // `?? 0` NO es cosmético: una orden sin cargo trae el campo nulo, y `Number(undefined)` es
+  // NaN — que escrito en `Order.total` es dinero ilegible, no un total equivocado. Misma
+  // semántica que el `dec()` de `computeStoredOrderTotal` (`value == null ? 0 : …`).
+  if (charges.length === 0) return Number(snapshotAmount ?? 0)
+
+  let total = 0
+  for (const charge of charges) {
+    // Un % se re-calcula cuando cambia la cuenta; un MONTO FIJO (descorche, entrega) se
+    // respeta tal cual — no depende de cuánto se consumió.
+    const amount = charge.type === 'PERCENTAGE' ? Math.round(((base * Number(charge.value)) / 100) * 100) / 100 : Number(charge.amount)
+    if (charge.type === 'PERCENTAGE' && amount !== Number(charge.amount)) {
+      await db.orderServiceCharge.update({ where: { id: charge.id }, data: { amount } })
+    }
+    total += amount
+  }
+  return Math.round(total * 100) / 100
+}
+
+/**
  * Comp (complimentary) items or entire order
  * Removes cost from delivered items (for service recovery)
  * @param venueId Venue ID
@@ -2507,11 +2560,12 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
   // balance (subtotal - existing discount), never pushing discountAmount above
   // subtotal or total below zero, no matter what was discounted before.
   const newDiscountAmount = Math.min(Number(order.discountAmount) + compAmount, Number(order.subtotal))
-  const newTotal = Math.max(0, Number(order.subtotal) - newDiscountAmount)
 
-  // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)
-  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+  // El total se calcula DENTRO de la transacción, porque el cargo por servicio porcentual
+  // se recalcula sobre la base nueva y sus filas se escriben ahí mismo. Se guarda fuera
+  // sólo para la bitácora del final.
+  let newTotal = 0
 
   const updatedOrder = await prisma.$transaction(async tx => {
     // Mark each comped OrderItem in the SAME transaction as the order total
@@ -2531,10 +2585,39 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       })
     }
 
+    // 🔴 MONEY: la cortesía baja la base, así que un cargo por servicio PORCENTUAL baja con
+    // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
+    // usarlo dejaba el total alto y el cliente pagaba de más.
+    const newServiceChargeAmount = await recalcServiceChargesOnBase(
+      tx,
+      orderId,
+      Math.max(0, Number(order.subtotal) - newDiscountAmount),
+      order.serviceChargeAmount,
+    )
+
+    // 🔴 MONEY: el total sale de `computeStoredOrderTotal` —la ÚNICA definición de la regla—
+    // y no de una resta escrita aquí. Escrita aquí OMITÍA `serviceChargeAmount` y `tipAmount`:
+    // una cortesía de cuenta completa dejaba `total = 0`, regalando el cargo por servicio
+    // («INGRESO GRAVABLE del negocio: SUMA al total y entra al corte y al CFDI», dice el
+    // schema) y la propina del mesero. El clamp de la mercancía que ya había aquí lo hace la
+    // función, con el mismo criterio: un descuento excedente se come la mercancía, no los cargos.
+    //
+    // `taxAmount` NO se pasa, a propósito: este camino no lo toca ni lo recalcula, y el cobro
+    // que le sigue (`recordOrderPayment`) tampoco lo suma — pasarlo haría que el total BAJARA al
+    // cobrar. Divergencia declarada con los tres caminos de descuento del dashboard, que sí lo suman.
+    newTotal = computeStoredOrderTotal({
+      subtotal: order.subtotal,
+      discountAmount: newDiscountAmount,
+      serviceChargeAmount: newServiceChargeAmount,
+      tipAmount: order.tipAmount,
+    }).toNumber()
+    const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
     const updated = await tx.order.update({
       where: { id: orderId },
       data: {
         discountAmount: newDiscountAmount,
+        serviceChargeAmount: newServiceChargeAmount,
         total: newTotal,
         remainingBalance: newRemainingBalance,
         version: {
@@ -2729,79 +2812,120 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   // Calculate new totals
   const remainingItems = order.items.filter(item => !input.itemIds.includes(item.id))
   const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
-  const newTotal = newSubtotal - Number(order.discountAmount)
-
-  // Calculate remaining balance (for partial payment tracking)
-  const currentPaidAmount = Number(order.paidAmount || 0)
-  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
 
   // ⭐ FIX: Auto-close order if voiding all items (Toast/Square pattern)
   // When 0 items remain, order should be cancelled and removed from active list
   const isVoidingAllItems = remainingItems.length === 0
 
+  // 🔴 MONEY: el subtotal BAJA al anular, pero el descuento acumulado NO. La resta escrita
+  // a mano (`newSubtotal − discountAmount`, sin clamp) escribía un `Order.total` NEGATIVO que
+  // RESTA del corte del día — el mecanismo del caso M13 por una tercera vía— y además tiraba
+  // del total el cargo por servicio («INGRESO GRAVABLE del negocio», dice el schema) y la
+  // propina del mesero. `computeStoredOrderTotal` clampa sólo la MERCANCÍA y conserva ambos.
+  //
+  // Anular TODO cancela la orden: ahí el total va a 0 a propósito. Una orden CANCELLED con un
+  // total > 0 sería dinero que nadie puede cobrar ensuciando los reportes.
+  //
+  // ⚠️ LÍMITE DECLARADO, el que QUEDA: este camino sigue SIN recalcular los DESCUENTOS por
+  // porcentaje sobre el subtotal nuevo — `removeOrderItem` (mismo archivo) sí lo hace. Un 30%
+  // calculado sobre $100 se queda en $30 aunque el subtotal baje a $40. Los CARGOS por
+  // porcentaje sí se recalculan desde el 2026-09-03 (`recalcServiceChargesOnBase`); el clamp
+  // sigue impidiendo el daño contable de la desproporción que queda.
+  const currentPaidAmount = Number(order.paidAmount || 0)
+
   if (isVoidingAllItems) {
     logger.info(`🚫 [ORDER SERVICE] Voiding ALL items - auto-closing order ${orderId}`)
   }
 
+  let newTotal = 0
+
   // Update order with new totals and increment version
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: {
-      subtotal: newSubtotal,
-      total: newTotal,
-      remainingBalance: newRemainingBalance,
-      // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
-      ...(isVoidingAllItems && {
-        status: 'CANCELLED',
-        paymentStatus: 'PENDING', // Keep PENDING (order was never paid)
-      }),
-      version: {
-        increment: 1,
+  // El recálculo del cargo y el `order.update` que lo consume van en la MISMA transacción:
+  // fuera de ella, un fallo entre las dos escrituras deja la fila con el importe nuevo y la
+  // orden con el total viejo — un estado a medias en el dinero.
+  // ⚠️ El `orderItem.deleteMany` de más arriba sigue FUERA: límite PREEXISTENTE, no tocado.
+  const updatedOrder = await prisma.$transaction(async tx => {
+    // 🔴 MONEY: al anular baja el subtotal, así que un cargo por servicio PORCENTUAL baja con
+    // él (auditoría 2026-09-03). El descuento acumulado entra a la base, igual que en
+    // `removeOrderItem`.
+    //
+    // Anular TODO cancela la orden: no se cobra nada, el total va a 0 y los cargos NO se
+    // tocan — escribir un cargo en una orden muerta sólo podría confundir. Declarado.
+    const newServiceChargeAmount = isVoidingAllItems
+      ? Number(order.serviceChargeAmount)
+      : await recalcServiceChargesOnBase(tx, orderId, Math.max(0, newSubtotal - Number(order.discountAmount)), order.serviceChargeAmount)
+
+    newTotal = isVoidingAllItems
+      ? 0
+      : computeStoredOrderTotal({
+          subtotal: newSubtotal,
+          discountAmount: order.discountAmount,
+          serviceChargeAmount: newServiceChargeAmount,
+          tipAmount: order.tipAmount,
+        }).toNumber()
+    const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
+    return tx.order.update({
+      where: { id: orderId },
+      data: {
+        subtotal: newSubtotal,
+        // Anular TODO no toca el snapshot del cargo (ver arriba): el total ya va a 0.
+        ...(isVoidingAllItems ? {} : { serviceChargeAmount: newServiceChargeAmount }),
+        total: newTotal,
+        remainingBalance: newRemainingBalance,
+        // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
+        ...(isVoidingAllItems && {
+          status: 'CANCELLED',
+          paymentStatus: 'PENDING', // Keep PENDING (order was never paid)
+        }),
+        version: {
+          increment: 1,
+        },
       },
-    },
-    include: {
-      items: {
-        include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              price: true,
+      include: {
+        items: {
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+                price: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
             },
           },
-          modifiers: {
-            include: {
-              modifier: true,
-            },
+        },
+        payments: {
+          include: {
+            allocations: true,
+          },
+        },
+        table: {
+          select: {
+            id: true,
+            number: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        servedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
           },
         },
       },
-      payments: {
-        include: {
-          allocations: true,
-        },
-      },
-      table: {
-        select: {
-          id: true,
-          number: true,
-        },
-      },
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      servedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
+    })
   })
 
   // ⭐ If voided all items, remove customer linkages (pay-later orders)
@@ -3001,65 +3125,92 @@ export async function applyDiscount(
 
   // Update order: add to existing discount
   const newDiscountAmount = Number(order.discountAmount) + discountAmount
-  const newTotal = Math.max(0, Number(order.subtotal) - newDiscountAmount)
 
-  // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)
-  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+  let newTotal = 0
 
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: {
+  // El recálculo del cargo y el `order.update` que lo consume van en la MISMA transacción:
+  // fuera de ella, un fallo entre las dos escrituras deja la fila con el importe nuevo y la
+  // orden con el total viejo — un estado a medias en el dinero.
+  const updatedOrder = await prisma.$transaction(async tx => {
+    // 🔴 MONEY: el descuento baja la base, así que un cargo por servicio PORCENTUAL baja con
+    // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
+    // usarlo dejaba el total alto y el cliente pagaba de más ($95 donde correspondían $92).
+    const newServiceChargeAmount = await recalcServiceChargesOnBase(
+      tx,
+      orderId,
+      Math.max(0, Number(order.subtotal) - newDiscountAmount),
+      order.serviceChargeAmount,
+    )
+
+    // 🔴 MONEY: misma regla compartida que la cortesía de arriba y que los caminos de descuento
+    // del dashboard. La resta escrita a mano se dejaba fuera el cargo por servicio y la propina.
+    // `taxAmount` queda fuera por la misma razón declarada en `compItems`.
+    newTotal = computeStoredOrderTotal({
+      subtotal: order.subtotal,
       discountAmount: newDiscountAmount,
-      total: newTotal,
-      remainingBalance: newRemainingBalance,
-      version: {
-        increment: 1,
+      serviceChargeAmount: newServiceChargeAmount,
+      tipAmount: order.tipAmount,
+    }).toNumber()
+    const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
+    return tx.order.update({
+      where: { id: orderId },
+      data: {
+        discountAmount: newDiscountAmount,
+        // 🔴 Sin persistir el snapshot el arreglo sería COSMÉTICO: `computeOrderBalance`
+        // —lo que de verdad se cobra— lee `Order.serviceChargeAmount`, no las filas.
+        serviceChargeAmount: newServiceChargeAmount,
+        total: newTotal,
+        remainingBalance: newRemainingBalance,
+        version: {
+          increment: 1,
+        },
       },
-    },
-    include: {
-      items: {
-        include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              price: true,
+      include: {
+        items: {
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+                price: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
             },
           },
-          modifiers: {
-            include: {
-              modifier: true,
-            },
+        },
+        payments: {
+          include: {
+            allocations: true,
+          },
+        },
+        table: {
+          select: {
+            id: true,
+            number: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        servedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
           },
         },
       },
-      payments: {
-        include: {
-          allocations: true,
-        },
-      },
-      table: {
-        select: {
-          id: true,
-          number: true,
-        },
-      },
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      servedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
+    })
   })
 
   // Create audit trail
