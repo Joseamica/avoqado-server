@@ -25,6 +25,15 @@ interface ConsentParams {
  * Es SÓLO un borrador de PRECARGA: `writeConsent` NUNCA llama a esta función — tiene su
  * PROPIA consulta a `privacyNoticeVersion` unas líneas abajo — así que la plantilla jamás
  * cuenta como aviso publicado; el candado de consentimiento sigue exigiendo una fila real.
+ *
+ * 🔴 Fix ronda final (revisor): cuando `esPlantilla` es `true`, el texto viaja bajo
+ * `draftContent` y `content` es SIEMPRE `null` — nunca al revés. Antes los dos casos
+ * compartían la llave `content`, así que un consumidor que la pintara sin fijarse en
+ * `esPlantilla` (la Fase 1C-B va a construir justo la pantalla del formulario de cliente
+ * con este aviso) le enseñaría a un cliente real un documento legal que el negocio nunca
+ * aprobó — el mismo riesgo que ya se blindó en la ruta pública (`privacyNotice.public.
+ * controller.ts`), aquí cerrado por la FORMA del dato en vez de por la disciplina de cada
+ * consumidor: un consumidor despistado recibe vacío, no un aviso falso.
  */
 export async function getCurrentPrivacyNotice(venueId: string) {
   const version = await prisma.privacyNoticeVersion.findFirst({
@@ -34,7 +43,7 @@ export async function getCurrentPrivacyNotice(venueId: string) {
   })
 
   if (version) {
-    return { ...version, esPlantilla: false as const }
+    return { ...version, draftContent: null, esPlantilla: false as const }
   }
 
   // Sin versión propia: se arma el borrador con lo que el venue YA tiene capturado. Nunca
@@ -48,7 +57,8 @@ export async function getCurrentPrivacyNotice(venueId: string) {
 
   return {
     id: null,
-    content: plantillaDeAviso({
+    content: null,
+    draftContent: plantillaDeAviso({
       nombreDelNegocio: venue?.name ?? '',
       domicilio,
       contacto: venue?.email?.trim() || venue?.phone?.trim() || '',

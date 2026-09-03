@@ -116,13 +116,19 @@ describe('getCurrentPrivacyNotice', () => {
       createdAt: new Date('2026-01-01'),
     })
     const notice = await getCurrentPrivacyNotice('venueA')
-    expect(notice).toEqual(expect.objectContaining({ id: 'not1', content: 'Mi aviso real, ya publicado', esPlantilla: false }))
+    expect(notice).toEqual(
+      expect.objectContaining({ id: 'not1', content: 'Mi aviso real, ya publicado', draftContent: null, esPlantilla: false }),
+    )
     expect(prisma.venue.findUnique as jest.Mock).not.toHaveBeenCalled()
   })
 
   // Task 8: sin versión propia, se devuelve la PLANTILLA precargada con los datos del venue,
   // marcada esPlantilla:true — nunca null, nunca un {{marcador}} sin sustituir.
-  it('T8: sin versión propia devuelve la PLANTILLA como borrador, marcada esPlantilla:true', async () => {
+  //
+  // 🔴 Fix ronda final (revisor): la plantilla viaja bajo `draftContent`, y `content` es
+  // SIEMPRE `null` en este camino — nunca al revés. Un consumidor que pinte `content` sin
+  // fijarse en `esPlantilla` recibe vacío, no el texto legal que el negocio nunca aprobó.
+  it('T8: sin versión propia devuelve la PLANTILLA en draftContent, con content:null y esPlantilla:true', async () => {
     ;(prisma.privacyNoticeVersion.findFirst as jest.Mock).mockResolvedValueOnce(null)
     ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({
       name: 'Testarudo Café',
@@ -135,9 +141,10 @@ describe('getCurrentPrivacyNotice', () => {
     const notice = await getCurrentPrivacyNotice('venueA')
     expect(notice.esPlantilla).toBe(true)
     expect(notice.id).toBeNull()
-    expect(notice.content).toContain('Testarudo Café')
-    expect(notice.content).toContain('hola@testarudo.mx')
-    expect(notice.content).not.toMatch(/\{\{[^}]+\}\}/)
+    expect(notice.content).toBeNull()
+    expect(notice.draftContent).toContain('Testarudo Café')
+    expect(notice.draftContent).toContain('hola@testarudo.mx')
+    expect(notice.draftContent).not.toMatch(/\{\{[^}]+\}\}/)
   })
 })
 

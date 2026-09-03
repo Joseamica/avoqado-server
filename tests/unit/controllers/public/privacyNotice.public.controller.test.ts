@@ -72,9 +72,12 @@ describe('GET /venues/:venueId/privacy-notice', () => {
   // el contacto del negocio (si lo tiene) para que el titular le escriba directamente.
   it('(b) venue SIN aviso propio ⇒ dice que no hay aviso publicado y NUNCA muestra el texto de la plantilla', async () => {
     mockVenueFindUnique.mockResolvedValue({ id: 'v1', name: 'Café Sin Aviso', email: 'hola@sinaviso.mx', phone: null })
+    // content:null + draftContent: el contrato REAL desde el fix ronda final — getCurrentPrivacyNotice
+    // ya no manda el texto de la plantilla bajo `content` en absoluto.
     mockGetNotice.mockResolvedValue({
       id: null,
-      content: 'TEXTO DE LA PLANTILLA — Aviso de Privacidad — Secretaría Anticorrupción y Buen Gobierno',
+      content: null,
+      draftContent: 'TEXTO DE LA PLANTILLA — Aviso de Privacidad — Secretaría Anticorrupción y Buen Gobierno',
       contentHash: null,
       language: 'es',
       createdAt: null,
@@ -117,7 +120,8 @@ describe('GET /venues/:venueId/privacy-notice', () => {
     mockVenueFindUnique.mockResolvedValue({ id: 'v1', name: 'Café Sin Aviso', email: 'hola@sinaviso.mx', phone: null })
     mockGetNotice.mockResolvedValue({
       id: null,
-      content: 'TEXTO DE LA PLANTILLA',
+      content: null,
+      draftContent: 'TEXTO DE LA PLANTILLA',
       contentHash: null,
       language: 'es',
       createdAt: null,
