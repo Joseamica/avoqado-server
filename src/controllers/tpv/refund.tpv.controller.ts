@@ -78,6 +78,28 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       // 'angelpay' (sent by TPV v2.31+ when refunding Nexgo payments).
       // Persisted into Payment.processor for downstream reconciliation.
       processor: req.body.processor,
+
+      // 🛡️ Llave de idempotencia — SIN esta línea el arreglo del servicio es decorativo.
+      //
+      // El servicio corta el reintento y persiste la llave en el `Payment` para que el
+      // `@@unique([venueId, idempotencyKey])` proteja de verdad; pero este objeto se arma
+      // campo por campo, así que una llave que no se copie aquí llega al servicio como
+      // `undefined` y el endpoint sigue duplicando reembolsos parciales. Las pruebas del
+      // servicio NO lo cazan: llaman al servicio directo, saltándose esta capa.
+      //
+      // Se aceptan las DOS vías porque la terminal manda las dos
+      // (`PaymentApiService.recordRefund`: `@Body` + `@Header("Idempotency-Key")`). El body
+      // gana; el header cubre a cualquier cliente que sólo use la convención HTTP.
+      //
+      // ⚠️ El body llega CRUDO: la ruta valida con `recordFastPaymentParamsSchema`, que sólo
+      // declara `params`, y `validateRequest` únicamente reemplaza el body cuando el esquema
+      // trae `body`. Añadirle un `body:` a ese esquema descartaría esta llave en silencio.
+      // Se toma el primer valor NO EN BLANCO, no el primero no-nulo: `'' ?? header` devuelve
+      // `''`, y como el servicio trata la cadena vacía como «ausente», una llave vacía en el
+      // body TAPABA silenciosamente una buena en el header.
+      idempotencyKey: [req.body.idempotencyKey, req.header('Idempotency-Key')].find(
+        (v): v is string => typeof v === 'string' && v.trim() !== '',
+      ),
     }
 
     // Call service to record the refund
