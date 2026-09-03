@@ -46,6 +46,56 @@ type SalePostingItem = {
 const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
   !!item.modifiers?.some(m => (m.modifier as any)?.rawMaterialId && (m.modifier as any)?.quantityPerUnit)
 
+/**
+ * La MISMA pregunta del bucle de abajo —«¿a este renglón le nace línea de deducción?»— pero en
+ * SQL, para quien no puede ejecutar el bucle: hoy la 7ª invariante del vigilante de dinero
+ * («ORDEN SIN VALE DE INVENTARIO», `jobs/money-integrity-watchdog.job.ts`), que necesita saber
+ * si una orden YA CERRADA debió descontar stock.
+ *
+ * 🔴 Vive AQUÍ, pegada al bucle, y no allá, a propósito: son dos copias de una misma regla y lo
+ * único que las mantiene juntas es que quien toque una VEA la otra. Y la deriva peligrosa va
+ * hacia el SILENCIO — si el camino del cobro se ensancha (un modo de inventario nuevo, un
+ * modificador que descuenta de otra forma) y esto no, el vigilante deja de ver pérdidas reales
+ * sin que nada falle. Si cambias `createSalePostingInTx`, cambia esto en el MISMO trabajo.
+ *
+ * Espeja, línea por línea, lo que hace el bucle:
+ *  · `if (!item.productId) continue` — sin producto NO hay línea, **ni siquiera por modificador**;
+ *  · producto deducible (`getProductInventoryMethods`) = del MISMO venue —el aislamiento por
+ *    tenant que pide su `venueId`—, con `trackInventory`, y con `inventoryMethod` explícito o
+ *    —fallback de los productos legacy— una `Recipe`;
+ *  · o el renglón trae un modificador con materia prima (`itemHasInventoryModifiers` exige
+ *    `rawMaterialId` Y `quantityPerUnit`), que descuenta aunque el producto no lleve inventario.
+ *
+ * ⚠️ Falso NEGATIVO conocido, y va hacia el silencio: `OrderItemModifier.modifierId` es
+ * `onDelete: SetNull`, así que borrar el modificador del menú deja el renglón sin con qué
+ * probar que descontaba y la venta deja de vigilarse. El bucle del cobro no lo sufre —congela
+ * los modificadores en `payloadSnapshot` al cobrar, justo por esto—, pero esta consulta mira la
+ * relación VIVA. Cubrirlo pediría leer el snapshot… que es lo que falta cuando el vale no nació.
+ *
+ * `alias` es texto de confianza (código propio), nunca entrada de usuario: se interpola sin
+ * parametrizar y acaba dentro de un `$queryRawUnsafe`. Mismo contrato que
+ * `baseQueDebeCubrirseSql` en `shared/pagadaPeroAbierta.ts`.
+ */
+export function ordenDescuentaInventarioSql(alias = 'o'): string {
+  const o = alias
+  return `EXISTS (
+            SELECT 1 FROM "OrderItem" oi
+            WHERE oi."orderId" = ${o}.id AND oi."productId" IS NOT NULL
+              AND (
+                EXISTS (
+                  SELECT 1 FROM "Product" pr
+                  WHERE pr.id = oi."productId" AND pr."venueId" = ${o}."venueId" AND pr."trackInventory"
+                    AND (pr."inventoryMethod" IS NOT NULL OR EXISTS (SELECT 1 FROM "Recipe" rc WHERE rc."productId" = pr.id))
+                )
+                OR EXISTS (
+                  SELECT 1 FROM "OrderItemModifier" oim
+                  JOIN "Modifier" m ON m.id = oim."modifierId"
+                  WHERE oim."orderItemId" = oi.id AND m."rawMaterialId" IS NOT NULL AND m."quantityPerUnit" IS NOT NULL
+                )
+              )
+          )`
+}
+
 /** Kilos para líneas por peso; piezas para el resto. */
 const baseQuantity = (item: SalePostingItem): Prisma.Decimal =>
   item.weightQuantity != null ? new Prisma.Decimal(item.weightQuantity as any) : new Prisma.Decimal(item.quantity)

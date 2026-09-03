@@ -17,13 +17,13 @@ import {
   MoneyIntegrityWatchdogJob,
   TRIAGED_AWAITING_THIRD_PARTY,
   HUERFANAS_DESDE,
-  DETAIL_LIMIT,
+  DETAIL_LIMIT_POR_CHECK,
   VENTANA_DEL_BARRIDO_MIN,
   VALES_DESDE,
-  ORDEN_DESCUENTA_INVENTARIO,
   buildWatchdogSql,
 } from '@/jobs/money-integrity-watchdog.job'
 import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '@/services/shared/pagadaPeroAbierta'
+import { ordenDescuentaInventarioSql } from '@/services/inventory/inventoryPosting.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -111,7 +111,7 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(sinVale).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM "InventoryPosting" ip[\s\S]*?ip\."effectKind" = 'SALE'/)
     // Por HUELLA, no por forma: la condición «esta venta descuenta» es un espejo de
     // `createSalePostingInTx`. Una copia inline pasaría los regex y se quedaría atrás.
-    expect(sinVale).toContain(ORDEN_DESCUENTA_INVENTARIO)
+    expect(sinVale).toContain(ordenDescuentaInventarioSql('o'))
     // Misma gracia que el check #6: una orden que el barrido acaba de cerrar todavía puede
     // estar recibiendo su vale.
     expect(sinVale).toContain(`o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'`)
@@ -119,10 +119,19 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     // vigilante gritaría por toda la historia de cada venue con recetas.
     expect(sinVale).toContain(`o."createdAt" >= '${VALES_DESDE}'`)
     expect(VALES_DESDE).toBe('2026-08-14')
+    // 🔴 El origen va en el detalle: sin él, quien recibe la alerta en Better Stack no puede
+    // separar la pérdida puntual del TPV del defecto sistémico de b4bit/pos-sync sin abrir
+    // Postgres — y son dos acciones distintas.
+    expect(sinVale).toContain(`' via=' || o.source`)
     expect(sinVale).toContain('Grupo Avoqado Prime')
   })
 
   it('🔴 «descuenta inventario» dice lo MISMO que el camino del cobro, renglón por renglón', () => {
+    const ORDEN_DESCUENTA_INVENTARIO = ordenDescuentaInventarioSql('o')
+    // Vive en `inventoryPosting.service.ts`, junto al bucle que espeja: quien toque uno ve el otro.
+    // Y toma alias como `baseQueDebeCubrirseSql`, en vez de traer 'o' cableado.
+    expect(ordenDescuentaInventarioSql('x')).toContain('oi."orderId" = x.id')
+    expect(ordenDescuentaInventarioSql('x')).toContain('pr."venueId" = x."venueId"')
     // Espejo de `createSalePostingInTx`: sin `productId` no hay línea NI POR MODIFICADOR
     // (el bucle hace `if (!item.productId) continue` antes de mirar los modificadores).
     expect(ORDEN_DESCUENTA_INVENTARIO).toContain('oi."productId" IS NOT NULL')
@@ -138,10 +147,15 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(ORDEN_DESCUENTA_INVENTARIO).toContain('m."quantityPerUnit" IS NOT NULL')
   })
 
-  it('los totales se cuentan sin tope y el detalle sí lleva tope', () => {
+  it('🔴 el tope del detalle es POR CHECK: un chorro de una invariante no puede enterrar a otra', () => {
     expect(counts).not.toMatch(/LIMIT/i)
     expect(counts).toMatch(/GROUP BY "check"/)
-    expect(details).toMatch(new RegExp(`LIMIT ${DETAIL_LIMIT}\\s*$`))
+    // Con un `LIMIT` GLOBAL, 300 filas de 'ORDEN SIN VALE DE INVENTARIO' (que ordena antes que
+    // SOBREPAGO y TOTAL NEGATIVO) dejaban un sobrepago real sin un solo orderId que investigar:
+    // los totales sobrevivían en `counts`, lo accionable no.
+    expect(details).toMatch(/ROW_NUMBER\(\) OVER \(PARTITION BY "check" ORDER BY venue, order_id\)/)
+    expect(details).toContain(`WHERE rn <= ${DETAIL_LIMIT_POR_CHECK}`)
+    expect(details).not.toMatch(/LIMIT \d+/)
   })
 
   it('regresión: las 7 invariantes siguen ahí y con el filtro de venues reales', () => {
@@ -163,17 +177,17 @@ describe('money-integrity-watchdog · lo que reporta', () => {
   it('🔴 el resumen dice el total REAL aunque el detalle esté acotado', async () => {
     arm(
       [{ check: 'PROPINA NO CUADRA', n: 672 }],
-      Array.from({ length: DETAIL_LIMIT }, (_, i) => propina(i)),
+      Array.from({ length: DETAIL_LIMIT_POR_CHECK }, (_, i) => propina(i)),
     )
 
     const r = await new MoneyIntegrityWatchdogJob().runNow(NOW)
 
-    expect(r).toEqual({ expired: false, total: 672, mostrados: DETAIL_LIMIT, porTipo: { 'PROPINA NO CUADRA': 672 } })
+    expect(r).toEqual({ expired: false, total: 672, mostrados: DETAIL_LIMIT_POR_CHECK, porTipo: { 'PROPINA NO CUADRA': 672 } })
     const resumen = error.mock.calls.find(([msg]) => String(msg).includes('problema(s) de dinero'))
     expect(resumen?.[0]).toContain('672 problema(s)')
-    expect(resumen?.[1]).toMatchObject({ porTipo: { 'PROPINA NO CUADRA': 672 }, mostrados: DETAIL_LIMIT })
+    expect(resumen?.[1]).toMatchObject({ porTipo: { 'PROPINA NO CUADRA': 672 }, mostrados: DETAIL_LIMIT_POR_CHECK })
     // Una línea por violación mostrada, con el nombre del venue en el campo que filtra Better Stack.
-    expect(error.mock.calls.filter(([msg]) => String(msg).includes('PROPINA NO CUADRA'))).toHaveLength(DETAIL_LIMIT)
+    expect(error.mock.calls.filter(([msg]) => String(msg).includes('PROPINA NO CUADRA'))).toHaveLength(DETAIL_LIMIT_POR_CHECK)
     expect(error.mock.calls[0][1]).toMatchObject({ venueName: 'Doña Simona', orderId: 'o0' })
   })
 

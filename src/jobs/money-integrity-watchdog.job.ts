@@ -6,6 +6,7 @@ import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
 import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '../services/shared/pagadaPeroAbierta'
+import { ordenDescuentaInventarioSql } from '../services/inventory/inventoryPosting.service'
 
 /**
  * Vigilante de integridad del dinero — PRUEBA TEMPORAL DE 4 DÍAS.
@@ -52,8 +53,22 @@ const WATCHDOG_UNTIL = new Date('2026-12-31T00:00:00-06:00')
  */
 export const HUERFANAS_DESDE = '2026-08-31'
 
-/** Tope del DETALLE (una línea de log por violación). Los totales se cuentan aparte, sin tope. */
-export const DETAIL_LIMIT = 200
+/**
+ * Tope del DETALLE (una línea de log por violación) **por invariante**, no global. Los totales
+ * se cuentan aparte, sin tope.
+ *
+ * 🔴 Era un `LIMIT` global de 200 repartido entre todas, y eso deja a una invariante enterrar a
+ * las demás: el detalle ordena por nombre, así que 300 filas de 'ORDEN SIN VALE DE INVENTARIO'
+ * —el modo de falla EN SERIE que estrena la 7ª, ver su comentario— se comen el cupo antes de
+ * llegar a 'SOBREPAGO' y 'TOTAL NEGATIVO'. Los totales sobreviven (salen de `counts`), pero el
+ * `orderId` que alguien necesita para investigar dinero cobrado de más, no. Con el tope por
+ * invariante cada una tiene sus líneas garantizadas.
+ *
+ * 30 y no 200: siete invariantes × 30 = 210 líneas en el peor caso, o sea el mismo volumen de
+ * log que antes; y nadie triando UNA invariante lee 200 ids. El total real siempre va en el
+ * resumen, así que acotar el detalle no esconde el tamaño del problema.
+ */
+export const DETAIL_LIMIT_POR_CHECK = 30
 
 /**
  * El vigilante sólo alerta lo que el barrido paid-order-reconciler YA tuvo oportunidad de
@@ -76,41 +91,6 @@ export const VENTANA_DEL_BARRIDO_MIN = 15
 export const VALES_DESDE = '2026-08-14'
 
 /**
- * «Esta venta descuenta inventario», en SQL — espejo de a quién le nace una LÍNEA de deducción
- * en `createSalePostingInTx` (`services/inventory/inventoryPosting.service.ts`), que clasifica
- * con `getProductInventoryMethods`. No se inventa aquí un criterio propio: uno más ancho
- * gritaría por ventas que nunca debieron descontar nada, y uno más estrecho callaría el caso
- * que este check existe para ver.
- *
- * Renglón por renglón, tal como lo decide el bucle del cobro:
- *  · `if (!item.productId) continue` — sin producto NO hay línea, **ni siquiera por modificador**;
- *  · producto deducible = del MISMO venue (el aislamiento por tenant que pide `venueId` en la
- *    clasificación), con `trackInventory`, y con `inventoryMethod` explícito o —fallback de los
- *    productos legacy— una `Recipe`;
- *  · o el renglón trae un modificador con materia prima, que descuenta aunque el producto no
- *    lleve inventario (`itemHasInventoryModifiers` exige `rawMaterialId` Y `quantityPerUnit`).
- *
- * 🔴 Si `createSalePostingInTx` cambia a quién le crea línea, esto cambia en el MISMO trabajo:
- * son las dos mitades de la misma pregunta.
- */
-export const ORDEN_DESCUENTA_INVENTARIO = `EXISTS (
-            SELECT 1 FROM "OrderItem" oi
-            WHERE oi."orderId" = o.id AND oi."productId" IS NOT NULL
-              AND (
-                EXISTS (
-                  SELECT 1 FROM "Product" pr
-                  WHERE pr.id = oi."productId" AND pr."venueId" = o."venueId" AND pr."trackInventory"
-                    AND (pr."inventoryMethod" IS NOT NULL OR EXISTS (SELECT 1 FROM "Recipe" rc WHERE rc."productId" = pr.id))
-                )
-                OR EXISTS (
-                  SELECT 1 FROM "OrderItemModifier" oim
-                  JOIN "Modifier" m ON m.id = oim."modifierId"
-                  WHERE oim."orderItemId" = oi.id AND m."rawMaterialId" IS NOT NULL AND m."quantityPerUnit" IS NOT NULL
-                )
-              )
-          )`
-
-/**
  * Filtro de venues reales — los demo/seed usan convenciones propias.
  *
  * 🔴 Excluir por slug NO basta: la org de pruebas del founder ("Grupo Avoqado Prime") tiene 4 venues
@@ -128,6 +108,12 @@ const REAL_VENUES = `v.slug NOT LIKE '%demo%' AND v.name NOT LIKE 'Live Demo%'
  *
  * 🔴 NO agregues aquí un caso "para que deje de sonar". Sólo entra lo que ya se investigó y
  * cuya resolución NO está en nuestras manos. Todo lo demás se arregla.
+ *
+ * 🔴 Es por ORDEN, no por (orden, invariante): silenciar una orden aquí la silencia en las SIETE
+ * —si esa misma cuenta desarrolla después un sobrepago, nadie se entera—. Se deja así a propósito
+ * (son casos ya investigados de punta a punta, no de una regla suelta), pero hay que saberlo al
+ * agregar una entrada. Y por lo mismo NO es la salida para un camino que falla EN SERIE: serían
+ * miles de entradas y siete puntos ciegos por cada una. Eso se arregla en el camino.
  *
  * Revisión: 2026-08-08 (el resto del backlog se limpió; ver ActivityLog `origen:
  * reparacion-manual-money-watchdog`).
@@ -157,7 +143,7 @@ export interface WatchdogRun {
   expired: boolean
   /** Total REAL de violaciones (sin tope), ya sin los casos triados. */
   total: number
-  /** Cuántas se escribieron al log (acotado por DETAIL_LIMIT). */
+  /** Cuántas se escribieron al log (acotado por DETAIL_LIMIT_POR_CHECK, por invariante). */
   mostrados: number
   porTipo: Record<string, number>
 }
@@ -238,7 +224,7 @@ export function buildWatchdogSql(): { counts: string; details: string } {
                'pagado=' || o."paidAmount" || ' total=' || o.total || ' creada=' || o."createdAt"::date
         FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
         WHERE o."paymentStatus" = 'PAID' AND o."paidAmount" > 0
-          AND o."createdAt" >= '2026-08-31'
+          AND o."createdAt" >= '${HUERFANAS_DESDE}'
           AND NOT EXISTS (SELECT 1 FROM "Payment" p WHERE p."orderId" = o.id)
           AND ${REAL_VENUES}
 
@@ -293,15 +279,21 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    llamar a createSalePostingInTx ni deducir nada (verificado el 3-sep-2026). Un
         --    venue con recetas que cobre por esos caminos aparecerá en serie — es el MISMO
         --    defecto en otro camino, no un falso positivo. Lo mismo una cortesía total cerrada
-        --    sin cobro. Si alguno resulta ser decisión de producto, va a
-        --    TRIAGED_AWAITING_THIRD_PARTY con su motivo escrito, nunca se amplía el criterio.
+        --    sin cobro. Por eso el detalle lleva 'via=' con Order.source: quien reciba la alerta
+        --    separa la pérdida puntual del TPV —accionable ya— del defecto sistémico de un
+        --    camino entero, que se arregla en el camino, no orden por orden.
+        --    🔴 Y para eso TRIAGED_AWAITING_THIRD_PARTY no sirve: está llaveado por orderId, así
+        --    que contra una fuente EN SERIE sería una entrada por venta, para siempre (y además
+        --    silenciaría esa orden en las SIETE invariantes, sobrepago incluido). Lo que sí se
+        --    hace es arreglar el camino; lo que NO se hace nunca es ensanchar el criterio para
+        --    que deje de sonar.
         SELECT 'ORDEN SIN VALE DE INVENTARIO', v.name, o.id,
-               'orden=' || o."orderNumber" || ' cerrada=' || COALESCE(o."completedAt"::date::text, 'sin fecha') ||
-               ' total=' || o.total
+               'orden=' || o."orderNumber" || ' via=' || o.source || ' cerrada=' ||
+               COALESCE(o."completedAt"::date::text, 'sin fecha') || ' total=' || o.total
         FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
         WHERE o.status = 'COMPLETED'
           AND o."createdAt" >= '${VALES_DESDE}'
-          AND ${ORDEN_DESCUENTA_INVENTARIO}
+          AND ${ordenDescuentaInventarioSql('o')}
           -- El vale de VENTA: una reversa (CANCELLATION/CUSTOMER_RETURN) no es una deducción.
           AND NOT EXISTS (
             SELECT 1 FROM "InventoryPosting" ip
@@ -316,8 +308,14 @@ export function buildWatchdogSql(): { counts: string; details: string } {
   return {
     counts: `${cte}
     SELECT "check", COUNT(*)::int AS n FROM v GROUP BY "check"`,
+    // El tope va POR INVARIANTE (ver DETAIL_LIMIT_POR_CHECK): con un LIMIT global, la que más
+    // filas produce entierra a las demás — y ordenando por nombre, no siempre es la más grave.
     details: `${cte}
-    SELECT "check", venue, order_id, detalle FROM v ORDER BY "check", venue, order_id LIMIT ${DETAIL_LIMIT}`,
+    SELECT "check", venue, order_id, detalle FROM (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY "check" ORDER BY venue, order_id) AS rn FROM v
+    ) t
+    WHERE rn <= ${DETAIL_LIMIT_POR_CHECK}
+    ORDER BY "check", venue, order_id`,
   }
 }
 
@@ -395,7 +393,7 @@ export class MoneyIntegrityWatchdogJob {
       logger.error(`🚨 [Money watchdog] ${total} problema(s) de dinero detectado(s)`, {
         porTipo,
         mostrados: violations.length,
-        tope: DETAIL_LIMIT,
+        topePorCheck: DETAIL_LIMIT_POR_CHECK,
       })
       return { expired: false, total, mostrados: violations.length, porTipo }
     } catch (err) {
