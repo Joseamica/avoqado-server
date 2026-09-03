@@ -25,9 +25,16 @@
  *
  * 🔴 Un turno cerrado CON conteo (`cashDeclared IS NOT NULL`) es un arqueo firmado por una
  * persona: no se reescribe ni se le quitan cobros. Sus cobros se listan aparte, «en turnos ya
- * contados (no se tocan)». Tampoco se tocan `Order.shiftId` ni ningún importe: reatribuir sólo
- * cambia DÓNDE cae un cobro, no cuánto vale — por eso es reversible con los ids que quedan en
- * la bitácora.
+ * contados (no se tocan)». No se toca ningún IMPORTE: reatribuir sólo cambia DÓNDE cae un cobro,
+ * no cuánto vale — por eso es reversible con los ids que quedan en la bitácora.
+ *
+ * ## `Order.shiftId` también se ata (ronda de corrección 1)
+ *
+ * `getActiveShifts` y el detalle del turno en el dashboard cuentan las ÓRDENES por
+ * `Order.shiftId`. Mover sólo los cobros le enseñaría al dueño «0 órdenes» junto a $12,002. Se
+ * ata sólo lo que no admite duda: órdenes con `shiftId IS NULL` cuyos cobros reatribuidos van
+ * TODOS al mismo turno. Una cuenta cobrada a caballo entre dos días se lista como «ambigua» y no
+ * se toca; una orden que ya cuelga de un turno tampoco se pisa.
  *
  * ## Cómo se recalculan los totales del turno
  *
@@ -55,8 +62,9 @@
  *
  * ## Bitácora
  *
- * Por turno tocado: `SHIFT_PAYMENTS_REATTRIBUTED` (con `movimientos: [{paymentId, deTurnoId}]`,
- * que es lo que hace la operación reversible), `SHIFT_CREATED_BY_REATTRIBUTION` si se creó, y
+ * Por turno tocado: `SHIFT_PAYMENTS_REATTRIBUTED` (con `movimientos: [{paymentId, deTurnoId}]` y
+ * `ordenesAtadas`, que es lo que hace la operación reversible), `SHIFT_CREATED_BY_REATTRIBUTION`
+ * si se creó, y
  * `SHIFT_CLOSED_WITHOUT_COUNT` con el motivo. Se escriben con `logAction` DESPUÉS del commit —
  * `logAction` usa el cliente global de Prisma, no el `tx`, y nunca lanza. Consecuencia aceptada
  * y declarada: si el proceso muere entre el commit y la bitácora, la reparación queda sin su
@@ -207,6 +215,16 @@ interface PlanDeCierre {
   extiende: boolean
 }
 
+/** Qué pasa con las ÓRDENES de los cobros que se mueven (ronda de corrección 1). */
+interface PlanDeOrdenes {
+  /** Se atan: `Order.shiftId IS NULL` y TODOS sus cobros reatribuidos van a este turno. */
+  atar: Array<{ orderId: string; folio: string }>
+  /** Cobros de la misma cuenta repartidos en dos turnos distintos: no se adivina. */
+  ambiguas: Array<{ orderId: string; folio: string; turnos: string[] }>
+  /** Ya cuelga de un turno (aunque sea otro): no se pisa. */
+  yaAtadas: Array<{ orderId: string; folio: string; turnoId: string }>
+}
+
 interface PlanDia {
   dia: string
   turno: TurnoLeido | null
@@ -214,6 +232,7 @@ interface PlanDia {
   cerrar: PlanDeCierre | null
   mover: Pago[]
   yaEnElTurno: Pago[]
+  ordenes: PlanDeOrdenes
 }
 
 const nombreDe = (p: Pago): string => [p.processedBy?.firstName, p.processedBy?.lastName].filter(Boolean).join(' ') || '—'
@@ -379,7 +398,7 @@ async function main(): Promise<void> {
     }
     if (!turno && mover.length === 0) continue
 
-    plan.push({ dia, turno, crear: null, cerrar: null, mover, yaEnElTurno })
+    plan.push({ dia, turno, crear: null, cerrar: null, mover, yaEnElTurno, ordenes: { atar: [], ambiguas: [], yaAtadas: [] } })
   }
 
   // Creación: sólo para los días que necesitan turno y no lo tienen.
@@ -421,6 +440,48 @@ async function main(): Promise<void> {
     if (!membresia) detener(`El staff ${staffId} no pertenece a este venue: no se le puede crear un turno.`)
 
     d.crear = { startTime, startingCash, staffId, origenInicio, origenFondo, origenStaff }
+  }
+
+  // Las ÓRDENES de los cobros que se mueven (ronda de corrección 1). Se decide DESPUÉS de
+  // resolver todos los días, porque «¿todos los cobros reatribuidos de esta cuenta van al mismo
+  // turno?» es una pregunta que cruza días.
+  //
+  // 🔴 Por qué hay que atarlas: `getActiveShifts` y el detalle del turno en el dashboard cuentan
+  // las órdenes por `Order.shiftId`. Si sólo se movieran los cobros, al dueño le saldría
+  // «0 órdenes» junto a $12,002. Y por qué hay que deduplicar la lista de la TPV al mismo tiempo:
+  // atarlas hace que el mismo cobro sea alcanzable por los dos caminos.
+  {
+    const destinoPorOrden = new Map<string, Set<string>>() // orderId → turnos destino distintos
+    const folios = new Map<string, string>()
+    const ordenYaAtada = new Map<string, string>()
+    for (const d of plan) {
+      const destino = d.turno?.id ?? `NUEVO:${d.dia}`
+      for (const p of d.mover) {
+        folios.set(p.orderId, String(p.order.orderNumber))
+        if (p.order.shiftId) ordenYaAtada.set(p.orderId, p.order.shiftId)
+        destinoPorOrden.set(p.orderId, (destinoPorOrden.get(p.orderId) ?? new Set()).add(destino))
+      }
+    }
+    for (const d of plan) {
+      const destino = d.turno?.id ?? `NUEVO:${d.dia}`
+      const suyas = [...new Set(d.mover.map(p => p.orderId))]
+      for (const orderId of suyas) {
+        const folio = folios.get(orderId) ?? orderId
+        const turnos = [...(destinoPorOrden.get(orderId) ?? [])]
+        // Nunca se pisa una orden que ya cuelga de un turno, aunque sea otro.
+        const atada = ordenYaAtada.get(orderId)
+        if (atada) {
+          if (turnos[0] === destino) d.ordenes.yaAtadas.push({ orderId, folio, turnoId: atada })
+          continue
+        }
+        // Una cuenta cobrada a caballo entre dos días no se adivina: se lista y se deja igual.
+        if (turnos.length > 1) {
+          if (turnos[0] === destino) d.ordenes.ambiguas.push({ orderId, folio, turnos })
+          continue
+        }
+        d.ordenes.atar.push({ orderId, folio })
+      }
+    }
   }
 
   // Cierre sin conteo, con la hora DERIVADA: el máximo entre el último cobro que quedará en el
@@ -548,6 +609,18 @@ function imprimirPlan(ctx: {
       console.log(`   ${d.cerrar.extiende ? 'se EXTIENDE el cierre a' : 'se CIERRA sin conteo a las'} ${selloLocal(d.cerrar.endTime, zona)}   ← ${d.cerrar.origenFin}`)
     }
 
+    // Órdenes (ronda de corrección 1): lo que se ata, lo ambiguo y lo que ya estaba atado.
+    const o = d.ordenes
+    if (o.atar.length + o.ambiguas.length + o.yaAtadas.length > 0) {
+      console.log(`   órdenes: ${o.atar.length} se atan · ${o.ambiguas.length} ambiguas (sin cambiar) · ${o.yaAtadas.length} ya atadas a otro turno`)
+      for (const a of o.ambiguas) {
+        console.log(`     ⚠️  folio ${a.folio}: sus cobros caen en ${a.turnos.length} turnos distintos (${a.turnos.join(', ')}) — NO se toca`)
+      }
+      for (const y of o.yaAtadas) {
+        console.log(`     ℹ️  folio ${y.folio}: ya cuelga del turno ${y.turnoId} — NO se pisa`)
+      }
+    }
+
     if (d.mover.length === 0) {
       console.log('   (ningún cobro cambia de turno)\n')
       continue
@@ -583,14 +656,6 @@ function imprimirPlan(ctx: {
         [...new Set(enTurnosContados.map(p => p.shiftId))].join(', '),
     )
   }
-  const conOrdenEnOtroTurno = plan.flatMap(d => d.mover.filter(p => p.order.shiftId && p.order.shiftId !== (d.turno?.id ?? null)))
-  if (conOrdenEnOtroTurno.length > 0) {
-    console.log(
-      `ℹ️  ${conOrdenEnOtroTurno.length} de los cobros que se mueven pertenecen a órdenes que cuelgan de OTRO turno (o de ninguno).\n` +
-        '    `Order.shiftId` NO se reescribe en esta tarea: el detalle del turno en el dashboard cuenta sus órdenes por ahí\n' +
-        '    y seguirá mostrando el conteo viejo. Las ventas y propinas sí salen de los cobros, que es lo que se repara.',
-    )
-  }
   console.log('')
 }
 
@@ -615,6 +680,7 @@ function proyectar(plan: PlanDia[], pagosDeLaVentana: Pago[]): Map<string, Pago[
 async function aplicarPlan(ctx: { plan: PlanDia[]; venueId: string; zona: string }): Promise<void> {
   const { plan, venueId, zona } = ctx
   const movimientosPorTurno = new Map<string, Array<{ paymentId: string; deTurnoId: string | null }>>()
+  const ordenesPorTurno = new Map<string, string[]>()
   const creados: Array<{ dia: string; shiftId: string }> = []
   const cerrados: Array<{ dia: string; shiftId: string; endTime: Date; extiende: boolean }> = []
 
@@ -671,6 +737,22 @@ async function aplicarPlan(ctx: { plan: PlanDia[]; venueId: string; zona: string
           ])
         }
 
+        // 3b. Atar las ÓRDENES que no admiten duda. `shiftId: null` en el `where` es la guarda
+        //     real: si otra sesión ató la orden entre la lectura y este momento, no se pisa —y
+        //     por eso el conteo NO se exige, a diferencia del de los cobros.
+        if (d.ordenes.atar.length > 0) {
+          const atadas = await tx.order.updateMany({
+            where: { id: { in: d.ordenes.atar.map(o => o.orderId) }, venueId, shiftId: null },
+            data: { shiftId },
+          })
+          ordenesPorTurno.set(shiftId, [...(ordenesPorTurno.get(shiftId) ?? []), ...d.ordenes.atar.map(o => o.orderId)])
+          if (atadas.count !== d.ordenes.atar.length) {
+            console.log(
+              `   ⚠️  ${d.dia}: se planearon ${d.ordenes.atar.length} órdenes y se ataron ${atadas.count}; el resto ya colgaba de un turno.`,
+            )
+          }
+        }
+
         // 4. Cerrar el turno del día si se pidió y era NUEVO (el existente ya se cerró arriba).
         if (d.crear && d.cerrar) {
           await tx.shift.update({ where: { id: shiftId }, data: { status: 'CLOSED', endTime: d.cerrar.endTime } })
@@ -718,6 +800,7 @@ async function aplicarPlan(ctx: { plan: PlanDia[]; venueId: string; zona: string
         script: 'reatribuir-cobros-al-turno',
         motivo: 'el turno de caja es del negocio (decisión del founder, 2-sep-2026); estos cobros quedaron fuera de todo turno',
         movimientos,
+        ordenesAtadas: ordenesPorTurno.get(shiftId) ?? [],
       },
     })
   }
@@ -749,7 +832,10 @@ async function aplicarPlan(ctx: { plan: PlanDia[]; venueId: string; zona: string
   }
 
   for (const c of creados) console.log(`✓ ${c.dia}: turno creado ${c.shiftId}`)
-  for (const [shiftId, m] of movimientosPorTurno) console.log(`✓ turno ${shiftId}: ${m.length} cobros reatribuidos`)
+  for (const [shiftId, m] of movimientosPorTurno) {
+    const ordenes = ordenesPorTurno.get(shiftId) ?? []
+    console.log(`✓ turno ${shiftId}: ${m.length} cobros reatribuidos${ordenes.length > 0 ? ` y ${ordenes.length} órdenes atadas` : ''}`)
+  }
   for (const c of cerrados) console.log(`✓ ${c.dia}: turno ${c.shiftId} ${c.extiende ? 'extendido' : 'cerrado sin conteo'} a las ${selloLocal(c.endTime, zona)}`)
   console.log('\nTotales recalculados con la misma agregación que el cierre. Vuelve a correr la simulación para verlo.')
 }
