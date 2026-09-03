@@ -26,8 +26,9 @@ interface RefundRequestData {
   reason: string // RefundReason.name (e.g., "CUSTOMER_REQUEST")
   staffId: string
   // 🔴 NO hay `shiftId`: el turno lo resuelve el SERVIDOR (`../shared/turnoDeCaja.ts`).
-  // La PAX lo sigue mandando en el cuerpo (`RefundRequest.kt` → `RefundRecorder.kt:265`) y
-  // aquí se DESCARTA — el contrato HTTP no cambia y las terminales en la calle no se rompen.
+  // El DTO de la PAX DECLARA el campo (`RefundRequest.kt` → `RefundRecorder.kt:265`), pero su
+  // VALOR es siempre `null` y Gson omite los nulos: la llave no llega (medido el 3-sep-2026,
+  // evidencia en el STEP 3). El contrato HTTP no cambia y la calle no se rompe.
   merchantAccountId?: string | null
   tpvId?: string | null // Terminal that processed this refund (for sales attribution)
   // Blumon serial: REQUIRED for Blumon/PAX refunds (used for SDK merchant switch
@@ -217,12 +218,34 @@ export async function recordRefund(
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 3: el turno abierto del NEGOCIO — se resuelve DENTRO de la transacción (STEP 4)
   // ═══════════════════════════════════════════════════════════════════════════
-  // Aquí NO queda nada: hasta el 3-sep-2026 este paso leía `refundData.shiftId` y sólo caía
-  // al helper cuando venía vacío — y venía SIEMPRE lleno (la ruta valida con
-  // `recordFastPaymentParamsSchema`, que declara sólo `params`, así que `validateRequest` no
-  // parsea ni reemplaza el body y `req.body.shiftId` llegaba crudo). El campo sigue llegando
-  // de las PAX en la calle y se ignora a propósito. El porqué de resolverlo dentro de la
-  // transacción está en el bloque «turno» del STEP 4.
+  // Aquí NO queda nada: hasta el 3-sep-2026 este paso leía `refundData.shiftId` y sólo caía al
+  // helper cuando venía vacío. El body SÍ llega crudo —la ruta valida con
+  // `recordFastPaymentParamsSchema`, que declara sólo `params`, así que `validateRequest` no lo
+  // parsea ni lo reemplaza—, y por eso se ignora a propósito.
+  //
+  // 🔴 CORRECCIÓN MEDIDA (3-sep-2026, sobre avoqado-tpv). Se escribió aquí que ese campo «venía
+  // SIEMPRE lleno», y es FALSO. La PAX manda `shiftId` VACÍO en todos los reembolsos:
+  //
+  //   · Blumon: `PaymentScreen.kt:566` construye el `RefundPayment` con `shiftId = null`;
+  //     `PaymentViewModel.startRefund` lo copia tal cual (`currentShiftId = context.shiftId`,
+  //     con su propio «will be resolved later» que nunca ocurre) y `buildRefundPaymentContext`
+  //     lo vuelve a leer (`currentShiftId ?: base.shiftId`) → null.
+  //   · AngelPay/Nexgo: `RecordAngelPayRefundUseCase.kt:598` pone `shiftId = null` explícito.
+  //   · `createRefundContext`, el ÚNICO helper que aceptaría un turno, sólo se usa en tests.
+  //   · Retrofit usa `GsonConverterFactory.create()` sin `serializeNulls()` ⇒ Gson OMITE los
+  //     nulos: la llave ni siquiera aparece en el JSON. `req.body.shiftId` es `undefined`.
+  //
+  // Nunca ha sido de otra forma: nació así con los reembolsos (`12d6e8b`, 16-dic-2025).
+  //
+  // 🔴 Y la consecuencia, para quien venga a «devolverle al cliente la autoridad del turno para
+  // el reembolso TARDÍO»: no hay contexto que conservar, y tardío tampoco hay. Los reembolsos
+  // NO tienen cola durable — Room sólo guarda `PendingPaymentEntity` (pagos); la libreta
+  // declara `KIND_REFUND`/`ROUTE_REFUND` pero su cableado «ships later» y su sweep es sólo
+  // observabilidad («NEVER records payments»)—, así que `RefundRecorder` hace UNA llamada con
+  // `callTimeout` de 25 s y, si falla, el dinero ya volvió a la tarjeta y la app manda a
+  // soporte. Entre el reembolso físico y este INSERT hay segundos, no horas.
+  //
+  // El porqué de resolverlo dentro de la transacción está en el bloque «turno» del STEP 4.
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 4: Create refund payment and update original in transaction

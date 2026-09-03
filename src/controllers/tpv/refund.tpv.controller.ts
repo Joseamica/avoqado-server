@@ -15,7 +15,7 @@ import * as refundTpvService from '../../services/tpv/refund.tpv.service'
  *   "amount": 5000,
  *   "reason": "CUSTOMER_REQUEST",
  *   "staffId": "claaa...",
- *   "shiftId": "clbbb...",   // ACEPTADO PERO IGNORADO — el turno lo resuelve el servidor
+ *   "shiftId": null,         // la PAX SIEMPRE lo manda vacío (medido); se ignora igual
  *   "merchantAccountId": "clccc...",
  *   "blumonSerialNumber": "2841548417",
  *   "authorizationNumber": "502511",
@@ -58,8 +58,13 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       reason: req.body.reason,
       staffId: req.body.staffId,
       // 🔴 `req.body.shiftId` NO se lee: el turno de caja es del NEGOCIO y lo resuelve el
-      // servidor (`services/shared/turnoDeCaja.ts`). La PAX lo sigue mandando y aquí se
-      // descarta — quitarlo del contrato rompería a las terminales que ya están en la calle.
+      // servidor (`services/shared/turnoDeCaja.ts`). Quitar la llave del contrato rompería a
+      // las terminales que ya están en la calle, así que se tolera y se descarta.
+      //
+      // ⚠️ Y hoy NO HAY NADA que rescatar de ahí, medido el 3-sep-2026 sobre avoqado-tpv: los
+      // DOS constructores del contexto de reembolso ponen `shiftId = null` y Retrofit usa
+      // `GsonConverterFactory.create()` sin `serializeNulls()`, que OMITE los nulos — la llave
+      // ni siquiera viaja en el JSON. Detalle y evidencia en el STEP 3 del servicio.
       merchantAccountId: req.body.merchantAccountId,
       blumonSerialNumber: req.body.blumonSerialNumber,
       authorizationNumber: req.body.authorizationNumber,

@@ -9,8 +9,20 @@
  *   1. la ruta valida con `recordFastPaymentParamsSchema`, que declara **sólo `params`**;
  *      `validateRequest` no parsea ni reemplaza el body cuando el esquema no trae `body`,
  *      así que `req.body.shiftId` llega crudo al controlador;
- *   2. la PAX lo manda de verdad (`RefundRequest.kt` → `RefundRecorder.kt:265`,
+ *   2. el DTO de la PAX DECLARA el campo (`RefundRequest.kt` → `RefundRecorder.kt:265`,
  *      `shiftId = context.shiftId`).
+ *
+ * ⚠️ CORRECCIÓN MEDIDA (3-sep-2026): el punto 2 se escribió como «la PAX lo manda de verdad» y
+ * eso es FALSO. `context.shiftId` vale `null` en los dos constructores de producción
+ * (`PaymentScreen.kt:566` en Blumon, `RecordAngelPayRefundUseCase.kt:598` en AngelPay) y Gson
+ * —`GsonConverterFactory.create()`, sin `serializeNulls()`— omite los nulos, así que la llave
+ * ni siquiera viaja. El hueco que se cerró era REAL en el código del servidor; lo que no era
+ * real es que hubiera un turno del cliente ganando en la calle.
+ *
+ * Estas pruebas siguen valiendo, y valen MÁS así: fijan que mande el SERVIDOR aunque algún día
+ * un cliente empiece a mandar un turno. Lo que no se puede seguir afirmando es que hoy exista
+ * un `shiftId` del cliente que rescatar (p. ej. para un reembolso «tardío»: tampoco los hay,
+ * los reembolsos no tienen cola durable y `RefundRecorder` corta a los 25 s).
  *
  * Resultado: en el camino Blumon normal el reembolso caía en el turno que cree la
  * TERMINAL. Y el decremento de `totalSales` iba por id solo —sin `venueId` ni `status`—,
