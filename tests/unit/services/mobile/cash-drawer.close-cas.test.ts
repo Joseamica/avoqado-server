@@ -48,15 +48,74 @@ beforeEach(() => {
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
 })
 
+/**
+ * 🔴 Desde la Fase 2 (3-sep-2026) esta ruta abre EL TURNO DE CAJA DEL NEGOCIO: por dentro llama a
+ * `abrirTurnoDeCaja`, que resuelve turno + cajón en una transacción. Hay que sembrar venue, staff y
+ * turno además de la caja — y el P2002 se prueba con la forma REAL que da Postgres.
+ */
+function sembrarAperturaUnificada() {
+  ;(prismaMock as any).venue.findUnique = jest.fn().mockResolvedValue({
+    id: VENUE,
+    name: 'Venue de prueba',
+    timezone: 'America/Mexico_City',
+    posType: null,
+    posStatus: 'NOT_INTEGRATED',
+  })
+  ;(prismaMock as any).staffVenue = {
+    findFirst: jest.fn().mockResolvedValue({
+      staffId: 'staff-2',
+      venueId: VENUE,
+      posStaffId: null,
+      staff: { id: 'staff-2', firstName: 'Luis', lastName: null },
+    }),
+  }
+  ;(prismaMock as any).shift = {
+    findFirst: jest.fn().mockResolvedValue(null),
+    findUnique: jest.fn().mockResolvedValue(null),
+    create: jest.fn().mockResolvedValue({ id: 'turno-nuevo' }),
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+  }
+}
+
+/**
+ * La forma REAL del choque, medida contra Postgres el 3-sep-2026: `meta.target` trae la lista de
+ * COLUMNAS del índice parcial, no su nombre, y `meta.constraint` no viene.
+ */
+const p2002DelIndiceDeAbiertas = () =>
+  new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'x', meta: { target: ['venueId'] } } as never)
+
 describe('fase 4 · doble apertura', () => {
   it('🔴 si dos aperturas chocan en el índice único, la segunda recibe el ConflictError de siempre (no un 500)', async () => {
+    sembrarAperturaUnificada()
     ;(prismaMock as any).cashDrawerSession = {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(null), // el check pasó (carrera)
-      create: jest.fn().mockRejectedValue(new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'x' })),
+      findUnique: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockRejectedValue(p2002DelIndiceDeAbiertas()),
     }
     await expect(openSession({ venueId: VENUE, staffId: 'staff-2', staffName: 'Luis', startingAmount: 50 })).rejects.toMatchObject({
+      statusCode: 409,
+    })
+  })
+
+  /**
+   * 🔴 Cambio DECLARADO de la Fase 2: un P2002 sin descriptor ya NO se traduce a 409. Antes esta
+   * ruta convertía cualquier P2002 en «ya existe una caja abierta», y `CashDrawerSession` tiene un
+   * segundo único (`shiftId`) además del `localId` de sus eventos: traducirlos todos mandaba al
+   * cajero a cerrar una caja que no existe. Sin saber QUÉ chocó no se adivina — y un 500 honesto es
+   * preferible, sobre todo porque el 409 lo tratan las apps como rechazo PERMANENTE.
+   */
+  it('🔴 un P2002 SIN descriptor no se disfraza de «ya hay una caja abierta»', async () => {
+    sembrarAperturaUnificada()
+    ;(prismaMock as any).cashDrawerSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue(null),
+      findUnique: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockRejectedValue(new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'x' })),
+    }
+    await expect(openSession({ venueId: VENUE, staffId: 'staff-2', staffName: 'Luis', startingAmount: 50 })).rejects.not.toMatchObject({
       statusCode: 409,
     })
   })

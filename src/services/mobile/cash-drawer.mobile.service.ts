@@ -7,8 +7,9 @@
 
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
+import { abrirTurnoDeCaja } from '../shared/turnoDeCaja'
 import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma } from '@prisma/client'
 
@@ -108,6 +109,28 @@ async function resolveMobileStaffName(staffId: string | null | undefined, provid
 }
 
 /**
+ * Abre la caja desde la tablet — la puerta del POS móvil (`POST /mobile/venues/:id/cash-drawer/open`).
+ *
+ * 🔴 **Desde la Fase 2 (3-sep-2026) esta ruta NO abre sólo el cajón: abre EL TURNO DE CAJA DEL
+ * NEGOCIO**, que es un solo gesto con dos registros ligados (`abrirTurnoDeCaja` en
+ * `shared/turnoDeCaja.ts`). Antes el negocio abría dos cosas cada mañana —la Caja aquí con su fondo
+ * y el Turno en la PAX con otro— para UNA sola gaveta física, y los cobros de quien no había
+ * abierto turno caían FUERA de todo turno (Testarudo, 1-sep-2026: 78 de 92 cobros, $10,337).
+ *
+ * **Quien llama sigue siendo la ruta de SIEMPRE, y ése es el punto**: Android e iOS reciben el gesto
+ * único sin actualizarse, y el servidor se puede desplegar solo.
+ *
+ * ── Qué cambia para el POS, y qué no ───────────────────────────────────────────────────────
+ *
+ * · La respuesta es la sesión de siempre (`formatSession`, campo por campo) MÁS `shiftId`, aditivo
+ *   y opcional: los dos clientes parsean sólo las llaves que declaran.
+ * · Con una caja ya abierta ya **no** contesta 409 «Ya existe una caja abierta»: LIGA y devuelve la
+ *   que hay. Los dos clientes ya trataban ese 409 cayendo a `syncCurrentSession()` para adoptar la
+ *   caja del servidor; ahora la adoptan directo, en la misma respuesta.
+ * · Aparece un rechazo nuevo: con un cierre de TURNO en curso contesta 409 `SHIFT_CLOSE_IN_PROGRESS`
+ *   y no abre nada. Es transitorio (milisegundos) y el POS ya abrió su caja en local; su siguiente
+ *   `GET /current` la adopta. Ver el reporte de la Task 4 para el análisis del código de estado.
+ *
  * @param incluirEsperado ¿el llamante tiene `cash-drawer:view-expected`? Al abrir, el esperado
  * ES el fondo que la persona acaba de teclear, así que ocultarlo no protege nada — pero sin el
  * flag el mismo usuario lo veía en `current` y no aquí, y un contrato que responde distinto
@@ -115,71 +138,39 @@ async function resolveMobileStaffName(staffId: string | null | undefined, provid
  */
 export async function openSession(params: OpenSessionParams, incluirEsperado = false) {
   const { venueId, staffId, startingAmount, deviceName } = params
-  const staffName = await resolveMobileStaffName(staffId, params.staffName)
 
+  // 🔴 La validación se queda AQUÍ, con su mensaje de siempre. `abrirTurnoDeCaja` también rechaza un
+  // fondo negativo, pero con otro texto ("El fondo inicial…"), y ese texto es lo que el cajero ve.
   if (startingAmount < 0) {
     throw new BadRequestError('El monto inicial no puede ser negativo')
   }
 
-  // Check for existing open session
-  const existingOpen = await prisma.cashDrawerSession.findFirst({
-    where: { venueId, status: 'OPEN' },
+  const apertura = await abrirTurnoDeCaja({
+    venueId,
+    staffId,
+    // El nombre lo resuelve el servicio con la MISMA regla que `resolveMobileStaffName` (si llega
+    // el placeholder 'Staff' se saca del registro), sin repetir la consulta.
+    staffName: params.staffName,
+    startingCash: startingAmount,
+    deviceName,
+    source: 'CAJA_MOVIL',
   })
 
-  if (existingOpen) {
-    throw new ConflictError('Ya existe una caja abierta. Cierra la caja actual antes de abrir una nueva.')
+  // Se relee con los eventos porque el POS calcula su esperado EN EL APARATO a partir de ellos: sin
+  // el evento OPEN, una caja recién abierta se leería con $0 de fondo. `formatSession` es la MISMA
+  // función de `current` y de `close`, así que la forma no puede divergir entre endpoints.
+  const session = await prisma.cashDrawerSession.findUnique({
+    where: { id: apertura.cashDrawerSessionId },
+    include: { events: { orderBy: { createdAt: 'desc' } } },
+  })
+  if (!session) {
+    // Imposible salvo que alguien borre la sesión entre la transacción y esta lectura.
+    throw new InternalServerError('La caja se abrió pero no se pudo releer')
   }
 
-  const amountDecimal = dollarsToDecimal(startingAmount)
-
-  // Fase 4: el check de arriba es la respuesta amable del caso normal, pero NO evita la
-  // carrera (dos requests pasan el findFirst antes de que ninguno cree). Lo que la evita es el
-  // índice único parcial `CashDrawerSession(venueId) WHERE status='OPEN'` (migración
-  // 20260827_cash_drawer_one_open_per_venue). Aquí sólo se traduce ese choque al MISMO
-  // ConflictError que las apps ya conocen, en vez de dejar escapar un P2002 como 500.
-  const session = await prisma.cashDrawerSession
-    .create({
-      data: {
-        venueId,
-        openedByStaffId: staffId,
-        openedByName: staffName,
-        startingAmount: amountDecimal,
-        deviceName: deviceName || null,
-        status: 'OPEN',
-        events: {
-          create: {
-            venueId,
-            type: 'OPEN',
-            amount: amountDecimal,
-            staffId,
-            staffName,
-            note: `Caja abierta con $${amountDecimal}`,
-          },
-        },
-      },
-      include: {
-        events: {
-          orderBy: { createdAt: 'desc' },
-        },
-      },
-    })
-    .catch((error: unknown) => {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        throw new ConflictError('Ya existe una caja abierta. Cierra la caja actual antes de abrir una nueva.')
-      }
-      throw error
-    })
-
-  logAction({
-    staffId,
-    venueId,
-    action: 'CASH_DRAWER_OPENED',
-    entity: 'CashDrawerSession',
-    entityId: session.id,
-    data: { startingAmount: Number(amountDecimal), deviceName, source: 'MOBILE' },
-  })
-
-  return formatSession(session, incluirEsperado)
+  // `logAction(CASH_DRAWER_OPENED)` ya lo escribe `abrirTurnoDeCaja` — aquí duplicarlo pondría dos
+  // renglones por apertura en la bitácora que el dueño audita.
+  return { ...formatSession(session, incluirEsperado), shiftId: apertura.shiftId }
 }
 
 // ============================================================================

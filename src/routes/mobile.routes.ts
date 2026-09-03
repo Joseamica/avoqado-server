@@ -2273,8 +2273,14 @@ router.get(
 
 /**
  * POST /api/v1/mobile/venues/:venueId/cash-drawer/open
- * Open a new cash drawer session.
- * Body: { startingAmount: number (cents), deviceName?: string, staffName: string }
+ * Abre el TURNO DE CAJA DEL NEGOCIO desde la tablet: un solo gesto que deja abiertos y ligados el
+ * cajón físico (`CashDrawerSession`) y el turno (`Shift`).
+ * Body: { startingAmount: number (pesos), deviceName?: string, staffName?: string }
+ *
+ * Respuesta: la sesión de siempre (`formatSession`) MÁS `shiftId`, aditivo y opcional.
+ * Si ya hay una caja abierta NO contesta 409: la LIGA y la devuelve, para que una apertura repetida
+ * —o encolada sin red— confirme en vez de rebotar. Un cierre de TURNO en curso sí rechaza con 409
+ * `SHIFT_CLOSE_IN_PROGRESS`: abrir la gaveta a media firma la ataría al turno equivocado.
  */
 router.post(
   '/venues/:venueId/cash-drawer/open',

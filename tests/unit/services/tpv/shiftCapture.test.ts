@@ -24,11 +24,21 @@ jest.mock('@/utils/prismaClient', () => ({
     venue: { findUnique: jest.fn() },
     shift: {
       findFirst: jest.fn(),
+      // Fase 2: la ruta RELEE el turno recién abierto para devolver la fila completa.
+      findUnique: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
     },
     staffVenue: { findFirst: jest.fn() },
+    // Fase 2 (3-sep-2026): `openShiftForVenue` delega en `abrirTurnoDeCaja`, que abre el turno Y el
+    // cajón físico ligados. Sin este modelo la apertura revienta con «Cannot read … of undefined».
+    cashDrawerSession: {
+      findFirst: jest.fn(),
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      updateMany: jest.fn(),
+    },
     payment: { findMany: jest.fn() },
     orderItem: { findMany: jest.fn() },
     rawMaterialMovement: { findMany: jest.fn() },
@@ -146,6 +156,37 @@ function makeUpdatedShift(overrides: Record<string, unknown> = {}) {
 // ── Import service (after all mocks are in place) ─────────────────────────────
 import { openShiftForVenue, closeShiftForVenue } from '@/services/tpv/shift.tpv.service'
 
+/**
+ * 🔴 Fase 2 (3-sep-2026): abrir el turno desde la PAX es UN gesto con DOS registros ligados.
+ * `openShiftForVenue` delega en `abrirTurnoDeCaja`, que corre dentro de una transacción, releva lo
+ * que quedó abierto de otro día de negocio (de ahí `venue.timezone`) y crea también el cajón.
+ */
+function sembrarAperturaUnificada(shiftCreado = makeCreatedShift()) {
+  mockPrisma.venue.findUnique.mockResolvedValue({
+    id: VENUE_ID,
+    name: 'Test Venue',
+    timezone: 'America/Mexico_City',
+    posType: 'NONE',
+    posStatus: 'DISCONNECTED',
+  })
+  mockPrisma.shift.findFirst.mockResolvedValue(null) // no hay turno abierto
+  mockPrisma.staffVenue.findFirst.mockResolvedValue({
+    staffId: STAFF_ID,
+    venueId: VENUE_ID,
+    posStaffId: null,
+    staff: { id: STAFF_ID, firstName: 'Ana', lastName: 'García' },
+  })
+  mockPrisma.shift.create.mockResolvedValue({ id: SHIFT_ID })
+  // La RELECTURA de la que sale la respuesta de la ruta.
+  mockPrisma.shift.findUnique.mockResolvedValue(shiftCreado)
+  mockPrisma.cashDrawerSession.findFirst.mockResolvedValue(null) // no hay caja abierta
+  mockPrisma.cashDrawerSession.findUnique.mockResolvedValue(null)
+  mockPrisma.cashDrawerSession.create.mockResolvedValue({ id: 'caja-nueva' })
+  mockPrisma.cashDrawerSession.updateMany.mockResolvedValue({ count: 1 })
+  mockPrisma.$transaction.mockImplementation((cb: any) => cb(mockPrisma))
+  return shiftCreado
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('ActivityLog dual-write in shift.tpv.service', () => {
@@ -159,28 +200,15 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
 
   describe('openShiftForVenue → SHIFT_OPENED', () => {
     it('fires logAction with action SHIFT_OPENED, entity Shift, and venueId', async () => {
-      // venue exists and is a standalone POS (no integration)
-      mockPrisma.venue.findUnique.mockResolvedValue({
-        id: VENUE_ID,
-        name: 'Test Venue',
-        posType: 'NONE',
-        posStatus: 'DISCONNECTED',
-      })
-      // no existing open shift
-      mockPrisma.shift.findFirst.mockResolvedValue(null)
-      // staff belongs to venue
-      mockPrisma.staffVenue.findFirst.mockResolvedValue({
-        staffId: STAFF_ID,
-        venueId: VENUE_ID,
-        posStaffId: null,
-        staff: { id: STAFF_ID, firstName: 'Ana', lastName: 'García' },
-      })
-      const createdShift = makeCreatedShift()
-      mockPrisma.shift.create.mockResolvedValue(createdShift)
+      sembrarAperturaUnificada()
 
       await openShiftForVenue(VENUE_ID, STAFF_ID, 500, 'station-1')
 
-      expect(mockLogAction).toHaveBeenCalledTimes(1)
+      // 🔴 Fase 2: la apertura escribe DOS renglones (el turno y el cajón que abre con él), así que
+      // se cuenta el que esta prueba cuida en vez del total — contar el total la volvería a romper
+      // cada vez que el gesto único gane un efecto.
+      const aperturasDelTurno = mockLogAction.mock.calls.filter(c => (c[0] as any)?.action === 'SHIFT_OPENED')
+      expect(aperturasDelTurno).toHaveLength(1)
       expect(mockLogAction).toHaveBeenCalledWith(
         expect.objectContaining({
           action: 'SHIFT_OPENED',
@@ -193,20 +221,7 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
     })
 
     it('includes startingCash and stationId in data', async () => {
-      mockPrisma.venue.findUnique.mockResolvedValue({
-        id: VENUE_ID,
-        name: 'Test Venue',
-        posType: 'NONE',
-        posStatus: 'DISCONNECTED',
-      })
-      mockPrisma.shift.findFirst.mockResolvedValue(null)
-      mockPrisma.staffVenue.findFirst.mockResolvedValue({
-        staffId: STAFF_ID,
-        venueId: VENUE_ID,
-        posStaffId: null,
-        staff: { id: STAFF_ID, firstName: 'Ana', lastName: 'García' },
-      })
-      mockPrisma.shift.create.mockResolvedValue(makeCreatedShift())
+      sembrarAperturaUnificada()
 
       await openShiftForVenue(VENUE_ID, STAFF_ID, 250, 'kiosk-2')
 
@@ -218,26 +233,15 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
     })
 
     // ── Regression: return value unchanged ──────────────────────────────────
-    it('still returns the created shift object', async () => {
-      mockPrisma.venue.findUnique.mockResolvedValue({
-        id: VENUE_ID,
-        name: 'Test Venue',
-        posType: 'NONE',
-        posStatus: 'DISCONNECTED',
-      })
-      mockPrisma.shift.findFirst.mockResolvedValue(null)
-      mockPrisma.staffVenue.findFirst.mockResolvedValue({
-        staffId: STAFF_ID,
-        venueId: VENUE_ID,
-        posStaffId: null,
-        staff: { id: STAFF_ID, firstName: 'Ana', lastName: 'García' },
-      })
-      const created = makeCreatedShift()
-      mockPrisma.shift.create.mockResolvedValue(created)
+    it('still returns the shift row — the same fields, plus the drawer id', async () => {
+      const created = sembrarAperturaUnificada()
 
       const result = await openShiftForVenue(VENUE_ID, STAFF_ID, 500)
 
-      expect(result).toBe(created)
+      // 🔴 Ya no es la MISMA referencia (la fila se relee y se le añade el campo nuevo), pero el
+      // contrato de la PAX es el contenido: los campos de siempre, intactos.
+      expect(result).toMatchObject(created)
+      expect(result.cashDrawerSessionId).toBe('caja-nueva')
     })
   })
 
@@ -360,14 +364,7 @@ describe('openShiftForVenue — la doble apertura simultánea no puede salir com
 
   beforeEach(() => {
     jest.clearAllMocks()
-    mockPrisma.venue.findUnique.mockResolvedValue({ id: VENUE_ID, name: 'Test Venue', posType: 'NONE', posStatus: 'DISCONNECTED' })
-    mockPrisma.shift.findFirst.mockResolvedValue(null)
-    mockPrisma.staffVenue.findFirst.mockResolvedValue({
-      staffId: STAFF_ID,
-      venueId: VENUE_ID,
-      posStaffId: null,
-      staff: { id: STAFF_ID, firstName: 'Ana', lastName: 'García' },
-    })
+    sembrarAperturaUnificada()
   })
 
   it('🔴 el P2002 del índice único parcial se traduce a ConflictError (409), no a un 500', async () => {

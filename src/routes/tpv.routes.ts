@@ -1232,7 +1232,14 @@ router.get(
  *     tags:
  *       - TPV - Shifts
  *     summary: Open a new shift
- *     description: Open a new shift for the venue (works with both integrated POS and standalone mode)
+ *     description: |
+ *       Abre el TURNO DE CAJA DEL NEGOCIO: un solo gesto que deja abiertos y ligados el turno
+ *       (`Shift`) y el cajón físico (`CashDrawerSession`). Funciona igual con POS integrado y en
+ *       modo autónomo.
+ *
+ *       Si el negocio ya tiene un turno abierto, NO es un error: se devuelve ese turno (201) en vez
+ *       de crear un segundo. Si ya hay un cajón abierto, el turno se liga a él y hereda su fondo —
+ *       el dinero que alguien contó gana sobre el que se teclea aquí.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -1293,8 +1300,18 @@ router.get(
  *                     externalId:
  *                       type: string
  *                       nullable: true
+ *                     cashDrawerSessionId:
+ *                       type: string
+ *                       description: |
+ *                         ADITIVO (3-sep-2026). El cajón físico que quedó ligado a este turno. Un
+ *                         cliente que no lo lea se comporta exactamente como antes.
  *       400:
- *         description: Bad request - Missing required fields or shift already open
+ *         description: Bad request - Missing required fields, or negative starting cash
+ *       409:
+ *         description: |
+ *           Conflicto. `SHIFT_CLOSE_IN_PROGRESS` = hay un cierre de turno EN CURSO (transitorio:
+ *           reintenta en unos segundos). `CASH_SHIFT_ALREADY_OPEN` = otra terminal ganó la carrera
+ *           de apertura. `SHIFT_HANDOVER_RETRY` = no se pudo relevar el turno del día anterior.
  *       401:
  *         description: Unauthorized - missing or invalid token
  *       403:

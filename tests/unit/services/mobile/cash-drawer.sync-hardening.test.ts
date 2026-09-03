@@ -152,6 +152,55 @@ describe('el cierre lee el fondo de su columna', () => {
     expect(Number(firmado[0])).toBeCloseTo(0, 2)
   })
 })
+/**
+ * 🔴 Desde la Fase 2 (3-sep-2026) `openSession` abre EL TURNO DE CAJA DEL NEGOCIO: la misma ruta,
+ * pero por dentro llama a `abrirTurnoDeCaja`, que además del cajón resuelve el `Shift` y los liga.
+ * Por eso hay que sembrar venue, staff y turno — antes bastaba con la caja.
+ */
+function armarAperturaUnificada() {
+  armarSesionAbierta()
+  ;(prismaMock as any).venue.findUnique = jest.fn().mockResolvedValue({
+    id: VENUE,
+    name: 'Venue de prueba',
+    timezone: 'America/Mexico_City',
+    posType: null,
+    posStatus: 'NOT_INTEGRATED',
+  })
+  ;(prismaMock as any).staffVenue.findFirst = jest
+    .fn()
+    .mockResolvedValue({ staffId: CAJERO, venueId: VENUE, posStaffId: null, staff: { id: CAJERO, firstName: 'Cajero', lastName: null } })
+  ;(prismaMock as any).shift = {
+    findFirst: jest.fn().mockResolvedValue(null),
+    findUnique: jest.fn().mockResolvedValue(null),
+    create: jest.fn().mockResolvedValue({ id: 'turno-nuevo' }),
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+  }
+  ;(prismaMock as any).cashDrawerSession.findFirst = jest.fn().mockResolvedValue(null) // no hay caja abierta
+  ;(prismaMock as any).cashDrawerSession.create = jest.fn().mockResolvedValue({ id: SESSION })
+  // 🔴 `findUnique` sirve a DOS llamadas: el guard de la liga (`where.shiftId`) y la RELECTURA de la
+  // ruta (`where.id`), que es de donde sale la respuesta.
+  ;(prismaMock as any).cashDrawerSession.findUnique = jest.fn().mockImplementation(async ({ where }: any) => {
+    if (where?.shiftId !== undefined) return null
+    return {
+      id: SESSION,
+      venueId: VENUE,
+      status: 'OPEN',
+      startingAmount: 1000,
+      openedAt: ABIERTA_A_LAS,
+      openedByStaffId: CAJERO,
+      openedByName: 'Cajero',
+      deviceName: null,
+      closedAt: null,
+      closedByStaffId: null,
+      closedByName: null,
+      actualAmount: null,
+      overShort: null,
+      closingNote: null,
+      events: [],
+    }
+  })
+}
+
 describe('abrir la caja respeta el permiso, no lo ignora', () => {
   // 🔴 Encontrado por /full-testing contra el servidor real: la respuesta de ABRIR omitía el
   // esperado incluso para quien SÍ tiene `cash-drawer:view-expected`, porque `openSession`
@@ -160,48 +209,16 @@ describe('abrir la caja respeta el permiso, no lo ignora', () => {
   // servidor— pero dejaba el contrato incoherente: el mismo usuario lo veía en `current` y
   // no en `open`.
   it('🔴 con permiso, la respuesta de abrir SÍ trae el esperado', async () => {
-    armarSesionAbierta()
-    ;(prismaMock as any).cashDrawerSession.findFirst = jest.fn().mockResolvedValue(null) // no hay caja abierta
-    ;(prismaMock as any).cashDrawerSession.create = jest.fn().mockResolvedValue({
-      id: SESSION,
-      venueId: VENUE,
-      status: 'OPEN',
-      startingAmount: 1000,
-      openedAt: ABIERTA_A_LAS,
-      openedByStaffId: CAJERO,
-      openedByName: 'Cajero',
-      closedAt: null,
-      closedByStaffId: null,
-      closedByName: null,
-      actualAmount: null,
-      overShort: null,
-      closingNote: null,
-      events: [],
-    })
+    armarAperturaUnificada()
 
     const r: any = await openSession({ venueId: VENUE, staffId: CAJERO, staffName: 'Cajero', startingAmount: 1000 } as never, true)
     expect(r.expectedAmount).toBeDefined()
+    // Fase 2: la misma respuesta trae ahora el turno al que quedó ligada la caja (aditivo).
+    expect(r.shiftId).toBe('turno-nuevo')
   })
 
   it('sin permiso, la respuesta de abrir NO lo trae', async () => {
-    armarSesionAbierta()
-    ;(prismaMock as any).cashDrawerSession.findFirst = jest.fn().mockResolvedValue(null) // no hay caja abierta
-    ;(prismaMock as any).cashDrawerSession.create = jest.fn().mockResolvedValue({
-      id: SESSION,
-      venueId: VENUE,
-      status: 'OPEN',
-      startingAmount: 1000,
-      openedAt: ABIERTA_A_LAS,
-      openedByStaffId: CAJERO,
-      openedByName: 'Cajero',
-      closedAt: null,
-      closedByStaffId: null,
-      closedByName: null,
-      actualAmount: null,
-      overShort: null,
-      closingNote: null,
-      events: [],
-    })
+    armarAperturaUnificada()
 
     const r: any = await openSession({ venueId: VENUE, staffId: CAJERO, staffName: 'Cajero', startingAmount: 1000 } as never)
     expect(r.expectedAmount).toBeUndefined()

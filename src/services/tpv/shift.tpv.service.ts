@@ -2,11 +2,10 @@ import { resolveShiftCashDrawer } from '../dashboard/shift.dashboard.service'
 import { PaymentFundsFlow, PaymentMethod, PaymentType, Prisma, Shift, ShiftStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import socketManager from '../../communication/sockets'
-import { logAction } from '../dashboard/activity-log.service'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { isCashReconciliationEnabled } from '../access/cashReconciliationAccess.service'
 import {
@@ -16,7 +15,7 @@ import {
   type NormalizedCashReconciliationRequest,
 } from '../shared/cashReconciliation.service'
 import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
-import { UNICO_TURNO_ABIERTO, esChoqueDelUnico } from '../shared/turnoDeCaja'
+import { abrirTurnoDeCaja } from '../shared/turnoDeCaja'
 
 interface ShiftFilters {
   staffId?: string
@@ -1014,14 +1013,45 @@ export interface ShiftCloseExecutionResult {
 }
 
 /**
- * Open a new shift for a venue
- * Works with both integrated POS (SOFTRESTAURANT) and standalone (NONE) mode
+ * Lo que la ruta de la PAX devuelve al abrir: la fila de `Shift` de siempre MÁS el id del cajón
+ * físico con el que quedó ligada.
+ *
+ * 🔴 **ADITIVO.** `cashDrawerSessionId` es un campo NUEVO; ninguna app instalada lo lee y ninguna
+ * puede romperse por recibirlo (la PAX mapea `ShiftDto` con Gson, que ignora las llaves que no
+ * declara). Nunca se quita ni se renombra un campo de esta respuesta.
+ */
+export type ShiftConCajon = Shift & { cashDrawerSessionId: string }
+
+/**
+ * Abre el turno de caja de la terminal — la puerta de la PAX (`POST /tpv/venues/:id/shifts/open`).
+ *
+ * 🔴 **Desde la Fase 2 (3-sep-2026) esta ruta NO abre un `Shift` a secas: abre EL TURNO DE CAJA DEL
+ * NEGOCIO**, que es un solo gesto con dos registros ligados (`abrirTurnoDeCaja` en
+ * `shared/turnoDeCaja.ts`). El negocio abría dos cosas cada mañana —la Caja en la tablet con su
+ * fondo y el Turno en la PAX con otro— para UNA sola gaveta física: Testarudo, 1-sep-2026, $2,000 a
+ * las 07:38 en el Sunmi y $0 a las 08:12 en la PAX.
+ *
+ * **Quien llama sigue siendo la ruta de SIEMPRE, y ése es el punto**: las PAX en la calle reciben el
+ * gesto único sin actualizarse, y el servidor se puede desplegar solo.
+ *
+ * ── Qué cambia para la PAX, y qué no ───────────────────────────────────────────────────────
+ *
+ * · La respuesta es la fila de `Shift` de siempre —los mismos campos, sin relaciones nuevas— MÁS
+ *   `cashDrawerSessionId`, aditivo y opcional para cualquier cliente que no lo lea.
+ * · Con un turno ya abierto ya **no** contesta 400 «There is already an open shift»: LIGA y
+ *   devuelve el que hay. Es lo que permite que una apertura repetida no rebote, y de paso la PAX
+ *   deja de enseñar «ciérralo antes de abrir otro» sobre un turno que es suyo.
+ * · Con un cierre EN CURSO contesta 409 `SHIFT_CLOSE_IN_PROGRESS`, que es la verdad —antes decía
+ *   400 «ya hay uno abierto, ciérralo», que era falso—. `ShiftViewModel.translateError` de la PAX
+ *   ya traduce ese 409 a «La caja se está cerrando en otra terminal. Espera unos segundos», sin
+ *   tocar una línea de la app.
+ *
  * @param venueId Venue ID
- * @param staffId Staff ID who is opening the shift
- * @param startingCash Starting cash amount
- * @param stationId POS station ID (optional)
- * @param orgId Organization ID for authorization
- * @returns Created shift object
+ * @param staffId Staff que abre el turno
+ * @param startingCash Fondo tecleado. Sólo manda si NO hay ya una caja o un turno abiertos con su
+ *   propio fondo: el dinero que alguien contó gana sobre el que alguien tecleó después.
+ * @param stationId Estación del POS integrado (opcional)
+ * @param _orgId Se conserva por compatibilidad de firma; la autorización vive en el middleware
  */
 export async function openShiftForVenue(
   venueId: string,
@@ -1029,7 +1059,7 @@ export async function openShiftForVenue(
   startingCash: number,
   stationId?: string,
   _orgId?: string,
-): Promise<Shift> {
+): Promise<ShiftConCajon> {
   logger.info('Opening new shift for venue', {
     venueId,
     staffId,
@@ -1037,187 +1067,68 @@ export async function openShiftForVenue(
     stationId,
   })
 
-  // Verify venue exists and get its POS configuration
-  const venue = await prisma.venue.findUnique({
-    where: { id: venueId },
-    select: {
-      id: true,
-      name: true,
-      posType: true,
-      posStatus: true,
-    },
+  const apertura = await abrirTurnoDeCaja({
+    venueId,
+    staffId,
+    startingCash: startingCash || 0,
+    stationId,
+    source: 'TURNO_TPV',
   })
 
-  if (!venue) {
-    throw new NotFoundError('Venue not found')
+  // La fila COMPLETA, sin `include`: es exactamente lo que `prisma.shift.create` devolvía y lo que
+  // la PAX mapea hoy (`ShiftDto`, con `staff` opcional que llega nulo). Un `include` nuevo aquí le
+  // cambiaría el payload a una app que nadie va a actualizar.
+  const shift = await prisma.shift.findUnique({ where: { id: apertura.shiftId } })
+  if (!shift) {
+    // Imposible salvo que alguien borre el turno entre la transacción y esta lectura. Se reporta
+    // como error del servidor y no como «no encontrado»: el turno SÍ se abrió.
+    throw new InternalServerError('El turno se abrió pero no se pudo releer')
   }
-
-  // Check if there's already an open shift for this venue
-  const existingOpenShift = await prisma.shift.findFirst({
-    where: {
-      venueId: venueId,
-      endTime: null, // Open shift
-    },
-  })
-
-  if (existingOpenShift) {
-    throw new BadRequestError('There is already an open shift for this venue. Please close it before opening a new one.')
-  }
-
-  // Verify staff member exists and belongs to venue
-  // Find staff and their venue association
-  const staffWithVenue = await prisma.staffVenue.findFirst({
-    where: {
-      staffId: staffId,
-      venueId: venueId,
-    },
-    include: {
-      staff: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
-  })
-
-  if (!staffWithVenue) {
-    throw new NotFoundError('Staff member not found or not associated with this venue')
-  }
-
-  const posStaffId = staffWithVenue.posStaffId || staffId
-
-  // Determine if we should send command to POS
-  const isIntegratedPOS = venue.posType === 'SOFTRESTAURANT' && venue.posStatus === 'CONNECTED'
-
-  let shiftExternalId: string | null = null
-
-  if (isIntegratedPOS) {
-    // INTEGRATED MODE: Send command to Windows service to open shift in POS
-    try {
-      // Generate a temporary shift ID for tracking
-      const tempShiftId = `SHIFT_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
-
-      logger.info('Sending shift open command to POS', {
-        venueId,
-        tempShiftId,
-        staffPosId: posStaffId,
-      })
-
-      await publishCommand(`command.softrestaurant.${venueId}`, {
-        entity: 'Shift',
-        action: 'OPEN',
-        payload: {
-          tempShiftId,
-          posStaffId: posStaffId,
-          startingCash: startingCash || 0,
-          stationId: stationId || 'AVOQADO',
-        },
-      })
-
-      // The Windows service will process this command and create the shift in POS
-      // The shift will be synced back via the posSyncShift service
-      // For now, we'll create the shift record with a marker that it's pending POS confirmation
-      shiftExternalId = tempShiftId
-    } catch (error) {
-      logger.error('Failed to send shift open command to POS', error)
-      throw new BadRequestError('Failed to open shift in POS system. Please try again.')
-    }
-  }
-
-  // Create shift record in database
-  //
-  // 🔴 El `findFirst` de arriba es la respuesta amable del caso normal, pero NO evita la carrera:
-  // dos terminales que abren a la vez pasan las dos el check antes de que ninguna cree. Lo que la
-  // evita es el índice único PARCIAL `Shift(venueId) WHERE status='OPEN'` (migración
-  // `20260903030000_shift_one_open_per_venue`, Fase 2 del turno de caja del negocio). Y no es un
-  // registro de más: `turnoAbiertoDelNegocio` elige «el más reciente», así que con dos turnos
-  // abiertos el dinero del negocio se parte entre ellos según el reloj.
-  //
-  // Aquí sólo se traduce ese choque al MISMO `ConflictError` que las apps ya conocen del cajón
-  // (`mobile/cash-drawer.mobile.service.openSession`), en vez de dejar escapar un P2002 como 500:
-  // un 500 al abrir el turno es un cajero mirando «algo salió mal» con la fila enfrente.
-  const shift = await prisma.shift
-    .create({
-      data: {
-        venueId: venueId,
-        staffId: staffId,
-        startTime: new Date(),
-        endTime: null,
-        status: 'OPEN' as ShiftStatus,
-        startingCash: startingCash || 0,
-        endingCash: null,
-        cashDeclared: null,
-        cardDeclared: null,
-        vouchersDeclared: null,
-        otherDeclared: null,
-        totalSales: 0,
-        totalTips: 0,
-        notes: null,
-        externalId: shiftExternalId,
-        posRawData: stationId ? { stationId } : undefined,
-      },
-    })
-    .catch((error: unknown) => {
-      // 🔴 SÓLO el índice de abiertos. `Shift` tiene un segundo único —`@@unique([venueId,
-      // externalId])`, que SÍ se puebla en los venues integrados— y traducir ése le diría al cajero
-      // «ya hay un turno abierto» sobre un negocio que no tiene ninguno. El discriminador vive UNA
-      // vez, en `shared/turnoDeCaja.ts`, para que las dos puertas de apertura no puedan divergir.
-      if (esChoqueDelUnico(error, UNICO_TURNO_ABIERTO)) {
-        throw new ConflictError('Ya hay un turno de caja abierto en este negocio. Ciérralo antes de abrir otro.', 'CASH_SHIFT_ALREADY_OPEN')
-      }
-      throw error
-    })
 
   logger.info('Shift opened successfully', {
     shiftId: shift.id,
     venueId,
     staffId,
-    isIntegratedPOS,
+    creado: apertura.shiftCreado,
+    cashDrawerSessionId: apertura.cashDrawerSessionId,
   })
 
-  void logAction({
-    staffId: staffId ?? null,
-    venueId: venueId,
-    action: 'SHIFT_OPENED',
-    entity: 'Shift',
-    entityId: shift.id,
-    data: { startingCash: startingCash, stationId: stationId ?? undefined, isIntegratedPOS: isIntegratedPOS },
-  })
-
-  // Emit Socket.IO event for real-time dashboard updates
-  try {
-    const broadcastingService = socketManager.getBroadcastingService()
-    if (broadcastingService) {
-      broadcastingService.broadcastShiftEvent(venueId, 'opened', {
+  // 🔴 El aviso en tiempo real sólo cuando el turno se CREÓ. Si sólo se ligó, nadie abrió nada y
+  // anunciar `shift_opened` le pintaría al dashboard una apertura que no ocurrió.
+  // `logAction(SHIFT_OPENED)` ya lo escribe `abrirTurnoDeCaja`, con el mismo `data` de siempre.
+  if (apertura.shiftCreado) {
+    try {
+      const broadcastingService = socketManager.getBroadcastingService()
+      if (broadcastingService) {
+        broadcastingService.broadcastShiftEvent(venueId, 'opened', {
+          shiftId: shift.id,
+          staffId: shift.staffId,
+          staffName: apertura.staffName,
+          status: 'OPEN',
+          startTime: shift.startTime.toISOString(),
+          startingCash: shift.startingCash.toNumber(),
+          totalSales: shift.totalSales.toNumber(),
+          totalTips: shift.totalTips.toNumber(),
+          totalOrders: shift.totalOrders,
+          totalCashPayments: shift.totalCashPayments?.toNumber() || 0,
+          totalCardPayments: shift.totalCardPayments?.toNumber() || 0,
+          totalVoucherPayments: shift.totalVoucherPayments?.toNumber() || 0,
+          totalOtherPayments: shift.totalOtherPayments?.toNumber() || 0,
+          totalProductsSold: shift.totalProductsSold || 0,
+          venueId,
+        })
+        logger.info('✅ Broadcasted shift_opened event to dashboard', { shiftId: shift.id, venueId })
+      }
+    } catch (error) {
+      logger.error('❌ Failed to broadcast shift_opened event', {
         shiftId: shift.id,
-        staffId: shift.staffId,
-        staffName: `${staffWithVenue.staff.firstName} ${staffWithVenue.staff.lastName}`,
-        status: 'OPEN',
-        startTime: shift.startTime.toISOString(),
-        startingCash: shift.startingCash.toNumber(),
-        totalSales: shift.totalSales.toNumber(),
-        totalTips: shift.totalTips.toNumber(),
-        totalOrders: shift.totalOrders,
-        totalCashPayments: shift.totalCashPayments?.toNumber() || 0,
-        totalCardPayments: shift.totalCardPayments?.toNumber() || 0,
-        totalVoucherPayments: shift.totalVoucherPayments?.toNumber() || 0,
-        totalOtherPayments: shift.totalOtherPayments?.toNumber() || 0,
-        totalProductsSold: shift.totalProductsSold || 0,
         venueId,
+        error: error instanceof Error ? error.message : 'Unknown error',
       })
-      logger.info('✅ Broadcasted shift_opened event to dashboard', { shiftId: shift.id, venueId })
     }
-  } catch (error) {
-    logger.error('❌ Failed to broadcast shift_opened event', {
-      shiftId: shift.id,
-      venueId,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    })
   }
 
-  return shift
+  return { ...shift, cashDrawerSessionId: apertura.cashDrawerSessionId }
 }
 
 type ClosableShift = Shift & {
