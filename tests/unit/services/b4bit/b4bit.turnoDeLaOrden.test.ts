@@ -2,11 +2,15 @@
  * La orden testigo de un cobro CRIPTO cae en el turno de caja del NEGOCIO.
  *
  * 🔴 Y el turno se resuelve por `venueId`, NO se reusa el `shiftId` del parámetro — que es la
- * decisión que esta prueba fija. `initiateCryptoPayment` recibe `shiftId` del cliente y arriba
- * sólo comprueba que ese turno esté OPEN, **no que sea de este negocio**: el `Payment` hereda ese
- * hueco desde antes y no se toca aquí (es el camino del dinero), pero la orden no tiene por qué
- * heredarlo. En el caso normal coinciden — `openShiftForVenue` obliga a un solo turno abierto por
- * venue.
+ * decisión que esta prueba fija. En el caso normal coinciden: `openShiftForVenue` obliga a un solo
+ * turno abierto por venue.
+ *
+ * ⚠️ Cuando se escribió, el `Payment` SÍ heredaba el hueco (se validaba el turno del cliente con un
+ * `findUnique` sin `venueId` y se persistía ese id) y este archivo lo declaraba como límite
+ * conocido. Se cerró el 3-sep-2026 (task 5b): hoy la orden y el pago llevan el MISMO turno, y eso
+ * lo fija `b4bit.turnoDelNegocio.test.ts`. El `shiftId` de `cobro()` y el mock de
+ * `shift.findUnique` se conservan aquí como trampa: si alguien devuelve la lectura del cliente,
+ * aquella prueba lo caza.
  */
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {

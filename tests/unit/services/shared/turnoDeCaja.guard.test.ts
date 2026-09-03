@@ -9,6 +9,12 @@ const raiz = join(__dirname, '../../../../src/services')
  * mientras el otro mantiene la aserción en verde.
  */
 const esperado: Record<string, number> = {
+  // Desde el 3-sep-2026 (task 5b). Estuvo EXCLUIDO a propósito y esa excepción documentada vaciaba
+  // el guard de sentido: `initiateCryptoPayment` validaba el turno del cliente con un `findUnique`
+  // sin `venueId` y lo persistía en el `Payment`, así que el venue A podía mandar un turno abierto
+  // del venue B y su cobro salía del corte de A para sumarse al de B. Ahora resuelve una sola vez
+  // por negocio y ese id va a la Order Y al Payment.
+  'b4bit/b4bit.service.ts': 1,
   'tpv/payment.tpv.service.ts': 2,
   'tpv/refund.tpv.service.ts': 1,
   // 3 desde el 3-sep-2026 (task 2b): `createOrderWithItems` ya lo llamaba; se suman `createOrder`
@@ -24,10 +30,6 @@ const esperado: Record<string, number> = {
   'mobile/areaTicketV7.mobile.service.ts': 1,
   'mobile/estimate.mobile.service.ts': 1,
   'reservation/createOrderFromReservation.ts': 1,
-  // ⚠️ `b4bit/b4bit.service.ts` también llama al helper (1) y NO está en esta lista a propósito:
-  // su `initiateCryptoPayment` destructura `shiftId` de `params` para el `Payment` (dato del
-  // CLIENTE), así que dispararía el segundo describe. La `Order` sí resuelve por negocio; la
-  // cobertura de eso vive en `tests/unit/services/shared/ordenLlevaElTurno.guard.test.ts`.
 }
 
 /**
