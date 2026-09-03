@@ -19,6 +19,8 @@ import {
   HUERFANAS_DESDE,
   DETAIL_LIMIT,
   VENTANA_DEL_BARRIDO_MIN,
+  VALES_DESDE,
+  ORDEN_DESCUENTA_INVENTARIO,
   buildWatchdogSql,
 } from '@/jobs/money-integrity-watchdog.job'
 import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '@/services/shared/pagadaPeroAbierta'
@@ -99,14 +101,59 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(pagadaAbierta).toContain('Grupo Avoqado Prime')
   })
 
+  it('🔴 «orden sin vale de inventario»: cerrada, con mercancía que descuenta, y sin vale que lo respalde', () => {
+    for (const sql of [counts, details]) expect(sql).toContain("'ORDEN SIN VALE DE INVENTARIO'")
+
+    const sinVale = regla('ORDEN SIN VALE DE INVENTARIO')
+    // Sólo órdenes YA cerradas: mientras la orden sigue abierta el vale todavía puede nacer.
+    expect(sinVale).toContain(`o.status = 'COMPLETED'`)
+    // La ausencia del vale se mide sobre el vale de VENTA — una reversa no cuenta como deducción.
+    expect(sinVale).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM "InventoryPosting" ip[\s\S]*?ip\."effectKind" = 'SALE'/)
+    // Por HUELLA, no por forma: la condición «esta venta descuenta» es un espejo de
+    // `createSalePostingInTx`. Una copia inline pasaría los regex y se quedaría atrás.
+    expect(sinVale).toContain(ORDEN_DESCUENTA_INVENTARIO)
+    // Misma gracia que el check #6: una orden que el barrido acaba de cerrar todavía puede
+    // estar recibiendo su vale.
+    expect(sinVale).toContain(`o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'`)
+    // Piso: antes de que el outbox existiera NINGUNA orden tuvo vale — sin este tope el
+    // vigilante gritaría por toda la historia de cada venue con recetas.
+    expect(sinVale).toContain(`o."createdAt" >= '${VALES_DESDE}'`)
+    expect(VALES_DESDE).toBe('2026-08-14')
+    expect(sinVale).toContain('Grupo Avoqado Prime')
+  })
+
+  it('🔴 «descuenta inventario» dice lo MISMO que el camino del cobro, renglón por renglón', () => {
+    // Espejo de `createSalePostingInTx`: sin `productId` no hay línea NI POR MODIFICADOR
+    // (el bucle hace `if (!item.productId) continue` antes de mirar los modificadores).
+    expect(ORDEN_DESCUENTA_INVENTARIO).toContain('oi."productId" IS NOT NULL')
+    // Producto deducible = `getProductInventoryMethods`: del MISMO venue, con trackInventory,
+    // y con método explícito o receta (el fallback legacy).
+    expect(ORDEN_DESCUENTA_INVENTARIO).toContain('pr."venueId" = o."venueId"')
+    expect(ORDEN_DESCUENTA_INVENTARIO).toContain('pr."trackInventory"')
+    expect(ORDEN_DESCUENTA_INVENTARIO).toContain('pr."inventoryMethod" IS NOT NULL')
+    expect(ORDEN_DESCUENTA_INVENTARIO).toMatch(/EXISTS \(\s*SELECT 1 FROM "Recipe" rc WHERE rc\."productId" = pr\.id\)/)
+    // Y la otra mitad: un modificador con materia prima descuenta aunque el producto no lleve
+    // inventario (`itemHasInventoryModifiers` exige LOS DOS campos).
+    expect(ORDEN_DESCUENTA_INVENTARIO).toContain('m."rawMaterialId" IS NOT NULL')
+    expect(ORDEN_DESCUENTA_INVENTARIO).toContain('m."quantityPerUnit" IS NOT NULL')
+  })
+
   it('los totales se cuentan sin tope y el detalle sí lleva tope', () => {
     expect(counts).not.toMatch(/LIMIT/i)
     expect(counts).toMatch(/GROUP BY "check"/)
     expect(details).toMatch(new RegExp(`LIMIT ${DETAIL_LIMIT}\\s*$`))
   })
 
-  it('regresión: las 5 invariantes previas siguen ahí y con el filtro de venues reales', () => {
-    for (const nombre of ['TOTAL NEGATIVO', 'DESCUENTO EXCEDE EL CONSUMO', 'PROPINA NO CUADRA', 'SOBREPAGO', 'ORDEN PAGADA SIN COBRO']) {
+  it('regresión: las 7 invariantes siguen ahí y con el filtro de venues reales', () => {
+    for (const nombre of [
+      'TOTAL NEGATIVO',
+      'DESCUENTO EXCEDE EL CONSUMO',
+      'PROPINA NO CUADRA',
+      'SOBREPAGO',
+      'ORDEN PAGADA SIN COBRO',
+      'PAGADA PERO ABIERTA',
+      'ORDEN SIN VALE DE INVENTARIO',
+    ]) {
       expect(regla(nombre)).toContain('Grupo Avoqado Prime')
     }
   })

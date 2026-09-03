@@ -17,8 +17,19 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * único: hay más órdenes así en producción.
  *
  * Sin tabla nueva: el `Payment` ya es la verdad. Reparar = reejecutar la MISMA transacción
- * del cobro (`reconcileOrderFromPayments`), que conserva el invariante «orden PAID ⟺ vale de
- * inventario». Barrer dos veces no duplica: la segunda pasada no encuentra candidatas.
+ * del cobro (`reconcileOrderFromPayments`). Barrer dos veces no duplica: la segunda pasada no
+ * encuentra candidatas.
+ *
+ * 🔴 Lo que este barrido NO hace, y aquí decía lo contrario hasta el 3-sep-2026: **no restaura
+ * el invariante «orden PAID ⟺ vale de inventario»**. No puede — sin cobro nuevo,
+ * `debeRegistrarPosting` queda en false y no nace vale (lo detalla el párrafo de abajo, que
+ * siempre lo dijo bien: esta frase lo contradecía). Consecuencia real, y es el caso semilla:
+ * ORD-1788276418170 nunca tuvo vale porque la segunda transacción de su cobro murió —por eso
+ * quedó abierta—, así que cerrarla fue lo correcto y a la vez **borró la única señal** de que
+ * la deducción se había perdido. Esa señal la recupera la 7ª invariante del vigilante de
+ * dinero, «ORDEN SIN VALE DE INVENTARIO» (`money-integrity-watchdog.job.ts`), que OBSERVA sin
+ * reparar: crear el vale días después reabriría la doble deducción que `settledBeforeThisPayment`
+ * existe para evitar, y `inventory-posting-sweeper` sólo reclama vales que YA existen.
  *
  * 🔴 Nunca fuerza `status = COMPLETED` a mano: si esa transacción no puede cerrar la orden,
  * queda como estaba y el motivo va al log. Eso lo cazará el vigilante.
@@ -32,10 +43,18 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * los daba por hechos cuando la orden tiene al menos un `Payment`, que es justo lo que el
  * criterio exige.
  *
- * 🔴 Y cierra SIEMPRE por ese camino, nunca por `computeOrderBalance`: la base del criterio
- * (`max(0, subtotal − descuento)`, reembolsos fuera) es la aritmética de ESA función. Con otro
- * cerrador, un venue con cargos por servicio quedaría elegido por el criterio y rechazado por
- * el cierre en cada pasada, para siempre.
+ * 🔴 Y cierra SIEMPRE por ese camino, nunca por `computeOrderBalance`: el criterio y el cierre
+ * tienen que compartir aritmética, o una orden quedaría elegida por uno y rechazada por el otro
+ * en cada pasada, para siempre. Hoy la base del criterio vive en `shared/pagadaPeroAbierta.ts`
+ * (`baseQueDebeCubrirseSql`) y es `max(0, subtotal − descuento) + cargo por servicio`, con los
+ * reembolsos fuera; la propina se cancela a los dos lados, que es lo que la reduce a esa forma.
+ *
+ * 🔴 Ese `+ cargo por servicio` NO sobra — hasta el 3-sep-2026 este comentario describía la
+ * aritmética ANTERIOR (sin el cargo) y advertía de un peligro que el arreglo del 2-sep ya había
+ * eliminado, así que invitaba justo a la regresión que costó dinero: omitiendo el cargo, una
+ * cuenta de $100 + $10 con $100 cobrados salía elegida como pagada, el barrido la cerraba, le
+ * reescribía el total hacia abajo y liberaba la mesa — $10 perdidos en silencio (auditoría Codex
+ * 2-sep-2026). No lo «simplifiques» de vuelta.
  */
 
 /** No pisar el cobro en vivo: una orden recién tocada todavía puede estar cerrándose sola. */

@@ -64,6 +64,53 @@ export const DETAIL_LIMIT = 200
 export const VENTANA_DEL_BARRIDO_MIN = 15
 
 /**
+ * Corte de la invariante «orden sin vale de inventario»: sólo órdenes creadas desde este día.
+ * Es cuando el outbox durable de `InventoryPosting` llegó a `main` —y con él a producción—
+ * (630e917f el 13-ago-2026, a6e34471 el 14). ANTES de esa fecha ninguna orden pudo tener vale,
+ * así que sin este piso el vigilante gritaría por la historia entera de cada venue con recetas y
+ * entrenaría a todos a ignorarlo, que es justo lo que este job existe para evitar. No es una
+ * precaución teórica: medido el 3-sep-2026 contra la base local, el check pasa de **0** alertas
+ * a **774** al quitarlo. Va inline en el SQL como literal, igual que HUERFANAS_DESDE: es una
+ * fecha civil fija, no un instante.
+ */
+export const VALES_DESDE = '2026-08-14'
+
+/**
+ * «Esta venta descuenta inventario», en SQL — espejo de a quién le nace una LÍNEA de deducción
+ * en `createSalePostingInTx` (`services/inventory/inventoryPosting.service.ts`), que clasifica
+ * con `getProductInventoryMethods`. No se inventa aquí un criterio propio: uno más ancho
+ * gritaría por ventas que nunca debieron descontar nada, y uno más estrecho callaría el caso
+ * que este check existe para ver.
+ *
+ * Renglón por renglón, tal como lo decide el bucle del cobro:
+ *  · `if (!item.productId) continue` — sin producto NO hay línea, **ni siquiera por modificador**;
+ *  · producto deducible = del MISMO venue (el aislamiento por tenant que pide `venueId` en la
+ *    clasificación), con `trackInventory`, y con `inventoryMethod` explícito o —fallback de los
+ *    productos legacy— una `Recipe`;
+ *  · o el renglón trae un modificador con materia prima, que descuenta aunque el producto no
+ *    lleve inventario (`itemHasInventoryModifiers` exige `rawMaterialId` Y `quantityPerUnit`).
+ *
+ * 🔴 Si `createSalePostingInTx` cambia a quién le crea línea, esto cambia en el MISMO trabajo:
+ * son las dos mitades de la misma pregunta.
+ */
+export const ORDEN_DESCUENTA_INVENTARIO = `EXISTS (
+            SELECT 1 FROM "OrderItem" oi
+            WHERE oi."orderId" = o.id AND oi."productId" IS NOT NULL
+              AND (
+                EXISTS (
+                  SELECT 1 FROM "Product" pr
+                  WHERE pr.id = oi."productId" AND pr."venueId" = o."venueId" AND pr."trackInventory"
+                    AND (pr."inventoryMethod" IS NOT NULL OR EXISTS (SELECT 1 FROM "Recipe" rc WHERE rc."productId" = pr.id))
+                )
+                OR EXISTS (
+                  SELECT 1 FROM "OrderItemModifier" oim
+                  JOIN "Modifier" m ON m.id = oim."modifierId"
+                  WHERE oim."orderItemId" = oi.id AND m."rawMaterialId" IS NOT NULL AND m."quantityPerUnit" IS NOT NULL
+                )
+              )
+          )`
+
+/**
  * Filtro de venues reales — los demo/seed usan convenciones propias.
  *
  * 🔴 Excluir por slug NO basta: la org de pruebas del founder ("Grupo Avoqado Prime") tiene 4 venues
@@ -116,7 +163,7 @@ export interface WatchdogRun {
 }
 
 /**
- * Las 6 invariantes de dinero como un CTE, y dos consultas encima: los totales por tipo (sin
+ * Las 7 invariantes de dinero como un CTE, y dos consultas encima: los totales por tipo (sin
  * tope) y el detalle (con tope). Exportado puro para poder probar su forma y correrlo a mano
  * contra producción en sólo lectura. Consultas probadas contra prod el 2026-08-03 y el 2026-09-02.
  */
@@ -225,6 +272,45 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         WHERE ${criterioPagadaPeroAbiertaSql('o')}
           AND o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'
           AND ${REAL_VENUES}
+
+        UNION ALL
+
+        -- 7. ORDEN SIN VALE DE INVENTARIO: se cerró vendiendo mercancía que descuenta stock y no
+        --    existe el vale (InventoryPosting) que lo respalda — la deducción se perdió, y sin
+        --    esta invariante se pierde EN SILENCIO.
+        --    Caso semilla ORD-1788276418170 (Testarudo, 1-sep-2026, $74.75, 1 CAPUCCINO): la
+        --    segunda transacción del cobro murió, así que el vale nunca nació — y por eso mismo
+        --    la orden se quedó abierta. Cuando el barrido la cerró (2-sep) hizo lo correcto, pero
+        --    con eso borró la ÚNICA señal que quedaba: la invariante 6 dejó de verla y ninguna
+        --    otra la mira. Medido el 3-sep-2026: de 219 órdenes COMPLETED de Testarudo del 1 y 2
+        --    de sep, 217 tienen vale y 2 no.
+        --    🔴 Esto OBSERVA, no repara, y es deliberado: inventory-posting-sweeper sólo
+        --    reclama vales que YA existen (PENDING/PARTIAL_FAILED/APPLYING) y no puede rescatar
+        --    uno que nunca nació; y crear el vale días después reabriría la doble deducción que
+        --    settledBeforeThisPayment existe para evitar. El faltante ya se contó en el
+        --    inventario físico: descontarlo tarde lo cobra dos veces.
+        --    ⚠️ Lo que también va a caer aquí y NO es ruido: b4bit y pos-sync cierran órdenes sin
+        --    llamar a createSalePostingInTx ni deducir nada (verificado el 3-sep-2026). Un
+        --    venue con recetas que cobre por esos caminos aparecerá en serie — es el MISMO
+        --    defecto en otro camino, no un falso positivo. Lo mismo una cortesía total cerrada
+        --    sin cobro. Si alguno resulta ser decisión de producto, va a
+        --    TRIAGED_AWAITING_THIRD_PARTY con su motivo escrito, nunca se amplía el criterio.
+        SELECT 'ORDEN SIN VALE DE INVENTARIO', v.name, o.id,
+               'orden=' || o."orderNumber" || ' cerrada=' || COALESCE(o."completedAt"::date::text, 'sin fecha') ||
+               ' total=' || o.total
+        FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
+        WHERE o.status = 'COMPLETED'
+          AND o."createdAt" >= '${VALES_DESDE}'
+          AND ${ORDEN_DESCUENTA_INVENTARIO}
+          -- El vale de VENTA: una reversa (CANCELLATION/CUSTOMER_RETURN) no es una deducción.
+          AND NOT EXISTS (
+            SELECT 1 FROM "InventoryPosting" ip
+            WHERE ip."orderId" = o.id AND ip."effectKind" = 'SALE'
+          )
+          -- Misma gracia que la invariante 6: una orden que el barrido acaba de cerrar todavía
+          -- puede estar recibiendo su vale, y gritar por eso enseña a ignorar la alarma.
+          AND o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'
+          AND ${REAL_VENUES}
     )`
 
   return {
@@ -318,7 +404,7 @@ export class MoneyIntegrityWatchdogJob {
     }
   }
 
-  /** Las 6 invariantes de dinero: totales sin tope + detalle acotado. */
+  /** Las 7 invariantes de dinero: totales sin tope + detalle acotado. */
   private async check(): Promise<{ counts: Array<{ check: string; n: number }>; rows: Violation[] }> {
     const sql = buildWatchdogSql()
     // Entry read con retry por la regla de cron-jobs.md (lecturas puras, seguras de reintentar).
