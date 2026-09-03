@@ -34,6 +34,29 @@ describe('renderizarBloques', () => {
     const { html } = renderizarBloques([{ type: 'image', url: 'https://x.mx/a.png', alt: 'Corte' }])
     expect(html).toContain('alt="Corte"')
   })
+
+  // 🔴 Estas tres pruebas sostienen la decisión de NO sanitizar: el escape tiene que ser COMPLETO
+  // en los cinco puntos donde entra texto del dueño a un atributo o al cuerpo, no sólo en los dos
+  // que ya cubrían las pruebas de arriba. Un solo punto sin escapar es un correo con marcado
+  // inyectado firmado con nuestro dominio de marketing.
+
+  it('escapa el alt de la imagen: un atributo hostil no puede inyectar onerror', () => {
+    const { html } = renderizarBloques([{ type: 'image', url: 'https://x.mx/a.png', alt: '" onerror="alert(1)' }])
+    expect(html).not.toContain('" onerror="alert(1)"')
+    expect(html).toContain('&quot; onerror=&quot;alert(1)')
+  })
+
+  it('escapa las comillas del src de la imagen: el atributo no se puede cerrar antes de tiempo', () => {
+    const { html } = renderizarBloques([{ type: 'image', url: 'https://x.mx/a.png?q="onerror="alert(1)', alt: 'x' }])
+    expect(html).not.toContain('src="https://x.mx/a.png?q="')
+    expect(html).toContain('&quot;onerror=&quot;alert(1)')
+  })
+
+  it('escapa la etiqueta del botón: un script no puede colarse en el texto visible', () => {
+    const { html } = renderizarBloques([{ type: 'button', label: '<script>alert(1)</script>', url: 'https://x.mx/p' }])
+    expect(html).not.toContain('<script>')
+    expect(html).toContain('&lt;script&gt;')
+  })
 })
 
 describe('dominiosDeLosBloques', () => {
