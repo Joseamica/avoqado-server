@@ -133,7 +133,7 @@ function filaDeTurno(over: Record<string, unknown> = {}) {
  * Arma el mundo: qué hay abierto y qué devuelven las escrituras. Guarda lo que se CREÓ para
  * poder afirmar sobre el fondo con el que nació cada registro.
  */
-function mundo({ turno = null as any, caja = null as any }) {
+function mundo({ turno = null as any, caja = null as any, cajonDelTurno = null as any }) {
   const creado: { turno?: any; caja?: any } = {}
 
   m.venue.findUnique.mockResolvedValue({
@@ -172,7 +172,8 @@ function mundo({ turno = null as any, caja = null as any }) {
   // `findUnique` sirve a DOS llamadas distintas: la del guard de la liga (`where.shiftId`) y
   // la relectura de la ruta del cajón (`where.id`).
   m.cashDrawerSession.findUnique.mockImplementation(({ where }: any) => {
-    if (where?.shiftId !== undefined) return Promise.resolve(null)
+    // `where.shiftId` = «¿este turno ya tuvo gaveta?». Es la pregunta de la que depende el fondo.
+    if (where?.shiftId !== undefined) return Promise.resolve(where.shiftId === TURNO ? cajonDelTurno : null)
     if (where?.id !== CAJA) return Promise.resolve(null)
     const base = caja ?? cajaAbierta({ startingAmount: creado.caja?.startingAmount ?? new Decimal(0), events: [] })
     return Promise.resolve(base)
@@ -271,6 +272,89 @@ describe('🔴 Espejo: el turno ya está abierto y la tablet abre caja', () => {
     const sesion: any = await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Viridiana', startingAmount: 0 })
 
     expect(sesion.shiftId).toBe(TURNO)
+  })
+})
+
+// ============================================================================
+// 2b · El fondo cuando NO hay gaveta abierta (ronda de arreglo 1)
+// ============================================================================
+
+/**
+ * 🔴 «Gana el que CONTÓ» no es «gana el que abrió primero».
+ *
+ * La primera versión heredaba de `turnoAReusar.startingCash` sin mirar nada más, y eso rompía dos
+ * casos de dinero que sí ocurren:
+ *
+ *   (a) **Relevo de mostrador**, un martes normal: turno + gaveta a las 08:00 con $2,000; a las
+ *       15:00 la tablet CIERRA la gaveta y cuenta, pero el `Shift` sigue OPEN (`closeSession` no
+ *       toca el turno: cero referencias, medido); a las 15:05 la cajera de la tarde abre con
+ *       **$500** suyos. Heredar los $2,000 del turno le firmaba un **faltante de $1,500** — y peor,
+ *       la tablet adopta la sesión del server y borra su OPEN provisional de $500.
+ *   (b) **El caso REAL del 1-sep**: la PAX abrió primero tecleando **$0**. `??` no salta el cero, así
+ *       que la gaveta nacía en $0 y los **$2,000 contados en la tablet se descartaban** — el mismo
+ *       sobrante fantasma que este arreglo existe para matar, entrando por la otra puerta.
+ *
+ * La regla que queda, y por qué cada rama:
+ *   · gaveta ABIERTA           → manda su fondo (es la caja que está abierta ahora mismo)
+ *   · turno SIN gaveta y con fondo > 0 → manda el del turno (nadie ha abierto la caja todavía)
+ *   · todo lo demás            → manda lo que se teclea AHORA, que es quien está viendo la gaveta
+ *
+ * Un `startingCash` de CERO en un turno que nunca tuvo gaveta no es un conteo: es el default del
+ * campo (Testarudo tecleó $0 en la PAX). Por eso no gana.
+ */
+describe('🔴 el fondo cuando no hay gaveta abierta', () => {
+  it('🔴 (b) turno en $0 sin gaveta + $2,000 tecleados en la tablet ⇒ la gaveta nace con los $2,000', async () => {
+    const creado = mundo({ turno: turnoAbierto({ startingCash: new Decimal(0) }) })
+
+    await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Viridiana', startingAmount: 2000 })
+
+    expect(Number(creado.caja.startingAmount)).toBe(2000)
+  })
+
+  it('🔴 (b) y el TURNO se alinea a esos $2,000: el cierre de la PAX lee `Shift.startingCash`', async () => {
+    mundo({ turno: turnoAbierto({ startingCash: new Decimal(0) }) })
+
+    await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Viridiana', startingAmount: 2000 })
+
+    // Sin esto el cierre del cajón esperaría $2,000 y el del turno $0: uno de los dos firma un
+    // descuadre de $2,000 contra alguien que no hizo nada mal.
+    const alineado = m.shift.updateMany.mock.calls.find((c: any) => c[0]?.data?.startingCash !== undefined)
+    expect(alineado).toBeDefined()
+    expect(alineado[0].where).toMatchObject({ id: TURNO, status: 'OPEN' })
+    expect(Number(alineado[0].data.startingCash)).toBe(2000)
+  })
+
+  it('🔴 (a) segundo cajón del mismo día: el turno YA tuvo gaveta ⇒ manda el fondo tecleado ahora', async () => {
+    const creado = mundo({
+      turno: turnoAbierto({ startingCash: new Decimal(2000) }),
+      cajonDelTurno: { id: 'caja-de-la-mañana' }, // cerrada a las 15:00, pero sigue siendo la del turno
+    })
+
+    await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Cajera de la tarde', startingAmount: 500 })
+
+    expect(Number(creado.caja.startingAmount)).toBe(500)
+  })
+
+  it('🔴 (a) y el turno de la mañana NO se toca: sus $2,000 son suyos', async () => {
+    mundo({
+      turno: turnoAbierto({ startingCash: new Decimal(2000) }),
+      cajonDelTurno: { id: 'caja-de-la-mañana' },
+    })
+
+    await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Cajera de la tarde', startingAmount: 500 })
+
+    const tocado = m.shift.updateMany.mock.calls.find((c: any) => c[0]?.data?.startingCash !== undefined)
+    expect(tocado).toBeUndefined()
+  })
+
+  it('un turno con fondo real y SIN gaveta sigue mandando: no se pisa con lo tecleado', async () => {
+    const creado = mundo({ turno: turnoAbierto({ startingCash: new Decimal(2000) }) })
+
+    await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Viridiana', startingAmount: 0 })
+
+    expect(Number(creado.caja.startingAmount)).toBe(2000)
+    // Y no hace falta alinear nada: ya dicen lo mismo.
+    expect(m.shift.updateMany.mock.calls.find((c: any) => c[0]?.data?.startingCash !== undefined)).toBeUndefined()
   })
 })
 

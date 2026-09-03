@@ -115,8 +115,14 @@ describe('fase 4 · doble apertura', () => {
       findUnique: jest.fn().mockResolvedValue(null),
       create: jest.fn().mockRejectedValue(new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'x' })),
     }
-    await expect(openSession({ venueId: VENUE, staffId: 'staff-2', staffName: 'Luis', startingAmount: 50 })).rejects.not.toMatchObject({
-      statusCode: 409,
+    // 🔴 `not.toMatchObject({statusCode: 409})` lo satisface CUALQUIER rechazo —incluido un
+    // `TypeError` sin relación—, así que se afirma que sube el error CRUDO de Prisma: es lo único
+    // que distingue «no se disfrazó» de «se rompió por otra cosa».
+    await expect(openSession({ venueId: VENUE, staffId: 'staff-2', staffName: 'Luis', startingAmount: 50 })).rejects.toBeInstanceOf(
+      Prisma.PrismaClientKnownRequestError,
+    )
+    await expect(openSession({ venueId: VENUE, staffId: 'staff-2', staffName: 'Luis', startingAmount: 50 })).rejects.toMatchObject({
+      code: 'P2002',
     })
   })
 })

@@ -138,6 +138,15 @@ export interface AbrirTurnoDeCajaResult {
    * repetir la consulta de `StaffVenue` que este servicio acaba de hacer.
    */
   staffName: string
+  /**
+   * El fondo con el que de verdad se escribieron los registros, en pesos como cadena. Puede NO ser
+   * el `startingCash` que se pidió: una gaveta ya abierta —o un turno sin gaveta con fondo propio—
+   * manda sobre lo que se teclea después. Existe para que la bitácora registre lo ESCRITO y no lo
+   * pedido: un dueño auditando no puede leer $500 en el log y $2,000 en la fila sin explicación.
+   */
+  fondoAplicado: string
+  /** Presente sólo si esta llamada subió el `startingCash` del turno (era cero y sin gaveta). */
+  turnoAlineadoDesde?: string
 }
 
 /** Marca legible del relevo. Va en `Shift.notes`: quien lo lea tiene que saber que NADIE contó. */
@@ -396,22 +405,68 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       caja = null
     }
 
-    // ── EL FONDO: uno solo por caja física, y gana el que YA EXISTE ───────────────────────
+    // ── EL FONDO: uno solo por caja física ────────────────────────────────────────────────
     //
-    // 🔴 El caso REAL de Testarudo (1-sep-2026): la tablet abrió la caja a las 07:38 con **$2,000**
-    // contados y la PAX pidió turno a las 08:12 tecleando **$0**. Ligar sin más dejaba el turno con
-    // $0 y la caja con $2,000 — dos fondos para UNA sola gaveta, que es exactamente el descuadre que
-    // este proyecto existe para borrar. Quien cerrara el turno vería un sobrante de $2,000.
+    // 🔴 El caso REAL de Testarudo (1-sep-2026): la tablet abrió la gaveta a las 07:38 con **$2,000**
+    // contados y la PAX pidió turno a las 08:12 tecleando **$0**. Dejar cada registro con su número
+    // da dos fondos para UNA sola gaveta, y uno de los dos cierres firma un descuadre de $2,000
+    // contra alguien que no hizo nada mal.
     //
-    // La regla es la misma que ya impide pisar el fondo de lo que estaba abierto, dicha al derecho:
-    // **el dinero que alguien CONTÓ gana sobre el que alguien tecleó después**. Así que lo que se
-    // CREA hereda el fondo de lo que ya existía —la caja primero, porque es la gaveta física; el
-    // turno si no hay caja— y el `startingCash` tecleado sólo manda cuando no hay nada que heredar.
+    // 🔴 «Gana el que CONTÓ» NO es «gana el que abrió primero», y confundirlos cuesta dinero en las
+    // dos direcciones (las dos verificadas contra el código, ronda de arreglo 1):
+    //
+    //   (a) **Relevo de mostrador**, un martes normal: turno + gaveta a las 08:00 con $2,000; a las
+    //       15:00 la tablet CIERRA la gaveta y cuenta, pero el `Shift` sigue OPEN —`closeSession`
+    //       de `mobile/cash-drawer.mobile.service.ts` no toca el turno, cero referencias—; a las
+    //       15:05 la cajera de la tarde abre con **$500** suyos. Heredar del turno le firmaría un
+    //       **faltante de $1,500**, y encima la tablet adopta la sesión del server y borra su OPEN
+    //       provisional de $500 (`CashDrawerRepository.kt`, promoción de provisionales).
+    //   (b) **La dirección que de verdad ocurrió**: la PAX primero, tecleando $0. Un `??` no salta
+    //       el cero, así que la gaveta nacía en $0 y los $2,000 contados se descartaban.
+    //
+    // Las tres ramas, y por qué:
+    //   · gaveta ABIERTA                    → manda su fondo, sin condiciones: es la caja que está
+    //                                          abierta ahora mismo, y su arqueo ya se calcula contra él
+    //   · turno SIN gaveta y con fondo > 0  → manda el del turno: nadie ha abierto la caja todavía,
+    //                                          así que ese número es lo único que la describe
+    //   · todo lo demás                     → manda lo que se teclea AHORA, que lo escribe quien está
+    //                                          viendo la gaveta
+    //
+    // 🔑 Un `startingCash` de CERO en un turno que nunca tuvo gaveta **no es un conteo**: es el
+    // default del campo — Testarudo tecleó $0 en la PAX— y por eso no gana. Un cero en una gaveta
+    // ABIERTA sí gana: ahí alguien miró la caja y dijo que estaba vacía.
     //
     // ⚠️ Por eso el cajón se resuelve ANTES de crear el turno: al revés, el turno nacería sin poder
     // saber que la gaveta ya tenía fondo.
-    const fondoQueYaExistia = caja?.startingAmount ?? turnoAReusar?.startingCash ?? null
-    const fondoEfectivo = fondoQueYaExistia === null ? fondo : new Prisma.Decimal(fondoQueYaExistia as never)
+    const cajonDelTurnoReusado = turnoAReusar
+      ? await tx.cashDrawerSession.findUnique({ where: { shiftId: turnoAReusar.id }, select: { id: true } })
+      : null
+
+    // ⚠️ `!= null` y no truthiness: un `Decimal(0)` es un OBJETO y por tanto truthy, así que un `&&`
+    // no distinguiría «cero» de «ausente». Quien decide es `greaterThan(0)`, explícito.
+    const fondoDelTurnoSinGaveta =
+      turnoAReusar != null &&
+      cajonDelTurnoReusado == null &&
+      turnoAReusar.startingCash != null &&
+      new Prisma.Decimal(turnoAReusar.startingCash).greaterThan(0)
+        ? new Prisma.Decimal(turnoAReusar.startingCash)
+        : null
+
+    const fondoDeLaGavetaAbierta = caja != null ? new Prisma.Decimal(caja.startingAmount) : null
+    const fondoEfectivo = fondoDeLaGavetaAbierta ?? fondoDelTurnoSinGaveta ?? fondo
+
+    // Un fondo tecleado que se descarta es la ÚNICA huella de que dos personas dijeron cosas
+    // distintas del mismo dinero. Sin esto, la divergencia entre lo que se ve en pantalla y lo que
+    // queda en la fila parece un bug del sistema.
+    if (!fondoEfectivo.equals(fondo)) {
+      logger.warn('[TURNO DE CAJA] Se descartó el fondo tecleado: manda el de la caja que ya existía', {
+        venueId,
+        source,
+        fondoTecleado: fondo.toString(),
+        fondoAplicado: fondoEfectivo.toString(),
+        origen: caja ? 'gaveta abierta' : 'turno sin gaveta',
+      })
+    }
 
     let shiftId: string
     let shiftCreado = false
@@ -498,6 +553,27 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       cajaYaLigadaA = null
     }
 
+    // ── QUE LOS DOS CIERRES DIGAN EL MISMO NÚMERO ─────────────────────────────────────────
+    //
+    // 🔴 Los dos cierres leen COLUMNAS DISTINTAS: el del cajón calcula su esperado desde
+    // `CashDrawerSession.startingAmount` (`calculateExpectedAmount`) y el del turno desde
+    // `Shift.startingCash` (`tpv/shift.tpv.service.ts`, `expectedCash = shift.startingCash + …`).
+    // Si divergen, uno de los dos le firma al cajero un descuadre que nadie causó.
+    //
+    // Sólo puede pasar en UN caso, y por eso la guarda es tan estrecha: el turno se abrió con fondo
+    // CERO y sin gaveta —el default de la PAX—, y ahora la gaveta se abre con un fondo real. Se
+    // sube el cero al fondo que de verdad tiene la caja. **Nunca al revés y nunca sobre un turno
+    // que ya tuvo gaveta**: ahí su `startingCash` es suyo y describe su propia sesión de caja.
+    let turnoAlineadoDesde: string | undefined
+    if (cajaCreada && turnoAReusar && !cajonDelTurnoReusado && !new Prisma.Decimal(turnoAReusar.startingCash ?? 0).equals(fondoEfectivo)) {
+      // CAS por estado: si el turno cambió debajo (cierre en curso), no se le toca el dinero.
+      const alineado = await tx.shift.updateMany({
+        where: { id: shiftId, venueId, status: ShiftStatus.OPEN },
+        data: { startingCash: fondoEfectivo, updatedAt: ahora },
+      })
+      if (alineado.count === 1) turnoAlineadoDesde = new Prisma.Decimal(turnoAReusar.startingCash ?? 0).toString()
+    }
+
     // ── La liga ───────────────────────────────────────────────────────────────────────────
     //
     // 🔴 NUNCA SE ROBA UNA LIGA. Si el cajón ya apunta a otro turno, se deja como está: ese
@@ -507,7 +583,8 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     // entera y tumbaría una apertura que por lo demás está bien. La liga mejora el reporte;
     // no es dinero, y `resolveShiftCashDrawer` sigue resolviendo por ventana de tiempo sin ella.
     if (cajaYaLigadaA == null) {
-      const reclamadoPorOtra = await tx.cashDrawerSession.findUnique({ where: { shiftId }, select: { id: true } })
+      // Se reusa la lectura de arriba: un turno recién CREADO no puede estar reclamado por nadie.
+      const reclamadoPorOtra = shiftCreado ? null : cajonDelTurnoReusado
       if (reclamadoPorOtra && reclamadoPorOtra.id !== cashDrawerSessionId) {
         logger.warn('[TURNO DE CAJA] El turno ya está ligado a otro cajón; no se reescribe la liga', {
           venueId,
@@ -534,7 +611,16 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
         ? { ...(shiftCerradoId ? { shiftCerradoId } : {}), ...(cajaCerradaId ? { cajaCerradaId } : {}) }
         : undefined
 
-    return { shiftId, cashDrawerSessionId, shiftCreado, cajaCreada, staffName, ...(relevo ? { relevo } : {}) } as AbrirTurnoDeCajaResult
+    return {
+      shiftId,
+      cashDrawerSessionId,
+      shiftCreado,
+      cajaCreada,
+      staffName,
+      fondoAplicado: fondoEfectivo.toString(),
+      ...(turnoAlineadoDesde !== undefined ? { turnoAlineadoDesde } : {}),
+      ...(relevo ? { relevo } : {}),
+    } as AbrirTurnoDeCajaResult
   })
 
   // ── Bitácora: fuera de la transacción y fire-and-forget ───────────────────────────────────
@@ -559,6 +645,24 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       data: { motivo: 'relevo al abrir la caja del día siguiente', sinConteo: true, source },
     })
   }
+  if (resultado.turnoAlineadoDesde !== undefined) {
+    // 🔴 Mover el fondo de un turno YA ABIERTO es tocar dinero: va con su renglón en la bitácora,
+    // con el antes y el después, para que un dueño pueda ver quién y por qué.
+    void logAction({
+      staffId,
+      venueId,
+      action: 'SHIFT_STARTING_CASH_ALIGNED',
+      entity: 'Shift',
+      entityId: resultado.shiftId,
+      data: {
+        motivo: 'el turno se abrió sin fondo y sin gaveta; se alinea al fondo con el que se abrió la caja',
+        de: Number(resultado.turnoAlineadoDesde),
+        a: Number(resultado.fondoAplicado),
+        cashDrawerSessionId: resultado.cashDrawerSessionId,
+        source,
+      },
+    })
+  }
   if (resultado.shiftCreado) {
     void logAction({
       staffId,
@@ -566,7 +670,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       action: 'SHIFT_OPENED',
       entity: 'Shift',
       entityId: resultado.shiftId,
-      data: { startingCash, stationId: stationId ?? undefined, isIntegratedPOS: posIntegrado, source },
+      data: { startingCash: Number(resultado.fondoAplicado), stationId: stationId ?? undefined, isIntegratedPOS: posIntegrado, source },
     })
   }
   if (resultado.cajaCreada) {
@@ -576,7 +680,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       action: 'CASH_DRAWER_OPENED',
       entity: 'CashDrawerSession',
       entityId: resultado.cashDrawerSessionId,
-      data: { startingAmount: Number(fondo), deviceName, source },
+      data: { startingAmount: Number(resultado.fondoAplicado), deviceName, source },
     })
   }
 
@@ -587,6 +691,8 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     cashDrawerSessionId: resultado.cashDrawerSessionId,
     shiftCreado: resultado.shiftCreado,
     cajaCreada: resultado.cajaCreada,
+    fondoAplicado: resultado.fondoAplicado,
+    turnoAlineadoDesde: resultado.turnoAlineadoDesde ?? null,
     turnoRelevado: resultado.relevo?.shiftCerradoId ?? null,
     cajaRelevada: resultado.relevo?.cajaCerradaId ?? null,
   })
