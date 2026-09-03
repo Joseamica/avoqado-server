@@ -23,6 +23,7 @@ jest.mock('jsonwebtoken', () => ({ sign: jest.fn(() => 'JWT-FALSO') }))
 
 import { ensureLoyaltyClass, issueGooglePass, buildSaveJwt } from '@/services/wallet/googleWalletPass.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import jwt from 'jsonwebtoken'
 
 const VENUE = { id: 'v1', name: 'Testarudo Café', logo: null, primaryColor: null, secondaryColor: null }
 
@@ -42,12 +43,20 @@ describe('googleWalletPass', () => {
   it('crea la clase del negocio si no existe', async () => {
     const id = await ensureLoyaltyClass('v1')
     expect(id).toBe('338.venue-v1')
+    // 🔴 Sin esto, la prueba pasaría igual aunque `get()` preguntara por la clase de OTRO
+    // venue: `getClass` siempre rechaza en este `beforeEach` sin importar qué resourceId
+    // reciba, así que sólo comprobar que insertó no demuestra que preguntó por la correcta.
+    expect(getClass).toHaveBeenCalledWith({ resourceId: '338.venue-v1' })
     expect(insertClass).toHaveBeenCalledWith(expect.objectContaining({ requestBody: expect.objectContaining({ id: '338.venue-v1' }) }))
   })
 
   it('🔴 si la clase YA existe no la vuelve a crear: insertar dos veces es un error de la API', async () => {
     getClass.mockResolvedValue({ data: { id: '338.venue-v1' } })
     await ensureLoyaltyClass('v1')
+    // 🔴 Misma razón que arriba: confirma que el "ya existe" que evitó el insert vino de
+    // preguntar por LA CLASE DE ESTE VENUE, no de una llamada con un id distinto que por
+    // casualidad resolvió.
+    expect(getClass).toHaveBeenCalledWith({ resourceId: '338.venue-v1' })
     expect(insertClass).not.toHaveBeenCalled()
   })
 
@@ -63,6 +72,13 @@ describe('googleWalletPass', () => {
       expect.objectContaining({ data: expect.objectContaining({ platform: 'GOOGLE' }) }),
     )
     expect(insertObject).toHaveBeenCalledWith(expect.objectContaining({ requestBody: expect.objectContaining({ id: '338.pass-wp-1' }) }))
+    // 🔴 El nombre de la prueba promete "guarda el googleObjectId", pero sin esta
+    // aserción nada obliga a que se persista: el valor devuelto se arma en memoria y la
+    // prueba pasaría igual aunque se borrara el `prisma.walletPass.update` de producción.
+    expect(prismaMock.walletPass.update).toHaveBeenCalledWith({
+      where: { id: 'wp-1' },
+      data: { googleObjectId: '338.pass-wp-1' },
+    })
   })
 
   it('🔴 idempotente: un pase que ya existe se devuelve, no se crea otro', async () => {
@@ -78,6 +94,20 @@ describe('googleWalletPass', () => {
 
     expect(r.googleObjectId).toBe('338.pass-wp-1')
     expect(prismaMock.walletPass.create).not.toHaveBeenCalled()
+    // 🔴 La aserción que da sentido a la prueba: sin `platform` en el where, `findFirst`
+    // devolvería el pase de APPLE del mismo cliente y lo trataríamos como si fuera el de
+    // Google. Con `prismaMock` el resultado lo controlamos nosotros, así que lo único que
+    // prueba algo es CÓMO se consultó.
+    expect(prismaMock.walletPass.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          venueId: 'v1',
+          customerId: 'c1',
+          platform: 'GOOGLE',
+          active: true,
+        }),
+      }),
+    )
   })
 
   it('el JWT de guardar se firma con la clave de la cuenta de servicio', async () => {
@@ -89,6 +119,18 @@ describe('googleWalletPass', () => {
       revision: 1,
     } as any)
     await expect(buildSaveJwt('v1', 'c1')).resolves.toBe('JWT-FALSO')
+    // 🔴 `jwt.sign` está mockeado para devolver 'JWT-FALSO' SIN IMPORTAR los argumentos —
+    // así que comprobar sólo el valor de retorno pasaría igual si el código nunca llamara
+    // a `jwt.sign`, o lo llamara con la llave de OTRO negocio. Lo que prueba algo es que
+    // se firmó con la llave privada de la cuenta de servicio y el id del pase correcto.
+    expect(jwt.sign).toHaveBeenCalledWith(
+      expect.objectContaining({
+        iss: 'sa@x.iam.gserviceaccount.com',
+        payload: { loyaltyObjects: [{ id: '338.pass-wp-1' }] },
+      }),
+      'k',
+      expect.objectContaining({ algorithm: 'RS256' }),
+    )
   })
 
   it('sin negocio o sin cliente devuelve null en vez de lanzar', async () => {
