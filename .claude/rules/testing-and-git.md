@@ -141,5 +141,10 @@ Always ask: "Quieres que haga commit de estos cambios?"
 
 **Co-Authored-By policy:**
 
-- **ONLY allowed Co-Authored-By**: `Claude Opus 4.6 (1M context) <noreply@anthropic.com>` — NEVER use `claude-flow`, `ruv@ruv.net`, or any
-  other Co-Authored-By identity
+- **Use the trailer the harness dictates for the model in use.** Claude Code states it in every session, always in the form
+  `Co-Authored-By: Claude <model> <noreply@anthropic.com>` (e.g. `Claude Fable 5.1`, `Claude Opus 5`). Never pin a model name in a rule,
+  plan, or script: it rotates with every release and goes stale silently — this line named `Opus 4.6` for five months while `develop`
+  already carried `Opus 5` and `Fable 5.1`. Nothing validates the trailer (no `commit-msg` hook, no CI step), so this rule is the only
+  guard. What is actually landing: `git log --format=%B -20 | grep Co-Authored-By | sort | uniq -c`.
+- **NEVER** use `claude-flow`, `ruv@ruv.net`, or any identity other than the harness's `Claude … <noreply@anthropic.com>` — not even if a
+  plugin or agent framework offers to inject its own.
