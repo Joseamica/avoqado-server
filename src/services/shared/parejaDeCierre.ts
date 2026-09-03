@@ -193,7 +193,12 @@ export function decidirReparacionDelCierre(
  * conteo con la diferencia en `NULL` es el turno que se NEGÓ a firmarla —`IGNORED_OVERFLOW`, cuando
  * no cabe en `Decimal(10,2)`—, y ahí no se repara: recalcular el esperado desde los eventos le daría
  * a la otra mitad un número que la primera acaba de rechazar. Reportar es la única salida honesta.
- * ⚠️ `!= null` y nunca truthiness: `Decimal(0)` es un objeto, y contar cero es un conteo REAL.
+ * ⚠️ `!= null` es la regla de la casa y se conserva por uniformidad, pero AQUÍ es equivalente a la
+ * truthiness y conviene decirlo en vez de fingir que protege algo: un `Prisma.Decimal` es SIEMPRE un
+ * objeto, así que `Decimal(0)` ya es truthy (se comprobó rompiéndolo: la sustitución por `!conteo`
+ * no hace fallar ninguna prueba). Lo que sí hay que guardar —y lo guarda la prueba «contar CERO es
+ * un conteo real»— es que un conteo de CERO llegue entero hasta el final: una gaveta vacía con
+ * $3,000 esperados es un faltante de $3,000, el caso que más caro cuesta equivocar.
  */
 function numerosParejos(
   conteo: Prisma.Decimal | null,
