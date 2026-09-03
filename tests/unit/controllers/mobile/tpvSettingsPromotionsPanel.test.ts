@@ -68,6 +68,11 @@ describe('GET /mobile/venues/:venueId/settings — bloque promotions', () => {
     // No terminals → settings null, no per-terminal settings lookup. Keeps the focus on `promotions`.
     prismaMock.terminal.findMany.mockResolvedValue([])
     mockedGetTpvSettings.mockResolvedValue({} as Awaited<ReturnType<typeof getTpvSettings>>)
+    // receiptInfo (encabezado fiscal del ticket, commit 14421c20): el controlador hace
+    // prisma.venue.findUnique(...).catch(...) — sin resolver el mock, `.catch` de
+    // undefined revienta y next(error) dispara. null = venue sin datos de recibo,
+    // que es justo el camino falla-abierto que ese código diseñó.
+    prismaMock.venue.findUnique.mockResolvedValue(null)
   })
 
   it('devuelve los modos de panel configurados en el venue', async () => {

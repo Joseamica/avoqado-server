@@ -6,12 +6,14 @@
  */
 import { z } from 'zod'
 
-// v1.1: el service acepta NETWORK y BLUETOOTH — ambas ruteables por el gateway de
-// impresión del POS Android (su PrinterService ya implementa el transporte BT/SPP).
+// v1.2: el service acepta NETWORK, BLUETOOTH y POS_INTERNAL. Las dos primeras las
+// rutea el gateway de impresión del POS Android (transporte BT/SPP incluido);
+// POS_INTERNAL es la impresora integrada del propio POS (Sunmi): cada aparato la
+// resuelve a SU cabezal local, así que la comanda sale donde se cobró — sin IP.
 // USB_SPOOLER (exclusivo del POS de escritorio/Windows) y TERMINAL_INTERNAL (impresora
 // interna del PAX) siguen rechazadas: el gateway Android no puede servir esas rutas
 // ("rechazar rutas no servibles", spec v3).
-const CONNECTION_TYPES = ['NETWORK', 'BLUETOOTH', 'USB_SPOOLER', 'TERMINAL_INTERNAL'] as const
+const CONNECTION_TYPES = ['NETWORK', 'BLUETOOTH', 'USB_SPOOLER', 'TERMINAL_INTERNAL', 'POS_INTERNAL'] as const
 
 const paperWidth = z.union([z.literal(58), z.literal(80)], { message: 'Ancho de papel inválido (58 o 80 mm)' })
 
@@ -42,6 +44,11 @@ export function isValidBluetoothAddress(address: string): boolean {
 
 export const NETWORK_ADDRESS_MESSAGE = 'La dirección de red debe ser un host o host:puerto válido (ej. 192.168.1.50 o impresora.local:9100)'
 export const BLUETOOTH_ADDRESS_MESSAGE = 'La dirección Bluetooth debe ser una MAC válida (ej. AA:BB:CC:DD:EE:FF)'
+// El caso real que motiva el rechazo (Testarudo, 2026-08-31): al no existir este tipo,
+// alguien registró la "impresora de barra" como NETWORK con la IP del propio Sunmi y
+// las comandas morían en silencio contra un puerto donde nadie escucha.
+export const POS_INTERNAL_ADDRESS_MESSAGE =
+  'La impresora integrada del POS no lleva dirección: la comanda sale en el propio aparato que cobró'
 
 // ── Printers ────────────────────────────────────────────────────────
 export const createPrinterSchema = z.object({
@@ -61,6 +68,9 @@ export const createPrinterSchema = z.object({
     .superRefine((data, ctx) => {
       if (!data.address) return
       const connectionType = data.connectionType ?? 'NETWORK'
+      if (connectionType === 'POS_INTERNAL') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['address'], message: POS_INTERNAL_ADDRESS_MESSAGE })
+      }
       if (connectionType === 'NETWORK' && !isValidNetworkAddress(data.address)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['address'], message: NETWORK_ADDRESS_MESSAGE })
       }

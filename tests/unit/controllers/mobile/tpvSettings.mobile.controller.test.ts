@@ -280,6 +280,120 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
   })
 })
 
+describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket impreso)', () => {
+  /** Distingue la consulta del encabezado del ticket de la del plan (grandfather):
+   *  ambas pasan por `prisma.venue.findUnique`, pero solo la del ticket pide
+   *  `fiscalEmisors`. */
+  function mockVenueLookups(receiptVenue: unknown) {
+    prismaMock.venue.findUnique.mockImplementation(((args: { select?: Record<string, unknown> }) => {
+      if (args?.select?.fiscalEmisors) {
+        return receiptVenue instanceof Error ? Promise.reject(receiptVenue) : Promise.resolve(receiptVenue)
+      }
+      return Promise.resolve({ seatCapExempt: false, status: 'ACTIVE' })
+    }) as any)
+  }
+
+  beforeEach(() => {
+    prismaMock.terminal.findMany.mockResolvedValue([])
+    mockedGetTpvSettings.mockResolvedValue({} as Awaited<ReturnType<typeof getTpvSettings>>)
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+  })
+
+  it('returns venue identity + first fiscal emisor for the printed receipt header', async () => {
+    mockVenueLookups({
+      name: 'Testarudo Cafe',
+      logo: 'https://cdn.avoqado.io/testarudo/logo.png',
+      phone: '5512345678',
+      address: 'Napoles 47',
+      city: 'Cuauhtemoc',
+      state: 'Ciudad de Mexico',
+      zipCode: '06600',
+      fiscalEmisors: [{ legalName: 'TESTARUDO CAFE S.A.P.I. DE C.V.', rfc: 'TCA2501231A6', lugarExpedicion: '06600' }],
+    })
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq(), res, jest.fn() as NextFunction)
+
+    expect(res.__json.success).toBe(true)
+    expect(res.__json.data.receiptInfo).toEqual({
+      name: 'Testarudo Cafe',
+      logoUrl: 'https://cdn.avoqado.io/testarudo/logo.png',
+      phone: '5512345678',
+      address: 'Napoles 47',
+      city: 'Cuauhtemoc',
+      state: 'Ciudad de Mexico',
+      zipCode: '06600',
+      legalName: 'TESTARUDO CAFE S.A.P.I. DE C.V.',
+      rfc: 'TCA2501231A6',
+      lugarExpedicion: '06600',
+    })
+  })
+
+  it('queries the FIRST emisor by createdAt (the same rule nomina/accounting use) — shape of the query', async () => {
+    // El mock contesta lo que sea; esta prueba fija la FORMA de la consulta,
+    // que es lo que un mock deja pasar gratis.
+    mockVenueLookups({ name: 'X', fiscalEmisors: [] })
+
+    await getVenueTpvSettings(makeReq(), makeRes(), jest.fn() as NextFunction)
+
+    expect(prismaMock.venue.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: venueId },
+        select: expect.objectContaining({
+          fiscalEmisors: {
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+            select: { legalName: true, rfc: true, lugarExpedicion: true },
+          },
+        }),
+      }),
+    )
+  })
+
+  it('venue without fiscal emisor → fiscal fields null, venue identity still present', async () => {
+    mockVenueLookups({
+      name: 'Sin Factura',
+      logo: null,
+      phone: null,
+      address: 'Calle 1',
+      city: null,
+      state: null,
+      zipCode: null,
+      fiscalEmisors: [],
+    })
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq(), res, jest.fn() as NextFunction)
+
+    expect(res.__json.data.receiptInfo).toEqual({
+      name: 'Sin Factura',
+      logoUrl: null,
+      phone: null,
+      address: 'Calle 1',
+      city: null,
+      state: null,
+      zipCode: null,
+      legalName: null,
+      rfc: null,
+      lugarExpedicion: null,
+    })
+  })
+
+  it('still returns the settings payload WITHOUT receiptInfo when the lookup throws (fail open)', async () => {
+    mockVenueLookups(new Error('db exploded'))
+
+    const res = makeRes()
+    const next = jest.fn() as NextFunction
+    await getVenueTpvSettings(makeReq(), res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.__json.success).toBe(true)
+    expect(res.__json.data).not.toHaveProperty('receiptInfo')
+    expect(res.__json.data.terminals).toEqual([])
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('receipt header info'), expect.objectContaining({ venueId }))
+  })
+})
+
 describe('mobile display-mode delivery and compatible ACK', () => {
   const terminalId = 'terminal-display-1'
   const deviceUid = 'device-display-1'

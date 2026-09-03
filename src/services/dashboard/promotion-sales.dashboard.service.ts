@@ -43,6 +43,7 @@ import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { parseDbDateRange } from '@/utils/datetime'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
+import { localWallClockRaw, utcTsParam } from '@/utils/sqlDates'
 import { lineGrossSql, lineRevenueSql } from './lineRevenue'
 
 // ============================================================
@@ -115,8 +116,8 @@ export interface PromotionSalesResponse {
  */
 const ORDER_SCOPE_SQL = `
       o."venueId" = $1
-      AND o."createdAt" >= $2
-      AND o."createdAt" <= $3
+      AND o."createdAt" >= ${utcTsParam(2)}
+      AND o."createdAt" <= ${utcTsParam(3)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
 `
@@ -257,7 +258,9 @@ async function calculatePromotionPeriodMetrics(
     weeks: 'week',
     months: 'month',
   }
-  const groupByExpression = `DATE_TRUNC('${truncUnit[reportType]}', o."createdAt" AT TIME ZONE '${safeTz}')`
+  // Venue wall clock of the UTC column (double AT TIME ZONE). With a single one the stored
+  // UTC value was read as local time: a 20:00 sale landed on the next day, at hour 02.
+  const groupByExpression = `DATE_TRUNC('${truncUnit[reportType]}', ${localWallClockRaw(safeTz, 'o."createdAt"')})`
 
   const periodQuery = `
     SELECT

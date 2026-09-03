@@ -99,6 +99,16 @@ que esconde lo que no se corrió es un reporte falso.
 
 "No era importante" es una conclusión que se justifica en el reporte, no un default. Si dudas, córrelo.
 
+## 🔴 Invariante de capacidad del backend
+
+Todo endpoint nuevo o modificado que liste datos debe imponer su propio límite, paginar con orden
+estable y resolver conteos/agregados en la base de datos. No se permite `findMany` sin `take`, cargar
+todo para calcular tarjetas, N+1 ni confiar en el `limit` enviado por el cliente. El límite no puede
+recortar la experiencia: el contrato debe exponer paginación/total para que el frontend llegue a
+todos los registros; una exportación completa sólo recorre páginas acotadas tras una acción explícita.
+Conserva clientes viejos y despliega backend primero. Lee y aplica
+`.claude/rules/bounded-queries-and-server-load.md` antes de crear endpoints.
+
 ## Operational Notes
 
 - Backend runtime logs live in `logs/` at the repo root. Check `logs/development.log` first when debugging local backend behavior; when the

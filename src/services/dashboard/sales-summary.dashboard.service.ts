@@ -27,6 +27,7 @@
 
 import { Prisma, TransactionCardType } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
+import { localInstantRaw, localWallClockRaw, utcTs, utcTsParam } from '@/utils/sqlDates'
 
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
@@ -34,7 +35,7 @@ import { foldGiveawaysIntoSummary, HIDDEN_COMP_LINE_WHERE } from '@/services/das
 import { projectPaymentSettlement } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import {
   MINDFORM_NEW_VENUE_ID,
-  getLegacyPayments,
+  forEachLegacyPaymentPage,
   getLegacyPeriodMetrics,
   type LegacyPeriodMetric,
   type LegacyPeriodReportType,
@@ -440,8 +441,8 @@ export async function computeMerchantAccountBreakdown(
       FROM "Payment" p
       LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
       WHERE p."venueId" = ${venueId}
-        AND p."createdAt" >= ${startDate}
-        AND p."createdAt" <= ${endDate}
+        AND p."createdAt" >= ${utcTs(startDate)}
+        AND p."createdAt" <= ${utcTs(endDate)}
         AND p.status = 'COMPLETED'
         AND p."merchantAccountId" IS NOT NULL
       GROUP BY p."merchantAccountId"
@@ -689,19 +690,26 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       }
     }
 
-    const { rows: legacyRows } = await getLegacyPayments({
-      startDate: parsedStartDate.toISOString(),
-      endDate: parsedEndDate.toISOString(),
-    })
-    const eligible = legacyRows.filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND')
-    const amount = eligible.reduce((s, p) => s + Number(p.amount), 0)
-    const tips = eligible.reduce((s, p) => s + Number(p.tipAmount), 0)
+    let amount = 0
+    let tips = 0
+    let legacyCount = 0
+    await forEachLegacyPaymentPage(
+      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
+      rows => {
+        for (const payment of rows) {
+          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+          amount += Number(payment.amount)
+          tips += Number(payment.tipAmount)
+          legacyCount += 1
+        }
+      },
+    )
     const summary: SalesSummaryMetrics = {
       ...emptySummary(),
       tips,
       totalCollected: amount + tips,
       netProfit: amount,
-      transactionCount: eligible.length,
+      transactionCount: legacyCount,
     }
 
     // For a non-summary reportType, build the time-series from legacy alone so
@@ -907,8 +915,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     FROM "TransactionCost" tc
     JOIN "Payment" p ON p.id = tc."paymentId"
     WHERE p."venueId" = $1
-      AND p."createdAt" >= $2
-      AND p."createdAt" <= $3
+      AND p."createdAt" >= ${utcTsParam(2)}
+      AND p."createdAt" <= ${utcTsParam(3)}
       ${platformFeesMerchantClause}
       ${platformFeesSqlClause}
   `
@@ -1028,17 +1036,19 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // MINDFORM_NEW_VENUE_ID to find every gate.
   let legacyAggregate: { amount: number; tips: number; count: number } | null = null
   if (venueId === MINDFORM_NEW_VENUE_ID) {
-    const { rows: legacyRows } = await getLegacyPayments({
-      startDate: parsedStartDate.toISOString(),
-      endDate: parsedEndDate.toISOString(),
-    })
-    const eligible = legacyRows.filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND')
-    const matching = eligible.filter(p => legacyMatchesFilter(p.method, paymentMethod, cardType))
-    legacyAggregate = {
-      amount: matching.reduce((s, p) => s + Number(p.amount), 0),
-      tips: matching.reduce((s, p) => s + Number(p.tipAmount), 0),
-      count: matching.length,
-    }
+    legacyAggregate = { amount: 0, tips: 0, count: 0 }
+    await forEachLegacyPaymentPage(
+      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
+      rows => {
+        for (const payment of rows) {
+          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+          if (!legacyMatchesFilter(payment.method, paymentMethod, cardType)) continue
+          legacyAggregate!.amount += Number(payment.amount)
+          legacyAggregate!.tips += Number(payment.tipAmount)
+          legacyAggregate!.count += 1
+        }
+      },
+    )
 
     if (legacyAggregate.count > 0) {
       // Payment-derived totals always include matching legacy volume.
@@ -1147,8 +1157,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         FROM "TransactionCost" tc
         JOIN "Payment" p ON p.id = tc."paymentId"
         WHERE p."venueId" = ${venueId}
-          AND p."createdAt" >= ${parsedStartDate}
-          AND p."createdAt" <= ${parsedEndDate}
+          AND p."createdAt" >= ${utcTs(parsedStartDate)}
+          AND p."createdAt" <= ${utcTs(parsedEndDate)}
           AND p."status" = 'COMPLETED'
           ${merchantAccountId ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId}` : Prisma.empty}
       `,
@@ -1508,31 +1518,38 @@ async function calculateTimePeriodMetrics(
   let groupByExpression: string
   let orderByExpression: string
 
+  // Venue wall clock of the UTC column. A single `AT TIME ZONE tz` read the stored UTC value
+  // as if it were local time: a 20:00 sale was bucketed on the next day, at hour 02. Kept
+  // unqualified on purpose — the platform-fees query rewrites `"createdAt"` to `p."createdAt"`.
+  const wall = localWallClockRaw(safeTz, '"createdAt"')
+
+  // Time-based periods are returned as the INSTANT the bucket starts (midnight / hour on the
+  // venue clock): formatPeriod/formatPeriodLabel and the dashboard format them in the venue zone.
   switch (reportType) {
     case 'hours':
-      groupByExpression = `DATE_TRUNC('hour', "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('hour', ${wall})`)
       orderByExpression = 'period'
       break
     case 'days':
-      groupByExpression = `DATE_TRUNC('day', "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('day', ${wall})`)
       orderByExpression = 'period'
       break
     case 'weeks':
-      groupByExpression = `DATE_TRUNC('week', "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('week', ${wall})`)
       orderByExpression = 'period'
       break
     case 'months':
-      groupByExpression = `DATE_TRUNC('month', "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('month', ${wall})`)
       orderByExpression = 'period'
       break
     case 'hourlySum':
       // Group by hour of day (0-23)
-      groupByExpression = `EXTRACT(HOUR FROM "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = `EXTRACT(HOUR FROM ${wall})`
       orderByExpression = 'period'
       break
     case 'dailySum':
       // Group by day of week (0=Sunday, 6=Saturday)
-      groupByExpression = `EXTRACT(DOW FROM "createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = `EXTRACT(DOW FROM ${wall})`
       orderByExpression = 'period'
       break
     default:

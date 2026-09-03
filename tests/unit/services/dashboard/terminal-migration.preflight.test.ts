@@ -10,7 +10,7 @@ jest.mock('@/utils/prismaClient', () => ({
     organizationPaymentConfig: { findUnique: jest.fn() },
     merchantAccount: { findMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
-    tpvCommandQueue: { findFirst: jest.fn() },
+    tpvCommandQueue: { findFirst: jest.fn(), findMany: jest.fn() },
   },
 }))
 
@@ -21,7 +21,7 @@ const m = prisma as unknown as {
   organizationPaymentConfig: { findUnique: jest.Mock }
   merchantAccount: { findMany: jest.Mock }
   staffVenue: { findFirst: jest.Mock }
-  tpvCommandQueue: { findFirst: jest.Mock }
+  tpvCommandQueue: { findFirst: jest.Mock; findMany: jest.Mock }
 }
 
 const healthy = () => {
@@ -52,6 +52,7 @@ const healthy = () => {
   m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p' }])
   m.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
   m.tpvCommandQueue.findFirst.mockResolvedValue(null)
+  m.tpvCommandQueue.findMany.mockResolvedValue([])
 }
 
 describe('migratePreflight', () => {
@@ -117,7 +118,7 @@ describe('migratePreflight', () => {
 
   it('blocks when a migration is already in progress', async () => {
     healthy()
-    m.tpvCommandQueue.findFirst.mockResolvedValue({ id: 'cmd-x' })
+    m.tpvCommandQueue.findMany.mockResolvedValue([{ id: 'cmd-x', createdAt: new Date() }])
     const r = await migratePreflight('term-1', 'venue-new')
     expect(r.blockers).toContainEqual(expect.objectContaining({ code: 'MIGRATION_IN_PROGRESS' }))
   })
@@ -128,7 +129,7 @@ describe('migratePreflight', () => {
   it('MIGRATION_IN_PROGRESS query is expiry-aware (excludes already-expired FACTORY_RESET commands)', async () => {
     healthy()
     await migratePreflight('term-1', 'venue-new')
-    expect(m.tpvCommandQueue.findFirst).toHaveBeenCalledWith(
+    expect(m.tpvCommandQueue.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           terminalId: 'term-1',
@@ -142,11 +143,182 @@ describe('migratePreflight', () => {
     )
   })
 
+  // Asana 1218069201250971 (2026-09-01): a FACTORY_RESET never ACKs, so a command with NO
+  // expiresAt (hand-inserted rows, `payload.source = "MANUAL_DB"`) stays SENT forever and
+  // blocked the org wizard for MONTHS on 3 PlayTelecom terminals. The 7-day migration TTL has
+  // the same shape: a COMPLETED migration keeps blocking re-migration for a whole week. The
+  // device's own post-wipe rebind (`Terminal.lastActivationStatusCheckAt` strictly AFTER the
+  // command's createdAt) is the proof the wipe already happened — the same rule the
+  // terminals-list badge (`computeTerminalMigration`) and `migrateStatus` already use.
+  const terminalReboundAt = (at: Date | null) => ({
+    id: 'term-1',
+    venueId: 'venue-old',
+    status: 'ACTIVE',
+    brand: 'PAX',
+    assignedMerchantIds: ['merch-p'],
+    lastActivationStatusCheckAt: at,
+  })
+
+  it('does NOT block when the device already rebound AFTER the pending FACTORY_RESET (proof of wipe)', async () => {
+    healthy()
+    m.terminal.findUnique.mockResolvedValue(terminalReboundAt(new Date('2026-09-01T18:05:51Z')))
+    m.tpvCommandQueue.findMany.mockResolvedValue([{ id: 'ghost', createdAt: new Date('2026-04-09T16:30:40Z') }])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.blockers.map(b => b.code)).not.toContain('MIGRATION_IN_PROGRESS')
+    expect(r.canProceed).toBe(true)
+  })
+
+  it('still blocks when the last rebind is BEFORE the pending FACTORY_RESET (wipe not executed yet)', async () => {
+    healthy()
+    m.terminal.findUnique.mockResolvedValue(terminalReboundAt(new Date('2026-08-31T23:00:00Z')))
+    m.tpvCommandQueue.findMany.mockResolvedValue([{ id: 'live', createdAt: new Date('2026-08-31T23:15:03Z') }])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.blockers.map(b => b.code)).toContain('MIGRATION_IN_PROGRESS')
+  })
+
+  it('still blocks when the device never rebound (lastActivationStatusCheckAt null)', async () => {
+    healthy()
+    m.terminal.findUnique.mockResolvedValue(terminalReboundAt(null))
+    m.tpvCommandQueue.findMany.mockResolvedValue([{ id: 'live', createdAt: new Date('2026-04-09T16:30:40Z') }])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.blockers.map(b => b.code)).toContain('MIGRATION_IN_PROGRESS')
+  })
+
+  it('blocks if ANY in-flight FACTORY_RESET postdates the last rebind (does not stop at the first row)', async () => {
+    healthy()
+    m.terminal.findUnique.mockResolvedValue(terminalReboundAt(new Date('2026-09-01T12:00:00Z')))
+    m.tpvCommandQueue.findMany.mockResolvedValue([
+      { id: 'ghost-survived', createdAt: new Date('2026-04-09T16:30:40Z') },
+      { id: 'fresh-not-executed', createdAt: new Date('2026-09-01T12:30:00Z') },
+    ])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.blockers.map(b => b.code)).toContain('MIGRATION_IN_PROGRESS')
+  })
+
   it('blocks when source and destination venue are the same', async () => {
     healthy()
     m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', status: 'ACTIVE', brand: 'PAX' })
     const r = await migratePreflight('term-1', 'venue-new')
     expect(r.blockers).toContainEqual(expect.objectContaining({ code: 'SAME_VENUE' }))
+  })
+})
+
+// Founder decision (2026-09-01, Asana 1218069201250971): a MIGRATION_IN_PROGRESS blocker
+// must never be a dead end. The preflight now describes the pending wipe (`pendingWipe`)
+// so the wizard can say WHEN it was queued, WHERE it came from, and offer the way out:
+// "cancel" while the device hasn't received it, "discard" once it's been silent 24 h.
+describe('migratePreflight — pendingWipe (the way out of MIGRATION_IN_PROGRESS)', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const HOUR = 60 * 60 * 1000
+  const wipe = (over: Partial<{ id: string; createdAt: Date; status: string; payload: unknown; venueId: string }>) => ({
+    id: 'cmd-1',
+    createdAt: new Date(Date.now() - 2 * HOUR),
+    status: 'SENT',
+    payload: null,
+    venueId: 'venue-old',
+    ...over,
+  })
+
+  it('is null when nothing is pending', async () => {
+    healthy()
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.pendingWipe).toBeNull()
+  })
+
+  it('a QUEUED wipe is cancellable (device has not received it) and never discardable', async () => {
+    healthy()
+    m.tpvCommandQueue.findMany.mockResolvedValue([wipe({ status: 'QUEUED' })])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.blockers.map(b => b.code)).toContain('MIGRATION_IN_PROGRESS')
+    expect(r.pendingWipe).toEqual(
+      expect.objectContaining({
+        commandId: 'cmd-1',
+        status: 'QUEUED',
+        cancellable: true,
+        discardable: false,
+        origin: 'MANUAL',
+        toVenueId: null,
+      }),
+    )
+  })
+
+  it('a migration wipe carries its origin and destination so the UI can name them', async () => {
+    healthy()
+    m.tpvCommandQueue.findMany.mockResolvedValue([
+      wipe({ status: 'PENDING', payload: { migration: { fromVenueId: 'venue-old', toVenueId: 'venue-x' } } }),
+    ])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.pendingWipe).toEqual(expect.objectContaining({ origin: 'MIGRATION', toVenueId: 'venue-x', cancellable: true }))
+  })
+
+  it('a SENT wipe silent for more than 24 h is discardable (and not cancellable)', async () => {
+    healthy()
+    const queuedAt = new Date(Date.now() - 25 * HOUR)
+    m.tpvCommandQueue.findMany.mockResolvedValue([wipe({ status: 'SENT', createdAt: queuedAt })])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.pendingWipe).toEqual(
+      expect.objectContaining({
+        status: 'SENT',
+        queuedAt,
+        cancellable: false,
+        discardable: true,
+        discardableAt: new Date(queuedAt.getTime() + 24 * HOUR),
+      }),
+    )
+  })
+
+  it('a SENT wipe younger than 24 h is neither cancellable nor discardable yet — but says WHEN it will be', async () => {
+    healthy()
+    const queuedAt = new Date(Date.now() - 2 * HOUR)
+    m.tpvCommandQueue.findMany.mockResolvedValue([wipe({ status: 'SENT', createdAt: queuedAt })])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.pendingWipe).toEqual(
+      expect.objectContaining({ cancellable: false, discardable: false, discardableAt: new Date(queuedAt.getTime() + 24 * HOUR) }),
+    )
+  })
+
+  // P2 #1 de Codex: `commandId`/`status`/`origin` describen el MÁS NUEVO, así que
+  // `cancellable` tiene que describir al mismo. Mirando "cualquiera", un SENT nuevo con un
+  // QUEUED viejo detrás salía como `status: SENT, cancellable: true` — y al cancelar,
+  // `migrateCancel` soltaba el QUEUED viejo, dejando el bloqueo intacto y al operador sin
+  // entender qué pasó.
+  it('cancellable describe al MÁS NUEVO, no a cualquiera de los pendientes', async () => {
+    healthy()
+    m.tpvCommandQueue.findMany.mockResolvedValue([
+      wipe({ id: 'viejo-cancelable', status: 'QUEUED', createdAt: new Date(Date.now() - 100 * HOUR) }),
+      wipe({ id: 'nuevo-enviado', status: 'SENT', createdAt: new Date(Date.now() - 30 * HOUR) }),
+    ])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.pendingWipe).toEqual(
+      expect.objectContaining({ commandId: 'nuevo-enviado', status: 'SENT', cancellable: false, discardable: true }),
+    )
+  })
+
+  it('describes the NEWEST still-pending wipe when there are several', async () => {
+    healthy()
+    m.tpvCommandQueue.findMany.mockResolvedValue([
+      wipe({ id: 'old', status: 'SENT', createdAt: new Date(Date.now() - 100 * HOUR) }),
+      wipe({ id: 'new', status: 'SENT', createdAt: new Date(Date.now() - 30 * HOUR) }),
+    ])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.pendingWipe?.commandId).toBe('new')
+  })
+
+  it('a wipe the device already rebound after is NOT pending → null, no blocker', async () => {
+    healthy()
+    m.terminal.findUnique.mockResolvedValue({
+      id: 'term-1',
+      venueId: 'venue-old',
+      status: 'ACTIVE',
+      brand: 'PAX',
+      assignedMerchantIds: ['merch-p'],
+      lastActivationStatusCheckAt: new Date(Date.now() - 1 * HOUR),
+    })
+    m.tpvCommandQueue.findMany.mockResolvedValue([wipe({ status: 'SENT', createdAt: new Date(Date.now() - 48 * HOUR) })])
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.pendingWipe).toBeNull()
+    expect(r.blockers.map(b => b.code)).not.toContain('MIGRATION_IN_PROGRESS')
   })
 })
 

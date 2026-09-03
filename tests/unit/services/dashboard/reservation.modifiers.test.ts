@@ -7,6 +7,33 @@ jest.mock('@/services/reservation/resolveModifierSelections', () => ({
 }))
 import { resolveModifierSelections } from '@/services/reservation/resolveModifierSelections'
 
+/**
+ * Las fechas de la ventana ya NO llegan como argumentos sueltos de `$queryRaw`.
+ * `reservationOverlapSql()` (fix de timezone `59dbe78f`) las mete dentro de un
+ * fragmento `Prisma.sql` que las ata con `AT TIME ZONE 'UTC'` — sin eso, una Date
+ * llegaba a Postgres como `timestamptz` y se comparaba contra columnas `timestamp`
+ * usando la zona de la sesión: la misma hora nunca chocaba y una a seis horas sí.
+ *
+ * Estos dos helpers aplanan la llamada —valores y texto, fragmentos incluidos— para
+ * poder seguir afirmando QUÉ instante se consultó y QUÉ columnas se filtraron, sin
+ * depender del nivel en que quedó cada cosa. Buscarlas sólo en el nivel de arriba es
+ * lo que dejó de ver la fecha correcta cuando el fragmento nació.
+ */
+const esFragmentoSql = (v: unknown): v is { strings: string[]; values: unknown[] } =>
+  typeof v === 'object' && v !== null && Array.isArray((v as { strings?: unknown }).strings)
+
+const fechasDeLaLlamada = (call: unknown[]): Date[] =>
+  call.flatMap(arg => (arg instanceof Date ? [arg] : esFragmentoSql(arg) ? fechasDeLaLlamada(arg.values) : []))
+
+const sqlDeLaLlamada = (call: unknown[]): string =>
+  call
+    .flatMap(arg => {
+      if (esFragmentoSql(arg)) return [...arg.strings, sqlDeLaLlamada(arg.values)]
+      if (Array.isArray(arg)) return arg.filter((s): s is string => typeof s === 'string')
+      return []
+    })
+    .join(' ')
+
 describe('createReservation with modifiers', () => {
   const venueId = 'cven0000000000000000000001'
   const productId = 'cprod00000000000000000001'
@@ -222,8 +249,11 @@ describe('createReservation with modifiers', () => {
     })
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
     for (const call of prismaMock.$queryRaw.mock.calls) {
-      expect(call).toContainEqual(new Date('2026-06-01T11:15:00Z'))
-      expect((call[0] as unknown as string[]).join('')).not.toContain('"partySize"')
+      expect(fechasDeLaLlamada(call)).toContainEqual(new Date('2026-06-01T11:15:00Z'))
+      // La positiva va PRIMERO a propósito: sola, la negativa de abajo pasaría también si
+      // `sqlDeLaLlamada` devolviera cadena vacía — o sea, aprobaría sin haber leído nada.
+      expect(sqlDeLaLlamada(call)).toContain('FOR UPDATE NOWAIT')
+      expect(sqlDeLaLlamada(call)).not.toContain('"partySize"')
     }
   })
 

@@ -23,6 +23,7 @@ import { StampRewardType, LoyaltyTransactionType } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import { grantStamp } from '../wallet/stampLedger.service'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -43,7 +44,9 @@ export async function getOrCreateLoyaltyConfig(venueId: string) {
         redemptionRate: 0.01, // 100 points = $1 discount (1 point = $0.01)
         minPointsRedeem: 100, // Minimum 100 points to redeem
         pointsExpireDays: 365, // Points expire after 1 year
-        active: true,
+        // Tier and activation are separate decisions. Creating/opening the
+        // settings page must never silently turn on a money-valued reward.
+        active: false,
       },
     })
   }
@@ -268,7 +271,21 @@ export async function earnPoints(
   orderId: string,
   staffId?: string,
 ): Promise<{ pointsEarned: number; newBalance: number }> {
-  const config = await getOrCreateLoyaltyConfig(venueId)
+  // Paid entitlement and venue activation are BOTH required. Automatic award
+  // paths must not create an active config merely because a payment happened.
+  if (!(await venueHasFeatureAccess(venueId, 'LOYALTY_PROGRAM'))) {
+    return { pointsEarned: 0, newBalance: 0 }
+  }
+
+  const storedConfig = await prisma.loyaltyConfig.findUnique({ where: { venueId } })
+  if (!storedConfig) {
+    return { pointsEarned: 0, newBalance: 0 }
+  }
+  const config = {
+    ...storedConfig,
+    pointsPerDollar: storedConfig.pointsPerDollar.toNumber(),
+    redemptionRate: storedConfig.redemptionRate.toNumber(),
+  }
 
   if (!config.active) {
     return { pointsEarned: 0, newBalance: 0 }
@@ -291,15 +308,26 @@ export async function earnPoints(
   //
   // Se le pasa la config que ya tenemos: esta función corre en CADA cobro de CADA
   // negocio, y releerla serían miles de consultas diarias que no aportan nada.
+  let deferredStampError: unknown
   try {
     await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
   } catch (stampError: any) {
+    deferredStampError = stampError
     logger.error('⚠️ Falló el sellado — los puntos siguen su curso', {
       venueId,
       customerId,
       orderId,
       error: stampError?.message,
     })
+  }
+
+  // The payment callers already isolate loyalty failures from the approved
+  // charge. We therefore persist points first, then surface a stamp failure so
+  // the durable paid-order reconciler can retry the missing stamp. Swallowing it
+  // here would mark the order processed forever with a visibly missing reward.
+  const finish = <T>(result: T): T => {
+    if (deferredStampError) throw deferredStampError
+    return result
   }
 
   // 🔒 IDEMPOTENCY CHECK: Prevent double-earning on payment retries
@@ -321,16 +349,16 @@ export async function earnPoints(
       existingPoints: existingEarnTransaction.points,
       currentBalance: customer?.loyaltyPoints,
     })
-    return {
+    return finish({
       pointsEarned: existingEarnTransaction.points,
       newBalance: customer?.loyaltyPoints ?? 0,
-    }
+    })
   }
 
   const pointsEarned = await calculatePointsForAmount(venueId, amount)
 
   if (pointsEarned === 0) {
-    return { pointsEarned: 0, newBalance: 0 }
+    return finish({ pointsEarned: 0, newBalance: 0 })
   }
 
   // 🔒 RACE CONDITION FIX: Database has partial unique index to prevent duplicates
@@ -359,10 +387,10 @@ export async function earnPoints(
       }),
     ])
 
-    return {
+    return finish({
       pointsEarned,
       newBalance: customer.loyaltyPoints,
-    }
+    })
   } catch (error: any) {
     // Handle unique constraint violation from partial unique index
     // This happens when concurrent calls race past the idempotency check
@@ -380,10 +408,10 @@ export async function earnPoints(
         where: { id: customerId },
         select: { loyaltyPoints: true },
       })
-      return {
+      return finish({
         pointsEarned: existingTransaction?.points ?? pointsEarned,
         newBalance: customer?.loyaltyPoints ?? 0,
-      }
+      })
     }
     throw error
   }

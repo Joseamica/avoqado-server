@@ -24,7 +24,7 @@ export class OrgStockControlExportService {
     options: OrgStockOverviewOptions,
     orgSlug: string,
   ): Promise<{ buffer: Buffer; filename: string }> {
-    const data = await orgStockControlService.getOrgOverview(orgId, options)
+    const data = await orgStockControlService.getOrgExportOverview(orgId, options)
 
     const wb = XLSX.utils.book_new()
 

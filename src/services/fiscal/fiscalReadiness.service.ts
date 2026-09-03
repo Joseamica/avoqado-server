@@ -1,6 +1,8 @@
 import prisma from '../../utils/prismaClient'
+import { env } from '../../config/env'
 import { getCatalog, resolveScopeOrNull } from './chartOfAccounts.service'
 import { getMappings } from './accountMapping.service'
+import { FacturapiProvider } from './providers/facturapi.provider'
 
 /**
  * Diagnóstico de PREPARACIÓN FISCAL (onboarding) de un contribuyente (org, RFC).
@@ -62,7 +64,14 @@ export function assembleReadiness(
       providerKeyEnc: string | null
       csdStatus: 'NONE' | 'UPLOADED' | 'ACTIVE' | 'EXPIRED' | 'RESTRICTED'
       csdExpiresAt: Date | null
+      providerOrgId: string | null
     } | null
+    /**
+     * Pasos pendientes reportados por el PAC para la org del emisor
+     * ('manifiesto', 'logo'…). `null` = no se pudo consultar (o el emisor no
+     * está provisionado, en cuyo caso el check se omite por completo).
+     */
+    manifiestoPendingSteps: string[] | null
     venueZipCode: string | null
     catalogSeeded: boolean
     mappingsTotal: number
@@ -129,6 +138,28 @@ export function assembleReadiness(
     })
   } else {
     checks.push({ key: 'csd', label: 'Sello digital (CSD)', status: 'ok', detail: 'CSD activo: puedes timbrar.' })
+  }
+
+  // 3b. Carta Manifiesto — la firma que autoriza al PAC a timbrar por este RFC.
+  // Sólo aplica a un emisor YA provisionado: antes de conectar no hay org que firmar.
+  if (emisor?.providerOrgId) {
+    if (input.manifiestoPendingSteps === null) {
+      checks.push({
+        key: 'manifiesto',
+        label: 'Carta Manifiesto',
+        status: 'warn',
+        detail: 'No se pudo consultar el estado de la Carta Manifiesto con el PAC; reintenta más tarde.',
+      })
+    } else if (input.manifiestoPendingSteps.includes('manifiesto')) {
+      checks.push({
+        key: 'manifiesto',
+        label: 'Carta Manifiesto',
+        status: 'missing',
+        detail: 'Firma la Carta Manifiesto en Facturación (necesitas tu e.firma); sin ella el PAC no puede timbrar.',
+      })
+    } else {
+      checks.push({ key: 'manifiesto', label: 'Carta Manifiesto', status: 'ok', detail: 'Carta Manifiesto firmada.' })
+    }
   }
 
   // 4. Código postal del local (lugar de expedición / receptor de nómina).
@@ -247,7 +278,15 @@ export async function getFiscalReadiness(venueId: string): Promise<FiscalReadine
     prisma.fiscalEmisor.findFirst({
       where: { venueId },
       orderBy: { createdAt: 'asc' },
-      select: { legalName: true, regimenFiscal: true, lugarExpedicion: true, providerKeyEnc: true, csdStatus: true, csdExpiresAt: true },
+      select: {
+        legalName: true,
+        regimenFiscal: true,
+        lugarExpedicion: true,
+        providerKeyEnc: true,
+        csdStatus: true,
+        csdExpiresAt: true,
+        providerOrgId: true,
+      },
     }),
     prisma.venue.findUnique({ where: { id: venueId }, select: { zipCode: true } }),
     getCatalog(venueId),
@@ -256,10 +295,23 @@ export async function getFiscalReadiness(venueId: string): Promise<FiscalReadine
     prisma.employee.count({ where: { organizationId: scope.organizationId, rfc: scope.rfc, activo: true, claveEntFed: null } }),
   ])
 
+  // Carta Manifiesto: consulta VIVA al PAC, fail-open — un PAC caído no puede
+  // tumbar el diagnóstico entero; el check sale 'warn' con "no se pudo consultar".
+  let manifiestoPendingSteps: string[] | null = null
+  if (emisor?.providerOrgId) {
+    try {
+      const status = await new FacturapiProvider(env.FACTURAPI_USER_KEY ?? '').getOrganizationStatus(emisor.providerOrgId)
+      manifiestoPendingSteps = status.pendingSteps
+    } catch {
+      manifiestoPendingSteps = null
+    }
+  }
+
   const result = assembleReadiness(
     {
       rfc: scope.rfc,
       emisor,
+      manifiestoPendingSteps,
       venueZipCode: venue?.zipCode ?? null,
       catalogSeeded: catalog.seeded,
       mappingsTotal: mappingsResult.mappings.length,

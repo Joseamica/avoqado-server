@@ -35,6 +35,7 @@ import { venuesWithFeatureAccess } from '../services/access/basePlan.service'
 import { computeDedupeKey, PRODUCT_VALIDATION_SELECT } from '../services/upsell/upsell.service'
 import { autoProposeRejectionReason, type ProductForValidation } from '../services/upsell/upsellModifiers'
 import { scheduleJob } from '../observability/jobContext'
+import { utcTs } from '../utils/sqlDates'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Umbrales — con nombre, no mágicos
@@ -149,7 +150,7 @@ async function findBasketPairs(venueId: string, since: Date): Promise<BasketPair
       FROM "Order" o
       WHERE o."venueId" = ${venueId}
         AND o."paymentStatus" = 'PAID'
-        AND o."createdAt" >= ${since}
+        AND o."createdAt" >= ${utcTs(since)}
     ),
     -- DISTINCT: dos cafés en el mismo ticket son UN ticket con café, no dos.
     order_products AS (

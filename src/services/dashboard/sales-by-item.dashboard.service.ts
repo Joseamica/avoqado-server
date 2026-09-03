@@ -18,6 +18,7 @@ import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
+import { localInstantRaw, localWallClockRaw, utcTsParam } from '@/utils/sqlDates'
 import { lineGrossSql, lineRevenueSql } from './lineRevenue'
 
 // ============================================================
@@ -176,8 +177,8 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     if (!isNaN(startH) && !isNaN(endH)) {
       // Filter by hour of day (0-23)
       hourFilterClause = `
-        AND EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${timezone}') >= ${startH}
-        AND EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${timezone}') <= ${endH}
+        AND EXTRACT(HOUR FROM ${localWallClockRaw(timezone, 'o."createdAt"')}) >= ${startH}
+        AND EXTRACT(HOUR FROM ${localWallClockRaw(timezone, 'o."createdAt"')}) <= ${endH}
       `
     }
   }
@@ -199,8 +200,8 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     ${paymentJoin}
     ${terminalJoin}
     WHERE o."venueId" = $1
-      AND o."createdAt" >= $2
-      AND o."createdAt" <= $3
+      AND o."createdAt" >= ${utcTsParam(2)}
+      AND o."createdAt" <= ${utcTsParam(3)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       ${hourFilterClause}
@@ -365,8 +366,8 @@ async function getPromotionAttribution(
     LEFT JOIN "Promotion" pr ON pr.id = op."promotionId"
     LEFT JOIN "Product" p ON p.id = oi."productId"
     WHERE o."venueId" = $1
-      AND o."createdAt" >= $2
-      AND o."createdAt" <= $3
+      AND o."createdAt" >= ${utcTsParam(2)}
+      AND o."createdAt" <= ${utcTsParam(3)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       ${hourFilterClause}
@@ -425,31 +426,37 @@ async function calculateTimePeriodItemMetrics(
   let groupByExpression: string
   let orderByExpression: string
 
+  // Venue wall clock of the UTC column. A single `AT TIME ZONE tz` read the stored UTC value
+  // as if it were local time: a 20:00 sale was bucketed on the next day, at hour 02.
+  const wall = localWallClockRaw(safeTz, 'o."createdAt"')
+
+  // Time-based periods are returned as the INSTANT the bucket starts (midnight / hour on the
+  // venue clock): formatPeriod/formatPeriodLabel and the dashboard format them in the venue zone.
   switch (reportType) {
     case 'hours':
-      groupByExpression = `DATE_TRUNC('hour', o."createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('hour', ${wall})`)
       orderByExpression = 'period'
       break
     case 'days':
-      groupByExpression = `DATE_TRUNC('day', o."createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('day', ${wall})`)
       orderByExpression = 'period'
       break
     case 'weeks':
-      groupByExpression = `DATE_TRUNC('week', o."createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('week', ${wall})`)
       orderByExpression = 'period'
       break
     case 'months':
-      groupByExpression = `DATE_TRUNC('month', o."createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = localInstantRaw(safeTz, `DATE_TRUNC('month', ${wall})`)
       orderByExpression = 'period'
       break
     case 'hourlySum':
       // Group by hour of day (0-23)
-      groupByExpression = `EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = `EXTRACT(HOUR FROM ${wall})`
       orderByExpression = 'period'
       break
     case 'dailySum':
       // Group by day of week (0=Sunday, 6=Saturday)
-      groupByExpression = `EXTRACT(DOW FROM o."createdAt" AT TIME ZONE '${safeTz}')`
+      groupByExpression = `EXTRACT(DOW FROM ${wall})`
       orderByExpression = 'period'
       break
     default:
@@ -463,8 +470,8 @@ async function calculateTimePeriodItemMetrics(
     const [endH] = endHour.split(':').map(Number)
     if (!isNaN(startH) && !isNaN(endH)) {
       hourFilterClause = `
-        AND EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${safeTz}') >= ${startH}
-        AND EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${safeTz}') <= ${endH}
+        AND EXTRACT(HOUR FROM ${wall}) >= ${startH}
+        AND EXTRACT(HOUR FROM ${wall}) <= ${endH}
       `
     }
   }
@@ -480,8 +487,8 @@ async function calculateTimePeriodItemMetrics(
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
     WHERE o."venueId" = $1
-      AND o."createdAt" >= $2
-      AND o."createdAt" <= $3
+      AND o."createdAt" >= ${utcTsParam(2)}
+      AND o."createdAt" <= ${utcTsParam(3)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       ${hourFilterClause}

@@ -159,12 +159,17 @@ describe('P1-2 · "mis checadas": venue de la URL == token, y persona propia o c
     expect(svc.getTimeEntries.mock.calls[0][0]).toEqual(expect.objectContaining({ venueId: VENUE_A, staffId: ME }))
   })
 
-  it('un WAITER NO ve las de un compañero → 403 y queda auditado', async () => {
+  it('un WAITER NO ve las de un compañero → 403, y la lectura rebotada NO va a la bitácora', async () => {
     const res = await request(server).get(my(VENUE_A, OTHER)).set(authHeader(waiterMe))
     expect(res.status).toBe(403)
     expect(svc.getTimeEntries).not.toHaveBeenCalled()
+    // Contrato NUEVO (debeAuditarDenegacion, 2026-09-01): una LECTURA rebotada dentro
+    // del propio venue no cambió nada y NO se escribe en el ActivityLog del dueño —
+    // medido en Testarudo: 122/122 registros de su bitácora eran este ruido de GETs
+    // de la propia app. La seguridad (403 + servicio sin llamar) queda intacta, y un
+    // cruce de TENANT sí se audita siempre (test de arriba + auditoriaDeDenegaciones).
     const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
-    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'PERMISSION_DENIED', staffId: ME }))
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'PERMISSION_DENIED' }))
   })
 
   it('un MANAGER (tpv-time-entries:read) sí ve las de un compañero', async () => {

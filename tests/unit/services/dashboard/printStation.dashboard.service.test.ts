@@ -23,6 +23,7 @@ jest.mock('../../../../src/services/printing/printConfig.service', () => ({
 }))
 
 import * as svc from '../../../../src/services/dashboard/printStation.dashboard.service'
+import { createPrinterSchema } from '../../../../src/schemas/dashboard/printStation.schema'
 import { buildPrintConfig, routingConfigFrom } from '../../../../src/services/printing/printConfig.service'
 
 const VENUE = 'venue_1'
@@ -85,6 +86,60 @@ describe('printStation.dashboard.service', () => {
     it('throws NotFound when the venue does not exist', async () => {
       mockPrisma.venue.findUnique.mockResolvedValue(null)
       await expect(svc.createPrinter(VENUE, { name: 'X' } as any)).rejects.toThrow(/Venue no encontrado/)
+    })
+  })
+
+  // ── NEW FEATURE: POS_INTERNAL — la impresora integrada del POS ─────
+  // Caso real que lo motiva (Testarudo, 2026-08-31): sin este tipo, la estación
+  // Barra acabó apuntando a una impresora NETWORK con la IP del PROPIO Sunmi
+  // (nadie escucha en 9100) y las comandas de barra morían en silencio.
+  describe('POS_INTERNAL (la impresora integrada del POS)', () => {
+    const params = { venueId: VENUE }
+
+    it('schema: accepts POS_INTERNAL without address', () => {
+      const r = createPrinterSchema.safeParse({ body: { name: 'Integrada del punto', connectionType: 'POS_INTERNAL' }, params })
+      expect(r.success).toBe(true)
+    })
+
+    it('schema: rejects POS_INTERNAL WITH an address (es el error que originó el bug)', () => {
+      const r = createPrinterSchema.safeParse({
+        body: { name: 'Integrada', connectionType: 'POS_INTERNAL', address: '192.168.1.72' },
+        params,
+      })
+      expect(r.success).toBe(false)
+      // El mensaje explica el porqué — no un "enum inválido" genérico.
+      expect(JSON.stringify(!r.success ? r.error.issues : [])).toMatch(/no lleva dirección/)
+    })
+
+    it('creates a POS_INTERNAL printer with address null (prints on the device that charged)', async () => {
+      mockPrisma.printer.create.mockResolvedValue({ id: 'pr_3', name: 'Integrada', connectionType: 'POS_INTERNAL', address: null })
+      await svc.createPrinter(VENUE, { name: 'Integrada', connectionType: 'POS_INTERNAL' } as any, 'staff_1')
+      const arg = mockPrisma.printer.create.mock.calls[0][0].data
+      expect(arg).toMatchObject({ venueId: VENUE, connectionType: 'POS_INTERNAL', address: null })
+    })
+
+    it('service: rejects a POS_INTERNAL printer WITH an address on create', async () => {
+      await expect(
+        svc.createPrinter(VENUE, { name: 'Integrada', connectionType: 'POS_INTERNAL', address: '192.168.1.72' } as any),
+      ).rejects.toThrow(/no lleva dirección/)
+      expect(mockPrisma.printer.create).not.toHaveBeenCalled()
+    })
+
+    it('service: rejects giving an address to an existing POS_INTERNAL printer on update', async () => {
+      mockPrisma.printer.findFirst.mockResolvedValue({
+        id: 'pr_3',
+        venueId: VENUE,
+        name: 'Integrada',
+        connectionType: 'POS_INTERNAL',
+        address: null,
+      })
+      await expect(svc.updatePrinter(VENUE, 'pr_3', { address: '192.168.1.72' } as any)).rejects.toThrow(/no lleva dirección/)
+      expect(mockPrisma.printer.update).not.toHaveBeenCalled()
+    })
+
+    // REGRESSION: abrir POS_INTERNAL no destapa los tipos que siguen sin ser servibles.
+    it('still rejects TERMINAL_INTERNAL (exclusiva del PAX) after allowing POS_INTERNAL', async () => {
+      await expect(svc.createPrinter(VENUE, { name: 'PAX', connectionType: 'TERMINAL_INTERNAL' } as any)).rejects.toThrow(/app del PAX/)
     })
   })
 

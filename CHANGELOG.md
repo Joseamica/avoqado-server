@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **MCP `sales_by_payment_method` y `staff_tips` suman en Postgres, no en Node (query-guard 2026-09-01)**: las dos
+  herramientas pasaban por `fetchPaymentsForAnalytics`, que trae TODAS las filas del rango sólo para sumarlas — un agente que pide
+  «ventas de este año» materializaba 24 mil pagos (el mismo camino que cazó el query-guard en `basic-metrics`). Ahora
+  `mergedPayments.service.ts` expone `aggregatePaymentsByMethod` y `aggregateTipsByProcessor` (`prisma.payment.groupBy` con el MISMO
+  `where` que las filas: COMPLETED, reembolsos y órdenes canceladas según las banderas, ventana de fechas) y devuelven UNA fila por
+  método o por cajero; los nombres de cajero salen de una consulta acotada al número de cajeros del rango. El puente legacy de MindForm
+  se conserva: sus pagos QR viven en otra base y se suman en Node sólo para ese venue, con las mismas reglas y el mismo gate
+  (ningún otro venue toca la base legacy). Se eligió `groupBy` y no `$queryRaw` para que el filtro de fechas quede idéntico al de
+  `findMany` (sin la trampa de zona de sesión de `utils/sqlDates.ts`). Verificación: golden al centavo contra la base de desarrollo
+  (12 venues × 4 rangos, 0 diferencias entre el camino viejo y el nuevo), prueba de integración con base real que fija la paridad
+  sobre propinas / reembolso / orden cancelada / QR sin cajero / propina 0, y unitarias del `where` y del gate. `fetchPaymentsForAnalytics`
+  sigue existiendo para `getExtendedMetrics` y queda documentado como camino de FILAS sin tope.
+
 ### Added
 
 - **PITS H1A — catálogo maestro corporativo, default-off y reversible**: se añadió gobierno de catálogo por organización sin cambiar la
