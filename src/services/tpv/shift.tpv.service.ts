@@ -16,7 +16,7 @@ import {
   type NormalizedCashReconciliationRequest,
 } from '../shared/cashReconciliation.service'
 import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
-import { INDICE_TURNO_ABIERTO, esChoqueDelUnico } from '../shared/turnoDeCaja'
+import { UNICO_TURNO_ABIERTO, esChoqueDelUnico } from '../shared/turnoDeCaja'
 
 interface ShiftFilters {
   staffId?: string
@@ -1164,7 +1164,7 @@ export async function openShiftForVenue(
       // externalId])`, que SÍ se puebla en los venues integrados— y traducir ése le diría al cajero
       // «ya hay un turno abierto» sobre un negocio que no tiene ninguno. El discriminador vive UNA
       // vez, en `shared/turnoDeCaja.ts`, para que las dos puertas de apertura no puedan divergir.
-      if (esChoqueDelUnico(error, INDICE_TURNO_ABIERTO)) {
+      if (esChoqueDelUnico(error, UNICO_TURNO_ABIERTO)) {
         throw new ConflictError('Ya hay un turno de caja abierto en este negocio. Ciérralo antes de abrir otro.', 'CASH_SHIFT_ALREADY_OPEN')
       }
       throw error

@@ -79,6 +79,25 @@ const p2002 = (target: string | string[] = 'Shift_venueId_open_key') =>
     meta: { target },
   } as any)
 
+/**
+ * 🔴 LA FORMA REAL, MEDIDA CONTRA POSTGRES EL 3-SEP-2026 provocando el choque de verdad dentro de
+ * una transacción revertida:
+ *
+ *     code: 'P2002'   meta: { modelName: 'Shift', target: ['venueId'] }   constraint: undefined
+ *
+ * O sea: `meta.target` trae la lista de COLUMNAS, **no** el nombre del índice, y `meta.constraint`
+ * ni siquiera viene. La primera versión de esta discriminación comparaba contra
+ * `'Shift_venueId_open_key'` y por tanto **no disparaba nunca** — y estas pruebas no podían cazarlo
+ * porque construían la forma que yo había asumido. Es el caso de libro de una prueba que pasa por
+ * el motivo equivocado, así que la forma medida entra como fixture propio.
+ */
+const p2002Real = (columnas: string[], modelName: string) =>
+  new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: 'x',
+    meta: { modelName, target: columnas },
+  } as any)
+
 const params = (over: Record<string, unknown> = {}) => ({
   venueId: VENUE,
   staffId: STAFF,
@@ -630,11 +649,44 @@ describe('abrirTurnoDeCaja — no todo P2002 es «ya hay un turno abierto»', ()
     await expect(abrirTurnoDeCaja(params())).rejects.not.toBeInstanceOf(ConflictError)
   })
 
+  it('🔴 la forma REAL de Postgres (`target: [venueId]`, sin `constraint`) SÍ se traduce', async () => {
+    // Es la que de verdad llega. Sin este caso, la traducción podía no dispararse nunca y las otras
+    // pruebas seguirían en verde: `openShiftForVenue` devolvería 500 en la ruta viva de la PAX ante
+    // un doble intento legítimo, en vez del 409 amable.
+    m.shift.create.mockRejectedValue(p2002Real(['venueId'], 'Shift'))
+
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'CASH_SHIFT_ALREADY_OPEN' })
+  })
+
+  it('🔴 la forma REAL del choque de la CAJA (`target: [venueId]`) SÍ se traduce', async () => {
+    m.cashDrawerSession.create.mockRejectedValue(p2002Real(['venueId'], 'CashDrawerSession'))
+
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'CASH_SHIFT_ALREADY_OPEN' })
+  })
+
+  it('🔴 la forma REAL del OTRO único de la caja (`target: [shiftId]`) NO se traduce', async () => {
+    m.cashDrawerSession.create.mockRejectedValue(p2002Real(['shiftId'], 'CashDrawerSession'))
+
+    await expect(abrirTurnoDeCaja(params())).rejects.not.toBeInstanceOf(ConflictError)
+  })
+
   it('el P2002 del índice de abiertos SÍ se traduce, venga como nombre de índice o como lista de campos', async () => {
     m.shift.create.mockRejectedValue(p2002('Shift_venueId_open_key'))
     await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'CASH_SHIFT_ALREADY_OPEN' })
 
     m.shift.create.mockRejectedValue(p2002(['Shift_venueId_open_key']))
+    await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'CASH_SHIFT_ALREADY_OPEN' })
+  })
+
+  it('también por `meta.constraint`, que es la tercera forma que Prisma puede dar', async () => {
+    m.shift.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'x',
+        meta: { modelName: 'Shift', constraint: 'Shift_venueId_open_key' },
+      } as any),
+    )
+
     await expect(abrirTurnoDeCaja(params())).rejects.toMatchObject({ code: 'CASH_SHIFT_ALREADY_OPEN' })
   })
 

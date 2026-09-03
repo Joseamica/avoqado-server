@@ -376,6 +376,20 @@ describe('openShiftForVenue — la doble apertura simultánea no puede salir com
     await expect(openShiftForVenue(VENUE_ID, STAFF_ID, 500, 'station-1')).rejects.toBeInstanceOf(ConflictError)
   })
 
+  it('🔴 y con la forma REAL medida contra Postgres el 3-sep (`target: [venueId]`, sin `constraint`)', async () => {
+    // Ésta es la ruta VIVA de la PAX. Comparando sólo contra el nombre del índice, la traducción no
+    // disparaba nunca y un doble intento legítimo salía como 500 en la cara del cajero.
+    mockPrisma.shift.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { modelName: 'Shift', target: ['venueId'] },
+      }),
+    )
+
+    await expect(openShiftForVenue(VENUE_ID, STAFF_ID, 500, 'station-1')).rejects.toBeInstanceOf(ConflictError)
+  })
+
   it('cualquier otro error de la base sigue subiendo tal cual (no se disfraza de conflicto)', async () => {
     mockPrisma.shift.create.mockRejectedValue(new Error('la base se cayó'))
 

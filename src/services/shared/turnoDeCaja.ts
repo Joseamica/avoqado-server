@@ -140,9 +140,20 @@ export const NOTA_DEL_RELEVO = 'Cerrado por relevo al abrir el turno del día si
 /** Su gemela para el cajón. Va en `closingNote`, con la misma promesa: nadie contó. */
 export const NOTA_DEL_RELEVO_DE_CAJA = '[Sistema] Cerrada por relevo al abrir la caja del día siguiente. Sin conteo.'
 
+/**
+ * Un único PARCIAL creado en SQL crudo, que Prisma no conoce por el schema. Lleva las dos formas
+ * con las que puede llegar identificado, porque Prisma no garantiza cuál da.
+ */
+export interface UnicoParcial {
+  /** El nombre del índice en Postgres. */
+  indice: string
+  /** Sus columnas EXACTAS, en orden. 🔴 Es la forma que Prisma reporta DE VERDAD (ver abajo). */
+  columnas: string[]
+}
+
 /** Los dos índices únicos PARCIALES que garantizan «uno abierto por negocio». Se crean en SQL. */
-export const INDICE_TURNO_ABIERTO = 'Shift_venueId_open_key'
-export const INDICE_CAJA_ABIERTA = 'CashDrawerSession_venueId_open_key'
+export const UNICO_TURNO_ABIERTO: UnicoParcial = { indice: 'Shift_venueId_open_key', columnas: ['venueId'] }
+export const UNICO_CAJA_ABIERTA: UnicoParcial = { indice: 'CashDrawerSession_venueId_open_key', columnas: ['venueId'] }
 
 function conflictoDeApertura(): ConflictError {
   return new ConflictError('Ya hay un turno de caja abierto en este negocio. Ciérralo antes de abrir otro.', 'CASH_SHIFT_ALREADY_OPEN')
@@ -159,16 +170,43 @@ function cierreEnProceso(): ConflictError {
  * sólo `error.code` traduciría cualquiera de esos choques a «ya hay un turno abierto» sobre un
  * negocio que no tiene ninguno.
  *
- * Se discrimina por `meta.target`, que en Postgres trae el nombre del índice (o la lista de campos).
- * 🔴 Y si NO viene, no se adivina: se deja subir el error tal cual. Un 500 honesto es mejor que un
- * 409 que miente — el 409 además lo tratan las apps como rechazo PERMANENTE y descartan lo encolado.
+ * 🔴 **LA FORMA SE MIDIÓ CONTRA POSTGRES EL 3-SEP-2026, no se asumió**, provocando el choque real
+ * dentro de una transacción revertida:
+ *
+ *     code: 'P2002'   meta: { modelName: 'Shift', target: ['venueId'] }   meta.constraint: undefined
+ *
+ * O sea: **`meta.target` trae la lista de COLUMNAS, no el nombre del índice, y `meta.constraint` ni
+ * siquiera viene.** La primera versión de esta función comparaba contra `'Shift_venueId_open_key'` y
+ * por tanto **no disparaba nunca** — con todas sus pruebas en verde, porque construían la forma
+ * asumida. Consecuencias que eso habría tenido vivas: un 500 en la ruta de la PAX ante un doble
+ * intento legítimo, y el rescate de `getOrCreatePosShift` sin correr, con la orden del POS dropeada
+ * porque el consumidor hace `nack(msg, false, false)` ante cualquier throw.
+ *
+ * Por eso se aceptan las TRES formas, igual que `isCatalogOverrideUniqueConstraint` en
+ * `master-catalog/catalogOverrideRecovery.service.ts` —el otro sitio del repo con un índice parcial
+ * crudo—: `meta.constraint`, el nombre del índice en `target`, y la lista EXACTA de columnas.
+ *
+ * La lista discrimina bien para nuestros dos índices: son sobre `(venueId)` a secas, mientras el
+ * otro único de `Shift` llega como `['venueId','externalId']` y el de la caja como `['shiftId']`.
+ *
+ * 🔴 Y si no viene NINGUNO de los dos descriptores, no se adivina: el error sube tal cual. Un 500
+ * honesto es mejor que un 409 que miente — el 409 además lo tratan las apps como rechazo PERMANENTE
+ * y descartan lo encolado para siempre.
  */
-export function esChoqueDelUnico(error: unknown, nombreDelIndice: string): boolean {
+export function esChoqueDelUnico(error: unknown, unico: UnicoParcial): boolean {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false
-  const target = (error.meta as { target?: unknown } | undefined)?.target
-  if (target === undefined || target === null) return false
-  const comoTexto = Array.isArray(target) ? target.join(',') : String(target)
-  return comoTexto.includes(nombreDelIndice)
+  const meta = error.meta as { target?: unknown; constraint?: unknown } | undefined
+  const descriptor = meta?.constraint ?? meta?.target
+  if (descriptor === undefined || descriptor === null) return false
+
+  // (1) el nombre del índice, suelto o dentro de un arreglo de uno
+  if (descriptor === unico.indice) return true
+  if (Array.isArray(descriptor) && descriptor.length === 1 && descriptor[0] === unico.indice) return true
+
+  // (2) la lista EXACTA de columnas, en orden — la forma medida
+  return (
+    Array.isArray(descriptor) && descriptor.length === unico.columnas.length && descriptor.every((campo, i) => campo === unico.columnas[i])
+  )
 }
 
 /**
@@ -346,7 +384,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
         .catch((error: unknown) => {
           // SÓLO el índice único parcial `Shift(venueId) WHERE status='OPEN'`: otra terminal ganó.
           // Un choque de `venueId_externalId` (venues integrados) sube tal cual, no se disfraza.
-          if (esChoqueDelUnico(error, INDICE_TURNO_ABIERTO)) throw conflictoDeApertura()
+          if (esChoqueDelUnico(error, UNICO_TURNO_ABIERTO)) throw conflictoDeApertura()
           throw error
         })
       shiftId = nuevo.id
@@ -427,7 +465,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
         .catch((error: unknown) => {
           // SÓLO el índice de cajas abiertas. Un choque de `CashDrawerSession_shiftId_key` o del
           // `localId` del evento no significa «ya hay una caja abierta» y sube tal cual.
-          if (esChoqueDelUnico(error, INDICE_CAJA_ABIERTA)) throw conflictoDeApertura()
+          if (esChoqueDelUnico(error, UNICO_CAJA_ABIERTA)) throw conflictoDeApertura()
           throw error
         })
       cashDrawerSessionId = nueva.id

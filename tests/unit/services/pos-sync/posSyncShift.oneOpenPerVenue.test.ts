@@ -39,8 +39,23 @@ const m = prisma as unknown as {
 
 const VENUE = 'venue-1'
 
-/** El choque del índice de abiertos, con su `meta.target` como lo reporta Postgres. */
+/**
+ * 🔴 EL CHOQUE DEL ÍNDICE DE ABIERTOS, CON LA FORMA REAL — medida contra Postgres el 3-sep-2026
+ * provocando el conflicto de verdad: `meta: { modelName: 'Shift', target: ['venueId'] }`, y
+ * `meta.constraint` **undefined**. `target` trae las COLUMNAS, no el nombre del índice.
+ *
+ * Importa aquí más que en ningún otro sitio: si el rescate no corre, el consumidor hace
+ * `nack(msg, false, false)` ante cualquier throw y **la orden del POS se dropea**.
+ */
 const p2002Abiertos = () =>
+  new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: 'test',
+    meta: { modelName: 'Shift', target: ['venueId'] },
+  })
+
+/** La forma que yo había ASUMIDO (nombre del índice). Se conserva: Prisma también puede darla. */
+const p2002PorNombre = () =>
   new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
     code: 'P2002',
     clientVersion: 'test',
@@ -84,6 +99,13 @@ describe('getOrCreatePosShift — con el índice de un turno abierto por negocio
     expect(where).toMatchObject({ venueId: VENUE, status: 'OPEN' })
     expect(where).not.toHaveProperty('externalId')
     expect(where).not.toHaveProperty('staffId')
+  })
+
+  it('el rescate también corre si Prisma da el nombre del índice en vez de las columnas', async () => {
+    m.shift.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'turno-del-negocio' })
+    m.shift.create.mockRejectedValue(p2002PorNombre())
+
+    expect(await getOrCreatePosShift(payload, VENUE, 'staff-1')).toBe('turno-del-negocio')
   })
 
   it('si el choque es de OTRO único, sube tal cual: no se disfraza ni se inventa un rescate', async () => {

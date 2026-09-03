@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { ConflictError, NotFoundError } from '../../errors/AppError'
-import { INDICE_TURNO_ABIERTO, esChoqueDelUnico } from '../shared/turnoDeCaja'
+import { UNICO_TURNO_ABIERTO, esChoqueDelUnico } from '../shared/turnoDeCaja'
 import { Prisma, Shift, ShiftStatus, OriginSystem } from '@prisma/client'
 import logger from '../../config/logger'
 import { PosShiftPayload } from '../../types/pos.types'
@@ -46,7 +46,7 @@ export async function getOrCreatePosShift(shiftPayload: PosShiftPayload, venueId
     .catch(async (error: unknown) => {
       // SÓLO el índice de abiertos: `Shift` tiene otro único (`venueId, externalId`) que no
       // significa esto y sube tal cual.
-      if (!esChoqueDelUnico(error, INDICE_TURNO_ABIERTO)) throw error
+      if (!esChoqueDelUnico(error, UNICO_TURNO_ABIERTO)) throw error
 
       // El turno es del NEGOCIO (decisión del founder, 2-sep-2026), así que «ya hay uno abierto» no
       // es un error: es la respuesta. La orden se ata a ÉSE. Devolver null la dejaría fuera de todo
@@ -187,7 +187,7 @@ export async function processPosShiftEvent(
       },
     })
     .catch((error: unknown) => {
-      if (esChoqueDelUnico(error, INDICE_TURNO_ABIERTO)) {
+      if (esChoqueDelUnico(error, UNICO_TURNO_ABIERTO)) {
         throw new ConflictError(
           `El negocio ya tiene un turno de caja abierto: no se puede abrir el turno ${externalId} del POS. Ciérralo antes de sincronizar.`,
           'CASH_SHIFT_ALREADY_OPEN',
