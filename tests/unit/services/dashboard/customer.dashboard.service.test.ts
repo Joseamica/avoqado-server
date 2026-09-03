@@ -12,6 +12,19 @@ import { prismaMock } from '../../../__helpers__/setup'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
 
+// ── marketingConsent (Task 5): customer.dashboard.service YA NO escribe el campo directo —
+// delega en consent.service (ledger+cache+ActivityLog atómicos, Task 3). Se mockea a nivel de
+// MÓDULO (fuera de cualquier describe) para que el mock quede registrado antes de que el
+// import de arriba cargue el servicio real — mismo patrón que `createSalePostingMasivoMock`
+// más abajo en este archivo.
+const grantConsentMock = jest.fn()
+const revokeConsentMock = jest.fn()
+jest.mock('@/services/customer/consent.service', () => ({
+  __esModule: true,
+  grantMarketingConsent: (...a: unknown[]) => grantConsentMock(...a),
+  revokeMarketingConsent: (...a: unknown[]) => revokeConsentMock(...a),
+}))
+
 // Helper to create mock customer
 const createMockCustomer = (overrides: Record<string, any> = {}) => ({
   id: 'customer-123',
@@ -184,17 +197,21 @@ describe('Customer Dashboard Service', () => {
       })
 
       expect(result.email).toBe('test@example.com')
+      // 🔴 marketingConsent ya NO se escribe en el create (Task 5) — sólo consent.service lo
+      // escribe (ledger+cache+ActivityLog atómicos). El default `@default(false)` de Prisma
+      // basta para "sin consentimiento", así que el campo no debe ir en el `data`.
       expect(prismaMock.customer.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           venueId: 'venue-123',
           email: 'new@example.com',
           firstName: 'Jane',
           lastName: 'Smith',
-          marketingConsent: false,
           tags: [],
         }),
         include: { customerGroup: true },
       })
+      const createCallData = prismaMock.customer.create.mock.calls[0][0].data
+      expect(createCallData).not.toHaveProperty('marketingConsent')
     })
 
     it('should create customer with phone only (no email)', async () => {
@@ -274,7 +291,7 @@ describe('Customer Dashboard Service', () => {
       expect(prismaMock.customer.create).toHaveBeenCalled()
     })
 
-    it('should set default values for tags and marketingConsent', async () => {
+    it('should default tags to [] and NOT write marketingConsent directly (Task 5: only consent.service writes it)', async () => {
       prismaMock.customer.findFirst.mockResolvedValue(null)
       prismaMock.customer.create.mockResolvedValue(createMockCustomer() as any)
 
@@ -285,9 +302,60 @@ describe('Customer Dashboard Service', () => {
       expect(prismaMock.customer.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           tags: [],
-          marketingConsent: false,
         }),
         include: { customerGroup: true },
+      })
+      const createCallData = prismaMock.customer.create.mock.calls[0][0].data
+      expect(createCallData).not.toHaveProperty('marketingConsent')
+    })
+  })
+
+  // ── marketingConsent: SOLO vía consent.service (Task 5) ─────────────────────
+  describe('createCustomer — consentimiento vía consent.service', () => {
+    beforeEach(() => {
+      grantConsentMock.mockReset().mockResolvedValue(undefined)
+      revokeConsentMock.mockReset()
+    })
+
+    it('marketingConsent:true ⇒ llama grantMarketingConsent con channel FORM_STAFF y el actor', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.customer.create.mockResolvedValue(createMockCustomer({ id: 'cust-new' }) as any)
+
+      await createCustomer('venue-123', { email: 'new@example.com', marketingConsent: true }, 'staff-9')
+
+      expect(grantConsentMock).toHaveBeenCalledWith({
+        venueId: 'venue-123',
+        customerId: 'cust-new',
+        channel: 'FORM_STAFF',
+        actorStaffId: 'staff-9',
+      })
+      expect(revokeConsentMock).not.toHaveBeenCalled()
+    })
+
+    it('marketingConsent:false (u omitido) ⇒ NO llama a consent.service', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.customer.create.mockResolvedValue(createMockCustomer() as any)
+
+      await createCustomer('venue-123', { email: 'test@example.com' })
+
+      expect(grantConsentMock).not.toHaveBeenCalled()
+      expect(revokeConsentMock).not.toHaveBeenCalled()
+    })
+
+    it('grant que lanza ⇒ el create SOBREVIVE (el cliente existe) y la respuesta trae el warning', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.customer.create.mockResolvedValue(createMockCustomer({ id: 'cust-fail' }) as any)
+      grantConsentMock.mockRejectedValue(
+        new BadRequestError('Registra el aviso de privacidad del negocio antes de capturar consentimiento'),
+      )
+
+      const result = await createCustomer('venue-123', { email: 'test@example.com', marketingConsent: true })
+
+      // El cliente se creó — no se revierte por un fallo de consentimiento.
+      expect(result.id).toBe('cust-fail')
+      expect((result as any).consentWarning).toEqual({
+        code: 'CONSENT_NOT_CAPTURED',
+        reason: 'Registra el aviso de privacidad del negocio antes de capturar consentimiento',
       })
     })
   })
@@ -428,6 +496,105 @@ describe('Customer Dashboard Service', () => {
         }),
         include: { customerGroup: true },
       })
+    })
+
+    it('el update ya NO escribe marketingConsent en el prisma.customer.update', async () => {
+      const existingCustomer = createMockCustomer({ marketingConsent: false })
+      prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ firstName: 'X' }) as any)
+
+      await updateCustomer('venue-123', 'customer-123', { firstName: 'X', marketingConsent: true })
+
+      const updateCallData = prismaMock.customer.update.mock.calls[0][0].data
+      expect(updateCallData).not.toHaveProperty('marketingConsent')
+    })
+  })
+
+  // ── marketingConsent en update: SOLO vía consent.service, y SOLO si cambia (Task 5) ──
+  describe('updateCustomer — consentimiento vía consent.service', () => {
+    beforeEach(() => {
+      grantConsentMock.mockReset().mockResolvedValue(undefined)
+      revokeConsentMock.mockReset().mockResolvedValue(undefined)
+    })
+
+    it('marketingConsent NO viene en el DTO ⇒ NO llama grant/revoke', async () => {
+      const existingCustomer = createMockCustomer({ marketingConsent: false })
+      prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
+      prismaMock.customer.update.mockResolvedValue(existingCustomer as any)
+
+      await updateCustomer('venue-123', 'customer-123', { firstName: 'Sólo el nombre' })
+
+      expect(grantConsentMock).not.toHaveBeenCalled()
+      expect(revokeConsentMock).not.toHaveBeenCalled()
+    })
+
+    it('marketingConsent viene pero es IGUAL al valor actual ⇒ NO llama grant/revoke', async () => {
+      const existingCustomer = createMockCustomer({ marketingConsent: true })
+      prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
+      prismaMock.customer.update.mockResolvedValue(existingCustomer as any)
+
+      await updateCustomer('venue-123', 'customer-123', { marketingConsent: true })
+
+      expect(grantConsentMock).not.toHaveBeenCalled()
+      expect(revokeConsentMock).not.toHaveBeenCalled()
+    })
+
+    it('false → true ⇒ llama grantMarketingConsent con channel FORM_STAFF y el actor', async () => {
+      const existingCustomer = createMockCustomer({ marketingConsent: false })
+      prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ marketingConsent: true }) as any)
+
+      await updateCustomer('venue-123', 'customer-123', { marketingConsent: true }, 'staff-7')
+
+      expect(grantConsentMock).toHaveBeenCalledWith({
+        venueId: 'venue-123',
+        customerId: 'customer-123',
+        channel: 'FORM_STAFF',
+        actorStaffId: 'staff-7',
+      })
+      expect(revokeConsentMock).not.toHaveBeenCalled()
+    })
+
+    it('true → false ⇒ llama revokeMarketingConsent', async () => {
+      const existingCustomer = createMockCustomer({ marketingConsent: true })
+      prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ marketingConsent: false }) as any)
+
+      await updateCustomer('venue-123', 'customer-123', { marketingConsent: false }, 'staff-7')
+
+      expect(revokeConsentMock).toHaveBeenCalledWith({
+        venueId: 'venue-123',
+        customerId: 'customer-123',
+        channel: 'FORM_STAFF',
+        actorStaffId: 'staff-7',
+      })
+      expect(grantConsentMock).not.toHaveBeenCalled()
+    })
+
+    it('🔴 revoke que lanza ⇒ el PUT entero se RECHAZA (fail closed) y NO se escribe nada', async () => {
+      const existingCustomer = createMockCustomer({ marketingConsent: true })
+      prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ firstName: 'Sigue' }) as any)
+      revokeConsentMock.mockRejectedValue(new Error('boom'))
+
+      // Un opt-out es evidencia legal — perderlo en silencio (200 con warning) es peor que
+      // rechazar el PUT: el operador reintenta hasta que la revocación aterrice de verdad.
+      await expect(updateCustomer('venue-123', 'customer-123', { firstName: 'Sigue', marketingConsent: false })).rejects.toThrow('boom')
+
+      expect(prismaMock.customer.update).not.toHaveBeenCalled()
+    })
+
+    it('grant (opt-in) que lanza en update SÍ sigue fail-open: el update sobrevive con warning', async () => {
+      const existingCustomer = createMockCustomer({ marketingConsent: false })
+      prismaMock.customer.findFirst.mockResolvedValue(existingCustomer as any)
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ firstName: 'Sigue' }) as any)
+      grantConsentMock.mockRejectedValue(new Error('boom'))
+
+      const result = await updateCustomer('venue-123', 'customer-123', { firstName: 'Sigue', marketingConsent: true })
+
+      expect(result.firstName).toBe('Sigue')
+      expect((result as any).consentWarning).toEqual({ code: 'CONSENT_NOT_CAPTURED', reason: 'boom' })
+      expect(prismaMock.customer.update).toHaveBeenCalled()
     })
   })
 

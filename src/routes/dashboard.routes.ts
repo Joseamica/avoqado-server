@@ -63,6 +63,7 @@ import * as rolePermissionController from '../controllers/dashboard/rolePermissi
 import * as permissionSetController from '../controllers/dashboard/permissionSet.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
+import * as privacyNoticeController from '../controllers/dashboard/privacyNotice.dashboard.controller'
 import * as venueRoleConfigController from '../controllers/dashboard/venueRoleConfig.dashboard.controller'
 import * as venueSettingsController from '../controllers/dashboard/venueSettings.dashboard.controller'
 import * as loyaltyController from '../controllers/dashboard/loyalty.dashboard.controller'
@@ -202,6 +203,7 @@ import {
   CustomersAwaitingApprovalQuerySchema,
   VenueIdParamsSchema as CustomerVenueIdParamsSchema,
 } from '../schemas/dashboard/customer.schema'
+import { GetPrivacyNoticeSchema, UpsertPrivacyNoticeSchema } from '../schemas/dashboard/privacyNotice.schema'
 import { SettleOrderSchema } from '../schemas/dashboard/order.schema'
 import {
   CreateCustomerGroupSchema,
@@ -364,6 +366,8 @@ import saleVerificationOrgDashboardRoutes from './dashboard/saleVerification.org
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
+// Campañas de correo a clientes (Fase 1C-A, Task 6)
+import marketingCampaignRoutes from './dashboard/marketingCampaign.routes'
 // Per-staff, per-venue onboarding UX state (tour banners, checklists, welcome-tour flags)
 import staffOnboardingRoutes from './dashboard/staffOnboarding.routes'
 // SUPERADMIN impersonation — view the dashboard as another user/role (read-only)
@@ -10070,6 +10074,86 @@ router.patch(
   validateRequest(CustomerApprovalDecisionSchema),
   customerController.decideCustomerApproval,
 )
+
+// ---------------------------------------------------------------------------
+// Fase 0 — aviso de privacidad del venue (campañas de correo, LFPDPPP)
+// PrivacyNoticeVersion es INMUTABLE: el PUT siempre crea una versión nueva, nunca
+// edita una existente. `marketing:send` nace en el catálogo desde ahora (Fase 1 del
+// spec de campañas) aunque todavía no tenga ruta propia.
+// ---------------------------------------------------------------------------
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/privacy-notice:
+ *   get:
+ *     summary: Ver el aviso de privacidad vigente del venue
+ *     tags: [Marketing]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: 'El aviso vigente, o null si el venue no ha registrado uno' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/privacy-notice',
+  authenticateTokenMiddleware,
+  checkPermission('marketing:read'),
+  validateRequest(GetPrivacyNoticeSchema),
+  privacyNoticeController.getPrivacyNotice,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/privacy-notice:
+ *   put:
+ *     summary: Registrar una versión nueva del aviso de privacidad
+ *     description: >
+ *       El aviso es INMUTABLE: esta ruta SIEMPRE crea una versión nueva (nunca edita la
+ *       anterior), con hash sha256 del contenido. Es la versión que `ConsentEvent` cita
+ *       al otorgar consentimiento.
+ *     tags: [Marketing]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [content]
+ *             properties:
+ *               content: { type: string, maxLength: 50000 }
+ *               language: { type: string, enum: [es, en, fr], default: es }
+ *     responses:
+ *       200: { description: Versión nueva creada }
+ *       400: { $ref: '#/components/responses/ValidationError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.put(
+  '/venues/:venueId/privacy-notice',
+  authenticateTokenMiddleware,
+  checkPermission('marketing:manage'),
+  validateRequest(UpsertPrivacyNoticeSchema),
+  privacyNoticeController.upsertPrivacyNotice,
+)
+
+// ---------------------------------------------------------------------------
+// Fase 1C-A — campañas de correo a clientes (Task 6). El permiso propio de cada
+// verbo vive DENTRO de `marketingCampaignRoutes` (leer/crear/editar/previsualizar
+// vs `marketing:send` en publicar); aquí sólo se abre el paso autenticado.
+// ---------------------------------------------------------------------------
+// 🔴 Gate de PLAN, además del de permiso que vive dentro del sub-router. Sin él, un venue
+// en plan GRATIS puede mandar campañas por API: el dashboard lo esconde tras <FeatureGate>,
+// pero esconder no es impedir. Y aquí el coste no es sólo de producto — cada correo lo
+// pagamos nosotros y consume la reputación del subdominio de marketing, que es compartido
+// entre todos los negocios. Mismo montaje que RESERVATIONS (los venues grandfathered y los
+// demo pasan por dentro del middleware).
+router.use('/venues/:venueId/campaigns', authenticateTokenMiddleware, checkFeatureAccess('CUSTOMER_CAMPAIGNS'), marketingCampaignRoutes)
 
 // ============================================================================
 // Customer Group Routes (Phase 1: Customer System)
