@@ -44,10 +44,21 @@ END $$;
 --
 -- 🔴 PREFLIGHT + ÍNDICE EN UN SOLO BLOQUE `DO` = UNA transacción, igual que
 -- `20260827151634_cash_drawer_one_open_per_venue`: Prisma no garantiza que el archivo entero corra
--- en una transacción, y entre el UPDATE y el CREATE INDEX cabría otra doble apertura. El preflight
--- es obligatorio y no teórico: PRODUCCIÓN ya tiene venues con dos turnos abiertos (Testarudo los
--- arrastra desde el 11 y el 13 de agosto) y la base local medida el 3-sep tenía 65 turnos OPEN con
--- dos venues de 32 cada uno — sin cerrar los sobrantes, el CREATE INDEX revienta la migración.
+-- en una transacción, y entre el UPDATE y el CREATE INDEX cabría otra doble apertura.
+--
+-- 🔴 QUÉ VA A PASAR EN PRODUCCIÓN — medido el 3-sep-2026, no supuesto:
+--
+--   · 33 turnos `OPEN` en total.
+--   · **30 son de un solo venue, `Avoqado Full`**: el preflight cierra 29 y deja vivo el más
+--     reciente. Ése es el duplicador, y es el único venue que esta migración toca.
+--   · Los otros 3 son el ÚNICO turno abierto de su negocio, así que **el preflight NO los toca**
+--     — incluido uno de medio año con **$745,268** acumulados. Un venue con un solo turno abierto
+--     no cumple el `EXISTS` de abajo y sale intacto.
+--   · **No se mueve ni un cobro.** Sólo cambian `status`, `endTime`, `notes` y `updatedAt` de los
+--     29 sobrantes; ninguna fila de `Payment` ni de `Order` se toca.
+--
+-- (En la base local del 3-sep había 65 turnos OPEN con dos venues de 32 cada uno — datos de
+-- semilla; el preflight los dejó en 3 sin inventar un solo conteo.)
 --
 -- El preflight es DETERMINISTA (sobrevive el más reciente por `startTime`, desempate por `id`) e
 -- idempotente. 🔴 Y NO INVENTA UN CONTEO: `endingCash`, `cashDeclared` y `cashDifference` se quedan
