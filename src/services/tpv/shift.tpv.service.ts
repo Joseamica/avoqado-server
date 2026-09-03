@@ -340,12 +340,22 @@ export async function getShifts(
   // Calculate the sum of tips and payments for each shift
   const shiftsWithCalculations = shifts.map(shift => {
     // Calculate payment totals from orders
-    const orderPayments = shift.orders.flatMap(order => order.payments)
-    // 🔴 Los dos caminos llevan AL MISMO dinero: un cobro es alcanzable por `Order.shiftId`
-    // (via `shift.orders[].payments`) y por `Payment.shiftId` (via `shift.payments`). Desde la
-    // fase 1 del «turno de caja del negocio» la orden y su cobro se atan al MISMO turno, así que
-    // sin deduplicar por id esta pantalla enseñaría el DOBLE del dinero real. Se conserva el
-    // orden actual (primero los de la orden) para no mover nada más que el conteo.
+    // 🔴 EL COBRO TIENE QUE SER DE ESTE TURNO — o de ninguno.
+    //
+    // La premisa que estaba escrita aquí («la orden y su cobro se atan al MISMO turno») dejó de
+    // ser cierta el 3-sep-2026: la orden se estampa al ABRIRSE y el cobro se resuelve al PAGARSE,
+    // y entre las dos cosas puede cambiar el turno. Mesa abierta 13:00 en el turno A → A cierra a
+    // las 15:00 → pagan 15:30 en B: A alcanzaba ese cobro por su orden y B por `Payment.shiftId`,
+    // y como el `Map` de abajo deduplica DENTRO de un turno y no ENTRE turnos, la pantalla sumaba
+    // el mismo dinero dos veces. El cobro pertenece a donde entró el dinero, que es B.
+    //
+    // 🔴 La rama por orden NO se borra, y ésa es la parte que no se ve: hay órdenes históricas de
+    // pos-sync con turno cuyo `Payment.shiftId` es NULO, y quitarla les borraría el dinero de la
+    // pantalla. Por eso el filtro deja pasar también el cobro sin turno: es de esta orden y no lo
+    // reclama nadie más.
+    const orderPayments = shift.orders.flatMap(order => order.payments).filter(p => p.shiftId === shift.id || p.shiftId == null)
+    // Deduplicar por id sigue haciendo falta: un cobro de ESTE turno llega por los dos caminos.
+    // Se conserva el orden actual (primero los de la orden) para no mover nada más.
     const allPayments = [...new Map([...orderPayments, ...shift.payments].map(payment => [payment.id, payment])).values()]
 
     // Calculate tip sum from payment allocations and tipAmount
