@@ -52,7 +52,13 @@ export async function listCampaigns(req: Request, res: Response, next: NextFunct
           createdAt: true,
           updatedAt: true,
         },
-        orderBy: { createdAt: 'desc' },
+        // 🔴 Desempate ÚNICO, no `createdAt` solo. Con `skip`/`take` sobre una clave no
+        // única, dos campañas creadas en el mismo instante pueden salir DOS veces o
+        // desaparecer al pasar de página: el orden entre ellas no está definido y Postgres
+        // puede devolverlo distinto en cada consulta. Lo exige
+        // `.claude/rules/bounded-queries-and-server-load.md` y lo vigila
+        // `tests/unit/services/pagination-stability.guard.test.ts` (Asana 1217127206664238).
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
