@@ -85,7 +85,13 @@ function felicitacion(overrides: Record<string, any> = {}) {
       textBody: 'FELIZ CUMPLE',
     },
     // Cumple el 8 de septiembre: hoy (1-sep) todavía falta.
-    customer: { id: 'cust-1', email: 'ana@ejemplo.mx', marketingConsent: true, active: true, birthDate: new Date('1990-09-08T00:00:00.000Z') },
+    customer: {
+      id: 'cust-1',
+      email: 'ana@ejemplo.mx',
+      marketingConsent: true,
+      active: true,
+      birthDate: new Date('1990-09-08T00:00:00.000Z'),
+    },
     ...overrides,
   }
 }
@@ -180,9 +186,7 @@ describe('enviarDelivery — felicitación de cumpleaños', () => {
   })
 
   it('respeta el consentimiento revocado igual que una campaña puntual', async () => {
-    findUniqueMock.mockResolvedValue(
-      felicitacion({ customer: { ...felicitacion().customer, marketingConsent: false } }),
-    )
+    findUniqueMock.mockResolvedValue(felicitacion({ customer: { ...felicitacion().customer, marketingConsent: false } }))
 
     const r = await enviarDelivery('dlv-b1', { ahora: AHORA })
 

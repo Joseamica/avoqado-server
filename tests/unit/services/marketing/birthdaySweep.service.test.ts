@@ -91,9 +91,7 @@ describe('barrerCumpleanos', () => {
   it('sólo mira las automatizaciones ACTIVE', async () => {
     automationFindMany.mockResolvedValue([])
     await barrerCumpleanos(AHORA)
-    expect(automationFindMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { status: BirthdayAutomationStatus.ACTIVE } }),
-    )
+    expect(automationFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: { status: BirthdayAutomationStatus.ACTIVE } }))
   })
 
   it('🔴 revalida el PLAN en cada barrido: sin él no encola nada', async () => {
