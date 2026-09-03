@@ -56,6 +56,14 @@ export const HUERFANAS_DESDE = '2026-08-31'
 export const DETAIL_LIMIT = 200
 
 /**
+ * El vigilante sólo alerta lo que el barrido paid-order-reconciler YA tuvo oportunidad de
+ * cerrar: su gracia (5 min sobre `updatedAt`) más un ciclo completo suyo (corre cada 10 min).
+ * Por debajo de esto una orden pagada-pero-abierta es un estado que se sana solo; alertarlo
+ * enseña a ignorar la alerta.
+ */
+export const VENTANA_DEL_BARRIDO_MIN = 15
+
+/**
  * Filtro de venues reales — los demo/seed usan convenciones propias.
  *
  * 🔴 Excluir por slug NO basta: la org de pruebas del founder ("Grupo Avoqado Prime") tiene 4 venues
@@ -195,10 +203,18 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    pendiente para siempre — y esa pantalla es de sólo lectura.
         --    🔴 El criterio NO se escribe aquí: sale del MISMO módulo que usa el barrido
         --    paid-order-reconciler.job.ts (cada 10 min). Si divergieran, el barrido cerraría un
-        --    conjunto de órdenes y el vigilante vigilaría otro. Consecuencia de compartirlo:
-        --    aquí sólo puede quedar lo que el barrido NO pudo cerrar (p. ej. falló el vale de
-        --    inventario). Una orden que reaparece pasada tras pasada NO se cierra a mano: el
-        --    motivo está en el log de ESE job.
+        --    conjunto de órdenes y el vigilante vigilaría otro.
+        --    Qué puede aparecer aquí SIN que el barrido haya fallado — son tres clases, y por eso
+        --    esto NO es «lo que el barrido no pudo cerrar» a secas:
+        --      · lo que intentó y no pudo cerrar (p. ej. falló el vale de inventario): el motivo
+        --        está en el log de ESE job, y una que reaparece pasada tras pasada NO se cierra
+        --        a mano;
+        --      · lo anterior a su lookback (LOOKBACK_DAYS = 30 días): nunca lo intentó. Es el
+        --        rezago viejo de producción, el que cierra el script de la fase 5;
+        --      · lo que excede su lote por tick (50 órdenes por pasada): lo alcanza en los
+        --        ticks siguientes.
+        --    Y lo que la ventana de VENTANA_DEL_BARRIDO_MIN deja fuera es, a propósito, lo que
+        --    todavía está a tiempo de sanarse solo.
         --    Sin tope de fecha a propósito, al revés que la invariante 5: el barrido sólo mira
         --    30 días hacia atrás, así que el rezago más viejo no lo vigila nadie más.
         SELECT 'PAGADA PERO ABIERTA', v.name, o.id,
@@ -207,6 +223,7 @@ export function buildWatchdogSql(): { counts: string; details: string } {
                ' pagado=' || (SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p WHERE p."orderId" = o.id AND ${COBRO_QUE_CUBRE})
         FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
         WHERE ${criterioPagadaPeroAbiertaSql('o')}
+          AND o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'
           AND ${REAL_VENUES}
     )`
 

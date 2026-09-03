@@ -18,9 +18,10 @@ import {
   TRIAGED_AWAITING_THIRD_PARTY,
   HUERFANAS_DESDE,
   DETAIL_LIMIT,
+  VENTANA_DEL_BARRIDO_MIN,
   buildWatchdogSql,
 } from '@/jobs/money-integrity-watchdog.job'
-import { COBRO_QUE_CUBRE } from '@/services/shared/pagadaPeroAbierta'
+import { COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '@/services/shared/pagadaPeroAbierta'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -73,14 +74,17 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(HUERFANAS_DESDE).toBe('2026-08-31')
   })
 
-  it('🔴 «pagada pero abierta» usa el criterio del barrido, y el `pagado` que reporta es el que la eligió', () => {
+  it('🔴 «pagada pero abierta»: criterio del barrido, su ventana, y el `pagado` que reporta es el que la eligió', () => {
     for (const sql of [counts, details]) expect(sql).toContain("'PAGADA PERO ABIERTA'")
 
     const pagadaAbierta = regla('PAGADA PERO ABIERTA')
-    // El criterio lo pone `criterioPagadaPeroAbiertaSql`. Reescrito a mano aquí, el barrido
-    // cerraría un conjunto de órdenes y el vigilante vigilaría otro — y nadie se enteraría.
-    expect(pagadaAbierta).toMatch(/o\.status NOT IN \('COMPLETED', ?'CANCELLED', ?'DELETED'\)/)
-    expect(pagadaAbierta).toMatch(/p\.type IN \('REGULAR', ?'FAST'\)/)
+    // Por HUELLA, no por forma: una copia inline del criterio de hoy pasaría los regex y luego
+    // se quedaría atrás en cuanto el módulo compartido cambiara — justo lo que esto impide.
+    expect(pagadaAbierta).toContain(criterioPagadaPeroAbiertaSql('o'))
+    // La gracia va con el reloj de pared UTC: un `NOW()` pelón acertaría en Render (sesión UTC) y
+    // abriría un hueco de 6 h en la Mac (sesión America/Mexico_City) — ver sqlDates.ts.
+    expect(pagadaAbierta).toContain(`o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'`)
+    expect(VENTANA_DEL_BARRIDO_MIN).toBe(15) // gracia del barrido (5) + un ciclo suyo (10)
     // Y el número del detalle sale de la MISMA regla de dinero (REFUND fuera), no de una copia:
     // si sumara distinto, explicaría la alerta con una cifra que no fue la que la disparó.
     expect(pagadaAbierta).toContain(
@@ -95,7 +99,7 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(details).toMatch(new RegExp(`LIMIT ${DETAIL_LIMIT}\\s*$`))
   })
 
-  it('regresión: las 4 invariantes originales siguen ahí y con el filtro de venues reales', () => {
+  it('regresión: las 5 invariantes previas siguen ahí y con el filtro de venues reales', () => {
     for (const nombre of ['TOTAL NEGATIVO', 'DESCUENTO EXCEDE EL CONSUMO', 'PROPINA NO CUADRA', 'SOBREPAGO', 'ORDEN PAGADA SIN COBRO']) {
       expect(regla(nombre)).toContain('Grupo Avoqado Prime')
     }
