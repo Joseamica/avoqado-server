@@ -41,11 +41,24 @@ describe('googleWalletClient', () => {
     expect(googleWalletCredentials()).toEqual(otra)
   })
 
-  it('un base64 corrupto no lanza: se reporta como no disponible', () => {
+  it('una credencial ilegible no lanza: se reporta como no disponible', () => {
     Object.assign(env, { GOOGLE_WALLET_ISSUER_ID: '338', GOOGLE_WALLET_SERVICE_ACCOUNT_BASE64: 'no-es-base64-valido{{{', FIREBASE_SERVICE_ACCOUNT_BASE64: undefined })
     expect(() => googleWalletCredentials()).not.toThrow()
     expect(googleWalletCredentials()).toBeNull()
     expect(googleWalletAvailable()).toBe(false)
+  })
+
+  it('🔴 un JSON válido pero SIN private_key no es una credencial usable', () => {
+    const incompleto = Buffer.from(JSON.stringify({ client_email: 'sa@x.iam.gserviceaccount.com', type: 'service_account' })).toString('base64')
+    Object.assign(env, { GOOGLE_WALLET_ISSUER_ID: '338', GOOGLE_WALLET_SERVICE_ACCOUNT_BASE64: incompleto, FIREBASE_SERVICE_ACCOUNT_BASE64: undefined })
+    expect(googleWalletCredentials()).toBeNull()
+    expect(googleWalletAvailable()).toBe(false)
+  })
+
+  it('un JSON válido sin client_email tampoco', () => {
+    const incompleto = Buffer.from(JSON.stringify({ private_key: 'k' })).toString('base64')
+    Object.assign(env, { GOOGLE_WALLET_ISSUER_ID: '338', GOOGLE_WALLET_SERVICE_ACCOUNT_BASE64: incompleto, FIREBASE_SERVICE_ACCOUNT_BASE64: undefined })
+    expect(googleWalletCredentials()).toBeNull()
   })
 
   it('con issuer pero sin credencial, tampoco está disponible', () => {
