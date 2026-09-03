@@ -19,6 +19,7 @@ import type { Request, Response } from 'express'
 import { sendTerminalPayment } from '@/controllers/mobile/terminal-payment.mobile.controller'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
+import { validateStaffVenue } from '@/utils/staff-venue.util'
 
 jest.mock('@/services/terminal-payment.service', () => ({
   terminalPaymentService: { sendPaymentToTerminal: jest.fn() },
@@ -32,6 +33,7 @@ jest.mock('@/utils/staff-venue.util', () => ({
 
 const sendPaymentToTerminalMock = terminalPaymentService.sendPaymentToTerminal as jest.Mock
 const getTerminalMock = terminalRegistry.getTerminal as jest.Mock
+const validateStaffVenueMock = validateStaffVenue as jest.Mock
 
 const venueId = 'venue-1'
 
@@ -117,5 +119,41 @@ describe('sendTerminalPayment — el cliente que el POS adjunta al cobro con tar
 
     expect(res.statusCode).toBe(400)
     expect(sendPaymentToTerminalMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['monto decimal', { amountCents: 100.5 }],
+    ['monto como string', { amountCents: '10000' }],
+    ['monto fuera de cota', { amountCents: 100_000_001 }],
+    ['propina negativa', { tipCents: -1 }],
+    ['propina decimal', { tipCents: 10.5 }],
+    ['calificación menor a 1', { rating: 0 }],
+    ['calificación mayor a 5', { rating: 6 }],
+    ['skipReview no booleano', { skipReview: 'true' }],
+  ])('rechaza %s antes de persistir o emitir', async (_label, body) => {
+    const res = buildRes()
+
+    await sendTerminalPayment(buildReq(body), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(sendPaymentToTerminalMock).not.toHaveBeenCalled()
+  })
+
+  it('valida y congela al usuario autenticado cuando iOS viejo no manda processedByStaffId', async () => {
+    validateStaffVenueMock.mockResolvedValueOnce('staff-authenticated')
+
+    await sendTerminalPayment(buildReq({}), buildRes())
+
+    expect(validateStaffVenueMock).toHaveBeenCalledWith(undefined, venueId, 'staff-1')
+    expect(argumentosDelServicio().processedByStaffId).toBe('staff-authenticated')
+  })
+
+  it('valida y conserva al vendedor elegido por el POS aunque la TPV use otra sesión', async () => {
+    validateStaffVenueMock.mockResolvedValueOnce('staff-selected')
+
+    await sendTerminalPayment(buildReq({ processedByStaffId: 'staff-selected' }), buildRes())
+
+    expect(validateStaffVenueMock).toHaveBeenCalledWith('staff-selected', venueId, 'staff-1')
+    expect(argumentosDelServicio().processedByStaffId).toBe('staff-selected')
   })
 })

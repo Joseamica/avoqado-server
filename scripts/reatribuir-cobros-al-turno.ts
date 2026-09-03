@@ -316,7 +316,9 @@ async function main(): Promise<void> {
       )
     }
     if (abiertoDelNegocio.cashDeclared != null) {
-      detener(`El turno abierto ${abiertoDelNegocio.id} ya tiene un conteo declarado (${pesos(abiertoDelNegocio.cashDeclared)}): no se reescribe.`)
+      detener(
+        `El turno abierto ${abiertoDelNegocio.id} ya tiene un conteo declarado (${pesos(abiertoDelNegocio.cashDeclared)}): no se reescribe.`,
+      )
     }
   }
 
@@ -529,10 +531,10 @@ async function main(): Promise<void> {
           where: { shiftId: d.turno.id, status: 'COMPLETED', ...(idsQueSalen.length > 0 ? { id: { notIn: idsQueSalen } } : {}) },
         })
       : null
-    const ultimoCobro = [...d.mover.map(p => p.createdAt), ...(enLaBase?._max.createdAt ? [enLaBase._max.createdAt] : [])].reduce<Date | null>(
-      (max, fecha) => (max === null || fecha > max ? fecha : max),
-      null,
-    )
+    const ultimoCobro = [
+      ...d.mover.map(p => p.createdAt),
+      ...(enLaBase?._max.createdAt ? [enLaBase._max.createdAt] : []),
+    ].reduce<Date | null>((max, fecha) => (max === null || fecha > max ? fecha : max), null)
     const cajaCerradaMismoDia = cajasDelRango.find(
       c => diaDelNegocio(c.openedAt, zona) === d.dia && c.closedAt != null && diaDelNegocio(c.closedAt, zona) === d.dia,
     )
@@ -551,7 +553,9 @@ async function main(): Promise<void> {
 
     const inicio = d.crear?.startTime ?? d.turno?.startTime
     if (inicio && endTime < inicio) {
-      detener(`El día ${d.dia}: la hora de fin derivada (${selloLocal(endTime, zona)}) es ANTERIOR al inicio (${selloLocal(inicio, zona)}).`)
+      detener(
+        `El día ${d.dia}: la hora de fin derivada (${selloLocal(endTime, zona)}) es ANTERIOR al inicio (${selloLocal(inicio, zona)}).`,
+      )
     }
     const yaCerrado = d.turno?.endTime != null
     if (yaCerrado && d.turno!.endTime! >= endTime) continue // nada que extender
@@ -568,7 +572,10 @@ async function main(): Promise<void> {
   // Un turno abierto del venue que NO esté en el plan (p. ej. de un día fuera de la ventana)
   // también cuenta: crear otro lo dejaría empatado con él.
   const abiertoAjeno = abiertoDelNegocio && !plan.some(d => d.turno?.id === abiertoDelNegocio.id) ? 1 : 0
-  const abiertosQueQuedarian = [...abiertosDelPlan.map(d => d.dia), ...(abiertoAjeno ? [`${abiertoDelNegocio!.id} (fuera de la ventana)`] : [])]
+  const abiertosQueQuedarian = [
+    ...abiertosDelPlan.map(d => d.dia),
+    ...(abiertoAjeno ? [`${abiertoDelNegocio!.id} (fuera de la ventana)`] : []),
+  ]
   if (abiertosQueQuedarian.length > 1) {
     detener(
       `Esta corrida dejaría ${abiertosQueQuedarian.length} turnos ABIERTOS a la vez (${abiertosQueQuedarian.join(', ')}),`,
@@ -622,10 +629,19 @@ function imprimirPlan(ctx: {
     }
 
     const antes = d.turno
-      ? { pagos: d.yaEnElTurno.length, monto: sumaDe(d.yaEnElTurno), ventas: d.turno.totalSales, propinas: d.turno.totalTips, ordenes: d.turno.totalOrders }
+      ? {
+          pagos: d.yaEnElTurno.length,
+          monto: sumaDe(d.yaEnElTurno),
+          ventas: d.turno.totalSales,
+          propinas: d.turno.totalTips,
+          ordenes: d.turno.totalOrders,
+        }
       : { pagos: 0, monto: D(0), ventas: D(0), propinas: D(0), ordenes: 0 }
     const despues = proyeccion.get(d.turno?.id ?? `NUEVO:${d.dia}`) ?? []
-    const t = totalesDe(despues, despues.map(p => p.orderId))
+    const t = totalesDe(
+      despues,
+      despues.map(p => p.orderId),
+    )
 
     console.log(`   cobros  ${antes.pagos} → ${despues.length}      ${pesos(antes.monto)} → ${pesos(sumaDe(despues))}`)
     console.log(
@@ -635,15 +651,21 @@ function imprimirPlan(ctx: {
       `                      efectivo ${pesos(t.totalCashPayments)} · tarjeta ${pesos(t.totalCardPayments)} · vales ${pesos(t.totalVoucherPayments)} · otros ${pesos(t.totalOtherPayments)} · propina en efectivo ${pesos(t.totalCashTips)}`,
     )
     if (d.cerrar) {
-      console.log(`   ${d.cerrar.extiende ? 'se EXTIENDE el cierre a' : 'se CIERRA sin conteo a las'} ${selloLocal(d.cerrar.endTime, zona)}   ← ${d.cerrar.origenFin}`)
+      console.log(
+        `   ${d.cerrar.extiende ? 'se EXTIENDE el cierre a' : 'se CIERRA sin conteo a las'} ${selloLocal(d.cerrar.endTime, zona)}   ← ${d.cerrar.origenFin}`,
+      )
     }
 
     // Órdenes (ronda de corrección 1): lo que se ata, lo ambiguo y lo que ya estaba atado.
     const o = d.ordenes
     if (o.atar.length + o.ambiguas.length + o.yaAtadas.length > 0) {
-      console.log(`   órdenes: ${o.atar.length} se atan · ${o.ambiguas.length} ambiguas (sin cambiar) · ${o.yaAtadas.length} ya atadas a otro turno`)
+      console.log(
+        `   órdenes: ${o.atar.length} se atan · ${o.ambiguas.length} ambiguas (sin cambiar) · ${o.yaAtadas.length} ya atadas a otro turno`,
+      )
       for (const a of o.ambiguas) {
-        console.log(`     ⚠️  folio ${a.folio}: sus cobros caen en ${a.turnos.length} turnos distintos (${a.turnos.join(', ')}) — NO se toca`)
+        console.log(
+          `     ⚠️  folio ${a.folio}: sus cobros caen en ${a.turnos.length} turnos distintos (${a.turnos.join(', ')}) — NO se toca`,
+        )
       }
       for (const y of o.yaAtadas) {
         console.log(`     ℹ️  folio ${y.folio}: ya cuelga del turno ${y.turnoId} — NO se pisa`)
@@ -656,7 +678,9 @@ function imprimirPlan(ctx: {
     }
     const huerfanos = d.mover.filter(p => p.shiftId === null)
     const deOtroTurno = d.mover.filter(p => p.shiftId !== null)
-    console.log(`   se mueven ${d.mover.length} cobros (${pesos(sumaDe(d.mover))}): ${huerfanos.length} huérfanos, ${deOtroTurno.length} desde otro turno`)
+    console.log(
+      `   se mueven ${d.mover.length} cobros (${pesos(sumaDe(d.mover))}): ${huerfanos.length} huérfanos, ${deOtroTurno.length} desde otro turno`,
+    )
     for (const p of d.mover) {
       const origen = p.shiftId ? `de ${p.shiftId}` : 'huérfano'
       console.log(
@@ -673,7 +697,10 @@ function imprimirPlan(ctx: {
   for (const id of perdedores) {
     const t = turnosPorId.get(id)
     const despues = proyeccion.get(id) ?? []
-    const nuevos = totalesDe(despues, despues.map(p => p.orderId))
+    const nuevos = totalesDe(
+      despues,
+      despues.map(p => p.orderId),
+    )
     console.log(
       `━━ turno ${id} (${t ? selloLocal(t.startTime, zona) : '?'}) PIERDE cobros → ventas ${pesos(t?.totalSales ?? 0)} → ${pesos(nuevos.totalSales)}, cobros restantes ${despues.length}\n`,
     )
@@ -727,7 +754,9 @@ async function aplicarPlan(ctx: { plan: PlanDia[]; venueId: string; zona: string
             data: { status: 'CLOSED', endTime: d.cerrar.endTime },
           })
           if (cerrado.count !== 1) {
-            throw new Error(`El turno ${d.turno.id} ya no se puede cerrar sin conteo (¿alguien lo contó mientras corría esto?). Se revierte todo.`)
+            throw new Error(
+              `El turno ${d.turno.id} ya no se puede cerrar sin conteo (¿alguien lo contó mientras corría esto?). Se revierte todo.`,
+            )
           }
           cerrados.push({ dia: d.dia, shiftId: d.turno.id, endTime: d.cerrar.endTime, extiende: d.cerrar.extiende })
           idsTocados.add(d.turno.id)
@@ -794,9 +823,20 @@ async function aplicarPlan(ctx: { plan: PlanDia[]; venueId: string; zona: string
       for (const shiftId of idsTocados) {
         const pagos = await tx.payment.findMany({
           where: { shiftId, status: 'COMPLETED' },
-          select: { amount: true, tipAmount: true, method: true, fundsFlow: true, tenderTypeId: true, tenderCountsAsCash: true, orderId: true },
+          select: {
+            amount: true,
+            tipAmount: true,
+            method: true,
+            fundsFlow: true,
+            tenderTypeId: true,
+            tenderCountsAsCash: true,
+            orderId: true,
+          },
         })
-        const t = totalesDe(pagos, pagos.map(p => p.orderId))
+        const t = totalesDe(
+          pagos,
+          pagos.map(p => p.orderId),
+        )
         await tx.shift.update({
           where: { id: shiftId },
           data: {
@@ -865,7 +905,8 @@ async function aplicarPlan(ctx: { plan: PlanDia[]; venueId: string; zona: string
     const ordenes = ordenesPorTurno.get(shiftId) ?? []
     console.log(`✓ turno ${shiftId}: ${m.length} cobros reatribuidos${ordenes.length > 0 ? ` y ${ordenes.length} órdenes atadas` : ''}`)
   }
-  for (const c of cerrados) console.log(`✓ ${c.dia}: turno ${c.shiftId} ${c.extiende ? 'extendido' : 'cerrado sin conteo'} a las ${selloLocal(c.endTime, zona)}`)
+  for (const c of cerrados)
+    console.log(`✓ ${c.dia}: turno ${c.shiftId} ${c.extiende ? 'extendido' : 'cerrado sin conteo'} a las ${selloLocal(c.endTime, zona)}`)
   console.log('\nTotales recalculados con la misma agregación que el cierre. Vuelve a correr la simulación para verlo.')
 }
 

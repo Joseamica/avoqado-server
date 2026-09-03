@@ -575,26 +575,29 @@ class StockDashboardService {
     const eventKeys = eventKeysWithLookahead.slice(0, safeLimit)
     const itemIds = Array.from(new Set(eventKeys.map(event => event.itemId)))
 
-    const recentItems = itemIds.length === 0 ? [] : await prisma.serializedItem.findMany({
-      where: { id: { in: itemIds } },
-      include: {
-        category: true,
-        venue: { select: { name: true } },
-        sellingVenue: { select: { name: true } },
-        registeredFromVenue: { select: { name: true } },
-        orderItem: {
-          select: {
-            order: {
-              select: {
-                createdBy: { select: { id: true, firstName: true, lastName: true } },
-                venue: { select: { name: true } },
+    const recentItems =
+      itemIds.length === 0
+        ? []
+        : await prisma.serializedItem.findMany({
+            where: { id: { in: itemIds } },
+            include: {
+              category: true,
+              venue: { select: { name: true } },
+              sellingVenue: { select: { name: true } },
+              registeredFromVenue: { select: { name: true } },
+              orderItem: {
+                select: {
+                  order: {
+                    select: {
+                      createdBy: { select: { id: true, firstName: true, lastName: true } },
+                      venue: { select: { name: true } },
+                    },
+                  },
+                },
               },
             },
-          },
-        },
-      },
-      take: safeLimit,
-    })
+            take: safeLimit,
+          })
     const selectedEvents = new Map<string, Set<EventKey['eventType']>>()
     for (const event of eventKeys) {
       const types = selectedEvents.get(event.itemId) ?? new Set<EventKey['eventType']>()

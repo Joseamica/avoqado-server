@@ -107,7 +107,15 @@ export async function awardLoyaltyForPaidOrder(args: AwardLoyaltyForPaidOrderArg
 
         // Puntos y sello SÓLO al primario (el primero que se agregó a la cuenta).
         if (oc.isPrimary) {
-          const credited = await acreditar(venueId, oc.customerId, nombre(oc.customer), orderTotal, orderId, staffVenueId, 'PRIMARY customer')
+          const credited = await acreditar(
+            venueId,
+            oc.customerId,
+            nombre(oc.customer),
+            orderTotal,
+            orderId,
+            staffVenueId,
+            'PRIMARY customer',
+          )
           if (!credited) errors.push(`loyalty:${oc.customerId}`)
         }
       }

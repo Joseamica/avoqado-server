@@ -165,10 +165,10 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 
 ## Server Capacity Is a Contract
 
-Every new or changed list endpoint must stay bounded at 10×/100× current tenant volume without silently hiding data from clients. Enforce the
-maximum on the server, paginate with stable ordering, aggregate cards in the database, and keep search/filtering server-side. Preserve old
-response contracts; exports may walk bounded pages only after an explicit user action. The mandatory design, indexing, testing, and canary
-checklist is in `.claude/rules/bounded-queries-and-server-load.md`.
+Every new or changed list endpoint must stay bounded at 10×/100× current tenant volume without silently hiding data from clients. Enforce
+the maximum on the server, paginate with stable ordering, aggregate cards in the database, and keep search/filtering server-side. Preserve
+old response contracts; exports may walk bounded pages only after an explicit user action. The mandatory design, indexing, testing, and
+canary checklist is in `.claude/rules/bounded-queries-and-server-load.md`.
 
 ## Documentation Router
 
@@ -176,7 +176,8 @@ checklist is in `.claude/rules/bounded-queries-and-server-load.md`.
 
 - `critical-warnings.md` - authContext, tenant isolation, money, webhooks, storage, migrations, Zod Spanish messages
 - `testing-and-git.md` - Regression prevention, git policy, test workflow
-- `bounded-queries-and-server-load.md` - Mandatory bounded endpoints, stable pagination, aggregate cards, indexes, compatibility, and canary checks
+- `bounded-queries-and-server-load.md` - Mandatory bounded endpoints, stable pagination, aggregate cards, indexes, compatibility, and canary
+  checks
 - `payments.md` - Payment/inventory rules (path-conditional: `src/services/tpv/**`, `src/services/dashboard/rawMaterial*`)
 - `cron-jobs.md` - Cron jobs MUST wrap entry DB read with `retry(..., shouldRetryDbConnectionError)` (path-conditional: `src/jobs/**`).
   Prevents top-of-hour P1001 stampede deaths. NO global Prisma retry.

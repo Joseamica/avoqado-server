@@ -28,11 +28,7 @@ import { normalizeNativePaymentMethods } from '@/services/dashboard/payment.dash
 describe('payment dashboard — alias CARD compatible con pagos nativos', () => {
   it('expande CARD a crédito y débito sin perder otros métodos', () => {
     expect(normalizeNativePaymentMethods(['CARD'])).toEqual(['CREDIT_CARD', 'DEBIT_CARD'])
-    expect(normalizeNativePaymentMethods(['CASH', 'CARD', 'CREDIT_CARD'])).toEqual([
-      'CASH',
-      'CREDIT_CARD',
-      'DEBIT_CARD',
-    ])
+    expect(normalizeNativePaymentMethods(['CASH', 'CARD', 'CREDIT_CARD'])).toEqual(['CASH', 'CREDIT_CARD', 'DEBIT_CARD'])
   })
 
   it('conserva undefined y los métodos nativos sin alterarlos', () => {
@@ -54,9 +50,7 @@ describe('qrPayments.legacy.service — facetas acotadas', () => {
 
 describe('qrPayments.legacy.service — páginas estables', () => {
   it('aplica método, límite y fechas ISO dentro de SQL', async () => {
-    mockLegacyQuery
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ total: 12 }] })
+    mockLegacyQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ total: 12 }] })
 
     await expect(
       getLegacyPayments({

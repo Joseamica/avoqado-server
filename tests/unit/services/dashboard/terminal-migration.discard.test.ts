@@ -175,13 +175,13 @@ describe('migrateDiscard', () => {
       expect(r.restoredVenueId).toBe('venue-a')
     })
 
-  it('todo ocurre en UNA transacción: expirar y revertir no pueden quedar a medias', async () => {
+    it('todo ocurre en UNA transacción: expirar y revertir no pueden quedar a medias', async () => {
       m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
 
       await migrateDiscard('term-1', actor)
 
-    expect(m.$transaction).toHaveBeenCalledTimes(1)
-  })
+      expect(m.$transaction).toHaveBeenCalledTimes(1)
+    })
 
     it('rejects an org-scoped discard when the migration origin belongs to another organization', async () => {
       m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])

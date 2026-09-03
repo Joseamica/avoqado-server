@@ -15,6 +15,8 @@ import { normalizeRequestedCustomerId } from '../../services/tpv/fastPaymentCust
 
 /** Cota del id de cliente: la misma que `/fast` (`tpv.schema.ts`). */
 const MAX_CUSTOMER_ID_LENGTH = 64
+/** Coincide con la cota del teclado POS Android: $1,000,000.00 por cobro. */
+const MAX_TERMINAL_PAYMENT_CENTS = 100_000_000
 
 /**
  * El cliente que el POS adjunta al cobro: se normaliza y, si no cabe o no es un string,
@@ -48,19 +50,36 @@ export async function sendTerminalPayment(req: Request, res: Response) {
     const userId = (req as any).authContext?.userId
     const relayCustomerId = sanitizeRelayCustomerId(customerId)
 
-    // Validate required fields
-    if (!terminalId || !amountCents) {
+    // Esta frontera termina en columnas Int + un SDK de dinero: no se coercionan
+    // strings ni decimales. Aceptarlos aquí crea diferencias silenciosas entre lo
+    // que pidió el POS, lo que recibe la terminal y lo que finalmente se concilia.
+    if (typeof terminalId !== 'string' || terminalId.trim().length === 0 || amountCents === undefined) {
       return res.status(400).json({
         success: false,
         message: 'terminalId y amountCents son requeridos',
       })
     }
 
-    if (amountCents <= 0) {
+    if (!Number.isSafeInteger(amountCents) || amountCents <= 0 || amountCents > MAX_TERMINAL_PAYMENT_CENTS) {
       return res.status(400).json({
         success: false,
-        message: 'El monto debe ser mayor a 0',
+        message: `El monto debe ser un entero entre 1 y ${MAX_TERMINAL_PAYMENT_CENTS} centavos`,
       })
+    }
+
+    if (tipCents !== undefined && (!Number.isSafeInteger(tipCents) || tipCents < 0 || tipCents > MAX_TERMINAL_PAYMENT_CENTS)) {
+      return res.status(400).json({
+        success: false,
+        message: `La propina debe ser un entero entre 0 y ${MAX_TERMINAL_PAYMENT_CENTS} centavos`,
+      })
+    }
+
+    if (rating !== undefined && (!Number.isInteger(rating) || rating < 1 || rating > 5)) {
+      return res.status(400).json({ success: false, message: 'La calificación debe ser un entero entre 1 y 5' })
+    }
+
+    if (skipReview !== undefined && typeof skipReview !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'skipReview debe ser booleano' })
     }
 
     // Validate terminal belongs to this venue (registry normalizes AVQD- prefix)
@@ -72,10 +91,10 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       })
     }
 
-    let validatedProcessedByStaffId: string | undefined
-    if (processedByStaffId) {
-      validatedProcessedByStaffId = await validateStaffVenue(processedByStaffId, venueId)
-    }
+    // El POS manda al vendedor elegido. Clientes viejos (iOS publicado) no mandan
+    // la llave: en ese caso se congela al usuario autenticado, no al usuario que por
+    // casualidad tenga sesión abierta en la TPV.
+    const validatedProcessedByStaffId = await validateStaffVenue(processedByStaffId, venueId, userId)
 
     logger.info(`💳 [API] Terminal payment request`, {
       venueId,

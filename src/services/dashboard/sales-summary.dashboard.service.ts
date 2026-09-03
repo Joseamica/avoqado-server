@@ -693,17 +693,14 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     let amount = 0
     let tips = 0
     let legacyCount = 0
-    await forEachLegacyPaymentPage(
-      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
-      rows => {
-        for (const payment of rows) {
-          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
-          amount += Number(payment.amount)
-          tips += Number(payment.tipAmount)
-          legacyCount += 1
-        }
-      },
-    )
+    await forEachLegacyPaymentPage({ startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() }, rows => {
+      for (const payment of rows) {
+        if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+        amount += Number(payment.amount)
+        tips += Number(payment.tipAmount)
+        legacyCount += 1
+      }
+    })
     const summary: SalesSummaryMetrics = {
       ...emptySummary(),
       tips,
@@ -1037,18 +1034,15 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   let legacyAggregate: { amount: number; tips: number; count: number } | null = null
   if (venueId === MINDFORM_NEW_VENUE_ID) {
     legacyAggregate = { amount: 0, tips: 0, count: 0 }
-    await forEachLegacyPaymentPage(
-      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
-      rows => {
-        for (const payment of rows) {
-          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
-          if (!legacyMatchesFilter(payment.method, paymentMethod, cardType)) continue
-          legacyAggregate!.amount += Number(payment.amount)
-          legacyAggregate!.tips += Number(payment.tipAmount)
-          legacyAggregate!.count += 1
-        }
-      },
-    )
+    await forEachLegacyPaymentPage({ startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() }, rows => {
+      for (const payment of rows) {
+        if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+        if (!legacyMatchesFilter(payment.method, paymentMethod, cardType)) continue
+        legacyAggregate!.amount += Number(payment.amount)
+        legacyAggregate!.tips += Number(payment.tipAmount)
+        legacyAggregate!.count += 1
+      }
+    })
 
     if (legacyAggregate.count > 0) {
       // Payment-derived totals always include matching legacy volume.

@@ -27,6 +27,7 @@ jest.mock('@/utils/prismaClient', () => {
   const client: any = {
     payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn() },
     order: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
+    orderItem: { findMany: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
     shift: { findUnique: jest.fn() },
@@ -54,6 +55,13 @@ jest.mock('@/services/tpv/digitalReceipt.tpv.service', () => ({
 
 jest.mock('@/services/venueSalesGuard', () => ({
   assertVenueSalesEnabled: jest.fn().mockResolvedValue(undefined),
+}))
+
+// El vale de inventario tiene su propia suite (`b4bit.inventoryPosting.test.ts`);
+// aquí sólo se verifica que la liquidación no truene por su culpa.
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  createSalePostingInTx: jest.fn().mockResolvedValue(null),
+  applySalePosting: jest.fn().mockResolvedValue(null),
 }))
 
 const onOrderPaid = jest.fn().mockResolvedValue(undefined)

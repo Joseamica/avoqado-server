@@ -29,6 +29,7 @@ jest.mock('@/communication/sockets/terminal-registry', () => {
     normalizeTerminalId,
     terminalRegistry: {
       getTerminal: jest.fn(),
+      getTerminalBySocketId: jest.fn(),
       getAllTerminalIds: jest.fn(() => []),
     },
   }
@@ -37,12 +38,14 @@ jest.mock('@/communication/sockets/terminal-registry', () => {
 const prismaMock = prisma as any
 const mockedGetServer = (socketManager as unknown as { getServer: jest.Mock }).getServer
 const mockedGetTerminal = terminalRegistry.getTerminal as jest.Mock
+const mockedGetTerminalBySocketId = terminalRegistry.getTerminalBySocketId as jest.Mock
 const tpr = () => prismaMock.terminalPaymentRequest
 
 const P2002 = Object.assign(new Error('Unique constraint failed'), { code: 'P2002' })
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
 let emit: jest.Mock
+let directEmit: jest.Mock
 
 function baseRequest(overrides: Record<string, unknown> = {}) {
   return {
@@ -59,7 +62,17 @@ beforeEach(() => {
   delete process.env.TERMINAL_PAYMENT_LOCK_ENABLED
 
   emit = jest.fn()
-  const io = { to: jest.fn(() => ({ emit })) }
+  directEmit = jest.fn((_event: string, payload: { requestId: string }, callback?: (error: null, response: unknown) => void) => {
+    callback?.(null, { accepted: true, requestId: payload.requestId })
+  })
+  const directSocket = {
+    emit: directEmit,
+    timeout: jest.fn(() => ({ emit: directEmit })),
+  }
+  const io = {
+    to: jest.fn(() => ({ emit })),
+    sockets: { sockets: { get: jest.fn(() => directSocket) } },
+  }
   mockedGetServer.mockReturnValue(io)
 
   mockedGetTerminal.mockImplementation((id: string) => {
@@ -70,8 +83,17 @@ beforeEach(() => {
       terminalId: normalized,
       registeredAt: new Date(),
       lastHeartbeat: new Date(),
+      terminalPaymentAckVersion: 1,
     }
   })
+  mockedGetTerminalBySocketId.mockImplementation((socketId: string) => ({
+    socketId,
+    venueId: 'venue-1',
+    terminalId: socketId.replace(/^sock-/, ''),
+    registeredAt: new Date(),
+    lastHeartbeat: new Date(),
+    terminalPaymentAckVersion: 1,
+  }))
 
   // Durable-row mock defaults: INSERT succeeds, nothing pre-existing, CAS updates 1 row.
   tpr().create.mockResolvedValue({})
@@ -85,14 +107,15 @@ beforeEach(() => {
 describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () => {
   it('rejects a second concurrent charge (P2002 on the slot index) with a busy error naming the blocker', async () => {
     tpr().create.mockRejectedValueOnce(P2002) // slot already held
-    tpr().findUnique.mockResolvedValueOnce(null) // my requestId not in table → slot conflict
-    tpr().findFirst.mockResolvedValueOnce({
-      requestId: 'REQ-A',
-      amountCents: 35000,
-      senderDevice: 'iPad Caja 1',
-      createdAt: new Date(Date.now() - 12_000),
-      status: 'PENDING',
-    })
+    tpr().findFirst
+      .mockResolvedValueOnce(null) // my requestId not in table → slot conflict
+      .mockResolvedValueOnce({
+        requestId: 'REQ-A',
+        amountCents: 35000,
+        senderDevice: 'iPad Caja 1',
+        createdAt: new Date(Date.now() - 12_000),
+        status: 'PENDING',
+      })
 
     let busy: any
     try {
@@ -107,12 +130,12 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(busy.details.blockingRequest.requestId).toBe('REQ-A')
     expect(busy.details.blockingRequest.amountCents).toBe(35000)
     expect(busy.details.blockingRequest.senderDevice).toBe('iPad Caja 1')
-    expect(emit).not.toHaveBeenCalled() // never reached the terminal
+    expect(directEmit).not.toHaveBeenCalled() // never reached the terminal
   })
 
   it('idempotent replay: same requestId on an already-COMPLETED row returns the stored result, no re-emit', async () => {
     tpr().create.mockRejectedValueOnce(P2002)
-    tpr().findUnique.mockResolvedValueOnce({
+    tpr().findFirst.mockResolvedValueOnce({
       requestId: 'REQ-A',
       status: 'COMPLETED',
       paymentId: 'pay-1',
@@ -124,12 +147,12 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     const result = await terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-REPLAY', requestId: 'REQ-A' }))
     expect(result.status).toBe('success')
     expect(result.paymentId).toBe('pay-1')
-    expect(emit).not.toHaveBeenCalled()
+    expect(directEmit).not.toHaveBeenCalled()
   })
 
   it('same requestId still in flight → busy (no double emit)', async () => {
     tpr().create.mockRejectedValueOnce(P2002)
-    tpr().findUnique.mockResolvedValueOnce({
+    tpr().findFirst.mockResolvedValueOnce({
       requestId: 'REQ-A',
       status: 'PENDING',
       amountCents: 10000,
@@ -140,7 +163,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     await expect(
       terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-DUP', requestId: 'REQ-A' })),
     ).rejects.toBeInstanceOf(TerminalBusyError)
-    expect(emit).not.toHaveBeenCalled()
+    expect(directEmit).not.toHaveBeenCalled()
   })
 
   it('happy path: INSERT succeeds → emits → result closes the row via in-flight CAS', async () => {
@@ -148,7 +171,11 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     // give the async create a tick, then assert the emit happened
     await flush()
     expect(tpr().create).toHaveBeenCalledTimes(1)
-    expect(emit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId: 'REQ-1' }))
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_request',
+      expect.objectContaining({ requestId: 'REQ-1' }),
+      expect.any(Function),
+    )
 
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-1', status: 'success', paymentId: 'pay-9' })
     const result = await p1
@@ -162,21 +189,184 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     )
   })
 
+  it('persiste el contrato completo antes de entregar: vendedor, rating y omisión de review', async () => {
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({
+        terminalId: 'T-CONTRACT',
+        requestId: 'REQ-CONTRACT',
+        processedByStaffId: 'staff-pos',
+        rating: 5,
+        skipReview: true,
+      }),
+    )
+    await flush()
+
+    expect(tpr().create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          processedByStaffId: 'staff-pos',
+          rating: 5,
+          skipReview: true,
+        }),
+      }),
+    )
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-CONTRACT', status: 'cancelled' })
+    await p1
+  })
+
+  it('sólo marca SENT y renueva expiración después del ACK durable de la TPV', async () => {
+    const before = Date.now()
+    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-ACK', requestId: 'REQ-ACK' }))
+    await flush()
+
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_request',
+      expect.objectContaining({ requestId: 'REQ-ACK' }),
+      expect.any(Function),
+    )
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ requestId: 'REQ-ACK', venueId: 'venue-1', status: 'PENDING' }),
+        data: expect.objectContaining({
+          status: 'SENT',
+          acknowledgedAt: expect.any(Date),
+          expiresAt: expect.any(Date),
+        }),
+      }),
+    )
+    const ackUpdate = (tpr().updateMany as jest.Mock).mock.calls.find(call => call[0]?.data?.status === 'SENT')?.[0]
+    expect(ackUpdate.data.expiresAt.getTime()).toBeGreaterThanOrEqual(before + 299_000)
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-ACK', status: 'cancelled' })
+    await p1
+  })
+
+  it('si la TPV nueva no confirma persistencia, falla sin dejar el cobro activo', async () => {
+    directEmit.mockImplementationOnce(
+      (_event: string, _payload: unknown, callback: (error: Error) => void) => callback(new Error('operation has timed out')),
+    )
+
+    await expect(
+      terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-NO-ACK', requestId: 'REQ-NO-ACK' })),
+    ).rejects.toThrow('no confirmó que guardó el cobro')
+    await flush()
+
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { requestId: 'REQ-NO-ACK', venueId: 'venue-1', status: 'PENDING' },
+        data: expect.objectContaining({ status: 'FAILED', failureCode: 'ACK_TIMEOUT' }),
+      }),
+    )
+  })
+
+  it('una TPV publicada sin capacidad ACK conserva la entrega única compatible', async () => {
+    mockedGetTerminal.mockReturnValueOnce({
+      socketId: 'sock-t-legacy',
+      venueId: 'venue-1',
+      terminalId: 't-legacy',
+      registeredAt: new Date(),
+      lastHeartbeat: new Date(),
+    })
+
+    const pending = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-LEGACY', requestId: 'REQ-LEGACY' }),
+    )
+    await flush()
+
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_request',
+      expect.objectContaining({ requestId: 'REQ-LEGACY' }),
+    )
+    expect(directEmit).toHaveBeenCalledTimes(1)
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-LEGACY', status: 'cancelled' })
+    await pending
+  })
+
+  it('rechaza un resultado cuyo socket no corresponde a la terminal y venue de la solicitud', async () => {
+    tpr().findFirst.mockResolvedValueOnce(null)
+
+    const handled = await (terminalPaymentService as any).handlePaymentResultFromSocket(
+      { requestId: 'REQ-FOREIGN', status: 'success', paymentId: 'pay-foreign' },
+      { socketId: 'sock-attacker', terminalId: 'attacker', venueId: 'venue-2' },
+    )
+
+    expect(handled).toBe(false)
+    expect(tpr().findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ requestId: 'REQ-FOREIGN', terminalId: 'attacker', venueId: 'venue-2' }),
+      }),
+    )
+    expect(tpr().updateMany).not.toHaveBeenCalled()
+  })
+
+  it('acepta el resultado sólo desde el socket registrado para esa solicitud', async () => {
+    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-AUTH', requestId: 'REQ-AUTH' }))
+    await flush()
+    tpr().findFirst.mockResolvedValueOnce({ requestId: 'REQ-AUTH' })
+
+    const handled = await (terminalPaymentService as any).handlePaymentResultFromSocket(
+      { requestId: 'REQ-AUTH', status: 'success', paymentId: 'pay-auth' },
+      { socketId: 'sock-t-auth', terminalId: 't-auth', venueId: 'venue-1' },
+    )
+
+    expect(handled).toBe(true)
+    expect((await p1).paymentId).toBe('pay-auth')
+  })
+
+  it('al reconectar reentrega una solicitud fresca SENT, nunca una expirada', async () => {
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        requestId: 'REQ-RECONNECT',
+        terminalId: 't-reconnect',
+        venueId: 'venue-1',
+        status: 'SENT',
+        amountCents: 10000,
+        tipCents: 500,
+        rating: 5,
+        skipReview: true,
+        orderId: null,
+        senderDevice: 'iPad',
+        processedByStaffId: 'staff-pos',
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    ])
+
+    await (terminalPaymentService as any).replayPendingForTerminal('T-RECONNECT', 'venue-1', 'sock-t-reconnect')
+
+    expect(tpr().findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          terminalId: 't-reconnect',
+          venueId: 'venue-1',
+          expiresAt: { gt: expect.any(Date) },
+        }),
+      }),
+    )
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_request',
+      expect.objectContaining({ requestId: 'REQ-RECONNECT', processedByStaffId: 'staff-pos' }),
+      expect.any(Function),
+    )
+  })
+
   it('rollback flag OFF: a busy-slot INSERT is swallowed and the charge proceeds (old behavior)', async () => {
     process.env.TERMINAL_PAYMENT_LOCK_ENABLED = 'false'
     tpr().create.mockRejectedValueOnce(P2002)
-    tpr().findUnique.mockResolvedValueOnce(null)
-    tpr().findFirst.mockResolvedValueOnce({
-      requestId: 'REQ-A',
-      amountCents: 10000,
-      senderDevice: null,
-      createdAt: new Date(),
-      status: 'PENDING',
-    })
+    tpr().findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        requestId: 'REQ-A',
+        amountCents: 10000,
+        senderDevice: null,
+        createdAt: new Date(),
+        status: 'PENDING',
+      })
 
     const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-FLAG', requestId: 'REQ-B' }))
     await flush()
-    expect(emit).toHaveBeenCalledTimes(1) // proceeded despite the busy slot
+    expect(directEmit).toHaveBeenCalledTimes(1) // proceeded despite the busy slot
 
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-B', status: 'success' })
     await p1
@@ -184,9 +374,9 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
 
   it('isTerminalBusy / getBusyTerminalIds read the durable rows', async () => {
     tpr().findFirst.mockResolvedValueOnce({ id: 'x' })
-    expect(await terminalPaymentService.isTerminalBusy('AVQD-ABC')).toBe(true)
+    expect(await terminalPaymentService.isTerminalBusy('AVQD-ABC', 'venue-1')).toBe(true)
     tpr().findFirst.mockResolvedValueOnce(null)
-    expect(await terminalPaymentService.isTerminalBusy('AVQD-ABC')).toBe(false)
+    expect(await terminalPaymentService.isTerminalBusy('AVQD-ABC', 'venue-1')).toBe(false)
 
     tpr().findMany.mockResolvedValueOnce([{ terminalId: 'a' }, { terminalId: 'b' }])
     const set = await terminalPaymentService.getBusyTerminalIds('venue-1')
@@ -197,7 +387,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-CANCEL', requestId: 'REQ-C' }))
     await flush()
 
-    await terminalPaymentService.cancelPayment('T-CANCEL', 'REQ-C')
+    await terminalPaymentService.cancelPayment('T-CANCEL', 'REQ-C', undefined, 'venue-1')
     const result = await p1
     expect(result.status).toBe('cancelled')
     expect(tpr().updateMany).toHaveBeenCalledWith(
@@ -238,7 +428,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
   })
 
   it('getPaymentStatus returns a pesos projection and enforces tenant isolation', async () => {
-    tpr().findUnique.mockResolvedValueOnce({
+    tpr().findFirst.mockResolvedValueOnce({
       requestId: 'REQ-A',
       venueId: 'venue-1',
       terminalId: 'abc',
@@ -258,15 +448,9 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(status?.status).toBe('COMPLETED')
 
     // Wrong venue → null (tenant isolation)
-    tpr().findUnique.mockResolvedValueOnce({
-      requestId: 'REQ-A',
-      venueId: 'venue-1',
-      amountCents: 1,
-      tipCents: 0,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    })
+    tpr().findFirst.mockResolvedValueOnce(null)
     expect(await terminalPaymentService.getPaymentStatus('REQ-A', 'venue-OTHER')).toBeNull()
+    expect(tpr().findFirst).toHaveBeenLastCalledWith({ where: { requestId: 'REQ-A', venueId: 'venue-OTHER' } })
   })
 })
 
@@ -368,7 +552,7 @@ describe('TerminalPaymentService — regression (existing behavior intact)', () 
     const pA = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-A', requestId: 'REQ-A' }))
     const pB = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-B', requestId: 'REQ-B' }))
     await flush()
-    expect(emit).toHaveBeenCalledTimes(2)
+    expect(directEmit).toHaveBeenCalledTimes(2)
 
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-A', status: 'success' })
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-B', status: 'success' })
@@ -390,7 +574,7 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
   const txWith = (status: string) =>
     ({
       terminalPaymentRequest: {
-        findUnique: jest.fn().mockResolvedValue({ status }),
+        findFirst: jest.fn().mockResolvedValue({ status }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     }) as any
@@ -400,11 +584,11 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
     const errSpy = jest.spyOn(logger, 'error')
     const tx = txWith('CANCELLED')
 
-    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-Z', 'pay-late')
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-Z', 'pay-late', 'venue-1')
 
     expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { requestId: 'REQ-Z', status: { not: 'COMPLETED' } },
+        where: { requestId: 'REQ-Z', venueId: 'venue-1', status: { not: 'COMPLETED' } },
         data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-late', lateResult: true }),
       }),
     )
@@ -417,7 +601,7 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
     const errSpy = jest.spyOn(logger, 'error')
     const tx = txWith('PENDING')
 
-    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-P', 'pay-1')
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-P', 'pay-1', 'venue-1')
 
     expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED', lateResult: false }) }),
@@ -426,9 +610,44 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
     errSpy.mockRestore()
   })
 
+  it('registra y alerta una diferencia de base, propina y total sin rechazar dinero ya cobrado', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = {
+      terminalPaymentRequest: {
+        findFirst: jest.fn().mockResolvedValue({ status: 'SENT', amountCents: 47_500, tipCents: 4_750 }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+    } as any
+
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-MISMATCH', 'pay-mismatch', 'venue-1', {
+      amountCents: 52_250,
+      tipCents: 0,
+    })
+
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'COMPLETED',
+          paymentId: 'pay-mismatch',
+          failureCode: 'CONTRACT_MISMATCH',
+          resultJson: expect.objectContaining({
+            requested: { amountCents: 47_500, tipCents: 4_750, totalCents: 52_250 },
+            reported: { amountCents: 52_250, tipCents: 0, totalCents: 52_250 },
+          }),
+        }),
+      }),
+    )
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('🚨 [Terminal-payment contract mismatch]'),
+      expect.objectContaining({ requestId: 'REQ-MISMATCH', paymentId: 'pay-mismatch' }),
+    )
+    errSpy.mockRestore()
+  })
+
   it('is a no-op on an already-COMPLETED row (idempotent — never clobbers the stored paymentId)', async () => {
     const tx = txWith('COMPLETED')
-    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-DONE', 'pay-2')
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-DONE', 'pay-2', 'venue-1')
     expect(tx.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
   })
 
@@ -437,7 +656,7 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
     const errSpy = jest.spyOn(logger, 'error')
     const tx = txWith('CANCEL_REQUESTED')
 
-    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-CR', 'pay-race')
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-CR', 'pay-race', 'venue-1')
 
     // CANCEL_REQUESTED is still in-flight → a normal close (lateResult=false), not a reopen
     expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
@@ -487,7 +706,7 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
 
     // Ni fila del lock, ni emit a la terminal: el cobro murió antes de existir
     expect(tpr().create).not.toHaveBeenCalled()
-    expect(emit).not.toHaveBeenCalled()
+    expect(directEmit).not.toHaveBeenCalled()
   })
 
   it('orden PENDING → el cobro procede normal (el candado no estorba cuentas abiertas)', async () => {
@@ -498,7 +717,11 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     )
     await flush()
     expect(tpr().create).toHaveBeenCalledTimes(1)
-    expect(emit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId: 'REQ-G1' }))
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_request',
+      expect.objectContaining({ requestId: 'REQ-G1' }),
+      expect.any(Function),
+    )
 
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G1', status: 'success', paymentId: 'pay-g1' })
     expect((await p1).status).toBe('success')
@@ -566,7 +789,7 @@ describe('TerminalPaymentService — el CLIENTE de la venta va a la FILA, nunca 
     )
     await flush()
 
-    const payload = emit.mock.calls[0][1]
+    const payload = directEmit.mock.calls[0][1]
     expect(payload.requestId).toBe('REQ-PII') // el emit sí ocurrió…
     expect(payload).not.toHaveProperty('customerId') // …y no lleva al cliente
 

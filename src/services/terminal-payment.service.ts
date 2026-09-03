@@ -152,6 +152,7 @@ interface PendingReceiptPrint {
 }
 
 const PAYMENT_TIMEOUT_MS = 300_000 // 5 minutes
+const PAYMENT_DELIVERY_ACK_TIMEOUT_MS = 5_000
 const RECEIPT_PRINT_TIMEOUT_MS = 30_000 // 30 seconds
 // Sólo se espera el ACK de "abrí la pantalla", no que alguien pase la tarjeta.
 const REFUND_OPEN_TIMEOUT_MS = 20_000 // 20 seconds
@@ -235,10 +236,10 @@ class TerminalPaymentService {
   }
 
   /** Best-effort busy flag for the terminal picker (authoritative gate is the send itself). */
-  async isTerminalBusy(terminalId: string): Promise<boolean> {
+  async isTerminalBusy(terminalId: string, venueId: string): Promise<boolean> {
     const lockKey = normalizeTerminalId(terminalId)
     const active = await prisma.terminalPaymentRequest.findFirst({
-      where: { terminalId: lockKey, status: { in: SLOT_HELD } },
+      where: { terminalId: lockKey, venueId, status: { in: SLOT_HELD } },
       select: { id: true },
     })
     return active !== null
@@ -344,6 +345,9 @@ class TerminalPaymentService {
           // El cliente de la venta viaja AQUÍ (no por el socket): es de donde
           // `recordFastPayment` lo recoge cuando la TPV registra el cobro.
           customerId: request.customerId ?? null,
+          processedByStaffId: request.processedByStaffId ?? null,
+          rating: request.rating ?? null,
+          skipReview: request.skipReview ?? true,
           expiresAt: new Date(Date.now() + PAYMENT_TIMEOUT_MS),
         },
       })
@@ -352,7 +356,7 @@ class TerminalPaymentService {
       // Disambiguate WITHOUT parsing meta.target: look up MY requestId.
       // - my row exists  → this requestId collided (replay or in-flight dup)
       // - my row absent  → the terminal slot is held by ANOTHER request → busy
-      const mine = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      const mine = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
       if (mine) {
         if ((IN_FLIGHT as string[]).includes(mine.status)) {
           // Same requestId still in flight → do NOT re-emit (would double-charge)
@@ -403,7 +407,7 @@ class TerminalPaymentService {
     const io = socketManager.getServer()
     if (!io) {
       // Never leak the slot if we bail before storing the pending payment.
-      if (persisted) await this.closeRow(requestId, { requestId, status: 'failed', errorMessage: 'Servidor no inicializado' })
+      if (persisted) await this.closeRow(requestId, venueId, { requestId, status: 'failed', errorMessage: 'Servidor no inicializado' })
       throw new Error('Servidor de Socket.IO no inicializado')
     }
 
@@ -449,9 +453,141 @@ class TerminalPaymentService {
         timestamp: new Date().toISOString(),
       }
 
-      io.to(socketId).emit('terminal:payment_request', paymentPayload)
-      logger.info(`📡 [TerminalPayment] Emitted to socket ${socketId}`, { requestId, terminalId })
+      const directSocket = io.sockets.sockets.get(socketId)
+      if (!directSocket) {
+        clearTimeout(timeout)
+        this.pendingPayments.delete(requestId)
+        if (persisted) void this.failUndelivered(requestId, venueId, 'SOCKET_NOT_FOUND')
+        reject(new BadRequestError('La terminal perdió la conexión antes de recibir el cobro'))
+        return
+      }
+
+      if ((terminalEntry.terminalPaymentAckVersion ?? 0) < 1) {
+        // Compatibilidad backend-first: APKs publicadas aún no conocen el ACK ni
+        // tienen inbox durable. Se entrega una sola vez, exactamente como antes.
+        directSocket.emit('terminal:payment_request', paymentPayload)
+        logger.info(`📡 [TerminalPayment] Emitted once to legacy socket ${socketId}`, { requestId, terminalId })
+        return
+      }
+
+      directSocket.timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS).emit(
+        'terminal:payment_request',
+        paymentPayload,
+        (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
+          const stillPending = this.pendingPayments.has(requestId)
+          if (error || response?.accepted !== true || response.requestId !== requestId) {
+            if (!stillPending) return
+            clearTimeout(timeout)
+            this.pendingPayments.delete(requestId)
+            if (persisted) void this.failUndelivered(requestId, venueId, error ? 'ACK_TIMEOUT' : 'ACK_REJECTED')
+            reject(new BadRequestError('La terminal no confirmó que guardó el cobro. No se inició ningún cargo.'))
+            return
+          }
+
+          if (persisted) void this.markDelivered(requestId, venueId)
+          logger.info(`📡 [TerminalPayment] Durable ACK received from socket ${socketId}`, { requestId, terminalId })
+        },
+      )
     })
+  }
+
+  private async markDelivered(requestId: string, venueId: string): Promise<void> {
+    const acknowledgedAt = new Date()
+    await prisma.terminalPaymentRequest.updateMany({
+      where: { requestId, venueId, status: TerminalPaymentRequestStatus.PENDING },
+      data: {
+        status: TerminalPaymentRequestStatus.SENT,
+        acknowledgedAt,
+        lastDeliveredAt: acknowledgedAt,
+        deliveryAttempts: { increment: 1 },
+        expiresAt: new Date(acknowledgedAt.getTime() + PAYMENT_TIMEOUT_MS),
+      },
+    })
+  }
+
+  private async failUndelivered(requestId: string, venueId: string, failureCode: string): Promise<void> {
+    await prisma.terminalPaymentRequest.updateMany({
+      where: { requestId, venueId, status: TerminalPaymentRequestStatus.PENDING },
+      data: {
+        status: TerminalPaymentRequestStatus.FAILED,
+        failureCode,
+        resultJson: {
+          requestId,
+          status: 'failed',
+          errorMessage: 'La terminal no confirmó la recepción; no se inició ningún cargo',
+        },
+      },
+    })
+  }
+
+  /**
+   * Reentrega al reconectar. Está capability-gated: una APK sin inbox durable no
+   * recibe replays porque no podría distinguirlos de un cobro nuevo.
+   */
+  async replayPendingForTerminal(terminalId: string, venueId: string | undefined, socketId: string): Promise<void> {
+    if (!venueId) return
+    const entry = terminalRegistry.getTerminal(terminalId)
+    if (!entry || entry.socketId !== socketId || entry.venueId !== venueId || (entry.terminalPaymentAckVersion ?? 0) < 1) return
+
+    const io = socketManager.getServer()
+    const directSocket = io?.sockets.sockets.get(socketId)
+    if (!directSocket) return
+
+    const normalizedTerminalId = normalizeTerminalId(terminalId)
+    const rows = await prisma.terminalPaymentRequest.findMany({
+      where: {
+        terminalId: normalizedTerminalId,
+        venueId,
+        status: { in: IN_FLIGHT },
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: 1,
+    })
+
+    for (const row of rows) {
+      if (row.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED) {
+        directSocket.emit('terminal:payment_cancel', {
+          requestId: row.requestId,
+          terminalId,
+          reason: 'Cancelación pendiente durante reconexión',
+          timestamp: new Date().toISOString(),
+        })
+        continue
+      }
+
+      const payload = {
+        requestId: row.requestId,
+        terminalId,
+        amountCents: row.amountCents,
+        tipCents: row.tipCents,
+        rating: row.rating ?? undefined,
+        skipReview: row.skipReview,
+        orderId: row.orderId ?? undefined,
+        senderDeviceName: row.senderDevice ?? undefined,
+        processedByStaffId: row.processedByStaffId ?? undefined,
+        venueId,
+        timestamp: new Date().toISOString(),
+      }
+      directSocket.timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS).emit(
+        'terminal:payment_request',
+        payload,
+        (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
+          if (error || response?.accepted !== true || response.requestId !== row.requestId) return
+          const acknowledgedAt = new Date()
+          void prisma.terminalPaymentRequest.updateMany({
+            where: { requestId: row.requestId, venueId, status: { in: [TerminalPaymentRequestStatus.PENDING, TerminalPaymentRequestStatus.SENT] } },
+            data: {
+              status: TerminalPaymentRequestStatus.SENT,
+              acknowledgedAt,
+              lastDeliveredAt: acknowledgedAt,
+              deliveryAttempts: { increment: 1 },
+              expiresAt: new Date(acknowledgedAt.getTime() + PAYMENT_TIMEOUT_MS),
+            },
+          })
+        },
+      )
+    }
   }
 
   /**
@@ -463,13 +599,12 @@ class TerminalPaymentService {
   handlePaymentResult(result: TerminalPaymentResult): boolean {
     const pending = this.pendingPayments.get(result.requestId)
 
-    // Always close the durable row, even if the long-poll already timed out.
-    void this.closeRow(result.requestId, result)
-
     if (!pending) {
-      logger.warn(`⚠️ [TerminalPayment] No in-flight long-poll for requestId (row still closed)`, { requestId: result.requestId })
+      logger.warn(`⚠️ [TerminalPayment] No in-flight long-poll for requestId`, { requestId: result.requestId })
       return false
     }
+
+    void this.closeRow(result.requestId, pending.venueId, result)
 
     clearTimeout(pending.timeout)
     this.pendingPayments.delete(result.requestId)
@@ -486,13 +621,52 @@ class TerminalPaymentService {
   }
 
   /**
+   * Frontera autenticada TPV → server. El requestId del payload no basta: se ata
+   * a la terminal y venue derivados del socket, y sólo entonces puede cerrar dinero.
+   */
+  async handlePaymentResultFromSocket(
+    result: TerminalPaymentResult,
+    terminal: { socketId: string | null; terminalId: string; venueId: string },
+  ): Promise<boolean> {
+    if (!result.requestId || !['success', 'failed', 'cancelled', 'timeout'].includes(result.status)) return false
+    const row = await prisma.terminalPaymentRequest.findFirst({
+      where: {
+        requestId: result.requestId,
+        terminalId: normalizeTerminalId(terminal.terminalId),
+        venueId: terminal.venueId,
+      },
+      select: { requestId: true },
+    })
+    if (!row) {
+      logger.warn('🛑 [TerminalPayment] Result rejected: request is not owned by authenticated terminal socket', {
+        requestId: result.requestId,
+        terminalId: terminal.terminalId,
+        venueId: terminal.venueId,
+        socketId: terminal.socketId,
+      })
+      return false
+    }
+
+    const pending = this.pendingPayments.get(result.requestId)
+    void this.closeRow(result.requestId, terminal.venueId, result)
+    if (!pending) {
+      logger.warn(`⚠️ [TerminalPayment] Authenticated late result closed row without an HTTP waiter`, { requestId: result.requestId })
+      return false
+    }
+    clearTimeout(pending.timeout)
+    this.pendingPayments.delete(result.requestId)
+    pending.resolve(result)
+    return true
+  }
+
+  /**
    * Transition a request row to its terminal status (CAS, immutable terminals).
    * - in-flight → terminal: normal close.
    * - TIMED_OUT/UNKNOWN → terminal: LATE result wins (flag lateResult); the POS
    *   was already told timeout, but the money truth is captured.
    * - already terminal: no-op (log the conflict).
    */
-  private async closeRow(requestId: string, result: TerminalPaymentResult): Promise<void> {
+  private async closeRow(requestId: string, venueId: string, result: TerminalPaymentResult): Promise<void> {
     const newStatus = resultToStatus(result.status)
     const data: Prisma.TerminalPaymentRequestUpdateManyMutationInput = {
       status: newStatus,
@@ -502,13 +676,13 @@ class TerminalPaymentService {
     }
     try {
       const inFlight = await prisma.terminalPaymentRequest.updateMany({
-        where: { requestId, status: { in: IN_FLIGHT } },
+        where: { requestId, venueId, status: { in: IN_FLIGHT } },
         data,
       })
       if (inFlight.count > 0) return
 
       const late = await prisma.terminalPaymentRequest.updateMany({
-        where: { requestId, status: { in: [TerminalPaymentRequestStatus.TIMED_OUT, TerminalPaymentRequestStatus.UNKNOWN] } },
+        where: { requestId, venueId, status: { in: [TerminalPaymentRequestStatus.TIMED_OUT, TerminalPaymentRequestStatus.UNKNOWN] } },
         data: { ...data, lateResult: true },
       })
       if (late.count > 0) {
@@ -531,7 +705,13 @@ class TerminalPaymentService {
    * result / watchdog close it instead. Best-effort: never throws (must not roll
    * back a real money write).
    */
-  async closeRowFromPaymentTx(tx: Prisma.TransactionClient, requestId: string, paymentId: string): Promise<void> {
+  async closeRowFromPaymentTx(
+    tx: Prisma.TransactionClient,
+    requestId: string,
+    paymentId: string,
+    venueId: string,
+    reported?: { amountCents: number; tipCents: number },
+  ): Promise<void> {
     try {
       // A recorded Payment is GROUND TRUTH that money moved — it beats any prior
       // cancel/fail/timeout close. Reconcile ANY non-COMPLETED row to COMPLETED so the
@@ -540,19 +720,66 @@ class TerminalPaymentService {
       // window where a POS-cancelled row is moved to CANCELLED by the watchdog (30s grace)
       // BEFORE the TPV records the Payment (AngelPay records "minutes later").
       // Idempotent: an already-COMPLETED row is left untouched (never clobber its paymentId).
-      const before = await tx.terminalPaymentRequest.findUnique({
-        where: { requestId },
-        select: { status: true },
+      const before = await tx.terminalPaymentRequest.findFirst({
+        where: { requestId, venueId },
+        select: { status: true, amountCents: true, tipCents: true },
       })
       if (!before || before.status === TerminalPaymentRequestStatus.COMPLETED) return
 
       // `lateResult` = this row had already been closed/timed-out when the money truth
       // arrived (reopened), vs a normal in-flight close.
       const reopened = !IN_FLIGHT.includes(before.status)
+      const requested =
+        Number.isSafeInteger(before.amountCents) && Number.isSafeInteger(before.tipCents)
+          ? {
+              amountCents: before.amountCents,
+              tipCents: before.tipCents,
+              totalCents: before.amountCents + before.tipCents,
+            }
+          : undefined
+      const reportedContract = reported && {
+        amountCents: reported.amountCents,
+        tipCents: reported.tipCents,
+        totalCents: reported.amountCents + reported.tipCents,
+      }
+      const contractMismatch =
+        requested !== undefined &&
+        reportedContract !== undefined &&
+        (reportedContract.amountCents !== requested.amountCents ||
+          reportedContract.tipCents !== requested.tipCents ||
+          reportedContract.totalCents !== requested.totalCents)
+
       await tx.terminalPaymentRequest.updateMany({
-        where: { requestId, status: { not: TerminalPaymentRequestStatus.COMPLETED } },
-        data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId, lateResult: reopened },
+        where: { requestId, venueId, status: { not: TerminalPaymentRequestStatus.COMPLETED } },
+        data: {
+          status: TerminalPaymentRequestStatus.COMPLETED,
+          paymentId,
+          lateResult: reopened,
+          ...(contractMismatch
+            ? {
+                failureCode: 'CONTRACT_MISMATCH',
+                resultJson: {
+                  requestId,
+                  status: 'success',
+                  paymentId,
+                  reconciliationRequired: true,
+                  requested,
+                  reported: reportedContract,
+                },
+              }
+            : {}),
+        },
       })
+
+      if (contractMismatch) {
+        logger.error('🚨 [Terminal-payment contract mismatch] Payment was recorded with values different from the POS request', {
+          requestId,
+          paymentId,
+          venueId,
+          requested,
+          reported: reportedContract,
+        })
+      }
 
       // If the POS had asked to cancel (CANCEL_REQUESTED) or we had already CLOSED this
       // row as cancelled/failed, the charge went through DESPITE that — reconciled to
@@ -568,6 +795,7 @@ class TerminalPaymentService {
           {
             requestId,
             paymentId,
+            venueId,
             priorStatus: before.status,
           },
         )
@@ -608,10 +836,9 @@ class TerminalPaymentService {
   }
 
   /** Read a request's current status (mobile status endpoint + MCP tool). */
-  async getPaymentStatus(requestId: string, venueId?: string): Promise<TerminalPaymentStatus | null> {
-    const row = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+  async getPaymentStatus(requestId: string, venueId: string): Promise<TerminalPaymentStatus | null> {
+    const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
     if (!row) return null
-    if (venueId && row.venueId !== venueId) return null // tenant isolation
     return {
       requestId: row.requestId,
       venueId: row.venueId,
@@ -691,7 +918,7 @@ class TerminalPaymentService {
         })
         if (candidate) {
           const claimedByAnother = await prisma.terminalPaymentRequest.findFirst({
-            where: { paymentId: candidate.id, id: { not: row.id } },
+            where: { paymentId: candidate.id, venueId: row.venueId, id: { not: row.id } },
             select: { id: true },
           })
           if (!claimedByAnother) payment = candidate
@@ -898,7 +1125,7 @@ class TerminalPaymentService {
     // está pagando. Se reporta QUIÉN la tiene ocupada, igual que en el cobro,
     // para que el cajero no se quede adivinando.
     const blocker = await prisma.terminalPaymentRequest.findFirst({
-      where: { terminalId: normalizeTerminalId(terminalId), status: { in: SLOT_HELD } },
+      where: { terminalId: normalizeTerminalId(terminalId), venueId, status: { in: SLOT_HELD } },
       select: { requestId: true, amountCents: true, senderDevice: true, createdAt: true },
       orderBy: { createdAt: 'desc' },
     })
@@ -987,7 +1214,7 @@ class TerminalPaymentService {
    * already authorized, a later result wins → COMPLETED; the watchdog frees the
    * slot (→ CANCELLED) only after a short grace with no Payment.
    */
-  async cancelPayment(terminalId: string, requestId?: string, reason?: string, venueId?: string): Promise<boolean> {
+  async cancelPayment(terminalId: string, requestId: string | undefined, reason: string | undefined, venueId: string): Promise<boolean> {
     const terminalEntry = terminalRegistry.getTerminal(terminalId)
 
     // The cancel INTENT must be recorded even when the terminal is unreachable:
@@ -1001,7 +1228,7 @@ class TerminalPaymentService {
       // Mark the durable row as cancel-requested (CAS, still holds the slot).
       try {
         await prisma.terminalPaymentRequest.updateMany({
-          where: { requestId, status: { in: IN_FLIGHT }, ...(venueId ? { venueId } : {}) },
+          where: { requestId, venueId, status: { in: IN_FLIGHT } },
           data: { status: TerminalPaymentRequestStatus.CANCEL_REQUESTED },
         })
       } catch (err) {

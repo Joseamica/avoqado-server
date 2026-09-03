@@ -961,7 +961,7 @@ model Staff {
   venues            StaffVenue[]
   shifts            Shift[]
   /// Turnos de caja que esta persona CERRÓ (no necesariamente los que abrió — ver `Shift.closedById`).
-  shiftsClosed      Shift[]  @relation("ShiftClosedBy")
+  shiftsClosed      Shift[]             @relation("ShiftClosedBy")
   ordersCreated     Order[]             @relation("OrderCreatedBy")
   ordersServed      Order[]             @relation("OrderServedBy")
   paymentsProcessed Payment[]
@@ -3157,7 +3157,7 @@ model Shift {
   /// Nulable y con muchos NULL: los turnos anteriores a la migración no lo tienen y NO se adivina
   /// hacia atrás — copiar `staffId` afirmaría que quien abrió también cerró.
   closedById String?
-  closedBy   Staff?    @relation("ShiftClosedBy", fields: [closedById], references: [id])
+  closedBy   Staff?  @relation("ShiftClosedBy", fields: [closedById], references: [id])
 
   // Cash management
   startingCash   Decimal  @default(0) @db.Decimal(10, 2)
@@ -5014,29 +5014,38 @@ enum TerminalPaymentRequestStatus {
 }
 
 model TerminalPaymentRequest {
-  id            String                       @id @default(cuid())
-  requestId     String                       @unique // POS-generated idempotency key (UUID)
-  venueId       String
-  terminalId    String // normalized registry lock key (no AVQD-, lowercase)
-  status        TerminalPaymentRequestStatus @default(PENDING)
-  amountCents   Int
-  tipCents      Int                          @default(0)
-  orderId       String?
-  requestedById String?
-  senderDevice  String?
+  id                 String                       @id @default(cuid())
+  requestId          String                       @unique // POS-generated idempotency key (UUID)
+  venueId            String
+  terminalId         String // normalized registry lock key (no AVQD-, lowercase)
+  status             TerminalPaymentRequestStatus @default(PENDING)
+  amountCents        Int
+  tipCents           Int                          @default(0)
+  orderId            String?
+  requestedById      String?
+  senderDevice       String?
   // El cliente que el cajero eligió en el POS antes de mandar el cobro. Soft ref SIN FK,
   // igual que orderId/paymentId: esta fila es un registro de INTENCIÓN en el camino del
   // dinero — no puede bloquear el borrado de un cliente ni tumbar un cobro por
   // integridad referencial. Es lo que permite que la venta con TARJETA nazca con
   // cliente sin que la TPV (que registra ese cobro) tenga que conocerlo.
-  customerId    String?
-  paymentId     String? // the recorded Payment.id once COMPLETED (soft ref)
-  resultJson    Json? // full terminal result, for idempotent replay
-  lateResult    Boolean                      @default(false) // result arrived after TIMED_OUT/UNKNOWN
-  failureCode   String?
-  expiresAt     DateTime
-  createdAt     DateTime                     @default(now())
-  updatedAt     DateTime                     @updatedAt
+  customerId         String?
+  // Snapshot del contrato que el POS ya resolvió antes de delegar el cobro. Se
+  // conserva en servidor para que una TPV vieja o con otra sesión no pueda perder
+  // vendedor/calificación al registrar el dinero.
+  processedByStaffId String?
+  rating             Int?
+  skipReview         Boolean                      @default(true)
+  paymentId          String? // the recorded Payment.id once COMPLETED (soft ref)
+  resultJson         Json? // full terminal result, for idempotent replay
+  lateResult         Boolean                      @default(false) // result arrived after TIMED_OUT/UNKNOWN
+  failureCode        String?
+  deliveryAttempts   Int                          @default(0)
+  lastDeliveredAt    DateTime?
+  acknowledgedAt     DateTime?
+  expiresAt          DateTime
+  createdAt          DateTime                     @default(now())
+  updatedAt          DateTime                     @updatedAt
   // Per-terminal active-slot partial UNIQUE index (the mutex) is in the
   // migration SQL: UNIQUE(terminalId) WHERE status IN
   // ('PENDING','SENT','CANCEL_REQUESTED','UNKNOWN').

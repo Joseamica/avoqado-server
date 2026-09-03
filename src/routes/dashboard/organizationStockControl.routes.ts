@@ -117,6 +117,12 @@ router.get('/stock-control/export.xlsx', authenticateTokenMiddleware, requireOrg
 // Tabla Ciudad › Supervisor › Promotor. Mismo gate de lectura que /overview:
 // los Supervisores (MANAGER) tienen que poder consultarla y exportarla para
 // auditar físicamente a sus promotores en tienda.
-router.get('/stock-control/by-responsible', authenticateTokenMiddleware, requireVenueInTargetOrg, requireOrgStockReader, getOrgInventoryByResponsible)
+router.get(
+  '/stock-control/by-responsible',
+  authenticateTokenMiddleware,
+  requireVenueInTargetOrg,
+  requireOrgStockReader,
+  getOrgInventoryByResponsible,
+)
 
 export default router

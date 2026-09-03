@@ -178,6 +178,9 @@ describe('requestRefundOnTerminal — abrir la devolución en el aparato', () =>
     })
 
     await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest())).rejects.toBeInstanceOf(TerminalBusyError)
+    expect(prismaMock.terminalPaymentRequest.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ terminalId: 't1', venueId: 'venue-1' }) }),
+    )
     expect(emit).not.toHaveBeenCalled()
   })
 

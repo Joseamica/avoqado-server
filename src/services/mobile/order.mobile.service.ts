@@ -2125,7 +2125,10 @@ function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | num
 
 function assertIdempotentPaymentOrder(payment: { orderId?: string | null }, orderId: string): void {
   if (payment.orderId && payment.orderId !== orderId) {
-    throw new ConflictError('La idempotencyKey ya pertenece a otra orden. Genera una llave nueva para este cobro.', 'IDEMPOTENCY_KEY_REUSED')
+    throw new ConflictError(
+      'La idempotencyKey ya pertenece a otra orden. Genera una llave nueva para este cobro.',
+      'IDEMPOTENCY_KEY_REUSED',
+    )
   }
 }
 
@@ -2466,8 +2469,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         tenderState.resolved = resolvedTender
         const effectiveMethod = resolvedTender?.method ?? paymentMethod
         const fundsFlow =
-          resolvedTender?.fundsFlow ??
-          (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
+          resolvedTender?.fundsFlow ?? (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
         const countsAsDrawerCash = paymentCountsAsDrawerCash({
           method: effectiveMethod,
           fundsFlow,

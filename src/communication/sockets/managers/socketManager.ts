@@ -185,6 +185,7 @@ export class SocketManager implements ISocketManager {
       const _correlationId = authenticatedSocket.correlationId || uuidv4()
 
       const user = authenticatedSocket.authContext?.userId || 'unauthenticated'
+      const terminalId = socket.handshake?.auth?.terminalId
       logger.info(`📡 Socket connected: ${user} (${socket.id})`)
 
       // Register socket with room manager if authenticated
@@ -192,9 +193,15 @@ export class SocketManager implements ISocketManager {
         this.roomManager.registerSocket(authenticatedSocket)
 
         // Register terminal in registry if terminalId provided in auth handshake
-        const terminalId = socket.handshake?.auth?.terminalId
         if (terminalId) {
-          terminalRegistry.register(terminalId, socket.id, authenticatedSocket.authContext.venueId)
+          const ackVersion = Number(socket.handshake?.auth?.terminalPaymentAckVersion)
+          terminalRegistry.register(
+            terminalId,
+            socket.id,
+            authenticatedSocket.authContext.venueId,
+            undefined,
+            Number.isInteger(ackVersion) && ackVersion > 0 ? ackVersion : undefined,
+          )
         }
       }
 
@@ -205,6 +212,12 @@ export class SocketManager implements ISocketManager {
 
       // Register event handlers
       this.registerSocketEventHandlers(authenticatedSocket)
+
+      // Sólo clientes que anunciaron inbox durable reciben reentregas. Mandar una
+      // repetición a una APK vieja (sin dedupe local) podría cobrar dos veces.
+      if (terminalId) {
+        void terminalPaymentService.replayPendingForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id)
+      }
     })
   }
 
@@ -338,7 +351,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Terminal Payment Result (TPV → Server → iOS HTTP response)
-    onWithContext(socket, 'terminal:payment_result', (payload, callback) => {
+    onWithContext(socket, 'terminal:payment_result', async (payload, callback) => {
       try {
         const { requestId, status, paymentId, transactionId, cardDetails, errorMessage, receipt } = payload
         logger.info('💳 Terminal payment result received', {
@@ -349,7 +362,18 @@ export class SocketManager implements ISocketManager {
           socketId: socket.id,
         })
 
-        const handled = terminalPaymentService.handlePaymentResult({
+        const terminal = terminalRegistry.getTerminalBySocketId(socket.id)
+        if (!terminal || terminal.venueId !== socket.authContext?.venueId) {
+          logger.warn('🛑 Terminal payment result rejected: socket is not a registered terminal for this venue', {
+            requestId,
+            socketId: socket.id,
+            authVenueId: socket.authContext?.venueId,
+          })
+          if (callback) callback({ success: false, error: 'Terminal socket not registered for venue' })
+          return
+        }
+
+        const handled = await terminalPaymentService.handlePaymentResultFromSocket({
           requestId,
           status,
           paymentId,
@@ -357,7 +381,7 @@ export class SocketManager implements ISocketManager {
           cardDetails,
           errorMessage,
           receipt,
-        })
+        }, terminal)
 
         if (callback) callback({ success: handled })
       } catch (error) {

@@ -2210,7 +2210,7 @@ export async function recordOrderPayment(
           netAmount: totalAmount + tipAmount, // For now, net amount = total
           posRawData: {
             splitType: paymentData.splitType,
-            staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
+            staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
             source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
             paidProductsId: paymentData.paidProductsId || [],
             ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
@@ -2256,7 +2256,10 @@ export async function recordOrderPayment(
       // Close the POS→TPV arbitration row (frees the terminal slot) atomically
       // with the Payment — the robust recovery path (survives socket loss/restart).
       if (paymentData.terminalPaymentRequestId) {
-        await terminalPaymentService.closeRowFromPaymentTx(tx, paymentData.terminalPaymentRequestId, newPayment.id)
+        await terminalPaymentService.closeRowFromPaymentTx(tx, paymentData.terminalPaymentRequestId, newPayment.id, venueId, {
+          amountCents: paymentData.amount,
+          tipCents: paymentData.tip,
+        })
       }
 
       // Update Order.splitType if this is the first payment
@@ -2441,7 +2444,7 @@ export async function recordOrderPayment(
             paymentId: payment.id,
             overallRating: rating,
             source: 'TPV',
-            servedById: paymentData.staffId, // Link to the staff who served
+            servedById: validatedStaffId, // vendedor validado; no confiar en el body crudo
           },
         })
         logger.info('Review created successfully', { paymentId: payment.id, rating, originalRating: paymentData.reviewRating })
@@ -2911,6 +2914,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Sin `terminalPaymentRequestId` esta variable NUNCA cambia, así que el camino de
   // EFECTIVO y el de las TPV viejas quedan byte por byte iguales a como estaban.
   let effectiveCustomerId: unknown = paymentData.customerId
+  let relayProcessedByStaffId: string | undefined
+  let effectiveReviewRating = paymentData.reviewRating
 
   // 🔴 ¿Este dinero pertenece a una venta que YA existe? El cajero pudo mandar el cobro
   // desde el POS, cancelar, y la terminal cobrar igual. Ese cobro es de la venta que lo
@@ -2920,15 +2925,22 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Fail-open a propósito: si la consulta truena, se sigue por FAST. Un fallo de infra
   // jamás puede impedir registrar dinero que YA se cobró.
   if (paymentData.terminalPaymentRequestId) {
-    let arbitrationRow: { orderId: string | null; venueId: string; status: string; customerId: string | null } | null = null
+    let arbitrationRow: {
+      orderId: string | null
+      venueId: string
+      status: string
+      customerId: string | null
+      processedByStaffId: string | null
+      rating: number | null
+    } | null = null
     try {
-      arbitrationRow = await prisma.terminalPaymentRequest.findUnique({
-        where: { requestId: paymentData.terminalPaymentRequestId },
+      arbitrationRow = await prisma.terminalPaymentRequest.findFirst({
+        where: { requestId: paymentData.terminalPaymentRequestId, venueId },
         // 🔑 `customerId` es el cliente que el POS eligió antes de mandar el cobro a la
         // terminal. La TPV registra el pago con SU payload, que no lo lleva — sin esto,
         // la venta con tarjeta nace anónima mientras la misma venta en efectivo sí trae
         // cliente.
-        select: { orderId: true, venueId: true, status: true, customerId: true },
+        select: { orderId: true, venueId: true, status: true, customerId: true, processedByStaffId: true, rating: true },
       })
     } catch (err) {
       logger.error('⚠️ [FastPayment] No se pudo leer la solicitud de arbitraje — se sigue como venta rápida', {
@@ -2944,6 +2956,24 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     // ya pasó por el MISMO candado de inquilino que la orden — una fila de otro venue no
     // presta ni su orden ni su cliente.
     effectiveCustomerId = normalizeRequestedCustomerId(paymentData.customerId) ?? target.seededCustomerId
+    if (arbitrationRow?.rating != null) effectiveReviewRating = String(arbitrationRow.rating)
+
+    // La identidad elegida en el POS es la autoridad del relay. Se valida otra vez
+    // al registrar porque pudo desactivarse mientras el cliente pasaba la tarjeta.
+    // Si ya no es válida, el dinero NO se pierde: se degrada a la identidad autenticada
+    // de la TPV y se levanta una alerta de conciliación.
+    if (arbitrationRow?.processedByStaffId) {
+      try {
+        relayProcessedByStaffId = await validateStaffVenue(arbitrationRow.processedByStaffId, venueId)
+      } catch (error) {
+        logger.error('🚨 [Terminal-payment] El vendedor congelado ya no está activo; se usará el operador de la TPV', {
+          requestId: paymentData.terminalPaymentRequestId,
+          processedByStaffId: arbitrationRow.processedByStaffId,
+          venueId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
 
     // 🔴 `requestId` es `@unique` GLOBAL y lo genera el cliente: una colisión entre
     // inquilinos devolvería el `orderId` de OTRO negocio. Se degrada a venta rápida —
@@ -2977,7 +3007,17 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // `snapshotOrderPaymentIds`): con llave, esta consulta NO corre.
       const paymentIdsBeforeDelegation = hasPaymentIdentityKey(paymentData) ? null : await snapshotOrderPaymentIds(venueId, target.orderId)
       try {
-        const delegated = await recordOrderPayment(venueId, target.orderId, paymentData, userId, _orgId)
+        const delegated = await recordOrderPayment(
+          venueId,
+          target.orderId,
+          {
+            ...paymentData,
+            ...(relayProcessedByStaffId ? { staffId: relayProcessedByStaffId } : {}),
+            ...(effectiveReviewRating ? { reviewRating: effectiveReviewRating } : {}),
+          },
+          userId,
+          _orgId,
+        )
         // El cliente que eligió el cajero también cuenta cuando el cobro pertenece a una
         // venta que YA existe. Sólo RELLENA (nunca reasigna) y nunca lanza, así que no
         // altera la semántica del catch de abajo. Así `customerLink` viaja en TODAS las
@@ -3166,7 +3206,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   const tipAmount = paymentData.tip / 100
 
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
-  const validatedStaffId = await t.time('validateStaffVenue', () => validateStaffVenue(paymentData.staffId, venueId, userId))
+  const validatedStaffId = await t.time('validateStaffVenue', () =>
+    validateStaffVenue(relayProcessedByStaffId ?? paymentData.staffId, venueId, userId),
+  )
 
   // 🔴 El turno de caja es del NEGOCIO, no de quien cobra (`../shared/turnoDeCaja.ts`):
   // el selector «Vendedor» cambia el `staffId` de cada cobro, y filtrar por él dejaba FUERA
@@ -3467,10 +3509,10 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           netAmount: totalAmount + tipAmount, // For now, net amount = total
           posRawData: {
             splitType: 'FULLPAYMENT',
-            staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
+            staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
             source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
             paymentType: 'FAST',
-            ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
+            ...(effectiveReviewRating && { reviewRating: effectiveReviewRating }),
           },
         },
         include: {
@@ -3567,7 +3609,10 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // Close the POS→TPV arbitration row (frees the terminal slot) atomically
       // with the Payment — the robust recovery path (survives socket loss/restart).
       if (paymentData.terminalPaymentRequestId) {
-        await terminalPaymentService.closeRowFromPaymentTx(tx, paymentData.terminalPaymentRequestId, newPayment.id)
+        await terminalPaymentService.closeRowFromPaymentTx(tx, paymentData.terminalPaymentRequestId, newPayment.id, venueId, {
+          amountCents: paymentData.amount,
+          tipCents: paymentData.tip,
+        })
       }
 
       return { payment: newPayment, fastOrder: order }
@@ -3657,9 +3702,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   }
 
   // Create Review record if reviewRating is provided
-  if (paymentData.reviewRating) {
+  if (effectiveReviewRating) {
     try {
-      const rating = mapTpvRatingToNumeric(paymentData.reviewRating)
+      const rating = mapTpvRatingToNumeric(effectiveReviewRating)
       if (rating !== null) {
         await prisma.review.create({
           data: {
@@ -3667,16 +3712,16 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
             paymentId: payment.id,
             overallRating: rating,
             source: 'TPV',
-            servedById: paymentData.staffId, // Link to the staff who served
+            servedById: validatedStaffId, // vendedor congelado por el POS cuando el cobro fue remoto
           },
         })
         logger.info('Review created successfully for fast payment', {
           paymentId: payment.id,
           rating,
-          originalRating: paymentData.reviewRating,
+          originalRating: effectiveReviewRating,
         })
       } else {
-        logger.warn('Invalid review rating provided for fast payment', { paymentId: payment.id, rating: paymentData.reviewRating })
+        logger.warn('Invalid review rating provided for fast payment', { paymentId: payment.id, rating: effectiveReviewRating })
       }
     } catch (error) {
       logger.error('Failed to create review for fast payment', { paymentId: payment.id, error })

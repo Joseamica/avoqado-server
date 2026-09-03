@@ -310,7 +310,32 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 }
 
 /**
- * Procesa los pagos para una orden
+ * Procesa los pagos para una orden.
+ *
+ * ⚠️ PREGUNTA ABIERTA (3-sep-2026), NO una decisión tomada: este camino cierra la orden
+ * como pagada **sin crear el vale de inventario** (`createSalePostingInTx`) y sin deducir
+ * stock. Todos los demás caminos de cobro sí lo hacen; cripto/b4bit era la otra excepción y
+ * se cerró como defecto ese mismo día.
+ *
+ * Aquí NO se cerró igual porque no es evidente que sea un defecto: SoftRestaurant es el
+ * sistema de registro de estas ventas —`status`, `paymentStatus`, `completedAt` y los totales
+ * llegan del payload, esto es un espejo, no un origen— y es defendible que su inventario lo
+ * lleve él. Pero **nadie lo escribió nunca**: se buscó en `.claude/rules/`, en `docs/` y en el
+ * historial de este archivo y no hay decisión, ni a favor ni en contra. Mientras no la haya,
+ * esto no se toca y **tampoco se silencia**: la 7ª invariante del vigilante de dinero
+ * (`jobs/money-integrity-watchdog.job.ts`) lo vigila a propósito, y su propio comentario
+ * prohíbe ensanchar el criterio para que deje de sonar.
+ *
+ * Exposición medida el 3-sep-2026, que es lo que hace que esto no urja: los productos que
+ * este servicio crea son placeholders (`getOrCreatePosProduct`, en `posSyncOrderItem`) y
+ * `Product.trackInventory` nace en `false`, así que no descuentan nada. Sólo muerde cuando el
+ * `externalId` del POS empata con un producto que alguien configuró en Avoqado CON receta o
+ * método de inventario. En la base local, 0 órdenes de origen `POS_SOFTRESTAURANT` cumplen ese
+ * predicado; en producción `Payment.source = 'POS'` no registra un cobro desde el 12-ago-2026.
+ *
+ * 🔴 Quien resuelva la pregunta: si la respuesta es "SoftRestaurant es dueño del inventario",
+ * escríbelo aquí Y en la 7ª invariante con su motivo; si es "Avoqado también descuenta",
+ * es el mismo arreglo que se le hizo a b4bit y hay que hacerlo antes de reactivar el puente.
  */
 async function processPaymentsForOrder(
   tx: any,

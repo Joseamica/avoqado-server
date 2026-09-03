@@ -124,15 +124,26 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
 import { getProductInventoryStatus } from '@/services/dashboard/productInventoryIntegration.service'
+import { validateStaffVenue } from '@/utils/staff-venue.util'
 
 const prismaMock = prisma as any
 const getProductInventoryStatusMock = getProductInventoryStatus as jest.Mock
+const validateStaffVenueMock = validateStaffVenue as jest.Mock
 
 // ---------------------------------------------------------------------------
 // Fila de arbitraje EN MEMORIA. La lee `recordFastPayment` y la MUTA el
 // `closeRowFromPaymentTx` real — nadie le dicta su contenido a la prueba.
 // ---------------------------------------------------------------------------
-type FakeRow = { requestId: string; venueId: string; orderId: string | null; status: string; paymentId: string | null }
+type FakeRow = {
+  requestId: string
+  venueId: string
+  orderId: string | null
+  status: string
+  paymentId: string | null
+  customerId?: string | null
+  processedByStaffId?: string | null
+  rating?: number | null
+}
 let arbitrationRow: FakeRow | null = null
 
 // Tabla `Payment` en memoria. `payment.create` inserta aquí, y las consultas —
@@ -149,8 +160,10 @@ function whereMatches(row: any, where: any): boolean {
 }
 
 function installFakes() {
-  prismaMock.terminalPaymentRequest.findUnique.mockImplementation(async ({ where }: any) =>
-    arbitrationRow && arbitrationRow.requestId === where.requestId ? { ...arbitrationRow } : null,
+  prismaMock.terminalPaymentRequest.findFirst.mockImplementation(async ({ where }: any) =>
+    arbitrationRow && arbitrationRow.requestId === where.requestId && arbitrationRow.venueId === where.venueId
+      ? { ...arbitrationRow }
+      : null,
   )
   prismaMock.terminalPaymentRequest.updateMany.mockImplementation(async ({ where, data }: any) => {
     if (!arbitrationRow || arbitrationRow.requestId !== where.requestId) return { count: 0 }
@@ -261,6 +274,7 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     arbitrationRow = null
     payments = []
     installFakes()
+    validateStaffVenueMock.mockImplementation(async (staffId?: string, _venueId?: string, userId?: string) => staffId ?? userId)
   })
 
   it('con solicitud que traia orden, delega en recordOrderPayment preguntando por el orderId correcto', async () => {
@@ -281,7 +295,7 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
   it('sin terminalPaymentRequestId sigue por la ruta FAST — ni siquiera consulta la fila', async () => {
     await recordFastPayment('venue-1', { amount: 30 } as any, 'user-1').catch(() => {})
 
-    expect(prismaMock.terminalPaymentRequest.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
     // Tampoco se acerca a la búsqueda de orden activa que sólo hace recordOrderPayment.
     expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
   })
@@ -289,7 +303,7 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
   it('si la consulta de la fila truena, el cobro SÍ se registra por la ruta FAST (no sólo "no delegó")', async () => {
     // 🔴 Fail-open: un fallo de infra jamás puede impedir registrar dinero que YA se cobró.
     // La señal que detecta un catch fail-CERRADO es POSITIVA: el dinero quedó registrado.
-    prismaMock.terminalPaymentRequest.findUnique.mockRejectedValueOnce(new Error('connection refused'))
+    prismaMock.terminalPaymentRequest.findFirst.mockRejectedValueOnce(new Error('connection refused'))
     prismaMock.order.create.mockResolvedValueOnce({
       id: 'fast-order-1',
       venueId: 'venue-1',
@@ -569,7 +583,7 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     )
   })
 
-  it('🔴 una fila de OTRO venue no presta su orden: el cobro se registra como venta rápida y alerta', async () => {
+  it('🔴 una fila de OTRO venue no presta su orden: la lectura ya nace acotada y el cobro queda en su venue', async () => {
     // `requestId` es @unique GLOBAL y lo genera el cliente: una colisión entre
     // inquilinos devolvería el orderId de otro negocio. Pagar esa orden le cobraría a
     // un venue la cuenta de otro, en silencio.
@@ -593,9 +607,78 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     // El dinero SÍ se registró — en el venue del token, como venta rápida.
     expect(payments).toHaveLength(1)
     expect(result).toMatchObject({ id: payments[0].id })
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('🚨'),
-      expect.objectContaining({ expectedVenueId: 'venue-1', rowVenueId: 'venue-2' }),
+    expect(prismaMock.terminalPaymentRequest.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { requestId: 'req-1', venueId: 'venue-1' } }),
+    )
+  })
+
+  it('el vendedor congelado por el POS gana sobre la sesión distinta de la TPV en venta rápida', async () => {
+    arbitrationRow = {
+      requestId: 'req-staff',
+      orderId: null,
+      venueId: 'venue-1',
+      status: 'SENT',
+      paymentId: null,
+      processedByStaffId: 'staff-pos',
+    }
+    prismaMock.order.create.mockImplementationOnce(async ({ data }: any) => ({ id: 'fast-order-staff', ...data }))
+
+    await recordFastPayment(
+      'venue-1',
+      {
+        amount: 3000,
+        tip: 300,
+        terminalPaymentRequestId: 'req-staff',
+        method: 'CREDIT_CARD',
+        staffId: 'staff-tpv',
+        status: 'COMPLETED',
+        splitType: 'FULLPAYMENT',
+        source: 'AVOQADO_TPV',
+        currency: 'MXN',
+        isInternational: false,
+      } as any,
+      'staff-tpv',
+    )
+
+    const orderData = prismaMock.order.create.mock.calls[0][0].data
+    expect(orderData.createdById).toBe('staff-pos')
+    expect(orderData.servedById).toBe('staff-pos')
+    expect(payments[0].processedById).toBe('staff-pos')
+    expect(payments[0].posRawData.staffId).toBe('staff-pos')
+  })
+
+  it('la calificación congelada por el POS crea el review aunque la TPV no la reenvíe', async () => {
+    arbitrationRow = {
+      requestId: 'req-rating',
+      orderId: null,
+      venueId: 'venue-1',
+      status: 'SENT',
+      paymentId: null,
+      processedByStaffId: 'staff-pos',
+      rating: 5,
+    }
+    prismaMock.order.create.mockImplementationOnce(async ({ data }: any) => ({ id: 'fast-order-rating', ...data }))
+
+    await recordFastPayment(
+      'venue-1',
+      {
+        amount: 3000,
+        tip: 300,
+        terminalPaymentRequestId: 'req-rating',
+        method: 'CREDIT_CARD',
+        staffId: 'staff-tpv',
+        status: 'COMPLETED',
+        source: 'AVOQADO_TPV',
+        currency: 'MXN',
+        isInternational: false,
+      } as any,
+      'staff-tpv',
+    )
+
+    expect(prismaMock.review.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ overallRating: 5, servedById: 'staff-pos' }),
+      }),
     )
   })
 })

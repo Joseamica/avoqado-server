@@ -21,6 +21,7 @@ import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
@@ -869,6 +870,54 @@ interface CryptoSettlementResult {
    * los `Payment` `type: REFUND` y el recálculo devuelve el mismo saldo.
    */
   balanceSkipped?: 'ORDER_NOT_CHARGEABLE'
+  /**
+   * El vale de inventario que nació con la transición a pagado, para aplicarlo
+   * YA COMMITEADO el cobro. `null` cuando no había nada que descontar o cuando
+   * esta ejecución no fue la que saldó la cuenta.
+   */
+  postingId?: string | null
+}
+
+/**
+ * Crea el vale de inventario etiquetando su fallo como REINTENTABLE.
+ *
+ * 🔴 Por qué existe este envoltorio, y por qué NO se copia tal cual al TPV: allá
+ * el `Payment` ya está commiteado en su propia transacción, así que el comentario
+ * de `payment.tpv.service` puede aceptar tranquilo que "si el insert del vale
+ * falla, la transición a PAID se revierte" — el dinero está a salvo. **Aquí no**:
+ * el `tx.payment.update({ status: COMPLETED })` vive DENTRO de esta misma
+ * transacción, así que dejar escapar el error revertiría también el cobro y
+ * dejaría el `Payment` PENDING con el dinero YA en la blockchain. Y nadie lo
+ * volvería a intentar: el controlador del webhook contesta 200 siempre ("prevent
+ * retries"), o sea que B4Bit tampoco reintenta.
+ *
+ * Marcándolo con el código que el bucle de arriba reconoce, un fallo transitorio
+ * de base se reintenta; y si se agotan los intentos cae en el camino de rescate
+ * que YA existía, que completa el `Payment` FUERA de la transacción. El orden de
+ * lo que se protege es explícito: el dinero primero, después la deducción —
+ * `payments.md` #2, "payment succeeds even if deduction fails".
+ *
+ * Lo que se pierde en ese caso NO es silencio: la orden se queda sin transición y
+ * la vigila la 6ª invariante del vigilante (más el barrido `paid-order-reconciler`);
+ * si el barrido la cierra sin vale, la ve la 7ª. Un vale que nunca nació no lo
+ * rescata `inventory-posting-sweeper` —sólo reclama los que ya existen—, así que
+ * la única defensa real es que se VEA, y se ve.
+ */
+async function crearValeDeInventario(
+  tx: Prisma.TransactionClient,
+  params: { venueId: string; orderId: string; items: unknown[]; staffId?: string | null },
+): Promise<{ id: string } | null> {
+  try {
+    // `as any` igual que los otros cuatro sitios que crean el vale: el tipo que
+    // devuelve Prisma con sus modificadores incluidos no encaja estructuralmente
+    // con `SalePostingItem`, y ninguno de ellos lo re-declara.
+    return await createSalePostingInTx(tx, { ...params, items: params.items as any })
+  } catch (error) {
+    const retryable: Error & { code?: string; cause?: unknown } = new Error('B4BIT_POSTING_FAILED')
+    retryable.code = 'B4BIT_POSTING_FAILED'
+    retryable.cause = error
+    throw retryable
+  }
 }
 
 /**
@@ -923,6 +972,8 @@ async function settleOrderForConfirmedCryptoPayment(
     amount: Prisma.Decimal | number
     externalId: string | null
     processorData: Prisma.JsonValue
+    /** Quién cobró: queda como autor del vale de inventario y de su aplicación. */
+    processedById: string | null
     /**
      * El estado del `Payment` **ANTES** de este webhook. `COMPLETED` significa
      * que este `CO` es una REENTREGA/replay (ya lo habíamos aplicado); cualquier
@@ -1081,21 +1132,68 @@ async function settleOrderForConfirmedCryptoPayment(
           throw conflict
         }
 
+        // 🔴 EL VALE DE INVENTARIO — lo que este camino NO hacía y costaba stock.
+        //
+        // Hasta el 3-sep-2026 cripto cerraba la venta sin crear el vale ni deducir
+        // nada: un venue con recetas vendía y su inventario no bajaba, EN SILENCIO.
+        // Es el mismo defecto del capuchino de Testarudo (ORD-1788276418170) en otro
+        // camino de cobro, y por eso la 7ª invariante del vigilante de dinero avisa
+        // de que `via=TPV` cripto aparecería en serie.
+        //
+        // Nace AQUÍ DENTRO, en el mismo commit que la transición (fase 2 de la
+        // auditoría 2026-08-12): si el proceso muere después del commit y antes de
+        // deducir, queda un posting PENDING que el sweeper reaplica — en vez de una
+        // deducción perdida que nadie puede ver. Crearlo fuera dejaría la ventana
+        // exacta que la fase 2 existe para cerrar.
+        //
+        // 🔑 Sólo en la TRANSICIÓN REAL a pagado, igual que el hook de referidos: un
+        // abono parcial no descuenta (regla de `payments.md`), y un `CO` reentregado
+        // sobre una cuenta que ya estaba PAID descontaría la venta DOS veces.
+        const becamePaid = balance.isFullyPaid && !wasAlreadyPaid
+        let postingId: string | null = null
+        if (becamePaid) {
+          // Los renglones se leen con la MISMA tx, no con `prisma`: fuera de ella
+          // no verían lo que esta transacción aún no ha commiteado.
+          const txItems = await tx.orderItem.findMany({
+            where: { orderId: payment.orderId },
+            include: { modifiers: { include: { modifier: true } } },
+          })
+          const posting = await crearValeDeInventario(tx, {
+            venueId: payment.venueId,
+            orderId: payment.orderId,
+            items: txItems,
+            staffId: payment.processedById,
+          })
+          postingId = posting?.id ?? null
+        }
+
         return {
           isFullyPaid: balance.isFullyPaid,
-          becamePaid: balance.isFullyPaid && !wasAlreadyPaid,
+          becamePaid,
           paidAmount: balance.paidAmount.toFixed(2),
           remainingBalance: balance.remainingBalance.toFixed(2),
+          postingId,
         }
       })
     } catch (error: any) {
-      // Sólo el conflicto de CAS se reintenta. Cualquier otro error sube tal cual.
-      if (error?.code !== 'B4BIT_ORDER_CAS_LOST') throw error
+      // Se reintentan DOS cosas, y sólo dos: perder la CAS contra otro cobro, y
+      // que el vale de inventario no se pudiera escribir (ver
+      // `crearValeDeInventario`). Cualquier otro error sube tal cual.
+      if (error?.code !== 'B4BIT_ORDER_CAS_LOST' && error?.code !== 'B4BIT_POSTING_FAILED') throw error
 
-      logger.warn('♻️ B4Bit: order changed while settling the crypto payment — retrying', {
-        orderId: payment.orderId,
-        attempt,
-      })
+      if (error.code === 'B4BIT_POSTING_FAILED') {
+        logger.warn('♻️ B4Bit: no se pudo escribir el vale de inventario — reintentando la liquidación', {
+          orderId: payment.orderId,
+          paymentId: payment.id,
+          attempt,
+          error: error.cause instanceof Error ? error.cause.message : String(error.cause),
+        })
+      } else {
+        logger.warn('♻️ B4Bit: order changed while settling the crypto payment — retrying', {
+          orderId: payment.orderId,
+          attempt,
+        })
+      }
     }
   }
 
@@ -1231,6 +1329,26 @@ async function handlePaymentConfirmed(
         paidAmount: settlement.paidAmount,
         remainingBalance: settlement.remainingBalance,
       })
+    }
+
+    // 🔴 SE APLICA EL VALE, YA COMMITEADO EL COBRO — y nunca puede tumbarlo.
+    //
+    // El vale ya existe y es durable: si deducir truena, queda PENDING y el
+    // `inventory-posting-sweeper` lo retoma. El dinero es un hecho; la deducción
+    // es reintentable — mismo enganche y mismo try/catch que `manualPayment` y el
+    // efectivo móvil.
+    if (settlement.postingId) {
+      try {
+        await applySalePosting(settlement.postingId, payment.processedById)
+      } catch (deductionError: any) {
+        logger.error('⚠️ [B4Bit] no se pudo aplicar el vale de inventario (el cobro SÍ quedó registrado)', {
+          orderId: payment.orderId,
+          venueId,
+          paymentId: payment.id,
+          postingId: settlement.postingId,
+          error: deductionError?.message ?? String(deductionError),
+        })
+      }
     }
 
     // REFERRAL HOOK: trigger referral qualification if this crypto-paid order has a pending referral.

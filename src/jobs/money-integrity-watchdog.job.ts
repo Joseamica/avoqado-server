@@ -275,13 +275,23 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    uno que nunca nació; y crear el vale días después reabriría la doble deducción que
         --    settledBeforeThisPayment existe para evitar. El faltante ya se contó en el
         --    inventario físico: descontarlo tarde lo cobra dos veces.
-        --    ⚠️ Lo que también va a caer aquí y NO es ruido: b4bit y pos-sync cierran órdenes sin
-        --    llamar a createSalePostingInTx ni deducir nada (verificado el 3-sep-2026). Un
-        --    venue con recetas que cobre por esos caminos aparecerá en serie — es el MISMO
-        --    defecto en otro camino, no un falso positivo. Lo mismo una cortesía total cerrada
-        --    sin cobro. Por eso el detalle lleva 'via=' con Order.source: quien reciba la alerta
-        --    separa la pérdida puntual del TPV —accionable ya— del defecto sistémico de un
-        --    camino entero, que se arregla en el camino, no orden por orden.
+        --    ⚠️ Lo que también va a caer aquí y NO es ruido: un camino de cobro que cierre la
+        --    orden sin llamar a createSalePostingInTx. Un venue con recetas que cobre por ahí
+        --    aparecerá en serie — es el MISMO defecto en otro camino, no un falso positivo. Lo
+        --    mismo una cortesía total cerrada sin cobro. Por eso el detalle lleva 'via=' con
+        --    Order.source: quien reciba la alerta separa la pérdida puntual del TPV —accionable
+        --    ya— del defecto sistémico de un camino entero, que se arregla en el camino, no
+        --    orden por orden.
+        --    Estado de los dos que se auditaron el 3-sep-2026:
+        --      · b4bit (cripto) — ARREGLADO ese mismo día: el vale nace en la misma transacción
+        --        que la transición a pagado ('settleOrderForConfirmedCryptoPayment'). 🔴 Así que
+        --        un 'via=TPV' de una venta cripto que caiga aquí YA NO es el defecto conocido:
+        --        es una pérdida real que hay que investigar como cualquier otra.
+        --      · pos-sync (SoftRestaurant) — SIGUE sin crear vale, y es una PREGUNTA ABIERTA,
+        --        no una decisión: el POS externo podría ser el dueño de ese inventario, pero
+        --        nadie lo escribió nunca. Se vigila a propósito hasta que alguien decida (el
+        --        razonamiento y la exposición medida están en 'processPaymentsForOrder', en
+        --        services/pos-sync/posSyncOrder.service.ts).
         --    🔴 Y para eso TRIAGED_AWAITING_THIRD_PARTY no sirve: está llaveado por orderId, así
         --    que contra una fuente EN SERIE sería una entrada por venta, para siempre (y además
         --    silenciaría esa orden en las SIETE invariantes, sobrepago incluido). Lo que sí se
