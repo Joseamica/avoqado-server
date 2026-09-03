@@ -55,9 +55,12 @@ describe('buildLoyaltyClass', () => {
     expect(c).not.toHaveProperty('programLogo')
   })
 
-  it('el premio se explica en el reverso, con el texto que configuró el negocio', () => {
+  it('el premio se explica en el reverso, en minúscula a media frase como en el pase de Apple', () => {
     const c = buildLoyaltyClass({ ...BASE, rewardLabel: 'Un café gratis' }) as any
     const textos = JSON.stringify(c.textModulesData)
-    expect(textos).toContain('Un café gratis')
+    // 🔴 Minúscula a propósito: va a media frase («…y obtén un café gratis»), igual que el
+    // `backFields` de Apple, cuya prueba exige lo mismo. Si las dos difieren, el mismo premio
+    // se lee distinto según el teléfono del cliente.
+    expect(textos).toContain('obtén un café gratis')
   })
 })

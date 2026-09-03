@@ -36,7 +36,9 @@ export function googleObjectId(issuerId: string, walletPassId: string): string {
  * personales — sólo sellos dibujados.
  */
 export function stampStripUrl(baseUrl: string, serialNumber: string, revision: number): string {
-  return `${baseUrl.replace(/\/$/, '')}/api/v1/public/wallet/stamps/${serialNumber}/${revision}.png`
+  // 🔴 `\/+$` (no `\/$`): una base mal configurada con MÁS de una diagonal final
+  // (`https://api.avoqado.io//`) no puede colarse hasta la URL que Google descarga.
+  return `${baseUrl.replace(/\/+$/, '')}/api/v1/public/wallet/stamps/${serialNumber}/${revision}.png`
 }
 
 export function buildLoyaltyObject(args: BuildLoyaltyObjectArgs): Record<string, unknown> {

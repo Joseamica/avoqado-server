@@ -58,10 +58,13 @@ export function buildLoyaltyClass(args: BuildLoyaltyClassArgs): Record<string, u
     textModulesData: [
       {
         header: 'Cómo funciona',
-        // 🔴 El premio va TAL CUAL lo escribió el negocio, sin bajarle el caso: es
-        // texto libre configurado por el venue (p.ej. "Un café gratis" con mayúscula
-        // inicial a propósito), no una palabra gramatical nuestra que podamos doblar.
-        body: `Junta tus sellos y obtén ${rewardLabel}. Muestra el código de esta tarjeta al pagar y el negocio te pone tu sello.`,
+        // 🔴 En minúscula a propósito, a media frase («…y obtén un café gratis»): es
+        // EXACTAMENTE lo que hace `applePassBuilder.service.ts` (línea con
+        // `rewardLabel.toLowerCase()`), cuya prueba lo exige igual. Si Google no lo
+        // hiciera, el mismo premio se leería "obtén Un café gratis" — una mayúscula a
+        // media oración que el cliente lee como falta de ortografía, y las dos
+        // tarjetas dirían el premio distinto según el teléfono.
+        body: `Junta tus sellos y obtén ${rewardLabel.toLowerCase()}. Muestra el código de esta tarjeta al pagar y el negocio te pone tu sello.`,
         id: 'howto',
       },
       {
