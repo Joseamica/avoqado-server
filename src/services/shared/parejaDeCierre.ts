@@ -1,6 +1,6 @@
 import { Prisma, ShiftStatus } from '@prisma/client'
 
-import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
 import { isAutoClosedSession } from './cashDrawerAutoClose'
 
 /**
@@ -207,4 +207,140 @@ function numerosParejos(
   if (conteo == null && diferencia == null) return { conteo: null, esperado: null }
   if (conteo == null || diferencia == null) return null
   return { conteo, esperado: new Prisma.Decimal(conteo).sub(diferencia) }
+}
+
+// ============================================================================
+// ENCONTRAR LAS PAREJAS A MEDIAS
+// ============================================================================
+
+/** Lo que hace falta del cliente de Prisma. Acepta el cliente o un `tx`, como `ShiftReader`. */
+export type LectorDeParejas = {
+  cashDrawerSession: {
+    findMany: (args: unknown) => Promise<unknown[]>
+    findUnique: (args: unknown) => Promise<{ id: string } | null>
+    updateMany: (args: unknown) => Promise<{ count: number }>
+  }
+  shift: { findMany: (args: unknown) => Promise<{ venueId: string }[]> }
+}
+
+/**
+ * Las parejas del cierre que quedaron a medias, ya decididas.
+ *
+ * 🔴 Sólo mira parejas LIGADAS (`shiftId != null`). La alternativa —emparejar por reloj, «el turno
+ * abierto que empezó antes de que la gaveta cerrara»— parece más generosa y es justo la que puede
+ * MEZCLAR JORNADAS, que es el daño que este barrido existe para evitar: la forma real de producción
+ * (Testarudo, 1-sep) es una caja abierta a las 07:38 y un turno a las 08:12, así que ningún filtro
+ * por tiempo distingue con seguridad «su turno» de «el turno de después». Una pareja sin ligar no se
+ * repara y se reporta; la liga la pone `asegurarLaLiga` antes del primer commit, así que la
+ * población sin ligar es la histórica y no crece.
+ *
+ * ⚠️ La ventana `since` acota el barrido: el criterio no tiene índice que sirva y sin tope cada
+ * pasada recorrería la historia entera de cajones. Es el mismo recurso de `paid-order-reconciler`.
+ */
+export async function buscarParejasAMedias(
+  db: LectorDeParejas,
+  opciones: { limit: number; since: Date },
+): Promise<ReparacionDelCierre[]> {
+  const filas = (await db.cashDrawerSession.findMany({
+    where: {
+      shiftId: { not: null },
+      OR: [
+        // La gaveta cerró y su turno sigue abierto (murió el gesto de la tablet).
+        { status: 'CLOSED', closedAt: { gte: opciones.since }, shift: { is: { status: ShiftStatus.OPEN } } },
+        // El turno cerró y su gaveta sigue abierta (murió el gesto de la PAX).
+        { status: 'OPEN', shift: { is: { status: ShiftStatus.CLOSED, endTime: { gte: opciones.since } } } },
+      ],
+    },
+    select: {
+      id: true,
+      venueId: true,
+      shiftId: true,
+      status: true,
+      openedAt: true,
+      closedAt: true,
+      actualAmount: true,
+      overShort: true,
+      closedByStaffId: true,
+      shift: {
+        select: {
+          id: true,
+          venueId: true,
+          status: true,
+          startTime: true,
+          endTime: true,
+          cashDeclared: true,
+          cashDifference: true,
+          closedById: true,
+        },
+      },
+    },
+    orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+    take: opciones.limit,
+  })) as (GavetaDeLaPareja & { shift: TurnoDeLaPareja | null })[]
+
+  if (filas.length === 0) return []
+
+  // 🔴 «¿El negocio siguió?» se PREGUNTA, no se deduce de las filas de arriba: el turno nuevo que
+  // reusa la gaveta huérfana no aparece en ellas (no está ligado a ninguna). `endTime: null` es la
+  // definición de turno vivo de la casa —cubre OPEN y CLOSING— y es la misma con la que
+  // `abrirTurnoDeCaja` decide si puede abrir otro.
+  const venues = [...new Set(filas.map(f => f.venueId))]
+  const vivos = await db.shift.findMany({
+    where: { venueId: { in: venues }, endTime: null },
+    select: { venueId: true },
+    distinct: ['venueId'],
+  })
+  const conTurnoVivo = new Set(vivos.map(v => v.venueId))
+
+  const parejas: ReparacionDelCierre[] = []
+  for (const fila of filas) {
+    if (!fila.shift) continue
+    const decision = decidirReparacionDelCierre(fila, fila.shift, { hayTurnoAbierto: conTurnoVivo.has(fila.venueId) })
+    if (decision.reparable) parejas.push(decision)
+  }
+  return parejas
+}
+
+/**
+ * LA LIGA ES EL REGISTRO DURABLE, y por eso se pone ANTES del primer commit del cierre.
+ *
+ * Sin ella, una pareja que muere a medias no se puede reparar: nadie sabe de qué turno era esa
+ * gaveta, y adivinarlo por reloj es exactamente lo que mezcla jornadas. Con ella, el estado partido
+ * es autodescriptivo y `buscarParejasAMedias` lo encuentra sin tabla nueva.
+ *
+ * 🔴 Tres cuidados, y los tres cuestan una línea:
+ *   · **nunca roba una liga**: el `where` exige `shiftId: null`, así que la gaveta de otro turno se
+ *     queda como está (misma regla que `abrirTurnoDeCaja`);
+ *   · **no intenta lo imposible**: si el turno ya tiene OTRA gaveta, `shiftId` es `@unique` y el
+ *     P2002 abortaría la transacción del llamador — un cierre bueno convertido en error;
+ *   · **NUNCA lanza**: es una mejora de la reparabilidad, no una condición para cerrar la caja. Si
+ *     falla, la pareja simplemente queda sin ligar y el barrido la reporta en vez de repararla.
+ *
+ * ⚠️ Va en su propia escritura, FUERA de la transacción del llamador: dentro, un P2002 en la carrera
+ * (otra gaveta ligándose al mismo turno en ese instante) abortaría la transacción entera y Postgres
+ * no deja continuar después del error, así que ni un try/catch la salvaría.
+ */
+export async function asegurarLaLiga(
+  db: LectorDeParejas,
+  venueId: string,
+  shiftId: string,
+  cashDrawerSessionId: string,
+): Promise<boolean> {
+  try {
+    const yaDelTurno = await db.cashDrawerSession.findUnique({ where: { shiftId }, select: { id: true } })
+    if (yaDelTurno) return yaDelTurno.id === cashDrawerSessionId
+    const ligada = await db.cashDrawerSession.updateMany({
+      where: { id: cashDrawerSessionId, venueId, shiftId: null },
+      data: { shiftId },
+    })
+    return ligada.count === 1
+  } catch (error) {
+    logger.warn('[TURNO DE CAJA] no se pudo ligar la gaveta a su turno; la pareja queda sin reparación automática', {
+      venueId,
+      shiftId,
+      cashDrawerSessionId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
 }
