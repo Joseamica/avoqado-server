@@ -9,7 +9,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
-import { abrirTurnoDeCaja } from '../shared/turnoDeCaja'
+import { abrirTurnoDeCaja, cerrarTurnoDeCaja } from '../shared/turnoDeCaja'
 import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma } from '@prisma/client'
 
@@ -403,8 +403,22 @@ interface CloseSessionParams {
 }
 
 /**
- * Close the current cash drawer session.
- * Calculates expected amount from events and determines over/short.
+ * Cierra la caja desde la tablet — la puerta del POS móvil (`POST /mobile/…/cash-drawer/close`).
+ *
+ * 🔴 **Desde la Task 5 (3-sep-2026) esta ruta NO cierra sólo el cajón: cierra EL TURNO DE CAJA DEL
+ * NEGOCIO**, que es un solo gesto con dos registros ligados (`cerrarTurnoDeCaja` en
+ * `shared/turnoDeCaja.ts`). Antes `closeSession` no tocaba el `Shift` —cero referencias—, así que
+ * el turno seguía abierto hasta el relevo de la mañana siguiente, sus totales seguían creciendo con
+ * las ventas del cajero siguiente, y la PAX no se enteraba de nada porque el aviso `shift closed`
+ * sólo lo emite el cierre del turno.
+ *
+ * **Quien llama sigue siendo la ruta de SIEMPRE**: Android e iOS reciben el gesto único sin
+ * actualizarse. La respuesta conserva EXACTAMENTE los campos de hoy MÁS `shiftId` (aditivo y
+ * opcional; una app instalada no puede notar un campo que no lee).
+ *
+ * 🔴 El ORDEN es la garantía: la gaveta se cierra y se commitea PRIMERO —el cajero ya contó y ese
+ * dinero ya está firmado—, y sólo después se cierra el turno. Un fallo en la segunda mitad degrada
+ * exactamente a lo de HOY y jamás convierte un cierre bueno en un error en el mostrador.
  */
 export async function closeSession(params: CloseSessionParams) {
   const { venueId, staffId, actualAmount, note } = params
@@ -492,7 +506,40 @@ export async function closeSession(params: CloseSessionParams) {
     },
   })
 
-  return formatSession(closedSession)
+  // ── La otra mitad del gesto: el turno de caja del negocio ──────────────────────────────────
+  //
+  // 🔴 Va con el conteo Y con el ESPERADO que se acaba de calcular sobre los eventos de ESTA
+  // gaveta. Sin el esperado, el turno lo recalcularía con su propia fórmula
+  // (`startingCash + ventas en efectivo`), que es ciega a los retiros: un `PAY_OUT` de $50 le
+  // firmaría al cajero un faltante de $50 que la gaveta acaba de decir que no existe.
+  //
+  // Fuera de la transacción y en try/catch: el cierre de la gaveta YA está commiteado.
+  let shiftId: string | null = null
+  try {
+    const cierre = await cerrarTurnoDeCaja({
+      venueId,
+      staffId,
+      staffName,
+      source: 'CAJA_MOVIL',
+      yaCerrado: { cashDrawerSessionId: session.id },
+      // ⚠️ Siempre hay conteo por esta puerta: el controlador devuelve 400 si falta `actualAmount`.
+      // Y contar CERO es un conteo REAL — una gaveta vacía con $2,950 esperados es un faltante de
+      // $2,950—, por eso viaja el `Decimal` tal cual y nunca detrás de un `&&`.
+      conteo: actualDecimal as unknown as Prisma.Decimal,
+      esperadoDelCajon: new Decimal(expectedAmount.toFixed(2)) as unknown as Prisma.Decimal,
+      note: note || null,
+    })
+    shiftId = cierre.shiftCerradoId ?? null
+  } catch (error) {
+    logger.error('💵 [CASH-DRAWER] La caja se cerró pero el turno del negocio no; queda abierto', {
+      venueId,
+      sessionId: session.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  // `shiftId` es ADITIVO: el turno que este cierre cerró, o `null` si no había ninguno abierto.
+  return { ...formatSession(closedSession), shiftId }
 }
 
 // ============================================================================

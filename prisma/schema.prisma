@@ -960,6 +960,8 @@ model Staff {
   organizations     StaffOrganization[]
   venues            StaffVenue[]
   shifts            Shift[]
+  /// Turnos de caja que esta persona CERRÓ (no necesariamente los que abrió — ver `Shift.closedById`).
+  shiftsClosed      Shift[]  @relation("ShiftClosedBy")
   ordersCreated     Order[]             @relation("OrderCreatedBy")
   ordersServed      Order[]             @relation("OrderServedBy")
   paymentsProcessed Payment[]
@@ -3147,6 +3149,16 @@ model Shift {
   startTime DateTime
   endTime   DateTime?
 
+  /// Quién CERRÓ el turno (Task 5 del turno de caja unificado, 3-sep-2026). `staffId` es quien lo
+  /// ABRIÓ, y con el gesto único no tienen por qué ser la misma persona: la caja puede cerrarla la
+  /// tablet y el turno la PAX. El cajón físico ya guardaba su equivalente
+  /// (`CashDrawerSession.closedByStaffId`); sin esta columna, la única constancia del autor del
+  /// cierre vivía en `ActivityLog`, que es best-effort y no se puede unir en una consulta.
+  /// Nulable y con muchos NULL: los turnos anteriores a la migración no lo tienen y NO se adivina
+  /// hacia atrás — copiar `staffId` afirmaría que quien abrió también cerró.
+  closedById String?
+  closedBy   Staff?    @relation("ShiftClosedBy", fields: [closedById], references: [id])
+
   // Cash management
   startingCash   Decimal  @default(0) @db.Decimal(10, 2)
   endingCash     Decimal? @db.Decimal(10, 2)
@@ -3206,6 +3218,7 @@ model Shift {
   @@unique([venueId, externalId])
   @@index([venueId])
   @@index([staffId])
+  @@index([closedById])
   @@index([status])
   @@index([startTime])
   @@index([venueId, createdAt])

@@ -347,6 +347,41 @@ describe('🔴 el fondo cuando no hay gaveta abierta', () => {
     expect(tocado).toBeUndefined()
   })
 
+  it('🔴 la pareja que YA existe también se alinea: turno en $0 + gaveta abierta con $2,000', async () => {
+    // Auditoría de Codex (3-sep): la alineación sólo disparaba cuando el cajón se CREABA
+    // (`cajaCreada`), así que una pareja ya ligada en producción se quedaba con el turno en $0 y la
+    // gaveta en $2,000 para siempre. Es la TERCERA manifestación del mismo defecto del fondo.
+    mundo({ turno: turnoAbierto({ startingCash: new Decimal(0) }), caja: cajaAbierta({ shiftId: TURNO }) })
+
+    await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Viridiana', startingAmount: 0 })
+
+    const alineado = m.shift.updateMany.mock.calls.find((c: any) => c[0]?.data?.startingCash !== undefined)
+    expect(alineado).toBeDefined()
+    expect(alineado[0].where).toMatchObject({ id: TURNO, status: 'OPEN' })
+    expect(Number(alineado[0].data.startingCash)).toBe(2000)
+  })
+
+  it('🔴 pero SÓLO al alza desde CERO: una gaveta con menos fondo NO le baja el suyo al turno', async () => {
+    // El fondo de un turno con dinero propio es suyo (regla del 3-sep, tres ramas). Esta extensión
+    // amplía a QUIÉN alcanza la alineación, nunca en qué dirección: sube un cero, jamás baja nada.
+    mundo({
+      turno: turnoAbierto({ startingCash: new Decimal(2000) }),
+      caja: cajaAbierta({ shiftId: TURNO, startingAmount: new Decimal(500) }),
+    })
+
+    await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Viridiana', startingAmount: 0 })
+
+    expect(m.shift.updateMany.mock.calls.find((c: any) => c[0]?.data?.startingCash !== undefined)).toBeUndefined()
+  })
+
+  it('🔴 y la gaveta de OTRO turno tampoco lo alinea: no se toca lo que no es suyo', async () => {
+    mundo({ turno: turnoAbierto({ startingCash: new Decimal(0) }), caja: cajaAbierta({ shiftId: 'turno-de-otro' }) })
+
+    await openSession({ venueId: VENUE, staffId: STAFF, staffName: 'Viridiana', startingAmount: 0 })
+
+    expect(m.shift.updateMany.mock.calls.find((c: any) => c[0]?.data?.startingCash !== undefined)).toBeUndefined()
+  })
+
   it('un turno con fondo real y SIN gaveta sigue mandando: no se pisa con lo tecleado', async () => {
     const creado = mundo({ turno: turnoAbierto({ startingCash: new Decimal(2000) }) })
 

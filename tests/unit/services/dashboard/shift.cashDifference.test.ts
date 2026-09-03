@@ -59,14 +59,29 @@ describe('computeCashDifference', () => {
 describe('both close paths share one formula', () => {
   const fs = require('fs') as typeof import('fs')
   const path = require('path') as typeof import('path')
-  const tpv = fs.readFileSync(path.join(__dirname, '../../../../src/services/tpv/shift.tpv.service.ts'), 'utf8')
-  const dashboard = fs.readFileSync(path.join(__dirname, '../../../../src/services/dashboard/shift.dashboard.service.ts'), 'utf8')
+  const raiz = path.join(__dirname, '../../../../src/services')
+  const tpv = fs.readFileSync(path.join(raiz, 'tpv/shift.tpv.service.ts'), 'utf8')
+  const dashboard = fs.readFileSync(path.join(raiz, 'dashboard/shift.dashboard.service.ts'), 'utf8')
+  const compartido = fs.readFileSync(path.join(raiz, 'shared/cashReconciliation.service.ts'), 'utf8')
 
   it('the TPV close calls the shared function instead of copying it', () => {
     // The purchase-order totals lived in triplicate and the copies drifted — editing an
     // order silently dropped the commission from its total. One function, two callers.
-    expect(tpv).toContain('calculateCashReconciliation(')
+    //
+    // 🔴 Desde la Task 5 el cierre del TURNO entra por `…FromExpected`, porque su esperado ya no es
+    // `startingCash + ventas`: cuando el venue usa el módulo de caja, el esperado es el de la
+    // GAVETA (ciega a los retiros la otra fórmula). Sigue siendo la MISMA aritmética del descuadre
+    // — `calculateCashReconciliation` delega en ella, y eso se comprueba abajo.
+    expect(tpv).toContain('calculateCashReconciliationFromExpected(')
     expect(dashboard).toContain('calculateCashReconciliation(')
     expect(tpv).not.toMatch(/cashDifference:\s*.*endingCash\s*-\s*startingCash/)
+  })
+
+  it('🔴 la resta del descuadre existe UNA sola vez: la fórmula del turno delega en la del esperado', () => {
+    // Copiar el `.sub()` en el otro camino es exactamente cómo divergieron los totales de la orden
+    // de compra. Aquí la única resta vive en `…FromExpected` y la de siempre la reusa.
+    expect(compartido).toMatch(/export function calculateCashReconciliation\([\s\S]*?return calculateCashReconciliationFromExpected\(/)
+    expect(compartido.match(/\.sub\(/g) ?? []).toHaveLength(1)
+    expect(tpv).not.toMatch(/\.sub\(\s*expectedCash/)
   })
 })

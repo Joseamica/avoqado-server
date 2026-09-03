@@ -555,43 +555,6 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       cajaYaLigadaA = null
     }
 
-    // ── QUE LOS DOS CIERRES DIGAN EL MISMO NÚMERO ─────────────────────────────────────────
-    //
-    // 🔴 Los dos cierres leen COLUMNAS DISTINTAS: el del cajón calcula su esperado desde
-    // `CashDrawerSession.startingAmount` (`calculateExpectedAmount`) y el del turno desde
-    // `Shift.startingCash` (`tpv/shift.tpv.service.ts`, `expectedCash = shift.startingCash + …`).
-    // Si divergen, uno de los dos le firma al cajero un descuadre que nadie causó.
-    //
-    // Sólo puede pasar en UN caso, y por eso la guarda es tan estrecha: el turno se abrió con fondo
-    // CERO y sin gaveta —el default de la PAX—, y ahora la gaveta se abre con un fondo real. Se
-    // sube el cero al fondo que de verdad tiene la caja. **Nunca al revés y nunca sobre un turno
-    // que ya tuvo gaveta**: ahí su `startingCash` es suyo y describe su propia sesión de caja.
-    let turnoAlineadoDesde: string | undefined
-    if (cajaCreada && turnoAReusar && !cajonDelTurnoReusado && !new Prisma.Decimal(turnoAReusar.startingCash).equals(fondoEfectivo)) {
-      // CAS por estado: si el turno cambió debajo (cierre en curso), no se le toca el dinero.
-      const alineado = await tx.shift.updateMany({
-        where: { id: shiftId, venueId, status: ShiftStatus.OPEN },
-        data: { startingCash: fondoEfectivo, updatedAt: ahora },
-      })
-      if (alineado.count === 1) {
-        turnoAlineadoDesde = new Prisma.Decimal(turnoAReusar.startingCash).toString()
-      } else {
-        // 🔴 Perder ESTE CAS no es benigno como los del relevo: la gaveta se acaba de crear con el
-        // fondo bueno y el turno se queda con el suyo, que es JUSTO la divergencia que este bloque
-        // existe para matar — uno de los dos cierres firmará un descuadre que nadie causó. No se
-        // reintenta (el turno está cerrándose y tocarle el dinero sería peor), pero tampoco se
-        // calla: sin este aviso la divergencia sólo se descubre al cuadrar la caja.
-        logger.warn('[TURNO DE CAJA] no se pudo alinear el fondo del turno: cambió de estado a media apertura', {
-          venueId,
-          shiftId,
-          source,
-          fondoDelTurno: new Prisma.Decimal(turnoAReusar.startingCash).toString(),
-          fondoDeLaGaveta: fondoEfectivo.toString(),
-          cashDrawerSessionId,
-        })
-      }
-    }
-
     // ── La liga ───────────────────────────────────────────────────────────────────────────
     //
     // 🔴 NUNCA SE ROBA UNA LIGA. Si el cajón ya apunta a otro turno, se deja como está: ese
@@ -600,6 +563,10 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     // (`shiftId` es `@unique`), tampoco se intenta: un P2002 aquí abortaría la transacción
     // entera y tumbaría una apertura que por lo demás está bien. La liga mejora el reporte;
     // no es dinero, y `resolveShiftCashDrawer` sigue resolviendo por ventana de tiempo sin ella.
+    // 🔴 `true` sólo si la gaveta con la que salimos ES la de ESTE turno. Es lo que decide si el
+    // fondo se puede alinear: la gaveta de otro turno —o la de la mañana que ya cerró— describe SU
+    // sesión de caja, no ésta.
+    let gavetaDeEsteTurno = false
     if (cajaYaLigadaA == null) {
       // Se reusa la lectura de arriba: un turno recién CREADO no puede estar reclamado por nadie.
       const reclamadoPorOtra = shiftCreado ? null : cajonDelTurnoReusado
@@ -611,6 +578,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
           cajaAbierta: cashDrawerSessionId,
         })
       } else if (!reclamadoPorOtra) {
+        gavetaDeEsteTurno = true
         // Condicional (`shiftId: null`) para que dos aperturas simultáneas no choquen contra el
         // único: la segunda encuentra 0 filas y sigue, en vez de reventar.
         await tx.cashDrawerSession.updateMany({ where: { id: cashDrawerSessionId, shiftId: null }, data: { shiftId } })
@@ -622,6 +590,55 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
         cajaAbierta: cashDrawerSessionId,
         ligadaA: cajaYaLigadaA,
       })
+    } else {
+      // Ya estaban ligados de antes: la pareja que existe en producción desde ayer.
+      gavetaDeEsteTurno = true
+    }
+
+    // ── QUE LOS DOS CIERRES DIGAN EL MISMO NÚMERO ─────────────────────────────────────────
+    //
+    // 🔴 Los dos cierres leen COLUMNAS DISTINTAS: el del cajón calcula su esperado desde
+    // `CashDrawerSession.startingAmount` (`calculateExpectedAmount`) y el del turno desde
+    // `Shift.startingCash`. Si divergen, uno de los dos le firma al cajero un descuadre que nadie
+    // causó. (Desde la Task 5 el cierre del turno prefiere el esperado de la gaveta, así que la
+    // divergencia ya no firma dinero — pero `Shift.startingCash` se sigue LEYENDO en el dashboard
+    // y en el editor de superadmin, y un turno que dice $0 sobre una gaveta de $2,000 miente igual.)
+    //
+    // 🔴 Dos condiciones, y las dos importan:
+    //
+    //   · **la gaveta tiene que ser la de ESTE turno** (`gavetaDeEsteTurno`). Nunca la de otro, ni
+    //     la segunda del día sobre un turno que ya tuvo la suya: ahí su `startingCash` es suyo.
+    //   · **sólo SUBE un cero.** Un turno con fondo propio no se baja jamás — el fondo de una
+    //     gaveta abierta manda para lo que se ESCRIBE ahora, no para reescribir hacia abajo un
+    //     número que alguien contó antes.
+    //
+    // ⚠️ Alcanza tanto a la gaveta recién creada como a la pareja que YA existía y sólo se ligó:
+    // la segunda era el hueco que quedó vivo tras la Task 4 (auditoría de Codex, 3-sep-2026), y en
+    // producción es el estado normal de cualquier venue que ya abrió las dos cosas por separado.
+    let turnoAlineadoDesde: string | undefined
+    const fondoDelTurno = turnoAReusar ? new Prisma.Decimal(turnoAReusar.startingCash) : null
+    if (gavetaDeEsteTurno && fondoDelTurno && fondoDelTurno.equals(0) && fondoEfectivo.greaterThan(0)) {
+      // CAS por estado: si el turno cambió debajo (cierre en curso), no se le toca el dinero.
+      const alineado = await tx.shift.updateMany({
+        where: { id: shiftId, venueId, status: ShiftStatus.OPEN },
+        data: { startingCash: fondoEfectivo, updatedAt: ahora },
+      })
+      if (alineado.count === 1) {
+        turnoAlineadoDesde = fondoDelTurno.toString()
+      } else {
+        // 🔴 Perder ESTE CAS no es benigno como los del relevo: la gaveta tiene el fondo bueno y el
+        // turno se queda con el suyo, que es JUSTO la divergencia que este bloque existe para matar.
+        // No se reintenta (el turno está cerrándose y tocarle el dinero sería peor), pero tampoco se
+        // calla: sin este aviso la divergencia sólo se descubre al cuadrar la caja.
+        logger.warn('[TURNO DE CAJA] no se pudo alinear el fondo del turno: cambió de estado a media apertura', {
+          venueId,
+          shiftId,
+          source,
+          fondoDelTurno: fondoDelTurno.toString(),
+          fondoDeLaGaveta: fondoEfectivo.toString(),
+          cashDrawerSessionId,
+        })
+      }
     }
 
     const relevo =
@@ -716,4 +733,269 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
   })
 
   return resultado
+}
+
+// ============================================================================
+// CERRAR EL TURNO DE CAJA DEL NEGOCIO — EL MISMO GESTO ÚNICO, AL REVÉS
+// ============================================================================
+
+/**
+ * 🔴 UN GESTO, DOS REGISTROS. Es la otra mitad de `abrirTurnoDeCaja` (Fase 2, Task 5, 3-sep-2026).
+ *
+ * La apertura ya está unificada: la caja física y el turno son dos registros de UNA sola caja, y
+ * quien llega primero crea mientras el segundo liga. El CIERRE seguía partido, y eso se veía: una
+ * caja creada por la apertura del turno desde la PAX **no la cerraba el cierre del turno**, sino el
+ * auto-cierre de las 04:00 o el relevo de la mañana siguiente. Consecuencia: los venues sólo-PAX
+ * habrían empezado a ver un bloque «Caja física · sin conteo» todos los días.
+ *
+ * ── Las dos direcciones ───────────────────────────────────────────────────────
+ *   · `TURNO_TPV`  — la PAX cerró el turno   → se cierra la GAVETA ligada
+ *   · `CAJA_MOVIL` — la tablet cerró la caja → se cierra el TURNO del negocio
+ *
+ * ── Reglas duras ──────────────────────────────────────────────────────────────
+ *
+ * 1. 🔴 **Un cierre NUNCA inventa un conteo.** Sin `conteo`, la gaveta se cierra con
+ *    `actualAmount` y `overShort` en NULL y **sin evento `CLOSE`** — un evento lleva `amount` y una
+ *    fila en cero se lee como un arqueo. Es la regla 1 de `cashDrawerAutoClose` y la misma que ya
+ *    cumple el relevo al abrir. Escribir un 0 le firmaría al cajero un faltante del tamaño de las
+ *    ventas del día.
+ * 2. 🔴 **Nunca se cierra el registro de otro.** La gaveta que se cierra tiene que haber estado
+ *    abierta ANTES del cierre del turno y no pertenecer a otro turno. Sin ese filtro, un relevo que
+ *    caiga en los milisegundos siguientes al cierre —la caja de la tarde abriéndose— se cerraría
+ *    sola, dejando a su turno nuevo sin gaveta.
+ * 3. 🔴 **La segunda mitad NUNCA tumba a la primera.** Cuando esto corre, el gesto que llamó ya
+ *    commiteó su parte y el dinero ya está firmado. Un fallo aquí degrada exactamente a lo de HOY
+ *    (el otro registro se queda abierto y lo recoge el relevo o el auto-cierre), y se reporta; nunca
+ *    se convierte en un error para quien está en el mostrador.
+ */
+export type OrigenDelCierre = 'CAJA_MOVIL' | 'TURNO_TPV'
+
+export interface CerrarTurnoDeCajaParams {
+  venueId: string
+  /**
+   * Quién cerró. Va al historial del cajón (`closedByStaffId`) y a la bitácora.
+   *
+   * 🔴 `null` cuando no se sabe (un script, o un llamador sin contexto de sesión). NO se cae a
+   * «quien abrió»: eso afirmaría que el que abrió también cerró, que es justo lo que estas
+   * columnas existen para dejar de suponer.
+   */
+  staffId: string | null
+  staffName?: string | null
+  source: OrigenDelCierre
+  /** El registro que el gesto que llama YA cerró. El OTRO es el que se cierra aquí. */
+  yaCerrado: { shiftId: string } | { cashDrawerSessionId: string }
+  /**
+   * El conteo físico, si alguien contó. 🔴 `null` = nadie contó, y entonces NADA se inventa.
+   * ⚠️ `Decimal(0)` es un objeto y por tanto truthy: quien decide siempre es `!= null`, nunca un
+   * `&&` — contar cero es un conteo REAL (una gaveta vacía con $2,000 esperados es un faltante de
+   * $2,000, el caso más importante que este cierre tiene que acertar).
+   */
+  conteo: Prisma.Decimal | null
+  /**
+   * El esperado de la gaveta que se acaba de cerrar (sólo desde `CAJA_MOVIL`). Es lo que hace que
+   * los DOS cierres firmen el MISMO número: sin él, el turno recalcularía su esperado contra un
+   * `Shift.startingCash` congelado en la apertura, que es ciego a los retiros y al refondeo.
+   */
+  esperadoDelCajon?: Prisma.Decimal | null
+  note?: string | null
+  now?: () => Date
+}
+
+export interface CerrarTurnoDeCajaResult {
+  /** Lo que ESTA llamada cerró. Ausente = no había nada que cerrar, o alguien se adelantó. */
+  shiftCerradoId?: string
+  cajaCerradaId?: string
+  /** `true` sólo si el registro cerrado aquí llevó un conteo físico. */
+  conConteo: boolean
+  /** Por qué no se cerró nada. Va al log; nunca es un error para el mostrador. */
+  motivo?: 'SIN_PAREJA' | 'YA_CERRADO' | 'CIERRE_EN_CURSO'
+}
+
+/** Va en `closingNote` cuando la PAX cierra el turno sin mandar un conteo. Nadie contó, y se dice. */
+export const NOTA_DEL_CIERRE_SIN_CONTEO =
+  '[Sistema] Cerrada al cerrar el turno de caja desde la terminal. SIN CONTEO FÍSICO: no hay monto real ni diferencia.'
+
+export async function cerrarTurnoDeCaja(parametros: CerrarTurnoDeCajaParams): Promise<CerrarTurnoDeCajaResult> {
+  return 'shiftId' in parametros.yaCerrado
+    ? cerrarLaGavetaDelTurno(parametros, parametros.yaCerrado.shiftId)
+    : cerrarElTurnoDeLaGaveta(parametros, parametros.yaCerrado.cashDrawerSessionId)
+}
+
+/**
+ * La gaveta que se puede cerrar cuando se cierra un turno: abierta, de ESTE negocio, abierta ANTES
+ * del instante del cierre, y de este turno o de ninguno.
+ *
+ * 🔴 Los tres filtros de más son la regla 2: sin `openedAt <= momento` una caja abierta un
+ * milisegundo después del cierre (el relevo de la tarde) se cerraría sola; sin el `OR` sobre
+ * `shiftId` se le arrancaría la gaveta a un turno ajeno.
+ */
+function gavetaCerrable(venueId: string, shiftId: string, momento: Date) {
+  return { venueId, status: 'OPEN' as const, openedAt: { lte: momento }, OR: [{ shiftId }, { shiftId: null }] }
+}
+
+/**
+ * El efectivo que DEBE haber en la gaveta que el cajero tiene enfrente, o `null` si no hay ninguna
+ * abierta que pertenezca a este turno.
+ *
+ * 🔴 Es el número con el que el cierre del turno tiene que comparar el conteo, y no
+ * `Shift.startingCash + ventas en efectivo`. Esa fórmula es ciega a dos cosas que sí mueven el
+ * dinero físico:
+ *
+ *   · **los retiros.** Un `PAY_OUT` de $50 baja el esperado de la gaveta y no toca el del turno, así
+ *     que el cierre de la PAX firma un faltante de $50 que nadie causó.
+ *   · **el refondeo a media jornada.** `Shift.startingCash` es un ESCALAR: si la gaveta se cierra a
+ *     las 15:00 y se abre otra con $500, el turno sigue creyendo que su fondo son los $2,000 de la
+ *     mañana y que las ventas del día entero están en la caja. En ese escenario las dos fórmulas
+ *     difieren en el fondo viejo MÁS las ventas ya retiradas.
+ *
+ * Devolver `null` no es un fallo: es el venue que no usa el módulo de caja, y ahí el cierre se
+ * queda con la fórmula de siempre, byte a byte.
+ */
+export async function esperadoDelCajonAbierto(
+  venueId: string,
+  shiftId: string,
+  momento: Date,
+): Promise<{ sessionId: string; esperado: Prisma.Decimal } | null> {
+  const gaveta = await prisma.cashDrawerSession.findFirst({
+    where: gavetaCerrable(venueId, shiftId, momento),
+    select: { id: true, startingAmount: true, events: { select: { type: true, amount: true } } },
+    orderBy: { openedAt: 'desc' },
+  })
+  if (!gaveta) return null
+
+  const { calculateExpectedAmount } = await import('../mobile/cash-drawer.mobile.service')
+  const esperado = calculateExpectedAmount({ startingAmount: gaveta.startingAmount, events: gaveta.events })
+  return { sessionId: gaveta.id, esperado: new Prisma.Decimal(esperado.toFixed(2)) }
+}
+
+async function cerrarLaGavetaDelTurno(p: CerrarTurnoDeCajaParams, shiftId: string): Promise<CerrarTurnoDeCajaResult> {
+  const { venueId, staffId, source, conteo } = p
+  const ahora = (p.now ?? (() => new Date()))()
+  // 🔴 Sin persona conocida NO se escribe el placeholder 'Staff' en el historial del cajón: eso fue
+  // un hallazgo real del /full-testing del 27-ago («Abierta por Staff»), y aquí además sería falso
+  // — no es que se ignore el nombre, es que no hubo sesión de nadie (un script). Se marca como del
+  // sistema, que es lo que de verdad pasó.
+  const staffName = (p.staffName || '').trim() || (staffId ? 'Staff' : AUTO_CLOSED_BY_NAME)
+
+  const gaveta = await prisma.cashDrawerSession.findFirst({
+    where: gavetaCerrable(venueId, shiftId, ahora),
+    select: { id: true, startingAmount: true },
+    orderBy: { openedAt: 'desc' },
+  })
+  if (!gaveta) {
+    logger.info('[TURNO DE CAJA] El turno se cerró sin gaveta abierta que cerrar', { venueId, shiftId, source })
+    return { conConteo: false, motivo: 'SIN_PAREJA' }
+  }
+
+  // La MISMA fórmula del arqueo de la tablet (`calculateExpectedAmount`), no una copia: dos
+  // fórmulas serían dos verdades para el mismo dinero. Import dinámico para no cerrar el ciclo
+  // `mobile → shared → mobile`, igual que hace `shared/cashDrawerPosting.ts`.
+  const { calculateExpectedAmount } = await import('../mobile/cash-drawer.mobile.service')
+
+  const resultado = await prisma.$transaction(async tx => {
+    // 🔴 El CAS va PRIMERO y toma el candado de la fila: un cobro que quiera sumar al cajón espera
+    // y al re-evaluar ya no encuentra la caja abierta. Lo que se lee bajo el candado es lo que se
+    // firma. Es exactamente el orden de `closeSession`.
+    const gano = await tx.cashDrawerSession.updateMany({
+      where: { id: gaveta.id, venueId, status: 'OPEN' },
+      data: {
+        status: 'CLOSED',
+        closedAt: ahora,
+        // Sí hubo una persona: fue quien cerró el turno. `actualAmount` en NULL sigue siendo la
+        // señal de «nadie contó» que ya leen el dashboard (`counted`) y las apps.
+        closedByStaffId: staffId,
+        closedByName: staffName,
+        closingNote: conteo != null ? p.note || null : NOTA_DEL_CIERRE_SIN_CONTEO,
+        ...(conteo != null ? { actualAmount: conteo } : {}),
+      },
+    })
+    if (gano.count !== 1) return null
+
+    if (conteo == null) return { esperado: null as number | null, overShort: null as number | null }
+
+    const eventos = await tx.cashDrawerEvent.findMany({ where: { sessionId: gaveta.id }, orderBy: { createdAt: 'asc' } })
+    const esperado = calculateExpectedAmount({ startingAmount: gaveta.startingAmount, events: eventos })
+    const diferencia = Number(Number(conteo).toFixed(2)) - esperado
+    const overShort = Number(diferencia.toFixed(2))
+    await tx.cashDrawerSession.update({ where: { id: gaveta.id }, data: { overShort: new Prisma.Decimal(overShort.toFixed(2)) } })
+    await tx.cashDrawerEvent.create({
+      data: { sessionId: gaveta.id, venueId, type: 'CLOSE', amount: conteo, staffId, staffName, note: p.note || null },
+    })
+    return { esperado, overShort }
+  })
+
+  if (!resultado) {
+    // Benigno: alguien la cerró primero, que es el estado que queríamos.
+    logger.info('[TURNO DE CAJA] Otro aparato ya había cerrado la gaveta del turno', { venueId, shiftId, cajaId: gaveta.id })
+    return { conConteo: false, motivo: 'YA_CERRADO' }
+  }
+
+  void logAction({
+    staffId,
+    venueId,
+    action: 'CASH_DRAWER_CLOSED',
+    entity: 'CashDrawerSession',
+    entityId: gaveta.id,
+    data: {
+      expectedAmount: resultado.esperado,
+      actualAmount: conteo != null ? Number(conteo) : null,
+      overShort: resultado.overShort,
+      sinConteo: conteo == null,
+      shiftId,
+      source,
+    },
+  })
+
+  logger.info('[TURNO DE CAJA] Cierre resuelto: la gaveta se cerró con el turno', {
+    venueId,
+    shiftId,
+    cajaCerradaId: gaveta.id,
+    conConteo: conteo != null,
+    source,
+  })
+
+  return { cajaCerradaId: gaveta.id, conConteo: conteo != null }
+}
+
+async function cerrarElTurnoDeLaGaveta(p: CerrarTurnoDeCajaParams, cashDrawerSessionId: string): Promise<CerrarTurnoDeCajaResult> {
+  const { venueId, staffId, source, conteo } = p
+
+  const turno = await turnoAbiertoDelNegocio(prisma, venueId)
+  if (!turno) {
+    logger.info('[TURNO DE CAJA] La gaveta se cerró sin turno abierto que cerrar', { venueId, cashDrawerSessionId, source })
+    return { conConteo: false, motivo: 'SIN_PAREJA' }
+  }
+
+  // Import dinámico: `tpv/shift.tpv.service` ya importa este módulo (`abrirTurnoDeCaja`), así que
+  // uno estático cerraría el ciclo. Es el mismo recurso que usa `shared/cashDrawerPosting.ts`.
+  const { cerrarTurnoPorCierreDeCaja } = await import('../tpv/shift.tpv.service')
+
+  try {
+    const cerrado = await cerrarTurnoPorCierreDeCaja(venueId, turno.id, {
+      conteo,
+      esperadoDelCajon: p.esperadoDelCajon ?? null,
+      actorStaffId: staffId,
+      cashDrawerSessionId,
+    })
+    logger.info('[TURNO DE CAJA] Cierre resuelto: el turno se cerró con la gaveta', {
+      venueId,
+      cashDrawerSessionId,
+      shiftCerradoId: cerrado.id,
+      conConteo: conteo != null,
+      source,
+    })
+    return { shiftCerradoId: cerrado.id, conConteo: conteo != null }
+  } catch (error) {
+    // 🔴 Regla 3: el conteo de la gaveta YA está commiteado y el cajero ya lo vio. Un turno que no
+    // se pudo cerrar degrada a lo de hoy —se queda abierto y lo recoge el relevo de mañana— y NO
+    // se convierte en un error en el mostrador.
+    logger.error('[TURNO DE CAJA] La gaveta se cerró pero el turno no; queda abierto', {
+      venueId,
+      cashDrawerSessionId,
+      shiftId: turno.id,
+      source,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { conConteo: false, motivo: 'CIERRE_EN_CURSO' }
+  }
 }

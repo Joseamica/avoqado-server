@@ -9,13 +9,13 @@ import socketManager from '../../communication/sockets'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { isCashReconciliationEnabled } from '../access/cashReconciliationAccess.service'
 import {
-  calculateCashReconciliation,
+  calculateCashReconciliationFromExpected,
   normalizeCashReconciliationRequest,
   type CashReconciliationOutcome,
   type NormalizedCashReconciliationRequest,
 } from '../shared/cashReconciliation.service'
 import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
-import { abrirTurnoDeCaja } from '../shared/turnoDeCaja'
+import { abrirTurnoDeCaja, cerrarTurnoDeCaja, esperadoDelCajonAbierto } from '../shared/turnoDeCaja'
 
 interface ShiftFilters {
   staffId?: string
@@ -1005,6 +1005,18 @@ export interface ShiftCloseRequestContext {
   userAgent?: string
   /** Deterministic clock for stale-claim recovery tests; HTTP callers use the real clock. */
   now?: () => Date
+  /**
+   * 🔴 Este cierre lo disparó el CIERRE DE LA GAVETA (la tablet), no la PAX. Dos consecuencias, y
+   * las dos son de dinero:
+   *
+   *   · el esperado ya viene resuelto por la gaveta que se acaba de cerrar — volver a buscarlo
+   *     daría `null` (ya no está abierta) y el turno recalcularía contra su fondo congelado;
+   *   · **no se cierra ninguna gaveta al terminar.** Sin esta guarda, el turno cerraría «la gaveta
+   *     abierta del negocio», que en ese instante puede ser la que alguien acaba de abrir para el
+   *     siguiente relevo: su turno nuevo se quedaría sin caja y el cajero de la tarde contando una
+   *     gaveta que se cerró sola.
+   */
+  cerrandoDesdeElCajon?: { sessionId: string; esperado: Decimal | null }
 }
 
 export interface ShiftCloseExecutionResult {
@@ -1587,7 +1599,30 @@ async function closeShiftUsingRequest(
     // Ver los comentarios donde se acumulan `totalCashTips` y `totalDrawerExtra`.
     const cashInDrawer = totalCashPayments.add(totalCashTips).add(totalDrawerExtra)
 
-    const expectedCash = new Decimal(shift.startingCash || 0).add(cashInDrawer)
+    // 🔴 EL ESPERADO SALE DE LA GAVETA, no de un fondo congelado en la apertura (Task 5).
+    //
+    // `startingCash + cashInDrawer` es ciego a los retiros (`PAY_OUT`) y a que la gaveta se
+    // refonde a media jornada — `Shift.startingCash` es un ESCALAR y no puede describir dos
+    // sesiones de caja el mismo día. El detalle, con los dos escenarios medidos, vive en
+    // `esperadoDelCajonAbierto`. Sin gaveta (el venue que no usa el módulo de caja) se cae a la
+    // fórmula de siempre, byte a byte.
+    //
+    // Cuando el cierre lo dispara la propia gaveta, el esperado llega ya resuelto: buscarlo aquí
+    // daría `null` porque esa caja acaba de cerrarse.
+    const cajon = context.cerrandoDesdeElCajon
+      ? { sessionId: context.cerrandoDesdeElCajon.sessionId, esperado: context.cerrandoDesdeElCajon.esperado }
+      : await esperadoDelCajonAbierto(venueId, shiftId, claimedAt).catch(error => {
+          // Es una lectura auxiliar: si falla, el cierre sigue con la fórmula del turno en vez de
+          // reventar sobre un turno ya reclamado en CLOSING.
+          logger.warn('[Shift Close] No se pudo resolver el esperado del cajón; se usa el del turno', {
+            venueId,
+            shiftId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          return null
+        })
+
+    const expectedCash = cajon?.esperado ?? new Decimal(shift.startingCash || 0).add(cashInDrawer)
     let outcome: CashReconciliationOutcome = request.outcome
     let ignoreReason = request.ignoreReason ?? request.reason
     let endingCash = cashInDrawer
@@ -1596,7 +1631,7 @@ async function closeShiftUsingRequest(
     let calculatedDifference: Decimal | null = null
 
     if (request.source === 'NEW' && request.action === 'COUNTED' && request.countedCash && outcome === 'APPLIED') {
-      const calculation = calculateCashReconciliation(request.countedCash, shift.startingCash || 0, cashInDrawer)
+      const calculation = calculateCashReconciliationFromExpected(request.countedCash, expectedCash)
       endingCash = new Decimal(request.countedCash)
       cashDeclared = new Decimal(request.countedCash)
       calculatedDifference = new Decimal(calculation.difference)
@@ -1620,6 +1655,10 @@ async function closeShiftUsingRequest(
     const finalData = {
       endTime: claimedAt,
       status: ShiftStatus.CLOSED,
+      // 🔴 QUIÉN cerró. `staffId` es quien ABRIÓ, y con el gesto único no tienen por qué ser la
+      // misma persona. Nunca se cae a `shift.staffId`: copiarlo afirmaría que quien abrió también
+      // cerró, que es exactamente el supuesto que esta columna existe para dejar de hacer.
+      closedById: context.actorStaffId ?? null,
       endingCash,
       cashDeclared,
       cashDifference,
@@ -1645,6 +1684,10 @@ async function closeShiftUsingRequest(
       action: request.action,
       outcome,
       expectedCash: moneyString(expectedCash),
+      // De DÓNDE salió ese esperado. Sin esto, dos cierres del mismo venue con números distintos
+      // son indistinguibles para quien audita.
+      expectedSource: cajon?.esperado ? 'CAJON' : 'TURNO',
+      ...(cajon ? { cashDrawerSessionId: cajon.sessionId } : {}),
       ignoreReason,
       endingCash: endingCash.toNumber(),
       totalSales: totalSales.toNumber(),
@@ -1703,6 +1746,41 @@ async function closeShiftUsingRequest(
     // External effects are attempted only after the Shift + ActivityLog transaction commits.
     await publishShiftCloseToPos(venueId, shift, request)
     await broadcastClosedShift(venueId, updatedShift)
+
+    // 🔴 UN GESTO, DOS REGISTROS (Task 5): cerrar el turno cierra también la gaveta ligada.
+    //
+    // Antes no lo hacía, y por eso una caja creada por la apertura del turno desde la PAX acababa
+    // cerrándola el auto-cierre de las 04:00 o el relevo de la mañana siguiente: los venues
+    // sólo-PAX habrían visto un bloque «Caja física · sin conteo» todos los días.
+    //
+    // 🔴 El conteo sólo viaja si de verdad se APLICÓ. Si el protocolo se ignoró —por el candado del
+    // venue, por un cuerpo inválido o por desbordar `Decimal(10,2)`— la gaveta se cierra SIN conteo:
+    // escribirlo ahí colaría por la puerta de atrás justo lo que el candado deja fuera, y dejaría
+    // las dos mitades diciendo cosas distintas del mismo dinero.
+    //
+    // Va después del commit y en try/catch: el turno YA está cerrado y firmado. Un fallo aquí
+    // degrada exactamente a lo de HOY (la gaveta se queda abierta y la recoge el relevo o el
+    // auto-cierre) y nunca convierte un cierre bueno en un error para el mostrador.
+    if (!context.cerrandoDesdeElCajon) {
+      try {
+        await cerrarTurnoDeCaja({
+          venueId,
+          staffId: context.actorStaffId ?? null,
+          staffName: null,
+          source: 'TURNO_TPV',
+          yaCerrado: { shiftId },
+          conteo: outcome === 'APPLIED' && cashDeclared ? cashDeclared : null,
+          note: legacy?.notes ?? null,
+          now: () => claimedAt,
+        })
+      } catch (error) {
+        logger.error('[Shift Close] El turno se cerró pero la gaveta ligada no', {
+          venueId,
+          shiftId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
 
     const reconciliation: CashReconciliationResult = { outcome }
     if (request.source === 'NEW' && request.action === 'COUNTED' && request.countedCash) {
@@ -1764,6 +1842,44 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
   const normalized = normalizeCashReconciliationRequest(closeData ?? {})
   const result = await closeShiftUsingRequest(venueId, shiftId, normalized, { orgId })
   return result.shift
+}
+
+/**
+ * Cierra el turno porque se acaba de cerrar LA GAVETA desde la tablet — la otra mitad del gesto
+ * único (`cerrarTurnoDeCaja` en `shared/turnoDeCaja.ts`, que es quien llama).
+ *
+ * 🔴 **No pasa por el candado del protocolo de conciliación de la PAX, a propósito.** Ese candado
+ * (`isCashReconciliationEnabled`) gobierna si la TERMINAL le pide al cajero que cuente. Aquí el
+ * cajero YA contó, por `POST /mobile/…/cash-drawer/close`, que es core, gratis y exige
+ * `actualAmount`. Volver a pedir permiso dejaría a la gaveta diciendo «faltan $50» y al turno
+ * callado sobre el mismo dinero — dos verdades para el mismo billete, que es justo lo que la
+ * unificación quita. (Decisión declarada de la Task 5; si el founder la revierte, se cambia aquí.)
+ *
+ * 🔴 Y el esperado viaja con el conteo: lo calculó la gaveta sobre SUS eventos, así que las dos
+ * mitades firman el mismo número por construcción y no por coincidencia.
+ */
+export async function cerrarTurnoPorCierreDeCaja(
+  venueId: string,
+  shiftId: string,
+  opciones: {
+    /** Lo que el cajero contó en la gaveta. `null` = nadie contó, y no se inventa nada. */
+    conteo: Decimal | null
+    /** El esperado de ESA gaveta, ya resuelto. */
+    esperadoDelCajon: Decimal | null
+    actorStaffId?: string | null
+    cashDrawerSessionId: string
+  },
+): Promise<Shift> {
+  const request: EffectiveCloseRequest =
+    opciones.conteo != null
+      ? { source: 'NEW', action: 'COUNTED', outcome: 'APPLIED', countedCash: opciones.conteo }
+      : { source: 'NONE', outcome: 'NOT_REQUESTED' }
+
+  const resultado = await closeShiftUsingRequest(venueId, shiftId, request, {
+    actorStaffId: opciones.actorStaffId ?? undefined,
+    cerrandoDesdeElCajon: { sessionId: opciones.cashDrawerSessionId, esperado: opciones.esperadoDelCajon },
+  })
+  return resultado.shift
 }
 
 /** HTTP-facing additive wrapper with request-scoped reconciliation outcome. */

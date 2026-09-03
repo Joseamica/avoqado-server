@@ -123,6 +123,27 @@ export interface CashReconciliationCalculation {
   fitsDifferenceColumn: boolean
 }
 
+/**
+ * La diferencia cuando el ESPERADO ya viene resuelto — el caso del cajón físico.
+ *
+ * 🔴 Existe porque `startingCash + ventas en efectivo` NO es el efectivo esperado cuando el venue
+ * usa el módulo de caja: es ciego a los retiros (`PAY_OUT`) y a que la gaveta se refonde a media
+ * jornada. El esperado bueno lo calcula `calculateExpectedAmount` sobre los eventos de la gaveta,
+ * y esta función es por dónde entra sin duplicar la aritmética del descuadre.
+ */
+export function calculateCashReconciliationFromExpected(
+  countedCash: Prisma.Decimal | string | number,
+  expectedCash: Prisma.Decimal | string | number,
+): CashReconciliationCalculation {
+  const esperado = new Prisma.Decimal(expectedCash)
+  const difference = new Prisma.Decimal(countedCash).sub(esperado)
+  return {
+    expectedCash: esperado,
+    difference,
+    fitsDifferenceColumn: difference.absoluteValue().lessThanOrEqualTo(DECIMAL_10_2_MAX),
+  }
+}
+
 /** Calculate physical count minus opening float and completed cash payments without JS numbers. */
 export function calculateCashReconciliation(
   countedCash: Prisma.Decimal | string | number,
@@ -130,11 +151,6 @@ export function calculateCashReconciliation(
   /** Lo que entró al cajón: ventas en efectivo **+ propina cobrada en efectivo**. */
   cashInDrawer: Prisma.Decimal | string | number,
 ): CashReconciliationCalculation {
-  const expectedCash = new Prisma.Decimal(startingCash).add(new Prisma.Decimal(cashInDrawer))
-  const difference = new Prisma.Decimal(countedCash).sub(expectedCash)
-  return {
-    expectedCash,
-    difference,
-    fitsDifferenceColumn: difference.absoluteValue().lessThanOrEqualTo(DECIMAL_10_2_MAX),
-  }
+  // UNA sola fórmula del descuadre: aquí sólo se arma el esperado con la regla del turno.
+  return calculateCashReconciliationFromExpected(countedCash, new Prisma.Decimal(startingCash).add(new Prisma.Decimal(cashInDrawer)))
 }
