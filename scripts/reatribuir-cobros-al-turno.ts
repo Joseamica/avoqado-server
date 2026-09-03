@@ -442,45 +442,74 @@ async function main(): Promise<void> {
     d.crear = { startTime, startingCash, staffId, origenInicio, origenFondo, origenStaff }
   }
 
-  // Las ÓRDENES de los cobros que se mueven (ronda de corrección 1). Se decide DESPUÉS de
-  // resolver todos los días, porque «¿todos los cobros reatribuidos de esta cuenta van al mismo
-  // turno?» es una pregunta que cruza días.
+  // Las ÓRDENES (rondas de corrección 1 y 2). Se decide DESPUÉS de resolver todos los días.
   //
   // 🔴 Por qué hay que atarlas: `getActiveShifts` y el detalle del turno en el dashboard cuentan
   // las órdenes por `Order.shiftId`. Si sólo se movieran los cobros, al dueño le saldría
-  // «0 órdenes» junto a $12,002. Y por qué hay que deduplicar la lista de la TPV al mismo tiempo:
+  // «0 órdenes» junto a $12,002. Y por qué hay que deduplicar a la vez la lista de la TPV:
   // atarlas hace que el mismo cobro sea alcanzable por los dos caminos.
+  //
+  // 🔴 La candidatura NO depende de si el cobro se MOVIÓ en esta corrida, sino de dónde ACABA
+  // (ronda 2). Con la definición vieja —«al menos un cobro reatribuido»— quedaban fuera las
+  // órdenes cuyos cobros ya estaban bien atados: en Testarudo, las de los 14 cobros del 1-sep
+  // que ya tenían turno, y el turno enseñaría ~14 órdenes de menos en la MISMA pantalla donde
+  // el dueño decide si el corte cuadra. Medio arreglo ahí es peor que ninguno.
   {
-    const destinoPorOrden = new Map<string, Set<string>>() // orderId → turnos destino distintos
+    // Turno FINAL de cada cobro de la ventana: su destino si el plan lo toca, si no el que ya tiene.
+    const finalDePago = new Map<string, string | null>()
+    for (const d of plan) {
+      const destino = d.turno?.id ?? `NUEVO:${d.dia}`
+      // ⚠️ `yaEnElTurno` es REDUNDANTE aquí y se deja por claridad, no por necesidad: un cobro que
+      // ya está en el turno del día tiene `p.shiftId` = ese turno, así que el respaldo de abajo
+      // llega a la misma conclusión. Lo comprobó un sabotaje: quitarlo no cambia ni un resultado.
+      for (const p of [...d.yaEnElTurno, ...d.mover]) finalDePago.set(p.id, destino)
+    }
+    const clavesGestionadas = plan.map(d => d.turno?.id ?? `NUEVO:${d.dia}`)
+
+    // Hay que mirar también los cobros que YA cuelgan de un turno gestionado aunque sean de otra
+    // fecha: si no, una orden con un cobro viejo ahí se juzgaría con información incompleta.
+    const idsExistentes = plan.map(d => d.turno?.id).filter((id): id is string => !!id)
+    const cobrosYaEnEsosTurnos =
+      idsExistentes.length > 0
+        ? await prisma.payment.findMany({
+            where: { venueId, status: 'COMPLETED', shiftId: { in: idsExistentes } },
+            select: { id: true, orderId: true, shiftId: true, order: { select: { orderNumber: true, shiftId: true } } },
+          })
+        : []
+
     const folios = new Map<string, string>()
     const ordenYaAtada = new Map<string, string>()
-    for (const d of plan) {
-      const destino = d.turno?.id ?? `NUEVO:${d.dia}`
-      for (const p of d.mover) {
-        folios.set(p.orderId, String(p.order.orderNumber))
-        if (p.order.shiftId) ordenYaAtada.set(p.orderId, p.order.shiftId)
-        destinoPorOrden.set(p.orderId, (destinoPorOrden.get(p.orderId) ?? new Set()).add(destino))
-      }
+    const turnosPorOrden = new Map<string, Set<string>>()
+    const anotar = (p: { id: string; orderId: string; shiftId: string | null; order: { orderNumber: string; shiftId: string | null } }) => {
+      folios.set(p.orderId, String(p.order.orderNumber))
+      if (p.order.shiftId) ordenYaAtada.set(p.orderId, p.order.shiftId)
+      const final = finalDePago.has(p.id) ? finalDePago.get(p.id)! : p.shiftId
+      if (!final) return
+      turnosPorOrden.set(p.orderId, (turnosPorOrden.get(p.orderId) ?? new Set()).add(final))
     }
-    for (const d of plan) {
-      const destino = d.turno?.id ?? `NUEVO:${d.dia}`
-      const suyas = [...new Set(d.mover.map(p => p.orderId))]
-      for (const orderId of suyas) {
-        const folio = folios.get(orderId) ?? orderId
-        const turnos = [...(destinoPorOrden.get(orderId) ?? [])]
-        // Nunca se pisa una orden que ya cuelga de un turno, aunque sea otro.
-        const atada = ordenYaAtada.get(orderId)
-        if (atada) {
-          if (turnos[0] === destino) d.ordenes.yaAtadas.push({ orderId, folio, turnoId: atada })
-          continue
-        }
-        // Una cuenta cobrada a caballo entre dos días no se adivina: se lista y se deja igual.
-        if (turnos.length > 1) {
-          if (turnos[0] === destino) d.ordenes.ambiguas.push({ orderId, folio, turnos })
-          continue
-        }
-        d.ordenes.atar.push({ orderId, folio })
+    for (const p of cobrosYaEnEsosTurnos) anotar(p)
+    for (const p of pagosDeLaVentana) anotar(p)
+
+    const diaDe = (clave: string): PlanDia | undefined => plan.find(d => (d.turno?.id ?? `NUEVO:${d.dia}`) === clave)
+    for (const [orderId, turnos] of turnosPorOrden) {
+      // El renglón se cuelga del PRIMER turno gestionado (en orden del plan) al que toca esta orden.
+      const destino = clavesGestionadas.find(c => turnos.has(c))
+      if (!destino) continue // ningún cobro suyo acaba en un turno de esta corrida
+      const d = diaDe(destino)
+      if (!d) continue
+      const folio = folios.get(orderId) ?? orderId
+      // Nunca se pisa una orden que ya cuelga de un turno, aunque sea otro.
+      const atada = ordenYaAtada.get(orderId)
+      if (atada) {
+        d.ordenes.yaAtadas.push({ orderId, folio, turnoId: atada })
+        continue
       }
+      // Su dinero acaba repartido en dos turnos: no se adivina, se lista y se deja igual.
+      if (turnos.size > 1) {
+        d.ordenes.ambiguas.push({ orderId, folio, turnos: [...turnos] })
+        continue
+      }
+      d.ordenes.atar.push({ orderId, folio })
     }
   }
 
