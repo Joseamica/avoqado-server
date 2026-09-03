@@ -20,6 +20,7 @@ import { createRefundTransactionCost } from '../payments/transactionCost.service
 import { logAction } from './activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { acumuladoPersistido, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
 
 export type RefundReason = 'RETURNED_GOODS' | 'ACCIDENTAL_CHARGE' | 'CANCELLED_ORDER' | 'FRAUDULENT_CHARGE' | 'OTHER'
 
@@ -106,7 +107,17 @@ interface LockedPaymentRow {
 
 interface RefundPaymentRow {
   id: string
+  /** Venta devuelta, en PESOS y en negativo. */
   amount: unknown
+  /**
+   * 🔴 Propina devuelta, en PESOS y en negativo. Hasta el 3-sep-2026 el `SELECT` NI SIQUIERA
+   * la pedía, así que lo ya devuelto se medía sólo sobre la venta mientras el remanente se
+   * medía sobre `amount + tipAmount`: dos bases distintas para el mismo cobro, y por ahí
+   * salían $130 sobre un cobro de $120. Quien la quite del `SELECT` no rompe el compilador
+   * —el tipo de un `$queryRaw` se declara a mano— pero `centavosDevueltosDeFilas` revienta
+   * al no encontrar la llave, que es lo que impide que vuelva a pasar en silencio.
+   */
+  tipAmount: unknown
   processorData: Prisma.JsonValue | null
   createdAt: Date
   status: string
@@ -290,7 +301,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     }
 
     const existingRefunds = await tx.$queryRaw<RefundPaymentRow[]>(Prisma.sql`
-      SELECT id, amount, "processorData", "createdAt", status
+      SELECT id, amount, "tipAmount", "processorData", "createdAt", status
       FROM "Payment"
       WHERE
         "venueId" = ${input.venueId}
@@ -299,7 +310,19 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       ORDER BY "createdAt" ASC, id ASC
     `)
 
-    const alreadyRefundedCents = existingRefunds.reduce((sum, refund) => sum + Math.abs(toCents(refund.amount)), 0)
+    // ¿Cuánto se ha devuelto ya de este cobro? La definición vive UNA sola vez, en
+    // `shared/devueltoDeUnCobro.ts`, y es la misma que usa el riel de la terminal:
+    // **venta + propina**. Aquí se le pasan las DOS evidencias —el acumulado persistido y
+    // las filas de reembolso, que este camino ya tenía a la mano— y gana la mayor; el
+    // porqué está en la cabecera de ese archivo. La cuenta se hace en CENTAVOS enteros.
+    //
+    // 🔴 Esto sustituye a un `reduce` que sumaba sólo `Math.abs(refund.amount)`: la propina
+    // ya devuelta no contaba, así que un cobro de $100 + $20 admitía dos reembolsos de $60
+    // ($120 entregados) y todavía declaraba $10 reembolsables. Prueba:
+    // `tests/unit/services/dashboard/refund.propinaEnElAcumulado.test.ts`, donde el cobro
+    // lleva propina a propósito — con `tipAmount = 0` las dos semánticas coinciden y una
+    // prueba así pasaría con el defecto vivo.
+    const alreadyRefundedCents = centavosYaDevueltos({ processorData: original.processorData, filas: existingRefunds })
     const totalOriginalCents = toCents(original.amount) + toCents(original.tipAmount)
     const remainingBeforeCents = Math.max(0, totalOriginalCents - alreadyRefundedCents)
     const refundedItemsByOrderItemId = collectExistingRefundedItems(existingRefunds)
@@ -507,11 +530,12 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       },
     })
 
-    // Bump refundedAmount on the original payment's processorData
+    // Bump refundedAmount on the original payment's processorData.
+    // Los dos campos salen del MISMO entero de centavos (`acumuladoPersistido`): derivarlos
+    // por separado es cómo empiezan a divergir. Semántica: venta + propina.
     const updatedProcessorData = {
       ...originalProcessorData,
-      refundedAmount: centsToNumber(alreadyRefundedCents + refundCents),
-      refundedAmountCents: alreadyRefundedCents + refundCents,
+      ...acumuladoPersistido(alreadyRefundedCents + refundCents),
       refunds: [
         ...((Array.isArray(originalProcessorData.refunds) ? originalProcessorData.refunds : []) as any[]),
         {

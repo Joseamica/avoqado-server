@@ -51,6 +51,11 @@ describe('refund.dashboard.service', () => {
         {
           id: 'refund-1',
           amount: -6.67,
+          // 🔴 `tipAmount` NO es decorativo en esta fila: desde la Task 5r «lo ya devuelto»
+          // se mide como venta + propina (`shared/devueltoDeUnCobro.ts`) y la ausencia de la
+          // llave REVIENTA a propósito — una fila de reembolso sin ella significa que el
+          // `SELECT` dejó de pedir la columna, no que la propina fuera cero.
+          tipAmount: 0,
           createdAt: new Date('2026-04-17T10:00:00.000Z'),
           status: TransactionStatus.COMPLETED,
           processorData: {
@@ -119,6 +124,7 @@ describe('refund.dashboard.service', () => {
         {
           id: 'refund-1',
           amount: -3.34,
+          tipAmount: 0,
           createdAt: new Date('2026-04-17T10:00:00.000Z'),
           status: TransactionStatus.COMPLETED,
           processorData: {
@@ -379,7 +385,9 @@ describe('refund.dashboard.service', () => {
     it('🔴 sigue respetando el límite de lo que queda por devolver (candado contra doble reembolso)', async () => {
       prismaMock.$queryRaw
         .mockResolvedValueOnce([pagoOriginal({ amount: 100 })])
-        .mockResolvedValueOnce([{ id: 'refund-prev', amount: -100, createdAt: new Date(), status: 'COMPLETED', processorData: {} }])
+        .mockResolvedValueOnce([
+          { id: 'refund-prev', amount: -100, tipAmount: 0, createdAt: new Date(), status: 'COMPLETED', processorData: {} },
+        ])
 
       await expect(reembolsar({ amount: 10000 })).rejects.toThrow(/exceeds remaining refundable/i)
       expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()

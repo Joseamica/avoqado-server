@@ -700,7 +700,12 @@ export async function recordRefund(
       // Prueba: `tests/unit/services/tpv/refund.acumuladoBajoCandado.test.ts`, donde las dos
       // fotos DIFIEREN a propósito (exterior 0, bloqueada 60). Con el mismo valor en ambas la
       // prueba pasaría con el defecto vivo.
-      const newRefundedAmount = lockedAlreadyRefunded + refundAmountInPesos
+      // Se acumula en CENTAVOS ENTEROS y los dos campos persistidos se derivan del MISMO
+      // entero (`acumuladoPersistido`): sumar pesos con `+` deriva, y derivar cada campo por
+      // su cuenta es cómo empiezan a contradecirse.
+      const nuevoDevueltoCents = lockedAlreadyRefundedCents + esteReembolsoCents
+      const acumulado = acumuladoPersistido(nuevoDevueltoCents)
+      const newRefundedAmount = acumulado.refundedAmount
 
       // 🔎 Si las dos fotos NO coinciden es que otro reembolso del MISMO cobro entró entre la
       // lectura del STEP 1 y este candado: exactamente la carrera de arriba. Con el defecto
@@ -716,18 +721,18 @@ export async function recordRefund(
           totalDevueltoTrasEste: newRefundedAmount,
         })
       }
-      // ⚠️ Esta línea NO está protegida por ninguna prueba, y se deja escrito en vez de
-      // fingir que lo está: `Number(locked.amount)` y `originalAmountNumber` valen HOY lo
-      // mismo siempre, porque un reembolso nunca toca la columna `amount` del cobro original
-      // (crea una fila aparte). Se lee del candado por coherencia con el resto del bloque;
-      // ninguna prueba puede distinguirlas sin fabricar un estado imposible. Lo que sí cambia
-      // —y sí está probado— es `newRefundedAmount`.
+      // 🔴 Se compara contra el TOTAL (venta + propina), que es la misma base sobre la que se
+      // mide el acumulado. Desde dic-2025 hasta la Task 5r esta línea usaba `locked.amount`
+      // —la VENTA sola—, así que con propina el dato PERSISTIDO y el que el historial de la
+      // terminal SIRVE se contradecían: devolver $100 de un cobro de $100 + $20 se guardaba
+      // como «totalmente reembolsado» mientras `payment.tpv.service.ts:1439`, que recalcula
+      // contra `amount + tipAmount`, respondía que no. Mismo cobro, dos respuestas.
       //
-      // Se conserva la comparación contra la VENTA (sin propina) que tenía este camino desde
-      // dic-2025. Nadie lee esta bandera persistida: el consumidor la recalcula en
-      // `payment.tpv.service.ts:1439` contra el total CON propina, así que unificar los dos
-      // criterios es una decisión aparte y no entra en un arreglo de concurrencia.
-      const isFullyRefunded = newRefundedAmount >= Number(locked.amount)
+      // ⚠️ Sigue leyéndose del candado y no de `originalAmountNumber` por coherencia con el
+      // resto del bloque: valen HOY lo mismo siempre —un reembolso nunca toca la columna
+      // `amount` del cobro original, crea una fila aparte— y ninguna prueba puede
+      // distinguirlas sin fabricar un estado imposible.
+      const isFullyRefunded = nuevoDevueltoCents >= lockedTotalCents
 
       // Build refund history array safely as plain JSON
       const existingHistory = Array.isArray(lockedProcessorData.refundHistory) ? lockedProcessorData.refundHistory : []
@@ -748,7 +753,7 @@ export async function recordRefund(
       const newRefundsEntry = {
         refundPaymentId: refundPayment.id,
         amount: refundAmountInPesos,
-        amountCents: Math.round(refundAmountInPesos * 100),
+        amountCents: esteReembolsoCents,
         reason: refundData.reason,
         at: new Date().toISOString(),
       }
@@ -756,8 +761,9 @@ export async function recordRefund(
       // Build updated processorData as plain object for Prisma JSON field
       const updatedProcessorData = {
         ...lockedProcessorData,
-        refundedAmount: newRefundedAmount,
-        refundedAmountCents: Math.round(newRefundedAmount * 100),
+        // `refundedAmount` (pesos) y `refundedAmountCents` salen del MISMO entero, y su
+        // significado es el ÚNICO de `shared/devueltoDeUnCobro.ts`: venta + propina.
+        ...acumulado,
         isFullyRefunded,
         lastRefundId: refundPayment.id,
         lastRefundAt: new Date().toISOString(),
