@@ -132,6 +132,12 @@ export interface AbrirTurnoDeCajaResult {
    * revés. Si otro aparato se adelantó y cerró primero, el campo NO aparece — no lo hicimos nosotros.
    */
   relevo?: { shiftCerradoId?: string; cajaCerradaId?: string }
+  /**
+   * El nombre que quedó en el historial del cajón, ya resuelto (nunca el placeholder 'Staff').
+   * Lo devuelve para que las rutas que ya avisaban por Socket.IO conserven su payload EXACTO sin
+   * repetir la consulta de `StaffVenue` que este servicio acaba de hacer.
+   */
+  staffName: string
 }
 
 /** Marca legible del relevo. Va en `Shift.notes`: quien lo lea tiene que saber que NADIE contó. */
@@ -300,7 +306,9 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     const turno = await tx.shift.findFirst({
       where: { venueId, endTime: null },
       orderBy: { startTime: 'desc' },
-      select: { id: true, status: true, startTime: true, notes: true },
+      // `startingCash` se lee porque es EL FONDO cuando este gesto sólo crea la caja: ver
+      // `fondoEfectivo` más abajo.
+      select: { id: true, status: true, startTime: true, notes: true, startingCash: true },
     })
 
     if (turno && turno.status === ShiftStatus.CLOSING) throw cierreEnProceso()
@@ -347,50 +355,6 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       }
     }
 
-    let shiftId: string
-    let shiftCreado = false
-    if (turnoAReusar) {
-      shiftId = turnoAReusar.id
-      if (posIntegrado && hariaFaltaCrearTurno) {
-        logger.warn('[TURNO DE CAJA] Se avisó al POS de una apertura que acabó ligándose a un turno ya abierto', {
-          venueId,
-          shiftId,
-          shiftExternalId,
-        })
-      }
-    } else {
-      const nuevo = await tx.shift
-        .create({
-          data: {
-            venueId,
-            staffId,
-            startTime: ahora,
-            endTime: null,
-            status: ShiftStatus.OPEN,
-            startingCash: fondo,
-            endingCash: null,
-            cashDeclared: null,
-            cardDeclared: null,
-            vouchersDeclared: null,
-            otherDeclared: null,
-            totalSales: 0,
-            totalTips: 0,
-            notes: null,
-            externalId: shiftExternalId,
-            posRawData: stationId ? { stationId } : undefined,
-          },
-          select: { id: true },
-        })
-        .catch((error: unknown) => {
-          // SÓLO el índice único parcial `Shift(venueId) WHERE status='OPEN'`: otra terminal ganó.
-          // Un choque de `venueId_externalId` (venues integrados) sube tal cual, no se disfraza.
-          if (esChoqueDelUnico(error, UNICO_TURNO_ABIERTO)) throw conflictoDeApertura()
-          throw error
-        })
-      shiftId = nuevo.id
-      shiftCreado = true
-    }
-
     // ── El cajón físico ───────────────────────────────────────────────────────────────────
     //
     // 🔴 SE RELEVA IGUAL QUE EL TURNO, y la simetría no es estética. Buscar aquí un
@@ -406,7 +370,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     // existe de que la sesión anterior terminó.
     const cajaAbierta = await tx.cashDrawerSession.findFirst({
       where: { venueId, status: 'OPEN' },
-      select: { id: true, shiftId: true, openedAt: true },
+      select: { id: true, shiftId: true, openedAt: true, startingAmount: true },
     })
 
     let cajaCerradaId: string | undefined
@@ -432,6 +396,67 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       caja = null
     }
 
+    // ── EL FONDO: uno solo por caja física, y gana el que YA EXISTE ───────────────────────
+    //
+    // 🔴 El caso REAL de Testarudo (1-sep-2026): la tablet abrió la caja a las 07:38 con **$2,000**
+    // contados y la PAX pidió turno a las 08:12 tecleando **$0**. Ligar sin más dejaba el turno con
+    // $0 y la caja con $2,000 — dos fondos para UNA sola gaveta, que es exactamente el descuadre que
+    // este proyecto existe para borrar. Quien cerrara el turno vería un sobrante de $2,000.
+    //
+    // La regla es la misma que ya impide pisar el fondo de lo que estaba abierto, dicha al derecho:
+    // **el dinero que alguien CONTÓ gana sobre el que alguien tecleó después**. Así que lo que se
+    // CREA hereda el fondo de lo que ya existía —la caja primero, porque es la gaveta física; el
+    // turno si no hay caja— y el `startingCash` tecleado sólo manda cuando no hay nada que heredar.
+    //
+    // ⚠️ Por eso el cajón se resuelve ANTES de crear el turno: al revés, el turno nacería sin poder
+    // saber que la gaveta ya tenía fondo.
+    const fondoQueYaExistia = caja?.startingAmount ?? turnoAReusar?.startingCash ?? null
+    const fondoEfectivo = fondoQueYaExistia === null ? fondo : new Prisma.Decimal(fondoQueYaExistia as never)
+
+    let shiftId: string
+    let shiftCreado = false
+    if (turnoAReusar) {
+      shiftId = turnoAReusar.id
+      if (posIntegrado && hariaFaltaCrearTurno) {
+        logger.warn('[TURNO DE CAJA] Se avisó al POS de una apertura que acabó ligándose a un turno ya abierto', {
+          venueId,
+          shiftId,
+          shiftExternalId,
+        })
+      }
+    } else {
+      const nuevo = await tx.shift
+        .create({
+          data: {
+            venueId,
+            staffId,
+            startTime: ahora,
+            endTime: null,
+            status: ShiftStatus.OPEN,
+            startingCash: fondoEfectivo,
+            endingCash: null,
+            cashDeclared: null,
+            cardDeclared: null,
+            vouchersDeclared: null,
+            otherDeclared: null,
+            totalSales: 0,
+            totalTips: 0,
+            notes: null,
+            externalId: shiftExternalId,
+            posRawData: stationId ? { stationId } : undefined,
+          },
+          select: { id: true },
+        })
+        .catch((error: unknown) => {
+          // SÓLO el índice único parcial `Shift(venueId) WHERE status='OPEN'`: otra terminal ganó.
+          // Un choque de `venueId_externalId` (venues integrados) sube tal cual, no se disfraza.
+          if (esChoqueDelUnico(error, UNICO_TURNO_ABIERTO)) throw conflictoDeApertura()
+          throw error
+        })
+      shiftId = nuevo.id
+      shiftCreado = true
+    }
+
     let cashDrawerSessionId: string
     let cajaCreada = false
     let cajaYaLigadaA: string | null | undefined
@@ -446,17 +471,17 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
             openedByStaffId: staffId,
             openedByName: staffName,
             openedAt: ahora,
-            startingAmount: fondo,
+            startingAmount: fondoEfectivo,
             deviceName: deviceName || null,
             status: 'OPEN',
             events: {
               create: {
                 venueId,
                 type: 'OPEN',
-                amount: fondo,
+                amount: fondoEfectivo,
                 staffId,
                 staffName,
-                note: `Caja abierta con $${fondo}`,
+                note: `Caja abierta con $${fondoEfectivo}`,
               },
             },
           },
@@ -509,7 +534,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
         ? { ...(shiftCerradoId ? { shiftCerradoId } : {}), ...(cajaCerradaId ? { cajaCerradaId } : {}) }
         : undefined
 
-    return { shiftId, cashDrawerSessionId, shiftCreado, cajaCreada, ...(relevo ? { relevo } : {}) } as AbrirTurnoDeCajaResult
+    return { shiftId, cashDrawerSessionId, shiftCreado, cajaCreada, staffName, ...(relevo ? { relevo } : {}) } as AbrirTurnoDeCajaResult
   })
 
   // ── Bitácora: fuera de la transacción y fire-and-forget ───────────────────────────────────
