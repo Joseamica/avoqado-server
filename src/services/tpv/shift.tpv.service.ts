@@ -1,5 +1,5 @@
 import { resolveShiftCashDrawer } from '../dashboard/shift.dashboard.service'
-import { Prisma, Shift, ShiftStatus } from '@prisma/client'
+import { PaymentFundsFlow, PaymentMethod, PaymentType, Prisma, Shift, ShiftStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
@@ -1349,6 +1349,124 @@ async function broadcastClosedShift(venueId: string, updatedShift: Shift): Promi
   }
 }
 
+/**
+ * La proyección MÍNIMA de un `Payment` con la que se pueden calcular los totales de un turno —
+ * exactamente lo que selecciona el cierre.
+ *
+ * 🔴 Los tres campos de `tenderSemantics` son OBLIGATORIOS (aunque nulos) a propósito: si fueran
+ * opcionales, un `select` que olvide `tenderCountsAsCash` compilaría y el vale de despensa
+ * dejaría de contar en el cajón sin que nada avise. Es la trampa del mock que ya costó una vez
+ * («el mock pasa el campo gratis, el `select` real no»).
+ */
+export interface ShiftPaymentForTotals {
+  amount: Decimal | number | string | null
+  tipAmount: Decimal | number | string | null
+  method: PaymentMethod | string
+  fundsFlow: PaymentFundsFlow | string | null
+  tenderTypeId: string | null
+  tenderCountsAsCash: boolean | null
+  /**
+   * Aceptado para que un llamador pueda pasar su fila tal cual, pero la agregación NO lo mira:
+   * el cierre nunca ramificó por `type`. Un REFUND ya viene con `amount` negativo y por eso
+   * resta solo. Ramificar aquí sería cambiar la regla, no extraerla.
+   */
+  type?: PaymentType | string | null
+}
+
+/** Los ocho totales con los que se cierra un turno. Todos `Decimal`: dinero nunca en float. */
+export interface ShiftPaymentTotals {
+  totalSales: Decimal
+  totalTips: Decimal
+  totalCashPayments: Decimal
+  totalCardPayments: Decimal
+  totalVoucherPayments: Decimal
+  totalOtherPayments: Decimal
+  totalCashTips: Decimal
+  totalDrawerExtra: Decimal
+}
+
+/**
+ * Los totales de un turno a partir de sus cobros COMPLETED.
+ *
+ * Extraída VERBATIM del cuerpo de `closeShiftUsingRequest` (tarea 9, «turno de caja del
+ * negocio»): mismas ramas por método, misma `totalCashTips`, mismo `totalDrawerExtra`. Existe
+ * para que el script de reatribución histórica (`scripts/reatribuir-cobros-al-turno.ts`)
+ * recalcule un turno con LA MISMA regla que el cierre en vez de con una copia — si divergieran,
+ * el turno reparado y el turno cerrado dirían cifras distintas del mismo dinero.
+ *
+ * Pura: sin base, sin reloj, sin `venueId`. Lo que decide qué está en el cajón NO es
+ * `method === 'CASH'` sino `paymentCountsAsDrawerCash` (la autoridad de `tenderSemantics`).
+ */
+export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): ShiftPaymentTotals {
+  let totalCashPayments = new Decimal(0)
+  let totalCardPayments = new Decimal(0)
+  let totalVoucherPayments = new Decimal(0)
+  let totalOtherPayments = new Decimal(0)
+  let totalSales = new Decimal(0)
+  let totalTips = new Decimal(0)
+  // 🔴 Propina cobrada EN EFECTIVO — se lleva aparte de `totalCashPayments` a propósito.
+  //
+  // `totalCashPayments` es la cifra de VENTAS en efectivo y la consumen el MCP
+  // (`src/mcp/tools/shifts.ts`), `cashSales` del dashboard y `salesTotal`
+  // (`shared-query.service.ts`). Sumarle la propina ahí arreglaría el arqueo inflando
+  // las ventas — cambiar un bug por otro peor.
+  //
+  // Pero el billete de propina SÍ entró físicamente al cajón junto con la venta, así
+  // que el efectivo esperado tiene que incluirlo o el cierre reporta un sobrante falso
+  // del tamaño de las propinas (era la contradicción contra
+  // `cashCloseout.dashboard.service.ts`, que sí las sumaba). El dueño cuenta, ve el
+  // desglose en el ticket y reparte DESPUÉS: por eso no hace falta registrar un egreso.
+  //
+  // La propina de TARJETA no entra aquí: ese dinero llega por el depósito del banco.
+  let totalCashTips = new Decimal(0)
+  // Dinero que SÍ está en el cajón sin ser venta en efectivo: tender personalizado con
+  // countsAsPhysicalCash (vale de despensa, method=OTHER). Entra al efectivo esperado
+  // pero NUNCA a `totalCashPayments` (que es la cifra de VENTAS en efectivo — ver arriba).
+  // Con la data actual (sin tender snapshots) esto es siempre 0: comportamiento idéntico.
+  let totalDrawerExtra = new Decimal(0)
+
+  payments.forEach(payment => {
+    const amount = new Decimal(payment.amount || 0)
+    const tipAmount = new Decimal(payment.tipAmount || 0)
+    totalSales = totalSales.add(amount)
+    totalTips = totalTips.add(tipAmount)
+
+    if (payment.method !== 'CASH' && paymentCountsAsDrawerCash(payment)) {
+      totalDrawerExtra = totalDrawerExtra.add(amount).add(tipAmount)
+    }
+
+    switch (payment.method) {
+      case 'CASH':
+        totalCashPayments = totalCashPayments.add(amount)
+        totalCashTips = totalCashTips.add(tipAmount)
+        break
+      case 'CREDIT_CARD':
+      case 'DEBIT_CARD':
+        totalCardPayments = totalCardPayments.add(amount)
+        break
+      case 'DIGITAL_WALLET':
+        totalVoucherPayments = totalVoucherPayments.add(amount)
+        break
+      case 'BANK_TRANSFER':
+      case 'OTHER':
+      default:
+        totalOtherPayments = totalOtherPayments.add(amount)
+        break
+    }
+  })
+
+  return {
+    totalSales,
+    totalTips,
+    totalCashPayments,
+    totalCardPayments,
+    totalVoucherPayments,
+    totalOtherPayments,
+    totalCashTips,
+    totalDrawerExtra,
+  }
+}
+
 async function closeShiftUsingRequest(
   venueId: string,
   shiftId: string,
@@ -1376,62 +1494,19 @@ async function closeShiftUsingRequest(
       },
     })
 
-    let totalCashPayments = new Decimal(0)
-    let totalCardPayments = new Decimal(0)
-    let totalVoucherPayments = new Decimal(0)
-    let totalOtherPayments = new Decimal(0)
-    let totalSales = new Decimal(0)
-    let totalTips = new Decimal(0)
-    // 🔴 Propina cobrada EN EFECTIVO — se lleva aparte de `totalCashPayments` a propósito.
-    //
-    // `totalCashPayments` es la cifra de VENTAS en efectivo y la consumen el MCP
-    // (`src/mcp/tools/shifts.ts`), `cashSales` del dashboard y `salesTotal`
-    // (`shared-query.service.ts`). Sumarle la propina ahí arreglaría el arqueo inflando
-    // las ventas — cambiar un bug por otro peor.
-    //
-    // Pero el billete de propina SÍ entró físicamente al cajón junto con la venta, así
-    // que el efectivo esperado tiene que incluirlo o el cierre reporta un sobrante falso
-    // del tamaño de las propinas (era la contradicción contra
-    // `cashCloseout.dashboard.service.ts`, que sí las sumaba). El dueño cuenta, ve el
-    // desglose en el ticket y reparte DESPUÉS: por eso no hace falta registrar un egreso.
-    //
-    // La propina de TARJETA no entra aquí: ese dinero llega por el depósito del banco.
-    let totalCashTips = new Decimal(0)
-    // Dinero que SÍ está en el cajón sin ser venta en efectivo: tender personalizado con
-    // countsAsPhysicalCash (vale de despensa, method=OTHER). Entra al efectivo esperado
-    // pero NUNCA a `totalCashPayments` (que es la cifra de VENTAS en efectivo — ver arriba).
-    // Con la data actual (sin tender snapshots) esto es siempre 0: comportamiento idéntico.
-    let totalDrawerExtra = new Decimal(0)
-
-    shiftPayments.forEach(payment => {
-      const amount = new Decimal(payment.amount || 0)
-      const tipAmount = new Decimal(payment.tipAmount || 0)
-      totalSales = totalSales.add(amount)
-      totalTips = totalTips.add(tipAmount)
-
-      if (payment.method !== 'CASH' && paymentCountsAsDrawerCash(payment)) {
-        totalDrawerExtra = totalDrawerExtra.add(amount).add(tipAmount)
-      }
-
-      switch (payment.method) {
-        case 'CASH':
-          totalCashPayments = totalCashPayments.add(amount)
-          totalCashTips = totalCashTips.add(tipAmount)
-          break
-        case 'CREDIT_CARD':
-        case 'DEBIT_CARD':
-          totalCardPayments = totalCardPayments.add(amount)
-          break
-        case 'DIGITAL_WALLET':
-          totalVoucherPayments = totalVoucherPayments.add(amount)
-          break
-        case 'BANK_TRANSFER':
-        case 'OTHER':
-        default:
-          totalOtherPayments = totalOtherPayments.add(amount)
-          break
-      }
-    })
+    // Los ocho totales salen de `aggregateShiftPayments` (arriba en este archivo). Vive fuera
+    // para que el script de reatribución histórica recalcule un turno con LA MISMA regla; los
+    // comentarios de por qué `totalCashTips` y `totalDrawerExtra` van aparte viven con ella.
+    const {
+      totalSales,
+      totalTips,
+      totalCashPayments,
+      totalCardPayments,
+      totalVoucherPayments,
+      totalOtherPayments,
+      totalCashTips,
+      totalDrawerExtra,
+    } = aggregateShiftPayments(shiftPayments)
 
     const orderItems = await prisma.orderItem.findMany({
       where: {
