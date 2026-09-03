@@ -223,6 +223,20 @@ const envSchema = z.object({
   APPLE_PASS_KEY_PASSWORD: z.string().optional(), // la puesta al exportar la llave
   APPLE_WWDR_PEM_BASE64: z.string().optional(), // wwdr.pem (G4) en base64
 
+  // ==========================================
+  // Google Wallet — la misma tarjeta, para Android (fase C)
+  // ==========================================
+  // 🔴 Opcionales por la MISMA razón que las de Apple: un parseo fallido hace
+  // `process.exit(1)` al importar este archivo y se lleva la API entera —pagos, POS,
+  // órdenes— por una tarjeta de lealtad. La ausencia se reporta en
+  // `googleWalletAvailable()` y el endpoint responde algo entendible.
+  GOOGLE_WALLET_ISSUER_ID: z.string().optional(), // 3388000000023181777
+  // 🔴 Normalmente VACÍA: la cuenta de servicio de Firebase que el server ya carga
+  // (`FIREBASE_SERVICE_ACCOUNT_BASE64`) es la que está registrada como Developer en la
+  // consola de Wallet. Esta variable existe sólo para poder separarlas algún día sin
+  // tocar código.
+  GOOGLE_WALLET_SERVICE_ACCOUNT_BASE64: z.string().optional(),
+
   // Google OAuth
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
