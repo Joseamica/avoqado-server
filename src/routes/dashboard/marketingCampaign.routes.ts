@@ -24,6 +24,14 @@ import {
  * irreversible y le llega a los clientes del negocio. `publish` es la ÚNICA ruta que
  * exige `marketing:send`; las demás mutaciones se quedan en `marketing:manage`.
  *
+ * 🔴 Leer (listar/detalle) exige `marketing:manage`, NO `marketing:read` (fix ronda
+ * final, revisor). `marketing:read` lo tienen roles de PISO (CASHIER, WAITER, KITCHEN,
+ * HOST) — `src/lib/permissions.ts` documenta su propósito ahí mismo: "Fase 0: ver el
+ * aviso de privacidad — editarlo/mandar campañas es ADMIN+". Dejar `GET /` y `GET /:id`
+ * en `:read` le abría a un cajero el listado completo de borradores y el conteo de
+ * destinatarios de cada campaña — nada de PII, pero contradice esa intención escrita.
+ * `preview` (abajo) ya usaba `:manage` desde la Task 5; esto lo alinea con el resto.
+ *
  * Orden de middlewares: `checkPermission` ANTES de `validateRequest` — es el orden
  * real de TODO el repo (customerGroup, classSession, attendance, printStation…), no
  * al revés.
@@ -31,11 +39,11 @@ import {
 
 const router = Router({ mergeParams: true })
 
-router.get('/', checkPermission('marketing:read'), validateRequest(listarCampanasSchema), controller.listCampaigns)
+router.get('/', checkPermission('marketing:manage'), validateRequest(listarCampanasSchema), controller.listCampaigns)
 
 router.post('/', checkPermission('marketing:manage'), validateRequest(crearCampanaSchema), controller.createCampaign)
 
-router.get('/:id', checkPermission('marketing:read'), validateRequest(campanaParamsSchema), controller.getCampaign)
+router.get('/:id', checkPermission('marketing:manage'), validateRequest(campanaParamsSchema), controller.getCampaign)
 
 router.put('/:id', checkPermission('marketing:manage'), validateRequest(editarCampanaSchema), controller.updateCampaign)
 

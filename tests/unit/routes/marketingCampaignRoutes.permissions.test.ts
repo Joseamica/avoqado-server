@@ -13,6 +13,12 @@
  * 🔴 La regla dura que este archivo protege: `marketing:send` NO se hereda de
  * `marketing:manage`. Quien puede editar una campaña no puede necesariamente
  * mandarla — mandar es irreversible y le llega a los clientes del negocio.
+ *
+ * 🔴 Y la segunda regla, fix ronda final (revisor): leer (listar/detalle) exige
+ * `marketing:manage`, NO `marketing:read` — ese permiso lo tienen roles de PISO
+ * (CASHIER, WAITER…) con un propósito distinto y explícito en `src/lib/permissions.ts`
+ * ("ver el aviso de privacidad"). Dejarlas en `:read` le abría a un cajero el listado
+ * completo de borradores y destinatarios.
  */
 import fs from 'fs'
 import path from 'path'
@@ -39,11 +45,13 @@ describe('rutas de campañas de correo — candados', () => {
   const audited = collectAuditedRoutes(router)
   const find = (method: string, routePath: string) => audited.find(r => r.method === method && r.path === routePath)
 
+  // 🔴 Fix ronda final: leer (listar/detalle) exige `marketing:manage`, NO
+  // `marketing:read` — ese permiso lo tienen roles de piso con OTRO propósito.
   it.each([
     ['get', '/'],
     ['get', '/:id'],
-  ])('leer (%s %s) exige marketing:read', (method, routePath) => {
-    expect(find(method, routePath)?.permission).toBe('marketing:read')
+  ])('leer (%s %s) exige marketing:manage (NO marketing:read — eso lo tiene el piso)', (method, routePath) => {
+    expect(find(method, routePath)?.permission).toBe('marketing:manage')
   })
 
   it.each([
