@@ -100,7 +100,11 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/sales-summary.dashboard.service.ts': 3,
   'src/services/dashboard/settlementCalendar.dashboard.service.ts': 1,
   'src/services/dashboard/settlementIncident.service.ts': 1,
-  'src/services/dashboard/shared-query.service.ts': 4,
+  // 4 → 3 el 2026-09-02: `getActiveShifts` dejó de traer una fila por ORDEN para contarlas en
+  // memoria y ahora las cuenta con `groupBy` en Postgres (una fila por turno). Con un turno abierto
+  // durante semanas —los hay en producción— ese `findMany` materializaba todas sus órdenes en un
+  // camino que el usuario dispara desde el chatbot a voluntad.
+  'src/services/dashboard/shared-query.service.ts': 3,
   'src/services/dashboard/shift.dashboard.service.ts': 1,
   'src/services/dashboard/venue.dashboard.service.ts': 2,
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts': 1,
