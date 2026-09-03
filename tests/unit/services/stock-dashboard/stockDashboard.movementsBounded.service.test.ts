@@ -32,24 +32,24 @@ describe('StockDashboardService.getRecentMovements', () => {
   it('no pierde eventos cuando un mismo item produce registro y venta', async () => {
     prismaMock.venue.findUnique.mockResolvedValue({ organizationId: 'org-1' } as any)
     const soldItem = {
-        id: 'sim-1',
-        serialNumber: '8952140000000000001',
-        status: 'SOLD',
-        categoryId: 'cat-1',
-        category: { name: 'SIM 5G' },
-        createdAt: new Date('2026-08-31T18:00:00.000Z'),
-        soldAt: new Date('2026-09-01T12:00:00.000Z'),
-        venueId: 'venue-1',
-        venue: { name: 'Sucursal Centro' },
-        sellingVenue: { name: 'Sucursal Centro' },
-        registeredFromVenueId: 'venue-1',
-        registeredFromVenue: { name: 'Sucursal Centro' },
-        createdBy: null,
-        assignedPromoterId: null,
-        assignedSupervisorId: null,
-        custodyState: 'SOLD',
-        orderItem: null,
-      } as any
+      id: 'sim-1',
+      serialNumber: '8952140000000000001',
+      status: 'SOLD',
+      categoryId: 'cat-1',
+      category: { name: 'SIM 5G' },
+      createdAt: new Date('2026-08-31T18:00:00.000Z'),
+      soldAt: new Date('2026-09-01T12:00:00.000Z'),
+      venueId: 'venue-1',
+      venue: { name: 'Sucursal Centro' },
+      sellingVenue: { name: 'Sucursal Centro' },
+      registeredFromVenueId: 'venue-1',
+      registeredFromVenue: { name: 'Sucursal Centro' },
+      createdBy: null,
+      assignedPromoterId: null,
+      assignedSupervisorId: null,
+      custodyState: 'SOLD',
+      orderItem: null,
+    } as any
     ;(prismaMock.$queryRaw as jest.Mock)
       .mockResolvedValueOnce([
         { itemId: 'sim-1', eventType: 'SOLD', timestamp: soldItem.soldAt },
@@ -89,12 +89,8 @@ describe('StockDashboardService.getRecentMovements', () => {
     } as any
 
     prismaMock.venue.findUnique.mockResolvedValue({ organizationId: 'org-1' } as any)
-    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([
-      { itemId: oldSoldItem.id, eventType: 'SOLD', timestamp: oldSoldItem.soldAt },
-    ])
-    prismaMock.serializedItem.findMany.mockImplementation(async (args: any) =>
-      args.where?.id?.in ? [oldSoldItem] : [],
-    )
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ itemId: oldSoldItem.id, eventType: 'SOLD', timestamp: oldSoldItem.soldAt }])
+    prismaMock.serializedItem.findMany.mockImplementation(async (args: any) => (args.where?.id?.in ? [oldSoldItem] : []))
 
     const result = await stockDashboardService.getRecentMovementsPage('venue-1', 20)
 

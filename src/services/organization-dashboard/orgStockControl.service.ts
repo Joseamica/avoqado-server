@@ -630,12 +630,7 @@ export class OrgStockControlService {
    * Fetches serialized items for an organization, optionally filtered by createdAt range.
    * Uses organizationId scope (bulk uploads are stored at org level with null venueId).
    */
-  async fetchSerializedItems(
-    orgId: string,
-    options: OrgStockOverviewOptions,
-    take: number = LEGACY_OVERVIEW_ITEMS_CAP,
-    cursor?: string,
-  ) {
+  async fetchSerializedItems(orgId: string, options: OrgStockOverviewOptions, take: number = LEGACY_OVERVIEW_ITEMS_CAP, cursor?: string) {
     const { dateFrom, dateTo } = options
     const dateFilter =
       dateFrom || dateTo
