@@ -204,3 +204,105 @@ describe('computeStoredOrderTotal — el clamp cubre SÓLO la mercancía', () =>
     expect(balance.total.toNumber()).toBe(115)
   })
 })
+
+describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta misma tarea)', () => {
+  /**
+   * Quitar el `Math.max(0, …)` que envolvía TODO arregló la mercancía y destapó el impuesto,
+   * que también puede quedar negativo — y ése SÍ ocurre en el camino vivo de la TPV:
+   *
+   *   `applyPredefinedDiscount` (tpv/discount.tpv.service.ts) → `evaluateAutomaticDiscounts`
+   *   → `calculateDiscountAmount`, donde `applyBeforeTax` es `true` por default (schema :7577;
+   *   los 17 descuentos del sistema lo tienen así) y `estimateAverageTaxRate()` devuelve un
+   *   **0.16 fijo sin mirar la orden**. De ahí `taxReduction = monto × 0.16`.
+   *
+   * Con `newTaxAmount = order.taxAmount − taxReduction`, basta que la reducción supere al
+   * impuesto de la orden para que el impuesto quede negativo. Y en producción NO se puede
+   * suponer `taxAmount = 0`: 31,775 de 45,503 órdenes lo tienen distinto de cero (máx.
+   * $11,288.16), así que el caso se sostiene por los dos lados.
+   *
+   * Un `Order.total` negativo RESTA del corte del día: es la forma exacta del caso M13 que
+   * este repo ya reprodujo en hardware.
+   *
+   * 🔑 Se clampa la CONTRIBUCIÓN del impuesto al total, no el `taxAmount` que se persiste.
+   * Persistirlo clampado rompería el viaje de ida y vuelta: `removeDiscountFromOrder` devuelve
+   * `+ taxReduction` sin tope, así que un impuesto guardado en 0 volvería a subir a +40.48 —
+   * impuesto inventado que el cliente nunca pagó. Qué significa un `taxAmount` negativo
+   * guardado es una raíz PREEXISTENTE y va en su propia tarea.
+   */
+  it('🔴 cortesía de $253 sobre una cuenta con impuesto 0: total 0, NUNCA −40.48', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(
+      ordenConCargo({ subtotal: new Decimal(253), serviceChargeAmount: new Decimal(0), total: new Decimal(253) }) as never,
+    )
+
+    const result = await applyDiscountToOrder('order-sc', {
+      discountId: 'd-comp',
+      name: 'Cortesía',
+      type: 'COMP' as DiscountType,
+      value: 100,
+      amount: 253,
+      taxReduction: 40.48, // 253 × 0.16, el 0.16 fijo de estimateAverageTaxRate()
+      applicableItems: [],
+      isAutomatic: false,
+      requiresApproval: false,
+    } as any)
+
+    expect(result.success).toBe(true)
+    expect(totalGuardado()).toBe(0)
+    expect(result.newOrderTotal).toBe(0)
+  })
+
+  it('un impuesto negativo tampoco se come el cargo por servicio ni la propina', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(
+      ordenConCargo({
+        subtotal: new Decimal(253),
+        serviceChargeAmount: new Decimal(100),
+        tipAmount: new Decimal(20),
+        total: new Decimal(373),
+      }) as never,
+    )
+
+    const result = await applyDiscountToOrder('order-sc', {
+      discountId: 'd-comp',
+      name: 'Cortesía',
+      type: 'COMP' as DiscountType,
+      value: 100,
+      amount: 253,
+      taxReduction: 40.48,
+      applicableItems: [],
+      isAutomatic: false,
+      requiresApproval: false,
+    } as any)
+
+    expect(result.success).toBe(true)
+    // Mercancía 0 + impuesto 0 (no −40.48) + cargo 100 + propina 20
+    expect(totalGuardado()).toBe(120)
+  })
+
+  it('una orden con el impuesto YA guardado en negativo tampoco produce un total negativo', async () => {
+    // El estado que deja hoy `applyDiscountToOrder`: persiste `taxAmount: -40.48` sin clamp, y
+    // los otros dos caminos lo leen tal cual desde la orden.
+    prismaMock.order.findUnique.mockResolvedValue(
+      ordenConCargo({
+        subtotal: new Decimal(50),
+        serviceChargeAmount: new Decimal(0),
+        taxAmount: new Decimal(-40.48),
+        total: new Decimal(9.52),
+      }) as never,
+    )
+
+    const result = await applyManualDiscount('order-sc', 'FIXED_AMOUNT' as DiscountType, 50, 'Cortesía', 'staff-1')
+
+    expect(result.success).toBe(true)
+    expect(totalGuardado()).toBe(0)
+  })
+
+  it('el impuesto POSITIVO sigue sumando al total, igual que siempre', () => {
+    // El clamp del impuesto no puede convertirse en «el impuesto ya no cuenta».
+    expect(computeStoredOrderTotal({ subtotal: 100, discountAmount: 0, taxAmount: 16 }).toNumber()).toBe(116)
+  })
+
+  it('la contribución del impuesto se clampa por separado, sin tocar la mercancía', () => {
+    // 100 de mercancía + 0 (no −30) = 100. Combinar los dos clamps daría 70.
+    expect(computeStoredOrderTotal({ subtotal: 100, discountAmount: 0, taxAmount: -30 }).toNumber()).toBe(100)
+  })
+})

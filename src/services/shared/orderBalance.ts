@@ -202,24 +202,48 @@ export interface StoredOrderTotalAmounts {
  * conservaron la fórmula vieja hasta el 2026-09-03.
  *
  * ── La regla ────────────────────────────────────────────────────────────────
- *   mercancía = max(0, subtotal − descuento)   ← el clamp cubre SÓLO la mercancía
+ *   mercancía = max(0, subtotal − descuento)   ← se clampa
+ *   impuesto  = max(0, impuesto)               ← se clampa, POR SEPARADO
  *   total     = mercancía + impuesto + cargo por servicio + propina
  *
- * 🔴 El clamp NO envuelve al resto. Un `discountAmount` mayor que el subtotal es
- * un estado que sí existe en la base (cortesía de cuenta completa encima de un
- * descuento previo) y sin clamp el total sale NEGATIVO y RESTA del corte del día
- * (caso M13: subtotal 253.00 − descuento 278.30 = −25.30). Pero la propina y el
- * cargo por servicio no son mercancía: meterlos dentro del `max` deja que un
- * descuento excedente se los coma.
+ * 🔴 Los dos conceptos que pueden llegar en negativo se clampan por separado, y
+ * el clamp NO envuelve al resto.
  *
- * 🔴 Todo en `Prisma.Decimal`. En float, 0.10 + 0.20 deja un residuo que
- * convierte una cuenta saldada en una con «$0.0000000001 por cobrar».
+ * - **Mercancía.** Un `discountAmount` mayor que el subtotal es un estado que sí
+ *   existe en la base (cortesía de cuenta completa encima de un descuento previo)
+ *   y sin clamp el total sale NEGATIVO y RESTA del corte del día (caso M13:
+ *   subtotal 253.00 − descuento 278.30 = −25.30).
+ * - **Impuesto.** `applyDiscountToOrder` calcula `taxAmount − taxReduction`, donde
+ *   la reducción es `monto × 0.16` FIJO (`estimateAverageTaxRate` no mira la orden)
+ *   y `applyBeforeTax` es `true` por default. Una cortesía de $253 sobre una cuenta
+ *   con poco o ningún impuesto deja el impuesto en −40.48; ese valor además se
+ *   PERSISTE, así que los otros dos caminos lo leen de la orden y lo arrastran. Un
+ *   impuesto negativo nunca puede RESTAR de lo que se debe.
+ *   ⚠️ Se clampa aquí la CONTRIBUCIÓN al total, no el `taxAmount` guardado:
+ *   `removeDiscountFromOrder` devuelve `+ taxReduction` sin tope, así que clampar
+ *   lo persistido haría que quitar el descuento inventara un impuesto que el
+ *   cliente nunca pagó. Qué debe guardarse ahí es una raíz PREEXISTENTE, con su
+ *   propia tarea.
+ *
+ * Se clampan POR SEPARADO y no sobre la suma: con mercancía 100 e impuesto −30, lo
+ * correcto es 100 (el impuesto no aporta), no 70.
+ *
+ * 🔴 La propina y el cargo por servicio NO se clampan ni se envuelven: no son
+ * mercancía, y meterlos dentro del `max` deja que un descuento excedente se los coma.
+ *
+ * ⚠️ El `Prisma.Decimal` protege ESTA suma, no el camino entero: los tres sitios de
+ * descuento ya entran con floats (`Number(order.subtotal)`, un `remainingDiscountable`
+ * redondeado a centavos) y salen con `.toNumber()`. Aquí no hay garantía de punta a
+ * punta — sólo deja de acumularse residuo en la suma final.
  */
 export function computeStoredOrderTotal(amounts: StoredOrderTotalAmounts): Prisma.Decimal {
   const merchandiseRaw = dec(amounts.subtotal).minus(dec(amounts.discountAmount))
   const merchandise = merchandiseRaw.isNegative() ? ZERO : merchandiseRaw
 
-  return merchandise.plus(dec(amounts.taxAmount)).plus(dec(amounts.serviceChargeAmount)).plus(dec(amounts.tipAmount))
+  const taxRaw = dec(amounts.taxAmount)
+  const tax = taxRaw.isNegative() ? ZERO : taxRaw
+
+  return merchandise.plus(tax).plus(dec(amounts.serviceChargeAmount)).plus(dec(amounts.tipAmount))
 }
 
 /**
