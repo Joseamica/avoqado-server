@@ -12482,6 +12482,7 @@ model CommercialSubscriptionPeriod {
   @@unique([contractId, scheduleKey, sequence], map: "CommercialSubscriptionPeriod_contract_schedule_sequence_key")
   @@unique([id, contractId], map: "CommercialSubscriptionPeriod_id_contract_key")
   @@index([status, dueAt])
+  @@index([status, graceEndsAt, id])
   @@index([contractId, startsAt])
 }
 

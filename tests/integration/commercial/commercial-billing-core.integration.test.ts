@@ -25,6 +25,7 @@ import {
   getCommercialBillingDashboardOverview,
   listCommercialBillingDashboardReceipts,
 } from '@/services/commercial/billing/commercialBillingDashboardRead.service'
+import { sweepExpiredCommercialSubscriptionPeriods } from '@/services/commercial/billing/subscriptionExpiry.service'
 import {
   createPrismaStripePaymentProviderRepository,
   createStripePaymentProviderAdapter,
@@ -50,6 +51,10 @@ const nonCashActivationMigrationSql = readFileSync(
 )
 const providerObjectIdentityMigrationSql = readFileSync(
   path.join(repoRoot, 'prisma/migrations/20260901200000_add_commercial_provider_object_identity/migration.sql'),
+  'utf8',
+)
+const subscriptionExpiryIndexMigrationSql = readFileSync(
+  path.join(repoRoot, 'prisma/migrations/20260903120000_add_commercial_subscription_expiry_index/migration.sql'),
   'utf8',
 )
 const schemaName = `commercial_p3b_${process.pid}_${randomBytes(4).toString('hex')}`
@@ -162,6 +167,7 @@ describe('commercial billing core migration', () => {
     await client.query(cashAdjustmentMigrationSql)
     await client.query(nonCashActivationMigrationSql)
     await client.query(providerObjectIdentityMigrationSql)
+    await client.query(subscriptionExpiryIndexMigrationSql)
     await client.query(`
       INSERT INTO "Organization" ("id") VALUES ('org-1');
       INSERT INTO "Venue" ("id", "organizationId") VALUES ('venue-1', 'org-1');
@@ -249,6 +255,146 @@ describe('commercial billing core migration', () => {
         'CommercialManualSpeiApproval',
       ]),
     )
+  })
+
+  it('indexes the bounded subscription expiry scan', async () => {
+    const index = await client.query<{ indexdef: string }>(
+      `SELECT indexdef
+         FROM pg_indexes
+        WHERE schemaname = $1
+          AND indexname = 'CommercialSubscriptionPeriod_status_graceEndsAt_id_idx'`,
+      [schemaName],
+    )
+
+    expect(index.rows[0]?.indexdef).toContain('(status, "graceEndsAt", id)')
+  })
+
+  it('concurrently expires a partially paid period after grace, pauses paid access and replays safely', async () => {
+    await client.query(`
+      INSERT INTO "Organization" ("id") VALUES ('org-expiry-1');
+      INSERT INTO "Venue" ("id", "organizationId") VALUES ('venue-expiry-1', 'org-expiry-1');
+      INSERT INTO "CommercialQuote" ("id", "checksum")
+      VALUES ('quote-expiry-1', repeat('e', 64));
+      INSERT INTO "CommercialQuoteAcceptance" (
+        "id", "quoteId", "idempotencyKey", "organizationId", "venueId", "acceptedById",
+        "status", "acceptedAt"
+      ) VALUES (
+        'acceptance-expiry-1', 'quote-expiry-1', 'acceptance-expiry-key-1',
+        'org-expiry-1', 'venue-expiry-1', 'finance-1', 'STRIPE_PENDING', '2026-09-01T06:00:00Z'
+      );
+      INSERT INTO "CommercialSubscriptionContract" (
+        "id", "quoteAcceptanceId", "idempotencyKey", "organizationId", "venueId",
+        "schemaVersion", "snapshot", "checksum", "status", "cadence", "currency",
+        "timezone", "startsAt", "createdAt", "updatedAt"
+      ) VALUES (
+        'contract-expiry-1', 'acceptance-expiry-1', 'contract-expiry-key-1',
+        'org-expiry-1', 'venue-expiry-1', 1, '{}'::jsonb, repeat('d', 64), 'PENDING_PAYMENT',
+        'MONTHLY', 'MXN', 'America/Mexico_City', '2026-09-01T06:00:00Z', now(), now()
+      );
+      INSERT INTO "CommercialSubscriptionPeriod" (
+        "id", "contractId", "sequence", "startsAt", "endsAt", "dueAt", "graceEndsAt",
+        "amountDueMinor", "currency", "status", "statusRevision", "createdAt", "updatedAt"
+      ) VALUES (
+        'period-expiry-1', 'contract-expiry-1', 1,
+        '2026-09-01T06:00:00Z', '2026-10-01T06:00:00Z',
+        '2026-09-01T06:00:00Z', '2026-09-03T06:00:00Z',
+        28884, 'MXN', 'PAST_DUE', 1, now(), now()
+      );
+      INSERT INTO "CommercialAccountReceivable" (
+        "id", "organizationId", "venueId", "subjectType", "subscriptionPeriodId",
+        "reference", "amountDueMinor", "currency", "dueAt", "status", "createdAt", "updatedAt"
+      ) VALUES (
+        'ar-expiry-1', 'org-expiry-1', 'venue-expiry-1', 'SUBSCRIPTION_PERIOD', 'period-expiry-1',
+        'AVQ-AR-EXPIRY-1', 28884, 'MXN', '2026-09-01T06:00:00Z', 'PARTIALLY_PAID', now(), now()
+      );
+      INSERT INTO "CommercialCashReceipt" (
+        "id", "organizationId", "venueId", "provider", "providerEventId", "idempotencyKey",
+        "entryType", "amountMinor", "currency", "receivingAccountFingerprint", "observedAt", "createdAt"
+      ) VALUES (
+        'receipt-expiry-1', 'org-expiry-1', 'venue-expiry-1', 'STRIPE', 'evt-expiry-partial-1',
+        'receipt-expiry-key-1', 'PAYMENT', 5000, 'MXN', repeat('e', 64),
+        '2026-09-02T06:00:00Z', now()
+      );
+      INSERT INTO "CommercialBillingAllocation" (
+        "id", "cashReceiptId", "receivableId", "direction", "amountMinor", "idempotencyKey", "createdAt"
+      ) VALUES (
+        'allocation-expiry-1', 'receipt-expiry-1', 'ar-expiry-1', 'CREDIT', 5000,
+        'allocation-expiry-key-1', now()
+      );
+    `)
+
+    await expect(
+      sweepExpiredCommercialSubscriptionPeriods(
+        { now: new Date('2026-09-03T06:00:00.000Z'), limit: 25 },
+        { host: billingPrisma },
+      ),
+    ).resolves.toEqual({ claimed: 0, expired: 0, contractsPaused: 0 })
+
+    const now = new Date('2026-09-04T06:00:00.000Z')
+    const [first, concurrent] = await Promise.all([
+      sweepExpiredCommercialSubscriptionPeriods({ now, limit: 25 }, { host: billingPrisma }),
+      sweepExpiredCommercialSubscriptionPeriods({ now, limit: 25 }, { host: billingPrisma }),
+    ])
+    const replay = await sweepExpiredCommercialSubscriptionPeriods({ now, limit: 25 }, { host: billingPrisma })
+
+    expect([first, concurrent].sort((left, right) => left.claimed - right.claimed)).toEqual([
+      { claimed: 0, expired: 0, contractsPaused: 0 },
+      { claimed: 1, expired: 1, contractsPaused: 1 },
+    ])
+    expect(replay).toEqual({ claimed: 0, expired: 0, contractsPaused: 0 })
+
+    const evidence = await client.query<{
+      periodStatus: string
+      periodRevision: number
+      receivableStatus: string
+      contractStatus: string
+      audits: string
+      outstandingMinor: string
+    }>(`
+      SELECT
+        (SELECT "status"::text FROM "CommercialSubscriptionPeriod" WHERE "id" = 'period-expiry-1') AS "periodStatus",
+        (SELECT "statusRevision" FROM "CommercialSubscriptionPeriod" WHERE "id" = 'period-expiry-1') AS "periodRevision",
+        (SELECT "status"::text FROM "CommercialAccountReceivable" WHERE "id" = 'ar-expiry-1') AS "receivableStatus",
+        (SELECT "status"::text FROM "CommercialSubscriptionContract" WHERE "id" = 'contract-expiry-1') AS "contractStatus",
+        (SELECT COUNT(*)::text FROM "ActivityLog"
+          WHERE "action" = 'COMMERCIAL_SUBSCRIPTION_PERIOD_EXPIRED'
+            AND "entityId" = 'period-expiry-1') AS audits,
+        (SELECT "data"->>'outstandingMinor' FROM "ActivityLog"
+          WHERE "action" = 'COMMERCIAL_SUBSCRIPTION_PERIOD_EXPIRED'
+            AND "entityId" = 'period-expiry-1') AS "outstandingMinor"
+    `)
+    expect(evidence.rows[0]).toEqual({
+      periodStatus: 'EXPIRED',
+      periodRevision: 2,
+      receivableStatus: 'EXPIRED',
+      contractStatus: 'PAUSED',
+      audits: '1',
+      outstandingMinor: '23884',
+    })
+
+    await client.query(`
+      INSERT INTO "CommercialSubscriptionPeriod" (
+        "id", "contractId", "sequence", "startsAt", "endsAt", "dueAt", "graceEndsAt",
+        "amountDueMinor", "currency", "status", "statusRevision", "createdAt", "updatedAt"
+      ) VALUES (
+        'period-expiry-db-clock-1', 'contract-expiry-1', 2,
+        clock_timestamp() - interval '2 minutes', clock_timestamp() + interval '1 month',
+        clock_timestamp() - interval '2 minutes', clock_timestamp() - interval '1 minute',
+        28884, 'MXN', 'PAST_DUE', 1, now(), now()
+      );
+      INSERT INTO "CommercialAccountReceivable" (
+        "id", "organizationId", "venueId", "subjectType", "subscriptionPeriodId",
+        "reference", "amountDueMinor", "currency", "dueAt", "status", "createdAt", "updatedAt"
+      ) VALUES (
+        'ar-expiry-db-clock-1', 'org-expiry-1', 'venue-expiry-1',
+        'SUBSCRIPTION_PERIOD', 'period-expiry-db-clock-1', 'AVQ-AR-EXPIRY-DB-CLOCK-1',
+        28884, 'MXN', clock_timestamp() - interval '2 minutes', 'PAST_DUE', now(), now()
+      );
+    `)
+
+    await expect(
+      sweepExpiredCommercialSubscriptionPeriods({ limit: 25 }, { host: billingPrisma }),
+    ).resolves.toEqual({ claimed: 1, expired: 1, contractsPaused: 0 })
   })
 
   it('persists an accepted quote as a pending contract, period and receivable without granting access', async () => {

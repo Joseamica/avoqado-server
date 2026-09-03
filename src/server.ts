@@ -73,6 +73,7 @@ import { cfdiGlobalJob } from './jobs/cfdiGlobal.job'
 import { cfdiReconcileJob } from './jobs/cfdiReconcile.job'
 import { catalogPublicationOutboxSweeperJob } from './jobs/catalog-publication-outbox-sweeper.job'
 import { commercialPublicationOutboxSweeperJob } from './jobs/commercial-publication-outbox-sweeper.job'
+import { commercialSubscriptionExpiryJob } from './jobs/commercial-subscription-expiry.job'
 import { catalogPublicationWatchdogJob } from './jobs/catalog-publication-watchdog.job'
 import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
@@ -160,6 +161,7 @@ const gracefulShutdown = async (signal: string) => {
       // durable recovery loops and both must stop before Prisma disconnects.
       catalogPublicationOutboxSweeperJob.stop()
       commercialPublicationOutboxSweeperJob.stop()
+      commercialSubscriptionExpiryJob.stop()
       catalogPublicationWatchdogJob.stop()
       shiftCloseWatchdogJob.stop()
       cashDrawerAutoCloseJob.stop()
@@ -478,6 +480,7 @@ const startApplication = async (retries = 3) => {
       // through these no-overlap durable workers after a process restart.
       catalogPublicationOutboxSweeperJob.start()
       commercialPublicationOutboxSweeperJob.start()
+      commercialSubscriptionExpiryJob.start()
       catalogPublicationWatchdogJob.start()
       shiftCloseWatchdogJob.start()
       // Cierra las cajas que nadie cerró, en el corte del día de negocio (04:00
