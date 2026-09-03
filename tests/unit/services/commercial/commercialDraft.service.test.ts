@@ -37,6 +37,32 @@ describe('commercialDraftService optimistic concurrency', () => {
     expect(tx.writeAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'COMMERCIAL_DRAFT_CREATED', entityId: 'draft_1', actor }))
   })
 
+  it('forwards an explicit transaction timeout for high-latency maintenance callers', async () => {
+    const created = { id: 'draft_1', revision: 1, ...input }
+    const tx = {
+      createGraph: jest.fn().mockResolvedValue(created),
+      replaceGraphIfRevision: jest.fn(),
+      writeAudit: jest.fn().mockResolvedValue(undefined),
+    }
+    const runInTransaction = jest.fn((operation: (transaction: typeof tx) => Promise<unknown>) =>
+      operation(tx),
+    )
+    const service = createCommercialDraftService({
+      getGraph: jest.fn(),
+      runInTransaction,
+    })
+
+    await expect(
+      service.createCommercialDraft(input, actor, {
+        sourceKey: 'REVIEW_SEED',
+        transactionTimeoutMilliseconds: 30_000,
+      }),
+    ).resolves.toEqual(created)
+    expect(runInTransaction).toHaveBeenCalledWith(expect.any(Function), {
+      timeoutMilliseconds: 30_000,
+    })
+  })
+
   it('rejects a stale revision and does not create a misleading audit row', async () => {
     const tx = {
       createGraph: jest.fn(),

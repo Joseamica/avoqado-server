@@ -85,7 +85,10 @@ async function ensureConfiguratorCatalog(publishedById: string): Promise<string>
     const created = await createCommercialDraft(
       initial.draft,
       { staffId: publishedById, reason: REVIEW_REASON },
-      { sourceKey: Q3B_RENDER_REVIEW_CATALOG.sourceKey },
+      {
+        sourceKey: Q3B_RENDER_REVIEW_CATALOG.sourceKey,
+        transactionTimeoutMilliseconds: 30_000,
+      },
     )
     draft = await prisma.commercialDraft.findUniqueOrThrow({
       where: { id: created.id },

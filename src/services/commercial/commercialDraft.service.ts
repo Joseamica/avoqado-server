@@ -25,7 +25,10 @@ interface CommercialDraftAudit {
 
 export interface CommercialDraftServiceDependencies {
   getGraph(id: string): Promise<CommercialDraftView | null>
-  runInTransaction<T>(operation: (transaction: CommercialDraftTransaction) => Promise<T>): Promise<T>
+  runInTransaction<T>(
+    operation: (transaction: CommercialDraftTransaction) => Promise<T>,
+    options?: { timeoutMilliseconds: number },
+  ): Promise<T>
 }
 
 function parseInput(input: CommercialDraftInput): CommercialDraftInput {
@@ -228,7 +231,10 @@ function prismaTransactionAdapter(tx: Prisma.TransactionClient): CommercialDraft
 
 const defaultDependencies: CommercialDraftServiceDependencies = {
   getGraph: id => getCommercialDraftGraphFromTx(prisma, id),
-  runInTransaction: operation => prisma.$transaction(tx => operation(prismaTransactionAdapter(tx))),
+  runInTransaction: (operation, options) =>
+    prisma.$transaction(tx => operation(prismaTransactionAdapter(tx)), {
+      ...(options ? { timeout: options.timeoutMilliseconds } : {}),
+    }),
 }
 
 export function createCommercialDraftService(dependencies: CommercialDraftServiceDependencies) {
@@ -239,20 +245,25 @@ export function createCommercialDraftService(dependencies: CommercialDraftServic
     async createCommercialDraft(
       input: CommercialDraftInput,
       actor: CommercialDraftActor,
-      options: { sourceKey?: string } = {},
+      options: { sourceKey?: string; transactionTimeoutMilliseconds?: number } = {},
     ): Promise<CommercialDraftView> {
       const validatedInput = parseInput(input)
       const validatedActor = parseActor(actor)
-      return dependencies.runInTransaction(async tx => {
-        const draft = await tx.createGraph(validatedInput, validatedActor.staffId, options.sourceKey)
-        await tx.writeAudit({
-          action: 'COMMERCIAL_DRAFT_CREATED',
-          entityId: draft.id,
-          actor: validatedActor,
-          after: { revision: draft.revision },
-        })
-        return draft
-      })
+      return dependencies.runInTransaction(
+        async tx => {
+          const draft = await tx.createGraph(validatedInput, validatedActor.staffId, options.sourceKey)
+          await tx.writeAudit({
+            action: 'COMMERCIAL_DRAFT_CREATED',
+            entityId: draft.id,
+            actor: validatedActor,
+            after: { revision: draft.revision },
+          })
+          return draft
+        },
+        options.transactionTimeoutMilliseconds === undefined
+          ? undefined
+          : { timeoutMilliseconds: options.transactionTimeoutMilliseconds },
+      )
     },
     async replaceCommercialDraft(
       id: string,
