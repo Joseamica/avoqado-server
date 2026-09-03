@@ -1754,34 +1754,26 @@ export class SharedQueryService {
     })
 
     // Fetch all relevant orders in one query, then count per-shift in memory
-    // Each shift has its own startTime, so we fetch since the earliest and filter per shift
     if (shifts.length === 0) return []
 
-    const earliestStart = shifts.reduce((min, s) => (s.startTime < min ? s.startTime : min), shifts[0].startTime)
-    const staffIds = shifts.map(s => s.staffId)
-
+    const shiftIds = shifts.map(s => s.id)
+    // El turno es del negocio (fase 1): sus órdenes son las que llevan su `shiftId`,
+    // las haya creado quien las haya creado. Antes se contaban por `createdById =
+    // shift.staffId` y las de los demás cajeros desaparecían del conteo.
+    // Consulta indexada: `Order.shiftId` tiene @@index([shiftId]).
     const allOrders = await prisma.order.findMany({
-      where: {
-        venueId,
-        createdById: { in: staffIds },
-        createdAt: { gte: earliestStart },
-      },
-      select: { createdById: true, createdAt: true },
+      where: { venueId, shiftId: { in: shiftIds } },
+      select: { shiftId: true },
     })
 
-    // Index orders by staffId for O(1) lookup instead of O(n*m) full scan
-    const ordersByStaff = new Map<string, Array<{ createdAt: Date }>>()
-    for (const order of allOrders) {
-      if (!order.createdById) continue
-      const arr = ordersByStaff.get(order.createdById)
-      if (arr) arr.push(order)
-      else ordersByStaff.set(order.createdById, [order])
-    }
+    // Índice por turno para lookup O(1) en vez de un barrido O(n*m)
+    const ordersByShift = new Map<string, number>()
+    for (const o of allOrders) if (o.shiftId) ordersByShift.set(o.shiftId, (ordersByShift.get(o.shiftId) ?? 0) + 1)
 
     const shiftInfos: ActiveShiftInfo[] = shifts.map(shift => {
-      // Count only orders created after THIS shift's startTime
-      const staffOrders = ordersByStaff.get(shift.staffId) || []
-      const ordersCount = staffOrders.filter(o => o.createdAt >= shift.startTime).length
+      // Una orden con `shiftId` pertenece al turno por construcción: no hace falta
+      // filtrar por `createdAt >= shift.startTime`.
+      const ordersCount = ordersByShift.get(shift.id) ?? 0
 
       const salesTotal = (shift.totalCashPayments?.toNumber() || 0) + (shift.totalCardPayments?.toNumber() || 0)
       const durationMinutes = Math.floor((now.getTime() - shift.startTime.getTime()) / (1000 * 60))
