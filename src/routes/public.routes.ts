@@ -17,6 +17,7 @@ import * as otpAuthController from '../controllers/public/otpAuth.public.control
 import * as paymentLinkPublicController from '../controllers/public/paymentLink.public.controller'
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
 import * as walletPassController from '../controllers/public/walletPass.public.controller'
+import * as walletStampsController from '../controllers/public/walletStamps.public.controller'
 import { submitContact, submitLabsBrief, continuarOnboarding } from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
@@ -389,6 +390,11 @@ router.get('/venues/:venueSlug/checkout-info', readLimit, validateRequest(venueC
 const requireWalletPlan = checkPublicVenueFeature('LOYALTY_WALLET', 'Este negocio todavia no tiene tarjeta digital disponible.')
 
 router.get('/venues/:venueSlug/wallet/apple/:customerId', readLimit, requireWalletPlan, walletPassController.downloadApplePass)
+
+// La franja de sellos que Google descarga para pintar la tarjeta. Sin gate de plan: la
+// pide un servidor de Google, no una persona, y para llegar aquí ya tuvo que existir un
+// pase emitido — que sí pasó por el candado.
+router.get('/wallet/stamps/:serialNumber/:revision.png', readLimit, walletStampsController.getStampStrip)
 
 // La marca del negocio y si tiene sellos, para la pagina publica de la tarjeta
 // (`book.avoqado.io/<negocio>/tarjeta`, la del cartel del mostrador).
