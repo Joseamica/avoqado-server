@@ -71,8 +71,11 @@ export async function deleteShift(req: Request, res: Response, next: NextFunctio
   try {
     const venueId: string = req.params.venueId
     const shiftId: string = req.params.shiftId
+    // QUIÉN borró. Mismo motivo que en `updateShift`: el servicio no ve el `authContext`, y sin
+    // el actor la bitácora —única evidencia que sobrevive a un borrado duro— quedaría anónima.
+    const performedBy: string | undefined = (req as any).authContext?.userId
 
-    const deleted = await shiftDashboardService.deleteShift(venueId, shiftId)
+    const deleted = await shiftDashboardService.deleteShift(venueId, shiftId, performedBy)
 
     if (!deleted) {
       res.status(404).json({
@@ -98,9 +101,12 @@ export async function updateShift(
     const updateData = req.body
     // QUIÉN editó. El servicio no ve el `authContext`, así que el actor se le pasa: sin él la
     // bitácora diría "alguien sin identificar" sobre una edición que puede mover el descuadre.
-    const performedBy: string | undefined = (req as any).authContext?.userId
-
-    const result = await shiftDashboardService.updateShift(venueId, shiftId, updateData, performedBy)
+    // `puedeVerEsperado` lo marca `marcarPermiso` en la ruta, igual que en el detalle del turno:
+    // sin él, una gaveta ABIERTA no revela su esperado ni siquiera para recalcular.
+    const result = await shiftDashboardService.updateShift(venueId, shiftId, updateData, {
+      performedBy: (req as any).authContext?.userId,
+      puedeVerEsperado: (req as any).puedeVerEsperado === true,
+    })
 
     if (!result) {
       res.status(404).json({

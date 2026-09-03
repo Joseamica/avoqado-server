@@ -184,8 +184,24 @@ export async function getShifts(
 // default) el esperado y el fondo se omiten MIENTRAS el cajón siga abierto: es el mismo
 // conteo ciego que aplica el endpoint del cajón, y sin él bastaba abrir el detalle del turno
 // para leer la cifra. Un cajón ya CERRADO revela siempre: ese resultado ya está firmado.
-export async function resolveShiftCashDrawer(venueId: string, startTime: Date | null, endTime?: Date | null, incluirEsperado = false) {
+// @param shiftId el turno que se está resolviendo. Con él, la ventana deja de poder devolver la
+// gaveta de OTRO turno: es el espejo de `gavetaCerrable` (`shared/turnoDeCaja.ts`), cuyo comentario
+// dice exactamente por qué —«sin el `OR` sobre `shiftId` se le arrancaría la gaveta a un turno
+// ajeno»—. Turno A 07:00–15:00 con su gaveta cerrando a las 15:00 y la de relevo B abriendo 14:55:
+// las dos caben en la ventana y `openedAt desc` elige B. Una gaveta SIN ligar sigue siendo
+// elegible, que es lo único que se puede hacer con lo anterior a la migración; omitirlo conserva
+// el comportamiento de siempre para quien no tenga el turno a la mano.
+export async function resolveShiftCashDrawer(
+  venueId: string,
+  startTime: Date | null,
+  endTime?: Date | null,
+  incluirEsperado = false,
+  shiftId?: string,
+) {
   if (!startTime) return null
+  // 🔴 Va en `AND` y no como segundo `OR` de primer nivel: un objeto sólo puede llevar una llave
+  // `OR`, así que escribirlo arriba SUSTITUIRÍA en silencio al filtro de `closedAt`.
+  const delTurno = shiftId ? { AND: [{ OR: [{ shiftId }, { shiftId: null }] }] } : {}
   // 🔴 P1 (Codex 27-ago): se ancla al CIERRE del turno (o a "ahora" si sigue abierto), no a su inicio.
   // Turno 08–20 con cajón A (07–12) y B (12–20): el que operó al cerrar es B; anclar al inicio
   // devolvía A y la PAX enseñaba el arqueo de otro cajón sin decirlo. El índice único parcial
@@ -196,12 +212,12 @@ export async function resolveShiftCashDrawer(venueId: string, startTime: Date | 
   const include = { events: { orderBy: { createdAt: 'asc' as const } } }
   const session =
     (await prisma.cashDrawerSession.findFirst({
-      where: { venueId, openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: anchor } }] },
+      where: { venueId, openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: anchor } }], ...delTurno },
       include,
       orderBy: { openedAt: 'desc' },
     })) ??
     (await prisma.cashDrawerSession.findFirst({
-      where: { venueId, openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: startTime } }] },
+      where: { venueId, openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: startTime } }], ...delTurno },
       include,
       orderBy: { openedAt: 'desc' },
     }))
@@ -523,7 +539,15 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
   let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
   try {
-    cashDrawer = await resolveShiftCashDrawer(venueId, (shift as any).startTime ?? null, (shift as any).endTime ?? null, incluirEsperado)
+    // `shiftId` acota al turno: sin él, el detalle puede PINTAR la gaveta de otro turno junto a un
+    // `cashDifference` que se firmó contra la propia — dos números para el mismo dinero.
+    cashDrawer = await resolveShiftCashDrawer(
+      venueId,
+      (shift as any).startTime ?? null,
+      (shift as any).endTime ?? null,
+      incluirEsperado,
+      shiftId,
+    )
   } catch (err) {
     logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
       shiftId,
@@ -703,9 +727,10 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
  * Delete a shift by ID
  * @param venueId Venue ID
  * @param shiftId Shift ID to delete
+ * @param performedBy Staff ID del actor — QUIÉN borró el corte (ver el asiento de abajo)
  * @returns boolean indicating if shift was deleted
  */
-export async function deleteShift(venueId: string, shiftId: string): Promise<boolean> {
+export async function deleteShift(venueId: string, shiftId: string, performedBy?: string): Promise<boolean> {
   try {
     logger.info('Deleting shift', { venueId, shiftId })
 
@@ -740,11 +765,32 @@ export async function deleteShift(venueId: string, shiftId: string): Promise<boo
 
     logger.info('Shift deleted successfully', { venueId, shiftId })
 
+    // 🔴 QUIÉN y QUÉ. El borrado es DURO: la fila se va, y las órdenes, pagos, comisiones y la
+    // sesión de gaveta que apuntaban al turno quedan SUELTAS (`onDelete: SetNull`) en vez de irse
+    // con él. O sea que el dinero sobrevive y el corte que lo firmó no: este asiento es la única
+    // constancia que queda. Sin autor decía que un turno dejó de existir y no quién lo decidió,
+    // mientras `SHIFT_UPDATED` —que toca el MISMO descuadre— sí lo registra.
+    const pesos = (value: unknown) => (value == null ? null : Number(value).toFixed(2))
     logAction({
       venueId,
       action: 'SHIFT_DELETED',
       entity: 'Shift',
       entityId: shiftId,
+      staffId: performedBy,
+      data: {
+        // Acotado al corte firmado, en pesos y como texto (mismo vocabulario que `SHIFT_UPDATED`).
+        // Un NULL se conserva NULL: un cierre sin conteo no tuvo un 0.00 — no tuvo conteo, y
+        // volcarlo como cero afirmaría que alguien contó y cuadró.
+        status: existingShift.status,
+        startTime: existingShift.startTime,
+        endTime: existingShift.endTime,
+        startingCash: pesos(existingShift.startingCash),
+        cashDeclared: pesos(existingShift.cashDeclared),
+        cashDifference: pesos(existingShift.cashDifference),
+        totalSales: pesos(existingShift.totalSales),
+        totalTips: pesos(existingShift.totalTips),
+        totalOrders: existingShift.totalOrders,
+      },
     })
 
     return true
@@ -1025,25 +1071,33 @@ export interface EsperadoDelTurno {
 export async function esperadoDeLaGavetaDelTurno(
   venueId: string,
   shift: { id: string; startTime: Date | null; endTime: Date | null },
+  // ¿el llamante tiene `cash-drawer:view-expected`? Con una gaveta todavía ABIERTA y sin ese
+  // permiso NO se resuelve el esperado, y el resultado es `DESCONOCIDO` — nunca la fórmula
+  // ciega. Caer a ella sería reintroducir el defecto justo para quien no puede ver el número, y
+  // escribirlo sería servir el esperado de una caja abierta por la puerta de atrás: la respuesta
+  // devuelve `cashDifference`, así que un `PUT {"endingCash":0}` daría `−esperado` de vuelta.
+  puedeVerEsperado: boolean,
 ): Promise<EsperadoDelTurno> {
   try {
     const ligada = await prisma.cashDrawerSession.findFirst({
       // `venueId` además del único: el aislamiento por tenant no se salta ni cuando la llave ya
       // es única. Un `findUnique` por `shiftId` pelón no lo lleva.
       where: { shiftId: shift.id, venueId },
-      select: { id: true, startingAmount: true, events: { select: { type: true, amount: true } } },
+      select: { id: true, status: true, startingAmount: true, events: { select: { type: true, amount: true } } },
     })
     if (ligada) {
+      if (ligada.status === 'OPEN' && !puedeVerEsperado) return { esperado: null, sessionId: ligada.id, fuente: 'DESCONOCIDO' }
       // La MISMA fórmula que ve el cajero en la tablet, no una copia.
       return { esperado: calculateExpectedAmount(ligada), sessionId: ligada.id, fuente: 'CAJON' }
     }
 
-    const porVentana = await resolveShiftCashDrawer(venueId, shift.startTime, shift.endTime, true)
-    const esperado = porVentana && 'expectedAmount' in porVentana ? porVentana.expectedAmount : null
-    if (porVentana && typeof esperado === 'number') {
-      return { esperado, sessionId: porVentana.sessionId, fuente: 'CAJON' }
-    }
-    return { esperado: null, sessionId: null, fuente: 'TURNO' }
+    const porVentana = await resolveShiftCashDrawer(venueId, shift.startTime, shift.endTime, puedeVerEsperado, shift.id)
+    if (!porVentana) return { esperado: null, sessionId: null, fuente: 'TURNO' }
+    const esperado = 'expectedAmount' in porVentana ? porVentana.expectedAmount : null
+    // Hay gaveta, pero su esperado viene oculto por el conteo ciego: se sabe que la fórmula del
+    // turno NO es la autoridad, así que tampoco se usa.
+    if (typeof esperado !== 'number') return { esperado: null, sessionId: porVentana.sessionId, fuente: 'DESCONOCIDO' }
+    return { esperado, sessionId: porVentana.sessionId, fuente: 'CAJON' }
   } catch (error) {
     logger.warn('[Shift Update] No se pudo resolver la gaveta del turno; el descuadre guardado no se toca', {
       venueId,
@@ -1055,13 +1109,19 @@ export async function esperadoDeLaGavetaDelTurno(
 }
 
 /**
- * Update a shift by ID (SUPERADMIN only)
+ * Update a shift by ID (MANAGER para arriba — ver el comentario de la ruta en dashboard.routes.ts)
  * @param venueId Venue ID
  * @param shiftId Shift ID to update
  * @param data Update data
  * @returns Updated shift
  */
-export async function updateShift(venueId: string, shiftId: string, data: UpdateShiftData, performedBy?: string): Promise<any> {
+export async function updateShift(
+  venueId: string,
+  shiftId: string,
+  data: UpdateShiftData,
+  contexto: { performedBy?: string; puedeVerEsperado?: boolean } = {},
+): Promise<any> {
+  const { performedBy, puedeVerEsperado = false } = contexto
   logger.info('Updating shift', { venueId, shiftId, fields: Object.keys(data) })
 
   // First check if shift exists and belongs to the venue
@@ -1116,13 +1176,12 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
   // La ventana es la GUARDADA, nunca la del cuerpo: qué gaveta operó es un hecho histórico, y
   // resolverla contra una fecha que alguien está editando en este mismo request podría cambiar de
   // gaveta y con ella el número firmado.
-  const gaveta = await esperadoDeLaGavetaDelTurno(venueId, {
-    id: existingShift.id,
-    startTime: existingShift.startTime,
-    endTime: existingShift.endTime,
-  })
-
-  const effectiveStartingCash = data.startingCash !== undefined ? data.startingCash : Number(existingShift.startingCash)
+  // 🔴 `Number(...)` sobre lo que llegó en el cuerpo, y no es paranoia: esta ruta no lleva
+  // `validateRequest`, así que un `startingCash: "500"` entra tal cual. Prisma lo acepta (string →
+  // Decimal), pero en JS `"500" + 1800` es la CONCATENACIÓN `"5001800"` y el `.toFixed` de la
+  // bitácora reventaría con el `update` YA commiteado: un 500 sobre una edición que sí se guardó,
+  // y sin fila de auditoría.
+  const effectiveStartingCash = data.startingCash !== undefined ? Number(data.startingCash) : Number(existingShift.startingCash)
 
   // 🔴 EL CONTEO ES `cashDeclared`, NUNCA `endingCash`. `endingCash` no es lo que alguien contó:
   // en un cierre sin conteo es el total del cajón, y en uno legacy vale `startingCash + declarado`
@@ -1133,15 +1192,42 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
   // Un `endingCash` en el cuerpo SÍ manda: ahí el dueño está corrigiendo el conteo con la hoja
   // enfrente, y entre dos conteos gana el más nuevo.
   const countedCash =
-    data.endingCash !== undefined ? data.endingCash : existingShift.cashDeclared == null ? null : Number(existingShift.cashDeclared)
+    data.endingCash !== undefined
+      ? data.endingCash === null
+        ? null
+        : Number(data.endingCash)
+      : existingShift.cashDeclared == null
+        ? null
+        : Number(existingShift.cashDeclared)
 
   // Ventas en efectivo + propina en efectivo: lo que hay físicamente en el cajón. Sólo alimenta
   // la fórmula del turno, que es el respaldo para el venue sin módulo de caja.
   const cashInDrawer = Number(existingShift.totalCashPayments ?? 0) + Number(existingShift.totalCashTips ?? 0)
-  const expectedCash = gaveta.esperado != null ? gaveta.esperado : effectiveStartingCash + cashInDrawer
+
+  // 🔴 EL ESPERADO SALE DE LA GAVETA, igual que el del cierre (Task 5). Sin esto, editar un turno
+  // desde el dashboard —aunque sólo se corrija `totalSales`, que es lo único que la pantalla manda
+  // hoy— reescribía el descuadre con la fórmula CIEGA: el 0.00 que el cierre firmó contra la
+  // gaveta volvía a firmarse en −2,500.00, con el dueño como autor de un faltante que nadie tuvo.
+  //
+  // Sin conteo NO se consulta: la mayoría de los turnos cerrados no tienen uno, y ahí resolver la
+  // gaveta son hasta 3 consultas con una carga de eventos sin tope para no escribir nada.
+  //
+  // La ventana es la GUARDADA, nunca la del cuerpo: qué gaveta operó es un hecho histórico, y
+  // resolverla contra una fecha que alguien está editando en este mismo request podría cambiar de
+  // gaveta y con ella el número firmado.
+  const gaveta =
+    countedCash == null
+      ? null
+      : await esperadoDeLaGavetaDelTurno(
+          venueId,
+          { id: existingShift.id, startTime: existingShift.startTime, endTime: existingShift.endTime },
+          puedeVerEsperado,
+        )
+
+  const expectedCash = gaveta == null || gaveta.fuente === 'DESCONOCIDO' ? null : (gaveta.esperado ?? effectiveStartingCash + cashInDrawer)
 
   const difference =
-    gaveta.fuente === 'DESCONOCIDO'
+    gaveta == null || gaveta.fuente === 'DESCONOCIDO'
       ? null
       : computeCashDifference({
           countedCash,
@@ -1197,9 +1283,9 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
       // Acotado: esta ruta no lleva Zod, así que el cuerpo es del que llama. Registrar QUÉ se
       // intentó tocar es útil; copiar mil llaves inventadas a la tabla de auditoría, no.
       fields: Object.keys(data).slice(0, 20),
-      expectedSource: gaveta.fuente,
-      ...(gaveta.sessionId ? { cashDrawerSessionId: gaveta.sessionId } : {}),
-      ...(gaveta.fuente === 'DESCONOCIDO' ? {} : { expectedCash: pesos(expectedCash) }),
+      ...(gaveta ? { expectedSource: gaveta.fuente } : {}),
+      ...(gaveta?.sessionId ? { cashDrawerSessionId: gaveta.sessionId } : {}),
+      ...(expectedCash != null ? { expectedCash: pesos(expectedCash) } : {}),
       ...(countedCash != null ? { countedCash: pesos(countedCash) } : {}),
       ...(difference != null ? { cashDifference: pesos(difference) } : {}),
     },

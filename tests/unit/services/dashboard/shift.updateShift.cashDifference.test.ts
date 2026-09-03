@@ -69,7 +69,10 @@ const GAVETA_DE_LA_TARDE = {
 /** Lo que `prisma.shift.update` acabó escribiendo, para poder afirmar sobre el dinero. */
 let escrito: any
 
-function mundo(opciones: { turno?: Record<string, unknown>; gaveta?: any | null } = {}) {
+/** El dueño editando, con permiso para ver el esperado (MANAGER+ lo trae por default). */
+const DUENO = { performedBy: AUTOR, puedeVerEsperado: true }
+
+function mundo(opciones: { turno?: Record<string, unknown>; gaveta?: any | null; porVentana?: any | null } = {}) {
   const turno = turnoCerrado(opciones.turno)
   escrito = undefined
   prismaMock.shift.findFirst.mockResolvedValue(turno)
@@ -77,10 +80,19 @@ function mundo(opciones: { turno?: Record<string, unknown>; gaveta?: any | null 
     escrito = args.data
     return { ...turno, ...args.data, staff: null, venue: { id: VENUE, name: 'Testarudo Cafe' } }
   })
-  // La gaveta LIGADA por `CashDrawerSession.shiftId` (columna de esta fase).
-  const gaveta = opciones.gaveta === undefined ? GAVETA_DE_LA_TARDE : opciones.gaveta
-  prismaMock.cashDrawerSession.findFirst.mockResolvedValue(gaveta)
+  // Dos caminos distintos: la gaveta LIGADA por `CashDrawerSession.shiftId` (columna de esta
+  // fase, con `shiftId` en el `where`) y el respaldo por VENTANA de tiempo, que es el único
+  // que corre hoy en producción porque allá ninguna gaveta está ligada todavía.
+  const ligada = opciones.gaveta === undefined ? GAVETA_DE_LA_TARDE : opciones.gaveta
+  prismaMock.cashDrawerSession.findFirst.mockImplementation(async (args: any) =>
+    args?.where?.shiftId !== undefined ? ligada : (opciones.porVentana ?? null),
+  )
   return turno
+}
+
+/** Las consultas que se hicieron por VENTANA de tiempo (el respaldo), no por liga. */
+function consultasPorVentana() {
+  return prismaMock.cashDrawerSession.findFirst.mock.calls.map((c: any[]) => c[0]?.where ?? {}).filter((w: any) => w.shiftId === undefined)
 }
 
 beforeEach(() => {
@@ -93,7 +105,7 @@ beforeEach(() => {
 
 describe('el esperado de una edición sale de la GAVETA, igual que el del cierre', () => {
   it('🔴 corregir `totalSales` NO reescribe el 0.00 del cierre como −2,500.00', async () => {
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     // Con la fórmula ciega: 1300 − (2000 + 1800) = −2500.
     expect(escrito.cashDifference).toBe(0)
@@ -102,7 +114,7 @@ describe('el esperado de una edición sale de la GAVETA, igual que el del cierre
   it('un faltante REAL sigue saliendo como faltante contra el esperado de la gaveta', async () => {
     mundo({ turno: { cashDeclared: '1250.00', endingCash: '1250.00', cashDifference: '-50' } })
 
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     expect(escrito.cashDifference).toBe(-50)
   })
@@ -113,7 +125,7 @@ describe('el esperado de una edición sale de la GAVETA, igual que el del cierre
     // saldría 1300 − 3800 = −2500 en vez del sobrante real de +1,300.
     mundo({ gaveta: { id: CAJA, startingAmount: '0.00', events: [] } })
 
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     expect(escrito.cashDifference).toBe(1300)
   })
@@ -121,7 +133,7 @@ describe('el esperado de una edición sale de la GAVETA, igual que el del cierre
   it('sin gaveta, la fórmula de siempre queda BYTE A BYTE (el venue sin módulo de caja)', async () => {
     mundo({ gaveta: null, turno: { cashDeclared: '3800.00', endingCash: '3800.00' } })
 
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     // 3800 − (2000 + 1800) = 0
     expect(escrito.cashDifference).toBe(0)
@@ -137,20 +149,20 @@ describe('qué gana cuando el número tecleado contradice a la gaveta', () => {
     // El esperado de la gaveta es un LIBRO (fondo + cada movimiento, cada uno con autor y hora);
     // `startingCash` es un escalar que no puede describir el día. Un escalar tecleado después no
     // manda sobre el libro: eso es exactamente el defecto que la Task 5 mató.
-    await updateShift(VENUE, TURNO, { startingCash: 9999 }, AUTOR)
+    await updateShift(VENUE, TURNO, { startingCash: 9999 }, DUENO)
 
     expect(escrito.startingCash).toBe(9999) // la columna SÍ se guarda…
     expect(escrito.cashDifference).toBe(0) // …pero no reescribe el descuadre
   })
 
   it('un `endingCash` tecleado SÍ manda: es el conteo, y la corrección más nueva gana', async () => {
-    await updateShift(VENUE, TURNO, { endingCash: 1350 }, AUTOR)
+    await updateShift(VENUE, TURNO, { endingCash: 1350 }, DUENO)
 
     expect(escrito.cashDifference).toBe(50)
   })
 
   it('un `endingCash` puesto en null borra el conteo, y sin conteo no hay descuadre que escribir', async () => {
-    await updateShift(VENUE, TURNO, { endingCash: null }, AUTOR)
+    await updateShift(VENUE, TURNO, { endingCash: null }, DUENO)
 
     expect(escrito).not.toHaveProperty('cashDifference')
   })
@@ -177,7 +189,7 @@ describe('el conteo es `cashDeclared`, nunca `endingCash`', () => {
       },
     })
 
-    await updateShift(VENUE, TURNO, { totalSales: 149 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 149 }, DUENO)
 
     // 649 − (500 + 149) = 0. Cuadró, que es la verdad.
     expect(escrito.cashDifference).toBe(0)
@@ -186,7 +198,7 @@ describe('el conteo es `cashDeclared`, nunca `endingCash`', () => {
   it('🔴 sin conteo NO se inventa un descuadre: el campo ni se toca', async () => {
     mundo({ gaveta: null, turno: { cashDeclared: null, endingCash: '1800.00', cashDifference: null } })
 
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     expect(escrito).not.toHaveProperty('cashDifference')
     expect(escrito.totalSales).toBe(1900)
@@ -199,7 +211,7 @@ describe('el conteo es `cashDeclared`, nunca `endingCash`', () => {
 
 describe('la gaveta se resuelve como la resuelve el cierre', () => {
   it('la ligada por `shiftId` manda, y se acota al venue', async () => {
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     expect(prismaMock.cashDrawerSession.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ shiftId: TURNO, venueId: VENUE }) }),
@@ -216,23 +228,119 @@ describe('la gaveta se resuelve como la resuelve el cierre', () => {
     // gaveta y comparar sobre cero llamadas siempre da verde.
     mundo({ gaveta: null })
 
-    await updateShift(VENUE, TURNO, { endTime: new Date('2026-09-10T02:00:00.000Z') }, AUTOR)
+    await updateShift(VENUE, TURNO, { endTime: new Date('2026-09-10T02:00:00.000Z') }, DUENO)
 
-    const consultas = prismaMock.cashDrawerSession.findFirst.mock.calls
-    expect(consultas.length).toBeGreaterThan(1) // la ligada + al menos una por ventana
-    const ventanas = consultas.map((c: any[]) => JSON.stringify(c[0]?.where ?? {})).join(' ')
-    expect(ventanas).toContain('2026-09-04') // el `endTime` GUARDADO
-    expect(ventanas).not.toContain('2026-09-10') // nunca el del cuerpo
+    const ventanas = consultasPorVentana()
+    expect(ventanas.length).toBeGreaterThan(0)
+    const texto = ventanas.map((w: any) => JSON.stringify(w)).join(' ')
+    expect(texto).toContain('2026-09-04') // el `endTime` GUARDADO
+    expect(texto).not.toContain('2026-09-10') // nunca el del cuerpo
+  })
+
+  it('🔴 el respaldo por VENTANA también se acota al turno: no le arranca la gaveta a otro', async () => {
+    // El espejo de `gavetaCerrable` (`turnoDeCaja.ts`), cuyo comentario lo dice con todas sus
+    // letras. Y NO es un caso de borde: hoy en producción ninguna gaveta está ligada, así que
+    // este respaldo es el ÚNICO camino que corre. Turno A 07:00–15:00 con su gaveta cerrando a
+    // las 15:00 y la de relevo B abriendo 14:55: las dos caen dentro de la ventana, y
+    // `openedAt desc` elige B — el descuadre de A se firmaría contra el libro de B.
+    mundo({ gaveta: null })
+
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+
+    const ventanas = consultasPorVentana()
+    expect(ventanas.length).toBeGreaterThan(0)
+    for (const donde of ventanas) {
+      // La gaveta de este turno, o una sin ligar (todo lo anterior a la migración).
+      expect(JSON.stringify(donde)).toContain(JSON.stringify([{ shiftId: TURNO }, { shiftId: null }]))
+    }
   })
 
   it('🔴 si la gaveta no se puede leer, el descuadre NO se toca — pero la edición sí se guarda', async () => {
     mundo()
     prismaMock.cashDrawerSession.findFirst.mockRejectedValue(new Error('db down'))
 
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     expect(escrito).not.toHaveProperty('cashDifference')
     expect(escrito.totalSales).toBe(1900)
+  })
+
+  it('🔴 sin conteo ni siquiera se consulta la gaveta: no hay descuadre que calcular', async () => {
+    // La mayoría de los turnos cerrados no tienen conteo. Resolver la gaveta ahí son hasta 3
+    // consultas con una carga de eventos sin tope, sólo para llenar una línea de bitácora.
+    mundo({ turno: { cashDeclared: null, endingCash: '1800.00', cashDifference: null } })
+
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+
+    expect(prismaMock.cashDrawerSession.findFirst).not.toHaveBeenCalled()
+    expect(escrito).not.toHaveProperty('cashDifference')
+  })
+})
+
+// ============================================================================
+// EL CONTEO CIEGO Y LOS DATOS SIN VALIDAR
+// ============================================================================
+
+describe('lo que entra por una ruta sin Zod ni permiso de ver el esperado', () => {
+  it('🔴 sin `cash-drawer:view-expected` y la gaveta ABIERTA, el descuadre NO se toca', async () => {
+    // Caer a la fórmula ciega aquí sería reintroducir el defecto justo para quien no puede ver
+    // el número; escribirlo sería servir el esperado de una caja abierta por la puerta de atrás
+    // (`PUT {"endingCash":0}` devuelve `cashDifference = −esperado`). No se toca, y punto.
+    mundo({ gaveta: { ...GAVETA_DE_LA_TARDE, status: 'OPEN' } })
+
+    await updateShift(VENUE, TURNO, { endingCash: 0 }, { performedBy: AUTOR, puedeVerEsperado: false })
+
+    expect(escrito).not.toHaveProperty('cashDifference')
+  })
+
+  it('🔴 lo mismo por el camino de la VENTANA, que es el único que corre hoy en producción', async () => {
+    // Aquí el esperado no lo esconde `updateShift` sino `resolveShiftCashDrawer`, que omite el
+    // campo con la caja ABIERTA y sin permiso. Saber que HAY gaveta ya basta para no usar la
+    // fórmula del turno: sería firmar con la autoridad equivocada.
+    mundo({
+      gaveta: null,
+      porVentana: {
+        id: 'caja-por-ventana',
+        status: 'OPEN',
+        startingAmount: '500.00',
+        events: [{ type: 'CASH_SALE', amount: '800.00', createdAt: FIN }],
+        actualAmount: null,
+        overShort: null,
+        deviceName: null,
+        openedByName: 'Cajero',
+        closedByName: null,
+        openedAt: INICIO,
+        closedAt: null,
+      },
+    })
+
+    await updateShift(VENUE, TURNO, { endingCash: 0 }, { performedBy: AUTOR, puedeVerEsperado: false })
+
+    expect(escrito).not.toHaveProperty('cashDifference')
+    const registro = (logAction as jest.Mock).mock.calls.at(-1)![0]
+    expect(registro.data.expectedSource).toBe('DESCONOCIDO')
+  })
+
+  it('con la gaveta ya CERRADA el resultado está firmado y se revela igual, sin permiso', async () => {
+    mundo({ gaveta: { ...GAVETA_DE_LA_TARDE, status: 'CLOSED' } })
+
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, { performedBy: AUTOR, puedeVerEsperado: false })
+
+    expect(escrito.cashDifference).toBe(0)
+  })
+
+  it('🔴 un `startingCash` que llega como TEXTO no puede tumbar la bitácora DESPUÉS de guardar', async () => {
+    // La ruta no lleva `validateRequest`: Prisma acepta el string y lo vuelve Decimal, pero en JS
+    // `"500" + 1800` es `"5001800"` y un `.toFixed` sobre eso revienta — con el `update` YA
+    // commiteado y sin fila de auditoría. El cliente vería un 500 por una edición que sí se guardó.
+    mundo({ gaveta: null, turno: { cashDeclared: '2300.00', endingCash: '2300.00' } })
+
+    await updateShift(VENUE, TURNO, { startingCash: '500' as any }, DUENO)
+
+    // 2300 − (500 + 1800) = 0
+    expect(escrito.cashDifference).toBe(0)
+    const registro = (logAction as jest.Mock).mock.calls.at(-1)![0]
+    expect(registro.data.expectedCash).toBe('2300.00')
   })
 })
 
@@ -242,7 +350,7 @@ describe('la gaveta se resuelve como la resuelve el cierre', () => {
 
 describe('la bitácora dice de dónde salió el número', () => {
   it('registra autor, importes en PESOS y la autoridad del esperado', async () => {
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -265,7 +373,7 @@ describe('la bitácora dice de dónde salió el número', () => {
   it('sin gaveta la bitácora lo dice, en vez de dejar creer que el número vino del cajón', async () => {
     mundo({ gaveta: null, turno: { cashDeclared: '3800.00', endingCash: '3800.00' } })
 
-    await updateShift(VENUE, TURNO, { totalSales: 1900 }, AUTOR)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     const registro = (logAction as jest.Mock).mock.calls.at(-1)![0]
     expect(registro.data.expectedSource).toBe('TURNO')

@@ -1395,7 +1395,8 @@ router.get('/venues/:venueId/reviews', authenticateTokenMiddleware, checkPermiss
 router.delete(
   '/venues/:venueId/reviews/:reviewId',
   authenticateTokenMiddleware,
-  checkPermission('reviews:delete'), // SUPERADMIN only
+  // ADMIN/OWNER, no sólo SUPERADMIN: entran por el comodín `reviews:*` de sus defaults.
+  checkPermission('reviews:delete'),
   reviewController.deleteReview,
 )
 
@@ -3690,14 +3691,17 @@ router.get(
 router.delete(
   '/venues/:venueId/payments/:paymentId',
   authenticateTokenMiddleware,
-  checkPermission('payments:delete'), // SUPERADMIN only
+  // 🔴 ADMIN/OWNER, no sólo SUPERADMIN: entran por el comodín `payments:*`. El literal no
+  // aparece en ningún rol, que es lo que hacía creer lo contrario a quien lo grepeara.
+  checkPermission('payments:delete'),
   paymentController.deletePayment,
 )
 
 router.put(
   '/venues/:venueId/payments/:paymentId',
   authenticateTokenMiddleware,
-  checkPermission('payments:update'), // SUPERADMIN only
+  // 🔴 ADMIN/OWNER, no sólo SUPERADMIN: mismo comodín `payments:*` que el borrado de arriba.
+  checkPermission('payments:update'),
   paymentController.updatePayment,
 )
 
@@ -8418,6 +8422,9 @@ router.get(
 router.delete(
   '/venues/:venueId/shifts/:shiftId',
   authenticateTokenMiddleware,
+  // ADMIN/OWNER (vía `shifts:*`), NO el gerente — founder, 3-sep-2026. El borrado es DURO y deja
+  // sueltas las órdenes, pagos, comisiones y la gaveta del turno. Fijado en
+  // `tests/unit/routes/dashboard.shifts.routes.permissions.test.ts`.
   checkPermission('shifts:delete'),
   shiftController.deleteShift,
 )
@@ -8425,7 +8432,16 @@ router.delete(
 router.put(
   '/venues/:venueId/shifts/:shiftId',
   authenticateTokenMiddleware,
-  checkPermission('shifts:update'), // SUPERADMIN only
+  // 🔴 DECÍA «SUPERADMIN only» y era FALSO: `shifts:update` lo tiene MANAGER desde hace
+  // tiempo (`permissions.ts`, bloque MANAGER), y ADMIN/OWNER por el comodín `shifts:*`. Lo único
+  // que parecía superadmin-only era el botón del dashboard, un candado de CLIENTE. Gerente para
+  // arriba es la decisión del founder (3-sep-2026); el comentario es lo que estaba mal.
+  checkPermission('shifts:update'),
+  // `marcarPermiso` NO bloquea: etiqueta si quien edita puede ver el efectivo esperado. Sin esa
+  // marca, una gaveta todavía ABIERTA no revela su esperado ni siquiera para recalcular el
+  // descuadre — el mismo conteo ciego del detalle del turno. Sin él bastaba un rol propio con
+  // `shifts:update` a secas y un `PUT {"endingCash":0}` para leer el esperado en `cashDifference`.
+  marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   shiftController.updateShift,
 )
 

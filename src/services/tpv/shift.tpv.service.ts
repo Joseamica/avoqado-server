@@ -1812,7 +1812,9 @@ async function closeShiftUsingRequest(
       // P2 (Codex): el turno YA está cerrado y commiteado; la PAX espera 12 s. Una consulta lenta no
       // puede convertir un cierre exitoso en un NetworkError: si tarda más de 1.5 s, va sin el campo.
       const drawer = await Promise.race([
-        resolveShiftCashDrawer(venueId, updatedShift.startTime, updatedShift.endTime ?? new Date()),
+        // `shiftId` acota al turno (espejo de `gavetaCerrable`): la PAX no puede imprimir el
+        // arqueo de la gaveta de OTRO turno junto al conteo de éste.
+        resolveShiftCashDrawer(venueId, updatedShift.startTime, updatedShift.endTime ?? new Date(), false, shiftId),
         new Promise<null>(resolve => setTimeout(() => resolve(null), 1500).unref?.()),
       ])
       // 🔴 Con el conteo ciego, `expectedAmount` puede venir ausente (cajón todavía ABIERTO y

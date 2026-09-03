@@ -151,7 +151,10 @@ describe('closeShiftForVenueWithResult cash reconciliation', () => {
       countedCash: '6000.00',
     })
 
-    expect(resolveShiftCashDrawer).toHaveBeenCalledWith(VENUE_ID, shift.startTime, expect.any(Date))
+    // 🔴 El `shiftId` del final NO es cosmético (Task 5h): acota la búsqueda a la gaveta de ESTE
+    // turno o a una sin ligar, para que la PAX no imprima el arqueo de la gaveta del turno de
+    // relevo — que cabe en la misma ventana de tiempo y gana por `openedAt desc`.
+    expect(resolveShiftCashDrawer).toHaveBeenCalledWith(VENUE_ID, shift.startTime, expect.any(Date), false, SHIFT_ID)
     // El contrato viejo NO cambia: los mismos tres campos siguen ahí, con los mismos valores.
     expect(result.reconciliation).toMatchObject({ outcome: 'APPLIED', countedCash: '6000.00', cashDifference: '0.00' })
     expect(result.reconciliation.cashDrawer).toMatchObject({
