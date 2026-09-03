@@ -35,6 +35,15 @@ export interface DrawerSessionView {
   closedByStaffId: string | null
   closedByName: string | null
   closedAt: string | null
+  /**
+   * El turno de caja al que pertenece esta gaveta (Fase 2, 3-sep-2026). Desde que abrir es UN solo
+   * gesto (`abrirTurnoDeCaja`), las dos verdades del mismo dinero quedan atadas y el dueño —o el
+   * MCP— puede ir de una a la otra sin adivinar por ventana de tiempo.
+   *
+   * `null` en las sesiones anteriores a la unificación y en cualquiera que se haya abierto sin
+   * turno: no se adivina la liga hacia atrás. NO es dinero, así que no lo esconde el conteo ciego.
+   */
+  shiftId: string | null
   // 🔴 OPCIONALES por el conteo ciego: a quien no tiene `cash-drawer:view-expected` no se
   // le sirven mientras la caja está ABIERTA. No basta con ocultar `expectedAmount`, porque
   // `startingAmount + cashSales + payIns − payOuts` ES el esperado.
@@ -86,6 +95,7 @@ function toView(session: any, incluirEsperado = false): DrawerSessionView {
     closedByStaffId: session.closedByStaffId ?? null,
     closedByName: session.closedByName ?? null,
     closedAt: session.closedAt ? session.closedAt.toISOString() : null,
+    shiftId: session.shiftId ?? null,
     ...(revelar
       ? {
           startingAmount: money(session.startingAmount),
