@@ -1,3 +1,4 @@
+import type { PrismaClient } from '@prisma/client'
 import { Prisma, ShiftStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
@@ -213,15 +214,13 @@ function numerosParejos(
 // ENCONTRAR LAS PAREJAS A MEDIAS
 // ============================================================================
 
-/** Lo que hace falta del cliente de Prisma. Acepta el cliente o un `tx`, como `ShiftReader`. */
-export type LectorDeParejas = {
-  cashDrawerSession: {
-    findMany: (args: unknown) => Promise<unknown[]>
-    findUnique: (args: unknown) => Promise<{ id: string } | null>
-    updateMany: (args: unknown) => Promise<{ count: number }>
-  }
-  shift: { findMany: (args: unknown) => Promise<{ venueId: string }[]> }
-}
+/**
+ * Lo que hace falta del cliente de Prisma. Es el mismo recurso que `ShiftReader` en
+ * `turnoDeCaja.ts`: un `Pick` del cliente REAL, no una interfaz escrita a mano. Escribirla a mano
+ * invierte la varianza de los parámetros (`(args: unknown) => …` no acepta un método tipado) y el
+ * error sale en el llamador, lejos de aquí.
+ */
+export type LectorDeParejas = Pick<PrismaClient, 'cashDrawerSession' | 'shift'>
 
 /**
  * Las parejas del cierre que quedaron a medias, ya decididas.

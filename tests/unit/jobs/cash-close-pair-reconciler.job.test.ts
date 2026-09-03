@@ -117,10 +117,7 @@ describe('reparar la mitad que falta', () => {
   })
 
   it('🔴 una pareja que falla no detiene a las demás: cada una es independiente', async () => {
-    const cerrar = jest
-      .fn()
-      .mockRejectedValueOnce(new Error('el turno está en CLOSING'))
-      .mockResolvedValueOnce({ conConteo: true })
+    const cerrar = jest.fn().mockRejectedValueOnce(new Error('el turno está en CLOSING')).mockResolvedValueOnce({ conConteo: true })
     const { j } = job({ parejas: [faltaElTurno, { ...faltaLaGaveta, shiftId: 'shift-2' }], cerrar })
 
     const r = await j.runNow()
@@ -165,7 +162,10 @@ describe('lo que NO se repara se DICE', () => {
 
     expect(cerrar).not.toHaveBeenCalled()
     expect(r.blocked).toEqual([bloqueada])
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no se pudieron cerrar solas'), expect.objectContaining({ bloqueadas: [bloqueada] }))
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no se pudieron cerrar solas'),
+      expect.objectContaining({ bloqueadas: [bloqueada] }),
+    )
   })
 
   it('🔴 el aviso se limita en el tiempo: una pareja atorada un día no puede escribir un renglón por minuto', async () => {
