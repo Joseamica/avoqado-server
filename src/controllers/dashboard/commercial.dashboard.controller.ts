@@ -8,6 +8,7 @@ import {
   getCommercialBillingDashboardOverview,
   listCommercialBillingDashboardReceipts,
 } from '@/services/commercial/billing/commercialBillingDashboardRead.service'
+import { commercialConfiguratorDashboardService } from '@/services/commercial/configurator/commercialConfiguratorDashboard.service'
 
 function auth(req: Request) {
   if (!req.authContext) throw new AppError('Authentication required', 401, true, 'AUTH_REQUIRED')
@@ -39,6 +40,25 @@ export async function listCommercialBillingReceipts(req: Request, res: Response,
     })
     res.setHeader('Cache-Control', 'no-store')
     res.status(200).json({ success: true, data: receipts })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function previewCommercialBillingConfigurator(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const context = auth(req)
+    const result = await commercialConfiguratorDashboardService.preview({
+      organizationId: context.orgId,
+      venueId: req.params.venueId,
+      selection: req.body.selection,
+    })
+    res.setHeader('Cache-Control', 'no-store')
+    res.status(200).json({ success: true, data: result })
   } catch (error) {
     next(error)
   }

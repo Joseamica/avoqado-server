@@ -1,5 +1,6 @@
 import {
   assertQ3bRenderReviewSeedTarget,
+  Q3B_RENDER_REVIEW_CATALOG,
   Q3B_RENDER_REVIEW_MAIN_SELECTIONS,
   Q3B_RENDER_REVIEW_MONEY,
   Q3B_RENDER_REVIEW_OFFER,
@@ -70,6 +71,14 @@ describe('Q3B Render review seed boundary', () => {
   })
 
   it('pins the founder-review offer and money expectations before any preview data is written', () => {
+    expect(Q3B_RENDER_REVIEW_CATALOG).toEqual({
+      sourceKey: 'Q3B_RENDER_CONFIGURATOR_CATALOG_20260902',
+      requiredPackageCapabilities: {
+        PRO: ['POS_CORE'],
+        PREMIUM: ['KITCHEN_DISPLAY', 'MULTI_LOCATION', 'POS_CORE'],
+        ENTERPRISE: ['KITCHEN_DISPLAY', 'MULTI_LOCATION', 'POS_CORE'],
+      },
+    })
     expect(Q3B_RENDER_REVIEW_OFFER).toMatchObject({
       code: 'Q3B_REVIEW_POS_50',
       ruleCode: 'POS_FIXED_50',

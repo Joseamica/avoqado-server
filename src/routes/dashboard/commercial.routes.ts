@@ -4,7 +4,10 @@ import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.mid
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { requireCommercialV2CheckoutActive } from '@/middlewares/requireCommercialV2CheckoutActive.middleware'
 import { validateRequest } from '@/middlewares/validation'
-import { commercialAuthenticatedQuoteRateLimiter } from '@/middlewares/commercial-authenticated-quote-rate-limit.middleware'
+import {
+  commercialAuthenticatedQuoteRateLimiter,
+  commercialConfiguratorPreviewRateLimiter,
+} from '@/middlewares/commercial-authenticated-quote-rate-limit.middleware'
 import { bridgeCommercialQuotePreviewRequestV2Schema, commercialDirectVenueQuoteRequestV2Schema } from '@/schemas/commercialQuoteV2.schema'
 import {
   acceptCommercialQuote,
@@ -13,6 +16,7 @@ import {
   createAuthenticatedCommercialQuote,
   getCommercialBillingOverview,
   listCommercialBillingReceipts,
+  previewCommercialBillingConfigurator,
 } from '@/controllers/dashboard/commercial.dashboard.controller'
 
 const router = Router({ mergeParams: true })
@@ -50,6 +54,30 @@ export const commercialBillingReceiptsHttpSchema = z
   })
   .strict()
 
+const commercialConfiguratorSelectionSchema = z.discriminatedUnion('mode', [
+  z
+    .object({
+      mode: z.literal('PACKAGE'),
+      packageCode: z.string().regex(/^[A-Z][A-Z0-9_]{1,63}$/),
+      billingUnit: z.enum(['VENUE_MONTH', 'VENUE_YEAR']),
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal('CUSTOM'),
+      moduleCodes: z.array(z.string().regex(/^[A-Z][A-Z0-9_]{1,63}$/)).max(49).refine(codes => new Set(codes).size === codes.length),
+      billingUnit: z.literal('VENUE_MONTH'),
+    })
+    .strict(),
+])
+
+export const commercialConfiguratorPreviewHttpSchema = z
+  .object({
+    params: z.object({ venueId: z.string().min(1).max(128) }).strict(),
+    body: z.object({ selection: commercialConfiguratorSelectionSchema }).strict(),
+  })
+  .strict()
+
 router.get(
   '/venues/:venueId/billing/overview',
   authenticateTokenMiddleware,
@@ -63,6 +91,14 @@ router.get(
   validateRequest(commercialBillingReceiptsHttpSchema),
   checkPermission('billing:history:read'),
   listCommercialBillingReceipts,
+)
+router.post(
+  '/venues/:venueId/billing/configurator/preview',
+  authenticateTokenMiddleware,
+  commercialConfiguratorPreviewRateLimiter,
+  validateRequest(commercialConfiguratorPreviewHttpSchema),
+  checkPermission('billing:subscriptions:manage'),
+  previewCommercialBillingConfigurator,
 )
 
 router.post(

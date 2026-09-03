@@ -127,7 +127,7 @@ describe('commercial artifact codec v2 read-write support', () => {
     const catalog = decodeAndVerifyCommercialArtifact(catalogInput())
     if (catalog.kind !== 'CATALOG') throw new Error('Expected decoded catalog')
     expect(catalog).toMatchObject({ kind: 'CATALOG', schemaVersion: 2, mode: 'READ_WRITE' })
-    expect(catalog.checksum).toBe('f487bb2a340cec9018e833718a0c3a53a1e503efb1587da8f7346dd0e994236e')
+    expect(catalog.checksum).toBe('d946ff3d054ba33550a5a76415facd56d0119dde5489511f8baacd6843fc95d1')
     expect(catalog.money.prices.every(price => typeof price.amountMinor === 'bigint')).toBe(true)
 
     const campaign = decodeAndVerifyCommercialArtifact(campaignInput())
@@ -310,7 +310,7 @@ describe('commercial artifact codec v2 read-write support', () => {
   it('emits all three v2 artifacts through one runtime boundary without aliases', () => {
     const sourceCatalog = clone(catalogFixture) as CommercialCatalogSnapshotV2
     const catalog = emitCommercialArtifactV2({ kind: 'CATALOG', schemaVersion: 2, domainValue: sourceCatalog })
-    expect(catalog.checksum).toBe('f487bb2a340cec9018e833718a0c3a53a1e503efb1587da8f7346dd0e994236e')
+    expect(catalog.checksum).toBe('d946ff3d054ba33550a5a76415facd56d0119dde5489511f8baacd6843fc95d1')
     expect(catalog.snapshot).not.toBe(sourceCatalog)
 
     const campaign = emitCommercialArtifact({

@@ -11,11 +11,11 @@
   "acquisitionContextId": "acquisition-context-summer-2026",
   "derivedFromPreview": {
     "previewQuoteId": "commercial-quote-v3-anonymous-preview",
-    "previewChecksum": "893c29c30f9bf9a50b3db1d2707a5bfb05d67c4e0c84d1852144ed69e27ab2ed",
+    "previewChecksum": "8c84f1add220c17d72d3dbf5196db734558d1cf96ed475bde786efc2f0c6d63b",
     "selectionFingerprint": "934a31d9b6495822a10bb8d4d07b17920982dcf13583eea0b1f8e9e6184d9eea"
   },
   "catalogPublicationId": "commercial-catalog-initial-v2",
-  "catalogChecksum": "f487bb2a340cec9018e833718a0c3a53a1e503efb1587da8f7346dd0e994236e",
+  "catalogChecksum": "d946ff3d054ba33550a5a76415facd56d0119dde5489511f8baacd6843fc95d1",
   "offerVersionId": "commercial-offer-version-summer-2026-v3",
   "offerCode": "SUMMER_2026",
   "offerChecksum": "b491005815029ea8f5cfaa838ee4fcf180c59a1a9bd192d9f69011b857f69be3",

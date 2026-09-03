@@ -2,6 +2,13 @@ import { createHash } from 'node:crypto'
 
 import { Prisma } from '@prisma/client'
 
+import { activateCommercialPublication } from '@/services/commercial/commercialActivation.service'
+import { createCommercialDraft } from '@/services/commercial/commercialDraft.service'
+import { buildInitialCommercialDraftV1 } from '@/services/commercial/commercialInitialCatalog'
+import {
+  previewCommercialPublication,
+  publishCommercialDraft,
+} from '@/services/commercial/commercialPublication.service'
 import { commercialOfferPublicationService } from '@/services/commercial/offers/commercialOfferPublication.service'
 import {
   createCommercialDirectQuoteV3Service,
@@ -29,6 +36,7 @@ import prisma from '@/utils/prismaClient'
 
 import {
   assertQ3bRenderReviewSeedTarget,
+  Q3B_RENDER_REVIEW_CATALOG,
   Q3B_RENDER_REVIEW_MAIN_CONTRACT,
   Q3B_RENDER_REVIEW_MAIN_SELECTIONS,
   Q3B_RENDER_REVIEW_MONEY,
@@ -58,6 +66,94 @@ function fail(code: string): never {
 
 function sha256(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+async function ensureConfiguratorCatalog(publishedById: string): Promise<string> {
+  const initial = buildInitialCommercialDraftV1()
+  let draft = await prisma.commercialDraft.findUnique({
+    where: { sourceKey: Q3B_RENDER_REVIEW_CATALOG.sourceKey },
+    select: {
+      id: true,
+      revision: true,
+      status: true,
+      featureBindings: {
+        select: { capabilityCode: true, product: { select: { code: true } } },
+      },
+    },
+  })
+  if (!draft) {
+    const created = await createCommercialDraft(
+      initial.draft,
+      { staffId: publishedById, reason: REVIEW_REASON },
+      { sourceKey: Q3B_RENDER_REVIEW_CATALOG.sourceKey },
+    )
+    draft = await prisma.commercialDraft.findUniqueOrThrow({
+      where: { id: created.id },
+      select: {
+        id: true,
+        revision: true,
+        status: true,
+        featureBindings: {
+          select: { capabilityCode: true, product: { select: { code: true } } },
+        },
+      },
+    })
+  }
+  if (draft.status !== 'ACTIVE') fail('COMMERCIAL_Q3B_RENDER_REVIEW_CATALOG_DRAFT_CONFLICT')
+  const bindings = new Set(draft.featureBindings.map(binding => `${binding.product.code}:${binding.capabilityCode}`))
+  for (const [productCode, capabilityCodes] of Object.entries(
+    Q3B_RENDER_REVIEW_CATALOG.requiredPackageCapabilities,
+  )) {
+    for (const capabilityCode of capabilityCodes) {
+      if (!bindings.has(`${productCode}:${capabilityCode}`)) {
+        fail('COMMERCIAL_Q3B_RENDER_REVIEW_CATALOG_DRAFT_CONFLICT')
+      }
+    }
+  }
+
+  const actor = {
+    staffId: publishedById,
+    permissions: ['commercial:publish'],
+    reason: REVIEW_REASON,
+    ipAddress: '127.0.0.1',
+    userAgent: 'avoqado-q3b-render-review-seed',
+  }
+  let publication = await prisma.commercialPublication.findFirst({
+    where: { sourceDraftId: draft.id, sourceRevision: draft.revision },
+    orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
+    select: { id: true },
+  })
+  if (!publication) {
+    const preview = await previewCommercialPublication(draft.id, draft.revision, actor)
+    publication = await publishCommercialDraft(
+      {
+        draftId: draft.id,
+        expectedRevision: draft.revision,
+        previewToken: preview.previewToken,
+        checksum: preview.checksum,
+        reason: REVIEW_REASON,
+        confirm: true,
+      },
+      actor,
+    )
+  }
+
+  const active = await prisma.commercialPublicationActivation.findUnique({
+    where: { environment: 'PRODUCTION' },
+    select: { publicationId: true, revision: true },
+  })
+  if (active?.publicationId !== publication.id) {
+    await activateCommercialPublication(
+      {
+        publicationId: publication.id,
+        expectedActivationRevision: active?.revision ?? 0,
+        reason: REVIEW_REASON,
+        confirm: true,
+      },
+      actor,
+    )
+  }
+  return publication.id
 }
 
 async function requirePreviewIdentity(email: string): Promise<ReviewIdentity> {
@@ -614,6 +710,7 @@ async function seed(): Promise<void> {
     wellnessVenue.id,
   ])
 
+  const catalogPublicationId = await ensureConfiguratorCatalog(superadmin.id)
   const offerVersionId = await publishReviewOffer(superadmin.id)
   const main = await ensureContract({
     quoteId: Q3B_RENDER_REVIEW_MAIN_CONTRACT.quoteId,
@@ -676,6 +773,7 @@ async function seed(): Promise<void> {
       main: {
         venueSlug: fullVenue.slug,
         contractId: main.contractId,
+        catalogPublicationId,
         currentTotalMinor: Q3B_RENDER_REVIEW_MONEY.mainCurrentTotalMinor,
         renewalTotalMinor: Q3B_RENDER_REVIEW_MONEY.mainRenewalTotalMinor,
       },

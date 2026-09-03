@@ -7,6 +7,7 @@ const acceptQuote = jest.fn()
 const createCheckout = jest.fn()
 const getBillingOverview = jest.fn()
 const listBillingReceipts = jest.fn()
+const previewConfigurator = jest.fn()
 const authenticateRequest = jest.fn((req: Request, _res: Response, next: NextFunction) => {
   req.authContext = {
     userId: 'staff-1',
@@ -37,6 +38,9 @@ jest.mock('@/services/commercial/commercialStripeCheckoutFacade.service', () => 
 jest.mock('@/services/commercial/billing/commercialBillingDashboardRead.service', () => ({
   getCommercialBillingDashboardOverview: (...args: unknown[]) => getBillingOverview(...args),
   listCommercialBillingDashboardReceipts: (...args: unknown[]) => listBillingReceipts(...args),
+}))
+jest.mock('@/services/commercial/configurator/commercialConfiguratorDashboard.service', () => ({
+  commercialConfiguratorDashboardService: { preview: (...args: unknown[]) => previewConfigurator(...args) },
 }))
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   authenticateTokenMiddleware: (req: Request, res: Response, next: NextFunction) => {
@@ -334,5 +338,52 @@ describe('authenticated commercial quote API', () => {
     })
     expect(response.headers['cache-control']).toBe('no-store')
     expect(response.body.data.items[0].amountMinor).toBe('28884')
+  })
+
+  it('previews one package or one custom configuration using only authenticated tenant identity', async () => {
+    previewConfigurator.mockResolvedValue({
+      schemaVersion: 1,
+      state: 'READY',
+      pricing: { state: 'BOUND_OFFER_APPLIED', offerCode: 'POS_50' },
+      preview: { quote: { today: { totalMinor: '26564' } } },
+    })
+    const selection = { mode: 'CUSTOM', billingUnit: 'VENUE_MONTH', moduleCodes: ['CFDI_MODULE'] }
+
+    const response = await request(app())
+      .post('/api/v1/dashboard/commercial/venues/venue-1/billing/configurator/preview')
+      .send({ selection })
+      .expect(200)
+
+    expect(previewConfigurator).toHaveBeenCalledWith({ organizationId: 'org-1', venueId: 'venue-1', selection })
+    expect(requestedPermissions).toContain('billing:subscriptions:manage')
+    expect(response.headers['cache-control']).toBe('no-store')
+    expect(response.body.data.preview.quote.today.totalMinor).toBe('26564')
+  })
+
+  it('rejects mixed modes, browser prices and annual custom modules before the pricing authority', async () => {
+    const invalidBodies = [
+      {
+        selection: {
+          mode: 'CUSTOM',
+          billingUnit: 'VENUE_MONTH',
+          moduleCodes: ['CFDI_MODULE'],
+          packageCode: 'PREMIUM',
+        },
+      },
+      {
+        selection: { mode: 'PACKAGE', billingUnit: 'VENUE_MONTH', packageCode: 'PREMIUM' },
+        totalMinor: '1',
+      },
+      { selection: { mode: 'CUSTOM', billingUnit: 'VENUE_YEAR', moduleCodes: [] } },
+    ]
+
+    for (const body of invalidBodies) {
+      await request(app())
+        .post('/api/v1/dashboard/commercial/venues/venue-1/billing/configurator/preview')
+        .send(body)
+        .expect(400)
+    }
+
+    expect(previewConfigurator).not.toHaveBeenCalled()
   })
 })

@@ -50,4 +50,22 @@ describe('buildInitialCommercialDraftV1', () => {
     expect(second.draft.products[0].name).toBe('Free')
     expect(buildInitialCommercialDraftV1()).toEqual(second)
   })
+
+  it('makes paid packages operational alternatives and Premium an entitlement superset of the modular offer', () => {
+    const draft = buildInitialCommercialDraftV1().draft
+    const bindingsFor = (productCode: string) =>
+      new Set(draft.featureBindings.filter(binding => binding.productCode === productCode).map(binding => binding.capabilityCode))
+    const moduleCapabilities = draft.products
+      .filter(product => product.kind === 'MODULE')
+      .flatMap(product => [...bindingsFor(product.code)])
+    const pro = bindingsFor('PRO')
+    const premium = bindingsFor('PREMIUM')
+    const enterprise = bindingsFor('ENTERPRISE')
+
+    expect(pro).toContain('POS_CORE')
+    expect(premium).toContain('POS_CORE')
+    expect(enterprise).toContain('POS_CORE')
+    expect(moduleCapabilities.every(capability => premium.has(capability))).toBe(true)
+    expect(moduleCapabilities.every(capability => enterprise.has(capability))).toBe(true)
+  })
 })

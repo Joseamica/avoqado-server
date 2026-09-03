@@ -21,13 +21,13 @@ import { hashCanonicalJsonV2 } from '@/services/commercial/commercialCanonicalJs
 describe('commercial contract hashes v2', () => {
   it('freezes individual artifact and bundle digests', () => {
     expect(COMMERCIAL_CONTRACT_V2_ARTIFACT_HASHES).toEqual({
-      CATALOG: 'd7380618527c005635b1f4098f929e4ee942aa2cc6fb81cc02baf7334276db91',
+      CATALOG: 'afd0c90c8e063b6e73aaf5d023aaa727666d6d88de55d6412f04a4bb06d756d1',
       CAMPAIGN: 'c086841a458e2b6cfd3ec26b094e55f6ba4486b038481624699a51c22c6081fd',
       QUOTE: 'c7283f2ac358fc8d169c5c130647d5796a9f8ecb4db85adc5ed9ddd9d01b670e',
       ENTITLEMENTS: '68c272adbb9d7cb4b2a982fb04a12165f3b753f0617100cfe816c8b58cc3109b',
       LIFECYCLE: '73220924b3239bbe7aab393511a260c4ebe907cb77737fb06386c38f4d655c7f',
     })
-    expect(COMMERCIAL_CONTRACT_V2_BUNDLE_HASH).toBe('a1755221256332250bb43a8e2130a62b25309c5a3917e555b0261dd652cb334d')
+    expect(COMMERCIAL_CONTRACT_V2_BUNDLE_HASH).toBe('c44845239477b7bcfcb5b952000a36634312dbe25a7fbe416464ba911ce04021')
   })
 
   it('uses the exact artifact fixture mapping and logical bundle key sets', () => {

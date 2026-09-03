@@ -12,6 +12,14 @@ import type { CommercialCapabilityKind } from '@/types/commercial'
 export const COMMERCIAL_INITIAL_SOURCE_KEY = 'MEXICO_INITIAL_CATALOG_V1'
 const PRICEBOOK_CODE = 'MX_STANDARD'
 
+// catalog-v1.json is a frozen wire-contract fixture. The editable initial draft may
+// enrich package coverage without rewriting that historical contract sentinel.
+const INITIAL_PACKAGE_CAPABILITY_ADDITIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  PRO: Object.freeze(['POS_CORE']),
+  PREMIUM: Object.freeze(['KITCHEN_DISPLAY', 'MULTI_LOCATION', 'POS_CORE']),
+  ENTERPRISE: Object.freeze(['KITCHEN_DISPLAY', 'MULTI_LOCATION', 'POS_CORE']),
+})
+
 interface FixturePrice {
   code: string
   billingUnit: CommercialBillingUnit
@@ -48,6 +56,10 @@ function requireCapabilityKind(capabilityCode: string): CommercialCapabilityKind
   const kind = getCommercialCapabilityKind(capabilityCode)
   if (!kind) throw new Error(`Initial commercial fixture uses unknown capability ${capabilityCode}`)
   return kind
+}
+
+function initialCapabilities(product: FixtureProduct): string[] {
+  return [...new Set([...product.capabilityCodes, ...(INITIAL_PACKAGE_CAPABILITY_ADDITIONS[product.code] ?? [])])].sort()
 }
 
 export function buildInitialCommercialDraftV1(): { sourceKey: string; draft: CommercialDraftInput } {
@@ -111,7 +123,7 @@ export function buildInitialCommercialDraftV1(): { sourceKey: string; draft: Com
         })),
       ),
       featureBindings: products.flatMap(product =>
-        product.capabilityCodes.map(capabilityCode => ({
+        initialCapabilities(product).map(capabilityCode => ({
           productCode: product.code,
           capabilityCode,
           capabilityKind: requireCapabilityKind(capabilityCode),

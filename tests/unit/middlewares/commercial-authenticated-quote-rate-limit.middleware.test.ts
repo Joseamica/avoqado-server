@@ -3,6 +3,7 @@ import request from 'supertest'
 
 type LimiterModule = {
   createCommercialAuthenticatedQuoteRateLimiter(): (req: Request, res: Response, next: NextFunction) => unknown
+  createCommercialConfiguratorPreviewRateLimiter(): (req: Request, res: Response, next: NextFunction) => unknown
 }
 
 function loadLimiter(): LimiterModule {
@@ -69,5 +70,30 @@ describe('authenticated commercial quote limiter', () => {
       code: 'COMMERCIAL_AUTHENTICATION_REQUIRED',
       message: 'La autenticación es obligatoria para cotizar.',
     })
+  })
+
+  it('keeps high-frequency configurator previews out of the durable quote budget', async () => {
+    const { createCommercialAuthenticatedQuoteRateLimiter, createCommercialConfiguratorPreviewRateLimiter } = loadLimiter()
+    const server = express()
+    server.use((req, _res, next) => {
+      req.authContext = {
+        userId: 'actor-a',
+        orgId: 'org-1',
+        venueId: 'venue-home',
+        role: 'OWNER',
+      }
+      next()
+    })
+    server.post('/venues/:venueId/configurator', createCommercialConfiguratorPreviewRateLimiter(), (_req, res) =>
+      res.status(200).json({ ok: true }),
+    )
+    server.post('/venues/:venueId/quotes/from-preview', createCommercialAuthenticatedQuoteRateLimiter(), (_req, res) =>
+      res.status(200).json({ ok: true }),
+    )
+
+    for (let index = 0; index < 30; index += 1) {
+      await request(server).post('/venues/venue-a/configurator').expect(200)
+    }
+    await request(server).post('/venues/venue-a/quotes/from-preview').expect(200)
   })
 })

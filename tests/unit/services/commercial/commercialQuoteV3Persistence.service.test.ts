@@ -86,7 +86,7 @@ const bridgeContext: CommercialQuoteV3BridgePersistenceContext = {
   },
   preview: {
     quoteId: 'commercial-quote-v3-anonymous-preview',
-    checksum: '893c29c30f9bf9a50b3db1d2707a5bfb05d67c4e0c84d1852144ed69e27ab2ed',
+    checksum: '8c84f1add220c17d72d3dbf5196db734558d1cf96ed475bde786efc2f0c6d63b',
     selectionFingerprint: '934a31d9b6495822a10bb8d4d07b17920982dcf13583eea0b1f8e9e6184d9eea',
   },
 }

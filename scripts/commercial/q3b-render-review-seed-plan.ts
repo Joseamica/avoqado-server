@@ -1,6 +1,15 @@
 export const Q3B_RENDER_REVIEW_CONFIRMATION = 'avq-q3b-20260902-a91e-staging-db'
 export const Q3B_RENDER_REVIEW_DATABASE = 'avoqado_q3b_preview'
 
+export const Q3B_RENDER_REVIEW_CATALOG = Object.freeze({
+  sourceKey: 'Q3B_RENDER_CONFIGURATOR_CATALOG_20260902',
+  requiredPackageCapabilities: Object.freeze({
+    PRO: Object.freeze(['POS_CORE']),
+    PREMIUM: Object.freeze(['KITCHEN_DISPLAY', 'MULTI_LOCATION', 'POS_CORE']),
+    ENTERPRISE: Object.freeze(['KITCHEN_DISPLAY', 'MULTI_LOCATION', 'POS_CORE']),
+  }),
+})
+
 export const Q3B_RENDER_REVIEW_OFFER = Object.freeze({
   draftId: 'q3b-review-pos-50-offer-draft-v3',
   code: 'Q3B_REVIEW_POS_50',

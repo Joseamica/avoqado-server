@@ -20,6 +20,14 @@ function rejectRateLimited(_request: Request, response: Response): void {
   })
 }
 
+function rejectConfiguratorPreviewRateLimited(_request: Request, response: Response): void {
+  response.status(429).json({
+    success: false,
+    code: 'COMMERCIAL_CONFIGURATOR_PREVIEW_RATE_LIMITED',
+    message: 'Demasiadas actualizaciones del configurador. Espera un momento.',
+  })
+}
+
 export function createCommercialAuthenticatedQuoteRateLimiter(): RateLimitRequestHandler {
   return rateLimit({
     windowMs: WINDOW_MS,
@@ -31,4 +39,16 @@ export function createCommercialAuthenticatedQuoteRateLimiter(): RateLimitReques
   })
 }
 
+export function createCommercialConfiguratorPreviewRateLimiter(): RateLimitRequestHandler {
+  return rateLimit({
+    windowMs: WINDOW_MS,
+    max: 90,
+    keyGenerator: authenticatedActorKey,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: rejectConfiguratorPreviewRateLimited,
+  })
+}
+
 export const commercialAuthenticatedQuoteRateLimiter = createCommercialAuthenticatedQuoteRateLimiter()
+export const commercialConfiguratorPreviewRateLimiter = createCommercialConfiguratorPreviewRateLimiter()
