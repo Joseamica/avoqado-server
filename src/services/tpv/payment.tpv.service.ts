@@ -13,6 +13,7 @@ import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service
 import { parseDateRange } from '@/utils/datetime'
 import { PhaseTimer } from '@/utils/phaseTimer'
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
@@ -1996,20 +1997,10 @@ export async function recordOrderPayment(
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
 
-  // ✅ CORRECTED: Find current open shift for THIS STAFF MEMBER (not just any shift)
-  // CRITICAL: If multiple staff members have open shifts simultaneously,
-  // we must match the payment to the correct staff's shift
-  const currentShift = await prisma.shift.findFirst({
-    where: {
-      venueId,
-      staffId: validatedStaffId, // ← FIX: Filter by staff member who made the payment
-      status: 'OPEN',
-      endTime: null,
-    },
-    orderBy: {
-      startTime: 'desc',
-    },
-  })
+  // 🔴 El turno de caja es del NEGOCIO, no de quien cobra (`../shared/turnoDeCaja.ts`):
+  // el selector «Vendedor» cambia el `staffId` de cada cobro, y filtrar por él dejaba FUERA
+  // de todo turno a quien no había abierto uno. Quién cobró vive en `processedById`.
+  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
 
   // ⭐ PROVIDER-AGNOSTIC MERCHANT TRACKING: Resolve merchantAccountId
   // Priority 1: Use merchantAccountId if provided by modern Android client
@@ -3162,21 +3153,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await t.time('validateStaffVenue', () => validateStaffVenue(paymentData.staffId, venueId, userId))
 
-  // ✅ CORRECTED: Find current open shift for THIS STAFF MEMBER (not just any shift)
-  // CRITICAL: If multiple staff members have open shifts simultaneously,
-  // we must match the payment to the correct staff's shift
+  // 🔴 El turno de caja es del NEGOCIO, no de quien cobra (`../shared/turnoDeCaja.ts`):
+  // el selector «Vendedor» cambia el `staffId` de cada cobro, y filtrar por él dejaba FUERA
+  // de todo turno a quien no había abierto uno. Quién cobró vive en `processedById`.
   t.mark('idempotenciaYChequeosPrevios')
-  const currentShift = await prisma.shift.findFirst({
-    where: {
-      venueId,
-      staffId: validatedStaffId, // ← FIX: Filter by staff member who made the payment
-      status: 'OPEN',
-      endTime: null,
-    },
-    orderBy: {
-      startTime: 'desc',
-    },
-  })
+  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
 
   // Map source from Android app format to PaymentSource enum
   const mapPaymentSource = (source?: string): PaymentSource => {

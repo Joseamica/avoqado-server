@@ -1883,8 +1883,12 @@ describe('manualPayment.service', () => {
       expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-1', 50, ORDER_ID, undefined)
     })
 
-    it('REVIEW P2: shift lookup filters by staffId AND status=OPEN (not venue-wide)', async () => {
-      const shiftFindFirst = jest.fn().mockResolvedValue({ id: 'open-shift-for-this-cashier' })
+    // 🔴 Fase 1 (2-sep-2026): esta prueba fijaba la regla CONTRARIA («filtra por staffId,
+    // no venue-wide»). El turno de caja es del NEGOCIO: filtrar por persona dejaba fuera de
+    // todo turno a quien no había abierto uno (Testarudo, 1-sep: 78 de 92 cobros). Ver
+    // `@/services/shared/turnoDeCaja.ts`. Quién capturó el pago sigue en `processedById`.
+    it('el turno se busca VENUE-WIDE (status=OPEN), nunca por la persona que captura', async () => {
+      const shiftFindFirst = jest.fn().mockResolvedValue({ id: 'open-shift-del-negocio' })
       const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-shift-attr' })
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({
@@ -1901,14 +1905,11 @@ describe('manualPayment.service', () => {
         externalSource: 'BUQ',
       })
 
+      // Igualdad EXACTA del `where`, no `objectContaining`: con él, volver a colar
+      // `staffId` seguiría pasando y la prueba dejaría de guardar lo que dice guardar.
       expect(shiftFindFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({
-            venueId: VENUE_ID,
-            staffId: 'cashier-A',
-            status: 'OPEN',
-            endTime: null,
-          }),
+          where: { venueId: VENUE_ID, status: 'OPEN', endTime: null },
         }),
       )
     })

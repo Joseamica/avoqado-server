@@ -1,5 +1,6 @@
 import { PaymentType, TransactionStatus, CardBrand, CardEntryMode, Prisma } from '@prisma/client'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -212,22 +213,12 @@ export async function recordRefund(
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // STEP 3: Find current shift for the staff (for reconciliation)
+  // STEP 3: el turno abierto del NEGOCIO (para conciliación) — `../shared/turnoDeCaja.ts`
   // ═══════════════════════════════════════════════════════════════════════════
   let shiftId = refundData.shiftId
 
   if (!shiftId) {
-    const currentShift = await prisma.shift.findFirst({
-      where: {
-        venueId,
-        staffId: refundData.staffId,
-        status: 'OPEN',
-        endTime: null,
-      },
-      orderBy: {
-        startTime: 'desc',
-      },
-    })
+    const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
     shiftId = currentShift?.id || null
   }
 

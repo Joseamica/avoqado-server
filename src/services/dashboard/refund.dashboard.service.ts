@@ -19,6 +19,7 @@ import { createRefundCommission } from './commission/commission-calculation.serv
 import { createRefundTransactionCost } from '../payments/transactionCost.service'
 import { logAction } from './activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 
 export type RefundReason = 'RETURNED_GOODS' | 'ACCIDENTAL_CHARGE' | 'CANCELLED_ORDER' | 'FRAUDULENT_CHARGE' | 'OTHER'
 
@@ -244,16 +245,10 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     throw new BadRequestError('Either amount (cents) or items[] is required')
   }
 
-  // Find active shift for the staff (optional, for reconciliation)
-  let shiftId: string | null = null
-  if (input.staffId) {
-    const openShift = await prisma.shift.findFirst({
-      where: { venueId: input.venueId, staffId: input.staffId, status: 'OPEN', endTime: null },
-      orderBy: { startTime: 'desc' },
-      select: { id: true },
-    })
-    if (openShift) shiftId = openShift.id
-  }
+  // El turno abierto del NEGOCIO (opcional, para conciliación) — `../shared/turnoDeCaja.ts`.
+  // Ya no se condiciona a que venga `staffId`: el turno no es de quien reembolsa.
+  const openShift = await turnoAbiertoDelNegocio(prisma, input.venueId)
+  const shiftId: string | null = openShift?.id ?? null
 
   const result = await prisma.$transaction(async tx => {
     const lockedOriginalRows = await tx.$queryRaw<LockedPaymentRow[]>(Prisma.sql`

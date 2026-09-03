@@ -11,6 +11,7 @@ import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
+import { turnoAbiertoDelNegocio } from '@/services/shared/turnoDeCaja'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -121,16 +122,9 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       let orderItems: unknown[] = []
       let yaEstabaPagada = false
 
-      // Link payment to the cashier's currently open shift (if any). Match the
-      // TPV pattern exactly: filter by staffId + status='OPEN' + endTime=null so
-      // multi-cashier venues attribute the payment to the RIGHT shift, not just
-      // any open one. Without staffId filter, manual payments could land on
-      // another staff member's shift in busy venues.
-      const openShift = await tx.shift.findFirst({
-        where: { venueId, staffId, status: 'OPEN', endTime: null },
-        select: { id: true },
-        orderBy: { startTime: 'desc' },
-      })
+      // El pago manual cae en el turno abierto del NEGOCIO, no en el de quien lo captura
+      // (`@/services/shared/turnoDeCaja.ts`): quién cobró vive en `processedById`.
+      const openShift = await turnoAbiertoDelNegocio(tx, venueId)
       const shiftId = openShift?.id ?? null
 
       if (input.orderId) {

@@ -20,6 +20,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 
 /**
@@ -1105,17 +1106,8 @@ export async function createOrderWithItems(
 
   async function runCreateOrderTransaction() {
     return prisma.$transaction(async tx => {
-      const currentShift = await tx.shift.findFirst({
-        where: {
-          venueId,
-          staffId: input.staffId,
-          status: 'OPEN',
-          endTime: null,
-        },
-        orderBy: {
-          startTime: 'desc',
-        },
-      })
+      // El turno de caja es del NEGOCIO, no de quien abre la orden (`../shared/turnoDeCaja.ts`).
+      const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
 
       // New Cobrar V1 keeps total/subtotal gross-net semantics explicit:
       // OrderItem.total and Order.subtotal are gross, reductions live in discountAmount.

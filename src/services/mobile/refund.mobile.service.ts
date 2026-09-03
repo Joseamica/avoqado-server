@@ -9,6 +9,7 @@ import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // ============================================================================
@@ -62,8 +63,8 @@ export async function createRefund(params: CreateRefundParams) {
   // (Payment sin VenueTransaction, o turno sin decrementar) descuadra dinero.
   const orderNumber = `REF-${Date.now()}`
   const { order, payment } = await prisma.$transaction(async tx => {
-    // 🔴 El turno del cajero, resuelto IGUAL que el refund del TPV
-    // (`refund.tpv.service.ts:219`) y que el cobro (`order.mobile.service.ts:1751`).
+    // 🔴 El turno abierto del NEGOCIO (`../shared/turnoDeCaja.ts`), resuelto IGUAL que el
+    // refund del TPV (`refund.tpv.service.ts`) y que el cobro (`order.mobile.service.ts`).
     // Sin `shiftId` el Payment REFUND era invisible para el CIERRE DE TURNO, que
     // selecciona por `{ shiftId, status: 'COMPLETED' }` (`shift.tpv.service.ts:1342`).
     //
@@ -74,15 +75,7 @@ export async function createRefund(params: CreateRefundParams) {
     // cerró entre la lectura y el claim, count=0 y el refund entra SIN turno (lo
     // recoge el cierre de caja por ventana de tiempo), nunca en uno cerrado.
     let shiftId: string | null = null
-    const currentShift = await tx.shift.findFirst({
-      where: {
-        venueId,
-        staffId,
-        status: 'OPEN',
-        endTime: null,
-      },
-      orderBy: { startTime: 'desc' },
-    })
+    const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
     if (currentShift) {
       // El claim ES el decremento (espejo del refund TPV): el cierre usa también
       // los contadores denormalizados; sin esto el reporte sobrestima ventas.

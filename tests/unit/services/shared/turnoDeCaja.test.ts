@@ -9,6 +9,14 @@ describe('turnoAbiertoDelNegocio', () => {
     expect(arg.where).toEqual({ venueId: 'v1', status: 'OPEN', endTime: null })
     expect(arg.where).not.toHaveProperty('staffId')
     expect(arg.orderBy).toEqual({ startTime: 'desc' })
+    // Sin `select`, los 8 caminos de dinero traerían la fila `Shift` entera —con sus
+    // `Decimal` y sus dos `Json`— en CADA cobro. El `select` no es cosmético.
+    expect(arg.select).toEqual({ id: true })
+  })
+
+  it('ESTRECHA la fila a `{ id }`: es la propiedad «drop-in» de la que dependen los 8 sitios', async () => {
+    const findFirst = jest.fn().mockResolvedValue({ id: 'x', staffId: 'y', startingCash: 100 })
+    expect(await turnoAbiertoDelNegocio({ shift: { findFirst } } as never, 'v1')).toEqual({ id: 'x' })
   })
 
   it('devuelve null cuando no hay turno abierto', async () => {

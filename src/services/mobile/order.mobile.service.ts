@@ -29,6 +29,7 @@ import {
 import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
+import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
@@ -2294,19 +2295,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   }
   const effectiveStaffId = await validateStaffVenue(input.staffId, venueId)
 
-  // Find current open shift for this staff member (if any)
-  let currentShift = null
-  if (effectiveStaffId) {
-    currentShift = await prisma.shift.findFirst({
-      where: {
-        venueId,
-        staffId: effectiveStaffId,
-        status: 'OPEN',
-        endTime: null,
-      },
-      orderBy: { startTime: 'desc' },
-    })
-  }
+  // El turno abierto del NEGOCIO (`../shared/turnoDeCaja.ts`), ya no el de quien cobra:
+  // el selector «Vendedor» cambia el `staffId` y filtrar por él sacaba la venta del turno.
+  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
 
   // Convert cents to decimal for database. `amount` es lo SOLICITADO; lo que se
   // registra como pago se decide dentro de la transacción (ver `aplicadoCents`).
