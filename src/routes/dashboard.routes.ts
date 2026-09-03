@@ -359,6 +359,8 @@ import saleVerificationOrgDashboardRoutes from './dashboard/saleVerification.org
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
+// Campañas de correo a clientes (Fase 1C-A, Task 6)
+import marketingCampaignRoutes from './dashboard/marketingCampaign.routes'
 // Per-staff, per-venue onboarding UX state (tour banners, checklists, welcome-tour flags)
 import staffOnboardingRoutes from './dashboard/staffOnboarding.routes'
 // SUPERADMIN impersonation — view the dashboard as another user/role (read-only)
@@ -10006,6 +10008,13 @@ router.put(
   validateRequest(UpsertPrivacyNoticeSchema),
   privacyNoticeController.upsertPrivacyNotice,
 )
+
+// ---------------------------------------------------------------------------
+// Fase 1C-A — campañas de correo a clientes (Task 6). El permiso propio de cada
+// verbo vive DENTRO de `marketingCampaignRoutes` (leer/crear/editar/previsualizar
+// vs `marketing:send` en publicar); aquí sólo se abre el paso autenticado.
+// ---------------------------------------------------------------------------
+router.use('/venues/:venueId/campaigns', authenticateTokenMiddleware, marketingCampaignRoutes)
 
 // ============================================================================
 // Customer Group Routes (Phase 1: Customer System)
