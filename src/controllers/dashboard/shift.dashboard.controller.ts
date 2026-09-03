@@ -96,8 +96,11 @@ export async function updateShift(
     const venueId: string = req.params.venueId
     const shiftId: string = req.params.shiftId
     const updateData = req.body
+    // QUIÉN editó. El servicio no ve el `authContext`, así que el actor se le pasa: sin él la
+    // bitácora diría "alguien sin identificar" sobre una edición que puede mover el descuadre.
+    const performedBy: string | undefined = (req as any).authContext?.userId
 
-    const result = await shiftDashboardService.updateShift(venueId, shiftId, updateData)
+    const result = await shiftDashboardService.updateShift(venueId, shiftId, updateData, performedBy)
 
     if (!result) {
       res.status(404).json({

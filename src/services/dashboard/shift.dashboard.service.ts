@@ -4,7 +4,7 @@ import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
-import { calculateCashReconciliation } from '../shared/cashReconciliation.service'
+import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
 
 interface ShiftFilters {
   staffId?: string
@@ -973,11 +973,85 @@ export function computeCashDifference(input: {
    * adentro, así que excluirlo reportaba un sobrante falso del tamaño de las propinas.
    */
   cashInDrawer: number
+  /**
+   * El esperado de la GAVETA cuando hay una (Task 5): fondo + cada venta + cada ingreso −
+   * cada retiro. Cuando viene, MANDA sobre `startingCash + cashInDrawer`, que es ciega a los
+   * retiros y al refondeo a media jornada. Sin gaveta se omite y la fórmula del turno queda
+   * byte a byte.
+   */
+  expectedCash?: number | null
 }): number | null {
   if (input.countedCash === null || input.countedCash === undefined) return null
-  const { difference } = calculateCashReconciliation(input.countedCash, input.startingCash, input.cashInDrawer)
+  // 🔴 `!= null` y NUNCA una comprobación por verdad/falsedad: un esperado de CERO (la gaveta
+  // que se vació entera) es un esperado, y `if (expectedCash)` lo leería como "no hay gaveta"
+  // devolviendo el descuadre ciego. Es el mismo motivo por el que el cierre usa `??` y no `||`.
+  const { difference } =
+    input.expectedCash != null
+      ? calculateCashReconciliationFromExpected(input.countedCash, input.expectedCash)
+      : calculateCashReconciliation(input.countedCash, input.startingCash, input.cashInDrawer)
   const rounded = difference.toDecimalPlaces(2).toNumber()
   return Object.is(rounded, -0) ? 0 : rounded
+}
+
+/** De dónde salió el esperado con el que se firmó un descuadre. Mismo vocabulario que el cierre. */
+export type FuenteDelEsperado = 'CAJON' | 'TURNO' | 'DESCONOCIDO'
+
+export interface EsperadoDelTurno {
+  /** El esperado de la gaveta, o `null` cuando manda la fórmula del turno. */
+  esperado: number | null
+  sessionId: string | null
+  fuente: FuenteDelEsperado
+}
+
+/**
+ * El esperado de la gaveta que cubrió un turno YA CERRADO.
+ *
+ * 🔴 No es `esperadoDelCajonAbierto`: aquélla sólo mira cajas `OPEN`, porque el cierre corre
+ * con el cajero enfrente. Aquí el turno ya se cerró y su gaveta también, así que hay que
+ * resolverla como la resuelve el dashboard:
+ *
+ *   1. **la LIGADA** por `CashDrawerSession.shiftId` (`@unique`, columna de esta fase). Es
+ *      exacta y no depende de ninguna fecha, así que corregir la hora de cierre no puede
+ *      cambiar de gaveta.
+ *   2. **por ventana de tiempo** (`resolveShiftCashDrawer`) para todo lo anterior a la
+ *      migración, que no tiene liga y no puede tenerla — es lo que dice el propio comentario
+ *      de la columna en el schema.
+ *
+ * `fuente` existe para no tener que adivinar por verdad/falsedad: `TURNO` es "no hay gaveta y
+ * manda la fórmula de siempre"; `DESCONOCIDO` es "no se pudo leer", y ahí el descuadre
+ * guardado NO se toca — degradar en silencio a la fórmula ciega sería reescribir un número
+ * bueno con uno malo, que es justo el defecto que esto viene a cerrar.
+ */
+export async function esperadoDeLaGavetaDelTurno(
+  venueId: string,
+  shift: { id: string; startTime: Date | null; endTime: Date | null },
+): Promise<EsperadoDelTurno> {
+  try {
+    const ligada = await prisma.cashDrawerSession.findFirst({
+      // `venueId` además del único: el aislamiento por tenant no se salta ni cuando la llave ya
+      // es única. Un `findUnique` por `shiftId` pelón no lo lleva.
+      where: { shiftId: shift.id, venueId },
+      select: { id: true, startingAmount: true, events: { select: { type: true, amount: true } } },
+    })
+    if (ligada) {
+      // La MISMA fórmula que ve el cajero en la tablet, no una copia.
+      return { esperado: calculateExpectedAmount(ligada), sessionId: ligada.id, fuente: 'CAJON' }
+    }
+
+    const porVentana = await resolveShiftCashDrawer(venueId, shift.startTime, shift.endTime, true)
+    const esperado = porVentana && 'expectedAmount' in porVentana ? porVentana.expectedAmount : null
+    if (porVentana && typeof esperado === 'number') {
+      return { esperado, sessionId: porVentana.sessionId, fuente: 'CAJON' }
+    }
+    return { esperado: null, sessionId: null, fuente: 'TURNO' }
+  } catch (error) {
+    logger.warn('[Shift Update] No se pudo resolver la gaveta del turno; el descuadre guardado no se toca', {
+      venueId,
+      shiftId: shift.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { esperado: null, sessionId: null, fuente: 'DESCONOCIDO' }
+  }
 }
 
 /**
@@ -987,7 +1061,7 @@ export function computeCashDifference(input: {
  * @param data Update data
  * @returns Updated shift
  */
-export async function updateShift(venueId: string, shiftId: string, data: UpdateShiftData): Promise<any> {
+export async function updateShift(venueId: string, shiftId: string, data: UpdateShiftData, performedBy?: string): Promise<any> {
   logger.info('Updating shift', { venueId, shiftId, fields: Object.keys(data) })
 
   // First check if shift exists and belongs to the venue
@@ -1034,16 +1108,47 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
     updateData.staffId = data.staffId
   }
 
-  const effectiveStartingCash = data.startingCash !== undefined ? data.startingCash : Number(existingShift.startingCash)
-  const effectiveEndingCash =
-    data.endingCash !== undefined ? data.endingCash : existingShift.endingCash == null ? null : Number(existingShift.endingCash)
-
-  const difference = computeCashDifference({
-    countedCash: effectiveEndingCash,
-    startingCash: effectiveStartingCash,
-    // Ventas en efectivo + propina en efectivo: lo que hay físicamente en el cajón.
-    cashInDrawer: Number(existingShift.totalCashPayments ?? 0) + Number(existingShift.totalCashTips ?? 0),
+  // 🔴 EL ESPERADO SALE DE LA GAVETA, igual que el del cierre (Task 5). Sin esto, editar un turno
+  // desde el dashboard —aunque sólo se corrija `totalSales`, que es lo único que la pantalla manda
+  // hoy— reescribía el descuadre con la fórmula CIEGA: el 0.00 que el cierre firmó contra la
+  // gaveta volvía a firmarse en −2,500.00, con el dueño como autor de un faltante que nadie tuvo.
+  //
+  // La ventana es la GUARDADA, nunca la del cuerpo: qué gaveta operó es un hecho histórico, y
+  // resolverla contra una fecha que alguien está editando en este mismo request podría cambiar de
+  // gaveta y con ella el número firmado.
+  const gaveta = await esperadoDeLaGavetaDelTurno(venueId, {
+    id: existingShift.id,
+    startTime: existingShift.startTime,
+    endTime: existingShift.endTime,
   })
+
+  const effectiveStartingCash = data.startingCash !== undefined ? data.startingCash : Number(existingShift.startingCash)
+
+  // 🔴 EL CONTEO ES `cashDeclared`, NUNCA `endingCash`. `endingCash` no es lo que alguien contó:
+  // en un cierre sin conteo es el total del cajón, y en uno legacy vale `startingCash + declarado`
+  // — o sea que tomarlo por conteo cuenta el fondo DOS veces y firma un sobrante fantasma del
+  // tamaño del fondo. Medido contra la base local: dos cortes de Desktop con `cashDifference` en
+  // NULL recibían +500.00 al editarlos, que era exactamente su fondo.
+  //
+  // Un `endingCash` en el cuerpo SÍ manda: ahí el dueño está corrigiendo el conteo con la hoja
+  // enfrente, y entre dos conteos gana el más nuevo.
+  const countedCash =
+    data.endingCash !== undefined ? data.endingCash : existingShift.cashDeclared == null ? null : Number(existingShift.cashDeclared)
+
+  // Ventas en efectivo + propina en efectivo: lo que hay físicamente en el cajón. Sólo alimenta
+  // la fórmula del turno, que es el respaldo para el venue sin módulo de caja.
+  const cashInDrawer = Number(existingShift.totalCashPayments ?? 0) + Number(existingShift.totalCashTips ?? 0)
+  const expectedCash = gaveta.esperado != null ? gaveta.esperado : effectiveStartingCash + cashInDrawer
+
+  const difference =
+    gaveta.fuente === 'DESCONOCIDO'
+      ? null
+      : computeCashDifference({
+          countedCash,
+          startingCash: effectiveStartingCash,
+          cashInDrawer,
+          expectedCash: gaveta.esperado,
+        })
   if (difference !== null) {
     updateData.cashDifference = difference
   }
@@ -1078,11 +1183,26 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
 
   logger.info('Shift updated successfully', { venueId, shiftId })
 
+  // 🔴 En PESOS y con la AUTORIDAD del esperado a la vista: el dashboard renderiza este jsonb tal
+  // cual al dueño, y dos ediciones del mismo turno con números distintos son indistinguibles si no
+  // dice de dónde salió cada uno. Mismo vocabulario que la bitácora del cierre (`SHIFT_CLOSED`).
+  const pesos = (value: number) => value.toFixed(2)
   logAction({
     venueId,
     action: 'SHIFT_UPDATED',
     entity: 'Shift',
     entityId: shiftId,
+    staffId: performedBy,
+    data: {
+      // Acotado: esta ruta no lleva Zod, así que el cuerpo es del que llama. Registrar QUÉ se
+      // intentó tocar es útil; copiar mil llaves inventadas a la tabla de auditoría, no.
+      fields: Object.keys(data).slice(0, 20),
+      expectedSource: gaveta.fuente,
+      ...(gaveta.sessionId ? { cashDrawerSessionId: gaveta.sessionId } : {}),
+      ...(gaveta.fuente === 'DESCONOCIDO' ? {} : { expectedCash: pesos(expectedCash) }),
+      ...(countedCash != null ? { countedCash: pesos(countedCash) } : {}),
+      ...(difference != null ? { cashDifference: pesos(difference) } : {}),
+    },
   })
 
   return {

@@ -84,4 +84,12 @@ describe('both close paths share one formula', () => {
     expect(compartido.match(/\.sub\(/g) ?? []).toHaveLength(1)
     expect(tpv).not.toMatch(/\.sub\(\s*expectedCash/)
   })
+
+  it('🔴 la EDICIÓN desde el dashboard entra por la misma aritmética que el cierre (Task 5h)', () => {
+    // `updateShift` recalculaba el descuadre con la fórmula ciega y pisaba lo que el cierre
+    // había firmado contra la gaveta. Ahora resuelve el esperado y entra por `…FromExpected`;
+    // el día que alguien copie el `.sub()` aquí, esta prueba lo caza.
+    expect(dashboard).toContain('calculateCashReconciliationFromExpected(')
+    expect(dashboard).not.toMatch(/\.sub\(/)
+  })
 })
