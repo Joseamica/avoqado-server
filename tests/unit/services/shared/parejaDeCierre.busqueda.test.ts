@@ -69,7 +69,8 @@ describe('buscarParejasAMedias — a quién se le pregunta y qué se descarta', 
   it('devuelve la reparación ya decidida, con los números de la mitad que firmó', async () => {
     const p = db({ gavetas: [gavetaCerrada] })
 
-    const [pareja] = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
+    const { parejas } = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
+    const [pareja] = parejas
 
     expect(pareja.falta).toBe('TURNO')
     expect(Number(pareja.conteo)).toBe(2950)
@@ -88,12 +89,14 @@ describe('buscarParejasAMedias — a quién se le pregunta y qué se descarta', 
     }
     const p = db({ gavetas: [gavetaHuerfana], turnosVivos: [{ venueId: VENUE }] })
 
-    const parejas = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
+    const { parejas, bloqueadas } = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
 
     // `endTime: null` es la definición de la casa de «turno vivo»: cubre OPEN y CLOSING, que es lo
     // que usa `abrirTurnoDeCaja` para decidir si puede abrir otro.
     expect(p.shift.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: { in: [VENUE] }, endTime: null } }))
     expect(parejas).toEqual([])
+    // 🔴 Y no se descarta en silencio: ese efectivo se está mezclando y alguien tiene que enterarse.
+    expect(bloqueadas).toEqual([{ venueId: VENUE, shiftId: 'shift-1', cashDrawerSessionId: 'caja-1', motivo: 'EL_NEGOCIO_SIGUIO' }])
   })
 
   it('sin turno vivo, esa misma gaveta huérfana SÍ se repara', async () => {
@@ -108,10 +111,23 @@ describe('buscarParejasAMedias — a quién se le pregunta y qué se descarta', 
     }
     const p = db({ gavetas: [gavetaHuerfana], turnosVivos: [] })
 
-    const [pareja] = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
+    const { parejas } = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
+    const [pareja] = parejas
 
     expect(pareja.falta).toBe('GAVETA')
     expect(pareja.cashDrawerSessionId).toBe('caja-1')
+  })
+
+  it('🔴 el ruido esperado NO se reporta: una gaveta que cerró SOLA es del relevo, no de este barrido', async () => {
+    // Ocurre cada mañana en cada venue cuyo cajón cierra el barrido de las 04:00 antes de que el
+    // relevo cierre su turno. Reportarlo ahogaría la única señal que importa.
+    const autoCerrada = { ...gavetaCerrada, actualAmount: null, overShort: null, closedByStaffId: null }
+    const p = db({ gavetas: [autoCerrada], turnosVivos: [] })
+
+    const { parejas, bloqueadas } = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
+
+    expect(parejas).toEqual([])
+    expect(bloqueadas).toEqual([])
   })
 
   it('no pregunta por turnos vivos si no hay candidatas: una consulta de más por tic, cada tic', async () => {

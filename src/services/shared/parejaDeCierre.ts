@@ -237,10 +237,7 @@ export type LectorDeParejas = {
  * ⚠️ La ventana `since` acota el barrido: el criterio no tiene índice que sirva y sin tope cada
  * pasada recorrería la historia entera de cajones. Es el mismo recurso de `paid-order-reconciler`.
  */
-export async function buscarParejasAMedias(
-  db: LectorDeParejas,
-  opciones: { limit: number; since: Date },
-): Promise<ReparacionDelCierre[]> {
+export async function buscarParejasAMedias(db: LectorDeParejas, opciones: { limit: number; since: Date }): Promise<ReparacionDelCierre[]> {
   const filas = (await db.cashDrawerSession.findMany({
     where: {
       shiftId: { not: null },
@@ -278,7 +275,7 @@ export async function buscarParejasAMedias(
     take: opciones.limit,
   })) as (GavetaDeLaPareja & { shift: TurnoDeLaPareja | null })[]
 
-  if (filas.length === 0) return []
+  if (filas.length === 0) return { parejas: [], bloqueadas: [] }
 
   // 🔴 «¿El negocio siguió?» se PREGUNTA, no se deduce de las filas de arriba: el turno nuevo que
   // reusa la gaveta huérfana no aparece en ellas (no está ligado a ninguna). `endTime: null` es la
@@ -293,13 +290,31 @@ export async function buscarParejasAMedias(
   const conTurnoVivo = new Set(vivos.map(v => v.venueId))
 
   const parejas: ReparacionDelCierre[] = []
+  const bloqueadas: ParejaBloqueada[] = []
   for (const fila of filas) {
     if (!fila.shift) continue
     const decision = decidirReparacionDelCierre(fila, fila.shift, { hayTurnoAbierto: conTurnoVivo.has(fila.venueId) })
     if (decision.reparable) parejas.push(decision)
+    else if (MOTIVOS_QUE_SE_REPORTAN.has(decision.motivo)) {
+      bloqueadas.push({ venueId: fila.venueId, shiftId: fila.shift.id, cashDrawerSessionId: fila.id, motivo: decision.motivo })
+    }
   }
-  return parejas
+  return { parejas, bloqueadas }
 }
+
+/**
+ * Qué NO reparar merece un aviso, y qué es ruido esperado.
+ *
+ * 🔴 `EL_NEGOCIO_SIGUIO` es el que importa: una gaveta abierta que pertenece a un turno ya cerrado
+ * mientras otro turno vende encima. El barrido no la cierra —sería quitarle la caja al mostrador—
+ * pero ese efectivo se está mezclando y alguien tiene que enterarse. `SIN_NUMEROS_PAREJOS` es un
+ * conteo firmado que no se puede emparejar, que es un dato de dinero incompleto.
+ *
+ * Fuera quedan los dos ESPERADOS, y dejarlos dentro ahogaría la señal: `CIERRE_AUTOMATICO` ocurre
+ * cada mañana en cada venue cuyo cajón cierra el barrido de las 04:00 antes de que el relevo cierre
+ * su turno —su dueño es el relevo, no esto—, y `CIERRE_EN_VUELO` dura lo que tarda un cierre.
+ */
+const MOTIVOS_QUE_SE_REPORTAN = new Set<MotivoNoReparable>(['EL_NEGOCIO_SIGUIO', 'SIN_NUMEROS_PAREJOS'])
 
 /**
  * LA LIGA ES EL REGISTRO DURABLE, y por eso se pone ANTES del primer commit del cierre.
@@ -320,12 +335,7 @@ export async function buscarParejasAMedias(
  * (otra gaveta ligándose al mismo turno en ese instante) abortaría la transacción entera y Postgres
  * no deja continuar después del error, así que ni un try/catch la salvaría.
  */
-export async function asegurarLaLiga(
-  db: LectorDeParejas,
-  venueId: string,
-  shiftId: string,
-  cashDrawerSessionId: string,
-): Promise<boolean> {
+export async function asegurarLaLiga(db: LectorDeParejas, venueId: string, shiftId: string, cashDrawerSessionId: string): Promise<boolean> {
   try {
     const yaDelTurno = await db.cashDrawerSession.findUnique({ where: { shiftId }, select: { id: true } })
     if (yaDelTurno) return yaDelTurno.id === cashDrawerSessionId

@@ -30,4 +30,8 @@ export const DATABASE_JOB_SCHEDULES = {
   announcementOutbox: '6,36 * * * * *',
   // Fase 0 del turno de caja del negocio: cierra órdenes cuyos cobros ya las cubren.
   paidOrderReconciler: '55 */10 * * * *',
+  // Task 5l: completa el cierre unificado que murió entre sus dos commits. Cada MINUTO en el
+  // segundo :37 (hueco libre) y no cada 5: mientras la pareja siga partida, una apertura nueva
+  // adopta la gaveta huérfana y entonces ya no se puede reparar sin quitarle la caja al mostrador.
+  cashClosePairReconciler: '37 * * * * *',
 } as const

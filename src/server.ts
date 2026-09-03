@@ -76,6 +76,7 @@ import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
+import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -159,6 +160,7 @@ const gracefulShutdown = async (signal: string) => {
       loyaltyReconciliationJob.stop()
       cashDrawerReconcilerJob.stop()
       paidOrderReconcilerJob.stop()
+      cashClosePairReconcilerJob.stop()
 
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
@@ -480,6 +482,9 @@ const startApplication = async (retries = 3) => {
       loyaltyReconciliationJob.start()
       cashDrawerReconcilerJob.start()
       paidOrderReconcilerJob.start()
+      // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
+      // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.
+      cashClosePairReconcilerJob.start()
 
       // Start subscription cancellation job
       subscriptionCancellationJob.start()
