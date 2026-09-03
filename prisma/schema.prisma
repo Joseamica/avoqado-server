@@ -7095,6 +7095,14 @@ model WalletPass {
   /// el QR de un pase lo lee cualquiera que vea la pantalla del cliente. Rotable.
   qrToken String @unique
 
+  /// Sólo GOOGLE: el id del `loyaltyObject` ante Google (`<issuerId>.pass-<walletPassId>`).
+  /// Nulo en los pases de Apple, que se identifican por `serialNumber`.
+  ///
+  /// 🔴 Se guarda aunque sea derivable del id: si algún día cambia el issuer o el
+  /// formato del sufijo, los objetos ya emitidos siguen siendo alcanzables. Un pase
+  /// que no se puede volver a encontrar es un cliente que deja de recibir sellos.
+  googleObjectId String? @unique
+
   /// Sube en cada cambio de contenido. El Plan C la usa para contestarle a Apple
   /// "que seriales cambiaron desde X".
   revision Int @default(1)
