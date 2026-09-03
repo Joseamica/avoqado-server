@@ -104,6 +104,55 @@ describe('list_shifts cash reconciliation fields', () => {
     )
   })
 
+  it('🔴 dice QUIÉN cerró el turno, que no tiene por qué ser quien lo abrió', async () => {
+    // Con el gesto único de cierre (Task 5) la caja la puede cerrar la tablet y el turno la PAX, y
+    // de personas distintas. Sin `closedBy`, el operador que le pregunta al asistente «¿quién cerró
+    // este turno?» sólo obtenía a quien lo ABRIÓ — la respuesta equivocada, dicha con confianza.
+    mockShiftFindMany.mockResolvedValueOnce([
+      {
+        startTime: new Date('2026-09-03T14:00:00.000Z'),
+        endTime: new Date('2026-09-04T02:00:00.000Z'),
+        status: 'CLOSED',
+        startingCash: 2000,
+        endingCash: 2950,
+        cashDeclared: 2950,
+        cashDifference: 0,
+        totalSales: 1000,
+        totalTips: 0,
+        totalOrders: 12,
+        totalCashPayments: 1000,
+        totalCardPayments: 0,
+        staff: { firstName: 'Viridiana', lastName: 'Soto' },
+        closedBy: { firstName: 'Héctor', lastName: 'Ruiz' },
+      },
+      {
+        startTime: new Date('2026-09-02T14:00:00.000Z'),
+        endTime: new Date('2026-09-03T02:00:00.000Z'),
+        status: 'CLOSED',
+        startingCash: 500,
+        endingCash: null,
+        cashDeclared: null,
+        cashDifference: null,
+        totalSales: 0,
+        totalTips: 0,
+        totalOrders: 0,
+        totalCashPayments: 0,
+        totalCardPayments: 0,
+        staff: { firstName: 'Ana', lastName: 'Ruiz' },
+        // Turno anterior a la columna, o cerrado por un script: NO se adivina.
+        closedBy: null,
+      },
+    ])
+
+    const output = parse(await call({ venueId: 'venue-1', status: 'closed' }))
+
+    expect(output.shifts[0]).toMatchObject({ staff: 'Viridiana Soto', closedBy: 'Héctor Ruiz' })
+    expect(output.shifts[1]).toMatchObject({ staff: 'Ana Ruiz', closedBy: null })
+    expect(mockShiftFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.objectContaining({ closedBy: expect.anything() }) }),
+    )
+  })
+
   it('rejects a venue outside scope before reading drawer money', async () => {
     await expect(call({ venueId: 'venue-foreign' })).rejects.toThrow('out of scope')
     expect(mockShiftFindMany).not.toHaveBeenCalled()

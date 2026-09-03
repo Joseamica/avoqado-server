@@ -16,7 +16,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_shifts',
-    'Cash-register shifts (turnos de caja) for a venue you can access: who opened it, since when, sales/tips/orders so far, cash vs card collected, starting/ending cash, physical cash declared at close, the resulting difference, and status. Defaults to currently open shifts. Answers "¿cómo va la caja? ¿quién está en turno? ¿cuánto llevan en efectivo? ¿cuánto contaron al cerrar?". Pass venueId.',
+    'Cash-register shifts (turnos de caja) for a venue you can access: who opened it and WHO CLOSED it (they need not be the same person — since 3-sep-2026 closing either the shift or the physical drawer closes both), since when, sales/tips/orders so far, cash vs card collected, starting/ending cash, physical cash declared at close, the resulting difference, and status. Defaults to currently open shifts. `closedBy` is null for shifts closed before that date or closed with no signed-in person. Answers "¿cómo va la caja? ¿quién está en turno? ¿cuánto llevan en efectivo? ¿cuánto contaron al cerrar? ¿quién cerró?". Pass venueId.',
     {
       venueId: z.string().describe('Venue whose shifts to read (must be in your scope)'),
       status: z.enum(['open', 'closed', 'all']).optional().describe("Which shifts: 'open' (default — open or closing), 'closed', or 'all'"),
@@ -47,6 +47,10 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
           totalCashPayments: true,
           totalCardPayments: true,
           staff: { select: { firstName: true, lastName: true } },
+          // Quién CERRÓ. `staff` es quien abrió, y con el gesto único de cierre (3-sep-2026) no
+          // tienen por qué ser la misma persona: la caja la puede cerrar la tablet y el turno la
+          // PAX. `null` en los turnos anteriores a la columna — no se adivina hacia atrás.
+          closedBy: { select: { firstName: true, lastName: true } },
         },
         orderBy: { startTime: 'desc' },
         take: limit ?? 20,
@@ -56,6 +60,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
         count: shifts.length,
         shifts: shifts.map(s => ({
           staff: `${s.staff.firstName} ${s.staff.lastName}`.trim(),
+          closedBy: s.closedBy ? `${s.closedBy.firstName} ${s.closedBy.lastName}`.trim() : null,
           status: s.status,
           openedAt: s.startTime.toISOString(),
           closedAt: s.endTime?.toISOString() ?? null,
