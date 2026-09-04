@@ -25,13 +25,14 @@
 
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
-    payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn() },
+    payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     order: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     orderItem: { findMany: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
-    shift: { findUnique: jest.fn() },
+    shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
     terminal: { findFirst: jest.fn() },
+    $queryRaw: jest.fn(),
     $transaction: jest.fn(),
   }
   client.$transaction.mockImplementation((cb: any) => cb(client))
@@ -76,8 +77,10 @@ import prisma from '@/utils/prismaClient'
 const mockLogger = logger as unknown as { info: jest.Mock; warn: jest.Mock; error: jest.Mock; debug: jest.Mock }
 
 const mockPrisma = prisma as unknown as {
-  payment: { findUnique: jest.Mock; findMany: jest.Mock; update: jest.Mock; create: jest.Mock }
+  payment: { findUnique: jest.Mock; findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock; create: jest.Mock }
   order: { findUnique: jest.Mock; update: jest.Mock; updateMany: jest.Mock; create: jest.Mock }
+  shift: { findFirst: jest.Mock; updateMany: jest.Mock }
+  $queryRaw: jest.Mock
   $transaction: jest.Mock
 }
 
@@ -129,8 +132,20 @@ const webhook = (over: Partial<B4BitWebhookPayload> = {}): B4BitWebhookPayload =
   ...over,
 })
 
-/** El último `payment.update` (o `undefined` si no hubo). */
-const lastPaymentUpdate = () => mockPrisma.payment.update.mock.calls.at(-1)?.[0]
+/** La última escritura de Payment, sea CAS (`updateMany`) o update. */
+const lastPaymentUpdate = () =>
+  [
+    ...mockPrisma.payment.update.mock.calls.map((call, index) => ({
+      call,
+      order: mockPrisma.payment.update.mock.invocationCallOrder[index],
+    })),
+    ...mockPrisma.payment.updateMany.mock.calls.map((call, index) => ({
+      call,
+      order: mockPrisma.payment.updateMany.mock.invocationCallOrder[index],
+    })),
+  ]
+    .sort((a, b) => a.order - b.order)
+    .at(-1)?.call[0]
 const errorLogged = (needle: string) => mockLogger.error.mock.calls.some((c: any[]) => String(c[0]).includes(needle))
 const warnLogged = (needle: string) => mockLogger.warn.mock.calls.some((c: any[]) => String(c[0]).includes(needle))
 const failureBroadcast = () => mockBroadcastToVenue.mock.calls.filter(c => c[1] === 'crypto:payment_failed')
@@ -140,9 +155,17 @@ beforeEach(() => {
   mockPrisma.order.updateMany.mockReset()
   mockPrisma.order.findUnique.mockReset()
   mockPrisma.payment.findMany.mockReset()
+  mockPrisma.payment.updateMany.mockReset()
+  mockPrisma.shift.findFirst.mockReset()
+  mockPrisma.shift.updateMany.mockReset()
+  mockPrisma.$queryRaw.mockReset()
 
   mockPrisma.$transaction.mockImplementation((cb: any) => cb(prisma))
   mockPrisma.payment.update.mockResolvedValue({})
+  mockPrisma.payment.updateMany.mockResolvedValue({ count: 1 })
+  mockPrisma.shift.findFirst.mockResolvedValue(null)
+  mockPrisma.shift.updateMany.mockResolvedValue({ count: 1 })
+  mockPrisma.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }])
   mockPrisma.order.update.mockResolvedValue({})
   mockPrisma.order.updateMany.mockResolvedValue({ count: 1 })
 })
@@ -187,6 +210,7 @@ describe('b4bit — un fallo TARDÍO no degrada un cobro ya confirmado', () => {
     const result = await processWebhook(webhook({ status: 'EX' }))
 
     expect(lastPaymentUpdate().data.status).toBe('FAILED')
+    expect(lastPaymentUpdate().where).toEqual({ id: PAYMENT_ID, venueId: VENUE_ID, status: { not: 'COMPLETED' } })
     expect(failureBroadcast()).toHaveLength(1)
     expect(result.action).toBe('EXPIRED')
   })

@@ -54,7 +54,7 @@ describe('candado de sesión al sumar al cajón (P1 venta tardía)', () => {
     const out = await postCashSaleToDrawer(venta())
     expect(out).toBe('POSTED')
     expect((prismaMock as any).$transaction).toHaveBeenCalledTimes(1)
-    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 's-1', status: 'OPEN' } }))
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 's-1', venueId: VENUE, status: 'OPEN' } }))
     expect(updateMany.mock.invocationCallOrder[0]).toBeLessThan(createMany.mock.invocationCallOrder[0])
   })
 
@@ -68,7 +68,7 @@ describe('candado de sesión al sumar al cajón (P1 venta tardía)', () => {
   it('el barrido que repara una ventana CERRADA (targetSessionId) no exige OPEN', async () => {
     const out = await postCashSaleToDrawer(venta({ targetSessionId: 's-cerrada' }))
     expect(out).toBe('POSTED')
-    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 's-1' } }))
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 's-1', venueId: VENUE } }))
   })
 
   it('el reembolso (PAY_OUT) usa el mismo candado', async () => {

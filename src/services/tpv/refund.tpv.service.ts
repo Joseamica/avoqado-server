@@ -636,6 +636,31 @@ export async function recordRefund(
       // `shiftId` nulo es REATRIBUIBLE después (`scripts/reatribuir-cobros-al-turno.ts`),
       // mientras que uno estampado en un turno ya cerrado CON conteo es justo lo que ese script
       // se niega a tocar.
+      // The total guard cannot protect the two accounting components on its own.
+      // Example: sale $100 + tip $20, with $90 of sale already refunded. Another $30
+      // sale-only refund fits the $30 total remainder, but would book $120 against a
+      // $100 sale. Measure both components from completed rows while the original is
+      // locked, before mutating the shift or creating the refund row.
+      let refundedSalesCents = 0
+      let refundedTipsCents = 0
+      for (const row of filasDeReembolso) {
+        if (row.status !== TransactionStatus.COMPLETED) continue
+        refundedSalesCents += Math.abs(Math.round(Number(row.amount ?? 0) * 100))
+        refundedTipsCents += Math.abs(Math.round(Number(row.tipAmount ?? 0) * 100))
+      }
+
+      const requestedSalesCents = Math.round(salesRefund * 100)
+      const requestedTipCents = Math.round(tipRefund * 100)
+      const originalSalesCents = Math.round(Number(locked.amount) * 100)
+      const originalTipsCents = Math.round(Number(locked.tipAmount ?? 0) * 100)
+
+      if (refundedSalesCents + requestedSalesCents > originalSalesCents) {
+        throw new BadRequestError('La parte de venta del reembolso excede la venta restante del cobro original')
+      }
+      if (refundedTipsCents + requestedTipCents > originalTipsCents) {
+        throw new BadRequestError('La parte de propina del reembolso excede la propina restante del cobro original')
+      }
+
       let shiftId: string | null = null
       const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
       if (turnoDelNegocio) {

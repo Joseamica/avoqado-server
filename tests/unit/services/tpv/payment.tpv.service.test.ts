@@ -52,6 +52,7 @@ jest.mock('@/utils/prismaClient', () => ({
     shift: {
       findFirst: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     staffVenue: {
       findFirst: jest.fn(),
@@ -128,6 +129,7 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
 
     // Setup common mocks that all tests need
     ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
+    ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ staffId: 'staff-1', venueId: mockVenueId })
 
     // Mock $transaction to execute the callback with a tx object
@@ -146,8 +148,11 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
           update: prisma.order.update,
         },
         shift: {
+          findFirst: prisma.shift.findFirst,
+          updateMany: prisma.shift.updateMany,
           update: prisma.shift.update,
         },
+        activityLog: { create: prisma.activityLog.create },
         // recordOrderPayment llama lockAreaTicketCheckoutForPayment(tx, …) — area
         // tickets v7. Este `tx` se arma A MANO: un modelo que la ruta toque y no
         // esté aquí sale undefined y el test truena con un TypeError en lugar de

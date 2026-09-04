@@ -88,7 +88,14 @@ describe('arqueo del cajón — la venta suma, el reembolso resta una sola vez',
 })
 
 describe('syncEvents — el servidor es dueño del CASH_SALE (no hay doble conteo)', () => {
-  const sesion = { id: 'session-1', venueId: VENUE, status: 'OPEN' }
+  const sesion = {
+    id: 'session-1',
+    venueId: VENUE,
+    status: 'OPEN',
+    openedAt: new Date('2026-08-16T08:00:00.000Z'),
+    closedAt: null,
+    actualAmount: null,
+  }
 
   beforeEach(() => {
     jest.clearAllMocks()
@@ -96,9 +103,12 @@ describe('syncEvents — el servidor es dueño del CASH_SALE (no hay doble conte
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(sesion),
+      findMany: jest.fn(async (args: any) => (args.where?.status === 'CLOSED' ? [] : [sesion])),
     }
     ;(prismaMock as any).cashDrawerEvent = {
-      createMany: jest.fn().mockResolvedValue({ count: 1 }),
+      createManyAndReturn: jest.fn(async (args: any) =>
+        args.data.map((row: any, index: number) => ({ id: `evt-keyed-${index}`, localId: row.localId, sessionId: row.sessionId })),
+      ),
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockImplementation(async (args: any) => ({
         id: 'evt-db-1',
@@ -106,6 +116,7 @@ describe('syncEvents — el servidor es dueño del CASH_SALE (no hay doble conte
         createdAt: args.data.createdAt ?? new Date(),
       })),
     }
+    ;(prismaMock as any).staffVenue = { findMany: jest.fn().mockResolvedValue([{ staffId: 'staff-1' }]) }
   })
 
   const evento = (type: string, amount: number, localId?: string) => ({
@@ -114,36 +125,36 @@ describe('syncEvents — el servidor es dueño del CASH_SALE (no hay doble conte
     amount,
     staffId: 'staff-1',
     staffName: 'Cajero',
+    sessionId: 'session-1',
+    createdAt: '2026-08-16T10:00:00.000Z',
   })
 
   it('🔴 un CASH_SALE empujado por una app YA DESPLEGADA se ignora: el server ya lo creó al cobrar', async () => {
     const res = await syncEvents(VENUE, [evento('CASH_SALE', 250, 'evt-local-1')] as any)
 
-    expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    expect((prismaMock as any).cashDrawerEvent.createManyAndReturn).not.toHaveBeenCalled()
     expect((prismaMock as any).cashDrawerEvent.create).not.toHaveBeenCalled()
     expect(res.syncedCount).toBe(0)
   })
 
   it('PAY_IN y PAY_OUT siguen sincronizando igual (el cliente sigue siendo su dueño)', async () => {
-    ;(prismaMock as any).cashDrawerEvent.createMany.mockResolvedValue({ count: 2 })
     ;(prismaMock as any).cashDrawerEvent.findMany.mockResolvedValue([
-      { ...evt('PAY_IN', 50), localId: 'evt-1' },
-      { ...evt('PAY_OUT', 30), localId: 'evt-2' },
+      { ...evt('PAY_IN', 50), localId: 'evt-1', sessionId: 'session-1' },
+      { ...evt('PAY_OUT', 30), localId: 'evt-2', sessionId: 'session-1' },
     ])
 
     const res = await syncEvents(VENUE, [evento('PAY_IN', 50, 'evt-1'), evento('PAY_OUT', 30, 'evt-2')] as any)
 
     expect(res.syncedCount).toBe(2)
-    expect((prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].data).toHaveLength(2)
+    expect((prismaMock as any).cashDrawerEvent.createManyAndReturn.mock.calls[0][0].data).toHaveLength(2)
   })
 
   it('lote mixto: se filtra el CASH_SALE y entra el resto', async () => {
-    ;(prismaMock as any).cashDrawerEvent.createMany.mockResolvedValue({ count: 1 })
-    ;(prismaMock as any).cashDrawerEvent.findMany.mockResolvedValue([{ ...evt('PAY_OUT', 30), localId: 'evt-2' }])
+    ;(prismaMock as any).cashDrawerEvent.findMany.mockResolvedValue([{ ...evt('PAY_OUT', 30), localId: 'evt-2', sessionId: 'session-1' }])
 
     const res = await syncEvents(VENUE, [evento('CASH_SALE', 250, 'evt-1'), evento('PAY_OUT', 30, 'evt-2')] as any)
 
-    const enviados = (prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].data
+    const enviados = (prismaMock as any).cashDrawerEvent.createManyAndReturn.mock.calls[0][0].data
     expect(enviados).toHaveLength(1)
     expect(enviados[0].type).toBe('PAY_OUT')
     expect(res.syncedCount).toBe(1)

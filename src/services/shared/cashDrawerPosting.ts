@@ -72,6 +72,39 @@ const SERVER_CASH_SALE_LOCAL_ID_PREFIX = 'srv-cash-sale:'
  */
 const SERVER_REFUND_LOCAL_ID_PREFIX = 'srv-refund:'
 
+/** `Shift.cashDifference` is Decimal(10,2); the drawer itself has the wider Decimal(12,2). */
+const SHIFT_CASH_DIFFERENCE_MAX = new Decimal('99999999.99')
+
+type LateShiftPendingReason =
+  | 'MISSING_SHIFT_RELATION'
+  | 'SHIFT_NOT_FOUND_OR_CROSS_VENUE'
+  | 'SHIFT_NOT_CLOSED'
+  | 'SHIFT_MISSING_CASH_DECLARED'
+  | 'SHIFT_COUNT_MISMATCH'
+  | 'SHIFT_DIFFERENCE_OVERFLOW'
+  | 'SHIFT_CONCURRENT_WRITE_LOST'
+
+interface LateClosedDrawerAudit {
+  staffId?: string
+  venueId: string
+  sessionId: string
+  linkedShiftId: string | null
+  cause: string
+  localId: string | null
+  amountPesos: string
+  expectedAfterPesos: string
+  overShortBeforePesos: string | null
+  overShortAfterPesos: string
+  shiftReconciliationStatus: 'APPLIED' | 'PENDING'
+  pendingReason?: LateShiftPendingReason
+  shiftDifferenceBeforePesos?: string | null
+}
+
+interface LateEventTransactionResult {
+  result: { count: number }
+  audit?: LateClosedDrawerAudit
+}
+
 /**
  * 🔴 CONTRATO CON EL POS, NO COSMÉTICA. El corte de caja del POS separa los
  * reembolsos del resto de los retiros por el PREFIJO de la nota
@@ -408,9 +441,9 @@ async function createEventUnderSessionLock(
   requireOpen: boolean,
   data: Prisma.CashDrawerEventCreateManyInput,
 ): Promise<{ count: number } | null> {
-  return prisma.$transaction(async tx => {
+  const transactionResult = await prisma.$transaction(async (tx): Promise<LateEventTransactionResult | null> => {
     const lock = await tx.cashDrawerSession.updateMany({
-      where: requireOpen ? { id: sessionId, status: 'OPEN' } : { id: sessionId },
+      where: requireOpen ? { id: sessionId, venueId: data.venueId, status: 'OPEN' } : { id: sessionId, venueId: data.venueId },
       data: { updatedAt: new Date() },
     })
     if (!lock || lock.count === 0) return null
@@ -419,11 +452,12 @@ async function createEventUnderSessionLock(
     // Sin esto el esperado subía y el `overShort` firmado se quedaba viejo: "esperado 1,100 / contado
     // 1,000 / diferencia 0". Se recalcula con la MISMA fórmula del cierre, bajo el mismo candado.
     if (!requireOpen && result.count > 0) {
-      const session = await tx.cashDrawerSession.findUnique({
-        where: { id: sessionId },
+      const session = await tx.cashDrawerSession.findFirst({
+        where: { id: sessionId, venueId: data.venueId },
         select: {
           venueId: true,
           status: true,
+          shiftId: true,
           actualAmount: true,
           overShort: true,
           startingAmount: true,
@@ -433,31 +467,145 @@ async function createEventUnderSessionLock(
       if (session && session.status === 'CLOSED' && session.actualAmount !== null) {
         const { calculateExpectedAmount } = await import('../mobile/cash-drawer.mobile.service')
         const expected = calculateExpectedAmount({ startingAmount: session.startingAmount, events: session.events })
-        const overShort = Number(session.actualAmount) - expected
-        await tx.cashDrawerSession.update({ where: { id: sessionId }, data: { overShort: new Decimal(overShort.toFixed(2)) } })
-        logger.info('💵 [CASH-DRAWER] Movimiento repuesto en una caja cerrada: overShort recalculado', { sessionId, expected, overShort })
-        // Un resultado FIRMADO cambió después del cierre: queda en bitácora con antes/después y la causa
-        // (Codex 3ª auditoría) — es lo que un dueño mira cuando el corte de ayer ya no dice lo mismo.
-        logAction({
+        // `calculateExpectedAmount` is the drawer's existing authority and returns a number. The
+        // signed difference itself is calculated and rounded with Decimal, then the SAME Decimal is
+        // offered to both records; no provider centavos or JS subtraction can split their values.
+        const expectedDecimal = new Decimal(expected.toString())
+        const overShort = new Decimal(session.actualAmount.toString()).minus(expectedDecimal).toDecimalPlaces(2)
+        await tx.cashDrawerSession.updateMany({ where: { id: sessionId, venueId: session.venueId }, data: { overShort } })
+
+        let pendingReason: LateShiftPendingReason | undefined
+        let shiftDifferenceBeforePesos: string | null | undefined
+
+        if (!session.shiftId) {
+          pendingReason = 'MISSING_SHIFT_RELATION'
+        } else {
+          // The explicit 1:1 relation is the only authority. A clock/window inference could attach
+          // yesterday's physical count to another person's shift, so a missing same-tenant row is
+          // deliberately one visible pending state.
+          const shift = await tx.shift.findFirst({
+            where: { id: session.shiftId, venueId: session.venueId },
+            select: { id: true, venueId: true, status: true, cashDeclared: true, cashDifference: true },
+          })
+
+          if (!shift) {
+            pendingReason = 'SHIFT_NOT_FOUND_OR_CROSS_VENUE'
+          } else if (shift.status !== 'CLOSED') {
+            pendingReason = 'SHIFT_NOT_CLOSED'
+          } else if (shift.cashDeclared === null) {
+            pendingReason = 'SHIFT_MISSING_CASH_DECLARED'
+          } else if (!new Decimal(shift.cashDeclared.toString()).equals(new Decimal(session.actualAmount.toString()))) {
+            pendingReason = 'SHIFT_COUNT_MISMATCH'
+          } else if (overShort.absoluteValue().greaterThan(SHIFT_CASH_DIFFERENCE_MAX)) {
+            pendingReason = 'SHIFT_DIFFERENCE_OVERFLOW'
+          } else {
+            shiftDifferenceBeforePesos = shift.cashDifference?.toFixed(2) ?? null
+            // Tenant + state + physical count + prior signed value form the CAS. If an owner edits
+            // the counted shift after our read, the stale late-posting repair cannot overwrite it.
+            const shifted = await tx.shift.updateMany({
+              where: {
+                id: shift.id,
+                venueId: session.venueId,
+                status: 'CLOSED',
+                cashDeclared: shift.cashDeclared,
+                cashDifference: shift.cashDifference,
+              },
+              data: { cashDifference: overShort },
+            })
+            if (shifted.count !== 1) pendingReason = 'SHIFT_CONCURRENT_WRITE_LOST'
+          }
+        }
+
+        const audit: LateClosedDrawerAudit = {
           staffId: data.staffId && data.staffId !== 'SYSTEM' ? data.staffId : undefined,
           venueId: session.venueId,
-          action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
-          entity: 'CashDrawerSession',
-          entityId: sessionId,
-          data: {
-            cause: data.type,
-            localId: data.localId ?? null,
-            amount: Number(data.amount),
-            overShortBefore: session.overShort != null ? Number(session.overShort) : null,
-            overShortAfter: overShort,
-            expectedAfter: expected,
-            source: 'RECONCILER',
-          },
-        })
+          sessionId,
+          linkedShiftId: session.shiftId,
+          cause: data.type,
+          localId: data.localId ?? null,
+          amountPesos: new Decimal(data.amount.toString()).toFixed(2),
+          expectedAfterPesos: expectedDecimal.toFixed(2),
+          overShortBeforePesos: session.overShort?.toFixed(2) ?? null,
+          overShortAfterPesos: overShort.toFixed(2),
+          shiftReconciliationStatus: pendingReason ? 'PENDING' : 'APPLIED',
+          ...(pendingReason ? { pendingReason } : {}),
+          ...(shiftDifferenceBeforePesos !== undefined ? { shiftDifferenceBeforePesos } : {}),
+        }
+
+        return { result, audit }
       }
     }
-    return result
+    return { result }
   })
+
+  if (!transactionResult) return null
+  if (!transactionResult.audit) return transactionResult.result
+
+  const audit = transactionResult.audit
+  logger.info('💵 [CASH-DRAWER] Movimiento repuesto en una caja cerrada: overShort recalculado', {
+    sessionId,
+    expected: audit.expectedAfterPesos,
+    overShort: audit.overShortAfterPesos,
+  })
+
+  if (audit.pendingReason) {
+    // Stable token for alerts/searches; the structured reason says why no Shift value was invented.
+    logger.error('❌ [CASH-DRAWER] LATE_SHIFT_RECONCILIATION_PENDING', {
+      venueId: audit.venueId,
+      sessionId: audit.sessionId,
+      linkedShiftId: audit.linkedShiftId,
+      reason: audit.pendingReason,
+    })
+  }
+
+  // Audit attempts happen only after the money transaction commits. `logAction` is best-effort and
+  // never throws, so an audit outage cannot undo a valid late event or its signed drawer repair.
+  await logAction({
+    staffId: audit.staffId,
+    venueId: audit.venueId,
+    action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
+    entity: 'CashDrawerSession',
+    entityId: audit.sessionId,
+    data: {
+      cause: audit.cause,
+      localId: audit.localId,
+      source: 'RECONCILER',
+      // Preserve the original numeric audit contract while adding explicit Decimal-safe peso
+      // strings for the linked correction. Existing audit consumers keep working unchanged.
+      amount: Number(audit.amountPesos),
+      overShortBefore: audit.overShortBeforePesos === null ? null : Number(audit.overShortBeforePesos),
+      overShortAfter: Number(audit.overShortAfterPesos),
+      expectedAfter: Number(audit.expectedAfterPesos),
+      amountPesos: audit.amountPesos,
+      expectedAfterPesos: audit.expectedAfterPesos,
+      overShortBeforePesos: audit.overShortBeforePesos,
+      overShortAfterPesos: audit.overShortAfterPesos,
+      linkedShiftId: audit.linkedShiftId,
+      shiftReconciliationStatus: audit.shiftReconciliationStatus,
+      ...(audit.pendingReason ? { shiftReconciliationPendingReason: audit.pendingReason } : {}),
+    },
+  })
+
+  if (audit.shiftReconciliationStatus === 'APPLIED' && audit.linkedShiftId) {
+    await logAction({
+      staffId: audit.staffId,
+      venueId: audit.venueId,
+      action: 'SHIFT_UPDATED',
+      entity: 'Shift',
+      entityId: audit.linkedShiftId,
+      data: {
+        cause: audit.cause,
+        localId: audit.localId,
+        source: 'RECONCILER',
+        amountPesos: audit.amountPesos,
+        cashDifferenceBeforePesos: audit.shiftDifferenceBeforePesos ?? null,
+        cashDifferenceAfterPesos: audit.overShortAfterPesos,
+        cashDrawerSessionId: audit.sessionId,
+      },
+    })
+  }
+
+  return transactionResult.result
 }
 
 async function resolveStaffName(staffId?: string | null): Promise<string> {

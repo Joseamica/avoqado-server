@@ -50,7 +50,7 @@ jest.mock('@/utils/prismaClient', () => ({
     order: { findUnique: jest.fn(), update: jest.fn() },
     payment: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn() },
     venueTransaction: { create: jest.fn() },
-    shift: { findFirst: jest.fn(), update: jest.fn() },
+    shift: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
     paymentAllocation: { create: jest.fn() },
     review: { create: jest.fn() },
@@ -158,6 +158,7 @@ const paymentData = {
 beforeEach(() => {
   jest.clearAllMocks()
   ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
+  ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
   ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE_ID })
   ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', status: 'COMPLETED' })
   ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
@@ -176,7 +177,8 @@ beforeEach(() => {
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
       order: { update: prisma.order.update },
-      shift: { update: prisma.shift.update },
+      shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
+      activityLog: { create: prisma.activityLog.create },
       // recordOrderPayment llama lockAreaTicketCheckoutForPayment(tx, …) — area
       // tickets v7. Este `tx` se arma A MANO, así que un modelo que la ruta toque
       // y no esté aquí sale undefined y el test truena con un TypeError en lugar

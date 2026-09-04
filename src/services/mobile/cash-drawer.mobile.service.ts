@@ -12,7 +12,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { Decimal } from '@prisma/client/runtime/library'
-import { Prisma } from '@prisma/client'
+import { CashDrawerEventType, Prisma } from '@prisma/client'
 
 /**
  * Largo máximo de la llave de idempotencia que un cliente puede mandar.
@@ -697,6 +697,53 @@ interface SyncEvent {
    * reglas de validación que en `pay-in` / `pay-out` (ver `normalizeLocalId`).
    */
   localId?: string | null
+  /**
+   * Identidad durable de la caja local donde ocurrió el movimiento. Aditivo: las apps
+   * viejas pueden omitirla, pero entonces la fecha debe resolver UNA sola ventana histórica.
+   */
+  sessionId?: string | null
+}
+
+/** Un día offline completo cabe holgadamente; más se rechaza en vez de cargar la DB sin techo. */
+const CASH_DRAWER_SYNC_EVENT_LIMIT = 500
+/** A full offline day should touch few drawers; cap fan-out before holding transaction locks. */
+const CASH_DRAWER_SYNC_SESSION_LIMIT = 100
+/** El barrido legacy trae uno extra para detectar truncamiento; jamás adivina al tocar el techo. */
+const CASH_DRAWER_SYNC_LEGACY_SESSION_LIMIT = 100
+/** `Shift.cashDifference` is Decimal(10,2), narrower than the drawer's Decimal(12,2). */
+const CASH_DRAWER_SYNC_SHIFT_DIFFERENCE_MAX = new Decimal('99999999.99')
+const CASH_DRAWER_EXPECTED_EVENT_TYPES = [CashDrawerEventType.PAY_IN, CashDrawerEventType.PAY_OUT, CashDrawerEventType.CASH_SALE]
+
+type SyncShiftPendingReason =
+  | 'MISSING_SHIFT_RELATION'
+  | 'SHIFT_NOT_FOUND_OR_CROSS_VENUE'
+  | 'SHIFT_NOT_CLOSED'
+  | 'SHIFT_MISSING_CASH_DECLARED'
+  | 'SHIFT_COUNT_MISMATCH'
+  | 'SHIFT_DIFFERENCE_OVERFLOW'
+  | 'SHIFT_CONCURRENT_WRITE_LOST'
+
+interface SyncClosedDrawerAudit {
+  sessionId: string
+  linkedShiftId: string | null
+  insertedCount: number
+  localIds: string[]
+  expectedBeforePesos: string | null
+  expectedAfterPesos: string
+  overShortBeforePesos: string | null
+  overShortAfterPesos: string
+  shiftStatus: 'APPLIED' | 'PENDING'
+  shiftDifferenceBeforePesos?: string | null
+  pendingReason?: SyncShiftPendingReason
+}
+
+function rejectCashDrawerSync(venueId: string, reason: string, details: Record<string, unknown> = {}): never {
+  logger.warn('💵 [CASH-DRAWER] CASH_DRAWER_SYNC_REJECTED', { venueId, reason, ...details })
+  throw new BadRequestError(
+    'No se pudo identificar con seguridad la caja histórica de todos los movimientos. Nada fue sincronizado.',
+    'CASH_DRAWER_SYNC_UNSAFE_IDENTITY',
+    { reason, ...details },
+  )
 }
 
 /**
@@ -710,12 +757,9 @@ interface SyncEvent {
  * actualizados" — decisión del founder (27-ago): nada de gates manuales, nada de código muerto.
  */
 export async function syncEvents(venueId: string, events: SyncEvent[], appVersion?: string | null, actorStaffId?: string | null) {
-  const session = await getOpenSession(venueId)
-
   if (!events || events.length === 0) {
     throw new BadRequestError('No hay eventos para sincronizar')
   }
-
   // 🔴 EL SERVIDOR ES DUEÑO DEL `CASH_SALE` — el cliente ya no lo puede empujar.
   //
   // Desde que el cobro en efectivo crea su propio movimiento de caja en el servidor
@@ -750,7 +794,6 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   if (droppedInvalidTypes > 0) {
     logger.warn('💵 [CASH-DRAWER] /sync descartó eventos de un tipo que el cliente no puede empujar', {
       venueId,
-      sessionId: session.id,
       droppedInvalidTypes,
       tipos: [...new Set(events.filter(e => !TIPOS_DEL_CLIENTE.has(e.type) && e.type !== 'CASH_SALE').map(e => e.type))],
     })
@@ -763,7 +806,6 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   if (droppedCashSales > 0) {
     logger.info('💵 [CASH-DRAWER] CASH_SALE del cliente ignorado — el servidor ya lo registra al cobrar', {
       venueId,
-      sessionId: session.id,
       droppedCashSales,
     })
   }
@@ -773,32 +815,119 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
     // aquí lo haría reintentar para siempre algo que nunca vamos a aceptar.
     return { syncedCount: 0, events: [] }
   }
-
-  // 🔴 La FECHA la acota el servidor. El cliente la manda porque el movimiento ocurrió sin
-  // red y su hora real importa, pero no puede caer FUERA de la vida de la caja: una fecha
-  // anterior a la apertura le ganaba el `orderBy createdAt asc` a los eventos legítimos, y
-  // una futura desordena el corte. Se recorta al rango [apertura, ahora] en vez de
-  // rechazarse, para no perder un movimiento real por un reloj mal puesto en el aparato.
-  const ahora = new Date()
-  const aperturaMs = new Date(session.openedAt).getTime()
-  const acotarFecha = (valor?: string | Date | null): Date => {
-    if (!valor) return ahora
-    const t = new Date(valor).getTime()
-    if (Number.isNaN(t)) return ahora
-    return new Date(Math.min(Math.max(t, aperturaMs), ahora.getTime()))
+  if (events.length > CASH_DRAWER_SYNC_EVENT_LIMIT) {
+    rejectCashDrawerSync(venueId, 'REQUEST_LIMIT_EXCEEDED', {
+      receivedCount: events.length,
+      limit: CASH_DRAWER_SYNC_EVENT_LIMIT,
+    })
   }
 
-  const toRow = (event: SyncEvent, autor: { staffId: string; staffName: string }) => ({
-    sessionId: session.id,
-    venueId,
-    type: event.type,
-    amount: dollarsToDecimal(event.amount),
-    note: event.note || null,
-    staffId: autor.staffId,
-    staffName: autor.staffName,
-    orderId: event.orderId || null,
-    localId: event.localId || null,
-    createdAt: acotarFecha(event.createdAt),
+  const requestNow = new Date()
+  const parseDate = (raw?: string | Date | null): Date | null => {
+    if (!raw) return null
+    const parsed = new Date(raw)
+    return Number.isNaN(parsed.getTime()) ? null : parsed
+  }
+
+  type SessionWindow = {
+    id: string
+    venueId: string
+    status: string
+    openedAt: Date
+    closedAt: Date | null
+  }
+  type Accepted = SyncEvent & { localId: string | null }
+  type Resolved = { event: Accepted; session: SessionWindow; createdAt: Date }
+
+  const explicitIds: string[] = []
+  const legacyDates: Date[] = []
+  for (const event of acceptedEvents as Accepted[]) {
+    if (event.sessionId !== undefined && event.sessionId !== null) {
+      if (typeof event.sessionId !== 'string' || event.sessionId.trim().length === 0 || event.sessionId.length > 128) {
+        rejectCashDrawerSync(venueId, 'INVALID_EXPLICIT_SESSION_ID', { localId: event.localId })
+      }
+      explicitIds.push(event.sessionId)
+    } else {
+      const createdAt = parseDate(event.createdAt)
+      if (!createdAt) rejectCashDrawerSync(venueId, 'LEGACY_TIMESTAMP_REQUIRED', { localId: event.localId })
+      legacyDates.push(createdAt)
+    }
+  }
+
+  // Explicit identities are fetched in one tenant-scoped, request-bounded query.
+  const uniqueExplicitIds = [...new Set(explicitIds)].sort()
+  const explicitSessions = uniqueExplicitIds.length
+    ? await prisma.cashDrawerSession.findMany({
+        where: { venueId, id: { in: uniqueExplicitIds } },
+        select: { id: true, venueId: true, status: true, openedAt: true, closedAt: true },
+        take: uniqueExplicitIds.length,
+      })
+    : []
+  const explicitById = new Map(explicitSessions.map(session => [session.id, session as SessionWindow]))
+  const missingExplicit = uniqueExplicitIds.filter(id => !explicitById.has(id))
+  if (missingExplicit.length > 0) {
+    rejectCashDrawerSync(venueId, 'EXPLICIT_SESSION_NOT_FOUND', { sessionIds: missingExplicit })
+  }
+
+  // Old clients have no durable id. One bounded interval scan covers the whole batch; each
+  // timestamp must belong to exactly one candidate or the complete request is rejected.
+  let legacySessions: SessionWindow[] = []
+  if (legacyDates.length > 0) {
+    const minLegacy = new Date(Math.min(...legacyDates.map(date => date.getTime())))
+    const maxLegacy = new Date(Math.max(...legacyDates.map(date => date.getTime())))
+    const candidates = await prisma.cashDrawerSession.findMany({
+      where: {
+        venueId,
+        openedAt: { lte: maxLegacy },
+        OR: [{ closedAt: { gte: minLegacy } }, { status: 'OPEN', closedAt: null }],
+      },
+      select: { id: true, venueId: true, status: true, openedAt: true, closedAt: true },
+      orderBy: { id: 'asc' },
+      take: CASH_DRAWER_SYNC_LEGACY_SESSION_LIMIT + 1,
+    })
+    if (candidates.length > CASH_DRAWER_SYNC_LEGACY_SESSION_LIMIT) {
+      rejectCashDrawerSync(venueId, 'LEGACY_CANDIDATE_LIMIT_REACHED', {
+        limit: CASH_DRAWER_SYNC_LEGACY_SESSION_LIMIT,
+        from: minLegacy.toISOString(),
+        to: maxLegacy.toISOString(),
+      })
+    }
+    legacySessions = candidates as SessionWindow[]
+  }
+
+  const resolved: Resolved[] = (acceptedEvents as Accepted[]).map(event => {
+    let session: SessionWindow
+    const explicit = event.sessionId !== undefined && event.sessionId !== null
+    if (explicit) {
+      session = explicitById.get(event.sessionId as string) as SessionWindow
+    } else {
+      const createdAt = parseDate(event.createdAt) as Date
+      const matches = legacySessions.filter(candidate => {
+        const opened = new Date(candidate.openedAt).getTime()
+        const end = candidate.closedAt
+          ? new Date(candidate.closedAt).getTime()
+          : candidate.status === 'OPEN'
+            ? requestNow.getTime()
+            : Number.NEGATIVE_INFINITY
+        return opened <= createdAt.getTime() && createdAt.getTime() <= end
+      })
+      if (matches.length !== 1) {
+        rejectCashDrawerSync(venueId, matches.length === 0 ? 'LEGACY_SESSION_NOT_FOUND' : 'LEGACY_SESSION_AMBIGUOUS', {
+          localId: event.localId,
+          createdAt: createdAt.toISOString(),
+          candidateCount: matches.length,
+        })
+      }
+      session = matches[0]
+    }
+
+    // Explicit identity remains authoritative even with a bad device clock. Its date is clamped
+    // only to that exact drawer's own lifetime, never to a newer open drawer.
+    const rawCreatedAt = parseDate(event.createdAt) ?? requestNow
+    const opened = new Date(session.openedAt).getTime()
+    const end = session.closedAt ? new Date(session.closedAt).getTime() : requestNow.getTime()
+    const createdAt = new Date(Math.min(Math.max(rawCreatedAt.getTime(), opened), end))
+    return { event, session, createdAt }
   })
 
   // 🔴 El AUTOR se comprueba contra el venue. El POS es compartido y el movimiento pudo
@@ -807,11 +936,14 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   // al del token: antes, cualquiera con `payments:create` podía colgarle un retiro a un
   // compañero, o a alguien de otro negocio.
   const idsDelCuerpo = [...new Set(acceptedEvents.map(e => e.staffId).filter(Boolean))] as string[]
-  const validos = new Set<string>()
-  for (const id of idsDelCuerpo) {
-    const pertenece = await prisma.staffVenue.findFirst({ where: { staffId: id, venueId }, select: { id: true } })
-    if (pertenece) validos.add(id)
-  }
+  const memberships = idsDelCuerpo.length
+    ? await prisma.staffVenue.findMany({
+        where: { venueId, staffId: { in: idsDelCuerpo } },
+        select: { staffId: true },
+        take: idsDelCuerpo.length,
+      })
+    : []
+  const validos = new Set<string>(memberships.map(row => row.staffId))
   const autorDe = (event: SyncEvent) =>
     event.staffId && validos.has(event.staffId)
       ? { staffId: event.staffId, staffName: event.staffName }
@@ -825,8 +957,63 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   // terminaba con efectivo inventado — que el arqueo daba por bueno. Con la llave
   // `localId` del POS y el índice `@@unique([venueId, localId])`, el reintento choca y
   // Postgres lo salta en vez de duplicar.
-  const keyed = acceptedEvents.filter(event => Boolean(event.localId))
-  const unkeyed = acceptedEvents.filter(event => !event.localId)
+  const keyed = resolved.filter(({ event }) => Boolean(event.localId))
+  const localIds = [...new Set(keyed.map(({ event }) => event.localId as string))]
+  const incomingTargetByLocalId = new Map<string, string>()
+  for (const item of keyed) {
+    const localId = item.event.localId as string
+    const previous = incomingTargetByLocalId.get(localId)
+    if (previous && previous !== item.session.id) {
+      rejectCashDrawerSync(venueId, 'LOCAL_ID_SESSION_CONFLICT', { localId, sessionIds: [previous, item.session.id].sort() })
+    }
+    incomingTargetByLocalId.set(localId, item.session.id)
+  }
+  const existingKeyed = localIds.length
+    ? await prisma.cashDrawerEvent.findMany({
+        where: { venueId, localId: { in: localIds } },
+        select: { id: true, localId: true, sessionId: true },
+        take: localIds.length,
+      })
+    : []
+  for (const existing of existingKeyed) {
+    if (existing.localId && incomingTargetByLocalId.get(existing.localId) !== existing.sessionId) {
+      rejectCashDrawerSync(venueId, 'LOCAL_ID_SESSION_CONFLICT', {
+        localId: existing.localId,
+        existingSessionId: existing.sessionId,
+        requestedSessionId: incomingTargetByLocalId.get(existing.localId),
+      })
+    }
+  }
+
+  const bySession = new Map<string, Resolved[]>()
+  for (const item of resolved) {
+    const group = bySession.get(item.session.id) ?? []
+    group.push(item)
+    bySession.set(item.session.id, group)
+  }
+  const orderedGroups = [...bySession.entries()].sort(([left], [right]) => left.localeCompare(right))
+  if (orderedGroups.length > CASH_DRAWER_SYNC_SESSION_LIMIT) {
+    rejectCashDrawerSync(venueId, 'TARGET_SESSION_LIMIT_EXCEEDED', {
+      targetSessionCount: orderedGroups.length,
+      limit: CASH_DRAWER_SYNC_SESSION_LIMIT,
+    })
+  }
+
+  const toRow = (item: Resolved) => {
+    const autor = autorDe(item.event)
+    return {
+      sessionId: item.session.id,
+      venueId,
+      type: item.event.type,
+      amount: dollarsToDecimal(item.event.amount),
+      note: item.event.note || null,
+      staffId: autor.staffId,
+      staffName: autor.staffName,
+      orderId: item.event.orderId || null,
+      localId: item.event.localId || null,
+      createdAt: item.createdAt,
+    }
+  }
 
   // 🔴 Apps viejas sin `localId` (contrato /mobile: las versiones ya
   // distribuidas siguen funcionando): tras un `createMany` no hay llave para
@@ -842,36 +1029,191 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
   // request regresara error — el reintento del cliente los reinsertaba (los
   // sin llave no tienen dedupe) y el cajón inventaba efectivo. Todo-o-nada:
   // o entra el lote completo, o el reintento parte de cero.
-  const { insertedCount, unkeyedRows } = await prisma.$transaction(
+  const { insertedCount, keyedRows, unkeyedRows, closedAudits } = await prisma.$transaction(
     async tx => {
-      // 🔴 CANDADO, dentro de la transacción y ANTES de insertar. `syncEvents` era el único
-      // escritor de `CashDrawerEvent` que no tocaba la fila de la sesión: leía "está abierta"
-      // fuera de la transacción y luego insertaba, así que un lote podía aterrizar en una caja
-      // que otro aparato acababa de cerrar y firmar — y nada recalculaba su diferencia. Mismo
-      // UPDATE condicional que usan la venta (`createEventUnderSessionLock`) y el movimiento
-      // manual (`lockOrThrow`), y el mismo error que las apps ya saben interpretar.
-      const lock = await tx.cashDrawerSession.updateMany({
-        where: { id: session.id, status: 'OPEN' },
-        data: { updatedAt: new Date() },
-      })
-      if (!lock || lock.count === 0) throw new NotFoundError('No hay una caja abierta')
-
-      let inserted = 0
-      if (keyed.length > 0) {
-        const result = await tx.cashDrawerEvent.createMany({
-          data: keyed.map(e => toRow(e, autorDe(e))),
-          skipDuplicates: true,
+      // Take every target row lock before the first insert. Stable id order prevents two devices
+      // syncing overlapping historical drawers from deadlocking each other.
+      for (const [sessionId] of orderedGroups) {
+        const lock = await tx.cashDrawerSession.updateMany({
+          where: { id: sessionId, venueId },
+          data: { updatedAt: requestNow },
         })
-        inserted += result.count
+        if (!lock || lock.count !== 1) {
+          throw new BadRequestError(
+            'Una caja cambió mientras se sincronizaba el lote. Nada fue sincronizado.',
+            'CASH_DRAWER_SYNC_SESSION_CHANGED',
+          )
+        }
       }
 
+      let durableKeyedRows = [] as Awaited<ReturnType<typeof prisma.cashDrawerEvent.findMany>>
       const createdUnkeyed = [] as Awaited<ReturnType<typeof prisma.cashDrawerEvent.create>>[]
-      for (const event of unkeyed) {
-        createdUnkeyed.push(await tx.cashDrawerEvent.create({ data: toRow(event, autorDe(event)) }))
+      const audits: SyncClosedDrawerAudit[] = []
+      const insertedKeyed =
+        keyed.length > 0
+          ? await tx.cashDrawerEvent.createManyAndReturn({
+              data: keyed.map(toRow),
+              skipDuplicates: true,
+              select: { id: true, localId: true, sessionId: true },
+            })
+          : []
+      for (const item of resolved.filter(({ event }) => !event.localId)) {
+        createdUnkeyed.push(await tx.cashDrawerEvent.create({ data: toRow(item) }))
       }
-      inserted += createdUnkeyed.length
 
-      return { insertedCount: inserted, unkeyedRows: createdUnkeyed }
+      // createManyAndReturn identifies the exact keyed winners of the unique-key race. This
+      // map therefore drives both reconciliation and audits; requested duplicates never appear.
+      const insertedBySession = new Map<string, { count: number; localIds: string[] }>()
+      for (const row of [...insertedKeyed, ...createdUnkeyed]) {
+        const inserted = insertedBySession.get(row.sessionId) ?? { count: 0, localIds: [] }
+        inserted.count += 1
+        if (row.localId) inserted.localIds.push(row.localId)
+        insertedBySession.set(row.sessionId, inserted)
+      }
+      const changedSessionIds = [...insertedBySession.keys()].sort()
+
+      // One bounded metadata read and one bounded aggregate replace a full, unbounded events
+      // relation per drawer. At most three aggregate rows can exist for each changed drawer.
+      const closedSessions = changedSessionIds.length
+        ? await tx.cashDrawerSession.findMany({
+            where: {
+              venueId,
+              id: { in: changedSessionIds },
+              status: 'CLOSED',
+              actualAmount: { not: null },
+            },
+            select: {
+              id: true,
+              venueId: true,
+              shiftId: true,
+              actualAmount: true,
+              overShort: true,
+              startingAmount: true,
+            },
+            orderBy: { id: 'asc' },
+            take: changedSessionIds.length,
+          })
+        : []
+      const closedSessionIds = closedSessions.map(session => session.id)
+      const eventTotals = closedSessionIds.length
+        ? await tx.cashDrawerEvent.groupBy({
+            by: ['sessionId', 'type'],
+            where: {
+              venueId,
+              sessionId: { in: closedSessionIds },
+              type: { in: CASH_DRAWER_EXPECTED_EVENT_TYPES },
+            },
+            _sum: { amount: true },
+            orderBy: [{ sessionId: 'asc' }, { type: 'asc' }],
+            take: closedSessionIds.length * CASH_DRAWER_EXPECTED_EVENT_TYPES.length,
+          })
+        : []
+      const totalsBySession = new Map<string, Array<{ type: CashDrawerEventType; amount: Decimal }>>()
+      for (const total of eventTotals) {
+        if (total._sum.amount === null) continue
+        const sessionTotals = totalsBySession.get(total.sessionId) ?? []
+        sessionTotals.push({ type: total.type, amount: total._sum.amount })
+        totalsBySession.set(total.sessionId, sessionTotals)
+      }
+
+      const linkedShiftIds = [...new Set(closedSessions.map(session => session.shiftId).filter((id): id is string => Boolean(id)))].sort()
+      const linkedShifts = linkedShiftIds.length
+        ? await tx.shift.findMany({
+            where: { venueId, id: { in: linkedShiftIds } },
+            select: { id: true, venueId: true, status: true, cashDeclared: true, cashDifference: true },
+            orderBy: { id: 'asc' },
+            take: linkedShiftIds.length,
+          })
+        : []
+      const shiftById = new Map(linkedShifts.map(shift => [shift.id, shift]))
+
+      for (const session of closedSessions) {
+        if (session.actualAmount === null) continue
+        const insertedForSession = insertedBySession.get(session.id)
+        if (!insertedForSession) continue
+
+        const expected = calculateExpectedAmount({
+          startingAmount: session.startingAmount,
+          events: totalsBySession.get(session.id) ?? [],
+        })
+        const expectedDecimal = new Decimal(expected.toString())
+        const difference = new Decimal(session.actualAmount.toString()).minus(expectedDecimal).toDecimalPlaces(2)
+        await tx.cashDrawerSession.updateMany({ where: { id: session.id, venueId }, data: { overShort: difference } })
+
+        let pendingReason: SyncShiftPendingReason | undefined
+        let shiftDifferenceBeforePesos: string | null | undefined
+        if (!session.shiftId) {
+          pendingReason = 'MISSING_SHIFT_RELATION'
+        } else {
+          const shift = shiftById.get(session.shiftId)
+          if (!shift) pendingReason = 'SHIFT_NOT_FOUND_OR_CROSS_VENUE'
+          else if (shift.status !== 'CLOSED') pendingReason = 'SHIFT_NOT_CLOSED'
+          else if (shift.cashDeclared === null) pendingReason = 'SHIFT_MISSING_CASH_DECLARED'
+          else if (!new Decimal(shift.cashDeclared.toString()).equals(new Decimal(session.actualAmount.toString()))) {
+            pendingReason = 'SHIFT_COUNT_MISMATCH'
+          } else if (difference.absoluteValue().greaterThan(CASH_DRAWER_SYNC_SHIFT_DIFFERENCE_MAX)) {
+            pendingReason = 'SHIFT_DIFFERENCE_OVERFLOW'
+          } else {
+            shiftDifferenceBeforePesos = shift.cashDifference?.toFixed(2) ?? null
+            const shifted = await tx.shift.updateMany({
+              where: {
+                id: shift.id,
+                venueId,
+                status: 'CLOSED',
+                cashDeclared: shift.cashDeclared,
+                cashDifference: shift.cashDifference,
+              },
+              data: { cashDifference: difference },
+            })
+            if (shifted.count !== 1) pendingReason = 'SHIFT_CONCURRENT_WRITE_LOST'
+          }
+        }
+
+        audits.push({
+          sessionId: session.id,
+          linkedShiftId: session.shiftId,
+          insertedCount: insertedForSession.count,
+          localIds: [...new Set(insertedForSession.localIds)].sort(),
+          expectedBeforePesos:
+            session.overShort === null
+              ? null
+              : new Decimal(session.actualAmount.toString()).minus(new Decimal(session.overShort.toString())).toFixed(2),
+          expectedAfterPesos: expectedDecimal.toFixed(2),
+          overShortBeforePesos: session.overShort?.toFixed(2) ?? null,
+          overShortAfterPesos: difference.toFixed(2),
+          shiftStatus: pendingReason ? 'PENDING' : 'APPLIED',
+          ...(pendingReason ? { pendingReason } : {}),
+          ...(shiftDifferenceBeforePesos !== undefined ? { shiftDifferenceBeforePesos } : {}),
+        })
+      }
+
+      // The preflight read cannot close the race by itself: two requests can both see no row,
+      // target different drawers, and let the unique key choose one winner. Re-read under this
+      // transaction after createMany while every requested drawer is still locked. The loser
+      // aborts instead of echoing/acknowledging a row attached to a different drawer.
+      if (localIds.length > 0) {
+        durableKeyedRows = await tx.cashDrawerEvent.findMany({
+          where: { venueId, localId: { in: localIds } },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: localIds.length,
+        })
+        for (const durable of durableKeyedRows) {
+          if (durable.localId && incomingTargetByLocalId.get(durable.localId) !== durable.sessionId) {
+            rejectCashDrawerSync(venueId, 'LOCAL_ID_SESSION_CONFLICT_AFTER_INSERT', {
+              localId: durable.localId,
+              existingSessionId: durable.sessionId,
+              requestedSessionId: incomingTargetByLocalId.get(durable.localId),
+            })
+          }
+        }
+      }
+
+      return {
+        insertedCount: insertedKeyed.length + createdUnkeyed.length,
+        keyedRows: durableKeyedRows,
+        unkeyedRows: createdUnkeyed,
+        closedAudits: audits,
+      }
     },
     // Timeout explícito (audit max): el default de 5s de la tx interactiva no
     // aguanta el lote de una app vieja que reconecta tras un día offline
@@ -880,24 +1222,83 @@ export async function syncEvents(venueId: string, events: SyncEvent[], appVersio
     { timeout: 30_000 },
   )
 
-  logAction({
-    staffId: acceptedEvents[0]?.staffId,
-    venueId,
-    action: 'CASH_DRAWER_SYNC',
-    entity: 'CashDrawerSession',
-    entityId: session.id,
-    data: { eventCount: insertedCount, receivedCount: events.length, droppedCashSales, appVersion: appVersion ?? null, source: 'MOBILE' },
+  // Audit attempts happen only after the transaction has committed. Duplicates (`inserted=0`)
+  // intentionally do not create another mutation audit.
+  if (insertedCount > 0) {
+    await logAction({
+      staffId: actorStaffId ?? acceptedEvents[0]?.staffId,
+      venueId,
+      action: 'CASH_DRAWER_SYNC',
+      entity: 'CashDrawerSession',
+      entityId: orderedGroups[0][0],
+      data: {
+        eventCount: insertedCount,
+        receivedCount: events.length,
+        droppedCashSales,
+        appVersion: appVersion ?? null,
+        source: 'MOBILE',
+        sessionIds: orderedGroups.map(([sessionId]) => sessionId),
+      },
+    })
+  }
+
+  for (const audit of closedAudits) {
+    if (audit.pendingReason) {
+      logger.error('❌ [CASH-DRAWER] LATE_SHIFT_RECONCILIATION_PENDING', {
+        venueId,
+        sessionId: audit.sessionId,
+        linkedShiftId: audit.linkedShiftId,
+        reason: audit.pendingReason,
+        source: 'MOBILE_SYNC',
+      })
+    }
+    await logAction({
+      staffId: actorStaffId ?? acceptedEvents[0]?.staffId,
+      venueId,
+      action: 'CASH_DRAWER_ADJUSTED_AFTER_CLOSE',
+      entity: 'CashDrawerSession',
+      entityId: audit.sessionId,
+      data: {
+        cause: 'OFFLINE_BATCH',
+        source: 'MOBILE_SYNC',
+        insertedCount: audit.insertedCount,
+        localIds: audit.localIds,
+        expectedBeforePesos: audit.expectedBeforePesos,
+        expectedAfterPesos: audit.expectedAfterPesos,
+        overShortBeforePesos: audit.overShortBeforePesos,
+        overShortAfterPesos: audit.overShortAfterPesos,
+        linkedShiftId: audit.linkedShiftId,
+        shiftReconciliationStatus: audit.shiftStatus,
+        ...(audit.pendingReason ? { shiftReconciliationPendingReason: audit.pendingReason } : {}),
+      },
+    })
+    if (audit.shiftStatus === 'APPLIED' && audit.linkedShiftId) {
+      await logAction({
+        staffId: actorStaffId ?? acceptedEvents[0]?.staffId,
+        venueId,
+        action: 'SHIFT_UPDATED',
+        entity: 'Shift',
+        entityId: audit.linkedShiftId,
+        data: {
+          cause: 'OFFLINE_BATCH',
+          source: 'MOBILE_SYNC',
+          cashDrawerSessionId: audit.sessionId,
+          insertedCount: audit.insertedCount,
+          localIds: audit.localIds,
+          cashDifferenceBeforePesos: audit.shiftDifferenceBeforePesos ?? null,
+          cashDifferenceAfterPesos: audit.overShortAfterPesos,
+        },
+      })
+    }
+  }
+
+  // `createMany` no devuelve filas: la transacción ya releyó por `localId` mientras
+  // conservaba los candados de todas las cajas objetivo. Ese mismo resultado durable
+  // es el eco que permite al cliente marcar todo su outbox sin una segunda lectura.
+  const allRows = [...keyedRows, ...unkeyedRows].sort((a, b) => {
+    const byDate = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    return byDate || a.id.localeCompare(b.id)
   })
-
-  // `createMany` no devuelve las filas: las del lote con llave se releen por su
-  // `localId` (incluye las que un lote anterior ya había insertado — el cliente
-  // necesita el eco de TODO lo que mandó para marcar su outbox como sincronizado).
-  const localIds = keyed.map(e => e.localId as string)
-  const keyedRows = localIds.length
-    ? await prisma.cashDrawerEvent.findMany({ where: { venueId, localId: { in: localIds } }, orderBy: { createdAt: 'asc' } })
-    : []
-
-  const allRows = [...keyedRows, ...unkeyedRows].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
 
   return {
     syncedCount: insertedCount,

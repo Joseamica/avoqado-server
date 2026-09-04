@@ -74,6 +74,9 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       entryMode: req.body.entryMode,
       isPartialRefund: req.body.isPartialRefund || false,
       currency: req.body.currency || 'MXN',
+      // Preserve zero: it means "refund sale only; keep the staff tip intact".
+      // A truthiness check would silently restore the proportional default.
+      tipRefundCents: typeof req.body.tipRefundCents === 'number' ? req.body.tipRefundCents : undefined,
       // Optional processor tag — 'blumon' (default for legacy TPVs) or
       // 'angelpay' (sent by TPV v2.31+ when refunding Nexgo payments).
       // Persisted into Payment.processor for downstream reconciliation.

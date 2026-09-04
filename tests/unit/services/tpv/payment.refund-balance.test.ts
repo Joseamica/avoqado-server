@@ -34,7 +34,7 @@ jest.mock('@/utils/prismaClient', () => ({
     payment: { create: jest.fn(), findFirst: jest.fn() },
     merchantAccount: { findUnique: jest.fn() },
     venueTransaction: { create: jest.fn() },
-    shift: { findFirst: jest.fn(), update: jest.fn() },
+    shift: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
     paymentAllocation: { create: jest.fn() },
     review: { create: jest.fn() },
@@ -144,6 +144,7 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
     jest.clearAllMocks()
     capturedPaymentsInclude = undefined
     ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
+    ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ staffId: 'staff-1', venueId: VENUE_ID })
     ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-new', feeAmount: 0, netAmount: 200 })
     ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
@@ -154,7 +155,8 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
         paymentAllocation: { create: prisma.paymentAllocation.create },
         venueTransaction: { create: prisma.venueTransaction.create },
         order: { update: prisma.order.update },
-        shift: { update: prisma.shift.update },
+        shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
+        activityLog: { create: prisma.activityLog.create },
         areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketPaymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
         $queryRaw: jest.fn().mockResolvedValue([]),

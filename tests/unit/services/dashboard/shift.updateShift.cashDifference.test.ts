@@ -155,16 +155,39 @@ describe('qué gana cuando el número tecleado contradice a la gaveta', () => {
     expect(escrito.cashDifference).toBe(0) // …pero no reescribe el descuadre
   })
 
-  it('un `endingCash` tecleado SÍ manda: es el conteo, y la corrección más nueva gana', async () => {
+  it('un `endingCash` tecleado persiste el mismo conteo y su descuadre', async () => {
     await updateShift(VENUE, TURNO, { endingCash: 1350 }, DUENO)
 
-    expect(escrito.cashDifference).toBe(50)
+    expect(escrito).toMatchObject({ endingCash: 1350, cashDeclared: 1350, cashDifference: 50 })
   })
 
-  it('un `endingCash` puesto en null borra el conteo, y sin conteo no hay descuadre que escribir', async () => {
+  it('una edición posterior deriva del conteo corregido que quedó persistido', async () => {
+    const turno = mundo()
+
+    await updateShift(VENUE, TURNO, { endingCash: 1350 }, DUENO)
+    Object.assign(turno, escrito)
+
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+
+    expect(escrito).toMatchObject({ totalSales: 1900, cashDifference: 50 })
+  })
+
+  it('un `endingCash` puesto en null borra el conteo y el descuadre anterior', async () => {
     await updateShift(VENUE, TURNO, { endingCash: null }, DUENO)
 
-    expect(escrito).not.toHaveProperty('cashDifference')
+    expect(escrito).toMatchObject({ endingCash: null, cashDeclared: null, cashDifference: null })
+  })
+
+  it('un conteo explícito de cero se persiste y se calcula como un conteo real', async () => {
+    await updateShift(VENUE, TURNO, { endingCash: 0 }, DUENO)
+
+    expect(escrito).toMatchObject({ endingCash: 0, cashDeclared: 0, cashDifference: -1300 })
+  })
+
+  it('una edición sin `endingCash` no reescribe el conteo persistido', async () => {
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+
+    expect(escrito).not.toHaveProperty('cashDeclared')
   })
 })
 

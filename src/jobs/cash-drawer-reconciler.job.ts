@@ -3,12 +3,7 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { logAction } from '../services/dashboard/activity-log.service'
 import { scheduleJob } from '../observability/jobContext'
-import {
-  postCashRefundToDrawer,
-  postCashSaleToDrawer,
-  cashRefundDrawerLocalId,
-  cashSaleDrawerLocalId,
-} from '../services/shared/cashDrawerPosting'
+import { postCashRefundToDrawer, postCashSaleToDrawer, cashRefundDrawerLocalId } from '../services/shared/cashDrawerPosting'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../services/shared/tenderSemantics'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -163,15 +158,38 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
 }
 
 async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number): Promise<UnpostedCashPayment[]> {
+  const refundLocalIdPrefix = cashRefundDrawerLocalId('')
+  // Resolve eligibility before LIMIT. Otherwise already-posted refunds (or refunds
+  // that can never belong to a drawer session) permanently spend the whole batch.
+  const candidates = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT p.id
+    FROM "Payment" p
+    WHERE p.status = 'COMPLETED'
+      AND p.type = 'REFUND'
+      AND p."originSystem" = 'AVOQADO'
+      AND p."createdAt" >= ${utcTs(since)}
+      AND p."createdAt" <= ${utcTs(until)}
+      AND (
+        p."fundsFlow" = 'CASH_DRAWER'
+        OR (p."fundsFlow" IS NULL AND (p.method = 'CASH' OR p."tenderCountsAsCash" = true))
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM "CashDrawerEvent" e
+        WHERE e."venueId" = p."venueId" AND e."localId" = ${refundLocalIdPrefix} || p.id
+      )
+      AND EXISTS (
+        SELECT 1 FROM "CashDrawerSession" s
+        WHERE s."venueId" = p."venueId"
+          AND p."createdAt" >= s."openedAt"
+          AND (s."closedAt" IS NULL OR p."createdAt" <= s."closedAt")
+      )
+    ORDER BY p."createdAt" ASC, p.id ASC
+    LIMIT ${limit}
+  `
+  if (candidates.length === 0) return []
+
   const rows = await prisma.payment.findMany({
-    where: {
-      status: 'COMPLETED',
-      type: 'REFUND',
-      createdAt: { gte: since, lte: until },
-      // Mismo criterio que las ventas: sólo lo que cobró (y devolvió) Avoqado.
-      originSystem: 'AVOQADO',
-      OR: [{ fundsFlow: 'CASH_DRAWER' }, { fundsFlow: null, method: 'CASH' }, { fundsFlow: null, tenderCountsAsCash: true }],
-    },
+    where: { id: { in: candidates.map(candidate => candidate.id) } },
     select: {
       id: true,
       venueId: true,
@@ -184,16 +202,12 @@ async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number
       createdAt: true,
       ...TENDER_SEMANTICS_SELECT,
     },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     take: limit,
   })
-  if (rows.length === 0) return []
-  const existing = await prisma.cashDrawerEvent.findMany({
-    where: { localId: { in: rows.map(r => cashRefundDrawerLocalId(r.id)) } },
-    select: { localId: true },
-  })
-  const posted = new Set(existing.map(e => e.localId))
-  return rows.filter(r => !posted.has(cashRefundDrawerLocalId(r.id))) as UnpostedCashPayment[]
+  // The anti-join and drawer-window filter already ran in SQL, so every hydrated
+  // row is actionable and none of the batch budget is discarded in memory.
+  return rows as UnpostedCashPayment[]
 }
 
 /** Sesiones del venue cuya ventana [openedAt, closedAt ∨ ahora] cubre el instante. */

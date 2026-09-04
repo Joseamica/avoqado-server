@@ -129,7 +129,9 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(SESSION_ROW),
+      findMany: jest.fn(async (args: any) => (args.where?.status === 'CLOSED' ? [] : [SESSION_ROW])),
     }
+    ;(prismaMock as any).staffVenue = { findMany: jest.fn().mockResolvedValue([{ staffId: 'staff-1' }]) }
   })
 
   // --------------------------------------------------------------------------
@@ -155,13 +157,23 @@ describe('contrato `localId` del cajón — el servidor manda la llave que ya ti
 
   it('el eco de /sync también trae el `localId` (es el que marca el outbox del POS)', async () => {
     ;(prismaMock as any).cashDrawerEvent = {
-      createMany: jest.fn().mockResolvedValue({ count: 1 }),
+      createManyAndReturn: jest.fn(async (args: any) =>
+        args.data.map((event: any) => ({ id: 'srv-ev-payin', localId: event.localId, sessionId: event.sessionId })),
+      ),
       findMany: jest.fn().mockResolvedValue([row({ id: 'srv-ev-payin', type: 'PAY_IN', amount: 100, localId: 'local-ev-payin' })]),
       create: jest.fn(),
     }
 
     const res = await syncEvents(VENUE, [
-      { type: 'PAY_IN', amount: 100, staffId: 'staff-1', staffName: 'Cajero', localId: 'local-ev-payin' },
+      {
+        type: 'PAY_IN',
+        amount: 100,
+        staffId: 'staff-1',
+        staffName: 'Cajero',
+        localId: 'local-ev-payin',
+        sessionId: 'session-1',
+        createdAt: '2026-08-16T10:00:00.000Z',
+      },
     ] as any)
 
     expect(res.events[0]).toMatchObject({ id: 'srv-ev-payin', localId: 'local-ev-payin' })

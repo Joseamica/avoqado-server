@@ -8,10 +8,12 @@
  * su corte y el venue B sumaba dinero ajeno. La regla dura del repo no admite matices — toda
  * consulta filtra por `venueId`.
  *
- * Lo que fija esta prueba: el turno se resuelve UNA sola vez con `turnoAbiertoDelNegocio(tx,
- * venueId)` y ese id va a la Order Y al Payment. El `shiftId` que llegue en la petición se ignora
- * (ninguna app lo manda: `CryptoPaymentRequest` de avoqado-tpv ni siquiera tiene el campo), y
- * `null` —negocio sin turno abierto— es un desenlace legítimo: el cobro no se detiene.
+ * Lo que fija esta prueba: al INICIAR, el turno se resuelve UNA sola vez con
+ * `turnoAbiertoDelNegocio(tx, venueId)` y ese id provisional va a la Order Y al Payment PENDING.
+ * El `shiftId` que llegue en la petición se ignora (ninguna app lo manda: `CryptoPaymentRequest`
+ * de avoqado-tpv ni siquiera tiene el campo), y `null` —negocio sin turno abierto— no detiene el
+ * intento. La atribución final del dinero se decide cuando el Payment pasa a COMPLETED; la Order
+ * conserva este turno como historia de creación.
  */
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
@@ -85,7 +87,7 @@ const cobro = (over: Record<string, any> = {}) => ({
 const datosDeLaOrden = () => mockPrisma.order.create.mock.calls[0]?.[0]?.data
 const datosDelPago = () => mockPrisma.payment.create.mock.calls[0]?.[0]?.data
 
-describe('initiateCryptoPayment — el cobro cripto cae en el turno del NEGOCIO', () => {
+describe('initiateCryptoPayment — atribución PROVISIONAL al turno del NEGOCIO', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     // Si alguien volviera a consultar el turno por id suelto, esto le devolvería el de OTRO venue:
@@ -146,10 +148,11 @@ describe('initiateCryptoPayment — el cobro cripto cae en el turno del NEGOCIO'
 })
 
 /**
- * La respuesta no puede callar dónde cayó el dinero: es el dato que el cajero necesita para
- * entender por qué un cobro no aparece en su corte. Campo NUEVO y opcional — nada se quita.
+ * La respuesta conserva el turno que estaba abierto al iniciar para compatibilidad, pero no
+ * promete la atribución final del dinero: esa vive en Payment.shiftId después del COMPLETED.
+ * Campo aditivo y opcional — nada se quita.
  */
-describe('initiateCryptoPayment — la respuesta dice en qué turno quedó el cobro', () => {
+describe('initiateCryptoPayment — la respuesta conserva el turno PROVISIONAL', () => {
   const respuestaDeB4Bit = () => ({
     ok: true,
     status: 200,
@@ -174,7 +177,7 @@ describe('initiateCryptoPayment — la respuesta dice en qué turno quedó el co
     global.fetch = jest.fn().mockResolvedValue(respuestaDeB4Bit()) as any
   })
 
-  it('devuelve el turno del negocio, no el que mandó el cliente', async () => {
+  it('devuelve el turno abierto al iniciar, no el que mandó el cliente', async () => {
     mockPrisma.shift.findFirst.mockResolvedValue({ id: TURNO_DE_A })
 
     const resultado = await initiateCryptoPayment(cobro() as any)
@@ -182,7 +185,7 @@ describe('initiateCryptoPayment — la respuesta dice en qué turno quedó el co
     expect(resultado.shiftId).toBe(TURNO_DE_A)
   })
 
-  it('devuelve `null` cuando el negocio no tiene turno abierto', async () => {
+  it('devuelve `null` cuando al iniciar no hay turno abierto', async () => {
     mockPrisma.shift.findFirst.mockResolvedValue(null)
 
     const resultado = await initiateCryptoPayment(cobro() as any)

@@ -1,10 +1,11 @@
 import type { PrismaClient } from '@prisma/client'
 import { Prisma, ShiftStatus } from '@prisma/client'
+import { randomUUID } from 'node:crypto'
 
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { publishCommand } from '../../communication/rabbitmq/publisher'
+import { deliverPosCommand } from '../../communication/rabbitmq/commandListener'
 import { logAction } from '../dashboard/activity-log.service'
 import { AUTO_CLOSED_BY_NAME, businessDayStart } from './cashDrawerAutoClose'
 
@@ -281,52 +282,9 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
   const fondo = new Prisma.Decimal(Number(startingCash).toFixed(2))
   const corteDelDiaDeNegocio = businessDayStart(ahora, venue.timezone)
 
-  // ── El puente a SoftRestaurant, conservado de `openShiftForVenue` ──────────────────────────
-  //
-  // 🔴 Va FUERA de la transacción a propósito: publicar en RabbitMQ es una llamada de red y
-  // sostenerla con una transacción abierta ata una conexión del pool a la latencia del bróker.
-  // Por eso hace falta una PRE-lectura que conteste «¿va a hacer falta crear turno?». La lectura
-  // que MANDA es la de dentro de la transacción; ésta sólo decide si se avisa al POS.
-  //
-  // ⚠️ Límite declarado: si entre la pre-lectura y la transacción otro aparato abre el turno,
-  // se habrá publicado un comando para un turno que acabó ligándose en vez de crearse. Se
-  // registra en el log. El caso contrario —crear sin avisarle al POS— sería peor, y el corte
-  // duro de abajo (si el POS no acepta, no se abre nada) es el mismo de `openShiftForVenue`.
   const posIntegrado = venue.posType === 'SOFTRESTAURANT' && venue.posStatus === 'CONNECTED'
-  const turnoPrevio = await prisma.shift.findFirst({
-    where: { venueId, endTime: null },
-    orderBy: { startTime: 'desc' },
-    select: { id: true, status: true, startTime: true },
-  })
-  // 🔴 El rechazo por CLOSING va ANTES de publicar, igual que en `openShiftForVenue`: si no, el POS
-  // externo se queda con un `Shift OPEN` que Avoqado nunca va a crear. La comprobación se repite
-  // dentro de la transacción porque ésta no es autoritativa — aquí sólo evita el efecto externo.
-  if (turnoPrevio && turnoPrevio.status === ShiftStatus.CLOSING) throw cierreEnProceso()
 
-  const hariaFaltaCrearTurno = !turnoPrevio || turnoPrevio.startTime < corteDelDiaDeNegocio
-
-  let shiftExternalId: string | null = null
-  if (posIntegrado && hariaFaltaCrearTurno) {
-    const tempShiftId = `SHIFT_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
-    try {
-      await publishCommand(`command.softrestaurant.${venueId}`, {
-        entity: 'Shift',
-        action: 'OPEN',
-        payload: {
-          tempShiftId,
-          posStaffId: staffVenue.posStaffId || staffId,
-          startingCash: startingCash || 0,
-          stationId: stationId || 'AVOQADO',
-        },
-      })
-      shiftExternalId = tempShiftId
-    } catch (error) {
-      logger.error('Failed to send shift open command to POS', error)
-      throw new BadRequestError('Failed to open shift in POS system. Please try again.')
-    }
-  }
-
-  const resultado = await prisma.$transaction(async tx => {
+  const resultadoConOutbox = await prisma.$transaction(async tx => {
     // ── El turno ──────────────────────────────────────────────────────────────────────────
     //
     // `endTime: null` y no `status: 'OPEN'`: un turno en CLOSING sigue con `endTime` nulo y su
@@ -493,16 +451,13 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
 
     let shiftId: string
     let shiftCreado = false
+    let shiftExternalId: string | null = null
     if (turnoAReusar) {
       shiftId = turnoAReusar.id
-      if (posIntegrado && hariaFaltaCrearTurno) {
-        logger.warn('[TURNO DE CAJA] Se avisó al POS de una apertura que acabó ligándose a un turno ya abierto', {
-          venueId,
-          shiftId,
-          shiftExternalId,
-        })
-      }
     } else {
+      // La identidad externa nace dentro de la transacción del turno ganador.
+      // Si otro dispositivo gana el único parcial, este valor nunca sale ni deja outbox.
+      shiftExternalId = posIntegrado ? `SHIFT_${ahora.getTime()}_${randomUUID().replace(/-/g, '').slice(0, 9)}` : null
       const nuevo = await tx.shift
         .create({
           data: {
@@ -667,6 +622,30 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
         ? { ...(shiftCerradoId ? { shiftCerradoId } : {}), ...(cajaCerradaId ? { cajaCerradaId } : {}) }
         : undefined
 
+    let posCommandId: string | undefined
+    if (shiftCreado && posIntegrado && shiftExternalId) {
+      // Outbox transaccional: el Shift, la gaveta y la intención OPEN viven o
+      // revierten juntos. La clave apunta a la apertura ganadora, no al request.
+      const command = await tx.posCommand.create({
+        data: {
+          venueId,
+          entityType: 'Shift',
+          entityId: shiftId,
+          commandType: 'CREATE',
+          action: 'OPEN',
+          dedupeKey: `shift-open:${shiftId}`,
+          payload: {
+            tempShiftId: shiftExternalId,
+            posStaffId: staffVenue.posStaffId || staffId,
+            startingCash: Number(fondoEfectivo.toFixed(2)),
+            stationId: stationId || 'AVOQADO',
+          },
+        },
+        select: { id: true },
+      })
+      posCommandId = command.id
+    }
+
     return {
       shiftId,
       cashDrawerSessionId,
@@ -676,8 +655,24 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       fondoAplicado: fondoEfectivo.toString(),
       ...(turnoAlineadoDesde !== undefined ? { turnoAlineadoDesde } : {}),
       ...(relevo ? { relevo } : {}),
-    } as AbrirTurnoDeCajaResult
+      ...(posCommandId ? { posCommandId } : {}),
+    } as AbrirTurnoDeCajaResult & { posCommandId?: string }
   })
+
+  const { posCommandId, ...resultado } = resultadoConOutbox
+
+  // Best effort DESPUÉS del commit. LISTEN/NOTIFY puede ganar esta carrera; el
+  // claim CAS de deliverPosCommand hace que sólo uno publique. Un fallo deja la
+  // fila PENDING con backoff persistido para el barrido recurrente y jamás
+  // deshace la apertura local ya confirmada.
+  if (posCommandId) {
+    try {
+      const delivery = await deliverPosCommand(posCommandId)
+      if (delivery === 'FAILED') logger.warn('[TURNO DE CAJA] OPEN de POS pendiente de reintento', { venueId, posCommandId })
+    } catch (error) {
+      logger.error('[TURNO DE CAJA] No se pudo intentar la entrega del OPEN durable', { venueId, posCommandId, error })
+    }
+  }
 
   // ── Bitácora: fuera de la transacción y fire-and-forget ───────────────────────────────────
   // Si la bitácora truena, la apertura NO se deshace (mismo patrón que el resto del repo).
@@ -975,12 +970,11 @@ async function cerrarLaGavetaDelTurno(p: CerrarTurnoDeCajaParams, shiftId: strin
     // dos mitades firmarían números distintos del mismo billete. Cuando no viene, se calcula de los
     // eventos con la MISMA fórmula que ve el cajero en la tablet (`calculateExpectedAmount`).
     //
-    // ⚠️ ALCANCE de esta garantía: vale AL CERRAR, no para siempre. Un `CASH_SALE` tardío que el
-    // reconciliador reponga después (`cash-drawer-reconciler`, dentro de `[openedAt, closedAt]`)
-    // recalcula el `overShort` de la GAVETA y deja `CASH_DRAWER_ADJUSTED_AFTER_CLOSE` — pero nadie
-    // le da esa misma corrección al `Shift`, cuyo `cashDifference` sólo se escribe al cerrar. Así
-    // que las dos mitades pueden volver a diverger minutos después, con rastro sólo del lado de la
-    // gaveta. Cerrarlo pide que la reposición toque también el turno; no está hecho.
+    // La garantía también se conserva DESPUÉS del cierre: una reposición tardía recalcula el
+    // `overShort` y, si esta gaveta trae su `shiftId` explícito hacia el mismo conteo cerrado,
+    // `cashDrawerPosting` actualiza el `cashDifference` con la misma Decimal dentro de la misma
+    // transacción. Una liga ausente, ambigua o que cambió concurrentemente queda visible como
+    // reconciliación pendiente en la bitácora; nunca se adivina un turno por reloj.
     const esperado =
       p.esperadoDelCajon != null
         ? Number(p.esperadoDelCajon)

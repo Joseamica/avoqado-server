@@ -108,6 +108,7 @@ function installFakes() {
   prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vt-1' })
   prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
   prismaMock.shift.findFirst.mockResolvedValue(null)
+  prismaMock.shift.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.customer.findUnique.mockResolvedValue(null)
   prismaMock.order.findFirst.mockResolvedValue(null)
   prismaMock.order.update.mockResolvedValue({ id: 'fast-order-1' })
@@ -136,14 +137,49 @@ function installFakes() {
 const datosDeLaOrden = () => prismaMock.order.create.mock.calls[0]?.[0]?.data
 const datosDelCobro = () => prismaMock.payment.create.mock.calls[0]?.[0]?.data
 
+function installDistinctTransaction(candidate: { id: string; status: string } | null, claimedCount = 1) {
+  const ops: string[] = []
+  const shiftFindFirst = jest.fn(async () => {
+    ops.push('shift.findFirst')
+    return candidate
+  })
+  const shiftUpdateMany = jest.fn(async () => {
+    ops.push('shift.updateMany')
+    return { count: claimedCount }
+  })
+  const activityCreate = jest.fn(async (args: any) => {
+    ops.push('activityLog.create')
+    return prismaMock.activityLog.create(args)
+  })
+  const orderCreate = jest.fn(async (args: any) => {
+    ops.push('order.create')
+    return prismaMock.order.create(args)
+  })
+  const paymentCreate = jest.fn(async (args: any) => {
+    ops.push('payment.create')
+    return prismaMock.payment.create(args)
+  })
+  const tx = {
+    ...prismaMock,
+    shift: { ...prismaMock.shift, findFirst: shiftFindFirst, updateMany: shiftUpdateMany },
+    activityLog: { ...prismaMock.activityLog, create: activityCreate },
+    order: { ...prismaMock.order, create: orderCreate },
+    payment: { ...prismaMock.payment, create: paymentCreate },
+  }
+  prismaMock.$transaction.mockImplementation(async (callback: any) => callback(tx))
+  return { ops, shiftFindFirst, shiftUpdateMany, activityCreate }
+}
+
 describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCIO', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     installFakes()
   })
 
-  it('con turno abierto, la orden y su cobro llevan el MISMO shiftId', async () => {
-    prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio' })
+  it('resuelve y reclama dentro de tx ANTES de crear; la orden y el cobro llevan el MISMO ganador', async () => {
+    // Si el servicio vuelve a leer antes de la transacción, tomaría este id obsoleto.
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-obsoleto', status: 'OPEN' })
+    const tx = installDistinctTransaction({ id: 'shift-negocio', status: 'OPEN' })
 
     await recordFastPayment(VENUE, cobroRapido(), 'user-1')
 
@@ -151,14 +187,28 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     // El mismo valor en los dos: si la orden volviera a consultar el turno por su cuenta, un
     // cierre de caja a media transacción los mandaría a turnos distintos.
     expect(datosDelCobro().shiftId).toBe('shift-negocio')
-    // Y se resolvió por NEGOCIO, no por quien cobra (el selector «Vendedor» cambia ese staffId).
-    expect(prismaMock.shift.findFirst).toHaveBeenCalledTimes(1)
-    expect(prismaMock.shift.findFirst.mock.calls[0][0].where).toEqual({ venueId: VENUE, status: 'OPEN', endTime: null })
+    expect(prismaMock.shift.findFirst).not.toHaveBeenCalled()
+    expect(tx.shiftFindFirst).toHaveBeenCalledWith({
+      where: { venueId: VENUE, endTime: null },
+      orderBy: { startTime: 'desc' },
+      select: { id: true, status: true },
+    })
+    expect(tx.shiftUpdateMany).toHaveBeenCalledWith({
+      where: { id: 'shift-negocio', venueId: VENUE, status: 'OPEN', endTime: null },
+      data: expect.objectContaining({
+        totalSales: { increment: expect.anything() },
+        totalTips: { increment: expect.anything() },
+        totalOrders: { increment: 1 },
+      }),
+    })
+    expect(prismaMock.shift.update).not.toHaveBeenCalled()
+    expect(tx.ops.indexOf('shift.updateMany')).toBeLessThan(tx.ops.indexOf('order.create'))
+    expect(tx.ops.indexOf('order.create')).toBeLessThan(tx.ops.indexOf('payment.create'))
   })
 
-  it('sin turno abierto la venta SIGUE ocurriendo, con la orden sin turno', async () => {
+  it('sin turno la venta SIGUE ocurriendo, ambos ids quedan null y nace una anomalía atómica', async () => {
     // Un negocio que no abrió caja tiene que poder vender igual: el turno es opcional.
-    prismaMock.shift.findFirst.mockResolvedValue(null)
+    const tx = installDistinctTransaction(null)
 
     await recordFastPayment(VENUE, cobroRapido(), 'user-1')
 
@@ -166,5 +216,62 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
     expect(datosDeLaOrden().shiftId ?? null).toBeNull()
     expect(datosDelCobro().shiftId ?? null).toBeNull()
+    expect(tx.activityCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'PAYMENT_PENDING_POST_CLOSE_RECONCILIATION',
+        entity: 'Payment',
+        entityId: 'pay-1',
+        staffId: 'staff-1',
+        venueId: VENUE,
+        data: expect.objectContaining({
+          reason: 'NO_SHIFT',
+          candidateShiftId: null,
+          paymentId: 'pay-1',
+          orderId: 'fast-order-1',
+          channel: 'recordFastPayment',
+          amountPesos: '100.00',
+          tipPesos: '0.00',
+        }),
+      }),
+    })
+    expect(tx.ops.indexOf('payment.create')).toBeLessThan(tx.ops.indexOf('activityLog.create'))
+  })
+
+  it('si el cierre gana entre lectura y claim no muta CLOSED ni estampa el candidato obsoleto', async () => {
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-que-cerro', status: 'OPEN' })
+    const tx = installDistinctTransaction({ id: 'shift-que-cerro', status: 'OPEN' }, 0)
+
+    await recordFastPayment(VENUE, cobroRapido({ tip: 1234 }), 'user-1')
+
+    expect(datosDeLaOrden().shiftId ?? null).toBeNull()
+    expect(datosDelCobro().shiftId ?? null).toBeNull()
+    expect(prismaMock.shift.update).not.toHaveBeenCalled()
+    expect(tx.activityCreate.mock.calls[0][0].data.data).toMatchObject({
+      reason: 'CLAIM_LOST',
+      candidateShiftId: 'shift-que-cerro',
+      channel: 'recordFastPayment',
+      amountPesos: '100.00',
+      tipPesos: '12.34',
+    })
+  })
+
+  it('un reintento idempotente retorna antes de claim/audit y no vuelve a incrementar', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue({
+      id: 'pay-winner',
+      orderId: 'fast-order-winner',
+      amount: 100,
+      tipAmount: 0,
+      method: 'CASH',
+      status: 'COMPLETED',
+      receipts: [],
+    })
+    const tx = installDistinctTransaction({ id: 'shift-open', status: 'OPEN' })
+
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ idempotencyKey: 'same-key' }), 'user-1')
+
+    expect(result.id).toBe('pay-winner')
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(tx.shiftUpdateMany).not.toHaveBeenCalled()
+    expect(tx.activityCreate).not.toHaveBeenCalled()
   })
 })

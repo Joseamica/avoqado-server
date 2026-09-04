@@ -4,9 +4,8 @@ import { join } from 'path'
 const raiz = join(__dirname, '../../../../src/services')
 /**
  * Archivo → cuántas veces DEBE llamarse al helper. Es un mapa y no una lista porque
- * `payment.tpv.service.ts` tiene DOS sitios (`recordOrderPayment` y `recordFastPayment`):
- * con un simple «¿aparece el helper?», uno de los dos podría volver a filtrar por persona
- * mientras el otro mantiene la aserción en verde.
+ * Los cobros que crean dinero usan desde Task 5f el helper de claim transaccional;
+ * este mapa conserva los sitios que sólo necesitan resolver el turno para una orden.
  */
 const esperado: Record<string, number> = {
   // Desde el 3-sep-2026 (task 5b). Estuvo EXCLUIDO a propósito y esa excepción documentada vaciaba
@@ -14,8 +13,10 @@ const esperado: Record<string, number> = {
   // sin `venueId` y lo persistía en el `Payment`, así que el venue A podía mandar un turno abierto
   // del venue B y su cobro salía del corte de A para sumarse al de B. Ahora resuelve una sola vez
   // por negocio y ese id va a la Order Y al Payment.
-  'b4bit/b4bit.service.ts': 1,
-  'tpv/payment.tpv.service.ts': 2,
+  // Task 5m añadió la atribución final al confirmar CO; la otra llamada conserva
+  // la atribución provisional de la iniciación.
+  'b4bit/b4bit.service.ts': 2,
+  'tpv/payment.tpv.service.ts': 0,
   'tpv/refund.tpv.service.ts': 1,
   // 3 desde el 3-sep-2026 (task 2b): `createOrderWithItems` ya lo llamaba; se suman `createOrder`
   // (orden de mostrador) y `sellSerializedItem`, que ahora estampan `Order.shiftId`.
@@ -23,13 +24,22 @@ const esperado: Record<string, number> = {
   'tpv/table.tpv.service.ts': 1,
   'dashboard/manualPayment.service.ts': 1,
   'dashboard/refund.dashboard.service.ts': 1,
-  // 2 desde el 3-sep-2026: `payCashOrder` (el que ya estaba) y `createOrderWithItems`.
-  'mobile/order.mobile.service.ts': 2,
+  // `payCashOrder` pasó al claim transaccional en Task 5f; éste es createOrderWithItems.
+  'mobile/order.mobile.service.ts': 1,
   'mobile/refund.mobile.service.ts': 1,
   'mobile/areaTicket.mobile.service.ts': 1,
   'mobile/areaTicketV7.mobile.service.ts': 1,
   'mobile/estimate.mobile.service.ts': 1,
   'reservation/createOrderFromReservation.ts': 1,
+}
+
+/**
+ * Los tres rieles reparados no pueden volver a una lectura pre-transacción. Contar
+ * por archivo evita que uno de los dos caminos TPV se esconda detrás del otro.
+ */
+const claimsDeCobroEsperados: Record<string, number> = {
+  'tpv/payment.tpv.service.ts': 2,
+  'mobile/order.mobile.service.ts': 1,
 }
 
 /**
@@ -100,6 +110,15 @@ describe('nadie resuelve «el turno abierto» filtrando por persona', () => {
       const lookups = src.match(/shift\.findFirst\(\{[\s\S]*?\}\)/g) ?? []
       for (const l of lookups) expect(l).not.toMatch(/staffId/)
       expect((src.match(/turnoAbiertoDelNegocio\(/g) ?? []).length).toBe(llamadas)
+    })
+  }
+})
+
+describe('los cobros reclaman el turno dentro de su transacción', () => {
+  for (const [rel, llamadas] of Object.entries(claimsDeCobroEsperados)) {
+    it(`${rel} (${llamadas} claim${llamadas > 1 ? 's' : ''})`, () => {
+      const src = sinComentarios(readFileSync(join(raiz, rel), 'utf8'))
+      expect((src.match(/claimShiftForCapturedPayment\(tx,/g) ?? []).length).toBe(llamadas)
     })
   }
 })

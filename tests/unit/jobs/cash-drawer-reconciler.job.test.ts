@@ -26,6 +26,7 @@ jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ s
 jest.mock('@/services/shared/cashDrawerPosting', () => ({
   postCashSaleToDrawer: jest.fn().mockResolvedValue('POSTED'),
   postCashRefundToDrawer: jest.fn().mockResolvedValue('POSTED'),
+  cashRefundDrawerLocalId: jest.fn((paymentId: string) => `srv-refund:${paymentId}`),
 }))
 
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -208,6 +209,54 @@ describe('CashDrawerReconcilerJob.runNow', () => {
 
     expect(r).toEqual([])
     // sin candidatos no se pide nada más: el barrido deja de traer 200 filas para descartarlas
+    expect((prismaMock as any).payment.findMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 200 reembolsos ya posteados no esconden el 201 que todavía necesita PAY_OUT', async () => {
+    const posted = Array.from({ length: 200 }, (_, index) =>
+      pago({ id: `refund-posted-${index}`, type: 'REFUND', amount: -10, createdAt: new Date(1_000 + index) }),
+    )
+    const missing = pago({ id: 'refund-missing', type: 'REFUND', amount: -25, createdAt: new Date(2_000) })
+    const allRefunds = [...posted, missing]
+
+    ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([{ id: missing.id }])
+    ;(prismaMock as any).payment = {
+      findMany: jest.fn().mockImplementation(async (args: any) => {
+        const requestedIds = args.where?.id?.in as string[] | undefined
+        const candidates = requestedIds ? allRefunds.filter(row => requestedIds.includes(row.id)) : allRefunds
+        return candidates.slice(0, args.take)
+      }),
+    }
+    ;(prismaMock as any).cashDrawerEvent = {
+      findMany: jest.fn().mockResolvedValue(posted.map(row => ({ localId: `srv-refund:${row.id}` }))),
+    }
+
+    const result = await defaults.findUnpostedCashRefunds(new Date(0), new Date(10_000), 200)
+
+    expect(result.map(row => row.id)).toEqual(['refund-missing'])
+  })
+
+  it('el selector de reembolsos gasta el LIMIT sólo en filas sin evento y dentro de una sesión', async () => {
+    ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([])
+    ;(prismaMock as any).payment = { findMany: jest.fn() }
+
+    await defaults.findUnpostedCashRefunds(new Date('2026-08-20'), new Date('2026-08-27'), 200)
+
+    const raw = (prismaMock as any).$queryRaw as jest.Mock
+    expect(raw).toHaveBeenCalledTimes(1)
+    const sql = raw.mock.calls[0][0].join('?')
+    const limitAt = sql.indexOf('LIMIT ')
+    expect(sql).toContain(`p.type = 'REFUND'`)
+    expect(sql).toContain('NOT EXISTS')
+    expect(sql).toContain('CashDrawerEvent')
+    expect(sql).toContain('e."venueId" = p."venueId" AND e."localId" = ? || p.id')
+    expect(sql).toContain('CashDrawerSession')
+    expect(sql).toContain('p."createdAt" >= s."openedAt"')
+    expect(sql).toContain('s."closedAt" IS NULL OR p."createdAt" <= s."closedAt"')
+    expect(sql.indexOf('NOT EXISTS')).toBeLessThan(limitAt)
+    expect(sql.indexOf('CashDrawerSession')).toBeLessThan(limitAt)
+    expect(sql).toContain('ORDER BY p."createdAt" ASC, p.id ASC')
+    expect(raw.mock.calls[0]).toContain('srv-refund:')
     expect((prismaMock as any).payment.findMany).not.toHaveBeenCalled()
   })
 })

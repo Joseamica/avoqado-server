@@ -13,7 +13,7 @@ import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service
 import { parseDateRange } from '@/utils/datetime'
 import { PhaseTimer } from '@/utils/phaseTimer'
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
-import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { claimShiftForCapturedPayment, recordPendingPaymentShiftReconciliation } from '../shared/paymentShiftClaim'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
@@ -2012,11 +2012,6 @@ export async function recordOrderPayment(
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
 
-  // 🔴 El turno de caja es del NEGOCIO, no de quien cobra (`../shared/turnoDeCaja.ts`):
-  // el selector «Vendedor» cambia el `staffId` de cada cobro, y filtrar por él dejaba FUERA
-  // de todo turno a quien no había abierto uno. Quién cobró vive en `processedById`.
-  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
-
   // ⭐ PROVIDER-AGNOSTIC MERCHANT TRACKING: Resolve merchantAccountId
   // Priority 1: Use merchantAccountId if provided by modern Android client
   // Priority 2: Resolve blumonSerialNumber → merchantAccountId for backward compatibility
@@ -2146,6 +2141,17 @@ export async function recordOrderPayment(
         })
       }
 
+      // El claim ES el incremento y ocurre dentro de esta misma tx, antes del
+      // Payment. Sólo el id que gana el CAS puede quedar estampado; si el cierre
+      // ganó, el cobro se conserva sin reescribir el corte firmado.
+      const shiftAmount = new Prisma.Decimal(totalAmount)
+      const shiftTip = new Prisma.Decimal(tipAmount)
+      const shiftClaim = await claimShiftForCapturedPayment(tx, {
+        venueId,
+        amountPesos: shiftAmount,
+        tipPesos: shiftTip,
+      })
+
       // Create the payment record
       const newPayment = await tx.payment.create({
         data: {
@@ -2204,7 +2210,7 @@ export async function recordOrderPayment(
           // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
           terminalId,
           processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-          shiftId: currentShift?.id,
+          shiftId: shiftClaim.shiftId,
           feePercentage: 0, // TODO: Calculate based on payment processor
           feeAmount: 0, // TODO: Calculate based on amount and percentage
           netAmount: totalAmount + tipAmount, // For now, net amount = total
@@ -2227,6 +2233,17 @@ export async function recordOrderPayment(
           },
           processedBy: true,
         },
+      })
+
+      await recordPendingPaymentShiftReconciliation(tx, {
+        claim: shiftClaim,
+        venueId,
+        paymentId: newPayment.id,
+        orderId: activeOrder.id,
+        staffId: validatedStaffId ?? null,
+        channel: 'recordOrderPayment',
+        amountPesos: shiftAmount,
+        tipPesos: shiftTip,
       })
 
       // Create VenueTransaction for financial tracking and settlement
@@ -2293,29 +2310,6 @@ export async function recordOrderPayment(
             orderId: activeOrder.id,
             amount: totalAmount,
           },
-        })
-      }
-
-      // ✅ UPDATE SHIFT TOTALS: Increment shift sales and tips when payment is recorded
-      if (currentShift) {
-        await tx.shift.update({
-          where: { id: currentShift.id },
-          data: {
-            totalSales: {
-              increment: totalAmount,
-            },
-            totalTips: {
-              increment: tipAmount,
-            },
-            totalOrders: {
-              increment: 1,
-            },
-          },
-        })
-        logger.info('✅ Shift totals updated', {
-          shiftId: currentShift.id,
-          incrementedSales: totalAmount,
-          incrementedTips: tipAmount,
         })
       }
 
@@ -3210,11 +3204,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     validateStaffVenue(relayProcessedByStaffId ?? paymentData.staffId, venueId, userId),
   )
 
-  // 🔴 El turno de caja es del NEGOCIO, no de quien cobra (`../shared/turnoDeCaja.ts`):
-  // el selector «Vendedor» cambia el `staffId` de cada cobro, y filtrar por él dejaba FUERA
-  // de todo turno a quien no había abierto uno. Quién cobró vive en `processedById`.
   t.mark('idempotenciaYChequeosPrevios')
-  const currentShift = await turnoAbiertoDelNegocio(prisma, venueId)
 
   // Map source from Android app format to PaymentSource enum
   const mapPaymentSource = (source?: string): PaymentSource => {
@@ -3353,6 +3343,16 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   try {
     t.mark('turnoMerchantYTerminal')
     const result = await prisma.$transaction(async tx => {
+      // En venta rápida la Order y el Payment nacen juntos: el claim debe ganar
+      // antes de crear cualquiera de los dos para que compartan el mismo id seguro.
+      const shiftAmount = new Prisma.Decimal(totalAmount)
+      const shiftTip = new Prisma.Decimal(tipAmount)
+      const shiftClaim = await claimShiftForCapturedPayment(tx, {
+        venueId,
+        amountPesos: shiftAmount,
+        tipPesos: shiftTip,
+      })
+
       // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
       // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
       // Photos are uploaded to Firebase with this same reference
@@ -3377,10 +3377,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           // `Order.shiftId`: un turno con diez ventas rápidas enseñaba el dinero correcto y
           // «0 órdenes», y el cierre tampoco veía sus productos.
           //
-          // Se reusa el `currentShift` YA resuelto arriba, nunca una segunda consulta: si el
-          // turno se cerrara entre las dos lecturas, el cobro y su orden caerían en turnos
-          // distintos. Opcional a propósito — un negocio que no abrió caja sigue vendiendo.
-          shiftId: currentShift?.id,
+          // Sólo el ganador del CAS transaccional se estampa. Sin turno (o si el
+          // cierre ganó) la venta sigue, pero queda pendiente explícita abajo.
+          shiftId: shiftClaim.shiftId,
           subtotal: totalAmount, // Base amount (without tip)
           taxAmount: 0, // No tax for fast payments
           total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
@@ -3503,7 +3502,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
           terminalId,
           processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-          shiftId: currentShift?.id,
+          shiftId: shiftClaim.shiftId,
           feePercentage: 0, // TODO: Calculate based on payment processor
           feeAmount: 0, // TODO: Calculate based on amount and percentage
           netAmount: totalAmount + tipAmount, // For now, net amount = total
@@ -3518,6 +3517,17 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         include: {
           processedBy: true,
         },
+      })
+
+      await recordPendingPaymentShiftReconciliation(tx, {
+        claim: shiftClaim,
+        venueId,
+        paymentId: newPayment.id,
+        orderId: order.id,
+        staffId: validatedStaffId ?? null,
+        channel: 'recordFastPayment',
+        amountPesos: shiftAmount,
+        tipPesos: shiftTip,
       })
 
       // Create VenueTransaction for financial tracking and settlement
@@ -3552,29 +3562,6 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           amount: totalAmount,
         },
       })
-
-      // ✅ UPDATE SHIFT TOTALS: Increment shift sales and tips when fast payment is recorded
-      if (currentShift) {
-        await tx.shift.update({
-          where: { id: currentShift.id },
-          data: {
-            totalSales: {
-              increment: totalAmount,
-            },
-            totalTips: {
-              increment: tipAmount,
-            },
-            totalOrders: {
-              increment: 1,
-            },
-          },
-        })
-        logger.info('✅ Shift totals updated (fast payment)', {
-          shiftId: currentShift.id,
-          incrementedSales: totalAmount,
-          incrementedTips: tipAmount,
-        })
-      }
 
       // 📸 Create SaleVerification if verification photos or barcodes were provided
       // This links the pre-uploaded Firebase photos to the payment record

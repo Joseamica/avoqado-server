@@ -30,13 +30,14 @@
 
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
-    payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn() },
+    payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     order: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     orderItem: { findMany: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
-    shift: { findUnique: jest.fn() },
+    shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
     terminal: { findFirst: jest.fn() },
+    $queryRaw: jest.fn(),
     $transaction: jest.fn(),
   }
   // El callback de la transacción recibe el MISMO cliente: así un test puede
@@ -82,11 +83,12 @@ import type { B4BitWebhookPayload } from '@/services/b4bit/types'
 const mockLogger = logger as unknown as { info: jest.Mock; warn: jest.Mock; error: jest.Mock; debug: jest.Mock }
 
 const mockPrisma = prisma as unknown as {
-  payment: { findUnique: jest.Mock; findMany: jest.Mock; update: jest.Mock; create: jest.Mock }
+  payment: { findUnique: jest.Mock; findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock; create: jest.Mock }
   order: { findUnique: jest.Mock; update: jest.Mock; updateMany: jest.Mock; create: jest.Mock }
   venue: { findUnique: jest.Mock }
-  shift: { findUnique: jest.Mock }
+  shift: { findUnique: jest.Mock; findFirst: jest.Mock; updateMany: jest.Mock }
   terminal: { findFirst: jest.Mock }
+  $queryRaw: jest.Mock
   $transaction: jest.Mock
 }
 
@@ -153,9 +155,17 @@ beforeEach(() => {
   mockPrisma.order.updateMany.mockReset()
   mockPrisma.order.findUnique.mockReset()
   mockPrisma.payment.findMany.mockReset()
+  mockPrisma.payment.updateMany.mockReset()
+  mockPrisma.shift.findFirst.mockReset()
+  mockPrisma.shift.updateMany.mockReset()
+  mockPrisma.$queryRaw.mockReset()
 
   mockPrisma.$transaction.mockImplementation((cb: any) => cb(prisma))
   mockPrisma.payment.update.mockResolvedValue({})
+  mockPrisma.payment.updateMany.mockResolvedValue({ count: 1 })
+  mockPrisma.shift.findFirst.mockResolvedValue(null)
+  mockPrisma.shift.updateMany.mockResolvedValue({ count: 1 })
+  mockPrisma.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }])
   mockPrisma.order.update.mockResolvedValue({})
   mockPrisma.order.updateMany.mockResolvedValue({ count: 1 })
 })
@@ -272,7 +282,7 @@ describe('b4bit — webhook de confirmación y saldo de la cuenta', () => {
     // 🔴 Ni un segundo cobro ni un `paidAmount += amount`: la reentrega ACTUALIZA
     // el mismo `Payment` y el saldo sigue en 50, no en 100.
     expect(mockPrisma.payment.update).toHaveBeenCalledTimes(1)
-    expect(mockPrisma.payment.update.mock.calls[0][0].where).toEqual({ id: PAYMENT_ID })
+    expect(mockPrisma.payment.update.mock.calls[0][0].where).toEqual({ id: PAYMENT_ID, venueId: VENUE_ID })
     expect(Number(second.paidAmount)).toBe(50)
   })
 
@@ -335,12 +345,12 @@ describe('b4bit — CAS: qué pasa si otro cobro gana la carrera', () => {
 
     expect(mockPrisma.order.updateMany).toHaveBeenCalledTimes(3)
 
-    // 🔴 Lo que de verdad importa: el `payment.update` de los 3 intentos vive DENTRO
-    // de la transacción y se revirtió con cada rollback. Sin la escritura de
-    // rescate FUERA de la transacción, los $50 quedarían en la blockchain sin
-    // ningún `Payment` COMPLETED — y el controlador ya le dijo 200 a B4Bit.
-    const rescue = mockPrisma.payment.update.mock.calls.at(-1)![0]
-    expect(rescue.where).toEqual({ id: PAYMENT_ID })
+    // 🔴 Lo que de verdad importa: el `payment.updateMany` de los 3 intentos vive DENTRO
+    // de la transacción y se revirtió con cada rollback. Sin la CAS de rescate en
+    // una transacción NUEVA, los $50 quedarían en la blockchain sin ningún
+    // `Payment` COMPLETED — y el controlador ya le dijo 200 a B4Bit.
+    const rescue = mockPrisma.payment.updateMany.mock.calls.at(-1)![0]
+    expect(rescue.where).toEqual({ id: PAYMENT_ID, venueId: VENUE_ID, status: { not: 'COMPLETED' } })
     expect(rescue.data.status).toBe('COMPLETED')
     expect(rescue.data.processorData.orderSettlementFailed).toBe(true)
 

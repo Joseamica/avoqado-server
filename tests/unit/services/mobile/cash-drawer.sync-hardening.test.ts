@@ -55,16 +55,22 @@ function armarSesionAbierta(over: Record<string, unknown> = {}) {
   }
   ;(prismaMock as any).cashDrawerSession = {
     findFirst: jest.fn().mockResolvedValue(session),
+    findMany: jest.fn(async (args: any) => (args.where?.status === 'CLOSED' ? [] : [session])),
     findUnique: jest.fn().mockResolvedValue(session),
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     update: jest.fn().mockResolvedValue({ ...session, status: 'CLOSED' }),
   }
   ;(prismaMock as any).cashDrawerEvent = {
-    createMany: jest.fn().mockResolvedValue({ count: 1 }),
+    createManyAndReturn: jest.fn(async (args: any) =>
+      args.data.map((row: any, index: number) => ({ id: `evt-keyed-${index}`, localId: row.localId, sessionId: row.sessionId })),
+    ),
     create: jest.fn().mockImplementation(async (a: any) => ({ id: 'evt-1', ...a.data })),
     findMany: jest.fn().mockResolvedValue([]),
   }
-  ;(prismaMock as any).staffVenue = { findFirst: jest.fn().mockResolvedValue({ id: 'sv-1' }) }
+  ;(prismaMock as any).staffVenue = {
+    findFirst: jest.fn().mockResolvedValue({ id: 'sv-1' }),
+    findMany: jest.fn().mockResolvedValue([{ staffId: CAJERO }]),
+  }
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
   return session
 }
@@ -75,6 +81,7 @@ const movimiento = (over: Record<string, unknown> = {}) => ({
   staffId: CAJERO,
   staffName: 'Cajero',
   localId: 'local-1',
+  sessionId: SESSION,
   ...over,
 })
 
@@ -85,7 +92,7 @@ describe('/sync sólo acepta lo que un POS puede haber hecho sin internet', () =
     armarSesionAbierta()
     await syncEvents(VENUE, [movimiento({ type: 'OPEN', amount: 0, localId: 'x' }) as never], null, CAJERO)
 
-    const filas = ((prismaMock as any).cashDrawerEvent.createMany as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? [])
+    const filas = ((prismaMock as any).cashDrawerEvent.createManyAndReturn as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? [])
     const sueltas = ((prismaMock as any).cashDrawerEvent.create as jest.Mock).mock.calls.map((c: any) => c[0]?.data)
     expect([...filas, ...sueltas].some((f: any) => f?.type === 'OPEN')).toBe(false)
   })
@@ -93,7 +100,7 @@ describe('/sync sólo acepta lo que un POS puede haber hecho sin internet', () =
   it('🔴 un CLOSE inyectado tampoco', async () => {
     armarSesionAbierta()
     await syncEvents(VENUE, [movimiento({ type: 'CLOSE', amount: 0, localId: 'y' }) as never], null, CAJERO)
-    const filas = ((prismaMock as any).cashDrawerEvent.createMany as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? [])
+    const filas = ((prismaMock as any).cashDrawerEvent.createManyAndReturn as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? [])
     expect(filas.some((f: any) => f?.type === 'CLOSE')).toBe(false)
   })
 
@@ -111,21 +118,21 @@ describe('/sync sólo acepta lo que un POS puede haber hecho sin internet', () =
   it('🔴 una fecha ANTERIOR a la apertura de la caja no puede ganarle al fondo', async () => {
     armarSesionAbierta()
     await syncEvents(VENUE, [movimiento({ createdAt: '2020-01-01T00:00:00.000Z', localId: 'viejo' })] as never, null, CAJERO)
-    const filas = ((prismaMock as any).cashDrawerEvent.createMany as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? [])
+    const filas = ((prismaMock as any).cashDrawerEvent.createManyAndReturn as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? [])
     for (const f of filas) expect(new Date(f.createdAt).getTime()).toBeGreaterThanOrEqual(ABIERTA_A_LAS.getTime())
   })
 
   it('🔴 el autor que no pertenece al venue cae al del token', async () => {
     armarSesionAbierta()
-    ;(prismaMock as any).staffVenue.findFirst = jest.fn().mockResolvedValue(null) // el staffId del cuerpo no es de aquí
+    ;(prismaMock as any).staffVenue.findMany = jest.fn().mockResolvedValue([]) // el staffId del cuerpo no es de aquí
     await syncEvents(VENUE, [movimiento({ staffId: 'ajeno', staffName: 'Otro', localId: 'c' })] as never, null, CAJERO)
-    const filas = ((prismaMock as any).cashDrawerEvent.createMany as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? [])
+    const filas = ((prismaMock as any).cashDrawerEvent.createManyAndReturn as jest.Mock).mock.calls.flatMap((c: any) => c[0]?.data ?? [])
     for (const f of filas) expect(f.staffId).toBe(CAJERO)
   })
 
-  it('🔴 toma el candado de la sesión: si otro aparato la cerró, el lote NO entra', async () => {
+  it('🔴 toma el candado de la sesión: si la fila desapareció o cambió de tenant, el lote NO entra', async () => {
     armarSesionAbierta()
-    ;(prismaMock as any).cashDrawerSession.updateMany = jest.fn().mockResolvedValue({ count: 0 }) // ya no está OPEN
+    ;(prismaMock as any).cashDrawerSession.updateMany = jest.fn().mockResolvedValue({ count: 0 })
     await expect(syncEvents(VENUE, [movimiento({ localId: 'd' })] as never, null, CAJERO)).rejects.toThrow()
   })
 })

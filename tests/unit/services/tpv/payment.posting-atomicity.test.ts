@@ -39,7 +39,7 @@ jest.mock('@/utils/prismaClient', () => ({
     order: { findUnique: jest.fn(), update: jest.fn() },
     payment: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn() },
     venueTransaction: { create: jest.fn() },
-    shift: { findFirst: jest.fn(), update: jest.fn() },
+    shift: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
     paymentAllocation: { create: jest.fn() },
     review: { create: jest.fn() },
@@ -160,6 +160,7 @@ beforeEach(() => {
   ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
   ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, paymentStatus: 'PAID', status: 'COMPLETED' })
   ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
+  ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
   ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE_ID })
   ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', status: 'COMPLETED', feeAmount: 0, netAmount: 100 })
   ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
@@ -194,7 +195,8 @@ beforeEach(() => {
           return (prisma.order.update as jest.Mock)(args)
         }),
       },
-      shift: { update: prisma.shift.update },
+      shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
+      activityLog: { create: prisma.activityLog.create },
       areaTicketCheckoutSession: {
         findFirst: prisma.areaTicketCheckoutSession.findFirst,
         updateMany: prisma.areaTicketCheckoutSession.updateMany,

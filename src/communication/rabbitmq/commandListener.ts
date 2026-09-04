@@ -4,6 +4,87 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { CommandPayload, publishCommand } from './publisher'
 
+export type PosCommandDeliveryResult = 'COMPLETED' | 'FAILED' | 'SKIPPED'
+
+const OPEN_RETRY_BASE_MS = 60_000
+const OPEN_RETRY_MAX_MS = 15 * 60_000
+
+function openRetryAt(attemptedAt: Date, previousAttempts: number): Date {
+  const exponent = Math.min(Math.max(previousAttempts, 0), 30)
+  const delay = Math.min(OPEN_RETRY_BASE_MS * 2 ** exponent, OPEN_RETRY_MAX_MS)
+  return new Date(attemptedAt.getTime() + delay)
+}
+
+/**
+ * Claims and delivers one command. The status transition is the cross-process
+ * mutex: only one server can move PENDING -> PROCESSING, so LISTEN/NOTIFY and a
+ * request-side best-effort delivery may race safely.
+ */
+export async function deliverPosCommand(commandId: string, attemptedAt = new Date()): Promise<PosCommandDeliveryResult> {
+  const claimed = await prisma.posCommand.updateMany({
+    where: {
+      id: commandId,
+      status: 'PENDING',
+      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: attemptedAt } }],
+    },
+    data: { status: 'PROCESSING', lastAttemptAt: attemptedAt },
+  })
+
+  if (claimed.count !== 1) {
+    logger.info(`⏭️ Command ${commandId} already claimed, completed or not found`)
+    return 'SKIPPED'
+  }
+
+  let durableOpen = false
+  let previousAttempts = 0
+  try {
+    const command = await prisma.posCommand.findUnique({
+      where: { id: commandId },
+      include: { venue: true },
+    })
+    if (!command) throw new Error(`Command ${commandId} disappeared after claim`)
+    if (!command.venue.posType) throw new Error(`Venue ${command.venueId} doesn't have a posType configured`)
+    durableOpen = command.entityType === 'Shift' && command.action === 'OPEN' && command.dedupeKey != null
+    previousAttempts = command.attempts
+
+    const routingKey = `command.${command.venue.posType.toLowerCase()}.${command.venueId}`
+    const messagePayload: CommandPayload = {
+      entity: command.entityType,
+      action: command.action ?? command.commandType,
+      payload: command.payload,
+    }
+
+    await publishCommand(routingKey, messagePayload)
+
+    await prisma.posCommand.updateMany({
+      where: { id: command.id, status: 'PROCESSING' },
+      data: { status: 'COMPLETED', completedAt: new Date(), nextAttemptAt: null, errorMessage: null },
+    })
+    logger.info(`✅ Command ${command.id} published successfully`)
+    return 'COMPLETED'
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error)
+    logger.error(`❌ Error processing command ${commandId}:`, error)
+    if (durableOpen) {
+      await prisma.posCommand.updateMany({
+        where: { id: commandId, status: 'PROCESSING' },
+        data: {
+          status: 'PENDING',
+          attempts: { increment: 1 },
+          nextAttemptAt: openRetryAt(attemptedAt, previousAttempts),
+          errorMessage: message,
+        },
+      })
+    } else {
+      await prisma.posCommand.updateMany({
+        where: { id: commandId, status: 'PROCESSING' },
+        data: { status: 'FAILED', attempts: { increment: 1 }, errorMessage: message },
+      })
+    }
+    return 'FAILED'
+  }
+}
+
 export class CommandListener {
   private pgClient: Client | null = null
   private isProcessing = false
@@ -79,7 +160,7 @@ export class CommandListener {
     }
   }
 
-  private async processCommand(commandId: string): Promise<void> {
+  private async processCommand(commandId: string, attemptedAt = new Date()): Promise<void> {
     // Prevent concurrent processing of the same command
     if (this.isProcessing) {
       logger.info('🔄 Already processing a command, queuing...')
@@ -91,57 +172,7 @@ export class CommandListener {
     this.isProcessing = true
 
     try {
-      // Fetch the full command with venue data
-      const command = await prisma.posCommand.findUnique({
-        where: { id: commandId },
-        include: { venue: true },
-      })
-
-      if (!command || command.status !== 'PENDING') {
-        logger.info(`⏭️ Command ${commandId} already processed or not found`)
-        return
-      }
-
-      // Mark as processing
-      await prisma.posCommand.update({
-        where: { id: command.id },
-        data: {
-          status: 'PROCESSING',
-          lastAttemptAt: new Date(),
-        },
-      })
-
-      if (!command.venue.posType) {
-        throw new Error(`Venue ${command.venueId} doesn't have a posType configured`)
-      }
-
-      // Build routing key
-      const posType = command.venue.posType.toLowerCase()
-      const routingKey = `command.${posType}.${command.venueId}`
-
-      // Build message payload
-      const messagePayload: CommandPayload = {
-        entity: command.entityType,
-        action: command.commandType,
-        payload: command.payload,
-      }
-
-      // Publish to RabbitMQ
-      await publishCommand(routingKey, messagePayload)
-
-      logger.info(`✅ Command ${command.id} published successfully`)
-    } catch (error: any) {
-      logger.error(`❌ Error processing command ${commandId}:`, error)
-
-      // Mark as failed
-      await prisma.posCommand.update({
-        where: { id: commandId },
-        data: {
-          status: 'FAILED',
-          attempts: { increment: 1 },
-          errorMessage: error.message,
-        },
-      })
+      await deliverPosCommand(commandId, attemptedAt)
     } finally {
       this.isProcessing = false
     }

@@ -17,10 +17,12 @@
  */
 
 jest.mock('@/communication/rabbitmq/publisher', () => ({ publishCommand: jest.fn() }))
+jest.mock('@/communication/rabbitmq/commandListener', () => ({ deliverPosCommand: jest.fn() }))
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { publishCommand } from '@/communication/rabbitmq/publisher'
+import { deliverPosCommand } from '@/communication/rabbitmq/commandListener'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { abrirTurnoDeCaja } from '@/services/shared/turnoDeCaja'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
@@ -34,6 +36,7 @@ const m = prisma as unknown as {
   staffVenue: { findFirst: jest.Mock }
   shift: { findFirst: jest.Mock; findUnique: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
   cashDrawerSession: { findFirst: jest.Mock; findUnique: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
+  posCommand: { create: jest.Mock }
   $transaction: jest.Mock
 }
 
@@ -118,6 +121,8 @@ beforeEach(() => {
   sembrarVenue()
   sinNada()
   ;(publishCommand as jest.Mock).mockResolvedValue(undefined)
+  ;(deliverPosCommand as jest.Mock).mockResolvedValue('COMPLETED')
+  m.posCommand.create.mockResolvedValue({ id: 'cmd-open' })
 })
 
 // ============================================================================
@@ -477,17 +482,16 @@ describe('abrirTurnoDeCaja — validaciones', () => {
 describe('abrirTurnoDeCaja — el puente a SoftRestaurant', () => {
   const integrado = { posType: 'SOFTRESTAURANT', posStatus: 'CONNECTED' }
 
-  it('venue integrado y turno NUEVO ⇒ manda el comando al POS y guarda su `externalId`', async () => {
+  it('venue integrado y turno NUEVO ⇒ confirma el outbox despues del commit y guarda su `externalId`', async () => {
     sembrarVenue(integrado)
 
     await abrirTurnoDeCaja(params({ startingCash: 700, stationId: 'CAJA1' }))
 
-    expect(publishCommand).toHaveBeenCalledWith(
-      `command.softrestaurant.${VENUE}`,
-      expect.objectContaining({ entity: 'Shift', action: 'OPEN' }),
-    )
-    const enviado = (publishCommand as jest.Mock).mock.calls[0][1]
-    expect(m.shift.create.mock.calls[0][0].data.externalId).toBe(enviado.payload.tempShiftId)
+    const outbox = m.posCommand.create.mock.calls[0][0].data
+    expect(outbox).toMatchObject({ entityType: 'Shift', action: 'OPEN', payload: { startingCash: 700, stationId: 'CAJA1' } })
+    expect(m.shift.create.mock.calls[0][0].data.externalId).toBe(outbox.payload.tempShiftId)
+    expect(deliverPosCommand).toHaveBeenCalledWith('cmd-open')
+    expect(publishCommand).not.toHaveBeenCalled()
   })
 
   it('venue integrado pero el turno se REUSA ⇒ no se manda ningún comando al POS', async () => {
@@ -503,23 +507,28 @@ describe('abrirTurnoDeCaja — el puente a SoftRestaurant', () => {
 
     await abrirTurnoDeCaja(params())
 
+    expect(m.posCommand.create).not.toHaveBeenCalled()
+    expect(deliverPosCommand).not.toHaveBeenCalled()
     expect(publishCommand).not.toHaveBeenCalled()
   })
 
   it('venue NO integrado ⇒ nunca se manda comando y el `externalId` queda nulo', async () => {
     await abrirTurnoDeCaja(params())
 
+    expect(m.posCommand.create).not.toHaveBeenCalled()
+    expect(deliverPosCommand).not.toHaveBeenCalled()
     expect(publishCommand).not.toHaveBeenCalled()
     expect(m.shift.create.mock.calls[0][0].data.externalId).toBeNull()
   })
 
-  it('si el POS no acepta el comando, NO se crea el turno (mismo corte que `openShiftForVenue`)', async () => {
+  it('si Rabbit falla despues del commit, el turno queda abierto y el outbox sigue durable', async () => {
     sembrarVenue(integrado)
-    ;(publishCommand as jest.Mock).mockRejectedValue(new Error('rabbit caído'))
+    ;(deliverPosCommand as jest.Mock).mockRejectedValue(new Error('rabbit caído'))
 
-    await expect(abrirTurnoDeCaja(params())).rejects.toThrow()
-    expect(m.shift.create).not.toHaveBeenCalled()
-    expect(m.cashDrawerSession.create).not.toHaveBeenCalled()
+    await expect(abrirTurnoDeCaja(params())).resolves.toMatchObject({ shiftCreado: true, cajaCreada: true })
+    expect(m.shift.create).toHaveBeenCalledTimes(1)
+    expect(m.cashDrawerSession.create).toHaveBeenCalledTimes(1)
+    expect(m.posCommand.create).toHaveBeenCalledTimes(1)
   })
 })
 

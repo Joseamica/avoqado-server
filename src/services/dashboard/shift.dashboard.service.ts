@@ -1162,7 +1162,9 @@ export async function updateShift(
     updateData.startingCash = data.startingCash
   }
   if (data.endingCash !== undefined) {
-    updateData.endingCash = data.endingCash
+    const normalizedCashCount = data.endingCash === null ? null : Number(data.endingCash)
+    updateData.endingCash = normalizedCashCount
+    updateData.cashDeclared = normalizedCashCount
   }
   if (data.totalSales !== undefined) {
     updateData.totalSales = data.totalSales
@@ -1247,7 +1249,9 @@ export async function updateShift(
           cashInDrawer,
           expectedCash: gaveta.esperado,
         })
-  if (difference !== null) {
+  if (data.endingCash === null) {
+    updateData.cashDifference = null
+  } else if (difference !== null) {
     updateData.cashDifference = difference
   }
 

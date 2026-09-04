@@ -8477,10 +8477,13 @@ model PosCommand {
   entityType    String // "Order", "Payment"
   entityId      String // ID en nuestra BD
   commandType   CommandType // CREATE, UPDATE, DELETE
+  action        String? // Override wire action (for example Shift OPEN); null preserves legacy commandType behavior
+  dedupeKey     String?       @unique // Nullable so legacy rows remain valid; durable commands use a stable business identity
   payload       Json
   status        CommandStatus @default(PENDING)
   attempts      Int           @default(0)
   lastAttemptAt DateTime?
+  nextAttemptAt DateTime? // Durable commands remain PENDING until this persisted backoff expires
   errorMessage  String?
   completedAt   DateTime?
   createdAt     DateTime      @default(now())
@@ -8489,6 +8492,8 @@ model PosCommand {
   @@index([venueId, status])
   @@index([entityType, entityId])
   @@index([status, createdAt])
+  @@index([status, entityType, action, lastAttemptAt, id], map: "PosCommand_stale_open_idx")
+  @@index([status, entityType, action, createdAt, id, nextAttemptAt], map: "PosCommand_due_open_idx")
 }
 
 // ==========================================

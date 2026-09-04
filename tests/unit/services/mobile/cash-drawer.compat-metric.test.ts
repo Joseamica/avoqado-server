@@ -19,7 +19,14 @@ import { syncEvents } from '@/services/mobile/cash-drawer.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'venue-1'
-const sesion = { id: 'session-1', venueId: VENUE, status: 'OPEN' }
+const sesion = {
+  id: 'session-1',
+  venueId: VENUE,
+  status: 'OPEN',
+  openedAt: new Date('2026-08-16T08:00:00.000Z'),
+  closedAt: null,
+  actualAmount: null,
+}
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -27,16 +34,27 @@ beforeEach(() => {
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     update: jest.fn().mockResolvedValue({}),
     findFirst: jest.fn().mockResolvedValue(sesion),
+    findMany: jest.fn(async (args: any) => (args.where?.status === 'CLOSED' ? [] : [sesion])),
   }
+  ;(prismaMock as any).staffVenue = { findMany: jest.fn().mockResolvedValue([{ staffId: 'staff-1' }]) }
   ;(prismaMock as any).cashDrawerEvent = {
-    createMany: jest.fn().mockResolvedValue({ count: 1 }),
+    createManyAndReturn: jest.fn(async (args: any) =>
+      args.data.map((row: any, index: number) => ({ id: `evt-keyed-${index}`, localId: row.localId, sessionId: row.sessionId })),
+    ),
     findMany: jest.fn().mockResolvedValue([]),
     create: jest.fn().mockImplementation(async (a: any) => ({ id: 'evt-1', ...a.data, createdAt: new Date() })),
   }
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
 })
 
-const ev = (type: 'PAY_IN' | 'PAY_OUT' | 'CASH_SALE', amount: number) => ({ type, amount, staffId: 'staff-1', staffName: 'Cajero' })
+const ev = (type: 'PAY_IN' | 'PAY_OUT' | 'CASH_SALE', amount: number) => ({
+  type,
+  amount,
+  staffId: 'staff-1',
+  staffName: 'Cajero',
+  sessionId: 'session-1',
+  createdAt: '2026-08-16T10:00:00.000Z',
+})
 
 describe('métrica de compatibilidad en CASH_DRAWER_SYNC', () => {
   it('🔴 registra cuántos CASH_SALE descartó y la versión de la app que los mandó', async () => {

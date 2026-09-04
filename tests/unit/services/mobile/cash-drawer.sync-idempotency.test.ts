@@ -28,7 +28,14 @@ const VENUE = 'venue-1'
  * ahora PAY_IN/PAY_OUT, que siguen siendo del cliente.
  */
 describe('syncEvents — idempotencia del cajón', () => {
-  const sesion = { id: 'session-1', venueId: VENUE, status: 'OPEN' }
+  const sesion = {
+    id: 'session-1',
+    venueId: VENUE,
+    status: 'OPEN',
+    openedAt: new Date('2026-08-13T08:00:00.000Z'),
+    closedAt: null,
+    actualAmount: null,
+  }
 
   const evento = (localId: string | undefined, amount: number, type: 'PAY_IN' | 'PAY_OUT' = 'PAY_IN') => ({
     localId,
@@ -36,6 +43,8 @@ describe('syncEvents — idempotencia del cajón', () => {
     amount,
     staffId: 'staff-1',
     staffName: 'Cajero',
+    sessionId: 'session-1',
+    createdAt: '2026-08-13T10:00:00.000Z',
   })
 
   beforeEach(() => {
@@ -44,9 +53,12 @@ describe('syncEvents — idempotencia del cajón', () => {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       update: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(sesion),
+      findMany: jest.fn(async (args: any) => (args.where?.status === 'CLOSED' ? [] : [sesion])),
     }
     ;(prismaMock as any).cashDrawerEvent = {
-      createMany: jest.fn().mockResolvedValue({ count: 1 }),
+      createManyAndReturn: jest.fn(async (args: any) =>
+        args.data.map((row: any, index: number) => ({ id: `evt-keyed-${index}`, localId: row.localId, sessionId: row.sessionId })),
+      ),
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockImplementation(async (args: any) => ({
         id: 'evt-db-1',
@@ -54,25 +66,28 @@ describe('syncEvents — idempotencia del cajón', () => {
         createdAt: args.data.createdAt ?? new Date(),
       })),
     }
+    ;(prismaMock as any).staffVenue = { findMany: jest.fn().mockResolvedValue([{ staffId: 'staff-1' }]) }
   })
 
   it('manda el localId del cliente al insertar, para que el reintento choque', async () => {
     await syncEvents(VENUE, [evento('evt-local-1', 50)] as any)
 
-    const args = (prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0]
+    const args = (prismaMock as any).cashDrawerEvent.createManyAndReturn.mock.calls[0][0]
     expect(args.data[0]).toMatchObject({ localId: 'evt-local-1', venueId: VENUE, sessionId: 'session-1' })
   })
 
   it('🔴 pide a Postgres saltar duplicados: un reintento del mismo lote NO inventa efectivo', async () => {
     await syncEvents(VENUE, [evento('evt-local-1', 50)] as any)
 
-    const args = (prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0]
+    const args = (prismaMock as any).cashDrawerEvent.createManyAndReturn.mock.calls[0][0]
     expect(args.skipDuplicates).toBe(true)
   })
 
   it('reporta cuántos entraron DE VERDAD, no cuántos se mandaron', async () => {
     // El lote trae 2 eventos pero uno ya existía: sólo se insertó 1.
-    ;(prismaMock as any).cashDrawerEvent.createMany.mockResolvedValue({ count: 1 })
+    ;(prismaMock as any).cashDrawerEvent.createManyAndReturn.mockResolvedValue([
+      { id: 'evt-keyed-1', localId: 'evt-1', sessionId: 'session-1' },
+    ])
 
     const res = await syncEvents(VENUE, [evento('evt-1', 50), evento('evt-2', 30)] as any)
 
@@ -84,7 +99,7 @@ describe('syncEvents — idempotencia del cajón', () => {
 
     // Sin llave no hay dedupe posible: el evento se inserta con `create`
     // individual (el comportamiento que esas apps siempre tuvieron).
-    expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    expect((prismaMock as any).cashDrawerEvent.createManyAndReturn).not.toHaveBeenCalled()
     const createArgs = (prismaMock as any).cashDrawerEvent.create.mock.calls[0][0]
     expect(createArgs.data.localId).toBeNull()
     expect(createArgs.data.amount).toBeDefined()
@@ -113,8 +128,10 @@ describe('syncEvents — idempotencia del cajón', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
   })
 
-  it('lote MIXTO: los con llave van por createMany y los sin llave se devuelven igual', async () => {
-    ;(prismaMock as any).cashDrawerEvent.createMany.mockResolvedValue({ count: 1 })
+  it('lote MIXTO: los con llave van por createManyAndReturn y los sin llave se devuelven igual', async () => {
+    ;(prismaMock as any).cashDrawerEvent.createManyAndReturn.mockResolvedValue([
+      { id: 'evt-db-keyed', localId: 'evt-1', sessionId: 'session-1' },
+    ])
     ;(prismaMock as any).cashDrawerEvent.findMany.mockResolvedValue([
       {
         id: 'evt-db-keyed',
@@ -132,7 +149,7 @@ describe('syncEvents — idempotencia del cajón', () => {
 
     const res = await syncEvents(VENUE, [evento('evt-1', 30), evento(undefined, 50)] as any)
 
-    // 1 insert del createMany (con llave) + 1 create individual (sin llave).
+    // 1 insert del createManyAndReturn (con llave) + 1 create individual (sin llave).
     expect(res.syncedCount).toBe(2)
     expect(res.events).toHaveLength(2)
     const ids = res.events.map((e: any) => e.id)
@@ -141,11 +158,9 @@ describe('syncEvents — idempotencia del cajón', () => {
   })
 
   it('inserta todos los eventos distintos de un mismo lote', async () => {
-    ;(prismaMock as any).cashDrawerEvent.createMany.mockResolvedValue({ count: 2 })
-
     await syncEvents(VENUE, [evento('evt-1', 50), evento('evt-2', 30, 'PAY_OUT')] as any)
 
-    const args = (prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0]
+    const args = (prismaMock as any).cashDrawerEvent.createManyAndReturn.mock.calls[0][0]
     expect(args.data).toHaveLength(2)
     expect(args.data.map((e: any) => e.localId)).toEqual(['evt-1', 'evt-2'])
   })
