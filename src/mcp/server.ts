@@ -22,6 +22,7 @@ import { registerStaffTools } from './tools/staff'
 import { registerReviewTools } from './tools/reviews'
 import { registerCustomerTools } from './tools/customers'
 import { registerCustomerGroupTools } from './tools/customerGroups'
+import { registerCampaignTools } from './tools/campaigns'
 import { registerCreditPackTools } from './tools/creditPacks'
 import { registerShiftTools } from './tools/shifts'
 import { registerDiscountTools } from './tools/discounts'
@@ -96,6 +97,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerReviewTools(server, scope)
   registerCustomerTools(server, scope)
   registerCustomerGroupTools(server, scope)
+  registerCampaignTools(server, scope)
   registerCreditPackTools(server, scope)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)

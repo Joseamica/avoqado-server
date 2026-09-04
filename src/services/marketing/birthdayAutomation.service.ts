@@ -113,3 +113,37 @@ export async function guardarAutomatizacion(p: GuardarAutomatizacionParams) {
 
   return guardada
 }
+
+/**
+ * Enciende o pausa la felicitación SIN tocar su contenido.
+ *
+ * 🔴 Existe aparte de `guardarAutomatizacion` porque ésa exige asunto y bloques: para
+ * pausar habría que releer y reescribir todo, y una reescritura es una oportunidad de
+ * perder el contenido por un error de quien llama. Pausar debe ser lo más simple posible —
+ * es lo que alguien hace con prisa cuando algo está saliendo mal.
+ *
+ * Devuelve `null` si el venue no tiene automatización: no se crea una al vuelo, porque
+ * encender algo que nadie configuró mandaría un correo vacío.
+ */
+export async function cambiarEstadoAutomatizacion(venueId: string, activa: boolean, actorStaffId?: string) {
+  const existe = await prisma.birthdayAutomation.findUnique({ where: { venueId }, select: { id: true, status: true } })
+  if (!existe) return null
+
+  const estado = activa ? BirthdayAutomationStatus.ACTIVE : BirthdayAutomationStatus.PAUSED
+  const actualizada = await prisma.birthdayAutomation.update({
+    where: { venueId },
+    data: { status: estado },
+    select: { id: true, status: true },
+  })
+
+  void logAction({
+    action: activa ? 'BIRTHDAY_AUTOMATION_ENABLED' : 'BIRTHDAY_AUTOMATION_DISABLED',
+    entity: 'BirthdayAutomation',
+    entityId: actualizada.id,
+    staffId: actorStaffId ?? null,
+    venueId,
+    data: { desde: existe.status, hacia: estado },
+  }).catch(() => {})
+
+  return actualizada
+}
