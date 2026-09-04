@@ -308,7 +308,6 @@ export async function recordRefund(
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 1: Find and validate original payment
   // ═══════════════════════════════════════════════════════════════════════════
-  const refundAuthorityObservedAt = new Date()
   const originalPayment = await prisma.payment.findFirst({
     where: { id: refundData.originalPaymentId, venueId },
     include: {
@@ -748,7 +747,7 @@ export async function recordRefund(
         venueId,
         salesRefundPesos,
         tipRefundPesos,
-        ...(unclassifiedPriorRefundCents > 0 ? { forcePendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const } : {}),
+        forcePendingReason: unclassifiedPriorRefundCents > 0 ? ('UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const) : undefined,
       })
       const shiftId = shiftClaim.shiftId
 
@@ -778,19 +777,15 @@ export async function recordRefund(
           //
           // La COMISIÓN no se hereda a propósito: que la plataforma devuelva su porcentaje
           // cuando el cliente cancela es un acuerdo comercial que no conocemos.
-          ...(locked.tenderTypeId
-            ? {
-                tenderTypeId: locked.tenderTypeId,
-                ...(locked.tenderRevision != null ? { tenderRevision: locked.tenderRevision } : {}),
-                ...(locked.tenderLabel != null ? { tenderLabel: locked.tenderLabel } : {}),
-                ...(locked.tenderCountsAsCash != null ? { tenderCountsAsCash: locked.tenderCountsAsCash } : {}),
-                ...(locked.tenderCaptureTip != null ? { tenderCaptureTip: locked.tenderCaptureTip } : {}),
-                ...(locked.tenderSatFormaPago != null ? { tenderSatFormaPago: locked.tenderSatFormaPago } : {}),
-              }
-            : {}),
-          ...(locked.fundsFlow ? { fundsFlow: locked.fundsFlow } : {}),
+          tenderTypeId: locked.tenderTypeId || undefined,
+          tenderRevision: locked.tenderTypeId && locked.tenderRevision != null ? locked.tenderRevision : undefined,
+          tenderLabel: locked.tenderTypeId && locked.tenderLabel != null ? locked.tenderLabel : undefined,
+          tenderCountsAsCash: locked.tenderTypeId && locked.tenderCountsAsCash != null ? locked.tenderCountsAsCash : undefined,
+          tenderCaptureTip: locked.tenderTypeId && locked.tenderCaptureTip != null ? locked.tenderCaptureTip : undefined,
+          tenderSatFormaPago: locked.tenderTypeId && locked.tenderSatFormaPago != null ? locked.tenderSatFormaPago : undefined,
+          fundsFlow: locked.fundsFlow || undefined,
           source: locked.source,
-          status: TransactionStatus.COMPLETED,
+          status: 'COMPLETED',
           type: PaymentType.REFUND,
 
           // Processor info — defaults to 'blumon' for backwards compat with
@@ -828,10 +823,12 @@ export async function recordRefund(
           authorizationNumber: refundData.authorizationNumber,
           referenceNumber: refundData.referenceNumber,
 
-          // Card details
-          cardBrand: locked.cardBrand ?? mapCardBrand(refundData.cardBrand),
-          maskedPan: locked.maskedPan ?? refundData.maskedPan,
-          entryMode: locked.entryMode ?? mapEntryMode(refundData.entryMode),
+          // Card identity belongs to the locked original Payment. A legacy
+          // request may still send these fields, but it cannot fill or replace
+          // durable authority when the original row has nulls.
+          cardBrand: locked.cardBrand,
+          maskedPan: locked.maskedPan,
+          entryMode: locked.entryMode,
 
           // Fee calculation (no fees on refunds typically)
           feePercentage: new Decimal(0),
@@ -853,7 +850,7 @@ export async function recordRefund(
           channel: 'recordRefund',
           amountPesos: salesRefundPesos.negated(),
           tipPesos: tipRefundPesos.negated(),
-          ...(unclassifiedPriorRefundCents > 0 ? { unclassifiedPriorRefundPesos: new Decimal(unclassifiedPriorRefundCents).div(100) } : {}),
+          unclassifiedPriorRefundPesos: unclassifiedPriorRefundCents > 0 ? new Decimal(unclassifiedPriorRefundCents).div(100) : undefined,
         })
       }
 
@@ -1003,7 +1000,7 @@ export async function recordRefund(
       const reassignmentWasRecorded = await refundAuthorityReassignmentWasRecorded(prisma, {
         venueId,
         orderId: originalPayment.orderId,
-        observedAt: refundAuthorityObservedAt,
+        sourceOrderUpdatedAt: originalPayment.order?.updatedAt ?? null,
       })
       if (reassignmentWasRecorded) {
         await recordRefundAuthorityReconciliation(prisma, {
@@ -1258,45 +1255,6 @@ export async function recordRefund(
     referenceNumber: result.referenceNumber,
     digitalReceipt,
   }
-}
-
-/**
- * Map card brand string to CardBrand enum
- */
-function mapCardBrand(brand?: string | null): CardBrand | null {
-  if (!brand) return null
-
-  const brandMap: Record<string, CardBrand> = {
-    VISA: CardBrand.VISA,
-    MASTERCARD: CardBrand.MASTERCARD,
-    AMEX: CardBrand.AMERICAN_EXPRESS,
-    AMERICAN_EXPRESS: CardBrand.AMERICAN_EXPRESS,
-    DISCOVER: CardBrand.DISCOVER,
-    DINERS_CLUB: CardBrand.DINERS_CLUB,
-    JCB: CardBrand.JCB,
-    MAESTRO: CardBrand.MAESTRO,
-    UNIONPAY: CardBrand.UNIONPAY,
-    OTHER: CardBrand.OTHER,
-  }
-
-  return brandMap[brand.toUpperCase()] || CardBrand.OTHER
-}
-
-/**
- * Map entry mode string to CardEntryMode enum
- */
-function mapEntryMode(mode?: string | null): CardEntryMode | null {
-  if (!mode) return null
-
-  const modeMap: Record<string, CardEntryMode> = {
-    CHIP: CardEntryMode.CHIP,
-    CONTACTLESS: CardEntryMode.CONTACTLESS,
-    SWIPE: CardEntryMode.SWIPE,
-    MANUAL: CardEntryMode.MANUAL,
-    FALLBACK: CardEntryMode.FALLBACK,
-  }
-
-  return modeMap[mode.toUpperCase()] || CardEntryMode.CHIP
 }
 
 /**

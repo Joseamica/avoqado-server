@@ -75,6 +75,56 @@ interface PaginatedResponse<T> {
   }
 }
 
+type LockedSaleVerification = Prisma.SaleVerificationGetPayload<{}>
+
+/**
+ * Every TPV writer shares the reassignment job's global lock order:
+ * Payment first, then its optional SaleVerification. The venue predicates are
+ * authority checks, not just lookup filters: after an A→B reassignment commits,
+ * a delayed request carrying venue A must observe no Payment and abort.
+ */
+async function lockPaymentAuthority(tx: Prisma.TransactionClient, venueId: string, paymentId: string): Promise<void> {
+  const payments = await tx.$queryRaw<Array<{ id: string; venueId: string }>>(Prisma.sql`
+    SELECT p.id, p."venueId"
+    FROM "Payment" p
+    WHERE p.id = ${paymentId}
+      AND p."venueId" = ${venueId}
+    FOR UPDATE OF p
+  `)
+
+  if (!payments[0]) {
+    throw new NotFoundError(`Payment ${paymentId} not found in venue ${venueId}`)
+  }
+}
+
+async function lockSaleVerificationAuthority(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  paymentId: string,
+  verificationId?: string,
+): Promise<LockedSaleVerification | null> {
+  const verifications = verificationId
+    ? await tx.$queryRaw<LockedSaleVerification[]>(Prisma.sql`
+        SELECT sv.*
+        FROM "SaleVerification" sv
+        WHERE sv.id = ${verificationId}
+          AND sv."paymentId" = ${paymentId}
+          AND sv."venueId" = ${venueId}
+        LIMIT 1
+        FOR UPDATE OF sv
+      `)
+    : await tx.$queryRaw<LockedSaleVerification[]>(Prisma.sql`
+        SELECT sv.*
+        FROM "SaleVerification" sv
+        WHERE sv."paymentId" = ${paymentId}
+          AND sv."venueId" = ${venueId}
+        LIMIT 1
+        FOR UPDATE OF sv
+      `)
+
+  return verifications[0] ?? null
+}
+
 /**
  * Create a sale verification record
  * Called when TPV completes Step 4 (photo + barcode capture)
@@ -92,7 +142,9 @@ export async function createSaleVerification(venueId: string, data: CreateSaleVe
     throw new NotFoundError(`Payment ${data.paymentId} not found in venue ${venueId}`)
   }
 
-  // Check if verification already exists
+  // Preserve the public duplicate-create fast-fail. This is only an advisory
+  // compatibility check; the same condition is re-resolved under Payment lock
+  // below, which is the authority for concurrent requests/reassignment.
   if (payment.saleVerification) {
     throw new BadRequestError(`Verification already exists for payment ${data.paymentId}`)
   }
@@ -113,18 +165,25 @@ export async function createSaleVerification(venueId: string, data: CreateSaleVe
   const requestedStatus = data.status ?? 'PENDING'
   const effectiveStatus: SaleVerificationStatus = requiresBackOfficeReview && requestedStatus === 'COMPLETED' ? 'PENDING' : requestedStatus
 
-  // Create the verification record
-  const verification = await prisma.saleVerification.create({
-    data: {
-      venueId,
-      paymentId: data.paymentId,
-      staffId: data.staffId,
-      photos: data.photos,
-      scannedProducts: data.scannedProducts as unknown as Prisma.InputJsonValue,
-      status: effectiveStatus,
-      deviceId: data.deviceId ?? null,
-      notes: data.notes ?? null,
-    },
+  const verification = await prisma.$transaction(async tx => {
+    await lockPaymentAuthority(tx, venueId, data.paymentId)
+    const existing = await lockSaleVerificationAuthority(tx, venueId, data.paymentId)
+    if (existing) {
+      throw new BadRequestError(`Verification already exists for payment ${data.paymentId}`)
+    }
+
+    return tx.saleVerification.create({
+      data: {
+        venueId,
+        paymentId: data.paymentId,
+        staffId: data.staffId,
+        photos: data.photos,
+        scannedProducts: data.scannedProducts as unknown as Prisma.InputJsonValue,
+        status: effectiveStatus,
+        deviceId: data.deviceId ?? null,
+        notes: data.notes ?? null,
+      },
+    })
   })
 
   logger.info(`✅ [SALE VERIFICATION SERVICE] Created verification ${verification.id}`)
@@ -241,12 +300,20 @@ export async function updateVerificationStatus(
     throw new NotFoundError(`Verification ${verificationId} not found in venue ${venueId}`)
   }
 
-  const updated = await prisma.saleVerification.update({
-    where: { id: verificationId },
-    data: {
-      status,
-      ...(inventoryDeducted !== undefined && { inventoryDeducted }),
-    },
+  const updated = await prisma.$transaction(async tx => {
+    await lockPaymentAuthority(tx, venueId, verification.paymentId)
+    const lockedVerification = await lockSaleVerificationAuthority(tx, venueId, verification.paymentId, verificationId)
+    if (!lockedVerification) {
+      throw new NotFoundError(`Verification ${verificationId} not found in venue ${venueId}`)
+    }
+
+    return tx.saleVerification.update({
+      where: { id: verificationId, paymentId: verification.paymentId, venueId },
+      data: {
+        status,
+        ...(inventoryDeducted !== undefined && { inventoryDeducted }),
+      },
+    })
   })
 
   logger.info(`✅ [SALE VERIFICATION SERVICE] Verification ${verificationId} updated to ${status}`)
@@ -274,19 +341,27 @@ export async function createPendingSaleVerification(data: {
     requiredPhotos: data.isPortabilidad ? 2 : 1,
   })
 
-  const verification = await prisma.saleVerification.create({
-    data: {
-      venueId: data.venueId,
-      paymentId: data.paymentId,
-      staffId: data.staffId,
-      photos: [],
-      scannedProducts: data.scannedProducts as unknown as Prisma.InputJsonValue,
-      status: 'PENDING',
-      inventoryDeducted: false,
-      isPortabilidad: data.isPortabilidad,
-      serialNumbers: data.serialNumbers,
-      deviceId: data.deviceId ?? null,
-    },
+  const verification = await prisma.$transaction(async tx => {
+    await lockPaymentAuthority(tx, data.venueId, data.paymentId)
+    const existing = await lockSaleVerificationAuthority(tx, data.venueId, data.paymentId)
+    if (existing) {
+      throw new BadRequestError(`Verification already exists for payment ${data.paymentId}`)
+    }
+
+    return tx.saleVerification.create({
+      data: {
+        venueId: data.venueId,
+        paymentId: data.paymentId,
+        staffId: data.staffId,
+        photos: [],
+        scannedProducts: data.scannedProducts as unknown as Prisma.InputJsonValue,
+        status: 'PENDING',
+        inventoryDeducted: false,
+        isPortabilidad: data.isPortabilidad,
+        serialNumbers: data.serialNumbers,
+        deviceId: data.deviceId ?? null,
+      },
+    })
   })
 
   logger.info(`✅ [SALE VERIFICATION SERVICE] Created PENDING verification ${verification.id}`)
@@ -434,8 +509,6 @@ export async function createOrUpdateProofOfSale(
     throw new NotFoundError(`Staff ${staffId} not found in venue ${venueId}`)
   }
 
-  let verification
-
   // Venues running serialized inventory (e.g. SIM promoters) require the
   // back-office to review EVERY sale — uploading the proof photos must NOT
   // auto-complete the verification. Restaurants without the module keep the
@@ -443,95 +516,100 @@ export async function createOrUpdateProofOfSale(
   // Config-driven per .claude/rules: never hardcode client slugs.
   const requiresBackOfficeReview = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
 
-  // Try to find existing verification (by verificationId or paymentId)
-  const existing = verificationId
-    ? await prisma.saleVerification.findFirst({ where: { id: verificationId, venueId } })
-    : payment.saleVerification
+  const { verification, postCommitLogs } = await prisma.$transaction(async tx => {
+    await lockPaymentAuthority(tx, venueId, paymentId)
+    const existing = await lockSaleVerificationAuthority(tx, venueId, paymentId, verificationId)
+    const logs: Array<{ message: string; meta?: Record<string, unknown> }> = []
 
-  if (existing) {
-    // Terminal guard: a REJECTED ("Rechazada") sale is a lost sale — the promoter
-    // cannot revive it by re-uploading evidence (unlike FAILED/"Revisar"). Only an
-    // admin can reopen it via the dashboard edit. Enforced server-side so it holds
-    // regardless of TPV app version. (Asana 1215725049493387)
-    if (existing.status === 'REJECTED') {
-      throw new BadRequestError('Esta venta fue rechazada y no puede modificarse desde el TPV')
-    }
-
-    let updatedPhotos: string[]
-
-    // Determine the target index from photoLabel (fixed slots: Vinculacion=0, Portabilidad=1)
-    const labelIndex = photoLabel === 'Vinculacion' ? 0 : photoLabel === 'Portabilidad' ? 1 : undefined
-
-    if (replaceIndex !== undefined && replaceIndex < existing.photos.length) {
-      // Replace mode: swap photo at the given index
-      updatedPhotos = [...existing.photos]
-      updatedPhotos[replaceIndex] = photoUrls[0]
-      logger.info(`📸 [SALE VERIFICATION SERVICE] Replacing photo at index ${replaceIndex} in verification ${existing.id}`)
-    } else if (labelIndex !== undefined) {
-      // Label-based fixed slot: place photo at the correct index regardless of upload order
-      // Pad array with empty strings if needed (e.g., portabilidad uploaded first → pad index 0)
-      updatedPhotos = [...existing.photos]
-      while (updatedPhotos.length <= labelIndex) {
-        updatedPhotos.push('')
+    if (existing) {
+      // Terminal guard: a REJECTED ("Rechazada") sale is a lost sale — the promoter
+      // cannot revive it by re-uploading evidence (unlike FAILED/"Revisar"). Only an
+      // admin can reopen it via the dashboard edit. Enforced server-side so it holds
+      // regardless of TPV app version. (Asana 1215725049493387)
+      if (existing.status === 'REJECTED') {
+        throw new BadRequestError('Esta venta fue rechazada y no puede modificarse desde el TPV')
       }
-      updatedPhotos[labelIndex] = photoUrls[0]
-      logger.info(`📸 [SALE VERIFICATION SERVICE] Placing photo at fixed slot ${labelIndex} (${photoLabel}) in verification ${existing.id}`)
-    } else {
-      // Append mode (default / legacy): add new photos
-      updatedPhotos = [...existing.photos, ...photoUrls]
+
+      let updatedPhotos: string[]
+
+      // Determine the target index from photoLabel (fixed slots: Vinculacion=0, Portabilidad=1)
+      const labelIndex = photoLabel === 'Vinculacion' ? 0 : photoLabel === 'Portabilidad' ? 1 : undefined
+
+      if (replaceIndex !== undefined && replaceIndex < existing.photos.length) {
+        // Replace mode: swap photo at the given index
+        updatedPhotos = [...existing.photos]
+        updatedPhotos[replaceIndex] = photoUrls[0]
+        logs.push({ message: `📸 [SALE VERIFICATION SERVICE] Replacing photo at index ${replaceIndex} in verification ${existing.id}` })
+      } else if (labelIndex !== undefined) {
+        // Label-based fixed slot: place photo at the correct index regardless of upload order
+        // Pad array with empty strings if needed (e.g., portabilidad uploaded first → pad index 0)
+        updatedPhotos = [...existing.photos]
+        while (updatedPhotos.length <= labelIndex) {
+          updatedPhotos.push('')
+        }
+        updatedPhotos[labelIndex] = photoUrls[0]
+        logs.push({
+          message: `📸 [SALE VERIFICATION SERVICE] Placing photo at fixed slot ${labelIndex} (${photoLabel}) in verification ${existing.id}`,
+        })
+      } else {
+        // Append mode (default / legacy): add new photos
+        updatedPhotos = [...existing.photos, ...photoUrls]
+      }
+
+      // Count non-empty photos for completion check
+      const nonEmptyPhotos = updatedPhotos.filter(p => p !== '')
+
+      const requiredPhotos = existing.isPortabilidad ? 2 : 1
+      const isComplete = nonEmptyPhotos.length >= requiredPhotos
+
+      // Correction flow (Asana: Administración de Ventas):
+      // Once the back-office has reviewed this verification at least once
+      // (reviewedAt set), ANY re-upload must return it to the review queue
+      // (PENDING) — never auto-complete — so the back-office re-checks the
+      // corrected docs. `reviewedAt` is kept as the "has been reviewed" marker
+      // so a multi-photo correction (portabilidad) doesn't auto-complete on the
+      // second upload after the first one flipped FAILED → PENDING.
+      const wasReviewed = existing.reviewedAt !== null
+      const isCorrectingRejection = existing.status === 'FAILED'
+
+      // Auto-complete only when the venue has NO back-office review step.
+      // With review required (serialized inventory), a completed photo set keeps
+      // the verification PENDING so the back-office accepts or sends it back.
+      const willAutoComplete = !requiresBackOfficeReview && !wasReviewed && isComplete
+
+      logs.push({
+        message: `📸 [SALE VERIFICATION SERVICE] Updated photos for verification ${existing.id}`,
+        meta: {
+          totalPhotos: nonEmptyPhotos.length,
+          requiredPhotos,
+          willComplete: willAutoComplete,
+          requiresBackOfficeReview,
+          wasReviewed,
+          isCorrectingRejection,
+        },
+      })
+
+      const updated = await tx.saleVerification.update({
+        where: { id: existing.id, paymentId, venueId },
+        data: {
+          photos: updatedPhotos,
+          status: willAutoComplete ? 'COMPLETED' : 'PENDING',
+          // Clear the stale rejection verdict so the back-office sees a fresh
+          // submission. Keep reviewedAt/reviewedById as the "reviewed" marker.
+          ...(isCorrectingRejection && {
+            rejectionReasons: [],
+            reviewNotes: null,
+          }),
+        },
+      })
+      return { verification: updated, postCommitLogs: logs }
     }
 
-    // Count non-empty photos for completion check
-    const nonEmptyPhotos = updatedPhotos.filter(p => p !== '')
-
-    const requiredPhotos = existing.isPortabilidad ? 2 : 1
-    const isComplete = nonEmptyPhotos.length >= requiredPhotos
-
-    // Correction flow (Asana: Administración de Ventas):
-    // Once the back-office has reviewed this verification at least once
-    // (reviewedAt set), ANY re-upload must return it to the review queue
-    // (PENDING) — never auto-complete — so the back-office re-checks the
-    // corrected docs. `reviewedAt` is kept as the "has been reviewed" marker
-    // so a multi-photo correction (portabilidad) doesn't auto-complete on the
-    // second upload after the first one flipped FAILED → PENDING.
-    const wasReviewed = existing.reviewedAt !== null
-    const isCorrectingRejection = existing.status === 'FAILED'
-
-    // Auto-complete only when the venue has NO back-office review step.
-    // With review required (serialized inventory), a completed photo set keeps
-    // the verification PENDING so the back-office accepts or sends it back.
-    const willAutoComplete = !requiresBackOfficeReview && !wasReviewed && isComplete
-
-    logger.info(`📸 [SALE VERIFICATION SERVICE] Updated photos for verification ${existing.id}`, {
-      totalPhotos: nonEmptyPhotos.length,
-      requiredPhotos,
-      willComplete: willAutoComplete,
-      requiresBackOfficeReview,
-      wasReviewed,
-      isCorrectingRejection,
-    })
-
-    verification = await prisma.saleVerification.update({
-      where: { id: existing.id },
-      data: {
-        photos: updatedPhotos,
-        status: willAutoComplete ? 'COMPLETED' : 'PENDING',
-        // Clear the stale rejection verdict so the back-office sees a fresh
-        // submission. Keep reviewedAt/reviewedById as the "reviewed" marker.
-        ...(isCorrectingRejection && {
-          rejectionReasons: [],
-          reviewNotes: null,
-        }),
-      },
-    })
-  } else {
     // No existing verification → legacy flow.
     // Restaurants (no review step) auto-complete; venues requiring back-office
     // review stay PENDING until someone accepts or sends the sale back.
     const legacyStatus: SaleVerificationStatus = requiresBackOfficeReview ? 'PENDING' : 'COMPLETED'
-    logger.info(`📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification (legacy flow), status=${legacyStatus}`)
-
-    verification = await prisma.saleVerification.create({
+    const created = await tx.saleVerification.create({
       data: {
         venueId,
         paymentId,
@@ -542,6 +620,12 @@ export async function createOrUpdateProofOfSale(
         inventoryDeducted: false,
       },
     })
+    logs.push({ message: `📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification (legacy flow), status=${legacyStatus}` })
+    return { verification: created, postCommitLogs: logs }
+  })
+
+  for (const log of postCommitLogs) {
+    logger.info(log.message, log.meta)
   }
 
   logger.info(`✅ [SALE VERIFICATION SERVICE] Proof-of-sale saved: ${verification.id} (status: ${verification.status})`)

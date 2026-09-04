@@ -246,7 +246,7 @@ it('si close ganó tras resolver OPEN, crea Order y Payment sin turno pero conse
   expect(tx.shift.updateMany.mock.invocationCallOrder[0]).toBeLessThan(tx.order.upsert.mock.invocationCallOrder[0])
   expect(tx.shift.updateMany.mock.invocationCallOrder[0]).toBeLessThan(tx.payment.create.mock.invocationCallOrder[0])
   expect(tx.order.upsert.mock.calls[0][0].create).not.toHaveProperty('shift')
-  expect(tx.payment.create.mock.calls[0][0].data).not.toHaveProperty('shift')
+  expect(tx.payment.create.mock.calls[0][0].data.shift).toBeUndefined()
   expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
   expect(tx.activityLog.create.mock.calls[0][0].data).toMatchObject({
     action: 'PAYMENT_WITHOUT_SHIFT',
@@ -330,7 +330,7 @@ it('si pierde con una Order existente, no roba/desconecta su liga previa y el Pa
   await processPosOrderEvent(payload)
 
   expect(tx.order.upsert.mock.calls[0][0].update).not.toHaveProperty('shift')
-  expect(tx.payment.create.mock.calls[0][0].data).not.toHaveProperty('shift')
+  expect(tx.payment.create.mock.calls[0][0].data.shift).toBeUndefined()
   expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
 })
 
@@ -375,5 +375,5 @@ it('smart resolution no escribe externalId antes de entrar a la transacción/loc
   expect(m.order.update).not.toHaveBeenCalled()
   expect(tx.shift.updateMany.mock.invocationCallOrder[0]).toBeLessThan(tx.order.update.mock.invocationCallOrder[0])
   expect(tx.order.update.mock.calls[0][0].data).not.toHaveProperty('shift')
-  expect(tx.payment.create.mock.calls[0][0].data).not.toHaveProperty('shift')
+  expect(tx.payment.create.mock.calls[0][0].data.shift).toBeUndefined()
 })

@@ -52,7 +52,8 @@ const INVENTARIO: Record<string, number> = {
   'src/jobs/attendance-late-alert.job.ts': 1,
   'src/jobs/auto-clockout.job.ts': 2,
   'src/jobs/blumon-webhook-reconciliation.job.ts': 1,
-  'src/jobs/playtelecomEventSimReassignment.job.ts': 3,
+  // 3 → 0 (2026-09-04): candidatos, hidratación y revalidación ya tienen topes;
+  // la paginación keyset además agota las páginas sin acumular mapas globales.
   'src/mcp/tools/inventory.ts': 3,
   'src/mcp/tools/sales.ts': 1,
   'src/mcp/tools/staff.ts': 1,
@@ -150,7 +151,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/tpv/payment.tpv.service.ts': 2,
   'src/services/tpv/refund.tpv.service.ts': 1,
   'src/services/tpv/sale-verification.service.ts': 1,
-  'src/services/tpv/shift.tpv.service.ts': 8,
+  'src/services/tpv/shift.tpv.service.ts': 7, // 2026-09-04: file == HEAD; scanner measured 7 (inventory-only correction).
   'src/services/tpv/table.tpv.service.ts': 2,
   'src/services/tpv/time-entry.tpv.service.ts': 3,
   'src/services/wallet/redeemStampReward.service.ts': 1,

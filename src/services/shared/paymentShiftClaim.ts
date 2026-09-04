@@ -104,26 +104,28 @@ export async function recordRefundAuthorityReconciliation(
 }
 
 /**
- * Confirma, sin leer el tenant nuevo, que el job server-owned movió esta
- * Order DESPUÉS de la foto tenant-scoped que abrió el flujo de refund.
+ * Confirma, sin leer el tenant nuevo, que el job server-owned movió
+ * exactamente la generación de Order que observó el flujo de refund.
  *
  * La fila origen `ORDER_VENUE_REASSIGNED` se escribe atómicamente junto con
- * Order+Payment. Filtrar por el venue solicitante y devolver sólo `id` evita
- * convertir esta comprobación en un oracle sobre el destino.
+ * Order+Payment. La generación es el `updatedAt` PREVIO al move, no el reloj
+ * de creación del marker: bajo MVCC el job puede construir T1 sin commit, la
+ * refund iniciar T2>T1 y aun leer la versión anterior. Filtrar por requester,
+ * Order y generación exacta evita tanto ese falso negativo como hacer match
+ * con una reasignación histórica distinta, sin revelar el destino.
  */
 export async function refundAuthorityReassignmentWasRecorded(
   db: ActivityLogReader,
-  input: { venueId: string; orderId: string | null; observedAt: Date },
+  input: { venueId: string; orderId: string | null; sourceOrderUpdatedAt: Date | null },
 ): Promise<boolean> {
-  if (!input.orderId) return false
+  if (!input.orderId || !input.sourceOrderUpdatedAt) return false
   const marker = await db.activityLog.findFirst({
     where: {
       action: 'ORDER_VENUE_REASSIGNED',
       entity: 'Order',
       entityId: input.orderId,
       venueId: input.venueId,
-      createdAt: { gte: input.observedAt },
-      data: { path: ['fromVenueId'], equals: input.venueId },
+      data: { path: ['sourceOrderUpdatedAt'], equals: input.sourceOrderUpdatedAt.toISOString() },
     },
     select: { id: true },
   })

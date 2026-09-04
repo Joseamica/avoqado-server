@@ -761,7 +761,7 @@ export async function settleOrder(
       data: {
         venueId,
         orderId,
-        ...(shiftClaim.shiftId ? { shiftId: shiftClaim.shiftId } : {}),
+        shiftId: shiftClaim.shiftId ? shiftClaim.shiftId : undefined,
         amount: toSettle,
         tipAmount: 0,
         method: 'CASH', // Default to cash for manual settlements

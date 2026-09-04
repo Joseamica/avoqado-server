@@ -296,10 +296,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, input.venueId)
   // El pago original sólo revela la Order que debe tomar el primer candado. La
   // fila Payment se vuelve a leer y valida bajo FOR UPDATE dentro de la tx.
-  const refundAuthorityObservedAt = new Date()
   const originalOrder = await prisma.payment.findFirst({
     where: { id: input.paymentId, venueId: input.venueId },
-    select: { orderId: true },
+    select: { orderId: true, order: { select: { updatedAt: true } } },
   })
   if (!originalOrder) throw new NotFoundError('Payment not found')
 
@@ -579,7 +578,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         venueId: input.venueId,
         salesRefundPesos,
         tipRefundPesos,
-        ...(unclassifiedPriorRefundCents > 0 ? { forcePendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const } : {}),
+        forcePendingReason: unclassifiedPriorRefundCents > 0 ? ('UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const) : undefined,
       })
       const shiftId = shiftClaim.shiftId
 
@@ -588,9 +587,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         data: {
           venueId: input.venueId,
           orderId: original.orderId,
-          ...(shiftId ? { shiftId } : {}),
-          ...(input.staffId ? { processedById: input.staffId } : {}),
-          ...(original.merchantAccountId ? { merchantAccountId: original.merchantAccountId } : {}),
+          shiftId: shiftId || undefined,
+          processedById: input.staffId || undefined,
+          merchantAccountId: original.merchantAccountId || undefined,
 
           // Negative amount/tip so that sum(refunds) mirrors the original split.
           amount: centsToDecimal(-salesRefundCents),
@@ -608,21 +607,17 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           // La COMISIÓN no se hereda a propósito: que Uber devuelva su 30% cuando el cliente
           // cancela es un acuerdo comercial que no conocemos, e inventarlo daría un costo o un
           // ingreso falso. Queda vacía hasta que haya una decisión.
-          ...(original.tenderTypeId
-            ? {
-                tenderTypeId: original.tenderTypeId,
-                ...(original.tenderRevision != null ? { tenderRevision: original.tenderRevision } : {}),
-                ...(original.tenderLabel != null ? { tenderLabel: original.tenderLabel } : {}),
-                ...(original.tenderCountsAsCash != null ? { tenderCountsAsCash: original.tenderCountsAsCash } : {}),
-                ...(original.tenderCaptureTip != null ? { tenderCaptureTip: original.tenderCaptureTip } : {}),
-                ...(original.tenderSatFormaPago != null ? { tenderSatFormaPago: original.tenderSatFormaPago } : {}),
-              }
-            : {}),
+          tenderTypeId: original.tenderTypeId || undefined,
+          tenderRevision: original.tenderTypeId && original.tenderRevision != null ? original.tenderRevision : undefined,
+          tenderLabel: original.tenderTypeId && original.tenderLabel != null ? original.tenderLabel : undefined,
+          tenderCountsAsCash: original.tenderTypeId && original.tenderCountsAsCash != null ? original.tenderCountsAsCash : undefined,
+          tenderCaptureTip: original.tenderTypeId && original.tenderCaptureTip != null ? original.tenderCaptureTip : undefined,
+          tenderSatFormaPago: original.tenderTypeId && original.tenderSatFormaPago != null ? original.tenderSatFormaPago : undefined,
           // `fundsFlow` va aparte del bloque de arriba: un pago SIN tender también lo tiene
           // (lo estampa su punto de entrada), y es la autoridad de "¿esto estaba en el cajón?".
-          ...(original.fundsFlow ? { fundsFlow: original.fundsFlow as PaymentFundsFlow } : {}),
-          ...(original.source || undefined ? { source: original.source as PaymentSource } : {}),
-          status: TransactionStatus.COMPLETED,
+          fundsFlow: original.fundsFlow ? (original.fundsFlow as PaymentFundsFlow) : undefined,
+          source: original.source ? (original.source as PaymentSource) : undefined,
+          status: 'COMPLETED',
           type: PaymentType.REFUND,
 
           processor: 'dashboard',
@@ -657,7 +652,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           channel: 'issueRefund',
           amountPesos: salesRefundPesos.negated(),
           tipPesos: tipRefundPesos.negated(),
-          ...(unclassifiedPriorRefundCents > 0 ? { unclassifiedPriorRefundPesos: centsToDecimal(unclassifiedPriorRefundCents) } : {}),
+          unclassifiedPriorRefundPesos: unclassifiedPriorRefundCents > 0 ? centsToDecimal(unclassifiedPriorRefundCents) : undefined,
         })
       }
 
@@ -726,7 +721,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       const reassignmentWasRecorded = await refundAuthorityReassignmentWasRecorded(prisma, {
         venueId: input.venueId,
         orderId: originalOrder.orderId,
-        observedAt: refundAuthorityObservedAt,
+        sourceOrderUpdatedAt: originalOrder.order?.updatedAt ?? null,
       })
       if (reassignmentWasRecorded) {
         await recordRefundAuthorityReconciliation(prisma, {

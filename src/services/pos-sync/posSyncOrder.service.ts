@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
-import { Order, OrderSource, OrderStatus, OriginSystem, Prisma, SplitType, SyncStatus, TransactionStatus } from '@prisma/client'
+import { Order, OrderSource, OrderStatus, OriginSystem, Prisma, SplitType, SyncStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { posSyncStaffService } from './posSyncStaff.service'
 import { getOrCreatePosTable } from './posSyncTable.service'
@@ -235,7 +235,13 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
         }
       }
     }
+    // Task 5t: capture the reviewed POS claim as immutable primitives before
+    // crossing the payment-helper boundary. The helper reconstructs the exact
+    // auditor payload inline, so no mutable claim object escapes.
     const writableShiftId = shiftClaim.shiftId
+    const paymentCandidateShiftId = shiftClaim.candidateShiftId
+    const paymentObservedShiftStatus = shiftClaim.observedStatus
+    const paymentShiftPendingReason = shiftClaim.pendingReason
 
     // Si encontramos una orden existente con resolución inteligente, actualizarla
     if (existingOrder && existingOrder.externalId !== externalId) {
@@ -278,7 +284,19 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
       // Procesar pagos si la orden está pagada
       if (order.paymentStatus === 'PAID' && payments && payments.length > 0) {
-        await processPaymentsForOrder(tx, order, payments, paymentMethodsCatalog, venue, shiftClaim, staffId, reconciliationEnabled)
+        await processPaymentsForOrder(
+          tx,
+          order,
+          payments,
+          paymentMethodsCatalog,
+          venue,
+          writableShiftId,
+          paymentCandidateShiftId,
+          paymentObservedShiftStatus,
+          paymentShiftPendingReason,
+          staffId,
+          reconciliationEnabled,
+        )
       }
 
       return order
@@ -350,7 +368,19 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
     // 2b. LÓGICA DE PAGOS MEJORADA
     if (order.paymentStatus === 'PAID' && payments && payments.length > 0) {
-      await processPaymentsForOrder(tx, order, payments, paymentMethodsCatalog, venue, shiftClaim, staffId, reconciliationEnabled)
+      await processPaymentsForOrder(
+        tx,
+        order,
+        payments,
+        paymentMethodsCatalog,
+        venue,
+        writableShiftId,
+        paymentCandidateShiftId,
+        paymentObservedShiftStatus,
+        paymentShiftPendingReason,
+        staffId,
+        reconciliationEnabled,
+      )
     }
 
     return order
@@ -420,7 +450,10 @@ async function processPaymentsForOrder(
   payments: any[],
   paymentMethodsCatalog: PosPaymentMethod[],
   venue: any,
-  shiftClaim: CapturedPaymentShiftClaim,
+  shiftId: CapturedPaymentShiftClaim['shiftId'],
+  candidateShiftId: CapturedPaymentShiftClaim['candidateShiftId'],
+  observedStatus: CapturedPaymentShiftClaim['observedStatus'],
+  pendingReason: CapturedPaymentShiftClaim['pendingReason'],
   staffId: string | null,
   reconciliationEnabled: boolean,
 ) {
@@ -438,8 +471,6 @@ async function processPaymentsForOrder(
     throw new Error('No se proporcionó el catálogo de métodos de pago para procesar los pagos.')
   }
 
-  const shiftId = shiftClaim.shiftId
-
   for (const posPayment of payments) {
     const feePercentage = venue.feeValue
     const feeAmount = posPayment.amount * parseFloat(feePercentage.toString())
@@ -452,7 +483,7 @@ async function processPaymentsForOrder(
         tipAmount: posPayment.tipAmount,
         method: mapPaymentMethodFromCatalog(posPayment.methodExternalId, paymentMethodsCatalog),
         splitType: SplitType.FULLPAYMENT,
-        status: TransactionStatus.COMPLETED,
+        status: 'COMPLETED',
         feePercentage,
         feeAmount,
         netAmount,
@@ -461,14 +492,14 @@ async function processPaymentsForOrder(
         externalId: `${order.externalId}-${posPayment.methodExternalId}`,
         venue: { connect: { id: venue.id } },
         order: { connect: { id: order.id } },
-        ...(shiftId && { shift: { connect: { id: shiftId } } }),
-        ...(staffId && { processedBy: { connect: { id: staffId } } }),
+        shift: shiftId ? { connect: { id: shiftId } } : undefined,
+        processedBy: staffId ? { connect: { id: staffId } } : undefined,
       },
     })
 
     await recordPendingPaymentShiftReconciliation(tx, {
       reconciliationEnabled,
-      claim: shiftClaim,
+      claim: { shiftId, candidateShiftId, observedStatus, pendingReason },
       venueId: venue.id,
       paymentId: newPayment.id,
       orderId: order.id,

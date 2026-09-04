@@ -18,8 +18,13 @@ import logger from '../config/logger'
 import { Prisma } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
-import { logAction } from '../services/dashboard/activity-log.service'
 import { scheduleCron } from '../observability/jobContext'
+
+// Una orden TPV normal tiene uno o pocos pagos/items y SaleVerification es 1:1
+// con Payment. El cap evita materializar una orden corrupta o artificialmente
+// enorme: se leen cap+1 filas y se aborta completa en vez de mover un subconjunto.
+const MAX_REASSIGNMENT_ROWS_PER_ORDER = 1_000
+const REASSIGNMENT_DISCOVERY_PAGE_SIZE = 100
 
 /**
  * Regla de reasignación: qué categoría, en qué estado de origen, se mueve a qué venue
@@ -94,134 +99,297 @@ export async function reassignEventSimSalesForRule(
     return { reassigned: 0, skippedMixed: 0 }
   }
 
-  const candidates = await retry(
-    () =>
-      prisma.serializedItem.findMany({
-        where: {
-          status: 'SOLD',
-          orderItemId: { not: null },
-          category: { name: { equals: rule.categoryName, mode: 'insensitive' } },
-          sellingVenueId: { not: null },
-          NOT: { sellingVenueId: targetVenue.id },
-          sellingVenue: { organizationId: org.id, state: { equals: rule.originState, mode: 'insensitive' } },
-        },
-        select: { orderItemId: true },
-      }),
-    {
-      retries: 2,
-      initialDelay: 1500,
-      shouldRetry: shouldRetryDbConnectionError,
-      context: 'playtelecom-event-sim-reassignment.findCandidates',
-    },
-  )
-
-  const orderItemIds = candidates.map(c => c.orderItemId).filter((id): id is string => id != null)
-  if (orderItemIds.length === 0) return { reassigned: 0, skippedMixed: 0 }
-
-  const orderItemsForCandidates = await prisma.orderItem.findMany({
-    where: { id: { in: orderItemIds } },
-    select: { orderId: true },
-  })
-  const orderIds = Array.from(new Set(orderItemsForCandidates.map(oi => oi.orderId)))
-
   let reassigned = 0
   let skippedMixed = 0
+  let afterSerializedItemId: string | undefined
 
-  for (const orderId of orderIds) {
-    try {
-      const orderItems = await prisma.orderItem.findMany({
-        where: { orderId },
-        select: { serializedItem: { select: { category: { select: { name: true } } } } },
-      })
-      const isPure = isOrderPureCategoryMatch(
-        orderItems.map(i => i.serializedItem?.category?.name ?? null),
-        rule.categoryName,
-      )
+  // Exhaust every eligible page in this run. Maps and IN-lists live for one
+  // fixed-size page only, so a recurring mixed order cannot consume the whole
+  // discovery window and starve an eligible order with a later key.
+  while (true) {
+    const candidates = await retry(
+      () =>
+        prisma.serializedItem.findMany({
+          where: {
+            status: 'SOLD',
+            orderItemId: { not: null },
+            category: { name: { equals: rule.categoryName, mode: 'insensitive' } },
+            sellingVenueId: { not: null },
+            NOT: { sellingVenueId: targetVenue.id },
+            sellingVenue: { organizationId: org.id, state: { equals: rule.originState, mode: 'insensitive' } },
+            ...(afterSerializedItemId && { id: { gt: afterSerializedItemId } }),
+          },
+          select: { id: true, orderItemId: true, sellingVenueId: true },
+          orderBy: { id: 'asc' },
+          take: REASSIGNMENT_DISCOVERY_PAGE_SIZE,
+        }),
+      {
+        retries: 2,
+        initialDelay: 1500,
+        shouldRetry: shouldRetryDbConnectionError,
+        context: 'playtelecom-event-sim-reassignment.findCandidates',
+      },
+    )
+    if (candidates.length === 0) break
+    const isLastDiscoveryPage = candidates.length < REASSIGNMENT_DISCOVERY_PAGE_SIZE
+    afterSerializedItemId = candidates[candidates.length - 1].id
 
-      if (!isPure) {
-        skippedMixed++
-        const alreadyFlagged = await prisma.activityLog.findFirst({
-          where: { action: 'ORDER_VENUE_REASSIGNMENT_SKIPPED_MIXED', entity: 'Order', entityId: orderId },
-          select: { id: true },
-        })
-        if (!alreadyFlagged) {
-          const orderForLog = await prisma.order.findUnique({ where: { id: orderId }, select: { venueId: true } })
-          await logAction({
-            action: 'ORDER_VENUE_REASSIGNMENT_SKIPPED_MIXED',
-            entity: 'Order',
-            entityId: orderId,
-            venueId: orderForLog?.venueId ?? null,
-            staffId: null,
-            data: { reason: 'mixed_order_skipped', category: rule.categoryName },
-          })
-          logger.warn('[PlayTelecom Event SIM Reassignment] Orden mixta detectada, se deja para revisión manual', { orderId })
-        } else {
-          logger.debug('[PlayTelecom Event SIM Reassignment] Orden mixta ya reportada antes, sigue esperando revisión manual', {
-            orderId,
-          })
-        }
-        continue
+    const sourceVenueByOrderItemId = new Map<string, string>()
+    for (const candidate of candidates) {
+      if (candidate.orderItemId && candidate.sellingVenueId) {
+        sourceVenueByOrderItemId.set(candidate.orderItemId, candidate.sellingVenueId)
       }
-
-      const movement = await prisma.$transaction(async tx => {
-        // El marker y las cuatro tablas parten de la MISMA fila bloqueada. El
-        // pre-read exterior no puede autorizar ni describir una reasignación.
-        const lockedOrders = await tx.$queryRaw<Array<{ id: string; venueId: string }>>(Prisma.sql`
-          SELECT id, "venueId"
-          FROM "Order"
-          WHERE id = ${orderId}
-          FOR UPDATE
-        `)
-        const lockedOrder = lockedOrders[0]
-        if (!lockedOrder || lockedOrder.venueId === targetVenue.id) return null
-
-        const movedOrder = await tx.order.updateMany({
-          where: { id: orderId, venueId: lockedOrder.venueId },
-          data: { venueId: targetVenue.id },
-        })
-        if (movedOrder.count !== 1) {
-          throw new Error('La Order bloqueada no pudo reasignarse con su venue esperado')
-        }
-        await tx.payment.updateMany({ where: { orderId, NOT: { venueId: targetVenue.id } }, data: { venueId: targetVenue.id } })
-        await tx.saleVerification.updateMany({
-          where: { payment: { orderId }, NOT: { venueId: targetVenue.id } },
-          data: { venueId: targetVenue.id },
-        })
-        await tx.serializedItem.updateMany({ where: { orderItem: { orderId } }, data: { sellingVenueId: targetVenue.id } })
-        const reassignedAt = new Date()
-        const auditData = {
-          fromVenueId: lockedOrder.venueId,
-          toVenueId: targetVenue.id,
-          reason: 'playtelecom_evento_sim',
-          category: rule.categoryName,
-          reassignedAt: reassignedAt.toISOString(),
-        }
-        // Estas dos filas conservan la auditabilidad bidireccional histórica y
-        // además son el marker durable que una refund puede verificar sin leer B.
-        for (const venueId of [targetVenue.id, lockedOrder.venueId]) {
-          await tx.activityLog.create({
-            data: {
-              action: 'ORDER_VENUE_REASSIGNED',
-              entity: 'Order',
-              entityId: orderId,
-              venueId,
-              staffId: null,
-              data: auditData,
-              createdAt: reassignedAt,
-            },
-          })
-        }
-        return { fromVenueId: lockedOrder.venueId }
-      })
-
-      if (!movement) continue
-      reassigned++
-    } catch (err) {
-      logger.error('[PlayTelecom Event SIM Reassignment] No se pudo reasignar una orden', {
-        orderId,
-        error: err instanceof Error ? err.message : err,
-      })
     }
+    const orderItemIds = [...sourceVenueByOrderItemId.keys()]
+    if (orderItemIds.length === 0) {
+      if (isLastDiscoveryPage) break
+      continue
+    }
+
+    const orderItemsForCandidates = await prisma.orderItem.findMany({
+      where: { id: { in: orderItemIds } },
+      select: { id: true, orderId: true },
+      orderBy: { id: 'asc' },
+      take: orderItemIds.length,
+    })
+    const expectedSourcesByOrderId = new Map<string, Set<string>>()
+    for (const orderItem of orderItemsForCandidates) {
+      const expectedSourceVenueId = sourceVenueByOrderItemId.get(orderItem.id)
+      if (!expectedSourceVenueId) continue
+      const sources = expectedSourcesByOrderId.get(orderItem.orderId) ?? new Set<string>()
+      sources.add(expectedSourceVenueId)
+      expectedSourcesByOrderId.set(orderItem.orderId, sources)
+    }
+    const orderIds = [...expectedSourcesByOrderId.keys()]
+
+    for (const orderId of orderIds) {
+      try {
+        const discoveredSources = expectedSourcesByOrderId.get(orderId)
+        const expectedSourceVenueId = discoveredSources?.size === 1 ? [...discoveredSources][0] : null
+
+        const movement = await prisma.$transaction(async tx => {
+          // El marker y las cuatro tablas parten de la MISMA fila bloqueada. La
+          // autoridad descubierta afuera sólo identifica la generación candidata;
+          // aquí se vuelve a probar source/org/state y la pureza actual completa.
+          const lockedOrders = await tx.$queryRaw<
+            Array<{
+              id: string
+              venueId: string
+              updatedAt: Date
+              organizationId: string
+              state: string | null
+            }>
+          >(Prisma.sql`
+          SELECT
+            o.id,
+            o."venueId",
+            o."updatedAt",
+            v."organizationId",
+            v.state
+          FROM "Order" o
+          JOIN "Venue" v ON v.id = o."venueId"
+          WHERE o.id = ${orderId}
+          FOR UPDATE OF o
+        `)
+          const lockedOrder = lockedOrders[0]
+          const currentState = lockedOrder?.state?.trim().toLowerCase() ?? null
+          const expectedState = rule.originState.trim().toLowerCase()
+          if (
+            !lockedOrder ||
+            !expectedSourceVenueId ||
+            lockedOrder.venueId !== expectedSourceVenueId ||
+            lockedOrder.venueId === targetVenue.id ||
+            lockedOrder.organizationId !== org.id ||
+            currentState !== expectedState
+          ) {
+            return null
+          }
+
+          const currentOrderItems = await tx.orderItem.findMany({
+            where: { orderId },
+            select: {
+              serializedItem: {
+                select: {
+                  status: true,
+                  sellingVenueId: true,
+                  category: { select: { name: true } },
+                },
+              },
+            },
+            take: MAX_REASSIGNMENT_ROWS_PER_ORDER + 1,
+          })
+          if (currentOrderItems.length > MAX_REASSIGNMENT_ROWS_PER_ORDER) {
+            throw new Error(`La Order excede el máximo seguro de ${MAX_REASSIGNMENT_ROWS_PER_ORDER} items`)
+          }
+          const stillPure = isOrderPureCategoryMatch(
+            currentOrderItems.map(item => item.serializedItem?.category?.name ?? null),
+            rule.categoryName,
+          )
+          if (!stillPure) {
+            // El lock de Order serializa tanto la decisión como el dedup. Por eso dos
+            // jobs concurrentes no pueden crear dos avisos para la misma autoridad.
+            const alreadyFlagged = await tx.activityLog.findFirst({
+              where: {
+                action: 'ORDER_VENUE_REASSIGNMENT_SKIPPED_MIXED',
+                entity: 'Order',
+                entityId: orderId,
+                venueId: lockedOrder.venueId,
+              },
+              select: { id: true },
+            })
+            if (!alreadyFlagged) {
+              await tx.activityLog.create({
+                data: {
+                  action: 'ORDER_VENUE_REASSIGNMENT_SKIPPED_MIXED',
+                  entity: 'Order',
+                  entityId: orderId,
+                  venueId: lockedOrder.venueId,
+                  staffId: null,
+                  data: { reason: 'mixed_order_skipped', category: rule.categoryName },
+                },
+              })
+            }
+            return { kind: 'skippedMixed' as const, counted: !alreadyFlagged }
+          }
+          const allItemsStillEligible = currentOrderItems.every(
+            item => item.serializedItem?.status === 'SOLD' && item.serializedItem.sellingVenueId === lockedOrder.venueId,
+          )
+          if (!allItemsStillEligible) return null
+
+          // Orden global de locks: Order → todos sus Payment → dependientes.
+          // Sólo se traen ids y autoridad; cap+1 permite detectar truncamiento.
+          const lockedPayments = await tx.$queryRaw<Array<{ id: string; venueId: string }>>(Prisma.sql`
+          SELECT p.id, p."venueId"
+          FROM "Payment" p
+          WHERE p."orderId" = ${orderId}
+          ORDER BY p.id
+          LIMIT ${MAX_REASSIGNMENT_ROWS_PER_ORDER + 1}
+          FOR UPDATE OF p
+        `)
+          if (lockedPayments.length > MAX_REASSIGNMENT_ROWS_PER_ORDER) {
+            throw new Error(`La Order excede el máximo seguro de ${MAX_REASSIGNMENT_ROWS_PER_ORDER} Payments`)
+          }
+          if (lockedPayments.some(payment => payment.venueId !== lockedOrder.venueId)) {
+            throw new Error('Los Payment de la Order ya no pertenecen al venue fuente bloqueado')
+          }
+          const paymentIds = lockedPayments.map(payment => payment.id)
+
+          const lockedSaleVerifications = await tx.$queryRaw<Array<{ id: string; paymentId: string; venueId: string }>>(Prisma.sql`
+          SELECT sv.id, sv."paymentId", sv."venueId"
+          FROM "SaleVerification" sv
+          JOIN "Payment" p ON p.id = sv."paymentId"
+          WHERE p."orderId" = ${orderId}
+          ORDER BY sv.id
+          LIMIT ${MAX_REASSIGNMENT_ROWS_PER_ORDER + 1}
+          FOR UPDATE OF sv
+        `)
+          if (lockedSaleVerifications.length > MAX_REASSIGNMENT_ROWS_PER_ORDER) {
+            throw new Error(`La Order excede el máximo seguro de ${MAX_REASSIGNMENT_ROWS_PER_ORDER} SaleVerifications`)
+          }
+          const paymentIdSet = new Set(paymentIds)
+          if (
+            lockedSaleVerifications.some(
+              verification => verification.venueId !== lockedOrder.venueId || !paymentIdSet.has(verification.paymentId),
+            )
+          ) {
+            throw new Error('Las SaleVerification ya no pertenecen al Payment/venue fuente bloqueado')
+          }
+
+          // SaleVerification debe cambiar mientras su Payment todavía conserva source.
+          const saleVerificationIds = lockedSaleVerifications.map(verification => verification.id)
+          if (saleVerificationIds.length > 0) {
+            const movedSaleVerifications = await tx.saleVerification.updateMany({
+              where: {
+                id: { in: saleVerificationIds },
+                paymentId: { in: paymentIds },
+                venueId: lockedOrder.venueId,
+              },
+              data: { venueId: targetVenue.id },
+            })
+            if (movedSaleVerifications.count !== saleVerificationIds.length) {
+              throw new Error('El inventario bloqueado de SaleVerification cambió durante la reasignación')
+            }
+          }
+          if (paymentIds.length > 0) {
+            const movedPayments = await tx.payment.updateMany({
+              where: { id: { in: paymentIds }, orderId, venueId: lockedOrder.venueId },
+              // VenueTenderType is tenant-bound through the composite FK
+              // [venueId, tenderTypeId]. There is no deterministic target mapping,
+              // so detach only that live relation. Immutable tender snapshots and
+              // historical method/fundsFlow fields remain untouched.
+              data: { venueId: targetVenue.id, tenderTypeId: null },
+            })
+            if (movedPayments.count !== paymentIds.length) {
+              throw new Error('El inventario bloqueado de Payment cambió durante la reasignación')
+            }
+          }
+          const movedSerializedItems = await tx.serializedItem.updateMany({
+            where: {
+              status: 'SOLD',
+              sellingVenueId: lockedOrder.venueId,
+              orderItem: { orderId },
+              category: { name: { equals: rule.categoryName, mode: 'insensitive' } },
+            },
+            data: { sellingVenueId: targetVenue.id },
+          })
+          if (movedSerializedItems.count !== currentOrderItems.length) {
+            throw new Error('Los SerializedItem elegibles cambiaron durante la reasignación')
+          }
+          const movedOrder = await tx.order.updateMany({
+            where: { id: orderId, venueId: lockedOrder.venueId, updatedAt: lockedOrder.updatedAt },
+            data: { venueId: targetVenue.id },
+          })
+          if (movedOrder.count !== 1) {
+            throw new Error('La Order bloqueada no pudo reasignarse con su venue esperado')
+          }
+          const reassignedAt = new Date()
+          const auditData = {
+            fromVenueId: lockedOrder.venueId,
+            toVenueId: targetVenue.id,
+            sourceOrderUpdatedAt: lockedOrder.updatedAt.toISOString(),
+            reason: 'playtelecom_evento_sim',
+            category: rule.categoryName,
+            reassignedAt: reassignedAt.toISOString(),
+          }
+          // Estas dos filas conservan la auditabilidad bidireccional histórica y
+          // además son el marker durable que una refund puede verificar sin leer B.
+          for (const venueId of [targetVenue.id, lockedOrder.venueId]) {
+            await tx.activityLog.create({
+              data: {
+                action: 'ORDER_VENUE_REASSIGNED',
+                entity: 'Order',
+                entityId: orderId,
+                venueId,
+                staffId: null,
+                data: auditData,
+                createdAt: reassignedAt,
+              },
+            })
+          }
+          return { kind: 'reassigned' as const }
+        })
+
+        if (!movement) continue
+        if (movement.kind === 'skippedMixed') {
+          if (movement.counted) {
+            skippedMixed++
+            logger.warn('[PlayTelecom Event SIM Reassignment] Orden mixta detectada, se deja para revisión manual', { orderId })
+          } else {
+            logger.debug('[PlayTelecom Event SIM Reassignment] Orden mixta ya reportada antes, sigue esperando revisión manual', {
+              orderId,
+            })
+          }
+          continue
+        }
+        reassigned++
+      } catch (err) {
+        logger.error('[PlayTelecom Event SIM Reassignment] No se pudo reasignar una orden', {
+          orderId,
+          error: err instanceof Error ? err.message : err,
+        })
+      }
+    }
+    if (isLastDiscoveryPage) break
   }
 
   return { reassigned, skippedMixed }

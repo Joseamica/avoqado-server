@@ -2582,7 +2582,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             splitType: 'FULLPAYMENT',
             source: paymentSource,
             externalSource,
-            fundsFlow,
+            fundsFlow: resolvedTender ? resolvedTender.fundsFlow : fundsFlow,
             processedById: effectiveStaffId,
             shiftId: shiftClaim.shiftId,
             // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
@@ -2596,22 +2596,16 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             netAmount: amountDecimal + tipDecimal,
             // Snapshots inmutables del tender (todos resueltos por el server). Editar
             // el catálogo mañana NO reinterpreta este cobro.
-            ...(resolvedTender
-              ? {
-                  tenderTypeId: resolvedTender.tenderTypeId,
-                  tenderRevision: resolvedTender.tenderRevision,
-                  tenderLabel: resolvedTender.tenderLabel,
-                  tenderCountsAsCash: resolvedTender.tenderCountsAsCash,
-                  tenderCaptureTip: resolvedTender.tenderCaptureTip,
-                  tenderSatFormaPago: resolvedTender.tenderSatFormaPago,
-                  tenderCommissionPercent: resolvedTender.tenderCommissionPercent,
-                  tenderCommissionAmount: computeTenderCommission(
-                    resolvedTender.tenderCommissionPercent,
-                    new Prisma.Decimal(amountDecimal),
-                  ),
-                  fundsFlow: resolvedTender.fundsFlow,
-                }
-              : {}),
+            tenderTypeId: resolvedTender?.tenderTypeId,
+            tenderRevision: resolvedTender?.tenderRevision,
+            tenderLabel: resolvedTender?.tenderLabel,
+            tenderCountsAsCash: resolvedTender?.tenderCountsAsCash,
+            tenderCaptureTip: resolvedTender?.tenderCaptureTip,
+            tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
+            tenderCommissionPercent: resolvedTender?.tenderCommissionPercent,
+            tenderCommissionAmount: resolvedTender
+              ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
+              : undefined,
           },
         })
 

@@ -987,17 +987,26 @@ async function completeAndAttributeB4BitPaymentInTx(
   processorPatch: Prisma.InputJsonObject,
   reconciliationEnabled: boolean,
 ): Promise<{ transitioned: boolean; ignoredAsOutOfOrder: boolean; preservedStatus?: string }> {
-  if (payment.orderId) {
-    await lockExistingOrderForPayment(tx, { venueId: payment.venueId, orderId: payment.orderId })
+  // Task 5t: the release guard reasons over immutable primitives, never over a
+  // mutable Prisma result that crossed the helper boundary.
+  const paymentId = payment.id
+  const paymentVenueId = payment.venueId
+  const paymentOrderId = payment.orderId
+  const paymentAmount = payment.amount
+  const paymentTipAmount = payment.tipAmount
+  const paymentProcessedById = payment.processedById
+
+  if (paymentOrderId) {
+    await lockExistingOrderForPayment(tx, { venueId: paymentVenueId, orderId: paymentOrderId })
   }
-  await lockB4BitPaymentRow(tx, payment.id, payment.venueId)
+  await lockB4BitPaymentRow(tx, paymentId, paymentVenueId)
   const freshPayment = await tx.payment.findUnique({
-    where: { id: payment.id, venueId: payment.venueId },
+    where: { id: paymentId, venueId: paymentVenueId },
     select: { status: true, processorData: true },
   })
 
   if (!freshPayment) {
-    throw new Error(`B4Bit payment ${payment.id} no longer exists for venue ${payment.venueId}`)
+    throw new Error(`B4Bit payment ${paymentId} no longer exists for venue ${paymentVenueId}`)
   }
 
   const merged = mergeB4BitProcessorData(freshPayment.processorData, processorPatch)
@@ -1007,7 +1016,7 @@ async function completeAndAttributeB4BitPaymentInTx(
     // A redelivery may refresh provider metadata, but it must not mention
     // `shiftId`: the winner's final attribution is immutable.
     await tx.payment.update({
-      where: { id: payment.id, venueId: payment.venueId },
+      where: { id: paymentId, venueId: paymentVenueId },
       data: { status: 'COMPLETED', processorData: merged.processorData },
     })
     return { transitioned: false, ignoredAsOutOfOrder: false }
@@ -1017,16 +1026,16 @@ async function completeAndAttributeB4BitPaymentInTx(
     return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: freshPayment.status }
   }
 
-  const priorCompletedPaymentCount = payment.orderId
+  const priorCompletedPaymentCount = paymentOrderId
     ? typeof tx.payment.count === 'function'
       ? ((await tx.payment.count({
-          where: { orderId: payment.orderId, venueId: payment.venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
+          where: { orderId: paymentOrderId, venueId: paymentVenueId, status: 'COMPLETED', type: { not: 'REFUND' } },
         })) ?? 0)
       : 0
     : 0
 
   const transition = await tx.payment.updateMany({
-    where: { id: payment.id, venueId: payment.venueId, status: 'PENDING' },
+    where: { id: paymentId, venueId: paymentVenueId, status: 'PENDING' },
     data: {
       status: 'COMPLETED',
       // The initiation-time value is provisional. Clearing it in the CAS makes
@@ -1040,10 +1049,10 @@ async function completeAndAttributeB4BitPaymentInTx(
     // Another confirmation won after our read. Re-read only to preserve its
     // metadata and final shift; never claim or increment a shift in this branch.
     const winner = await tx.payment.findUnique({
-      where: { id: payment.id, venueId: payment.venueId },
+      where: { id: paymentId, venueId: paymentVenueId },
       select: { status: true, processorData: true },
     })
-    if (!winner) throw new Error(`B4Bit payment ${payment.id} no longer exists for venue ${payment.venueId}`)
+    if (!winner) throw new Error(`B4Bit payment ${paymentId} no longer exists for venue ${paymentVenueId}`)
     if (winner.status !== 'COMPLETED') {
       return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: winner.status }
     }
@@ -1052,7 +1061,7 @@ async function completeAndAttributeB4BitPaymentInTx(
     if (winnerMerge.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true }
 
     await tx.payment.update({
-      where: { id: payment.id, venueId: payment.venueId },
+      where: { id: paymentId, venueId: paymentVenueId },
       data: {
         status: 'COMPLETED',
         processorData: winnerMerge.processorData,
@@ -1063,27 +1072,27 @@ async function completeAndAttributeB4BitPaymentInTx(
 
   // Resolve only after winning the payment transition: a redelivery/concurrent
   // loser never reaches the common claim or its atomic anomaly row.
-  const amountPesos = new Prisma.Decimal(payment.amount)
-  const tipPesos = new Prisma.Decimal(payment.tipAmount)
+  const amountPesos = new Prisma.Decimal(paymentAmount)
+  const tipPesos = new Prisma.Decimal(paymentTipAmount)
   const shiftClaim = await claimShiftForCapturedPayment(tx, {
-    venueId: payment.venueId,
+    venueId: paymentVenueId,
     amountPesos,
     tipPesos,
-    incrementTotalOrders: Boolean(payment.orderId) && priorCompletedPaymentCount === 0,
+    incrementTotalOrders: Boolean(paymentOrderId) && priorCompletedPaymentCount === 0,
   })
 
   if (shiftClaim.shiftId) {
     await tx.payment.update({
-      where: { id: payment.id, venueId: payment.venueId },
+      where: { id: paymentId, venueId: paymentVenueId },
       data: { shiftId: shiftClaim.shiftId },
     })
   } else {
     await recordPendingPaymentShiftReconciliation(tx, {
       claim: shiftClaim,
-      venueId: payment.venueId,
-      paymentId: payment.id,
-      orderId: payment.orderId,
-      staffId: payment.processedById,
+      venueId: paymentVenueId,
+      paymentId,
+      orderId: paymentOrderId,
+      staffId: paymentProcessedById,
       channel: 'b4bitWebhook',
       amountPesos,
       tipPesos,

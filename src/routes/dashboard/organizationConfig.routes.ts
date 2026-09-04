@@ -531,7 +531,16 @@ router.get('/team', orgOwnerAccess, async (req: Request, res: Response, next: Ne
       // Free-text identifier the org sets per staff (used by white-label orgs
       // like PlayTelecom that assign internal employee numbers). Null when unset.
       employeeCode: so.staff.employeeCode,
-      status: 'ACTIVE',
+      // 🔴 Sale de `Staff.active`, NUNCA de una cadena fija. El login de la TPV exige
+      // membresía activa + PIN + CUENTA activa, y devuelve el mismo «Pin Incorrecto»
+      // para las tres (a propósito: si distinguiera, se podrían enumerar PINes). Esta
+      // pantalla es el único sitio donde el operador puede ver cuál de las tres falla;
+      // mientras dijo 'ACTIVE' a secas, mandó a cambiar el PIN dos días seguidos contra
+      // la única condición que ya estaba bien (Asana 1218125347443126).
+      status: so.staff.active ? 'ACTIVE' : 'INACTIVE',
+      // Explícito además del string, para que la UI no tenga que comparar textos
+      // (`.claude/rules` del workspace: un texto de UI usado como llave se rompe al traducirlo).
+      accountActive: so.staff.active,
       orgRole: so.role,
       venues: so.staff.venues.map((v: any) => ({
         id: v.venue.id,
@@ -649,7 +658,7 @@ router.patch('/team/:staffId/status', orgOwnerAccess, async (req: Request, res: 
     const orgVenueIds = orgVenues.map(v => v.id)
 
     // Update active status on ALL StaffVenue records
-    await prisma.staffVenue.updateMany({
+    const result = await prisma.staffVenue.updateMany({
       where: {
         staffId,
         venueId: { in: orgVenueIds },
@@ -657,16 +666,44 @@ router.patch('/team/:staffId/status', orgOwnerAccess, async (req: Request, res: 
       data: { active },
     })
 
+    // 🔴 Este botón gobierna las MEMBRESÍAS de esta organización, nunca `Staff.active`.
+    // Y no es un olvido: la misma persona puede trabajar en otras organizaciones, así que
+    // apagar su cuenta desde aquí le tumbaría el acceso en negocios que no son de este
+    // dueño. Lo que sí se puede —y faltaba— es DECIR que encender la membresía no alcanza
+    // cuando la cuenta está desactivada a nivel plataforma: mientras callaba, un operador
+    // apretó este botón creyendo que resolvía un «Pin Incorrecto» que sólo soporte podía
+    // resolver (Asana 1218125347443126).
+    let accountActive: boolean | null = null
+    let warning: string | null = null
+    if (active) {
+      const cuenta = await prisma.staff.findUnique({ where: { id: staffId }, select: { active: true } })
+      accountActive = cuenta?.active ?? null
+      if (accountActive === false) {
+        warning =
+          'Las sucursales quedaron activas, pero la cuenta de este usuario está desactivada a nivel plataforma y no podrá iniciar sesión ' +
+          '(la terminal dirá «Pin Incorrecto» aunque el PIN sea correcto). Reactivar la cuenta lo hace soporte de Avoqado.'
+      }
+    }
+
     logAction({
       staffId: authContext?.userId || null,
       venueId: null,
       action: active ? 'STAFF_ACTIVATED' : 'STAFF_DEACTIVATED',
       entity: 'Staff',
       entityId: staffId,
-      data: { orgId, active },
+      data: { orgId, active, venuesUpdated: result.count, accountActive },
     })
 
-    res.json({ success: true, data: { message: `Staff ${active ? 'activated' : 'deactivated'} across all venues`, active } })
+    res.json({
+      success: true,
+      data: {
+        message: `Staff ${active ? 'activated' : 'deactivated'} across all venues`,
+        active,
+        venuesUpdated: result.count,
+        accountActive,
+        warning,
+      },
+    })
   } catch (error) {
     next(error)
   }
@@ -755,15 +792,24 @@ router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: 
     const existingAssignment = currentAssignments.find(a => a.active)
     const defaultRole = existingAssignment?.role || 'VIEWER'
 
-    // Add new venue assignments
+    // Add new venue assignments.
+    // 🔴 Una membresía NUEVA nace sin PIN, y una que se había quitado tampoco lo recupera:
+    // al desasignar se hace `pin: null` para liberar el `@@unique([venueId, pin])`, y este
+    // upsert no lo repone (no puede: no sabe cuál era, y adivinar uno sería peor). El PIN
+    // no se inventa aquí — se REPORTA, para que la pantalla lo pida en el momento en vez de
+    // dejar una membresía muda con la que nadie puede entrar a la terminal.
+    const addedWithoutPin: Array<{ venueId: string; venueName: string }> = []
     for (const addVenueId of toAdd) {
-      await prisma.staffVenue.upsert({
+      const fila = await prisma.staffVenue.upsert({
         where: { staffId_venueId: { staffId, venueId: addVenueId } },
         update: { active: true, role: defaultRole },
         create: { staffId, venueId: addVenueId, role: defaultRole, active: true },
       })
 
       const venueName = orgVenues.find(v => v.id === addVenueId)?.name || addVenueId
+      if (!fila?.pin) {
+        addedWithoutPin.push({ venueId: addVenueId, venueName })
+      }
       logAction({
         staffId: authContext?.userId || null,
         venueId: addVenueId,
@@ -795,7 +841,15 @@ router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: 
 
     res.json({
       success: true,
-      data: { added: toAdd.length, removed: toRemove.length },
+      data: {
+        added: toAdd.length,
+        removed: toRemove.length,
+        addedWithoutPin,
+        warning:
+          addedWithoutPin.length > 0
+            ? `Falta ponerle un PIN en: ${addedWithoutPin.map(v => v.venueName).join(', ')}. Sin PIN no podrá iniciar sesión en la terminal de esa sucursal.`
+            : null,
+      },
     })
   } catch (error) {
     next(error)
@@ -853,8 +907,11 @@ router.patch('/team/:staffId/pin', orgOwnerAccess, async (req: Request, res: Res
       }
     }
 
-    // Update PIN on ALL StaffVenue records for this staff in this org
-    await prisma.staffVenue.updateMany({
+    // Update PIN on ALL StaffVenue records for this staff in this org.
+    // 🔴 Sólo toca las filas que YA existen: si la persona todavía no está asignada a la
+    // sucursal donde va a usar la terminal, esto escribe en CERO filas. El orden correcto
+    // es asignar la sucursal primero y el PIN después.
+    const result = await prisma.staffVenue.updateMany({
       where: {
         staffId,
         venueId: { in: orgVenueIds },
@@ -862,16 +919,31 @@ router.patch('/team/:staffId/pin', orgOwnerAccess, async (req: Request, res: Res
       data: { pin },
     })
 
+    // 🔴 Un 200 que no dice CUÁNTAS sucursales tocó es un 200 mudo: cero se ve igual que
+    // cincuenta y cinco. Ese silencio es lo que dejó a un operador cambiando el PIN dos
+    // veces sin que llegara a la tienda donde estaba la terminal (Asana 1218125347443126).
+    const warning =
+      result.count === 0
+        ? 'El PIN no se aplicó en ninguna sucursal: este usuario todavía no está asignado a ninguna. Asígnale primero su sucursal y vuelve a poner el PIN.'
+        : null
+
     logAction({
       staffId: authContext?.userId || null,
       venueId: null,
       action: 'PIN_UPDATED',
       entity: 'Staff',
       entityId: staffId,
-      data: { orgId },
+      data: { orgId, venuesUpdated: result.count },
     })
 
-    res.json({ success: true, data: { message: 'PIN updated across all venues' } })
+    res.json({
+      success: true,
+      data: {
+        message: result.count === 0 ? 'PIN not applied: no venue assignments' : 'PIN updated across all venues',
+        venuesUpdated: result.count,
+        warning,
+      },
+    })
   } catch (error) {
     next(error)
   }

@@ -17,6 +17,7 @@ jest.mock('@/utils/prismaClient', () => ({
     payment: { findFirst: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
     saleVerification: { findFirst: jest.fn(), update: jest.fn() },
+    $transaction: jest.fn(),
   },
 }))
 
@@ -34,6 +35,7 @@ jest.mock('@/config/logger', () => ({
 const mockedPaymentFindFirst = prisma.payment.findFirst as jest.Mock
 const mockedStaffVenueFindFirst = prisma.staffVenue.findFirst as jest.Mock
 const mockedSvUpdate = prisma.saleVerification.update as jest.Mock
+const mockedTransaction = prisma.$transaction as jest.Mock
 const mockedIsModuleEnabled = moduleService.isModuleEnabled as jest.Mock
 
 const VENUE_ID = 'venue-1'
@@ -46,12 +48,35 @@ beforeEach(() => {
   mockedIsModuleEnabled.mockResolvedValue(true) // serialized inventory → back-office review
 })
 
+function installAuthorityTransaction(existing: Record<string, unknown>) {
+  const queryRaw = jest
+    .fn()
+    .mockResolvedValueOnce([{ id: PAYMENT_ID, venueId: VENUE_ID }])
+    .mockResolvedValueOnce([existing])
+  mockedTransaction.mockImplementation(async callback =>
+    callback({
+      $queryRaw: queryRaw,
+      saleVerification: { update: mockedSvUpdate },
+    }),
+  )
+}
+
 it('blocks re-upload on a REJECTED sale (terminal) and never writes', async () => {
+  const existing = {
+    id: 'ver-1',
+    paymentId: PAYMENT_ID,
+    venueId: VENUE_ID,
+    status: 'REJECTED',
+    photos: [],
+    isPortabilidad: false,
+    reviewedAt: new Date(),
+  }
   mockedPaymentFindFirst.mockResolvedValue({
     id: PAYMENT_ID,
     venueId: VENUE_ID,
-    saleVerification: { id: 'ver-1', venueId: VENUE_ID, status: 'REJECTED', photos: [], isPortabilidad: false, reviewedAt: new Date() },
+    saleVerification: existing,
   })
+  installAuthorityTransaction(existing)
 
   await expect(createOrUpdateProofOfSale(VENUE_ID, PAYMENT_ID, ['https://x/photo.jpg'], STAFF_ID)).rejects.toMatchObject({
     message: expect.stringMatching(/rechazada y no puede modificarse/i),
@@ -61,11 +86,21 @@ it('blocks re-upload on a REJECTED sale (terminal) and never writes', async () =
 })
 
 it('still allows re-upload on a FAILED sale ("Revisar" is correctable)', async () => {
+  const existing = {
+    id: 'ver-1',
+    paymentId: PAYMENT_ID,
+    venueId: VENUE_ID,
+    status: 'FAILED',
+    photos: [],
+    isPortabilidad: false,
+    reviewedAt: new Date(),
+  }
   mockedPaymentFindFirst.mockResolvedValue({
     id: PAYMENT_ID,
     venueId: VENUE_ID,
-    saleVerification: { id: 'ver-1', venueId: VENUE_ID, status: 'FAILED', photos: [], isPortabilidad: false, reviewedAt: new Date() },
+    saleVerification: existing,
   })
+  installAuthorityTransaction(existing)
   mockedSvUpdate.mockResolvedValue({
     id: 'ver-1',
     venueId: VENUE_ID,

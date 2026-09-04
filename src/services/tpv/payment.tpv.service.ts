@@ -3495,19 +3495,17 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
               ? null
               : paymentData.externalSource?.trim()?.slice(0, 50) || null,
           // Snapshots inmutables del tender, todos resueltos por el server.
-          ...(resolvedTender
-            ? {
-                tenderTypeId: resolvedTender.tenderTypeId,
-                tenderRevision: resolvedTender.tenderRevision,
-                tenderLabel: resolvedTender.tenderLabel,
-                tenderCountsAsCash: resolvedTender.tenderCountsAsCash,
-                tenderCaptureTip: resolvedTender.tenderCaptureTip,
-                tenderSatFormaPago: resolvedTender.tenderSatFormaPago,
-                tenderCommissionPercent: resolvedTender.tenderCommissionPercent,
-                tenderCommissionAmount: computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(totalAmount)),
-                fundsFlow: resolvedTender.fundsFlow,
-              }
-            : {}),
+          tenderTypeId: resolvedTender?.tenderTypeId,
+          tenderRevision: resolvedTender?.tenderRevision,
+          tenderLabel: resolvedTender?.tenderLabel,
+          tenderCountsAsCash: resolvedTender?.tenderCountsAsCash,
+          tenderCaptureTip: resolvedTender?.tenderCaptureTip,
+          tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
+          tenderCommissionPercent: resolvedTender?.tenderCommissionPercent,
+          tenderCommissionAmount: resolvedTender
+            ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(totalAmount))
+            : undefined,
+          fundsFlow: resolvedTender?.fundsFlow,
           status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
           splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value

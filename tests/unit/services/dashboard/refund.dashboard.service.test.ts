@@ -11,10 +11,15 @@ jest.mock('@/services/dashboard/rawMaterial.service', () => ({
   adjustStock: jest.fn(),
 }))
 
+const ORDER_GENERATION = new Date('2026-09-04T09:00:00.000Z')
+
 describe('refund.dashboard.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.payment.findFirst.mockResolvedValue({ orderId: 'order-1' } as any)
+    prismaMock.payment.findFirst.mockResolvedValue({
+      orderId: 'order-1',
+      order: { updatedAt: ORDER_GENERATION },
+    } as any)
     prismaMock.$transaction.mockImplementation(async (callback: any) => {
       // El lock de Order comparte `$queryRaw` con las dos lecturas Payment del servicio.
       // Interceptarlo aquí mantiene las colas `.mockResolvedValueOnce` enfocadas en Payment.
@@ -321,7 +326,7 @@ describe('refund.dashboard.service', () => {
 
     expect(prismaMock.payment.findFirst).toHaveBeenCalledWith({
       where: { id: 'payment-original', venueId: 'venue-1' },
-      select: { orderId: true },
+      select: { orderId: true, order: { select: { updatedAt: true } } },
     })
     const lockedPaymentQuery = (prismaMock.$queryRaw as jest.Mock).mock.calls[0][0]
     expect(String(lockedPaymentQuery.sql).replace(/\s+/g, ' ')).toMatch(/WHERE id = .*"venueId" = .*"orderId" =/)
@@ -340,7 +345,12 @@ describe('refund.dashboard.service', () => {
 
   it('sólo emite REFUND_AUTHORITY_CHANGED cuando el marker atómico confirma la reasignación posterior', async () => {
     prismaMock.$queryRaw.mockResolvedValueOnce([])
-    ;(prismaMock.activityLog.findFirst as jest.Mock).mockResolvedValue({ id: 'marker-order-1' })
+    ;(prismaMock.activityLog.findFirst as jest.Mock).mockImplementation(async ({ where }: any) => {
+      // Marker creado pre-commit antes de iniciar la refund: el filtro por reloj
+      // lo perdería aunque el commit sea lo que desbloqueó el miss del lock.
+      if (where.createdAt) return null
+      return where.data?.equals === ORDER_GENERATION.toISOString() ? { id: 'marker-order-1' } : null
+    })
 
     await expect(
       issueRefund({
@@ -358,8 +368,7 @@ describe('refund.dashboard.service', () => {
         entity: 'Order',
         entityId: 'order-1',
         venueId: 'venue-1',
-        createdAt: { gte: expect.any(Date) },
-        data: { path: ['fromVenueId'], equals: 'venue-1' },
+        data: { path: ['sourceOrderUpdatedAt'], equals: ORDER_GENERATION.toISOString() },
       },
       select: { id: true },
     })
@@ -382,6 +391,26 @@ describe('refund.dashboard.service', () => {
     ).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_AUTHORITY_UNAVAILABLE' })
 
     expect(prismaMock.activityLog.findFirst).toHaveBeenCalledTimes(1)
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('un marker de una generación anterior no cambia un conflicto genérico a reasignación', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([])
+    ;(prismaMock.activityLog.findFirst as jest.Mock).mockImplementation(async ({ where }: any) => {
+      if (where.data?.path?.[0] === 'fromVenueId') return { id: 'marker-viejo' }
+      return where.data?.equals === '2026-09-03T08:00:00.000Z' ? { id: 'marker-viejo' } : null
+    })
+
+    await expect(
+      issueRefund({
+        venueId: 'venue-1',
+        paymentId: 'payment-original',
+        amount: 500,
+        reason: 'ACCIDENTAL_CHARGE',
+        staffId: 'staff-autenticado',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_AUTHORITY_UNAVAILABLE' })
+
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
 

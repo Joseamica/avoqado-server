@@ -59,6 +59,7 @@ import { postCashRefundToDrawer } from '@/services/shared/cashDrawerPosting'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'venue-1'
+const ORDER_GENERATION = new Date('2026-09-04T09:00:00.000Z')
 
 /** El pago original que se va a reembolsar, y todos los mocks que el camino necesita. */
 function armar() {
@@ -85,6 +86,9 @@ function armar() {
     tenderSatFormaPago: null,
     processedById: 'staff-1',
     processor: 'blumon',
+    cardBrand: null,
+    maskedPan: null,
+    entryMode: null,
   }
   ;(prismaMock as any).payment = {
     findUnique: jest.fn().mockResolvedValue(original),
@@ -146,7 +150,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
 
   it('si la reasignación gana antes del lock aborta sin refund/Shift/audit monetario y deja señal para el venue solicitante', async () => {
     const original = armar()
-    Object.assign(original, { orderId: 'order-a', order: null })
+    Object.assign(original, { orderId: 'order-a', order: { id: 'order-a', updatedAt: ORDER_GENERATION } })
 
     const paymentCreate = jest.fn().mockImplementation(async ({ data }: any) => ({ id: 'refund-cross-tenant', ...data }))
     const paymentUpdate = jest.fn().mockResolvedValue(original)
@@ -164,7 +168,20 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
           orderId: 'order-b',
         },
       ])
-    ;(prismaMock as any).activityLog.findFirst.mockResolvedValue({ id: 'marker-a-b' })
+    const markerCommittedAfterRefundWaited = {
+      id: 'marker-a-b',
+      // El job construyó el marker T1 antes de que la refund iniciara T2, pero
+      // seguía sin commit: MVCC permitió leer la generación vieja de A.
+      createdAt: new Date('2026-09-04T09:59:59.000Z'),
+      sourceOrderUpdatedAt: ORDER_GENERATION.toISOString(),
+    }
+    ;(prismaMock as any).activityLog.findFirst.mockImplementation(async ({ where }: any) => {
+      // La autoridad vieja por reloj excluye legalmente el marker T1 < T2.
+      if (where.createdAt) return null
+      return where.data?.path?.[0] === 'sourceOrderUpdatedAt' && where.data.equals === markerCommittedAfterRefundWaited.sourceOrderUpdatedAt
+        ? { id: markerCommittedAfterRefundWaited.id }
+        : null
+    })
     ;(prismaMock as any).$transaction.mockImplementationOnce(async (callback: any) =>
       callback({
         ...(prismaMock as any),
@@ -197,8 +214,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
         entity: 'Order',
         entityId: 'order-a',
         venueId: VENUE,
-        createdAt: { gte: expect.any(Date) },
-        data: { path: ['fromVenueId'], equals: VENUE },
+        data: { path: ['sourceOrderUpdatedAt'], equals: ORDER_GENERATION.toISOString() },
       },
       select: { id: true },
     })
@@ -225,7 +241,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     ['el Payment cambió de relación', [[{ id: 'order-a' }], []]],
   ])('%s: devuelve conflicto genérico y no fabrica una señal de reasignación', async (_case, rawResults) => {
     const original = armar()
-    Object.assign(original, { orderId: 'order-a', order: null })
+    Object.assign(original, { orderId: 'order-a', order: { id: 'order-a', updatedAt: ORDER_GENERATION } })
     const queryRaw = jest.fn()
     for (const rows of rawResults) queryRaw.mockResolvedValueOnce(rows)
     ;(prismaMock as any).$transaction.mockImplementationOnce(async (callback: any) =>
@@ -246,6 +262,30 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     })
 
     expect((prismaMock as any).activityLog.findFirst).toHaveBeenCalledTimes(1)
+    expect((prismaMock as any).activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('un marker anterior de otra generación de la misma Order no prueba la reasignación actual', async () => {
+    const original = armar()
+    Object.assign(original, { orderId: 'order-a', order: { id: 'order-a', updatedAt: ORDER_GENERATION } })
+    ;(prismaMock as any).$transaction.mockImplementationOnce(async (callback: any) =>
+      callback({
+        ...(prismaMock as any),
+        $queryRaw: jest.fn().mockResolvedValueOnce([]),
+        payment: { findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
+      }),
+    )
+    ;(prismaMock as any).activityLog.findFirst.mockImplementation(async ({ where }: any) => {
+      // El filtro viejo por fromVenue+reloj tomaría este marker no relacionado.
+      if (where.data?.path?.[0] === 'fromVenueId') return { id: 'marker-de-generacion-anterior' }
+      return where.data?.equals === '2026-09-03T08:00:00.000Z' ? { id: 'marker-de-generacion-anterior' } : null
+    })
+
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-autenticado')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'REFUND_AUTHORITY_UNAVAILABLE',
+    })
+
     expect((prismaMock as any).activityLog.create).not.toHaveBeenCalled()
   })
 
@@ -272,12 +312,21 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
       tenderSatFormaPago: '04',
       processedById: 'staff-original-locked',
       processor: 'angelpay',
+      cardBrand: null,
+      maskedPan: null,
+      entryMode: null,
     }
     ;(prismaMock as any).$queryRaw.mockResolvedValue([locked])
 
     await refundService.recordRefund(
       VENUE,
-      cuerpo({ merchantAccountId: 'merchant-hostil-de-otro-tenant', tpvId: 'terminal-hostil' }) as never,
+      cuerpo({
+        merchantAccountId: 'merchant-hostil-de-otro-tenant',
+        tpvId: 'terminal-hostil',
+        cardBrand: 'VISA',
+        maskedPan: '9999',
+        entryMode: 'CONTACTLESS',
+      }) as never,
       'staff-autenticado',
     )
 
@@ -307,6 +356,9 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
       tenderCountsAsCash: false,
       tenderCaptureTip: true,
       tenderSatFormaPago: '04',
+      cardBrand: null,
+      maskedPan: null,
+      entryMode: null,
     })
     expect(postCashRefundToDrawer).toHaveBeenCalledWith(
       expect.objectContaining({

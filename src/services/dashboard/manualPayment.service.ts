@@ -380,7 +380,7 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
           // ya lo tiene el negocio o se lo deposita el otro banco.
           // Efectivo capturado a mano sí entra al cajón; el resto es registro externo.
           fundsFlow: input.method === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED,
-          status: TransactionStatus.COMPLETED,
+          status: 'COMPLETED',
           processedById: staffId,
           // Fee fields are required on Payment model — manual payments have no processor fees.
           feePercentage: new Prisma.Decimal(0),

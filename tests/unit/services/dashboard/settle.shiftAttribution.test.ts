@@ -129,7 +129,7 @@ describe('settleOrder — turno y señal atómica', () => {
 
     await settleOrder(VENUE, 'order-1', undefined, ACTOR)
 
-    expect(prismaMock.payment.create.mock.calls[0][0].data).not.toHaveProperty('shiftId')
+    expect(prismaMock.payment.create.mock.calls[0][0].data.shiftId).toBeUndefined()
     expect(prismaMock.activityLog.create.mock.calls[0][0].data.data).toMatchObject({
       reason: 'SHIFT_NOT_OPEN',
       candidateShiftId: 'shift-closing',
@@ -144,7 +144,7 @@ describe('settleOrder — turno y señal atómica', () => {
 
     await settleOrder(VENUE, 'order-1', undefined, ACTOR)
 
-    expect(prismaMock.payment.create.mock.calls[0][0].data).not.toHaveProperty('shiftId')
+    expect(prismaMock.payment.create.mock.calls[0][0].data.shiftId).toBeUndefined()
     expect(prismaMock.activityLog.create.mock.calls[0][0].data.data).toMatchObject({
       reason: 'CLAIM_LOST',
       candidateShiftId: 'shift-race',

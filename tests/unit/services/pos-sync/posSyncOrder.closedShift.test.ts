@@ -147,7 +147,7 @@ it('un evento tardío crea Order/Payment sin turno y nunca intenta recrear el Sh
     data: expect.any(Object),
   })
   expect(tx.order.upsert.mock.calls[0][0].create).not.toHaveProperty('shift')
-  expect(tx.payment.create.mock.calls[0][0].data).not.toHaveProperty('shift')
+  expect(tx.payment.create.mock.calls[0][0].data.shift).toBeUndefined()
   expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
   expect(tx.activityLog.create.mock.calls[0][0].data.data).toMatchObject({
     reason: 'SHIFT_NOT_OPEN',
@@ -167,7 +167,7 @@ it('una Order existente conserva su liga durable y el Payment tardío queda sin 
 
   expect(m.shift.create).not.toHaveBeenCalled()
   expect(tx.order.upsert.mock.calls[0][0].update).not.toHaveProperty('shift')
-  expect(tx.payment.create.mock.calls[0][0].data).not.toHaveProperty('shift')
+  expect(tx.payment.create.mock.calls[0][0].data.shift).toBeUndefined()
 })
 
 it('null→P2002 compuesto→ganador CLOSED conserva la venta tardía sin turno y no cae a DLQ', async () => {
@@ -181,5 +181,5 @@ it('null→P2002 compuesto→ganador CLOSED conserva la venta tardía sin turno 
 
   expect(m.shift.create).toHaveBeenCalledTimes(1)
   expect(tx.order.upsert.mock.calls[0][0].create).not.toHaveProperty('shift')
-  expect(tx.payment.create.mock.calls[0][0].data).not.toHaveProperty('shift')
+  expect(tx.payment.create.mock.calls[0][0].data.shift).toBeUndefined()
 })
