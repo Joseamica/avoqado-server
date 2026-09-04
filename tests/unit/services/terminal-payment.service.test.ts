@@ -107,8 +107,8 @@ beforeEach(() => {
 describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () => {
   it('rejects a second concurrent charge (P2002 on the slot index) with a busy error naming the blocker', async () => {
     tpr().create.mockRejectedValueOnce(P2002) // slot already held
-    tpr().findFirst
-      .mockResolvedValueOnce(null) // my requestId not in table → slot conflict
+    tpr()
+      .findFirst.mockResolvedValueOnce(null) // my requestId not in table → slot conflict
       .mockResolvedValueOnce({
         requestId: 'REQ-A',
         amountCents: 35000,
@@ -243,8 +243,8 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
   })
 
   it('si la TPV nueva no confirma persistencia, falla sin dejar el cobro activo', async () => {
-    directEmit.mockImplementationOnce(
-      (_event: string, _payload: unknown, callback: (error: Error) => void) => callback(new Error('operation has timed out')),
+    directEmit.mockImplementationOnce((_event: string, _payload: unknown, callback: (error: Error) => void) =>
+      callback(new Error('operation has timed out')),
     )
 
     await expect(
@@ -269,15 +269,10 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
       lastHeartbeat: new Date(),
     })
 
-    const pending = terminalPaymentService.sendPaymentToTerminal(
-      baseRequest({ terminalId: 'T-LEGACY', requestId: 'REQ-LEGACY' }),
-    )
+    const pending = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-LEGACY', requestId: 'REQ-LEGACY' }))
     await flush()
 
-    expect(directEmit).toHaveBeenCalledWith(
-      'terminal:payment_request',
-      expect.objectContaining({ requestId: 'REQ-LEGACY' }),
-    )
+    expect(directEmit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId: 'REQ-LEGACY' }))
     expect(directEmit).toHaveBeenCalledTimes(1)
 
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-LEGACY', status: 'cancelled' })
@@ -354,15 +349,13 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
   it('rollback flag OFF: a busy-slot INSERT is swallowed and the charge proceeds (old behavior)', async () => {
     process.env.TERMINAL_PAYMENT_LOCK_ENABLED = 'false'
     tpr().create.mockRejectedValueOnce(P2002)
-    tpr().findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        requestId: 'REQ-A',
-        amountCents: 10000,
-        senderDevice: null,
-        createdAt: new Date(),
-        status: 'PENDING',
-      })
+    tpr().findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      requestId: 'REQ-A',
+      amountCents: 10000,
+      senderDevice: null,
+      createdAt: new Date(),
+      status: 'PENDING',
+    })
 
     const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-FLAG', requestId: 'REQ-B' }))
     await flush()

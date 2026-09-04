@@ -126,6 +126,13 @@ export interface ParejaBloqueada {
   motivo: MotivoNoReparable
 }
 
+/** Resultado del barrido de parejas a medias, separadas por reparabilidad. */
+export interface ParejasAMedias {
+  escaneadas: number
+  parejas: ReparacionDelCierre[]
+  bloqueadas: ParejaBloqueada[]
+}
+
 /**
  * ¿Esta pareja quedó a medias, y con qué números se cierra la mitad que falta? PURA: sin base y sin
  * reloj — el instante sale de lo que la primera mitad firmó.

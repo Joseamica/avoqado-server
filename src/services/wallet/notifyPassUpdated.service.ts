@@ -161,7 +161,16 @@ export async function notifyCustomerPassUpdated(venueId: string, customerId: str
     // en silencio, y el iPhone dejaba de recibir sellos sin que nada fallara.
     const passes = await prisma.walletPass.findMany({
       where: { venueId, customerId, active: true },
-      select: { id: true, platform: true, venueId: true, customerId: true, serialNumber: true, qrToken: true, revision: true, googleObjectId: true },
+      select: {
+        id: true,
+        platform: true,
+        venueId: true,
+        customerId: true,
+        serialNumber: true,
+        qrToken: true,
+        revision: true,
+        googleObjectId: true,
+      },
     })
     if (passes.length === 0) return { notified: 0 }
 

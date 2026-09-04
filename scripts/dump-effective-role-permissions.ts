@@ -43,9 +43,8 @@ import { readFileSync } from 'fs'
 const escrituraReal = process.stdout.write.bind(process.stdout)
 process.stdout.write = ((chunk: any, ...resto: any[]) => (process.stderr.write as any)(chunk, ...resto)) as any
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { StaffRole } = require('@prisma/client')
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+
 const { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } = require('../src/lib/permissions')
 
 process.stdout.write = escrituraReal
@@ -69,7 +68,7 @@ for (const role of Object.values(StaffRole) as any[]) {
   const declared = [...(DEFAULT_PERMISSIONS[role] ?? [])].sort()
   const effective = getEffectiveRolePermissions(role, null).slice().sort()
   const declaredSet = new Set(declared)
-  roles[role] = { declared, effective, implicit: effective.filter(p => !declaredSet.has(p)) }
+  roles[role] = { declared, effective, implicit: effective.filter((p: string) => !declaredSet.has(p)) }
 }
 
 // 🔴 La huella es del CONTENIDO, nunca del commit de git. Un hash de HEAD marca

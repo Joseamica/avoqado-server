@@ -80,7 +80,16 @@ describe('un despliegue incompleto no puede apagar los sellos en silencio', () =
 
   it('el camino feliz sigue sin marcar fallo', async () => {
     prismaMock.walletPass.findMany.mockResolvedValue([
-      { id: 'wp-a', platform: 'APPLE', serialNumber: 'AVQ-A', qrToken: 'a'.repeat(48), revision: 1, venueId: 'v1', customerId: 'c1', googleObjectId: null },
+      {
+        id: 'wp-a',
+        platform: 'APPLE',
+        serialNumber: 'AVQ-A',
+        qrToken: 'a'.repeat(48),
+        revision: 1,
+        venueId: 'v1',
+        customerId: 'c1',
+        googleObjectId: null,
+      },
     ] as any)
     prismaMock.walletPass.findUnique.mockResolvedValue({ id: 'wp-a', serialNumber: 'AVQ-A', revision: 1 } as any)
     prismaMock.walletPass.update.mockResolvedValue({ revision: 2 } as any)

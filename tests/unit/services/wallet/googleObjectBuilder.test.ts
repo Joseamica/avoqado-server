@@ -32,11 +32,15 @@ describe('stampStripUrl', () => {
   })
 
   it('no duplica la diagonal si la base ya la trae', () => {
-    expect(stampStripUrl('https://api.avoqado.io/', 'AVQ-1111', 3)).toBe('https://api.avoqado.io/api/v1/public/wallet/stamps/AVQ-1111/3.png')
+    expect(stampStripUrl('https://api.avoqado.io/', 'AVQ-1111', 3)).toBe(
+      'https://api.avoqado.io/api/v1/public/wallet/stamps/AVQ-1111/3.png',
+    )
   })
 
   it('🔴 tampoco deja `//` si la base trae MÁS de una diagonal final (env mal configurada)', () => {
-    expect(stampStripUrl('https://api.avoqado.io//', 'AVQ-1111', 3)).toBe('https://api.avoqado.io/api/v1/public/wallet/stamps/AVQ-1111/3.png')
+    expect(stampStripUrl('https://api.avoqado.io//', 'AVQ-1111', 3)).toBe(
+      'https://api.avoqado.io/api/v1/public/wallet/stamps/AVQ-1111/3.png',
+    )
   })
 })
 

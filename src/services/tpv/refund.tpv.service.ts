@@ -131,6 +131,10 @@ function chocoLaLlaveDeIdempotencia(error: Prisma.PrismaClientKnownRequestError)
 /** `Payment.idempotencyKey` es `@db.VarChar(64)`. */
 const LLAVE_IDEMPOTENCIA_MAX = 64
 
+// Read one extra row so an abnormal refund history fails visibly. Truncating this
+// list would undercount money already returned and could permit an over-refund.
+const MAX_REFUND_ROWS_PER_PAYMENT = 1_000
+
 /**
  * 🔴 Prefijo obligatorio. `Payment.idempotencyKey` es UNA sola columna para cobros Y
  * reembolsos, bajo un `@@unique([venueId, idempotencyKey])` de toda la tabla. Un cliente que
@@ -548,8 +552,9 @@ export async function recordRefund(
       //
       // Es `findMany` y no `$queryRaw` a propósito: el `select` lo comprueba TypeScript, así
       // que aquí la columna `tipAmount` no se puede recortar en silencio — que es el descuido
-      // del que esta tarea entera nació. El resultado está acotado por construcción: son los
-      // reembolsos de UN cobro.
+      // del que esta tarea entera nació. La relación sigue pudiendo crecer, por eso se lee
+      // `MAX + 1`: si existe esa fila extra se rechaza ruidosamente en vez de validar dinero
+      // contra una historia truncada.
       const filasDeReembolso = await tx.payment.findMany({
         where: {
           venueId,
@@ -557,7 +562,20 @@ export async function recordRefund(
           processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
         },
         select: { amount: true, tipAmount: true, status: true },
+        take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
       })
+
+      if (filasDeReembolso.length > MAX_REFUND_ROWS_PER_PAYMENT) {
+        logger.error('El cobro rebasa el máximo verificable de filas de reembolso', {
+          venueId,
+          originalPaymentId: refundData.originalPaymentId,
+          maxRefundRows: MAX_REFUND_ROWS_PER_PAYMENT,
+        })
+        throw new InternalServerError(
+          `El cobro tiene más de ${MAX_REFUND_ROWS_PER_PAYMENT} reembolsos registrados; no se puede validar el monto reembolsable. ` +
+            'No se registró ningún reembolso.',
+        )
+      }
 
       // Misma definición ÚNICA que el pre-vuelo y que el riel del dashboard: venta + propina,
       // en centavos enteros (`shared/devueltoDeUnCobro.ts`). Se conserva la copia en pesos

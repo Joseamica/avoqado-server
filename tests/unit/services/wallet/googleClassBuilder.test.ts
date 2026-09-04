@@ -49,13 +49,21 @@ describe('buildLoyaltyClass', () => {
   })
 
   it('el logo del negocio va como programLogo cuando lo subió en el diseñador', () => {
-    const c = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: 'https://cdn/logo.png' }, venueLogo: 'https://cdn/venue-logo.png' }) as any
+    const c = buildLoyaltyClass({
+      ...BASE,
+      design: { ...DEFAULT_CARD_DESIGN, logoUrl: 'https://cdn/logo.png' },
+      venueLogo: 'https://cdn/venue-logo.png',
+    }) as any
     // 🔴 El del diseñador manda sobre el del venue: es el más específico de la cadena.
     expect(c.programLogo.sourceUri.uri).toBe('https://cdn/logo.png')
   })
 
   it('🔴 sin logo del diseñador pero con Venue.logo, usa el del venue', () => {
-    const c = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: null }, venueLogo: 'https://cdn/venue-logo.jpg' }) as any
+    const c = buildLoyaltyClass({
+      ...BASE,
+      design: { ...DEFAULT_CARD_DESIGN, logoUrl: null },
+      venueLogo: 'https://cdn/venue-logo.jpg',
+    }) as any
     expect(c.programLogo.sourceUri.uri).toBe('https://cdn/venue-logo.jpg')
   })
 
@@ -67,7 +75,11 @@ describe('buildLoyaltyClass', () => {
 
   it('🔴 NUNCA se emite una clase sin programLogo: Google la rechaza con un 400 si falta', () => {
     const sinNada = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: null }, venueLogo: null })
-    const soloVenue = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: null }, venueLogo: 'https://cdn/venue-logo.png' })
+    const soloVenue = buildLoyaltyClass({
+      ...BASE,
+      design: { ...DEFAULT_CARD_DESIGN, logoUrl: null },
+      venueLogo: 'https://cdn/venue-logo.png',
+    })
     const soloDiseno = buildLoyaltyClass({ ...BASE, design: { ...DEFAULT_CARD_DESIGN, logoUrl: 'https://cdn/logo.png' }, venueLogo: null })
     for (const c of [sinNada, soloVenue, soloDiseno]) {
       expect(c).toHaveProperty('programLogo')

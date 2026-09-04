@@ -67,7 +67,8 @@ let cliente: walletobjects_v1.Walletobjects | null = null
 export async function walletClient(): Promise<walletobjects_v1.Walletobjects> {
   if (cliente) return cliente
   const creds = googleWalletCredentials()
-  if (!creds) throw new Error('Falta la credencial de Google Wallet (GOOGLE_WALLET_SERVICE_ACCOUNT_BASE64 o FIREBASE_SERVICE_ACCOUNT_BASE64)')
+  if (!creds)
+    throw new Error('Falta la credencial de Google Wallet (GOOGLE_WALLET_SERVICE_ACCOUNT_BASE64 o FIREBASE_SERVICE_ACCOUNT_BASE64)')
 
   const auth = new google.auth.GoogleAuth({ credentials: creds, scopes: [WALLET_SCOPE] })
   cliente = google.walletobjects({ version: 'v1', auth })

@@ -1,6 +1,7 @@
 // src/services/marketing/campaignScheduler.service.ts
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
 
 /**
  * Scheduler de envío — reclamo con tope global y reparto justo (Fase 1A, Task 6).
@@ -169,8 +170,8 @@ export async function reclamarLote({ topeGlobal, lotePorVenue, ahora }: Reclamar
   // 🔴 Las columnas DateTime de este schema son `timestamp without time zone`. Un Date crudo
   // interpolado en el tagged template viaja como timestamptz y se corre en sesiones de DB que
   // no estén en UTC — el mismo patrón (y la misma trampa) que `claimDeliveries` ya resolvió.
-  const ahoraSql = Prisma.sql`${ahora.toISOString()}::timestamp`
-  const leaseSql = Prisma.sql`${leaseUntil.toISOString()}::timestamp`
+  const nowSql = utcTs(ahora)
+  const leaseSql = utcTs(leaseUntil)
   // Se repite el mismo fragmento en `venues` y dentro del LATERAL — Prisma.sql lo trata como
   // una sub-plantilla reutilizable, así que sigue siendo UN solo lugar donde vive el predicado.
   // Es una expresión booleana AUTOCONTENIDA (sus propios paréntesis por dentro y por fuera):
@@ -184,11 +185,11 @@ export async function reclamarLote({ topeGlobal, lotePorVenue, ahora }: Reclamar
   // `SENDING` no lleva condición de `nextAttemptAt` a propósito: ese campo sólo significa algo
   // mientras la fila espera un backoff, y ahí el guard del lease ya hace todo el trabajo.
   const elegibilidadSql = Prisma.sql`(
-    (d.status = 'PENDING' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${ahoraSql}))
-    OR (d.status = 'RETRYING' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${ahoraSql}))
+    (d.status = 'PENDING' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${nowSql}))
+    OR (d.status = 'RETRYING' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${nowSql}))
     OR d.status = 'SENDING'
   )
-  AND (d."leaseUntil" IS NULL OR d."leaseUntil" <= ${ahoraSql})`
+  AND (d."leaseUntil" IS NULL OR d."leaseUntil" <= ${nowSql})`
 
   const rows = await prisma.$queryRaw<RawClaimedRow[]>(Prisma.sql`
     WITH venues AS (
@@ -249,7 +250,7 @@ export async function reclamarLote({ topeGlobal, lotePorVenue, ahora }: Reclamar
       -- campana que reintenta mucho terminaria con cupones "mas frescos" que una que salio
       -- a la primera. El sendAttemptAt YA GUARDADO siempre gana sobre el "ahora" de este
       -- intento cuando no es null.
-      "sendAttemptAt" = COALESCE(d."sendAttemptAt", ${ahoraSql})
+      "sendAttemptAt" = COALESCE(d."sendAttemptAt", ${nowSql})
     FROM selected
     WHERE d.id = selected.id
     RETURNING d.id, d."venueId", d."campaignId", d."customerId", d.attempts, d."leaseUntil", d."sendAttemptAt"

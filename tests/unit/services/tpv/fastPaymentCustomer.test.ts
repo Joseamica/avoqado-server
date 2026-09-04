@@ -141,7 +141,7 @@ function installFakes() {
   prismaMock.orderCustomer.create = jest.fn().mockResolvedValue({ id: 'oc-1' })
   prismaMock.orderCustomer.update = jest.fn().mockResolvedValue({ id: 'oc-1' })
   // Sólo para el camino de delegación (recordOrderPayment corre de verdad).
-  prismaMock.terminalPaymentRequest.findUnique.mockResolvedValue(null)
+  prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
   prismaMock.terminalPaymentRequest.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.order.findUnique.mockResolvedValue(null)
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
@@ -505,7 +505,7 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
   // y no tendría cómo distinguir "server viejo" de "no se vinculó".
   // ---------------------------------------------------------------------------
   it('SALIDA delegación (el cobro pertenece a una orden que ya existe): trae customerLink', async () => {
-    prismaMock.terminalPaymentRequest.findUnique.mockResolvedValue({
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({
       requestId: 'req-1',
       orderId: 'order-real',
       venueId: VENUE,
@@ -622,7 +622,7 @@ describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la termi
 
   /** La fila de arbitraje que el POS dejó al mandar el cobro a la terminal. */
   function filaDeArbitraje(extra: Record<string, unknown> = {}) {
-    prismaMock.terminalPaymentRequest.findUnique.mockResolvedValue({
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({
       requestId: 'req-1',
       orderId: null,
       venueId: VENUE,
@@ -647,7 +647,7 @@ describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la termi
     // 🔴 El mock devuelve la fila entera pase lo que pase en el `select`; sin esta
     // aserción, olvidar `customerId: true` dejaría el test verde y la feature muerta
     // (Prisma devolvería `undefined` en producción).
-    expect(prismaMock.terminalPaymentRequest.findUnique).toHaveBeenCalledWith(
+    expect(prismaMock.terminalPaymentRequest.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ select: expect.objectContaining({ customerId: true }) }),
     )
   })
@@ -693,7 +693,7 @@ describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la termi
   it('REGRESIÓN: sin terminalPaymentRequestId el camino queda idéntico — ni una consulta de más', async () => {
     const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD' }), 'user-1')
 
-    expect(prismaMock.terminalPaymentRequest.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
     expect(prismaMock.customer.findUnique).not.toHaveBeenCalled()
     expect(datosDeLaOrdenFast().customerId).toBeUndefined()
     expect(result.customerLink.status).toBe('NOT_REQUESTED')
@@ -738,7 +738,7 @@ describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la termi
   })
 
   it('si la lectura de la fila truena, el cobro se registra igual (fail-open)', async () => {
-    prismaMock.terminalPaymentRequest.findUnique.mockRejectedValue(new Error('connection refused'))
+    prismaMock.terminalPaymentRequest.findFirst.mockRejectedValue(new Error('connection refused'))
 
     const result: any = await recordFastPayment(VENUE, cobroRapido({ method: 'CREDIT_CARD', terminalPaymentRequestId: 'req-1' }), 'user-1')
 

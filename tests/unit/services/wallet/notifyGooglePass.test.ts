@@ -30,8 +30,26 @@ import { sendSilentPush } from '@/services/wallet/apnsClient'
 import { googleWalletAvailable, walletBaseUrl } from '@/services/wallet/googleWalletClient'
 import { prismaMock } from '../../../__helpers__/setup'
 
-const APPLE = { id: 'wp-a', platform: 'APPLE', serialNumber: 'AVQ-A', qrToken: 'a'.repeat(48), revision: 1, venueId: 'v1', customerId: 'c1', googleObjectId: null }
-const GOOGLE = { id: 'wp-g', platform: 'GOOGLE', serialNumber: 'AVQ-G', qrToken: 'g'.repeat(48), revision: 3, venueId: 'v1', customerId: 'c1', googleObjectId: '338.pass-wp-g' }
+const APPLE = {
+  id: 'wp-a',
+  platform: 'APPLE',
+  serialNumber: 'AVQ-A',
+  qrToken: 'a'.repeat(48),
+  revision: 1,
+  venueId: 'v1',
+  customerId: 'c1',
+  googleObjectId: null,
+}
+const GOOGLE = {
+  id: 'wp-g',
+  platform: 'GOOGLE',
+  serialNumber: 'AVQ-G',
+  qrToken: 'g'.repeat(48),
+  revision: 3,
+  venueId: 'v1',
+  customerId: 'c1',
+  googleObjectId: '338.pass-wp-g',
+}
 
 describe('notifyCustomerPassUpdated con las dos plataformas', () => {
   beforeEach(() => {

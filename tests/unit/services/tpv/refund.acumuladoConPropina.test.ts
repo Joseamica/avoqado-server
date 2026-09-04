@@ -255,6 +255,16 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     expect(args.where.processorData).toEqual({ path: ['originalPaymentId'], equals: 'pay-orig' })
     // El `select` es lo que hace imposible recortar `tipAmount` sin que TypeScript lo vea.
     expect(args.select).toEqual({ amount: true, tipAmount: true, status: true })
+    expect(args.take).toBe(1_001)
+  })
+
+  it('falla ruidosamente si un cobro rebasa el máximo verificable de reembolsos', async () => {
+    armar({}, Array(1_001).fill(filaDeReembolso(-0.01, 0)))
+
+    await expect(refundService.recordRefund(VENUE, cuerpo(1) as never)).rejects.toThrow(/más de 1000 reembolsos/i)
+
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    expect((prismaMock as any).payment.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 1_001 }))
   })
 
   it('🔴 una fila de reembolso que NO completó no infla el piso ni rechaza de más', async () => {
@@ -268,6 +278,33 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
   })
 
   // ─── Regresión: el camino de todos los días no cambia ────────────────────────────────
+
+  it('🔴 no permite agotar dos veces la VENTA conservando la propina', async () => {
+    // Cobro original: $100 venta + $20 propina. Ya salieron $90 exclusivamente de venta.
+    // Pedir otros $30 con `tipRefundCents=0` cabe en el TOTAL restante ($30), pero llevaría
+    // la venta devuelta a $120. El límite por componente debe mirarse bajo el mismo candado
+    // y usando las filas reales, no sólo el acumulado total.
+    armar({}, [filaDeReembolso(-90, 0)])
+
+    await expect(
+      refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 0 } as never),
+    ).rejects.toThrow(/venta.*excede|sale portion.*exceeds/i)
+
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 no permite agotar dos veces la PROPINA aunque quede saldo total', async () => {
+    // Ya se devolvieron $15 de propina. Otros $10 caben holgadamente en el total, pero
+    // excederían los $20 de propina originales. El desglose explícito no puede transformar
+    // venta restante en propina devuelta.
+    armar({}, [filaDeReembolso(0, -15)])
+
+    await expect(
+      refundService.recordRefund(VENUE, { ...cuerpo(1000), tipRefundCents: 1000 } as never),
+    ).rejects.toThrow(/propina.*excede|tip portion.*exceeds/i)
+
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+  })
 
   it('un cobro sin reembolsos previos se comporta igual que siempre', async () => {
     armar({})

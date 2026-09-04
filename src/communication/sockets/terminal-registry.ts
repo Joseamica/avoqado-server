@@ -41,13 +41,7 @@ class TerminalRegistry {
    * Register or update a terminal's socket mapping.
    * Called on heartbeat or explicit registration.
    */
-  register(
-    terminalId: string,
-    socketId: string | null,
-    venueId: string,
-    name?: string,
-    terminalPaymentAckVersion?: number,
-  ): void {
+  register(terminalId: string, socketId: string | null, venueId: string, name?: string, terminalPaymentAckVersion?: number): void {
     terminalId = normalizeTerminalId(terminalId)
     // Clean up old socket mapping if terminal reconnected with new socket
     const existing = this.terminals.get(terminalId)
@@ -107,7 +101,7 @@ class TerminalRegistry {
   /** Identidad de terminal derivada del socket autenticado; el payload no decide esto. */
   getTerminalBySocketId(socketId: string): TerminalEntry | null {
     const terminalId = this.socketToTerminal.get(socketId)
-    return terminalId ? this.terminals.get(terminalId) ?? null : null
+    return terminalId ? (this.terminals.get(terminalId) ?? null) : null
   }
 
   /**

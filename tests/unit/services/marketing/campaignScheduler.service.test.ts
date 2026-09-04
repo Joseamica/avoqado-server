@@ -190,10 +190,11 @@ describe('campaignScheduler.service — reclamarLote (forma del SQL)', () => {
     expect(text).toContain('d.status = \'RETRYING\' AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ')
   })
 
-  it('las columnas DateTime viajan con el cast ::timestamp (nunca un Date crudo)', async () => {
+  it("las columnas DateTime viajan con AT TIME ZONE 'UTC' (nunca un Date crudo ni ::timestamp)", async () => {
     await reclamarLote({ topeGlobal: 60, lotePorVenue: 20, ahora: AHORA })
     const text = sqlTextOf()
-    expect(text).toContain('::timestamp')
+    expect(text).toContain("AT TIME ZONE 'UTC'")
+    expect(text).not.toContain('::timestamp')
   })
 
   it('corta por rn <= lotePorVenue y LIMIT topeGlobal, ordenado por capas (rn ASC, "venueId" ASC)', async () => {

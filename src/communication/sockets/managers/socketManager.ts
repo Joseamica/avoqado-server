@@ -373,15 +373,18 @@ export class SocketManager implements ISocketManager {
           return
         }
 
-        const handled = await terminalPaymentService.handlePaymentResultFromSocket({
-          requestId,
-          status,
-          paymentId,
-          transactionId,
-          cardDetails,
-          errorMessage,
-          receipt,
-        }, terminal)
+        const handled = await terminalPaymentService.handlePaymentResultFromSocket(
+          {
+            requestId,
+            status,
+            paymentId,
+            transactionId,
+            cardDetails,
+            errorMessage,
+            receipt,
+          },
+          terminal,
+        )
 
         if (callback) callback({ success: handled })
       } catch (error) {

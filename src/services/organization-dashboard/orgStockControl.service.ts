@@ -57,10 +57,10 @@ export class OrgStockControlService {
     const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)))
     const search = options.search?.trim()
     const managedMemberships = await prisma.staffVenue.findMany({
-        where: {
-          staffId: actorStaffId,
-          active: true,
-          staff: { active: true },
+      where: {
+        staffId: actorStaffId,
+        active: true,
+        staff: { active: true },
         role: { in: ['MANAGER', 'ADMIN', 'OWNER'] },
         venue: { organizationId: orgId },
       },

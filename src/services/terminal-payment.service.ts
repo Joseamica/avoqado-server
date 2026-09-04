@@ -470,10 +470,9 @@ class TerminalPaymentService {
         return
       }
 
-      directSocket.timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS).emit(
-        'terminal:payment_request',
-        paymentPayload,
-        (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
+      directSocket
+        .timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS)
+        .emit('terminal:payment_request', paymentPayload, (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
           const stillPending = this.pendingPayments.has(requestId)
           if (error || response?.accepted !== true || response.requestId !== requestId) {
             if (!stillPending) return
@@ -486,8 +485,7 @@ class TerminalPaymentService {
 
           if (persisted) void this.markDelivered(requestId, venueId)
           logger.info(`📡 [TerminalPayment] Durable ACK received from socket ${socketId}`, { requestId, terminalId })
-        },
-      )
+        })
     })
   }
 
@@ -569,14 +567,17 @@ class TerminalPaymentService {
         venueId,
         timestamp: new Date().toISOString(),
       }
-      directSocket.timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS).emit(
-        'terminal:payment_request',
-        payload,
-        (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
+      directSocket
+        .timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS)
+        .emit('terminal:payment_request', payload, (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
           if (error || response?.accepted !== true || response.requestId !== row.requestId) return
           const acknowledgedAt = new Date()
           void prisma.terminalPaymentRequest.updateMany({
-            where: { requestId: row.requestId, venueId, status: { in: [TerminalPaymentRequestStatus.PENDING, TerminalPaymentRequestStatus.SENT] } },
+            where: {
+              requestId: row.requestId,
+              venueId,
+              status: { in: [TerminalPaymentRequestStatus.PENDING, TerminalPaymentRequestStatus.SENT] },
+            },
             data: {
               status: TerminalPaymentRequestStatus.SENT,
               acknowledgedAt,
@@ -585,8 +586,7 @@ class TerminalPaymentService {
               expiresAt: new Date(acknowledgedAt.getTime() + PAYMENT_TIMEOUT_MS),
             },
           })
-        },
-      )
+        })
     }
   }
 

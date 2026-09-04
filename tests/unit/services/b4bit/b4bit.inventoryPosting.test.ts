@@ -31,14 +31,15 @@
 // ── Mocks ────────────────────────────────────────────────────────────────────
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
-    payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn() },
+    payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     order: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     orderItem: { findMany: jest.fn() },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
     venueSettings: { findUnique: jest.fn() },
-    shift: { findUnique: jest.fn() },
+    shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
     terminal: { findFirst: jest.fn() },
+    $queryRaw: jest.fn(),
     $transaction: jest.fn(),
   }
   client.$transaction.mockImplementation((cb: any) => cb(client))
@@ -78,9 +79,11 @@ import { processWebhook } from '@/services/b4bit/b4bit.service'
 import type { B4BitWebhookPayload } from '@/services/b4bit/types'
 
 const mockPrisma = prisma as unknown as {
-  payment: { findUnique: jest.Mock; findMany: jest.Mock; update: jest.Mock }
+  payment: { findUnique: jest.Mock; findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
   order: { findUnique: jest.Mock; updateMany: jest.Mock }
   orderItem: { findMany: jest.Mock }
+  shift: { findFirst: jest.Mock; updateMany: jest.Mock }
+  $queryRaw: jest.Mock
   $transaction: jest.Mock
 }
 
@@ -148,9 +151,17 @@ beforeEach(() => {
   mockPrisma.order.updateMany.mockReset()
   mockPrisma.order.findUnique.mockReset()
   mockPrisma.payment.findMany.mockReset()
+  mockPrisma.payment.updateMany.mockReset()
+  mockPrisma.shift.findFirst.mockReset()
+  mockPrisma.shift.updateMany.mockReset()
+  mockPrisma.$queryRaw.mockReset()
 
   mockPrisma.$transaction.mockImplementation((cb: any) => cb(prisma))
   mockPrisma.payment.update.mockResolvedValue({})
+  mockPrisma.payment.updateMany.mockResolvedValue({ count: 1 })
+  mockPrisma.shift.findFirst.mockResolvedValue(null)
+  mockPrisma.shift.updateMany.mockResolvedValue({ count: 1 })
+  mockPrisma.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }])
   mockPrisma.order.updateMany.mockResolvedValue({ count: 1 })
   mockPrisma.orderItem.findMany.mockResolvedValue(ITEMS)
   createSalePostingInTx.mockResolvedValue({ id: POSTING_ID })
@@ -191,6 +202,8 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
       payment: mockPrisma.payment,
       order: mockPrisma.order,
       orderItem: { findMany: txOrderItemFindMany },
+      shift: mockPrisma.shift,
+      $queryRaw: mockPrisma.$queryRaw,
     }
     mockPrisma.$transaction.mockImplementation((cb: any) => cb(txClient))
 
@@ -272,10 +285,24 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
     // Se reintentó, no se rindió al primer fallo.
     expect(createSalePostingInTx).toHaveBeenCalledTimes(3)
 
-    // 🔑 Los dientes: el `payment.update` del rescate corre FUERA de la
-    // transacción. Sin él, un fallo del vale dejaría el pago PENDING con el
-    // dinero ya en la blockchain — y B4Bit no reintenta.
-    const rescate = mockPrisma.payment.update.mock.calls.at(-1)?.[0]
+    // 🔑 Los dientes: la CAS del rescate corre en una transacción NUEVA,
+    // separada de la liquidación revertida. Sin ella, un fallo del vale dejaría
+    // el pago PENDING con el dinero ya en la blockchain — y B4Bit no reintenta.
+    const rescate = mockPrisma.payment.updateMany.mock.calls.at(-1)?.[0]
+    expect(rescate?.data?.status).toBe('COMPLETED')
+  })
+
+  it('rechaza una orden anormalmente grande sin crear un vale parcial y conserva el cobro', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder({ paymentStatus: 'PARTIAL' }))
+    mockPrisma.payment.findMany.mockResolvedValue(pagosQueSaldan())
+    mockPrisma.orderItem.findMany.mockResolvedValue(Array(1_001).fill(ITEMS[0]))
+
+    await expect(processWebhook(webhookCO())).rejects.toThrow('No se pudo actualizar el saldo de la cuenta tras confirmar el pago cripto')
+
+    expect(mockPrisma.orderItem.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 1_001 }))
+    expect(createSalePostingInTx).not.toHaveBeenCalled()
+    const rescate = mockPrisma.payment.updateMany.mock.calls.at(-1)?.[0]
     expect(rescate?.data?.status).toBe('COMPLETED')
   })
 })

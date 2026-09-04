@@ -47,6 +47,10 @@ const B4BIT_BASE_URL = isProduction ? 'https://pos.b4bit.com' : 'https://dev-pay
 // Expressed in centavos to match the `amount` param used across the payment layer.
 const B4BIT_MINIMUM_AMOUNT_CENTAVOS = 2000
 
+// An order above this size is operationally abnormal. Read one extra row so the
+// inventory posting fails visibly instead of silently omitting order items.
+const MAX_B4BIT_INVENTORY_POSTING_ITEMS = 1_000
+
 const getB4BitGlobalConfig = (): B4BitGlobalConfig => {
   return { baseUrl: B4BIT_BASE_URL }
 }
@@ -274,8 +278,9 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
   // admite matices: toda consulta filtra por `venueId`.
   //
   // Ahora el turno se resuelve UNA sola vez por negocio, dentro de la transacción, y ese id va a
-  // la `Order` Y al `Payment` (antes la orden ya lo hacía bien y el pago no: dos fuentes de verdad
-  // para el mismo dato son justo de donde salió el defecto).
+  // la `Order` Y al `Payment` todavía PENDING. Es atribución provisional de iniciación: cuando
+  // B4Bit confirma el dinero real, `Payment.shiftId` se finaliza de nuevo dentro de su CAS;
+  // `Order.shiftId` conserva a propósito la historia operativa de creación.
   //
   // El turno que llegue en la petición se IGNORA en silencio, no se rechaza: hoy no lo manda
   // nadie (`CryptoPaymentRequest` de avoqado-tpv ni siquiera declara el campo) y rechazar lo que
@@ -296,7 +301,7 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
   }
 
   // Create payment and order in a transaction (atomic)
-  const { payment, turnoDelCobro } = await prisma.$transaction(async tx => {
+  const { payment, turnoProvisional } = await prisma.$transaction(async tx => {
     // For crypto payments without an existing order, create a "fast order" (placeholder)
     let orderIdToUse = orderId
 
@@ -321,12 +326,13 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
       }
     }
 
-    // 🔴 EL TURNO, UNA SOLA VEZ, PARA LAS DOS MITADES DEL COBRO.
+    // 🔴 EL TURNO PROVISIONAL, UNA SOLA VEZ, PARA LOS DOS REGISTROS DE AQUÍ.
     //
     // El turno de caja es del NEGOCIO, no de la persona ni del aparato (`../shared/turnoDeCaja.ts`,
     // decisión del founder del 2-sep-2026), y se resuelve con el cliente de la transacción. La orden
-    // testigo y el pago tienen que llevar el MISMO id: si cada uno lo resolviera por su cuenta, las
-    // dos mitades del mismo cobro podrían acabar en turnos distintos.
+    // testigo y el pago pendiente arrancan con el MISMO id: si cada uno lo resolviera por su cuenta,
+    // la iniciación misma podría partirse entre turnos. Al confirmar puede moverse sólo
+    // `Payment.shiftId`, porque ahí el dinero se vuelve real; `Order.shiftId` no se reescribe.
     //
     // `null` es un desenlace legítimo: un negocio sin turno abierto sigue vendiendo, y el cobro se
     // registra sin turno — nunca en uno ajeno ni en uno cerrado.
@@ -379,7 +385,7 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
         type: 'FAST',
         processor: 'B4BIT',
         processedById: staffId,
-        // El MISMO turno que llevó la orden: el del negocio, nunca el que mandó el cliente.
+        // El MISMO turno provisional que llevó la orden: nunca el que mandó el cliente.
         shiftId: turnoDelNegocio?.id ?? null,
         terminalId,
         feePercentage: 0.0095, // B4Bit 0.95% fee
@@ -394,10 +400,10 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
       },
     })
 
-    return { payment: newPayment, fastOrder: orderIdToUse !== orderId ? orderIdToUse : null, turnoDelCobro: turnoDelNegocio?.id ?? null }
+    return { payment: newPayment, fastOrder: orderIdToUse !== orderId ? orderIdToUse : null, turnoProvisional: turnoDelNegocio?.id ?? null }
   })
 
-  logger.info('💾 Created pending crypto payment', { paymentId: payment.id, turnoDelCobro })
+  logger.info('💾 Created pending crypto payment', { paymentId: payment.id, turnoProvisional })
 
   // Create order with B4Bit
   const webhookUrl = `${process.env.API_BASE_URL || 'https://api.avoqado.io'}/api/v1/webhooks/b4bit`
@@ -438,7 +444,7 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
   //
   // El camino normal NO se registra a propósito: la bitácora guarda las anomalías que un dueño
   // audita, no un asiento por cada venta.
-  if (!turnoDelCobro) {
+  if (!turnoProvisional) {
     // 🔴 Y tampoco es anomalía si el negocio APAGÓ los turnos: ahí «sin turno» no es un descuadre,
     // es el ajuste, y sin este gate cada cobro dejaría una falsa alarma permanente.
     //
@@ -522,9 +528,10 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
     expiresInSeconds: b4bitResponse.data.expires_in_seconds,
     cryptoSymbol: b4bitResponse.data.crypto_symbol,
     cryptoAddress: b4bitResponse.data.crypto_address,
-    // Campo NUEVO y opcional: el turno en el que quedó el cobro (`null` = ninguno abierto). La
-    // respuesta no puede callar dónde cayó el dinero; nada de lo que ya existía cambia.
-    shiftId: turnoDelCobro,
+    // Campo aditivo y opcional: el turno abierto cuando se INICIÓ el intento (`null` = ninguno).
+    // Es provisional por compatibilidad; la atribución final del dinero se decide al confirmar
+    // y su fuente de verdad es `Payment.shiftId` una vez que el pago queda COMPLETED.
+    shiftId: turnoProvisional,
   }
 }
 
@@ -596,6 +603,95 @@ function parseEditedAtMs(value: unknown): number | null {
 /** El `edited_at` del payload sólo si es una fecha válida (si no, `undefined`). */
 function validEditedAt(payload: B4BitWebhookPayload): string | undefined {
   return parseEditedAtMs(payload.edited_at) !== null ? payload.edited_at : undefined
+}
+
+/**
+ * Serializes every terminal B4Bit transition on the Payment row itself.
+ *
+ * The tenant predicate is part of the lock, not merely the later ORM read: a
+ * stale webhook may never obtain authority over a row from another venue.
+ */
+async function lockB4BitPaymentRow(tx: Prisma.TransactionClient, paymentId: string, venueId: string): Promise<void> {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM "Payment" WHERE id = ${paymentId} AND "venueId" = ${venueId} FOR UPDATE`
+  if (rows.length === 0) throw new Error(`B4Bit payment ${paymentId} no longer exists for venue ${venueId}`)
+}
+
+/**
+ * Merges provider metadata only when the incoming durable watermark is not
+ * older than the one read while holding the Payment row lock.
+ */
+function mergeB4BitProcessorData(
+  current: Prisma.JsonValue,
+  patch: Prisma.InputJsonObject,
+): { processorData: Prisma.InputJsonObject; ignoredAsOutOfOrder: boolean } {
+  const currentObject = typeof current === 'object' && current !== null && !Array.isArray(current) ? (current as Prisma.JsonObject) : {}
+  const incomingEditedAtMs = parseEditedAtMs(patch.lastEditedAt)
+  const durableEditedAtMs = parseEditedAtMs(currentObject.lastEditedAt)
+
+  if (incomingEditedAtMs !== null && durableEditedAtMs !== null && incomingEditedAtMs < durableEditedAtMs) {
+    return { processorData: currentObject as Prisma.InputJsonObject, ignoredAsOutOfOrder: true }
+  }
+
+  return {
+    processorData: { ...currentObject, ...patch } as Prisma.InputJsonObject,
+    ignoredAsOutOfOrder: false,
+  }
+}
+
+type B4BitFailureTransition = 'FAILED' | 'COMPLETED' | 'IGNORED'
+
+/**
+ * Applies OC/EX while holding the same row lock used by CO.
+ *
+ * A stale outer Payment snapshot is deliberately not consulted. If CO committed
+ * first, the failure is recorded as late metadata without touching status. If
+ * this webhook is older than the durable watermark, it is discarded entirely.
+ */
+async function failB4BitPaymentInTx(
+  tx: Prisma.TransactionClient,
+  payment: { id: string; venueId: string },
+  status: 'OC' | 'EX',
+  failReason: string,
+  editedAt?: string,
+): Promise<B4BitFailureTransition> {
+  await lockB4BitPaymentRow(tx, payment.id, payment.venueId)
+  const freshPayment = await tx.payment.findUnique({
+    where: { id: payment.id, venueId: payment.venueId },
+    select: { status: true, processorData: true },
+  })
+  if (!freshPayment) throw new Error(`B4Bit payment ${payment.id} no longer exists for venue ${payment.venueId}`)
+
+  const now = new Date().toISOString()
+  const terminalPatch: Prisma.InputJsonObject = {
+    ...(editedAt ? { lastEditedAt: editedAt } : {}),
+    lastStatus: status,
+    ...(freshPayment.status === 'COMPLETED'
+      ? { lateFailureIgnored: true, lateFailureReason: failReason, lateFailureAt: now }
+      : { failReason, failedAt: now }),
+  }
+  const merged = mergeB4BitProcessorData(freshPayment.processorData, terminalPatch)
+  if (merged.ignoredAsOutOfOrder) return 'IGNORED'
+
+  if (freshPayment.status === 'COMPLETED') {
+    await tx.payment.update({
+      where: { id: payment.id, venueId: payment.venueId },
+      data: { processorData: merged.processorData },
+    })
+    return 'COMPLETED'
+  }
+
+  const transition = await tx.payment.updateMany({
+    where: { id: payment.id, venueId: payment.venueId, status: { not: 'COMPLETED' } },
+    data: { status: 'FAILED', processorData: merged.processorData },
+  })
+  if (transition.count !== 1) {
+    const conflict: Error & { code?: string } = new Error('B4BIT_FAILURE_TRANSITION_LOST')
+    conflict.code = 'B4BIT_FAILURE_TRANSITION_LOST'
+    throw conflict
+  }
+
+  return 'FAILED'
 }
 
 /**
@@ -750,29 +846,28 @@ export async function processWebhook(payload: B4BitWebhookPayload): Promise<Proc
     case 'EX': // Expired
       const failReason = status === 'OC' ? 'Monto insuficiente' : 'Orden expirada'
 
-      // 🔴 MONEY — un fallo TARDÍO no degrada un cobro que ya se confirmó.
-      //
-      // `OC`/`EX` escribían `status: 'FAILED'` sin mirar el estado actual, así que
-      // un webhook rezagado (B4Bit no garantiza el orden) marcaba FAILED un cobro
-      // REAL y ya cobrado. El cierre de turno y el de caja seleccionan
-      // `status: 'COMPLETED'`: el dinero desaparecía del corte mientras la orden
-      // seguía PAID. Se registra el intento en `processorData` y se avisa, pero el
-      // estado del cobro es terminal.
-      if (payment.status === 'COMPLETED') {
-        await prisma.payment.update({
-          where: { id: payment.id },
-          data: {
-            processorData: {
-              ...processorData,
-              ...editedAtPatch,
-              lastStatus: status,
-              lateFailureIgnored: true,
-              lateFailureReason: failReason,
-              lateFailureAt: new Date().toISOString(),
-            },
-          },
-        })
+      // 🔴 MONEY — CO, OC y EX se ordenan bajo el MISMO lock de Payment. La
+      // lectura exterior puede ser PENDING aunque CO ya haya commiteado; sólo la
+      // relectura tenant-scoped bajo FOR UPDATE decide qué estado puede escribirse.
+      const failureTransition = await prisma.$transaction(tx => failB4BitPaymentInTx(tx, payment, status, failReason, applicableEditedAt))
 
+      if (failureTransition === 'IGNORED') {
+        logger.warn('⚠️ [B4Bit] webhook FUERA DE ORDEN ignorado dentro de la transición terminal', {
+          paymentId: payment.id,
+          venueId,
+          status,
+          editedAt: payload.edited_at,
+        })
+        return {
+          success: true,
+          action: 'IGNORED',
+          message: 'Webhook fuera de orden: edited_at anterior al último aplicado',
+          paymentId: payment.id,
+          details: { status },
+        }
+      }
+
+      if (failureTransition === 'COMPLETED') {
         logger.warn('⚠️ [B4Bit] estado tardío ignorado — el cobro ya estaba COMPLETED y no se degrada', {
           paymentId: payment.id,
           venueId,
@@ -795,20 +890,6 @@ export async function processWebhook(payload: B4BitWebhookPayload): Promise<Proc
           },
         }
       }
-
-      await prisma.payment.update({
-        where: { id: payment.id },
-        data: {
-          status: 'FAILED',
-          processorData: {
-            ...processorData,
-            ...editedAtPatch,
-            lastStatus: status,
-            failReason,
-            failedAt: new Date().toISOString(),
-          },
-        },
-      })
 
       // Emit CRYPTO_PAYMENT_FAILED event
       socketManager.broadcastToVenue(venueId, 'crypto:payment_failed' as SocketEventType, {
@@ -878,6 +959,10 @@ interface CryptoSettlementResult {
   postingId?: string | null
 }
 
+interface IgnoredCryptoSettlementResult {
+  webhookIgnored: true
+}
+
 /**
  * Crea el vale de inventario etiquetando su fallo como REINTENTABLE.
  *
@@ -908,6 +993,10 @@ async function crearValeDeInventario(
   params: { venueId: string; orderId: string; items: unknown[]; staffId?: string | null },
 ): Promise<{ id: string } | null> {
   try {
+    if (params.items.length > MAX_B4BIT_INVENTORY_POSTING_ITEMS) {
+      throw new Error(`La orden ${params.orderId} tiene más de ${MAX_B4BIT_INVENTORY_POSTING_ITEMS} renglones; no se creó un vale parcial.`)
+    }
+
     // `as any` igual que los otros cuatro sitios que crean el vale: el tipo que
     // devuelve Prisma con sus modificadores incluidos no encaja estructuralmente
     // con `SalePostingItem`, y ninguno de ellos lo re-declara.
@@ -921,12 +1010,122 @@ async function crearValeDeInventario(
 }
 
 /**
+ * Performs the only transition that is allowed to finalize a B4Bit payment's
+ * shift attribution.
+ *
+ * A tenant-scoped `SELECT ... FOR UPDATE` orders CO against every other terminal
+ * webhook before the payment CAS and shift claim. Only the completion winner can
+ * continue to the conditional OPEN-shift increment. All writes live in the same
+ * transaction: if later order settlement rolls back, neither the payment
+ * transition nor the shift totals survive.
+ */
+async function completeAndAttributeB4BitPaymentInTx(
+  tx: Prisma.TransactionClient,
+  payment: {
+    id: string
+    venueId: string
+    amount: Prisma.Decimal | number
+    tipAmount: Prisma.Decimal | number
+  },
+  processorPatch: Prisma.InputJsonObject,
+): Promise<{ transitioned: boolean; ignoredAsOutOfOrder: boolean }> {
+  await lockB4BitPaymentRow(tx, payment.id, payment.venueId)
+  const freshPayment = await tx.payment.findUnique({
+    where: { id: payment.id, venueId: payment.venueId },
+    select: { status: true, processorData: true },
+  })
+
+  if (!freshPayment) {
+    throw new Error(`B4Bit payment ${payment.id} no longer exists for venue ${payment.venueId}`)
+  }
+
+  const merged = mergeB4BitProcessorData(freshPayment.processorData, processorPatch)
+  if (merged.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true }
+
+  if (freshPayment.status === 'COMPLETED') {
+    // A redelivery may refresh provider metadata, but it must not mention
+    // `shiftId`: the winner's final attribution is immutable.
+    await tx.payment.update({
+      where: { id: payment.id, venueId: payment.venueId },
+      data: { status: 'COMPLETED', processorData: merged.processorData },
+    })
+    return { transitioned: false, ignoredAsOutOfOrder: false }
+  }
+
+  const transition = await tx.payment.updateMany({
+    where: { id: payment.id, venueId: payment.venueId, status: { not: 'COMPLETED' } },
+    data: {
+      status: 'COMPLETED',
+      // The initiation-time value is provisional. Clearing it in the CAS makes
+      // `null` the safe final result when no OPEN shift can be claimed.
+      shiftId: null,
+      processorData: merged.processorData,
+    },
+  })
+
+  if (transition.count === 0) {
+    // Another confirmation won after our read. Re-read only to preserve its
+    // metadata and final shift; never claim or increment a shift in this branch.
+    const winner = await tx.payment.findUnique({
+      where: { id: payment.id, venueId: payment.venueId },
+      select: { status: true, processorData: true },
+    })
+    if (!winner || winner.status !== 'COMPLETED') {
+      const conflict: Error & { code?: string } = new Error('B4BIT_PAYMENT_CAS_LOST')
+      conflict.code = 'B4BIT_PAYMENT_CAS_LOST'
+      throw conflict
+    }
+
+    const winnerMerge = mergeB4BitProcessorData(winner.processorData, processorPatch)
+    if (winnerMerge.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true }
+
+    await tx.payment.update({
+      where: { id: payment.id, venueId: payment.venueId },
+      data: {
+        status: 'COMPLETED',
+        processorData: winnerMerge.processorData,
+      },
+    })
+    return { transitioned: false, ignoredAsOutOfOrder: false }
+  }
+
+  // Resolve only after winning the payment transition: a redelivery/concurrent
+  // loser must never even attempt to move shift totals.
+  const candidate = await turnoAbiertoDelNegocio(tx, payment.venueId)
+  if (!candidate) return { transitioned: true, ignoredAsOutOfOrder: false }
+
+  const claimed = await tx.shift.updateMany({
+    where: {
+      id: candidate.id,
+      venueId: payment.venueId,
+      status: 'OPEN',
+      endTime: null,
+    },
+    data: {
+      // Payment fields are already peso-valued Decimals. Provider centavos do
+      // not participate in this accounting write.
+      totalSales: { increment: payment.amount },
+      totalTips: { increment: payment.tipAmount },
+    },
+  })
+
+  if (claimed.count === 1) {
+    await tx.payment.update({
+      where: { id: payment.id, venueId: payment.venueId },
+      data: { shiftId: candidate.id },
+    })
+  }
+
+  return { transitioned: true, ignoredAsOutOfOrder: false }
+}
+
+/**
  * Completa el `Payment` de cripto y recalcula el saldo de su orden — todo en UNA
  * transacción.
  *
  * ── Lo que hace y por qué ───────────────────────────────────────────────────
- * 1. Marca el pago COMPLETED. Repetirlo es inocuo: es justamente lo que hace que
- *    un `CO` reentregado por B4Bit no cree un segundo cobro.
+ * 1. Hace CAS del pago a COMPLETED, elige el turno abierto EN ESE MOMENTO y lo
+ *    reclama condicionalmente. Repetirlo preserva la atribución que ganó.
  * 2. RELEE la orden dentro de la transacción (la lectura de arriba pudo quedar
  *    vieja mientras se generaba el recibo) y sus `Payment` COMPLETED durables.
  * 3. Recalcula con `computeOrderBalance` — la aritmética canónica compartida.
@@ -970,37 +1169,22 @@ async function settleOrderForConfirmedCryptoPayment(
     venueId: string
     orderId: string | null
     amount: Prisma.Decimal | number
+    tipAmount: Prisma.Decimal | number
     externalId: string | null
     processorData: Prisma.JsonValue
     /** Quién cobró: queda como autor del vale de inventario y de su aplicación. */
     processedById: string | null
-    /**
-     * El estado del `Payment` **ANTES** de este webhook. `COMPLETED` significa
-     * que este `CO` es una REENTREGA/replay (ya lo habíamos aplicado); cualquier
-     * otro es la transición real a cobrado. Ya no decide nada del saldo (el guard
-     * de reembolsos se fue el 2026-08-18) — sólo etiqueta el aviso del log.
-     */
-    status: string
   },
   processorPatch: Prisma.InputJsonObject,
-): Promise<CryptoSettlementResult | null> {
-  /** ¿Este `CO` ya lo habíamos aplicado antes? */
-  const isRedelivery = payment.status === 'COMPLETED'
+): Promise<CryptoSettlementResult | IgnoredCryptoSettlementResult | null> {
   const MAX_SETTLEMENT_ATTEMPTS = 3
 
   for (let attempt = 1; attempt <= MAX_SETTLEMENT_ATTEMPTS; attempt++) {
     try {
       return await prisma.$transaction(async tx => {
-        await tx.payment.update({
-          where: { id: payment.id },
-          data: {
-            status: 'COMPLETED',
-            processorData: {
-              ...(typeof payment.processorData === 'object' && payment.processorData !== null ? payment.processorData : {}),
-              ...processorPatch,
-            } as Prisma.InputJsonObject,
-          },
-        })
+        const completion = await completeAndAttributeB4BitPaymentInTx(tx, payment, processorPatch)
+        if (completion.ignoredAsOutOfOrder) return { webhookIgnored: true as const }
+        const isRedelivery = !completion.transitioned
 
         if (!payment.orderId) return null
 
@@ -1157,6 +1341,7 @@ async function settleOrderForConfirmedCryptoPayment(
           const txItems = await tx.orderItem.findMany({
             where: { orderId: payment.orderId },
             include: { modifiers: { include: { modifier: true } } },
+            take: MAX_B4BIT_INVENTORY_POSTING_ITEMS + 1,
           })
           const posting = await crearValeDeInventario(tx, {
             venueId: payment.venueId,
@@ -1198,33 +1383,30 @@ async function settleOrderForConfirmedCryptoPayment(
   }
 
   // ── Agotados los 3 intentos ────────────────────────────────────────────────
-  // 🔴 El `payment.update` vive DENTRO de la transacción, así que cada intento
+  // 🔴 La transición del Payment vive DENTRO de la transacción, así que cada intento
   // perdido lo revirtió: en este punto el `Payment` sigue PENDING aunque el dinero
   // YA esté en la blockchain. Y el controlador contesta 200 siempre ("prevent
   // retries"), o sea que B4Bit tampoco va a reintentar. Sin lo de abajo, el cobro
   // desaparecería de los libros sin que nadie se entere.
   //
-  // Por eso se completa el pago FUERA de la transacción: son dos durabilidades
-  // distintas. "Este cobro ocurrió" no se puede perder nunca; el derivado de la
-  // orden (`paidAmount`/`remainingBalance`) es RECALCULABLE — y de hecho se repara
-  // solo, porque `computeOrderBalance` lee los `Payment` COMPLETED durables: el
-  // siguiente abono sobre esa cuenta ya cuenta éste.
+  // Por eso se completa el pago en una NUEVA transacción, sin volver a tocar la
+  // orden: son dos durabilidades distintas. "Este cobro ocurrió" no se puede
+  // perder nunca; el derivado de la orden (`paidAmount`/`remainingBalance`) es
+  // RECALCULABLE — y de hecho se repara solo, porque `computeOrderBalance` lee los
+  // `Payment` COMPLETED durables: el siguiente abono sobre esa cuenta ya cuenta
+  // éste. La nueva transacción reutiliza la MISMA CAS + claim del camino normal,
+  // para no conservar el turno provisional ni duplicar totales si otro `CO` ganó.
   //
   // El estado resultante (pago COMPLETED, orden con saldo de más) yerra hacia el
   // lado seguro: el negocio ve que le deben de más y lo detecta al cobrar, en vez
   // de perder el dinero en silencio.
   try {
-    await prisma.payment.update({
-      where: { id: payment.id },
-      data: {
-        status: 'COMPLETED',
-        processorData: {
-          ...(typeof payment.processorData === 'object' && payment.processorData !== null ? payment.processorData : {}),
-          ...processorPatch,
-          orderSettlementFailed: true,
-          orderSettlementFailedAt: new Date().toISOString(),
-        } as Prisma.InputJsonObject,
-      },
+    await prisma.$transaction(async tx => {
+      await completeAndAttributeB4BitPaymentInTx(tx, payment, {
+        ...processorPatch,
+        orderSettlementFailed: true,
+        orderSettlementFailedAt: new Date().toISOString(),
+      })
     })
   } catch (persistError: any) {
     logger.error('🚨 [B4Bit settlement] NO SE PUDO REGISTRAR EL COBRO CRIPTO — dinero cobrado sin Payment COMPLETED', {
@@ -1321,6 +1503,21 @@ async function handlePaymentConfirmed(
     // Sólo si es una fecha válida — ver `parseEditedAtMs`.
     ...(validEditedAt(payload) ? { lastEditedAt: validEditedAt(payload) } : {}),
   })
+
+  if (settlement && 'webhookIgnored' in settlement) {
+    logger.warn('⚠️ [B4Bit] CO FUERA DE ORDEN ignorado dentro de la transición terminal', {
+      paymentId: payment.id,
+      venueId,
+      editedAt: payload.edited_at,
+    })
+    return {
+      success: true,
+      action: 'IGNORED',
+      message: 'Webhook fuera de orden: edited_at anterior al último aplicado',
+      paymentId: payment.id,
+      details: { status: 'CO' },
+    }
+  }
 
   if (payment.orderId && settlement) {
     if (!settlement.balanceSkipped) {
