@@ -785,9 +785,15 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
  *    caiga en los milisegundos siguientes al cierre —la caja de la tarde abriéndose— se cerraría
  *    sola, dejando a su turno nuevo sin gaveta.
  * 3. 🔴 **La segunda mitad NUNCA tumba a la primera.** Cuando esto corre, el gesto que llamó ya
- *    commiteó su parte y el dinero ya está firmado. Un fallo aquí degrada exactamente a lo de HOY
- *    (el otro registro se queda abierto y lo recoge el relevo o el auto-cierre), y se reporta; nunca
- *    se convierte en un error para quien está en el mostrador.
+ *    commiteó su parte y el dinero ya está firmado, así que un fallo aquí se reporta y nunca se
+ *    convierte en un error para quien está en el mostrador.
+ *
+ *    🔴 **Lo que ese fallo deja NO es «lo de hoy», y esta regla lo afirmaba hasta el 3-sep-2026**
+ *    (auditoría de Codex). Con la apertura ya unificada el estado partido hace daño de dinero en
+ *    las dos direcciones —mezcla jornadas, o deja una gaveta tragando efectivo sin turno—, y por
+ *    eso NO se tolera: se deja reparable (`asegurarLaLiga` en `shared/parejaDeCierre.ts`) y lo
+ *    completa el barrido `cash-close-pair-reconciler`. Tolerar el fallo aquí es lo correcto; darlo
+ *    por inocuo, no.
  */
 export type OrigenDelCierre = 'CAJA_MOVIL' | 'TURNO_TPV'
 
@@ -1088,9 +1094,13 @@ async function cerrarElTurnoDeLaGaveta(p: CerrarTurnoDeCajaParams, cashDrawerSes
     })
     return { shiftCerradoId: cerrado.id, conConteo: conteo != null }
   } catch (error) {
-    // 🔴 Regla 3: el conteo de la gaveta YA está commiteado y el cajero ya lo vio. Un turno que no
-    // se pudo cerrar degrada a lo de hoy —se queda abierto y lo recoge el relevo de mañana— y NO
-    // se convierte en un error en el mostrador.
+    // 🔴 Regla 3: el conteo de la gaveta YA está commiteado y el cajero ya lo vio, así que un turno
+    // que no se pudo cerrar NO se convierte en un error en el mostrador.
+    //
+    // 🔴 **No «se queda abierto y lo recoge el relevo de mañana», que es lo que decía este
+    // comentario hasta el 3-sep-2026** (auditoría de Codex): antes del relevo puede recogerlo la
+    // apertura de ESTA tarde, que lo REUSA por ser del mismo día de negocio, y entonces un solo
+    // turno firma dos arqueos. Lo recoge `cash-close-pair-reconciler` en el siguiente minuto.
     logger.error('[TURNO DE CAJA] La gaveta se cerró pero el turno no; queda abierto', {
       venueId,
       cashDrawerSessionId,

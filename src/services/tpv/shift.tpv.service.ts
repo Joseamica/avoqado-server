@@ -1845,9 +1845,14 @@ async function closeShiftUsingRequest(
     // escribirlo ahí colaría por la puerta de atrás justo lo que el candado deja fuera, y dejaría
     // las dos mitades diciendo cosas distintas del mismo dinero.
     //
-    // Va después del commit y en try/catch: el turno YA está cerrado y firmado. Un fallo aquí
-    // degrada exactamente a lo de HOY (la gaveta se queda abierta y la recoge el relevo o el
-    // auto-cierre) y nunca convierte un cierre bueno en un error para el mostrador.
+    // Va después del commit y en try/catch: el turno YA está cerrado y firmado. Un fallo aquí nunca
+    // convierte un cierre bueno en un error para el mostrador.
+    //
+    // 🔴 **Pero NO «degrada a lo de hoy», y este comentario lo afirmaba hasta el 3-sep-2026**
+    // (auditoría de Codex): la gaveta se queda OPEN mientras `turnoAbiertoDelNegocio` ya devuelve
+    // `null`, así que los cobros nuevos nacen sin turno y sus `CASH_SALE` se siguen posteando ahí.
+    // Se tolera porque queda REPARABLE —la liga se escribió arriba— y lo completa
+    // `cash-close-pair-reconciler`, no porque sea inocuo.
     //
     // ⚠️ CONSECUENCIA DECLARADA, sin mitigación inventada: **no hay evento de socket para el estado
     // de la gaveta** (no existe en `src/communication/`) — la tablet SONDEA. Antes, cerrar el turno

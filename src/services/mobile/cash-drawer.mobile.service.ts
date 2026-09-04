@@ -418,8 +418,14 @@ interface CloseSessionParams {
  * opcional; una app instalada no puede notar un campo que no lee).
  *
  * 🔴 El ORDEN es la garantía: la gaveta se cierra y se commitea PRIMERO —el cajero ya contó y ese
- * dinero ya está firmado—, y sólo después se cierra el turno. Un fallo en la segunda mitad degrada
- * exactamente a lo de HOY y jamás convierte un cierre bueno en un error en el mostrador.
+ * dinero ya está firmado—, y sólo después se cierra el turno. Un fallo en la segunda mitad jamás
+ * convierte un cierre bueno en un error en el mostrador.
+ *
+ * 🔴 **Lo que ese fallo deja NO es «lo de hoy», y este comentario lo afirmaba hasta el 3-sep-2026**
+ * (auditoría de Codex). Con la apertura ya unificada, el turno que sobrevive a su gaveta lo REUSA
+ * la cajera de la tarde —`abrirTurnoDeCaja` sólo releva turnos de un día de negocio ANTERIOR— y
+ * acaba firmando dos arqueos con los totales del día entero. Por eso el fallo no se tolera: se
+ * deja REPARABLE (`asegurarLaLiga`, abajo) y lo completa `cash-close-pair-reconciler`.
  */
 export async function closeSession(params: CloseSessionParams) {
   const { venueId, staffId, actualAmount, note } = params
@@ -467,7 +473,18 @@ export async function closeSession(params: CloseSessionParams) {
   // que sólo cuesta consultas cuando la liga de verdad falta. Y nunca lanza: si no se puede ligar,
   // la pareja queda como hoy y el barrido la reporta en vez de repararla.
   if (!session.shiftId) {
-    const turno = await turnoAbiertoDelNegocio(prisma, venueId).catch(() => null)
+    // 🔴 El `catch` no puede ser mudo: lo que se pierde aquí no es una consulta, es la
+    // REPARABILIDAD de este cierre — sin la liga, la pareja partida ni siquiera se puede ver
+    // (`buscarParejasAMedias` filtra `shiftId: { not: null }`). Se traga el error para no tumbar un
+    // cierre bueno, pero se dice.
+    const turno = await turnoAbiertoDelNegocio(prisma, venueId).catch(error => {
+      logger.warn('💵 [CASH-DRAWER] no se pudo resolver el turno abierto; este cierre queda sin liga y sin reparación', {
+        venueId,
+        sessionId: session.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    })
     if (turno) await asegurarLaLiga(prisma, venueId, turno.id, session.id)
   }
 

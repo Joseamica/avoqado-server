@@ -29,6 +29,7 @@ jest.mock('@/services/shared/turnoDeCaja', () => ({
 jest.mock('@/services/shared/parejaDeCierre', () => ({ __esModule: true, asegurarLaLiga: jest.fn() }))
 
 import { Prisma } from '@prisma/client'
+import logger from '@/config/logger'
 import { cerrarTurnoDeCaja, turnoAbiertoDelNegocio } from '@/services/shared/turnoDeCaja'
 import { asegurarLaLiga } from '@/services/shared/parejaDeCierre'
 import { closeSession } from '@/services/mobile/cash-drawer.mobile.service'
@@ -154,9 +155,7 @@ describe('cerrar la caja desde la tablet cierra el turno del negocio', () => {
     expect(mockLigar).toHaveBeenCalledWith(expect.anything(), VENUE, TURNO, CAJA)
     // ANTES: la liga es el registro durable del gesto, así que tiene que estar commiteada antes de
     // que la primera mitad lo esté. Después no serviría de nada si el proceso muere en medio.
-    expect(mockLigar.mock.invocationCallOrder[0]).toBeLessThan(
-      (prismaMock as any).cashDrawerSession.updateMany.mock.invocationCallOrder[0],
-    )
+    expect(mockLigar.mock.invocationCallOrder[0]).toBeLessThan((prismaMock as any).cashDrawerSession.updateMany.mock.invocationCallOrder[0])
   })
 
   it('con la gaveta ya ligada no se vuelve a ligar: es el estado normal desde la Task 4', async () => {
@@ -164,6 +163,22 @@ describe('cerrar la caja desde la tablet cierra el turno del negocio', () => {
 
     expect(mockLigar).not.toHaveBeenCalled()
     expect(mockTurnoAbierto).not.toHaveBeenCalled()
+  })
+
+  it('🔴 si no se puede resolver el turno, se DICE: lo que se pierde no es una consulta, es la reparabilidad', async () => {
+    mundo()
+    ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue(abierta({ shiftId: null }))
+    mockTurnoAbierto.mockRejectedValue(new Error('la base se cayó') as never)
+
+    const sesion: any = await cerrar()
+
+    // El cierre NO se cae: el cajero ya contó. Pero sin la liga esta pareja no se puede ni ver,
+    // porque la búsqueda filtra `shiftId: { not: null }` — y un `catch` mudo lo dejaba invisible.
+    expect(sesion.status).toBe('CLOSED')
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('sin liga y sin reparación'),
+      expect.objectContaining({ venueId: VENUE }),
+    )
   })
 
   it('🔴 sin turno abierto no hay pareja que ligar, y el cierre de la gaveta sigue igual', async () => {
